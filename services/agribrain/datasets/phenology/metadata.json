@@ -1,0 +1,10 @@
+{
+  "name": "phenology",
+  "schema": "phenology",
+  "schema_version": "1.0.0",
+  "schema_hash": "da086383",
+  "created": "2026-02-05T19:11:02.857350",
+  "updated": "2026-02-05T19:11:02.857356",
+  "sample_count": 0,
+  "partitions": []
+}

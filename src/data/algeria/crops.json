@@ -1,0 +1,184 @@
+{
+  "crops": [
+    {
+      "code": "wheat",
+      "nameAr": "قمح",
+      "nameFr": "Blé",
+      "nameEn": "Wheat",
+      "category": "cereals",
+      "icon": "🌾",
+      "growingMonths": [10, 11, 12],
+      "harvestMonths": [5, 6, 7],
+      "growingDays": 180,
+      "waterNeeds": "medium",
+      "optimalRegions": ["14", "17", "19", "28", "05"],
+      "description": {
+        "ar": "محصول استراتيجي رئيسي في الجزائر",
+        "fr": "Culture stratégique principale en Algérie",
+        "en": "Main strategic crop in Algeria"
+      }
+    },
+    {
+      "code": "barley",
+      "nameAr": "شعير",
+      "nameFr": "Orge",
+      "nameEn": "Barley",
+      "category": "cereals",
+      "icon": "🌿",
+      "growingMonths": [10, 11, 12],
+      "harvestMonths": [5, 6],
+      "growingDays": 150,
+      "waterNeeds": "low",
+      "optimalRegions": ["14", "17", "28", "32", "45"],
+      "description": {
+        "ar": "محصول مقاوم للجفاف يستخدم للعلف",
+        "fr": "Culture résistante à la sécheresse pour le fourrage",
+        "en": "Drought-resistant crop used for fodder"
+      }
+    },
+    {
+      "code": "olive",
+      "nameAr": "زيتون",
+      "nameFr": "Olive",
+      "nameEn": "Olive",
+      "category": "tree_crops",
+      "icon": "🫒",
+      "growingMonths": [1, 2, 3],
+      "harvestMonths": [10, 11, 12],
+      "growingDays": 365,
+      "waterNeeds": "low",
+      "optimalRegions": ["06", "15", "13", "10", "09"],
+      "description": {
+        "ar": "شجرة تقليدية مهمة لإنتاج الزيت",
+        "fr": "Arbre traditionnel important pour la production d'huile",
+        "en": "Traditional tree important for oil production"
+      }
+    },
+    {
+      "code": "date",
+      "nameAr": "تمر",
+      "nameFr": "Datte",
+      "nameEn": "Date",
+      "category": "tree_crops",
+      "icon": "🌴",
+      "growingMonths": [3, 4, 5],
+      "harvestMonths": [9, 10, 11],
+      "growingDays": 200,
+      "waterNeeds": "medium",
+      "optimalRegions": ["07", "39", "30", "47", "55"],
+      "description": {
+        "ar": "محصول صحراوي استراتيجي - دقلة نور",
+        "fr": "Culture saharienne stratégique - Deglet Nour",
+        "en": "Strategic Saharan crop - Deglet Nour"
+      }
+    },
+    {
+      "code": "potato",
+      "nameAr": "بطاطا",
+      "nameFr": "Pomme de terre",
+      "nameEn": "Potato",
+      "category": "vegetables",
+      "icon": "🥔",
+      "growingMonths": [2, 3, 9, 10],
+      "harvestMonths": [5, 6, 12, 1],
+      "growingDays": 120,
+      "waterNeeds": "high",
+      "optimalRegions": ["44", "26", "09", "35", "42"],
+      "description": {
+        "ar": "محصول غذائي أساسي عالي الإنتاج",
+        "fr": "Culture alimentaire de base à haut rendement",
+        "en": "High-yield staple food crop"
+      }
+    },
+    {
+      "code": "tomato",
+      "nameAr": "طماطم",
+      "nameFr": "Tomate",
+      "nameEn": "Tomato",
+      "category": "vegetables",
+      "icon": "🍅",
+      "growingMonths": [2, 3, 4],
+      "harvestMonths": [6, 7, 8, 9],
+      "growingDays": 90,
+      "waterNeeds": "high",
+      "optimalRegions": ["07", "39", "30", "09", "06"],
+      "description": {
+        "ar": "خضار رئيسية للاستهلاك المحلي والتصنيع",
+        "fr": "Légume principal pour la consommation locale et la transformation",
+        "en": "Main vegetable for local consumption and processing"
+      }
+    },
+    {
+      "code": "chickpea",
+      "nameAr": "حمص",
+      "nameFr": "Pois chiche",
+      "nameEn": "Chickpea",
+      "category": "legumes",
+      "icon": "🫘",
+      "growingMonths": [11, 12, 1],
+      "harvestMonths": [5, 6],
+      "growingDays": 150,
+      "waterNeeds": "low",
+      "optimalRegions": ["19", "05", "25", "43", "24"],
+      "description": {
+        "ar": "بقوليات غنية بالبروتين",
+        "fr": "Légumineuse riche en protéines",
+        "en": "Protein-rich legume"
+      }
+    },
+    {
+      "code": "lentil",
+      "nameAr": "عدس",
+      "nameFr": "Lentille",
+      "nameEn": "Lentil",
+      "category": "legumes",
+      "icon": "🟤",
+      "growingMonths": [11, 12, 1],
+      "harvestMonths": [5, 6],
+      "growingDays": 140,
+      "waterNeeds": "low",
+      "optimalRegions": ["19", "05", "25", "34", "43"],
+      "description": {
+        "ar": "بقوليات تقليدية مهمة في النظام الغذائي",
+        "fr": "Légumineuse traditionnelle importante dans l'alimentation",
+        "en": "Traditional legume important in diet"
+      }
+    },
+    {
+      "code": "onion",
+      "nameAr": "بصل",
+      "nameFr": "Oignon",
+      "nameEn": "Onion",
+      "category": "vegetables",
+      "icon": "🧅",
+      "growingMonths": [9, 10, 2, 3],
+      "harvestMonths": [4, 5, 7, 8],
+      "growingDays": 120,
+      "waterNeeds": "medium",
+      "optimalRegions": ["39", "07", "30", "17", "28"],
+      "description": {
+        "ar": "محصول أساسي في المطبخ الجزائري",
+        "fr": "Culture de base dans la cuisine algérienne",
+        "en": "Basic crop in Algerian cuisine"
+      }
+    },
+    {
+      "code": "watermelon",
+      "nameAr": "دلاع",
+      "nameFr": "Pastèque",
+      "nameEn": "Watermelon",
+      "category": "fruits",
+      "icon": "🍉",
+      "growingMonths": [3, 4, 5],
+      "harvestMonths": [7, 8, 9],
+      "growingDays": 90,
+      "waterNeeds": "high",
+      "optimalRegions": ["07", "39", "30", "17", "03"],
+      "description": {
+        "ar": "فاكهة صيفية شعبية",
+        "fr": "Fruit d'été populaire",
+        "en": "Popular summer fruit"
+      }
+    }
+  ]
+}

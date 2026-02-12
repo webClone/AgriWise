@@ -2,25 +2,180 @@
 
 :root {
   --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --foreground: #020617; /* Slate-950 */
+  --color-primary: #3b82f6;
+  --color-primary-600: #2563eb;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #020617; /* Slate-950 */
+    --foreground: #f8fafc; /* Slate-50 */
+  }
+  .card {
+     background: #0f172a; /* Slate-900 */
+     border-color: #1e293b; /* Slate-800 */
   }
 }
 
+.dark {
+  --background: #020617;
+  --foreground: #f8fafc;
+}
+
 body {
-  background: var(--background);
+  background-color: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.fade-in {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+/* Card Styles */
+@layer components {
+  .card {
+    @apply bg-white border border-slate-200 shadow-sm rounded-xl;
+    @apply dark:bg-slate-950 dark:border-slate-800 dark:shadow-none;
+  }
+  
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium transition-all duration-200 active:scale-95;
+  }
+}
+
+/* Page Layout */
+.page {
+  @apply max-w-4xl mx-auto p-4 min-h-screen text-right;
+  padding-bottom: 80px; /* Space for bottom nav */
+}
+
+.page-header {
+  @apply mb-6;
+}
+
+.page-title {
+  @apply text-2xl font-bold text-slate-900 dark:text-slate-100;
+}
+
+.page-subtitle {
+  @apply text-slate-500 dark:text-slate-400 text-sm;
+}
+
+/* Stats Summary */
+.stats-grid {
+  @apply grid grid-cols-2 md:grid-cols-4 gap-3;
+}
+
+.stat-card {
+  @apply bg-white border border-slate-200 shadow-sm rounded-xl dark:bg-slate-950 dark:border-slate-800 dark:shadow-none p-4 flex flex-col items-center justify-center text-center;
+}
+
+.stat-value {
+  @apply text-2xl font-bold text-green-600;
+}
+
+.stat-label {
+  @apply text-xs text-slate-500 dark:text-slate-400 font-medium mt-1;
+}
+
+/* Weather Card */
+.weather-card {
+  @apply bg-linear-to-br from-blue-500 to-blue-600 text-white rounded-2xl p-6 shadow-lg;
+}
+
+.weather-temp {
+  @apply text-5xl font-bold my-2;
+}
+
+.weather-condition {
+  @apply text-lg opacity-90;
+}
+
+/* Animations */
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.slide-up {
+  animation: slideUp 0.5s ease-out forwards;
+}
+
+/* Alerts */
+.alert {
+  @apply flex items-start gap-3 p-4 rounded-xl border;
+}
+
+.alert-warning {
+  @apply bg-amber-50 border-amber-200 text-amber-800 dark:bg-amber-900/20 dark:border-amber-900/30 dark:text-amber-200;
+}
+
+/* Bottom Navigation */
+.nav-bottom {
+  @apply fixed bottom-0 left-0 right-0 h-16 bg-white/80 dark:bg-slate-950/80 backdrop-blur-lg border-t border-slate-200 dark:border-slate-800 flex justify-around items-center px-2 z-50;
+}
+
+.nav-item {
+  @apply flex flex-col items-center justify-center gap-1 text-slate-500 dark:text-slate-400 transition-colors duration-200;
+  width: 20%;
+}
+
+.nav-item svg {
+  @apply w-6 h-6;
+}
+
+.nav-item span {
+  @apply text-[10px] font-medium;
+}
+
+.nav-item.active {
+  @apply text-green-600 dark:text-green-500;
+}
+
+/* Leaflet Overrides */
+.leaflet-container {
+  z-index: 0;
+}
+
+/* Scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background-color: rgba(156, 163, 175, 0.5);
+  border-radius: 20px;
+}
+
+/* Masonry Layout Styles */
+.my-masonry-grid {
+  display: -webkit-box; /* Not needed if grid, but library uses flex */
+  display: -ms-flexbox; /* IE10 */
+  display: flex;
+  margin-left: -1.5rem; /* gutter size offset */
+  width: auto;
+}
+.my-masonry-grid_column {
+  padding-left: 1.5rem; /* gutter size */
+  background-clip: padding-box;
+}
+
+/* Style your items */
+.my-masonry-grid_column > div { 
+  margin-bottom: 1.5rem;
 }

@@ -1,0 +1,10 @@
+{
+  "name": "water_stress",
+  "schema": "water_stress",
+  "schema_version": "1.0.0",
+  "schema_hash": "ac9c2b28",
+  "created": "2026-02-05T19:11:02.855435",
+  "updated": "2026-02-05T19:11:02.855442",
+  "sample_count": 0,
+  "partitions": []
+}

@@ -39,3 +39,22 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/src/generated/prisma
+
+# project-specific temporary files
+*.log
+*_output.txt
+debug_log.txt
+diag.log
+ids.json
+sar-*.json
+sar-result.json
+sentinel_error.txt
+
+# [NEW] Keep repo clean by ignoring ad-hoc test/diag scripts
+check_*.ts
+diagnose_*.py
+test_*.js
+test_*.py
+verify_*.py

@@ -1,0 +1,526 @@
+{
+  "wilayas": [
+    {
+      "code": "01",
+      "nameAr": "أدرار",
+      "nameFr": "Adrar",
+      "nameEn": "Adrar",
+      "lat": 27.87,
+      "lng": -0.29,
+      "climate": "saharan"
+    },
+    {
+      "code": "02",
+      "nameAr": "الشلف",
+      "nameFr": "Chlef",
+      "nameEn": "Chlef",
+      "lat": 36.16,
+      "lng": 1.33,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "03",
+      "nameAr": "الأغواط",
+      "nameFr": "Laghouat",
+      "nameEn": "Laghouat",
+      "lat": 33.8,
+      "lng": 2.88,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "04",
+      "nameAr": "أم البواقي",
+      "nameFr": "Oum El Bouaghi",
+      "nameEn": "Oum El Bouaghi",
+      "lat": 35.87,
+      "lng": 7.11,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "05",
+      "nameAr": "باتنة",
+      "nameFr": "Batna",
+      "nameEn": "Batna",
+      "lat": 35.56,
+      "lng": 6.17,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "06",
+      "nameAr": "بجاية",
+      "nameFr": "Béjaïa",
+      "nameEn": "Bejaia",
+      "lat": 36.75,
+      "lng": 5.08,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "07",
+      "nameAr": "بسكرة",
+      "nameFr": "Biskra",
+      "nameEn": "Biskra",
+      "lat": 34.85,
+      "lng": 5.73,
+      "climate": "arid"
+    },
+    {
+      "code": "08",
+      "nameAr": "بشار",
+      "nameFr": "Béchar",
+      "nameEn": "Bechar",
+      "lat": 31.62,
+      "lng": -2.22,
+      "climate": "saharan"
+    },
+    {
+      "code": "09",
+      "nameAr": "البليدة",
+      "nameFr": "Blida",
+      "nameEn": "Blida",
+      "lat": 36.47,
+      "lng": 2.83,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "10",
+      "nameAr": "البويرة",
+      "nameFr": "Bouira",
+      "nameEn": "Bouira",
+      "lat": 36.38,
+      "lng": 3.9,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "11",
+      "nameAr": "تمنراست",
+      "nameFr": "Tamanrasset",
+      "nameEn": "Tamanrasset",
+      "lat": 22.79,
+      "lng": 5.53,
+      "climate": "saharan"
+    },
+    {
+      "code": "12",
+      "nameAr": "تبسة",
+      "nameFr": "Tébessa",
+      "nameEn": "Tebessa",
+      "lat": 35.4,
+      "lng": 8.12,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "13",
+      "nameAr": "تلمسان",
+      "nameFr": "Tlemcen",
+      "nameEn": "Tlemcen",
+      "lat": 34.88,
+      "lng": -1.31,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "14",
+      "nameAr": "تيارت",
+      "nameFr": "Tiaret",
+      "nameEn": "Tiaret",
+      "lat": 35.37,
+      "lng": 1.32,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "15",
+      "nameAr": "تيزي وزو",
+      "nameFr": "Tizi Ouzou",
+      "nameEn": "Tizi Ouzou",
+      "lat": 36.71,
+      "lng": 4.05,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "16",
+      "nameAr": "الجزائر",
+      "nameFr": "Alger",
+      "nameEn": "Algiers",
+      "lat": 36.75,
+      "lng": 3.06,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "17",
+      "nameAr": "الجلفة",
+      "nameFr": "Djelfa",
+      "nameEn": "Djelfa",
+      "lat": 34.67,
+      "lng": 3.25,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "18",
+      "nameAr": "جيجل",
+      "nameFr": "Jijel",
+      "nameEn": "Jijel",
+      "lat": 36.82,
+      "lng": 5.77,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "19",
+      "nameAr": "سطيف",
+      "nameFr": "Sétif",
+      "nameEn": "Setif",
+      "lat": 36.19,
+      "lng": 5.41,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "20",
+      "nameAr": "سعيدة",
+      "nameFr": "Saïda",
+      "nameEn": "Saida",
+      "lat": 34.83,
+      "lng": 0.15,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "21",
+      "nameAr": "سكيكدة",
+      "nameFr": "Skikda",
+      "nameEn": "Skikda",
+      "lat": 36.88,
+      "lng": 6.91,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "22",
+      "nameAr": "سيدي بلعباس",
+      "nameFr": "Sidi Bel Abbès",
+      "nameEn": "Sidi Bel Abbes",
+      "lat": 35.19,
+      "lng": -0.63,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "23",
+      "nameAr": "عنابة",
+      "nameFr": "Annaba",
+      "nameEn": "Annaba",
+      "lat": 36.9,
+      "lng": 7.77,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "24",
+      "nameAr": "قالمة",
+      "nameFr": "Guelma",
+      "nameEn": "Guelma",
+      "lat": 36.46,
+      "lng": 7.43,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "25",
+      "nameAr": "قسنطينة",
+      "nameFr": "Constantine",
+      "nameEn": "Constantine",
+      "lat": 36.37,
+      "lng": 6.61,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "26",
+      "nameAr": "المدية",
+      "nameFr": "Médéa",
+      "nameEn": "Medea",
+      "lat": 36.26,
+      "lng": 2.75,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "27",
+      "nameAr": "مستغانم",
+      "nameFr": "Mostaganem",
+      "nameEn": "Mostaganem",
+      "lat": 35.93,
+      "lng": 0.09,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "28",
+      "nameAr": "المسيلة",
+      "nameFr": "M'Sila",
+      "nameEn": "M'Sila",
+      "lat": 35.71,
+      "lng": 4.54,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "29",
+      "nameAr": "معسكر",
+      "nameFr": "Mascara",
+      "nameEn": "Mascara",
+      "lat": 35.4,
+      "lng": 0.14,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "30",
+      "nameAr": "ورقلة",
+      "nameFr": "Ouargla",
+      "nameEn": "Ouargla",
+      "lat": 31.95,
+      "lng": 5.33,
+      "climate": "saharan"
+    },
+    {
+      "code": "31",
+      "nameAr": "وهران",
+      "nameFr": "Oran",
+      "nameEn": "Oran",
+      "lat": 35.7,
+      "lng": -0.63,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "32",
+      "nameAr": "البيض",
+      "nameFr": "El Bayadh",
+      "nameEn": "El Bayadh",
+      "lat": 33.68,
+      "lng": 1.02,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "33",
+      "nameAr": "إليزي",
+      "nameFr": "Illizi",
+      "nameEn": "Illizi",
+      "lat": 26.48,
+      "lng": 8.48,
+      "climate": "saharan"
+    },
+    {
+      "code": "34",
+      "nameAr": "برج بوعريريج",
+      "nameFr": "Bordj Bou Arréridj",
+      "nameEn": "Bordj Bou Arreridj",
+      "lat": 36.07,
+      "lng": 4.76,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "35",
+      "nameAr": "بومرداس",
+      "nameFr": "Boumerdès",
+      "nameEn": "Boumerdes",
+      "lat": 36.76,
+      "lng": 3.48,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "36",
+      "nameAr": "الطارف",
+      "nameFr": "El Tarf",
+      "nameEn": "El Tarf",
+      "lat": 36.77,
+      "lng": 8.31,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "37",
+      "nameAr": "تندوف",
+      "nameFr": "Tindouf",
+      "nameEn": "Tindouf",
+      "lat": 27.67,
+      "lng": -8.15,
+      "climate": "saharan"
+    },
+    {
+      "code": "38",
+      "nameAr": "تيسمسيلت",
+      "nameFr": "Tissemsilt",
+      "nameEn": "Tissemsilt",
+      "lat": 35.61,
+      "lng": 1.81,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "39",
+      "nameAr": "الوادي",
+      "nameFr": "El Oued",
+      "nameEn": "El Oued",
+      "lat": 33.37,
+      "lng": 6.87,
+      "climate": "saharan"
+    },
+    {
+      "code": "40",
+      "nameAr": "خنشلة",
+      "nameFr": "Khenchela",
+      "nameEn": "Khenchela",
+      "lat": 35.43,
+      "lng": 7.14,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "41",
+      "nameAr": "سوق أهراس",
+      "nameFr": "Souk Ahras",
+      "nameEn": "Souk Ahras",
+      "lat": 36.29,
+      "lng": 7.95,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "42",
+      "nameAr": "تيبازة",
+      "nameFr": "Tipaza",
+      "nameEn": "Tipaza",
+      "lat": 36.59,
+      "lng": 2.45,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "43",
+      "nameAr": "ميلة",
+      "nameFr": "Mila",
+      "nameEn": "Mila",
+      "lat": 36.45,
+      "lng": 6.26,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "44",
+      "nameAr": "عين الدفلى",
+      "nameFr": "Aïn Defla",
+      "nameEn": "Ain Defla",
+      "lat": 36.26,
+      "lng": 1.97,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "45",
+      "nameAr": "النعامة",
+      "nameFr": "Naâma",
+      "nameEn": "Naama",
+      "lat": 33.27,
+      "lng": -0.31,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "46",
+      "nameAr": "عين تموشنت",
+      "nameFr": "Aïn Témouchent",
+      "nameEn": "Ain Temouchent",
+      "lat": 35.3,
+      "lng": -1.14,
+      "climate": "mediterranean"
+    },
+    {
+      "code": "47",
+      "nameAr": "غرداية",
+      "nameFr": "Ghardaïa",
+      "nameEn": "Ghardaia",
+      "lat": 32.49,
+      "lng": 3.67,
+      "climate": "saharan"
+    },
+    {
+      "code": "48",
+      "nameAr": "غليزان",
+      "nameFr": "Relizane",
+      "nameEn": "Relizane",
+      "lat": 35.74,
+      "lng": 0.56,
+      "climate": "semi-arid"
+    },
+    {
+      "code": "49",
+      "nameAr": "تيميمون",
+      "nameFr": "Timimoun",
+      "nameEn": "Timimoun",
+      "lat": 29.26,
+      "lng": 0.23,
+      "climate": "saharan"
+    },
+    {
+      "code": "50",
+      "nameAr": "برج باجي مختار",
+      "nameFr": "Bordj Badji Mokhtar",
+      "nameEn": "Bordj Badji Mokhtar",
+      "lat": 21.33,
+      "lng": 0.95,
+      "climate": "saharan"
+    },
+    {
+      "code": "51",
+      "nameAr": "أولاد جلال",
+      "nameFr": "Ouled Djellal",
+      "nameEn": "Ouled Djellal",
+      "lat": 34.42,
+      "lng": 5.07,
+      "climate": "arid"
+    },
+    {
+      "code": "52",
+      "nameAr": "بني عباس",
+      "nameFr": "Béni Abbès",
+      "nameEn": "Beni Abbes",
+      "lat": 30.13,
+      "lng": -2.17,
+      "climate": "saharan"
+    },
+    {
+      "code": "53",
+      "nameAr": "عين صالح",
+      "nameFr": "In Salah",
+      "nameEn": "In Salah",
+      "lat": 27.2,
+      "lng": 2.47,
+      "climate": "saharan"
+    },
+    {
+      "code": "54",
+      "nameAr": "عين قزام",
+      "nameFr": "In Guezzam",
+      "nameEn": "In Guezzam",
+      "lat": 19.57,
+      "lng": 5.77,
+      "climate": "saharan"
+    },
+    {
+      "code": "55",
+      "nameAr": "توقرت",
+      "nameFr": "Touggourt",
+      "nameEn": "Touggourt",
+      "lat": 33.1,
+      "lng": 6.06,
+      "climate": "saharan"
+    },
+    {
+      "code": "56",
+      "nameAr": "جانت",
+      "nameFr": "Djanet",
+      "nameEn": "Djanet",
+      "lat": 24.55,
+      "lng": 9.48,
+      "climate": "saharan"
+    },
+    {
+      "code": "57",
+      "nameAr": "المغير",
+      "nameFr": "El M'Ghair",
+      "nameEn": "El M'Ghair",
+      "lat": 33.95,
+      "lng": 5.92,
+      "climate": "saharan"
+    },
+    {
+      "code": "58",
+      "nameAr": "المنيعة",
+      "nameFr": "El Meniaa",
+      "nameEn": "El Meniaa",
+      "lat": 30.58,
+      "lng": 2.88,
+      "climate": "saharan"
+    }
+  ]
+}

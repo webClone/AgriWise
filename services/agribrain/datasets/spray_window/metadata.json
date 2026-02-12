@@ -1,0 +1,10 @@
+{
+  "name": "spray_window",
+  "schema": "spray_window",
+  "schema_version": "1.0.0",
+  "schema_hash": "579fb9ad",
+  "created": "2026-02-05T19:11:02.853088",
+  "updated": "2026-02-05T19:11:02.853093",
+  "sample_count": 0,
+  "partitions": []
+}

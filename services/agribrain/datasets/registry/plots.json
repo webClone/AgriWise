@@ -1,0 +1,32 @@
+{
+  "test-farm-001:test-plot-001": {
+    "farm_id": "test-farm-001",
+    "plot_id": "test-plot-001",
+    "coordinates": {
+      "lat": 36.5667,
+      "lng": 2.9167
+    },
+    "crop": "tomato",
+    "area": 2.5,
+    "registered_at": "2026-02-06T14:28:15.090313",
+    "last_weather_collection": "2026-02-06T14:28:16.736082",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "697ddd3bd4195b809226a67d:6985f26b18f6b36fe2ff9c08": {
+    "farm_id": "697ddd3bd4195b809226a67d",
+    "plot_id": "6985f26b18f6b36fe2ff9c08",
+    "coordinates": {
+      "lat": 33.5493858,
+      "lng": 6.879555399999999
+    },
+    "crop": "SANDY",
+    "area": 0.46,
+    "registered_at": "2026-02-06T14:53:47.689671",
+    "last_weather_collection": "2026-02-06T14:53:48.695629",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  }
+}
