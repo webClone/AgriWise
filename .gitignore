@@ -51,6 +51,8 @@ ids.json
 sar-*.json
 sar-result.json
 sentinel_error.txt
+*.pyc
+__pycache__/
 
 # [NEW] Keep repo clean by ignoring ad-hoc test/diag scripts
 check_*.ts

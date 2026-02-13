@@ -103,7 +103,7 @@ async function chatCompletion(messages: any[], tools: any[]): Promise<any> {
         headers: {
             "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
             "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:3000", // Required by OpenRouter
+            "HTTP-Referer": "https://carbonic-lore-forceless.ngrok-free.dev", // Required by OpenRouter
             "X-Title": "AgriWise"
         },
         body: JSON.stringify({
@@ -328,7 +328,7 @@ Current Context:`;
     }
 
     // 4. Build Message History (include previous messages if provided)
-    const messages: { role: string; content: string }[] = [
+    const messages: any[] = [
         { role: "system", content: systemInstruction }
     ];
     
