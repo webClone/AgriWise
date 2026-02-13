@@ -1,36 +1,74 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AgriWise 🛰️🌱
 
-## Getting Started
+AgriWise is a next-generation Precision Agriculture platform designed for hyper-local crop monitoring and AI-driven agronomic advice. It specializes in the North African (Algerian) landscape, utilizing multi-spectral satellite data and radar-resilient monitoring.
 
-First, run the development server:
+## 🔷 The Architecture
+
+AgriWise uses a unique **Dual-Stack Intelligence** approach:
+
+1.  **Frontend & Orchestration (TypeScript/Next.js)**:
+    - Responsive dashboard for farm and plot management.
+    - Context-aware AI orchestration (`AgriBrain`).
+    - Integration with OpenRouter (Gemini 1.5/2.0) for agricultural advice.
+2.  **Scientific Core (Python/FastAPI)**:
+    - **EO Engine**: Processes Sentinel-2 (Multi-spectral) and Sentinel-1 (SAR Radar) data.
+    - **Agronomic Models**: Implements FAO-56 Water Stress and GDD-based Phenology tracking.
+    - **ML Core**: Placeholders for Yield Prediction and Computer Vision for pests.
+
+---
+
+## 🚀 Getting Started
+
+### 1. Requirements
+
+- **Node.js** v20+
+- **Python** v3.10+
+- **MongoDB** (running locally or via Docker)
+
+### 2. Next.js Frontend Setup
 
 ```bash
+git clone https://github.com/webClone/AgriWise
+cd agriwise
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 3. Python Backend Setup
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+# From the root directory
+pip install -r services/agribrain/requirements.txt
+python services/agribrain/main.py
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+---
 
-## Learn More
+## 🧠 AgriBrain AI Layer
 
-To learn more about Next.js, take a look at the following resources:
+The platform implements a **9-Layer Intelligence Foundation**:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- **L1-L2**: Plot Foundation & Remote Sensing ingest (Sentinel/NASA).
+- **L3-L4**: Signal Engineering & Feature Vector construction.
+- **L5-L7**: Crop Models (Stress, Phenology, Yield) & Bayesian Diagnosis Fusion.
+- **L8-L9**: Plot Output & the Learning Feedback Loop.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+---
 
-## Deploy on Vercel
+## 🔐 Environment Configuration
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Copy `.env.example` to `.env` and configure the following:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `DATABASE_URL`: MongoDB connection string.
+- `GEMINI_API_KEY`: For the advisory chat.
+- `SENTINEL_HUB_*`: Credentials for satellite data fetching.
+- `NASA_API_KEY`: For meteorological history.
+
+---
+
+## 🛠️ Development & Testing
+
+Ad-hoc diagnostic and testing scripts are located in the root directory (ignored by Git by default) for:
+
+- Satellite WMS testing (`test-nasa.js`, `diagnose-sentinel-raw.js`)
+- Local backend verification (`test_local_backend.py`)
