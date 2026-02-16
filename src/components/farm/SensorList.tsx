@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Wifi,
-  WifiOff,
   Plus,
   Activity,
   Battery,
@@ -18,6 +17,8 @@ import {
   Zap,
   Trash2,
   Loader2,
+  ChevronRight,
+  AlertTriangle,
 } from "lucide-react";
 import AddSensorModal from "./AddSensorModal";
 
@@ -62,7 +63,26 @@ function getRelativeTime(dateStr: string | null): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  return `${days} day${days > 1 ? "s" : ""} ago`;
+}
+
+function getOfflineTag(sensor: any) {
+  if (sensor.isOnline) return null;
+  
+  if (!sensor.lastSync) return { label: "Never connected", color: "text-slate-400", dot: "bg-slate-300" };
+  
+  if (sensor.battery != null && sensor.battery < 20) {
+    return { label: "Low battery", color: "text-red-500 font-bold", dot: "bg-red-500" };
+  }
+
+  const diffMs = Date.now() - new Date(sensor.lastSync).getTime();
+  const diffHours = diffMs / (1000 * 60 * 60);
+  
+  if (diffHours > 6) {
+    return { label: "No data 6h+", color: "text-amber-500", dot: "bg-amber-400" };
+  }
+  
+  return { label: "Offline", color: "text-slate-400", dot: "bg-slate-300" };
 }
 
 function getBatteryIcon(level: number | null) {
@@ -106,6 +126,36 @@ function getTypeIcon(type: string) {
     case "EC": return <Zap size={20} />;
     case "WEATHER": return <Wind size={20} />;
     default: return <Activity size={20} />;
+  }
+}
+
+function getSensorBenefits(type: string) {
+  switch (type) {
+    case "MOISTURE":
+      return [
+        "Irrigation scheduling precision",
+        "Drought risk detection",
+        "Root zone modeling"
+      ];
+    case "TEMP":
+        return [
+            "Frost prediction accuracy",
+            "Growing degree days tracking",
+            "Disease risk modeling"
+        ];
+    case "EC":
+        return [
+            "Salinity stress alerts",
+            "Fertilizer efficiency tracking",
+            "Yield loss prevention"
+        ];
+    case "WEATHER":
+        return [
+            "Hyper-local forecast",
+            "Spray window optimization",
+            "Evapotranspiration (ET0) calc"
+        ];
+    default: return ["Improves overall model accuracy"];
   }
 }
 
@@ -201,10 +251,10 @@ export default function SensorList({ plotId, sensors: initialSensors }: SensorLi
           displaySensors.map((sensor) => (
             <div
               key={sensor.id}
-              className={`relative p-4 rounded-xl border shadow-sm transition-all hover:shadow-md ${
+              className={`relative p-4 rounded-xl border shadow-sm transition-all group cursor-pointer ${
                 sensor.isOnline
-                  ? "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900"
-                  : "border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 opacity-75"
+                  ? "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:border-indigo-300 dark:hover:border-indigo-700 hover:shadow-md"
+                  : "border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 opacity-75 hover:opacity-100"
               }`}
             >
               <div className="flex items-start justify-between">
@@ -257,9 +307,9 @@ export default function SensorList({ plotId, sensors: initialSensors }: SensorLi
                       </span>
 
                       {/* Last Sync */}
-                      <span className="flex items-center gap-1">
-                        <Activity size={12} />
-                        {getRelativeTime(sensor.lastSync)}
+                      <span className="flex items-center gap-1 font-medium text-slate-400 dark:text-slate-500">
+                        <Activity size={12} className="opacity-70" />
+                        Last seen: {getRelativeTime(sensor.lastSync)}
                       </span>
                     </div>
 
@@ -316,24 +366,78 @@ export default function SensorList({ plotId, sensors: initialSensors }: SensorLi
                         <span className="text-xs font-medium text-green-600 dark:text-green-400">Online</span>
                       </>
                     ) : (
-                      <>
-                        <WifiOff size={12} className="text-slate-400" />
-                        <span className="text-xs font-medium text-slate-400">Offline</span>
-                      </>
+                      (() => {
+                        const tag = getOfflineTag(sensor);
+                        return (
+                          <div className="flex flex-col items-end gap-1">
+                            <div className="flex items-center gap-1.5">
+                              <div className={`w-1.5 h-1.5 rounded-full ${tag?.dot || "bg-slate-300"}`} />
+                              <span className={`text-[10px] uppercase font-bold tracking-wider ${tag?.color || "text-slate-400"}`}>
+                                {tag?.label || "Offline"}
+                              </span>
+                            </div>
+                            {tag?.label === "Never Connected" ? (
+                                <p className="text-[9px] text-indigo-500 cursor-pointer hover:underline text-right leading-tight">
+                                    Connect to enable<br/>dynamic irrigation alerts
+                                </p>
+                            ) : (
+                                <span className="text-[9px] font-medium text-amber-500/80 bg-amber-500/5 px-1.5 py-0.5 rounded border border-amber-500/10 flex items-center gap-1">
+                                    <AlertTriangle size={8} /> Data confidence: Low
+                                </span>
+                            )}
+                          
+                          {/* Benefits List for Disconnected Sensors */}
+                          {!sensor.isOnline && tag?.label === "Never Connected" && (
+                              <div className="mt-2 pt-2 border-t border-slate-100 dark:border-slate-800 w-full">
+                                  <p className="text-[9px] font-bold text-slate-400 uppercase tracking-tight mb-1">
+                                      Connect to unlock:
+                                  </p>
+                                  <ul className="space-y-0.5">
+                                      {getSensorBenefits(sensor.type).map((benefit, idx) => (
+                                          <li key={idx} className="flex items-center gap-1 text-[9px] text-slate-500">
+                                              <div className="w-1 h-1 rounded-full bg-indigo-400"></div>
+                                              {benefit}
+                                          </li>
+                                      ))}
+                                  </ul>
+                              </div>
+                          )}
+                          
+                          {/* Consequence Warning for Moisture Sensors */}
+                          {!sensor.isOnline && sensor.type === "MOISTURE" && (
+                              <div className="mt-2 text-[9px] font-medium text-amber-600 dark:text-amber-500 flex items-start gap-1 p-1.5 bg-amber-50 dark:bg-amber-900/10 rounded border border-amber-100 dark:border-amber-800/30 leading-tight">
+                                  <AlertTriangle size={10} className="shrink-0 mt-0.5" />
+                                  <span>Irrigation recommendations currently use satellite evapotranspiration models. Live soil data would increase precision.</span>
+                              </div>
+                          )}
+                        </div>
+                      );
+                      })()
                     )}
                   </div>
-                  <button
-                    onClick={() => handleDelete(sensor.id)}
-                    disabled={deletingId === sensor.id}
-                    className="p-1 rounded-md text-slate-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 transition-colors disabled:opacity-50"
-                    title="Remove sensor"
-                  >
-                    {deletingId === sensor.id ? (
-                      <Loader2 className="animate-spin" size={14} />
-                    ) : (
-                      <Trash2 size={14} />
-                    )}
-                  </button>
+                  
+                  <div className="flex items-center gap-2 mt-auto">
+                      <span className="text-[10px] font-bold text-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity uppercase tracking-widest translate-x-1 group-hover:translate-x-0 transform duration-300">
+                        View Details
+                      </span>
+                      <ChevronRight size={14} className="text-slate-300 group-hover:text-indigo-400 transition-colors" />
+                      
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDelete(sensor.id);
+                        }}
+                        disabled={deletingId === sensor.id}
+                        className="p-1 rounded-md text-slate-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 transition-colors disabled:opacity-50 ml-1"
+                        title="Remove sensor"
+                      >
+                        {deletingId === sensor.id ? (
+                          <Loader2 className="animate-spin" size={14} />
+                        ) : (
+                          <Trash2 size={14} />
+                        )}
+                      </button>
+                  </div>
                 </div>
               </div>
             </div>

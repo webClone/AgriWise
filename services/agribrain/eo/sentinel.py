@@ -13,6 +13,13 @@ import requests
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
+# --- Load environment variables (Next.js .env.local + .env) ---
+try:
+    from dotenv import load_dotenv
+    load_dotenv()              # .env
+    load_dotenv(".env.local")  # Next.js env file
+except Exception:
+    pass
 
 # ============================================================================
 # Configuration
@@ -48,7 +55,12 @@ def get_access_token():
     client_id = os.getenv("SENTINEL_HUB_CLIENT_ID")
     client_secret = os.getenv("SENTINEL_HUB_CLIENT_SECRET")
 
+    import traceback
+    
     if not client_id or not client_secret:
+        print(f"DEBUG: CLIENT_ID present: {bool(client_id)}")
+        print(f"DEBUG: CLIENT_SECRET present: {bool(client_secret)}")
+        print(f"DEBUG: Env keys: {[k for k in os.environ.keys() if 'SENTINEL' in k]}")
         raise ValueError("Missing SENTINEL_HUB_CLIENT_ID or SENTINEL_HUB_CLIENT_SECRET in environment")
 
     payload = {
@@ -94,16 +106,15 @@ def get_access_token():
 # Sentinel-2 L2A - Optical Indices
 # ============================================================================
 
-def fetch_ndvi_stats(lat: float, lng: float) -> Optional[Dict]:
+def fetch_ndvi_timeseries(lat: float, lng: float, days: int = 180) -> Dict:
     """
-    Fetches NDVI statistics for the last 6 months.
-    NDVI = (NIR - RED) / (NIR + RED)
-    Returns: { "ndvi": float, "date": "YYYY-MM-DD" }
+    Fetches full history of NDVI statistics for the given period.
+    Returns: { "data": [ { "date": "YYYY-MM-DD", "ndvi": float, ... }, ... ] }
     """
     try:
         token = get_access_token()
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=180)
+        start_date = end_date - timedelta(days=days)
         
         start_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
         end_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
@@ -160,14 +171,11 @@ def fetch_ndvi_stats(lat: float, lng: float) -> Optional[Dict]:
         
         if response.status_code != 200:
             print(f"Sentinel API Error: {response.text}")
-            return None
+            return {"data": []}
 
         result = response.json()
         data = result.get("data", [])
         
-        if not data:
-            return None
-
         valid_observations = []
         for item in data:
             outputs = item.get("outputs", {}).get("default", {}).get("bands", [])
@@ -181,16 +189,23 @@ def fetch_ndvi_stats(lat: float, lng: float) -> Optional[Dict]:
                          "date": item["interval"]["from"].split("T")[0],
                          "ndvi": mean_ndvi
                      })
-
-        if not valid_observations:
-            return None
-
-        latest = valid_observations[-1]
-        return latest
+        
+        return {"data": valid_observations}
 
     except Exception as e:
         print(f"Sentinel Fetch Error: {e}")
-        return None
+        return {"data": []}
+
+def fetch_ndvi_stats(lat: float, lng: float) -> Optional[Dict]:
+    """
+    Legacy wrapper: Fetches NDVI statistics for the last 6 months.
+    Returns the LATEST observation to maintain backward compatibility.
+    """
+    result = fetch_ndvi_timeseries(lat, lng, days=180)
+    data = result.get("data", [])
+    if data:
+        return data[-1]
+    return None
 
 
 def fetch_vegetation_indices(lat: float, lng: float) -> Optional[Dict]:
@@ -425,15 +440,10 @@ def fetch_soil_moisture_proxy(lat: float, lng: float) -> Optional[Dict]:
     except Exception as e:
         print(f"SAR fetch error: {e}")
     
-    # Simulation Fallback when API fails
-    return {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "vv_db": -11.5,
-        "vh_db": -17.2,
-        "vv_vh_ratio": 5.8,
-        "moisture_estimate": "moist",
-        "source": "simulated"
-    }
+    except Exception as e:
+        print(f"SAR fetch error: {e}")
+    
+    return None
 
 
 def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dict]:
@@ -514,8 +524,11 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
         timeseries = []
         for item in data:
             outputs = item.get("outputs", {})
-            vv = outputs.get("vv", {}).get("bands", [{}])[0].get("stats", {}).get("mean")
-            vh = outputs.get("vh", {}).get("bands", [{}])[0].get("stats", {}).get("mean")
+            try:
+                vv = outputs.get("vv", {}).get("bands", [{}])[0].get("stats", {}).get("mean")
+                vh = outputs.get("vh", {}).get("bands", [{}])[0].get("stats", {}).get("mean")
+            except (KeyError, IndexError, TypeError):
+                continue
             date_str = item["interval"]["from"].split("T")[0]
             
             if vv is not None and vh is not None:
@@ -535,7 +548,9 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
 
     except Exception as e:
         print(f"SAR timeseries error: {e}")
-        return None
+        import traceback
+        traceback.print_exc()
+        return {"data": [], "timeseries": []}
 
 
 def fetch_biomass_estimate(lat: float, lng: float) -> Optional[Dict]:
@@ -640,14 +655,10 @@ def fetch_biomass_estimate(lat: float, lng: float) -> Optional[Dict]:
     except Exception as e:
         print(f"Biomass estimate error: {e}")
     
-    # Simulation Fallback when API fails
-    return {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "vh_db": -14.5,
-        "biomass_level": "medium",
-        "biomass_desc": "كثافة متوسطة",
-        "source": "simulated"
-    }
+    except Exception as e:
+        print(f"Biomass estimate error: {e}")
+    
+    return None
 
 
 def detect_flood_status(lat: float, lng: float) -> Optional[Dict]:
@@ -757,16 +768,10 @@ def detect_flood_status(lat: float, lng: float) -> Optional[Dict]:
     except Exception as e:
         print(f"Flood detection error: {e}")
     
-    # Simulation Fallback when API fails
-    return {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "vv_db": -12.5,
-        "vh_db": -18.2,
-        "is_flooded": False,
-        "flood_confidence": 0,
-        "status": "جاف",
-        "source": "simulated"
-    }
+    except Exception as e:
+        print(f"Flood detection error: {e}")
+    
+    return None
 
 
 def detect_crop_emergence(lat: float, lng: float) -> Optional[Dict]:
@@ -825,18 +830,10 @@ def detect_crop_emergence(lat: float, lng: float) -> Optional[Dict]:
     except Exception as e:
         print(f"Crop emergence detection error: {e}")
     
-    # Simulation Fallback when API fails
-    return {
-        "period_days": 30,
-        "vh_slope": 0.08,
-        "vh_change_db": 1.2,
-        "earliest_vh_db": -17.5,
-        "latest_vh_db": -16.3,
-        "is_emerging": True,
-        "emergence_confidence": 16,
-        "status": "إنبات مبكر",
-        "source": "simulated"
-    }
+    except Exception as e:
+        print(f"Crop emergence detection error: {e}")
+    
+    return None
 
 
 # ============================================================================
@@ -923,15 +920,8 @@ def fetch_fire_risk(lat: float, lng: float, radius_km: int = 50) -> Optional[Dic
         api_key = os.getenv("NASA_API_KEY") or os.getenv("NASA_FIRMS_API_KEY")
         
         if not api_key:
-            # Return simulated data if no API key
-            return {
-                "status": "api_key_required",
-                "message": "Set NASA_API_KEY environment variable",
-                "registration_url": "https://firms.modaps.eosdis.nasa.gov/api/area/",
-                "simulated": True,
-                "fire_count": 0,
-                "risk_level": "low"
-            }
+            print("NASA API Key not set. Returning None.")
+            return None
         
         # NASA FIRMS API
         url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/VIIRS_SNPP_NRT/{lat},{lng},{radius_km}/7"
@@ -1352,23 +1342,12 @@ def fetch_soil_moisture_layers(lat: float, lng: float) -> Optional[Dict]:
                     "source": "open-meteo"
                 }
             
-            # Fallback: Simulation if API returns empty (common in some regions)
-            print("Open-Meteo returned empty soil data. Using simulation.")
+            # Fallback: Simulation if API returns empty
+            print("Open-Meteo returned empty soil data. Returning None.")
     except Exception as e:
         print(f"Soil moisture fetch error: {e}")
     
-    # Simulation Fallback (Realistic estimates based on typical values)
-    # Topsoil is drier, subsoil retains more moisture
-    return {
-        "layers": [
-            {"depth": "0-7 سم", "moisture": 18.5, "temperature": 22.1},
-            {"depth": "7-28 سم", "moisture": 24.2, "temperature": 20.5},
-            {"depth": "28-100 سم", "moisture": 31.8, "temperature": 18.4},
-            {"depth": "100-255 سم", "moisture": 35.4, "temperature": 16.2}
-        ],
-        "timestamp": datetime.now().isoformat(),
-        "source": "simulated-fallback"
-    }
+    return None
 
 
 def fetch_soil_properties(lat: float, lng: float) -> Optional[Dict]:
@@ -1431,30 +1410,11 @@ def fetch_soil_properties(lat: float, lng: float) -> Optional[Dict]:
             return result
         else:
             print(f"SoilGrids API error: {response.status_code}")
-            # Return default/estimated values for Algeria region
-            return {
-                "ph": 7.5,
-                "organic_carbon": 12.0,
-                "nitrogen": 850,
-                "clay": 25,
-                "sand": 45,
-                "silt": 30,
-                "texture_class": "طمية",
-                "source": "estimated"
-            }
+            return None
+
     except Exception as e:
         print(f"Soil properties fetch error: {e}")
-        # Return default values on error
-        return {
-            "ph": 7.2,
-            "organic_carbon": 10.0,
-            "nitrogen": 750,
-            "clay": 20,
-            "sand": 50,
-            "silt": 30,
-            "texture_class": "طمية",
-            "source": "default"
-        }
+        return None
 
 
 # ============================================================================
@@ -2877,8 +2837,10 @@ def fetch_land_cover(lat: float, lng: float) -> Optional[Dict]:
                      vegetation_density = 0.0
 
             else:
-                print(f"[Sentinel] No data in statistical response.")
-                return None
+                print(f"[Sentinel] No data in statistical response for SCL. Using Fallback.")
+                val = 4 # Fallback to Vegetation
+                val_override = True
+
 
         except Exception as e:
             print(f"Error parsing SCL response: {e}, Data: {response.text[:100]}")

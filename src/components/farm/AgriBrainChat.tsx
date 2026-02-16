@@ -8,6 +8,7 @@ interface Message {
   role: 'user' | 'model';
   content: string;
   toolCalls?: { name: string; args: any; result?: any }[];
+  metadata?: { intent?: string; evidence?: string[] };
 }
 
 interface AgriBrainChatProps {
@@ -27,6 +28,14 @@ export default function AgriBrainChat({ context }: AgriBrainChatProps) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // DEBUG: Log context to console so user can see it
+  useEffect(() => {
+      console.log("------------------------------------------");
+      console.log("🐛 [AgriBrain] OUTGOING CONTEXT TO API:");
+      console.log(context);
+      console.log("------------------------------------------");
+  }, [context]);
 
   const handleSend = async () => {
     if (!input.trim() || loading) return;
@@ -58,7 +67,8 @@ export default function AgriBrainChat({ context }: AgriBrainChatProps) {
       const modelMsg: Message = {
         role: 'model',
         content: data.text || "I processed that.",
-        toolCalls: data.toolCalls
+        toolCalls: data.toolCalls,
+        metadata: data.metadata
       };
       
       setMessages(prev => [...prev, modelMsg]);
@@ -104,6 +114,17 @@ export default function AgriBrainChat({ context }: AgriBrainChatProps) {
                  )}
               </div>
             ))}
+            
+            {/* Cognitive Evidence (New) */}
+            {msg.metadata && msg.metadata.evidence && msg.metadata.evidence.length > 0 && (
+                <div className="mb-1 flex flex-wrap gap-1">
+                    {msg.metadata.evidence.map((ev, i) => (
+                        <span key={i} className="px-1.5 py-0.5 rounded text-[10px] bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-300 border border-indigo-100 dark:border-indigo-800">
+                           🔍 {ev}
+                        </span>
+                    ))}
+                </div>
+            )} 
 
             {/* Bubble */}
             <div className={`

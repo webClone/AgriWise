@@ -140,6 +140,9 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
                 <MapIcon className="text-emerald-500" size={18} />
                 Plot Basics
             </h3>
+            <p className="text-[10px] text-slate-500 mt-1">
+                Establishes spatial context for satellite integration.
+            </p>
             {!isEditingDetails && (
                 <span className="text-xs text-slate-400 font-mono bg-slate-100 dark:bg-slate-900 px-2 py-1 rounded border border-slate-200 dark:border-slate-800">
                     {plot.id.substring(0, 8)}
@@ -376,6 +379,15 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
                         </div>
                     )}
             </div>
+            
+            {/* Boundary Source Metadata */}
+            <div className="mt-2 flex items-center gap-1.5 text-[10px] text-slate-400 dark:text-slate-500 font-medium">
+                <span className="uppercase tracking-wider opacity-70">Boundary source:</span>
+                <span className="text-slate-600 dark:text-slate-400">User-drawn</span>
+                <span className="mx-0.5 opacity-30">·</span>
+                <span>Updated Feb 10, 2026</span>
+            </div>
+
             {isEditingMap && (
                  <div className="text-xs text-slate-500 mt-2 text-center">
                     Use the sidebar tools to draw. Click the square to save.

@@ -20,8 +20,8 @@ export default function PlotSoilData({ plotId, soilAnalyses, sensors }: PlotSoil
            <Leaf className="text-amber-500" size={18} />
            Soil & Physical Properties
         </h3>
-        <p className="text-xs text-slate-500 mt-1">
-            Track soil composition and connected sensor streams.
+        <p className="text-[10px] text-slate-500 mt-1">
+            Enables nutrient optimization & salinity risk detection.
         </p>
       </div>
 

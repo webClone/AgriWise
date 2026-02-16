@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Beaker, FileText, MapPin, Ruler, Trash2, Loader2, ChevronDown, ChevronUp } from "lucide-react";
+import { Plus, Beaker, FileText, MapPin, Ruler, Trash2, Loader2, ChevronDown, ChevronUp, Zap, FlaskConical, Leaf, Droplets } from "lucide-react";
 import SoilAnalysisUploadModal from "./SoilAnalysisUploadModal";
 
 interface SoilAnalysisHistoryProps {
@@ -167,44 +167,96 @@ export default function SoilAnalysisHistory({ plotId, analyses: initialAnalyses 
                 {isExpanded && (
                   <div className="px-4 pb-4 pt-2 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900">
                     
-                    {/* Sampling Context */}
-                    {(item.depthFrom != null || item.samplingLocation || item.notes) && (
-                      <div className="mb-4 p-3 bg-slate-50 dark:bg-slate-950 rounded-lg text-xs space-y-1">
+                    {/* Sampling Context - Integrated at top of expanded view */}
+                    {(item.depthFrom != null || item.samplingLocation) && (
+                      <div className="mb-4 grid grid-cols-1 md:grid-cols-2 gap-2 bg-slate-50 dark:bg-slate-950 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
                         {(item.depthFrom != null || item.depthTo != null) && (
-                          <p className="text-slate-600 dark:text-slate-400 flex items-center gap-2">
-                            <Ruler size={12} className="text-slate-400 shrink-0" />
-                            <span><strong>Sampling Depth:</strong> {item.depthFrom ?? 0}–{item.depthTo ?? "?"} cm</span>
-                          </p>
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 bg-blue-100/50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 rounded-lg">
+                                <Ruler size={14} />
+                            </div>
+                            <div className="flex flex-col">
+                                <span className="text-[9px] text-slate-400 uppercase font-bold tracking-tight">Sampling Depth</span>
+                                <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">{item.depthFrom ?? 0}–{item.depthTo ?? "?"} cm</span>
+                            </div>
+                          </div>
                         )}
                         {item.samplingLocation && (
-                          <p className="text-slate-600 dark:text-slate-400 flex items-center gap-2">
-                            <MapPin size={12} className="text-slate-400 shrink-0" />
-                            <span><strong>Location:</strong> {item.samplingLocation}</span>
-                          </p>
-                        )}
-                        {item.notes && (
-                          <p className="text-slate-500 dark:text-slate-500 mt-1 italic">{item.notes}</p>
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 bg-purple-100/50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 rounded-lg">
+                                <MapPin size={14} />
+                            </div>
+                            <div className="flex flex-col">
+                                <span className="text-[9px] text-slate-400 uppercase font-bold tracking-tight">Sampling Location</span>
+                                <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">{item.samplingLocation}</span>
+                            </div>
+                          </div>
                         )}
                       </div>
                     )}
 
-                    {/* Value Cards */}
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      <ValueCard label="pH" value={item.ph} />
-                      <ValueCard label="EC" value={item.ec} unit="dS/m" />
-                      <ValueCard label="OM" value={item.organicMatter} unit="%" />
-                      <div className="bg-slate-50 dark:bg-slate-950 p-3 rounded-lg border border-slate-100 dark:border-slate-800">
-                        <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">NPK</span>
-                        <div className="flex items-baseline gap-1 text-sm font-medium text-slate-600 dark:text-slate-300">
-                          <span>{item.nitrogen ?? "–"}</span>
-                          <span className="text-slate-300 dark:text-slate-600">/</span>
-                          <span>{item.phosphorus ?? "–"}</span>
-                          <span className="text-slate-300 dark:text-slate-600">/</span>
-                          <span>{item.potassium ?? "–"}</span>
+                    <div className="space-y-4">
+                        {/* Section 1: Soil Chemistry */}
+                        <div>
+                            <h5 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-2">
+                                <FlaskConical size={12} />
+                                Soil Chemistry
+                            </h5>
+                            <div className="grid grid-cols-2 gap-3">
+                                <ValueCard 
+                                    label="pH Level" 
+                                    value={item.ph} 
+                                    icon={<FlaskConical className="text-indigo-500" size={14} />}
+                                    description="Acidity/Alkalinity"
+                                />
+                                <ValueCard 
+                                    label="EC (Salinity)" 
+                                    value={item.ec} 
+                                    unit="dS/m" 
+                                    icon={<Zap className="text-amber-500" size={14} />}
+                                    description="Soluble Salts"
+                                />
+                            </div>
                         </div>
-                        <span className="text-[9px] text-slate-400">mg/kg</span>
-                      </div>
+
+                        {/* Section 2: Nutrients & Organic Matter */}
+                        <div>
+                            <h5 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-2">
+                                <Leaf size={12} />
+                                Nutrients & OM
+                            </h5>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                <ValueCard 
+                                    label="Org. Matter" 
+                                    value={item.organicMatter} 
+                                    unit="%" 
+                                    icon={<Leaf className="text-emerald-500" size={14} />}
+                                />
+                                <div className="bg-slate-50 dark:bg-slate-950 p-3 rounded-lg border border-slate-100 dark:border-slate-800 flex flex-col justify-between">
+                                    <div className="flex items-center justify-between mb-1">
+                                        <span className="text-[10px] text-slate-400 uppercase tracking-wider block">NPK</span>
+                                        <Droplets size={14} className="text-blue-400" />
+                                    </div>
+                                    <div className="flex items-baseline gap-1 text-sm font-bold text-slate-700 dark:text-slate-200">
+                                        <span>{item.nitrogen ?? "–"}</span>
+                                        <span className="text-slate-300 dark:text-slate-600">/</span>
+                                        <span>{item.phosphorus ?? "–"}</span>
+                                        <span className="text-slate-300 dark:text-slate-600">/</span>
+                                        <span>{item.potassium ?? "–"}</span>
+                                    </div>
+                                    <span className="text-[9px] text-slate-400">mg/kg (N/P/K)</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
+
+                    {item.notes && (
+                        <div className="mt-4 p-3 bg-amber-50/30 dark:bg-amber-900/5 rounded-lg border border-amber-100/50 dark:border-amber-900/20">
+                            <p className="text-[11px] text-amber-800/70 dark:text-amber-400/60 italic leading-relaxed">
+                                <strong>Notes:</strong> {item.notes}
+                            </p>
+                        </div>
+                    )}
 
                     {/* Texture */}
                     {item.texture && (
@@ -257,14 +309,34 @@ export default function SoilAnalysisHistory({ plotId, analyses: initialAnalyses 
   );
 }
 
-function ValueCard({ label, value, unit }: { label: string; value: number | null; unit?: string }) {
+function ValueCard({ 
+  label, 
+  value, 
+  unit, 
+  icon, 
+  description 
+}: { 
+  label: string; 
+  value: number | null; 
+  unit?: string;
+  icon?: React.ReactNode;
+  description?: string;
+}) {
   return (
-    <div className="bg-slate-50 dark:bg-slate-950 p-3 rounded-lg border border-slate-100 dark:border-slate-800">
-      <span className="text-[10px] text-slate-400 uppercase tracking-wider block mb-1">{label}</span>
-      <span className="text-lg font-bold text-slate-700 dark:text-slate-200">
-        {value != null ? value : "–"}
-        {unit && value != null && <span className="text-xs font-normal text-slate-400 ml-1">{unit}</span>}
-      </span>
+    <div className="bg-slate-50 dark:bg-slate-950 p-3 rounded-xl border border-slate-100 dark:border-slate-800 flex flex-col justify-between hover:border-slate-300 dark:hover:border-slate-700 transition-colors">
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-[10px] text-slate-400 uppercase tracking-wider block">{label}</span>
+        {icon && <span className="opacity-70">{icon}</span>}
+      </div>
+      <div>
+        <span className="text-xl font-bold text-slate-700 dark:text-slate-200">
+          {value != null ? value : "–"}
+          {unit && value != null && <span className="text-xs font-normal text-slate-400 ml-1">{unit}</span>}
+        </span>
+        {description && (
+          <p className="text-[9px] text-slate-400 mt-0.5">{description}</p>
+        )}
+      </div>
     </div>
   );
 }
