@@ -46,12 +46,27 @@ def _generate_deterministic_run_id(
     hash_obj = hashlib.sha256(raw.encode("utf-8"))
     return f"L4-{hash_obj.hexdigest()[:12]}"
 
+from services.agribrain.orchestrator_v2.schema import OrchestratorInput
+
 def run_layer4_nutrients(
+    inputs: OrchestratorInput,
     tensor: FieldTensor,
     veg_int: VegIntOutput,
-    decision_l3: DecisionOutput,
-    context: PlotContext
+    decision_l3: DecisionOutput
 ) -> NutrientIntelligenceOutput:
+    
+    # Map Context
+    cc = inputs.crop_config
+    oc = inputs.operational_context
+    
+    context = PlotContext(
+        crop_type=cc.get("crop", "unknown"),
+        variety=cc.get("variety"),
+        planting_date=cc.get("planting_date", ""),
+        irrigation_type=oc.get("irrigation_type", "rainfed"),
+        management_goal=oc.get("management_goal", "yield_max"),
+        constraints=oc.get("constraints", {})
+    )
     """
     Layer 4 Orchestrator (Locked v4.0 Hardened)
     """

@@ -37,20 +37,28 @@ class PolicyEngine:
             # Create Recommendation Candidate
             rec = self._create_recommendation(d, action_def, context, half_week_rain, missing_drivers)
             
-            # 2. Safety Fallback Logic
+                # 2. Safety Fallback Logic
             # If blocked or low confidence/feasibility, downgrade to Fallback
             if (not rec.is_allowed) or (rec.confidence < action_def.min_confidence):
                 if action_def.fallback_action_id:
                     fallback_def = ACTIONS.get(action_def.fallback_action_id)
                     if fallback_def:
+                        # Expert Grade Guard: Prevent soil moisture scouting if NDVI is stable/improving
+                        # Unless confidence is very low (Data Gap)
+                        if fallback_def.action_id == "VERIFY_SOIL_MOISTURE":
+                            # Check L2 trend from signals or features
+                            # We don't have features object here easily, but we have diagnoses traces?
+                            # Actually, we can check if the diagnosis probability is primarily driven by rain shortfall
+                            # vs actual vegetation decline.
+                            # For simplicity, we can look at the evidence trace of the diagnosis 'd'.
+                            has_veg_issue = any(t.feature_name in ["ndvi_anomaly", "ndvi_drop", "growth_velocity"] and t.score > 0 for t in d.evidence_trace)
+                            if not has_veg_issue and d.probability < 0.8:
+                                continue # Suppress scouting if no plant-side evidence
+                        
                         # CREATE FALLBACK
                         fallback_rec = self._create_recommendation(
                             d, fallback_def, context, half_week_rain, missing_drivers, is_fallback=True
                         )
-                        # Append the BLOCKED primary as 'info' or just append fallback?
-                        # User spec: "If blocked: must produce a safe alternative"
-                        # We append the fallback. We might also keep the primary to show it was considered but blocked.
-                        # Let's append primary (marked blocked) AND fallback.
                         recommendations.append(rec)
                         recommendations.append(fallback_rec)
                     else:
@@ -58,6 +66,12 @@ class PolicyEngine:
                 else:
                     recommendations.append(rec)
             else:
+                # Expert Grade Guard for Primary Irrigation as well
+                if action_def.action_id == "IRRIGATE_FULL":
+                     has_veg_issue = any(t.feature_name in ["ndvi_anomaly", "ndvi_drop", "growth_velocity"] and t.score > 0 for t in d.evidence_trace)
+                     if not has_veg_issue and d.probability < 0.9:
+                        continue # Suppress intervention if strictly rain-based but plants look fine
+                
                 # Allowed and confident
                 recommendations.append(rec)
 

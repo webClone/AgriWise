@@ -134,10 +134,12 @@ class DiagnosisEngine:
         if f.rain_sum_14d < 5.0:
             lo += self._add_evidence("rain_sum_14d", "14d", f.rain_sum_14d, 1.0, 2.0, trace)
         elif f.rain_sum_14d > 30.0:
-            lo += self._add_evidence("rain_sum_14d", "14d", f.rain_sum_14d, -1.0, 2.0, trace)
+            # Strong contraindication if rain is abundant (Expert Grade: lowered from 40 to 30)
+            lo += self._add_evidence("rain_sum_14d", "14d", f.rain_sum_14d, -1.0, 4.0, trace)
             
-        if f.days_since_rain > 10:
+        if f.days_since_rain > 12: # increased from 10 to 12
              lo += self._add_evidence("days_since_rain", "current", f.days_since_rain, 1.0, 1.5, trace)
+
         
         if f.has_anomaly and f.anomaly_type in ["DROP", "STALL"]:
             lo += self._add_evidence("ndvi_anomaly", "current", f.anomaly_severity, 1.0, 1.5, trace)
@@ -371,13 +373,21 @@ class DiagnosisEngine:
         count = len(f.missing_inputs)
         
         # User spec: "Confidence must be computed from data quality only"
-        # Diagnosis itself has 1.0 confidence because we are SURE data is missing.
+        # If we have degraded components (e.g. valid checks failed elsewhere), reduce conf.
+        # But for 'DATA_GAP' diagnosis itself, we are confident that data IS missing.
+        # However, to avoid 1.0/1.0 appearing authoritative in degraded mode:
         
+        conf = 1.0
+        # If we have critical missing inputs (SAR/RAIN), we reduce confidence slightly
+        # to ensure it doesn't look like a "perfect" diagnosis in a broken system.
+        if Driver.SAR_VV in f.missing_inputs or Driver.RAIN in f.missing_inputs:
+             conf = 0.8
+             
         return self._build_diagnosis(
             ProblemType.DATA_GAP.value,
             1.0, 
             count / 5.0, 
-            1.0,
+            conf,
             [EvidenceTerm("missing_inputs", "current", count, 1.0, 5.0, count)],
             f,
             []

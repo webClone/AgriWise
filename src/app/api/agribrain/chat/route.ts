@@ -129,18 +129,16 @@ export async function POST(req: Request) {
         console.warn("[AgriBrain Chat] No plotId provided in context");
     }
 
-    console.log(`[AgriBrain Chat] Spawning Python with Context: ${JSON.stringify(injectedContext)}`);
+    console.log(`[AgriBrain Chat] Spawning Orchestrator V2 with Context: ${JSON.stringify(injectedContext)}`);
 
-    // Path to Orchestrator
-    const scriptPath = path.join(process.cwd(), 'services', 'agribrain', 'orchestrator.py');
+    // Path to Orchestrator V2 Entrypoint
+    const scriptPath = path.join(process.cwd(), 'services', 'agribrain', 'orchestrator_v2', 'chat_entrypoint.py');
     
-    // Spawn Python Process with --query
-    // Using 'py' for Windows compatibility as 'python' often points to App Store alias
+    // Spawn Python Process
     const pythonProcess = spawn('py', [
       scriptPath,
-      '--plot_id', plotId || "UNKNOWN",
-      '--query', message,
-      '--context', JSON.stringify(injectedContext)
+      '--context', JSON.stringify({plot_id: plotId, ...injectedContext}),
+      '--query', message || ""
     ]);
 
     let dataString = '';
@@ -153,42 +151,80 @@ export async function POST(req: Request) {
 
       pythonProcess.stderr.on('data', (data) => {
         errorString += data.toString();
-        // console.error(`[AgriBrain Chat] ${data}`); 
       });
 
       pythonProcess.on('close', (code) => {
-        if (code === 0) {
+        if (code === 0 && dataString) {
           resolve(dataString);
         } else {
-          // If python falls back or errors, we might still get dataString, or we might reject.
-          // In orchestrated mode, we might just log error.
-          if (dataString) {
-             resolve(dataString); // Sometimes stderr has logs but stdout has valid json
-          } else {
-             reject(new Error(`Chat Process exited with code ${code}: ${errorString}`));
-          }
+             // If dataString exists, we might have caught an exception and printed JSON error
+             if (dataString) resolve(dataString);
+             else reject(new Error(`Orchestrator exited with code ${code}: ${errorString}`));
         }
       });
     });
 
     try {
       await processPromise;
-      // Parse JSON output from Python
-      const chatResult = JSON.parse(dataString);
+      const payload = JSON.parse(dataString);
+      
+      if (payload.error) {
+          throw new Error(payload.error);
+      }
+
+      // --- TEMPORARY: Deterministic Template Rendering (No LLM) ---
+      // Conforms to User Request: "Quick fix: Make the chat answer consistently good... Use this chat response template"
+      
+      const headline = payload.summary?.headline || "Analysis Complete";
+      const diags = payload.diagnoses || [];
+      const topDiag = diags.length > 0 ? diags[0] : null;
+      
+      const relScore = payload.global_quality?.reliability || 0.0;
+      const modes = payload.global_quality?.degradation_modes || [];
+      
+      let md = `### ${headline}\n\n`;
+      
+      if (topDiag) {
+          md += `**Likely Issue:** ${topDiag.id} (P=${(topDiag.prob || 0).toFixed(2)}, Conf=${(topDiag.conf || 0).toFixed(2)})\n\n`;
+      } else {
+          md += `**Status:** Nominal. No critical threats detected.\n\n`;
+      }
+      
+      md += `**Key Signals:**\n`;
+      (payload.summary?.key_signals || []).forEach((s: any) => {
+          md += `- ${s.name}: **${s.value}** (${s.direction})\n`;
+      });
+      md += `\n`;
+      
+      md += `**Recommended Actions:**\n`;
+      (payload.actions || []).slice(0, 3).forEach((a: any) => {
+          md += `- ${a.title} __[${a.priority}]__\n`;
+      });
+      
+      if (payload.plan?.tasks?.length > 0) {
+          md += `\n**Plan:**\n`;
+          payload.plan.tasks.slice(0, 2).forEach((t: any) => {
+             md += `- ${t.task}\n`; 
+          });
+      }
+
+      if (modes.length > 0) {
+          md += `\n> ⚠️ **Data Gaps:** ${modes.join(", ")} (Reliability: ${relScore})`;
+      }
+
       return NextResponse.json({
-         text: chatResult.answer,
+         text: md,
          toolCalls: [], 
          metadata: {
-             intent: chatResult.intent,
-             evidence: chatResult.evidence
-             // debug_logs: errorString
+             intent: "ANALYSIS",
+             evidence: modes
          }
       });
       
     } catch (err: any) {
-      console.error("Chat Failed:", err);
+      console.error("Orchestrator V2 Failed:", err, errorString);
       return NextResponse.json({ 
-        text: "I'm having trouble connecting to the field sensors right now. Please try again.", 
+        text: `### System Error\nI encountered an issue running the diagnostics pipeline.\n\n\`\`\`\n${err.message}\n\`\`\``, 
         error: err.message
       });
     }

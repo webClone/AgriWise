@@ -164,3 +164,11 @@ class VegetationIntelligenceEngine:
 
 # Singleton
 veg_int_engine = VegetationIntelligenceEngine()
+
+from services.agribrain.orchestrator_v2.schema import OrchestratorInput
+
+def run_layer2_veg(inputs: OrchestratorInput, tensor: FieldTensor) -> VegIntOutput:
+    """
+    Standard Entry Point for Layer 2.
+    """
+    return veg_int_engine.analyze_tensor(tensor)

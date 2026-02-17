@@ -356,15 +356,19 @@ def fetch_soil_moisture_proxy(lat: float, lng: float) -> Optional[Dict]:
             };
         }
         function evaluatePixel(s) {
+            let mask = s.dataMask;
+            // Guard against missing/invalid bands
+            if (!s.VV || !s.VH || s.VH <= 0) mask = 0;
+
             let vv_db = 10 * Math.log10(s.VV);
             let vh_db = 10 * Math.log10(s.VH);
-            let ratio = s.VV / s.VH;
+            let ratio = (mask === 1) ? (s.VV / s.VH) : 0;
             
             return {
                 vv: [vv_db],
                 vh: [vh_db],
                 ratio: [ratio],
-                dataMask: [s.dataMask]
+                dataMask: [mask]
             };
         }
         """
@@ -379,7 +383,8 @@ def fetch_soil_moisture_proxy(lat: float, lng: float) -> Optional[Dict]:
                     "type": "sentinel-1-grd",
                     "timeRange": { "from": start_str, "to": end_str },
                     "dataFilter": {
-                        "acquisitionMode": "IW"
+                        "acquisitionMode": "IW",
+                        "polarization": "DV"
                     }
                 }]
             },
@@ -476,12 +481,16 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
             };
         }
         function evaluatePixel(s) {
+            let mask = s.dataMask;
+            // Guard against missing/invalid bands
+            if (!s.VV || !s.VH || s.VH <= 0) mask = 0;
+
             let vv_db = 10 * Math.log10(s.VV);
             let vh_db = 10 * Math.log10(s.VH);
             return {
                 vv: [vv_db],
                 vh: [vh_db],
-                dataMask: [s.dataMask]
+                dataMask: [mask]
             };
         }
         """
@@ -495,7 +504,10 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
                 "data": [{
                     "type": "sentinel-1-grd",
                     "timeRange": { "from": start_str, "to": end_str },
-                    "dataFilter": { "acquisitionMode": "IW" }
+                    "dataFilter": { 
+                        "acquisitionMode": "IW",
+                        "polarization": "DV"
+                    }
                 }]
             },
             "aggregation": {
@@ -520,6 +532,9 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
 
         result = response.json()
         data = result.get("data", [])
+        
+        if not data:
+            print(f"⚠️ SAR Timeseries Empty Data. Raw Response: {result}")
         
         timeseries = []
         for item in data:
@@ -582,7 +597,9 @@ def fetch_biomass_estimate(lat: float, lng: float) -> Optional[Dict]:
             };
         }
         function evaluatePixel(s) {
-            return { vh: [10 * Math.log10(s.VH)], dataMask: [s.dataMask] };
+            let mask = s.dataMask;
+            if (!s.VH || s.VH <= 0) mask = 0;
+            return { vh: [10 * Math.log10(s.VH)], dataMask: [mask] };
         }
         """
 
@@ -595,7 +612,10 @@ def fetch_biomass_estimate(lat: float, lng: float) -> Optional[Dict]:
                 "data": [{
                     "type": "sentinel-1-grd",
                     "timeRange": { "from": start_str, "to": end_str },
-                    "dataFilter": { "acquisitionMode": "IW" }
+                    "dataFilter": { 
+                        "acquisitionMode": "IW",
+                        "polarization": "DV" 
+                    }
                 }]
             },
             "aggregation": {
@@ -691,10 +711,12 @@ def detect_flood_status(lat: float, lng: float) -> Optional[Dict]:
             };
         }
         function evaluatePixel(s) {
+            let mask = s.dataMask;
+            if (!s.VV || !s.VH || s.VH <= 0) mask = 0;
             return {
                 vv: [10 * Math.log10(s.VV)],
                 vh: [10 * Math.log10(s.VH)],
-                dataMask: [s.dataMask]
+                dataMask: [mask]
             };
         }
         """
@@ -708,7 +730,10 @@ def detect_flood_status(lat: float, lng: float) -> Optional[Dict]:
                 "data": [{
                     "type": "sentinel-1-grd",
                     "timeRange": { "from": start_str, "to": end_str },
-                    "dataFilter": { "acquisitionMode": "IW" }
+                    "dataFilter": { 
+                        "acquisitionMode": "IW", 
+                        "polarization": "DV"
+                    }
                 }]
             },
             "aggregation": {

@@ -95,33 +95,52 @@ def build_decision_features(
         missing.append(Driver.TEMP)
 
     # Metric Calculation
-    # Filter Nones (L1 might have gaps even if channel exists)
+    # We must operate on the aligned time series (last N days), treating None as 0.0 or ignored within the window.
+    # Using 'valid_rain' collapses time gaps, which is wrong for "last 14 days".
+    
+    clean_rain = [r if r is not None else 0.0 for r in rain_series]
+    
+    # Check availability on the raw SERIES (if too many Nones in last 14 days, it's missing)
+    # But for calculation, we use clean_rain.
+    
+    # Availability Logic (Global or Window based?)
+    # User spec: DATA_GAP if critical data missing.
+    # Let's say if > 50% of total series is valid? Or recent?
+    # Existing logic: len(valid_rain) > n * 0.5. Keeping it for now.
     valid_rain = [r for r in rain_series if r is not None]
     rain_available = len(valid_rain) > (n * 0.5) and has_rain
-    if has_rain and not rain_available: missing.append(Driver.RAIN) # Gap even if channel present
+    if has_rain and not rain_available: missing.append(Driver.RAIN)
 
-    rain_7d = sum(valid_rain[-7:]) if len(valid_rain) >= 7 else sum(valid_rain)
-    rain_14d = sum(valid_rain[-14:]) if len(valid_rain) >= 14 else sum(valid_rain)
+    # Sums on TEMPORAL window (last 7/14 indices)
+    rain_7d = sum(clean_rain[-7:]) if n >= 7 else sum(clean_rain)
+    rain_14d = sum(clean_rain[-14:]) if n >= 14 else sum(clean_rain)
     
     # Days dry
     days_dry = 0
-    clean_rain = [r if r is not None else 0.0 for r in rain_series]
+    # Clean rain is already 0.0 for Nones
     for r in reversed(clean_rain):
         if r > 2.0: break
         days_dry += 1
         
     # Thermal
-    valid_tmax = [t for t in tmax_series if t is not None]
-    valid_tmin = [t for t in tmin_series if t is not None]
-    temp_available = (len(valid_tmax) > 5) and has_tmax
+    # For temperature, we can't assume 0.0. We should filter Nones within the window.
+    tmax_window_7d = tmax_series[-7:] if n >= 7 else tmax_series
+    tmin_window_7d = tmin_series[-7:] if n >= 7 else tmin_series
+    
+    valid_tmax_7d = [t for t in tmax_window_7d if t is not None]
+    valid_tmin_7d = [t for t in tmin_window_7d if t is not None]
+    
+    # Availability check (global)
+    valid_tmax_all = [t for t in tmax_series if t is not None]
+    temp_available = (len(valid_tmax_all) > 5) and has_tmax
     
     heat_days = 0
     cold_days = 0
     if temp_available:
-        heat_days = sum(1 for t in valid_tmax[-7:] if t > 30.0) if len(valid_tmax) >= 7 else 0
-        cold_days = sum(1 for t in valid_tmin[-7:] if t < 10.0) if len(valid_tmin) >= 7 else 0
+        heat_days = sum(1 for t in valid_tmax_7d if t > 30.0)
+        cold_days = sum(1 for t in valid_tmin_7d if t < 10.0)
         
-    saturation_days = sum(1 for r in valid_rain[-7:] if r > 15.0) if len(valid_rain) >= 7 else 0
+    saturation_days = sum(1 for r in clean_rain[-7:] if r > 15.0) if n >= 7 else 0
 
     # --- 3. Crop State (Source: Layer 2) ---
     curr_stage = veg.phenology.stage_by_day[-1] if veg.phenology.stage_by_day else "BARE_SOIL"

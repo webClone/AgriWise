@@ -163,11 +163,30 @@ class DecisionIntelligenceEngine:
 # Singleton
 _engine = DecisionIntelligenceEngine()
 
+from services.agribrain.orchestrator_v2.schema import OrchestratorInput
+
 def run_layer3_decision(
+    inputs: OrchestratorInput,
     tensor: FieldTensor, 
-    veg_int: VegIntOutput, 
-    context: PlotContext,
-    weather_forecast: List[Dict[str, Any]] = None
+    veg_int: VegIntOutput
 ) -> DecisionOutput:
-    input_pack = DecisionInput(tensor, veg_int, context, weather_forecast or [])
+    
+    # Map Context
+    cc = inputs.crop_config
+    oc = inputs.operational_context
+    pc = inputs.policy_snapshot
+    
+    context = PlotContext(
+        crop_type=cc.get("crop", "unknown"),
+        variety=cc.get("variety"),
+        planting_date=cc.get("planting_date", ""),
+        irrigation_type=oc.get("irrigation_type", "rainfed"),
+        management_goal=oc.get("management_goal", "yield_max"),
+        constraints=oc.get("constraints", {})
+    )
+    
+    # Weather Forecast (optional in operational context)
+    weather_forecast = oc.get("weather_forecast", [])
+    
+    input_pack = DecisionInput(tensor, veg_int, context, weather_forecast)
     return _engine.run_decision_cycle(input_pack)

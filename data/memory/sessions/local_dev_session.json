@@ -1,0 +1,638 @@
+{
+  "conversation_id": "local_dev_session",
+  "turns": [
+    {
+      "timestamp": "2026-02-17T08:01:43.978644",
+      "user": "Is there fungal pressure?",
+      "assistant": {
+        "headline": "No Clear Evidence of Fungal Pressure",
+        "direct_answer": "There is no clear evidence of fungal pressure based on the available data.",
+        "what_it_means": "The current data does not indicate any signs of fungal diseases. However, due to missing key signals and the bare soil stage, we cannot rule out potential issues.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "99.4 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest excessive moisture that could promote fungal growth."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which could be an early sign of fungal pressure."
+          }
+        ],
+        "diagnoses": [
+          {
+            "hypothesis": "No fungal pressure",
+            "probability": "LOW",
+            "confidence": "LOW",
+            "reasoning": "The available data does not provide strong evidence of fungal pressure. However, the lack of specific crop and soil information, as well as the bare soil stage, reduces our confidence in this diagnosis."
+          }
+        ],
+        "actions": [
+          {
+            "type": "VERIFY",
+            "description": "Verify soil and crop information to better assess potential fungal pressure.",
+            "is_allowed": true,
+            "blocked_reason": ""
+          },
+          {
+            "type": "MONITOR",
+            "description": "Monitor the field for any changes in NDVI and rainfall patterns.",
+            "is_allowed": true,
+            "blocked_reason": ""
+          }
+        ],
+        "teaching_note": "Fungal pressure can be influenced by several factors, including soil moisture, temperature, and crop type. Without specific information about the crop and soil, it's difficult to make a definitive diagnosis. Monitoring and verifying additional data can help in making more informed decisions.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect fungal growth?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available"
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-02-17T08:02:19.744167",
+      "user": "Is there fungal pressure?",
+      "assistant": {
+        "headline": "No Clear Evidence of Fungal Pressure",
+        "direct_answer": "There is no clear evidence of fungal pressure based on the available data.",
+        "what_it_means": "The current data does not indicate any signs of fungal diseases. However, due to missing key signals and the bare soil stage, we cannot rule out potential issues.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "99.4 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest excessive moisture that could promote fungal growth."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which could be an early sign of fungal pressure."
+          }
+        ],
+        "diagnoses": [
+          {
+            "hypothesis": "No fungal pressure",
+            "probability": "LOW",
+            "confidence": "LOW",
+            "reasoning": "The available data does not provide strong evidence of fungal pressure. However, the lack of specific crop and soil information, as well as the bare soil stage, reduces our confidence in this diagnosis."
+          }
+        ],
+        "actions": [
+          {
+            "type": "VERIFY",
+            "description": "Verify soil and crop information to better assess potential fungal pressure.",
+            "is_allowed": true,
+            "blocked_reason": ""
+          },
+          {
+            "type": "MONITOR",
+            "description": "Monitor the field for any changes in NDVI and rainfall patterns.",
+            "is_allowed": true,
+            "blocked_reason": ""
+          }
+        ],
+        "teaching_note": "Fungal pressure can be influenced by several factors, including soil moisture, temperature, and crop type. Without specific information about the crop and soil, it's difficult to make a definitive diagnosis. Monitoring and verifying additional data can help in making more informed decisions.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect fungal growth?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available"
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-02-17T08:03:42.983365",
+      "user": "Is there fungal pressure?",
+      "assistant": {
+        "headline": "No Clear Evidence of Fungal Pressure",
+        "direct_answer": "There is no clear evidence of fungal pressure based on the available data.",
+        "what_it_means": "The current data does not indicate any signs of fungal diseases. However, due to missing key signals and the bare soil stage, we cannot rule out potential issues.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "99.4 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest excessive moisture that could promote fungal growth."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which could be an early sign of fungal pressure."
+          }
+        ],
+        "diagnoses": [
+          {
+            "hypothesis": "No fungal pressure",
+            "probability": "LOW",
+            "confidence": "LOW",
+            "reasoning": "The available data does not provide strong evidence of fungal pressure. However, the lack of specific crop and soil information, as well as the bare soil stage, reduces our confidence in this diagnosis."
+          }
+        ],
+        "actions": [
+          {
+            "type": "VERIFY",
+            "description": "Verify soil and crop information to better assess potential fungal pressure.",
+            "is_allowed": true,
+            "blocked_reason": ""
+          },
+          {
+            "type": "MONITOR",
+            "description": "Monitor the field for any changes in NDVI and rainfall patterns.",
+            "is_allowed": true,
+            "blocked_reason": ""
+          }
+        ],
+        "teaching_note": "Fungal pressure can be influenced by several factors, including soil moisture, temperature, and crop type. Without specific information about the crop and soil, it's difficult to make a definitive diagnosis. Monitoring and verifying additional data can help in making more informed decisions.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect fungal growth?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available"
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-02-17T08:05:04.456937",
+      "user": "How is my field doing right now?",
+      "assistant": {
+        "headline": "Field Analysis: Data Gaps and Water Stress Concerns",
+        "direct_answer": "Your field is currently at the bare soil stage with normal rainfall and stable NDVI trends. However, there are data gaps and a moderate probability of water stress.",
+        "what_it_means": "The field is not showing any immediate signs of distress, but the lack of specific crop and soil information, along with a moderate probability of water stress, suggests that further verification is needed.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "46.5 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest excessive moisture or drought conditions."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which is expected at the bare soil stage."
+          }
+        ],
+        "diagnoses": [
+          {
+            "id": "DATA_GAP",
+            "prob": 1.0,
+            "conf": 0.8,
+            "reasoning": "There is a significant data gap due to the lack of specific crop and soil information, which reduces our ability to make a confident diagnosis."
+          },
+          {
+            "id": "WATER_STRESS",
+            "prob": 0.7863017115706753,
+            "conf": 0.3,
+            "reasoning": "There is a moderate probability of water stress, but the low confidence is due to the lack of specific soil and crop data."
+          }
+        ],
+        "actions": [
+          {
+            "title": "MONITOR: Wait for Clear Data recommended due to DATA_GAP (100%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Waiting for more complete data will help in making a more accurate assessment."
+            ]
+          },
+          {
+            "title": "VERIFY: Scout: Check Soil Moisture recommended due to WATER_STRESS (79%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Scouting the field to check soil moisture can help verify the presence of water stress."
+            ]
+          }
+        ],
+        "teaching_note": "Data gaps can significantly impact the accuracy of field assessments. It's important to gather complete information about the crop type, soil texture, and recent environmental conditions to make informed decisions. Monitoring and verifying soil moisture can help in identifying and addressing potential water stress issues.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect water stress?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available"
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-02-17T08:06:21.476886",
+      "user": "How is my field doing right now?",
+      "assistant": {
+        "headline": "Field Analysis: Data Gaps and Water Stress Concerns",
+        "direct_answer": "Your field is currently at the bare soil stage with normal rainfall and stable NDVI trends. However, there are data gaps and a moderate probability of water stress.",
+        "what_it_means": "The field is not showing any immediate signs of distress, but the lack of specific crop and soil information, along with a moderate probability of water stress, suggests that further verification is needed.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "46.5 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest excessive moisture or drought conditions."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which is expected at the bare soil stage."
+          }
+        ],
+        "diagnoses": [
+          {
+            "id": "DATA_GAP",
+            "prob": 1.0,
+            "conf": 0.8,
+            "reasoning": "There is a significant data gap due to the lack of specific crop and soil information, which reduces our ability to make a confident diagnosis."
+          },
+          {
+            "id": "WATER_STRESS",
+            "prob": 0.7863017115706753,
+            "conf": 0.3,
+            "reasoning": "There is a moderate probability of water stress, but the low confidence is due to the lack of specific soil and crop data."
+          }
+        ],
+        "actions": [
+          {
+            "title": "MONITOR: Wait for Clear Data recommended due to DATA_GAP (100%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Waiting for more complete data will help in making a more accurate assessment."
+            ]
+          },
+          {
+            "title": "VERIFY: Scout: Check Soil Moisture recommended due to WATER_STRESS (79%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Scouting the field to check soil moisture can help verify the presence of water stress."
+            ]
+          }
+        ],
+        "teaching_note": "Data gaps can significantly impact the accuracy of field assessments. It's important to gather complete information about the crop type, soil texture, and recent environmental conditions to make informed decisions. Monitoring and verifying soil moisture can help in identifying and addressing potential water stress issues.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect water stress?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available"
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-02-17T08:07:45.030076",
+      "user": "How is my field doing right now?",
+      "assistant": {
+        "headline": "Field Analysis: Data Gaps and Water Stress Concerns",
+        "direct_answer": "Your field is currently at the bare soil stage with normal rainfall and stable NDVI trends. However, there are data gaps and a moderate probability of water stress.",
+        "what_it_means": "The field is not showing any immediate signs of distress, but the lack of specific crop and soil information, along with a moderate probability of water stress, suggests that further verification is needed.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "46.5 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest excessive moisture or drought conditions."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which is expected at the bare soil stage."
+          }
+        ],
+        "diagnoses": [
+          {
+            "id": "DATA_GAP",
+            "prob": 1.0,
+            "conf": 0.8,
+            "reasoning": "There is a significant data gap due to the lack of specific crop and soil information, which reduces our ability to make a confident diagnosis."
+          },
+          {
+            "id": "WATER_STRESS",
+            "prob": 0.7863017115706753,
+            "conf": 0.3,
+            "reasoning": "There is a moderate probability of water stress, but the low confidence is due to the lack of specific soil and crop data."
+          }
+        ],
+        "actions": [
+          {
+            "title": "MONITOR: Wait for Clear Data recommended due to DATA_GAP (100%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Waiting for more complete data will help in making a more accurate assessment."
+            ]
+          },
+          {
+            "title": "VERIFY: Scout: Check Soil Moisture recommended due to WATER_STRESS (79%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Scouting the field to check soil moisture can help verify the presence of water stress."
+            ]
+          }
+        ],
+        "teaching_note": "Data gaps can significantly impact the accuracy of field assessments. It's important to gather complete information about the crop type, soil texture, and recent environmental conditions to make informed decisions. Monitoring and verifying soil moisture can help in identifying and addressing potential water stress issues.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect water stress?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available"
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-02-17T08:08:08.042874",
+      "user": "Is there fungal pressure right now?",
+      "assistant": {
+        "headline": "Field Analysis: No Fungal Pressure Indicated",
+        "direct_answer": "There is no indication of fungal pressure in your field at this time.",
+        "what_it_means": "The current data does not suggest any fungal issues, but the lack of specific crop and soil information limits our ability to make a highly confident diagnosis.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "46.5 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest conditions favorable for fungal growth."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which is expected at the bare soil stage."
+          }
+        ],
+        "diagnoses": [
+          {
+            "id": "DATA_GAP",
+            "prob": 1.0,
+            "conf": 0.8,
+            "reasoning": "There is a significant data gap due to the lack of specific crop and soil information, which reduces our ability to make a confident diagnosis."
+          },
+          {
+            "id": "NO_FUNGAL_PRESSURE",
+            "prob": 0.95,
+            "conf": 0.3,
+            "reasoning": "There is a high probability of no fungal pressure, but the low confidence is due to the lack of specific crop and soil data."
+          }
+        ],
+        "actions": [
+          {
+            "title": "MONITOR: Wait for Clear Data recommended due to DATA_GAP (100%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Waiting for more complete data will help in making a more accurate assessment."
+            ]
+          },
+          {
+            "title": "VERIFY: Scout: Check for Fungal Symptoms if Crops are Planted.",
+            "priority": "MEDIUM",
+            "is_allowed": true,
+            "why": [
+              "Scouting the field to check for any visible signs of fungal diseases can help verify the absence of fungal pressure."
+            ]
+          }
+        ],
+        "teaching_note": "Fungal pressure is often influenced by environmental conditions such as moisture and temperature. The lack of specific crop and soil information limits the accuracy of our diagnosis. Monitoring and verifying the field can help in identifying and addressing potential issues.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect fungal growth?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available"
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-02-17T08:09:27.857145",
+      "user": "Do I need to irrigate?",
+      "assistant": {
+        "headline": "Field Analysis: Data Gaps and Water Stress Concerns",
+        "direct_answer": "Based on the current data, there is a moderate probability of water stress, but the lack of specific crop and soil information limits our ability to make a definitive recommendation on irrigation.",
+        "what_it_means": "The field is not showing immediate signs of severe water stress, but the moderate probability and data gaps suggest that further verification is needed before making an irrigation decision.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "46.5 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest excessive moisture or drought conditions."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which is expected at the bare soil stage."
+          }
+        ],
+        "diagnoses": [
+          {
+            "id": "DATA_GAP",
+            "prob": 1.0,
+            "conf": 0.8,
+            "reasoning": "There is a significant data gap due to the lack of specific crop and soil information, which reduces our ability to make a confident diagnosis."
+          },
+          {
+            "id": "WATER_STRESS",
+            "prob": 0.7863017115706753,
+            "conf": 0.3,
+            "reasoning": "There is a moderate probability of water stress, but the low confidence is due to the lack of specific soil and crop data."
+          }
+        ],
+        "actions": [
+          {
+            "title": "MONITOR: Wait for Clear Data recommended due to DATA_GAP (100%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Waiting for more complete data will help in making a more accurate assessment."
+            ]
+          },
+          {
+            "title": "VERIFY: Scout: Check Soil Moisture recommended due to WATER_STRESS (79%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Scouting the field to check soil moisture can help verify the presence of water stress and inform irrigation decisions."
+            ]
+          }
+        ],
+        "teaching_note": "Data gaps can significantly impact the accuracy of field assessments. It's important to gather complete information about the crop type, soil texture, and recent environmental conditions to make informed decisions. Monitoring and verifying soil moisture can help in identifying and addressing potential water stress issues.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect water stress?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available"
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-02-17T08:12:15.185919",
+      "user": "Is there fungal pressure?",
+      "assistant": {
+        "headline": "Field Analysis: No Fungal Pressure Indicated",
+        "direct_answer": "There is no indication of fungal pressure in your field at this time.",
+        "what_it_means": "The current data does not suggest any fungal issues, but the lack of specific crop and soil information limits our ability to make a highly confident diagnosis.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "99.4 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest conditions favorable for fungal growth."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which is expected at the bare soil stage."
+          }
+        ],
+        "diagnoses": [
+          {
+            "id": "DATA_GAP",
+            "prob": 1.0,
+            "conf": 0.8,
+            "reasoning": "There is a significant data gap due to the lack of specific crop and soil information, which reduces our ability to make a confident diagnosis."
+          },
+          {
+            "id": "NO_FUNGAL_PRESSURE",
+            "prob": 0.95,
+            "conf": 0.3,
+            "reasoning": "There is a high probability of no fungal pressure, but the low confidence is due to the lack of specific crop and soil data."
+          }
+        ],
+        "actions": [
+          {
+            "title": "MONITOR: Wait for Clear Data recommended due to DATA_GAP (100%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Waiting for more complete data will help in making a more accurate assessment."
+            ]
+          },
+          {
+            "title": "VERIFY: Scout: Check for Fungal Symptoms if Crops are Planted.",
+            "priority": "MEDIUM",
+            "is_allowed": true,
+            "why": [
+              "Scouting the field to check for any visible signs of fungal diseases can help verify the absence of fungal pressure."
+            ]
+          }
+        ],
+        "teaching_note": "Fungal pressure is often influenced by environmental conditions such as moisture and temperature. The lack of specific crop and soil information limits the accuracy of our diagnosis. Monitoring and verifying the field can help in identifying and addressing potential issues.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect fungal growth?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available"
+        ]
+      }
+    },
+    {
+      "timestamp": "2026-02-17T08:21:19.448505",
+      "user": "Is there fungal pressure?",
+      "assistant": {
+        "headline": "Field Analysis: No Fungal Pressure Indicated",
+        "direct_answer": "There is no indication of fungal pressure in your field at this time.",
+        "what_it_means": "The current data does not suggest any fungal issues, but the lack of specific crop and soil information limits our ability to make a highly confident diagnosis.",
+        "evidence": [
+          {
+            "name": "Rain (14d)",
+            "value": "99.4 mm",
+            "direction": "NORMAL",
+            "interpretation": "Normal rainfall levels do not suggest conditions favorable for fungal growth."
+          },
+          {
+            "name": "NDVI Trend",
+            "value": "STABLE",
+            "direction": "STABLE",
+            "interpretation": "The stable NDVI trend indicates no significant changes in vegetation health, which is expected at the bare soil stage."
+          }
+        ],
+        "diagnoses": [
+          {
+            "id": "DATA_GAP",
+            "prob": 1.0,
+            "conf": 0.8,
+            "reasoning": "There is a significant data gap due to the lack of specific crop and soil information, which reduces our ability to make a confident diagnosis."
+          },
+          {
+            "id": "NO_FUNGAL_PRESSURE",
+            "prob": 0.95,
+            "conf": 0.3,
+            "reasoning": "There is a high probability of no fungal pressure, but the low confidence is due to the lack of specific crop and soil data."
+          }
+        ],
+        "actions": [
+          {
+            "title": "MONITOR: Wait for Clear Data recommended due to DATA_GAP (100%).",
+            "priority": "HIGH",
+            "is_allowed": true,
+            "why": [
+              "Waiting for more complete data will help in making a more accurate assessment."
+            ]
+          },
+          {
+            "title": "VERIFY: Scout: Check for Fungal Symptoms if Crops are Planted.",
+            "priority": "MEDIUM",
+            "is_allowed": true,
+            "why": [
+              "Scouting the field to check for any visible signs of fungal diseases can help verify the absence of fungal pressure."
+            ]
+          }
+        ],
+        "teaching_note": "Fungal pressure is often influenced by environmental conditions such as moisture and temperature. The lack of specific crop and soil information limits the accuracy of our diagnosis. Monitoring and verifying the field can help in identifying and addressing potential issues.",
+        "next_questions": [
+          "What is the crop type and variety planted in the field?",
+          "What is the soil texture and drainage like in the field?",
+          "Have there been any recent temperature changes that could affect fungal growth?"
+        ],
+        "limitations": [
+          "Lack of specific crop and soil information",
+          "Field is currently at the bare soil stage",
+          "No temperature data available",
+          "Limited SAR coverage; assessing via optical/weather proxies."
+        ]
+      }
+    }
+  ],
+  "summary": "",
+  "started_at": "2026-02-17T08:01:43.978633"
+}

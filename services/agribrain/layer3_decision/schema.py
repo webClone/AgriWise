@@ -51,6 +51,7 @@ class Driver(Enum):
     SAR_VV = "SAR_VV"
     SAR_VH = "SAR_VH"
     GDD = "GDD"
+    NDVI_UNC = "NDVI_UNC"
 
 @dataclass
 class EvidenceTerm:

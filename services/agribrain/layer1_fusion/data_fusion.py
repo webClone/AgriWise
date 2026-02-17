@@ -81,7 +81,7 @@ class DataFusionEngine:
         print(f"🔄 [Layer 1] Starting Production Fusion Run: {run_id} ({mode} Mode)")
 
         # --- Step 1: Acquire Evidence (Catalog) ---
-        evidence_pool = self._acquire_all_evidence(lat, lng, start_date, end_date)
+        evidence_pool, acquisition_snapshot = self._acquire_all_evidence(lat, lng, start_date, end_date)
 
         tracker.log_event(
             "ACQUIRED_EVIDENCE",
@@ -143,6 +143,7 @@ class DataFusionEngine:
         tensor.provenance = {
             "run_id": run_id,
             "lineage": tracker.export_lineage(),
+            "acquisition_diagnostics": acquisition_snapshot,
             "tracker_stats": {
                 "events_count": len(tracker.events),
                 "duration_ms": 0.0
@@ -203,14 +204,27 @@ class DataFusionEngine:
             raw = repr(payload).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:12]
 
-    def _acquire_all_evidence(self, lat: float, lng: float, start: str, end: str) -> List["EvidenceItem"]:
+    def _acquire_all_evidence(self, lat: float, lng: float, start: str, end: str) -> tuple[List["EvidenceItem"], Dict[str, Any]]:
         pool: List[EvidenceItem] = []
+        snapshot: Dict[str, Any] = {"sar": {}, "optical": {}, "weather": {}}
 
         start_dt = datetime.strptime(start, "%Y-%m-%d")
         end_dt = datetime.strptime(end, "%Y-%m-%d")
 
         # 1. Optical (Sentinel-2)
-        opt_raw = fetch_ndvi_timeseries(lat, lng).get("data", []) or []
+        try:
+            opt_resp = fetch_ndvi_timeseries(lat, lng)
+            opt_raw = opt_resp.get("data", []) or []
+            snapshot["optical"] = {
+                "status": "OK",
+                "count": len(opt_raw),
+                "keys_seen": list(opt_resp.keys()) if isinstance(opt_resp, dict) else [],
+                "sample_keys": list(opt_raw[0].keys()) if opt_raw else []
+            }
+        except Exception as e:
+            opt_raw = []
+            snapshot["optical"] = {"status": "ERROR", "error": str(e)}
+
         for rec in opt_raw:
             ts = self._safe_parse_date(rec.get("date"))
             if not self._in_range(ts, start_dt, end_dt):
@@ -227,9 +241,24 @@ class DataFusionEngine:
 
         # 2. SAR (Sentinel-1) — respect requested window
         sar_days = max(1, (end_dt - start_dt).days + 1)
+        
+        try:
+            sar_resp = fetch_sar_timeseries(lat, lng, days=sar_days) or {}
+            sar_raw = sar_resp.get("timeseries", []) or sar_resp.get("data", []) or []  # accept both shapes
+            
+            snapshot["sar"] = {
+                "status": "OK",
+                "count": len(sar_raw),
+                "keys_seen": list(sar_resp.keys()) if isinstance(sar_resp, dict) else [],
+                "params": {"lat": lat, "lng": lng, "days": sar_days},
+                "provider": "earthengine-api" # Assumption
+            }
+            if not sar_raw and "error" in sar_resp:
+                 snapshot["sar"]["provider_error"] = sar_resp["error"]
 
-        sar_resp = fetch_sar_timeseries(lat, lng, days=sar_days) or {}
-        sar_raw = sar_resp.get("timeseries", []) or sar_resp.get("data", []) or []  # accept both shapes
+        except Exception as e:
+            sar_raw = []
+            snapshot["sar"] = {"status": "ERROR", "error": str(e)}
 
         for rec in sar_raw:
             ts = self._safe_parse_date(rec.get("date"))
@@ -246,7 +275,13 @@ class DataFusionEngine:
             ))
 
         # 3. Weather (modeled)
-        wx_raw = fetch_historical_weather(lat, lng, start, end)
+        try:
+            wx_raw = fetch_historical_weather(lat, lng, start, end)
+            snapshot["weather"] = {"status": "OK", "keys": list(wx_raw.keys()) if isinstance(wx_raw, dict) else []}
+        except Exception as e:
+            wx_raw = {}
+            snapshot["weather"] = {"status": "ERROR", "error": str(e)}
+
         if wx_raw:
             # New schema: "records"
             if "records" in wx_raw:
@@ -299,7 +334,11 @@ class DataFusionEngine:
                     ))
 
         # 4. Soil (Static)
-        soil_raw = fetch_soil_properties(lat, lng)
+        try:
+            soil_raw = fetch_soil_properties(lat, lng)
+        except Exception:
+            soil_raw = {}
+            
         if soil_raw:
             pool.append(EvidenceItem(
                 id=f"soil_grids_static_{self._hash_payload(soil_raw)}",
@@ -309,7 +348,7 @@ class DataFusionEngine:
                 payload=soil_raw
             ))
 
-        return pool
+        return pool, snapshot
 
     def _perform_temporal_fusion_pandas(self, date_strs: List[str], evidence: List["EvidenceItem"]) -> List[Dict]:
         """High-Performance implementation using Pandas. Fuses optical + SAR (plot-level)."""
