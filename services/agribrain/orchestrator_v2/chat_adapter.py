@@ -60,9 +60,10 @@ class ChatPayload:
     assistant_mode: str = "MONITORING" # ADVISORY | DATA_GAP | VERIFY_REQUIRED | MONITORING
     assistant_style: str = "TUTOR" # TUTOR | CONCISE | DEBUG
     questions_for_user: List[str] = field(default_factory=list)
-    context_question: Optional[str] = None
-    structured_response: Optional[Dict[str, Any]] = None # ARF-v1 JSON Output
-    memory_context: Dict[str, Any] = field(default_factory=dict) # Snapshot of what LLM knew
+    # ARF-v2 fields
+    arf: Optional[Dict[str, Any]] = None # Parsed JSON from ARF-v2
+    memory: Dict[str, Any] = field(default_factory=dict) # Farmer level, open loops, known context
+    ui_hints: Dict[str, Any] = field(default_factory=dict) # Display config
     visuals: List[ChatVisual] = field(default_factory=list) # Rich charts
 
 from services.agribrain.orchestrator_v2.intents import Intent
@@ -174,19 +175,26 @@ def build_chat_payload(
             ))
             
     # Actions mostly come from L3 policy or L5 recommnedations
-    # We can extract them from the plan implicitly or from layer outputs
-    # For now, simplistic extraction from plan tasks
-    seen_actions = set()
-    for t in tasks:
-        key = t.task.split(":")[0]
-        if key not in seen_actions:
+    if artifact.layer_3 and artifact.layer_3.output:
+        l3_rec = getattr(artifact.layer_3.output, "recommendations", [])
+        for r in l3_rec:
             actions.append(ChatAction(
-                title=t.task,
-                priority="HIGH", # infer
-                is_allowed=True,
-                why=[]
+                title=f"{r.action_type}: {r.action_id}",
+                priority=f"P-Score {r.priority_score:.1f}",
+                is_allowed=r.is_allowed,
+                why=r.blocked_reason if not r.is_allowed else []
             ))
-            seen_actions.add(key)
+            
+    # L5 actions
+    if artifact.layer_5 and artifact.layer_5.output:
+         l5_rec = getattr(artifact.layer_5.output, "recommended_actions", [])
+         for r in l5_rec:
+             actions.append(ChatAction(
+                title=f"{r.action_type}: {r.action_id}",
+                priority=f"Impact {r.expected_impact:.1f}",
+                is_allowed=r.is_allowed,
+                why=r.blocked_reason if not r.is_allowed else []
+            ))
 
     # 5. Assistant Mode Logic & Thresholding
     
@@ -213,73 +221,67 @@ def build_chat_payload(
     
     # If we have NO high impact diags and NO forced mode, keep it MONITORING even if low diags exist
     
-    # 6. Memory Integration & ARF-v1
-    from services.agribrain.memory.store import MemoryStore
-    store = MemoryStore()
+    # 6. Memory Integration & ARF-v2
+    from services.agribrain.orchestrator_v2.chat_memory import load_memory, save_memory
     
     # IDs
     plot_id = artifact.inputs.plot_id
     conversation_id = getattr(artifact.meta, "conversation_id", "local_dev_session") 
     
-    # Load Context
-    profile = store.get_profile(plot_id)
-    session = store.get_session(conversation_id)
+    # Load Memory
+    chat_memory = load_memory(plot_id)
     
     memory_context = {
-        "profile": profile,
-        "session_summary": session.get("summary", ""),
-        "last_turns": session.get("turns", [])[-3:] # Last 3 turns
+        "experience_level": chat_memory.experience_level,
+        "known_context": chat_memory.known_context,
+        "open_loops": chat_memory.open_loops
     }
     
-    # Generate ARF-v1 Response - Pass FILTERED diags as primary
-    arf_json = _generate_llm_answer_arf_v1(
+    # Generate ARF-v2 Response
+    arf_json = _generate_arf_v2(
         summary=summary,
-        diags=high_impact_diags, # Only show high-certainty ones in main narrative
+        diags=high_impact_diags, 
         actions=actions,
         tasks=tasks,
-        memory_context=memory_context,
+        memory=chat_memory,
         user_query=user_query,
-        mode=mode
+        mode=mode,
+        quality=quality_summary
     )
     
     # Add low-impact to limitations if ARF succeeded
     if "error" not in arf_json:
         if low_impact_diags:
-            arf_json.setdefault("limitations", []).append(
-                f"Low-probability indicators: {', '.join(d.id for d in low_impact_diags)} (p<0.6 or c<0.6)"
+            limitations = arf_json.setdefault("limitations", [])
+            limitations.append(
+                f"Low-probability indicators ignored: {', '.join(d.id for d in low_impact_diags)}"
             )
         if has_datagap and mode != "DATA_GAP":
             arf_json.setdefault("limitations", []).append("Limited SAR coverage; assessing via optical/weather proxies.")
+            
+        # Extract UI Hints
+        ui_hints = {
+             "show_reliability_banner": reliability < 0.6,
+             "show_blocked_banner": any(not a.is_allowed for a in actions),
+             "card_ordering": [c.get("type", "UNKNOWN") for c in arf_json.get("reasoning_cards", [])]
+        }
+            
+        # Update Memory
+        if user_query:
+            chat_memory.last_questions.append(user_query)
+            if len(chat_memory.last_questions) > 10:
+                chat_memory.last_questions.pop(0)
+        
+        if arf_json.get("followups"):
+            chat_memory.asked_followups.extend([f.get("question") for f in arf_json["followups"] if f.get("question")])
+            
+        save_memory(plot_id, chat_memory)
     
-    # Fallback if ARF failed
-    if "error" in arf_json:
-        explanation = f"Analysis complete. (System Note: {arf_json['error']})"
-        summary["explanation"] = explanation
-        summary["headline"] = "System Notification"
     else:
-        # Construct Markdown from ARF JSON
-        # Headline
-        headline = arf_json.get("headline", "Field Analysis")
-        summary["headline"] = headline
-        
-        # Narrative
-        md = f"**{arf_json.get('direct_answer', 'Analysis Complete')}**\n\n"
-        md += f"**What it means**: {arf_json.get('what_it_means', '')}\n\n"
-        
-        if arf_json.get("evidence"):
-            md += "**Evidence**:\n"
-            for ev in arf_json["evidence"]:
-                md += f"- {ev.get('signal')}: {ev.get('value')} ({ev.get('interpretation')})\n"
-            md += "\n"
-            
-        if arf_json.get("teaching_note"):
-            md += f"**Quick Lesson**: {arf_json['teaching_note']}\n"
-            
-        explanation = md
-        summary["explanation"] = explanation
-        
-        # Persist Turn
-        store.append_turn(conversation_id, user_query or "Status Update", arf_json)
+        # Fallback if ARF failed
+        ui_hints = {}
+        summary["explanation"] = f"Analysis complete. (System Note: {arf_json['error']})"
+        summary["headline"] = "System Notification"
 
     # 7. Feature Snapshot (Visual Debugging)
     snapshot = {}
@@ -345,22 +347,24 @@ def build_chat_payload(
         assistant_mode=mode,
         assistant_style="TUTOR",
         questions_for_user=questions,
-        context_question=None, # Deprecated
-        structured_response=arf_json,
-        memory_context=memory_context,
+        arf=arf_json,
+        memory=memory_context,
+        ui_hints=ui_hints,
         visuals=visuals
     )
 
-def _generate_llm_explanation(
+def _generate_arf_v2(
     summary: Dict, 
     diags: List[ChatDiagnosis], 
     actions: List[ChatAction], 
     tasks: List[ChatTask],
+    memory: Any, # ChatMemory
     user_query: Optional[str] = None,
-    mode: str = "MONITORING"
-) -> str:
+    mode: str = "MONITORING",
+    quality: Dict[str, Any] = None
+) -> Dict[str, Any]:
     """
-    Calls OpenRouter to generate a user-friendly explanation.
+    Calls OpenRouter to generate ARF-v2 strict JSON response.
     """
     import os
     import requests
@@ -368,54 +372,85 @@ def _generate_llm_explanation(
     
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
-        return "Analysis complete. (LLM Key missing)"
+        return {"error": "LLM Key missing"}
 
-    # Safety Guard: If DATA_GAP, remove Interventions from context
-    safe_actions = actions
-    if mode == "DATA_GAP":
-        safe_actions = [a for a in actions if "INTERVENE" not in a.title]
+    # Format Diagnoses
+    diag_str = [f"{d.id} (P:{d.prob:.2f}, C:{d.conf:.2f})" for d in diags]
+    
+    # Format Actions
+    action_str = []
+    for a in actions:
+        status = "ALLOWED" if a.is_allowed else f"BLOCKED: {a.why}"
+        action_str.append(f"{a.title} Priority:{a.priority} Status:{status}")
 
-    # Adaptive Depth
-    depth_instr = "Provide a structured agronomic explanation."
-    if user_query and len(user_query.split()) < 5:
-        depth_instr = "Provide a concise but educational explanation."
-
-    # Construct Context (Hidden State)
-    # Format Diagnoses to show Prob vs Conf
-    diag_str = []
-    for d in diags:
-        diag_str.append(f"{d.id} (Prob: {d.prob:.2f}, Conf: {d.conf:.2f})")
-        
     context_str = f"""
-    [FIELD STATUS]
+    [FIELD CONTEXT]
     - Stage: {summary.get('stage')}
     - Signals: {json.dumps(summary.get('key_signals', []))}
-    - Diagnoses: {diag_str}
-    - Actions: {[a.title for a in safe_actions]}
-    - Pending Tasks: {len(tasks)}
-    [END FIELD STATUS]
+    - Diagnoses (High Cert): {diag_str}
+    - Proposed Actions: {action_str}
+    - Quality Issues: {quality.get('degradation_modes', []) if quality else []}
     """
     
+    memory_str = f"""
+    [FARMER PROFILE]
+    - Experience Level: {memory.experience_level}
+    - Known Field Traits: {json.dumps(memory.known_context)}
+    - Open Loops (Pending tasks we asked them to do): {memory.open_loops}
+    - Recent Follow-ups Asked: {memory.asked_followups[-5:] if memory.asked_followups else []}
+    """
+
     system_prompt = f"""
-    You are AgriBrain, an expert agronomist and intelligent farming assistant.
+    You are AgriBrain, an expert agronomist + teacher + safety-first AI.
     
-    Your Capabilities:
-    1. **Field Analysis**: You have access to real-time satellite/sensor data for the user's field (provided in [FIELD STATUS]). Use this ONLY when the user asks about *their* field.
-    2. **General Knowledge**: You are a world-class expert on agronomy.
-    
-    Current Field Data (Hidden from user):
+    INPUT CONTEXT:
     {context_str}
+    {memory_str}
     
-    Guidelines:
-    - **Structure your response in 4 layers**:
-      1. **Direct Answer**: Short, precise response to the user's question.
-      2. **Agronomic Meaning**: What does this mean strictly biologically?
-      3. **Evidence**: Which signals (Rain, NDVI, etc.) triggered this?
-      4. **Quick Lesson**: A general agronomy rule or principle (e.g., "Fungal pathogens require moisture duration...").
+    CRITICAL RULES:
+    1. Respond ONLY in valid JSON matching the schema below. No markdown outside the JSON.
+    2. Adapt teaching depth to Farmer Experience Level ({memory.experience_level}).
+    3. If Quality Issues include NO_SAR or PARTIAL_DATA, shift to VERIFY actions and explain uncertainty.
+    4. Provide contextual follow-up questions but DO NOT repeat 'Recent Follow-ups Asked'.
     
-    - **Probability vs Confidence**: If diagnosing, explain that Probability is the likelihood of the stress, while Confidence reflects data quality/completeness.
-    - **Expert Tone**: Professional but accessible.
-    - {depth_instr}
+    RESPONSE JSON SCHEMA:
+    {{
+        "headline": "1 sentence title summarizing field status",
+        "direct_answer": "Direct answer to user's specific question",
+        "reliability_badge": "HIGH" | "MED" | "LOW",
+        "reliability_reason": "Why the badge is what it is (e.g., 'Missing SAR data')",
+        "what_it_means": "Agronomic interpretation of the situation",
+        "reasoning_cards": [
+            {{
+                "type": "EVIDENCE" | "THREAT",
+                "claim": "Summary of finding (e.g., High fungal risk)",
+                "evidence": "What data supports this",
+                "uncertainty": "What could be wrong/missing"
+            }}
+        ],
+        "recommendations": [
+            {{
+                "type": "VERIFY" | "MONITOR" | "INTERVENE",
+                "title": "Action title",
+                "is_allowed": true/false (must match INPUT CONTEXT),
+                "blocked_reasons": ["if not allowed, why"],
+                "why_it_matters": "Benefit of doing this",
+                "how_to_do_it_steps": ["step 1", "step 2"],
+                "risk_if_wrong": "LOW" | "MED" | "HIGH"
+            }}
+        ],
+        "learning": {{
+            "level": "BEGINNER" | "INTERMEDIATE" | "EXPERT",
+            "micro_lesson": "A 3-8 line educational snippet tailored to the user's level about the core concepts involved today.",
+            "definitions": {{"Term": "Meaning"}}
+        }},
+        "followups": [
+            {{
+                "question": "Ask a relevant question to clarify context or progress. Exclude already known context.",
+                "why": "Why are you asking this?"
+            }}
+        ]
+    }}
     """
     
     user_prompt = user_query if user_query else "Provide a brief status update for my field."
@@ -435,23 +470,27 @@ def _generate_llm_explanation(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                "temperature": 0.7,
-                # Increased limit for structured explanation
-                "max_tokens": 600
+                "temperature": 0.4, # Lower temperature for stable JSON structure
+                "max_tokens": 1500, # Large structure needs tokens
+                "response_format": {"type": "json_object"}
             },
-            timeout=10
+            timeout=20
         )
         
         if resp.status_code == 200:
-            data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            # Clean possible markdown block wrappers
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.endswith("```"):
+                content = content[:-3]
+            return json.loads(content)
         else:
-            return f"Analysis complete. (AI unavailable: {resp.status_code})"
+            return {"error": f"AI unavailable: {resp.status_code}"}
             
     except Exception as e:
         print(f"DEBUG: LLM Error: {e}")
-        fallback = f"Analysis complete based on stored data. (LLM Unavailable: {str(e)})"
-        return fallback
+        return {"error": str(e)}
 
 def _extract_headline(text: str) -> str:
     # First sentence or first 50 chars
@@ -547,6 +586,25 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
 
     # Context Question
     ctx_q = _select_context_question(artifact.inputs, artifact.global_quality)
+    if ctx_q:
+        questions_for_user = [ctx_q]
+    else:
+        questions_for_user = []
+        
+    arf = {
+        "headline": summary["headline"],
+        "direct_answer": narrative, # Using narrative as direct answer for simple data queries
+        "reliability_badge": "HIGH",
+        "what_it_means": interpretation,
+        "reasoning_cards": [],
+        "recommendations": [],
+        "learning": {
+            "level": "INTERMEDIATE",
+            "micro_lesson": teaching,
+            "definitions": {}
+        },
+        "followups": [{"question": ctx_q, "why": "Context needed"}] if ctx_q else []
+    }
 
     return ChatPayload(
         run_id=artifact.meta.orchestrator_run_id,
@@ -558,8 +616,11 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
         citations=[],
         assistant_mode="DATA_ONLY",
         assistant_style="TUTOR",
-        questions_for_user=[],
-        context_question=ctx_q
+        questions_for_user=questions_for_user,
+        arf=arf,
+        memory={},
+        ui_hints={"show_reliability_banner": False, "show_blocked_banner": False, "card_ordering": []},
+        visuals=[]
     )
 
 def _select_context_question(inputs, quality, mode: str = "MONITORING") -> Optional[str]:

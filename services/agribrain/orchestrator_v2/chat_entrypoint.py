@@ -19,6 +19,8 @@ def main():
     parser = argparse.ArgumentParser(description="Orchestrator v2 Chat Entrypoint")
     parser.add_argument("--context", type=str, required=True, help="JSON context from Node.js")
     parser.add_argument("--query", type=str, help="User query (unused by strict orchestrator, but kept for compat)")
+    parser.add_argument("--exp", type=str, default="INTERMEDIATE", help="Farmer experience level")
+    parser.add_argument("--cid", type=str, default="local_dev_session", help="Conversation ID")
     
     args = parser.parse_args()
     
@@ -26,7 +28,6 @@ def main():
         ctx = json.loads(args.context)
         
         # 1. Construct Inputs
-        # Default to last 14 days if not specified
         end_date = datetime.now()
         start_date = end_date - timedelta(days=14)
         
@@ -35,12 +36,21 @@ def main():
             "end": end_date.strftime("%Y-%m-%d")
         }
         
-        # Geometry Hash fallback
-        geo_hash = "UNKNOWN_GEO" 
+        plot_id = ctx.get("plot_id", "UNKNOWN")
         
+        # Update Memory explicitly if passed
+        if plot_id != "UNKNOWN":
+            from services.agribrain.orchestrator_v2.chat_memory import load_memory, save_memory
+            mem = load_memory(plot_id)
+            if args.exp: mem.experience_level = args.exp
+            # Sync context
+            mem.known_context["irrigation_type"] = ctx.get("irrigation_type")
+            mem.known_context["soil_type"] = ctx.get("soil_type")
+            save_memory(plot_id, mem)
+
         inputs = OrchestratorInput(
-            plot_id=ctx.get("plot_id", "UNKNOWN"),
-            geometry_hash=geo_hash,
+            plot_id=plot_id,
+            geometry_hash="UNKNOWN_GEO",
             date_range=date_range,
             crop_config={"crop": ctx.get("crop", "unknown"), "stage": ctx.get("stage", "unknown")},
             operational_context={
@@ -52,12 +62,16 @@ def main():
         )
         
         # 2. Run Pipeline (Suppress Stdout to avoid JSON corruption)
-        # Redirect stdout to debug logs (stderr) or devnull
         import io
         from contextlib import redirect_stdout
         
         f = io.StringIO()
         with redirect_stdout(f):
+             # Inject metadata before run (runner doesn't overwrite it)
+             # OrchestratorInput doesn't have metadata field, Runner attaches it.
+             # We will just pass it to run_for_chat which doesn't take meta. 
+             # We can patch runner.py or just let chat_adapter read it from where we can inject.
+             # Easier: Just let chat_adapter read memory from plot_id.
              payload: ChatPayload = run_for_chat(inputs, user_query=args.query)
         
         # Optional: Print captured logs to stderr for debugging
