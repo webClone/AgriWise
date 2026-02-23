@@ -24,6 +24,7 @@ class GlobalDegradation(str, Enum):
     NORMAL = "NORMAL"
     NO_OPTICAL = "NO_OPTICAL" # Weather only
     NO_SAR = "NO_SAR"
+    LOW_SAR_CADENCE = "LOW_SAR_CADENCE"
     PARTIAL_DATA = "PARTIAL_DATA"
     CRITICAL_FAILURE = "CRITICAL_FAILURE" # Unsafe to proceed
 
@@ -98,6 +99,7 @@ class RunArtifact:
     layer_4: Optional[LayerResult] = None
     layer_5: Optional[LayerResult] = None
     layer_6: Optional[LayerResult] = None
+    layer_7: Optional[LayerResult] = None
     
     # Unified Results
     final_execution_plan: Optional[ExecutionPlan] = None

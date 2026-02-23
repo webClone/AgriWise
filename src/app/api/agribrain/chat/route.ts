@@ -25,7 +25,7 @@ export async function POST(req: Request) {
     }
 
     // 1. Fetch Real Data from DB if plotId is present
-    const injectedContext: any = {};
+    const injectedContext: Record<string, unknown> = {};
     if (plotId) {
         try {
             const plot = await prisma.plot.findUnique({
@@ -95,7 +95,7 @@ export async function POST(req: Request) {
 
                 // Sensor Data
                 if (plot.sensors && plot.sensors.length > 0) {
-                    const sensorData: any = {};
+                    const sensorData: Record<string, unknown> = {};
                     plot.sensors.forEach(s => {
                         if (s.readings.length > 0) {
                             const r = s.readings[0];
@@ -134,10 +134,13 @@ export async function POST(req: Request) {
     // Path to Orchestrator V2 Entrypoint
     const scriptPath = path.join(process.cwd(), 'services', 'agribrain', 'orchestrator_v2', 'chat_entrypoint.py');
     
+    const contextObj = { plot_id: plotId, ...injectedContext };
+    const b64Context = Buffer.from(JSON.stringify(contextObj)).toString('base64');
+    
     // Spawn Python Process
     const pythonProcess = spawn('py', [
       scriptPath,
-      '--context', JSON.stringify({plot_id: plotId, ...injectedContext}),
+      '--context', b64Context,
       '--query', message || ""
     ]);
 
@@ -175,41 +178,69 @@ export async function POST(req: Request) {
       // --- TEMPORARY: Deterministic Template Rendering (No LLM) ---
       // Conforms to User Request: "Quick fix: Make the chat answer consistently good... Use this chat response template"
       
-      const headline = payload.summary?.headline || "Analysis Complete";
-      const diags = payload.diagnoses || [];
-      const topDiag = diags.length > 0 ? diags[0] : null;
-      
       const relScore = payload.global_quality?.reliability || 0.0;
       const modes = payload.global_quality?.degradation_modes || [];
+      const arf = payload.arf;
       
-      let md = `### ${headline}\n\n`;
+      let md = "";
       
-      if (topDiag) {
-          md += `**Likely Issue:** ${topDiag.id} (P=${(topDiag.prob || 0).toFixed(2)}, Conf=${(topDiag.conf || 0).toFixed(2)})\n\n`;
+      if (arf && !arf.error) {
+          md += `### ${arf.headline || 'Field Status Analysis'}\n\n`;
+          
+          if (arf.reliability_badge) {
+              md += `**Reliability:** ${arf.reliability_badge} (${arf.reliability_reason || ''})\n\n`;
+          }
+          
+          if (arf.direct_answer) {
+              md += `**${arf.direct_answer}**\n\n`;
+          }
+          
+          if (arf.what_it_means) {
+              md += `**What it means:** ${arf.what_it_means}\n\n`;
+          }
+          
+          if (arf.reasoning_cards && arf.reasoning_cards.length > 0) {
+              md += `**Evidence & Findings:**\n`;
+              arf.reasoning_cards.forEach((card: Record<string, string>) => {
+                  md += `- **${card.claim}**: ${card.evidence} *(Uncertainty: ${card.uncertainty})*\n`;
+              });
+              md += `\n`;
+          }
+          
+          if (arf.recommendations && arf.recommendations.length > 0) {
+              md += `**Recommended Actions:**\n`;
+              arf.recommendations.forEach((rec: Record<string, any>) => {
+                  const status = rec.is_allowed ? "✅" : "⚠️ BLOCKED";
+                  md += `- **${rec.type}: ${rec.title}** ${status}\n`;
+                  if (!rec.is_allowed && rec.blocked_reasons) {
+                      md += `  - *Reason:* ${(rec.blocked_reasons as string[]).join(", ")}\n`;
+                  }
+                  if (rec.why_it_matters) md += `  - *Why:* ${rec.why_it_matters}\n`;
+                  if (rec.how_to_do_it_steps && (rec.how_to_do_it_steps as string[]).length > 0) {
+                      md += `  - *Steps:*\n`;
+                      (rec.how_to_do_it_steps as string[]).forEach((step: string) => md += `    - ${step}\n`);
+                  }
+              });
+              md += `\n`;
+          }
+          
+          if (arf.learning) {
+               md += `> 💡 **AgriBrain Lesson (${arf.learning.level}):** ${arf.learning.micro_lesson}\n\n`;
+          }
+          
+          if (arf.limitations && arf.limitations.length > 0) {
+               md += `\n> ℹ️ **Limitations:** ${arf.limitations.join("; ")}\n`;
+          }
+          
       } else {
-          md += `**Status:** Nominal. No critical threats detected.\n\n`;
+          // Fallback if ARF parsing failed or is empty
+          const fallbackHeadline = payload.summary?.headline || (arf?.error ? "LLM Generation Error" : "Analysis Complete");
+          const fallbackBody = arf?.error ? `**Error:** ${arf.error}` : (payload.summary?.explanation || 'No detailed explanation available.');
+          md = `### ${fallbackHeadline}\n\n${fallbackBody}\n\n`;
       }
       
-      md += `**Key Signals:**\n`;
-      (payload.summary?.key_signals || []).forEach((s: any) => {
-          md += `- ${s.name}: **${s.value}** (${s.direction})\n`;
-      });
-      md += `\n`;
-      
-      md += `**Recommended Actions:**\n`;
-      (payload.actions || []).slice(0, 3).forEach((a: any) => {
-          md += `- ${a.title} __[${a.priority}]__\n`;
-      });
-      
-      if (payload.plan?.tasks?.length > 0) {
-          md += `\n**Plan:**\n`;
-          payload.plan.tasks.slice(0, 2).forEach((t: any) => {
-             md += `- ${t.task}\n`; 
-          });
-      }
-
       if (modes.length > 0) {
-          md += `\n> ⚠️ **Data Gaps:** ${modes.join(", ")} (Reliability: ${relScore})`;
+          md += `\n> ⚠️ **Data Gaps:** ${modes.join(", ")} (Reliability: ${relScore.toFixed(2)})`;
       }
 
       return NextResponse.json({
@@ -220,16 +251,16 @@ export async function POST(req: Request) {
              evidence: modes
          }
       });
-      
-    } catch (err: any) {
-      console.error("Orchestrator V2 Failed:", err, errorString);
+    } catch (err: unknown) {
+      const e = err as Error;
+      console.error("Orchestrator V2 Failed:", e.message, errorString);
       return NextResponse.json({ 
-        text: `### System Error\nI encountered an issue running the diagnostics pipeline.\n\n\`\`\`\n${err.message}\n\`\`\``, 
-        error: err.message
+        text: `### System Error\nI encountered an issue running the diagnostics pipeline.\n\n\`\`\`\n${e.message}\n\`\`\``, 
+        error: e.message
       });
     }
 
-  } catch (error) {
+  } catch {
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
 }

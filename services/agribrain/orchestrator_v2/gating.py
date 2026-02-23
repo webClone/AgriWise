@@ -133,8 +133,11 @@ def evaluate_global_quality(
                 missing.extend([f"{lid}.{d}" for d in md])
                 
                 # Check specifics
-                if "NO_SAR" in str(md) or "SAR" in str(missing):
+                degradation_str = str(getattr(qm, "degradation_mode", ""))
+                if "NO_SAR" in str(md) or ("SAR" in str(missing) and "LOW_SAR_CADENCE" not in degradation_str):
                     modes.add(GlobalDegradation.NO_SAR)
+                if "LOW_SAR_CADENCE" in degradation_str:
+                    modes.add(GlobalDegradation.LOW_SAR_CADENCE)
                 if "RAIN" in str(md):
                     modes.add(GlobalDegradation.PARTIAL_DATA)
                     
@@ -145,6 +148,8 @@ def evaluate_global_quality(
     # Cap reliability if critical modes
     if GlobalDegradation.NO_SAR in modes:
         final_reliability = min(final_reliability, 0.85)
+    if GlobalDegradation.LOW_SAR_CADENCE in modes:
+        final_reliability = min(final_reliability, 0.95)
     if GlobalDegradation.CRITICAL_FAILURE in modes or critical_failure:
         final_reliability = 0.0
         

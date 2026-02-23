@@ -1,0 +1,253 @@
+{
+  "run_id": "AGB2-d4d05035a776",
+  "global_quality": {
+    "reliability": 0.725,
+    "degradation_modes": [
+      "NO_SAR",
+      "PARTIAL_DATA"
+    ],
+    "alerts": [
+      "LayerId.L3.Driver.NDVI",
+      "LayerId.L3.Driver.SAR_VV",
+      "LayerId.L3.Driver.RAIN",
+      "LayerId.L3.Driver.TEMP"
+    ]
+  },
+  "summary": {
+    "headline": "Analysis Complete",
+    "period": "2026-02-08 to 2026-02-22",
+    "stage": "BARE_SOIL",
+    "key_signals": [
+      {
+        "name": "Rain (14d)",
+        "value": "69.2 mm",
+        "direction": "SignalDirection.NORMAL"
+      },
+      {
+        "name": "NDVI Trend",
+        "value": "STABLE",
+        "direction": "SignalDirection.STABLE"
+      }
+    ],
+    "feature_snapshot": {
+      "rain_14d": "69.2 mm",
+      "soil_moisture": "N/A",
+      "sar_vv": null
+    }
+  },
+  "diagnoses": [
+    {
+      "id": "DATA_GAP",
+      "prob": 1.0,
+      "conf": 0.8,
+      "type": "DIAGNOSIS"
+    },
+    {
+      "id": "WATER_STRESS",
+      "prob": 0.7863017115706753,
+      "conf": 0.3,
+      "type": "DIAGNOSIS"
+    }
+  ],
+  "actions": [
+    {
+      "title": "MONITOR: ACT_WAIT_FOR_DATA_DATA_GAP",
+      "priority": "P-Score 0.3",
+      "is_allowed": true,
+      "why": []
+    }
+  ],
+  "plan": {
+    "tasks": []
+  },
+  "citations": [
+    {
+      "source": "Layer3.diagnosis",
+      "ref": "DATA_GAP"
+    },
+    {
+      "source": "Layer3.diagnosis",
+      "ref": "WATER_STRESS"
+    }
+  ],
+  "assistant_mode": "PLANNING",
+  "assistant_style": "TUTOR",
+  "questions_for_user": [
+    "Sentinel-1 data is missing. Do you have recent drone imagery or photos?",
+    "Do you use irrigation (drip, pivot) or is this rainfed?"
+  ],
+  "arf": {
+    "headline": "Planting Decision: Conditional",
+    "direct_answer": "Expected yield: 25-30 tons/ha with a feasibility score of 60%.",
+    "reliability_badge": "MED",
+    "reliability_reason": "Partial data available, missing SAR and soil type information.",
+    "what_it_means": "The field is currently bare soil with stable NDVI and recent rainfall, but we need more data to make a fully informed decision.",
+    "reasoning_cards": [
+      {
+        "type": "EVIDENCE",
+        "claim": "Sufficient recent rainfall",
+        "evidence": "Rain (14d) is 69.2 mm, which is adequate for initial potato growth.",
+        "uncertainty": "Soil type and water retention capacity are unknown, which could affect the actual water availability."
+      },
+      {
+        "type": "THREAT",
+        "claim": "Low water quota status",
+        "evidence": "Water quota status is low, which could limit irrigation if needed.",
+        "uncertainty": "Irrigation type is unknown, so the impact on water management is unclear."
+      }
+    ],
+    "recommendations": [
+      {
+        "type": "VERIFY",
+        "title": "Determine Soil Type",
+        "is_allowed": true,
+        "blocked_reasons": [],
+        "why_it_matters": "Knowing the soil type will help in assessing water retention and nutrient availability, which are crucial for potato growth.",
+        "how_to_do_it_steps": [
+          "Collect soil samples from different parts of the field.",
+          "Send the samples to a local lab for analysis."
+        ],
+        "risk_if_wrong": "MED"
+      },
+      {
+        "type": "VERIFY",
+        "title": "Check Soil Temperature",
+        "is_allowed": true,
+        "blocked_reasons": [],
+        "why_it_matters": "Potatoes require a soil temperature of at least 7\u00b0C for optimal germination and growth.",
+        "how_to_do_it_steps": [
+          "Use a soil thermometer to measure the temperature at a depth of 5-10 cm.",
+          "Take multiple readings across the field."
+        ],
+        "risk_if_wrong": "MED"
+      },
+      {
+        "type": "MONITOR",
+        "title": "Continue Monitoring Rainfall and Soil Conditions",
+        "is_allowed": true,
+        "blocked_reasons": [],
+        "why_it_matters": "Continuous monitoring will help in adjusting irrigation and planting plans as needed.",
+        "how_to_do_it_steps": [
+          "Keep a log of rainfall and soil moisture levels.",
+          "Check for any signs of soil compaction or crusting."
+        ],
+        "risk_if_wrong": "LOW"
+      }
+    ],
+    "learning": {
+      "level": "INTERMEDIATE",
+      "micro_lesson": "Potatoes are sensitive to both soil temperature and moisture. They require a soil temperature of at least 7\u00b0C and consistent moisture for optimal germination and growth. Understanding your soil type can help you manage these conditions more effectively. For example, sandy soils drain quickly and may require more frequent irrigation, while clay soils retain moisture longer and may need less frequent watering.",
+      "definitions": {
+        "Soil Temperature": "The temperature of the soil at a specific depth, which affects seed germination and plant growth.",
+        "Water Quota Status": "The amount of water available for irrigation, which can be limited by local regulations or water availability."
+      }
+    },
+    "followups": [
+      {
+        "question": "What is the current soil temperature in your field?",
+        "why": "To ensure the soil is warm enough for potato planting."
+      },
+      {
+        "question": "What is the irrigation type in your field?",
+        "why": "To better understand how you can manage water resources for potato growth."
+      }
+    ],
+    "internal_memory_updates": {
+      "experience_level_upgrade": null,
+      "new_known_facts": {},
+      "closed_loops": []
+    },
+    "limitations": [
+      "Low-probability indicators ignored: DATA_GAP, WATER_STRESS",
+      "Limited SAR coverage; assessing via optical/weather proxies."
+    ]
+  },
+  "memory": {
+    "experience_level": "INTERMEDIATE",
+    "known_context": {
+      "irrigation_type": null,
+      "soil_type": null,
+      "water_quota_status": "low"
+    },
+    "open_loops": []
+  },
+  "ui_hints": {
+    "show_reliability_banner": false,
+    "show_blocked_banner": false,
+    "card_ordering": [
+      "EVIDENCE",
+      "THREAT"
+    ]
+  },
+  "visuals": [
+    {
+      "id": "rain_daily",
+      "type": "BAR",
+      "title": "Daily Rainfall (mm)",
+      "data": [
+        {
+          "x": "2026-02-08",
+          "y": 0.0
+        },
+        {
+          "x": "2026-02-09",
+          "y": 7.6
+        },
+        {
+          "x": "2026-02-10",
+          "y": 16.2
+        },
+        {
+          "x": "2026-02-11",
+          "y": 2.6
+        },
+        {
+          "x": "2026-02-12",
+          "y": 0.0
+        },
+        {
+          "x": "2026-02-13",
+          "y": 0.0
+        },
+        {
+          "x": "2026-02-14",
+          "y": 0.0
+        },
+        {
+          "x": "2026-02-15",
+          "y": 0.0
+        },
+        {
+          "x": "2026-02-16",
+          "y": 4.6
+        },
+        {
+          "x": "2026-02-17",
+          "y": 13.2
+        },
+        {
+          "x": "2026-02-18",
+          "y": 0.3
+        },
+        {
+          "x": "2026-02-19",
+          "y": 6.2
+        },
+        {
+          "x": "2026-02-20",
+          "y": 7.1
+        },
+        {
+          "x": "2026-02-21",
+          "y": 3.7
+        },
+        {
+          "x": "2026-02-22",
+          "y": 7.7
+        }
+      ],
+      "axis_label": "mm",
+      "color_hint": "BLUE"
+    }
+  ]
+}

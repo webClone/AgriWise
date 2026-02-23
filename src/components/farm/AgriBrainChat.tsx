@@ -127,8 +127,10 @@ export default function AgriBrainChat({ context }: AgriBrainChatProps) {
             )} 
 
             {/* Bubble */}
-            <div className={`
-              px-4 py-3 rounded-xl shadow-sm text-sm
+            <div 
+              dir="ltr"
+              className={`
+              px-4 py-3 rounded-xl shadow-sm text-sm text-left
               ${msg.role === 'user' 
                 ? 'bg-blue-600 text-white rounded-br-sm' 
                 : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-bl-sm'}

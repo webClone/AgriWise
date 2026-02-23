@@ -18,6 +18,7 @@ class EvidenceSourceType(str, Enum):
     SENSOR = "sensor"
     USER_EVENT = "user_event"
     USER_OBSERVATION = "user_observation"
+    WEATHER_FORECAST = "weather_forecast"
 
 class ValidationStatus(str, Enum):
     PENDING = "pending"
@@ -131,6 +132,9 @@ class FieldTensor:
     # Compatibility View (Layer 1 Legacy)
     plot_timeseries: List[Dict] = field(default_factory=list)
     
+    # Forward-Looking Models
+    forecast_7d: List[Dict] = field(default_factory=list)
+    
     def to_json(self):
         return {
             "plot_id": self.plot_id,
@@ -143,6 +147,7 @@ class FieldTensor:
             "static": self.static,
             # "data": self.data, # WARNING: Too large to dump in full JSON usually
             "plot_timeseries": self.plot_timeseries, # Return the summary view by default
+            "forecast_7d": self.forecast_7d,
             "provenance": self.provenance
         }
 

@@ -4,11 +4,17 @@
   "units": "metric",
   "known_context": {},
   "last_questions": [
+    "Is there fungal pressure?",
+    "Is there fungal pressure?",
+    "Is there fungal pressure?",
     "Is there fungal pressure?"
   ],
   "last_diagnoses_shown": [],
   "asked_followups": [
-    "Have you noticed any unusual residue or signs of disease in the field recently?"
+    "Have you noticed any unusual residue or signs of disease in the field recently?",
+    "Have you noticed any unusual spots or discoloration on any remaining plant residue in the field?",
+    "Have you noticed any changes in the soil structure or any unusual odors in the field recently?",
+    "Have you noticed any white or grayish patches on the soil surface or any remaining plant residue?"
   ],
   "open_loops": []
 }

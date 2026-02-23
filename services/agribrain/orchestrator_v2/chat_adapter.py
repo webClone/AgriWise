@@ -5,11 +5,21 @@ from datetime import datetime
 
 from services.agribrain.orchestrator_v2.schema import RunArtifact, GlobalDegradation
 
+from enum import Enum
+
+class SignalDirection(str, Enum):
+    LOW = "LOW"
+    NORMAL = "NORMAL"
+    HIGH = "HIGH"
+    POSITIVE = "POSITIVE"
+    NEGATIVE = "NEGATIVE"
+    STABLE = "STABLE"
+
 @dataclass
 class ChatSignal:
     name: str
     value: str
-    direction: str # "LOW", "HIGH", "STABLE", "NEGATIVE"
+    direction: SignalDirection
 
 @dataclass
 class ChatDiagnosis:
@@ -65,6 +75,7 @@ class ChatPayload:
     memory: Dict[str, Any] = field(default_factory=dict) # Farmer level, open loops, known context
     ui_hints: Dict[str, Any] = field(default_factory=dict) # Display config
     visuals: List[ChatVisual] = field(default_factory=list) # Rich charts
+    data_inventory: Dict[str, str] = field(default_factory=dict) # ✅/⚠️/❌ summary
 
 from services.agribrain.orchestrator_v2.intents import Intent
 
@@ -88,6 +99,8 @@ def build_chat_payload(
         assistant_mode = "EXECUTION"
     elif intent == Intent.DECISION:
         assistant_mode = "ADVISORY" # Default for Decision
+    elif intent == Intent.PLANNING:
+        assistant_mode = "PLANNING"
     else:
         assistant_mode = "MONITORING" # Fallback
         
@@ -108,7 +121,7 @@ def build_chat_payload(
         if ts:
             last_14 = ts[-14:]
             rain_sum = sum(r.get("rain", 0.0) for r in last_14)
-            signals.append(ChatSignal("Rain (14d)", f"{rain_sum:.1f} mm", "LOW" if rain_sum < 10 else "NORMAL"))
+            signals.append(ChatSignal("Rain (14d)", f"{rain_sum:.1f} mm", SignalDirection.LOW if rain_sum < 10 else SignalDirection.NORMAL))
             
     # L2: NDVI
     if artifact.layer_2 and artifact.layer_2.output:
@@ -118,13 +131,13 @@ def build_chat_payload(
             stage = pheno.stage_by_day[-1]
             
         curve = getattr(artifact.layer_2.output, "curve", None)
-        trend = "STABLE"
+        trend = SignalDirection.STABLE
         if curve and curve.ndvi_fit_d1:
             last_d1 = curve.ndvi_fit_d1[-1]
-            if last_d1 > 0.01: trend = "POSITIVE"
-            elif last_d1 < -0.01: trend = "NEGATIVE"
+            if last_d1 > 0.01: trend = SignalDirection.POSITIVE
+            elif last_d1 < -0.01: trend = SignalDirection.NEGATIVE
             
-        signals.append(ChatSignal("NDVI Trend", trend, trend))
+        signals.append(ChatSignal("NDVI Trend", trend.value, trend))
         
     summary = {
         "headline": "Analysis Complete", # Placeholder
@@ -166,11 +179,20 @@ def build_chat_payload(
     actions = []
     tasks = []
     
+    # Plan Generation
+    # Ensure Plan visibility is gated by L7 recommendation if applicable
+    l7_is_allowed = True
+    if artifact.layer_7 and artifact.layer_7.output:
+        l7_rec = getattr(artifact.layer_7.output, "chosen_plan", None)
+        if l7_rec:
+            l7_is_allowed = l7_rec.is_allowed
+
     if artifact.final_execution_plan:
         for t in artifact.final_execution_plan.tasks:
+            task_status = "Pending" if l7_is_allowed else "BLOCKED (Review L7 Constraints)"
             tasks.append(ChatTask(
                 task=f"{t.type}: {t.instructions}",
-                when="Pending",
+                when=task_status,
                 depends_on=t.depends_on
             ))
             
@@ -195,11 +217,51 @@ def build_chat_payload(
                 is_allowed=r.is_allowed,
                 why=r.blocked_reason if not r.is_allowed else []
             ))
+            
+    # L7 Actions (Season Planning)
+    print("DEBUG L7_MAP type:", type(artifact.layer_7.output if artifact.layer_7 else None))
+    print("DEBUG L7_MAP keys/attrs:", dir(artifact.layer_7.output) if artifact.layer_7 and artifact.layer_7.output else "N/A")
+    if artifact.layer_7 and artifact.layer_7.output:
+         l7_rec = getattr(artifact.layer_7.output, "chosen_plan", None)
+         l7_options = getattr(artifact.layer_7.output, "options", [])
+         if l7_rec:
+             why_reasons = []
+             if not l7_rec.is_allowed:
+                 if l7_rec.blocked_reason:
+                     why_reasons.append(l7_rec.blocked_reason)
+                 if l7_rec.risk_if_wrong:
+                     why_reasons.append(f"Risk if ignored: {l7_rec.risk_if_wrong}")
+                     
+             actions.append(ChatAction(
+                title=f"{l7_rec.decision_id}: {l7_rec.crop}",
+                priority=f"Planning Decision",
+                is_allowed=l7_rec.is_allowed,
+                why=why_reasons
+             ))
+             
+             # Extract cognitive planning metrics
+             chosen_opt = next((o for o in l7_options if o.crop == l7_rec.crop), None)
+             if chosen_opt:
+                 summary["planning_context"] = {
+                     "crop": chosen_opt.crop,
+                     "overall_score": chosen_opt.overall_rank_score,
+                     "window_prob": chosen_opt.window.probability_ok,
+                     "water_prob": getattr(chosen_opt.water, "probability_ok", 0.0),
+                     "biotic_prob": getattr(chosen_opt.biotic, "probability_ok", 0.0),
+                     "expected_yield": chosen_opt.yield_dist.mean,
+                     "downside_risk_p10": chosen_opt.yield_dist.p10,
+                     "expected_profit": chosen_opt.econ.expected_profit
+                 }
 
     # 5. Assistant Mode Logic & Thresholding
     
     # Threshold Gating: Only surface certain stressors
     high_impact_diags = [d for d in diags if d.prob > 0.6 and d.conf > 0.6]
+    
+    # In PLANNING mode, we suppress L3/L5 diagnostics from dominating unless Extremely critical
+    if assistant_mode == "PLANNING":
+        high_impact_diags = [d for d in high_impact_diags if d.prob > 0.8 and d.conf > 0.8]
+        
     low_impact_diags = [d for d in diags if d not in high_impact_diags]
     
     # Refine Assistant Mode (Intent vs Reality)
@@ -212,7 +274,7 @@ def build_chat_payload(
     has_verify = any(a.title.startswith("VERIFY") for a in actions)
     
     # DATA_GAP should NOT be primary headline unless reliability is critical
-    if reliability < 0.6 and has_datagap and mode != "DATA_ONLY":
+    if reliability < 0.6 and has_datagap and mode not in ["DATA_ONLY", "PLANNING"]:
         mode = "DATA_GAP"
     elif has_intervene and mode == "MONITORING":
         mode = "ADVISORY"
@@ -275,6 +337,17 @@ def build_chat_payload(
         if arf_json.get("followups"):
             chat_memory.asked_followups.extend([f.get("question") for f in arf_json["followups"] if f.get("question")])
             
+        mem_updates = arf_json.get("internal_memory_updates")
+        if mem_updates:
+            if mem_updates.get("experience_level_upgrade"):
+                chat_memory.experience_level = mem_updates["experience_level_upgrade"]
+            if mem_updates.get("new_known_facts"):
+                chat_memory.known_context.update(mem_updates["new_known_facts"])
+            if mem_updates.get("closed_loops"):
+                for cl in mem_updates["closed_loops"]:
+                    if cl in chat_memory.open_loops:
+                        chat_memory.open_loops.remove(cl)
+            
         save_memory(plot_id, chat_memory)
     
     else:
@@ -287,11 +360,19 @@ def build_chat_payload(
     snapshot = {}
     if artifact.layer_1 and artifact.layer_1.output:
         ts = getattr(artifact.layer_1.output, "plot_timeseries", [])
+        static_props = getattr(artifact.layer_1.output, "static", {})
+        
         if ts:
              last = ts[-1]
              snapshot["rain_14d"] = summary.get("key_signals", [{}])[0].get("value", "N/A")
              snapshot["soil_moisture"] = last.get("soil_moisture_proxy", "N/A")
-             snapshot["sar_vv"] = last.get("vv", "N/A")
+             snapshot["sar_vv"] = last.get("vv_db", last.get("vv", "N/A"))
+             
+        if static_props:
+             snapshot["soil_texture"] = static_props.get("texture_class", "UNKNOWN")
+             snapshot["soil_clay"] = f"{static_props.get('soil_clay_mean', 'N/A')}%"
+             snapshot["soil_ph"] = static_props.get("soil_ph_mean", "N/A")
+             snapshot["soil_soc"] = static_props.get("soil_org_c_mean", "N/A")
 
     summary["feature_snapshot"] = snapshot
 
@@ -336,6 +417,23 @@ def build_chat_payload(
                     color_hint="GREEN"
                 ))
 
+    # 10. Data Inventory 
+    data_inv = {
+        "SAR": "❌ Missing",
+        "Optical": "❌ Missing", 
+        "Historical Weather": "❌ Missing",
+        "Forecast": "❌ Missing",
+        "Soil Data": "❌ Missing"
+    }
+    
+    if artifact.layer_1 and artifact.layer_1.output:
+        l1o = artifact.layer_1.output
+        if any(r.get("vv_db") is not None for r in getattr(l1o, "plot_timeseries", [])): data_inv["SAR"] = "✅ Present"
+        if any(r.get("ndvi") is not None for r in getattr(l1o, "plot_timeseries", [])): data_inv["Optical"] = "✅ Present"
+        if any(r.get("rain") is not None for r in getattr(l1o, "plot_timeseries", [])): data_inv["Historical Weather"] = "✅ Present"
+        if getattr(l1o, "forecast_7d", []): data_inv["Forecast"] = "✅ Present"
+        if getattr(l1o, "static", {}).get("soil_clay_mean"): data_inv["Soil Data"] = "✅ Present"
+
     return ChatPayload(
         run_id=artifact.meta.orchestrator_run_id,
         global_quality=quality_summary,
@@ -350,7 +448,8 @@ def build_chat_payload(
         arf=arf_json,
         memory=memory_context,
         ui_hints=ui_hints,
-        visuals=visuals
+        visuals=visuals,
+        data_inventory=data_inv
     )
 
 def _generate_arf_v2(
@@ -383,12 +482,36 @@ def _generate_arf_v2(
         status = "ALLOWED" if a.is_allowed else f"BLOCKED: {a.why}"
         action_str.append(f"{a.title} Priority:{a.priority} Status:{status}")
 
+    # Format Tasks
+    task_str = []
+    for t in tasks:
+        task_str.append(f"Task: {t.task} | Status: {t.when} | Depends on: {t.depends_on}")
+
+    # Build Planning Context String
+    planning_str = ""
+    if mode == "PLANNING" and "planning_context" in summary:
+        p_ctx = summary["planning_context"]
+        planning_str = f"""
+    [PLANNING FEASIBILITY & ECONOMICS] (PRIMARY FOCUS)
+    - Target Crop: {p_ctx.get('crop')}
+    - Overall Suitability Score: {p_ctx.get('overall_score', 0):.2f}
+    - Window Probability: {p_ctx.get('window_prob', 0):.2f}
+    - Water Probability: {p_ctx.get('water_prob', 0):.2f}
+    - Biotic Probability: {p_ctx.get('biotic_prob', 0):.2f}
+    - Yield Potential (Mean): {p_ctx.get('expected_yield', 0):.1f} t/ha
+    - Yield Risk (p10): {p_ctx.get('downside_risk_p10', 0):.1f} t/ha
+    - Expected Profit: ${p_ctx.get('expected_profit', 0):.1f}
+        """
+
     context_str = f"""
-    [FIELD CONTEXT]
+    {planning_str}
+    
+    [FIELD CONTEXT] (SECONDARY CONSTRAINTS)
     - Stage: {summary.get('stage')}
     - Signals: {json.dumps(summary.get('key_signals', []))}
     - Diagnoses (High Cert): {diag_str}
     - Proposed Actions: {action_str}
+    - Execution Plan Tasks: {task_str}
     - Quality Issues: {quality.get('degradation_modes', []) if quality else []}
     """
     
@@ -410,8 +533,10 @@ def _generate_arf_v2(
     CRITICAL RULES:
     1. Respond ONLY in valid JSON matching the schema below. No markdown outside the JSON.
     2. Adapt teaching depth to Farmer Experience Level ({memory.experience_level}).
-    3. If Quality Issues include NO_SAR or PARTIAL_DATA, shift to VERIFY actions and explain uncertainty.
+    3. If Quality Issues include NO_SAR or PARTIAL_DATA, shift to VERIFY actions and explain uncertainty (UNLESS Assistant Mode is PLANNING; for PLANNING, proceed with the Execution Plan Tasks as requested and ignore missing data warnings unless critical).
     4. Provide contextual follow-up questions but DO NOT repeat 'Recent Follow-ups Asked'.
+    5. VERY IMPORTANT: If Assistant Mode is PLANNING, do NOT act like a diagnostic monitor. Act like a Season Feasibility Optimizer. Your `headline` MUST be a Decision (e.g., "Planting Decision: Conditional"). Your `direct_answer` MUST state the quantitative expected yield and feasibility score. Your `reasoning_cards` MUST explain the specific water/biotic probabilities. Do NOT focus the narrative on NO_SAR.
+    6. STRICTLY NO SPAM / NO DUPLICATION: DO NOT output all available Execution Plan Tasks or Proposed Actions. ONLY select 1-3 recommendations that are DIRECTLY RELEVANT to the user's specific query.
     
     RESPONSE JSON SCHEMA:
     {{
@@ -431,7 +556,7 @@ def _generate_arf_v2(
         "recommendations": [
             {{
                 "type": "VERIFY" | "MONITOR" | "INTERVENE",
-                "title": "Action title",
+                "title": "Action title (ONLY include 1-3 actions directly relevant to the query)",
                 "is_allowed": true/false (must match INPUT CONTEXT),
                 "blocked_reasons": ["if not allowed, why"],
                 "why_it_matters": "Benefit of doing this",
@@ -449,11 +574,16 @@ def _generate_arf_v2(
                 "question": "Ask a relevant question to clarify context or progress. Exclude already known context.",
                 "why": "Why are you asking this?"
             }}
-        ]
+        ],
+        "internal_memory_updates": {{
+            "experience_level_upgrade": "Optional string (INTERMEDIATE or EXPERT) if they demonstrate higher knowledge, else null",
+            "new_known_facts": {{"FactKey": "FactValue learned in this turn"}},
+            "closed_loops": ["IDs or names of pending tasks the user just confirmed they did"]
+        }}
     }}
     """
     
-    user_prompt = user_query if user_query else "Provide a brief status update for my field."
+    user_prompt = user_query if user_query else "Acknowledge the context and ask the user what they would like to know about their field."
     
     try:
         resp = requests.post(
@@ -484,7 +614,14 @@ def _generate_arf_v2(
                 content = content[7:]
             if content.endswith("```"):
                 content = content[:-3]
-            return json.loads(content)
+                
+            raw_json = json.loads(content)
+            
+            # STRIKE: Strict Pydantic Validation
+            from services.agribrain.orchestrator_v2.arf_schema import ARFResponse
+            validated_arf = ARFResponse(**raw_json)
+            
+            return validated_arf.dict() # Return valid dict representing ARF
         else:
             return {"error": f"AI unavailable: {resp.status_code}"}
             
@@ -526,18 +663,18 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
             signals.append(ChatSignal(
                 name="Rainfall (Total)", 
                 value=f"{rain_sum:.1f} mm", 
-                direction="NORMAL" # We don't have L2/L3 to judge 'normal', maybe omit? Or simple heuristic?
+                direction=SignalDirection.NORMAL
             ))
             
             # RAIN DAYS
             rain_days = sum(1 for r in ts if float(r.get("rain", 0.0) or 0.0) > 0.1)
-            signals.append(ChatSignal("Days with Rain", str(rain_days), "N/A"))
+            signals.append(ChatSignal("Days with Rain", str(rain_days), SignalDirection.NORMAL))
             
             # NDVI (Avg of last if available)
             # Check last valid
             ndvis = [float(r.get("ndvi")) for r in ts if r.get("ndvi") is not None]
             if ndvis:
-                signals.append(ChatSignal("Avg NDVI", f"{sum(ndvis)/len(ndvis):.2f}", "N/A"))
+                signals.append(ChatSignal("Avg NDVI", f"{sum(ndvis)/len(ndvis):.2f}", SignalDirection.NORMAL))
                 
     summary["key_signals"] = [s.__dict__ for s in signals]
     
@@ -581,7 +718,6 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
         ts = getattr(artifact.layer_1.output, "plot_timeseries", [])
         if ts and ts:
              snapshot["rain_total"] = rain_val
-
     summary["feature_snapshot"] = snapshot
 
     # Context Question
@@ -595,6 +731,7 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
         "headline": summary["headline"],
         "direct_answer": narrative, # Using narrative as direct answer for simple data queries
         "reliability_badge": "HIGH",
+        "reliability_reason": "Based directly on verifiable deterministic telemetry and local station data.",
         "what_it_means": interpretation,
         "reasoning_cards": [],
         "recommendations": [],
@@ -603,8 +740,13 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
             "micro_lesson": teaching,
             "definitions": {}
         },
-        "followups": [{"question": ctx_q, "why": "Context needed"}] if ctx_q else []
+        "followups": [{"question": ctx_q, "why": "Context needed"}] if ctx_q else [],
+        "internal_memory_updates": None
     }
+    
+    # Validate through Schema to guarantee compliance
+    from services.agribrain.orchestrator_v2.arf_schema import ARFResponse
+    arf = ARFResponse(**arf).dict()
 
     return ChatPayload(
         run_id=artifact.meta.orchestrator_run_id,

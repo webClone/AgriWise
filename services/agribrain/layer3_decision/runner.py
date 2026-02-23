@@ -104,6 +104,7 @@ class DecisionIntelligenceEngine:
         
         mode = DegradationMode.NORMAL
         if not feat.sar_available: mode = DegradationMode.NO_SAR
+        if getattr(feat, 'low_sar_cadence', False): mode = DegradationMode.LOW_SAR_CADENCE
         if feat.optical_obs_count < 2: mode = DegradationMode.WEATHER_ONLY
         if not feat.sar_available and feat.optical_obs_count < 2: mode = DegradationMode.DATA_GAP
         

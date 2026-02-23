@@ -40,7 +40,8 @@ class DecisionFeatures:
     spatial_confidence: float
     
     # Data Quality / Availability (L1 Meta)
-    sar_available: bool
+    sar_available: bool # True if count > 0
+    low_sar_cadence: bool # True if 0 < count <= 5
     rain_available: bool
     temp_available: bool
     optical_available: bool
@@ -69,12 +70,14 @@ def build_decision_features(
         return _empty_features()
         
     # --- 1. Channel Availability Check ---
-    # We use string values from the Enum to check against tensor.channels list (which are strings)
-    has_rain = FieldTensorChannels.PRECIPITATION.value in tensor.channels
-    has_tmax = FieldTensorChannels.TEMP_MAX.value in tensor.channels
-    has_tmin = FieldTensorChannels.TEMP_MIN.value in tensor.channels
-    has_vv = FieldTensorChannels.VV.value in tensor.channels
-    has_ndvi = FieldTensorChannels.NDVI.value in tensor.channels
+    channel_values = [c.value if hasattr(c, "value") else c for c in tensor.channels]
+    ts_keys = set(tensor.plot_timeseries[-1].keys()) if tensor.plot_timeseries else set()
+    
+    has_rain = "precipitation" in channel_values or "rain" in ts_keys
+    has_tmax = "temp_max" in channel_values or "tmax" in ts_keys or "tmean" in ts_keys
+    has_tmin = "temp_min" in channel_values or "tmin" in ts_keys or "tmean" in ts_keys
+    has_vv = "vv" in channel_values or "vv_db" in ts_keys
+    has_ndvi = "ndvi" in channel_values or "ndvi" in ts_keys
     
     # --- 2. Weather Features (Source: Layer 1 plot_timeseries) ---
     rain_series = []
@@ -82,14 +85,14 @@ def build_decision_features(
     tmin_series = []
     
     if has_rain:
-        rain_series = [r.get(FieldTensorChannels.PRECIPITATION.value) for r in tensor.plot_timeseries]
+        rain_series = [r.get("rain", 0.0) for r in tensor.plot_timeseries]
     else:
         missing.append(Driver.RAIN)
         
     if has_tmax:
-        tmax_series = [r.get(FieldTensorChannels.TEMP_MAX.value) for r in tensor.plot_timeseries]
+        tmax_series = [r.get("tmax", r.get("tmean", 0.0)) for r in tensor.plot_timeseries]
     if has_tmin:
-        tmin_series = [r.get(FieldTensorChannels.TEMP_MIN.value) for r in tensor.plot_timeseries]
+        tmin_series = [r.get("tmin", r.get("tmean", 0.0)) for r in tensor.plot_timeseries]
         
     if not has_tmax or not has_tmin:
         missing.append(Driver.TEMP)
@@ -160,7 +163,7 @@ def build_decision_features(
     # Counts
     optical_obs_count = 0
     if has_ndvi:
-        optical_obs_count = len([x for x in tensor.plot_timeseries if x.get(FieldTensorChannels.NDVI.value) is not None])
+        optical_obs_count = len([x for x in tensor.plot_timeseries if x.get("ndvi") is not None])
     
     # Strict Threshold from v4.0 Spec: WEATHER_ONLY if count < 2
     optical_available = optical_obs_count >= 2
@@ -177,18 +180,19 @@ def build_decision_features(
 
     # --- 5. SAR (Source: Layer 1 plot_timeseries) ---
     sar_available = False
+    low_sar_cadence = False
     vv_trend = 0.0
     roughness_change = 0.0
     valid_vv = []
     sar_obs_count = 0
     
     if has_vv:
-        vv_series = [r.get(FieldTensorChannels.VV.value) for r in tensor.plot_timeseries]
+        vv_series = [r.get("vv_db", r.get("vv", r.get("vv_interpolated"))) for r in tensor.plot_timeseries]
         valid_vv = [v for v in vv_series if v is not None]
         sar_obs_count = len(valid_vv)
         
-        # Strict Threshold from v4.0 Spec: NO_SAR if count <= 5
-        sar_available = sar_obs_count > 5
+        sar_available = sar_obs_count > 0
+        low_sar_cadence = 0 < sar_obs_count <= 5
     else:
         missing.append(Driver.SAR_VV)
         sar_available = False
@@ -231,6 +235,7 @@ def build_decision_features(
         spatial_confidence=veg.stability.confidence,
         
         sar_available=sar_available,
+        low_sar_cadence=low_sar_cadence,
         rain_available=rain_available,
         temp_available=temp_available,
         optical_available=optical_available,

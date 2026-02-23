@@ -29,7 +29,8 @@ try:
         fetch_ndvi_timeseries,  # Updated import
         fetch_sar_timeseries,
         fetch_historical_weather,
-        fetch_soil_properties
+        fetch_soil_properties,
+        fetch_openweather_forecast
     )
     from layer1_fusion.corrections import correction_engine
     from layer1_fusion.schema import (
@@ -44,6 +45,7 @@ except ImportError:
     fetch_sar_timeseries = lambda *args, **kwargs: {}
     fetch_historical_weather = lambda *args, **kwargs: {}
     fetch_soil_properties = lambda *args, **kwargs: {}
+    fetch_openweather_forecast = lambda *args, **kwargs: {}
     correction_engine = None
     trust_system = None
 
@@ -128,6 +130,9 @@ class DataFusionEngine:
 
         # 7. Static Layers
         self._merge_static(tensor, valid_evidence)
+
+        # 8. Forecast 7D (Forward-looking models)
+        self._merge_forecast_7d(tensor, valid_evidence)
 
         # --- Step 8: Finalize Artifacts ---
         summary = [e.to_dict() for e in evidence_pool]
@@ -333,7 +338,25 @@ class DataFusionEngine:
                         payload=payload
                     ))
 
-        # 4. Soil (Static)
+        # 4. Forecast (Open-Meteo)
+        try:
+            forecast_raw = fetch_openweather_forecast(lat, lng)
+            snapshot["forecast"] = {"status": "OK", "count": len(forecast_raw)} if forecast_raw else {"status": "EMPTY"}
+        except Exception as e:
+            forecast_raw = []
+            snapshot["forecast"] = {"status": "ERROR", "error": str(e)}
+
+        if forecast_raw:
+            for i, day_fc in enumerate(forecast_raw):
+                pool.append(EvidenceItem(
+                    id=f"wx_fc_{day_fc.get('date', i)}",
+                    source_type=EvidenceSourceType.WEATHER_FORECAST,
+                    timestamp=datetime.now(),
+                    location_scope="point",
+                    payload=day_fc
+                ))
+
+        # 5. Soil (Static)
         try:
             soil_raw = fetch_soil_properties(lat, lng)
         except Exception:
@@ -380,8 +403,8 @@ class DataFusionEngine:
             dt = pd.to_datetime(item.timestamp)
             if dt in df.index:
                 sar_data[dt] = {
-                    "vv": item.payload.get("vv", np.nan),
-                    "vh": item.payload.get("vh", np.nan)
+                    "vv": item.payload.get("vv_db", item.payload.get("vv", np.nan)),
+                    "vh": item.payload.get("vh_db", item.payload.get("vh", np.nan))
                 }
         sar_df = pd.DataFrame.from_dict(sar_data, orient="index")
         if not sar_df.empty:
@@ -448,8 +471,8 @@ class DataFusionEngine:
                 d_str = e.timestamp.strftime("%Y-%m-%d")
                 if d_str in date_strs:
                     sar_map[d_str] = {
-                        "vv": e.payload.get("vv"),
-                        "vh": e.payload.get("vh")
+                        "vv": e.payload.get("vv_db", e.payload.get("vv")),
+                        "vh": e.payload.get("vh_db", e.payload.get("vh"))
                     }
 
         # Build daily records and sequences for interpolation
@@ -666,6 +689,12 @@ class DataFusionEngine:
                 "soil_org_c_mean": raw.get("organic_carbon", 10),
                 "texture_class": raw.get("texture_class", "unknown")
             }
+
+    def _merge_forecast_7d(self, tensor: "FieldTensor", evidence: List["EvidenceItem"]):
+        """Step 8: Weather forecast mapping"""
+        fc_items = [e for e in evidence if e.source_type == EvidenceSourceType.WEATHER_FORECAST]
+        for e in fc_items:
+            tensor.forecast_7d.append(e.payload)
 
     def _generate_health_report(self, evidence_pool: List["EvidenceItem"], records: List[Dict]) -> Dict:
         """Step 9: Monitoring & QA"""

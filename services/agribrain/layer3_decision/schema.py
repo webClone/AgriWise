@@ -40,7 +40,8 @@ class RiskIfWrong(Enum):
 
 class DegradationMode(Enum):
     NORMAL = "NORMAL"
-    NO_SAR = "NO_SAR" # Missing SAR channels or count <= 5
+    NO_SAR = "NO_SAR" # Missing SAR channels entirely (count == 0)
+    LOW_SAR_CADENCE = "LOW_SAR_CADENCE" # Count > 0 but <= 5
     WEATHER_ONLY = "WEATHER_ONLY" # Missing Optical
     DATA_GAP = "DATA_GAP" # Critical Missing Drivers
 

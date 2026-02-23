@@ -540,8 +540,8 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
         for item in data:
             outputs = item.get("outputs", {})
             try:
-                vv = outputs.get("vv", {}).get("bands", [{}])[0].get("stats", {}).get("mean")
-                vh = outputs.get("vh", {}).get("bands", [{}])[0].get("stats", {}).get("mean")
+                vv = outputs.get("vv", {}).get("bands", {}).get("B0", {}).get("stats", {}).get("mean")
+                vh = outputs.get("vh", {}).get("bands", {}).get("B0", {}).get("stats", {}).get("mean")
             except (KeyError, IndexError, TypeError):
                 continue
             date_str = item["interval"]["from"].split("T")[0]
@@ -2981,3 +2981,68 @@ def fetch_ndvi_max(lat: float, lng: float, days: int = 90) -> float:
     except Exception as e:
         print(f"NDVI Max fetch error: {e}")
         return 0.0
+
+def fetch_soil_properties(lat: float, lng: float) -> Dict[str, Any]:
+    """
+    Fetches base soil properties from ISRIC SoilGrids REST API.
+    Provides fallback static data if the parcel lacks uploaded soil tests.
+    """
+    url = f"https://rest.isric.org/soilgrids/v2.0/properties/query?lon={lng}&lat={lat}&property=clay&property=sand&property=soc&property=phh2o&depth=0-5cm&value=mean"
+    try:
+        resp = requests.get(url, headers={"Accept": "application/json"}, timeout=10)
+        if resp.status_code != 200:
+            return {}
+        
+        data = resp.json()
+        layers = data.get("properties", {}).get("layers", [])
+        
+        parsed = {}
+        for layer in layers:
+            name = layer.get("name")
+            unit = layer.get("unit_measure", {})
+            d_factor = unit.get("d_factor", 10)
+            
+            # Extract mean from first depth (0-5cm)
+            depths = layer.get("depths", [])
+            if not depths:
+                continue
+            
+            mean_val = depths[0].get("values", {}).get("mean")
+            if mean_val is None:
+                continue
+                
+            # Scale by d_factor
+            scaled_val = mean_val / float(d_factor)
+            
+            if name == "clay":
+                parsed["clay"] = scaled_val 
+            elif name == "sand":
+                parsed["sand"] = scaled_val
+            elif name == "phh2o":
+                parsed["ph"] = scaled_val
+            elif name == "soc":
+                parsed["organic_carbon"] = scaled_val
+
+        if not parsed:
+            return {}
+            
+        # Basic texture classification
+        clay = parsed.get("clay", 0)
+        sand = parsed.get("sand", 0)
+        silt = 100 - (clay + sand)
+        
+        texture = "loam"
+        if clay >= 40:
+            texture = "clay"
+        elif sand >= 70:
+            texture = "sand"
+        elif silt >= 40 and clay < 27 and sand < 50:
+            texture = "silt"
+            
+        parsed["texture_class"] = texture
+        return parsed
+        
+    except Exception as e:
+        print(f"⚠️ [SoilGrids] Failed to fetch: {e}")
+        return {}
+

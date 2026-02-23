@@ -10,6 +10,7 @@ from services.agribrain.layer3_decision.runner import run_layer3_decision
 from services.agribrain.layer4_nutrients.runner import run_layer4_nutrients
 from services.agribrain.layer5_bio.runner import run_layer5_bio
 from services.agribrain.layer6_exec.runner import run_layer6_exec
+from services.agribrain.layer7_planning.runner import run as run_layer7_planning
 
 class LayerId(str, Enum):
     L1 = "L1"
@@ -18,6 +19,7 @@ class LayerId(str, Enum):
     L4 = "L4"
     L5 = "L5"
     L6 = "L6"
+    L7 = "L7"
 
 @dataclass
 class LayerSpec:
@@ -74,6 +76,14 @@ LAYER_REGISTRY: Dict[LayerId, LayerSpec] = {
         runner=run_layer6_exec,
         depends_on=[LayerId.L3], # Technically consumes L4/L5 too if present
         required=True
+    ),
+    LayerId.L7: LayerSpec(
+        id=LayerId.L7,
+        name="SeasonPlanning",
+        version="7.0.0",
+        runner=run_layer7_planning,
+        depends_on=[LayerId.L1],
+        required=False
     )
 }
 
