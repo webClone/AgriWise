@@ -29,19 +29,18 @@ def debug():
     )
     
     try:
-        from services.agribrain.orchestrator_v2.runner import run_orchestrator
-        # Run raw orchestrator first to see full artifact including errors
-        art = run_orchestrator(inputs)
+        from services.agribrain.orchestrator_v2.runner import run_for_chat
         
-        print(f"\n✅ Run ID: {art.meta.orchestrator_run_id}")
-        print(f"📊 Global Quality: {art.global_quality}")
+        # Test the spatial AI adapter
+        user_query = "Please give me a complete summary of this plot and point out any weak zones."
+        payload = run_for_chat(inputs, user_query=user_query)
         
-        print(f"L1: {art.layer_1}")
-        print(f"L2: {art.layer_2}")
-        print(f"L3: {art.layer_3}")
-        print(f"L4: {art.layer_4}")
-        print(f"L5: {art.layer_5}")
-        print(f"L6: {art.layer_6}")
+        print("\n✅ Payload Generated")
+        print("\n--- CHAT RESPONSE ---")
+        
+        # In a real environment, the LLM processes this payload, but the payload itself contains the prompt.
+        from dataclasses import asdict
+        print(json.dumps(asdict(payload), indent=2))
         
     except Exception as e:
         print(f"❌ CRITICAL EXCEPTION: {e}")

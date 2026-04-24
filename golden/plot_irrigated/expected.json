@@ -1,0 +1,43 @@
+{
+  "description": "Irrigated: SM response to events, sensor drift late",
+  "final_state_ranges": {
+    "lai_proxy": [
+      1.5,
+      6.0
+    ],
+    "sm_0_10": [
+      0.1,
+      0.45
+    ],
+    "phenology_stage": [
+      1.0,
+      3.0
+    ]
+  },
+  "event_response_invariants": {
+    "irrigation_day_12": {
+      "sm_increase_within_2_days": true,
+      "sm_increase_range": [
+        0.05,
+        0.25
+      ]
+    },
+    "irrigation_day_28": {
+      "sm_increase_within_2_days": true,
+      "sm_increase_range": [
+        0.04,
+        0.2
+      ]
+    }
+  },
+  "sensor_drift_invariants": {
+    "drift_detected_after_day_35": true,
+    "reliability_decreases_late": true
+  },
+  "audit_invariants": {
+    "health_grade_range": [
+      "A",
+      "C"
+    ]
+  }
+}

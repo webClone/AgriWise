@@ -59,7 +59,7 @@ export const YieldChart: React.FC<YieldPredictionProps> = ({ data }) => {
             />
             <Tooltip 
                 labelFormatter={(val) => `Yield: ${Number(val).toFixed(2)} t/ha`}
-                formatter={(val: number) => [`${val.toFixed(0)}%`, 'Probability']}
+                formatter={(val?: number) => [`${(val ?? 0).toFixed(0)}%`, 'Probability']}
             />
             <Area type="monotone" dataKey="displayProb" fill="#10b981" stroke="#059669" fillOpacity={0.2} />
             <ReferenceLine x={mean} stroke="red" strokeDasharray="3 3" label={{ position: 'top', value: 'Avg', fontSize: 10, fill: 'red' }} />

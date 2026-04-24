@@ -4,7 +4,7 @@ Aligns with the 8-Step Fusion Pipeline.
 Supports degradation to Pure Python if dependencies are missing.
 """
 
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import math
 
 # Try imports
@@ -48,7 +48,7 @@ class CorrectionPipeline:
         raw_data = pd.to_numeric(df[feature], errors='coerce')
         
         # Interpolate
-        dense_data = raw_data.interpolate(method='linear').fillna(method='bfill').fillna(method='ffill')
+        dense_data = raw_data.interpolate(method='linear').bfill().ffill()
         
         if len(dense_data) > 7:
             try:

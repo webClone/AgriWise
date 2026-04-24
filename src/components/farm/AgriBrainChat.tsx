@@ -3,23 +3,24 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from 'react-markdown';
 import { ToolResultRenderer } from '../chat/widgets/ToolResultRenderer';
+import ARFWidget from '../chat/widgets/ARFWidget';
 
 interface Message {
   role: 'user' | 'model';
   content: string;
   toolCalls?: { name: string; args: any; result?: any }[];
   metadata?: { intent?: string; evidence?: string[] };
+  arf?: any;
 }
 
 interface AgriBrainChatProps {
   context?: any;
+  onZoneUpdate?: (zones: any, zoneSuitability: any) => void;
 }
 
-export default function AgriBrainChat({ context }: AgriBrainChatProps) {
+export default function AgriBrainChat({ context, onZoneUpdate }: AgriBrainChatProps) {
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'model', content: "Hello! I am AgriBrain. I can analyze your fields using Earth Observation data and ML models. Ask me about yield, weather, or crop health." }
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -52,24 +53,58 @@ export default function AgriBrainChat({ context }: AgriBrainChatProps) {
         content: m.content
       }));
 
-      const res = await fetch('/api/agribrain/chat', {
+      // Unified canonical route — all intelligence through Orchestrator v2
+      const res = await fetch('/api/agribrain/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMsg.content, history: historyForApi, context })
+        body: JSON.stringify({
+          plotId: context?.plotId || context?.plot?.id,
+          mode: 'chat',
+          query: userMsg.content,
+          history: historyForApi,
+          experienceLevel: 'INTERMEDIATE',
+        })
       });
       
       const data = await res.json();
       
-      if (data.error) {
-        throw new Error(data.details || data.error);
+      if (data.error || data.success === false) {
+        throw new Error(data.error || 'AgriBrain run failed');
+      }
+
+      // Extract chat-relevant fields from AgriBrainRun or ChatPayload
+      const arf = data.arf || data.explanations?.arf;
+      const modes = data.global_quality?.degradation_modes || [];
+      const relScore = data.global_quality?.reliability || 0;
+
+      // Build display text
+      let md = "";
+      if (arf && !arf.error && (arf.headline || arf.direct_answer)) {
+        md = `Here is the diagnostic analysis based on your request:`;
+      } else {
+        const headline = data.summary?.headline || data.explanations?.summary?.headline || "Analysis Complete";
+        const body = arf?.error ? `**Error:** ${arf.error}` : (data.summary?.explanation || "");
+        md = `### ${headline}\n\n${body}\n\n`;
+      }
+
+      if (modes.length > 0) {
+        md += `\n> ⚠️ **Data Gaps:** ${modes.join(", ")} (Reliability: ${relScore.toFixed(2)})`;
       }
 
       const modelMsg: Message = {
         role: 'model',
-        content: data.text || "I processed that.",
+        content: md || (arf ? "" : "I processed that."),
         toolCalls: data.toolCalls,
-        metadata: data.metadata
+        metadata: { intent: data.assistant_mode || data.intent, evidence: modes },
+        arf: arf
       };
+      
+      // Forward zone data to map via parent callback
+      const zones = data.zones || data.summary?.management_zones;
+      const zoneSuitability = data.zoneSuitability || data.summary?.zone_suitability;
+      if (onZoneUpdate && (zones || zoneSuitability)) {
+        onZoneUpdate(zones, zoneSuitability);
+      }
       
       setMessages(prev => [...prev, modelMsg]);
     } catch (e) {
@@ -135,15 +170,22 @@ export default function AgriBrainChat({ context }: AgriBrainChatProps) {
                 ? 'bg-blue-600 text-white rounded-br-sm' 
                 : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-bl-sm'}
             `}>
-              <ReactMarkdown 
-                components={{
-                  p: ({node, ...props}) => <p className="m-0 leading-relaxed" {...props} />,
-                  ul: ({node, ...props}) => <ul className="my-2 pl-4 list-disc" {...props} />,
-                  li: ({node, ...props}) => <li className="mb-1" {...props} />
-                }}
-              >
-                {msg.content}
-              </ReactMarkdown>
+              {msg.arf ? (
+                  <div className="flex flex-col gap-2">
+                     {msg.content && <div className="mb-2"><ReactMarkdown>{msg.content}</ReactMarkdown></div>}
+                     <ARFWidget arf={msg.arf} />
+                  </div>
+              ) : (
+                  <ReactMarkdown 
+                    components={{
+                      p: ({...props}) => <p className="m-0 leading-relaxed" {...props} />,
+                      ul: ({...props}) => <ul className="my-2 pl-4 list-disc" {...props} />,
+                      li: ({...props}) => <li className="mb-1" {...props} />
+                    }}
+                  >
+                    {msg.content}
+                  </ReactMarkdown>
+              )}
             </div>
           </div>
         ))}

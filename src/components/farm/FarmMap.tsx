@@ -13,9 +13,29 @@ const icon = L.icon({
   iconAnchor: [12, 41],
 });
 
+export interface FarmData {
+  id: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  geoJson?: string;
+}
+
+export interface PlotData {
+  id: string;
+  name?: string;
+  area?: number | string;
+  soilType?: string;
+  geoJson?: {
+    geometry: {
+      type: string;
+      coordinates: number[][] | number[][][] | number[][][][]; // Using union for polygon/multipolygon
+    }
+  };
+}
+
 interface FarmMapProps {
-  farms: any[];
-  plots?: any[];
+  farms: FarmData[];
+  plots?: PlotData[];
   onSelectFarm?: (farmId: string) => void;
   onSelectPlot?: (plotId: string) => void;
 }
@@ -26,28 +46,31 @@ function ChangeView({ center, zoom }: { center: [number, number]; zoom: number }
   return null;
 }
 
-export default function FarmMap({ farms, plots = [], onSelectFarm, onSelectPlot, cropName }: FarmMapProps & { cropName?: string }) {
-  const [center, setCenter] = useState<[number, number]>([36.75, 3.05]); // Default: Algiers
-  const [zoom, setZoom] = useState(13);
+export default function FarmMap({ farms, plots = [], onSelectPlot, cropName }: FarmMapProps & { cropName?: string }) {
+  const [center] = useState<[number, number]>([36.75, 3.05]); // Default: Algiers
+  const [zoom] = useState(13);
 
   // Auto-fit bounds component
-  function AutoFitBoundaries({ plots }: { plots: any[] }) {
+  function AutoFitBoundaries({ plots }: { plots: PlotData[] }) {
     const map = useMap();
 
     useEffect(() => {
       if (plots && plots.length > 0 && plots[0].geoJson) {
         try {
           const geoJson = plots[0].geoJson;
-          let coords: any[] = [];
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let coords: any = [];
           
           if (geoJson.geometry.type === 'Polygon') {
             coords = geoJson.geometry.coordinates[0];
           } else if (geoJson.geometry.type === 'MultiPolygon') {
-             coords = geoJson.geometry.coordinates[0][0];
+             // eslint-disable-next-line @typescript-eslint/no-explicit-any
+             coords = (geoJson.geometry.coordinates[0] as any)[0];
           }
 
           if (coords.length > 0) {
-             const bounds = L.latLngBounds(coords.map((c: any) => [c[1], c[0]]));
+             // eslint-disable-next-line @typescript-eslint/no-explicit-any
+             const bounds = L.latLngBounds((coords as any[]).map((c: any) => [c[1], c[0]]));
              map.fitBounds(bounds, { padding: [50, 50], animate: true, duration: 1 });
           }
         } catch (e) {
@@ -108,6 +131,7 @@ export default function FarmMap({ farms, plots = [], onSelectFarm, onSelectPlot,
             plot.geoJson && (
               <Polygon 
                 key={plot.id}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 positions={plot.geoJson.geometry.coordinates?.map((ring: any) => ring.map((coord: any) => [coord[1], coord[0]])) || []}
                 pathOptions={{ 
                     color: '#facc15', // Yellow 400

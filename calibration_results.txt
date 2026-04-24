@@ -1,0 +1,49 @@
+
+==================================================
+🔄 SCENARIO: BASELINE - UNKNOWN MOISTURE
+==================================================
+Headline: Potato Planting Feasibility Confirmed
+Suitability: 82.6%
+Confidence: MED (Missing SAR data, but other key variables are favorable)
+
+Recommendations:
+  - [VERIFY] Confirm soil moisture at 10cm depth
+  - [MONITOR] Monitor for any unexpected rainfall or temperature changes
+  - [INTERVENE] Prepare for post-emergence disease monitoring
+
+📈 --- MATH ENGINE SNAPSHOT ---
+Suitability %: 82.6%
+Expected Yield: 40.0 t/ha
+Downside p10: 28.0 t/ha
+Profit (Exp): $13000.0/ha
+
+Matrix Log:
+  - FROST_RISK: Frost risk check: CLEAR. Forecasted min temp (15.0C) is safe. (Weight: 1.0) [L1_Forecast]
+  - SEASON_LENGTH: Month 3 is inside 'north_africa' window (Weight: 1.0) [CCL_Calendar]
+  - TEMP: Soil temperature forecast: OPTIMAL. (15.0C) is ideal for rapid emergence. (Weight: 1.0) [L1_Forecast]
+
+
+
+==================================================
+🔄 SCENARIO: CALIBRATED - OPTIMAL MOISTURE CONFIRMED
+==================================================
+Headline: Potato Planting Feasibility Confirmed
+Suitability: 87.5%
+Confidence: MED (Missing SAR data)
+
+Recommendations:
+  - [VERIFY] Confirm soil moisture at 10cm depth
+  - [MONITOR] Monitor for foliar fungal diseases post-emergence
+
+📈 --- MATH ENGINE SNAPSHOT ---
+Suitability %: 87.5%
+Expected Yield: 40.0 t/ha
+Downside p10: 28.0 t/ha
+Profit (Exp): $13000.0/ha
+
+Matrix Log:
+  - FROST_RISK: Frost risk check: CLEAR. Forecasted min temp (15.0C) is safe. (Weight: 1.0) [L1_Forecast]
+  - SEASON_LENGTH: Month 3 is inside 'north_africa' window (Weight: 1.0) [CCL_Calendar]
+  - TEMP: Soil temperature forecast: OPTIMAL. (15.0C) is ideal for rapid emergence. (Weight: 1.0) [L1_Forecast]
+
+

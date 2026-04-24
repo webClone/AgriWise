@@ -1,0 +1,110 @@
+{
+  "arf": {
+    "headline": "Feasibility is high, but with some data gaps",
+    "direct_answer": "Yes, it is feasible to plant potatoes right now, but you should verify some key factors.",
+    "suitability_score": "87.1%",
+    "confidence_badge": "MED",
+    "confidence_reason": "There are data gaps, particularly in soil moisture levels and soil temperature at different depths.",
+    "what_it_means": "The current conditions are favorable for planting potatoes, but there are some uncertainties that need to be addressed to ensure optimal success.",
+    "reasoning_cards": [
+      {
+        "type": "EVIDENCE",
+        "claim": "Frost risk is clear",
+        "evidence": "The forecasted minimum temperature (15.0\u00b0C) is safe for potato planting.",
+        "uncertainty": "No immediate frost risk, but long-term forecasts should be monitored."
+      },
+      {
+        "type": "EVIDENCE",
+        "claim": "Soil temperature is optimal",
+        "evidence": "The soil temperature (15.0\u00b0C) is ideal for rapid emergence.",
+        "uncertainty": "Soil temperature can vary at different depths, and verifying this is important."
+      },
+      {
+        "type": "THREAT",
+        "claim": "Dry seedbed conditions",
+        "evidence": "The 7-day rain accumulation is very low (1.9mm), which might make the seedbed too dry for optimal emergence.",
+        "uncertainty": "Soil moisture levels at different depths are unknown and could affect germination."
+      },
+      {
+        "type": "EVIDENCE",
+        "claim": "Low disease pressure",
+        "evidence": "Foliar fungal pressure is low due to sparse rain history and a drier forecast.",
+        "uncertainty": "Post-emergence monitoring is still necessary."
+      }
+    ],
+    "recommendations": [
+      {
+        "type": "VERIFY",
+        "title": "Check soil moisture levels",
+        "is_allowed": true,
+        "blocked_reasons": [],
+        "why_it_matters": "Ensuring adequate soil moisture at different depths will help with seedbed preparation and germination.",
+        "how_to_do_it_steps": [
+          "Measure soil moisture at 5-10cm and 10-20cm depths using a soil moisture meter or by hand.",
+          "Adjust irrigation if the soil is too dry."
+        ],
+        "risk_if_wrong": "MED"
+      },
+      {
+        "type": "MONITOR",
+        "title": "Monitor soil temperature",
+        "is_allowed": true,
+        "blocked_reasons": [],
+        "why_it_matters": "Soil temperature can vary, and maintaining optimal conditions is crucial for rapid emergence.",
+        "how_to_do_it_steps": [
+          "Measure soil temperature at 5-10cm depth using a soil thermometer.",
+          "Ensure the temperature remains around 15.0\u00b0C."
+        ],
+        "risk_if_wrong": "LOW"
+      }
+    ],
+    "learning": {
+      "level": "INTERMEDIATE",
+      "micro_lesson": "Potato planting is highly dependent on soil conditions. While the forecasted temperature and low disease pressure are favorable, soil moisture and temperature at different depths are critical for successful germination. Verifying these factors can help you avoid issues like poor emergence or seedling stress.",
+      "definitions": {
+        "Soil Moisture": "The amount of water present in the soil, crucial for seed germination and plant growth.",
+        "Soil Temperature": "The temperature of the soil, which affects seed germination and early plant development."
+      }
+    },
+    "followups": [
+      {
+        "question": "What is the current soil moisture level at 5-10cm depth?",
+        "why": "To ensure the seedbed is not too dry for optimal germination."
+      },
+      {
+        "question": "What is the current soil temperature at 5-10cm depth?",
+        "why": "To confirm that the soil temperature remains optimal for potato emergence."
+      }
+    ],
+    "internal_memory_updates": {
+      "experience_level_upgrade": null,
+      "new_known_facts": {},
+      "closed_loops": []
+    },
+    "limitations": [
+      "Low-probability indicators ignored: COLD_STRESS"
+    ]
+  },
+  "planning_context": {
+    "crop": "Potato (Solanum tuberosum)",
+    "overall_score": 8630.69,
+    "window_prob": 0.9706877692486436,
+    "water_prob": 0.8807970779778823,
+    "biotic_prob": 0.598687660112452,
+    "expected_yield": 40.0,
+    "downside_risk_p10": 28.0,
+    "expected_profit": 13000.0,
+    "break_even_yield": 7.5,
+    "suitability_percentage": 87.1,
+    "driver_matrix": [
+      "FROST_RISK: Frost risk check: CLEAR. Forecasted min temp (15.0C) is safe. (Weight: 1.0) [L1_Forecast]",
+      "SEASON_LENGTH: Month 2 is inside 'north_africa' window (Weight: 1.0) [CCL_Calendar]",
+      "TEMP: Soil temperature forecast: OPTIMAL. (15.0C) is ideal for rapid emergence. (Weight: 1.0) [L1_Forecast]",
+      "RAIN_7D: 7-day rain accumulation risk: 0% (LOW). ET0 demand forecast stable for germination. (Weight: 1.0) [L1_Forecast7D]",
+      "RAIN_7D: Very dry 1.9mm. Seedbed might be too powdery/dry for emergence without irrigation. (Weight: 1.0) [L1_Rain]",
+      "SOIL_TEXTURE: Soil texture 'loam' (estimated from SoilGrids) aligns with crop preferences (Weight: 1.0) [L1_SoilGrids_250m]",
+      "WATER_QUOTA: High-efficiency irrigation present (drip) (Weight: 1.0) [Context_Present]",
+      "DISEASE_PRESSURE: Foliar fungal pressure remains low due to sparse rain history and drier forecast. Monitor post-emergence. (Weight: 0.5) [L1_Rain,L1_Forecast7D]"
+    ]
+  }
+}

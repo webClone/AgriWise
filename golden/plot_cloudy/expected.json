@@ -1,0 +1,39 @@
+{
+  "description": "Cloudy coastal: frequent S2 gaps, S1 reliable",
+  "final_state_ranges": {
+    "lai_proxy": [
+      0.5,
+      6.0
+    ],
+    "sm_0_10": [
+      0.15,
+      0.55
+    ],
+    "phenology_stage": [
+      0.5,
+      2.5
+    ],
+    "canopy_stress": [
+      0.0,
+      0.3
+    ]
+  },
+  "uncertainty_invariants": {
+    "grows_during_gaps": true,
+    "max_gap_days": 15,
+    "shrinks_on_obs_day": true
+  },
+  "reliability_invariants": {
+    "sentinel1_stays_high": [
+      0.85,
+      1.0
+    ]
+  },
+  "audit_invariants": {
+    "health_grade_range": [
+      "A",
+      "D"
+    ],
+    "min_data_availability_pct": 20
+  }
+}

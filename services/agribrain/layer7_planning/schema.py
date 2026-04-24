@@ -87,6 +87,12 @@ class CropOptionEvaluation:
     yield_dist: YieldDistribution
     econ: EconomicOutcome
     overall_rank_score: float
+    suitability_percentage: float = 0.0
+    # L10 explainability fields (optional, populated by planning engine when available)
+    name: str = ""
+    strategy_id: str = ""
+    description: str = ""
+    expected_impacts: Dict[str, float] = field(default_factory=dict)
 
 @dataclass
 class PlanningRecommendation:

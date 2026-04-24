@@ -1,0 +1,22 @@
+{
+  "experience_level": "INTERMEDIATE",
+  "language_preference": "EN",
+  "units": "metric",
+  "known_context": {},
+  "last_questions": [
+    "how is my crop",
+    "how is my crop",
+    "how is my crop",
+    "how is my crop",
+    "how is my crop"
+  ],
+  "last_diagnoses_shown": [],
+  "asked_followups": [
+    "Have you noticed any signs of compaction or crusting on the soil surface?",
+    "Have you checked the soil texture in your field recently?",
+    "Have you noticed any areas in the field where water tends to pool or run off?",
+    "Have you noticed any areas in the field where the soil seems particularly dry or compacted?",
+    "Have you noticed any changes in soil structure or compaction recently?"
+  ],
+  "open_loops": []
+}

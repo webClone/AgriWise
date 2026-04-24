@@ -6,70 +6,24 @@ import FarmMapClient from "@/components/farm/FarmMapClient";
 import PlotsSection from "@/components/farm/PlotsSection";
 import FarmHeaderActions from "@/components/farm/FarmHeaderActions";
 import EquipmentList from "@/components/farm/EquipmentList";
-import { ObjectId } from "bson";
-
-interface RawFarm {
-  _id: { $oid: string };
-  name: string;
-  nameAr?: string;
-  wilaya: string;
-  commune?: string;
-  totalArea: number;
-  latitude?: number;
-  longitude?: number;
-  soilType?: string;
-  waterSource?: string;
-  irrigationType?: string;
-  userId: { $oid: string };
-}
-
-interface RawPlot {
-  _id: { $oid: string };
-  name: string;
-  nameAr?: string;
-  area: number;
-  soilType?: string;
-  irrigation?: string;
-  geoJson?: any;
-}
-
-// RawEquipment interface removed as we now use Prisma Client types
-
-interface RawCropCycle {
-  _id: { $oid: string };
-  cropCode: string;
-  cropNameAr?: string;
-  variety?: string;
-  status: string;
-  estimatedYield?: number;
-  plotId: { $oid: string };
-}
 
 async function getFarm(id: string) {
   try {
-    if (!ObjectId.isValid(id)) return null;
-    
-    const result = await prisma.$runCommandRaw({
-      find: "Farm",
-      filter: { _id: new ObjectId(id) },
-      limit: 1
-    }) as { cursor?: { firstBatch?: RawFarm[] } };
-    
-    const rawFarm = result.cursor?.firstBatch?.[0];
-    if (!rawFarm) return null;
+    const farm = await prisma.farm.findUnique({ where: { id } });
+    if (!farm) return null;
     
     return {
-      id: rawFarm._id.$oid || String(rawFarm._id),
-      name: rawFarm.name,
-      nameAr: rawFarm.nameAr || null,
-      wilaya: rawFarm.wilaya,
-      commune: rawFarm.commune || null,
-      totalArea: rawFarm.totalArea,
-      latitude: rawFarm.latitude || null,
-      longitude: rawFarm.longitude || null,
-      soilType: rawFarm.soilType || null,
-      waterSource: rawFarm.waterSource || null,
-      irrigationType: rawFarm.irrigationType || null,
+      id: farm.id,
+      name: farm.name,
+      nameAr: (farm as Record<string, unknown>).nameAr as string || null,
+      wilaya: farm.wilaya,
+      commune: farm.commune || null,
+      totalArea: farm.totalArea,
+      latitude: farm.latitude || null,
+      longitude: farm.longitude || null,
+      soilType: farm.soilType || null,
+      waterSource: farm.waterSource || null,
+      irrigationType: farm.irrigationType || null,
     };
   } catch (error) {
     console.error("getFarm error:", error);
@@ -79,19 +33,16 @@ async function getFarm(id: string) {
 
 async function getPlots(farmId: string) {
   try {
-    const result = await prisma.$runCommandRaw({
-      find: "Plot",
-      filter: { farmId: new ObjectId(farmId) }
-    }) as { cursor?: { firstBatch?: RawPlot[] } };
+    const plots = await prisma.plot.findMany({ where: { farmId } });
     
-    return (result.cursor?.firstBatch || []).map(p => ({
-      id: p._id.$oid || String(p._id),
+    return plots.map(p => ({
+      id: p.id,
       name: p.name,
-      nameAr: p.nameAr,
+      nameAr: (p as Record<string, unknown>).nameAr as string | undefined,
       area: p.area,
-      soilType: p.soilType,
-      irrigation: p.irrigation,
-      geoJson: p.geoJson,
+      soilType: p.soilType ? String(p.soilType) : undefined,
+      irrigation: p.irrigation ? String(p.irrigation) : undefined,
+      geoJson: (p as Record<string, unknown>).geoJson,
     }));
   } catch (error) {
     console.error("getPlots error:", error);
@@ -123,19 +74,18 @@ async function getCropCycles(plotIds: string[]) {
   try {
     if (plotIds.length === 0) return [];
     
-    const result = await prisma.$runCommandRaw({
-      find: "CropCycle",
-      filter: { plotId: { $in: plotIds.map(id => new ObjectId(id)) } }
-    }) as { cursor?: { firstBatch?: RawCropCycle[] } };
+    const cycles = await prisma.cropCycle.findMany({
+      where: { plotId: { in: plotIds } }
+    });
     
-    return (result.cursor?.firstBatch || []).map(c => ({
-      id: c._id.$oid || String(c._id),
+    return cycles.map(c => ({
+      id: c.id,
       cropCode: c.cropCode,
-      cropNameAr: c.cropNameAr,
-      variety: c.variety,
-      status: c.status,
-      estimatedYield: c.estimatedYield,
-      plotId: c.plotId.$oid || String(c.plotId),
+      cropNameAr: (c as Record<string, unknown>).cropNameAr as string | undefined,
+      variety: c.variety || undefined,
+      status: String(c.status),
+      estimatedYield: c.estimatedYield ?? undefined,
+      plotId: c.plotId,
     }));
   } catch (error) {
     console.error("getCropCycles error:", error);
@@ -271,7 +221,8 @@ export default async function FarmDetailsPage({ params }: { params: Promise<{ id
           )}
         </div>
         <div style={{ height: "200px" }}>
-          <FarmMapClient farms={[farm]} plots={plots} />
+          {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+          <FarmMapClient farms={[farm] as any} plots={plots as any} />
         </div>
       </div>
 
@@ -282,8 +233,8 @@ export default async function FarmDetailsPage({ params }: { params: Promise<{ id
       {/* Plots Section */}
       <PlotsSection 
         farmId={id} 
-        plots={plots} 
-        cropCycles={cropCycles} 
+        plots={plots as { id: string; name: string; nameAr?: string; area: number; soilType?: string; irrigation?: string }[]} 
+        cropCycles={cropCycles as { id: string; cropCode: string; cropNameAr?: string; variety?: string; status: string; plotId: string }[]} 
         farmCoordinates={
           farm.latitude && farm.longitude 
             ? { lat: farm.latitude, lng: farm.longitude } 

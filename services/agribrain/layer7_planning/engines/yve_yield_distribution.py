@@ -2,7 +2,7 @@ from typing import Any
 from services.agribrain.layer7_planning.schema import YieldDistribution, SuitabilityState
 from services.agribrain.layer7_planning.engines.ccl_crop_library import CropProfile
 
-def compute_yield_distribution(profile: CropProfile, window_state: SuitabilityState, water_state: SuitabilityState, biotic_state: SuitabilityState) -> YieldDistribution:
+def compute_yield_distribution(profile: CropProfile, window_state: SuitabilityState, water_state: SuitabilityState, soil_state: SuitabilityState, biotic_state: SuitabilityState) -> YieldDistribution:
     """
     Engine F: Yield Potential & Variability Engine (YVE)
     Produces yield distributions considering downside risk from weather, biotic limits, and soil constraints.
@@ -53,6 +53,13 @@ def compute_yield_distribution(profile: CropProfile, window_state: SuitabilitySt
     if biotic_state.severity == "CRITICAL" or biotic_state.probability_ok < 0.4:
          p10 *= 0.4 # Catastrophic failure risk
          contributors.append("High disease pressure radically expands downside variance (p10).")
+         
+    # 4. Data Gap Uncertainty Expansion
+    avg_conf = (window_state.confidence + water_state.confidence + biotic_state.confidence + soil_state.confidence) / 4.0
+    if avg_conf < 0.8:
+         uncertainty_spread = (1.0 - avg_conf) * 1.5
+         p10 *= (1.0 - min(uncertainty_spread, 0.7))
+         contributors.append(f"Data gaps expand uncertainty bands significantly! (Overall Confidence: {avg_conf:.2f}).")
          
     # Ensure sane bounds
     p10 = max(0.0, p10)

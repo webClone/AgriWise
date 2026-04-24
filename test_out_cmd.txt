@@ -1,0 +1,21 @@
+🔄 [Layer 1] Starting Production Fusion Run: b08fd5b88ea025f6 (PurePython Mode)
+DEBUG L7_MAP type: <class 'NoneType'>
+DEBUG L7_MAP keys/attrs: N/A
+=== ChatPayload Summary ===
+{
+  "headline": "Analysis Complete",
+  "period": "2026-02-08 to 2026-02-22",
+  "stage": "UNKNOWN",
+  "key_signals": [],
+  "feature_snapshot": {}
+}
+=== ChatPayload Quality ===
+{
+  "reliability": 0.1,
+  "degradation_modes": [
+    "CRITICAL_FAILURE"
+  ],
+  "alerts": [
+    "LayerId.L1: 'str' object has no attribute 'get'"
+  ]
+}

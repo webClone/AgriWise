@@ -1,0 +1,17 @@
+[
+  {
+    "day": "2024-01-05",
+    "type": "sowing",
+    "crop": "wheat"
+  },
+  {
+    "day": "2024-03-13",
+    "type": "irrigation",
+    "amount_mm": 30
+  },
+  {
+    "day": "2024-03-29",
+    "type": "irrigation",
+    "amount_mm": 25
+  }
+]

@@ -86,14 +86,14 @@ export async function POST(request: NextRequest) {
     await prisma.$runCommandRaw({
       insert: "Plot",
       documents: [{
-        _id: plotId,
+        _id: { $oid: plotId.toHexString() },
         name,
         nameAr: nameAr || name,
         area: parseFloat(area),
         soilType: soilType || null,
         irrigation: irrigation || null,
         geoJson: geoJson || null,
-        farmId: new ObjectId(farmId),
+        farmId: { $oid: farmId },
         createdAt: dateObj,
         updatedAt: dateObj,
       }]

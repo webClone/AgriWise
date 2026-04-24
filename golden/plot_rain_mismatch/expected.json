@@ -1,0 +1,39 @@
+{
+  "description": "Rain mismatch: convective storms not confirmed by SAR",
+  "final_state_ranges": {
+    "lai_proxy": [
+      0.5,
+      6.0
+    ],
+    "sm_0_10": [
+      0.12,
+      0.45
+    ]
+  },
+  "conflict_invariants": {
+    "rainfall_spatial_mismatch_expected": true,
+    "conflict_days_near": [
+      12,
+      24,
+      36
+    ],
+    "weather_reliability_decreases": true,
+    "weather_reliability_range_after_conflicts": [
+      0.4,
+      0.95
+    ]
+  },
+  "reliability_invariants": {
+    "sentinel1_stays_stable": [
+      0.8,
+      1.0
+    ]
+  },
+  "audit_invariants": {
+    "health_grade_range": [
+      "B",
+      "D"
+    ],
+    "min_conflict_count": 1
+  }
+}

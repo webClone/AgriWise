@@ -1,0 +1,15 @@
+{
+  "experience_level": "INTERMEDIATE",
+  "language_preference": "EN",
+  "units": "metric",
+  "known_context": {},
+  "last_questions": [
+    "how is my field"
+  ],
+  "last_diagnoses_shown": [],
+  "asked_followups": [
+    "What is the current soil moisture at 10cm depth in your field?",
+    "Do you have any specific planting dates in mind, or are you flexible based on weather and soil conditions?"
+  ],
+  "open_loops": []
+}

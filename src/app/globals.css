@@ -5,6 +5,29 @@
   --foreground: #020617; /* Slate-950 */
   --color-primary: #3b82f6;
   --color-primary-600: #2563eb;
+
+  /* ── AgriWise V2.2 Design Tokens ─────────────────────────────── */
+  --aw-bg: #080c19;
+  --aw-surface: rgba(10, 16, 32, 0.88);
+  --aw-surface-solid: #0c1224;
+  --aw-glass: rgba(6, 10, 22, 0.82);
+  --aw-glass-panel: rgba(8, 13, 28, 0.85);
+  --aw-border: rgba(71, 85, 105, 0.12);
+  --aw-text-primary: #e8ecf4;
+  --aw-text-secondary: #94a3b8;
+  --aw-text-muted: #64748b;
+  --aw-accent: #6366f1;
+  --aw-accent-soft: rgba(99, 102, 241, 0.12);
+  --aw-severity-low: #22c55e;
+  --aw-severity-mid: #f59e0b;
+  --aw-severity-high: #ef4444;
+  --aw-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --aw-ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+  --aw-radius: 16px;
+  --aw-radius-sm: 10px;
+  --aw-radius-lg: 20px;
+  --aw-shadow-panel: 0 8px 40px rgba(0, 0, 0, 0.45), 0 2px 12px rgba(0, 0, 0, 0.25);
+  --aw-font: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -178,4 +201,1344 @@ body {
 /* Style your items */
 .my-masonry-grid_column > div { 
   margin-bottom: 1.5rem;
+}
+
+/* ============================================================================
+   LAYER 10 INTELLIGENCE UI
+   ============================================================================ */
+
+/* Surface Color Palettes */
+:root {
+  /* Vegetation (brown-red → yellow → deep green) */
+  --surface-vegetation-low: #8B0000;
+  --surface-vegetation-mid: #FFD700;
+  --surface-vegetation-high: #006400;
+
+  /* Water Stress (calm blue → amber → red) */
+  --surface-water-low: #1a5276;
+  --surface-water-mid: #f39c12;
+  --surface-water-high: #e74c3c;
+
+  /* Nutrient Risk (green → yellow → red) */
+  --surface-nutrient-low: #27ae60;
+  --surface-nutrient-mid: #f1c40f;
+  --surface-nutrient-high: #c0392b;
+
+  /* Composite Risk (safe → warning → critical) */
+  --surface-risk-low: #2ecc71;
+  --surface-risk-mid: #e67e22;
+  --surface-risk-high: #e74c3c;
+
+  /* Uncertainty (low → medium → high) */
+  --surface-uncertainty-low: #2c3e50;
+  --surface-uncertainty-mid: #8e44ad;
+  --surface-uncertainty-high: #e74c3c;
+}
+
+/* Glass Panel Base */
+.intelligence-panel {
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 12px;
+}
+
+/* Mode Switcher */
+.mode-switcher {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.7);
+  backdrop-filter: blur(12px);
+}
+
+.mode-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #94a3b8;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  white-space: nowrap;
+}
+
+.mode-btn:hover {
+  color: #e2e8f0;
+  background: rgba(51, 65, 85, 0.5);
+}
+
+.mode-btn.active {
+  color: #f0fdf4;
+  background: rgba(34, 197, 94, 0.15);
+  border-color: rgba(34, 197, 94, 0.3);
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.1);
+}
+
+.mode-btn .mode-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transition: transform 0.2s ease;
+}
+
+.mode-btn.active .mode-dot {
+  transform: scale(1.3);
+  box-shadow: 0 0 6px currentColor;
+}
+
+/* Histogram Styling */
+.histogram-container {
+  display: flex;
+  align-items: flex-end;
+  gap: 1px;
+  height: 80px;
+  padding: 0 4px;
+}
+
+.histogram-bar {
+  flex: 1;
+  min-width: 2px;
+  border-radius: 2px 2px 0 0;
+  transition: height 0.3s ease, background-color 0.3s ease;
+  cursor: crosshair;
+}
+
+.histogram-bar:hover {
+  filter: brightness(1.3);
+}
+
+.histogram-sparkline {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5px;
+  height: 24px;
+}
+
+.histogram-sparkline .spark-bar {
+  flex: 1;
+  min-width: 1px;
+  border-radius: 1px 1px 0 0;
+  background: rgba(34, 197, 94, 0.5);
+}
+
+/* Quicklook Thumbnails */
+.quicklook-strip {
+  display: flex;
+  gap: 8px;
+  padding: 8px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.quicklook-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.quicklook-thumb {
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  border-radius: 8px;
+  border: 2px solid rgba(51, 65, 85, 0.5);
+  cursor: pointer;
+  transition: all 0.25s ease;
+  overflow: hidden;
+  position: relative;
+}
+
+.quicklook-thumb:hover {
+  border-color: rgba(148, 163, 184, 0.5);
+  transform: scale(1.05);
+}
+
+.quicklook-thumb.active {
+  border-color: #22c55e;
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.3), 0 0 24px rgba(34, 197, 94, 0.1);
+}
+
+/* Zone Inspector */
+.zone-inspector {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 320px;
+  max-height: 100%;
+  overflow-y: auto;
+  z-index: 1000;
+  transform: translateX(100%);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.zone-inspector.open {
+  transform: translateX(0);
+}
+
+.zone-inspector .severity-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right, #22c55e, #eab308, #ef4444);
+  position: relative;
+}
+
+.zone-inspector .severity-marker {
+  position: absolute;
+  top: -3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid white;
+  transform: translateX(-50%);
+}
+
+.confidence-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.confidence-badge.high {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.confidence-badge.medium {
+  background: rgba(234, 179, 8, 0.15);
+  color: #facc15;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.confidence-badge.low {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Grounding Badge */
+.grounding-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.grounding-badge.raster {
+  background: rgba(59, 130, 246, 0.15);
+  color: #93c5fd;
+}
+
+.grounding-badge.zone {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c4b5fd;
+}
+
+.grounding-badge.proxy {
+  background: rgba(234, 179, 8, 0.15);
+  color: #fde047;
+}
+
+.grounding-badge.uniform {
+  background: rgba(100, 116, 139, 0.15);
+  color: #94a3b8;
+}
+
+/* Intelligence Legend */
+.intelligence-legend {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  z-index: 500;
+  min-width: 180px;
+}
+
+.legend-gradient {
+  height: 8px;
+  border-radius: 4px;
+  width: 100%;
+}
+
+/* Drawer */
+.histogram-drawer {
+  transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+
+.histogram-drawer.collapsed {
+  max-height: 48px;
+}
+
+.histogram-drawer.expanded {
+  max-height: 280px;
+}
+
+/* Loading skeleton pulse for intelligence panels */
+@keyframes intelligencePulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.15; }
+}
+
+.intelligence-skeleton {
+  animation: intelligencePulse 1.5s ease-in-out infinite;
+  background: linear-gradient(90deg, rgba(51, 65, 85, 0.3) 25%, rgba(71, 85, 105, 0.3) 50%, rgba(51, 65, 85, 0.3) 75%);
+  background-size: 200% 100%;
+  border-radius: 8px;
+}
+
+/* Smooth Surface Overlay */
+.surface-overlay-image {
+  image-rendering: auto; /* smooth interpolation, not pixelated */
+  filter: drop-shadow(0 0 6px rgba(0, 0, 0, 0.3));
+}
+
+/* Enhanced Base Imagery */
+.leaflet-tile-pane {
+  filter: contrast(1.08) saturate(1.12) brightness(1.02);
+}
+
+/* Plot outline enhancement */
+.leaflet-overlay-pane path {
+  filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.3));
+}
+
+/* Zone contour glow */
+.zone-contour {
+  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.2));
+}
+
+/* Mode switcher bar */
+.mode-switcher {
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(71, 85, 105, 0.3);
+  border-radius: 10px;
+  padding: 2px;
+}
+
+/* Quicklook strip */
+.quicklook-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  overflow-x: auto;
+}
+
+.quicklook-thumb {
+  width: 40px;
+  height: 28px;
+  border-radius: 4px;
+  border: 1.5px solid rgba(71, 85, 105, 0.4);
+  overflow: hidden;
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.quicklook-thumb:hover {
+  border-color: rgba(148, 163, 184, 0.6);
+  transform: scale(1.08);
+}
+
+.quicklook-thumb.active {
+  border-color: rgba(59, 130, 246, 0.8);
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.3);
+}
+
+/* Analysis Strip */
+.analysis-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(71, 85, 105, 0.3);
+  border-radius: 10px;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+/* Glass panel base */
+.glass-panel {
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(71, 85, 105, 0.25);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+/* Zone tooltip styling */
+.zone-tooltip {
+  background: rgba(15, 23, 42, 0.95) !important;
+  border: 1px solid rgba(71, 85, 105, 0.4) !important;
+  border-radius: 8px !important;
+  padding: 8px 10px !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+  color: #e2e8f0 !important;
+}
+
+.zone-tooltip::before {
+  border-top-color: rgba(15, 23, 42, 0.95) !important;
+}
+
+/* ============================================================================
+   TICKET 3: REAL MOTION SYSTEM
+   Replacing placeholder animate-* classes with actual keyframes
+   Timing: Overlays 180-220ms, Drawers 200ms translate+fade
+   ============================================================================ */
+
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.animate-slide-in-right {
+  animation: slideInRight 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fadeInLeft {
+  from { transform: translateX(-20px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.animate-fade-in-left {
+  animation: fadeInLeft 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fadeInUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 200ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-fade-in {
+  /* Re-using the existing fadeIn keyframe but matching the naming convention */
+  animation: fadeIn 200ms ease-out forwards;
+}
+
+/* ============================================================================
+   ZONE VISUAL SYSTEM — Calm, weighted motion. Apple Maps precision.
+   No bounce. No spring. Deliberate and expensive.
+   ============================================================================ */
+
+:root {
+  --zone-hover-duration: 180ms;
+  --zone-select-duration: 260ms;
+  --zone-drawer-duration: 300ms;
+  --zone-mode-duration: 380ms;
+  --zone-ease: cubic-bezier(0.4, 0, 0.2, 1);          /* Material standard — measured, never springy */
+  --zone-ease-out: cubic-bezier(0.0, 0, 0.2, 1);      /* gentle deceleration */
+  --zone-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);   /* weighted symmetry */
+}
+
+/* ── Zone Chip — minimal, anchored, restrained ───────────────────────────── */
+.zone-chip {
+  position: absolute;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+  z-index: 600;
+  /* Staged: appears AFTER zone highlight settles (200ms delay, 180ms reveal) */
+  animation: zoneChipEnter 180ms var(--zone-ease) 200ms both;
+}
+
+/* Anchor — tiny neutral dot, not a glow */
+.zone-chip-anchor {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: rgba(148, 163, 184, 0.35);
+  box-shadow: 0 0 3px 1px rgba(148, 163, 184, 0.12);
+  margin: 0 auto 2px;
+}
+
+/* (zone-chip-body styles moved below zone-chip-meta — see updated block) */
+
+/* Label — quiet, measured typography */
+.zone-chip-label {
+  font-size: 9px;
+  font-weight: 500;
+  color: #94a3b8;
+  white-space: nowrap;
+  text-transform: capitalize;
+  letter-spacing: 0.02em;
+}
+
+/* Meta — even smaller confidence % */
+.zone-chip-meta {
+  font-size: 8px;
+  font-weight: 500;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+/* Driver — tiny secondary line below the meta */
+.zone-chip-driver {
+  display: block;
+  font-size: 7px;
+  font-weight: 500;
+  color: #475569;
+  white-space: nowrap;
+  margin-top: 1px;
+  text-transform: capitalize;
+  letter-spacing: 0.02em;
+}
+
+/* Chip body layout: stack label row + driver vertically */
+.zone-chip-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(8, 12, 25, 0.92);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(71, 85, 105, 0.15);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+/* Label and meta inline on same row */
+.zone-chip-body > .zone-chip-label,
+.zone-chip-body > .zone-chip-meta {
+  display: inline;
+}
+
+/* Chip entrance — unhurried slide-up + fade */
+@keyframes zoneChipEnter {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-100% + 2px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -100%);
+  }
+}
+
+/* ── Centroid hover pulse — barely-visible single opacity ripple ────────── */
+@keyframes zoneCentroidPulse {
+  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
+  40%  { opacity: 0.12; transform: translate(-50%, -50%) scale(1.0); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.3); }
+}
+
+.zone-centroid-pulse {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 590;
+  animation: zoneCentroidPulse 800ms var(--zone-ease) forwards;
+}
+
+/* ── Why this zone? — expandable section reveal ──────────────────────────── */
+@keyframes zoneWhyReveal {
+  from {
+    opacity: 0;
+    max-height: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    max-height: 300px;
+    transform: translateY(0);
+  }
+}
+
+.zone-why-enter {
+  animation: zoneWhyReveal 180ms var(--zone-ease) forwards;
+  overflow: hidden;
+}
+
+/* ── Zone Inspector — calm staggered content reveal ──────────────────────── */
+.zone-inspector.open > div {
+  animation: zoneDrawerContent 280ms var(--zone-ease) both;
+}
+
+.zone-inspector.open > div:nth-child(1) { animation-delay: 0ms; }
+.zone-inspector.open > div:nth-child(2) { animation-delay: 60ms; }
+.zone-inspector.open > div:nth-child(3) { animation-delay: 120ms; }
+.zone-inspector.open > div:nth-child(4) { animation-delay: 180ms; }
+.zone-inspector.open > div:nth-child(5) { animation-delay: 240ms; }
+.zone-inspector.open > div:nth-child(6) { animation-delay: 300ms; }
+.zone-inspector.open > div:nth-child(7) { animation-delay: 360ms; }
+
+@keyframes zoneDrawerContent {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Drawer sync glow — brief zone edge brighten when drawer opens ─────── */
+@keyframes drawerSyncGlow {
+  0%   { filter: brightness(1.0); }
+  30%  { filter: brightness(1.15); }
+  100% { filter: brightness(1.0); }
+}
+
+/* ── Reduced Motion Override ─────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .animate-slide-in-right,
+  .animate-fade-in-left,
+  .animate-fade-in-up,
+  .animate-fade-in,
+  .fade-in,
+  .slide-up,
+  .zone-chip,
+  .zone-why-enter,
+  .zone-centroid-pulse,
+  .zone-inspector.open > div,
+  .zone-nav-bar {
+    animation: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+  }
+}
+
+/* ============================================================================
+   ZONE NAVIGATION BAR
+   ============================================================================ */
+
+.zone-nav-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(8, 12, 25, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(71, 85, 105, 0.20);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  animation: zoneNavEnter 0.35s ease-out both;
+  max-width: min(600px, calc(100vw - 32px));
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.zone-nav-bar::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes zoneNavEnter {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.zone-nav-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  position: relative;
+}
+
+.zone-nav-tab:hover {
+  background: rgba(71, 85, 105, 0.15);
+  color: #cbd5e1;
+}
+
+.zone-nav-tab--active {
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.25);
+}
+
+.zone-nav-tab--active:hover {
+  background: rgba(99, 102, 241, 0.22);
+}
+
+.zone-nav-tab--all {
+  color: #64748b;
+  font-size: 9px;
+}
+
+.zone-nav-tab--all:hover {
+  color: #94a3b8;
+}
+
+.zone-nav-divider {
+  width: 1px;
+  height: 16px;
+  background: rgba(71, 85, 105, 0.25);
+  flex-shrink: 0;
+  margin: 0 2px;
+}
+
+/* Rank number badge */
+.zone-nav-rank {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: rgba(71, 85, 105, 0.25);
+  color: #94a3b8;
+  font-size: 8px;
+  font-weight: 700;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.zone-nav-tab--active .zone-nav-rank {
+  background: rgba(99, 102, 241, 0.30);
+  color: #a5b4fc;
+}
+
+/* Zone label text */
+.zone-nav-label {
+  text-transform: capitalize;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Severity micro-dot */
+.zone-nav-severity {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Zone count badge */
+.zone-nav-count {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: rgba(71, 85, 105, 0.20);
+  color: #64748b;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   AgriWise V2 — Component Styles
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Dashboard Layout ─────────────────────────────────────────────────────── */
+.aw-dashboard {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;      /* V2.2: Full-bleed — fill available space */
+  min-height: 500px;
+  overflow: hidden;
+  background: var(--aw-bg);
+  font-family: var(--aw-font);
+}
+
+.aw-dashboard__map {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: var(--aw-bg);
+}
+
+.aw-dashboard__mode-lens {
+  position: absolute;
+  top: 120px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 35;
+  pointer-events: auto;
+}
+
+.aw-dashboard__status {
+  position: absolute;
+  top: 120px;
+  left: 16px;
+  z-index: 10;
+}
+
+.aw-dashboard__error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--aw-glass);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: var(--aw-radius-sm);
+  color: #fca5a5;
+  font-size: 13px;
+}
+
+.aw-dashboard__error-icon {
+  font-size: 14px;
+}
+
+.aw-dashboard__loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: var(--aw-glass);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius-sm);
+  color: var(--aw-text-secondary);
+  font-size: 13px;
+}
+
+.aw-dashboard__loading-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+  animation: aw-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes aw-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+.aw-dashboard__insight-bar {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  right: 16px;
+  z-index: 10;
+  pointer-events: auto;
+}
+
+.aw-dashboard__zone-sheet {
+  position: absolute;
+  top: 120px;    /* V2.2: below top bar + context band */
+  right: 12px;
+  bottom: 12px;
+  z-index: 15;
+  width: 360px;
+  pointer-events: auto;
+  animation: aw-slide-in-right 0.45s var(--aw-ease) forwards;
+}
+
+@keyframes aw-slide-in-right {
+  from { transform: translateX(40px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* ── AgriBrain FAB ────────────────────────────────────────────────────────── */
+.aw-dashboard__fab {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  border: none;
+  background: var(--aw-accent);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto !important;
+  box-shadow: 0 4px 24px rgba(99, 102, 241, 0.35), 0 0 0 3px rgba(99, 102, 241, 0.12);
+  transition: all 0.25s var(--aw-ease);
+}
+
+.aw-dashboard__fab:hover {
+  transform: scale(1.08);
+  background: #818cf8;
+  box-shadow: 0 8px 32px rgba(99, 102, 241, 0.45), 0 0 0 5px rgba(99, 102, 241, 0.18);
+}
+
+.aw-dashboard__fab-icon {
+  width: 22px;
+  height: 22px;
+}
+
+/* ── ModeLens ─────────────────────────────────────────────────────────────── */
+.aw-mode-lens {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 5px;
+  background: var(--aw-glass-panel);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border: 1px solid var(--aw-border);
+  border-radius: 28px;
+  box-shadow: var(--aw-shadow-panel);
+}
+
+.aw-mode-lens__back {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  color: var(--aw-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 20px;
+  transition: color 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+
+.aw-mode-lens__back:hover {
+  color: var(--aw-text-primary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.aw-mode-lens__divider {
+  width: 1px;
+  height: 20px;
+  background: var(--aw-border);
+  margin: 0 4px;
+}
+
+.aw-mode-lens__btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+  background: none;
+  border: none;
+  border-radius: 20px;
+  cursor: pointer;
+  color: var(--aw-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.2s var(--aw-ease);
+  white-space: nowrap;
+}
+
+.aw-mode-lens__btn:hover {
+  color: var(--aw-text-primary);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.aw-mode-lens__btn--active {
+  color: var(--aw-text-primary);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.aw-mode-lens__icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.aw-mode-lens__label {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* ── FieldInsightBar ──────────────────────────────────────────────────────── */
+.aw-insight-bar {
+  display: flex;
+  flex-direction: column;
+  padding: 14px 24px;
+  background: var(--aw-glass-panel);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius);
+  box-shadow: var(--aw-shadow-panel);
+}
+
+.aw-insight-bar__loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--aw-text-secondary);
+  font-size: 13px;
+}
+
+.aw-insight-bar__pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--aw-accent);
+  animation: aw-pulse 1.5s ease-in-out infinite;
+}
+
+.aw-insight-bar__content {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.aw-insight-bar__sentence {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--aw-text-primary);
+  letter-spacing: 0.005em;
+  font-weight: 400;
+}
+
+.aw-insight-bar__action {
+  flex-shrink: 0;
+  padding: 6px 16px;
+  background: var(--aw-accent);
+  border: none;
+  border-radius: 20px;
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s var(--aw-ease);
+  letter-spacing: 0.02em;
+}
+
+.aw-insight-bar__action:hover {
+  background: #818cf8;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(99, 102, 241, 0.3);
+}
+
+.aw-insight-bar__legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
+}
+
+.aw-insight-bar__legend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.aw-insight-bar__legend-label {
+  font-size: 10px;
+  color: var(--aw-text-muted);
+  margin-right: 8px;
+  letter-spacing: 0.03em;
+}
+
+/* ── ZoneSheet ────────────────────────────────────────────────────────────── */
+.aw-zone-sheet {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--aw-glass-panel);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius-lg);
+  box-shadow: var(--aw-shadow-panel);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.2) transparent;
+}
+
+.aw-zone-sheet__header {
+  padding: 24px 24px 18px;
+  border-bottom: 1px solid var(--aw-border);
+}
+
+.aw-zone-sheet__title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.aw-zone-sheet__name {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--aw-text-primary);
+  margin: 0;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+}
+
+.aw-zone-sheet__close {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--aw-border);
+  border-radius: var(--aw-radius-sm);
+  color: var(--aw-text-muted);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.aw-zone-sheet__close:hover {
+  color: var(--aw-text-primary);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.aw-zone-sheet__meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.aw-zone-sheet__confidence {
+  font-size: 11px;
+  color: var(--aw-text-secondary);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.aw-zone-sheet__severity-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.aw-zone-sheet__severity-word {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.aw-zone-sheet__section {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--aw-border);
+}
+
+.aw-zone-sheet__condition {
+  margin: 0;
+  font-size: 15px; /* Larger, more editorial */
+  line-height: 1.6;
+  color: var(--aw-text-primary);
+  letter-spacing: 0.01em;
+  font-weight: 400;
+}
+
+/* Severity elements removed from CSS (replaced by dot/word above) */
+
+/* Why section */
+.aw-zone-sheet__why-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--aw-accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  transition: color 0.15s;
+}
+
+.aw-zone-sheet__why-toggle:hover {
+  color: #818cf8;
+}
+
+.aw-zone-sheet__chevron {
+  transition: transform 0.2s var(--aw-ease);
+}
+
+.aw-zone-sheet__chevron--open {
+  transform: rotate(90deg);
+}
+
+.aw-zone-sheet__why-content {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: aw-fade-in-down 0.25s var(--aw-ease) forwards;
+}
+
+@keyframes aw-fade-in-down {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.aw-zone-sheet__label {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--aw-text-muted);
+  margin-bottom: 6px;
+}
+
+.aw-zone-sheet__label--action {
+  color: var(--aw-severity-low);
+}
+
+.aw-zone-sheet__drivers ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.aw-zone-sheet__drivers li {
+  font-size: 12px;
+  color: var(--aw-text-secondary);
+  padding-left: 14px;
+  position: relative;
+}
+
+.aw-zone-sheet__drivers li::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: var(--aw-accent);
+}
+
+.aw-zone-sheet__evidence p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--aw-text-secondary);
+}
+
+.aw-zone-sheet__trust-note {
+  font-style: italic;
+  color: var(--aw-text-muted) !important;
+  margin-top: 4px !important;
+}
+
+/* Expert toggle removed from CSS (now in ModeLens) */
+
+/* Action section */
+.aw-zone-sheet__action-section {
+  background: rgba(34, 197, 94, 0.03);
+}
+
+.aw-zone-sheet__actions {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px; /* More breathing room */
+}
+
+.aw-zone-sheet__actions li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 14px; /* Larger action text */
+  color: var(--aw-text-primary); /* Less system-green, more solid white */
+  font-weight: 500;
+  line-height: 1.5;
+  padding-left: 14px;
+  position: relative;
+}
+
+.aw-zone-sheet__actions li::before {
+  content: "→";
+  position: absolute;
+  left: 0;
+  color: var(--aw-severity-low);
+  font-weight: 700;
+}
+
+/* Action arrows removed */
+
+.aw-zone-sheet__action-fallback {
+  margin: 0;
+  font-size: 12px;
+  color: var(--aw-text-secondary);
+  font-style: italic;
+}
+
+/* Zone navigation chips */
+.aw-zone-sheet__zone-list {
+  padding: 16px 20px;
+}
+
+.aw-zone-sheet__zone-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.aw-zone-sheet__zone-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--aw-border);
+  border-radius: 16px;
+  color: var(--aw-text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s var(--aw-ease);
+}
+
+.aw-zone-sheet__zone-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--aw-text-primary);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.aw-zone-sheet__chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }

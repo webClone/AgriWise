@@ -1,3 +1,4 @@
+from datetime import timezone
 from typing import List, Tuple
 from services.agribrain.layer7_planning.schema import CropOptionEvaluation, PlanningDecisionId, PlanningRecommendation
 from services.agribrain.layer3_decision.schema import TaskNode, ExecutionPlan
@@ -142,7 +143,7 @@ def generate_execution_plan(option: CropOptionEvaluation, plot_id: str) -> Tuple
             edges.append({"from": d, "to": t.task_id})
             
     import datetime
-    now_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    now_str = datetime.datetime.now(timezone.utc).strftime("%Y-%m-%d")
     plan = ExecutionPlan(
         tasks=tasks, 
         edges=edges, 

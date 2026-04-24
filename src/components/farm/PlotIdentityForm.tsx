@@ -97,6 +97,8 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
           ownership: formData.ownership,
           irrigationDistrict: formData.irrigationDistrict,
           physicalConstraints: formData.physicalConstraints,
+          geoJson: formData.geoJson,
+          area: area
         }),
       });
 
@@ -120,14 +122,36 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
   };
   
   const handleMapSave = async (newGeoJson: any, newArea: number) => {
-      // Update local state
+      // Update local state immediately
       setFormData(prev => ({ ...prev, geoJson: newGeoJson }));
       setArea(newArea);
       setIsEditingMap(false);
+      setLoading(true);
       
-      // TODO: Call server action to update Geometry (updatePlotDetails needs to support this or a new action)
-      // For now, alerting user that backend save is pending feature update
-      alert(`Geometry updated locally! New Area: ${newArea} ha. (Note: Backend save requires action update)`);
+      try {
+        const res = await fetch(`/api/plots/${plot.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            geoJson: newGeoJson,
+            area: newArea,
+          }),
+        });
+
+        const data = await res.json();
+        
+        if (res.ok && data.success) {
+          setSuccess(true);
+          setTimeout(() => setSuccess(false), 3000);
+        } else {
+          alert(`Failed to save geometry: ${data.error || 'Unknown error'}`);
+          console.error("Geometry save failed:", data);
+        }
+      } catch (err) {
+        alert(`Failed to save geometry: Network error`);
+        console.error("Geometry save network error:", err);
+      }
+      setLoading(false);
   };
 
   return (

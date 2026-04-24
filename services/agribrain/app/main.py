@@ -76,6 +76,14 @@ class SpecializedAIRequest(BaseModel):
     context: Dict[str, Any]
     crop: Optional[str] = "tomato"
 
+class V2RunRequest(BaseModel):
+    """Unified Next.js API route payload"""
+    context: str  # Base64 encoded context
+    query: Optional[str] = ""
+    mode: Optional[str] = "chat"
+    history: Optional[str] = ""
+    exp: Optional[str] = "INTERMEDIATE"
+
 # ============================================================================
 # Legacy Endpoints (for backward compatibility)
 # ============================================================================
@@ -706,6 +714,43 @@ def orchestrate(req: OrchestrationRequest):
         needs_llm_synthesis=True,  # LLM should always synthesize
         timestamp=datetime.now().isoformat()
     )
+
+@app.post("/v2/run")
+def api_v2_run(req: V2RunRequest):
+    """
+    Unified entrypoint as a persistent FastAPI endpoint. 
+    Replaces the slow subprocess.spawn("py", "run_entrypoint.py") approach.
+    """
+    from services.agribrain.orchestrator_v2.run_entrypoint import (
+        _parse_context, run_chat_mode, run_full_mode, run_surfaces_mode
+    )
+    
+    try:
+        ctx = _parse_context(req.context)
+        
+        # Construct mock args for run_chat_mode to read history/exp
+        class MockArgs:
+            history = req.history
+            exp = req.exp
+            
+        args = MockArgs()
+        query = req.query.strip() if req.query else ""
+        
+        if req.mode == "chat":
+            result = run_chat_mode(ctx, query, args)
+        elif req.mode == "full":
+            result = run_full_mode(ctx, query)
+        elif req.mode == "surfaces":
+            result = run_surfaces_mode(ctx, query)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown mode: {req.mode}")
+            
+        return result
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail={"error": str(e), "type": "AgriBrainRunError"})
 
 # ============================================================================
 # Direct Specialized AI Endpoints

@@ -22,12 +22,12 @@ interface Farm {
   commune?: string | null;
   totalArea: number;
 }
-
 import { useRouter } from "next/navigation";
+import { FarmData, PlotData } from "@/components/farm/FarmMap";
 
 interface FarmMapClientProps {
   farms: Farm[];
-  plots?: any[];
+  plots?: PlotData[];
   cropName?: string;
 }
 
@@ -41,5 +41,5 @@ export default function FarmMapClient({ farms, plots, cropName }: FarmMapClientP
     }
   };
 
-  return <FarmMap farms={farms} plots={plots} onSelectPlot={handleSelectPlot} cropName={cropName} />;
+  return <FarmMap farms={farms as unknown as FarmData[]} plots={plots} onSelectPlot={handleSelectPlot} cropName={cropName} />;
 }

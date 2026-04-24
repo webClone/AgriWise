@@ -1,6 +1,6 @@
 
 from typing import Dict, List, Tuple, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from services.agribrain.layer5_bio.schema import (
     BioThreatState, BioRecommendation, ActionId, ThreatId
@@ -10,10 +10,10 @@ from services.agribrain.layer3_decision.schema import (
 )
 
 def _iso_today():
-    return datetime.utcnow().date().isoformat()
+    return datetime.now(timezone.utc).date().isoformat()
 
 def _window(days: int = 5):
-    s = datetime.utcnow().date()
+    s = datetime.now(timezone.utc).date()
     e = s + timedelta(days=days)
     return {"start": s.isoformat(), "end": e.isoformat()}
 

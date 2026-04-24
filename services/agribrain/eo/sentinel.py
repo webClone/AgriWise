@@ -11,13 +11,13 @@ Integrates multiple free satellite and climate data sources:
 import os
 import requests
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 # --- Load environment variables (Next.js .env.local + .env) ---
 try:
     from dotenv import load_dotenv
-    load_dotenv()              # .env
-    load_dotenv(".env.local")  # Next.js env file
+    load_dotenv(override=True)              # .env
+    load_dotenv(".env.local", override=True)  # Next.js env file
 except Exception:
     pass
 
@@ -38,6 +38,10 @@ token_cache = {
     "expires_at": 0
 }
 
+# Fast-fail guard: once auth fails, skip re-attempts in this process
+_auth_failed = False
+_auth_fail_reason = ""
+
 
 # ============================================================================
 # Authentication
@@ -46,9 +50,14 @@ token_cache = {
 def get_access_token():
     """
     Retrieves OAuth2 token from Copernicus Dataspace Ecosystem.
-    Handles caching and uses robust retry logic for network stability.
+    Fast-fail: if auth has failed once this session, returns None immediately.
     """
-    global token_cache
+    global token_cache, _auth_failed, _auth_fail_reason
+
+    # Fast-fail guard: don't retry broken auth in the same process
+    if _auth_failed:
+        raise ConnectionError(f"Copernicus auth previously failed: {_auth_fail_reason}")
+
     if token_cache["access_token"] and time.time() < token_cache["expires_at"]:
         return token_cache["access_token"]
 
@@ -58,9 +67,10 @@ def get_access_token():
     import traceback
     
     if not client_id or not client_secret:
+        _auth_failed = True
+        _auth_fail_reason = "Missing credentials"
         print(f"DEBUG: CLIENT_ID present: {bool(client_id)}")
         print(f"DEBUG: CLIENT_SECRET present: {bool(client_secret)}")
-        print(f"DEBUG: Env keys: {[k for k in os.environ.keys() if 'SENTINEL' in k]}")
         raise ValueError("Missing SENTINEL_HUB_CLIENT_ID or SENTINEL_HUB_CLIENT_SECRET in environment")
 
     payload = {
@@ -69,14 +79,14 @@ def get_access_token():
         "client_secret": client_secret
     }
     
-    # Robust retry strategy (Backoff: 1s, 2s, 4s)
+    # Fast-fail strategy: 1 retry, 8s timeout (not 30s x 3 retries)
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
     
     session = requests.Session()
     retry = Retry(
-        total=3,
-        backoff_factor=1,
+        total=1,
+        backoff_factor=0.5,
         status_forcelist=[500, 502, 503, 504],
         allowed_methods=["POST"]
     )
@@ -84,10 +94,12 @@ def get_access_token():
     session.mount("https://", adapter)
     
     try:
-        response = session.post(SENTINEL_AUTH_URL, data=payload, timeout=30)
+        response = session.post(SENTINEL_AUTH_URL, data=payload, timeout=8)
         
         if response.status_code != 200:
             print(f"Sentinel Auth Error ({response.status_code}): {response.text}")
+            _auth_failed = True
+            _auth_fail_reason = f"HTTP {response.status_code}"
             raise Exception(f"Sentinel Auth Failed: {response.text}")
 
         data_resp = response.json()
@@ -97,16 +109,302 @@ def get_access_token():
         return token_cache["access_token"]
         
     except Exception as e:
-        print(f"Sentinel Auth Connection Failed: {e}")
-        # If we can't get a token, we can't do anything. Repropagate.
+        _auth_failed = True
+        _auth_fail_reason = str(e)
+        print(f"⚠️ Sentinel Auth Failed (fast-fail enabled for this session): {e}")
         raise
 
 
 # ============================================================================
-# Sentinel-2 L2A - Optical Indices
+# RASTER EO ACQUISITION — Process API (Patch 1: Spatial Surfaces)
+# Returns real pixel grids for zone engines. Stats API = plot summaries only.
 # ============================================================================
 
-def fetch_ndvi_timeseries(lat: float, lng: float, days: int = 180) -> Dict:
+def _build_process_bounds(polygon_coords: Optional[Any], lat: float, lng: float, buffer: float = 0.003):
+    """Build bounds dict for the Process API — polygon preferred, bbox fallback."""
+    coords = None
+    if isinstance(polygon_coords, dict):
+        if "coordinates" in polygon_coords:
+            # Handle standard GeoJSON dict
+            if polygon_coords["type"] == "Polygon":
+                coords = polygon_coords["coordinates"][0]  # Take outer ring
+            elif polygon_coords["type"] == "MultiPolygon":
+                coords = polygon_coords["coordinates"][0][0]
+    elif isinstance(polygon_coords, list):
+        if len(polygon_coords) > 0 and isinstance(polygon_coords[0], list):
+            # Nested list [[lng, lat], ...]
+            coords = polygon_coords[0] if isinstance(polygon_coords[0][0], list) else polygon_coords
+            
+    if coords and len(coords) >= 3:
+        return {
+            "geometry": {"type": "Polygon", "coordinates": [coords]},
+            "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
+        }
+        
+    return {
+        "bbox": [lng - buffer, lat - buffer, lng + buffer, lat + buffer],
+        "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
+    }
+
+
+def _compute_raster_dimensions(polygon_coords: Optional[Any], lat: float, lng: float,
+                                target_resolution_m: float = 10.0, max_dim: int = 64) -> tuple:
+    """Compute pixel width/height for a polygon bbox at a target GSD."""
+    import math
+    coords = None
+    if isinstance(polygon_coords, dict):
+        if "coordinates" in polygon_coords:
+            if polygon_coords["type"] == "Polygon":
+                coords = polygon_coords["coordinates"][0]
+            elif polygon_coords["type"] == "MultiPolygon":
+                coords = polygon_coords["coordinates"][0][0]
+    elif isinstance(polygon_coords, list):
+        if len(polygon_coords) > 0 and isinstance(polygon_coords[0], list):
+            coords = polygon_coords[0] if isinstance(polygon_coords[0][0], list) else polygon_coords
+            
+    if coords and len(coords) >= 3:
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        d_lng = max(xs) - min(xs)
+        d_lat = max(ys) - min(ys)
+    else:
+        d_lng = 0.006
+        d_lat = 0.006
+    m_per_deg_lat = 111320
+    m_per_deg_lng = 111320 * math.cos(math.radians(lat))
+    w = max(4, min(max_dim, int((d_lng * m_per_deg_lng) / target_resolution_m)))
+    h = max(4, min(max_dim, int((d_lat * m_per_deg_lat) / target_resolution_m)))
+    return w, h
+
+
+def _parse_raster_tar(content: bytes, w: int, h: int, index_name: str,
+                       start_date: str, end_date: str) -> Optional[Dict]:
+    """Parse multipart tar from Sentinel Hub Process API into a grid dict.
+    Securely reads TIFFs using tifffile to support LZW/Deflate compression.
+    """
+    try:
+        import io, tarfile
+        try:
+            import tifffile
+        except ImportError:
+            print("⚠️ [Raster] 'tifffile' not installed. Please pip install tifffile.")
+            return None
+            
+        tar = tarfile.open(fileobj=io.BytesIO(content))
+        members = tar.getmembers()
+        
+        sub_grids = {}
+        valid_mask = [[0] * w for _ in range(h)]
+        pixel_count = w * h
+
+        for m in members:
+            if m.size > 0 and (m.name.endswith('.tiff') or m.name.endswith('.tif')):
+                name_parts = m.name.split('.')
+                band_id = name_parts[0].lower() if name_parts else "values"
+                
+                f = tar.extractfile(m)
+                if f:
+                    raw = f.read()
+                    with tifffile.TiffFile(io.BytesIO(raw)) as tif:
+                        pixels = tif.asarray()
+                        # Ensure shape matches w, h
+                        ph, pw = pixels.shape
+                        
+                        band_grid = [[None] * w for _ in range(h)]
+                        for r in range(min(h, ph)):
+                            for c in range(min(w, pw)):
+                                v = float(pixels[r][c])
+                                if band_id == "valid":
+                                    if v > 0:
+                                        valid_mask[r][c] = 1
+                                else:
+                                    if v > -9000:
+                                        band_grid[r][c] = round(v, 6)
+                        
+                        if band_id != "valid":
+                            sub_grids[band_id] = band_grid
+        tar.close()
+        
+        valid_count = sum(sum(row) for row in valid_mask)
+        coverage = valid_count / (w * h) if w * h > 0 else 0
+        
+        primary_grid = [[None] * w for _ in range(h)]
+        for k, g in sub_grids.items():
+            primary_grid = g
+            break
+            
+        result = {
+            "width": w, "height": h, "values": primary_grid, "valid_mask": valid_mask,
+            "valid_pixel_count": valid_count, "coverage_ratio": round(coverage, 3),
+            "source": "sentinel-2-l2a" if "SAR" not in index_name else "sentinel-1-grd",
+            "index": index_name, "window": {"start": start_date, "end": end_date},
+        }
+        for k, g in sub_grids.items():
+            result[k] = g
+            
+        return result
+    except Exception as e:
+        print(f"⚠️ [Raster] TAR parse error for {index_name}: {e}")
+        return {
+            "width": w, "height": h,
+            "values": [[None] * w for _ in range(h)],
+            "valid_mask": [[0] * w for _ in range(h)],
+            "valid_pixel_count": 0, "coverage_ratio": 0.0,
+            "source": "parse_failed", "index": index_name,
+            "window": {"start": start_date, "end": end_date},
+        }
+
+
+def fetch_ndvi_raster_composite(lat: float, lng: float, start_date: str, end_date: str,
+                                 polygon_coords: Optional[list] = None,
+                                 target_resolution_m: float = 10.0) -> Optional[Dict]:
+    """Fetch NDVI median composite raster via Process API."""
+    try:
+        token = get_access_token()
+        bounds = _build_process_bounds(polygon_coords, lat, lng)
+        w, h = _compute_raster_dimensions(polygon_coords, lat, lng, target_resolution_m)
+        evalscript = """
+        //VERSION=3
+        function setup() {
+            return {
+                input: [{bands: ["B04","B08","dataMask"], timeRange: "full"}],
+                output: [{id:"ndvi",bands:1,sampleType:"FLOAT32"},{id:"valid",bands:1,sampleType:"UINT8"}],
+                mosaicking: "ORBIT"
+            };
+        }
+        function evaluatePixel(samples) {
+            var vals=[];
+            for(var i=0;i<samples.length;i++){
+                if(samples[i].dataMask==1&&samples[i].B08+samples[i].B04>0)
+                    vals.push((samples[i].B08-samples[i].B04)/(samples[i].B08+samples[i].B04));
+            }
+            if(vals.length==0) return {ndvi:[-9999],valid:[0]};
+            vals.sort(function(a,b){return a-b;});
+            return {ndvi:[vals[Math.floor(vals.length/2)]],valid:[1]};
+        }"""
+        payload = {
+            "input":{"bounds":bounds,"data":[{"type":"sentinel-2-l2a","dataFilter":{"mosaickingOrder":"leastCC"},
+                     "timeRange":{"from":start_date+"T00:00:00Z","to":end_date+"T23:59:59Z"}}]},
+            "output":{"width":w,"height":h,"responses":[{"identifier":"ndvi","format":{"type":"image/tiff"}},
+                      {"identifier":"valid","format":{"type":"image/tiff"}}]},
+            "evalscript":evalscript,
+        }
+        headers = {"Authorization":f"Bearer {token}","Content-Type":"application/json","Accept":"application/tar"}
+        resp = requests.post(SENTINEL_PROCESS_URL, json=payload, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            print(f"⚠️ [Raster] NDVI composite: {resp.status_code}")
+            return None
+        return _parse_raster_tar(resp.content, w, h, "NDVI", start_date, end_date)
+    except Exception as e:
+        print(f"⚠️ [Raster] NDVI error: {e}")
+        return None
+
+
+def fetch_ndmi_raster_composite(lat: float, lng: float, start_date: str, end_date: str,
+                                 polygon_coords: Optional[list] = None,
+                                 target_resolution_m: float = 10.0) -> Optional[Dict]:
+    """Fetch NDMI (moisture) median composite raster. B08 vs B11."""
+    try:
+        token = get_access_token()
+        bounds = _build_process_bounds(polygon_coords, lat, lng)
+        w, h = _compute_raster_dimensions(polygon_coords, lat, lng, target_resolution_m)
+        evalscript = """
+        //VERSION=3
+        function setup(){return{input:[{bands:["B08","B11","dataMask"],timeRange:"full"}],
+          output:[{id:"ndmi",bands:1,sampleType:"FLOAT32"},{id:"valid",bands:1,sampleType:"UINT8"}],mosaicking:"ORBIT"};}
+        function evaluatePixel(samples){var v=[];for(var i=0;i<samples.length;i++){
+          if(samples[i].dataMask==1&&samples[i].B08+samples[i].B11>0)
+            v.push((samples[i].B08-samples[i].B11)/(samples[i].B08+samples[i].B11));}
+          if(v.length==0)return{ndmi:[-9999],valid:[0]};v.sort(function(a,b){return a-b;});
+          return{ndmi:[v[Math.floor(v.length/2)]],valid:[1]};}"""
+        payload = {
+            "input":{"bounds":bounds,"data":[{"type":"sentinel-2-l2a","dataFilter":{"mosaickingOrder":"leastCC"},
+                     "timeRange":{"from":start_date+"T00:00:00Z","to":end_date+"T23:59:59Z"}}]},
+            "output":{"width":w,"height":h,"responses":[{"identifier":"ndmi","format":{"type":"image/tiff"}},
+                      {"identifier":"valid","format":{"type":"image/tiff"}}]},
+            "evalscript":evalscript,
+        }
+        headers = {"Authorization":f"Bearer {token}","Content-Type":"application/json","Accept":"application/tar"}
+        resp = requests.post(SENTINEL_PROCESS_URL, json=payload, headers=headers, timeout=30)
+        if resp.status_code != 200: return None
+        return _parse_raster_tar(resp.content, w, h, "NDMI", start_date, end_date)
+    except Exception as e:
+        print(f"⚠️ [Raster] NDMI error: {e}")
+        return None
+
+
+def fetch_sar_raster_composite(lat: float, lng: float, start_date: str, end_date: str,
+                                polygon_coords: Optional[list] = None,
+                                target_resolution_m: float = 10.0) -> Optional[Dict]:
+    """Fetch VV/VH mean composite rasters from Sentinel-1 GRD."""
+    try:
+        token = get_access_token()
+        bounds = _build_process_bounds(polygon_coords, lat, lng)
+        w, h = _compute_raster_dimensions(polygon_coords, lat, lng, target_resolution_m)
+        evalscript = """
+        //VERSION=3
+        function setup(){return{input:[{bands:["VV","VH","dataMask"],timeRange:"full"}],
+          output:[{id:"vv",bands:1,sampleType:"FLOAT32"},{id:"vh",bands:1,sampleType:"FLOAT32"},
+                  {id:"valid",bands:1,sampleType:"UINT8"}],mosaicking:"ORBIT"};}
+        function evaluatePixel(samples){var vs=0,hs=0,n=0;
+          for(var i=0;i<samples.length;i++){if(samples[i].dataMask==1&&samples[i].VV>0&&samples[i].VH>0){
+            vs+=10*Math.log10(samples[i].VV);hs+=10*Math.log10(samples[i].VH);n++;}}
+          if(n==0)return{vv:[-9999],vh:[-9999],valid:[0]};
+          return{vv:[vs/n],vh:[hs/n],valid:[1]};}"""
+        payload = {
+            "input":{"bounds":bounds,"data":[{"type":"sentinel-1-grd","dataFilter":{"mosaickingOrder":"mostRecent"},
+                     "timeRange":{"from":start_date+"T00:00:00Z","to":end_date+"T23:59:59Z"}}]},
+            "output":{"width":w,"height":h,"responses":[{"identifier":"vv","format":{"type":"image/tiff"}},
+                      {"identifier":"vh","format":{"type":"image/tiff"}},
+                      {"identifier":"valid","format":{"type":"image/tiff"}}]},
+            "evalscript":evalscript,
+        }
+        headers = {"Authorization":f"Bearer {token}","Content-Type":"application/json","Accept":"application/tar"}
+        resp = requests.post(SENTINEL_PROCESS_URL, json=payload, headers=headers, timeout=30)
+        if resp.status_code != 200: return None
+        return _parse_raster_tar(resp.content, w, h, "SAR_VV_VH", start_date, end_date)
+    except Exception as e:
+        print(f"⚠️ [Raster] SAR error: {e}")
+        return None
+
+
+def fetch_quality_mask(lat: float, lng: float, start_date: str, end_date: str,
+                        polygon_coords: Optional[list] = None,
+                        target_resolution_m: float = 10.0) -> Optional[Dict]:
+    """Fetch scene classification quality mask from S2 SCL band."""
+    try:
+        token = get_access_token()
+        bounds = _build_process_bounds(polygon_coords, lat, lng)
+        w, h = _compute_raster_dimensions(polygon_coords, lat, lng, target_resolution_m)
+        evalscript = """
+        //VERSION=3
+        function setup(){return{input:[{bands:["SCL","dataMask"],timeRange:"full"}],
+          output:[{id:"quality",bands:1,sampleType:"FLOAT32"},{id:"valid",bands:1,sampleType:"UINT8"}],
+          mosaicking:"ORBIT"};}
+        function evaluatePixel(samples){var c=0,t=0;for(var i=0;i<samples.length;i++){
+          if(samples[i].dataMask==1){t++;var s=samples[i].SCL;if(s==4||s==5||s==6)c++;}}
+          if(t==0)return{quality:[0],valid:[0]};return{quality:[c/t],valid:[1]};}"""
+        payload = {
+            "input":{"bounds":bounds,"data":[{"type":"sentinel-2-l2a","dataFilter":{"mosaickingOrder":"leastCC"},
+                     "timeRange":{"from":start_date+"T00:00:00Z","to":end_date+"T23:59:59Z"}}]},
+            "output":{"width":w,"height":h,"responses":[{"identifier":"quality","format":{"type":"image/tiff"}},
+                      {"identifier":"valid","format":{"type":"image/tiff"}}]},
+            "evalscript":evalscript,
+        }
+        headers = {"Authorization":f"Bearer {token}","Content-Type":"application/json","Accept":"application/tar"}
+        resp = requests.post(SENTINEL_PROCESS_URL, json=payload, headers=headers, timeout=30)
+        if resp.status_code != 200: return None
+        return _parse_raster_tar(resp.content, w, h, "QUALITY_MASK", start_date, end_date)
+    except Exception as e:
+        print(f"⚠️ [Raster] Quality mask error: {e}")
+        return None
+
+
+# ============================================================================
+# Sentinel-2 L2A - Optical Indices (Stats Path — plot summaries)
+# ============================================================================
+
+def fetch_ndvi_timeseries(lat: float, lng: float, days: int = 180, polygon_coords: Optional[list] = None) -> Dict:
     """
     Fetches full history of NDVI statistics for the given period.
     Returns: { "data": [ { "date": "YYYY-MM-DD", "ndvi": float, ... }, ... ] }
@@ -119,8 +417,7 @@ def fetch_ndvi_timeseries(lat: float, lng: float, days: int = 180) -> Dict:
         start_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
         end_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
 
-        delta = 0.001
-        bbox = [lng - delta, lat - delta, lng + delta, lat + delta]
+        bounds = _build_process_bounds(polygon_coords, lat, lng)
 
         evalscript = """
         //VERSION=3
@@ -144,10 +441,7 @@ def fetch_ndvi_timeseries(lat: float, lng: float, days: int = 180) -> Dict:
 
         payload = {
             "input": {
-                "bounds": {
-                    "bbox": bbox,
-                    "properties": { "crs": "http://www.opengis.net/def/crs/EPSG/0/4326" }
-                },
+                "bounds": bounds,
                 "data": [{
                     "type": "sentinel-2-l2a",
                     "timeRange": { "from": start_str, "to": end_str }
@@ -157,8 +451,7 @@ def fetch_ndvi_timeseries(lat: float, lng: float, days: int = 180) -> Dict:
                 "timeRange": { "from": start_str, "to": end_str },
                 "aggregationInterval": { "of": "P1D" },
                 "evalscript": evalscript,
-                "width": 1,
-                "height": 1
+                "resolution": 10
             }
         }
 
@@ -281,8 +574,7 @@ def fetch_vegetation_indices(lat: float, lng: float) -> Optional[Dict]:
                 "timeRange": { "from": start_str, "to": end_str },
                 "aggregationInterval": { "of": "P30D" },
                 "evalscript": evalscript,
-                "width": 1,
-                "height": 1
+                "resolution": 10
             }
         }
 
@@ -451,7 +743,7 @@ def fetch_soil_moisture_proxy(lat: float, lng: float) -> Optional[Dict]:
     return None
 
 
-def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dict]:
+def fetch_sar_timeseries(lat: float, lng: float, days: int = 30, polygon_coords: Optional[list] = None) -> Optional[Dict]:
     """
     Fetches 30-day Sentinel-1 SAR time-series for trend analysis.
     Returns daily VV/VH values to track biomass evolution and moisture changes.
@@ -465,8 +757,7 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
         start_str = start_date.strftime("%Y-%m-%dT00:00:00Z")
         end_str = end_date.strftime("%Y-%m-%dT23:59:59Z")
 
-        delta = 0.002
-        bbox = [lng - delta, lat - delta, lng + delta, lat + delta]
+        bounds = _build_process_bounds(polygon_coords, lat, lng, buffer=0.002)
 
         evalscript = """
         //VERSION=3
@@ -497,10 +788,7 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
 
         payload = {
             "input": {
-                "bounds": {
-                    "bbox": bbox,
-                    "properties": { "crs": "http://www.opengis.net/def/crs/EPSG/0/4326" }
-                },
+                "bounds": bounds,
                 "data": [{
                     "type": "sentinel-1-grd",
                     "timeRange": { "from": start_str, "to": end_str },
@@ -514,8 +802,7 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
                 "timeRange": { "from": start_str, "to": end_str },
                 "aggregationInterval": { "of": "P6D" },  # 6-day intervals (S1 revisit)
                 "evalscript": evalscript,
-                "width": 1,
-                "height": 1
+                "resolution": 10
             }
         }
 
@@ -562,9 +849,7 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30) -> Optional[Dic
         }
 
     except Exception as e:
-        print(f"SAR timeseries error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"⚠️ SAR timeseries fetch gracefully degraded: {e}")
         return {"data": [], "timeseries": []}
 
 
@@ -870,13 +1155,23 @@ def fetch_historical_weather(lat: float, lng: float,
     """
     Fetches historical weather data from ERA5 via Open-Meteo.
     Useful for training data and climate pattern analysis.
+    Note: Archive API only has data up to yesterday. We clamp end_date accordingly.
     """
     try:
+        # Clamp end_date to yesterday — the archive API doesn't have today's data yet
+        from datetime import datetime, timedelta
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        clamped_end = min(end_date, yesterday)
+        if clamped_end < start_date:
+            # Entire requested range is in the future
+            print(f"⚠️ [Weather] Requested range ({start_date} to {end_date}) is entirely future. No archive data.")
+            return None
+        
         params = {
             "latitude": lat,
             "longitude": lng,
             "start_date": start_date,
-            "end_date": end_date,
+            "end_date": clamped_end,
             "daily": [
                 "temperature_2m_max",
                 "temperature_2m_min",
@@ -990,52 +1285,68 @@ def fetch_fire_risk(lat: float, lng: float, radius_km: int = 50) -> Optional[Dic
 
 def fetch_soil_moisture_layers(lat: float, lng: float) -> Optional[Dict]:
     """
-    Fetches multi-layer soil moisture from Open-Meteo (ERA5-Land).
-    Returns moisture at different depths (0-7cm, 7-28cm, 28-100cm, 100-289cm).
+    Fetches multi-layer soil moisture from Open-Meteo ERA5-Land archive.
+    Uses the archive API (daily resolution, last 3 days) because the forecast
+    API often returns nulls for soil moisture at many locations.
     This is FREE and requires NO API key.
     """
     try:
+        from datetime import datetime, timedelta
+        # Use archive API (yesterday - 3 days ago) for reliable ERA5-Land data
+        end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        
         params = {
             "latitude": lat,
             "longitude": lng,
-            "hourly": [
-                "soil_moisture_0_to_7cm",
-                "soil_moisture_7_to_28cm", 
-                "soil_moisture_28_to_100cm",
-                "soil_moisture_100_to_255cm",
-                "soil_temperature_0_to_7cm",
-                "soil_temperature_7_to_28cm"
+            "start_date": start_date,
+            "end_date": end_date,
+            "daily": [
+                "soil_moisture_0_to_7cm_mean",
+                "soil_moisture_7_to_28cm_mean",
+                "soil_moisture_28_to_100cm_mean",
+                "soil_temperature_0_to_7cm_mean",
+                "soil_temperature_7_to_28cm_mean"
             ],
-            "forecast_days": 1,
             "timezone": "auto"
         }
         
-        response = requests.get(OPEN_METEO_CURRENT_URL, params=params, timeout=15)
+        response = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=15)
         
         if response.status_code != 200:
             print(f"Open-Meteo Soil Error: {response.text}")
             return None
         
         data = response.json()
-        hourly = data.get("hourly", {})
+        daily = data.get("daily", {})
         
-        if not hourly.get("time"):
+        if not daily.get("time"):
             return None
         
-        # Get latest values (last hour)
+        # Get latest available day with data
         latest_idx = -1
         
+        m_07 = daily.get("soil_moisture_0_to_7cm_mean", [None])[latest_idx]
+        m_728 = daily.get("soil_moisture_7_to_28cm_mean", [None])[latest_idx]
+        m_28100 = daily.get("soil_moisture_28_to_100cm_mean", [None])[latest_idx]
+        t_07 = daily.get("soil_temperature_0_to_7cm_mean", [None])[latest_idx]
+        t_728 = daily.get("soil_temperature_7_to_28cm_mean", [None])[latest_idx]
+        
+        # Reject if all values are None
+        if all(v is None for v in [m_07, m_728, m_28100]):
+            print("Open-Meteo returned empty soil data. Returning None.")
+            return None
+        
         return {
-            "timestamp": hourly["time"][latest_idx] if hourly.get("time") else None,
+            "timestamp": daily["time"][latest_idx] if daily.get("time") else None,
             "moisture": {
-                "0_7cm": hourly.get("soil_moisture_0_to_7cm", [None])[latest_idx],
-                "7_28cm": hourly.get("soil_moisture_7_to_28cm", [None])[latest_idx],
-                "28_100cm": hourly.get("soil_moisture_28_to_100cm", [None])[latest_idx],
-                "100_255cm": hourly.get("soil_moisture_100_to_255cm", [None])[latest_idx]
+                "0_7cm": m_07,
+                "7_28cm": m_728,
+                "28_100cm": m_28100,
             },
             "temperature": {
-                "0_7cm": hourly.get("soil_temperature_0_to_7cm", [None])[latest_idx],
-                "7_28cm": hourly.get("soil_temperature_7_to_28cm", [None])[latest_idx]
+                "0_7cm": t_07,
+                "7_28cm": t_728
             },
             "unit": "m³/m³",
             "source": "open-meteo-era5-land"
@@ -1284,95 +1595,9 @@ def fetch_air_quality(lat: float, lng: float) -> Optional[Dict]:
         return None
 
 
-# ============================================================================
-# Soil Moisture from Open-Meteo
-# ============================================================================
 
-def fetch_soil_moisture_layers(lat: float, lng: float) -> Optional[Dict]:
-    """
-    Fetches soil moisture at multiple depths from Open-Meteo.
-    Returns moisture percentages at 0-7cm, 7-28cm, 28-100cm, and 100-255cm.
-    """
-    try:
-        url = "https://api.open-meteo.com/v1/forecast"
-        params = {
-            "latitude": lat,
-            "longitude": lng,
-            "hourly": "soil_moisture_0_to_7cm,soil_moisture_7_to_28cm,soil_moisture_28_to_100cm,soil_moisture_100_to_255cm,soil_temperature_0cm,soil_temperature_6cm,soil_temperature_18cm,soil_temperature_54cm",
-            "forecast_days": 1,
-            "timezone": "auto"
-        }
-        response = requests.get(url, params=params, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            hourly = data.get("hourly", {})
-            print(f"DEBUG Soil Moisture Keys: {list(hourly.keys())}")
-            if "soil_moisture_0_to_7cm" in hourly:
-                print(f"DEBUG Sample Moisture: {hourly['soil_moisture_0_to_7cm'][:5]}")
-            
-            # Get latest values (last hour typically has most current data)
-            def get_latest(key):
-                values = hourly.get(key, [])
-                for v in reversed(values):
-                    if v is not None:
-                        return v
-                return None
-            
-            layers = []
-            
-            # 0-7cm depth
-            m1 = get_latest("soil_moisture_0_to_7cm")
-            t1 = get_latest("soil_temperature_0cm")
-            if m1 is not None:
-                layers.append({
-                    "depth": "0-7 سم",
-                    "moisture": m1 * 100,  # Convert to percentage
-                    "temperature": t1
-                })
-            
-            # 7-28cm depth
-            m2 = get_latest("soil_moisture_7_to_28cm")
-            t2 = get_latest("soil_temperature_6cm")
-            if m2 is not None:
-                layers.append({
-                    "depth": "7-28 سم",
-                    "moisture": m2 * 100,
-                    "temperature": t2
-                })
-            
-            # 28-100cm depth
-            m3 = get_latest("soil_moisture_28_to_100cm")
-            t3 = get_latest("soil_temperature_18cm")
-            if m3 is not None:
-                layers.append({
-                    "depth": "28-100 سم",
-                    "moisture": m3 * 100,
-                    "temperature": t3
-                })
-            
-            # 100-255cm depth
-            m4 = get_latest("soil_moisture_100_to_255cm")
-            t4 = get_latest("soil_temperature_54cm")
-            if m4 is not None:
-                layers.append({
-                    "depth": "100-255 سم",
-                    "moisture": m4 * 100,
-                    "temperature": t4
-                })
-            
-            if layers:
-                return {
-                    "layers": layers,
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "open-meteo"
-                }
-            
-            # Fallback: Simulation if API returns empty
-            print("Open-Meteo returned empty soil data. Returning None.")
-    except Exception as e:
-        print(f"Soil moisture fetch error: {e}")
-    
-    return None
+# NOTE: fetch_soil_moisture_layers is defined above (line ~1001) using the ERA5 archive API.
+# A duplicate was removed from here that used the forecast API which returns nulls.
 
 
 def fetch_soil_properties(lat: float, lng: float) -> Optional[Dict]:
@@ -2754,8 +2979,8 @@ def fetch_land_cover(lat: float, lng: float) -> Optional[Dict]:
             },
             "aggregation": {
                 "timeRange": {
-                    "from": (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "to": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                    "from": (datetime.now(timezone.utc) - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "to": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 },
                 "aggregationInterval": { "of": "P30D" },
                 "evalscript": evalscript
@@ -2945,8 +3170,8 @@ def fetch_ndvi_max(lat: float, lng: float, days: int = 90) -> float:
             },
             "aggregation": {
                 "timeRange": {
-                    "from": (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "to": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+                    "from": (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "to": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 },
                 "aggregationInterval": { "of": f"P{days}D" },
                 "evalscript": evalscript

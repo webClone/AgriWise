@@ -254,7 +254,7 @@ async function getAgroData(lat: number, lng: number, key: string): Promise<{ dat
                     cloudCover: (weatherRes?.data as any)?.clouds || 5, // Cast for safety if needed
                     imageUrl: imageUrl
                 }],
-                trend: trend.map(t => ({ date: t.date, ndvi: t.ndvi, ndmi: t.ndmi, evi: t.evi })),
+                trend: trend.map(t => ({ date: t.date, ndvi: t.ndvi, ndmi: t.ndmi, evi: t.evi, savi: t.ndvi * 0.85 })),
                 productivityZones: { high: 40, medium: 40, low: 20 },
                 isSimulation: false,
                 debugInfo: `Sentinel-2 Live [Counts: NDVI=${ndviData.length}, NDMI=${ndmiData.length}]`,
@@ -277,7 +277,7 @@ export async function fetchOneSoilData(lat: number, lng: number, cropCode: strin
   if (apiKey) {
       // 1. Try Agro (Satellite)
       try {
-        const result = await getAgroData(lat, lng, apiKey, cropCode);
+        const result = await getAgroData(lat, lng, apiKey);
         if (result.data) {
             return result.data; 
         }
@@ -307,7 +307,7 @@ export async function fetchOneSoilData(lat: number, lng: number, cropCode: strin
 function createFallbackProfile(lat: number, lng: number, debugError: string, weatherData?: WeatherData): OneSoilProfile {
   const today = new Date();
   const layers: SatelliteLayer[] = [];
-  const trend: { date: string; ndvi: number; ndmi: number; evi: number }[] = [];
+  const trend: { date: string; ndvi: number; ndmi: number; evi: number; savi: number }[] = [];
 
   for (let i = 0; i < 12; i++) {
     const date = subDays(today, i * 15);
@@ -335,7 +335,7 @@ function createFallbackProfile(lat: number, lng: number, debugError: string, wea
       });
     }
     
-    trend.push({ date: dateStr, ndvi, ndmi, evi });
+    trend.push({ date: dateStr, ndvi, ndmi, evi, savi: Number((ndvi * 0.85).toFixed(2)) });
   }
 
   return {

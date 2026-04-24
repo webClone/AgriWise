@@ -1,0 +1,97 @@
+{
+  "arf": {
+    "headline": "Potato Planting Feasibility Under 40mm Rain Impact",
+    "direct_answer": "If 40mm of rain hits in the next 5 days, the feasibility score for planting potatoes would likely drop significantly due to increased soil compaction and reduced trafficability.",
+    "reliability_badge": "MED",
+    "reliability_reason": "The current forecast is for very dry conditions, but the impact of 40mm of rain is a hypothetical scenario that introduces uncertainty.",
+    "what_it_means": "The current conditions are favorable for planting potatoes, but a significant rainfall event could severely impact the soil's workability and the overall feasibility of planting.",
+    "reasoning_cards": [
+      {
+        "type": "THREAT",
+        "claim": "40mm of rain would degrade seedbed trafficability and soil workability.",
+        "evidence": "The current 7-day forecast predicts very dry conditions (1.9mm), but 40mm of rain would saturate the soil, leading to compaction and reduced trafficability.",
+        "uncertainty": "The actual impact depends on soil type and drainage, which are currently unknown."
+      },
+      {
+        "type": "EVIDENCE",
+        "claim": "Current soil conditions are optimal for planting.",
+        "evidence": "The soil temperature is 15.0\u00b0C, which is ideal for rapid emergence, and the 7-day rain accumulation risk is 0%, indicating stable conditions for germination.",
+        "uncertainty": "Soil texture is unknown, which could affect water retention and drainage."
+      }
+    ],
+    "recommendations": [
+      {
+        "type": "VERIFY",
+        "title": "Check Soil Moisture and Texture",
+        "is_allowed": true,
+        "blocked_reasons": [],
+        "why_it_matters": "Understanding the current soil moisture and texture will help you assess the impact of potential heavy rainfall and make informed decisions.",
+        "how_to_do_it_steps": [
+          "Measure the soil moisture level at 5-10cm depth.",
+          "Identify the soil type in your field."
+        ],
+        "risk_if_wrong": "MED"
+      },
+      {
+        "type": "MONITOR",
+        "title": "Monitor Weather Forecast for Heavy Rain",
+        "is_allowed": true,
+        "blocked_reasons": [],
+        "why_it_matters": "Staying updated on the weather forecast will help you avoid planting during heavy rainfall, which could lead to suboptimal conditions and potential financial loss.",
+        "how_to_do_it_steps": [
+          "Check the 5-day weather forecast for any significant changes.",
+          "Be prepared to delay planting if heavy rain is predicted."
+        ],
+        "risk_if_wrong": "HIGH"
+      }
+    ],
+    "learning": {
+      "level": "INTERMEDIATE",
+      "micro_lesson": "Soil moisture and texture are critical factors in potato planting. Excessive rainfall can lead to soil compaction, reduced trafficability, and poor emergence. Monitoring these conditions and adjusting your planting schedule accordingly can significantly improve your crop's success. For example, a well-drained sandy loam soil can handle more rainfall without becoming waterlogged compared to a clay soil.",
+      "definitions": {
+        "Soil Compaction": "The process by which soil particles are pressed together, reducing pore space and affecting water infiltration and root growth.",
+        "Trafficability": "The ability of the soil to support machinery and foot traffic without causing damage or compaction."
+      }
+    },
+    "followups": [
+      {
+        "question": "What is the current soil moisture level at 5-10cm depth?",
+        "why": "To better understand the current soil conditions and how they might be affected by potential heavy rainfall."
+      },
+      {
+        "question": "What is the soil type in your field?",
+        "why": "To assess how well the soil will handle heavy rainfall and to determine the best planting strategy."
+      }
+    ],
+    "internal_memory_updates": {
+      "experience_level_upgrade": null,
+      "new_known_facts": {},
+      "closed_loops": []
+    },
+    "limitations": [
+      "Low-probability indicators ignored: COLD_STRESS"
+    ]
+  },
+  "planning_context": {
+    "crop": "Potato (Solanum tuberosum)",
+    "overall_score": 6630.69,
+    "window_prob": 0.9706877692486436,
+    "water_prob": 0.8807970779778823,
+    "biotic_prob": 0.598687660112452,
+    "expected_yield": 40.0,
+    "downside_risk_p10": 28.0,
+    "expected_profit": 13000.0,
+    "break_even_yield": 7.5,
+    "suitability_percentage": 74.5,
+    "driver_matrix": [
+      "FROST_RISK: Frost risk check: CLEAR. Forecasted min temp (15.0C) is safe. (Weight: 1.0) [L1_Forecast]",
+      "SEASON_LENGTH: Month 2 is inside 'north_africa' window (Weight: 1.0) [CCL_Calendar]",
+      "TEMP: Soil temperature forecast: OPTIMAL. (15.0C) is ideal for rapid emergence. (Weight: 1.0) [L1_Forecast]",
+      "RAIN_7D: 7-day rain accumulation risk: 0% (LOW). ET0 demand forecast stable for germination. (Weight: 1.0) [L1_Forecast7D]",
+      "RAIN_7D: Very dry 1.9mm. Seedbed might be too powdery/dry for emergence without irrigation. (Weight: 1.0) [L1_Rain]",
+      "SOIL_TEXTURE: Soil texture 'None' (estimated from SoilGrids) might limit optimal Potato (Solanum tuberosum) growth (Weight: 1.0) [L1_SoilGrids_250m]",
+      "WATER_QUOTA: High-efficiency irrigation present (drip) (Weight: 1.0) [Context_Present]",
+      "DISEASE_PRESSURE: Foliar fungal pressure remains low due to sparse rain history and drier forecast. Monitor post-emergence. (Weight: 0.5) [L1_Rain,L1_Forecast7D]"
+    ]
+  }
+}

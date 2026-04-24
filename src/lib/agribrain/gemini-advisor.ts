@@ -53,11 +53,9 @@ interface FarmContext {
     cec: number;
     nitrogen: number;
     mineralogy: string;
-    hydraulics: {
-        awc: number;
-        fieldCapacity: number;
-        wiltingPoint: number;
-    };
+    awc?: number;
+    fieldCapacity?: number;
+    wiltingPoint?: number;
     subsoil: {
         clay: number;
         ph: number;
@@ -266,7 +264,7 @@ export async function generateAICropPlan(
       **HYPER-LOCALIZED FIELD DATA (STRICT ADHERENCE REQUIRED):**
       - Soil Texture: ${profile.soil.textureClass} (Clay: ${profile.soil.clay}%, Sand: ${profile.soil.sand}%)
       - Chemistry: pH ${profile.soil.ph}, CEC ${profile.soil.cec} cmol/kg, Organic Carbon ${profile.soil.organicCarbon}%
-      - Hydraulics: AWC ${profile.soil.hydraulics.awc || profile.soil.awc}% (Wilting Point: ${profile.soil.hydraulics.wiltingPoint || 0}%)
+      - Hydraulics: AWC ${(profile.soil as any).awc || 0}% (Wilting Point: ${(profile.soil as any).wv0033 || 0}%)
       - Climate: GDD ${profile.climate.growingDegreeDays}, Aridity: ${profile.climate.aridityIndex}
       
       **MANDATORY ADAPTATIONS (DO NOT IGNORE):**

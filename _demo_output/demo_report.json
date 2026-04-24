@@ -1,0 +1,45 @@
+{
+  "demo": "AgriWise Drone Pipeline \u2014 End-to-End Demo",
+  "timestamp": "2026-04-24T14:13:48.759726",
+  "input": {
+    "videos": [
+      "Drone_footage_covering_202604241357.mp4",
+      "Drone_footage_covering_202604241357 (1).mp4"
+    ],
+    "total_frames_extracted": 30,
+    "frame_resolution": "120x90",
+    "flight_altitude_m": 80.0
+  },
+  "photogrammetry": {
+    "status": "degraded",
+    "usable": true,
+    "qa_score": 0.848,
+    "coverage": 0.704,
+    "gsd_cm": 8.75,
+    "overlap": 0.354,
+    "holes": 0.296,
+    "seam_score": 0.076,
+    "sigma_inflation": 1.76,
+    "pipeline_version": "v2",
+    "alignment_method": "bundle_adjusted",
+    "reproj_error_px": 0.225,
+    "frames_ingested": 30,
+    "frames_used": 30
+  },
+  "perception": {
+    "qa_score": 0.563,
+    "row_azimuth_deg": null,
+    "row_spacing_cm": 75.0,
+    "row_count": 0,
+    "canopy_cover": null,
+    "bare_soil": 0.994,
+    "weed_pressure": 0.0029,
+    "tree_count": 0,
+    "missing_trees": 0,
+    "canopy_uniformity_cv": 0.0,
+    "row_breaks": 0,
+    "spatial_maps": 3,
+    "observation_packets": 1
+  },
+  "total_elapsed_s": 10.0
+}

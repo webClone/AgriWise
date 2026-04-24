@@ -78,7 +78,7 @@ export async function updatePlotDetails(plotId: string, data: {
     const result = await prisma.$runCommandRaw({
       findAndModify: collectionName,
       query: { _id: { $oid: plot.id } },
-      update: { $set: updateData },
+      update: { $set: updateData as any },
       new: true
     }) as { ok?: number; value?: unknown; lastErrorObject?: { n: number; updatedExisting: boolean } };
 

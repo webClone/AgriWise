@@ -35,25 +35,47 @@ def compute_biotic_risk(profile: CropProfile, l1_out: Any, l5_out: Any, chat_mem
     else:
          # Fallback to L1
          confidence -= 0.3
+         
+         wet_days = 0
          if l1_out and hasattr(l1_out, "plot_timeseries") and l1_out.plot_timeseries:
              ts = l1_out.plot_timeseries
              wet_days = sum(1 for r in ts[-7:] if (r.get("rain", 0.0) or 0.0) > 2.0)
-             if wet_days >= 4:
-                 logits.append(EvidenceLogit(
-                     driver=SuitabilityDriver.DISEASE_PRESSURE,
-                     condition=f"High wet-day count ({wet_days} days > 2mm). Elevated damping-off/fungal risk for {profile.display_name}.",
-                     logit_delta=-1.5,
-                     weight=1.0,
-                     source_refs=["L1_Rain"]
-                 ))
-             else:
-                 logits.append(EvidenceLogit(
-                     driver=SuitabilityDriver.DISEASE_PRESSURE,
-                     condition=f"Dry conditions limiting early-stage fungal risk.",
-                     logit_delta=0.8,
-                     weight=0.5, # Not absolute proof
-                     source_refs=["L1_Rain"]
-                 ))
+             
+         fc_rain_sum = 0.0
+         fc_temp_mean = 15.0
+         if l1_out and getattr(l1_out, "forecast_7d", []):
+             fc_rain_sum = sum(day.get("precipitation_sum", 0.0) for day in l1_out.forecast_7d)
+             temps = [day.get("temperature_2m_mean", 15.0) for day in l1_out.forecast_7d]
+             if temps:
+                 fc_temp_mean = sum(temps) / len(temps)
+                 
+         print(f"DEBUG BRF: rain_sum={fc_rain_sum}, temp_mean={fc_temp_mean}")
+         
+         if fc_rain_sum > 25.0 and fc_temp_mean > 12.0:
+             pathogen = "Rhizoctonia / Late Blight" if "potato" in profile.display_name.lower() else "Fusarium / Septoria"
+             logits.append(EvidenceLogit(
+                 driver=SuitabilityDriver.DISEASE_PRESSURE,
+                 condition=f"7-day cumulative rain forecast ({fc_rain_sum:.0f}mm) and stabilizing temperatures (>12°C) significantly elevate {pathogen} risk during emergence.",
+                 logit_delta=-2.5,
+                 weight=1.2,
+                 source_refs=["L1_Forecast7D"]
+             ))
+         elif wet_days >= 4:
+             logits.append(EvidenceLogit(
+                 driver=SuitabilityDriver.DISEASE_PRESSURE,
+                 condition=f"Recent wet history ({wet_days} days > 2mm) maintains basal damping-off risk for {profile.display_name}, but forecast is drier.",
+                 logit_delta=-1.0,
+                 weight=1.0,
+                 source_refs=["L1_Rain"]
+             ))
+         else:
+             logits.append(EvidenceLogit(
+                 driver=SuitabilityDriver.DISEASE_PRESSURE,
+                 condition=f"Foliar fungal pressure remains low due to sparse rain history and drier forecast. Monitor post-emergence.",
+                 logit_delta=0.8,
+                 weight=0.5,
+                 source_refs=["L1_Rain", "L1_Forecast7D"]
+             ))
                  
     # 2. History Check (Agronomic Memory Synthesizer legacy check)
     if chat_memory and chat_memory.known_context:

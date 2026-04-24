@@ -152,5 +152,8 @@ class BioThreatIntelligenceOutput:
     quality_metrics: QualityMetricsL5
     audit: AuditSnapshot
 
+    # --- SPATIAL EXTENSIONS (Phase 11) ---
+    zone_metrics: Dict[str, Any] = field(default_factory=dict)
+
 # Export commonly used items
 PestIntelligenceOutput = BioThreatIntelligenceOutput 

@@ -90,10 +90,10 @@ export async function fetchSatelliteData(
 
     // 3. Fallback to simulation if provider unavailable or failed
     console.warn(`[SatelliteProvider] Provider ${provider} unavailable or failed, using simulation`);
-    return fallbackSimulation(lat, lng);
+    return fallbackSimulation(lat, lng, "");
 
   } catch (error) {
     console.error(`[SatelliteProvider] Error fetching ${provider} data:`, error);
-    return fallbackSimulation(lat, lng);
+    return fallbackSimulation(lat, lng, "");
   }
 }

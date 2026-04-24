@@ -87,6 +87,10 @@ class Diagnosis:
     drivers_used: List[Driver] = field(default_factory=list)
     drivers_missing: List[Driver] = field(default_factory=list)
 
+    # --- SPATIAL EXTENSIONS (Phase 11) ---
+    affected_area_pct: float = 100.0 # Percentage of plot affected
+    hotspot_zone_ids: List[str] = field(default_factory=list) # Zones where this is acute
+
 @dataclass
 class Recommendation:
     """
@@ -123,6 +127,10 @@ class TaskNode:
     required_inputs: List[str]
     completion_signal: str # e.g. "USER_CONFIRM", "SENSOR_READING"
     depends_on: List[str] = field(default_factory=list) # IDs of parent tasks
+    
+    # --- SPATIAL EXTENSIONS (Phase 11) ---
+    target_zones: List[str] = field(default_factory=list) # Specific zones to target (e.g. ['Zone C'])
+    target_points: List[Dict[str, float]] = field(default_factory=list) # [{lat, lng}] for scouting routes
 
 @dataclass
 class ExecutionPlan:

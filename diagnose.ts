@@ -3,7 +3,7 @@ import { getAccessToken, EVALSCRIPTS } from "./src/lib/satellite-providers/senti
 import * as fs from 'node:fs';
 
 async function diagnose() {
-  const log = (msg) => { console.log(msg); fs.appendFileSync('diag.log', msg + '\n'); };
+  const log = (msg: string) => { console.log(msg); fs.appendFileSync('diag.log', msg + '\n'); };
   if (fs.existsSync('diag.log')) fs.unlinkSync('diag.log');
 
   log("--- Sentinel Hub Deep Diagnostic (Flat Structure) ---");
@@ -44,7 +44,7 @@ async function diagnose() {
     }
 
   } catch (error) {
-    log("💥 DIAGNOSTIC CRASH: " + error.message);
+    log("💥 DIAGNOSTIC CRASH: " + (error as Error).message);
   }
 }
 

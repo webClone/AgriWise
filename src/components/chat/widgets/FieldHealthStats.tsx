@@ -40,7 +40,7 @@ export const FieldHealthStats: React.FC<FieldIndicatorsProps> = ({ data }) => {
       </div>
       
       <div className="mt-2 text-[10px] text-neutral-400 text-right">
-          Source: {latest.source || "Sentinel-2"}
+          Source: {(latest as any).source || "Sentinel-2"}
       </div>
     </div>
   );

@@ -108,6 +108,9 @@ class VegIntOutput:
     anomalies: List[VegetationAnomaly]
     stability: SpatialMetrics
     
+    # --- SPATIAL EXTENSIONS (Phase 11) ---
+    zone_metrics: Dict[str, Any] = field(default_factory=dict) # zone_id -> {curve, phenology}
+    
     # Provenance
     provenance: Dict[str, Any] = field(default_factory=dict)
     
@@ -125,5 +128,6 @@ class VegIntOutput:
             },
             "anomalies": [a.__dict__ for a in self.anomalies],
             "stability": self.stability.__dict__,
+            "zone_metrics": {k: {"quality": v.get("curve", {}).get("quality")} for k, v in self.zone_metrics.items()},
             "provenance": self.provenance
         }

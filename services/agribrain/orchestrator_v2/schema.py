@@ -11,6 +11,7 @@ from services.agribrain.layer3_decision.schema import DecisionOutput, ExecutionP
 from services.agribrain.layer4_nutrients.schema import NutrientIntelligenceOutput
 from services.agribrain.layer5_bio.schema import BioThreatIntelligenceOutput
 from services.agribrain.layer6_exec.schema import Layer6Output, ExecutionState
+from services.agribrain.layer10_sire.schema import Layer10Output
 
 # Enums
 
@@ -100,6 +101,9 @@ class RunArtifact:
     layer_5: Optional[LayerResult] = None
     layer_6: Optional[LayerResult] = None
     layer_7: Optional[LayerResult] = None
+    layer_8: Optional[LayerResult] = None
+    layer_10: Optional[LayerResult] = None  # SIRE (spatial rendering)
+    layer_9: Optional[LayerResult] = None   # Interface (after L10)
     
     # Unified Results
     final_execution_plan: Optional[ExecutionPlan] = None

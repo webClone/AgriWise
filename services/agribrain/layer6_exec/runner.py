@@ -1,7 +1,7 @@
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from dataclasses import asdict
 
@@ -27,19 +27,37 @@ def run_layer6(inputs: Layer6Input) -> Layer6Output:
     """
     Research-Grade Layer 6 Execution Loop.
     """
-    ts_now = datetime.utcnow().isoformat()
+    ts_now = datetime.now(timezone.utc).isoformat()
     
     # 1. Normalize Evidence
     plot_id = inputs.tensor.plot_id if hasattr(inputs.tensor, "plot_id") else "UNKNOWN"
     norm_evidence = normalize_evidence_batch(inputs.evidence_batch, plot_id)
     
     # 2. Execute DAG (State Transition)
-    # Plan comes from L3 (or consolidated L3+L5). Using L3 for now.
-    l3 = inputs.decision_l3
-    plan = l3.execution_plan if l3 and getattr(l3, "execution_plan", None) else ExecutionPlan([], [], "", "")
+    # Phase 11 SPATIAL EXTENSION: Consolidate execution plans from all modules (L3, L4, L5)
+    global_tasks = []
+    
+    if inputs.decision_l3 and hasattr(inputs.decision_l3, "execution_plan"):
+        if inputs.decision_l3.execution_plan:
+            global_tasks.extend(inputs.decision_l3.execution_plan.tasks)
+            
+    if hasattr(inputs, "nutrient_l4") and inputs.nutrient_l4 and hasattr(inputs.nutrient_l4, "verification_plan"):
+        if inputs.nutrient_l4.verification_plan:
+            global_tasks.extend(inputs.nutrient_l4.verification_plan.tasks)
+            
+    if hasattr(inputs, "bio_l5") and inputs.bio_l5 and hasattr(inputs.bio_l5, "execution_plan"):
+        if inputs.bio_l5.execution_plan:
+            global_tasks.extend(inputs.bio_l5.execution_plan.tasks)
+            
+    unified_plan = ExecutionPlan(
+        tasks=global_tasks, 
+        edges=[], 
+        recommended_start_date=ts_now, 
+        review_date=ts_now
+    )
     
     new_state = update_execution_state(
-        plan=plan,
+        plan=unified_plan,
         current_state=inputs.current_state,
         op_context=inputs.op_context,
         normalized_evidence=norm_evidence,
@@ -50,8 +68,8 @@ def run_layer6(inputs: Layer6Input) -> Layer6Output:
     # Needs L1 timeseries
     # Needs completed tasks
     completed = []
-    if plan and plan.tasks:
-        for t in plan.tasks:
+    if unified_plan and unified_plan.tasks:
+        for t in unified_plan.tasks:
             if new_state.tasks.get(t.task_id) == TaskStatus.COMPLETED:
                 completed.append(t)
     

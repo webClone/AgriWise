@@ -1,7 +1,12 @@
 import { useState, useCallback } from 'react';
 
-// Layer 10.4: AgriBrain UI Hook
-// Decouples analysis state from UI components.
+/**
+ * AgriBrain Analysis Hook
+ * 
+ * Updated to consume the unified /api/agribrain/run endpoint.
+ * Previously called /api/agribrain/analyze (legacy orchestrator.py).
+ * Now goes through Orchestrator v2 with mode="full".
+ */
 
 export interface AgriBrainAnalysis {
   meta: {
@@ -13,13 +18,13 @@ export interface AgriBrainAnalysis {
     actions: string;
   };
   metrics: {
-    yield: any;
-    risk: any;
-    trust: any;
+    yield: unknown;
+    risk: unknown;
+    trust: unknown;
   };
   plan: {
-    actions: any[];
-    schedule: any[];
+    actions: unknown[];
+    schedule: unknown[];
   };
 }
 
@@ -28,26 +33,50 @@ export function useAgriBrain() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const analyzePlot = useCallback(async (plotId: string, config: any = {}) => {
+  const analyzePlot = useCallback(async (plotId: string, config: Record<string, unknown> = {}) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/agribrain/analyze', {
+      // Unified canonical route — all intelligence through Orchestrator v2
+      const res = await fetch('/api/agribrain/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plotId, config })
+        body: JSON.stringify({ plotId, mode: 'full', ...config })
       });
 
-      const data = await res.json();
+      const json = await res.json();
 
-      if (!res.ok) {
-        throw new Error(data.error || 'Analysis Failed');
+      if (!res.ok || json.error) {
+        throw new Error(json.error || 'Analysis Failed');
       }
 
-      setAnalysis(data);
-      return data;
-    } catch (err: any) {
-      setError(err.message);
+      // Map canonical AgriBrainRun to legacy AgriBrainAnalysis shape
+      const run = json;
+      const mapped: AgriBrainAnalysis = {
+        meta: {
+          plot_id: run.plot_id || plotId,
+          timestamp: run.audit?.timestamp_utc || new Date().toISOString(),
+        },
+        analysis: {
+          summary: run.top_findings?.join('. ') || run.explanations?.summary?.headline || 'Analysis complete.',
+          actions: run.recommendations?.map((r: { action: string }) => r.action).join('; ') || '',
+        },
+        metrics: {
+          yield: null,
+          risk: run.global_quality?.reliability || 0,
+          trust: run.global_quality?.reliability || 0,
+        },
+        plan: {
+          actions: run.unified_plan?.tasks || [],
+          schedule: [],
+        },
+      };
+
+      setAnalysis(mapped);
+      return mapped;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setError(message);
       console.error(err);
     } finally {
       setLoading(false);

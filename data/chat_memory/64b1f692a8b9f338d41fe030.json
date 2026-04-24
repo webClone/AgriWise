@@ -1,0 +1,18 @@
+{
+  "experience_level": "INTERMEDIATE",
+  "language_preference": "EN",
+  "units": "metric",
+  "known_context": {},
+  "last_questions": [
+    "how is my field",
+    "how is my field",
+    "how is my field"
+  ],
+  "last_diagnoses_shown": [],
+  "asked_followups": [
+    "What is the current soil moisture level at 10cm depth?",
+    "What is the current soil temperature at 10cm depth?",
+    "What is the current soil type in your field (e.g., clay, sand, loam)?"
+  ],
+  "open_loops": []
+}

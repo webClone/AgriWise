@@ -28,5 +28,20 @@
     "last_satellite_collection": null,
     "collection_count": 1,
     "active": true
+  },
+  "697ddd3bd4195b809226a680:69de624047f8c01c4979d381": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "69de624047f8c01c4979d381",
+    "coordinates": {
+      "lat": 36.61948112499999,
+      "lng": 2.9713791250000003
+    },
+    "crop": "CLAY",
+    "area": 42.08,
+    "registered_at": "2026-04-14T16:50:24.391629",
+    "last_weather_collection": "2026-04-14T16:50:25.425029",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
   }
 }

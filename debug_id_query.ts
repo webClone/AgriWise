@@ -35,7 +35,7 @@ async function main() {
         });
         console.log("Result p3:", p3 ? "FOUND" : "NULL");
     } catch (e) {
-        console.error("findUnique error:", e.message);
+        console.error("findUnique error:", (e as Error).message);
     }
 
   } catch (e) {

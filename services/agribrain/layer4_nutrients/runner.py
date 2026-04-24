@@ -2,14 +2,14 @@
 import hashlib
 import json
 from typing import Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from services.agribrain.layer1_fusion.schema import FieldTensor
 from services.agribrain.layer2_veg_int.schema import VegIntOutput
 from services.agribrain.layer3_decision.schema import DecisionOutput, PlotContext, DegradationMode
 
 from services.agribrain.layer4_nutrients.schema import (
-    NutrientIntelligenceOutput, RunMeta, QualityMetricsL4, AuditSnapshot, ParentRunIds, Nutrient
+    NutrientIntelligenceOutput, RunMeta, QualityMetricsL4, AuditSnapshot, ParentRunIds, Nutrient, ActionId
 )
 
 from services.agribrain.layer4_nutrients.soil_water_balance.engine import SoilWaterBalanceEngine
@@ -89,17 +89,57 @@ def run_layer4_nutrients(
     evidence = nop_engine.extract_features(tensor, veg_int)
     
     # 4. Inference
-    states = nie_engine.infer_states(evidence, swb_out, demands, decision_l3)
+    global_states = nie_engine.infer_states(evidence, swb_out, demands, decision_l3)
     
     # 5. Optimization
-    prescriptions = opt_engine.optimize(states, swb_out, context)
+    global_prescriptions = opt_engine.optimize(global_states, swb_out, context)
     
-    # 6. Planning
-    execution_plan = plan_engine.create_plan(states, prescriptions)
+    # --- SPATIAL EXTENSIONS (Phase 11): Zonal Prescriptions ---
+    zone_metrics = {}
+    if hasattr(tensor, "zones") and tensor.zones:
+        for z_id, z_data in tensor.zones.items():
+            print(f"🌍 [Layer 4] Generating Nutrient Prescription for {z_id}")
+            # In a full refactor, we would compute Zonal SWB, Zonal CDU, Zonal Proxies.
+            # For Phase 11 MVP, we will use the global inference but map the exact 
+            # spatial target zones to the prescription and reduce rates for stress zones.
+            
+            # Simple Zonal heuristic: if it's "Zone C" (Stress), we might hold back N
+            # to let the plant recover from abiotic stress, or if "Zone A" (High Vigor), push N.
+            # This logic should theoretically be in `opt_engine`, but we mock the mapping here.
+            
+            # Deduce prescriptions
+            z_prescriptions = []
+            import copy
+            for p in global_prescriptions:
+                zp = copy.deepcopy(p)
+                if z_id == "Zone A":
+                    zp.rate_kg_ha *= 1.1 # Push yield
+                elif z_id == "Zone C":
+                    zp.rate_kg_ha *= 0.8 # Save inputs on poor performers
+                z_prescriptions.append(zp)
+                
+            zone_metrics[z_id] = {
+                # "states": global_states, # Use global states as baseline
+                "prescriptions": z_prescriptions
+            }
+            
+    
+    # 6. Planning (Compile global execution plan, attaching zones)
+    execution_plan = plan_engine.create_plan(global_states, global_prescriptions)
+    
+    # Tag Execution Plan tasks with target zones
+    if zone_metrics:
+        for task in execution_plan.tasks:
+            # If the task is VERIFY_ONLY, scout the stress zones
+            if task.type == ActionId.VERIFY_ONLY.value:
+                task.target_zones = [z for z in zone_metrics.keys() if "C" in z]
+            else:
+                # Apply fertilization everywhere but with Variable Rate
+                task.target_zones = list(zone_metrics.keys())
     
     # 7. Quality & Audit
     metrics = QualityMetricsL4(
-        decision_reliability=states[Nutrient.N].confidence if Nutrient.N in states else 0.0,
+        decision_reliability=global_states[Nutrient.N].confidence if Nutrient.N in global_states else 0.0,
         missing_drivers=[],
         data_completeness={},
         penalties_applied=[]
@@ -126,15 +166,16 @@ def run_layer4_nutrients(
         layer="L4",
         run_id=run_id,
         parent_run_ids=parent_ids,
-        generated_at=datetime.utcnow().isoformat() + "Z",
+        generated_at=datetime.now(timezone.utc).isoformat() + "Z",
         degradation_mode=DegradationMode.NORMAL
     )
     
     return NutrientIntelligenceOutput(
         run_meta=meta,
-        nutrient_states=states,
-        prescriptions=prescriptions,
+        nutrient_states=global_states,
+        prescriptions=global_prescriptions,
         verification_plan=execution_plan,
+        zone_metrics=zone_metrics,
         quality_metrics=metrics,
         audit=audit
     )

@@ -164,3 +164,6 @@ class NutrientIntelligenceOutput:
     
     quality_metrics: QualityMetricsL4
     audit: AuditSnapshot
+
+    # --- SPATIAL EXTENSIONS (Phase 11) ---
+    zone_metrics: Dict[str, Any] = field(default_factory=dict)

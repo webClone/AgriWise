@@ -1,4 +1,6 @@
-
+import os
+import requests
+import json
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -82,7 +84,8 @@ from services.agribrain.orchestrator_v2.intents import Intent
 def build_chat_payload(
     artifact: RunArtifact, 
     user_query: Optional[str] = None,
-    intent: Intent = Intent.DECISION
+    intent: Intent = Intent.DECISION,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> ChatPayload:
     """
     Transform the massive RunArtifact into a clean ChatPayload.
@@ -242,6 +245,16 @@ def build_chat_payload(
              # Extract cognitive planning metrics
              chosen_opt = next((o for o in l7_options if o.crop == l7_rec.crop), None)
              if chosen_opt:
+                 
+                 # 4b. Extract Driver Coverage Matrix (Traces that applied penalties or bonuses)
+                 driver_matrix = []
+                 for state in [chosen_opt.window, chosen_opt.soil, getattr(chosen_opt, 'water', None), getattr(chosen_opt, 'biotic', None)]:
+                     if state and getattr(state, "evidence_trace", None):
+                         for trace in state.evidence_trace:
+                             if abs(trace.logit_delta) > 0.1: # Only include meaningful driver shifts
+                                 source_info = f" [{','.join(trace.source_refs)}]" if getattr(trace, "source_refs", None) else ""
+                                 driver_matrix.append(f"{trace.driver.value if hasattr(trace.driver, 'value') else str(trace.driver)}: {trace.condition} (Weight: {trace.weight}){source_info}")
+                 
                  summary["planning_context"] = {
                      "crop": chosen_opt.crop,
                      "overall_score": chosen_opt.overall_rank_score,
@@ -250,8 +263,40 @@ def build_chat_payload(
                      "biotic_prob": getattr(chosen_opt.biotic, "probability_ok", 0.0),
                      "expected_yield": chosen_opt.yield_dist.mean,
                      "downside_risk_p10": chosen_opt.yield_dist.p10,
-                     "expected_profit": chosen_opt.econ.expected_profit
+                     "expected_profit": chosen_opt.econ.expected_profit,
+                     "break_even_yield": chosen_opt.econ.break_even_yield,
+                     "suitability_percentage": getattr(chosen_opt, "suitability_percentage", 0.0),
+                     "driver_matrix": driver_matrix
                  }
+
+         # Phase D+: Extract Zone Suitability Breakdown from L7 (Institutional-Grade)
+         plot_suit = getattr(artifact.layer_7.output, "plot_suitability", None)
+         if plot_suit and hasattr(plot_suit, "zone_breakdown") and plot_suit.zone_breakdown:
+             zone_cards = []
+             for zs in plot_suit.zone_breakdown:
+                 zone_cards.append({
+                     "zone_key": zs.zone_key,
+                     "semantic_label": getattr(zs, "semantic_label", zs.zone_key),
+                     "spatial_label": zs.spatial_label,
+                     "area_pct": zs.area_pct,
+                     "suitability_pct": zs.suitability_pct,
+                     "confidence": zs.confidence,
+                     "confidence_narrative": getattr(zs, "confidence_narrative", ""),
+                     "limiting_factors": zs.limiting_factors,
+                     "driver_scores": zs.driver_scores,
+                     "multi_driver_narrative": getattr(zs, "multi_driver_narrative", ""),
+                     "intervention_delta": getattr(zs, "intervention_delta", 0),
+                     "notes": zs.notes,
+                 })
+             summary["zone_suitability"] = {
+                 "plot_suitability": plot_suit.suitability_pct,
+                 "plot_confidence": plot_suit.confidence,
+                 "weakest_zone": plot_suit.weakest_zone_key,
+                 "strongest_zone": plot_suit.strongest_zone_key,
+                 "risk_concentration_index": getattr(plot_suit, "risk_concentration_index", 0),
+                 "risk_distribution": getattr(plot_suit, "risk_distribution", ""),
+                 "zone_cards": zone_cards,
+             }
 
     # 5. Assistant Mode Logic & Thresholding
     
@@ -308,7 +353,8 @@ def build_chat_payload(
         memory=chat_memory,
         user_query=user_query,
         mode=mode,
-        quality=quality_summary
+        quality=quality_summary,
+        history=history
     )
     
     # Add low-impact to limitations if ARF succeeded
@@ -371,10 +417,47 @@ def build_chat_payload(
         if static_props:
              snapshot["soil_texture"] = static_props.get("texture_class", "UNKNOWN")
              snapshot["soil_clay"] = f"{static_props.get('soil_clay_mean', 'N/A')}%"
+             snapshot["soil_sand"] = f"{static_props.get('soil_sand_mean', 'N/A')}%"
              snapshot["soil_ph"] = static_props.get("soil_ph_mean", "N/A")
              snapshot["soil_soc"] = static_props.get("soil_org_c_mean", "N/A")
+             
+        # Extract 7-Day Forecast Extremes
+        forecast_7d = getattr(artifact.layer_1.output, "forecast_7d", [])
+        if forecast_7d:
+             min_temps = [f.get("temp_min", 99) for f in forecast_7d if f.get("temp_min") is not None]
+             max_winds = [f.get("wind_speed", 0) for f in forecast_7d if f.get("wind_speed") is not None]
+             max_pops = [f.get("pop", 0) for f in forecast_7d if f.get("pop") is not None]
+             
+             snapshot["forecast_min_temp_7d"] = f"{min(min_temps)}°C" if min_temps else "N/A"
+             snapshot["forecast_max_wind_7d"] = f"{max(max_winds)} km/h" if max_winds else "N/A"
+             snapshot["forecast_max_rain_probability"] = f"{max(max_pops)*100:.0f}%" if max_pops else "N/A"
 
     summary["feature_snapshot"] = snapshot
+    
+    # 7b. Management Zone Context (Phase 12: Spatial Heterogeneity)
+    zone_context_str = ""
+    if artifact.layer_1 and artifact.layer_1.output:
+        zones = getattr(artifact.layer_1.output, "zones", {})
+        if zones and len(zones) > 1:
+            zone_lines = []
+            for z_id, z_data in zones.items():
+                label = z_data.get("label", z_id)
+                area = z_data.get("area_pct", 0)
+                spatial = z_data.get("spatial_label", "unknown location")
+                sig = z_data.get("signature", {})
+                ndvi_med = sig.get("ndvi_median", "N/A")
+                zone_lines.append(f"    - {z_id} ({spatial}, {area}% of field): {label} | NDVI median: {ndvi_med}")
+            zone_context_str = "\n".join(zone_lines)
+            summary["management_zones"] = {
+                z_id: {
+                    "label": z_data.get("label"),
+                    "area_pct": z_data.get("area_pct"),
+                    "spatial_label": z_data.get("spatial_label"),
+                    "ndvi_median": z_data.get("signature", {}).get("ndvi_median"),
+                    "geometry": z_data.get("geometry"),  # GeoJSON Feature (data-driven zone shape)
+                } for z_id, z_data in zones.items()
+            }
+    summary["_zone_context_str"] = zone_context_str
 
     # 8. Questions Logic (Context Retrieval)
     questions = arf_json.get("next_questions", []) if "error" not in arf_json else []
@@ -460,14 +543,13 @@ def _generate_arf_v2(
     memory: Any, # ChatMemory
     user_query: Optional[str] = None,
     mode: str = "MONITORING",
-    quality: Dict[str, Any] = None
+    quality: Dict[str, Any] = None,
+    history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
     Calls OpenRouter to generate ARF-v2 strict JSON response.
     """
-    import os
-    import requests
-    import json
+
     
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -489,26 +571,68 @@ def _generate_arf_v2(
 
     # Build Planning Context String
     planning_str = ""
-    if mode == "PLANNING" and "planning_context" in summary:
+    if "planning_context" in summary:
         p_ctx = summary["planning_context"]
         planning_str = f"""
     [PLANNING FEASIBILITY & ECONOMICS] (PRIMARY FOCUS)
     - Target Crop: {p_ctx.get('crop')}
-    - Overall Suitability Score: {p_ctx.get('overall_score', 0):.2f}
+    - True Feasibility Index: {p_ctx.get('suitability_percentage', 0):.1f}% (Calculated via 5-factor weighted ensemble)
     - Window Probability: {p_ctx.get('window_prob', 0):.2f}
     - Water Probability: {p_ctx.get('water_prob', 0):.2f}
     - Biotic Probability: {p_ctx.get('biotic_prob', 0):.2f}
     - Yield Potential (Mean): {p_ctx.get('expected_yield', 0):.1f} t/ha
     - Yield Risk (p10): {p_ctx.get('downside_risk_p10', 0):.1f} t/ha
+    - Break-Even Yield: {p_ctx.get('break_even_yield', 0):.1f} t/ha
     - Expected Profit: ${p_ctx.get('expected_profit', 0):.1f}
+    
+    [L7 DRIVER COVERAGE MATRIX] (WHY probabilities changed)
+    {chr(10).join(f'    - {d}' for d in p_ctx.get('driver_matrix', []))}
         """
 
+    # Build Zone Context for LLM (Institutional-Grade)
+    zone_ctx = summary.get('_zone_context_str', '')
+    zone_suit = summary.get('zone_suitability', {})
+    zone_block = ""
+    if zone_ctx or zone_suit:
+        zone_lines = []
+        zone_lines.append("    [MANAGEMENT ZONES] (WITHIN-FIELD SPATIAL VARIABILITY — CRITICAL)")
+        zone_lines.append("    The field has been segmented into management zones. You MUST use SEMANTIC LABELS (not Zone A/B/C).")
+        
+        if zone_ctx:
+            zone_lines.append(zone_ctx)
+        
+        if zone_suit:
+            zone_lines.append(f"    Plot Suitability: {zone_suit.get('plot_suitability', 'N/A')}% (Conf: {zone_suit.get('plot_confidence', 'N/A')})")
+            zone_lines.append(f"    Weakest: {zone_suit.get('weakest_zone', 'N/A')} | Strongest: {zone_suit.get('strongest_zone', 'N/A')}")
+            rci = zone_suit.get('risk_concentration_index', 0)
+            rd = zone_suit.get('risk_distribution', '')
+            if rci > 0:
+                zone_lines.append(f"    Risk Concentration Index: {rci} — {rd}")
+            
+            for zc in zone_suit.get('zone_cards', []):
+                sem = zc.get('semantic_label', zc['zone_key'])
+                lf = ', '.join(zc.get('limiting_factors', [])) or 'None'
+                mdn = zc.get('multi_driver_narrative', '')
+                cn = zc.get('confidence_narrative', '')
+                delta = zc.get('intervention_delta', 0)
+                zone_lines.append(f"    - {sem} ({zc['spatial_label']}, {zc['area_pct']}%): Suit={zc['suitability_pct']}%, Limiting: [{lf}]")
+                if mdn:
+                    zone_lines.append(f"      Drivers: {mdn}")
+                if cn:
+                    zone_lines.append(f"      {cn}")
+                if delta > 0:
+                    zone_lines.append(f"      Intervention Impact: Fixing this zone raises plot suitability by +{delta:.1f}%")
+        
+        zone_block = "\n".join(zone_lines)
+    
     context_str = f"""
     {planning_str}
+    {zone_block}
     
     [FIELD CONTEXT] (SECONDARY CONSTRAINTS)
     - Stage: {summary.get('stage')}
     - Signals: {json.dumps(summary.get('key_signals', []))}
+    - Hyper-Local Variables (MUST CITE THESE NUMBERS IN REASONING): {json.dumps(summary.get('feature_snapshot', {}))}
     - Diagnoses (High Cert): {diag_str}
     - Proposed Actions: {action_str}
     - Execution Plan Tasks: {task_str}
@@ -533,17 +657,36 @@ def _generate_arf_v2(
     CRITICAL RULES:
     1. Respond ONLY in valid JSON matching the schema below. No markdown outside the JSON.
     2. Adapt teaching depth to Farmer Experience Level ({memory.experience_level}).
-    3. If Quality Issues include NO_SAR or PARTIAL_DATA, shift to VERIFY actions and explain uncertainty (UNLESS Assistant Mode is PLANNING; for PLANNING, proceed with the Execution Plan Tasks as requested and ignore missing data warnings unless critical).
+    3. DECOUPLE SUITABILITY FROM CONFIDENCE: You must separate pure agronomic feasibility from epistemic certainty.
+       - "Suitability Score" is the sheer mathematical probability of success based on knowns.
+       - "Confidence Badge" represents how much data is missing.
+       - If Quality Issues include NO_SAR or PARTIAL_DATA, your Confidence is LOW or MED. But DO NOT say "Not advisable due to data gaps".
+       - DECISION RULES:
+         a) Suitability > 70% & Confidence is HIGH/MED -> "Proceed"
+         b) Suitability 50-70% OR (High Suitability but LOW Confidence) -> "Proceed with verification" (Advise caution, list verifications as prerequisites).
+         c) Suitability < 50% -> "Delay" 
+       - NEVER block a decision purely because of missing data if the calculated Suitability remains > 50%. Instead, recommend proceeding *after* verifying the missing variable.
     4. Provide contextual follow-up questions but DO NOT repeat 'Recent Follow-ups Asked'.
-    5. VERY IMPORTANT: If Assistant Mode is PLANNING, do NOT act like a diagnostic monitor. Act like a Season Feasibility Optimizer. Your `headline` MUST be a Decision (e.g., "Planting Decision: Conditional"). Your `direct_answer` MUST state the quantitative expected yield and feasibility score. Your `reasoning_cards` MUST explain the specific water/biotic probabilities. Do NOT focus the narrative on NO_SAR.
-    6. STRICTLY NO SPAM / NO DUPLICATION: DO NOT output all available Execution Plan Tasks or Proposed Actions. ONLY select 1-3 recommendations that are DIRECTLY RELEVANT to the user's specific query.
+    5. ELITE AGRONOMIST TONE: Act as a senior, highly-paid agronomic consultant. You MUST use conversational, advisory phrasing (e.g., "Before planting, I recommend confirming soil moisture..."). YOU ARE STRICTLY FORBIDDEN from using robotic, capitalized prefixes like "VERIFY: " or "MONITOR: " in your recommendation titles. Make them sound human.
+    6. CAUSAL FORECAST NARRATIVE: You MUST explicitly link the *future* 7-day forecast variables (temperature, rain, frost) found in the L7 DRIVER COVERAGE MATRIX to your final feasibility score. Do not just list static facts. State *why* the score shifted (e.g., "The forecasted 30mm rain degrades seedbed trafficability and pushes feasibility down to 65%").
+    7. ECONOMIC SENSITIVITY: Explicitly incorporate economic variance into your narrative. You MUST clearly state how data gaps or harsh forecasts impact the downside risk (p10) or break-even margin (e.g., "Under current water quota constraints, expected yield variance widens. Downside risk increases if irrigation efficiency falls.").
+    8. AVOID REDUNDANT DATA REQUESTS: Since you are already receiving the 7-day forecast evaluations (Rain risk, Frost risk) in the L7 MATRIX, DO NOT recommend that the user "check the weather forecast". You already did that.
+    9. HYPER-LOCAL GEOGRAPHIC SPECIFICITY: You MUST cite exact numeric values from the "Hyper-Local Variables" block in your reasoning cards.
+       - SOIL: If soil_clay, soil_sand, or soil_silt values are present, you MUST write them as evidence (e.g., "Clay: 34%, Sand: 48% (SoilGrids 250m)"). Do not say "loam" without backing it up with numbers.
+       - FORECAST: If forecast_min_temp_7d, forecast_max_wind_7d, or forecast_max_rain_probability are present, you MUST reference them (e.g., "Next 7 nights stay above 8°C — frost is unlikely", "Max wind exposure reaches 35 km/h — consider windbreak for young seedlings").
+       - If these values are "N/A", acknowledge the missing data source explicitly and state impact on confidence.
+    10. SPATIAL AWARENESS (HETEROGENEITY): If the MANAGEMENT ZONES block is present, you MUST speak in spatial terms. NEVER say "the field is stressed" — say "the south-east corner (Zone C, 31%) is showing severe lag, while Zone A remains vigorous". Call out patchiness and recommend targeted interventions rather than blanket applications.
+    11. ZONE-SPECIFIC REASONING: When zone suitability data is available for each zone, EVERY reasoning card MUST reference the specific zone it applies to. Example: "Zone C (south-west, 31%) has a suitability of 45% vs Zone A's 72% — the 27-point gap is driven by lower water probability (0.52 vs 0.78)."
+    12. ZONE CARDS IN RECOMMENDATIONS: Show worst 1 zone and best 1 zone in detail. Collapse others into a summary sentence. For the worst zone, always include: (a) its spatial label, (b) the primary limiting factor, (c) a targeted action for that specific zone, (d) confidence level.
+    13. WEAKEST ZONE PROTOCOL: If the user asks "which part is weakest" or "where is the problem", you MUST respond with: zone identifier, spatial descriptor, primary limiting driver with numeric evidence, targeted zone-specific action, and confidence statement tied to data coverage in that zone. Example: "Zone C (south-west, 31% of your field) is the weakest right now — suitability is only 45% (confidence: LOW). The bottleneck is water availability (0.52 probability) compounded by sparse SAR coverage. I'd recommend checking soil moisture at 10cm depth specifically in that zone first."
     
     RESPONSE JSON SCHEMA:
     {{
         "headline": "1 sentence title summarizing field status",
         "direct_answer": "Direct answer to user's specific question",
-        "reliability_badge": "HIGH" | "MED" | "LOW",
-        "reliability_reason": "Why the badge is what it is (e.g., 'Missing SAR data')",
+        "suitability_score": "Pure agronomic feasibility percentage e.g., '65%'",
+        "confidence_badge": "HIGH" | "MED" | "LOW",
+        "confidence_reason": "Why the confidence badge is what it is (e.g., 'Missing SAR data')",
         "what_it_means": "Agronomic interpretation of the situation",
         "reasoning_cards": [
             {{
@@ -556,7 +699,7 @@ def _generate_arf_v2(
         "recommendations": [
             {{
                 "type": "VERIFY" | "MONITOR" | "INTERVENE",
-                "title": "Action title (ONLY include 1-3 actions directly relevant to the query)",
+                "title": "Natural human sentence (e.g., 'Confirm soil moisture at 10cm depth')",
                 "is_allowed": true/false (must match INPUT CONTEXT),
                 "blocked_reasons": ["if not allowed, why"],
                 "why_it_matters": "Benefit of doing this",
@@ -585,6 +728,21 @@ def _generate_arf_v2(
     
     user_prompt = user_query if user_query else "Acknowledge the context and ask the user what they would like to know about their field."
     
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    if history:
+        for msg in history[-8:]:  # Provide last 8 turns of context
+            r = msg.get("role", "user")
+            # Map 'model' to 'assistant' for OpenRouter compliance
+            if r == "model":
+                r = "assistant"
+            # Ensure text isn't massive and strip ARF logic
+            c = msg.get("content", "")[:2000]
+            if c.strip():
+                messages.append({"role": r, "content": c})
+                
+    messages.append({"role": "user", "content": user_prompt})
+
     try:
         resp = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -596,10 +754,7 @@ def _generate_arf_v2(
             },
             json={
                 "model": "qwen/qwen-2.5-72b-instruct", 
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
+                "messages": messages,
                 "temperature": 0.4, # Lower temperature for stable JSON structure
                 "max_tokens": 1500, # Large structure needs tokens
                 "response_format": {"type": "json_object"}
@@ -617,11 +772,93 @@ def _generate_arf_v2(
                 
             raw_json = json.loads(content)
             
+            # --- ARF Sanitizer ---
+            # 1. Fix strings in recommendations
+            recs = raw_json.get("recommendations", [])
+            if isinstance(recs, list):
+                sanitized_recs = []
+                for r in recs:
+                    if isinstance(r, str):
+                        sanitized_recs.append({
+                            "type": "MONITOR",
+                            "title": r,
+                            "is_allowed": True,
+                            "blocked_reasons": [],
+                            "why_it_matters": "",
+                            "how_to_do_it_steps": [],
+                            "risk_if_wrong": "LOW"
+                        })
+                    elif isinstance(r, dict):
+                        sanitized_recs.append(r)
+                raw_json["recommendations"] = sanitized_recs
+                
+            # 2. Fix strings in followups
+            fups = raw_json.get("followups", [])
+            if isinstance(fups, list):
+                sanitized_fups = []
+                for f in fups:
+                    if isinstance(f, str):
+                        sanitized_fups.append({"question": f, "why": "Clarifying context"})
+                    elif isinstance(f, dict):
+                        sanitized_fups.append(f)
+                raw_json["followups"] = sanitized_fups
+
+            # 3. Fix strings in reasoning_cards
+            cards = raw_json.get("reasoning_cards", [])
+            if isinstance(cards, list):
+                sanitized_cards = []
+                for c in cards:
+                    if isinstance(c, str):
+                        sanitized_cards.append({
+                            "type": "EVIDENCE",
+                            "claim": c,
+                            "evidence": "",
+                            "uncertainty": ""
+                        })
+                    elif isinstance(c, dict):
+                        sanitized_cards.append(c)
+                raw_json["reasoning_cards"] = sanitized_cards
+                
+            # 4. Fix missing or bad learning block
+            learning = raw_json.get("learning", {})
+            if isinstance(learning, str):
+                raw_json["learning"] = {
+                    "level": "INTERMEDIATE",
+                    "micro_lesson": learning,
+                    "definitions": {}
+                }
+            elif not learning or not isinstance(learning, dict):
+                raw_json["learning"] = {
+                    "level": "INTERMEDIATE",
+                    "micro_lesson": "No learning module provided.",
+                    "definitions": {}
+                }
+            
             # STRIKE: Strict Pydantic Validation
             from services.agribrain.orchestrator_v2.arf_schema import ARFResponse
-            validated_arf = ARFResponse(**raw_json)
-            
-            return validated_arf.dict() # Return valid dict representing ARF
+            try:
+                validated_arf = ARFResponse(**raw_json)
+                return validated_arf.dict() # Return valid dict representing ARF
+            except Exception as e:
+                print(f"DEBUG: LLM schema validation failed even after sanitization: {e}")
+                # Safe Fallback Payload
+                return {
+                    "headline": summary.get("headline", "Analysis available"),
+                    "direct_answer": summary.get("explanation", "I analyzed the field, but the response format was incomplete."),
+                    "suitability_score": "N/A",
+                    "confidence_badge": "MED",
+                    "confidence_reason": "Structured explanation formatting failed",
+                    "what_it_means": "Core pipeline ran, but the natural-language formatter needs fallback shaping.",
+                    "reasoning_cards": [],
+                    "recommendations": [],
+                    "learning": {
+                        "level": "INTERMEDIATE",
+                        "micro_lesson": "You can still use the map and layer diagnostics while the explanation formatter is repaired.",
+                        "definitions": {}
+                    },
+                    "followups": [],
+                    "internal_memory_updates": None
+                }
         else:
             return {"error": f"AI unavailable: {resp.status_code}"}
             
@@ -643,95 +880,200 @@ def _extract_headline(text: str) -> str:
 
 def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = None) -> ChatPayload:
     """
-    simplified payload for pure data queries. No diagnoses, no actions.
+    Deterministic payload for pure data queries. No diagnoses, no actions.
+    Query-aware: detects whether user asks about weather or soil and surfaces the right data.
     """
-    # 1. Extract Signals form L1 (Raw)
     signals = []
     
     summary = {
         "headline": "Data Retrieval Complete",
         "period": f"{artifact.inputs.date_range['start']} to {artifact.inputs.date_range['end']}",
-        "stage": "OBSERVATIONAL", # No L2
+        "stage": "OBSERVATIONAL",
         "key_signals": []
     }
     
+    q = (user_query or "").lower()
+    is_soil_query = any(k in q for k in ["soil", "moisture", "clay", "sand", "silt", "ph", "organic", "texture", "nitrogen", "carbon"])
+    is_weather_query = any(k in q for k in ["rain", "raining", "temp", "temperature", "weather", "precipitation", "wind", "frost", "humidity"])
+    
+    # Default to weather if neither detected
+    if not is_soil_query and not is_weather_query:
+        is_weather_query = True
+
+    # ---- WEATHER SIGNALS ----
+    rain_val = 0.0
+    days_count = 0
     if artifact.layer_1 and artifact.layer_1.output:
         ts = getattr(artifact.layer_1.output, "plot_timeseries", [])
         if ts:
-            # RAIN: Sum EVERYTHING in the returned time series (which matches resolved date range)
-            rain_sum = sum(float(r.get("rain", 0.0) or 0.0) for r in ts)
-            signals.append(ChatSignal(
-                name="Rainfall (Total)", 
-                value=f"{rain_sum:.1f} mm", 
-                direction=SignalDirection.NORMAL
-            ))
+            rain_val = sum(float(r.get("rain", 0.0) or 0.0) for r in ts)
+            days_count = sum(1 for r in ts if float(r.get("rain", 0.0) or 0.0) > 0.1)
             
-            # RAIN DAYS
-            rain_days = sum(1 for r in ts if float(r.get("rain", 0.0) or 0.0) > 0.1)
-            signals.append(ChatSignal("Days with Rain", str(rain_days), SignalDirection.NORMAL))
+            if is_weather_query:
+                signals.append(ChatSignal("Rainfall (Total)", f"{rain_val:.1f} mm", SignalDirection.NORMAL))
+                signals.append(ChatSignal("Days with Rain", str(days_count), SignalDirection.NORMAL))
+                
+                # Temperature
+                tmeans = [float(r.get("tmean", 0)) for r in ts if r.get("tmean") is not None]
+                if tmeans:
+                    signals.append(ChatSignal("Avg Temperature", f"{sum(tmeans)/len(tmeans):.1f} °C", SignalDirection.NORMAL))
             
-            # NDVI (Avg of last if available)
-            # Check last valid
+            # NDVI always useful
             ndvis = [float(r.get("ndvi")) for r in ts if r.get("ndvi") is not None]
             if ndvis:
                 signals.append(ChatSignal("Avg NDVI", f"{sum(ndvis)/len(ndvis):.2f}", SignalDirection.NORMAL))
-                
+
+    # ---- SOIL SIGNALS (SoilGrids + Open-Meteo) ----
+    soil_static = {}
+    soil_moisture_data = {}
+    
+    if is_soil_query and artifact.layer_1 and artifact.layer_1.output:
+        # 1. SoilGrids static data (already in tensor.static from L1)
+        soil_static = getattr(artifact.layer_1.output, "static", {}) or {}
+        
+        if soil_static:
+            clay = soil_static.get("soil_clay_mean")
+            sand = soil_static.get("soil_sand_mean")
+            silt = soil_static.get("soil_silt_mean")
+            ph = soil_static.get("soil_ph_mean")
+            soc = soil_static.get("soil_org_c_mean")
+            texture = soil_static.get("texture_class", "unknown")
+            
+            if clay is not None:
+                signals.append(ChatSignal("Clay Content", f"{clay}%", SignalDirection.NORMAL))
+            if sand is not None:
+                signals.append(ChatSignal("Sand Content", f"{sand}%", SignalDirection.NORMAL))
+            if silt is not None:
+                signals.append(ChatSignal("Silt Content", f"{silt}%", SignalDirection.NORMAL))
+            if ph is not None:
+                signals.append(ChatSignal("Soil pH", f"{ph}", SignalDirection.NORMAL))
+            if soc is not None:
+                signals.append(ChatSignal("Organic Carbon", f"{soc} g/kg", SignalDirection.NORMAL))
+            if texture and texture != "unknown":
+                signals.append(ChatSignal("Texture Class", texture, SignalDirection.NORMAL))
+        
+        # 2. Real-time soil moisture from Open-Meteo (fetch live)
+        try:
+            lat = float(artifact.inputs.operational_context.get("lat", 0))
+            lng = float(artifact.inputs.operational_context.get("lng", 0))
+            if lat != 0 and lng != 0:
+                from services.agribrain.eo.sentinel import fetch_soil_moisture_layers
+                sm = fetch_soil_moisture_layers(lat, lng)
+                if sm:
+                    soil_moisture_data = sm
+                    m = sm.get("moisture", {})
+                    if m.get("0_7cm") is not None:
+                        signals.append(ChatSignal("Moisture 0-7cm", f"{m['0_7cm']:.3f} m³/m³", SignalDirection.NORMAL))
+                    if m.get("7_28cm") is not None:
+                        signals.append(ChatSignal("Moisture 7-28cm", f"{m['7_28cm']:.3f} m³/m³", SignalDirection.NORMAL))
+                    if m.get("28_100cm") is not None:
+                        signals.append(ChatSignal("Moisture 28-100cm", f"{m['28_100cm']:.3f} m³/m³", SignalDirection.NORMAL))
+                    
+                    t = sm.get("temperature", {})
+                    if t.get("0_7cm") is not None:
+                        signals.append(ChatSignal("Soil Temp 0-7cm", f"{t['0_7cm']:.1f} °C", SignalDirection.NORMAL))
+        except Exception as e:
+            print(f"⚠️ [Chat] Soil moisture fetch failed: {e}")
+
     summary["key_signals"] = [s.__dict__ for s in signals]
     
-    # Generate simple explanation (Tutor Style)
-    # 4 Layers: Answer, Meaning, Evidence, Teach
-    
-    # Interpretation Logic
-    rain_val = float(summary.get("key_signals", [{}])[0].get("value", "0").split(" ")[0])
-    days_count = int(summary.get("key_signals", [{}])[1].get("value", "0"))
-    period_days = 30 # Approx def
+    # ---- BUILD NARRATIVE ----
+    period_days = 14
     try:
         start = datetime.strptime(artifact.inputs.date_range['start'], "%Y-%m-%d")
         end = datetime.strptime(artifact.inputs.date_range['end'], "%Y-%m-%d")
         period_days = (end - start).days + 1
     except:
         pass
+
+    if is_soil_query:
+        # Soil-focused narrative
+        parts = []
+        if soil_static:
+            clay = soil_static.get("soil_clay_mean", "N/A")
+            sand = soil_static.get("soil_sand_mean", "N/A")
+            silt = soil_static.get("soil_silt_mean", "N/A")
+            ph = soil_static.get("soil_ph_mean", "N/A")
+            soc = soil_static.get("soil_org_c_mean", "N/A")
+            texture = soil_static.get("texture_class", "unknown")
+            parts.append(f"**Soil Profile** (SoilGrids 250m, ISRIC): {texture} — Clay: {clay}%, Sand: {sand}%, Silt: {silt}% | pH: {ph} | Organic Carbon: {soc} g/kg.")
+        else:
+            parts.append("Soil profile data from SoilGrids is not available for this location.")
+            
+        if soil_moisture_data:
+            m = soil_moisture_data.get("moisture", {})
+            t = soil_moisture_data.get("temperature", {})
+            ts_str = soil_moisture_data.get("timestamp", "now")
+            m_07 = f"{m.get('0_7cm', 'N/A'):.3f}" if m.get('0_7cm') is not None else "N/A"
+            m_728 = f"{m.get('7_28cm', 'N/A'):.3f}" if m.get('7_28cm') is not None else "N/A"
+            m_28100 = f"{m.get('28_100cm', 'N/A'):.3f}" if m.get('28_100cm') is not None else "N/A"
+            t_07 = f"{t.get('0_7cm', 'N/A'):.1f}°C" if t.get('0_7cm') is not None else "N/A"
+            parts.append(f"\n**Current Soil Moisture** (Open-Meteo ERA5-Land, {ts_str}): Surface (0-7cm): {m_07} m³/m³ | Root zone (7-28cm): {m_728} m³/m³ | Deep (28-100cm): {m_28100} m³/m³ | Surface Temp: {t_07}.")
+        else:
+            parts.append("\nReal-time soil moisture data is not available.")
         
-    avg_weekly = (rain_val / period_days) * 7 if period_days > 0 else 0
-    
-    interpretation = "This is within the normal seasonal range."
-    if avg_weekly < 10:
-        interpretation = "This is below the typical 25mm/week threshold for many crops, suggesting potential dryness."
-    elif avg_weekly > 50:
-        interpretation = "This is substantial rainfall, likely refilling the soil profile but increasing fungal risk."
+        # Interpretation
+        if soil_moisture_data and soil_moisture_data.get("moisture", {}).get("0_7cm") is not None:
+            sm_surface = soil_moisture_data["moisture"]["0_7cm"]
+            if sm_surface < 0.15:
+                interpretation = "Surface soil moisture is low. Consider monitoring irrigation needs."
+            elif sm_surface < 0.30:
+                interpretation = "Soil moisture is in a healthy range for most crops."
+            else:
+                interpretation = "Soil moisture is high — waterlogging risk for sensitive crops."
+        else:
+            interpretation = "Without real-time moisture readings, assess field conditions visually."
         
-    # Teaching
-    teaching = "Rule of thumb: 25-35 mm/week often maintains crops in mid-season, though sandy soils drain faster."
-    
-    # Construct Narrative
-    narrative = f"During this period ({artifact.inputs.date_range['start']} to {artifact.inputs.date_range['end']}), your field received {rain_val:.1f} mm of rainfall over {days_count} wet days.\n\n"
-    narrative += f"**What it means**: {interpretation}\n\n"
-    narrative += f"**Why**: Data from Layer 1 Weather Aggregation shows {days_count} precipitation events.\n\n"
-    narrative += f"**Quick Lesson**: {teaching}"
+        parts.append(f"\n**What it means**: {interpretation}")
+        
+        teaching = "Soil moisture between 0.15–0.30 m³/m³ at surface depth typically supports healthy root uptake. Sandy soils drain faster (need more frequent irrigation), while clay soils retain more water but risk waterlogging."
+        parts.append(f"\n**Quick Lesson**: {teaching}")
+        
+        narrative = "\n".join(parts)
+        headline = f"Soil Data for Your Field"
+    else:
+        # Weather-focused narrative (existing logic)
+        avg_weekly = (rain_val / period_days) * 7 if period_days > 0 else 0
+        
+        interpretation = "This is within the normal seasonal range."
+        if avg_weekly < 10:
+            interpretation = "This is below the typical 25mm/week threshold for many crops, suggesting potential dryness."
+        elif avg_weekly > 50:
+            interpretation = "This is substantial rainfall, likely refilling the soil profile but increasing fungal risk."
+        
+        teaching = "Rule of thumb: 25-35 mm/week often maintains crops in mid-season, though sandy soils drain faster."
+        
+        narrative = f"During this period ({artifact.inputs.date_range['start']} to {artifact.inputs.date_range['end']}), your field received {rain_val:.1f} mm of rainfall over {days_count} wet days.\n\n"
+        narrative += f"**What it means**: {interpretation}\n\n"
+        narrative += f"**Why**: Data from Layer 1 Weather Aggregation shows {days_count} precipitation events.\n\n"
+        narrative += f"**Quick Lesson**: {teaching}"
+        headline = _extract_headline(narrative)
     
     summary["explanation"] = narrative
-    summary["headline"] = _extract_headline(narrative) # Likely "Field Received X mm"
+    summary["headline"] = headline
     
     # Feature Snapshot
-    snapshot = {}
-    if artifact.layer_1 and artifact.layer_1.output:
-        ts = getattr(artifact.layer_1.output, "plot_timeseries", [])
-        if ts and ts:
-             snapshot["rain_total"] = rain_val
+    snapshot = {"rain_total": rain_val}
+    if soil_static:
+        snapshot["soil_clay"] = soil_static.get("soil_clay_mean")
+        snapshot["soil_sand"] = soil_static.get("soil_sand_mean")
+        snapshot["soil_ph"] = soil_static.get("soil_ph_mean")
+        snapshot["soil_texture"] = soil_static.get("texture_class")
+    if soil_moisture_data:
+        snapshot["soil_moisture_0_7cm"] = soil_moisture_data.get("moisture", {}).get("0_7cm")
+        snapshot["soil_moisture_7_28cm"] = soil_moisture_data.get("moisture", {}).get("7_28cm")
     summary["feature_snapshot"] = snapshot
 
     # Context Question
     ctx_q = _select_context_question(artifact.inputs, artifact.global_quality)
-    if ctx_q:
-        questions_for_user = [ctx_q]
-    else:
-        questions_for_user = []
+    questions_for_user = [ctx_q] if ctx_q else []
         
     arf = {
-        "headline": summary["headline"],
-        "direct_answer": narrative, # Using narrative as direct answer for simple data queries
-        "reliability_badge": "HIGH",
-        "reliability_reason": "Based directly on verifiable deterministic telemetry and local station data.",
+        "headline": headline,
+        "direct_answer": narrative,
+        "suitability_score": "N/A",
+        "confidence_badge": "HIGH",
+        "confidence_reason": "Based directly on verifiable deterministic telemetry from SoilGrids (ISRIC) and Open-Meteo ERA5-Land." if is_soil_query else "Based directly on verifiable deterministic telemetry and local station data.",
         "what_it_means": interpretation,
         "reasoning_cards": [],
         "recommendations": [],
@@ -744,7 +1086,7 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
         "internal_memory_updates": None
     }
     
-    # Validate through Schema to guarantee compliance
+    # Validate through Schema
     from services.agribrain.orchestrator_v2.arf_schema import ARFResponse
     arf = ARFResponse(**arf).dict()
 
@@ -752,9 +1094,9 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
         run_id=artifact.meta.orchestrator_run_id,
         global_quality={"reliability": 1.0, "degradation_modes": [], "alerts": []},
         summary=summary,
-        diagnoses=[], # STRICTLY EMPTY
-        actions=[],   # STRICTLY EMPTY
-        plan={"tasks": []}, # STRICTLY EMPTY
+        diagnoses=[],
+        actions=[],
+        plan={"tasks": []},
         citations=[],
         assistant_mode="DATA_ONLY",
         assistant_style="TUTOR",

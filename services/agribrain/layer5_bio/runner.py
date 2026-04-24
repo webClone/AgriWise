@@ -1,7 +1,7 @@
 
 from dataclasses import asdict
 from typing import Any, Dict, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -63,20 +63,112 @@ def run_layer5(
     ts = getattr(field_tensor, "plot_timeseries", []) or []
     # (we keep channels for gating; main truth is plot_timeseries)
     
-    # ... inputs checking ...
+    features_snapshot = {}
+    missing = []
+    penalties = {}
+    completeness = 1.0
+    from services.agribrain.layer3_decision.schema import DegradationMode
+    degradation = DegradationMode.NORMAL
+    reliability = 1.0
 
-    # --- Confounders from Layer 4 (strict) ---
-    confounders: List[str] = []
-    if nutrient_output:
-        try:
-            ns_map = getattr(nutrient_output, "nutrient_states", {}) or {}
-            for k, state in ns_map.items():
-                for c in (getattr(state, "confounders", []) or []):
-                    confounders.append(str(c))
-        except Exception:
-            pass
+    # Strict Partial Tolerance Check
+    if not ts:
+        missing.append("L1_Rain")
+        missing.append("L1_Temp")
+        degradation = DegradationMode.DATA_GAP
+        reliability -= 0.4
+        
+    static_props = getattr(field_tensor, "static", {}) or {}
+    if not static_props.get("texture_class"):
+        missing.append("L1_Soil")
+        reliability -= 0.2
+        # Note: We do NOT fail. We just lower reliability and neutralize soil-dependent logics.
 
-    # ... inference ...
+    # 1. Weather Pressure Engine
+    wp = build_weather_pressure(ts, veg_output, plot_context)
+    features_snapshot.update(wp)
+
+    # 2. Spread Signature (must happen before remote signature)
+    # If spatial anomalies exist in veg_output, use them. Otherwise default to UNKNOWN or UNIFORM.
+    sss = infer_spread_signature(field_tensor, veg_output, plot_context)
+    features_snapshot["spread"] = sss
+
+    # 3. Remote Signature (NDVI/SAR)
+    rs, rs_missing = build_remote_evidence(
+        ts=ts, 
+        veg_output=veg_output,
+        wdp=wp,
+        spread=sss,
+        nutrient_output=nutrient_output,
+        plot_context=plot_context,
+        degradation_mode=DegradationMode.NORMAL
+    )
+    missing.extend(rs_missing)
+    if rs_missing:
+        reliability -= (0.1 * len(rs_missing))
+    features_snapshot.update(rs)
+
+    # 4. Synthesize Evidence
+    from services.agribrain.layer5_bio.schema import EvidenceLogit
+    from services.agribrain.layer3_decision.schema import Driver
+    evidence_by_threat = {
+        ThreatId.FUNGAL_LEAF_SPOT: [
+            EvidenceLogit(Driver.NDVI, "NDVI Drop",  0.5 if rs.get("ndvi_drop_detected") else -0.5, 1.0, []),
+            EvidenceLogit(Driver.RAIN, "Wetness Proxy",  wp.get("fungal_pressure", 0.0) * 2.0 - 1.0, 1.5, [])
+        ],
+        ThreatId.BACTERIAL_BLIGHT: [
+            EvidenceLogit(Driver.TEMP, "Bacterial Heat Proxy",  wp.get("bacterial_pressure", 0.0) * 2.0 - 1.0, 1.2, [])
+        ],
+        ThreatId.CHEWING_INSECTS: [
+            EvidenceLogit(Driver.TEMP, "Degree Days",  wp.get("insect_pressure", 0.0) * 2.5 - 1.0, 1.0, [])
+        ],
+        ThreatId.DOWNY_MILDEW: [
+             EvidenceLogit(Driver.NDVI_UNC, "Soil Clay Proxy", 1.0 if "clay" in static_props.get("texture_class", "").lower() else -0.5, 1.5, [])
+        ]
+    }
+    
+    # Apply strict penalties for missing drivers
+    if "L1_Soil" in missing:
+        evidence_by_threat[ThreatId.DOWNY_MILDEW] = [] # Unknown risk
+        
+    if "L1_Rain" in missing or "L1_Temp" in missing:
+        evidence_by_threat[ThreatId.FUNGAL_LEAF_SPOT] = []
+        evidence_by_threat[ThreatId.BACTERIAL_BLIGHT] = []
+        evidence_by_threat[ThreatId.CHEWING_INSECTS] = []
+
+    reliability = max(0.1, reliability)
+
+    threat_states = infer_threat_states(
+        evidence_by_threat=evidence_by_threat,
+        spread=sss,
+        nutrient_output=nutrient_output,
+        plot_context=plot_context,
+        confidence=reliability
+    )
+
+    # --- SPATIAL EXTENSIONS (Phase 11): Zonal Threats ---
+    zone_metrics = {}
+    if hasattr(field_tensor, "zones") and field_tensor.zones:
+        for z_id, z_data in field_tensor.zones.items():
+            print(f"🌍 [Layer 5] Assessing Biotic Risk for {z_id}")
+            # Mock Zonal heuristics based on global inference:
+            z_threat_states = {}
+            import copy
+            for t_id, zt in threat_states.items():
+                zts = copy.deepcopy(zt)
+                if z_id == "Zone C":
+                    # Stressed zones are generally more susceptible to weeds and soil-borne diseases
+                    if zts.threat_id in [ThreatId.WEED_PRESSURE, ThreatId.DOWNY_MILDEW]:
+                        zts.probability = min(1.0, zts.probability * 1.2)
+                elif z_id == "Zone A":
+                    # Dense lush canopy favors fungal/mildew due to microclimate
+                    if "FUNGAL" in zts.threat_id or "MILDEW" in zts.threat_id:
+                        zts.probability = min(1.0, zts.probability * 1.15)
+                z_threat_states[t_id] = zts
+            
+            zone_metrics[z_id] = {
+                "threat_states": z_threat_states
+            }
 
     # --- Plan ---
     recommendations, plan = build_response_plan(
@@ -85,6 +177,21 @@ def run_layer5(
         plot_context=plot_context,
         degradation_mode=degradation
     )
+    
+    # Tag Execution Plan tasks with target zones
+    if zone_metrics and plan:
+        for task in plan.tasks:
+            # Map interventions/scouting to high-probability localized zones
+            target_zones = []
+            for z_id, zm in zone_metrics.items():
+                # Gather all threats exceeding 50% probability in this zone
+                high_threats = [t_id for t_id, state in zm["threat_states"].items() if state.probability > 0.5]
+                # In MVP, if the task is triggered (globally), we point it to ALL active threat zones.
+                if len(high_threats) > 0:
+                    target_zones.append(z_id)
+                    
+            # Set minimum fallback if no > 50% detected but a task exists
+            task.target_zones = target_zones if target_zones else list(zone_metrics.keys())
 
     # --- Deterministic run id ---
     l3_policy = {}
@@ -109,7 +216,7 @@ def run_layer5(
     run_meta = RunMeta(
         run_id=run_id,
         parent_run_ids=parent_ids,
-        generated_at=datetime.utcnow().isoformat(),
+        generated_at=datetime.now(timezone.utc).isoformat(),
         degradation_mode=degradation
     )
 
@@ -131,12 +238,17 @@ def run_layer5(
         threat_states={k: v for k, v in threat_states.items()},
         recommendations=recommendations,
         execution_plan=plan,
+        zone_metrics=zone_metrics,
         quality_metrics=quality,
         audit=audit
     )
 
 from services.agribrain.orchestrator_v2.schema import OrchestratorInput
 from services.agribrain.layer5_bio.schema import Layer5Input
+from services.agribrain.layer1_fusion.schema import FieldTensor
+from services.agribrain.layer2_veg_int.schema import VegIntOutput
+from services.agribrain.layer3_decision.schema import DecisionOutput
+from services.agribrain.layer4_nutrients.schema import NutrientIntelligenceOutput
 
 def run_layer5_bio(
     inputs: OrchestratorInput,

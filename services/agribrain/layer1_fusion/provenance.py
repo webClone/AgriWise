@@ -7,7 +7,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 # --- 1. Deterministic ID Generation ---
@@ -38,7 +38,7 @@ class LineageEvent:
     """
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     event_type: str = "GENERIC"
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     input_ids: List[str] = field(default_factory=list) # Upstream artifacts
     output_ids: List[str] = field(default_factory=list) # Downstream artifacts
     metadata: Dict[str, Any] = field(default_factory=dict) # Params used (e.g. "cloud_threshold": 30)
@@ -61,7 +61,7 @@ class FusionRun:
     
     # Status
     status: str = "PENDING" # PENDING, COMPLETED, FAILED
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     duration_ms: float = 0.0
     
     # The DAG log

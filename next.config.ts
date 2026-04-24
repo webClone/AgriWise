@@ -12,8 +12,8 @@ const nextConfig: NextConfig = {
     formats: ["image/avif", "image/webp"],
   },
 
-  // Strict mode for better development
-  reactStrictMode: true,
+  // Strict mode disabled due to deck.gl v9 WebGL context double-render bugs
+  reactStrictMode: false,
   // Cache invalidation trigger: 1
 };
 

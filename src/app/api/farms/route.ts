@@ -75,7 +75,7 @@ export async function POST(req: Request) {
       await prisma.$runCommandRaw({
         insert: "User",
         documents: [{
-          _id: newUserId,
+          _id: { $oid: newUserId.toHexString() },
           phone: "+213555000000",
           name: "مستخدم تجريبي",
           nameAr: "مستخدم تجريبي",
@@ -104,7 +104,7 @@ export async function POST(req: Request) {
     await prisma.$runCommandRaw({
       insert: "Farm",
       documents: [{
-        _id: farmId,
+        _id: { $oid: farmId.toHexString() },
         name,
         totalArea: parseFloat(totalArea),
         wilaya,
@@ -114,7 +114,7 @@ export async function POST(req: Request) {
         irrigationType: irrigationType || null,
         latitude,  // Added from wilaya data
         longitude, // Added from wilaya data
-        userId: userId,
+        userId: { $oid: userId.toHexString() },
         createdAt: dateObj,
         updatedAt: dateObj,
       }]

@@ -1,0 +1,53 @@
+{
+  "version": "layer0-v2.0",
+  "plot_id": "69de624047f8c01c4979d381",
+  "saved_at": "2026-04-20T18:25:59.166785",
+  "crop_params_hash": "44136fa355b3",
+  "kalman_zones": {
+    "plot": {
+      "state_values": {
+        "day": "2026-04-20",
+        "lai_proxy": 5.0,
+        "biomass_proxy": 4.815,
+        "sm_0_10": 0.7108,
+        "sm_10_40": 0.9357,
+        "canopy_stress": 0,
+        "phenology_gdd": 178.5,
+        "phenology_stage": 0,
+        "stress_thermal": 0
+      },
+      "last_day": "2026-04-20"
+    }
+  },
+  "validation": {
+    "source_reliability": {
+      "sentinel2": 1.0,
+      "sentinel1": 1.0,
+      "weather": 1.0,
+      "sensor": 1.0,
+      "user": 1.0,
+      "camera": 1.0
+    },
+    "zone_reliability": {
+      "plot": {
+        "sentinel2": 1.0,
+        "sentinel1": 1.0,
+        "weather": 1.0,
+        "sensor": 1.0,
+        "user": 1.0,
+        "camera": 1.0
+      }
+    },
+    "obs_reliability": {},
+    "violation_counts": {
+      "sentinel2": 0,
+      "sentinel1": 0,
+      "weather": 0,
+      "sensor": 0,
+      "user": 0,
+      "camera": 0
+    },
+    "history_len": 15
+  },
+  "metadata": {}
+}

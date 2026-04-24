@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Tuple
+from typing import Tuple, Optional
 from datetime import datetime, timedelta
 import re
 
@@ -56,10 +56,17 @@ def detect_intent(query: str, has_context: bool = False) -> Intent:
     if any(k in q for k in ["did you do", "did it finish", "task status", "execution", "plan status", "completed"]):
         return Intent.EXECUTION_STATUS
 
-    # 3) GENERAL (concept learning) — only if NOT about their field
+    # 3) GENERAL (concept learning) — Explicit Educational/Definition Queries
+    # We want these to trigger even IF the user is in a plot chat.
+    # We only avoid it if they explicitly ask about *their* field's metrics.
     general_patterns = ["what is", "explain", "meaning of", "how does", "difference between", "define"]
-    general_topics = ["ndvi", "sar", "vv", "vh", "et0", "gdd", "ph", "ec", "salinity", "nitrogen", "fungal", "irrigation"]
-    if any(p in q for p in general_patterns) and any(t in q for t in general_topics) and not has_field:
+    general_topics = ["ndvi", "sar", "vv", "vh", "et0", "gdd", "ph", "ec", "salinity", "nitrogen", "fungal", "irrigation", "phosphorus", "potassium", "fertilizer", "disease", "pest"]
+    
+    is_general_question = any(p in q for p in general_patterns) and any(t in q for t in general_topics)
+    # If they say "what is ndvi in my field", that's DATA_QUERY/DIAGNOSIS, not GENERAL.
+    is_explicit_my_field = _has_field_context(q) or ("my field" in q) or ("my plot" in q)
+    
+    if is_general_question and not is_explicit_my_field:
         return Intent.GENERAL
 
     # 4.5) DECISION (actionable) — should we do X?
@@ -72,22 +79,40 @@ def detect_intent(query: str, has_context: bool = False) -> Intent:
         return Intent.DECISION
 
     # 5) DATA_QUERY (observations/metrics about their field)
-    data_keywords = ["how much", "show me", "history", "graph", "trend", "last month", "this month", "last week", "yesterday"]
-    data_metrics = ["rain", "temp", "weather", "precipitation", "ndvi", "moisture", "vv", "vh", "sar"]
+    data_keywords = ["how much", "show me", "history", "graph", "trend", "last month", "this month", "last week", "yesterday",
+                     "is it", "will it", "did it", "was there", "today", "current", "right now", "forecast", "how is the weather",
+                     "how about", "what about", "check", "tell me", "what is the", "how is", "any", "this week", "this season"]
+    data_metrics = ["rain", "raining", "temp", "temperature", "weather", "precipitation", "ndvi", "moisture", "vv", "vh", "sar",
+                    "wind", "frost", "humidity", "et0", "evapotranspiration", "cloud", "sun", "hot", "cold",
+                    "soil", "clay", "sand", "silt", "ph", "organic", "texture", "nitrogen", "carbon"]
     if any(k in q for k in data_keywords) and any(m in q for m in data_metrics):
         # only treat as DATA_QUERY if it is about their field (or implied field context)
-        return Intent.DATA_QUERY if has_field or any(k in q for k in ["last month", "this month", "last week", "yesterday"]) else Intent.GENERAL
+        return Intent.DATA_QUERY if has_field or any(k in q for k in ["last month", "this month", "last week", "yesterday", "today", "right now", "forecast", "this week", "this season"]) else Intent.GENERAL
 
     # 6) DIAGNOSIS (health check)
-    diag_keywords = ["problem", "issue", "risk", "stress", "health", "disease", "pest", "fungal", "yellow", "bug", "status", "how is my field"]
-    if any(k in q for k in diag_keywords) or (len(words) <= 6 and has_field):
+    diag_keywords = [
+        "problem", "issue", "risk", "stress", "health", "disease", "pest", "fungal", "yellow", "bug", "status", 
+        "how is my field", "how is the plot", "how is my plot", "how is the field"
+    ]
+    if any(k in q for k in diag_keywords) or (len(words) <= 8 and has_field):
         return Intent.DIAGNOSIS
 
     # safer default
-    return Intent.GENERAL if not has_field else Intent.DIAGNOSIS
+    # If they are just chatting generally without specific action/data keywords, default to GENERAL
+    if not has_field:
+        return Intent.GENERAL
+        
+    # If they have a field, it's safer to assume a short question ("how is the plot?") is targeted at the plot 
+    # and should be DIAGNOSIS. Only treat as GENERAL if they use explicit GENERAL conversational keywords 
+    # ("what is X", "explain Y").
+    general_trigger = any(q.startswith(w) for w in ["what is ", "who ", "define ", "explain ", "meaning "])
+    if general_trigger and len(words) < 8:
+        return Intent.GENERAL
+        
+    return Intent.DIAGNOSIS
 
 
-def resolve_time_window(query: str, ref_date: datetime = None) -> Tuple[datetime, datetime]:
+def resolve_time_window(query: str, ref_date: Optional[datetime] = None) -> Tuple[datetime, datetime]:
     if not ref_date:
         ref_date = datetime.now()
     q = (query or "").lower()
@@ -101,8 +126,20 @@ def resolve_time_window(query: str, ref_date: datetime = None) -> Tuple[datetime
     if "this month" in q:
         start = ref_date.replace(day=1)
         return start, ref_date
+        
+    if "this season" in q:
+        return ref_date - timedelta(days=90), ref_date
+        
+    if "last season" in q:
+        return ref_date - timedelta(days=180), ref_date - timedelta(days=90)
+        
+    if any(k in q for k in ["past 30 days", "last 30 days"]):
+        return ref_date - timedelta(days=30), ref_date
 
-    if "last week" in q:
+    if any(k in q for k in ["last week", "past 7 days", "last 7 days"]):
+        return ref_date - timedelta(days=7), ref_date
+        
+    if "this week" in q:
         return ref_date - timedelta(days=7), ref_date
 
     if "yesterday" in q:

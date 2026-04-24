@@ -4,7 +4,6 @@ import { useState } from "react";
 import Link from "next/link";
 import { useParams, usePathname } from "next/navigation";
 import { 
-  Menu, 
   X, 
   Layers,
   LayoutDashboard, 
@@ -13,6 +12,7 @@ import {
   Brain, 
   Headset 
 } from "lucide-react";
+import { useLayer10 } from "@/hooks/useLayer10";
 
 export default function FloatingActionMenu() {
   const [isOpen, setIsOpen] = useState(false);
@@ -33,15 +33,17 @@ export default function FloatingActionMenu() {
     { label: "Live Assistance", icon: <Headset size={20} />, href: `${baseUrl}/live-assistance` },
   ];
 
-  if (!farmId || !plotId) return null;
+  const { isDecideMode } = useLayer10();
+
+  if (!farmId || !plotId || isDecideMode) return null;
 
   return (
-    <div className="fixed bottom-24 left-6 z-50 flex flex-col items-start gap-4">
+    <div className="fixed bottom-32 right-6 z-50 flex flex-col items-end gap-3 pointer-events-none">
       
       {/* Menu Items Container */}
       <div 
         className={`
-          flex flex-col-reverse gap-3 transition-all duration-300 ease-in-out origin-bottom-left
+          flex flex-col-reverse gap-2 transition-all duration-300 ease-in-out origin-bottom-right
           ${isOpen ? "opacity-100 scale-100 translate-y-0" : "opacity-0 scale-95 translate-y-4 pointer-events-none"}
         `}
       >
@@ -53,17 +55,17 @@ export default function FloatingActionMenu() {
               href={item.href}
               onClick={() => setIsOpen(false)}
               className={`
-                group flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border transition-all hover:scale-105 active:scale-95
+                pointer-events-auto group flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl shadow-lg border transition-all active:scale-95
                 ${isActive 
-                  ? "bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400" 
-                  : "bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700"
+                  ? "bg-white/10 border-white/15 text-white" 
+                  : "bg-[#0B1015]/80 backdrop-blur-xl text-slate-300 border-white/8 hover:bg-white/10 hover:text-white"
                 }
               `}
             >
-              <span className={`transition-transform group-hover:scale-110 ${isActive ? "text-emerald-600 dark:text-emerald-400" : "text-blue-600 dark:text-blue-400"}`}>
+              <span className={`transition-transform ${isActive ? "text-emerald-400" : "text-slate-400 group-hover:text-slate-200"}`}>
                 {item.icon}
               </span>
-              <span className="font-semibold text-sm whitespace-nowrap">
+              <span className="font-medium text-sm whitespace-nowrap">
                 {item.label}
               </span>
             </Link>
@@ -71,19 +73,19 @@ export default function FloatingActionMenu() {
         })}
       </div>
 
-      {/* Main Toggle Button (FAB) */}
+      {/* Main Toggle — subdued glass pill */}
       <button
         onClick={() => setIsOpen(!isOpen)}
         className={`
-          flex items-center justify-center w-20 h-20 rounded-full shadow-2xl transition-all duration-300 transform hover:scale-110 active:scale-95 z-50
+          pointer-events-auto flex items-center justify-center w-11 h-11 rounded-xl shadow-lg transition-all duration-300 transform active:scale-95
           ${isOpen 
-            ? "bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 rotate-90" 
-            : "bg-emerald-600 hover:bg-emerald-700 text-white rotate-0 ring-4 ring-emerald-600/30"
+            ? "bg-white/15 backdrop-blur-xl text-white border border-white/15 rotate-90 opacity-100 scale-100" 
+            : "bg-[#0B1015]/70 backdrop-blur-xl text-slate-400 hover:text-white border border-white/8 hover:bg-white/20 rotate-0 opacity-40 hover:opacity-100 scale-90 hover:scale-100"
           }
         `}
         aria-label="Toggle Menu"
       >
-        {isOpen ? <X size={32} /> : <Layers size={32} />}
+        {isOpen ? <X size={18} /> : <Layers size={18} />}
       </button>
 
     </div>

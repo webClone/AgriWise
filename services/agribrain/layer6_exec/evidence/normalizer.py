@@ -1,7 +1,7 @@
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List
 
 from services.agribrain.layer6_exec.schema import (
@@ -38,7 +38,7 @@ def normalize_evidence_batch(
                 print(f"Skipping unknown evidence type: {raw_type}")
                 continue
                 
-            ts = item.get("timestamp") or datetime.utcnow().isoformat()
+            ts = item.get("timestamp") or datetime.now(timezone.utc).isoformat()
             payload = item.get("payload", {})
             refs = item.get("source_refs", {})
             

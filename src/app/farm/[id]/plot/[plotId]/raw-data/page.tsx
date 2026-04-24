@@ -12,6 +12,7 @@ import PlotSARPanel from "@/components/farm/PlotSARPanel";
 import PlotRainfallHistoryPanel from "@/components/farm/PlotRainfallHistoryPanel";
 import PlotWaterStressPanel from "@/components/farm/PlotWaterStressPanel";
 import PlotLandCoverPanel from "@/components/farm/PlotLandCoverPanel";
+import PlotRawMetricsPanel from "@/components/farm/PlotRawMetricsPanel";
 import MasonryGrid from "@/components/ui/MasonryGrid";
 
 export default async function RawDataPage({ params }: { params: Promise<{ id: string; plotId: string }> }) {
@@ -71,6 +72,11 @@ export default async function RawDataPage({ params }: { params: Promise<{ id: st
 
         {/* ROW 3: MASONRY GRID (Automatic Packing for Remaining Widgets) */}
         <MasonryGrid>
+
+            {/* NEW: Deep Telemetry & Anomalies (Ticket 14) */}
+            <div className="h-full">
+                <PlotRawMetricsPanel />
+            </div>
 
             {/* 1. Land Cover (Priority: High, Visual) */}
             <div className="h-full">

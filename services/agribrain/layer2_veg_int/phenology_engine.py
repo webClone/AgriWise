@@ -5,7 +5,7 @@ Infers the biological stage of the crop based on the Growth Curve and GDD.
 Algorithm: Rule-Based Bayesian Filter (Simplified HMM).
 """
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from services.agribrain.layer2_veg_int.schema import PhenologyStage
 
 class PhenologyEngine:

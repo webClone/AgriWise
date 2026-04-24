@@ -1,2 +1,3 @@
 {"timestamp": "2026-02-06T14:28:15.093456", "type": "plot_registered", "farm_id": "test-farm-001", "plot_id": "test-plot-001", "coordinates": {"lat": 36.5667, "lng": 2.9167}, "crop": "tomato", "area": 2.5}
 {"timestamp": "2026-02-06T14:53:47.700558", "type": "plot_registered", "farm_id": "697ddd3bd4195b809226a67d", "plot_id": "6985f26b18f6b36fe2ff9c08", "coordinates": {"lat": 33.5493858, "lng": 6.879555399999999}, "crop": "SANDY", "area": 0.46}
+{"timestamp": "2026-04-14T16:50:24.394438", "type": "plot_registered", "farm_id": "697ddd3bd4195b809226a680", "plot_id": "69de624047f8c01c4979d381", "coordinates": {"lat": 36.61948112499999, "lng": 2.9713791250000003}, "crop": "CLAY", "area": 42.08}

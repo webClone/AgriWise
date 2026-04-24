@@ -2,7 +2,7 @@
 import json
 import os
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 MEMORY_DIR = "data/memory"
 PROFILES_DIR = os.path.join(MEMORY_DIR, "plots")
@@ -39,7 +39,7 @@ class MemoryStore:
             "irrigation": {"system": "Unknown", "flow_known": False},
             "farmer_prefs": {"style": "tutor", "units": "metric"},
             "observations": [], # List of {date, observation}
-            "last_updated": datetime.utcnow().isoformat()
+            "last_updated": datetime.now(timezone.utc).isoformat()
         }
         
     def update_profile(self, plot_id: str, updates: Dict[str, Any]):
@@ -58,7 +58,7 @@ class MemoryStore:
              # Assume updates["observations"] is a list of NEW observations
              profile["observations"].extend(updates["observations"])
              
-        profile["last_updated"] = datetime.utcnow().isoformat()
+        profile["last_updated"] = datetime.now(timezone.utc).isoformat()
         
         with open(self._get_profile_path(plot_id), "w") as f:
             json.dump(profile, f, indent=2)
@@ -79,7 +79,7 @@ class MemoryStore:
             "conversation_id": conversation_id,
             "turns": [], # List of {user, assistant, timestamp}
             "summary": "",
-            "started_at": datetime.utcnow().isoformat()
+            "started_at": datetime.now(timezone.utc).isoformat()
         }
         
     def append_turn(self, conversation_id: str, user_query: str, assistant_response: Dict[str, Any]):
@@ -89,7 +89,7 @@ class MemoryStore:
         """
         session = self.get_session(conversation_id)
         turn = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "user": user_query,
             "assistant": assistant_response # Structured
         }

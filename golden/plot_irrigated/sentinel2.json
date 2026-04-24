@@ -1,0 +1,74 @@
+[
+  {
+    "day": "2024-03-01",
+    "ndvi": 0.347,
+    "ndmi": 0.217,
+    "cloud_probability": 0.05,
+    "valid_fraction": 0.95,
+    "is_cloudy": false
+  },
+  {
+    "day": "2024-03-06",
+    "ndvi": 0.424,
+    "ndmi": 0.235,
+    "cloud_probability": 0.05,
+    "valid_fraction": 0.95,
+    "is_cloudy": false
+  },
+  {
+    "day": "2024-03-11",
+    "ndvi": 0.457,
+    "ndmi": 0.227,
+    "cloud_probability": 0.05,
+    "valid_fraction": 0.95,
+    "is_cloudy": false
+  },
+  {
+    "day": "2024-03-16",
+    "ndvi": 0.334,
+    "ndmi": 0.252,
+    "cloud_probability": 0.8,
+    "valid_fraction": 0.2,
+    "is_cloudy": true
+  },
+  {
+    "day": "2024-03-21",
+    "ndvi": 0.591,
+    "ndmi": 0.289,
+    "cloud_probability": 0.05,
+    "valid_fraction": 0.95,
+    "is_cloudy": false
+  },
+  {
+    "day": "2024-03-26",
+    "ndvi": 0.65,
+    "ndmi": 0.292,
+    "cloud_probability": 0.05,
+    "valid_fraction": 0.95,
+    "is_cloudy": false
+  },
+  {
+    "day": "2024-03-31",
+    "ndvi": 0.423,
+    "ndmi": 0.315,
+    "cloud_probability": 0.8,
+    "valid_fraction": 0.2,
+    "is_cloudy": true
+  },
+  {
+    "day": "2024-04-05",
+    "ndvi": 0.806,
+    "ndmi": 0.317,
+    "cloud_probability": 0.05,
+    "valid_fraction": 0.95,
+    "is_cloudy": false
+  },
+  {
+    "day": "2024-04-10",
+    "ndvi": 0.826,
+    "ndmi": 0.357,
+    "cloud_probability": 0.05,
+    "valid_fraction": 0.95,
+    "is_cloudy": false
+  }
+]

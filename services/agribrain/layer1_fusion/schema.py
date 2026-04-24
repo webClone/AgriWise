@@ -125,18 +125,48 @@ class FieldTensor:
     #       or np.ndarray (if available)
     data: Any = field(default_factory=list)
     
+    # --- SPATIAL EXTENSIONS ---
+    grid: Dict[str, Any] = field(default_factory=dict) # cells: id, centroid, area, mask
+    maps: Dict[str, Any] = field(default_factory=dict) # variable -> raster_ref/array
+    zones: Dict[str, Any] = field(default_factory=dict) # zone_id -> polygon/mask + area_pct + label
+    
     # Metadata & Provenance
     provenance: Dict[str, Any] = field(default_factory=dict) # Lineage graph
     static: Dict[str, Any] = field(default_factory=dict) # Unchanging field props
 
     # Compatibility View (Layer 1 Legacy)
     plot_timeseries: List[Dict] = field(default_factory=list)
+    zone_stats: Dict[str, Any] = field(default_factory=dict) # variable -> {zone_id -> timeseries}
     
     # Forward-Looking Models
     forecast_7d: List[Dict] = field(default_factory=list)
     
+    # ==========================================================================
+    # LAYER 0 OUTPUTS — Daily State Estimation
+    # ==========================================================================
+    
+    # Per-zone daily estimated state vector
+    # Structure: { "zone_a": [ {day: "2024-01-01", lai: 1.2, sm_0_10: 0.3, ...}, ... ] }
+    daily_state: Dict[str, List[Dict]] = field(default_factory=dict)
+    
+    # Per-zone daily uncertainty (sigma per variable per day)
+    # Structure: { "zone_a": [ {day: "2024-01-01", lai: 0.15, sm_0_10: 0.05, ...}, ... ] }
+    state_uncertainty: Dict[str, List[Dict]] = field(default_factory=dict)
+    
+    # Source contribution log (who contributed what per day)
+    # Structure: [ {day: "2024-01-01", sources: {s2: 0.6, s1: 0.3, weather: 0.1}, conflicts: [...]} ]
+    provenance_log: List[Dict] = field(default_factory=list)
+    
+    # Per-pixel spatial reliability map (latest snapshot)
+    # Structure: { "reliability": [[...]], "last_valid_obs": [[...]] }
+    spatial_reliability: Dict[str, Any] = field(default_factory=dict)
+    
+    # Plot boundary metadata
+    # Structure: { "confidence": 0.85, "source": "user_drawn", "alpha_summary": {...} }
+    boundary_info: Dict[str, Any] = field(default_factory=dict)
+    
     def to_json(self):
-        return {
+        result = {
             "plot_id": self.plot_id,
             "run_id": self.run_id,
             "version": self.version,
@@ -145,11 +175,27 @@ class FieldTensor:
             "time_index": self.time_index,
             "grid_spec": self.grid_spec.to_dict(),
             "static": self.static,
+            "grid": self.grid,
+            "zones": self.zones,
+            "zone_stats": self.zone_stats,
             # "data": self.data, # WARNING: Too large to dump in full JSON usually
+            # "maps": self.maps, # WARNING: Too large to dump in full JSON
             "plot_timeseries": self.plot_timeseries, # Return the summary view by default
             "forecast_7d": self.forecast_7d,
-            "provenance": self.provenance
+            "provenance": self.provenance,
         }
+        # Layer 0 outputs (if populated by Kalman engine)
+        if self.daily_state:
+            result["daily_state"] = self.daily_state
+        if self.state_uncertainty:
+            result["state_uncertainty"] = self.state_uncertainty
+        if self.provenance_log:
+            result["provenance_log"] = self.provenance_log
+        if self.boundary_info:
+            result["boundary_info"] = self.boundary_info
+        if self.spatial_reliability:
+            result["spatial_reliability"] = self.spatial_reliability
+        return result
 
     def get_shape(self) -> List[int]:
         """Returns [T, H, W, C]"""
@@ -173,11 +219,17 @@ class FusionOutput:
     evidence_summary: List[Dict] # Summary of used inputs
     validation_report: Dict[str, Any] # Issues, warnings, health score
     logs: List[Dict] = field(default_factory=list) # Lineage Events
+    observation_products: Optional[Dict[str, Any]] = None  # Perception bundle output
+    raster_composites: Optional[Dict[str, Any]] = None     # Raster grids from Process API
     
     def to_json(self):
-        return {
+        result = {
             "tensor": self.tensor.to_json(),
             "evidence_summary": self.evidence_summary,
             "validation_report": self.validation_report,
             "logs": self.logs
         }
+        if self.observation_products:
+            result["observation_products"] = self.observation_products
+        return result
+

@@ -1,6 +1,6 @@
 
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from services.agribrain.layer6_exec.schema import (
     OutcomeMetric, OutcomeMetricId, CausalMethod, ExecutionState, TaskStatus
@@ -27,7 +27,7 @@ def compute_outcomes(
     
     for task in interventions:
         # Determine execution date from logs
-        exec_dt = datetime.utcnow() # Fallback
+        exec_dt = datetime.now(timezone.utc) # Fallback
         
         for log in reversed(state.logs):
             msg = log.get("msg", "")

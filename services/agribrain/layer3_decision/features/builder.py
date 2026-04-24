@@ -250,4 +250,4 @@ def build_decision_features(
 
 def _empty_features():
     # Use empty list for missing inputs
-    return DecisionFeatures(0,0,0,0,"UNKNOWN",0,0,0,0,False,0,"NONE",0,0,0,"UNKNOWN",0, False, False, False, False, [], 0, 0, 0, 0, 0)
+    return DecisionFeatures(0,0,0,0,"UNKNOWN",0,0,0,0,False,0,"NONE",0,0,0,"UNKNOWN",0, False, False, False, False, False, [], 0, 0, 0, 0, 0)

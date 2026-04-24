@@ -4,7 +4,7 @@ Layer 1.1.2: Validation & Trust System.
 Implements the 'Trust System' to flag or reject data before fusion.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 from ..schema import EvidenceItem, ValidationStatus, EvidenceSourceType
 

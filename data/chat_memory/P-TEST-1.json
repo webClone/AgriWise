@@ -1,0 +1,39 @@
+{
+  "experience_level": "INTERMEDIATE",
+  "language_preference": "EN",
+  "units": "metric",
+  "known_context": {},
+  "last_questions": [
+    "how is my field",
+    "how is my field",
+    "how is my field",
+    "how is my field",
+    "how is my field",
+    "how is my field",
+    "how is my field",
+    "how is my field",
+    "how is my field",
+    "how is my field"
+  ],
+  "last_diagnoses_shown": [],
+  "asked_followups": [
+    "Have you noticed any recent changes in the field environment, such as unusual weather patterns or soil conditions?",
+    "Have you checked the soil moisture levels recently?",
+    "Have you observed any changes in soil texture or structure recently?",
+    "Have you noticed any signs of pests or diseases in the field recently?",
+    "What is the current soil temperature in your field?",
+    "What is the current soil temperature in your field?",
+    "Have you noticed any changes in soil texture or structure recently?",
+    "What is the current soil moisture at 10cm depth in your field?",
+    "What is the current soil temperature at 10cm depth in your field?",
+    "What is the current soil texture or structure like?",
+    "What is the current soil temperature at 10cm depth in your field?",
+    "What is the current soil moisture at 10cm depth in your field?",
+    "What is the current soil texture or structure like?",
+    "What is the current soil temperature at 10cm depth in your field?",
+    "What is the current soil moisture at 10cm depth in your field?",
+    "What is the current soil texture or structure like?",
+    "What is the current soil temperature at 10cm depth in your field?"
+  ],
+  "open_loops": []
+}

@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description="Orchestrator v2 Chat Entrypoint")
     parser.add_argument("--context", type=str, required=True, help="JSON context from Node.js")
     parser.add_argument("--query", type=str, help="User query (unused by strict orchestrator, but kept for compat)")
+    parser.add_argument("--history", type=str, default="", help="Base64-encoded chat history for multi-turn memory")
     parser.add_argument("--exp", type=str, default="INTERMEDIATE", help="Farmer experience level")
     parser.add_argument("--cid", type=str, default="local_dev_session", help="Conversation ID")
     
@@ -45,8 +46,9 @@ def main():
             arf = ARFResponse(
                 headline="Hi 👋 I am AgriBrain.",
                 direct_answer="I can help with crop health, irrigation decisions, pests/disease risk, and rainfall summaries.",
-                reliability_badge="HIGH",
-                reliability_reason="System online.",
+                suitability_score="N/A",
+                confidence_badge="HIGH",
+                confidence_reason="System online.",
                 what_it_means="I am ready to analyze your field data context.",
                 reasoning_cards=[],
                 recommendations=[],
@@ -115,8 +117,9 @@ def main():
                 {{
                     "headline": "Brief title of the topic",
                     "direct_answer": "Clear, direct answer to the user's question",
-                    "reliability_badge": "HIGH",
-                    "reliability_reason": "General established agronomic knowledge",
+                    "suitability_score": "N/A",
+                    "confidence_badge": "HIGH",
+                    "confidence_reason": "General established agronomic knowledge",
                     "what_it_means": "Why this concept is important in farming",
                     "reasoning_cards": [],
                     "recommendations": [

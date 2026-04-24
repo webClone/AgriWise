@@ -7,6 +7,7 @@ Supports degradation to Pure Python if Pandas/Numpy are missing.
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import sys
+import os
 from pathlib import Path
 import hashlib  # deterministic IDs / noise
 import random  # kept, but we will make spatial noise deterministic
@@ -49,6 +50,19 @@ except ImportError:
     correction_engine = None
     trust_system = None
 
+# Layer 0: Data Assimilation Engine
+try:
+    from services.agribrain.layer0.kalman_engine import (
+        DailyAssimilationEngine, KalmanObservation
+    )
+    from services.agribrain.layer0.validation_graph import ValidationGraph
+    from services.agribrain.layer0.monitoring import run_audit as layer0_audit
+    from services.agribrain.layer0.invariants import enforce_all_invariants
+    from services.agribrain.layer0.state_persistence import save_engine_state
+    HAS_LAYER0 = True
+except ImportError:
+    HAS_LAYER0 = False
+
 
 class DataFusionEngine:
     """
@@ -66,7 +80,9 @@ class DataFusionEngine:
         lat: float,
         lng: float,
         start_date: str,
-        end_date: str
+        end_date: str,
+        polygon_coords: Optional[list] = None,
+        user_evidence: Optional[list] = None
     ) -> FusionOutput:
 
         # --- Step 0: Initialize Provenance ---
@@ -83,7 +99,59 @@ class DataFusionEngine:
         print(f"🔄 [Layer 1] Starting Production Fusion Run: {run_id} ({mode} Mode)")
 
         # --- Step 1: Acquire Evidence (Catalog) ---
-        evidence_pool, acquisition_snapshot = self._acquire_all_evidence(lat, lng, start_date, end_date)
+        evidence_pool, acquisition_snapshot = self._acquire_all_evidence(lat, lng, start_date, end_date, polygon_coords)
+        
+        # --- Step 1.5: Perception Adapter (Layer 0 Handoff) ---
+        perception_bundle = None
+        try:
+            from services.agribrain.layer1_fusion.perception_adapter import build_perception_bundle, ObservationSourceType as PObsSource
+            
+            # Separate user evidence into typed buckets for the perception adapter
+            raw_photos = []
+            raw_soil = []
+            raw_sensors = []
+            for item in (user_evidence or []):
+                src = (item.get("source_type") or "").lower()
+                if src in ("photo", "drone", "ip_camera", "camera", "image"):
+                    raw_photos.append(item.get("payload", item))
+                elif src in ("soil_analysis", "soil", "lab"):
+                    raw_soil.append(item.get("payload", item))
+                elif src in ("sensor", "iot", "weather_station"):
+                    raw_sensors.append(item.get("payload", item))
+            
+            perception_bundle = build_perception_bundle(
+                photos=raw_photos or None,
+                soil_analyses=raw_soil or None,
+                sensors=raw_sensors or None,
+            )
+            
+            obs_count = len(perception_bundle.observation_products)
+            spatial_count = len(perception_bundle.spatially_supported_observations)
+            print(f"🔬 [Layer 0] Perception bundle: {obs_count} observations ({spatial_count} spatially supported)")
+        except Exception as e:
+            print(f"⚠️ [Layer 0] Perception adapter skipped: {e}")
+        
+        # Merge structured user evidence down from Orchestrator Layer
+        if user_evidence:
+            from services.agribrain.layer1_fusion.schema import EvidenceItem, EvidenceSourceType
+            from datetime import datetime
+            for item in user_evidence:
+                try:
+                    ts_str = item.get("timestamp")
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                    except:
+                        ts = datetime.now()
+                    
+                    evidence_pool.append(EvidenceItem(
+                        id=str(item.get("id")),
+                        source_type=EvidenceSourceType(item.get("source_type")),
+                        timestamp=ts,
+                        location_scope=item.get("location_scope", "point"),
+                        payload=item.get("payload", {})
+                    ))
+                except Exception as e:
+                    print(f"⚠️ Failed to parse user evidence item: {e}")
 
         tracker.log_event(
             "ACQUIRED_EVIDENCE",
@@ -122,11 +190,66 @@ class DataFusionEngine:
         # 6. Weather Fusion MUST occur before spatial tensor building so precip exists in tensor channels
         self._merge_weather_into_records(daily_records, valid_evidence)
 
+        # =====================================================================
+        # LAYER 0: Daily State Assimilation (Kalman Engine)
+        # Replaces "interpolated indices" with uncertainty-aware daily states.
+        # Runs AFTER evidence collection & weather merge, BEFORE spatial fusion.
+        # =====================================================================
+        if HAS_LAYER0:
+            try:
+                self._run_layer0_assimilation(
+                    tensor, valid_evidence, daily_records,
+                    start_date, end_date, tracker
+                )
+                print(f"✅ [Layer 0] Daily state assimilation complete: "
+                      f"{len(tensor.daily_state)} zones")
+            except Exception as e:
+                print(f"⚠️ [Layer 0] Assimilation failed, falling back to interpolation: {e}")
+        # =====================================================================
+
         # Attach plot timeseries
         tensor.plot_timeseries = daily_records
 
+        # --- Step 4.5: Raster Composites (Spatial Surfaces Patch 2) ---
+        # Fetch real pixel grids here so Step 5 can inject them into the tensor.
+        raster_composites = None
+        if polygon_coords or (lat and lng):
+            try:
+                from services.agribrain.eo.sentinel import (
+                    fetch_ndvi_raster_composite, fetch_ndmi_raster_composite,
+                    fetch_sar_raster_composite, fetch_quality_mask,
+                )
+                composites = {}
+                ndvi_r = fetch_ndvi_raster_composite(lat, lng, start_date, end_date, polygon_coords)
+                if ndvi_r and ndvi_r.get("valid_pixel_count", 0) > 0:
+                    composites["NDVI"] = ndvi_r
+                ndmi_r = fetch_ndmi_raster_composite(lat, lng, start_date, end_date, polygon_coords)
+                if ndmi_r and ndmi_r.get("valid_pixel_count", 0) > 0:
+                    composites["NDMI"] = ndmi_r
+                sar_r = fetch_sar_raster_composite(lat, lng, start_date, end_date, polygon_coords)
+                if sar_r and sar_r.get("valid_pixel_count", 0) > 0:
+                    composites["SAR"] = sar_r
+                qm = fetch_quality_mask(lat, lng, start_date, end_date, polygon_coords)
+                if qm and qm.get("valid_pixel_count", 0) > 0:
+                    composites["QUALITY"] = qm
+                if composites:
+                    raster_composites = composites
+                    self._pending_raster_composites = composites  # Hand off to _perform_spatial_fusion
+                    print(f"🛰️ [Layer 1] Raster composites acquired: {list(composites.keys())}")
+                else:
+                    print(f"⚠️ [Layer 1] No valid raster composites for this window")
+            except Exception as e:
+                print(f"⚠️ [Layer 1] Raster composite acquisition skipped: {e}")
+
         # 5. Spatial Fusion (build tensor.data from daily_records — now includes rain)
-        self._perform_spatial_fusion(tensor, daily_records, run_id=run_id)
+        self._perform_spatial_fusion(
+            tensor=tensor, 
+            daily_records=daily_records, 
+            lat=lat, 
+            lng=lng, 
+            polygon_coords=polygon_coords, 
+            run_id=run_id
+        )
 
         # 7. Static Layers
         self._merge_static(tensor, valid_evidence)
@@ -157,11 +280,27 @@ class DataFusionEngine:
 
         print(f"✅ [Layer 1] Fusion Complete. Run ID: {run_id}")
 
+        # Serialize perception bundle for downstream layers
+        obs_products = None
+        if perception_bundle:
+            from dataclasses import asdict
+            try:
+                obs_products = {
+                    "plot_level": [asdict(o) for o in perception_bundle.plot_level_observations],
+                    "spatially_supported": [asdict(o) for o in perception_bundle.spatially_supported_observations],
+                    "total_count": len(perception_bundle.observation_products),
+                    "has_row_features": perception_bundle.row_features is not None and perception_bundle.row_features.confidence > 0,
+                }
+            except Exception as e:
+                print(f"⚠️ [Layer 0] Observation product serialization failed: {e}")
+
         return FusionOutput(
             tensor=tensor,
             evidence_summary=summary,
             validation_report=report,
-            logs=tracker.export_lineage()
+            logs=tracker.export_lineage(),
+            observation_products=obs_products,
+            raster_composites=raster_composites,
         )
 
     # ------------------------------------------------------------------------
@@ -209,7 +348,7 @@ class DataFusionEngine:
             raw = repr(payload).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:12]
 
-    def _acquire_all_evidence(self, lat: float, lng: float, start: str, end: str) -> tuple[List["EvidenceItem"], Dict[str, Any]]:
+    def _acquire_all_evidence(self, lat: float, lng: float, start: str, end: str, polygon_coords: Optional[list] = None) -> tuple[List["EvidenceItem"], Dict[str, Any]]:
         pool: List[EvidenceItem] = []
         snapshot: Dict[str, Any] = {"sar": {}, "optical": {}, "weather": {}}
 
@@ -218,7 +357,7 @@ class DataFusionEngine:
 
         # 1. Optical (Sentinel-2)
         try:
-            opt_resp = fetch_ndvi_timeseries(lat, lng)
+            opt_resp = fetch_ndvi_timeseries(lat, lng, polygon_coords=polygon_coords)
             opt_raw = opt_resp.get("data", []) or []
             snapshot["optical"] = {
                 "status": "OK",
@@ -248,7 +387,7 @@ class DataFusionEngine:
         sar_days = max(1, (end_dt - start_dt).days + 1)
         
         try:
-            sar_resp = fetch_sar_timeseries(lat, lng, days=sar_days) or {}
+            sar_resp = fetch_sar_timeseries(lat, lng, days=sar_days, polygon_coords=polygon_coords) or {}
             sar_raw = sar_resp.get("timeseries", []) or sar_resp.get("data", []) or []  # accept both shapes
             
             snapshot["sar"] = {
@@ -341,13 +480,15 @@ class DataFusionEngine:
         # 4. Forecast (Open-Meteo)
         try:
             forecast_raw = fetch_openweather_forecast(lat, lng)
-            snapshot["forecast"] = {"status": "OK", "count": len(forecast_raw)} if forecast_raw else {"status": "EMPTY"}
+            fc_list = forecast_raw.get("forecast", []) if forecast_raw else []
+            snapshot["forecast"] = {"status": "OK", "count": len(fc_list)} if fc_list else {"status": "EMPTY"}
         except Exception as e:
             forecast_raw = []
+            fc_list = []
             snapshot["forecast"] = {"status": "ERROR", "error": str(e)}
 
-        if forecast_raw:
-            for i, day_fc in enumerate(forecast_raw):
+        if fc_list:
+            for i, day_fc in enumerate(fc_list):
                 pool.append(EvidenceItem(
                     id=f"wx_fc_{day_fc.get('date', i)}",
                     source_type=EvidenceSourceType.WEATHER_FORECAST,
@@ -446,10 +587,21 @@ class DataFusionEngine:
         df["uncertainty"] = 0.1
         df.loc[~df["is_observed"], "uncertainty"] = 0.5
 
-        # Prepare records
+        # Prepare records — sanitize any remaining NaN before serialization
+        # After interpolation + bfill/ffill, NaN only persists when an entire column
+        # has zero observations. Replace those with safe defaults (0.0).
+        nan_cols = ["ndvi_mean", "ndvi_interpolated", "ndvi_smoothed",
+                    "vv", "vh", "vv_interpolated", "vh_interpolated", "coverage"]
+        for col in nan_cols:
+            if col in df.columns:
+                df[col] = df[col].fillna(0.0)
+
         df = df.reset_index()
         df["date"] = df["date"].dt.strftime("%Y-%m-%d")
-        return df.to_dict("records")
+
+        # Final defense: convert any straggling NaN/NaT to None for JSON safety
+        records = df.where(df.notna(), None).to_dict("records")
+        return records
 
     def _perform_temporal_fusion_pure(self, date_strs: List[str], evidence: List["EvidenceItem"]) -> List[Dict]:
         """Pure Python implementation using lists. Fuses optical + SAR (plot-level)."""
@@ -577,7 +729,7 @@ class DataFusionEngine:
 
         return records
 
-    def _perform_spatial_fusion(self, tensor: "FieldTensor", daily_records: List[Dict], run_id: str):
+    def _perform_spatial_fusion(self, tensor: "FieldTensor", daily_records: List[Dict], lat: float, lng: float, polygon_coords: Optional[list] = None, run_id: str = ""):
         """
         Step 5: Generate 4D Tensor Data [T, H, W, C] using Raster Backend.
 
@@ -595,11 +747,25 @@ class DataFusionEngine:
             backend = TileStoreBackend()
             print("⚠️ [Spatial] Rasterio not found. Using TileStoreBackend (Restricted Mode)")
 
-        # Create GridSpec from Plot Geometry (still mocked here; replace with real polygon by plot_id in your repo)
-        mock_polygon = [
-            (3.05, 36.75), (3.051, 36.75), (3.051, 36.751), (3.05, 36.751), (3.05, 36.75)
-        ]
-        tensor.grid_spec = backend.create_grid(mock_polygon, resolution_m=10.0)
+        # Create GridSpec from Plot Geometry or generate a fallback bbox
+        if polygon_coords and (isinstance(polygon_coords, list) and isinstance(polygon_coords[0], list)):
+            print("🗺️ [Spatial] Using real polygon coordinates from caller")
+            target_polygon = polygon_coords
+        elif polygon_coords and isinstance(polygon_coords, dict) and "features" in polygon_coords:
+             print("🗺️ [Spatial] Using real GeoJSON feature from caller")
+             target_polygon = polygon_coords["features"][0]["geometry"]["coordinates"][0] # simple extractor
+        else:
+            print("⚠️ [Spatial] No polygon provided. Generating 100x100m fallback bbox around centroid.")
+            offset = 0.00045 # roughly 50m
+            target_polygon = [
+                (lng - offset, lat + offset),
+                (lng + offset, lat + offset),
+                (lng + offset, lat - offset),
+                (lng - offset, lat - offset),
+                (lng - offset, lat + offset)
+            ]
+            
+        tensor.grid_spec = backend.create_grid(target_polygon, resolution_m=10.0)
 
         w = tensor.grid_spec.width
         h = tensor.grid_spec.height
@@ -607,13 +773,8 @@ class DataFusionEngine:
         channels = tensor.channels
         c_map = {c: i for i, c in enumerate(channels)}
 
-        # Deterministic "noise" (optional) based on run_id/date/x/y so it is reproducible
-        def deterministic_noise(day: str, x: int, y: int) -> float:
-            seed_raw = f"{run_id}|{day}|{x}|{y}".encode("utf-8")
-            hv = hashlib.sha256(seed_raw).digest()
-            # map first byte to [-0.05, +0.05]
-            return ((hv[0] / 255.0) - 0.5) * 0.1
-
+        # Generate uniform raster base from plot-level signals.
+        # In the future, this is where pixel-level satellite data is queried and aligned.
         tensor_data: List[Any] = []  # [T][H][W][C]
 
         for row in daily_records:
@@ -631,10 +792,8 @@ class DataFusionEngine:
                 for x in range(w):
                     pixel = [0.0] * len(channels)
 
-                    n = deterministic_noise(day, x, y)
-
                     if FieldTensorChannels.NDVI in c_map:
-                        pixel[c_map[FieldTensorChannels.NDVI]] = max(-1.0, min(1.0, float(ndvi) + n))
+                        pixel[c_map[FieldTensorChannels.NDVI]] = None  # Stop flat spatial broadcast
 
                     if FieldTensorChannels.NDVI_UNC in c_map:
                         pixel[c_map[FieldTensorChannels.NDVI_UNC]] = float(unc)
@@ -644,15 +803,154 @@ class DataFusionEngine:
 
                     # Populate SAR channels if present in enum
                     if hasattr(FieldTensorChannels, "VV") and FieldTensorChannels.VV in c_map:
-                        pixel[c_map[FieldTensorChannels.VV]] = float(vv)
+                        pixel[c_map[FieldTensorChannels.VV]] = None  # Stop flat spatial broadcast
                     if hasattr(FieldTensorChannels, "VH") and FieldTensorChannels.VH in c_map:
-                        pixel[c_map[FieldTensorChannels.VH]] = float(vh)
+                        pixel[c_map[FieldTensorChannels.VH]] = None  # Stop flat spatial broadcast
 
                     row_grid.append(pixel)
                 t_grid.append(row_grid)
             tensor_data.append(t_grid)
 
         tensor.data = tensor_data
+
+        # --- Fix B: Inject real raster composites into spatial channels ---
+        # If raster composites were acquired (Step 9), write them into the
+        # last time step and into tensor.maps so L10 sees real pixel data.
+        raster_composites = getattr(self, '_pending_raster_composites', None)
+        if raster_composites and tensor_data:
+            last_t_idx = len(tensor_data) - 1
+
+            # NDVI raster → NDVI channel + maps["ndvi"]
+            ndvi_rc = raster_composites.get("NDVI")
+            if ndvi_rc and FieldTensorChannels.NDVI in c_map:
+                ci = c_map[FieldTensorChannels.NDVI]
+                rc_h, rc_w = ndvi_rc["height"], ndvi_rc["width"]
+                ndvi_map = [[None] * w for _ in range(h)]
+                for r in range(min(h, rc_h)):
+                    for c in range(min(w, rc_w)):
+                        v = ndvi_rc["values"][r][c]
+                        if v is not None:
+                            tensor_data[last_t_idx][r][c][ci] = v
+                            ndvi_map[r][c] = v
+                if not hasattr(tensor, 'maps') or tensor.maps is None:
+                    tensor.maps = {}
+                tensor.maps["ndvi"] = ndvi_map
+                print(f"🛰️ [Spatial] NDVI raster injected: {rc_h}×{rc_w}")
+
+            # NDMI raster → maps["ndmi"]
+            ndmi_rc = raster_composites.get("NDMI")
+            if ndmi_rc:
+                ndmi_map = [[None] * w for _ in range(h)]
+                for r in range(min(h, ndmi_rc["height"])):
+                    for c in range(min(w, ndmi_rc["width"])):
+                        ndmi_map[r][c] = ndmi_rc["values"][r][c]
+                if not hasattr(tensor, 'maps') or tensor.maps is None:
+                    tensor.maps = {}
+                tensor.maps["ndmi"] = ndmi_map
+
+            # SAR raster → VV/VH channels + maps["vv"], maps["vh"]
+            sar_rc = raster_composites.get("SAR")
+            if sar_rc:
+                rc_h, rc_w = sar_rc["height"], sar_rc["width"]
+                vv_map = [[None] * w for _ in range(h)]
+                vh_map = [[None] * w for _ in range(h)]
+                for r in range(min(h, rc_h)):
+                    for c in range(min(w, rc_w)):
+                        v = sar_rc["values"][r][c]
+                        if v is not None:
+                            vv_map[r][c] = v
+                            # Write into tensor channels if available
+                            if hasattr(FieldTensorChannels, "VV") and FieldTensorChannels.VV in c_map:
+                                tensor_data[last_t_idx][r][c][c_map[FieldTensorChannels.VV]] = v
+                if not hasattr(tensor, 'maps') or tensor.maps is None:
+                    tensor.maps = {}
+                tensor.maps["vv"] = vv_map
+                tensor.maps["vh"] = vh_map
+
+            # Quality mask → maps["quality_mask"]
+            qm_rc = raster_composites.get("QUALITY")
+            if qm_rc:
+                qm_map = [[None] * w for _ in range(h)]
+                for r in range(min(h, qm_rc["height"])):
+                    for c in range(min(w, qm_rc["width"])):
+                        qm_map[r][c] = qm_rc["values"][r][c]
+                if not hasattr(tensor, 'maps') or tensor.maps is None:
+                    tensor.maps = {}
+                tensor.maps["quality_mask"] = qm_map
+
+        
+        # --- SPATIAL EXTENSIONS (Phase 11): Zone Generation ---
+        # Extract [T, H, W] stacks for NDVI and SAR_VV (needed by both numpy and pure python engines)
+        if FieldTensorChannels.NDVI in c_map:
+            c_idx = c_map[FieldTensorChannels.NDVI]
+            ndvi_stack = [[[pixel[c_idx] for pixel in row] for row in t_grid] for t_grid in tensor_data]
+        else:
+            ndvi_stack = []
+            
+        if hasattr(FieldTensorChannels, "VV") and FieldTensorChannels.VV in c_map:
+            c_idx_vv = c_map[FieldTensorChannels.VV]
+            sar_stack = [[[pixel[c_idx_vv] for pixel in row] for row in t_grid] for t_grid in tensor_data]
+        else:
+            sar_stack = []
+        
+        # Try numpy-based engine first, fallback to Pure Python
+        try:
+            from services.agribrain.layer1_fusion.zone_engine import generate_management_zones, compute_zone_stats
+            tensor.zones = generate_management_zones(tensor.plot_id, ndvi_stack, sar_stack, tensor.grid_spec.to_dict())
+            tensor.zone_stats = compute_zone_stats(ndvi_stack, sar_stack, tensor.zones, tensor.time_index)
+        except Exception as e:
+            print(f"⚠️ [Spatial] Numpy zone engine failed: {e}. Using Pure Python fallback.")
+            try:
+                from services.agribrain.layer1_fusion.zone_engine import generate_management_zones_pure_python, compute_zone_stats_pure_python
+                tensor.zones = generate_management_zones_pure_python(tensor.plot_id, ndvi_stack, sar_stack, tensor.grid_spec.to_dict())
+                tensor.zone_stats = compute_zone_stats_pure_python(ndvi_stack, sar_stack, tensor.zones, tensor.time_index)
+            except Exception as e2:
+                print(f"⚠️ [Spatial] Pure Python zone engine also failed: {e2}")
+        
+        # Phase A: Build Research-Grade ZoneStats (p10/p90, uncertainty, polygon-aware labels)
+        try:
+            from services.agribrain.layer1_fusion.zone_engine import build_spatial_zone_stats
+            soil_static = tensor.static if hasattr(tensor, 'static') else {}
+            tensor.spatial_zone_stats = build_spatial_zone_stats(
+                zones=tensor.zones,
+                ndvi_stack=ndvi_stack,
+                sar_vv_stack=sar_stack,
+                grid_spec=tensor.grid_spec.to_dict(),
+                polygon_coords=polygon_coords,
+                soil_static=soil_static
+            )
+        except Exception as e:
+            print(f"⚠️ [Spatial] ZoneStats builder failed: {e}")
+            tensor.spatial_zone_stats = []
+
+        # Phase A.1: Inject GeoJSON geometries into zones (mask → lat/lng polygons)
+        try:
+            from services.agribrain.layer1_fusion.zone_engine import inject_zone_geometries
+            # Prefer the real polygon; fall back to grid_spec bounds only if absent
+            if polygon_coords:
+                zone_polygon = polygon_coords
+                print(f"✅ [Spatial] Zone geometries injected from real plot polygon")
+            else:
+                gs = tensor.grid_spec.to_dict()
+                bounds = gs.get("bounds", ())
+                if bounds and len(bounds) == 4:
+                    min_lng, min_lat, max_lng, max_lat = bounds
+                    zone_polygon = [
+                        [min_lng, max_lat],  # NW
+                        [max_lng, max_lat],  # NE
+                        [max_lng, min_lat],  # SE
+                        [min_lng, min_lat],  # SW
+                        [min_lng, max_lat],  # close ring
+                    ]
+                    print(f"⚠️ [Spatial] Zone geometries injected from grid_spec bounds (no real polygon)")
+                else:
+                    zone_polygon = None
+                    print(f"⚠️ [Spatial] No bounds in grid_spec — zone geometries skipped")
+
+            if zone_polygon:
+                tensor.zones = inject_zone_geometries(tensor.zones, zone_polygon)
+        except Exception as e:
+            print(f"⚠️ [Spatial] Zone geometry injection failed: {e}")
 
     def _merge_weather_into_records(self, records: List[Dict], evidence: List["EvidenceItem"]):
         """Step 6: Weather Fusion into daily records BEFORE tensor build."""
@@ -678,23 +976,364 @@ class DataFusionEngine:
                 row.setdefault("gdd", max(0.0, row["tmean"] - 10.0))
 
     def _merge_static(self, tensor: "FieldTensor", evidence: List["EvidenceItem"]):
-        """Step 7: Static Layers"""
+        """Step 7: Static Layers (Robust against missing data)"""
         soil_items = [e for e in evidence if e.source_type == EvidenceSourceType.SOIL]
+        
+        # Start with safe defaults
+        clay = 20.0
+        sand = 40.0
+        silt = 40.0
+        ph = 6.5
+        org_c = 10.0
+        texture_class = "unknown"
+
+        data_source = "defaults_no_data"
+
         if soil_items:
             best = soil_items[0]
             raw = best.payload or {}
-            tensor.static = {
-                "soil_clay_mean": raw.get("clay", 20),
-                "soil_ph_mean": raw.get("ph", 6.5),
-                "soil_org_c_mean": raw.get("organic_carbon", 10),
-                "texture_class": raw.get("texture_class", "unknown")
-            }
+            data_source = "soil_evidence"
+            
+            try:
+                raw_clay = raw.get("clay")
+                if raw_clay is not None:
+                    clay = float(raw_clay)
+                    
+                raw_sand = raw.get("sand", raw.get("sand_percent"))
+                if raw_sand is not None:
+                    sand = float(raw_sand)
+                    
+                silt = round(100.0 - clay - sand, 1)
+                
+                raw_ph = raw.get("ph")
+                if raw_ph is not None:
+                    ph = float(raw_ph)
+                    
+                raw_org_c = raw.get("organic_carbon")
+                if raw_org_c is not None:
+                    org_c = float(raw_org_c)
+                    
+                texture_class = str(raw.get("texture_class", "unknown"))
+            except (ValueError, TypeError) as e:
+                print(f"⚠️ [Spatial] Error parsing static soil data: {e}")
+                data_source = "defaults_parse_error"
+
+        tensor.static = {
+            "soil_clay_mean": clay,
+            "soil_sand_mean": sand,
+            "soil_silt_mean": silt,
+            "soil_ph_mean": ph,
+            "soil_org_c_mean": org_c,
+            "texture_class": texture_class,
+            "data_source": data_source
+        }
 
     def _merge_forecast_7d(self, tensor: "FieldTensor", evidence: List["EvidenceItem"]):
         """Step 8: Weather forecast mapping"""
         fc_items = [e for e in evidence if e.source_type == EvidenceSourceType.WEATHER_FORECAST]
         for e in fc_items:
             tensor.forecast_7d.append(e.payload)
+
+    # ==================================================================
+    # LAYER 0: Daily State Assimilation (Kalman Engine Integration)
+    # ==================================================================
+
+    def _run_layer0_assimilation(
+        self,
+        tensor: "FieldTensor",
+        evidence: list,
+        daily_records: list,
+        start_date: str,
+        end_date: str,
+        tracker=None
+    ) -> None:
+        """
+        Run LayerΒ 0 Kalman-based daily state estimation.
+
+        Converts EvidenceItems into:
+          A) daily_weather  — plot-level drivers (NOT fake 10m weather)
+          B) events_by_day  — user management events as state constraints
+          C) zone_observations — per-zone KalmanObservations from S2/S1
+
+        Then runs DailyAssimilationEngine and writes outputs
+        (daily_state, state_uncertainty, provenance_log) into the tensor.
+        """
+        # ---- A) Build daily weather dict from weather evidence ----
+        daily_weather = {}
+        for rec in daily_records:
+            d = rec.get("date")
+            if not d:
+                continue
+            tmean = rec.get("tmean", 20.0)
+            rain = rec.get("rain", 0.0)
+            et0 = rec.get("et0", 3.0)
+            daily_weather[d] = {
+                "temp_max": tmean + 5.0,   # Approximate from mean
+                "temp_min": tmean - 5.0,
+                "precipitation": rain,
+                "et0": float(et0) if et0 is not None else 3.0,
+            }
+        
+        # If weather evidence has explicit temp_max/min, use them
+        for e in evidence:
+            if e.source_type == EvidenceSourceType.WEATHER and e.timestamp:
+                d = e.timestamp.strftime("%Y-%m-%d")
+                p = e.payload or {}
+                if d in daily_weather:
+                    if p.get("temperature_max") is not None:
+                        daily_weather[d]["temp_max"] = float(p["temperature_max"])
+                    if p.get("temperature_min") is not None:
+                        daily_weather[d]["temp_min"] = float(p["temperature_min"])
+                    if p.get("et0") is not None:
+                        daily_weather[d]["et0"] = float(p["et0"])
+
+        # ---- B) Build events from user evidence ----
+        events_by_day = {}
+        for e in evidence:
+            if e.source_type == EvidenceSourceType.USER_EVENT and e.timestamp:
+                d = e.timestamp.strftime("%Y-%m-%d")
+                if d not in events_by_day:
+                    events_by_day[d] = []
+                events_by_day[d].append(e.payload or {})
+
+        # ---- C) Build observations per zone per day ----
+        # For now: single-zone fallback ("plot") using plot-level means.
+        # When zone segmentation exists, this expands to per-zone α-weighted means.
+        zone_id = "plot"
+
+        all_observations = {}  # {day: {zone_id: [KalmanObservation, ...]}}
+
+        # C.1) Optical observations (S2 → NDVI)
+        for e in evidence:
+            if e.source_type == EvidenceSourceType.SATELLITE_OPTICAL and e.timestamp:
+                d = e.timestamp.strftime("%Y-%m-%d")
+                ndvi = e.payload.get("ndvi")
+                if ndvi is not None:
+                    try:
+                        ndvi_val = float(ndvi)
+                    except (TypeError, ValueError):
+                        continue
+
+                    if d not in all_observations:
+                        all_observations[d] = {}
+                    if zone_id not in all_observations[d]:
+                        all_observations[d][zone_id] = []
+
+                    # Cloud cover → reliability
+                    cloud = e.payload.get("cloud_cover", 0)
+                    reliability = max(0.1, 1.0 - float(cloud or 0) / 100.0)
+
+                    all_observations[d][zone_id].append(
+                        KalmanObservation(
+                            obs_type="ndvi",
+                            value=ndvi_val,
+                            sigma=0.02,
+                            reliability=reliability,
+                            source="sentinel2",
+                        )
+                    )
+
+                    # Also add NDMI if available
+                    ndmi = e.payload.get("ndmi")
+                    if ndmi is not None:
+                        try:
+                            all_observations[d][zone_id].append(
+                                KalmanObservation(
+                                    obs_type="ndmi",
+                                    value=float(ndmi),
+                                    sigma=0.04,
+                                    reliability=reliability,
+                                    source="sentinel2",
+                                )
+                            )
+                        except (TypeError, ValueError):
+                            pass
+
+        # C.2) SAR observations (S1 → VV, VH)
+        for e in evidence:
+            if e.source_type == EvidenceSourceType.SATELLITE_SAR and e.timestamp:
+                d = e.timestamp.strftime("%Y-%m-%d")
+                vv = e.payload.get("vv_db", e.payload.get("vv"))
+                vh = e.payload.get("vh_db", e.payload.get("vh"))
+
+                if d not in all_observations:
+                    all_observations[d] = {}
+                if zone_id not in all_observations[d]:
+                    all_observations[d][zone_id] = []
+
+                if vv is not None:
+                    try:
+                        all_observations[d][zone_id].append(
+                            KalmanObservation(
+                                obs_type="vv",
+                                value=float(vv),
+                                sigma=1.5,
+                                reliability=1.0,  # SAR is cloud-independent
+                                source="sentinel1",
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        pass
+
+                if vh is not None:
+                    try:
+                        all_observations[d][zone_id].append(
+                            KalmanObservation(
+                                obs_type="vh",
+                                value=float(vh),
+                                sigma=2.0,
+                                reliability=1.0,
+                                source="sentinel1",
+                            )
+                        )
+                    except (TypeError, ValueError):
+                        pass
+
+        # ---- D) Extract soil priors ----
+        soil_props = None
+        for e in evidence:
+            if e.source_type == EvidenceSourceType.SOIL:
+                raw = e.payload or {}
+                soil_props = {
+                    "clay_pct": raw.get("clay", 25),
+                    "sand_pct": raw.get("sand", raw.get("sand_percent", 40)),
+                }
+                break
+
+        # ---- E) Initialize and run assimilation ----
+        engine = DailyAssimilationEngine()
+        engine.add_zone(zone_id, soil_props=soil_props, start_day=start_date)
+
+        # If existing zone segmentation exists in tensor, add those zones too
+        if tensor.zones:
+            for zid in tensor.zones:
+                if zid != zone_id:
+                    engine.add_zone(zid, soil_props=soil_props, start_day=start_date)
+                    # Duplicate plot-level obs for each zone (until we have α-weighted per-zone)
+                    for d, zone_obs in all_observations.items():
+                        if zone_id in zone_obs and zid not in zone_obs:
+                            zone_obs[zid] = zone_obs[zone_id]
+
+        engine.run_period(
+            start_date, end_date,
+            daily_weather, all_observations, events_by_day
+        )
+
+        # ---- F) Write outputs into FieldTensor ----
+        daily_state, state_uncertainty, provenance_log = engine.to_field_tensor_outputs()
+        tensor.daily_state = daily_state
+        tensor.state_uncertainty = state_uncertainty
+        tensor.provenance_log = provenance_log
+
+        # ---- G) Cross-source validation (closed loop) ----
+        try:
+            validator = ValidationGraph()
+            for d_rec in provenance_log:
+                day = d_rec.get("day", "")
+                for zid, zdata in d_rec.get("zones", {}).items():
+                    state_dict = zdata.get("state", {})
+                    # Build obs dict for this day/zone
+                    obs_dict = {}
+                    day_obs = all_observations.get(day, {}).get(zid, [])
+                    for o in day_obs:
+                        obs_dict[o.obs_type] = o.value
+                    wx = daily_weather.get(day, {})
+
+                    validator.validate_day(
+                        day, zid, state_dict, obs_dict, wx
+                    )
+
+            # Store conflict summary in provenance
+            conflicts = validator.get_conflict_summary(last_n_days=len(provenance_log))
+            if conflicts:
+                tensor.provenance["layer0_conflicts"] = conflicts
+                tensor.provenance["layer0_reliability"] = dict(validator.source_reliability)
+        except Exception as ve:
+            print(f"⚠️ [Layer 0] Validation graph failed: {ve}")
+
+        # ---- H) Boundary info placeholder ----
+        tensor.boundary_info = {
+            "source": "user_drawn",
+            "confidence": 0.8,
+            "note": "PlotGrid fractional alpha available via layer0.plot_grid"
+        }
+
+        if tracker:
+            tracker.log_event(
+                "LAYER0_ASSIMILATION",
+                metadata={
+                    "zones": list(daily_state.keys()),
+                    "days": len(provenance_log),
+                    "obs_days": sum(
+                        1 for d in provenance_log
+                        for zd in d.get("zones", {}).values()
+                        if zd.get("provenance", {}).get("n_obs", 0) > 0
+                    ),
+                }
+            )
+
+        # ---- I) Self-Audit: Trust Report + Structural Checks ----
+        try:
+            from datetime import datetime as _dt
+            d1 = _dt.strptime(start_date, "%Y-%m-%d")
+            d2 = _dt.strptime(end_date, "%Y-%m-%d")
+            expected_days = (d2 - d1).days + 1
+
+            audit_result = layer0_audit(
+                plot_id=tensor.plot_id,
+                tensor_daily_state=tensor.daily_state,
+                tensor_state_uncertainty=tensor.state_uncertainty,
+                tensor_provenance_log=tensor.provenance_log,
+                tensor_boundary_info=tensor.boundary_info,
+                source_reliability=tensor.provenance.get("layer0_reliability"),
+                conflicts=tensor.provenance.get("layer0_conflicts"),
+                expected_days=expected_days,
+            )
+            tensor.provenance["audit"] = audit_result
+
+            grade = audit_result.get("trust_report", {}).get("health_grade", "?")
+            score = audit_result.get("trust_report", {}).get("health_score", 0)
+            alerts = audit_result.get("trust_report", {}).get("alerts", [])
+            print(f"📊 [Layer 0] Audit: Grade={grade} Score={score:.2f} Alerts={len(alerts)}")
+        except Exception as ae:
+            print(f"⚠️ [Layer 0] Audit failed: {ae}")
+
+        # ---- J) Runtime Invariants — auto-clamp + log violations ----
+        try:
+            time_index = [d.get("day", "") for d in provenance_log]
+            violations = enforce_all_invariants(
+                tensor.daily_state,
+                tensor.state_uncertainty,
+                tensor.provenance_log,
+                time_index,
+                source_reliability=tensor.provenance.get("layer0_reliability"),
+                auto_fix=True,
+            )
+            if violations:
+                tensor.provenance["invariant_violations"] = [v.to_dict() for v in violations]
+                n_fixed = sum(1 for v in violations if v.auto_fixed)
+                print(f"🔒 [Layer 0] Invariants: {len(violations)} issues ({n_fixed} auto-fixed)")
+        except Exception as ie:
+            print(f"⚠️ [Layer 0] Invariant check failed: {ie}")
+
+        # ---- K) Persist engine state for continuity ----
+        try:
+            kalman_zones = {}
+            for z_id in daily_state:
+                kalman_zones[z_id] = {
+                    "state_values": daily_state[z_id][-1] if daily_state[z_id] else {},
+                    "last_day": end_date,
+                }
+            vg_state = validator.to_state_dict() if validator else {}
+            state_dir = os.path.join(os.path.dirname(__file__), "..", "layer0", ".state")
+            save_engine_state(
+                plot_id=tensor.plot_id,
+                state_dir=state_dir,
+                kalman_zones=kalman_zones,
+                validation_state=vg_state,
+            )
+        except Exception as pe:
+            print(f"⚠️ [Layer 0] State persist failed: {pe}")
 
     def _generate_health_report(self, evidence_pool: List["EvidenceItem"], records: List[Dict]) -> Dict:
         """Step 9: Monitoring & QA"""

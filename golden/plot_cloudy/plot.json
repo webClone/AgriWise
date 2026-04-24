@@ -1,0 +1,12 @@
+{
+  "plot_id": "golden_cloudy",
+  "lat": 36.72,
+  "lng": 3.08,
+  "area_ha": 2.5,
+  "crop": "wheat",
+  "sowing_date": "2024-01-10",
+  "zones": [
+    "plot"
+  ],
+  "utm_zone": "31N"
+}

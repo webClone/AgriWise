@@ -74,7 +74,13 @@ class NormalizedEvidence:
     type: EvidenceType
     timestamp: str # ISO
     plot_id: str
+    
     payload: Dict[str, Any]
+    
+    # --- SPATIAL EXTENSIONS (Phase 11) ---
+    zone_id: Optional[str] = None # Which management zone this evidence belongs to
+    location: Optional[Dict[str, float]] = None # {lat, lng} of the exact evidence point
+    
     source_refs: Dict[str, str] = field(default_factory=dict) # {task_id: ..., diagnosis_id: ...}
     attachment_hashes: List[str] = field(default_factory=list)
 

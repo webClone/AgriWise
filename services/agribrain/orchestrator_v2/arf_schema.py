@@ -33,8 +33,9 @@ class InternalMemoryUpdate(BaseModel):
 class ARFResponse(BaseModel):
     headline: str = Field(description="1 sentence title summarizing field status")
     direct_answer: str = Field(description="Direct answer to user's specific question")
-    reliability_badge: str = Field(description="HIGH, MED, or LOW")
-    reliability_reason: str = Field(description="Why the badge is what it is")
+    suitability_score: str = Field(description="Pure agronomic feasibility percentage e.g., '65%'")
+    confidence_badge: str = Field(description="HIGH, MED, or LOW")
+    confidence_reason: str = Field(description="Why the confidence badge is what it is")
     what_it_means: str = Field(description="Agronomic interpretation of the situation")
     reasoning_cards: List[ReasoningCard] = Field(default_factory=list)
     recommendations: List[Recommendation] = Field(default_factory=list)

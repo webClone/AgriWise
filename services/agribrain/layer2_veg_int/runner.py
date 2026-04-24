@@ -7,7 +7,7 @@ Orchestrates Growth Modeling and Phenology Inference.
 from typing import Dict, List, Any
 import math
 import statistics
-from datetime import datetime
+from datetime import datetime, timezone
 
 from services.agribrain.layer2_veg_int.schema import (
     VegIntOutput, VegIntInput, ModeledCurveOutput, CurveQuality, 
@@ -143,6 +143,58 @@ class VegetationIntelligenceEngine:
             key_dates=transitions
         )
 
+        # --- SPATIAL EXTENSIONS (Phase 11): Zonal Phenology ---
+        zone_metrics = {}
+        if hasattr(tensor, "zone_stats") and "ndvi" in tensor.zone_stats:
+            for z_id, z_timeseries in tensor.zone_stats["ndvi"].items():
+                if not z_timeseries: continue
+                # Extract Zonal Signal
+                z_signal = []
+                z_obs = []
+                for idx, t_point in enumerate(z_timeseries):
+                    mean_val = t_point.get("mean")
+                    if mean_val is not None and not math.isnan(mean_val):
+                        z_signal.append(mean_val)
+                        if inputs[idx].is_observed:
+                            z_obs.append(mean_val)
+                        else:
+                            z_obs.append(None)
+                    else:
+                        z_signal.append(signal_to_fit[idx]) # Fallback to plot mean
+                        z_obs.append(None)
+                        
+                # Model Zonal Curve
+                z_modeled, z_deriv, z_unc = self.growth_engine.fit_growth_curve(
+                    dates, z_signal, unc_series
+                )
+                
+                # Zonal Phenology
+                z_stages, z_stage_confs = self.phenology_engine.infer_daily_stages(
+                    z_modeled, z_deriv["velocity"], dates, cumulative_gdd, uncertainty=z_unc
+                )
+                z_transitions = self.phenology_engine.extract_transitions(dates, z_stages)
+                
+                # Zonal RMSE
+                z_res = []
+                for i, obs in enumerate(z_obs):
+                    if obs is not None:
+                        z_res.append((obs - z_modeled[i])**2)
+                z_rmse = math.sqrt(statistics.mean(z_res)) if z_res else 0.0
+                
+                zone_metrics[z_id] = {
+                    "curve": ModeledCurveOutput(
+                        ndvi_fit=z_modeled,
+                        ndvi_fit_d1=z_deriv["velocity"],
+                        ndvi_fit_unc=z_unc,
+                        quality=CurveQuality(rmse=z_rmse, outlier_frac=0.0, obs_coverage=curve_out.quality.obs_coverage)
+                    ),
+                    "phenology": PhenologyOutput(
+                        stage_by_day=[s.value for s in z_stages],
+                        confidence_by_day=z_stage_confs,
+                        key_dates=z_transitions
+                    )
+                }
+
         return VegIntOutput(
             run_id=f"vegint_{tensor.run_id}",
             layer1_run_id=tensor.run_id,
@@ -150,9 +202,10 @@ class VegetationIntelligenceEngine:
             phenology=pheno_out,
             anomalies=anomalies,
             stability=spatial_metrics,
+            zone_metrics=zone_metrics,
             provenance={
                 "engine_version": "2.2.0-uncertainty",
-                "execution_time": datetime.utcnow().isoformat(),
+                "execution_time": datetime.now(timezone.utc).isoformat(),
                 "models": {
                     "growth": "RobustSpline_v2_Unc", 
                     "phenology": "GDD_Probabilistic_v1",

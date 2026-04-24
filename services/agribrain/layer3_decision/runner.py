@@ -1,10 +1,12 @@
+from datetime import timezone
 
 import datetime
 from typing import List, Dict, Any
 
 from services.agribrain.layer1_fusion.schema import FieldTensor
+from services.agribrain.layer2_veg_int.schema import VegIntOutput
 from services.agribrain.layer3_decision.schema import (
-    DecisionInput, DecisionOutput, PlotContext, 
+    DecisionInput, DecisionOutput, PlotContext, Diagnosis,
     ExecutionPlan, TaskNode, QualityMetrics, AuditTrail, Recommendation
 )
 from services.agribrain.layer3_decision.features.builder import build_decision_features, DecisionFeatures
@@ -22,26 +24,80 @@ class DecisionIntelligenceEngine:
         Orchestrates the Research-Grade decision loop.
         """
         
-        # 1. Feature Engineering
-        features = build_decision_features(inputs.tensor, inputs.veg_int, inputs.context)
+        # 1. Feature Engineering (Global Plot Level)
+        global_features = build_decision_features(inputs.tensor, inputs.veg_int, inputs.context)
         
-        # 2. Diagnosis (Probabilistic + Trace)
-        diagnoses = self.diagnosis_engine.diagnose(features, inputs.context)
+        # 2. Zonal Diagnosis (Phase 11 Spatial Extension)
+        all_diagnoses: Dict[str, Diagnosis] = {} # Deduplicated by problem_id
+        
+        # If we have zones, evaluate per zone
+        zone_metrics = getattr(inputs.veg_int, "zone_metrics", {})
+        zones = getattr(inputs.tensor, "zones", {})
+        
+        if zone_metrics and zones:
+            for z_id, z_metric in zone_metrics.items():
+                print(f"🌍 [Layer 3] Evaluating Diagnoses for {z_id}")
+                
+                # Mock a zonal feature set (ideally builder would take zone_metrics)
+                # For now, we reuse global rules but we should map Zonal NDVI / Stage.
+                # In a full refactor, `build_decision_features` would accept `z_metric`.
+                # We will use the global features as a baseline, but ideally stage is zone-specific.
+                
+                # For Phase 11 MVP, we run the diagnosis engine (which currently expects global features).
+                # To make it truly Zonal, we need to pass the zonal features. 
+                # Since `build_decision_features` expects `inputs.veg_int`, we can mock it for the zone.
+                import copy
+                z_veg_int = copy.copy(inputs.veg_int)
+                z_veg_int.curve = z_metric.get("curve", z_veg_int.curve)
+                z_veg_int.phenology = z_metric.get("phenology", z_veg_int.phenology)
+                
+                z_features = build_decision_features(inputs.tensor, z_veg_int, inputs.context)
+                z_diagnoses = self.diagnosis_engine.diagnose(z_features, inputs.context)
+                
+                area_pct = zones[z_id].get("area_pct", 0.0)
+                
+                for d in z_diagnoses:
+                    # If probability is high enough to be a "hotspot" (e.g. > 50%)
+                    if d.probability > 0.5:
+                        if d.problem_id not in all_diagnoses:
+                            all_diagnoses[d.problem_id] = d
+                            all_diagnoses[d.problem_id].affected_area_pct = 0.0
+                            all_diagnoses[d.problem_id].hotspot_zone_ids = []
+                            
+                        # Accumulate area and tag the zone
+                        all_diagnoses[d.problem_id].affected_area_pct += area_pct
+                        all_diagnoses[d.problem_id].hotspot_zone_ids.append(z_id)
+                        
+                        # Take the max severity across afflicted zones
+                        if d.severity > all_diagnoses[d.problem_id].severity:
+                            all_diagnoses[d.problem_id].severity = d.severity
+        else:
+            # Fallback to Global Plot Level
+            global_diagnoses = self.diagnosis_engine.diagnose(global_features, inputs.context)
+            for d in global_diagnoses:
+                if d.probability > 0.5:
+                    d.affected_area_pct = 100.0
+                    d.hotspot_zone_ids = ["Plot-Wide"]
+                    all_diagnoses[d.problem_id] = d
+                    
+        
+        # Flatten deduced diagnoses back to list
+        diagnosed_list = list(all_diagnoses.values())
         
         # 3. Policy Generation (Compliance + Feasibility)
         recommendations = self.policy_engine.generate_plan(
-            diagnoses, 
+            diagnosed_list, 
             inputs.context, 
             inputs.weather_forecast,
-            features.missing_inputs
+            global_features.missing_inputs
         )
         
         # 4. Execution Graph Construction
-        execution_plan = self._build_execution_plan(recommendations)
+        execution_plan = self._build_execution_plan(recommendations, diagnosed_list)
         
         # 5. Governance & Output Construction
-        metrics = self._calculate_quality_metrics(features, diagnoses)
-        audit = self._build_audit_trail(features, diagnoses)
+        metrics = self._calculate_quality_metrics(global_features, diagnosed_list)
+        audit = self._build_audit_trail(global_features, diagnosed_list)
         
         return DecisionOutput(
             run_id_l3=f"l3_{inputs.veg_int.run_id}",
@@ -49,9 +105,9 @@ class DecisionIntelligenceEngine:
                 "l1_run_id": inputs.veg_int.layer1_run_id,
                 "l2_run_id": inputs.veg_int.run_id
             },
-            timestamp_utc=datetime.datetime.utcnow().isoformat(),
+            timestamp_utc=datetime.datetime.now(timezone.utc).isoformat(),
             
-            diagnoses=diagnoses,
+            diagnoses=diagnosed_list,
             recommendations=recommendations,
             execution_plan=execution_plan,
             
@@ -59,22 +115,37 @@ class DecisionIntelligenceEngine:
             audit=audit
         )
 
-    def _build_execution_plan(self, recs: List[Recommendation]) -> ExecutionPlan:
+    def _build_execution_plan(self, recs: List[Recommendation], diagnosed_list: List[Diagnosis]) -> ExecutionPlan:
         tasks = []
         edges = []
         
         # Filter strictly allowed actions for execution
         allowed_recs = [r for r in recs if r.is_allowed]
         
+        # Map diagnoses for quick lookup
+        diag_map = {d.problem_id: d for d in diagnosed_list}
+        
         for i, r in enumerate(allowed_recs):
+            
+            # Extract target zones from linked diagnoses
+            target_zones = []
+            for d_id in r.linked_diagnosis_ids:
+                if d_id in diag_map and hasattr(diag_map[d_id], 'hotspot_zone_ids'):
+                    target_zones.extend(diag_map[d_id].hotspot_zone_ids)
+            
+            # Deduplicate zones
+            target_zones = list(set(target_zones))
+            
             # Create Task Node
             task = TaskNode(
                 task_id=f"TASK_{r.action_id}",
                 type=r.action_type,
                 instructions=r.explain,
-                required_inputs=r.blocked_reason, # Should be empty if allowed, but maybe drivers?
-                completion_signal="MANUAL_CONFIRM", # Placeholder
-                depends_on=[] # Flat DAG for now, logic to be expanded if sequence needed
+                required_inputs=r.blocked_reason, 
+                completion_signal="MANUAL_CONFIRM", 
+                depends_on=[],
+                target_zones=target_zones,
+                target_points=[]
             )
             tasks.append(task)
             
@@ -89,8 +160,8 @@ class DecisionIntelligenceEngine:
         return ExecutionPlan(
             tasks=tasks,
             edges=edges,
-            recommended_start_date=datetime.datetime.utcnow().isoformat(),
-            review_date=(datetime.datetime.utcnow() + datetime.timedelta(days=1)).isoformat()
+            recommended_start_date=datetime.datetime.now(timezone.utc).isoformat(),
+            review_date=(datetime.datetime.now(timezone.utc) + datetime.timedelta(days=1)).isoformat()
         )
 
     def _calculate_quality_metrics(

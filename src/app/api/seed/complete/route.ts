@@ -73,7 +73,7 @@ export async function POST() {
     // For each farm, create plots, crops, tasks, and equipment
     for (let farmIndex = 0; farmIndex < farms.length; farmIndex++) {
       const farm = farms[farmIndex];
-      const farmId = farm._id.$oid ? new ObjectId(farm._id.$oid) : farm._id as ObjectId;
+      const farmId = (farm._id as { $oid?: string }).$oid ? new ObjectId((farm._id as { $oid?: string }).$oid!) : farm._id as ObjectId;
       const farmArea = farm.totalArea || 10;
 
       // Create 2-3 plots per farm
@@ -89,13 +89,13 @@ export async function POST() {
         await prisma.$runCommandRaw({
           insert: "Plot",
           documents: [{
-            _id: plotId,
+            _id: { $oid: plotId.toHexString() },
             name: `${plotTemplate.name} ${i + 1}`,
             nameAr: `${plotTemplate.nameAr} ${i + 1}`,
             area: +(farmArea * plotTemplate.areaPercent).toFixed(2),
             soilType: plotTemplate.soilType,
             irrigation: plotTemplate.irrigation,
-            farmId: farmId,
+            farmId: { $oid: farmId.toHexString() },
             createdAt: plotDateObj,
             updatedAt: plotDateObj,
           }]
@@ -125,7 +125,7 @@ export async function POST() {
           await prisma.$runCommandRaw({
             insert: "CropCycle",
             documents: [{
-              _id: cropCycleId,
+              _id: { $oid: cropCycleId.toHexString() },
               cropCode: cropTemplate.code,
               cropNameAr: cropTemplate.nameAr,
               variety: cropTemplate.variety,
@@ -133,7 +133,7 @@ export async function POST() {
               expectedHarvest: { $date: { $numberLong: String(expectedHarvest.getTime()) } },
               status: cropTemplate.status,
               estimatedYield: Math.floor(Math.random() * 3000 + 2000), // 2000-5000 kg/ha
-              plotId: plotId,
+              plotId: { $oid: plotId.toHexString() },
               createdAt: cropDateObj,
               updatedAt: cropDateObj,
             }]
@@ -156,7 +156,7 @@ export async function POST() {
             await prisma.$runCommandRaw({
               insert: "CropTask",
               documents: [{
-                _id: taskId,
+                _id: { $oid: taskId.toHexString() },
                 type: taskTemplate.type,
                 title: taskTemplate.title,
                 titleAr: taskTemplate.titleAr,
@@ -164,7 +164,7 @@ export async function POST() {
                 dueDate: { $date: { $numberLong: String(dueDate.getTime()) } },
                 completed: taskTemplate.completed || false,
                 completedAt: taskTemplate.completed ? taskDateObj : null,
-                cropCycleId: cropCycleId,
+                cropCycleId: { $oid: cropCycleId.toHexString() },
                 createdAt: taskDateObj,
               }]
             });
@@ -187,7 +187,7 @@ export async function POST() {
             await prisma.$runCommandRaw({
               insert: "InputLog",
               documents: [{
-                _id: inputId,
+                _id: { $oid: inputId.toHexString() },
                 type: inputTemplate.type,
                 name: inputTemplate.name,
                 nameAr: inputTemplate.nameAr,
@@ -197,7 +197,7 @@ export async function POST() {
                 cost: inputTemplate.cost,
                 currency: "DZD",
                 appliedAt: { $date: { $numberLong: String(appliedAt.getTime()) } },
-                cropCycleId: cropCycleId,
+                cropCycleId: { $oid: cropCycleId.toHexString() },
                 createdAt: inputDateObj,
               }]
             });
@@ -216,12 +216,12 @@ export async function POST() {
         await prisma.$runCommandRaw({
           insert: "Equipment",
           documents: [{
-            _id: equipmentId,
+            _id: { $oid: equipmentId.toHexString() },
             name: eqTemplate.name,
             type: eqTemplate.type,
             condition: eqTemplate.condition,
             quantity: eqTemplate.quantity,
-            farmId: farmId,
+            farmId: { $oid: farmId.toHexString() },
           }]
         });
 
@@ -252,7 +252,7 @@ export async function POST() {
         await prisma.$runCommandRaw({
           insert: "Crop",
           documents: [{
-            _id: cropId,
+            _id: { $oid: cropId.toHexString() },
             ...crop,
             minTemp: 5,
             maxTemp: 40,

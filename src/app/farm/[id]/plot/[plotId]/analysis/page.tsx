@@ -1,15 +1,21 @@
-export default function AnalysisPage() {
+import { getPlot, getFarm, getCropCycles } from "@/lib/farm-services";
+import { notFound } from "next/navigation";
+import AgriBrainCommandCenterClient from "@/components/farm/intelligence/AgriBrainCommandCenterClient";
+
+export default async function AnalysisPage({ params }: { params: Promise<{ id: string; plotId: string }> }) {
+  const { id: farmId, plotId } = await params;
+  
+  const plot = await getPlot(plotId);
+  const farm = await getFarm(farmId);
+  const cropCycles = await getCropCycles(plotId);
+  const currentCrop = cropCycles.find(c => c.status !== 'HARVESTED') ?? null;
+
+  if (!plot || !farm) return notFound();
+
   return (
-    <div className="min-h-screen p-8 flex flex-col items-center justify-center text-center">
-      <h1 className="text-3xl font-bold mb-4 text-slate-800 dark:text-slate-200">
-        🧠 AgriBrain Analysis
-      </h1>
-      <p className="text-slate-600 dark:text-slate-400 max-w-md">
-        Deep dive into AI-driven insights, yield predictions, and anomaly detection.
-      </p>
-      <div className="mt-8 p-4 bg-slate-100 dark:bg-slate-800 rounded-lg animate-pulse">
-        Coming Soon...
-      </div>
+    <div className="min-h-screen pb-32 bg-slate-50 dark:bg-[#0a0f1a] animate-in fade-in duration-500">
+      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+      <AgriBrainCommandCenterClient plot={plot} farm={farm} currentCrop={currentCrop as any} />
     </div>
   );
 }
