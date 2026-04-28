@@ -59,9 +59,11 @@ def compute_hard_prohibitions(
 ) -> Dict[str, bool]:
     """Compute hard prohibition results from actual package contents.
 
-    RC4: Every prohibition uses strict detection — no vacuous truth.
-    If a category has no relevant items, we still return True (absence
-    is not violation), but if items exist, they are fully checked.
+    Final freeze: Strictly computed — no vacuous truth for required data.
+    - Evidence is REQUIRED: empty evidence → fail (prohibitions 1, 10)
+    - Fused features are REQUIRED: empty features → fail (prohibition 8)
+    - Resolver diagnostics are REQUIRED: missing → fail (prohibition 9)
+    - Optional sources (forecast, geo, wapor): absence is not violation
     """
     all_features = _all_fused(fused)
     # State features exclude data-quality meta-features
@@ -76,9 +78,13 @@ def compute_hard_prohibitions(
 
     # ── 1. no_fake_fallback_evidence ─────────────────────────────────────
     # Every evidence item must have a non-empty provenance_ref.
-    results["no_fake_fallback_evidence"] = all(
-        bool(e.provenance_ref) for e in evidence
-    ) if evidence else True
+    # Empty evidence → fail (engine must produce evidence for a valid package).
+    if not evidence:
+        results["no_fake_fallback_evidence"] = False
+    else:
+        results["no_fake_fallback_evidence"] = all(
+            bool(e.provenance_ref) for e in evidence
+        )
 
     # ── 2. no_diagnosis_or_recommendation ────────────────────────────────
     # No forbidden diagnosis/recommendation terms in any fused feature
@@ -141,28 +147,35 @@ def compute_hard_prohibitions(
 
     # ── 8. no_unprovenanced_fused_feature ────────────────────────────────
     # Every fused feature (including DQ) must have ≥1 source evidence ID.
-    results["no_unprovenanced_fused_feature"] = all(
-        len(f.source_evidence_ids) > 0 for f in all_features
-    ) if all_features else True
+    # Empty features → fail (engine must produce features for a valid package).
+    if not all_features:
+        results["no_unprovenanced_fused_feature"] = False
+    else:
+        results["no_unprovenanced_fused_feature"] = all(
+            len(f.source_evidence_ids) > 0 for f in all_features
+        )
 
     # ── 9. no_conflict_suppression ───────────────────────────────────────
-    # Proven from resolver diagnostics when available.
-    # Fallback: verify conflicts list is self-consistent (non-empty check).
-    if resolver_diag is not None:
+    # Proven from resolver diagnostics. No fallback — resolver_diag is
+    # required by the engine contract.
+    if resolver_diag is None:
+        results["no_conflict_suppression"] = False
+    else:
         results["no_conflict_suppression"] = (
             resolver_diag.suppressed_conflicts == 0
             and resolver_diag.candidate_conflicts == resolver_diag.emitted_conflicts
         )
-    else:
-        # No resolver diag — conservatively pass only if we got conflicts list
-        results["no_conflict_suppression"] = isinstance(conflicts, list)
 
     # ── 10. no_unit_mismatch_allowed ─────────────────────────────────────
     # Every accepted evidence item must have a canonical unit (or None).
-    results["no_unit_mismatch_allowed"] = all(
-        e.unit is None or e.unit in CANONICAL_UNITS
-        for e in evidence
-    ) if evidence else True
+    # Empty evidence → fail (same rationale as prohibition 1).
+    if not evidence:
+        results["no_unit_mismatch_allowed"] = False
+    else:
+        results["no_unit_mismatch_allowed"] = all(
+            e.unit is None or e.unit in CANONICAL_UNITS
+            for e in evidence
+        )
 
     # ── 11. no_spatial_scope_collapse ────────────────────────────────────
     # State features must preserve source spatial scope. A fused feature
@@ -237,13 +250,14 @@ def build_diagnostics(
     conflicts: List[EvidenceConflict],
     gaps: List[EvidenceGap],
     quarantined: List[QuarantinedEvidence],
-    fused: FusedFeatureSet = None,
-    resolver_diag: Optional[ConflictResolverDiagnostics] = None,
+    *,
+    fused: FusedFeatureSet,
+    resolver_diag: ConflictResolverDiagnostics,
 ) -> Layer1Diagnostics:
     """Build comprehensive diagnostics.
 
-    RC4: fused is always expected. Fallback uses empty FusedFeatureSet
-    (not hard-coded True) so prohibitions run against real (empty) data.
+    Final freeze: fused and resolver_diag are required keyword arguments.
+    The engine always provides them — no fallback needed.
     """
 
     # Source counts
@@ -305,10 +319,9 @@ def build_diagnostics(
         status=status,
     )
 
-    # Hard prohibition results — always computed against fused features
-    effective_fused = fused if fused is not None else FusedFeatureSet()
+    # Hard prohibition results — computed against fused features (required)
     prohibition_results = compute_hard_prohibitions(
-        evidence, effective_fused, conflicts, quarantined,
+        evidence, fused, conflicts, quarantined,
         resolver_diag=resolver_diag,
     )
 

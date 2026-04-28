@@ -103,10 +103,13 @@ def _fuse_group(
             weights_raw = [(e, e.confidence * e.reliability) for e in numeric]
             total_weight = sum(w for _, w in weights_raw) or 1.0
             fused_value = sum(e.value * w for e, w in weights_raw) / total_weight
-            source_weights = {
-                e.source_family: round(w / total_weight, 4)
-                for e, w in weights_raw
-            }
+            # Accumulate weights per source_family (not overwrite)
+            source_weights: Dict[str, float] = {}
+            for e, w in weights_raw:
+                source_weights[e.source_family] = (
+                    source_weights.get(e.source_family, 0.0)
+                    + round(w / total_weight, 4)
+                )
             avg_freshness = sum(e.freshness_score for e in numeric) / len(numeric)
             max_confidence = min(0.95, max(e.confidence for e in numeric))
 

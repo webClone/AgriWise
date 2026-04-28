@@ -812,7 +812,7 @@
   ],
   "layer1_fusion_ok": true,
   "layer1_fusion_tests": {
-    "passed": 239,
+    "passed": 256,
     "failed": 0,
     "warnings": 0
   },

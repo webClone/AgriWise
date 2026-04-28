@@ -542,7 +542,7 @@ def main():
         res = next((r for r in results if r["step"] == name), None)
         return res["passed"] if res else False
 
-    gate_passed = all_passed and (sr_parsed["passed"] >= 90) and (le_parsed["passed"] >= 80) and (l1_parsed["passed"] >= 150)
+    gate_passed = all_passed and (sr_parsed["passed"] >= 90) and (le_parsed["passed"] >= 80) and (l1_parsed["passed"] >= 200)
 
     report = {
         "timestamp": time.time(),
