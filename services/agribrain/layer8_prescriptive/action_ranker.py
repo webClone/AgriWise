@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import hashlib
 
-from services.agribrain.layer8_prescriptive.schema import (
+from layer8_prescriptive.schema import (
     ActionCard, ActionType, PriorityBreakdown, RateRange, TimeWindow,
     PrescriptiveEvidence, ConfidenceLevel, PrescriptiveDegradation,
     Layer8Input,

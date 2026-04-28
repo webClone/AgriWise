@@ -1,22 +1,22 @@
 {
   "version": "layer0-v2.0",
   "plot_id": "697dddb0d4195b809226a681",
-  "saved_at": "2026-04-24T02:22:24.984700",
+  "saved_at": "2026-04-27T19:49:08.201966",
   "crop_params_hash": "44136fa355b3",
   "kalman_zones": {
     "plot": {
       "state_values": {
-        "day": "2026-04-24",
+        "day": "2026-04-27",
         "lai_proxy": 5.0,
-        "biomass_proxy": 4.7566,
-        "sm_0_10": 0.5985,
-        "sm_10_40": 0.9108,
+        "biomass_proxy": 4.7481,
+        "sm_0_10": 0.964,
+        "sm_10_40": 0.9604,
         "canopy_stress": 0,
-        "phenology_gdd": 181.0,
+        "phenology_gdd": 181.6,
         "phenology_stage": 0,
         "stress_thermal": 0
       },
-      "last_day": "2026-04-24"
+      "last_day": "2026-04-27"
     }
   },
   "validation": {
@@ -26,7 +26,8 @@
       "weather": 1.0,
       "sensor": 1.0,
       "user": 1.0,
-      "camera": 1.0
+      "camera": 1.0,
+      "ip_camera": 1.0
     },
     "zone_reliability": {
       "plot": {
@@ -35,7 +36,8 @@
         "weather": 1.0,
         "sensor": 1.0,
         "user": 1.0,
-        "camera": 1.0
+        "camera": 1.0,
+        "ip_camera": 1.0
       }
     },
     "obs_reliability": {},
@@ -45,7 +47,8 @@
       "weather": 0,
       "sensor": 0,
       "user": 0,
-      "camera": 0
+      "camera": 0,
+      "ip_camera": 0
     },
     "history_len": 15
   },

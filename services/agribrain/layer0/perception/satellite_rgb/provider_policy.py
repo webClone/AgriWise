@@ -8,8 +8,8 @@ Rationale: without a single policy file, source-policy tends to drift
 across QA thresholds, cache TTLs, and engine defaults.
 
 Production free-source policy:
-  Primary  → Sentinel-2 (ESA Copernicus, 10m resolution, 5-day revisit)
-  Fallback → Landsat 8 / 9 (USGS, 30m resolution, 16-day revisit)
+  Primary  -> Sentinel-2 (ESA Copernicus, 10m resolution, 5-day revisit)
+  Fallback -> Landsat 8 / 9 (USGS, 30m resolution, 16-day revisit)
 
 Test policy:
   Synthetic fixture grids / local pinned RGB samples only.
@@ -55,7 +55,7 @@ PROVIDER_SPECS: Dict[str, ProviderSpec] = {
         typical_resolution_m=30.0,
         max_resolution_m=30.0,
         revisit_days=16,
-        max_age_days=35,            # Longer revisit → allow older acquisition
+        max_age_days=35,            # Longer revisit -> allow older acquisition
         min_coverage_fraction=0.6,
         min_plot_pixel_count=9,
         notes="USGS. Fallback free source. Bands: B4/B3/B2 for RGB.",
@@ -114,10 +114,10 @@ class FreshnessPolicy:
     These drive the recentness_score in SatelliteRGBQA and determine
     how stale an image can be before being rejected / heavily downgraded.
     """
-    fresh_days: int = 5        # ≤ this → full recentness score
-    moderate_days: int = 15    # ≤ this → moderate recentness (0.8)
-    stale_days: int = 30       # ≤ this → stale (0.5)
-    unusable_days: int = 90    # > this → near-zero recentness; strongly discouraged
+    fresh_days: int = 5        # ≤ this -> full recentness score
+    moderate_days: int = 15    # ≤ this -> moderate recentness (0.8)
+    stale_days: int = 30       # ≤ this -> stale (0.5)
+    unusable_days: int = 90    # > this -> near-zero recentness; strongly discouraged
 
 
 FRESHNESS_POLICY = FreshnessPolicy()

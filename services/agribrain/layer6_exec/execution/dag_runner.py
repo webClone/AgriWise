@@ -2,10 +2,10 @@
 from typing import Dict, List, Any, Tuple
 from datetime import datetime
 
-from services.agribrain.layer6_exec.schema import (
+from layer6_exec.schema import (
     ExecutionState, TaskStatus, OperationalContext
 )
-from services.agribrain.layer3_decision.schema import ExecutionPlan, TaskNode
+from layer3_decision.schema import ExecutionPlan, TaskNode
 
 def _is_expired(node: TaskNode, current_date: str) -> bool:
     # Check if beyond valid window (stub logic: assuming tasks usually valid for 7 days if not specified)

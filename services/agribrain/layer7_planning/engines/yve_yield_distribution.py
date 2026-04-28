@@ -1,6 +1,6 @@
 from typing import Any
-from services.agribrain.layer7_planning.schema import YieldDistribution, SuitabilityState
-from services.agribrain.layer7_planning.engines.ccl_crop_library import CropProfile
+from layer7_planning.schema import YieldDistribution, SuitabilityState
+from layer7_planning.engines.ccl_crop_library import CropProfile
 
 def compute_yield_distribution(profile: CropProfile, window_state: SuitabilityState, water_state: SuitabilityState, soil_state: SuitabilityState, biotic_state: SuitabilityState) -> YieldDistribution:
     """

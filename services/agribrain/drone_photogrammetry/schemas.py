@@ -37,6 +37,36 @@ class SurfaceModelType(str, Enum):
     DENSE_RECONSTRUCTION = "dense_reconstruction"  # V2 future
 
 
+class ResolutionMode(str, Enum):
+    """How the pipeline handles frame resolution.
+    
+    NATIVE:    Process at full camera resolution. Production path.
+    WORKING:   Process at a capped working resolution. Default for
+               resource-constrained environments.
+    BENCHMARK: Small synthetic frames. Hard caps to keep tests fast.
+    """
+    NATIVE = "native"
+    WORKING = "working"
+    BENCHMARK = "benchmark"
+
+
+class SceneType(str, Enum):
+    """Scene type hint for seam optimization and quality assessment.
+    
+    Can be explicitly set on input or auto-detected from frame QA.
+    """
+    ORCHARD = "orchard"        # Tree canopy blobs, repeated structure
+    ROW_CROP = "row_crop"      # Linear row patterns (corn, wheat, vineyard)
+    GENERIC = "generic"        # No specific structure assumption
+
+
+class PyramidLevel(str, Enum):
+    """Resolution pyramid level identifiers."""
+    NATIVE = "native"          # Full camera resolution
+    HALF = "half"              # 50% of native
+    QUARTER = "quarter"        # 25% of native
+
+
 # ============================================================================
 # Camera & Frame Metadata
 # ============================================================================
@@ -103,6 +133,14 @@ class FrameMetadata:
     aperture: float = 0.0
     white_balance: str = ""
     
+    # Resolution tracking (V3)
+    native_width_px: int = 0         # Original frame width from camera/EXIF
+    native_height_px: int = 0        # Original frame height from camera/EXIF
+    working_width_px: int = 0        # Working resolution width (may be capped)
+    working_height_px: int = 0       # Working resolution height (may be capped)
+    pyramid_levels_available: List[str] = field(default_factory=list)
+    # e.g. ["native", "half", "quarter"]
+    
     # Synthetic pixel data (for benchmarking only)
     synthetic_pixels: Optional[Dict[str, List[List[int]]]] = None
 
@@ -128,6 +166,11 @@ class FrameQAResult:
     rolling_shutter_risk: float = 0.0
     vegetation_content: float = 0.0  # Proxy for useful ag content
     coverage_usefulness: float = 1.0 # How much of the frame is useful
+    
+    # Multi-scale QA (V3)
+    native_blur_score: float = 0.0   # Blur measured at native resolution
+    working_blur_score: float = 0.0  # Blur measured at working resolution
+    estimated_texture_density: float = 0.5  # 0 = uniform/textureless, 1 = rich texture
     
     # Overall quality weight for mosaic contribution
     quality_weight: float = 1.0      # 0 = should not contribute, 1 = ideal
@@ -219,6 +262,14 @@ class OrthoTile:
     synthetic_pixels: Optional[Dict[str, List[List[int]]]] = None
     # Usable mask (True = pixel is valid)
     usable_fraction: float = 1.0
+    
+    # V3: Per-tile quality products
+    valid_mask: Optional[List[List[bool]]] = None  # True = pixel has valid source data
+    off_nadir_penalty: float = 0.0     # 0 = nadir, 1 = extreme off-nadir
+    uncertainty_score: float = 0.0     # Combined uncertainty from view angle + pose sigma
+    view_angle_deg: float = 0.0        # Mean view angle for this tile
+    tile_width_px: int = 0             # Output tile dimensions
+    tile_height_px: int = 0
 
 
 # ============================================================================
@@ -255,6 +306,10 @@ class DroneFrameSetInput:
     target_overlap_pct: float = 75.0
     flight_altitude_m: float = 50.0
     coverage_pattern: str = "boustrophedon"
+    
+    # V3: Scene and resolution hints
+    scene_type: Optional[str] = None         # "orchard", "row_crop", "generic", or None for auto
+    resolution_mode: Optional[str] = None    # "native", "working", "benchmark", or None for auto
     
     # Synthetic frames (for benchmarking only)
     synthetic_frames: Optional[List[Dict[str, List[List[int]]]]] = None
@@ -326,6 +381,15 @@ class PipelineProvenance:
     pipeline_version: str = "heuristic_v1"
     processing_steps: List[str] = field(default_factory=list)
     processing_time_ms: float = 0.0
+    
+    # V3: Mode decisions — always recorded for reproducibility
+    resolution_mode_used: str = ""       # ResolutionMode value
+    pyramid_levels_used: List[str] = field(default_factory=list)
+    seam_mode_selected: str = ""         # SceneType value used for seam logic
+    scene_type_source: str = ""          # "explicit" or "auto_detected"
+    benchmark_mode: bool = False
+    native_resolution: str = ""          # e.g. "4000x3000"
+    working_resolution: str = ""         # e.g. "2000x1500"
 
 
 # ============================================================================

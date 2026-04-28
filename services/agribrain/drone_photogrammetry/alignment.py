@@ -30,6 +30,11 @@ class AlignmentResult:
     method: str = "gps_only"
     # Frames that could not be aligned
     unaligned_frame_ids: List[str] = field(default_factory=list)
+    
+    # V3: Strip-level awareness
+    strip_count: int = 0             # Number of detected flight strips
+    weak_connections: List[str] = field(default_factory=list)  # Frame IDs with < 2 overlaps
+    strip_gap_risk: float = 0.0      # 0 = solid, 1 = probable inter-strip gap
 
 
 class InitialAligner:
@@ -108,7 +113,11 @@ class InitialAligner:
             
             pose_map[frame.frame_id] = pose
         
-        # --- Step 2: Tie-point-assisted refinement ---
+        # --- Step 2: Strip detection (V3) ---
+        strips = self._detect_strips(frame_map, pose_map)
+        result.strip_count = len(strips)
+        
+        # --- Step 3: Tie-point-assisted refinement ---
         if overlap_pairs and len(overlap_pairs) > 0 and len(pose_map) > 1:
             corrections_applied = self._apply_tiepoint_corrections(
                 pose_map, frame_map, overlap_pairs
@@ -120,26 +129,40 @@ class InitialAligner:
         
         result.poses = list(pose_map.values())
         
-        # --- Step 3: Alignment confidence ---
+        # --- Step 4: Weak connection analysis (V3) ---
+        if overlap_pairs:
+            result.weak_connections = self._find_weak_connections(
+                pose_map, overlap_pairs
+            )
+            if result.weak_connections:
+                result.strip_gap_risk = min(
+                    1.0, len(result.weak_connections) / max(len(pose_map), 1) * 3
+                )
+        
+        # --- Step 5: Alignment confidence ---
         total_frames = sum(1 for q in qa_results if q.usable)
         if total_frames > 0 and result.poses:
             gps_coverage = has_gps / total_frames
             mean_sigma = sum(p.position_sigma_m for p in result.poses) / len(result.poses)
             uncertainty_factor = max(0.1, 1.0 - mean_sigma / 10.0)
             
-            # Tie-point boost: if we successfully used correspondences
             tiepoint_boost = 1.0
             if result.method == "gps_tiepoint":
-                tiepoint_boost = 1.15  # 15% confidence boost
+                tiepoint_boost = 1.15
+            
+            # V3: Penalize strip gaps
+            gap_penalty = max(0.7, 1.0 - result.strip_gap_risk * 0.3)
             
             result.alignment_confidence = min(
-                1.0, gps_coverage * uncertainty_factor * tiepoint_boost
+                1.0, gps_coverage * uncertainty_factor * tiepoint_boost * gap_penalty
             )
         
         logger.info(
             f"[Alignment] {len(result.poses)} poses, "
             f"method={result.method}, "
             f"confidence={result.alignment_confidence:.2f}, "
+            f"strips={result.strip_count}, "
+            f"weak={len(result.weak_connections)}, "
             f"{len(result.unaligned_frame_ids)} unaligned"
         )
         
@@ -287,3 +310,59 @@ class InitialAligner:
             )
         
         return corrected_count
+    
+    def _detect_strips(
+        self,
+        frame_map: Dict[str, FrameMetadata],
+        pose_map: Dict[str, CameraPose],
+    ) -> List[List[str]]:
+        """V3: Detect flight strips from GPS heading consistency.
+        
+        Frames with similar headings that are spatially sequential
+        belong to the same strip. A heading change > 90° marks a
+        strip boundary.
+        """
+        if len(pose_map) < 2:
+            return [list(pose_map.keys())]
+        
+        # Sort by sequence index
+        sorted_ids = sorted(
+            pose_map.keys(),
+            key=lambda fid: frame_map[fid].sequence_index if fid in frame_map else 0
+        )
+        
+        strips: List[List[str]] = []
+        current_strip = [sorted_ids[0]]
+        
+        for i in range(1, len(sorted_ids)):
+            prev_pose = pose_map[sorted_ids[i - 1]]
+            curr_pose = pose_map[sorted_ids[i]]
+            
+            heading_diff = abs(curr_pose.heading_deg - prev_pose.heading_deg)
+            if heading_diff > 180:
+                heading_diff = 360 - heading_diff
+            
+            if heading_diff > 90:
+                strips.append(current_strip)
+                current_strip = [sorted_ids[i]]
+            else:
+                current_strip.append(sorted_ids[i])
+        
+        strips.append(current_strip)
+        return strips
+    
+    def _find_weak_connections(
+        self,
+        pose_map: Dict[str, CameraPose],
+        pairs: List[TiePointPair],
+    ) -> List[str]:
+        """V3: Find frames with fewer than 2 overlap pairs (fragile connectivity)."""
+        overlap_count: Dict[str, int] = {fid: 0 for fid in pose_map}
+        
+        for pair in pairs:
+            if pair.frame_a_id in overlap_count:
+                overlap_count[pair.frame_a_id] += 1
+            if pair.frame_b_id in overlap_count:
+                overlap_count[pair.frame_b_id] += 1
+        
+        return [fid for fid, count in overlap_count.items() if count < 2]

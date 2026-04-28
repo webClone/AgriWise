@@ -17,7 +17,7 @@ Metrics:
   - Boundary contamination accuracy (target >= 90%)
 """
 
-from __future__ import annotations
+import sys
 import json
 import os
 import time
@@ -25,15 +25,19 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from .cases import (
+from layer0.perception.satellite_rgb.benchmark.cases import (
     BENCHMARK_CASES,
     BENCHMARK_VERSION,
     SatRGBBenchmarkCase,
     _generate_pixel_grid,
 )
-from ..engine import SatelliteRGBEngine
-from ..schemas import SatelliteRGBEngineInput
-from ...common.base_types import SatelliteProvider
+from layer0.perception.satellite_rgb.engine import SatelliteRGBEngine
+from layer0.perception.satellite_rgb.schemas import SatelliteRGBEngineInput
+from layer0.perception.common.base_types import SatelliteProvider
+from layer0.perception.common.benchmark_contract import (
+    BenchmarkGateResult, finalize, result_to_dict,
+    exit_code_from_result, summarize_failures, validate_case_metadata,
+)
 
 
 # ============================================================================
@@ -116,6 +120,10 @@ def run_benchmark(verbose: bool = True) -> List[CaseResult]:
         print(f"  Running {len(BENCHMARK_CASES)} cases...")
         print(f"{'=' * 72}\n")
 
+    # Validate case metadata: reject critical + soft_fail combination
+    for case in BENCHMARK_CASES:
+        validate_case_metadata(case.case_id, case.critical_case, case.allowed_soft_fail)
+
     for i, case in enumerate(BENCHMARK_CASES):
         t0 = time.time()
         result = CaseResult(case)
@@ -171,7 +179,7 @@ def run_benchmark(verbose: bool = True) -> List[CaseResult]:
         results.append(result)
 
         if verbose:
-            ok = "✓" if not result.error else "✗"
+            ok = "PASS" if not result.error else f"FAIL ({result.error})"
             print(f"  [{i+1:2d}/{len(BENCHMARK_CASES)}] {ok} {case.case_id}")
 
     total_elapsed = (time.time() - total_start) * 1000
@@ -179,10 +187,102 @@ def run_benchmark(verbose: bool = True) -> List[CaseResult]:
     if verbose:
         _print_scorecard(results, total_elapsed)
 
-    # Save results
-    _save_results(results)
+    # --- Compute gate result (same population/thresholds as scorecard) ---
+    gate_result = _compute_gate_result(results)
 
-    return results
+    # Save results with gate contract
+    _save_results(results, gate_result)
+
+    return results, gate_result
+
+
+# ============================================================================
+# Gate result computation (single source of truth for thresholds)
+# ============================================================================
+
+# These thresholds are used for BOTH the printed scorecard and the gate logic.
+# If the scorecard prints [FAIL], the gate MUST also fail.
+THRESHOLDS = {
+    "veg_mae": 0.08,
+    "soil_mae": 0.08,
+    "density_acc": 85.0,
+    "pheno_mae": 1.0,
+    "qa_acc": 95.0,
+    "anomaly_fp_rate": 10.0,
+    "boundary_acc": 90.0,
+}
+
+
+def _compute_gate_result(results: List[CaseResult]) -> BenchmarkGateResult:
+    """Compute aggregate metrics and gate result.
+
+    Uses ALL gt_qa_usable cases for structural metrics (same population
+    as the printed scorecard). If the scorecard says [FAIL], gate says FAIL.
+    """
+    structural = [r for r in results if r.case.gt_qa_usable]
+    all_cases = results
+
+    veg_mae = sum(r.veg_error for r in structural) / max(len(structural), 1)
+    soil_mae = sum(r.soil_error for r in structural) / max(len(structural), 1)
+    density_acc = sum(1 for r in structural if r.density_correct) / max(len(structural), 1) * 100
+    pheno_mae = sum(r.phenology_error for r in structural) / max(len(structural), 1)
+    qa_acc = sum(1 for r in all_cases if r.qa_correct) / max(len(all_cases), 1) * 100
+
+    non_anomaly = [r for r in structural if not r.case.gt_anomaly_expected]
+    anomaly_fps = sum(1 for r in non_anomaly if r.anomaly_fp)
+    anomaly_fp_rate = anomaly_fps / max(len(non_anomaly), 1) * 100
+
+    boundary_acc = sum(1 for r in all_cases if r.boundary_correct) / max(len(all_cases), 1) * 100
+
+    # Evaluate each metric against its threshold
+    gate = BenchmarkGateResult(engine="satellite_rgb")
+    scorecard_metrics = {}
+
+    for name, value, threshold, higher_better in [
+        ("veg_mae", veg_mae, THRESHOLDS["veg_mae"], False),
+        ("soil_mae", soil_mae, THRESHOLDS["soil_mae"], False),
+        ("density_acc", density_acc, THRESHOLDS["density_acc"], True),
+        ("pheno_mae", pheno_mae, THRESHOLDS["pheno_mae"], False),
+        ("qa_acc", qa_acc, THRESHOLDS["qa_acc"], True),
+        ("anomaly_fp_rate", anomaly_fp_rate, THRESHOLDS["anomaly_fp_rate"], False),
+        ("boundary_acc", boundary_acc, THRESHOLDS["boundary_acc"], True),
+    ]:
+        passed = (value >= threshold) if higher_better else (value <= threshold)
+        scorecard_metrics[name] = {"value": round(value, 4), "threshold": threshold, "passed": passed}
+        if not passed:
+            gate.aggregate_failures += 1
+            gate.failing_metrics.append(name)
+
+    gate.scorecard = scorecard_metrics
+
+    # Evaluate each case
+    for r in results:
+        c = r.case
+        veg_ok = r.veg_error <= 0.12
+        soil_ok = r.soil_error <= 0.12
+        den_ok = r.density_correct
+        phen_ok = r.phenology_error <= 1.5
+        qa_ok = r.qa_correct
+        bnd_ok = r.boundary_correct
+        anom_ok = not r.anomaly_fp
+        all_ok = veg_ok and soil_ok and den_ok and phen_ok and qa_ok and bnd_ok and anom_ok
+
+        case_entry = {
+            "case_id": c.case_id,
+            "passed": all_ok,
+            "critical": c.critical_case,
+            "soft_fail": c.allowed_soft_fail,
+        }
+        gate.case_results.append(case_entry)
+
+        if not all_ok:
+            if c.allowed_soft_fail:
+                gate.soft_failures += 1
+            elif c.critical_case:
+                gate.critical_failures += 1
+                gate.failing_cases.append(c.case_id)
+
+    return finalize(gate)
 
 
 # ============================================================================
@@ -190,16 +290,15 @@ def run_benchmark(verbose: bool = True) -> List[CaseResult]:
 # ============================================================================
 
 def _print_scorecard(results: List[CaseResult], total_elapsed_ms: float) -> None:
-    """Print the full benchmark scorecard."""
-    sep = "─" * 72
+    """Print the full benchmark scorecard.
 
-    # --- Filter usable cases for structural metrics ---
-    # Don't include cases where QA should reject (gt_qa_usable=False)
-    # for structural accuracy metrics
+    Uses the exact same population and thresholds as _compute_gate_result.
+    """
+    sep = "-" * 72
     structural = [r for r in results if r.case.gt_qa_usable]
     all_cases = results
 
-    # --- Overall scorecard ---
+    # Compute metrics (same formulas as _compute_gate_result)
     veg_mae = sum(r.veg_error for r in structural) / max(len(structural), 1)
     soil_mae = sum(r.soil_error for r in structural) / max(len(structural), 1)
     density_correct = sum(1 for r in structural if r.density_correct)
@@ -207,29 +306,26 @@ def _print_scorecard(results: List[CaseResult], total_elapsed_ms: float) -> None
     pheno_mae = sum(r.phenology_error for r in structural) / max(len(structural), 1)
     qa_correct = sum(1 for r in all_cases if r.qa_correct)
     qa_acc = qa_correct / max(len(all_cases), 1) * 100
-
-    # Anomaly FP: count FPs among non-anomaly cases
     non_anomaly = [r for r in structural if not r.case.gt_anomaly_expected]
     anomaly_fps = sum(1 for r in non_anomaly if r.anomaly_fp)
     anomaly_fp_rate = anomaly_fps / max(len(non_anomaly), 1) * 100
+    boundary_correct_n = sum(1 for r in all_cases if r.boundary_correct)
+    boundary_acc = boundary_correct_n / max(len(all_cases), 1) * 100
 
-    # Boundary accuracy
-    boundary_correct = sum(1 for r in all_cases if r.boundary_correct)
-    boundary_acc = boundary_correct / max(len(all_cases), 1) * 100
-
+    T = THRESHOLDS
     print(f"\n{'=' * 72}")
-    print(f"  OVERALL SCORECARD — {BENCHMARK_VERSION}")
+    print(f"  OVERALL SCORECARD -- {BENCHMARK_VERSION}")
     print(f"{'=' * 72}")
     print(f"  Total cases:             {len(all_cases)}")
     print(f"  Structural cases:        {len(structural)} (gt_qa_usable=True)")
     print(f"")
-    print(f"  Veg fraction MAE:        {veg_mae:.3f}  {'✅' if veg_mae <= 0.08 else '❌'} (target <= 0.08)")
-    print(f"  Soil fraction MAE:       {soil_mae:.3f}  {'✅' if soil_mae <= 0.08 else '❌'} (target <= 0.08)")
-    print(f"  Density class accuracy:  {density_acc:.1f}%  {'✅' if density_acc >= 85 else '❌'} (target >= 85%)")
-    print(f"  Phenology stage MAE:     {pheno_mae:.2f}  {'✅' if pheno_mae <= 1.0 else '❌'} (target <= 1.0)")
-    print(f"  QA gating accuracy:      {qa_acc:.1f}%  {'✅' if qa_acc >= 95 else '❌'} (target >= 95%)")
-    print(f"  Anomaly FP rate:         {anomaly_fp_rate:.1f}%  {'✅' if anomaly_fp_rate <= 10 else '❌'} (target <= 10%)")
-    print(f"  Boundary accuracy:       {boundary_acc:.1f}%  {'✅' if boundary_acc >= 90 else '❌'} (target >= 90%)")
+    print(f"  Veg fraction MAE:        {veg_mae:.3f}  {'[PASS]' if veg_mae <= T['veg_mae'] else '[FAIL]'} (target <= {T['veg_mae']})")
+    print(f"  Soil fraction MAE:       {soil_mae:.3f}  {'[PASS]' if soil_mae <= T['soil_mae'] else '[FAIL]'} (target <= {T['soil_mae']})")
+    print(f"  Density class accuracy:  {density_acc:.1f}%  {'[PASS]' if density_acc >= T['density_acc'] else '[FAIL]'} (target >= {T['density_acc']}%)")
+    print(f"  Phenology stage MAE:     {pheno_mae:.2f}  {'[PASS]' if pheno_mae <= T['pheno_mae'] else '[FAIL]'} (target <= {T['pheno_mae']})")
+    print(f"  QA gating accuracy:      {qa_acc:.1f}%  {'[PASS]' if qa_acc >= T['qa_acc'] else '[FAIL]'} (target >= {T['qa_acc']}%)")
+    print(f"  Anomaly FP rate:         {anomaly_fp_rate:.1f}%  {'[PASS]' if anomaly_fp_rate <= T['anomaly_fp_rate'] else '[FAIL]'} (target <= {T['anomaly_fp_rate']}%)")
+    print(f"  Boundary accuracy:       {boundary_acc:.1f}%  {'[PASS]' if boundary_acc >= T['boundary_acc'] else '[FAIL]'} (target >= {T['boundary_acc']}%)")
 
     # --- Per-slice scorecard ---
     print(f"\n{sep}")
@@ -260,8 +356,8 @@ def _print_scorecard(results: List[CaseResult], total_elapsed_ms: float) -> None
     print(f"  DETAILED RESULTS")
     print(f"  {'Case ID':30s} {'Slice':18s} {'Veg':>6s} {'Soil':>6s} "
           f"{'Den':>6s} {'Phen':>5s} {'QA':>4s} {'Anom':>5s} {'Bnd':>4s} OK?")
-    print(f"  {'─' * 30} {'─' * 18} {'─' * 6} {'─' * 6} "
-          f"{'─' * 6} {'─' * 5} {'─' * 4} {'─' * 5} {'─' * 4} ───")
+    print(f"  {'-' * 30} {'-' * 18} {'-' * 6} {'-' * 6} "
+          f"{'-' * 6} {'-' * 5} {'-' * 4} {'-' * 5} {'-' * 4} ---")
 
     for r in results:
         c = r.case
@@ -274,7 +370,7 @@ def _print_scorecard(results: List[CaseResult], total_elapsed_ms: float) -> None
         anom_ok = not r.anomaly_fp
 
         all_ok = veg_ok and soil_ok and den_ok and phen_ok and qa_ok and bnd_ok and anom_ok
-        ok_sym = "✓" if all_ok else "✗"
+        ok_sym = "[PASS]" if all_ok else "[FAIL]"
 
         veg_str = f"{r.pred_vegetation_fraction:.2f}" if c.gt_qa_usable else "-"
         soil_str = f"{r.pred_soil_fraction:.2f}" if c.gt_qa_usable else "-"
@@ -350,15 +446,19 @@ def _print_scorecard(results: List[CaseResult], total_elapsed_ms: float) -> None
     print(f"{'=' * 72}")
 
 
-def _save_results(results: List[CaseResult]) -> None:
-    """Save benchmark results to JSON."""
+def _save_results(results: List[CaseResult], gate_result: BenchmarkGateResult) -> None:
+    """Save benchmark results and gate contract to JSON."""
     out_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Save detailed results with embedded gate contract
     out_path = os.path.join(out_dir, "benchmark_results.json")
+    gate_dict = result_to_dict(gate_result)
 
     data = {
         "version": BENCHMARK_VERSION,
         "timestamp": datetime.now().isoformat(),
         "n_cases": len(results),
+        "gate_result": gate_dict,
         "cases": [],
     }
 
@@ -388,10 +488,18 @@ def _save_results(results: List[CaseResult]) -> None:
         json.dump(data, f, indent=2)
     print(f"\n  Results saved to: {out_path}")
 
+    # Save standalone gate artifact
+    gate_path = os.path.join(out_dir, "benchmark_gate_result.json")
+    with open(gate_path, "w") as f:
+        json.dump(gate_dict, f, indent=2)
+    print(f"  Gate artifact saved to: {gate_path}")
+
 
 # ============================================================================
 # CLI entry point
 # ============================================================================
 
 if __name__ == "__main__":
-    run_benchmark(verbose=True)
+    results, gate_result = run_benchmark(verbose=True)
+    print(f"\n{summarize_failures(gate_result)}")
+    sys.exit(exit_code_from_result(gate_result))

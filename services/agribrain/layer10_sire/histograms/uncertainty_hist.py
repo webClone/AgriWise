@@ -5,7 +5,7 @@ Uncertainty & Source Dominance Histograms
 Distribution of uncertainty and source contribution across the field.
 """
 from typing import List, Dict, Any
-from services.agribrain.layer10_sire.schema import SurfaceArtifact, SurfaceType
+from layer10_sire.schema import SurfaceArtifact, SurfaceType
 
 
 def compute_uncertainty_histograms(

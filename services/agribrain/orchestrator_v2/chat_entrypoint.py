@@ -8,9 +8,9 @@ from datetime import datetime, timedelta
 import os
 sys.path.insert(0, os.getcwd())
 
-from services.agribrain.orchestrator_v2.runner import run_for_chat
-from services.agribrain.orchestrator_v2.schema import OrchestratorInput
-from services.agribrain.orchestrator_v2.chat_adapter import ChatPayload
+from orchestrator_v2.runner import run_for_chat
+from orchestrator_v2.schema import OrchestratorInput
+from orchestrator_v2.chat_adapter import ChatPayload
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -32,7 +32,7 @@ def main():
             ctx = json.loads(decoded)
         except Exception:
             ctx = json.loads(args.context)
-        from services.agribrain.orchestrator_v2.intents import detect_intent, Intent
+        from orchestrator_v2.intents import detect_intent, Intent
         
         query_text = args.query.strip() if args.query else ""
         plot_id_early = ctx.get("plot_id", "UNKNOWN")
@@ -40,8 +40,8 @@ def main():
         
         if intent == Intent.GREETING:
             # 0. Early Exit for Greetings (Do not run Orchestrator)
-            from services.agribrain.orchestrator_v2.chat_adapter import ChatPayload
-            from services.agribrain.orchestrator_v2.arf_schema import ARFResponse, LearningModule
+            from orchestrator_v2.chat_adapter import ChatPayload
+            from orchestrator_v2.arf_schema import ARFResponse, LearningModule
             
             arf = ARFResponse(
                 headline="Hi 👋 I am AgriBrain.",
@@ -82,7 +82,7 @@ def main():
             
         if intent == Intent.GENERAL:
             # 0.5 Early Exit for General Agronomy (LLM only, no orchestrator)
-            from services.agribrain.orchestrator_v2.chat_adapter import ChatPayload
+            from orchestrator_v2.chat_adapter import ChatPayload
             import os
             
             # Create a mock summary for context
@@ -96,7 +96,7 @@ def main():
             exp_level = args.exp
             mem = None
             if plot_id != "UNKNOWN":
-                from services.agribrain.orchestrator_v2.chat_memory import load_memory
+                from orchestrator_v2.chat_memory import load_memory
                 mem = load_memory(plot_id)
                 exp_level = mem.experience_level
                 
@@ -165,7 +165,7 @@ def main():
                     )
                     raw_json = json.loads(resp.json()["choices"][0]["message"]["content"].strip().replace('```json', '').replace('```', ''))
                     
-                    from services.agribrain.orchestrator_v2.arf_schema import ARFResponse
+                    from orchestrator_v2.arf_schema import ARFResponse
                     arf_dict = ARFResponse(**raw_json).dict()
                 except Exception as e:
                     arf_dict = {"error": f"LLM Failure: {str(e)}"}
@@ -204,7 +204,7 @@ def main():
         
         # Update Memory explicitly if passed
         if plot_id != "UNKNOWN":
-            from services.agribrain.orchestrator_v2.chat_memory import load_memory, save_memory
+            from orchestrator_v2.chat_memory import load_memory, save_memory
             mem = load_memory(plot_id)
             if args.exp: mem.experience_level = args.exp
             # Sync context

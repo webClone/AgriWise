@@ -23,45 +23,45 @@ from datetime import datetime, timezone
 import hashlib
 import json
 
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, Layer10Output, QualityReport, RenderManifest,
     HistogramBundle, SIREDegradation, RenderMode, GroundingClass, SurfaceType,
 )
-from services.agribrain.layer10_sire.invariants import enforce_layer10_invariants
+from layer10_sire.invariants import enforce_layer10_invariants
 
 # Adapters
-from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
-from services.agribrain.layer10_sire.adapters.l2_adapter import adapt_l2
-from services.agribrain.layer10_sire.adapters.l3_adapter import adapt_l3
-from services.agribrain.layer10_sire.adapters.l4_l9_adapters import (
+from layer10_sire.adapters.l1_adapter import adapt_l1
+from layer10_sire.adapters.l2_adapter import adapt_l2
+from layer10_sire.adapters.l3_adapter import adapt_l3
+from layer10_sire.adapters.l4_l9_adapters import (
     adapt_l4, adapt_l5, adapt_l6, adapt_l7, adapt_l8, adapt_l9,
 )
 
 # Sub-engine imports
-from services.agribrain.layer10_sire.surfaces.vegetation import generate_vegetation_surfaces
-from services.agribrain.layer10_sire.surfaces.water import generate_water_surfaces
-from services.agribrain.layer10_sire.surfaces.uncertainty import generate_uncertainty_surfaces
-from services.agribrain.layer10_sire.surfaces.nutrients import generate_nutrient_surfaces
-from services.agribrain.layer10_sire.surfaces.disease import generate_disease_surfaces
-from services.agribrain.layer10_sire.surfaces.yield_surface import generate_yield_surfaces
-from services.agribrain.layer10_sire.surfaces.suitability import generate_suitability_surfaces
-from services.agribrain.layer10_sire.surfaces.risk import generate_risk_surfaces
-from services.agribrain.layer10_sire.zones.extractor import extract_zones
-from services.agribrain.layer10_sire.zones.heterogeneity_zones import extract_heterogeneity_zones
-from services.agribrain.layer10_sire.zones.labeler import label_zones
-from services.agribrain.layer10_sire.zones.topology import validate_topology
-from services.agribrain.layer10_sire.histograms.field_hist import compute_field_histograms
-from services.agribrain.layer10_sire.histograms.zone_hist import compute_zone_histograms
-from services.agribrain.layer10_sire.histograms.uncertainty_hist import compute_uncertainty_histograms
-from services.agribrain.layer10_sire.histograms.delta_hist import compute_delta_histograms
-from services.agribrain.layer10_sire.histograms.compare import compare_zones, compare_surfaces
-from services.agribrain.layer10_sire.structure.canopy_mask import detect_canopy
-from services.agribrain.layer10_sire.products.manifest import build_render_manifest
-from services.agribrain.layer10_sire.products.export import (
+from layer10_sire.surfaces.vegetation import generate_vegetation_surfaces
+from layer10_sire.surfaces.water import generate_water_surfaces
+from layer10_sire.surfaces.uncertainty import generate_uncertainty_surfaces
+from layer10_sire.surfaces.nutrients import generate_nutrient_surfaces
+from layer10_sire.surfaces.disease import generate_disease_surfaces
+from layer10_sire.surfaces.yield_surface import generate_yield_surfaces
+from layer10_sire.surfaces.suitability import generate_suitability_surfaces
+from layer10_sire.surfaces.risk import generate_risk_surfaces
+from layer10_sire.zones.extractor import extract_zones
+from layer10_sire.zones.heterogeneity_zones import extract_heterogeneity_zones
+from layer10_sire.zones.labeler import label_zones
+from layer10_sire.zones.topology import validate_topology
+from layer10_sire.histograms.field_hist import compute_field_histograms
+from layer10_sire.histograms.zone_hist import compute_zone_histograms
+from layer10_sire.histograms.uncertainty_hist import compute_uncertainty_histograms
+from layer10_sire.histograms.delta_hist import compute_delta_histograms
+from layer10_sire.histograms.compare import compare_zones, compare_surfaces
+from layer10_sire.structure.canopy_mask import detect_canopy
+from layer10_sire.products.manifest import build_render_manifest
+from layer10_sire.products.export import (
     export_raster_pack, export_vector_pack, export_tile_manifest,
 )
-from services.agribrain.layer10_sire.imagery.quicklooks import generate_quicklook
-from services.agribrain.layer10_sire.explainability import build_premium_packs
+from layer10_sire.imagery.quicklooks import generate_quicklook
+from layer10_sire.explainability import build_premium_packs
 
 
 def _deterministic_run_id(inp: Layer10Input, adapted_ids: Dict[str, str]) -> str:
@@ -134,7 +134,7 @@ def _compute_field_valid_cells(l10_input, H: int, W: int, surfaces) -> Optional[
                         return count
 
     # Strategy 2: NDVI non-null count (a reasonable proxy)
-    from services.agribrain.layer10_sire.schema import SurfaceType as _ST
+    from layer10_sire.schema import SurfaceType as _ST
     ndvi_surf = next((s for s in surfaces if s.semantic_type == _ST.NDVI_CLEAN), None)
     if ndvi_surf:
         count = sum(
@@ -292,13 +292,13 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         except Exception:
             pass
         try:
-            from services.agribrain.layer10_sire.structure.row_detection import detect_rows
+            from layer10_sire.structure.row_detection import detect_rows
             row_objs = detect_rows(l10_input, H, W, l1_data=l1_data)
             micro_objects.extend(row_objs)
         except Exception:
             pass
         try:
-            from services.agribrain.layer10_sire.structure.crown_detection import detect_crowns
+            from layer10_sire.structure.crown_detection import detect_crowns
             crown_objs = detect_crowns(l10_input, H, W, l1_data=l1_data)
             micro_objects.extend(crown_objs)
         except Exception:
@@ -362,7 +362,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
 
     # Convert uncertainty dicts to HistogramArtifact-compatible form
     unc_hists_typed = []
-    from services.agribrain.layer10_sire.schema import HistogramArtifact
+    from layer10_sire.schema import HistogramArtifact
     for uh in unc_hists_raw:
         st = uh.get('surface_type', '')
         hist_data = uh.get('histogram', {})
@@ -405,7 +405,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 curr_grid, prev_grid, H, W, surface_name='NDVI'
             )
             if delta_result.get('counts'):
-                from services.agribrain.layer10_sire.schema import DeltaHistogram
+                from layer10_sire.schema import DeltaHistogram
                 shift = 'STABLE'
                 mean_ch = delta_result.get('stats', {}).get('mean', 0.0)
                 if mean_ch > 0.02: shift = 'IMPROVING'

@@ -2,7 +2,7 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Union
 
-from services.agribrain.layer3_decision.schema import ProblemClass, RiskIfWrong, Driver
+from layer3_decision.schema import ProblemClass, RiskIfWrong, Driver
 
 class ProblemType(Enum):
     # Abiotic

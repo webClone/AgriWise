@@ -1,7 +1,7 @@
 """
 Shared Packet Adapter — The single exit point from perception into Layer 0.
 
-Converts PerceptionEngineOutput → List[ObservationPacket].
+Converts PerceptionEngineOutput -> List[ObservationPacket].
 
 This is THE bridge between perception engines and the Kalman assimilation
 engine. Every engine (satellite_rgb, farmer_photo, drone, ip_camera)
@@ -21,20 +21,20 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 import hashlib
 
-from .contracts import (
+from layer0.perception.common.contracts import (
     PerceptionEngineFamily,
     PerceptionEngineOutput,
     PerceptionVariable,
 )
 
-from services.agribrain.layer0.observation_packet import (
+from layer0.observation_packet import (
     ObservationPacket, ObservationSource, ObservationType,
     QAMetadata, QAFlag, UncertaintyModel, Provenance,
 )
 
 
 # ============================================================================
-# Engine family → ObservationSource mapping
+# Engine family -> ObservationSource mapping
 # ============================================================================
 
 ENGINE_TO_SOURCE: Dict[PerceptionEngineFamily, ObservationSource] = {
@@ -46,7 +46,7 @@ ENGINE_TO_SOURCE: Dict[PerceptionEngineFamily, ObservationSource] = {
 
 
 # ============================================================================
-# Variable → observation type mapping
+# Variable -> observation type mapping
 # ============================================================================
 
 VARIABLE_TO_OBS_TYPE: Dict[str, str] = {

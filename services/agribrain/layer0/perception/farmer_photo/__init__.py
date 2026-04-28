@@ -7,13 +7,13 @@ uncertainty-aware observations about crop identity, organ type,
 and visible symptoms.
 
 Usage:
-    from services.agribrain.layer0.perception.farmer_photo import FarmerPhotoEngine
-    from services.agribrain.layer0.perception.farmer_photo.schemas import FarmerPhotoEngineInput
+    from layer0.perception.farmer_photo import FarmerPhotoEngine
+    from layer0.perception.farmer_photo.schemas import FarmerPhotoEngineInput
 
     engine = FarmerPhotoEngine()
     packets = engine.process(engine_input)
 """
 
-from .engine import FarmerPhotoEngine
+from layer0.perception.farmer_photo.engine import FarmerPhotoEngine
 
 __all__ = ["FarmerPhotoEngine"]

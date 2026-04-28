@@ -1,7 +1,7 @@
 """
-Layer 0.9: Perception Packet Factory — Image → ObservationPacket
+Layer 0.9: Perception Packet Factory — Image -> ObservationPacket
 
-⚠️  LEGACY MODULE — Deprecated in favor of engine-specific pipelines.
+  LEGACY MODULE — Deprecated in favor of engine-specific pipelines.
     See: services/agribrain/layer0/perception/satellite_rgb/engine.py
          services/agribrain/layer0/perception/farmer_photo/  (planned)
          services/agribrain/layer0/perception/drone/          (planned)
@@ -28,12 +28,12 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 import hashlib
 
-from .image_qa import ImageQAEngine, ImageQAResult
-from .perception_models.inference import (
+from layer0.image_qa import ImageQAEngine, ImageQAResult
+from layer0.perception_models.inference import (
     CanopyCoverModel, PhenologyStageModel,
     DiseaseSymptomModel, DroneWeedRowModel, PerceptionOutput
 )
-from .observation_packet import (
+from layer0.observation_packet import (
     ObservationPacket, ObservationSource, ObservationType,
     QAMetadata, QAFlag, UncertaintyModel, Provenance
 )
@@ -43,7 +43,7 @@ class PerceptionPacketFactory:
     """
     Converts raw image inputs into ObservationPackets.
     
-    Orchestrates: ImageQA → perception models → packet creation.
+    Orchestrates: ImageQA -> perception models -> packet creation.
     Each packet flows through the same pipeline as satellite observations.
     """
     
@@ -58,7 +58,7 @@ class PerceptionPacketFactory:
         run_models: Optional[List[str]] = None,
     ) -> List[ObservationPacket]:
         """
-        Full pipeline: QA → inference → packets.
+        Full pipeline: QA -> inference -> packets.
         
         Args:
             image_metadata: see ImageQAEngine.assess() for schema

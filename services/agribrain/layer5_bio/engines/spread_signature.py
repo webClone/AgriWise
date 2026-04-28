@@ -1,6 +1,6 @@
 
 from typing import Dict, Any
-from services.agribrain.layer5_bio.schema import SpreadPattern
+from layer5_bio.schema import SpreadPattern
 
 def infer_spread_signature(field_tensor, veg_output, plot_context: Dict[str, Any]) -> Dict[str, Any]:
     # Use L2 stability outputs if present; fallback using heuristics if needed

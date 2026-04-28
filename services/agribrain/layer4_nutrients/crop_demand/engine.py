@@ -1,8 +1,8 @@
 
 import math
 from typing import Dict, Any, List
-from services.agribrain.layer2_veg_int.schema import PhenologyOutput
-from services.agribrain.layer3_decision.schema import PlotContext
+from layer2_veg_int.schema import PhenologyOutput
+from layer3_decision.schema import PlotContext
 
 class CropDemandUptakeEngine:
     """

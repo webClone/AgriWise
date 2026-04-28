@@ -8,7 +8,7 @@ Determines if it is STABLE, HETEROGENEOUS (persistently variable), or TRANSIENTL
 import math
 import statistics
 from typing import List, Dict, Tuple
-from services.agribrain.layer2_veg_int.schema import SpatialMetrics
+from layer2_veg_int.schema import SpatialMetrics
 
 class SpatialProxyStabilityEngine:
     

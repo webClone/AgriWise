@@ -6,7 +6,7 @@ Purely algorithmic enhancement for rendering surfaces as images.
 Works on surface value grids (not RGB images).
 """
 from typing import List, Optional, Dict, Any
-from services.agribrain.layer10_sire.schema import SurfaceArtifact
+from layer10_sire.schema import SurfaceArtifact
 
 
 def enhance_surface(

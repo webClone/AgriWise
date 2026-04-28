@@ -6,20 +6,20 @@ These mappings (plus their Jacobians) are what the Kalman filter
 uses to correct the model prediction when observations arrive.
 
 Observation models:
-  - Sentinel-2 NDVI/EVI → LAI proxy
-  - Sentinel-2 NDMI → canopy water stress
-  - Sentinel-1 VV → soil surface moisture (0–10cm)
-  - Sentinel-1 VH → biomass/canopy structure
-  - Weather → GDD accumulation (direct)
-  - Soil sensor → soil moisture at specific depth
-  - Camera canopy cover → LAI proxy
+  - Sentinel-2 NDVI/EVI -> LAI proxy
+  - Sentinel-2 NDMI -> canopy water stress
+  - Sentinel-1 VV -> soil surface moisture (0–10cm)
+  - Sentinel-1 VH -> biomass/canopy structure
+  - Weather -> GDD accumulation (direct)
+  - Soil sensor -> soil moisture at specific depth
+  - Camera canopy cover -> LAI proxy
 """
 
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 import math
 
-from .state_vector import (
+from layer0.state_vector import (
     N_STATES, STATE_NAMES,
     IDX_LAI, IDX_BIOMASS, IDX_SM_0_10, IDX_SM_10_40,
     IDX_CANOPY_STRESS, IDX_PHENO_GDD, IDX_PHENO_STAGE, IDX_STRESS_THERMAL
@@ -94,7 +94,7 @@ class ObservationModel:
     @staticmethod
     def sentinel2_ndmi(state_values: List[float]) -> Tuple[float, List[float], float]:
         """
-        NDMI reflects canopy water content → stress proxy.
+        NDMI reflects canopy water content -> stress proxy.
         
         Model: NDMI = base_ndmi * (1 - stress) * LAI_factor
         """
@@ -274,6 +274,62 @@ class ObservationModel:
         return predicted, H, R
 
     @staticmethod
+    def sentinel2_ndre(state_values: List[float]) -> Tuple[float, List[float], float]:
+        """
+        NDRE (red-edge) → weak chlorophyll/vigor proxy.
+
+        Maps to canopy_stress (soft) with high uncertainty.
+        V1: supporting evidence only, cannot dominate state.
+        """
+        lai = state_values[IDX_LAI]
+        stress = state_values[IDX_CANOPY_STRESS]
+
+        # NDRE correlates with chlorophyll, which tracks vigor/stress
+        # Higher NDRE = healthier, lower NDRE = stress
+        ndre_max = 0.6
+        ndre_min = 0.05
+        k = 0.35
+
+        lai_factor = min(1.0, lai / 4.0)
+        stress_reduction = 1.0 - stress * 0.4
+        predicted = ndre_min + (ndre_max - ndre_min) * (1 - math.exp(-k * lai)) * stress_reduction
+
+        H = [0.0] * N_STATES
+        H[IDX_LAI] = (ndre_max - ndre_min) * k * math.exp(-k * lai) * stress_reduction * 0.5
+        H[IDX_CANOPY_STRESS] = -(ndre_max - ndre_min) * (1 - math.exp(-k * lai)) * 0.4 * 0.5
+
+        # HIGH sigma — this is a weak proxy
+        R = 0.06 ** 2
+
+        return predicted, H, R
+
+    @staticmethod
+    def sentinel2_bsi(state_values: List[float]) -> Tuple[float, List[float], float]:
+        """
+        BSI (bare soil index) → weak inverse LAI proxy.
+
+        High BSI = bare soil = low vegetation cover.
+        V1: supporting evidence only with very high uncertainty.
+        Cannot dominate LAI — only supports emergence/senescence signals.
+        """
+        lai = state_values[IDX_LAI]
+
+        # BSI decreases as vegetation increases
+        bsi_bare = 0.3   # Bare soil BSI
+        bsi_veg = -0.15   # Dense vegetation BSI
+        k = 0.4
+
+        predicted = bsi_veg + (bsi_bare - bsi_veg) * math.exp(-k * lai)
+
+        H = [0.0] * N_STATES
+        H[IDX_LAI] = -(bsi_bare - bsi_veg) * k * math.exp(-k * lai) * 0.5  # Weakened
+
+        # VERY HIGH sigma — this is a weak proxy
+        R = 0.08 ** 2
+
+        return predicted, H, R
+
+    @staticmethod
     def rgb_anomaly_score(state_values: List[float]) -> Tuple[float, List[float], float]:
         """
         RGB anomaly score (0–1) — weak structural-stress proxy.
@@ -330,7 +386,7 @@ class ObservationModel:
     @staticmethod
     def farmer_photo_symptom(state_values: List[float]) -> Tuple[float, List[float], float]:
         """
-        Farmer Photo symptom probability → canopy_stress proxy.
+        Farmer Photo symptom probability -> canopy_stress proxy.
 
         Maps visible symptom evidence to the canopy_stress state variable.
         This is symptom-first, not disease-first:
@@ -355,6 +411,53 @@ class ObservationModel:
 
         return predicted, H, R
 
+    @staticmethod
+    def sar_rvi(state_values: List[float]) -> Tuple[float, List[float], float]:
+        """
+        SAR Radar Vegetation Index (dual-pol approximation).
+        RVI = 4 * VH / (VV + VH)
+
+        Weak proxy for biomass/canopy structure.
+        Reliability ceiling: 0.55.
+        """
+        biomass = state_values[IDX_BIOMASS]
+        lai = state_values[IDX_LAI]
+
+        # RVI correlates with biomass/structure, weak sensitivity
+        rvi_base = 0.2
+        biomass_sens = 0.15   # Weak
+        lai_sens = 0.05       # Very weak
+
+        predicted = rvi_base + biomass_sens * biomass + lai_sens * lai
+
+        H = [0.0] * N_STATES
+        H[IDX_BIOMASS] = biomass_sens
+        H[IDX_LAI] = lai_sens
+
+        R = 0.10 ** 2  # High uncertainty — weak proxy
+
+        return predicted, H, R
+
+    @staticmethod
+    def sar_moisture_proxy(state_values: List[float]) -> Tuple[float, List[float], float]:
+        """
+        SAR-derived surface wetness proxy.
+
+        NOT calibrated volumetric soil moisture.
+        Weak indicator until calibrated with sensors or ground truth.
+        Reliability ceiling: 0.50.
+        """
+        sm = state_values[IDX_SM_0_10]
+
+        # Simple linear mapping of surface moisture
+        predicted = max(0.0, min(1.0, sm * 2.0))
+
+        H = [0.0] * N_STATES
+        H[IDX_SM_0_10] = 2.0 if sm < 0.5 else 0.0  # Saturates
+
+        R = 0.12 ** 2  # High uncertainty — uncalibrated proxy
+
+        return predicted, H, R
 
 # ============================================================================
 # Observation Dispatcher — routes observation type to the right model
@@ -373,14 +476,22 @@ def get_observation_model(obs_type: str, **kwargs):
         "vv": ObservationModel.sentinel1_vv,
         "vh": ObservationModel.sentinel1_vh,
         "canopy_cover": ObservationModel.camera_canopy_cover,
+        "canopy_cover_high_res": ObservationModel.camera_canopy_cover, # Drone RGB
         "phenology_stage": ObservationModel.phenology_stage_camera,
+        "phenology_stage_camera": ObservationModel.phenology_stage_camera,
         "stress_proxy": ObservationModel.stress_proxy,
         # Satellite RGB engine V1 observation types
         "vegetation_fraction": ObservationModel.satellite_rgb_vegetation,
         "rgb_anomaly_score": ObservationModel.rgb_anomaly_score,
+        # Sentinel-2 Optical Engine V1 observation types
+        "ndre": ObservationModel.sentinel2_ndre,
+        "bare_soil_index": ObservationModel.sentinel2_bsi,
+        # Sentinel-1 SAR Engine V1 observation types
+        "sar_rvi": ObservationModel.sar_rvi,
+        "sar_moisture_proxy": ObservationModel.sar_moisture_proxy,
         # Farmer Photo engine V1 observation types
-        "farmer_photo_canopy": ObservationModel.farmer_photo_canopy,
-        "farmer_photo_symptom": ObservationModel.farmer_photo_symptom,
+        "local_canopy_cover": ObservationModel.farmer_photo_canopy,
+        "symptom_evidence": ObservationModel.farmer_photo_symptom,
     }
     
     if obs_type == "soil_moisture":

@@ -19,15 +19,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from ..common.contracts import (
+from layer0.perception.common.contracts import (
     PerceptionVariable,
     PerceptionEngineOutput,
     PerceptionEngineFamily,
 )
-from ..common.packet_adapter import to_observation_packets
+from layer0.perception.common.packet_adapter import to_observation_packets
 
-from .calibrator import CalibratedEvidence
-from .schemas import OrganClass, SymptomClass
+from layer0.perception.farmer_photo.calibrator import CalibratedEvidence
+from layer0.perception.farmer_photo.schemas import OrganClass, SymptomClass
 
 
 class FarmerPhotoPacketizer:

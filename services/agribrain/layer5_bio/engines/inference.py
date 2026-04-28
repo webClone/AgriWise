@@ -2,11 +2,11 @@
 from typing import Dict, List, Any
 import math
 
-from services.agribrain.layer5_bio.schema import (
+from layer5_bio.schema import (
     ThreatId, ThreatClass, BioThreatState, Severity, EvidenceLogit, SpreadPattern
 )
-from services.agribrain.layer3_decision.schema import Driver
-from services.agribrain.layer5_bio.knowledge.threats import THREAT_PRIORS, THREAT_CLASS
+from layer3_decision.schema import Driver
+from layer5_bio.knowledge.threats import THREAT_PRIORS, THREAT_CLASS
 
 def _sigmoid(x: float) -> float:
     if x >= 0:

@@ -154,3 +154,46 @@ class CameraModelNormalizer:
     ) -> Tuple[float, float]:
         """Compute ground footprint (width_m, height_m) of one frame."""
         return cam.intrinsics.calculate_footprint_m(altitude_m)
+    
+    def compute_pixel_view_angle(
+        self,
+        cam: NormalizedCamera,
+        pixel_x: float,
+        pixel_y: float,
+    ) -> float:
+        """Compute off-nadir view angle (degrees) for a pixel position.
+        
+        The nadir point (principal point) has angle 0°. Pixels at the
+        edge of the frame have the maximum angle. Used by orthorectify
+        to compute off-nadir penalty and uncertainty per tile pixel.
+        
+        Args:
+            cam: Normalized camera model.
+            pixel_x: Pixel x coordinate.
+            pixel_y: Pixel y coordinate.
+            
+        Returns:
+            Off-nadir angle in degrees (0 = nadir, increases toward edges).
+        """
+        if cam.fx_px <= 0 or cam.fy_px <= 0:
+            return 0.0
+        
+        # Normalized image coordinates
+        nx = (pixel_x - cam.cx_px) / cam.fx_px
+        ny = (pixel_y - cam.cy_px) / cam.fy_px
+        
+        # View angle = atan(sqrt(nx² + ny²))
+        r = math.sqrt(nx * nx + ny * ny)
+        angle_rad = math.atan(r)
+        
+        return math.degrees(angle_rad)
+    
+    def compute_max_view_angle(self, cam: NormalizedCamera) -> float:
+        """Compute maximum off-nadir angle (at frame corners)."""
+        if cam.fx_px <= 0 or cam.fy_px <= 0:
+            return 0.0
+        
+        # Corner pixel
+        corner_x = cam.intrinsics.image_width_px
+        corner_y = cam.intrinsics.image_height_px
+        return self.compute_pixel_view_angle(cam, corner_x, corner_y)

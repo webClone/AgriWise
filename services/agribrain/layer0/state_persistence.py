@@ -107,14 +107,14 @@ def load_engine_state(
     
     # Version check
     if state.get("version") != VERSION:
-        print(f"⚠️ State version mismatch: {state.get('version')} → {VERSION}, cold start")
+        print(f" State version mismatch: {state.get('version')} -> {VERSION}, cold start")
         return None
     
     # Crop params check
     if crop_params:
         expected_hash = _hash_params(crop_params)
         if state.get("crop_params_hash") != expected_hash:
-            print(f"⚠️ Crop params changed, cold start")
+            print(f" Crop params changed, cold start")
             return None
     
     return state
@@ -170,5 +170,5 @@ def restore_kalman_state(zone_filter, saved_zone: Dict[str, Any]) -> bool:
         
         return True
     except Exception as e:
-        print(f"⚠️ State restore failed: {e}")
+        print(f" State restore failed: {e}")
         return False

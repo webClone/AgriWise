@@ -6,11 +6,11 @@ Uses L1 adapter raster_maps (from 4D tensor or maps dict) for true per-pixel
 values. Falls back to zone rasterization, then field broadcast as last resort.
 """
 from typing import List, Optional
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, PaletteId,
 )
-from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
-from services.agribrain.layer10_sire.adapters.l2_adapter import L2VegData
+from layer10_sire.adapters.l1_adapter import L1SpatialData
+from layer10_sire.adapters.l2_adapter import L2VegData
 
 
 def generate_vegetation_surfaces(
@@ -21,10 +21,10 @@ def generate_vegetation_surfaces(
     """Generate vegetation surfaces using adapter data (spatial-first)."""
     surfaces = []
     if l1_data is None:
-        from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
+        from layer10_sire.adapters.l1_adapter import adapt_l1
         l1_data = adapt_l1(inp.field_tensor, H, W)
     if l2_data is None:
-        from services.agribrain.layer10_sire.adapters.l2_adapter import adapt_l2
+        from layer10_sire.adapters.l2_adapter import adapt_l2
         l2_data = adapt_l2(inp.veg_int)
 
     # --- 1. NDVI_CLEAN — from L1 raster or broadcast ---

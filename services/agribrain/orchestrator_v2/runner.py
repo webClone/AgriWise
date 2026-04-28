@@ -5,23 +5,23 @@ import hashlib
 import json
 from dataclasses import asdict
 
-from services.agribrain.orchestrator_v2.schema import (
+from orchestrator_v2.schema import (
     OrchestratorInput, RunArtifact, RunMeta, LayerResult, LayerStatus, GlobalQuality
 )
-from services.agribrain.orchestrator_v2.registry import LAYER_REGISTRY, LayerId, get_layer_versions
-from services.agribrain.orchestrator_v2.hashing import generate_orchestrator_run_id
-from services.agribrain.orchestrator_v2.gating import merge_execution_plans, evaluate_global_quality, filter_unsafe_actions
-from services.agribrain.orchestrator_v2.storage import LocalJsonStore
-from services.agribrain.orchestrator_v2.chat_adapter import ChatPayload, build_chat_payload
-from services.agribrain.layer10_sire.schema import Layer10Input
-from services.agribrain.layer8_prescriptive.schema import Layer8Input
+from orchestrator_v2.registry import LAYER_REGISTRY, LayerId, get_layer_versions
+from orchestrator_v2.hashing import generate_orchestrator_run_id
+from orchestrator_v2.gating import merge_execution_plans, evaluate_global_quality, filter_unsafe_actions
+from orchestrator_v2.storage import LocalJsonStore
+from orchestrator_v2.chat_adapter import ChatPayload, build_chat_payload
+from layer10_sire.schema import Layer10Input
+from layer8_prescriptive.schema import Layer8Input
 
 ORCHESTRATOR_VERSION = "2.1.0"
 
 def _canonical_json(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
 
-from services.agribrain.orchestrator_v2.intents import Intent, detect_intent, resolve_time_window
+from orchestrator_v2.intents import Intent, detect_intent, resolve_time_window
 
 def run_orchestrator(
     inputs: OrchestratorInput,
@@ -124,7 +124,7 @@ def run_orchestrator(
             results[LayerId.L5] = l5_res
         
         # Load chat memory if needed by L7
-        from services.agribrain.orchestrator_v2.chat_memory import load_memory
+        from orchestrator_v2.chat_memory import load_memory
         mem = load_memory(inputs.plot_id)
         
         l7_res = _safe_run(LayerId.L7, inputs, l1_res.output, l5_res.output if l5_res else None, mem)

@@ -1,0 +1,314 @@
+{
+  "engine": "farmer_photo",
+  "aggregate_failures": 0,
+  "critical_failures": 0,
+  "soft_failures": 0,
+  "gate_passed": true,
+  "failing_metrics": [],
+  "failing_cases": [],
+  "scorecard": {
+    "scene_accuracy": {
+      "value": 1.0,
+      "threshold": 0.9,
+      "passed": true
+    },
+    "non_field_f1": {
+      "value": 1.0,
+      "threshold": 0.8,
+      "passed": true
+    },
+    "organ_accuracy": {
+      "value": 1.0,
+      "threshold": 0.7,
+      "passed": true
+    },
+    "junk_fp_rate": {
+      "value": 0.0,
+      "threshold": 0.1,
+      "passed": true
+    },
+    "soil_agronomic_leaks": {
+      "value": 0,
+      "threshold": 0,
+      "passed": true
+    }
+  },
+  "case_results": [
+    {
+      "case_id": "nf_gray_wall_1",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_gray_wall_2",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_document",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_desk_dark",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_green_tarp",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_blue_sky",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_potted_plant",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_red_object",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "soil_brown_dry",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "soil_red_clay",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "soil_sandy",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "soil_dark_wet",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "field_wheat_green",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "field_maize_canopy",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "field_mixed_weedy",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "closeup_healthy_leaf",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "closeup_maize_leaf",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "symptom_chlorosis_mild",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "symptom_chlorosis_severe",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "symptom_necrosis",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "symptom_spots",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "fruit_tomato_red",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "edge_golden_wheat",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "edge_sparse_crop",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_asphalt",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_concrete",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_red_plastic",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_red_wall",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_green_fabric",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_decorative_plant",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_lawn_patch",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "nf_wood_surface",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "crop_wheat_no_hint",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "crop_maize_no_hint",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "crop_tomato_no_hint",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "crop_potato_no_hint",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "crop_olive_no_hint",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "crop_citrus_no_hint",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "crop_wheat_hint_maize",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "crop_maize_hint_wheat",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "crop_generic_hint_wheat",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "symptom_rust_wheat",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "symptom_wilt_tomato",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "symptom_insect_maize",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "edge_brown_canopy",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "edge_seedling_closeup",
+      "passed": true,
+      "critical": false,
+      "soft_fail": true
+    }
+  ]
+}

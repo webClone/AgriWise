@@ -9,11 +9,11 @@ Multi-evidence trust surfaces:
   - Conflict density from source disagreement
 """
 from typing import List, Optional, Dict
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, PaletteId,
 )
-from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
-from services.agribrain.layer10_sire.adapters.l2_adapter import L2VegData
+from layer10_sire.adapters.l1_adapter import L1SpatialData
+from layer10_sire.adapters.l2_adapter import L2VegData
 
 SOURCE_CATEGORIES = ['s2', 's1', 'weather', 'soil', 'sensor', 'user']
 
@@ -26,10 +26,10 @@ def generate_uncertainty_surfaces(
     """Generate trust/uncertainty surfaces from multi-evidence synthesis."""
     surfaces = []
     if l1_data is None:
-        from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
+        from layer10_sire.adapters.l1_adapter import adapt_l1
         l1_data = adapt_l1(inp.field_tensor, H, W)
     if l2_data is None:
-        from services.agribrain.layer10_sire.adapters.l2_adapter import adapt_l2
+        from layer10_sire.adapters.l2_adapter import adapt_l2
         l2_data = adapt_l2(inp.veg_int)
 
     # --- 1. UNCERTAINTY_SIGMA — from real raster or curve ---

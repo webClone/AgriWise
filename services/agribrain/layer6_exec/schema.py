@@ -5,11 +5,11 @@ from enum import Enum
 from datetime import datetime
 
 # Upstream Contracts
-from services.agribrain.layer1_fusion.schema import FieldTensor
-from services.agribrain.layer2_veg_int.schema import VegIntOutput
-from services.agribrain.layer3_decision.schema import DecisionOutput, PlotContext, TaskNode, Driver, DegradationMode
-from services.agribrain.layer4_nutrients.schema import NutrientIntelligenceOutput
-from services.agribrain.layer5_bio.schema import BioThreatIntelligenceOutput
+from layer1_fusion.schema import FieldTensor
+from layer2_veg_int.schema import VegIntOutput
+from layer3_decision.schema import DecisionOutput, PlotContext, TaskNode, Driver, DegradationMode
+from layer4_nutrients.schema import NutrientIntelligenceOutput
+from layer5_bio.schema import BioThreatIntelligenceOutput
 
 # --- Enums (Locked) ---
 

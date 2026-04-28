@@ -17,7 +17,7 @@ from typing import List
 from dataclasses import dataclass
 from datetime import datetime
 
-from services.agribrain.layer8_prescriptive.schema import (
+from layer8_prescriptive.schema import (
     Layer8Output, ActionCard, ScheduledAction, ScheduleStatus,
 )
 

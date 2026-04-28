@@ -1,7 +1,7 @@
 """
 Satellite RGB Variable Semantics — V1 Frozen Definitions.
 
-⚠️  READ THIS BEFORE USING SATELLITE RGB VARIABLES DOWNSTREAM.
+  READ THIS BEFORE USING SATELLITE RGB VARIABLES DOWNSTREAM.
 
 This module documents the precise, frozen meaning of every variable
 produced by the Satellite RGB V1 engine.

@@ -3,15 +3,15 @@ from datetime import timezone
 import datetime
 from typing import List, Dict, Any
 
-from services.agribrain.layer1_fusion.schema import FieldTensor
-from services.agribrain.layer2_veg_int.schema import VegIntOutput
-from services.agribrain.layer3_decision.schema import (
+from layer1_fusion.schema import FieldTensor
+from layer2_veg_int.schema import VegIntOutput
+from layer3_decision.schema import (
     DecisionInput, DecisionOutput, PlotContext, Diagnosis,
     ExecutionPlan, TaskNode, QualityMetrics, AuditTrail, Recommendation
 )
-from services.agribrain.layer3_decision.features.builder import build_decision_features, DecisionFeatures
-from services.agribrain.layer3_decision.diagnosis.inference import DiagnosisEngine
-from services.agribrain.layer3_decision.policy.policies import PolicyEngine
+from layer3_decision.features.builder import build_decision_features, DecisionFeatures
+from layer3_decision.diagnosis.inference import DiagnosisEngine
+from layer3_decision.policy.policies import PolicyEngine
 
 class DecisionIntelligenceEngine:
     
@@ -171,7 +171,7 @@ class DecisionIntelligenceEngine:
     ) -> QualityMetrics:
         
         # Degradation Mode
-        from services.agribrain.layer3_decision.schema import DegradationMode
+        from layer3_decision.schema import DegradationMode
         
         mode = DegradationMode.NORMAL
         if not feat.sar_available: mode = DegradationMode.NO_SAR
@@ -235,7 +235,7 @@ class DecisionIntelligenceEngine:
 # Singleton
 _engine = DecisionIntelligenceEngine()
 
-from services.agribrain.orchestrator_v2.schema import OrchestratorInput
+from orchestrator_v2.schema import OrchestratorInput
 
 def run_layer3_decision(
     inputs: OrchestratorInput,

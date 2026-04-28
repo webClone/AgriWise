@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import math
 
-from .observation_packet import (
+from layer0.observation_packet import (
     ObservationPacket, ObservationSource, ObservationType,
     QAMetadata, QAFlag, UncertaintyModel, Provenance
 )
@@ -84,7 +84,7 @@ class Sentinel2QA:
             # Derive from SCL
             cloud_prob_map = cls._scl_to_cloud_prob(scl_map, height, width)
         elif cloud_prob_map is None:
-            # No cloud info → assume clean but with higher uncertainty
+            # No cloud info -> assume clean but with higher uncertainty
             cloud_prob_map = [[0.0] * width for _ in range(height)]
         
         # ---- Dilate cloud edges (2-pixel buffer) ----
@@ -402,7 +402,7 @@ class WeatherQA:
             rain_sigma *= dist_factor
             temp_sigma *= min(dist_factor, 2.0)
         
-        # Check for convective rain (high daily values → higher uncertainty)
+        # Check for convective rain (high daily values -> higher uncertainty)
         rain_values = daily_data.get("precipitation", [])
         max_rain = max(rain_values) if rain_values else 0
         if max_rain > 20:

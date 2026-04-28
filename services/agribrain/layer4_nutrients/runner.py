@@ -4,20 +4,20 @@ import json
 from typing import Dict, Any
 from datetime import datetime, timezone
 
-from services.agribrain.layer1_fusion.schema import FieldTensor
-from services.agribrain.layer2_veg_int.schema import VegIntOutput
-from services.agribrain.layer3_decision.schema import DecisionOutput, PlotContext, DegradationMode
+from layer1_fusion.schema import FieldTensor
+from layer2_veg_int.schema import VegIntOutput
+from layer3_decision.schema import DecisionOutput, PlotContext, DegradationMode
 
-from services.agribrain.layer4_nutrients.schema import (
+from layer4_nutrients.schema import (
     NutrientIntelligenceOutput, RunMeta, QualityMetricsL4, AuditSnapshot, ParentRunIds, Nutrient, ActionId
 )
 
-from services.agribrain.layer4_nutrients.soil_water_balance.engine import SoilWaterBalanceEngine
-from services.agribrain.layer4_nutrients.crop_demand.engine import CropDemandUptakeEngine
-from services.agribrain.layer4_nutrients.proxies.engine import NutrientObservationProxyEngine
-from services.agribrain.layer4_nutrients.inference.engine import NutrientInferenceEngine
-from services.agribrain.layer4_nutrients.optimization.engine import OptimizationEngine
-from services.agribrain.layer4_nutrients.planner.engine import PlanningEngine
+from layer4_nutrients.soil_water_balance.engine import SoilWaterBalanceEngine
+from layer4_nutrients.crop_demand.engine import CropDemandUptakeEngine
+from layer4_nutrients.proxies.engine import NutrientObservationProxyEngine
+from layer4_nutrients.inference.engine import NutrientInferenceEngine
+from layer4_nutrients.optimization.engine import OptimizationEngine
+from layer4_nutrients.planner.engine import PlanningEngine
 
 L4_CODE_VERSION = "4.0.0"
 ENGINE_VERSIONS = {
@@ -46,7 +46,7 @@ def _generate_deterministic_run_id(
     hash_obj = hashlib.sha256(raw.encode("utf-8"))
     return f"L4-{hash_obj.hexdigest()[:12]}"
 
-from services.agribrain.orchestrator_v2.schema import OrchestratorInput
+from orchestrator_v2.schema import OrchestratorInput
 
 def run_layer4_nutrients(
     inputs: OrchestratorInput,

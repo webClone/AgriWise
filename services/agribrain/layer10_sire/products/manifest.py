@@ -2,7 +2,7 @@
 Render Manifest Builder — Generate frontend-consumable map mode definitions
 """
 from typing import List
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, RenderManifest,
     MapModeDef, RenderMode, PaletteId, LegendEntry,
 )

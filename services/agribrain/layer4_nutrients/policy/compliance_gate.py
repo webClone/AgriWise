@@ -1,7 +1,7 @@
 
 from typing import Dict, Any, Tuple, List
-from services.agribrain.layer4_nutrients.schema import ApplicationMethod, Prescription, EnvironmentalRisk
-from services.agribrain.layer3_decision.schema import PlotContext
+from layer4_nutrients.schema import ApplicationMethod, Prescription, EnvironmentalRisk
+from layer3_decision.schema import PlotContext
 
 class ComplianceGate:
     """

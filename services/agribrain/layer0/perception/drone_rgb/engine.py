@@ -9,15 +9,15 @@ Dual-mode Layer 0 perception engine for drone imagery.
 from typing import Tuple, List, Optional
 import logging
 
-from .schemas import DroneRGBInput, DroneRGBOutput
-from .qa import DroneQAOutput, evaluate_drone_qa
-from .structural import DroneStructuralAnalyzer
-from .packetizer import DronePacketizer
+from layer0.perception.drone_rgb.schemas import DroneRGBInput, DroneRGBOutput
+from layer0.perception.drone_rgb.qa import DroneQAOutput, evaluate_drone_qa
+from layer0.perception.drone_rgb.structural import DroneStructuralAnalyzer
+from layer0.perception.drone_rgb.packetizer import DronePacketizer
 
-from ...observation_packet import ObservationPacket
-from ..farmer_photo.engine import FarmerPhotoEngine
-from ..farmer_photo.schemas import FarmerPhotoEngineInput
-from ....drone_mission.schemas import FlightMode
+from layer0.observation_packet import ObservationPacket
+from layer0.perception.farmer_photo.engine import FarmerPhotoEngine
+from layer0.perception.farmer_photo.schemas import FarmerPhotoEngineInput
+from drone_mission.schemas import FlightMode
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ class DroneRGBEngine:
                 
         # V1.5B: Aggregate multi-frame results into a hotspot summary
         if packets:
-            from ....drone_mission.hotspot_summarizer import HotspotSummarizer
+            from drone_mission.hotspot_summarizer import HotspotSummarizer
             summarizer = HotspotSummarizer()
             out.hotspot_summary = summarizer.summarize(
                 packets,
@@ -153,6 +153,10 @@ class DroneRGBEngine:
                 mission_id=inp.mission_id,
                 is_valid=False,
                 qa_score=qa_result.overall_score,
+                reliability_weight=0.0,
+                sigma_inflation=10.0,
+                provenance_chain=["qa_rejected:" + str(qa_result.rejection_reason)],
+                model_versions={"structural_analyzer": "v1.0", "qa": "v1.0"},
                 rejection_reason=qa_result.rejection_reason
             )
             return out, []

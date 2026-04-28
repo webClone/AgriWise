@@ -9,7 +9,7 @@ Exports Layer 10 outputs into frontend-consumable formats:
 """
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field, asdict
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Output, SurfaceArtifact, ZoneArtifact, MicroObjectArtifact,
     HistogramBundle, RenderManifest, QualityReport,
 )

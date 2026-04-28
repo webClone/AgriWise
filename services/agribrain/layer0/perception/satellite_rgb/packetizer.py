@@ -1,5 +1,5 @@
 """
-Satellite RGB Packetizer — Inference → PerceptionEngineOutput → ObservationPackets.
+Satellite RGB Packetizer — Inference -> PerceptionEngineOutput -> ObservationPackets.
 
 Converts SatelliteRGBInferenceResult into a PerceptionEngineOutput that the
 shared packet_adapter can then convert into ObservationPackets.
@@ -19,19 +19,19 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
-from .inference import SatelliteRGBInferenceResult
-from .qa import SatelliteRGBQAResult
-from .schemas import SatelliteRGBEngineInput, SatelliteRGBEngineOutput
-from ..common.contracts import (
+from layer0.perception.satellite_rgb.inference import SatelliteRGBInferenceResult
+from layer0.perception.satellite_rgb.qa import SatelliteRGBQAResult
+from layer0.perception.satellite_rgb.schemas import SatelliteRGBEngineInput, SatelliteRGBEngineOutput
+from layer0.perception.common.contracts import (
     PerceptionEngineFamily,
     PerceptionEngineOutput,
     PerceptionVariable,
     PerceptionArtifact,
     ZoneOutput,
 )
-from ..common.packet_adapter import to_observation_packets
-from ..common.provenance import build_provenance
-from services.agribrain.layer0.observation_packet import ObservationPacket
+from layer0.perception.common.packet_adapter import to_observation_packets
+from layer0.perception.common.provenance import build_provenance
+from layer0.observation_packet import ObservationPacket
 
 
 def packetize(
@@ -62,7 +62,7 @@ def packetize(
     # --- 1. Build PerceptionVariables ---
     variables = []
 
-    # Vegetation fraction → maps to canopy_cover / LAI proxy
+    # Vegetation fraction -> maps to canopy_cover / LAI proxy
     variables.append(PerceptionVariable(
         name="vegetation_fraction",
         value=round(inference_result.vegetation_fraction, 4),
@@ -74,7 +74,7 @@ def packetize(
         },
     ))
 
-    # Bare soil fraction → auxiliary, no Kalman state mapping in V1
+    # Bare soil fraction -> auxiliary, no Kalman state mapping in V1
     variables.append(PerceptionVariable(
         name="bare_soil_fraction",
         value=round(inference_result.bare_soil_fraction, 4),
@@ -83,7 +83,7 @@ def packetize(
         unit="fraction",
     ))
 
-    # RGB anomaly score → weak canopy stress proxy
+    # RGB anomaly score -> weak canopy stress proxy
     variables.append(PerceptionVariable(
         name="rgb_anomaly_score",
         value=round(inference_result.anomaly_fraction, 4),

@@ -9,7 +9,7 @@ from typing import List, Tuple
 from dataclasses import dataclass
 import math
 
-from .schemas import RowBreak
+from layer0.perception.drone_rgb.schemas import RowBreak
 
 
 def _build_row_mask(

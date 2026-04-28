@@ -38,10 +38,10 @@ try:
         from layer8_prescriptive.action_ranker import action_ranker
         from layer8_prescriptive.scheduler import scheduler
     except ImportError:
-        from services.agribrain.layer7_risk.risk_composite import risk_engine
-        from services.agribrain.layer6_yield.yield_forecast import yield_engine
-        from services.agribrain.layer8_prescriptive.action_ranker import action_ranker
-        from services.agribrain.layer8_prescriptive.scheduler import scheduler
+        from layer7_risk.risk_composite import risk_engine
+        from layer6_yield.yield_forecast import yield_engine
+        from layer8_prescriptive.action_ranker import action_ranker
+        from layer8_prescriptive.scheduler import scheduler
 except ImportError as e:
     print(f"[AgriBrain] Warning: Scientific Layers Disabled (Missing: {e})", file=sys.stderr)
 
@@ -51,8 +51,8 @@ try:
         from layer9_interface.advisor_llm import advisor
         from layer9_interface.qa_llm import qa_bot
     except ImportError:
-        from services.agribrain.layer9_interface.advisor_llm import advisor
-        from services.agribrain.layer9_interface.qa_llm import qa_bot
+        from layer9_interface.advisor_llm import advisor
+        from layer9_interface.qa_llm import qa_bot
 except ImportError as e:
     print(f"[AgriBrain] Warning: Interface Layers Disabled (Missing: {e})", file=sys.stderr)
 

@@ -2,8 +2,8 @@
 from typing import List, Dict, Any, Optional
 import datetime
 
-from services.agribrain.layer3_decision.schema import Diagnosis, Recommendation, PlotContext
-from services.agribrain.layer3_decision.knowledge.ontology import ACTIONS, ProblemType, ActionDefinition
+from layer3_decision.schema import Diagnosis, Recommendation, PlotContext
+from layer3_decision.knowledge.ontology import ACTIONS, ProblemType, ActionDefinition
 
 class PolicyEngine:
     """

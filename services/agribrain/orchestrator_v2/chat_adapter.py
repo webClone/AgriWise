@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-from services.agribrain.orchestrator_v2.schema import RunArtifact, GlobalDegradation
+from orchestrator_v2.schema import RunArtifact, GlobalDegradation
 
 from enum import Enum
 
@@ -79,7 +79,7 @@ class ChatPayload:
     visuals: List[ChatVisual] = field(default_factory=list) # Rich charts
     data_inventory: Dict[str, str] = field(default_factory=dict) # ✅/⚠️/❌ summary
 
-from services.agribrain.orchestrator_v2.intents import Intent
+from orchestrator_v2.intents import Intent
 
 def build_chat_payload(
     artifact: RunArtifact, 
@@ -329,7 +329,7 @@ def build_chat_payload(
     # If we have NO high impact diags and NO forced mode, keep it MONITORING even if low diags exist
     
     # 6. Memory Integration & ARF-v2
-    from services.agribrain.orchestrator_v2.chat_memory import load_memory, save_memory
+    from orchestrator_v2.chat_memory import load_memory, save_memory
     
     # IDs
     plot_id = artifact.inputs.plot_id
@@ -835,7 +835,7 @@ def _generate_arf_v2(
                 }
             
             # STRIKE: Strict Pydantic Validation
-            from services.agribrain.orchestrator_v2.arf_schema import ARFResponse
+            from orchestrator_v2.arf_schema import ARFResponse
             try:
                 validated_arf = ARFResponse(**raw_json)
                 return validated_arf.dict() # Return valid dict representing ARF
@@ -957,7 +957,7 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
             lat = float(artifact.inputs.operational_context.get("lat", 0))
             lng = float(artifact.inputs.operational_context.get("lng", 0))
             if lat != 0 and lng != 0:
-                from services.agribrain.eo.sentinel import fetch_soil_moisture_layers
+                from eo.sentinel import fetch_soil_moisture_layers
                 sm = fetch_soil_moisture_layers(lat, lng)
                 if sm:
                     soil_moisture_data = sm
@@ -1087,7 +1087,7 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
     }
     
     # Validate through Schema
-    from services.agribrain.orchestrator_v2.arf_schema import ARFResponse
+    from orchestrator_v2.arf_schema import ARFResponse
     arf = ARFResponse(**arf).dict()
 
     return ChatPayload(

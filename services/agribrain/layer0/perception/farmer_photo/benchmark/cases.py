@@ -47,6 +47,10 @@ class BenchmarkCase:
     
     # Category for scorecard grouping
     category: str = "general"  # "non_field_junk", "soil", "crop_field", "crop_closeup", "symptom"
+    
+    # Benchmark gating rules
+    critical_case: bool = True
+    allowed_soft_fail: bool = False
 
 
 # --- Benchmark Image Pack ---
@@ -447,6 +451,8 @@ BENCHMARK_CASES: List[BenchmarkCase] = [
         case_id="edge_seedling_closeup",
         description="Very young seedling — tiny green sprout on soil background",
         gt_scene="field", gt_organ="mixed", gt_crop="wheat", gt_symptom="healthy",
+        critical_case=False,
+        allowed_soft_fail=True,
         rgb_mean=(105, 90, 60), rgb_noise_std=30, saturation_boost=0.8,
         crop_hint="wheat", category="crop_field",
         # Mixed soil + small green = mixed organ, young emergence

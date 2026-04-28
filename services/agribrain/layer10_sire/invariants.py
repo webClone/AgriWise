@@ -6,7 +6,7 @@ Enforced after every L10 run. Violations → warning + quality degradation.
 """
 
 from typing import List
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Output, SurfaceArtifact, ZoneArtifact, SurfaceType,
     ZoneFamily, SIREDegradation,
 )

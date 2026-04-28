@@ -40,14 +40,14 @@ class InnovationStats:
     """
     Innovation = observation - model_prediction (Kalman residual).
     Healthy filter: mean ≈ 0, variance ≈ observation_noise.
-    If mean drifts → model bias. If variance explodes → model/obs mismatch.
+    If mean drifts -> model bias. If variance explodes -> model/obs mismatch.
     """
     obs_type: str
     mean: float = 0.0
     std: float = 0.0
     n_observations: int = 0
-    bias_flag: bool = False      # |mean| > 2*std → systematic bias
-    variance_flag: bool = False   # std > 3*expected → obs/model mismatch
+    bias_flag: bool = False      # |mean| > 2*std -> systematic bias
+    variance_flag: bool = False   # std > 3*expected -> obs/model mismatch
 
 
 @dataclass
@@ -333,7 +333,7 @@ class TrustReportBuilder:
             avg_coverage = sum(
                 a.get("coverage_pct", 0) for a in report.availability
             ) / len(report.availability) / 100.0
-            score += 0.30 * min(1.0, avg_coverage * 2)  # 50%+ coverage → full score
+            score += 0.30 * min(1.0, avg_coverage * 2)  # 50%+ coverage -> full score
         else:
             score += 0.15  # Partial score even with no data (still ran model)
         
@@ -358,14 +358,14 @@ class TrustReportBuilder:
             except (ValueError, TypeError):
                 period_days = 30
         conflict_rate = total_days / period_days
-        score += 0.20 * max(0, 1.0 - conflict_rate * 5)  # >20% conflict days → 0
+        score += 0.20 * max(0, 1.0 - conflict_rate * 5)  # >20% conflict days -> 0
         
         # Uncertainty: should grow in gaps, shrink on obs
         unc_healthy = 1.0
         if report.uncertainty_growth_rate < 0:
-            unc_healthy -= 0.3  # Uncertainty DECREASING without obs → suspicious
+            unc_healthy -= 0.3  # Uncertainty DECREASING without obs -> suspicious
         if report.uncertainty_shrink_on_obs > 0:
-            unc_healthy -= 0.3  # Uncertainty INCREASING on obs days → Kalman broken
+            unc_healthy -= 0.3  # Uncertainty INCREASING on obs days -> Kalman broken
         if report.max_gap_days > 20:
             unc_healthy -= 0.2  # Very long data gap
         score += 0.15 * max(0, unc_healthy)
@@ -393,39 +393,39 @@ class TrustReportBuilder:
         alerts = []
         
         if report.health_score < 0.5:
-            alerts.append("⚠️ DEGRADED: Plot data quality is below threshold")
+            alerts.append(" DEGRADED: Plot data quality is below threshold")
         
         # Check each source reliability
         for src, rel in report.source_reliability.items():
             if rel < 0.3:
-                alerts.append(f"🔴 {src} reliability critically low ({rel:.0%})")
+                alerts.append(f" {src} reliability critically low ({rel:.0%})")
             elif rel < 0.6:
-                alerts.append(f"🟡 {src} reliability degraded ({rel:.0%})")
+                alerts.append(f" {src} reliability degraded ({rel:.0%})")
         
         # Check availability
         for avail in report.availability:
             if avail.get("coverage_pct", 0) < 10:
-                alerts.append(f"🔴 {avail['source']} coverage very low ({avail['coverage_pct']}%)")
+                alerts.append(f" {avail['source']} coverage very low ({avail['coverage_pct']}%)")
         
         # Check uncertainty
         if report.max_gap_days > 14:
-            alerts.append(f"🟡 Long data gap detected ({report.max_gap_days} days)")
+            alerts.append(f" Long data gap detected ({report.max_gap_days} days)")
         
         if report.uncertainty_shrink_on_obs > 0:
-            alerts.append("🔴 Kalman update not reducing uncertainty — check observation models")
+            alerts.append(" Kalman update not reducing uncertainty — check observation models")
         
         # Check conflicts
         if report.conflict_count > 10:
-            alerts.append(f"🟡 High conflict count ({report.conflict_count}) — review source quality")
+            alerts.append(f" High conflict count ({report.conflict_count}) — review source quality")
         
         # Boundary
         for w in report.boundary_warnings:
-            alerts.append(f"🟡 Boundary: {w}")
+            alerts.append(f" Boundary: {w}")
         
         # Innovation bias
         for stat in report.innovation_stats:
             if stat.get("bias_flag"):
-                alerts.append(f"🟡 {stat['source']} shows systematic bias in contributions")
+                alerts.append(f" {stat['source']} shows systematic bias in contributions")
         
         return alerts
 
@@ -448,7 +448,7 @@ class SensorDriftDetector:
     
     def __init__(self, window_size: int = 14):
         self.window_size = window_size
-        self.readings: Dict[str, List[Tuple[str, float]]] = {}  # sensor_id → [(day, value)]
+        self.readings: Dict[str, List[Tuple[str, float]]] = {}  # sensor_id -> [(day, value)]
         self.model_predictions: Dict[str, List[Tuple[str, float]]] = {}
     
     def add_reading(self, sensor_id: str, day: str, value: float) -> None:
@@ -509,7 +509,7 @@ class SensorDriftDetector:
                 issues.append({
                     "type": "step_change",
                     "severity": min(1.0, jump / typical_range),
-                    "detail": f"Step change detected: {mean_first:.3f} → {mean_second:.3f}",
+                    "detail": f"Step change detected: {mean_first:.3f} -> {mean_second:.3f}",
                 })
                 health -= 0.3
         
@@ -575,7 +575,7 @@ class AssimilationAuditor:
     """
     
     def __init__(self):
-        self.error_budget: Dict[str, int] = {}  # plot_id → failure count (rolling 7d)
+        self.error_budget: Dict[str, int] = {}  # plot_id -> failure count (rolling 7d)
         self.error_threshold = 3  # Max failures per 7 days before alert
     
     def audit(

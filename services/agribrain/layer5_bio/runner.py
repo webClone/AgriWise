@@ -6,18 +6,18 @@ import hashlib
 import json
 import math
 
-from services.agribrain.layer5_bio.schema import (
+from layer5_bio.schema import (
     BioThreatIntelligenceOutput, RunMeta, QualityMetricsL5, AuditSnapshot,
     BioThreatState, BioRecommendation, ThreatId, ThreatClass, Severity, SpreadPattern,
     Confounder, ActionId
 )
-from services.agribrain.layer3_decision.schema import Driver, DegradationMode, ExecutionPlan, TaskNode
+from layer3_decision.schema import Driver, DegradationMode, ExecutionPlan, TaskNode
 
-from services.agribrain.layer5_bio.engines.weather_pressure import build_weather_pressure
-from services.agribrain.layer5_bio.engines.spread_signature import infer_spread_signature
-from services.agribrain.layer5_bio.engines.remote_signature import build_remote_evidence
-from services.agribrain.layer5_bio.engines.inference import infer_threat_states
-from services.agribrain.layer5_bio.engines.response_planner import build_response_plan
+from layer5_bio.engines.weather_pressure import build_weather_pressure
+from layer5_bio.engines.spread_signature import infer_spread_signature
+from layer5_bio.engines.remote_signature import build_remote_evidence
+from layer5_bio.engines.inference import infer_threat_states
+from layer5_bio.engines.response_planner import build_response_plan
 
 CODE_VERSION = "5.0.0"
 MODEL_VERSIONS = {
@@ -67,7 +67,7 @@ def run_layer5(
     missing = []
     penalties = {}
     completeness = 1.0
-    from services.agribrain.layer3_decision.schema import DegradationMode
+    from layer3_decision.schema import DegradationMode
     degradation = DegradationMode.NORMAL
     reliability = 1.0
 
@@ -109,8 +109,8 @@ def run_layer5(
     features_snapshot.update(rs)
 
     # 4. Synthesize Evidence
-    from services.agribrain.layer5_bio.schema import EvidenceLogit
-    from services.agribrain.layer3_decision.schema import Driver
+    from layer5_bio.schema import EvidenceLogit
+    from layer3_decision.schema import Driver
     evidence_by_threat = {
         ThreatId.FUNGAL_LEAF_SPOT: [
             EvidenceLogit(Driver.NDVI, "NDVI Drop",  0.5 if rs.get("ndvi_drop_detected") else -0.5, 1.0, []),
@@ -243,12 +243,12 @@ def run_layer5(
         audit=audit
     )
 
-from services.agribrain.orchestrator_v2.schema import OrchestratorInput
-from services.agribrain.layer5_bio.schema import Layer5Input
-from services.agribrain.layer1_fusion.schema import FieldTensor
-from services.agribrain.layer2_veg_int.schema import VegIntOutput
-from services.agribrain.layer3_decision.schema import DecisionOutput
-from services.agribrain.layer4_nutrients.schema import NutrientIntelligenceOutput
+from orchestrator_v2.schema import OrchestratorInput
+from layer5_bio.schema import Layer5Input
+from layer1_fusion.schema import FieldTensor
+from layer2_veg_int.schema import VegIntOutput
+from layer3_decision.schema import DecisionOutput
+from layer4_nutrients.schema import NutrientIntelligenceOutput
 
 def run_layer5_bio(
     inputs: OrchestratorInput,

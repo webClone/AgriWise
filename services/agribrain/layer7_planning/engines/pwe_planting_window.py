@@ -2,8 +2,8 @@ import math
 from datetime import datetime
 from typing import List, Dict, Any
 
-from services.agribrain.layer7_planning.schema import SuitabilityState, EvidenceLogit, SuitabilityDriver
-from services.agribrain.layer7_planning.engines.ccl_crop_library import CropProfile
+from layer7_planning.schema import SuitabilityState, EvidenceLogit, SuitabilityDriver
+from layer7_planning.engines.ccl_crop_library import CropProfile
 
 def compute_planting_window(date: datetime, profile: CropProfile, l1_out: Any, region: str = "north_africa") -> SuitabilityState:
     """

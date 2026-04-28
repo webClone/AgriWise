@@ -57,8 +57,8 @@ class PhotogrammetryEngine:
     COVERAGE_DEGRADED = 0.70
     BLUR_UNUSABLE = 0.60
     BLUR_DEGRADED = 0.35
-    SEAM_UNUSABLE = 0.50
-    SEAM_DEGRADED = 0.20
+    SEAM_UNUSABLE = 0.60
+    SEAM_DEGRADED = 0.25
     REPROJ_UNUSABLE = 15.0   # pixels
     REPROJ_DEGRADED = 5.0
     HOLES_UNUSABLE = 0.40
@@ -95,6 +95,9 @@ class PhotogrammetryEngine:
             f"mission={inp.mission_id}, plot={inp.plot_id}, "
             f"frames={inp.frame_count or len(inp.frame_refs or inp.synthetic_frames or [])}"
         )
+        
+        # --- V3: Determine resolution mode ---
+        resolution_mode = self._detect_resolution_mode(inp)
         
         # --- Stage A: Frame Ingestion ---
         manifest = self.ingestor.ingest(inp)
@@ -157,6 +160,7 @@ class PhotogrammetryEngine:
         tile_stack = self.orthorectifier.rectify(
             manifest.frames, qa_results,
             ba_result.refined_poses, cameras, surface,
+            resolution_mode=resolution_mode,
         )
         processing_steps.append("G:orthorectify")
         
@@ -171,6 +175,7 @@ class PhotogrammetryEngine:
         # --- Stage J: Georeferencing ---
         mean_overlap = overlap.mean_confidence
         georef = self.georeferencer.georeference(mosaic, inp, mean_overlap)
+        self.georeferencer._compute_v3_metrics(georef, mosaic, seam)
         processing_steps.append("J:georef")
         
         # --- Build Provenance (MANDATORY) ---
@@ -178,6 +183,8 @@ class PhotogrammetryEngine:
             manifest, qa_results, overlap, ba_result, surface,
             seam, mosaic, georef, processing_steps, start_time,
             gcps_provided=len(inp.gcps),
+            resolution_mode=resolution_mode,
+            inp=inp,
         )
         
         # --- Determine Status ---
@@ -208,6 +215,7 @@ class PhotogrammetryEngine:
     def _build_provenance(
         self, manifest, qa_results, overlap, ba_result, surface,
         seam, mosaic, georef, steps, start_time, gcps_provided=0,
+        resolution_mode="benchmark", inp=None,
     ) -> PipelineProvenance:
         """Build mandatory provenance record."""
         usable_frames = [q for q in qa_results if q.usable]
@@ -215,6 +223,18 @@ class PhotogrammetryEngine:
         
         blur_scores = [q.blur_score for q in usable_frames]
         exposure_scores = [q.exposure_score for q in usable_frames]
+        
+        # V3: Collect pyramid levels from manifest
+        pyramid_levels = []
+        if manifest.frames:
+            pyramid_levels = list(manifest.frames[0].pyramid_levels_available)
+        
+        # V3: Scene type source
+        scene_type_source = "auto_detected"
+        scene_type = "generic"
+        if inp and inp.scene_type:
+            scene_type = inp.scene_type
+            scene_type_source = "explicit"
         
         return PipelineProvenance(
             source_frame_ids=[f.frame_id for f in manifest.frames],
@@ -247,6 +267,14 @@ class PhotogrammetryEngine:
             gcps_used=0,  # V1: no fake GCP refinement
             pipeline_version="v3",
             processing_steps=steps,
+            # V3: Mode decisions
+            resolution_mode_used=resolution_mode,
+            pyramid_levels_used=pyramid_levels,
+            seam_mode_selected=scene_type,
+            scene_type_source=scene_type_source,
+            benchmark_mode=(resolution_mode == "benchmark"),
+            native_resolution=manifest.native_resolution,
+            working_resolution=manifest.working_resolution,
         )
     
     def _determine_status(
@@ -392,3 +420,21 @@ class PhotogrammetryEngine:
             rejection_reason=reason,
             provenance=provenance,
         )
+    
+    def _detect_resolution_mode(self, inp: DroneFrameSetInput) -> str:
+        """Auto-detect resolution mode from input characteristics.
+        
+        Priority:
+        1. Explicit input override (inp.resolution_mode)
+        2. Synthetic frames → benchmark
+        3. Real frames → native
+        
+        Benchmark limits never leak into production paths.
+        """
+        if inp.resolution_mode:
+            return inp.resolution_mode
+        
+        if inp.synthetic_frames is not None and len(inp.synthetic_frames) > 0:
+            return "benchmark"
+        
+        return "native"

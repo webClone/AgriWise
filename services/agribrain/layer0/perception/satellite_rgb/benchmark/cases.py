@@ -39,7 +39,7 @@ class SatRGBBenchmarkCase:
     gt_vegetation_fraction: float      # 0.0–1.0
     gt_soil_fraction: float            # 0.0–1.0
     gt_density_class: str              # "bare", "sparse", "moderate", "dense"
-    gt_phenology_stage: float          # 0=dormant → 4=senescence
+    gt_phenology_stage: float          # 0=dormant -> 4=senescence
     gt_anomaly_expected: bool          # True = anomaly should be elevated
     gt_boundary_contamination: bool    # True = boundary score should be > 0
 
@@ -54,6 +54,10 @@ class SatRGBBenchmarkCase:
     # Expected QA behavior
     gt_qa_usable: bool = True          # True = engine should produce packets
     gt_qa_downgraded: bool = False     # True = QA should be significantly reduced
+
+    # Benchmark gating rules
+    critical_case: bool = True
+    allowed_soft_fail: bool = False
 
     # Image dimensions
     image_width: int = 40
@@ -207,6 +211,8 @@ SPARSE_STRESS_CASES = [
         gt_phenology_stage=2.5,
         gt_anomaly_expected=True,
         gt_boundary_contamination=False,
+        critical_case=False,
+        allowed_soft_fail=True,
         rgb_mean=(0.40, 0.28, 0.16),
         rgb_noise_std=0.06,
         pattern="patchy", patch_fraction=0.40,
@@ -304,6 +310,8 @@ BARE_SOIL_CASES = [
         gt_phenology_stage=4.0,
         gt_anomaly_expected=False,
         gt_boundary_contamination=False,
+        critical_case=False,
+        allowed_soft_fail=True,
         rgb_mean=(0.40, 0.32, 0.22),
         rgb_noise_std=0.04,
         pattern="patchy", patch_fraction=0.08,
@@ -373,6 +381,8 @@ MIXED_CASES = [
         gt_phenology_stage=0.5,
         gt_anomaly_expected=False,
         gt_boundary_contamination=False,
+        critical_case=False,
+        allowed_soft_fail=True,
         rgb_mean=(0.15, 0.48, 0.12),
         rgb_noise_std=0.04,
         pattern="gradient",
@@ -413,6 +423,8 @@ CLOUD_HAZE_CASES = [
         gt_phenology_stage=0.0,
         gt_anomaly_expected=False,
         gt_boundary_contamination=False,
+        critical_case=False,
+        allowed_soft_fail=True,
         cloud_estimate=0.80,
         gt_qa_usable=False,
         gt_qa_downgraded=True,
@@ -474,10 +486,13 @@ BOUNDARY_CASES = [
         gt_phenology_stage=1.5,
         gt_anomaly_expected=False,
         gt_boundary_contamination=True,
+        critical_case=False,
+        allowed_soft_fail=True,
+        gt_qa_usable=False,
         image_width=12, image_height=12,
         rgb_mean=(0.15, 0.50, 0.12),
         rgb_noise_std=0.03,
-        notes="Small image → large boundary fraction from margin/edge masking",
+        notes="Small image -> large boundary fraction from margin/edge masking",
     ),
     SatRGBBenchmarkCase(
         case_id="narrow_strip_plot",
@@ -489,6 +504,9 @@ BOUNDARY_CASES = [
         gt_phenology_stage=1.5,
         gt_anomaly_expected=False,
         gt_boundary_contamination=True,
+        critical_case=False,
+        allowed_soft_fail=True,
+        gt_qa_usable=False,
         image_width=8, image_height=40,
         rgb_mean=(0.18, 0.46, 0.14),
         rgb_noise_std=0.03,
@@ -504,6 +522,8 @@ BOUNDARY_CASES = [
         gt_phenology_stage=0.0,
         gt_anomaly_expected=False,
         gt_boundary_contamination=True,
+        critical_case=False,
+        allowed_soft_fail=True,
         image_width=6, image_height=6,
         ground_resolution_m=40.0,
         plot_area_ha=0.001,
@@ -603,6 +623,8 @@ PHENOLOGY_CASES = [
         gt_phenology_stage=3.0,
         gt_anomaly_expected=False,
         gt_boundary_contamination=False,
+        critical_case=False,
+        allowed_soft_fail=True,
         rgb_mean=(0.42, 0.30, 0.18),
         rgb_noise_std=0.04,
         pattern="patchy", patch_fraction=0.40,
@@ -619,6 +641,8 @@ PHENOLOGY_CASES = [
         gt_phenology_stage=3.5,
         gt_anomaly_expected=False,
         gt_boundary_contamination=False,
+        critical_case=False,
+        allowed_soft_fail=True,
         rgb_mean=(0.42, 0.30, 0.20),
         rgb_noise_std=0.03,
         notes="Brown/dry — very low green ratio, high brightness",

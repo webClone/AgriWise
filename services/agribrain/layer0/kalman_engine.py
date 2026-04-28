@@ -21,11 +21,11 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import math
 
-from .state_vector import (
+from layer0.state_vector import (
     StateVector, StateCovariance, ProcessModel,
     N_STATES, STATE_NAMES, IDX_LAI, IDX_SM_0_10,
 )
-from .observation_model import get_observation_model
+from layer0.observation_model import get_observation_model
 
 
 # ============================================================================
@@ -58,9 +58,9 @@ class KalmanObservation:
         Effective observation noise variance (inflated by low reliability).
         
         Bayesian formulation: R_effective = σ² / w
-        When reliability w=1.0 → R = σ² (normal)
-        When reliability w=0.5 → R = 2σ² (observation down-weighted)
-        When reliability w=0.1 → R = 10σ² (nearly ignored)
+        When reliability w=1.0 -> R = σ² (normal)
+        When reliability w=0.5 -> R = 2σ² (observation down-weighted)
+        When reliability w=0.1 -> R = 10σ² (nearly ignored)
         """
         reliability_factor = max(0.1, self.reliability)
         return (self.sigma ** 2) / reliability_factor
@@ -261,7 +261,7 @@ class DailyAssimilationEngine:
     
     Daily pipeline:
       1. Collect weather (shared across zones)
-      2. For each zone: predict → collect zone-level observations → update
+      2. For each zone: predict -> collect zone-level observations -> update
       3. Output daily states + uncertainty + provenance for all zones
     """
     

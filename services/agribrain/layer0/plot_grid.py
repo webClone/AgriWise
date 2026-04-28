@@ -143,7 +143,7 @@ class PlotGrid:
     def _wgs84_to_utm_approx(lng: float, lat: float, 
                                zone: int, northern: bool) -> List[float]:
         """
-        Approximate WGS84 → UTM conversion (pure Python).
+        Approximate WGS84 -> UTM conversion (pure Python).
         Accurate to ~1m for small areas. In production, use pyproj.
         """
         import math as m
@@ -192,7 +192,7 @@ class PlotGrid:
     @staticmethod
     def _utm_to_wgs84_approx(easting: float, northing: float,
                                zone: int, northern: bool) -> List[float]:
-        """Approximate UTM → WGS84 (inverse of above)."""
+        """Approximate UTM -> WGS84 (inverse of above)."""
         import math as m
         
         a = 6378137.0

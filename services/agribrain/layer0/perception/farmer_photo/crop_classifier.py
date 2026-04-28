@@ -20,8 +20,8 @@ Design rule:
 from __future__ import annotations
 from typing import Any, Dict, Optional
 
-from .schemas import CropClass, CropResult
-from .preprocess import PreprocessResult
+from layer0.perception.farmer_photo.schemas import CropClass, CropResult
+from layer0.perception.farmer_photo.preprocess import PreprocessResult
 
 
 class CropClassifier:

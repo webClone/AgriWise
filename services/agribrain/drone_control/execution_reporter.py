@@ -76,8 +76,8 @@ class ExecutionReporter:
             report.plot_id = compiled_mission.plot_id
             report.flight_mode = compiled_mission.flight_mode
             report.mission_type = compiled_mission.mission_type
-            report.driver_type = compiled_mission.drone_profile
-            report.vehicle_profile = compiled_mission.drone_profile
+            report.driver_type = compiled_mission.driver_type        # runtime driver
+            report.vehicle_profile = compiled_mission.drone_profile  # vehicle capability
             report.compiler_version = compiled_mission.compiler_version
             
             # Planned metrics

@@ -5,7 +5,7 @@ Compare Toolchain — Zone vs Zone, Surface vs Surface comparisons
 Enables side-by-side histograms for two zones or two surfaces.
 """
 from typing import List, Dict, Any, Optional, Tuple
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     SurfaceArtifact, ZoneArtifact,
 )
 

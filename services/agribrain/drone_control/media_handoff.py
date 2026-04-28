@@ -73,7 +73,8 @@ class MediaHandoff:
             "plot_id": compiled_mission.plot_id,
             "flight_mode": flight_mode,
             "mission_type": compiled_mission.mission_type,
-            "driver_type": compiled_mission.drone_profile,
+            "driver_type": compiled_mission.driver_type,         # runtime driver
+            "vehicle_profile": compiled_mission.drone_profile,   # vehicle capability
             "compiler_version": compiled_mission.compiler_version,
             "flight_altitude_m": compiled_mission.flight_altitude_m,
             "target_gsd_cm": compiled_mission.target_gsd_cm,

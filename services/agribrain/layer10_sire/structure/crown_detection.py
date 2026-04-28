@@ -6,10 +6,10 @@ For orchard/plantation crops: detect circular canopy patches
 using local maxima + watershed-like segmentation.
 """
 from typing import List, Optional
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, MicroObjectArtifact, ObjectType,
 )
-from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
+from layer10_sire.adapters.l1_adapter import L1SpatialData
 
 
 def detect_crowns(
@@ -21,7 +21,7 @@ def detect_crowns(
         return []
 
     if l1_data is None:
-        from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
+        from layer10_sire.adapters.l1_adapter import adapt_l1
         l1_data = adapt_l1(inp.field_tensor, H, W)
 
     ndvi = l1_data.raster_maps.get('ndvi')

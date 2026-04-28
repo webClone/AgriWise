@@ -9,8 +9,8 @@ This is the ONLY shape the frontend should ever see.
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
-from services.agribrain.orchestrator_v2.schema import RunArtifact, LayerStatus
-from services.agribrain.layer9_interface.fallback_actions import build_fallback_guidance_map
+from orchestrator_v2.schema import RunArtifact, LayerStatus
+from layer9_interface.fallback_actions import build_fallback_guidance_map
 
 
 def artifact_to_run(artifact: RunArtifact,

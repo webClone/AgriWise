@@ -133,14 +133,19 @@ class FrameQA:
         else:
             qa.quality_weight = 0.0
         
+        # V3: Populate dual-scale blur scores
+        qa.native_blur_score = qa.blur_score
+        qa.working_blur_score = qa.blur_score
+        
         return qa
     
     def _assess_from_pixels(
         self, pixels: dict, qa: FrameQAResult
     ) -> None:
-        """Compute QA metrics from synthetic pixel arrays.
+        """Compute QA metrics from pixel arrays.
         
-        V1 heuristic: uses basic statistics. No learned models.
+        V3: Adaptive sampling stride proportional to frame dimensions.
+        Computes texture density for downstream tiepoint guidance.
         """
         green = pixels.get("green", [])
         red = pixels.get("red", [])
@@ -152,10 +157,16 @@ class FrameQA:
         h, w = len(green), len(green[0])
         total = h * w
         
+        # V3: Adaptive stride — proportional to frame size
+        # Small frames (benchmark): stride = 1-3
+        # Large frames (native): stride = 8-16
+        blur_stride = max(1, min(16, int(math.sqrt(total) / 15)))
+        sample_stride = max(1, min(16, int(math.sqrt(total) / 10)))
+        
         # --- Blur score (Laplacian variance proxy) ---
         laplacians = []
-        for y in range(1, h - 1, 3):
-            for x in range(1, w - 1, 3):
+        for y in range(1, h - 1, blur_stride):
+            for x in range(1, w - 1, blur_stride):
                 g_val = green[y][x]
                 if g_val > 0:
                     lap = (
@@ -172,8 +183,8 @@ class FrameQA:
         
         # --- Exposure score ---
         sample_vals = []
-        for y in range(0, h, 4):
-            for x in range(0, w, 4):
+        for y in range(0, h, sample_stride):
+            for x in range(0, w, sample_stride):
                 brightness = (red[y][x] + green[y][x] + blue[y][x]) / 3.0
                 sample_vals.append(brightness)
         
@@ -199,8 +210,8 @@ class FrameQA:
         # --- Vegetation content proxy ---
         veg_count = 0
         sample_count = 0
-        for y in range(0, h, 4):
-            for x in range(0, w, 4):
+        for y in range(0, h, sample_stride):
+            for x in range(0, w, sample_stride):
                 r, g, b = red[y][x], green[y][x], blue[y][x]
                 total_rgb = r + g + b
                 if total_rgb > 0 and g / total_rgb > 0.38:
@@ -209,3 +220,20 @@ class FrameQA:
         
         if sample_count > 0:
             qa.vegetation_content = veg_count / sample_count
+        
+        # --- V3: Texture density estimation ---
+        # Count pixels with significant gradient (edges)
+        edge_count = 0
+        edge_total = 0
+        edge_stride = max(1, min(8, blur_stride))
+        for y in range(1, h - 1, edge_stride):
+            for x in range(1, w - 1, edge_stride):
+                gx = abs(green[y][x+1] - green[y][x-1])
+                gy = abs(green[y+1][x] - green[y-1][x])
+                edge_mag = gx + gy
+                edge_total += 1
+                if edge_mag > 20:  # Significant edge
+                    edge_count += 1
+        
+        if edge_total > 0:
+            qa.estimated_texture_density = min(1.0, edge_count / edge_total * 2.0)

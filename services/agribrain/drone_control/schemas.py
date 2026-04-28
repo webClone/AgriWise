@@ -305,7 +305,8 @@ class CompiledMission:
     
     # Provenance
     source_plan_id: str = ""
-    drone_profile: str = ""
+    drone_profile: str = ""                # Vehicle/capability profile (e.g. "dji_m3e")
+    driver_type: str = ""                  # Runtime driver (e.g. "mock", "dji_wayline", "mavsdk")
     compiler_version: str = "v1"
     compiled_at: datetime.datetime = field(default_factory=datetime.datetime.now)
 

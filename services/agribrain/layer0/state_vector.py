@@ -120,7 +120,7 @@ class StateVector:
         
         if soil_props:
             clay = soil_props.get("clay_pct", 25)
-            # Higher clay → higher water holding capacity → higher initial moisture
+            # Higher clay -> higher water holding capacity -> higher initial moisture
             initial_sm = min(0.8, 0.3 + clay * 0.01)
         
         state = cls(
@@ -312,7 +312,7 @@ class ProcessModel:
         et_crop = et0_mm * kc * dt_days
         
         # Top layer (0–10cm): receives rain directly, loses to ET and percolation
-        whc_top = p["whc_mm_per_m"] * 0.1  # 10cm depth → mm
+        whc_top = p["whc_mm_per_m"] * 0.1  # 10cm depth -> mm
         sm_top = x.values[IDX_SM_0_10]
         
         # Add irrigation events
@@ -391,7 +391,7 @@ class ProcessModel:
         
         # Higher process noise when weather uncertainty is high
         if rain_mm > 10:
-            Q[IDX_SM_0_10] *= 2  # heavy rain → uncertain infiltration
+            Q[IDX_SM_0_10] *= 2  # heavy rain -> uncertain infiltration
         
         return x, Q
     

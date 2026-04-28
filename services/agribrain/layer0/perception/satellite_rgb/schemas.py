@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..common.contracts import (
+from layer0.perception.common.contracts import (
     PerceptionEngineInput,
     PerceptionEngineOutput,
     PerceptionEngineFamily,
@@ -19,7 +19,7 @@ from ..common.contracts import (
     PerceptionArtifact,
     ZoneOutput,
 )
-from ..common.base_types import SatelliteProvider
+from layer0.perception.common.base_types import SatelliteProvider
 
 
 # ============================================================================

@@ -1,9 +1,9 @@
 
 from typing import Dict, Any, List, Tuple
-from services.agribrain.layer5_bio.schema import EvidenceLogit, ThreatId, SpreadPattern, Confounder
-from services.agribrain.layer3_decision.schema import Driver, DegradationMode
-from services.agribrain.layer5_bio.knowledge.evidence_weights import EVIDENCE_WEIGHTS
-from services.agribrain.layer5_bio.knowledge.thresholds import (
+from layer5_bio.schema import EvidenceLogit, ThreatId, SpreadPattern, Confounder
+from layer3_decision.schema import Driver, DegradationMode
+from layer5_bio.knowledge.evidence_weights import EVIDENCE_WEIGHTS
+from layer5_bio.knowledge.thresholds import (
     PRESSURE_THRESHOLD_HIGH, SPREAD_STRENGTH_STRONG, DROP_MAGNITUDE_SIGNIFICANT
 )
 

@@ -3,7 +3,7 @@ import hashlib
 import json
 from typing import Dict, Any
 
-from services.agribrain.orchestrator_v2.schema import OrchestratorInput
+from orchestrator_v2.schema import OrchestratorInput
 
 def _canonical_json(obj: Any) -> str:
     """Produces consistent JSON string for hashing."""

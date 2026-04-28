@@ -65,6 +65,7 @@ class MissionCompiler:
         intent=None,          # MissionIntent (optional)
         mission_id: str = "",
         execution_id: str = "",
+        driver_type: str = "",  # Runtime driver ("mock", "dji_wayline", "mavsdk")
     ) -> CompiledMission:
         """Compile a FlightPlan into an executable CompiledMission.
         
@@ -159,6 +160,7 @@ class MissionCompiler:
             intent_id=intent_id,
             source_plan_id=plan_id,
             drone_profile=drone_profile,
+            driver_type=driver_type,
             compiler_version=self.VERSION,
         )
         

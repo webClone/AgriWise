@@ -1,7 +1,7 @@
 """
 Satellite RGB Engine — Top-level orchestrator.
 
-Pipeline: validate input → preprocess → QA → inference → packetize.
+Pipeline: validate input -> preprocess -> QA -> inference -> packetize.
 
 This is the single entry point for satellite RGB perception.
 All other modules in this package are internal implementation details.
@@ -17,15 +17,15 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
 
-from .schemas import SatelliteRGBEngineInput, SatelliteRGBEngineOutput
-from .qa import SatelliteRGBQA, SatelliteRGBQAResult
-from .preprocess import SatelliteRGBPreprocessor, PlotImageContext
-from .inference import SatelliteRGBInference, SatelliteRGBInferenceResult
-from .packetizer import packetize, build_engine_output
-from ..common.cache import PerceptionCache
-from ..common.contracts import PerceptionEngineFamily, PerceptionEngineOutput
+from layer0.perception.satellite_rgb.schemas import SatelliteRGBEngineInput, SatelliteRGBEngineOutput
+from layer0.perception.satellite_rgb.qa import SatelliteRGBQA, SatelliteRGBQAResult
+from layer0.perception.satellite_rgb.preprocess import SatelliteRGBPreprocessor, PlotImageContext
+from layer0.perception.satellite_rgb.inference import SatelliteRGBInference, SatelliteRGBInferenceResult
+from layer0.perception.satellite_rgb.packetizer import packetize, build_engine_output
+from layer0.perception.common.cache import PerceptionCache
+from layer0.perception.common.contracts import PerceptionEngineFamily, PerceptionEngineOutput
 
-from services.agribrain.layer0.observation_packet import ObservationPacket
+from layer0.observation_packet import ObservationPacket
 
 
 class SatelliteRGBEngine:
@@ -36,9 +36,9 @@ class SatelliteRGBEngine:
     Provider-agnostic: accepts Sentinel-2, Landsat 8/9, or any georeferenced RGB.
     
     V1 outputs:
-      - Vegetation fraction (→ LAI proxy via Kalman)
+      - Vegetation fraction (-> LAI proxy via Kalman)
       - Bare soil fraction (auxiliary)
-      - RGB anomaly score (→ weak canopy stress proxy via Kalman)
+      - RGB anomaly score (-> weak canopy stress proxy via Kalman)
       - Coarse phenology stage
       - Boundary contamination score
       - Zone-level aggregates
@@ -98,7 +98,7 @@ class SatelliteRGBEngine:
         # --- Step 0: Validate input ---
         is_valid, errors = engine_input.validate()
         if not is_valid:
-            print(f"❌ [SatelliteRGBEngine] Input validation failed: {errors}")
+            print(f"[FAIL] [SatelliteRGBEngine] Input validation failed: {errors}")
             return None
         processing_steps.append("validate_input")
 
@@ -112,17 +112,17 @@ class SatelliteRGBEngine:
             )
             cached = self.cache.get(cache_key)
             if cached is not None:
-                print(f"✅ [SatelliteRGBEngine] Cache hit for plot {engine_input.plot_id}")
+                print(f"[PASS] [SatelliteRGBEngine] Cache hit for plot {engine_input.plot_id}")
                 processing_steps.append("cache_hit")
                 return cached
 
-        # --- Step 2: Preprocess ---
         ctx = self.preprocessor.preprocess(
             image_width=engine_input.image_width,
             image_height=engine_input.image_height,
             ground_resolution_m=engine_input.ground_resolution_m,
             plot_polygon=engine_input.plot_polygon,
             synthetic_pixels=engine_input.synthetic_pixels,
+            rgb_image_ref=engine_input.rgb_image_ref,
         )
         processing_steps.append("preprocess_crop_mask")
 
@@ -135,7 +135,7 @@ class SatelliteRGBEngine:
             lng_km = abs(max_lng - min_lng) * 111.0 * abs(
                 __import__('math').cos(__import__('math').radians((min_lat + max_lat) / 2))
             )
-            plot_area_ha = lat_km * lng_km * 100  # km² → ha
+            plot_area_ha = lat_km * lng_km * 100  # km² -> ha
 
         qa_result = self.qa.assess(
             ground_resolution_m=engine_input.ground_resolution_m,
@@ -154,7 +154,7 @@ class SatelliteRGBEngine:
 
         # --- Step 4: Check usability ---
         if not qa_result.usable:
-            print(f"⚠️ [SatelliteRGBEngine] Image not usable: qa_score={qa_result.qa_score:.2f}, flags={qa_result.flags}")
+            print(f"[WARN] [SatelliteRGBEngine] Image not usable: qa_score={qa_result.qa_score:.2f}, flags={qa_result.flags}")
             # Still return a minimal output with QA info
             minimal = SatelliteRGBEngineOutput(
                 plot_id=engine_input.plot_id,
@@ -201,7 +201,7 @@ class SatelliteRGBEngine:
             )
             self.cache.set(cache_key, (engine_output, packets))
 
-        print(f"✅ [SatelliteRGBEngine] Processed plot {engine_input.plot_id}: "
+        print(f"[PASS] [SatelliteRGBEngine] Processed plot {engine_input.plot_id}: "
               f"veg={engine_output.vegetation_fraction:.2f}, "
               f"soil={engine_output.bare_soil_fraction:.2f}, "
               f"anomaly={engine_output.anomaly_fraction:.2f}, "

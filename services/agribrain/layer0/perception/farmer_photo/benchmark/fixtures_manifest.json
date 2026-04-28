@@ -1,0 +1,58 @@
+{
+  "fixtures": {
+    "clean_photo": {
+      "id": "clean_photo",
+      "local_path": "fixtures/clean_photo.jpg",
+      "sha256": "d5b663f33d63617f4f01a11c9095fc34fa28fc14c0a3e0932175b36c136ee4ca",
+      "license": "synthetic",
+      "license_notes": "generated for test",
+      "downloaded_at": "2026-04-25T00:00:00Z",
+      "scene_type": "synthetic",
+      "crop_type": "mixed",
+      "expected_labels": [],
+      "ci_safe": true,
+      "benchmark_only": true,
+      "redistributable": false,
+      "notes": "Governance upgrade",
+      "pattern": "clean",
+      "original_source_url": "https://synthetic.agriwise.internal/fixtures/clean_photo",
+      "local_mirror_url": "file://./fixtures/clean_photo.jpg"
+    },
+    "blurry_photo": {
+      "id": "blurry_photo",
+      "local_path": "fixtures/blurry_photo.jpg",
+      "sha256": "97880a11fe4f6e6d6bfacaa509de1f1f18ff6d0c4b4efe875637fc27a0265def",
+      "license": "synthetic",
+      "license_notes": "generated for test",
+      "downloaded_at": "2026-04-25T00:00:00Z",
+      "scene_type": "synthetic",
+      "crop_type": "mixed",
+      "expected_labels": [],
+      "ci_safe": true,
+      "benchmark_only": true,
+      "redistributable": false,
+      "notes": "Governance upgrade",
+      "pattern": "blur",
+      "original_source_url": "https://synthetic.agriwise.internal/fixtures/blurry_photo",
+      "local_mirror_url": "file://./fixtures/blurry_photo.jpg"
+    },
+    "dark_photo": {
+      "id": "dark_photo",
+      "local_path": "fixtures/dark_photo.jpg",
+      "sha256": "215e9b92e3398221d033660bc9c37d1e6961191856ffbf33ea8c0f7674e2e8c8",
+      "license": "synthetic",
+      "license_notes": "generated for test",
+      "downloaded_at": "2026-04-25T00:00:00Z",
+      "scene_type": "synthetic",
+      "crop_type": "mixed",
+      "expected_labels": [],
+      "ci_safe": true,
+      "benchmark_only": true,
+      "redistributable": false,
+      "notes": "Governance upgrade",
+      "pattern": "dark",
+      "original_source_url": "https://synthetic.agriwise.internal/fixtures/dark_photo",
+      "local_mirror_url": "file://./fixtures/dark_photo.jpg"
+    }
+  }
+}

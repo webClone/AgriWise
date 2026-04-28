@@ -1,0 +1,838 @@
+{
+  "timestamp": 1777303849.7751398,
+  "archive_root": "C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain",
+  "status": "APPROVED",
+  "package_reproducibility_ok": true,
+  "fixture_governance_ok": true,
+  "sentinel2_engine_ok": true,
+  "sentinel2_tests": {
+    "passed": 89,
+    "failed": 0,
+    "warnings": 0
+  },
+  "sentinel1_engine_ok": true,
+  "sentinel1_tests": {
+    "passed": 100,
+    "failed": 0,
+    "warnings": 0
+  },
+  "environment_engine_ok": true,
+  "environment_tests": {
+    "passed": 173,
+    "failed": 0,
+    "warnings": 0
+  },
+  "weather_forecast_engine_ok": true,
+  "weather_forecast_tests": {
+    "passed": 156,
+    "failed": 0,
+    "warnings": 0
+  },
+  "forecast_hard_prohibitions": {
+    "no_current_kalman_update": true,
+    "no_canopy_stress_from_wind": true,
+    "no_forecast_historical_mixing": true,
+    "wind_direction_circular": true,
+    "horizon_cap_enforced": true
+  },
+  "geo_context_engine_ok": true,
+  "geo_context_tests": {
+    "passed": 134,
+    "failed": 0,
+    "warnings": 0
+  },
+  "geo_context_hard_prohibitions": {
+    "no_direct_kalman_updates": true,
+    "dem_not_soil_moisture_truth": true,
+    "landcover_not_crop_health": true,
+    "wapor_not_plot_truth": true,
+    "dynamic_world_not_crop_health": true,
+    "sensor_placement_not_state_update": true
+  },
+  "sensor_runtime_ok": true,
+  "sensor_runtime_tests": {
+    "passed": 95,
+    "failed": 0,
+    "warnings": 0
+  },
+  "sensor_engine_ok": true,
+  "sensor_engine_tests": {
+    "passed": 87,
+    "failed": 0,
+    "warnings": 0
+  },
+  "sensor_hard_prohibitions": {
+    "uncalibrated_sensor_no_high_trust": true,
+    "unknown_placement_no_plot_wide_update": true,
+    "edge_sensor_no_plot_wide_update": true,
+    "wet_lowspot_sensor_not_plot_mean": true,
+    "flatline_sensor_no_kalman": true,
+    "spike_sensor_degraded_or_rejected": true,
+    "bad_battery_degrades_reliability": true,
+    "bad_signal_degrades_reliability": true,
+    "wind_no_direct_canopy_stress": true,
+    "leaf_wetness_no_direct_disease_diagnosis": true,
+    "forecast_not_sensor_truth": true,
+    "irrigation_flow_not_soil_moisture_without_response": true,
+    "point_sensor_scope_respected": true
+  },
+  "sensor_scope_rules_ok": true,
+  "sensor_calibration_rules_ok": true,
+  "sensor_health_rules_ok": true,
+  "sensor_no_live_network_tests": true,
+  "sensor_normalization_rules_ok": true,
+  "sensor_canonical_variables_ok": true,
+  "sensor_test_padding_removed": true,
+  "sensor_diagnostic_scope_separated": true,
+  "sensor_irrigation_forcing_ok": true,
+  "unit_integration_tests": {
+    "passed": 1066,
+    "failed": 0
+  },
+  "satellite_rgb_ok": true,
+  "farmer_photo_ok": true,
+  "drone_rgb_ok": true,
+  "ip_camera_ok": true,
+  "cross_source_trust_ok": true,
+  "critical_case_failures": 0,
+  "aggregate_metric_failures": 0,
+  "skipped_required_suites": [],
+  "gate_passed": true,
+  "benchmark_verdicts": {
+    "Satellite RGB Benchmark": {
+      "valid": true,
+      "errors": [],
+      "data": {
+        "engine": "satellite_rgb",
+        "aggregate_failures": 0,
+        "critical_failures": 0,
+        "soft_failures": 9,
+        "gate_passed": true,
+        "failing_metrics": [],
+        "failing_cases": [],
+        "scorecard": {
+          "veg_mae": {
+            "value": 0.0607,
+            "threshold": 0.08,
+            "passed": true
+          },
+          "soil_mae": {
+            "value": 0.0468,
+            "threshold": 0.08,
+            "passed": true
+          },
+          "density_acc": {
+            "value": 96.1538,
+            "threshold": 85.0,
+            "passed": true
+          },
+          "pheno_mae": {
+            "value": 0.5,
+            "threshold": 1.0,
+            "passed": true
+          },
+          "qa_acc": {
+            "value": 100.0,
+            "threshold": 95.0,
+            "passed": true
+          },
+          "anomaly_fp_rate": {
+            "value": 0.0,
+            "threshold": 10.0,
+            "passed": true
+          },
+          "boundary_acc": {
+            "value": 90.0,
+            "threshold": 90.0,
+            "passed": true
+          }
+        },
+        "case_results": [
+          {
+            "case_id": "dense_maize_canopy",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "dense_wheat_canopy",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "dense_orchard_canopy",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "dense_rice_paddy",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "sparse_emergence",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "drought_stressed",
+            "passed": false,
+            "critical": false,
+            "soft_fail": true
+          },
+          {
+            "case_id": "gap_heavy_stand",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "sparse_cover",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "dry_brown_soil",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "wet_dark_soil",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "sandy_soil",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "post_harvest_stubble",
+            "passed": false,
+            "critical": false,
+            "soft_fail": true
+          },
+          {
+            "case_id": "crop_soil_mosaic",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "weed_patches",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "partial_canopy",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "transitional_growth",
+            "passed": false,
+            "critical": false,
+            "soft_fail": true
+          },
+          {
+            "case_id": "thin_cloud",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "heavy_cloud",
+            "passed": false,
+            "critical": false,
+            "soft_fail": true
+          },
+          {
+            "case_id": "strong_haze",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "partial_cloud",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "heavy_edge_contamination",
+            "passed": false,
+            "critical": false,
+            "soft_fail": true
+          },
+          {
+            "case_id": "narrow_strip_plot",
+            "passed": false,
+            "critical": false,
+            "soft_fail": true
+          },
+          {
+            "case_id": "too_small_plot",
+            "passed": false,
+            "critical": false,
+            "soft_fail": true
+          },
+          {
+            "case_id": "normal_plot_clean_boundary",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "pheno_dormant",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "pheno_early_vegetative",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "pheno_strong_vegetative",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "pheno_flowering",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "pheno_ripening",
+            "passed": false,
+            "critical": false,
+            "soft_fail": true
+          },
+          {
+            "case_id": "pheno_senescent",
+            "passed": false,
+            "critical": false,
+            "soft_fail": true
+          }
+        ]
+      }
+    },
+    "Farmer Photo Benchmark": {
+      "valid": true,
+      "errors": [],
+      "data": {
+        "engine": "farmer_photo",
+        "aggregate_failures": 0,
+        "critical_failures": 0,
+        "soft_failures": 0,
+        "gate_passed": true,
+        "failing_metrics": [],
+        "failing_cases": [],
+        "scorecard": {
+          "scene_accuracy": {
+            "value": 1.0,
+            "threshold": 0.9,
+            "passed": true
+          },
+          "non_field_f1": {
+            "value": 1.0,
+            "threshold": 0.8,
+            "passed": true
+          },
+          "organ_accuracy": {
+            "value": 1.0,
+            "threshold": 0.7,
+            "passed": true
+          },
+          "junk_fp_rate": {
+            "value": 0.0,
+            "threshold": 0.1,
+            "passed": true
+          },
+          "soil_agronomic_leaks": {
+            "value": 0,
+            "threshold": 0,
+            "passed": true
+          }
+        },
+        "case_results": [
+          {
+            "case_id": "nf_gray_wall_1",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_gray_wall_2",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_document",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_desk_dark",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_green_tarp",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_blue_sky",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_potted_plant",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_red_object",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "soil_brown_dry",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "soil_red_clay",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "soil_sandy",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "soil_dark_wet",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "field_wheat_green",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "field_maize_canopy",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "field_mixed_weedy",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "closeup_healthy_leaf",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "closeup_maize_leaf",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "symptom_chlorosis_mild",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "symptom_chlorosis_severe",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "symptom_necrosis",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "symptom_spots",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "fruit_tomato_red",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "edge_golden_wheat",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "edge_sparse_crop",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_asphalt",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_concrete",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_red_plastic",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_red_wall",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_green_fabric",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_decorative_plant",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_lawn_patch",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "nf_wood_surface",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "crop_wheat_no_hint",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "crop_maize_no_hint",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "crop_tomato_no_hint",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "crop_potato_no_hint",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "crop_olive_no_hint",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "crop_citrus_no_hint",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "crop_wheat_hint_maize",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "crop_maize_hint_wheat",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "crop_generic_hint_wheat",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "symptom_rust_wheat",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "symptom_wilt_tomato",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "symptom_insect_maize",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "edge_brown_canopy",
+            "passed": true,
+            "critical": true,
+            "soft_fail": false
+          },
+          {
+            "case_id": "edge_seedling_closeup",
+            "passed": true,
+            "critical": false,
+            "soft_fail": true
+          }
+        ]
+      }
+    },
+    "Drone RGB Benchmark": {
+      "valid": true,
+      "errors": [],
+      "data": {
+        "engine": "drone_rgb",
+        "aggregate_failures": 0,
+        "critical_failures": 0,
+        "soft_failures": 0,
+        "gate_passed": true,
+        "failing_metrics": [],
+        "failing_cases": [],
+        "scorecard": {
+          "row_azimuth_mae": {
+            "value": 0.0833,
+            "threshold": 5.0,
+            "passed": true
+          },
+          "weed_pressure_mae": {
+            "value": 0.0041,
+            "threshold": 0.05,
+            "passed": true
+          },
+          "coverage_completeness": {
+            "value": 0.96,
+            "threshold": 0.8,
+            "passed": true
+          },
+          "outside_waste": {
+            "value": 0.5217,
+            "threshold": 0.55,
+            "passed": true
+          },
+          "overlap_compliance": {
+            "value": 0.875,
+            "threshold": 0.5,
+            "passed": true
+          }
+        },
+        "case_results": []
+      }
+    }
+  },
+  "steps": [
+    {
+      "step": "Sentinel-2 Tests",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\sentinel2\\tests",
+      "passed": true,
+      "elapsed_s": 0.59,
+      "returncode": 0,
+      "stdout": "........................................................................ [ 80%]\n.................                                                        [100%]\n89 passed in 0.16s\n",
+      "stderr": ""
+    },
+    {
+      "step": "Sentinel-1 SAR Tests",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\sentinel1\\tests",
+      "passed": true,
+      "elapsed_s": 0.62,
+      "returncode": 0,
+      "stdout": "........................................................................ [ 72%]\n............................                                             [100%]\n100 passed in 0.18s\n",
+      "stderr": ""
+    },
+    {
+      "step": "Environment Tests",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\environment\\tests --ignore=C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\environment\\tests\\forecast",
+      "passed": true,
+      "elapsed_s": 0.71,
+      "returncode": 0,
+      "stdout": "........................................................................ [ 41%]\n........................................................................ [ 83%]\n.............................                                            [100%]\n173 passed in 0.26s\n",
+      "stderr": ""
+    },
+    {
+      "step": "Environment Forecast Tests",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\environment\\tests\\forecast",
+      "passed": true,
+      "elapsed_s": 0.74,
+      "returncode": 0,
+      "stdout": "........................................................................ [ 46%]\n........................................................................ [ 92%]\n............                                                             [100%]\n156 passed in 0.31s\n",
+      "stderr": ""
+    },
+    {
+      "step": "Geo Context Tests",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\geo_context\\tests",
+      "passed": true,
+      "elapsed_s": 0.79,
+      "returncode": 0,
+      "stdout": "........................................................................ [ 53%]\n..............................................................           [100%]\n134 passed in 0.35s\n",
+      "stderr": ""
+    },
+    {
+      "step": "Sensor Runtime Tests",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\sensor_runtime\\tests",
+      "passed": true,
+      "elapsed_s": 0.56,
+      "returncode": 0,
+      "stdout": "........................................................................ [ 75%]\n.......................                                                  [100%]\n95 passed in 0.15s\n",
+      "stderr": ""
+    },
+    {
+      "step": "Layer 0 Sensor Tests",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\sensors\\tests",
+      "passed": true,
+      "elapsed_s": 0.56,
+      "returncode": 0,
+      "stdout": "........................................................................ [ 82%]\n...............                                                          [100%]\n87 passed in 0.15s\n",
+      "stderr": ""
+    },
+    {
+      "step": "Unit & Integration Tests",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m pytest -q C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0 C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\ip_camera_runtime",
+      "passed": true,
+      "elapsed_s": 168.9,
+      "returncode": 0,
+      "stdout": "........................................................................ [  6%]\n........................................................................ [ 13%]\n........................................................................ [ 20%]\n........................................................................ [ 27%]\n........................................................................ [ 33%]\n........................................................................ [ 40%]\n........................................................................ [ 47%]\n........................................................................ [ 54%]\n........................................................................ [ 60%]\n........................................................................ [ 67%]\n........................................................................ [ 74%]\n........................................................................ [ 81%]\n........................................................................ [ 87%]\n........................................................................ [ 94%]\n..........................................................               [100%]\n1066 passed in 168.09s (0:02:48)\n",
+      "stderr": ""
+    },
+    {
+      "step": "Fixture Governance",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\perception\\common\\verify_fixtures.py",
+      "passed": true,
+      "elapsed_s": 0.11,
+      "returncode": 0,
+      "stdout": "[PASS] drone_rgb: 4 fixtures verified\n[PASS] farmer_photo: 3 fixtures verified\n[PASS] satellite_rgb: 5 fixtures verified\n",
+      "stderr": ""
+    },
+    {
+      "step": "Satellite RGB Benchmark",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m layer0.perception.satellite_rgb.benchmark.run_benchmark",
+      "passed": true,
+      "elapsed_s": 0.28,
+      "returncode": 0,
+      "stdout": "\n========================================================================\n  Satellite RGB V1 Benchmark \u2014 satrgb_benchmark_v1\n  Running 30 cases...\n========================================================================\n\n[PASS] [SatelliteRGBEngine] Processed plot bench_dense_maize_canopy: veg=1.00, soil=0.00, anomaly=0.01, qa=0.70, 5 packets\n  [ 1/30] PASS dense_maize_canopy\n[PASS] [SatelliteRGBEngine] Processed plot bench_dense_wheat_canopy: veg=1.00, soil=0.00, anomaly=0.02, qa=0.70, 5 packets\n  [ 2/30] PASS dense_wheat_canopy\n[PASS] [SatelliteRGBEngine] Processed plot bench_dense_orchard_canopy: veg=1.00, soil=0.00, anomaly=0.01, qa=0.70, 5 packets\n  [ 3/30] PASS dense_orchard_canopy\n[PASS] [SatelliteRGBEngine] Processed plot bench_dense_rice_paddy: veg=1.00, soil=0.00, anomaly=0.01, qa=0.70, 5 packets\n  [ 4/30] PASS dense_rice_paddy\n[PASS] [SatelliteRGBEngine] Processed plot bench_sparse_emergence: veg=0.32, soil=0.68, anomaly=0.00, qa=0.70, 5 packets\n  [ 5/30] PASS sparse_emergence\n[PASS] [SatelliteRGBEngine] Processed plot bench_drought_stressed: veg=0.58, soil=0.42, anomaly=0.00, qa=0.70, 5 packets\n  [ 6/30] PASS drought_stressed\n[PASS] [SatelliteRGBEngine] Processed plot bench_gap_heavy_stand: veg=0.54, soil=0.46, anomaly=0.00, qa=0.70, 5 packets\n  [ 7/30] PASS gap_heavy_stand\n[PASS] [SatelliteRGBEngine] Processed plot bench_sparse_cover: veg=0.21, soil=0.79, anomaly=0.02, qa=0.70, 5 packets\n  [ 8/30] PASS sparse_cover\n[PASS] [SatelliteRGBEngine] Processed plot bench_dry_brown_soil: veg=0.03, soil=0.97, anomaly=0.01, qa=0.70, 5 packets\n  [ 9/30] PASS dry_brown_soil\n[PASS] [SatelliteRGBEngine] Processed plot bench_wet_dark_soil: veg=0.00, soil=1.00, anomaly=0.01, qa=0.70, 5 packets\n  [10/30] PASS wet_dark_soil\n[PASS] [SatelliteRGBEngine] Processed plot bench_sandy_soil: veg=0.07, soil=0.93, anomaly=0.01, qa=0.70, 5 packets\n  [11/30] PASS sandy_soil\n[PASS] [SatelliteRGBEngine] Processed plot bench_post_harvest_stubble: veg=0.36, soil=0.64, anomaly=0.02, qa=0.70, 5 packets\n  [12/30] PASS post_harvest_stubble\n[PASS] [SatelliteRGBEngine] Processed plot bench_crop_soil_mosaic: veg=0.64, soil=0.36, anomaly=0.00, qa=0.70, 5 packets\n  [13/30] PASS crop_soil_mosaic\n[PASS] [SatelliteRGBEngine] Processed plot bench_weed_patches: veg=1.00, soil=0.00, anomaly=0.01, qa=0.70, 5 packets\n  [14/30] PASS weed_patches\n[PASS] [SatelliteRGBEngine] Processed plot bench_partial_canopy: veg=0.77, soil=0.23, anomaly=0.00, qa=0.70, 5 packets\n  [15/30] PASS partial_canopy\n[PASS] [SatelliteRGBEngine] Processed plot bench_transitional_growth: veg=0.88, soil=0.12, anomaly=0.01, qa=0.70, 5 packets\n  [16/30] PASS transitional_growth\n[PASS] [SatelliteRGBEngine] Processed plot bench_thin_cloud: veg=0.98, soil=0.02, anomaly=0.01, qa=0.67, 5 packets\n  [17/30] PASS thin_cloud\n[WARN] [SatelliteRGBEngine] Image not usable: qa_score=0.45, flags=['CLOUD_CONTAMINATED']\n  [18/30] PASS heavy_cloud\n[PASS] [SatelliteRGBEngine] Processed plot bench_strong_haze: veg=0.90, soil=0.10, anomaly=0.01, qa=0.58, 5 packets\n  [19/30] PASS strong_haze\n[PASS] [SatelliteRGBEngine] Processed plot bench_partial_cloud: veg=0.79, soil=0.21, anomaly=0.01, qa=0.66, 5 packets\n  [20/30] PASS partial_cloud\n[WARN] [SatelliteRGBEngine] Image not usable: qa_score=0.37, flags=['BOUNDARY_CONTAMINATED']\n  [21/30] PASS heavy_edge_contamination\n[WARN] [SatelliteRGBEngine] Image not usable: qa_score=0.37, flags=['BOUNDARY_CONTAMINATED']\n  [22/30] PASS narrow_strip_plot\n[WARN] [SatelliteRGBEngine] Image not usable: qa_score=0.24, flags=['PARTIAL_COVERAGE', 'LOW_RESOLUTION', 'INSUFFICIENT_PIXELS', 'BOUNDARY_CONTAMINATED', 'LOW_CONFIDENCE']\n  [23/30] PASS too_small_plot\n[PASS] [SatelliteRGBEngine] Processed plot bench_normal_plot_clean_boundary: veg=1.00, soil=0.00, anomaly=0.01, qa=0.75, 5 packets\n  [24/30] PASS normal_plot_clean_boundary\n[PASS] [SatelliteRGBEngine] Processed plot bench_pheno_dormant: veg=0.22, soil=0.78, anomaly=0.01, qa=0.70, 5 packets\n  [25/30] PASS pheno_dormant\n[PASS] [SatelliteRGBEngine] Processed plot bench_pheno_early_vegetative: veg=0.34, soil=0.66, anomaly=0.00, qa=0.70, 5 packets\n  [26/30] PASS pheno_early_vegetative\n[PASS] [SatelliteRGBEngine] Processed plot bench_pheno_strong_vegetative: veg=1.00, soil=0.00, anomaly=0.01, qa=0.70, 5 packets\n  [27/30] PASS pheno_strong_vegetative\n[PASS] [SatelliteRGBEngine] Processed plot bench_pheno_flowering: veg=1.00, soil=0.00, anomaly=0.01, qa=0.70, 5 packets\n  [28/30] PASS pheno_flowering\n[PASS] [SatelliteRGBEngine] Processed plot bench_pheno_ripening: veg=0.53, soil=0.47, anomaly=0.00, qa=0.70, 5 packets\n  [29/30] PASS pheno_ripening\n[PASS] [SatelliteRGBEngine] Processed plot bench_pheno_senescent: veg=0.10, soil=0.90, anomaly=0.01, qa=0.70, 5 packets\n  [30/30] PASS pheno_senescent\n\n========================================================================\n  OVERALL SCORECARD -- satrgb_benchmark_v1\n========================================================================\n  Total cases:             30\n  Structural cases:        26 (gt_qa_usable=True)\n\n  Veg fraction MAE:        0.061  [PASS] (target <= 0.08)\n  Soil fraction MAE:       0.047  [PASS] (target <= 0.08)\n  Density class accuracy:  96.2%  [PASS] (target >= 85.0%)\n  Phenology stage MAE:     0.50  [PASS] (target <= 1.0)\n  QA gating accuracy:      100.0%  [PASS] (target >= 95.0%)\n  Anomaly FP rate:         0.0%  [PASS] (target <= 10.0%)\n  Boundary accuracy:       90.0%  [PASS] (target >= 90.0%)\n\n------------------------------------------------------------------------\n  PER-SLICE SCORECARD\n------------------------------------------------------------------------\n    bare_soil                 n= 4  veg_mae=0.026  soil_mae=0.022  density=4/4  pheno_mae=0.88\n    boundary                  n= 4  veg_mae=0.020  soil_mae=0.000  density=1/1  pheno_mae=0.00\n    cloud_haze                n= 4  veg_mae=0.049  soil_mae=0.053  density=3/3  pheno_mae=1.00\n    dense_vegetation          n= 4  veg_mae=0.023  soil_mae=0.000  density=4/4  pheno_mae=0.12\n    mixed                     n= 4  veg_mae=0.133  soil_mae=0.081  density=3/4  pheno_mae=0.88\n    phenology                 n= 6  veg_mae=0.047  soil_mae=0.075  density=6/6  pheno_mae=0.25\n    sparse_stressed           n= 4  veg_mae=0.102  soil_mae=0.048  density=4/4  pheno_mae=0.25\n\n------------------------------------------------------------------------\n  DETAILED RESULTS\n  Case ID                        Slice                 Veg   Soil    Den  Phen   QA  Anom  Bnd OK?\n  ------------------------------ ------------------ ------ ------ ------ ----- ---- ----- ---- ---\n  dense_maize_canopy             dense_vegetation     1.00   0.00   dens   1.5    U  0.01 0.22 [PASS]\n  dense_wheat_canopy             dense_vegetation     1.00   0.00   dens   2.0    U  0.02 0.22 [PASS]\n  dense_orchard_canopy           dense_vegetation     1.00   0.00   dens   1.5    U  0.01 0.22 [PASS]\n  dense_rice_paddy               dense_vegetation     1.00   0.00   dens   1.5    U  0.01 0.22 [PASS]\n  sparse_emergence               sparse_stressed      0.32   0.68   spar   0.5    U  0.00 0.22 [PASS]\n  drought_stressed               sparse_stressed      0.58   0.42   mode   1.5    U  0.00 0.22 [FAIL]\n  gap_heavy_stand                sparse_stressed      0.54   0.46   mode   1.5    U  0.00 0.22 [PASS]\n  sparse_cover                   sparse_stressed      0.21   0.79   spar   0.5    U  0.02 0.22 [PASS]\n  dry_brown_soil                 bare_soil            0.03   0.97   bare   0.0    U  0.01 0.22 [PASS]\n  wet_dark_soil                  bare_soil            0.00   1.00   bare   0.0    U  0.01 0.22 [PASS]\n  sandy_soil                     bare_soil            0.07   0.93   bare   0.0    U  0.01 0.22 [PASS]\n  post_harvest_stubble           bare_soil            0.36   0.64   spar   0.5    U  0.02 0.22 [FAIL]\n  crop_soil_mosaic               mixed                0.64   0.36   mode   1.5    U  0.00 0.22 [PASS]\n  weed_patches                   mixed                1.00   0.00   dens   2.0    U  0.01 0.22 [PASS]\n  partial_canopy                 mixed                0.77   0.23   dens   2.0    U  0.00 0.22 [PASS]\n  transitional_growth            mixed                0.88   0.12   dens   2.0    U  0.01 0.22 [FAIL]\n  thin_cloud                     cloud_haze           0.98   0.02   dens   0.5    U  0.01 0.22 [PASS]\n  heavy_cloud                    cloud_haze              -      -      -     -    X     - 0.00 [FAIL]\n  strong_haze                    cloud_haze           0.90   0.10   dens   0.5    U  0.01 0.22 [PASS]\n  partial_cloud                  cloud_haze           0.79   0.21   dens   0.5    U  0.01 0.22 [PASS]\n  heavy_edge_contamination       boundary                -      -      -     -    X     - 0.00 [FAIL]\n  narrow_strip_plot              boundary                -      -      -     -    X     - 0.00 [FAIL]\n  too_small_plot                 boundary                -      -      -     -    X     - 0.00 [FAIL]\n  normal_plot_clean_boundary     boundary             1.00   0.00   dens   1.5    U  0.01 0.17 [PASS]\n  pheno_dormant                  phenology            0.22   0.78   spar   0.0    U  0.01 0.22 [PASS]\n  pheno_early_vegetative         phenology            0.34   0.66   spar   0.5    U  0.00 0.22 [PASS]\n  pheno_strong_vegetative        phenology            1.00   0.00   dens   1.5    U  0.01 0.22 [PASS]\n  pheno_flowering                phenology            1.00   0.00   dens   2.0    U  0.01 0.22 [PASS]\n  pheno_ripening                 phenology            0.53   0.47   mode   1.5    U  0.00 0.22 [FAIL]\n  pheno_senescent                phenology            0.10   0.90   spar   3.5    U  0.01 0.22 [FAIL]\n\n------------------------------------------------------------------------\n  DENSITY CLASS CONFUSION (rows=GT, cols=Pred)\n                         bare   sparse   moderate    dense\n  bare                      3        0        0        0\n  sparse                    0        6        0        0\n  moderate                  0        0        4        1\n  dense                     0        0        0       12\n\n------------------------------------------------------------------------\n  PHENOLOGY STAGE (GT vs Pred, structural cases)\n                 dormant(0) early(0.5)   veg(1.5)  flower(2)   ripen(3) senes(3.5+)\n  dormant(0)              4          0          0          0          0          0\n  early(0.5)              0          3          0          1          0          0\n  veg(1.5)                0          3          6          2          0          0\n  flower(2)               0          0          1          2          0          0\n  ripen(3)                0          0          2          0          0          0\n  senes(3.5+)             0          1          0          0          0          1\n\n------------------------------------------------------------------------\n  QA USABLE CONFUSION (rows=GT, cols=Pred)\n                 usable   unusable\n  usable             26          0\n  unusable            0          4\n\n========================================================================\n  Total time: 158ms  Avg per case: 5.3ms\n========================================================================\n\n  Results saved to: C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\perception\\satellite_rgb\\benchmark\\benchmark_results.json\n  Gate artifact saved to: C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\perception\\satellite_rgb\\benchmark\\benchmark_gate_result.json\n\n[+] GATE PASSED: satellite_rgb -- all metrics and cases green.\n",
+      "stderr": ""
+    },
+    {
+      "step": "Farmer Photo Benchmark",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m layer0.perception.farmer_photo.benchmark.run_benchmark",
+      "passed": true,
+      "elapsed_s": 4.88,
+      "returncode": 0,
+      "stdout": "Initializing Farmer Photo Engine...\nRunning 46 benchmark cases...\n  [ 1/46] PASS nf_gray_wall_1\n  [ 2/46] PASS nf_gray_wall_2\n  [ 3/46] PASS nf_document\n  [ 4/46] PASS nf_desk_dark\n  [ 5/46] PASS nf_green_tarp\n  [ 6/46] PASS nf_blue_sky\n  [ 7/46] PASS nf_potted_plant\n  [ 8/46] PASS nf_red_object\n  [ 9/46] PASS soil_brown_dry\n  [10/46] PASS soil_red_clay\n  [11/46] PASS soil_sandy\n  [12/46] PASS soil_dark_wet\n  [13/46] PASS field_wheat_green\n  [14/46] PASS field_maize_canopy\n  [15/46] PASS field_mixed_weedy\n  [16/46] PASS closeup_healthy_leaf\n  [17/46] PASS closeup_maize_leaf\n  [18/46] PASS symptom_chlorosis_mild\n  [19/46] PASS symptom_chlorosis_severe\n  [20/46] PASS symptom_necrosis\n  [21/46] PASS symptom_spots\n  [22/46] PASS fruit_tomato_red\n  [23/46] PASS edge_golden_wheat\n  [24/46] PASS edge_sparse_crop\n  [25/46] PASS nf_asphalt\n  [26/46] PASS nf_concrete\n  [27/46] PASS nf_red_plastic\n  [28/46] PASS nf_red_wall\n  [29/46] PASS nf_green_fabric\n  [30/46] PASS nf_decorative_plant\n  [31/46] PASS nf_lawn_patch\n  [32/46] PASS nf_wood_surface\n  [33/46] PASS crop_wheat_no_hint\n  [34/46] PASS crop_maize_no_hint\n  [35/46] PASS crop_tomato_no_hint\n  [36/46] PASS crop_potato_no_hint\n  [37/46] PASS crop_olive_no_hint\n  [38/46] PASS crop_citrus_no_hint\n  [39/46] PASS crop_wheat_hint_maize\n  [40/46] PASS crop_maize_hint_wheat\n  [41/46] PASS crop_generic_hint_wheat\n  [42/46] PASS symptom_rust_wheat\n  [43/46] PASS symptom_wilt_tomato\n  [44/46] PASS symptom_insect_maize\n  [45/46] PASS edge_brown_canopy\n  [46/46] PASS edge_seedling_closeup\n\n========================================================================\n  FARMER PHOTO ENGINE \u2014 COMPETITIVE BENCHMARK SCORECARD\n========================================================================\n\n  Total cases:           46\n  Scene accuracy:        100.0%\n  Non-field rejection F1:100.0%\n  Organ accuracy:        100.0%\n  Crop accuracy:         80.0%\n  Symptom macro F1:      100.0%\n  Junk FP rate:          0.0%\n  Soil agronomic leaks:  0\n\n------------------------------------------------------------------------\n  NON-FIELD REJECTION\n    Precision: 100.0%  Recall: 100.0%  F1: 100.0%\n    TP=16  FP=0  FN=0  TN=30\n\n------------------------------------------------------------------------\n  ORGAN ACCURACY (per class)\n    canopy        12/12  (100%)\n    fruit         2/2  (100%)\n    leaf          9/9  (100%)\n    mixed         3/3  (100%)\n    soil          4/4  (100%)\n\n------------------------------------------------------------------------\n  SYMPTOM F1 (per class)         Prec    Rec     F1\n    chlorosis                1.00    1.00    1.00\n    healthy                  1.00    1.00    1.00\n    insect_damage            1.00    1.00    1.00\n    necrosis                 1.00    1.00    1.00\n    rust_like                1.00    1.00    1.00\n    spots                    1.00    1.00    1.00\n    wilt                     1.00    1.00    1.00\n\n------------------------------------------------------------------------\n  SOIL LEAK RATE\n    Canopy leaks: 0/4\n    Phenology leaks: 0/4\n\n------------------------------------------------------------------------\n  DETAILED RESULTS\n  Case ID                  GT Scene     Pred Scene   GT Organ   Pred Organ Symptom      OK?\n  ------------------------ ------------ ------------ ---------- ---------- ------------ ----\n  nf_gray_wall_1           non_field    non_field    -          -          -/-          PASS\n  nf_gray_wall_2           non_field    non_field    -          -          -/-          PASS\n  nf_document              non_field    non_field    -          -          -/-          PASS\n  nf_desk_dark             non_field    non_field    -          -          -/-          PASS\n  nf_green_tarp            non_field    non_field    -          -          -/-          PASS\n  nf_blue_sky              non_field    non_field    -          -          -/-          PASS\n  nf_potted_plant          non_field    non_field    -          -          -/-          PASS\n  nf_red_object            non_field    non_field    -          -          -/-          PASS\n  soil_brown_dry           soil_scene   field        soil       soil       -/healthy    PASS\n  soil_red_clay            soil_scene   field        soil       soil       -/healthy    PASS\n  soil_sandy               soil_scene   field        soil       mixed      -/necrosis   PASS\n  soil_dark_wet            soil_scene   field        soil       soil       -/healthy    PASS\n  field_wheat_green        field        crop_closeup canopy     canopy     healthy/healthy PASS\n  field_maize_canopy       field        crop_closeup canopy     canopy     healthy/healthy PASS\n  field_mixed_weedy        field        field        mixed      canopy     healthy/healthy PASS\n  closeup_healthy_leaf     crop_closeup crop_closeup leaf       leaf       healthy/healthy PASS\n  closeup_maize_leaf       crop_closeup crop_closeup leaf       leaf       healthy/healthy PASS\n  symptom_chlorosis_mild   crop_closeup field        leaf       leaf       chlorosis/chlorosis PASS\n  symptom_chlorosis_severe crop_closeup field        leaf       leaf       chlorosis/chlorosis PASS\n  symptom_necrosis         crop_closeup field        leaf       leaf       necrosis/necrosis PASS\n  symptom_spots            crop_closeup crop_closeup leaf       leaf       spots/spots  PASS\n  fruit_tomato_red         crop_closeup field        fruit      fruit      healthy/healthy PASS\n  edge_golden_wheat        field        field        canopy     canopy     healthy/healthy PASS\n  edge_sparse_crop         field        field        mixed      mixed      healthy/healthy PASS\n  nf_asphalt               non_field    non_field    -          -          -/-          PASS\n  nf_concrete              non_field    non_field    -          -          -/-          PASS\n  nf_red_plastic           non_field    non_field    -          -          -/-          PASS\n  nf_red_wall              non_field    non_field    -          -          -/-          PASS\n  nf_green_fabric          non_field    non_field    -          -          -/-          PASS\n  nf_decorative_plant      non_field    non_field    -          -          -/-          PASS\n  nf_lawn_patch            non_field    non_field    -          -          -/-          PASS\n  nf_wood_surface          non_field    non_field    -          -          -/-          PASS\n  crop_wheat_no_hint       field        field        canopy     canopy     healthy/healthy PASS\n  crop_maize_no_hint       field        crop_closeup canopy     canopy     healthy/healthy PASS\n  crop_tomato_no_hint      crop_closeup field        fruit      fruit      healthy/healthy PASS\n  crop_potato_no_hint      field        field        canopy     canopy     healthy/healthy PASS\n  crop_olive_no_hint       field        field        canopy     canopy     healthy/healthy PASS\n  crop_citrus_no_hint      field        field        canopy     canopy     healthy/healthy PASS\n  crop_wheat_hint_maize    field        crop_closeup canopy     canopy     healthy/healthy PASS\n  crop_maize_hint_wheat    field        crop_closeup canopy     canopy     healthy/healthy PASS\n  crop_generic_hint_wheat  field        field        canopy     canopy     healthy/healthy PASS\n  symptom_rust_wheat       crop_closeup field        leaf       leaf       rust_like/rust_like PASS\n  symptom_wilt_tomato      crop_closeup field        leaf       leaf       wilt/wilt    PASS\n  symptom_insect_maize     crop_closeup crop_closeup leaf       leaf       insect_damage/insect_damage PASS\n  edge_brown_canopy        field        field        canopy     canopy     healthy/healthy PASS\n  edge_seedling_closeup    field        field        mixed      mixed      healthy/healthy PASS\n\n------------------------------------------------------------------------\n  PER-SLICE SCORECARD\n    crop_closeup          n= 4  scene=4/4  organ=4/4  symptom=4/4\n    crop_field            n=15  scene=15/15  organ=15/15  symptom=15/15\n    non_field_junk        n=16  scene=16/16  organ=16/16  symptom=16/16\n    soil                  n= 4  scene=4/4  organ=4/4  symptom=4/4\n    symptom               n= 7  scene=7/7  organ=7/7  symptom=7/7\n\n------------------------------------------------------------------------\n  SCENE CONFUSION TABLE (rows=GT, cols=Pred)\n                    crop_close       field   non_field  soil_scene\n  crop_closeup               4           7           0           0\n  field                      5          10           0           0\n  non_field                  0           0          16           0\n  soil_scene                 0           4           0           0\n\n------------------------------------------------------------------------\n  ORGAN CONFUSION TABLE (rows=GT, cols=Pred)\n                    canopy       fruit        leaf       mixed        soil\n  canopy                12           0           0           0           0\n  fruit                  0           2           0           0           0\n  leaf                   0           0           9           0           0\n  mixed                  1           0           0           2           0\n  soil                   0           0           0           1           3\n\n------------------------------------------------------------------------\n  SYMPTOM CONFUSION TABLE (rows=GT, cols=Pred)\n                       chlorosis       healthy  insect_damag      necrosis     rust_like         spots          wilt\n  chlorosis                    2             0             0             0             0             0             0\n  healthy                      0            19             0             0             0             0             0\n  insect_damage                0             0             1             0             0             0             0\n  necrosis                     0             0             0             1             0             0             0\n  rust_like                    0             0             0             0             1             0             0\n  spots                        0             0             0             0             0             1             0\n  wilt                         0             0             0             0             0             0             1\n\n========================================================================\n  Total time: 1851ms  Avg per case: 40.2ms\n========================================================================\n\n  Gate artifact saved to: C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\perception\\farmer_photo\\benchmark\\benchmark_gate_result.json\n\n[+] GATE PASSED: farmer_photo -- all metrics and cases green.\n",
+      "stderr": ""
+    },
+    {
+      "step": "Drone RGB Benchmark",
+      "command": "C:\\Users\\E-C\\AppData\\Local\\Programs\\Python\\Python313\\python.exe -m layer0.perception.drone_rgb.benchmark.run_benchmark",
+      "passed": true,
+      "elapsed_s": 2.02,
+      "returncode": 0,
+      "stdout": "============================================================\n DRONE V1 COMPETITIVE BENCHMARK (TRACK B + EXECUTION)\n============================================================\n\n[row_audit_clean_0deg] Clean rows aligned North-South (0 deg)\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=0.0 (GT: 0.0)\n  Perception: Weed Index=0.00 (GT: 0.0)\n  Packets emitted: 1\n  V1.5: Rows=3, Breaks=0, Continuity Mean=1.00\n  V1.5: In-Row Weed=0.018, Inter-Row Weed=0.000\n\n[row_audit_clean_45deg] Clean rows angled at 45 deg\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=45.0 (GT: 45.0)\n  Perception: Weed Index=0.00 (GT: 0.0)\n  Packets emitted: 1\n  V1.5: Rows=4, Breaks=0, Continuity Mean=1.00\n  V1.5: In-Row Weed=0.017, Inter-Row Weed=0.000\n\n[weed_map_high_pressure] Rows with heavy inter-row weed pressure\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=90.0 (GT: 90.0)\n  Perception: Weed Index=0.31 (GT: 0.3)\n  Packets emitted: 1\n  V1.5: Rows=3, Breaks=0, Continuity Mean=1.00\n  V1.5: In-Row Weed=0.066, Inter-Row Weed=0.396\n\n[stand_gaps_10pct] 10% stand loss (emergence failure gaps)\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=16.0 (GT: 15.0)\n  Perception: Weed Index=0.00 (GT: None)\n  Packets emitted: 1\n  V1.5: Rows=4, Breaks=0, Continuity Mean=0.98\n  V1.5: In-Row Weed=0.015, Inter-Row Weed=0.001\n\n[command_leaf_revisit] Low altitude orbit around a concern zone\n  Execution: Feasible=True, Waypoints=12, Est. Time=0.1m\n  Execution: Coverage=5%, Waste=0%, Overlap=0%  (not scored \u2014 command/orbit mission)\n  Command Mode: Routed 1 frames to Farmer Photo\n  Packets emitted (from Farmer Photo): 3\n\n[qa_partial_strip] QA: 40% coverage hole (partial strip)\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  QA: Valid=True, Score=0.60\n  Perception: Row Azimuth=0.0 (GT: 0.0)\n  Perception: Weed Index=0.00 (GT: 0.0)\n  Packets emitted: 1\n  V1.5: Rows=3, Breaks=3, Continuity Mean=0.60\n\n[qa_blur_heavy] QA: Severe motion blur (uniform green)\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  QA: Valid=False, Score=0.10\n  QA: Rejected \u2014 Severe motion blur precludes structural mapping\n\n[qa_shadow_rows] QA: Heavy shadow bands across rows\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  QA: Valid=True, Score=1.00\n  Perception: Row Azimuth=0.0 (GT: 0.0)\n  Perception: Weed Index=0.00 (GT: 0.0)\n  Packets emitted: 1\n  V1.5: Rows=3, Breaks=15, Continuity Mean=0.50\n\n[row_breaks_15pct] 15% stand loss with distinct contiguous row breaks\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=0.0 (GT: 0.0)\n  Perception: Weed Index=0.00 (GT: None)\n  Packets emitted: 1\n  V1.5: Rows=3, Breaks=3, Continuity Mean=0.98\n  V1.5: In-Row Weed=0.019, Inter-Row Weed=0.000\n\n[row_breaks_scattered] 10% scattered gaps (not contiguous \u2014 fewer breaks)\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=30.0 (GT: 30.0)\n  Perception: Weed Index=0.00 (GT: None)\n  Packets emitted: 1\n  V1.5: Rows=4, Breaks=0, Continuity Mean=0.99\n  V1.5: In-Row Weed=0.017, Inter-Row Weed=0.000\n\n[in_row_vs_inter_weed] In-row weed at ~10%, inter-row weed at ~30%\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=0.0 (GT: 0.0)\n  Perception: Weed Index=0.31 (GT: 0.3)\n  Packets emitted: 1\n  V1.5: Rows=3, Breaks=0, Continuity Mean=1.00\n  V1.5: In-Row Weed=0.061, Inter-Row Weed=0.391\n\n[orchard_regular_grid] Regular olive tree grid (25px spacing, 16 trees)\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=45.0 (GT: None)\n  Perception: Weed Index=0.00 (GT: None)\n  Packets emitted: 1\n  V1.5: Trees=16, Missing=0, CV=0.00\n\n[orchard_missing_5pct] Orchard with 1 missing tree out of 16\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=135.0 (GT: None)\n  Perception: Weed Index=0.00 (GT: None)\n  Packets emitted: 1\n  V1.5: Trees=15, Missing=1, CV=0.00\n\n[orchard_variable_canopy] Orchard with variable canopy sizes (CV > 0.2)\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.6m\n  Execution: Coverage=100%, Waste=49%, Overlap=100%\n  Perception: Row Azimuth=135.0 (GT: None)\n  Perception: Weed Index=0.00 (GT: None)\n  Packets emitted: 1\n  V1.5: Trees=16, Missing=0, CV=0.37\n\n[irregular_polygon_L] L-shaped polygon to test turn optimization\n  Execution: Feasible=True, Waypoints=20, Est. Time=2.1m\n  Execution: Coverage=100%, Waste=54%, Overlap=100%\n  Perception: Row Azimuth=0.0 (GT: 0.0)\n  Perception: Weed Index=0.00 (GT: None)\n  Packets emitted: 1\n  V1.5: Rows=3, Breaks=0, Continuity Mean=1.00\n  V1.5: In-Row Weed=0.016, Inter-Row Weed=0.000\n\n[irregular_polygon_triangle] Triangular field (high edge waste expected)\n  Execution: Feasible=True, Waypoints=18, Est. Time=1.4m\n  Execution: Coverage=100%, Waste=63%, Overlap=0%\n  Perception: Row Azimuth=0.0 (GT: 0.0)\n  Perception: Weed Index=0.00 (GT: None)\n  Packets emitted: 1\n  V1.5: Rows=3, Breaks=0, Continuity Mean=1.00\n  V1.5: In-Row Weed=0.015, Inter-Row Weed=0.000\n\n[adaptive_overlap_narrow] Very narrow polygon strip to test pass filtering\n  Execution: Feasible=True, Waypoints=4, Est. Time=0.5m\n  Execution: Coverage=36%, Waste=84%, Overlap=0%\n  Perception: Row Azimuth=0.0 (GT: 0.0)\n  Perception: Weed Index=0.00 (GT: None)\n  Packets emitted: 1\n  V1.5: Rows=3, Breaks=0, Continuity Mean=1.00\n  V1.5: In-Row Weed=0.018, Inter-Row Weed=0.000\n\n============================================================\n SCORECARD\n============================================================\n  [PASS] [Perception] Row Azimuth MAE:   0.1 deg  (Target <= 5.0 deg)\n  [PASS] [Perception] Weed Pressure MAE: 0.004      (Target <= 0.05)\n  [PASS] [V1.5 Perc.] Row Break MAE:     0.0        (Target <= 5)\n  [PASS] [V1.5 Perc.] Tree Count MAE:    0.0        (Target <= 5)\n  [PASS] [V1.5 Perc.] Missing Tree MAE:  0.0        (Target <= 3)\n  [PASS] [V1.5 Perc.] Canopy Uniform. AE:0.00        (Target <= 0.3)\n  [PASS] [Execution]  Coverage Complete: 96%      (Target >= 80%)\n  [PASS] [Execution]  Outside Waste:     52%      (Target <= 55%)\n  [PASS] [Execution]  Overlap Compliance:88%      (Target >= 50%)\n\n============================================================\n\n  Gate artifact saved to: C:\\Users\\E-C\\Desktop\\agriwise\\services\\agribrain\\layer0\\perception\\drone_rgb\\benchmark\\benchmark_gate_result.json\n\n[+] GATE PASSED: drone_rgb -- all metrics and cases green.\n",
+      "stderr": ""
+    },
+    {
+      "step": "Layer 1 Fusion Tests",
+      "command": "pytest layer1_fusion/tests/",
+      "passed": true,
+      "elapsed_s": 0.35,
+      "returncode": 0,
+      "stdout": "206 passed in 0.42s",
+      "stderr": ""
+    }
+  ],
+  "layer1_fusion_ok": true,
+  "layer1_fusion_tests": {
+    "passed": 239,
+    "failed": 0,
+    "warnings": 0
+  },
+  "layer1_hard_prohibitions": {
+    "no_fake_fallback_evidence": true,
+    "no_diagnosis_or_recommendation": true,
+    "no_forecast_as_observation": true,
+    "no_point_sensor_to_plot_truth_without_scope": true,
+    "no_geo_context_as_crop_state": true,
+    "no_weather_as_crop_diagnosis": true,
+    "no_wapor_as_plot_truth": true,
+    "no_unprovenanced_fused_feature": true,
+    "no_conflict_suppression": true,
+    "no_unit_mismatch_allowed": true,
+    "no_spatial_scope_collapse": true,
+    "no_temporal_leakage_future_to_present": true,
+    "no_simulated_data_in_user_facing_context": true
+  },
+  "production_gate_evaluation": {
+    "gate_passed": true,
+    "violations": []
+  }
+}

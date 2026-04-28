@@ -1,6 +1,6 @@
 from typing import Dict, Any
-from services.agribrain.layer7_planning.schema import YieldDistribution, EconomicOutcome
-from services.agribrain.layer7_planning.engines.ccl_crop_library import CropProfile
+from layer7_planning.schema import YieldDistribution, EconomicOutcome
+from layer7_planning.engines.ccl_crop_library import CropProfile
 
 def compute_economics(profile: CropProfile, yield_dist: YieldDistribution, user_context: Dict[str, Any] = None) -> EconomicOutcome:
     """

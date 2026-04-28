@@ -2,7 +2,7 @@
 Zone Topology Validator — Ensures zone integrity invariants
 """
 from typing import List
-from services.agribrain.layer10_sire.schema import ZoneArtifact
+from layer10_sire.schema import ZoneArtifact
 
 
 def validate_topology(zones: List[ZoneArtifact]) -> bool:

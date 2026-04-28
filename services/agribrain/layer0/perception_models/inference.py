@@ -1,12 +1,12 @@
 """
 Perception Models — ML inference stubs for image-to-state extraction.
 
-⚠️  LEGACY MODULE — These generic heuristic models will be superseded
+  LEGACY MODULE — These generic heuristic models will be superseded
     by engine-specific inference modules:
-      - satellite_rgb/inference.py  → vegetation/soil seg, anomaly, canopy
-      - farmer_photo/inference.py   → close-range canopy, disease (planned)
-      - drone/inference.py          → ortho segmentation, rows (planned)
-      - ip_camera/inference.py      → temporal canopy tracking (planned)
+      - satellite_rgb/inference.py  -> vegetation/soil seg, anomaly, canopy
+      - farmer_photo/inference.py   -> close-range canopy, disease (planned)
+      - drone/inference.py          -> ortho segmentation, rows (planned)
+      - ip_camera/inference.py      -> temporal canopy tracking (planned)
 
     Do not add new logic here.
 

@@ -1,8 +1,8 @@
 import math
 from typing import Any
 
-from services.agribrain.layer7_planning.schema import SuitabilityState, EvidenceLogit, SuitabilityDriver
-from services.agribrain.layer7_planning.engines.ccl_crop_library import CropProfile
+from layer7_planning.schema import SuitabilityState, EvidenceLogit, SuitabilityDriver
+from layer7_planning.engines.ccl_crop_library import CropProfile
 
 def compute_soil_workability(profile: CropProfile, l1_out: Any, soil_texture: str = "unknown", soil_moisture: str = "unknown") -> SuitabilityState:
     """

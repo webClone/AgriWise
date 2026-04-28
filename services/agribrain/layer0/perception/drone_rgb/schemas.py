@@ -8,6 +8,8 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 import datetime
 
+from layer0.perception.common.contracts import PerceptionEngineOutput
+
 
 @dataclass
 class RowBreak:
@@ -17,7 +19,7 @@ class RowBreak:
     end_block: int         # End position along the row (block units)
     gap_length_blocks: int # Length of the break in blocks
 
-from ....drone_mission.schemas import FlightMode, MissionType
+from drone_mission.schemas import FlightMode, MissionType
 
 @dataclass
 class DroneRGBInput:
@@ -68,10 +70,10 @@ class DroneStructuralMap:
 
 
 @dataclass
-class DroneRGBOutput:
+class DroneRGBOutput(PerceptionEngineOutput):
     """Output payload from the Drone RGB Engine."""
-    plot_id: str
-    mission_id: str
+    plot_id: str = ""
+    mission_id: str = ""
     is_valid: bool = True
     qa_score: float = 1.0
     rejection_reason: Optional[str] = None

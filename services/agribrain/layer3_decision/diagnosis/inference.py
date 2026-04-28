@@ -2,9 +2,9 @@
 import math
 from typing import List, Dict, Any, Tuple, Optional
 
-from services.agribrain.layer3_decision.schema import Diagnosis, PlotContext, EvidenceTerm, Driver
-from services.agribrain.layer3_decision.features.builder import DecisionFeatures
-from services.agribrain.layer3_decision.knowledge.ontology import ProblemType, PROBLEM_DB
+from layer3_decision.schema import Diagnosis, PlotContext, EvidenceTerm, Driver
+from layer3_decision.features.builder import DecisionFeatures
+from layer3_decision.knowledge.ontology import ProblemType, PROBLEM_DB
 
 class DiagnosisEngine:
     """

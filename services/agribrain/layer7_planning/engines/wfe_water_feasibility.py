@@ -1,8 +1,8 @@
 import math
 from typing import Any
 
-from services.agribrain.layer7_planning.schema import SuitabilityState, EvidenceLogit, SuitabilityDriver
-from services.agribrain.layer7_planning.engines.ccl_crop_library import CropProfile
+from layer7_planning.schema import SuitabilityState, EvidenceLogit, SuitabilityDriver
+from layer7_planning.engines.ccl_crop_library import CropProfile
 
 def compute_water_feasibility(profile: CropProfile, l1_out: Any, irrigation_type: str = "unknown") -> SuitabilityState:
     """

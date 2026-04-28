@@ -19,6 +19,18 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class HoleCluster:
+    """V3: A contiguous region of missing data in the mosaic."""
+    cluster_id: int = 0
+    area_cells: int = 0              # Number of hole cells
+    centroid_y: float = 0.0
+    centroid_x: float = 0.0
+    is_edge: bool = False            # Touches mosaic edge
+    recoverable: bool = True         # Could be filled by a refly
+    # Edge holes with no adjacent data are unrecoverable
+
+
+@dataclass
 class MosaicResult:
     """Raw blended orthomosaic before seam optimization and georef."""
     # Pixel data (for benchmark / in-memory pipeline)
@@ -49,6 +61,14 @@ class MosaicResult:
     # Which frames contributed where
     frame_contribution_index: Dict[str, int] = field(default_factory=dict)
     # {frame_id: number_of_cells_contributed}
+    
+    # V3: Hole cluster products
+    hole_clusters: List[HoleCluster] = field(default_factory=list)
+    recoverable_holes_fraction: float = 0.0
+    unrecoverable_holes_fraction: float = 0.0
+    
+    # V3: Exposure normalization applied
+    exposure_normalized: bool = False
 
 
 class MosaicGenerator:
@@ -59,10 +79,16 @@ class MosaicGenerator:
     Tracks contribution uniformity and hole coverage.
     """
     
-    # Maximum grid dimension (caps memory for benchmark performance)
-    MAX_GRID_DIM = 500
+    # Resolution-mode-aware grid caps
+    GRID_CAPS = {
+        "benchmark": 500,
+        "working": 1000,
+        "native": 2000,
+    }
     # Minimum grid dimension
     MIN_GRID_DIM = 50
+    # Feather margin: fraction of tile dimension for edge weight falloff
+    FEATHER_MARGIN = 0.15
     
     def generate(self, tile_stack: OrthoTileStack) -> MosaicResult:
         """Blend tiles into a mosaic.
@@ -102,11 +128,41 @@ class MosaicGenerator:
         weight_acc = [[0.0] * w for _ in range(h)]
         contrib_count = [[0] * w for _ in range(h)]
         
+        # --- V3: Per-tile exposure normalization ---
+        # Equalize mean brightness across tiles to reduce seam artifacts
+        # from auto-exposure variation during flight.
+        tile_means = []
         for tile in tile_stack.tiles:
+            if tile.synthetic_pixels:
+                green_data = tile.synthetic_pixels.get("green", [])
+                if green_data:
+                    flat = [v for row in green_data for v in row if v > 0]
+                    if flat:
+                        tile_means.append(sum(flat) / len(flat))
+                        continue
+            tile_means.append(128.0)  # Default
+        
+        global_mean = sum(tile_means) / max(len(tile_means), 1) if tile_means else 128.0
+        
+        # Compute per-tile exposure correction factor
+        exposure_factors = []
+        for tm in tile_means:
+            if tm > 10:
+                factor = global_mean / tm
+                # Clamp to ±30% correction to avoid over-correction
+                factor = max(0.7, min(1.3, factor))
+            else:
+                factor = 1.0
+            exposure_factors.append(factor)
+        
+        result.exposure_normalized = any(abs(f - 1.0) > 0.02 for f in exposure_factors)
+        
+        for i, tile in enumerate(tile_stack.tiles):
             self._accumulate_tile(
                 tile, result,
                 red_acc, green_acc, blue_acc, weight_acc, contrib_count,
                 lat_range, lon_range, h, w,
+                exposure_factor=exposure_factors[i],
             )
         
         # --- 3. Normalize to get final pixel values ---
@@ -131,7 +187,15 @@ class MosaicGenerator:
         result.hole_map = holes
         result.holes_fraction = hole_count / max(h * w, 1)
         
-        # --- 4. Contribution statistics ---
+        # --- 4. Hole cluster analysis (V3) ---
+        result.hole_clusters = self._find_hole_clusters(holes, h, w)
+        recoverable = sum(c.area_cells for c in result.hole_clusters if c.recoverable)
+        unrecoverable = sum(c.area_cells for c in result.hole_clusters if not c.recoverable)
+        total_cells = max(h * w, 1)
+        result.recoverable_holes_fraction = recoverable / total_cells
+        result.unrecoverable_holes_fraction = unrecoverable / total_cells
+        
+        # --- 5. Contribution statistics ---
         flat_contrib = [contrib_count[y][x] for y in range(h) for x in range(w)]
         non_hole = [c for c in flat_contrib if c > 0]
         if non_hole:
@@ -145,11 +209,37 @@ class MosaicGenerator:
         logger.info(
             f"[Mosaic] {w}x{h} grid, "
             f"holes={result.holes_fraction:.1%}, "
+            f"hole_clusters={len(result.hole_clusters)}, "
+            f"recoverable={result.recoverable_holes_fraction:.1%}, "
             f"mean_contrib={result.mean_contribution_count:.1f}, "
             f"uniformity={result.contribution_uniformity:.2f}"
         )
         
         return result
+    
+    def _feather_weight(self, dx: int, dy: int, tile_w: int, tile_h: int) -> float:
+        """Compute feathered edge weight for a pixel at (dx, dy) in a tile.
+        
+        Returns 1.0 at tile center, linearly falls to 0.3 at tile edges.
+        This eliminates hard seam lines by smoothly blending overlapping tiles.
+        """
+        margin_x = max(1, int(tile_w * self.FEATHER_MARGIN))
+        margin_y = max(1, int(tile_h * self.FEATHER_MARGIN))
+        
+        # Distance from each edge, normalized to [0, 1]
+        fx = 1.0
+        if dx < margin_x:
+            fx = 0.3 + 0.7 * (dx / margin_x)
+        elif dx >= tile_w - margin_x:
+            fx = 0.3 + 0.7 * ((tile_w - 1 - dx) / margin_x)
+        
+        fy = 1.0
+        if dy < margin_y:
+            fy = 0.3 + 0.7 * (dy / margin_y)
+        elif dy >= tile_h - margin_y:
+            fy = 0.3 + 0.7 * ((tile_h - 1 - dy) / margin_y)
+        
+        return fx * fy
     
     def _accumulate_tile(
         self,
@@ -157,8 +247,13 @@ class MosaicGenerator:
         result: MosaicResult,
         red_acc, green_acc, blue_acc, weight_acc, contrib_count,
         lat_range, lon_range, h, w,
+        exposure_factor: float = 1.0,
     ) -> None:
-        """Accumulate a single tile's contribution to the mosaic grid."""
+        """Accumulate a single tile's contribution to the mosaic grid.
+        
+        V3: Feathered edge blending + exposure normalization reduces
+        tile-boundary seam artifacts.
+        """
         # Map tile bounds to grid coordinates
         y_start = int((tile.min_lat - result.min_lat) / lat_range * h)
         y_end = int((tile.max_lat - result.min_lat) / lat_range * h)
@@ -170,7 +265,10 @@ class MosaicGenerator:
         x_start = max(0, min(w - 1, x_start))
         x_end = max(0, min(w, x_end))
         
-        weight = tile.qa_weight * tile.usable_fraction
+        # V3: View-angle-aware weighting
+        base_weight = tile.qa_weight * tile.usable_fraction
+        view_angle_penalty = max(0.3, 1.0 - tile.off_nadir_penalty * 0.7)
+        weight = base_weight * view_angle_penalty
         cells_contributed = 0
         
         if tile.synthetic_pixels:
@@ -206,10 +304,19 @@ class MosaicGenerator:
                     else:
                         r, g, b = 128, 128, 128
                     
-                    red_acc[y][x] += r * weight
-                    green_acc[y][x] += g * weight
-                    blue_acc[y][x] += b * weight
-                    weight_acc[y][x] += weight
+                    # V3: exposure normalization
+                    r = min(255, int(r * exposure_factor))
+                    g = min(255, int(g * exposure_factor))
+                    b = min(255, int(b * exposure_factor))
+                    
+                    # V3: feathered edge blending
+                    feather = self._feather_weight(dx, dy, tile_w, tile_h)
+                    w_final = weight * feather
+                    
+                    red_acc[y][x] += r * w_final
+                    green_acc[y][x] += g * w_final
+                    blue_acc[y][x] += b * w_final
+                    weight_acc[y][x] += w_final
                     contrib_count[y][x] += 1
                     cells_contributed += 1
         else:
@@ -281,10 +388,71 @@ class MosaicGenerator:
                 w = base
                 h = max(1, int(base * lat_range / lon_range))
         
-        # Cap at MAX_GRID_DIM to keep benchmark fast
-        if h > self.MAX_GRID_DIM or w > self.MAX_GRID_DIM:
-            scale = min(self.MAX_GRID_DIM / h, self.MAX_GRID_DIM / w)
+        # Cap at mode-aware limit
+        max_grid = self.GRID_CAPS.get(
+            getattr(tile_stack, 'resolution_mode', 'benchmark'),
+            self.GRID_CAPS['benchmark']
+        )
+        if h > max_grid or w > max_grid:
+            scale = min(max_grid / h, max_grid / w)
             h = max(self.MIN_GRID_DIM, int(h * scale))
             w = max(self.MIN_GRID_DIM, int(w * scale))
         
         return h, w
+    
+    def _find_hole_clusters(
+        self,
+        hole_map: List[List[bool]],
+        h: int, w: int,
+    ) -> List[HoleCluster]:
+        """V3: Connected-component analysis on the hole map.
+        
+        Classifies each hole cluster as recoverable or unrecoverable.
+        Edge clusters (touching mosaic boundary) with no adjacent data
+        are unrecoverable.
+        """
+        visited = [[False] * w for _ in range(h)]
+        clusters = []
+        cluster_id = 0
+        
+        for sy in range(h):
+            for sx in range(w):
+                if hole_map[sy][sx] and not visited[sy][sx]:
+                    # BFS flood fill
+                    queue = [(sy, sx)]
+                    visited[sy][sx] = True
+                    cells = []
+                    is_edge = False
+                    
+                    while queue:
+                        cy, cx = queue.pop(0)
+                        cells.append((cy, cx))
+                        
+                        if cy == 0 or cy == h - 1 or cx == 0 or cx == w - 1:
+                            is_edge = True
+                        
+                        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                            ny, nx = cy + dy, cx + dx
+                            if 0 <= ny < h and 0 <= nx < w:
+                                if hole_map[ny][nx] and not visited[ny][nx]:
+                                    visited[ny][nx] = True
+                                    queue.append((ny, nx))
+                    
+                    if cells:
+                        centroid_y = sum(c[0] for c in cells) / len(cells)
+                        centroid_x = sum(c[1] for c in cells) / len(cells)
+                        
+                        # Recoverable: interior holes or small edge holes
+                        recoverable = not is_edge or len(cells) < max(h, w)
+                        
+                        clusters.append(HoleCluster(
+                            cluster_id=cluster_id,
+                            area_cells=len(cells),
+                            centroid_y=centroid_y,
+                            centroid_x=centroid_x,
+                            is_edge=is_edge,
+                            recoverable=recoverable,
+                        ))
+                        cluster_id += 1
+        
+        return clusters

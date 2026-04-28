@@ -20,9 +20,9 @@ V2: ONNX/TensorRT PyTorch CNN model.
 from __future__ import annotations
 from typing import Any, Dict, Optional
 
-from .schemas import SceneClass, SceneResult
-from .preprocess import PreprocessResult
-from .qa import FarmerPhotoQAResult, FarmerPhotoQAFlag
+from layer0.perception.farmer_photo.schemas import SceneClass, SceneResult
+from layer0.perception.farmer_photo.preprocess import PreprocessResult
+from layer0.perception.farmer_photo.qa import FarmerPhotoQAResult, FarmerPhotoQAFlag
 
 class SceneGate:
     """
@@ -205,7 +205,7 @@ class SceneGate:
                 confidence=0.5,
             )
 
-        # --- Default (D2.1C): Not enough evidence → NON_FIELD ---
+        # --- Default (D2.1C): Not enough evidence -> NON_FIELD ---
         # Ambiguous scenes MUST NOT become FIELD.
         return SceneResult(
             scene_class=SceneClass.NON_FIELD,

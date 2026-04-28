@@ -6,7 +6,7 @@ Algorithm: Rule-Based Bayesian Filter (Simplified HMM).
 """
 
 from typing import List, Dict, Optional, Tuple
-from services.agribrain.layer2_veg_int.schema import PhenologyStage
+from layer2_veg_int.schema import PhenologyStage
 
 class PhenologyEngine:
     

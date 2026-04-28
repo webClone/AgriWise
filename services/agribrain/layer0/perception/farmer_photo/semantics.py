@@ -1,7 +1,7 @@
 """
 Farmer Photo Variable Semantics — V1 Frozen Definitions.
 
-⚠️  READ THIS BEFORE USING FARMER PHOTO VARIABLES DOWNSTREAM.
+  READ THIS BEFORE USING FARMER PHOTO VARIABLES DOWNSTREAM.
 
 These definitions lock the precise meaning of every variable
 produced by the Farmer Photo V1 engine.

@@ -4,13 +4,13 @@ Farmer Photo — Organ Classifier.
 Identifies what part of the plant is visible in the photo.
 This determines which inference models run:
 
-  CANOPY  → canopy cover + phenology
-  LEAF    → symptom detection (primary disease evidence source)
-  FRUIT   → maturity hint + fruit symptom detection
-  STEM    → structural symptoms only
-  SOIL    → bare soil confirmation (auxiliary)
-  MIXED   → all models, lower confidence
-  UNKNOWN → all models, very low confidence
+  CANOPY  -> canopy cover + phenology
+  LEAF    -> symptom detection (primary disease evidence source)
+  FRUIT   -> maturity hint + fruit symptom detection
+  STEM    -> structural symptoms only
+  SOIL    -> bare soil confirmation (auxiliary)
+  MIXED   -> all models, lower confidence
+  UNKNOWN -> all models, very low confidence
 
 V1: Heuristic from image features (FOV, texture, color composition).
 V2: Trained CNN on organ-labeled crop image datasets.
@@ -19,8 +19,8 @@ V2: Trained CNN on organ-labeled crop image datasets.
 from __future__ import annotations
 from typing import Any, Dict, Optional
 
-from .schemas import OrganClass, OrganResult
-from .preprocess import PreprocessResult
+from layer0.perception.farmer_photo.schemas import OrganClass, OrganResult
+from layer0.perception.farmer_photo.preprocess import PreprocessResult
 
 
 class OrganClassifier:

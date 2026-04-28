@@ -55,6 +55,7 @@ class ValidationGraph:
             "sensor": 1.0,
             "user": 1.0,
             "camera": 1.0,
+            "ip_camera": 1.0,
         }
         
         # Per-zone reliability: {zone_id: {source: weight}}
@@ -133,6 +134,41 @@ class ValidationGraph:
                 predicted_state, observations
             ))
         
+        # ---- IP Camera: Canopy stability vs satellite ----
+        if "canopy_cover" in observations and "ndvi" in observations:
+            ip_cam_check = self._check_ip_camera_canopy_stability(
+                predicted_state, observations
+            )
+            if ip_cam_check is not None:
+                results.append(ip_cam_check)
+            
+        # ---- Ingest Pre-computed Auditable Validation Checks ----
+        # (e.g. from IP Camera's satellite_validation.py and weather_validation.py)
+        if "precomputed_validations" in observations:
+            for val in observations["precomputed_validations"]:
+                agreement = val.get("agreement", True)
+                confidence = val.get("confidence", 1.0)
+                severity = min(1.0, (1.0 - confidence) + (0.5 if not agreement else 0.0))
+                
+                check = ConsistencyResult(
+                    check_name=val.get("check_name", "unknown_precomputed"),
+                    passed=agreement,
+                    residual=1.0 - confidence,
+                    severity=severity,
+                    hypothesis=val.get("agreement_reason", ""),
+                    affected_sources=[val.get("affected_upstream_source", "unknown")],
+                    details=f"Expected: {val.get('expected_signal', '')} | Observed: {val.get('observed_signal', '')}"
+                )
+                results.append(check)
+                
+                # Apply severity-based penalty to ip_camera when its own validations disagree
+                if not agreement and severity > 0.3:
+                    affected_src = val.get("affected_upstream_source", "")
+                    # If the IP camera disagrees with satellite/weather, also mildly penalize ip_camera
+                    # (the affected upstream source gets the main penalty via _update_reliability_weights)
+                    current_ipc = self.source_reliability.get("ip_camera", 1.0)
+                    self.source_reliability["ip_camera"] = max(0.05, current_ipc - 0.03 * severity)
+        
         # ---- Update reliability weights (global + zone-level) ----
         self._update_reliability_weights(results, zone_id)
         
@@ -158,7 +194,7 @@ class ValidationGraph:
         """
         Vegetation check: NDVI vs SAR vs predicted LAI.
         
-        If NDVI drops sharply but SAR vegetation proxy is stable →
+        If NDVI drops sharply but SAR vegetation proxy is stable ->
         likely cloud contamination or atmospheric issue.
         """
         ndvi_obs = obs.get("ndvi", None)
@@ -209,7 +245,7 @@ class ValidationGraph:
         """
         Water check: rain + ET vs SAR wetness vs soil sensors.
         
-        If weather says heavy rain but SAR shows no change in soil moisture →
+        If weather says heavy rain but SAR shows no change in soil moisture ->
         rainfall estimate is uncertain or storm missed the plot.
         """
         rain = weather.get("precipitation", 0)
@@ -221,7 +257,7 @@ class ValidationGraph:
         severity = 0.0
         
         if rain > 10 and vv_obs is not None:
-            # Heavy rain → expect wet soil → higher VV
+            # Heavy rain -> expect wet soil -> higher VV
             vv_wet_threshold = -14.0  # dB
             if vv_obs < -17.0:  # Still looks dry
                 issues.append("heavy_rain_but_dry_sar")
@@ -254,7 +290,7 @@ class ValidationGraph:
         """
         Phenology check: GDD-based stage vs NDVI growth curve.
         
-        If GDD says vegetative growth but NDVI hasn't risen → something wrong.
+        If GDD says vegetative growth but NDVI hasn't risen -> something wrong.
         """
         gdd = state.get("phenology_gdd", 0)
         stage = state.get("phenology_stage", 0)
@@ -268,7 +304,7 @@ class ValidationGraph:
         ndvi_trend = recent_ndvi[-1] - recent_ndvi[0] if len(recent_ndvi) >= 2 else 0
         
         if stage > 1.0 and ndvi_trend < -0.05:
-            # Growing stage but NDVI declining → stress or phenology mismatch
+            # Growing stage but NDVI declining -> stress or phenology mismatch
             return ConsistencyResult(
                 check_name="phenology_consistency",
                 passed=False,
@@ -328,7 +364,7 @@ class ValidationGraph:
         """
         Cloud artifact disambiguation:
         If camera canopy_cover is stable/high but Sentinel-2 NDVI drops sharply
-        → the NDVI drop is likely cloud contamination, not real change.
+        -> the NDVI drop is likely cloud contamination, not real change.
         
         Action: down-weight sentinel2 reliability for this day.
         """
@@ -365,7 +401,7 @@ class ValidationGraph:
         """
         Phenology camera conflict:
         If camera stage estimate conflicts with GDD-derived stage over
-        multiple checks → either sowing date wrong or weather bias.
+        multiple checks -> either sowing date wrong or weather bias.
         """
         camera_stage = obs.get("phenology_stage", None)
         model_stage = state.get("phenology_stage", 0)
@@ -394,7 +430,7 @@ class ValidationGraph:
         """
         Stress conflict:
         If NDMI indicates water stress but camera shows healthy green
-        canopy + soil moisture is adequate → down-weight NDMI-derived stress.
+        canopy + soil moisture is adequate -> down-weight NDMI-derived stress.
         """
         ndmi = obs.get("ndmi", None)
         canopy = obs.get("canopy_cover", None)
@@ -420,6 +456,67 @@ class ValidationGraph:
             )
         
         return ConsistencyResult(check_name="stress_conflict", passed=True)
+    
+    def _check_ip_camera_canopy_stability(
+        self,
+        state: Dict[str, float],
+        obs: Dict[str, float],
+    ) -> Optional[ConsistencyResult]:
+        """
+        IP Camera canopy stability check:
+        Compares IP camera's canopy_cover observation against
+        the LAI-predicted canopy cover from the state model.
+        
+        If the camera reports high canopy but the model (informed by
+        satellite NDVI) predicts low LAI -> possible satellite cloud artifact.
+        If the camera reports low canopy but model predicts high LAI -> 
+        possible camera obstruction or calibration issue.
+        
+        Only fires when canopy_cover source is likely from ip_camera
+        (detected by co-occurrence with specific obs keys).
+        """
+        canopy = obs.get("canopy_cover")
+        ndvi = obs.get("ndvi")
+        
+        if canopy is None or ndvi is None:
+            return None
+        
+        # Predicted canopy from state LAI
+        lai = state.get("lai_proxy", 1.0)
+        k = 0.6
+        import math
+        predicted_canopy = 1.0 - math.exp(-k * lai)
+        
+        canopy_delta = abs(canopy - predicted_canopy)
+        
+        if canopy_delta < 0.2:
+            return ConsistencyResult(
+                check_name="ip_camera_canopy_stability",
+                passed=True,
+                residual=canopy_delta,
+            )
+        
+        # Divergence detected
+        if canopy > predicted_canopy + 0.2:
+            # Camera sees more canopy than model predicts
+            # Likely satellite underestimating (cloud?)
+            hypothesis = "satellite_underestimate_camera_healthy"
+            affected = ["sentinel2"]
+        else:
+            # Camera sees less canopy than model predicts
+            # Possible camera issue or real localized damage
+            hypothesis = "camera_obstruction_or_localized_damage"
+            affected = ["ip_camera"]
+        
+        return ConsistencyResult(
+            check_name="ip_camera_canopy_stability",
+            passed=False,
+            residual=canopy_delta,
+            severity=min(1.0, canopy_delta / 0.4),
+            hypothesis=hypothesis,
+            affected_sources=affected,
+            details=f"Camera cover={canopy:.2f} vs predicted={predicted_canopy:.2f} (LAI={lai:.1f})"
+        )
     
     # ================================================================
     # Dynamic reliability update

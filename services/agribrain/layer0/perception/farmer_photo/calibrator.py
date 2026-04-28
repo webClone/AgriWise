@@ -19,11 +19,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from .schemas import (
+from layer0.perception.farmer_photo.schemas import (
     OrganClass, CropClass, SymptomClass,
     CropResult, OrganResult, SymptomResult, SceneResult,
 )
-from .preprocess import PreprocessResult
+from layer0.perception.farmer_photo.preprocess import PreprocessResult
 
 
 @dataclass

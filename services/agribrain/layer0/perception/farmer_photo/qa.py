@@ -15,7 +15,7 @@ This is close-range camera QA:
 The FIELD GATE is the most important check.
 Without it, random user photos poison the engine.
 
-Output: FarmerPhotoQAResult → determines reliability weight and sigma inflation.
+Output: FarmerPhotoQAResult -> determines reliability weight and sigma inflation.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 import math
 
-from ..common.contracts import QAResult
-from .schemas import SceneResult, SceneClass
+from layer0.perception.common.contracts import QAResult
+from layer0.perception.farmer_photo.schemas import SceneResult, SceneClass
 
 
 # ============================================================================
@@ -425,7 +425,7 @@ class FarmerPhotoQA:
     ) -> float:
         """GPS validation: distance from photo to plot centroid."""
         if gps_lat is None or gps_lng is None:
-            return 0.5  # Missing GPS → moderate uncertainty
+            return 0.5  # Missing GPS -> moderate uncertainty
 
         if plot_lat is None or plot_lng is None:
             return 0.8  # Can't validate, assume OK
@@ -476,7 +476,7 @@ class FarmerPhotoQA:
         return score
 
     # ================================================================
-    # Score → reliability/sigma conversion
+    # Score -> reliability/sigma conversion
     # ================================================================
 
     @staticmethod

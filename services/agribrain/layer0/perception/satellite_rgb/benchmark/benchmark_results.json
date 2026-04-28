@@ -1,7 +1,235 @@
 {
   "version": "satrgb_benchmark_v1",
-  "timestamp": "2026-04-24T16:02:27.433660",
+  "timestamp": "2026-04-27T16:30:42.852066",
   "n_cases": 30,
+  "gate_result": {
+    "engine": "satellite_rgb",
+    "aggregate_failures": 0,
+    "critical_failures": 0,
+    "soft_failures": 9,
+    "gate_passed": true,
+    "failing_metrics": [],
+    "failing_cases": [],
+    "scorecard": {
+      "veg_mae": {
+        "value": 0.0607,
+        "threshold": 0.08,
+        "passed": true
+      },
+      "soil_mae": {
+        "value": 0.0468,
+        "threshold": 0.08,
+        "passed": true
+      },
+      "density_acc": {
+        "value": 96.1538,
+        "threshold": 85.0,
+        "passed": true
+      },
+      "pheno_mae": {
+        "value": 0.5,
+        "threshold": 1.0,
+        "passed": true
+      },
+      "qa_acc": {
+        "value": 100.0,
+        "threshold": 95.0,
+        "passed": true
+      },
+      "anomaly_fp_rate": {
+        "value": 0.0,
+        "threshold": 10.0,
+        "passed": true
+      },
+      "boundary_acc": {
+        "value": 90.0,
+        "threshold": 90.0,
+        "passed": true
+      }
+    },
+    "case_results": [
+      {
+        "case_id": "dense_maize_canopy",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "dense_wheat_canopy",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "dense_orchard_canopy",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "dense_rice_paddy",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "sparse_emergence",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "drought_stressed",
+        "passed": false,
+        "critical": false,
+        "soft_fail": true
+      },
+      {
+        "case_id": "gap_heavy_stand",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "sparse_cover",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "dry_brown_soil",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "wet_dark_soil",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "sandy_soil",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "post_harvest_stubble",
+        "passed": false,
+        "critical": false,
+        "soft_fail": true
+      },
+      {
+        "case_id": "crop_soil_mosaic",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "weed_patches",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "partial_canopy",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "transitional_growth",
+        "passed": false,
+        "critical": false,
+        "soft_fail": true
+      },
+      {
+        "case_id": "thin_cloud",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "heavy_cloud",
+        "passed": false,
+        "critical": false,
+        "soft_fail": true
+      },
+      {
+        "case_id": "strong_haze",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "partial_cloud",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "heavy_edge_contamination",
+        "passed": false,
+        "critical": false,
+        "soft_fail": true
+      },
+      {
+        "case_id": "narrow_strip_plot",
+        "passed": false,
+        "critical": false,
+        "soft_fail": true
+      },
+      {
+        "case_id": "too_small_plot",
+        "passed": false,
+        "critical": false,
+        "soft_fail": true
+      },
+      {
+        "case_id": "normal_plot_clean_boundary",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "pheno_dormant",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "pheno_early_vegetative",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "pheno_strong_vegetative",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "pheno_flowering",
+        "passed": true,
+        "critical": true,
+        "soft_fail": false
+      },
+      {
+        "case_id": "pheno_ripening",
+        "passed": false,
+        "critical": false,
+        "soft_fail": true
+      },
+      {
+        "case_id": "pheno_senescent",
+        "passed": false,
+        "critical": false,
+        "soft_fail": true
+      }
+    ]
+  },
   "cases": [
     {
       "case_id": "dense_maize_canopy",
@@ -20,7 +248,7 @@
       "anomaly_fraction": 0.0147,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 10.7,
+      "elapsed_ms": 5.7,
       "error": null
     },
     {
@@ -40,7 +268,7 @@
       "anomaly_fraction": 0.0156,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 10.7,
+      "elapsed_ms": 5.4,
       "error": null
     },
     {
@@ -60,7 +288,7 @@
       "anomaly_fraction": 0.013,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 7.8,
+      "elapsed_ms": 5.3,
       "error": null
     },
     {
@@ -80,7 +308,7 @@
       "anomaly_fraction": 0.0138,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.5,
+      "elapsed_ms": 6.4,
       "error": null
     },
     {
@@ -100,7 +328,7 @@
       "anomaly_fraction": 0.0017,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.4,
+      "elapsed_ms": 6.0,
       "error": null
     },
     {
@@ -120,7 +348,7 @@
       "anomaly_fraction": 0.0017,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.5,
+      "elapsed_ms": 5.5,
       "error": null
     },
     {
@@ -140,7 +368,7 @@
       "anomaly_fraction": 0.0,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.2,
+      "elapsed_ms": 5.6,
       "error": null
     },
     {
@@ -160,7 +388,7 @@
       "anomaly_fraction": 0.0199,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.6,
+      "elapsed_ms": 5.6,
       "error": null
     },
     {
@@ -180,7 +408,7 @@
       "anomaly_fraction": 0.0069,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.9,
+      "elapsed_ms": 5.6,
       "error": null
     },
     {
@@ -200,7 +428,7 @@
       "anomaly_fraction": 0.0147,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.4,
+      "elapsed_ms": 5.6,
       "error": null
     },
     {
@@ -220,7 +448,7 @@
       "anomaly_fraction": 0.013,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 7.2,
+      "elapsed_ms": 5.5,
       "error": null
     },
     {
@@ -240,7 +468,7 @@
       "anomaly_fraction": 0.019,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.3,
+      "elapsed_ms": 5.8,
       "error": null
     },
     {
@@ -260,7 +488,7 @@
       "anomaly_fraction": 0.0009,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.5,
+      "elapsed_ms": 5.7,
       "error": null
     },
     {
@@ -280,7 +508,7 @@
       "anomaly_fraction": 0.0112,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.1,
+      "elapsed_ms": 5.5,
       "error": null
     },
     {
@@ -300,7 +528,7 @@
       "anomaly_fraction": 0.0026,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.1,
+      "elapsed_ms": 5.8,
       "error": null
     },
     {
@@ -320,7 +548,7 @@
       "anomaly_fraction": 0.0087,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 8.5,
+      "elapsed_ms": 6.2,
       "error": null
     },
     {
@@ -340,7 +568,7 @@
       "anomaly_fraction": 0.0147,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.9,
+      "elapsed_ms": 5.5,
       "error": null
     },
     {
@@ -349,18 +577,18 @@
       "gt_veg": 0.0,
       "pred_veg": 0.0,
       "gt_soil": 0.0,
-      "pred_soil": 1.0,
+      "pred_soil": 0.0,
       "gt_density": "bare",
-      "pred_density": "bare",
+      "pred_density": "sparse",
       "gt_pheno": 0.0,
       "pred_pheno": 0.0,
       "gt_qa_usable": false,
-      "pred_qa_usable": true,
+      "pred_qa_usable": false,
       "qa_score": 0.455,
-      "anomaly_fraction": 0.0087,
-      "boundary_score": 0.2215,
-      "n_packets": 5,
-      "elapsed_ms": 9.8,
+      "anomaly_fraction": 0.0,
+      "boundary_score": 0.0,
+      "n_packets": 0,
+      "elapsed_ms": 3.0,
       "error": null
     },
     {
@@ -380,7 +608,7 @@
       "anomaly_fraction": 0.0112,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.0,
+      "elapsed_ms": 5.8,
       "error": null
     },
     {
@@ -400,47 +628,47 @@
       "anomaly_fraction": 0.0087,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.6,
+      "elapsed_ms": 6.0,
       "error": null
     },
     {
       "case_id": "heavy_edge_contamination",
       "slice": "boundary",
       "gt_veg": 0.98,
-      "pred_veg": 1.0,
+      "pred_veg": 0.0,
       "gt_soil": 0.0,
       "pred_soil": 0.0,
       "gt_density": "dense",
-      "pred_density": "dense",
+      "pred_density": "sparse",
       "gt_pheno": 1.5,
-      "pred_pheno": 1.5,
-      "gt_qa_usable": true,
-      "pred_qa_usable": true,
+      "pred_pheno": 0.0,
+      "gt_qa_usable": false,
+      "pred_qa_usable": false,
       "qa_score": 0.373,
       "anomaly_fraction": 0.0,
-      "boundary_score": 0.8889,
-      "n_packets": 5,
-      "elapsed_ms": 0.7,
+      "boundary_score": 0.0,
+      "n_packets": 0,
+      "elapsed_ms": 0.3,
       "error": null
     },
     {
       "case_id": "narrow_strip_plot",
       "slice": "boundary",
       "gt_veg": 0.98,
-      "pred_veg": 1.0,
+      "pred_veg": 0.0,
       "gt_soil": 0.0,
       "pred_soil": 0.0,
       "gt_density": "dense",
-      "pred_density": "dense",
+      "pred_density": "sparse",
       "gt_pheno": 1.5,
-      "pred_pheno": 2.0,
-      "gt_qa_usable": true,
-      "pred_qa_usable": true,
+      "pred_pheno": 0.0,
+      "gt_qa_usable": false,
+      "pred_qa_usable": false,
       "qa_score": 0.373,
-      "anomaly_fraction": 0.0294,
-      "boundary_score": 1.0,
-      "n_packets": 5,
-      "elapsed_ms": 1.1,
+      "anomaly_fraction": 0.0,
+      "boundary_score": 0.0,
+      "n_packets": 0,
+      "elapsed_ms": 0.6,
       "error": null
     },
     {
@@ -459,8 +687,8 @@
       "qa_score": 0.24,
       "anomaly_fraction": 0.0,
       "boundary_score": 0.0,
-      "n_packets": 5,
-      "elapsed_ms": 0.2,
+      "n_packets": 0,
+      "elapsed_ms": 0.1,
       "error": null
     },
     {
@@ -480,7 +708,7 @@
       "anomaly_fraction": 0.0129,
       "boundary_score": 0.1736,
       "n_packets": 5,
-      "elapsed_ms": 9.5,
+      "elapsed_ms": 10.1,
       "error": null
     },
     {
@@ -500,7 +728,7 @@
       "anomaly_fraction": 0.0138,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.7,
+      "elapsed_ms": 7.4,
       "error": null
     },
     {
@@ -520,7 +748,7 @@
       "anomaly_fraction": 0.0,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.1,
+      "elapsed_ms": 5.5,
       "error": null
     },
     {
@@ -540,7 +768,7 @@
       "anomaly_fraction": 0.0087,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.9,
+      "elapsed_ms": 5.5,
       "error": null
     },
     {
@@ -560,7 +788,7 @@
       "anomaly_fraction": 0.0121,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.8,
+      "elapsed_ms": 5.4,
       "error": null
     },
     {
@@ -580,7 +808,7 @@
       "anomaly_fraction": 0.0035,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.1,
+      "elapsed_ms": 6.0,
       "error": null
     },
     {
@@ -600,7 +828,7 @@
       "anomaly_fraction": 0.0138,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 8.7,
+      "elapsed_ms": 5.5,
       "error": null
     }
   ]

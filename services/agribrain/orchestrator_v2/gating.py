@@ -3,9 +3,9 @@ from typing import List, Dict, Any, Optional, Set
 import hashlib
 import json
 
-from services.agribrain.layer3_decision.schema import ExecutionPlan, TaskNode
-from services.agribrain.orchestrator_v2.schema import GlobalQuality, GlobalDegradation, LayerResult, LayerStatus
-from services.agribrain.orchestrator_v2.registry import LayerId
+from layer3_decision.schema import ExecutionPlan, TaskNode
+from orchestrator_v2.schema import GlobalQuality, GlobalDegradation, LayerResult, LayerStatus
+from orchestrator_v2.registry import LayerId
 
 def _compute_task_uid(task: TaskNode) -> str:
     """

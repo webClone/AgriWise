@@ -15,7 +15,7 @@ Methods:
 """
 import math
 from typing import List, Optional, Dict, Tuple, Any
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     SurfaceArtifact, SurfaceType, ZoneArtifact, ZoneType, ZoneFamily,
 )
 

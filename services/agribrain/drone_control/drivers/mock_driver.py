@@ -4,6 +4,11 @@ Drone Control — Mock Driver.
 Deterministic simulation driver for CI, tests, and benchmarks.
 Supports both Mapping and Command execution paths. Can inject
 configurable failure modes for testing failsafe logic.
+
+V2: Supports stepped mode for mid-flight control testing.
+    When stepped=True, stream_telemetry() blocks at each waypoint
+    until step() is called externally — allowing pause/resume/abort/RTL
+    to be tested during active execution windows.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Iterator, List, Optional
 import datetime
 import math
+import threading
 import uuid
 
 from ..driver_base import DroneDriverBase
@@ -66,9 +72,14 @@ class MockDriver(DroneDriverBase):
     - Deterministic telemetry stream
     - Capture events at waypoints with capture=True
     - Configurable failure injection
+    
+    Stepped mode:
+    - When stepped=True, stream_telemetry() blocks at each waypoint
+      until step() is called. This allows external threads to issue
+      pause/resume/abort/RTL commands during active execution.
     """
     
-    def __init__(self, failure_config: Optional[MockFailureConfig] = None):
+    def __init__(self, failure_config: Optional[MockFailureConfig] = None, stepped: bool = False):
         self._failure = failure_config or MockFailureConfig()
         self._connected = False
         self._armed = False
@@ -83,6 +94,12 @@ class MockDriver(DroneDriverBase):
         self._current_wp = 0
         self._telemetry_seq = 0
         self._paused = False
+        
+        # Stepped mode support
+        self._stepped = stepped
+        self._step_event = threading.Event()    # Set by step() to advance one waypoint
+        self._stop_event = threading.Event()    # Set by stop() to terminate telemetry
+        self._at_waypoint = threading.Event()   # Set when driver is waiting at a waypoint
     
     @property
     def driver_type(self) -> str:
@@ -91,6 +108,29 @@ class MockDriver(DroneDriverBase):
     @property
     def connected(self) -> bool:
         return self._connected
+    
+    @property
+    def current_waypoint(self) -> int:
+        """Current waypoint index (for test inspection)."""
+        return self._current_wp
+    
+    def step(self):
+        """Advance one waypoint in stepped mode. No-op if not stepped."""
+        self._step_event.set()
+    
+    def stop(self):
+        """Terminate the telemetry stream (for abort/RTL from external thread)."""
+        self._stop_event.set()
+        self._step_event.set()  # Unblock if waiting
+    
+    def wait_at_waypoint(self, timeout: float = 5.0) -> bool:
+        """Wait until the driver is blocked at a waypoint (stepped mode).
+        
+        Returns True if the driver reached a waypoint, False on timeout.
+        """
+        result = self._at_waypoint.wait(timeout=timeout)
+        self._at_waypoint.clear()
+        return result
     
     def connect(self, vehicle_id: str = "") -> CommandAck:
         self._vehicle_id = vehicle_id or f"mock_{uuid.uuid4().hex[:6]}"
@@ -233,7 +273,15 @@ class MockDriver(DroneDriverBase):
         )
     
     def stream_telemetry(self) -> Iterator[TelemetryPacket]:
-        """Simulate flight along waypoints, yielding telemetry at each."""
+        """Simulate flight along waypoints, yielding telemetry at each.
+        
+        Stepped mode:
+            When self._stepped is True, the loop blocks at each waypoint
+            until step() is called. This allows external threads to:
+            - Inspect state at each waypoint
+            - Issue pause/resume/abort/RTL commands
+            - Verify mid-flight state transitions
+        """
         if not self._mission or not self._mission.waypoints:
             return
         
@@ -242,6 +290,34 @@ class MockDriver(DroneDriverBase):
         link_loss_remaining = 0
         
         for i, wp in enumerate(wps):
+            # --- Stepped mode: block until step() is called ---
+            if self._stepped:
+                self._step_event.clear()
+                self._at_waypoint.set()           # Signal: "I'm at waypoint i"
+                self._step_event.wait()           # Block until step() or stop()
+                
+                if self._stop_event.is_set():
+                    return
+            
+            # --- Check if externally stopped or state changed ---
+            if self._state in (LiveMissionState.ABORTED, LiveMissionState.FAILED):
+                yield self._make_telemetry(i, total, wp)
+                return
+            
+            # --- If paused, yield paused state and wait ---
+            if self._stepped and self._state == LiveMissionState.PAUSED:
+                yield self._make_telemetry(i, total, wp)
+                # Stay paused: block again until step() resumes us
+                self._step_event.clear()
+                self._at_waypoint.set()
+                self._step_event.wait()
+                
+                if self._stop_event.is_set():
+                    return
+                if self._state in (LiveMissionState.ABORTED, LiveMissionState.FAILED):
+                    yield self._make_telemetry(i, total, wp)
+                    return
+            
             self._current_wp = i
             
             # Battery drain

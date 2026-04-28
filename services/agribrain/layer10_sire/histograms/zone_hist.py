@@ -3,7 +3,7 @@ Zone Histogram Engine — Compute per-zone histograms for cross-zone comparison
 """
 import math
 from typing import List
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     SurfaceArtifact, ZoneArtifact, HistogramArtifact,
 )
 

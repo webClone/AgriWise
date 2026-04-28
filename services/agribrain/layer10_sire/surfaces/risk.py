@@ -8,7 +8,7 @@ Improvements over v1:
   - Action-relevance masking: only show risk where action is possible
 """
 from typing import List
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, PaletteId,
 )
 

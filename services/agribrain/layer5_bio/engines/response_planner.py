@@ -2,10 +2,10 @@
 from typing import Dict, List, Tuple, Any, Optional
 from datetime import datetime, timedelta, timezone
 
-from services.agribrain.layer5_bio.schema import (
+from layer5_bio.schema import (
     BioThreatState, BioRecommendation, ActionId, ThreatId
 )
-from services.agribrain.layer3_decision.schema import (
+from layer3_decision.schema import (
     RiskIfWrong, ExecutionPlan, TaskNode, DegradationMode
 )
 

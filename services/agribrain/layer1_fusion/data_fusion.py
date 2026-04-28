@@ -38,8 +38,8 @@ try:
         FieldTensor, EvidenceItem, EvidenceSourceType,
         ValidationStatus, FusionOutput, FieldTensorChannels
     )
-    from services.agribrain.layer1_fusion.raster_backend import TileStoreBackend, RasterioBackend
-    from services.agribrain.layer1_fusion.validation.validator import trust_system
+    from layer1_fusion.raster_backend import TileStoreBackend, RasterioBackend
+    from layer1_fusion.validation.validator import trust_system
 except ImportError:
     # Fallback for linting/mocking
     fetch_ndvi_timeseries = lambda *args, **kwargs: {}
@@ -52,13 +52,13 @@ except ImportError:
 
 # Layer 0: Data Assimilation Engine
 try:
-    from services.agribrain.layer0.kalman_engine import (
+    from layer0.kalman_engine import (
         DailyAssimilationEngine, KalmanObservation
     )
-    from services.agribrain.layer0.validation_graph import ValidationGraph
-    from services.agribrain.layer0.monitoring import run_audit as layer0_audit
-    from services.agribrain.layer0.invariants import enforce_all_invariants
-    from services.agribrain.layer0.state_persistence import save_engine_state
+    from layer0.validation_graph import ValidationGraph
+    from layer0.monitoring import run_audit as layer0_audit
+    from layer0.invariants import enforce_all_invariants
+    from layer0.state_persistence import save_engine_state
     HAS_LAYER0 = True
 except ImportError:
     HAS_LAYER0 = False
@@ -87,7 +87,7 @@ class DataFusionEngine:
 
         # --- Step 0: Initialize Provenance ---
         # Deterministic Run ID
-        from services.agribrain.layer1_fusion.provenance import ProvenanceTracker, generate_run_id
+        from layer1_fusion.provenance import ProvenanceTracker, generate_run_id
 
         # Hash params + inputs (simplification for MVP: just timestamps)
         run_id = generate_run_id(plot_id, start_date, end_date, "params_v1", "code_v2.0.0")
@@ -104,7 +104,7 @@ class DataFusionEngine:
         # --- Step 1.5: Perception Adapter (Layer 0 Handoff) ---
         perception_bundle = None
         try:
-            from services.agribrain.layer1_fusion.perception_adapter import build_perception_bundle, ObservationSourceType as PObsSource
+            from layer1_fusion.perception_adapter import build_perception_bundle, ObservationSourceType as PObsSource
             
             # Separate user evidence into typed buckets for the perception adapter
             raw_photos = []
@@ -133,7 +133,7 @@ class DataFusionEngine:
         
         # Merge structured user evidence down from Orchestrator Layer
         if user_evidence:
-            from services.agribrain.layer1_fusion.schema import EvidenceItem, EvidenceSourceType
+            from layer1_fusion.schema import EvidenceItem, EvidenceSourceType
             from datetime import datetime
             for item in user_evidence:
                 try:
@@ -215,7 +215,7 @@ class DataFusionEngine:
         raster_composites = None
         if polygon_coords or (lat and lng):
             try:
-                from services.agribrain.eo.sentinel import (
+                from eo.sentinel import (
                     fetch_ndvi_raster_composite, fetch_ndmi_raster_composite,
                     fetch_sar_raster_composite, fetch_quality_mask,
                 )
@@ -895,13 +895,13 @@ class DataFusionEngine:
         
         # Try numpy-based engine first, fallback to Pure Python
         try:
-            from services.agribrain.layer1_fusion.zone_engine import generate_management_zones, compute_zone_stats
+            from layer1_fusion.zone_engine import generate_management_zones, compute_zone_stats
             tensor.zones = generate_management_zones(tensor.plot_id, ndvi_stack, sar_stack, tensor.grid_spec.to_dict())
             tensor.zone_stats = compute_zone_stats(ndvi_stack, sar_stack, tensor.zones, tensor.time_index)
         except Exception as e:
             print(f"⚠️ [Spatial] Numpy zone engine failed: {e}. Using Pure Python fallback.")
             try:
-                from services.agribrain.layer1_fusion.zone_engine import generate_management_zones_pure_python, compute_zone_stats_pure_python
+                from layer1_fusion.zone_engine import generate_management_zones_pure_python, compute_zone_stats_pure_python
                 tensor.zones = generate_management_zones_pure_python(tensor.plot_id, ndvi_stack, sar_stack, tensor.grid_spec.to_dict())
                 tensor.zone_stats = compute_zone_stats_pure_python(ndvi_stack, sar_stack, tensor.zones, tensor.time_index)
             except Exception as e2:
@@ -909,7 +909,7 @@ class DataFusionEngine:
         
         # Phase A: Build Research-Grade ZoneStats (p10/p90, uncertainty, polygon-aware labels)
         try:
-            from services.agribrain.layer1_fusion.zone_engine import build_spatial_zone_stats
+            from layer1_fusion.zone_engine import build_spatial_zone_stats
             soil_static = tensor.static if hasattr(tensor, 'static') else {}
             tensor.spatial_zone_stats = build_spatial_zone_stats(
                 zones=tensor.zones,
@@ -925,7 +925,7 @@ class DataFusionEngine:
 
         # Phase A.1: Inject GeoJSON geometries into zones (mask → lat/lng polygons)
         try:
-            from services.agribrain.layer1_fusion.zone_engine import inject_zone_geometries
+            from layer1_fusion.zone_engine import inject_zone_geometries
             # Prefer the real polygon; fall back to grid_spec bounds only if absent
             if polygon_coords:
                 zone_polygon = polygon_coords

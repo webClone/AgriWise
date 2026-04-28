@@ -1,7 +1,7 @@
 
 from typing import List, Dict, Any
 
-from services.agribrain.layer6_exec.schema import (
+from layer6_exec.schema import (
     CalibrationProposal, NormalizedEvidence, EvidenceType, ApprovalStatus
 )
 

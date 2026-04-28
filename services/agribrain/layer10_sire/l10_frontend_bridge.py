@@ -20,15 +20,15 @@ import random
 # Ensure project root is on path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, SurfaceType, GroundingClass,
     ExplainabilityPack, DriverWeight, ModelEquation, 
     ExplainabilityProvenance, ExplainabilityConfidence, ConfidencePenalty
 )
-from services.agribrain.layer10_sire.runner import run_layer10_sire
-from services.agribrain.layer1_fusion.schema import FieldTensor, FieldTensorChannels
-from services.agribrain.layer1_fusion.raster_backend import GridSpec
-from services.agribrain.layer2_veg_int.schema import (
+from layer10_sire.runner import run_layer10_sire
+from layer1_fusion.schema import FieldTensor, FieldTensorChannels
+from layer1_fusion.raster_backend import GridSpec
+from layer2_veg_int.schema import (
     VegIntOutput, ModeledCurveOutput, CurveQuality, PhenologyOutput, SpatialMetrics,
 )
 from types import SimpleNamespace

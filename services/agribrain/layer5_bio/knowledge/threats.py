@@ -1,5 +1,5 @@
 
-from services.agribrain.layer5_bio.schema import ThreatId, ThreatClass
+from layer5_bio.schema import ThreatId, ThreatClass
 
 # Conservative priors; later calibrate by region/crop
 THREAT_PRIORS = {

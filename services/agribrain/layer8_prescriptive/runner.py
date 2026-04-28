@@ -4,7 +4,7 @@ Layer 8 Pipeline Runner
 Orchestrates: rank → schedule → zone allocate → enforce invariants → Layer8Output
 
 Usage:
-    from services.agribrain.layer8_prescriptive.runner import run_layer8
+    from layer8_prescriptive.runner import run_layer8
     output = run_layer8(l8_input, forecast, start_date)
 """
 
@@ -12,15 +12,15 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import hashlib
 
-from services.agribrain.layer8_prescriptive.schema import (
+from layer8_prescriptive.schema import (
     Layer8Input, Layer8Output, OutcomeForecast, Tradeoff,
     PrescriptiveQuality, PrescriptiveAudit, PrescriptiveDegradation,
     ConfidenceLevel,
 )
-from services.agribrain.layer8_prescriptive.action_ranker import ActionRankingEngine
-from services.agribrain.layer8_prescriptive.scheduler import ConstraintScheduler
-from services.agribrain.layer8_prescriptive.zone_prioritizer import ZonePrioritizer
-from services.agribrain.layer8_prescriptive.invariants import enforce_layer8_invariants
+from layer8_prescriptive.action_ranker import ActionRankingEngine
+from layer8_prescriptive.scheduler import ConstraintScheduler
+from layer8_prescriptive.zone_prioritizer import ZonePrioritizer
+from layer8_prescriptive.invariants import enforce_layer8_invariants
 
 
 def run_layer8(l8_input: Layer8Input,

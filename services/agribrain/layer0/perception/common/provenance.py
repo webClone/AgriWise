@@ -9,13 +9,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 from datetime import datetime
 
-import sys
-import os
-
-# Add parent paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
-
-from services.agribrain.layer0.observation_packet import Provenance
+from layer0.observation_packet import Provenance
 
 
 def build_provenance(

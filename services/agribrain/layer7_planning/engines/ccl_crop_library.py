@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from services.agribrain.layer7_planning.schema import SuitabilityDriver
+from layer7_planning.schema import SuitabilityDriver
 
 @dataclass
 class CultivarOption:

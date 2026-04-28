@@ -1,0 +1,228 @@
+{
+  "engine": "satellite_rgb",
+  "aggregate_failures": 0,
+  "critical_failures": 0,
+  "soft_failures": 9,
+  "gate_passed": true,
+  "failing_metrics": [],
+  "failing_cases": [],
+  "scorecard": {
+    "veg_mae": {
+      "value": 0.0607,
+      "threshold": 0.08,
+      "passed": true
+    },
+    "soil_mae": {
+      "value": 0.0468,
+      "threshold": 0.08,
+      "passed": true
+    },
+    "density_acc": {
+      "value": 96.1538,
+      "threshold": 85.0,
+      "passed": true
+    },
+    "pheno_mae": {
+      "value": 0.5,
+      "threshold": 1.0,
+      "passed": true
+    },
+    "qa_acc": {
+      "value": 100.0,
+      "threshold": 95.0,
+      "passed": true
+    },
+    "anomaly_fp_rate": {
+      "value": 0.0,
+      "threshold": 10.0,
+      "passed": true
+    },
+    "boundary_acc": {
+      "value": 90.0,
+      "threshold": 90.0,
+      "passed": true
+    }
+  },
+  "case_results": [
+    {
+      "case_id": "dense_maize_canopy",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "dense_wheat_canopy",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "dense_orchard_canopy",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "dense_rice_paddy",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "sparse_emergence",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "drought_stressed",
+      "passed": false,
+      "critical": false,
+      "soft_fail": true
+    },
+    {
+      "case_id": "gap_heavy_stand",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "sparse_cover",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "dry_brown_soil",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "wet_dark_soil",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "sandy_soil",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "post_harvest_stubble",
+      "passed": false,
+      "critical": false,
+      "soft_fail": true
+    },
+    {
+      "case_id": "crop_soil_mosaic",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "weed_patches",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "partial_canopy",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "transitional_growth",
+      "passed": false,
+      "critical": false,
+      "soft_fail": true
+    },
+    {
+      "case_id": "thin_cloud",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "heavy_cloud",
+      "passed": false,
+      "critical": false,
+      "soft_fail": true
+    },
+    {
+      "case_id": "strong_haze",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "partial_cloud",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "heavy_edge_contamination",
+      "passed": false,
+      "critical": false,
+      "soft_fail": true
+    },
+    {
+      "case_id": "narrow_strip_plot",
+      "passed": false,
+      "critical": false,
+      "soft_fail": true
+    },
+    {
+      "case_id": "too_small_plot",
+      "passed": false,
+      "critical": false,
+      "soft_fail": true
+    },
+    {
+      "case_id": "normal_plot_clean_boundary",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "pheno_dormant",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "pheno_early_vegetative",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "pheno_strong_vegetative",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "pheno_flowering",
+      "passed": true,
+      "critical": true,
+      "soft_fail": false
+    },
+    {
+      "case_id": "pheno_ripening",
+      "passed": false,
+      "critical": false,
+      "soft_fail": true
+    },
+    {
+      "case_id": "pheno_senescent",
+      "passed": false,
+      "critical": false,
+      "soft_fail": true
+    }
+  ]
+}

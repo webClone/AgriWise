@@ -5,13 +5,13 @@ Layer 9 Interface Runner
 Pipeline entry point that wraps PolicyRouter into a standard runner.
 
 Usage:
-    from services.agribrain.layer9_interface.runner import run_layer9
+    from layer9_interface.runner import run_layer9
     output = run_layer9(orch_inputs, l8_output, l3_output, l6_output, l10_output)
 """
 from typing import Any, Optional, Dict, List
 from dataclasses import asdict
-from services.agribrain.layer9_interface.schema import Layer9Input, InterfaceOutput
-from services.agribrain.layer9_interface.policy_router import PolicyRouter
+from layer9_interface.schema import Layer9Input, InterfaceOutput
+from layer9_interface.policy_router import PolicyRouter
 
 
 def run_layer9(

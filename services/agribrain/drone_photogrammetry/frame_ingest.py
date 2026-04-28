@@ -42,6 +42,11 @@ class FrameManifest:
     missing_gps_count: int = 0
     missing_exif_count: int = 0
     
+    # Resolution tracking (V3)
+    resolution_mode: str = "benchmark"   # ResolutionMode value
+    native_resolution: str = ""          # e.g. "4000x3000"
+    working_resolution: str = ""         # e.g. "2000x1500"
+    
     # Temporal span
     first_capture: Optional[datetime.datetime] = None
     last_capture: Optional[datetime.datetime] = None
@@ -120,11 +125,26 @@ class FrameIngestor:
         manifest.frames = frames
         manifest.is_valid = len(manifest.validation_errors) == 0
         
+        # --- V3: Record resolution info ---
+        is_synthetic = inp.synthetic_frames is not None and len(inp.synthetic_frames) > 0
+        if inp.resolution_mode:
+            manifest.resolution_mode = inp.resolution_mode
+        elif is_synthetic:
+            manifest.resolution_mode = "benchmark"
+        else:
+            manifest.resolution_mode = "native"
+        
+        if frames:
+            manifest.native_resolution = f"{frames[0].native_width_px}x{frames[0].native_height_px}"
+            manifest.working_resolution = f"{frames[0].working_width_px}x{frames[0].working_height_px}"
+        
         logger.info(
             f"[FrameIngestor] Ingested {manifest.total_ingested} frames "
             f"for mission {inp.mission_id}: "
             f"{manifest.duplicates_found} dups, "
             f"{manifest.missing_gps_count} missing GPS, "
+            f"res_mode={manifest.resolution_mode}, "
+            f"native={manifest.native_resolution}, "
             f"valid={manifest.is_valid}"
         )
         
@@ -164,6 +184,32 @@ class FrameIngestor:
             # Attach synthetic pixels (for benchmarking)
             if inp.synthetic_frames and i < len(inp.synthetic_frames):
                 frame.synthetic_pixels = inp.synthetic_frames[i]
+            
+            # --- V3: Populate resolution tracking ---
+            # Native dimensions from camera intrinsics (real frame size)
+            frame.native_width_px = inp.camera.image_width_px
+            frame.native_height_px = inp.camera.image_height_px
+            
+            # If synthetic pixels exist, actual working size is the synthetic array
+            if frame.synthetic_pixels:
+                green = frame.synthetic_pixels.get("green", [])
+                if green:
+                    frame.working_height_px = len(green)
+                    frame.working_width_px = len(green[0]) if green[0] else 0
+                else:
+                    frame.working_width_px = frame.native_width_px
+                    frame.working_height_px = frame.native_height_px
+            else:
+                # Real frames: working = native (no forced downscale)
+                frame.working_width_px = frame.native_width_px
+                frame.working_height_px = frame.native_height_px
+            
+            # Pyramid levels available (lazily built — we only record availability)
+            frame.pyramid_levels_available = ["native"]
+            if frame.native_width_px >= 200 and frame.native_height_px >= 200:
+                frame.pyramid_levels_available.append("half")
+            if frame.native_width_px >= 400 and frame.native_height_px >= 400:
+                frame.pyramid_levels_available.append("quarter")
             
             # Generate timestamp from sequence if not provided
             if inp.capture_timestamp:

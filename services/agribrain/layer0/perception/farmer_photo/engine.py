@@ -4,13 +4,13 @@ Farmer Photo Engine — Top-Level Orchestrator.
 Plant recognition + symptom evidence engine.
 
 Pipeline:
-  validate → cache → preprocess → QA gate → scene classify →
-  crop classify → organ classify → symptom classify →
-  calibrate → packetize
+  validate -> cache -> preprocess -> QA gate -> scene classify ->
+  crop classify -> organ classify -> symptom classify ->
+  calibrate -> packetize
 
 Key behaviors:
-  - NON_FIELD / UNUSABLE → stop, return zero packets
-  - GPS far from plot → emit with extreme sigma inflation
+  - NON_FIELD / UNUSABLE -> stop, return zero packets
+  - GPS far from plot -> emit with extreme sigma inflation
   - Always enforces geometry_scope = "point"
   - Disease confidence is gated by crop confidence
 """
@@ -19,23 +19,23 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..common.cache import PerceptionCache
-from ..common.contracts import PerceptionEngineFamily
+from layer0.perception.common.cache import PerceptionCache
+from layer0.perception.common.contracts import PerceptionEngineFamily
 
-from .schemas import (
+from layer0.perception.farmer_photo.schemas import (
     FarmerPhotoEngineInput,
     FarmerPhotoEngineOutput,
     SceneClass, CropClass, OrganClass, SymptomClass,
     SceneResult,
 )
-from .qa import FarmerPhotoQA, FarmerPhotoQAResult, FarmerPhotoQAFlag
-from .preprocess import FarmerPhotoPreprocessor
-from .crop_classifier import CropClassifier
-from .organ_classifier import OrganClassifier
-from .symptom_classifier import SymptomClassifier
-from .scene_gate import SceneGate
-from .calibrator import EvidenceCalibrator
-from .packetizer import FarmerPhotoPacketizer
+from layer0.perception.farmer_photo.qa import FarmerPhotoQA, FarmerPhotoQAResult, FarmerPhotoQAFlag
+from layer0.perception.farmer_photo.preprocess import FarmerPhotoPreprocessor
+from layer0.perception.farmer_photo.crop_classifier import CropClassifier
+from layer0.perception.farmer_photo.organ_classifier import OrganClassifier
+from layer0.perception.farmer_photo.symptom_classifier import SymptomClassifier
+from layer0.perception.farmer_photo.scene_gate import SceneGate
+from layer0.perception.farmer_photo.calibrator import EvidenceCalibrator
+from layer0.perception.farmer_photo.packetizer import FarmerPhotoPacketizer
 
 
 class FarmerPhotoEngine:
@@ -131,8 +131,8 @@ class FarmerPhotoEngine:
             recentness_days = max(0, delta.days)
 
         qa_result = self.qa.assess(
-            image_width=engine_input.image_width,
-            image_height=engine_input.image_height,
+            image_width=features.width,
+            image_height=features.height,
             pixel_stats={
                 "green_ratio": features.green_ratio,
                 "brightness_mean": features.brightness_mean,
@@ -170,9 +170,17 @@ class FarmerPhotoEngine:
         )
         output.qa_flags = qa_result.flags
         output.qa_details = qa_result.details
+        output.provenance_chain = processing_steps.copy()
+        output.model_versions = {
+            "scene_gate": self.scene_gate.VERSION,
+            "crop_classifier": self.crop_classifier.VERSION,
+            "organ_classifier": self.organ_classifier.VERSION,
+            "symptom_classifier": self.symptom_classifier.VERSION,
+            "calibrator": self.calibrator.VERSION,
+        }
 
 
-        # --- Gate: non-field / unusable → zero packets ---
+        # --- Gate: non-field / unusable -> zero packets ---
         if scene.scene_class in (SceneClass.NON_FIELD, SceneClass.UNUSABLE):
             output.variables = []
             result = (output, [])

@@ -1,8 +1,8 @@
 
 
 from typing import Dict, Any, List, Optional
-from services.agribrain.layer1_fusion.schema import FieldTensor, FieldTensorChannels
-from services.agribrain.layer3_decision.schema import PlotContext
+from layer1_fusion.schema import FieldTensor, FieldTensorChannels
+from layer3_decision.schema import PlotContext
 
 class SoilWaterBalanceEngine:
     """

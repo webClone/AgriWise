@@ -8,10 +8,10 @@ Uses directional variance analysis to detect planted rows:
   - Extract row segments as elongated connected components
 """
 from typing import List, Optional, Tuple
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, MicroObjectArtifact, ObjectType,
 )
-from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
+from layer10_sire.adapters.l1_adapter import L1SpatialData
 
 MIN_ROW_LENGTH = 3  # Minimum cells to count as row
 
@@ -25,7 +25,7 @@ def detect_rows(
         return []
 
     if l1_data is None:
-        from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
+        from layer10_sire.adapters.l1_adapter import adapt_l1
         l1_data = adapt_l1(inp.field_tensor, H, W)
 
     ndvi = l1_data.raster_maps.get('ndvi')

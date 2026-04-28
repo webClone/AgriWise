@@ -13,7 +13,7 @@ def _rolling(ts: List[Dict[str, Any]], key: str, n: int):
         vals.append(float(v) if v is not None else None)
     return vals
 
-from services.agribrain.layer5_bio.knowledge.thresholds import (
+from layer5_bio.knowledge.thresholds import (
     WETNESS_RAIN_DIVISOR, WETNESS_DAYS_DIVISOR, HEAT_PENALTY_DIVISOR,
     FUNGAL_TEMP_OPTIMAL, FUNGAL_TEMP_WIDTH,
     BACTERIAL_TEMP_BASE, BACTERIAL_TEMP_SCALE,

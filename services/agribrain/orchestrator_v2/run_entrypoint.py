@@ -37,7 +37,7 @@ def _parse_context(raw: str) -> dict:
 
 def _build_inputs(ctx: dict, query: str = ""):
     """Build OrchestratorInput from frontend context dict."""
-    from services.agribrain.orchestrator_v2.schema import OrchestratorInput
+    from orchestrator_v2.schema import OrchestratorInput
 
     end_date = datetime.now()
     start_date = end_date - timedelta(days=14)
@@ -127,7 +127,7 @@ def run_chat_mode(ctx: dict, query: str, args) -> dict:
     The ChatPayload is embedded inside explanations, not returned raw.
     Greeting/general early exits also use the canonical envelope.
     """
-    from services.agribrain.orchestrator_v2.intents import detect_intent, Intent
+    from orchestrator_v2.intents import detect_intent, Intent
 
     plot_id = ctx.get("plot_id", "UNKNOWN")
     intent = detect_intent(query, has_context=(plot_id != "UNKNOWN"))
@@ -141,8 +141,8 @@ def run_chat_mode(ctx: dict, query: str, args) -> dict:
         return _canonical_early_exit("GENERAL_KNOWLEDGE", "GENERAL", _general_arf(query, args.exp), args.exp)
 
     # Full pipeline → canonical AgriBrainRun
-    from services.agribrain.orchestrator_v2.runner import run_orchestrator, run_for_chat
-    from services.agribrain.orchestrator_v2.run_schema import artifact_to_run
+    from orchestrator_v2.runner import run_orchestrator, run_for_chat
+    from orchestrator_v2.run_schema import artifact_to_run
 
     inputs = _build_inputs(ctx, query)
 
@@ -173,16 +173,16 @@ def run_full_mode(ctx: dict, query: str = "") -> dict:
     Full mode — runs orchestrator, returns canonical AgriBrainRun JSON.
     Used by /api/agribrain/run and /api/agribrain/analyze replacement.
     """
-    from services.agribrain.orchestrator_v2.runner import run_orchestrator
-    from services.agribrain.orchestrator_v2.run_schema import artifact_to_run
-    from services.agribrain.orchestrator_v2.intents import detect_intent
+    from orchestrator_v2.runner import run_orchestrator
+    from orchestrator_v2.run_schema import artifact_to_run
+    from orchestrator_v2.intents import detect_intent
 
     inputs = _build_inputs(ctx, query)
     intent = detect_intent(query, has_context=True) if query else None
 
     # If query exists, we use run_for_chat to get date resolution + payload in one shot
     if query:
-        from services.agribrain.orchestrator_v2.runner import run_for_chat
+        from orchestrator_v2.runner import run_for_chat
         f = io.StringIO()
         with redirect_stdout(f):
             cp, artifact = run_for_chat(inputs, user_query=query)
@@ -353,9 +353,9 @@ def run_surfaces_mode(ctx: dict, query: str = "") -> dict:
     Surfaces mode — runs orchestrator and returns canonical AgriBrainRun
     enriched with full Layer 10 frontend payload.
     """
-    from services.agribrain.orchestrator_v2.runner import run_orchestrator
-    from services.agribrain.orchestrator_v2.run_schema import artifact_to_run
-    from services.agribrain.orchestrator_v2.intents import Intent
+    from orchestrator_v2.runner import run_orchestrator
+    from orchestrator_v2.run_schema import artifact_to_run
+    from orchestrator_v2.intents import Intent
 
     inputs = _build_inputs(ctx, query)
 
@@ -463,7 +463,7 @@ def _canonical_early_exit(run_id: str, mode: str, arf_dict: dict, exp_level: str
 
 def _greeting_arf(exp_level: str = "INTERMEDIATE") -> dict:
     """Build greeting ARF dict."""
-    from services.agribrain.orchestrator_v2.arf_schema import ARFResponse, LearningModule
+    from orchestrator_v2.arf_schema import ARFResponse, LearningModule
 
     return ARFResponse(
         headline="Hi 👋 I am AgriBrain.",
@@ -600,7 +600,7 @@ Respond ONLY in valid JSON matching this schema:
                 "definitions": {}
             }
 
-        from services.agribrain.orchestrator_v2.arf_schema import ARFResponse
+        from orchestrator_v2.arf_schema import ARFResponse
         try:
             return ARFResponse(**raw_json).dict()
         except Exception as e:

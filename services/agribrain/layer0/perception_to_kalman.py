@@ -1,5 +1,5 @@
 """
-Layer 0.10: Perception → Kalman Bridge
+Layer 0.10: Perception -> Kalman Bridge
 
 Converts PerceptionPacketFactory outputs (ObservationPackets from images)
 into KalmanObservations compatible with the DailyAssimilationEngine.
@@ -15,11 +15,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
-from .observation_packet import ObservationPacket
-from .kalman_engine import KalmanObservation
+from layer0.observation_packet import ObservationPacket
+from layer0.kalman_engine import KalmanObservation
 
 
-# Mapping: perception variable → KalmanObservation obs_type
+# Mapping: perception variable -> KalmanObservation obs_type
 PERCEPTION_OBS_TYPE_MAP = {
     "canopy_cover": "canopy_cover",
     "phenology_stage": "phenology_stage",
@@ -33,6 +33,9 @@ PERCEPTION_OBS_TYPE_MAP = {
     "local_canopy_cover": "farmer_photo_canopy",
     "disease_symptom_prob": "stress_proxy",
     "phenology_stage_est": "phenology_stage",
+    # IP Camera engine V1
+    "visible_stress_prob": "stress_proxy",
+    "phenology_stage_camera": "phenology_stage_camera",
 }
 
 # Base sigma for each perception type (before QA inflation)
@@ -47,6 +50,8 @@ BASE_SIGMA = {
     # Farmer Photo engine V1 — point scope, higher sigma
     "farmer_photo_canopy": 0.12,
     "farmer_photo_symptom": 0.35,  # symptom-first, not disease diagnosis
+    # IP Camera engine V1
+    "phenology_stage_camera": 0.50,
 }
 
 

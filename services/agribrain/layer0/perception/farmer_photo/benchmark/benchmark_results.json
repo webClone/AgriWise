@@ -47,8 +47,8 @@
       }
     },
     "crop_accuracy": {
-      "accuracy": 0.84,
-      "correct": 21,
+      "accuracy": 0.8,
+      "correct": 20,
       "total": 25
     },
     "symptom_f1": {
@@ -127,7 +127,7 @@
       "scene_accuracy": 1.0,
       "non_field_f1": 1.0,
       "organ_accuracy": 1.0,
-      "crop_accuracy": 0.84,
+      "crop_accuracy": 0.8,
       "symptom_macro_f1": 1.0,
       "junk_fp_rate": 0.0,
       "soil_agronomic_leaks": 0
@@ -153,7 +153,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 40.73539999080822
+      "elapsed_ms": 48.754399991594255
     },
     {
       "case_id": "nf_gray_wall_2",
@@ -174,7 +174,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 39.38130001188256
+      "elapsed_ms": 41.68359999312088
     },
     {
       "case_id": "nf_document",
@@ -195,7 +195,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 37.4059000168927
+      "elapsed_ms": 39.50559999793768
     },
     {
       "case_id": "nf_desk_dark",
@@ -216,7 +216,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 41.857699980027974
+      "elapsed_ms": 36.71020001638681
     },
     {
       "case_id": "nf_green_tarp",
@@ -237,7 +237,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 43.17580000497401
+      "elapsed_ms": 38.18090001004748
     },
     {
       "case_id": "nf_blue_sky",
@@ -258,7 +258,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 39.824899984523654
+      "elapsed_ms": 36.05640001478605
     },
     {
       "case_id": "nf_potted_plant",
@@ -279,7 +279,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 40.59419999248348
+      "elapsed_ms": 37.57220000261441
     },
     {
       "case_id": "nf_red_object",
@@ -300,7 +300,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 46.59300000639632
+      "elapsed_ms": 35.86470001027919
     },
     {
       "case_id": "soil_brown_dry",
@@ -321,7 +321,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 40.33390001859516
+      "elapsed_ms": 42.85249998793006
     },
     {
       "case_id": "soil_red_clay",
@@ -342,7 +342,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 46.81599998730235
+      "elapsed_ms": 38.88929999084212
     },
     {
       "case_id": "soil_sandy",
@@ -363,7 +363,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 46.40810002456419
+      "elapsed_ms": 36.92549999686889
     },
     {
       "case_id": "soil_dark_wet",
@@ -384,7 +384,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 41.8336000002455
+      "elapsed_ms": 38.0635000183247
     },
     {
       "case_id": "field_wheat_green",
@@ -409,7 +409,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 48.216600000159815
+      "elapsed_ms": 38.18350000074133
     },
     {
       "case_id": "field_maize_canopy",
@@ -434,7 +434,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 39.65339998831041
+      "elapsed_ms": 40.27749999659136
     },
     {
       "case_id": "field_mixed_weedy",
@@ -459,7 +459,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 42.07620001398027
+      "elapsed_ms": 38.82679998059757
     },
     {
       "case_id": "closeup_healthy_leaf",
@@ -483,7 +483,7 @@
       "organ_correct": true,
       "crop_correct": false,
       "symptom_correct": true,
-      "elapsed_ms": 46.28260000026785
+      "elapsed_ms": 42.55440001725219
     },
     {
       "case_id": "closeup_maize_leaf",
@@ -507,7 +507,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 41.40789998928085
+      "elapsed_ms": 43.85729998466559
     },
     {
       "case_id": "symptom_chlorosis_mild",
@@ -532,7 +532,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 44.26329999114387
+      "elapsed_ms": 37.81320000416599
     },
     {
       "case_id": "symptom_chlorosis_severe",
@@ -557,7 +557,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 38.13040000386536
+      "elapsed_ms": 38.135899987537414
     },
     {
       "case_id": "symptom_necrosis",
@@ -582,7 +582,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 39.38830000697635
+      "elapsed_ms": 38.09680000995286
     },
     {
       "case_id": "symptom_spots",
@@ -607,7 +607,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 40.31410001334734
+      "elapsed_ms": 39.658800000324845
     },
     {
       "case_id": "fruit_tomato_red",
@@ -631,7 +631,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 39.999599975999445
+      "elapsed_ms": 38.17459999118
     },
     {
       "case_id": "edge_golden_wheat",
@@ -656,7 +656,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 39.07860000617802
+      "elapsed_ms": 39.183199987746775
     },
     {
       "case_id": "edge_sparse_crop",
@@ -681,7 +681,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 40.13660000055097
+      "elapsed_ms": 40.60080001363531
     },
     {
       "case_id": "nf_asphalt",
@@ -702,7 +702,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 38.257099979091436
+      "elapsed_ms": 38.520999980391935
     },
     {
       "case_id": "nf_concrete",
@@ -723,7 +723,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 39.104800001950935
+      "elapsed_ms": 36.72910001478158
     },
     {
       "case_id": "nf_red_plastic",
@@ -744,7 +744,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 41.08039999846369
+      "elapsed_ms": 36.861600005067885
     },
     {
       "case_id": "nf_red_wall",
@@ -765,7 +765,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 44.93990002083592
+      "elapsed_ms": 37.34539999277331
     },
     {
       "case_id": "nf_green_fabric",
@@ -786,7 +786,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 46.87070002546534
+      "elapsed_ms": 40.94840001198463
     },
     {
       "case_id": "nf_decorative_plant",
@@ -807,7 +807,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 48.675800004275516
+      "elapsed_ms": 41.34429999976419
     },
     {
       "case_id": "nf_lawn_patch",
@@ -828,7 +828,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 47.72969998884946
+      "elapsed_ms": 41.99269998935051
     },
     {
       "case_id": "nf_wood_surface",
@@ -849,7 +849,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 47.797199978958815
+      "elapsed_ms": 38.23449998162687
     },
     {
       "case_id": "crop_wheat_no_hint",
@@ -874,7 +874,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 44.5692999928724
+      "elapsed_ms": 39.179000013973564
     },
     {
       "case_id": "crop_maize_no_hint",
@@ -899,7 +899,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 47.91920000570826
+      "elapsed_ms": 41.54599999310449
     },
     {
       "case_id": "crop_tomato_no_hint",
@@ -923,7 +923,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 45.597200019983575
+      "elapsed_ms": 38.531500002136454
     },
     {
       "case_id": "crop_potato_no_hint",
@@ -948,7 +948,7 @@
       "organ_correct": true,
       "crop_correct": false,
       "symptom_correct": true,
-      "elapsed_ms": 48.60959999496117
+      "elapsed_ms": 39.82649999670684
     },
     {
       "case_id": "crop_olive_no_hint",
@@ -973,7 +973,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 44.79220000212081
+      "elapsed_ms": 39.706100011244416
     },
     {
       "case_id": "crop_citrus_no_hint",
@@ -985,7 +985,7 @@
       "gt_symptom": "healthy",
       "pred_scene": "field",
       "pred_organ": "canopy",
-      "pred_crop": "citrus",
+      "pred_crop": "maize",
       "pred_symptom": "healthy",
       "num_packets": 3,
       "num_variables": 3,
@@ -996,9 +996,9 @@
       ],
       "scene_correct": true,
       "organ_correct": true,
-      "crop_correct": true,
+      "crop_correct": false,
       "symptom_correct": true,
-      "elapsed_ms": 44.94560000603087
+      "elapsed_ms": 39.43600002094172
     },
     {
       "case_id": "crop_wheat_hint_maize",
@@ -1023,7 +1023,7 @@
       "organ_correct": true,
       "crop_correct": false,
       "symptom_correct": true,
-      "elapsed_ms": 40.52760000922717
+      "elapsed_ms": 41.43759998260066
     },
     {
       "case_id": "crop_maize_hint_wheat",
@@ -1048,7 +1048,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 41.24590000719763
+      "elapsed_ms": 48.28379998798482
     },
     {
       "case_id": "crop_generic_hint_wheat",
@@ -1073,7 +1073,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 40.66759999841452
+      "elapsed_ms": 43.06920000817627
     },
     {
       "case_id": "symptom_rust_wheat",
@@ -1098,7 +1098,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 38.673699978971854
+      "elapsed_ms": 43.494899990037084
     },
     {
       "case_id": "symptom_wilt_tomato",
@@ -1123,7 +1123,7 @@
       "organ_correct": true,
       "crop_correct": false,
       "symptom_correct": true,
-      "elapsed_ms": 41.41929998877458
+      "elapsed_ms": 46.09849999542348
     },
     {
       "case_id": "symptom_insect_maize",
@@ -1148,7 +1148,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 40.03470001043752
+      "elapsed_ms": 43.4524999873247
     },
     {
       "case_id": "edge_brown_canopy",
@@ -1158,7 +1158,7 @@
       "gt_organ": "canopy",
       "gt_crop": "wheat",
       "gt_symptom": "healthy",
-      "pred_scene": "crop_closeup",
+      "pred_scene": "field",
       "pred_organ": "canopy",
       "pred_crop": "wheat",
       "pred_symptom": "healthy",
@@ -1173,7 +1173,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 39.61340000387281
+      "elapsed_ms": 45.06770000443794
     },
     {
       "case_id": "edge_seedling_closeup",
@@ -1198,7 +1198,7 @@
       "organ_correct": true,
       "crop_correct": true,
       "symptom_correct": true,
-      "elapsed_ms": 39.09770000609569
+      "elapsed_ms": 43.54179999791086
     }
   ]
 }

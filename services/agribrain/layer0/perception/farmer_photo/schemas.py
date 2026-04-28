@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..common.contracts import (
+from layer0.perception.common.contracts import (
     PerceptionEngineInput,
     PerceptionEngineOutput,
     PerceptionEngineFamily,

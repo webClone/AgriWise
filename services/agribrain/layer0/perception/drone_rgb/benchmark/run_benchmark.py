@@ -8,19 +8,18 @@ Evaluates:
 """
 
 import sys
-import os
 
-_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", ".."))
-if _root not in sys.path:
-    sys.path.insert(0, _root)
-
-from services.agribrain.layer0.perception.drone_rgb.engine import DroneRGBEngine
-from services.agribrain.layer0.perception.drone_rgb.schemas import DroneRGBInput
-from services.agribrain.drone_mission.schemas import MissionIntent, FlightMode
-from services.agribrain.drone_mission.planner import DroneMissionPlanner
-from services.agribrain.drone_mission.coverage_patterns import compute_execution_quality
-from services.agribrain.drone_mission.capability_profiles import get_profile
-from services.agribrain.layer0.perception.drone_rgb.benchmark.cases import BENCHMARK_CASES, _generate_synthetic_ortho
+from layer0.perception.drone_rgb.engine import DroneRGBEngine
+from layer0.perception.drone_rgb.schemas import DroneRGBInput
+from drone_mission.schemas import MissionIntent, FlightMode
+from drone_mission.planner import DroneMissionPlanner
+from drone_mission.coverage_patterns import compute_execution_quality
+from drone_mission.capability_profiles import get_profile
+from layer0.perception.drone_rgb.benchmark.cases import BENCHMARK_CASES, _generate_synthetic_ortho
+from layer0.perception.common.benchmark_contract import (
+    BenchmarkGateResult, finalize, result_to_dict,
+    exit_code_from_result, summarize_failures,
+)
 
 # ============================================================================
 # Pass/Fail Thresholds
@@ -46,9 +45,9 @@ THRESHOLDS = {
 
 def _pass_fail(value: float, threshold: float, higher_is_better: bool) -> str:
     if higher_is_better:
-        return "✅" if value >= threshold else "❌"
+        return "[PASS]" if value >= threshold else "[FAIL]"
     else:
-        return "✅" if value <= threshold else "❌"
+        return "[PASS]" if value <= threshold else "[FAIL]"
 
 
 def run_benchmark():
@@ -251,243 +250,45 @@ def run_benchmark():
 
     print("\n" + "=" * 60)
 
-    # ====================================================================
-    # Phase B: Mission Intelligence Benchmark
-    # ====================================================================
-    _run_autonomy_benchmark()
+    # --- Aggregate metric enforcement via shared contract ---
+    import json, os
+    gate = BenchmarkGateResult(engine="drone_rgb")
 
-
-def _run_autonomy_benchmark():
-    """Benchmark Phase B mission intelligence features."""
-    from datetime import datetime, timedelta
-    from services.agribrain.drone_mission.anomaly_bridge import AnomalyReport, MissionSuggestionEngine
-    from services.agribrain.drone_mission.mission_history import MissionRecord, MissionHistory
-    from services.agribrain.drone_mission.temporal_diff import TemporalDiffEngine
-    from services.agribrain.drone_mission.refly_planner import ReflyPlanner
-    from services.agribrain.drone_mission.hotspot_summarizer import HotspotSummarizer
-    from services.agribrain.layer0.observation_packet import ObservationPacket, ObservationSource, ObservationType, QAMetadata
-    from services.agribrain.layer0.perception.drone_rgb.benchmark.cases import STANDARD_POLYGON
-
-    print("\n" + "=" * 60)
-    print(" PHASE B: MISSION INTELLIGENCE BENCHMARK")
-    print("=" * 60)
-
-    NOW = datetime(2026, 4, 24, 12, 0, 0)
-    suggestion_engine = MissionSuggestionEngine()
-    temporal_engine = TemporalDiffEngine()
-    refly_planner = ReflyPlanner()
-    hotspot_summarizer = HotspotSummarizer()
-
-    # --- Track 1: Auto-suggestion accuracy ---
-    print("\n[Track 1] Auto-Suggestion Accuracy")
-    suggestion_cases = [
-        ("vegetation_drop",    0.7, 0.8, False, "row_audit"),
-        ("weed_pressure_high", 0.6, 0.7, False, "weed_map"),
-        ("disease_suspected",  0.8, 0.9, False, "concern_zone_command"),
-        ("canopy_decline",     0.5, 0.6, False, "full_plot_map"),
-        ("orchard_gap",        0.7, 0.8, False, "orchard_audit"),
-        ("vegetation_drop",    0.1, 0.8, True,  "row_audit"),       # Low severity → suppress
-        ("disease_suspected",  0.8, 0.2, True,  "concern_zone_command"), # Low confidence → suppress
+    metric_checks = [
+        ("row_azimuth_mae", row_errors, THRESHOLDS["row_azimuth_mae_deg"], False),
+        ("weed_pressure_mae", weed_errors, THRESHOLDS["weed_pressure_mae"], False),
+        ("coverage_completeness", coverage_scores, THRESHOLDS["coverage_completeness"], True),
+        ("outside_waste", waste_scores, THRESHOLDS["outside_waste"], False),
+        ("overlap_compliance", overlap_scores, THRESHOLDS["overlap_compliance"], True),
     ]
-    suggest_correct = 0
-    suggest_total = len(suggestion_cases)
 
-    for anomaly_type, severity, confidence, expect_suppressed, expect_mission in suggestion_cases:
-        report = AnomalyReport(
-            source="satellite_rgb", plot_id="bench",
-            anomaly_type=anomaly_type, severity=severity, confidence=confidence,
-            polygon_geojson=STANDARD_POLYGON, timestamp=NOW,
-        )
-        suggestion = suggestion_engine.evaluate(report)
+    for name, values, threshold, higher_better in metric_checks:
+        if not values:
+            continue
+        avg = sum(values) / len(values)
+        if higher_better:
+            passed = avg >= threshold
+        else:
+            passed = avg <= threshold
+        gate.scorecard[name] = {"value": round(avg, 4), "threshold": threshold, "passed": passed}
+        if not passed:
+            gate.aggregate_failures += 1
+            gate.failing_metrics.append(name)
 
-        type_correct = suggestion.intent.mission_type.value == expect_mission
-        suppress_correct = suggestion.suppressed == expect_suppressed
-        both = type_correct and suppress_correct
+    gate = finalize(gate)
 
-        status = "✓" if both else "✗"
-        print(f"  {status} {anomaly_type} (sev={severity}, conf={confidence}) "
-              f"→ {suggestion.intent.mission_type.value} "
-              f"{'[SUPPRESSED]' if suggestion.suppressed else '[ACTIVE]'}")
+    # Save gate artifact
+    out_dir = os.path.dirname(os.path.abspath(__file__))
+    gate_dict = result_to_dict(gate)
+    gate_path = os.path.join(out_dir, "benchmark_gate_result.json")
+    with open(gate_path, "w") as f:
+        json.dump(gate_dict, f, indent=2)
+    print(f"\n  Gate artifact saved to: {gate_path}")
 
-        if both:
-            suggest_correct += 1
-
-    # Recency suppression case
-    report_recent = AnomalyReport(
-        source="satellite_rgb", plot_id="bench",
-        anomaly_type="vegetation_drop", severity=0.7, confidence=0.8,
-        polygon_geojson=STANDARD_POLYGON, timestamp=NOW,
-    )
-    recent_ts = {"bench:vegetation_drop:": NOW - timedelta(hours=12)}
-    suggestion_recent = suggestion_engine.evaluate(report_recent, recent_ts)
-    recency_ok = suggestion_recent.suppressed
-    suggest_total += 1
-    if recency_ok:
-        suggest_correct += 1
-    print(f"  {'✓' if recency_ok else '✗'} Recency gate (12h ago) → "
-          f"{'[SUPPRESSED]' if suggestion_recent.suppressed else '[ACTIVE]'}")
-
-    suggest_accuracy = suggest_correct / suggest_total
-    pf = "✅" if suggest_accuracy >= 0.80 else "❌"
-    print(f"  {pf} Auto-suggestion accuracy: {suggest_accuracy:.0%} ({suggest_correct}/{suggest_total})")
-
-    # --- Track 2: Temporal direction accuracy ---
-    print("\n[Track 2] Temporal Direction Accuracy")
-    temporal_cases = [
-        # (metric, prev_val, cur_val, expect_direction)
-        ("weed_pressure", 0.05, 0.25, "worsened"),
-        ("weed_pressure", 0.25, 0.05, "improved"),
-        ("canopy_cover", 0.50, 0.80, "improved"),
-        ("canopy_cover", 0.80, 0.50, "worsened"),
-        ("tree_count", 16, 14, "worsened"),
-        ("canopy_cover", 0.70, 0.71, "stable"),
-    ]
-    temporal_correct = 0
-    temporal_total = len(temporal_cases)
-
-    for metric, prev_val, cur_val, expect_dir in temporal_cases:
-        prev = MissionRecord(mission_id="prev", plot_id="p1", timestamp=NOW - timedelta(days=7))
-        curr = MissionRecord(mission_id="curr", plot_id="p1", timestamp=NOW)
-        setattr(prev, metric, prev_val)
-        setattr(curr, metric, cur_val)
-
-        changes = temporal_engine.compare(curr, prev)
-        change = next((c for c in changes if c.metric == metric), None)
-        got_dir = change.direction if change else "error"
-        ok = got_dir == expect_dir
-        status = "✓" if ok else "✗"
-        print(f"  {status} {metric}: {prev_val} → {cur_val} = {got_dir} (expected {expect_dir})")
-        if ok:
-            temporal_correct += 1
-
-    temporal_accuracy = temporal_correct / temporal_total
-    pf = "✅" if temporal_accuracy >= 0.90 else "❌"
-    print(f"  {pf} Temporal direction accuracy: {temporal_accuracy:.0%} ({temporal_correct}/{temporal_total})")
-
-    # --- Track 3: Refly targeting precision ---
-    print("\n[Track 3] Refly Targeting Precision")
-    refly_cases = [
-        # (qa, coverage, expect_refly, desc)
-        (0.9, 0.60, True,  "Low coverage → refly"),
-        (0.3, 0.95, True,  "Low QA → refly"),
-        (0.95, 0.98, False, "Full coverage + good QA → no refly"),
-    ]
-    refly_correct = 0
-    refly_total = len(refly_cases)
-
-    for qa, cov, expect_refly, desc in refly_cases:
-        zones = refly_planner.identify_weak_zones(
-            qa_score=qa, coverage_completeness=cov,
-            plot_polygon=STANDARD_POLYGON,
-        )
-        plan = refly_planner.plan_refly(zones, STANDARD_POLYGON, plot_id="bench")
-        got_refly = plan is not None
-        ok = got_refly == expect_refly
-        status = "✓" if ok else "✗"
-
-        # Check zone targeting
-        zone_info = ""
-        if got_refly and zones:
-            has_bbox = any(z.zone_bbox for z in zones)
-            wps = len(plan.waypoints) if plan else 0
-            zone_info = f" [zones={len(zones)}, bbox={'yes' if has_bbox else 'no'}, wps={wps}]"
-
-        print(f"  {status} {desc}: refly={'yes' if got_refly else 'no'}{zone_info}")
-        if ok:
-            refly_correct += 1
-
-    # Sub-polygon targeting test: gap map with one quadrant of gaps
-    gap_grid = [[0.0] * 20 for _ in range(20)]
-    # Fill top-left quadrant with gaps
-    for y in range(10):
-        for x in range(10):
-            gap_grid[y][x] = 1.0
-
-    from services.agribrain.layer0.perception.drone_rgb.schemas import DroneStructuralMap
-    gap_smap = DroneStructuralMap(map_type="stand_gaps", resolution_cm=10.0, data_grid=gap_grid)
-    zones_targeted = refly_planner.identify_weak_zones(
-        qa_score=0.9, coverage_completeness=0.95,
-        spatial_maps=[gap_smap], plot_polygon=STANDARD_POLYGON,
-    )
-    has_targeted_zones = len(zones_targeted) > 0
-    has_bbox = any(z.zone_bbox for z in zones_targeted)
-    not_all_quadrants = len(zones_targeted) < 4  # Should only flag the gappy quadrant
-
-    refly_total += 1
-    targeted_ok = has_targeted_zones and has_bbox and not_all_quadrants
-    if targeted_ok:
-        refly_correct += 1
-    status = "✓" if targeted_ok else "✗"
-    print(f"  {status} Quadrant gap detection: zones={len(zones_targeted)}, "
-          f"bbox={'yes' if has_bbox else 'no'}, targeted={not_all_quadrants}")
-
-    refly_precision = refly_correct / refly_total
-    pf = "✅" if refly_precision >= 0.70 else "❌"
-    print(f"  {pf} Refly precision: {refly_precision:.0%} ({refly_correct}/{refly_total})")
-
-    # --- Track 4: Hotspot consensus accuracy ---
-    print("\n[Track 4] Hotspot Consensus Accuracy")
-    def _pkt(symptom, qa_score=0.8):
-        pkt = ObservationPacket(
-            source=ObservationSource.FARMER_PHOTO,
-            obs_type=ObservationType.IMAGE,
-            payload={"top_symptom": symptom},
-        )
-        pkt.qa = QAMetadata(scene_score=qa_score)
-        return pkt
-
-    hotspot_cases = [
-        # (packets, expect_symptom, expect_consensus, desc)
-        (
-            [_pkt("chlorosis"), _pkt("chlorosis"), _pkt("chlorosis")],
-            "chlorosis", "unanimous", "3/3 chlorosis → unanimous"
-        ),
-        (
-            [_pkt("chlorosis"), _pkt("chlorosis"), _pkt("necrosis")],
-            "chlorosis", "majority", "2/3 chlorosis → majority"
-        ),
-        (
-            [_pkt("chlorosis", 0.5), _pkt("chlorosis", 0.5),
-             _pkt("necrosis", 0.9), _pkt("healthy", 0.4)],
-            "necrosis", "mixed_evidence", "Best frame disagrees → mixed"
-        ),
-        (
-            [_pkt("chlorosis", 0.7)] * 4 + [_pkt("necrosis", 0.9)],
-            "chlorosis", "majority", "4/5 majority holds over best frame"
-        ),
-    ]
-    hotspot_correct = 0
-    hotspot_total = len(hotspot_cases)
-
-    for packets, expect_sym, expect_cons, desc in hotspot_cases:
-        summary = hotspot_summarizer.summarize(packets, "zone_bench", "m_bench")
-        sym_ok = summary.top_symptom == expect_sym
-        cons_ok = summary.consensus_type == expect_cons
-        ok = sym_ok and cons_ok
-        status = "✓" if ok else "✗"
-        print(f"  {status} {desc}: got {summary.top_symptom}/{summary.consensus_type}")
-        if ok:
-            hotspot_correct += 1
-
-    hotspot_accuracy = hotspot_correct / hotspot_total
-    pf = "✅" if hotspot_accuracy >= 0.80 else "❌"
-    print(f"  {pf} Hotspot consensus accuracy: {hotspot_accuracy:.0%} ({hotspot_correct}/{hotspot_total})")
-
-    # --- Phase B Summary ---
-    print("\n" + "-" * 60)
-    print(" PHASE B SCORECARD")
-    print("-" * 60)
-    pf_s = "✅" if suggest_accuracy >= 0.80 else "❌"
-    pf_t = "✅" if temporal_accuracy >= 0.90 else "❌"
-    pf_r = "✅" if refly_precision >= 0.70 else "❌"
-    pf_h = "✅" if hotspot_accuracy >= 0.80 else "❌"
-    print(f"  {pf_s} [Autonomy]  Suggestion Accuracy: {suggest_accuracy:.0%}      (Target >= 80%)")
-    print(f"  {pf_t} [Autonomy]  Temporal Direction:   {temporal_accuracy:.0%}      (Target >= 90%)")
-    print(f"  {pf_r} [Autonomy]  Refly Precision:      {refly_precision:.0%}      (Target >= 70%)")
-    print(f"  {pf_h} [Autonomy]  Hotspot Consensus:    {hotspot_accuracy:.0%}      (Target >= 80%)")
-    print("=" * 60)
+    return gate
 
 
 if __name__ == "__main__":
-    run_benchmark()
-
+    gate_result = run_benchmark()
+    print(f"\n{summarize_failures(gate_result)}")
+    sys.exit(exit_code_from_result(gate_result))

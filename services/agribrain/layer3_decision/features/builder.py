@@ -2,10 +2,10 @@
 from dataclasses import dataclass, field
 from typing import Dict, Any, List
 
-from services.agribrain.layer1_fusion.schema import FieldTensor, FieldTensorChannels
-from services.agribrain.layer2_veg_int.schema import VegIntOutput, PhenologyStage
+from layer1_fusion.schema import FieldTensor, FieldTensorChannels
+from layer2_veg_int.schema import VegIntOutput, PhenologyStage
     # ... (imports)
-from services.agribrain.layer3_decision.schema import PlotContext, Driver
+from layer3_decision.schema import PlotContext, Driver
 
 @dataclass
 class DecisionFeatures:

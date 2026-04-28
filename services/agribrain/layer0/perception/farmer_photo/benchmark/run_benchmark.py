@@ -25,17 +25,16 @@ from collections import defaultdict
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple, Any
 
-# Ensure project root is on path
-_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..", ".."))
-if _root not in sys.path:
-    sys.path.insert(0, _root)
-
-from services.agribrain.layer0.perception.farmer_photo.schemas import (
+from layer0.perception.farmer_photo.schemas import (
     FarmerPhotoEngineInput, SceneClass, OrganClass, SymptomClass,
 )
-from services.agribrain.layer0.perception.farmer_photo.engine import FarmerPhotoEngine
-from services.agribrain.layer0.perception.farmer_photo.benchmark.cases import (
+from layer0.perception.farmer_photo.engine import FarmerPhotoEngine
+from layer0.perception.farmer_photo.benchmark.cases import (
     BENCHMARK_CASES, BenchmarkCase,
+)
+from layer0.perception.common.benchmark_contract import (
+    BenchmarkGateResult, finalize, result_to_dict,
+    exit_code_from_result, summarize_failures, validate_case_metadata,
 )
 
 
@@ -54,7 +53,7 @@ def _generate_synthetic_pixels(
       - Per-pixel Gaussian noise from rgb_noise_std
       - Values clamped to [0, 255]
     
-    This exercises the full _from_synthetic → _derive_color_features pipeline,
+    This exercises the full _from_synthetic -> _derive_color_features pipeline,
     which computes per-pixel brightness, saturation, and channel ratios from
     actual pixel values — not pre-summarized stats.
     """
@@ -402,35 +401,35 @@ def _print_scorecard(scorecard: Dict[str, Any], results: List[BenchmarkResult]):
     
     # Non-field rejection detail
     nf = scorecard["non_field_rejection"]
-    print(f"\n{'─' * 72}")
+    print(f"\n{'-' * 72}")
     print(f"  NON-FIELD REJECTION")
     print(f"    Precision: {nf['precision']:.1%}  Recall: {nf['recall']:.1%}  F1: {nf['f1']:.1%}")
     print(f"    TP={nf['true_positives']}  FP={nf['false_positives']}  FN={nf['false_negatives']}  TN={nf['true_negatives']}")
     
     # Organ per-class
-    print(f"\n{'─' * 72}")
+    print(f"\n{'-' * 72}")
     print(f"  ORGAN ACCURACY (per class)")
     for cls, data in scorecard["organ_per_class"].items():
         print(f"    {cls:12s}  {data['correct']}/{data['total']}  ({data['accuracy']:.0%})")
     
     # Symptom per-class
-    print(f"\n{'─' * 72}")
+    print(f"\n{'-' * 72}")
     print(f"  SYMPTOM F1 (per class)         Prec    Rec     F1")
     for cls, data in scorecard["symptom_f1"]["per_class"].items():
         print(f"    {cls:16s}         {data['precision']:.2f}    {data['recall']:.2f}    {data['f1']:.2f}")
     
     # Soil leak detail
     sl = scorecard["soil_leak_rate"]
-    print(f"\n{'─' * 72}")
+    print(f"\n{'-' * 72}")
     print(f"  SOIL LEAK RATE")
     print(f"    Canopy leaks: {sl['canopy_leaks']}/{sl['total_soil']}")
     print(f"    Phenology leaks: {sl['phenology_leaks']}/{sl['total_soil']}")
     
     # Detailed per-case results
-    print(f"\n{'─' * 72}")
+    print(f"\n{'-' * 72}")
     print(f"  DETAILED RESULTS")
     print(f"  {'Case ID':<24s} {'GT Scene':<12s} {'Pred Scene':<12s} {'GT Organ':<10s} {'Pred Organ':<10s} {'Symptom':<12s} {'OK?'}")
-    print(f"  {'─'*24} {'─'*12} {'─'*12} {'─'*10} {'─'*10} {'─'*12} {'─'*4}")
+    print(f"  {'-'*24} {'-'*12} {'-'*12} {'-'*10} {'-'*10} {'-'*12} {'-'*4}")
     for r in results:
         gt_s = r.gt_scene or "-"
         pr_s = r.pred_scene or "-"
@@ -438,12 +437,12 @@ def _print_scorecard(scorecard: Dict[str, Any], results: List[BenchmarkResult]):
         pr_o = r.pred_organ or "-"
         gt_sym = r.gt_symptom or "-"
         pr_sym = r.pred_symptom or "-"
-        ok = "✓" if (r.scene_correct and r.organ_correct and r.symptom_correct) else "✗"
+        ok = "PASS" if (r.scene_correct and r.organ_correct and r.symptom_correct) else "FAIL"
         sym_display = f"{gt_sym}/{pr_sym}"
         print(f"  {r.case_id:<24s} {gt_s:<12s} {pr_s:<12s} {gt_o:<10s} {pr_o:<10s} {sym_display:<12s} {ok}")
     
     # --- Per-slice scorecard ---
-    print(f"\n{'─' * 72}")
+    print(f"\n{'-' * 72}")
     print(f"  PER-SLICE SCORECARD")
     slices = defaultdict(list)
     for r in results:
@@ -458,7 +457,7 @@ def _print_scorecard(scorecard: Dict[str, Any], results: List[BenchmarkResult]):
         print(f"    {slice_name:<20s}  n={n:2d}  scene={scene_ok}/{n}  organ={organ_ok}/{n}  symptom={symptom_ok}/{n}")
     
     # --- Scene confusion table ---
-    print(f"\n{'─' * 72}")
+    print(f"\n{'-' * 72}")
     print(f"  SCENE CONFUSION TABLE (rows=GT, cols=Pred)")
     scene_classes = sorted(set(
         [r.gt_scene for r in results] + [r.pred_scene for r in results]
@@ -476,7 +475,7 @@ def _print_scorecard(scorecard: Dict[str, Any], results: List[BenchmarkResult]):
     # --- Organ confusion table ---
     field_with_organ = [r for r in results if r.gt_organ is not None]
     if field_with_organ:
-        print(f"\n{'─' * 72}")
+        print(f"\n{'-' * 72}")
         print(f"  ORGAN CONFUSION TABLE (rows=GT, cols=Pred)")
         organ_classes = sorted(set(
             [r.gt_organ for r in field_with_organ if r.gt_organ] +
@@ -495,7 +494,7 @@ def _print_scorecard(scorecard: Dict[str, Any], results: List[BenchmarkResult]):
     # --- Symptom confusion table ---
     field_with_symptom = [r for r in results if r.gt_symptom is not None]
     if field_with_symptom:
-        print(f"\n{'─' * 72}")
+        print(f"\n{'-' * 72}")
         print(f"  SYMPTOM CONFUSION TABLE (rows=GT, cols=Pred)")
         symptom_classes = sorted(set(
             [r.gt_symptom for r in field_with_symptom if r.gt_symptom] +
@@ -530,11 +529,16 @@ def run_benchmark():
     engine = FarmerPhotoEngine()
     
     print(f"Running {len(BENCHMARK_CASES)} benchmark cases...")
+
+    # Validate case metadata: reject critical + soft_fail combination
+    for case in BENCHMARK_CASES:
+        validate_case_metadata(case.case_id, case.critical_case, case.allowed_soft_fail)
+
     results = []
     for i, case in enumerate(BENCHMARK_CASES, 1):
         r = _run_single_case(engine, case)
         results.append(r)
-        status = "✓" if r.scene_correct else "✗"
+        status = "PASS" if r.scene_correct else "FAIL"
         print(f"  [{i:2d}/{len(BENCHMARK_CASES)}] {status} {case.case_id}")
     
     # Compute scorecard
@@ -551,10 +555,63 @@ def run_benchmark():
             "scorecard": scorecard,
             "results": [asdict(r) for r in results],
         }, f, indent=2)
-    print(f"  Results saved to: {out_path}")
-    
-    return scorecard, results
+    # --- Build gate result using shared contract ---
+    FP_THRESHOLDS = {
+        "scene_accuracy": (0.90, True),
+        "non_field_f1": (0.80, True),
+        "organ_accuracy": (0.70, True),
+        "junk_fp_rate": (0.10, False),
+        "soil_agronomic_leaks": (0, False),
+    }
+
+    gate = BenchmarkGateResult(engine="farmer_photo")
+    s = scorecard["summary"]
+
+    for name, (threshold, higher_better) in FP_THRESHOLDS.items():
+        value = s[name]
+        if higher_better:
+            passed = value >= threshold
+        else:
+            passed = value <= threshold
+        gate.scorecard[name] = {"value": value, "threshold": threshold, "passed": passed}
+        if not passed:
+            gate.aggregate_failures += 1
+            gate.failing_metrics.append(name)
+
+    # Case-level evaluation
+    for r in results:
+        ok = r.scene_correct and r.organ_correct and r.symptom_correct
+        case_def = next((c for c in BENCHMARK_CASES if c.case_id == r.case_id), None)
+        is_critical = getattr(case_def, 'critical_case', True) if case_def else True
+        allowed_soft_fail = getattr(case_def, 'allowed_soft_fail', False) if case_def else False
+
+        gate.case_results.append({
+            "case_id": r.case_id,
+            "passed": ok,
+            "critical": is_critical,
+            "soft_fail": allowed_soft_fail,
+        })
+
+        if not ok:
+            if allowed_soft_fail:
+                gate.soft_failures += 1
+            elif is_critical:
+                gate.critical_failures += 1
+                gate.failing_cases.append(r.case_id)
+
+    gate = finalize(gate)
+
+    # Save gate artifact
+    gate_dict = result_to_dict(gate)
+    gate_path = os.path.join(out_dir, "benchmark_gate_result.json")
+    with open(gate_path, "w") as f:
+        json.dump(gate_dict, f, indent=2)
+    print(f"  Gate artifact saved to: {gate_path}")
+
+    return scorecard, results, gate
 
 
 if __name__ == "__main__":
-    run_benchmark()
+    scorecard, results, gate_result = run_benchmark()
+    print(f"\n{summarize_failures(gate_result)}")
+    sys.exit(exit_code_from_result(gate_result))

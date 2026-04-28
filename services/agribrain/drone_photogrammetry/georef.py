@@ -8,7 +8,7 @@ outside-polygon waste, achieved GSD, overlap compliance.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 import logging
 import math
 
@@ -34,6 +34,16 @@ class GeorefResult:
     outside_polygon_waste: float = 0.0    # Fraction of mosaic outside plot
     achieved_overlap: float = 0.0         # Mean pairwise overlap
     overlap_compliance: float = 0.0       # Fraction meeting target overlap
+    
+    # V3: Separate coverage metrics
+    coverage_continuity: float = 1.0      # 1 = continuous, 0 = fragmented
+    hole_cluster_risk: float = 0.0        # Risk from hole clusters
+    
+    # V3: Per-zone georeg confidence (quadrants)
+    zone_confidences: Dict[str, float] = field(default_factory=dict)
+    
+    # V3: Task-specific usability flags
+    task_usability: Dict[str, bool] = field(default_factory=dict)
     
     # Clipped pixel data (for benchmark)
     clipped_pixels: dict = field(default_factory=dict)
@@ -218,3 +228,94 @@ class Georeferencer:
                     outside_covered += 1
         
         return outside_covered / max(total_covered, 1)
+    
+    def _compute_v3_metrics(
+        self,
+        result: GeorefResult,
+        mosaic: MosaicResult,
+        seam=None,
+    ) -> None:
+        """V3: Compute additional georef quality products."""
+        # Hole cluster risk
+        if hasattr(mosaic, 'recoverable_holes_fraction'):
+            result.hole_cluster_risk = min(
+                1.0,
+                mosaic.holes_fraction * 2.0 +
+                getattr(mosaic, 'unrecoverable_holes_fraction', 0) * 3.0
+            )
+            result.coverage_continuity = max(
+                0.0, 1.0 - result.hole_cluster_risk
+            )
+        
+        # Per-zone confidence (4 quadrants)
+        result.zone_confidences = self._compute_zone_confidences(
+            mosaic, result
+        )
+        
+        # Task-specific usability
+        result.task_usability = self._compute_task_usability(
+            result, mosaic, seam
+        )
+    
+    def _compute_zone_confidences(
+        self,
+        mosaic: MosaicResult,
+        result: GeorefResult,
+    ) -> Dict[str, float]:
+        """V3: Compute per-quadrant georeg confidence."""
+        zones = {"NW": 0.0, "NE": 0.0, "SW": 0.0, "SE": 0.0}
+        
+        if not mosaic.contribution_map or mosaic.height_px < 2 or mosaic.width_px < 2:
+            return {k: result.coverage_completeness for k in zones}
+        
+        h, w = mosaic.height_px, mosaic.width_px
+        mid_y, mid_x = h // 2, w // 2
+        contrib = mosaic.contribution_map
+        holes = mosaic.hole_map if mosaic.hole_map else [[False] * w for _ in range(h)]
+        
+        quadrants = {
+            "NW": (0, mid_y, 0, mid_x),
+            "NE": (0, mid_y, mid_x, w),
+            "SW": (mid_y, h, 0, mid_x),
+            "SE": (mid_y, h, mid_x, w),
+        }
+        
+        for name, (y0, y1, x0, x1) in quadrants.items():
+            total = max((y1 - y0) * (x1 - x0), 1)
+            covered = 0
+            for y in range(y0, min(y1, len(contrib))):
+                for x in range(x0, min(x1, len(contrib[0]) if contrib else 0)):
+                    if not holes[y][x]:
+                        covered += 1
+            zones[name] = covered / total
+        
+        return zones
+    
+    def _compute_task_usability(
+        self,
+        result: GeorefResult,
+        mosaic: MosaicResult,
+        seam,
+    ) -> Dict[str, bool]:
+        """V3: Task-specific usability flags."""
+        seam_row_risk = 0.0
+        if seam and hasattr(seam, 'row_discontinuity_risk'):
+            seam_row_risk = seam.row_discontinuity_risk
+        
+        return {
+            "structural_analysis": (
+                result.coverage_completeness > 0.80
+                and mosaic.holes_fraction < 0.10
+            ),
+            "counting": (
+                result.coverage_completeness > 0.90
+                and result.ground_resolution_cm < 3.0
+            ),
+            "row_analysis": (
+                result.coverage_completeness > 0.70
+                and seam_row_risk < 0.30
+            ),
+            "weed_map": (
+                result.coverage_completeness > 0.60
+            ),
+        }

@@ -1,0 +1,37 @@
+{
+  "engine": "drone_rgb",
+  "aggregate_failures": 0,
+  "critical_failures": 0,
+  "soft_failures": 0,
+  "gate_passed": true,
+  "failing_metrics": [],
+  "failing_cases": [],
+  "scorecard": {
+    "row_azimuth_mae": {
+      "value": 0.0833,
+      "threshold": 5.0,
+      "passed": true
+    },
+    "weed_pressure_mae": {
+      "value": 0.0041,
+      "threshold": 0.05,
+      "passed": true
+    },
+    "coverage_completeness": {
+      "value": 0.96,
+      "threshold": 0.8,
+      "passed": true
+    },
+    "outside_waste": {
+      "value": 0.5217,
+      "threshold": 0.55,
+      "passed": true
+    },
+    "overlap_compliance": {
+      "value": 0.875,
+      "threshold": 0.5,
+      "passed": true
+    }
+  },
+  "case_results": []
+}

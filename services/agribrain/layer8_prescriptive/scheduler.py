@@ -13,7 +13,7 @@ Output: List[ScheduledAction] with ScheduleStatus (CONFIRMED / TENTATIVE / BLOCK
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
 
-from services.agribrain.layer8_prescriptive.schema import (
+from layer8_prescriptive.schema import (
     ActionCard, ActionType, ScheduledAction, ScheduleStatus,
 )
 

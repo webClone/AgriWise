@@ -5,17 +5,17 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from dataclasses import asdict
 
-from services.agribrain.layer6_exec.schema import (
+from layer6_exec.schema import (
     Layer6Input, Layer6Output, RunMeta, QualityMetricsL6, AuditSnapshot,
     ExecutionState, TaskStatus, OperationalContext
 )
-from services.agribrain.layer3_decision.schema import Driver, DegradationMode, ExecutionPlan
+from layer3_decision.schema import Driver, DegradationMode, ExecutionPlan
 
 # Engines
-from services.agribrain.layer6_exec.evidence.normalizer import normalize_evidence_batch
-from services.agribrain.layer6_exec.execution.dag_runner import update_execution_state
-from services.agribrain.layer6_exec.outcomes.metrics import compute_outcomes
-from services.agribrain.layer6_exec.governance.calibration import propose_calibration
+from layer6_exec.evidence.normalizer import normalize_evidence_batch
+from layer6_exec.execution.dag_runner import update_execution_state
+from layer6_exec.outcomes.metrics import compute_outcomes
+from layer6_exec.governance.calibration import propose_calibration
 
 CODE_VERSION = "6.0.0"
 
@@ -126,8 +126,8 @@ def run_layer6(inputs: Layer6Input) -> Layer6Output:
         audit=audit
     )
 
-from services.agribrain.orchestrator_v2.schema import OrchestratorInput
-from services.agribrain.layer5_bio.schema import BioThreatIntelligenceOutput
+from orchestrator_v2.schema import OrchestratorInput
+from layer5_bio.schema import BioThreatIntelligenceOutput
 
 def run_layer6_exec(inputs: OrchestratorInput, *args) -> Layer6Output:
     # DEBUG: Inspect args matching

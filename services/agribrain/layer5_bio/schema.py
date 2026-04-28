@@ -3,12 +3,12 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from enum import Enum
 
-from services.agribrain.layer1_fusion.schema import FieldTensor
-from services.agribrain.layer2_veg_int.schema import VegIntOutput
-from services.agribrain.layer3_decision.schema import (
+from layer1_fusion.schema import FieldTensor
+from layer2_veg_int.schema import VegIntOutput
+from layer3_decision.schema import (
     Driver, DegradationMode, RiskIfWrong, TaskNode, ExecutionPlan, PlotContext, DecisionOutput
 )
-from services.agribrain.layer4_nutrients.schema import NutrientIntelligenceOutput
+from layer4_nutrients.schema import NutrientIntelligenceOutput
 
 # --- Enums (Locked) ---
 

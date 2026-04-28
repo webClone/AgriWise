@@ -13,7 +13,7 @@ Returns:
   - Refined values per structural object (conservative redistribution)
 """
 from typing import List, Dict, Any
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     SurfaceArtifact, MicroObjectArtifact, ZoneArtifact,
 )
 

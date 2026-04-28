@@ -2,19 +2,19 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 
-from services.agribrain.orchestrator_v2.schema import LayerResult, OrchestratorInput, GlobalDegradation
-from services.agribrain.layer3_decision.schema import ExecutionPlan
-from services.agribrain.layer7_planning.schema import Layer7Output, CropOptionEvaluation
+from orchestrator_v2.schema import LayerResult, OrchestratorInput, GlobalDegradation
+from layer3_decision.schema import ExecutionPlan
+from layer7_planning.schema import Layer7Output, CropOptionEvaluation
 
 # 8 Engines
-from services.agribrain.layer7_planning.engines.ccl_crop_library import get_crop_profile
-from services.agribrain.layer7_planning.engines.pwe_planting_window import compute_planting_window
-from services.agribrain.layer7_planning.engines.ste_seedbed import compute_soil_workability
-from services.agribrain.layer7_planning.engines.wfe_water_feasibility import compute_water_feasibility
-from services.agribrain.layer7_planning.engines.brf_biotic_risk import compute_biotic_risk
-from services.agribrain.layer7_planning.engines.yve_yield_distribution import compute_yield_distribution
-from services.agribrain.layer7_planning.engines.eoe_economics import compute_economics
-from services.agribrain.layer7_planning.engines.ped_planner import generate_execution_plan
+from layer7_planning.engines.ccl_crop_library import get_crop_profile
+from layer7_planning.engines.pwe_planting_window import compute_planting_window
+from layer7_planning.engines.ste_seedbed import compute_soil_workability
+from layer7_planning.engines.wfe_water_feasibility import compute_water_feasibility
+from layer7_planning.engines.brf_biotic_risk import compute_biotic_risk
+from layer7_planning.engines.yve_yield_distribution import compute_yield_distribution
+from layer7_planning.engines.eoe_economics import compute_economics
+from layer7_planning.engines.ped_planner import generate_execution_plan
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def run(inputs: OrchestratorInput, l1_res: Any, l5_res: Any = None, chat_memory 
     # Engine A: CCL
     profile = get_crop_profile(target_crop)
     if not profile:
-        from services.agribrain.orchestrator_v2.schema import LayerStatus
+        from orchestrator_v2.schema import LayerStatus
         return LayerResult(
             layer_id="L7",
             status=LayerStatus.FAILED,
@@ -168,7 +168,7 @@ def run(inputs: OrchestratorInput, l1_res: Any, l5_res: Any = None, chat_memory 
     try:
         spatial_zone_stats = getattr(l1_out, "spatial_zone_stats", [])
         if spatial_zone_stats and len(spatial_zone_stats) > 1:
-            from services.agribrain.layer7_planning.zone_suitability import (
+            from layer7_planning.zone_suitability import (
                 ZoneSuitability, compute_zone_confidence, aggregate_plot_suitability,
                 generate_semantic_label, build_multi_driver_narrative,
                 build_confidence_narrative

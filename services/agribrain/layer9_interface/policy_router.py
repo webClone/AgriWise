@@ -11,7 +11,7 @@ Enforced BEFORE LLM call, not after.
 
 from typing import Dict, Any, List, Optional
 
-from services.agribrain.layer9_interface.schema import (
+from layer9_interface.schema import (
     Layer9Input, InterfaceOutput, Alert, AlertType, AlertSeverity,
     ZoneCard, Explanation, Disclaimer, Citation, RenderHint,
     BadgeColor, PhrasingMode,

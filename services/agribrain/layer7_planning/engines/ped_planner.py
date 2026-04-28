@@ -1,7 +1,7 @@
 from datetime import timezone
 from typing import List, Tuple
-from services.agribrain.layer7_planning.schema import CropOptionEvaluation, PlanningDecisionId, PlanningRecommendation
-from services.agribrain.layer3_decision.schema import TaskNode, ExecutionPlan
+from layer7_planning.schema import CropOptionEvaluation, PlanningDecisionId, PlanningRecommendation
+from layer3_decision.schema import TaskNode, ExecutionPlan
 
 def generate_execution_plan(option: CropOptionEvaluation, plot_id: str) -> Tuple[PlanningRecommendation, ExecutionPlan]:
     """

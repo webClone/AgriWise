@@ -13,7 +13,7 @@ a confident consensus.
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from ..layer0.observation_packet import ObservationPacket
+from layer0.observation_packet import ObservationPacket
 
 
 @dataclass

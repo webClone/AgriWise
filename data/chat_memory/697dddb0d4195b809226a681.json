@@ -9,7 +9,6 @@
     "forecast_rain_7d": "20mm"
   },
   "last_questions": [
-    "cant you gess the current stage of the crop from y the data you have",
     "since you have gdd and sar and sentinel data you can tell",
     "tell me about gdd in this plot",
     "is it raining today ?",
@@ -18,7 +17,8 @@
     "how is the plot doing this week ?",
     "how is the plot doing this week ?",
     "whats going on",
-    "how are you ?"
+    "how are you ?",
+    "what hapening in the plot this week"
   ],
   "last_diagnoses_shown": [],
   "asked_followups": [
@@ -50,7 +50,8 @@
     "What is the specific crop you are planning to plant?",
     "What is the specific soil type in your field?",
     "What is the specific soil type in your field?",
-    "What type of irrigation system do you use?"
+    "What type of irrigation system do you use?",
+    "What is the specific crop you are planning to plant?"
   ],
   "open_loops": []
 }

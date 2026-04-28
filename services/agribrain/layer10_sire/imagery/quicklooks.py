@@ -5,7 +5,7 @@ Quicklook Generator — Fast preview images from surfaces
 Generates compact preview tiles from surface data.
 """
 from typing import Dict, Any, List, Optional
-from services.agribrain.layer10_sire.schema import SurfaceArtifact, SurfaceType
+from layer10_sire.schema import SurfaceArtifact, SurfaceType
 
 
 # Palette lookups — surface type to quick color ramp

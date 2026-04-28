@@ -10,11 +10,11 @@ Multi-evidence spatial nutrient surfaces:
   - NDVI as final modulation if no other spatial source
 """
 from typing import List, Optional, Dict, Any
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, PaletteId,
 )
-from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
-from services.agribrain.layer10_sire.adapters.l4_l9_adapters import L4NutrientData
+from layer10_sire.adapters.l1_adapter import L1SpatialData
+from layer10_sire.adapters.l4_l9_adapters import L4NutrientData
 
 
 def generate_nutrient_surfaces(
@@ -25,10 +25,10 @@ def generate_nutrient_surfaces(
     """Generate nutrient surfaces using multi-evidence spatial synthesis."""
     surfaces = []
     if l4_data is None:
-        from services.agribrain.layer10_sire.adapters.l4_l9_adapters import adapt_l4
+        from layer10_sire.adapters.l4_l9_adapters import adapt_l4
         l4_data = adapt_l4(inp.nutrients)
     if l1_data is None:
-        from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
+        from layer10_sire.adapters.l1_adapter import adapt_l1
         l1_data = adapt_l1(inp.field_tensor, H, W)
 
     if not l4_data.nutrient_states:

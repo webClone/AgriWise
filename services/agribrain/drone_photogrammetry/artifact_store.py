@@ -99,6 +99,12 @@ class ArtifactStore:
         
         # Optional high-value refs
         output.contribution_map_ref = f"{base}/contribution_map.json"
+        output.hole_map_ref = f"{base}/hole_map.json"
+        output.uncertainty_map_ref = f"{base}/uncertainty_map.json"
+        
+        # V3: Propagate task usability
+        if hasattr(georef, 'task_usability') and georef.task_usability:
+            output._task_usability = georef.task_usability
         
         logger.info(
             f"[ArtifactStore] Stored orthomosaic: "

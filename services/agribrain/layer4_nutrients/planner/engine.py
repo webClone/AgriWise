@@ -1,7 +1,7 @@
 
 from typing import Dict, Any, List, Optional
-from services.agribrain.layer4_nutrients.schema import ExecutionPlan, Prescription, NutrientState, ActionId, TaskNode, Nutrient
-from services.agribrain.layer3_decision.schema import TaskNode
+from layer4_nutrients.schema import ExecutionPlan, Prescription, NutrientState, ActionId, TaskNode, Nutrient
+from layer3_decision.schema import TaskNode
 
 
 class PlanningEngine:

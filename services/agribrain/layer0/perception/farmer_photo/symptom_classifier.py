@@ -7,12 +7,12 @@ This module detects VISIBLE SYMPTOMS from close-range photos:
   healthy, chlorosis, necrosis, spots, mildew_like, rust_like,
   blight_like, insect_damage, wilt, unknown_stress
 
-It then optionally maps (symptoms + crop class) → disease candidate.
+It then optionally maps (symptoms + crop class) -> disease candidate.
 The disease candidate is ALWAYS a weak suggestion (confidence < 0.40).
 
 Design rules:
-  - If crop ID is weak → disease confidence is downgraded
-  - If organ type is wrong for disease → symptom inference is suppressed
+  - If crop ID is weak -> disease confidence is downgraded
+  - If organ type is wrong for disease -> symptom inference is suppressed
   - Symptom probability is useful evidence; disease name is speculation
   - All outputs carry explicit uncertainty
 
@@ -25,18 +25,18 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import math
 
-from .schemas import (
+from layer0.perception.farmer_photo.schemas import (
     SymptomClass, SymptomResult, OrganClass, CropClass,
     ALL_SYMPTOM_CLASSES,
 )
-from .preprocess import PreprocessResult
+from layer0.perception.farmer_photo.preprocess import PreprocessResult
 
 
 # ============================================================================
-# Symptom → Disease mapping (weak associations)
+# Symptom -> Disease mapping (weak associations)
 # ============================================================================
 
-# Maps (symptom, crop) → disease candidate name
+# Maps (symptom, crop) -> disease candidate name
 # These are WEAK suggestions, not diagnoses
 SYMPTOM_DISEASE_MAP: Dict[str, Dict[str, str]] = {
     SymptomClass.CHLOROSIS: {
@@ -274,7 +274,7 @@ class SymptomClassifier:
             # High green shouldn't yield extreme chlorosis regardless of yellow tone
             chlorosis_score *= 0.4
 
-        # Saturation check: real chlorosis causes pigment loss → low saturation.
+        # Saturation check: real chlorosis causes pigment loss -> low saturation.
         # High saturation + yellow = natural golden maturity (ripe wheat), not disease.
         # BUT: this suppression ONLY applies to canopy or mixed scenes. Single leaves
         # must be allowed to register vibrant saturated chlorosis.
@@ -314,7 +314,7 @@ class SymptomClassifier:
         context_available = features.color_entropy > 0
         if features.brightness_std > 25:
             spots_score = (features.brightness_std - 25) / 20
-            # Strong combo: high noise on a green surface → likely actual lesion spots
+            # Strong combo: high noise on a green surface -> likely actual lesion spots
             # Only apply when context features confirm real pixel data (not defaults)
             # BUT: suppress when rel_std is very high (> 0.35), indicating
             # deep perforations (insect holes) rather than surface lesion spots

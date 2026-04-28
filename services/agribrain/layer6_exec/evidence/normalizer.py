@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Dict, Any, List
 
-from services.agribrain.layer6_exec.schema import (
+from layer6_exec.schema import (
     EvidenceType, NormalizedEvidence
 )
 

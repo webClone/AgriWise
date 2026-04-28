@@ -7,7 +7,7 @@ Types: STALL (Slow growth), DROP (Sudden loss), EARLY_SENESCENCE.
 
 import statistics
 from typing import List, Dict, Tuple
-from services.agribrain.layer2_veg_int.schema import VegetationAnomaly, AnomalyType
+from layer2_veg_int.schema import VegetationAnomaly, AnomalyType
 
 class TemporalAnomalyEngine:
     

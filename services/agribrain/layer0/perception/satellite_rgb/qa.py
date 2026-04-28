@@ -11,7 +11,7 @@ This module assesses satellite-specific quality factors:
   5. Boundary contamination
   6. Acquisition recentness
 
-Output: SatelliteRGBQAResult → determines reliability weight and sigma inflation.
+Output: SatelliteRGBQAResult -> determines reliability weight and sigma inflation.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 import math
 
-from ..common.contracts import QAResult
+from layer0.perception.common.contracts import QAResult
 
 
 # ============================================================================
@@ -186,7 +186,8 @@ class SatelliteRGBQA:
         result.qa_score = max(0.0, min(1.0, result.qa_score))
 
         # --- Determine usability ---
-        result.usable = result.qa_score >= 0.1
+        # Must have reasonable overall score and no catastrophic single failures
+        result.usable = result.qa_score >= 0.3 and min(scores) >= 0.25
 
         # --- Derive reliability and sigma inflation ---
         result.reliability_weight = self._score_to_reliability(result.qa_score)
@@ -221,13 +222,13 @@ class SatelliteRGBQA:
     def _assess_cloud(self, cloud_estimate: Optional[float]) -> float:
         """Cloud contamination: 0=fully cloudy, 1=clear."""
         if cloud_estimate is None:
-            return 0.7  # Unknown cloud → moderate uncertainty
+            return 0.7  # Unknown cloud -> moderate uncertainty
         return max(0.0, 1.0 - cloud_estimate)
 
     def _assess_haze(self, haze_score: Optional[float]) -> float:
         """Haze assessment: input is 0=clear, 1=hazy; output is 0=bad, 1=good."""
         if haze_score is None:
-            return 0.8  # Unknown haze → assume mostly clear
+            return 0.8  # Unknown haze -> assume mostly clear
         return max(0.0, 1.0 - haze_score)
 
     def _assess_coverage(
@@ -248,7 +249,7 @@ class SatelliteRGBQA:
             coverage = min(1.0, plot_area_ha / max(image_area_ha, 0.01))
             return max(0.0, coverage)
 
-        return 0.7  # Unknown → moderate
+        return 0.7  # Unknown -> moderate
 
     def _assess_resolution(
         self,
@@ -276,14 +277,14 @@ class SatelliteRGBQA:
     def _assess_boundary(self, boundary_pixel_fraction: Optional[float]) -> float:
         """Boundary contamination: fraction of boundary-adjacent pixels."""
         if boundary_pixel_fraction is None:
-            return 0.8  # Unknown → assume moderate
+            return 0.8  # Unknown -> assume moderate
         # High boundary fraction = more contamination = lower score
         return max(0.0, 1.0 - boundary_pixel_fraction * 2.0)
 
     def _assess_recentness(self, recentness_days: Optional[int]) -> float:
         """Acquisition recentness: fresher is better."""
         if recentness_days is None:
-            return 0.7  # Unknown age → moderate
+            return 0.7  # Unknown age -> moderate
 
         if recentness_days <= self.FRESH_DAYS:
             return 1.0
@@ -295,7 +296,7 @@ class SatelliteRGBQA:
             return max(0.1, 1.0 - recentness_days / 90.0)
 
     # ================================================================
-    # Score → reliability/sigma conversion
+    # Score -> reliability/sigma conversion
     # ================================================================
 
     @staticmethod

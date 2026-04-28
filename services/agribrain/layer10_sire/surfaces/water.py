@@ -2,11 +2,11 @@
 Water Surface Engine (v2) — Spatial-first water stress from L1/L3 adapter data
 """
 from typing import List, Optional
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, PaletteId,
 )
-from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
-from services.agribrain.layer10_sire.adapters.l3_adapter import L3DiagnosticData
+from layer10_sire.adapters.l1_adapter import L1SpatialData
+from layer10_sire.adapters.l3_adapter import L3DiagnosticData
 
 
 def generate_water_surfaces(
@@ -17,10 +17,10 @@ def generate_water_surfaces(
     """Generate water surfaces from L1/L3 adapter data (spatial-first)."""
     surfaces = []
     if l1_data is None:
-        from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
+        from layer10_sire.adapters.l1_adapter import adapt_l1
         l1_data = adapt_l1(inp.field_tensor, H, W)
     if l3_data is None:
-        from services.agribrain.layer10_sire.adapters.l3_adapter import adapt_l3
+        from layer10_sire.adapters.l3_adapter import adapt_l3
         l3_data = adapt_l3(inp.decision)
 
     # --- 1. WATER_STRESS_PROB — from L3 diagnoses + spatial modulation ---

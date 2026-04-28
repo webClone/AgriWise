@@ -9,16 +9,16 @@ import math
 import statistics
 from datetime import datetime, timezone
 
-from services.agribrain.layer2_veg_int.schema import (
+from layer2_veg_int.schema import (
     VegIntOutput, VegIntInput, ModeledCurveOutput, CurveQuality, 
     PhenologyOutput, VegetationAnomaly
 )
-from services.agribrain.layer2_veg_int.growth_engine import GrowthCurveEngine
-from services.agribrain.layer2_veg_int.phenology_engine import PhenologyEngine
-from services.agribrain.layer1_fusion.schema import FieldTensor, FieldTensorChannels
+from layer2_veg_int.growth_engine import GrowthCurveEngine
+from layer2_veg_int.phenology_engine import PhenologyEngine
+from layer1_fusion.schema import FieldTensor, FieldTensorChannels
 
-from services.agribrain.layer2_veg_int.anomaly_engine import TemporalAnomalyEngine
-from services.agribrain.layer2_veg_int.spatial_engine import SpatialProxyStabilityEngine
+from layer2_veg_int.anomaly_engine import TemporalAnomalyEngine
+from layer2_veg_int.spatial_engine import SpatialProxyStabilityEngine
 
 class VegetationIntelligenceEngine:
     
@@ -218,7 +218,7 @@ class VegetationIntelligenceEngine:
 # Singleton
 veg_int_engine = VegetationIntelligenceEngine()
 
-from services.agribrain.orchestrator_v2.schema import OrchestratorInput
+from orchestrator_v2.schema import OrchestratorInput
 
 def run_layer2_veg(inputs: OrchestratorInput, tensor: FieldTensor) -> VegIntOutput:
     """

@@ -3,7 +3,7 @@ Zone Extractor — Convert surfaces to spatial zones via threshold + connected c
 """
 import math
 from typing import List, Optional, Tuple, Dict
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     SurfaceArtifact, SurfaceType, ZoneArtifact, ZoneType, ZoneFamily,
 )
 

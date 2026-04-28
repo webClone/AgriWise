@@ -9,7 +9,7 @@ Output: Dict[zone_id, ZoneActionPlan]
 
 from typing import Dict, List, Any
 
-from services.agribrain.layer8_prescriptive.schema import (
+from layer8_prescriptive.schema import (
     ActionCard, ZoneActionPlan, ActionType,
 )
 

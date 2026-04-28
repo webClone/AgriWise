@@ -2,7 +2,7 @@
 Zone Labeler — Attach semantic labels and link to upstream evidence/actions
 """
 from typing import List, Optional, Tuple
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, ZoneArtifact, ZoneFamily,
 )
 

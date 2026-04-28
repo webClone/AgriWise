@@ -721,7 +721,7 @@ def api_v2_run(req: V2RunRequest):
     Unified entrypoint as a persistent FastAPI endpoint. 
     Replaces the slow subprocess.spawn("py", "run_entrypoint.py") approach.
     """
-    from services.agribrain.orchestrator_v2.run_entrypoint import (
+    from orchestrator_v2.run_entrypoint import (
         _parse_context, run_chat_mode, run_full_mode, run_surfaces_mode
     )
     

@@ -3,7 +3,7 @@ Field Histogram Engine — Compute per-surface histograms for entire field
 """
 import math
 from typing import List
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     SurfaceArtifact, HistogramArtifact,
 )
 

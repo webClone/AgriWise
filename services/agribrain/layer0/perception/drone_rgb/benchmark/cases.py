@@ -11,7 +11,7 @@ import math
 import hashlib
 import random
 
-from services.agribrain.drone_mission.schemas import MissionType, FlightMode
+from drone_mission.schemas import MissionType, FlightMode
 
 @dataclass
 class DroneBenchmarkCase:
@@ -113,7 +113,7 @@ def _generate_synthetic_ortho(case: DroneBenchmarkCase) -> Dict[str, List[List[i
     
     if case.case_id == "qa_blur_heavy":
         # Uniform green with near-zero variance — simulates severe motion blur.
-        # All pixels are exactly the same value (Laplacian variance → 0).
+        # All pixels are exactly the same value (Laplacian variance -> 0).
         for y in range(h):
             for x in range(w):
                 red[y][x] = 60

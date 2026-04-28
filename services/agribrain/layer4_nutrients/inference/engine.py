@@ -1,8 +1,8 @@
 
 import math
 from typing import Dict, Any, List
-from services.agribrain.layer4_nutrients.schema import NutrientState, Severity, EvidenceLogit, Nutrient, Confounder
-from services.agribrain.layer3_decision.schema import Driver, DegradationMode
+from layer4_nutrients.schema import NutrientState, Severity, EvidenceLogit, Nutrient, Confounder
+from layer3_decision.schema import Driver, DegradationMode
 
 class NutrientInferenceEngine:
     """

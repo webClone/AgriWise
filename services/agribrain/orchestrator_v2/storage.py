@@ -4,7 +4,7 @@ import os
 from typing import Protocol, Any
 from dataclasses import asdict
 
-from services.agribrain.orchestrator_v2.schema import RunArtifact
+from orchestrator_v2.schema import RunArtifact
 
 class ArtifactStore(Protocol):
     def save(self, artifact: RunArtifact) -> str:

@@ -10,7 +10,7 @@ Invariants:
   2. Unit bounds: SAR in dB (never linear), NDVI ∈ [-1,1], SM ∈ [0,1],
      phenology ∈ [0,4], LAI ∈ [0,10], stress ∈ [0,1].
   3. Reliability bounds: reliability ∈ [0.05, 1.0] everywhere (never 0,
-     because it enters R_effective = σ²/w and w=0 → division by zero).
+     because it enters R_effective = σ²/w and w=0 -> division by zero).
   4. Covariance positive-definite: diagonal P ≥ epsilon.
   5. No NaN/Inf: in any state or observation value.
 
@@ -152,7 +152,7 @@ def check_unit_bounds(
                         violations.append(InvariantViolation(
                             "unit_bounds", "fixed",
                             f"{zone_id}/{day}/{var_name}",
-                            f"Clamped {val:.4f} → [{lo}, {hi}]",
+                            f"Clamped {val:.4f} -> [{lo}, {hi}]",
                             auto_fixed=True,
                         ))
                     else:
@@ -171,7 +171,7 @@ def check_reliability_bounds(
 ) -> List[InvariantViolation]:
     """
     Invariant 3: Reliability ∈ [0.05, 1.0] everywhere.
-    w=0 causes R_effective = σ²/w → division by zero.
+    w=0 causes R_effective = σ²/w -> division by zero.
     """
     violations = []
 
@@ -183,7 +183,7 @@ def check_reliability_bounds(
                 violations.append(InvariantViolation(
                     "reliability_bounds", "fixed",
                     f"source={src}",
-                    f"Clamped {rel:.4f} → [{RELIABILITY_MIN}, {RELIABILITY_MAX}]",
+                    f"Clamped {rel:.4f} -> [{RELIABILITY_MIN}, {RELIABILITY_MAX}]",
                     auto_fixed=True,
                 ))
             else:

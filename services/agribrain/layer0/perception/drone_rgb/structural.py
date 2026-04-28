@@ -14,10 +14,10 @@ from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass, field
 import math
 
-from .schemas import DroneRGBInput, DroneStructuralMap, RowBreak
-from . import row_analysis
-from . import orchard_analysis
-from ....drone_mission.schemas import MissionType
+from layer0.perception.drone_rgb.schemas import DroneRGBInput, DroneStructuralMap, RowBreak
+from layer0.perception.drone_rgb import row_analysis
+from layer0.perception.drone_rgb import orchard_analysis
+from drone_mission.schemas import MissionType
 
 @dataclass
 class StructuralResult:
@@ -118,7 +118,7 @@ class DroneStructuralAnalyzer:
                             if exg > 0.85 and rg_ratio < 0.40:
                                 block_veg_count += 1
                             elif rg_ratio < 0.35:
-                                # Very low r/g despite lower ExG → still crop
+                                # Very low r/g despite lower ExG -> still crop
                                 block_veg_count += 1
                             else:
                                 block_weed_count += 1

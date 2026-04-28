@@ -9,8 +9,8 @@ from typing import Dict, Any, Tuple
 from dataclasses import dataclass
 import random
 
-from .schemas import DroneRGBInput
-from ....drone_mission.schemas import FlightMode
+from layer0.perception.drone_rgb.schemas import DroneRGBInput
+from drone_mission.schemas import FlightMode
 
 @dataclass
 class DroneQAOutput:

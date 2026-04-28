@@ -23,9 +23,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import math
 
-from .preprocess import PlotImageContext
-from ..common.contracts import PerceptionVariable, PerceptionArtifact, ZoneOutput
-from ..common.base_types import FeasibilityGate
+from layer0.perception.satellite_rgb.preprocess import PlotImageContext
+from layer0.perception.common.contracts import PerceptionVariable, PerceptionArtifact, ZoneOutput
+from layer0.perception.common.base_types import FeasibilityGate
 
 
 # ============================================================================
@@ -50,7 +50,7 @@ class SatelliteRGBInferenceResult:
     
     # Canopy summary
     canopy_density_class: str = "sparse"  # "bare", "sparse", "moderate", "dense"
-    coarse_phenology_stage: float = 0.0    # 0=dormant → 4=senescence
+    coarse_phenology_stage: float = 0.0    # 0=dormant -> 4=senescence
     phenology_sigma: float = 0.80          # Very uncertain from RGB alone
 
     # Boundary contamination
@@ -201,8 +201,8 @@ class SatelliteRGBInference:
         Uses Excess Green Index: ExG = 2G - R - B (normalized)
         This is the most reliable first feature from RGB.
         
-        ExG > 0  → green dominant → vegetation
-        ExG < 0  → red/blue dominant → soil or non-vegetation
+        ExG > 0  -> green dominant -> vegetation
+        ExG < 0  -> red/blue dominant -> soil or non-vegetation
         """
         h, w = ctx.height, ctx.width
         veg_mask = [[0.0] * w for _ in range(h)]
@@ -366,7 +366,7 @@ class SatelliteRGBInference:
         brightness = (ctx.mean_red + ctx.mean_green + ctx.mean_blue) / 3.0
         rg_ratio = ctx.mean_red / max(ctx.mean_green, 0.001)
         
-        # --- Stage 1: High vegetation, green dominant → vegetative/flowering ---
+        # --- Stage 1: High vegetation, green dominant -> vegetative/flowering ---
         if veg_fraction > 0.75 and gr > 0.40:
             # Dense green canopy
             if rg_ratio < 0.35:
@@ -374,7 +374,7 @@ class SatelliteRGBInference:
             else:
                 return 2.0  # Flowering / mid-season (slightly less green)
         
-        # --- Stage 2: Moderate vegetation, green present → mid-season ---
+        # --- Stage 2: Moderate vegetation, green present -> mid-season ---
         if 0.40 <= veg_fraction <= 0.75:
             if gr > 0.40:
                 return 1.5  # Vegetative with moderate coverage
@@ -385,20 +385,20 @@ class SatelliteRGBInference:
             else:
                 return 2.5  # Stressed / late vegetative
         
-        # --- Stage 3: Low vegetation (< 0.40) → early, senescence, or bare ---
+        # --- Stage 3: Low vegetation (< 0.40) -> early, senescence, or bare ---
         if veg_fraction < 0.08:
-            return 0.0  # Almost no vegetation → dormant/bare
+            return 0.0  # Almost no vegetation -> dormant/bare
         
         # Low-moderate veg (0.08 - 0.40): could be emergence or senescence
         # Key discriminator: senescence/post-harvest has high r/g ratio (browning),
         # emergence has lower r/g.
         if rg_ratio >= 1.25 and brightness > 0.25:
             if veg_fraction < 0.15:
-                # Almost no green left but what remains is browning → senescence
+                # Almost no green left but what remains is browning -> senescence
                 return 3.5
             elif veg_fraction < 0.25:
                 # Some green on brown base — could be dormant or late senescence.
-                # Lower brightness → more likely dormant (winter field)
+                # Lower brightness -> more likely dormant (winter field)
                 if brightness < 0.30:
                     return 0.0  # Dormant
                 else:
@@ -408,7 +408,7 @@ class SatelliteRGBInference:
             else:
                 return 3.5  # Late senescence
         
-        # Low veg with moderate r/g → early emergence
+        # Low veg with moderate r/g -> early emergence
         return 0.5  # Early stage (sparse seedlings on soil)
 
 

@@ -2,10 +2,10 @@
 Suitability Surface Engine (v2) — From L7 adapter
 """
 from typing import List, Optional
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, PaletteId,
 )
-from services.agribrain.layer10_sire.adapters.l4_l9_adapters import L7PlanningData
+from layer10_sire.adapters.l4_l9_adapters import L7PlanningData
 
 
 def generate_suitability_surfaces(
@@ -15,7 +15,7 @@ def generate_suitability_surfaces(
     """Generate suitability surface from L7 adapter data."""
     surfaces = []
     if l7_data is None:
-        from services.agribrain.layer10_sire.adapters.l4_l9_adapters import adapt_l7
+        from layer10_sire.adapters.l4_l9_adapters import adapt_l7
         l7_data = adapt_l7(inp.planning)
 
     if l7_data.suitability_pct == 0:

@@ -2,8 +2,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
 # Import Upstream Contracts
-from services.agribrain.layer1_fusion.schema import FieldTensor
-from services.agribrain.layer2_veg_int.schema import VegIntOutput
+from layer1_fusion.schema import FieldTensor
+from layer2_veg_int.schema import VegIntOutput
 
 @dataclass
 class PlotContext:

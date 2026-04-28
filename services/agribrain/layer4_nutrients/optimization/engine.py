@@ -1,12 +1,12 @@
 
 import math
 from typing import Dict, Any, List
-from services.agribrain.layer4_nutrients.schema import (
+from layer4_nutrients.schema import (
     Prescription, NutrientState, ActionId, ApplicationMethod, RiskIfWrong, 
     PrescriptionAudit, Severity, TimingWindow, SplitApplication, Nutrient
 )
-from services.agribrain.layer3_decision.schema import PlotContext
-from services.agribrain.layer4_nutrients.policy.compliance_gate import ComplianceGate
+from layer3_decision.schema import PlotContext
+from layer4_nutrients.policy.compliance_gate import ComplianceGate
 
 class OptimizationEngine:
     """
@@ -74,7 +74,7 @@ class OptimizationEngine:
         # 3. Compliance Check
         is_allowed = True
         blocked = []
-        from services.agribrain.layer4_nutrients.schema import EnvironmentalRisk
+        from layer4_nutrients.schema import EnvironmentalRisk
         env_risks = EnvironmentalRisk(0.0, 0.0, 0.0) 
         
         if optimal_rate > 0:

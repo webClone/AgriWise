@@ -1,5 +1,5 @@
 import random
-from services.agribrain.layer10_sire.schema import (
+from layer10_sire.schema import (
     Layer10Output,
     Layer10Input,
     ExplainabilityPack,
@@ -128,7 +128,7 @@ def build_premium_packs(l10_input: Layer10Input, output: Layer10Output) -> Layer
         # 3. Build History from Memory logs
         history_events = []
         try:
-            from services.agribrain.orchestrator_v2.chat_memory import load_memory
+            from orchestrator_v2.chat_memory import load_memory
             mem = load_memory(l10_input.plot_id)
             if hasattr(mem, "history") and mem.history:
                 for item in reversed(mem.history[-4:]):  # last 4

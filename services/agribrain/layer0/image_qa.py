@@ -1,13 +1,13 @@
 """
 Layer 0.8: Image QA — Quality Assessment for Camera/Drone/Phone Imagery
 
-⚠️  LEGACY MODULE — This camera/phone/drone QA will be superseded by
+  LEGACY MODULE — This camera/phone/drone QA will be superseded by
     engine-specific QA modules. Each perception engine implements QA
     tuned to its source type:
-      - satellite_rgb/qa.py  → cloud, haze, coverage, resolution, recentness
-      - farmer_photo/qa.py   → blur, exposure, framing, GPS (planned)
-      - drone/qa.py          → GSD, alignment, overlap (planned)
-      - ip_camera/qa.py      → focus, exposure, timestamp drift (planned)
+      - satellite_rgb/qa.py  -> cloud, haze, coverage, resolution, recentness
+      - farmer_photo/qa.py   -> blur, exposure, framing, GPS (planned)
+      - drone/qa.py          -> GSD, alignment, overlap (planned)
+      - ip_camera/qa.py      -> focus, exposure, timestamp drift (planned)
 
     Do not add new logic here. Existing callers will be migrated
     to engine-specific paths. This module is preserved for backward
@@ -22,7 +22,7 @@ Original QA checks:
   6. GPS sanity (distance to plot centroid)
   7. Drone-specific: GSD, alignment, seam artifacts
 
-Output: ImageQAResult with flags + overall score → determines reliability weight.
+Output: ImageQAResult with flags + overall score -> determines reliability weight.
 """
 
 from __future__ import annotations
@@ -410,7 +410,7 @@ class ImageQAEngine:
         return score
     
     # ================================================================
-    # Score → reliability/sigma conversion
+    # Score -> reliability/sigma conversion
     # ================================================================
     
     @staticmethod

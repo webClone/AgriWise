@@ -1,8 +1,8 @@
 
 
 from typing import Dict, Any, List
-from services.agribrain.layer1_fusion.schema import FieldTensor
-from services.agribrain.layer2_veg_int.schema import VegIntOutput
+from layer1_fusion.schema import FieldTensor
+from layer2_veg_int.schema import VegIntOutput
 
 class NutrientObservationProxyEngine:
     """
