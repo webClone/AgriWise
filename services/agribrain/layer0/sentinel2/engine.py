@@ -119,10 +119,28 @@ class Sentinel2Engine:
 
         # 7. Generate or use zone masks
         if zone_masks is None:
-            zone_masks = generate_quadrant_zones(alpha_mask)
-            zone_source = "auto_quadrant_v1"
-            zone_method = "grid_subdivision_2x2"
-            zone_confidence = 0.4
+            # Attempt data-driven zones from weakness raster
+            if "NDVI" in index_rasters:
+                from layer0.weakness_raster import (
+                    compute_weakness_raster as _compute_wsr,
+                    derive_zones_from_weakness as _derive_zones,
+                )
+                _wsr = _compute_wsr(
+                    index_rasters["NDVI"], alpha_mask, valid_mask,
+                    ndmi_raster=index_rasters.get("NDMI"),
+                    buffer_pixels=buffer_pixels,
+                )
+                _zone_result = _derive_zones(_wsr, alpha_mask)
+                zone_masks = _zone_result.zone_masks
+                zone_source = _zone_result.zone_source
+                zone_method = _zone_result.zone_method
+                zone_confidence = _zone_result.zone_confidence
+            else:
+                # No NDVI — pure geometry fallback
+                zone_masks = generate_quadrant_zones(alpha_mask)
+                zone_source = "geometry_fallback"
+                zone_method = "auto_quadrant_v1"
+                zone_confidence = 0.25
         else:
             zone_source = "user_defined"
             zone_method = "user_provided"

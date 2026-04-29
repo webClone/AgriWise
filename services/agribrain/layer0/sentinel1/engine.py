@@ -114,7 +114,19 @@ class Sentinel1Engine:
 
         # 7. Zone summaries
         if zone_masks is None:
-            zone_masks = generate_quadrant_zones(alpha_mask)
+            # Attempt data-driven zones from SAR weakness raster
+            if "VV_DB" in features:
+                from layer0.weakness_raster import (
+                    compute_weakness_raster_sar as _compute_wsr_sar,
+                    derive_zones_from_weakness as _derive_zones,
+                )
+                _wsr = _compute_wsr_sar(
+                    features["VV_DB"], alpha_mask,
+                )
+                _zone_result = _derive_zones(_wsr, alpha_mask)
+                zone_masks = _zone_result.zone_masks
+            else:
+                zone_masks = generate_quadrant_zones(alpha_mask)
         zone_summaries = extract_sar_zone_summaries(
             features, qa, mask_set, zone_masks, alpha_mask,
         )

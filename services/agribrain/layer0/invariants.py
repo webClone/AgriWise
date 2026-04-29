@@ -258,6 +258,62 @@ def check_observation_bounds(
 
 
 # ============================================================================
+# Zone quality invariants
+# ============================================================================
+
+QUADRANT_CONFIDENCE_MAX = 0.30
+DATA_DERIVED_CONFIDENCE_MIN = 0.50
+
+def check_zone_quality(
+    zone_summaries: List[Dict[str, Any]],
+) -> List[InvariantViolation]:
+    """
+    Spatial zone quality invariants:
+      1. Geometry-only zones must have confidence ≤ 0.30
+      2. Data-derived zones must have confidence ≥ 0.50
+      3. Zone area fractions must sum to ~1.0 (±0.10)
+    """
+    violations = []
+
+    area_sum = 0.0
+    for zs in zone_summaries:
+        method = zs.get("zone_method", "")
+        conf = zs.get("zone_confidence", 0.0)
+        area = zs.get("area_fraction", 0.0)
+        zone_id = zs.get("zone_id", "?")
+
+        area_sum += area
+
+        # Geometry-only zones must not inflate confidence
+        if method in ("auto_quadrant_v1", "grid_subdivision_2x2"):
+            if conf > QUADRANT_CONFIDENCE_MAX:
+                violations.append(InvariantViolation(
+                    "zone_confidence_inflated", "warning",
+                    f"zone={zone_id}",
+                    f"Geometry-only zone has confidence {conf:.2f} > {QUADRANT_CONFIDENCE_MAX}"
+                ))
+
+        # Data-derived zones should have meaningful confidence
+        if method == "weakness_quantile_v1":
+            if conf < DATA_DERIVED_CONFIDENCE_MIN:
+                violations.append(InvariantViolation(
+                    "zone_confidence_too_low", "warning",
+                    f"zone={zone_id}",
+                    f"Data-derived zone has confidence {conf:.2f} < {DATA_DERIVED_CONFIDENCE_MIN}"
+                ))
+
+    # Area fraction sum check (only if we have zones)
+    if zone_summaries and abs(area_sum - 1.0) > 0.10:
+        violations.append(InvariantViolation(
+            "zone_area_fraction_sum", "warning",
+            "all_zones",
+            f"Zone area fractions sum to {area_sum:.3f}, expected ~1.0"
+        ))
+
+    return violations
+
+
+# ============================================================================
 # Combined enforcer
 # ============================================================================
 
