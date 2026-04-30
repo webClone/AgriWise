@@ -128,6 +128,7 @@ class Sentinel2Engine:
                 _wsr = _compute_wsr(
                     index_rasters["NDVI"], alpha_mask, valid_mask,
                     ndmi_raster=index_rasters.get("NDMI"),
+                    evi_raster=index_rasters.get("EVI"),
                     buffer_pixels=buffer_pixels,
                 )
                 _zone_result = _derive_zones(_wsr, alpha_mask)

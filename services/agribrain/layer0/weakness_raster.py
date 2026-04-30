@@ -1,16 +1,22 @@
 """
 Layer 0 — Data-Driven Weakness Score Raster & Zone Derivation.
 
-Computes a per-pixel weakness score from real spectral data (NDVI, NDMI),
+Computes a per-pixel weakness score from real spectral data (NDVI/EVI, NDMI),
 strictly alpha-masked to the field polygon. Zones emerge from where
 the data shows weakness — not from arbitrary geometry.
+
+Adaptive VI selection:
+  When field-mean NDVI > 0.80 (saturation zone), the engine automatically
+  switches to EVI as the primary vegetation index. EVI does not saturate
+  in dense, high-biomass canopies (e.g. late-stage corn, tropical crops),
+  preserving spatial variance that NDVI would lose.
 
 WSR ∈ [0, 1]:
   0.0 = pixel at or above field mean (healthy)
   1.0 = maximum weakness (far below mean, stressed, contaminated)
 
 Components:
-  - NDVI deviation (weight 0.50): below-mean pixels get positive score
+  - VI deviation  (weight 0.50): below-mean pixels get positive score
   - NDMI stress   (weight 0.30): negative NDMI = water stress
   - Edge contamination (weight 0.20): partial-alpha boundary pixels
 """
@@ -26,14 +32,17 @@ from layer0.sentinel2.schemas import Raster2D
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-W_NDVI_DEVIATION = 0.50
+W_NDVI_DEVIATION = 0.50      # Weight for primary VI (NDVI or EVI) deviation
 W_NDMI_STRESS = 0.30
 W_EDGE_CONTAMINATION = 0.20
 
 MIN_ZONE_CELLS = 4
 MAX_ZONES = 5
 MIN_VALID_PIXELS = 8       # Need at least this many valid pixels to attempt
-HOMOGENEITY_THRESHOLD = 0.02  # If NDVI std < this, field is homogeneous
+HOMOGENEITY_THRESHOLD = 0.02  # If VI std < this, field is homogeneous
+
+# When field-mean NDVI exceeds this, switch to EVI to avoid saturation
+EVI_SATURATION_THRESHOLD = 0.80
 
 
 # ── Data Classes ──────────────────────────────────────────────────────────────
@@ -55,6 +64,11 @@ class WeaknessRaster:
     weakness_mean: float = 0.0
     weakness_p90: float = 0.0
     weakness_max: float = 0.0
+
+    # Provenance: which vegetation index was actually used
+    primary_vi_used: str = "NDVI"       # "NDVI" or "EVI"
+    evi_fallback_triggered: bool = False  # True if NDVI saturation caused EVI switch
+    ndvi_mean_pre_switch: Optional[float] = None  # Original NDVI mean (when EVI used)
 
 
 @dataclass
@@ -124,16 +138,23 @@ def compute_weakness_raster(
     alpha_mask: List[List[float]],
     valid_mask: List[List[int]],
     ndmi_raster: Optional[Raster2D] = None,
+    evi_raster: Optional[Raster2D] = None,
     buffer_pixels: int = 2,
 ) -> WeaknessRaster:
     """
     Compute per-pixel weakness score, strictly alpha-masked to the field polygon.
+
+    Adaptive VI selection:
+      - Uses NDVI as primary vegetation index by default.
+      - When field-mean NDVI > 0.80 AND EVI is available, automatically
+        switches to EVI to avoid saturation in dense canopies.
 
     Args:
         ndvi_raster: NDVI index raster (from S2 engine)
         alpha_mask: PlotGrid fractional coverage mask
         valid_mask: SCL-derived valid-for-index mask
         ndmi_raster: Optional NDMI raster (adds water stress component)
+        evi_raster: Optional EVI raster (used when NDVI saturates)
         buffer_pixels: Edge contamination buffer distance
 
     Returns:
@@ -148,21 +169,43 @@ def compute_weakness_raster(
         width=w,
     )
 
-    # 1. Compute field-level NDVI baselines
+    # 1. Compute field-level NDVI baselines (always needed for saturation check)
     ndvi_mean, ndvi_std, ndvi_p10, ndvi_p90 = _alpha_weighted_field_stats(
         ndvi_raster.values, alpha_mask, valid_mask,
     )
     if ndvi_mean is None:
         return wsr  # No valid data
 
-    ndvi_range = (ndvi_p90 - ndvi_p10) if (ndvi_p90 is not None and ndvi_p10 is not None) else 0.01
-    ndvi_range = max(ndvi_range, 0.01)  # Prevent division by zero
+    # 2. Adaptive VI selection: switch to EVI when NDVI saturates
+    use_evi = False
+    vi_raster = ndvi_raster
+    vi_mean = ndvi_mean
+    vi_std = ndvi_std
+    vi_range = (ndvi_p90 - ndvi_p10) if (ndvi_p90 is not None and ndvi_p10 is not None) else 0.01
 
-    wsr.field_mean_ndvi = round(ndvi_mean, 6)
-    wsr.field_std_ndvi = round(ndvi_std, 6)
-    wsr.field_range_ndvi = round(ndvi_range, 6)
+    if ndvi_mean >= EVI_SATURATION_THRESHOLD and evi_raster is not None:
+        evi_mean, evi_std, evi_p10, evi_p90 = _alpha_weighted_field_stats(
+            evi_raster.values, alpha_mask, valid_mask,
+        )
+        if evi_mean is not None and evi_std is not None:
+            # EVI has more spatial variance than NDVI in this saturated regime
+            # → better zone discrimination
+            use_evi = True
+            vi_raster = evi_raster
+            vi_mean = evi_mean
+            vi_std = evi_std
+            vi_range = (evi_p90 - evi_p10) if (evi_p90 is not None and evi_p10 is not None) else 0.01
 
-    # 2. Optional: NDMI baselines
+    vi_range = max(vi_range, 0.01)  # Prevent division by zero
+
+    wsr.field_mean_ndvi = round(vi_mean, 6)
+    wsr.field_std_ndvi = round(vi_std, 6)
+    wsr.field_range_ndvi = round(vi_range, 6)
+    wsr.primary_vi_used = "EVI" if use_evi else "NDVI"
+    wsr.evi_fallback_triggered = use_evi
+    wsr.ndvi_mean_pre_switch = round(ndvi_mean, 6) if use_evi else None
+
+    # 3. Optional: NDMI baselines
     ndmi_mean = None
     ndmi_range = 1.0
     if ndmi_raster is not None:
@@ -173,7 +216,7 @@ def compute_weakness_raster(
             ndmi_mean = nm
             ndmi_range = max(0.01, (np90 - np10) if np90 is not None and np10 is not None else 1.0)
 
-    # 3. Per-pixel weakness computation
+    # 4. Per-pixel weakness computation
     valid_count = 0
     weakness_vals = []
 
@@ -185,13 +228,13 @@ def compute_weakness_raster(
             if valid_mask and (r >= len(valid_mask) or c >= len(valid_mask[r]) or not valid_mask[r][c]):
                 continue
 
-            ndvi_val = ndvi_raster.values[r][c] if r < len(ndvi_raster.values) and c < len(ndvi_raster.values[r]) else None
-            if ndvi_val is None:
+            vi_val = vi_raster.values[r][c] if r < len(vi_raster.values) and c < len(vi_raster.values[r]) else None
+            if vi_val is None:
                 continue
 
-            # Component 1: NDVI deviation (below mean = positive weakness)
-            ndvi_dev = max(0.0, (ndvi_mean - ndvi_val) / ndvi_range)
-            ndvi_component = min(1.0, ndvi_dev)
+            # Component 1: VI deviation (below mean = positive weakness)
+            vi_dev = max(0.0, (vi_mean - vi_val) / vi_range)
+            vi_component = min(1.0, vi_dev)
 
             # Component 2: NDMI stress (negative NDMI = water stress)
             ndmi_component = 0.0
@@ -226,14 +269,14 @@ def compute_weakness_raster(
             # Weighted combination
             if ndmi_raster is not None and ndmi_mean is not None:
                 score = (
-                    W_NDVI_DEVIATION * ndvi_component
+                    W_NDVI_DEVIATION * vi_component
                     + W_NDMI_STRESS * ndmi_component
                     + W_EDGE_CONTAMINATION * edge_component
                 )
             else:
-                # No NDMI: redistribute weight to NDVI
+                # No NDMI: redistribute weight to VI
                 score = (
-                    (W_NDVI_DEVIATION + W_NDMI_STRESS) * ndvi_component
+                    (W_NDVI_DEVIATION + W_NDMI_STRESS) * vi_component
                     + W_EDGE_CONTAMINATION * edge_component
                 )
 

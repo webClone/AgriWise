@@ -1,8 +1,9 @@
 """
 Tests for Layer 0 — Weakness Score Raster & Data-Driven Zone Derivation.
 
-Tests strict spatial masking, data-derived weakness scoring, zone derivation
-from quantile banding, and fallback behavior.
+Tests strict spatial masking, data-derived weakness scoring, adaptive EVI
+fallback for dense canopies, zone derivation from quantile banding,
+fallback behavior, and performance benchmarks.
 """
 
 import pytest
@@ -16,6 +17,7 @@ from layer0.weakness_raster import (
     _alpha_weighted_field_stats,
     MIN_VALID_PIXELS,
     HOMOGENEITY_THRESHOLD,
+    EVI_SATURATION_THRESHOLD,
 )
 from layer0.sentinel2.schemas import Raster2D
 
@@ -462,3 +464,266 @@ class TestZoneInvariant:
         ]
         violations = check_zone_quality(zones)
         assert any(v.invariant == "zone_area_fraction_sum" for v in violations)
+
+
+# ── Test: Adaptive EVI Fallback ─────────────────────────────────────────────
+
+class TestAdaptiveEVIFallback:
+    """When NDVI saturates (mean > 0.80), EVI should be used instead."""
+
+    def _make_saturated_field(self, h=8, w=8):
+        """Create a field where NDVI is saturated but EVI has variance."""
+        # NDVI: all very high (saturated) — tiny spatial variance
+        ndvi_vals = [[0.88] * w for _ in range(h)]
+        for r in range(4, h):
+            ndvi_vals[r] = [0.86] * w  # Only 0.02 NDVI diff (nearly invisible)
+
+        # EVI: same field but EVI shows real variance
+        evi_vals = [[0.55] * w for _ in range(h)]
+        for r in range(4, h):
+            evi_vals[r] = [0.25] * w  # 0.30 EVI diff (highly visible)
+
+        return (
+            _make_raster(ndvi_vals),
+            _make_raster(evi_vals),
+            _uniform_alpha(h, w),
+            _uniform_valid(h, w),
+        )
+
+    def test_evi_triggered_when_ndvi_saturated(self):
+        """EVI should be used when field mean NDVI >= 0.80."""
+        ndvi, evi, alpha, valid = self._make_saturated_field()
+        wsr = compute_weakness_raster(ndvi, alpha, valid, evi_raster=evi)
+
+        assert wsr.primary_vi_used == "EVI"
+        assert wsr.evi_fallback_triggered is True
+
+    def test_ndvi_used_when_below_threshold(self):
+        """NDVI should be used when field mean is below saturation."""
+        h, w = 8, 8
+        ndvi = _make_raster([[0.5] * w for _ in range(h)])
+        evi = _make_raster([[0.3] * w for _ in range(h)])
+        alpha = _uniform_alpha(h, w)
+        valid = _uniform_valid(h, w)
+
+        wsr = compute_weakness_raster(ndvi, alpha, valid, evi_raster=evi)
+        assert wsr.primary_vi_used == "NDVI"
+        assert wsr.evi_fallback_triggered is False
+        assert wsr.ndvi_mean_pre_switch is None
+
+    def test_provenance_tracks_original_ndvi_mean(self):
+        """When EVI is used, original NDVI mean should be recorded."""
+        ndvi, evi, alpha, valid = self._make_saturated_field()
+        wsr = compute_weakness_raster(ndvi, alpha, valid, evi_raster=evi)
+
+        assert wsr.ndvi_mean_pre_switch is not None
+        assert wsr.ndvi_mean_pre_switch >= EVI_SATURATION_THRESHOLD
+
+    def test_evi_preserves_spatial_variance(self):
+        """EVI path should preserve more spatial variance than saturated NDVI."""
+        h, w = 10, 10
+        # NDVI saturated: top=0.88, bottom=0.86 (tiny 0.02 diff)
+        ndvi_vals = [[0.88] * w for _ in range(h)]
+        for r in range(5, h):
+            ndvi_vals[r] = [0.86] * w
+
+        # EVI: top=0.55, bottom=0.20 (big 0.35 diff)
+        evi_vals = [[0.55] * w for _ in range(h)]
+        for r in range(5, h):
+            evi_vals[r] = [0.20] * w
+
+        ndvi = _make_raster(ndvi_vals)
+        evi = _make_raster(evi_vals)
+        alpha = _uniform_alpha(h, w)
+        valid = _uniform_valid(h, w)
+
+        wsr_ndvi_only = compute_weakness_raster(ndvi, alpha, valid, buffer_pixels=0)
+        wsr_with_evi = compute_weakness_raster(ndvi, alpha, valid, evi_raster=evi, buffer_pixels=0)
+
+        # The key metric: field_std_ndvi tracks the std of whichever VI was used
+        # EVI has far more variance (std ~0.17) than saturated NDVI (std ~0.01)
+        assert wsr_with_evi.field_std_ndvi > wsr_ndvi_only.field_std_ndvi, (
+            f"EVI std ({wsr_with_evi.field_std_ndvi}) should exceed "
+            f"NDVI std ({wsr_ndvi_only.field_std_ndvi}) in saturated regime"
+        )
+        # EVI path should have switched
+        assert wsr_with_evi.primary_vi_used == "EVI"
+        assert wsr_ndvi_only.primary_vi_used == "NDVI"
+
+    def test_no_evi_graceful_degradation(self):
+        """When NDVI saturates but no EVI available, still works (NDVI fallback)."""
+        h, w = 8, 8
+        ndvi = _make_raster([[0.88] * w for _ in range(h)])
+        alpha = _uniform_alpha(h, w)
+        valid = _uniform_valid(h, w)
+
+        wsr = compute_weakness_raster(ndvi, alpha, valid, evi_raster=None)
+        assert wsr.primary_vi_used == "NDVI"
+        assert wsr.evi_fallback_triggered is False
+        assert wsr.valid_pixel_count == h * w
+
+    def test_evi_zones_data_derived_in_saturated_field(self):
+        """Saturated field with EVI should produce data-derived zones."""
+        ndvi, evi, alpha, valid = self._make_saturated_field()
+        wsr = compute_weakness_raster(ndvi, alpha, valid, evi_raster=evi)
+        result = derive_zones_from_weakness(wsr, alpha)
+
+        assert not result.fallback_used, "EVI should enable data-derived zones"
+        assert result.zone_method == "weakness_quantile_v1"
+        assert result.zone_confidence == 0.70
+
+    def test_evi_with_ndmi_combined(self):
+        """EVI + NDMI should work together when NDVI is saturated."""
+        ndvi, evi, alpha, valid = self._make_saturated_field()
+        h, w = 8, 8
+        ndmi = _make_raster([[0.2] * w for _ in range(h)])
+        for r in range(4, h):
+            ndmi.values[r] = [-0.1] * w  # Moisture stress in bottom half
+
+        wsr = compute_weakness_raster(ndvi, alpha, valid, ndmi_raster=ndmi, evi_raster=evi)
+        assert wsr.primary_vi_used == "EVI"
+        assert wsr.valid_pixel_count == h * w
+
+    def test_evi_threshold_boundary(self):
+        """NDVI exactly at threshold should trigger EVI switch."""
+        h, w = 6, 6
+        ndvi = _make_raster([[EVI_SATURATION_THRESHOLD] * w for _ in range(h)])
+        evi = _make_raster([[0.4] * w for _ in range(h)])
+        alpha = _uniform_alpha(h, w)
+        valid = _uniform_valid(h, w)
+
+        wsr = compute_weakness_raster(ndvi, alpha, valid, evi_raster=evi)
+        assert wsr.evi_fallback_triggered is True
+
+    def test_evi_just_below_threshold_no_switch(self):
+        """NDVI just below threshold should NOT trigger EVI switch."""
+        h, w = 6, 6
+        ndvi = _make_raster([[EVI_SATURATION_THRESHOLD - 0.01] * w for _ in range(h)])
+        evi = _make_raster([[0.4] * w for _ in range(h)])
+        alpha = _uniform_alpha(h, w)
+        valid = _uniform_valid(h, w)
+
+        wsr = compute_weakness_raster(ndvi, alpha, valid, evi_raster=evi)
+        assert wsr.evi_fallback_triggered is False
+
+
+# ── Benchmarks: Performance & Scaling ───────────────────────────────────────
+
+import time
+import random
+
+class TestBenchmarks:
+    """Performance benchmarks for weakness raster computation."""
+
+    @staticmethod
+    def _timed_run(fn, *args, **kwargs):
+        """Run function and return (result, elapsed_seconds)."""
+        t0 = time.perf_counter()
+        result = fn(*args, **kwargs)
+        return result, time.perf_counter() - t0
+
+    def _make_field(self, h, w, ndvi_base=0.6, stressed_frac=0.25, seed=42):
+        """Generate a realistic heterogeneous field for benchmarking."""
+        rng = random.Random(seed)
+        ndvi_vals = []
+        evi_vals = []
+        ndmi_vals = []
+        for r in range(h):
+            ndvi_row, evi_row, ndmi_row = [], [], []
+            for c in range(w):
+                if rng.random() < stressed_frac:
+                    ndvi_row.append(round(rng.uniform(0.15, 0.35), 4))
+                    evi_row.append(round(rng.uniform(0.10, 0.25), 4))
+                    ndmi_row.append(round(rng.uniform(-0.3, 0.0), 4))
+                else:
+                    ndvi_row.append(round(rng.uniform(ndvi_base - 0.05, ndvi_base + 0.1), 4))
+                    evi_row.append(round(rng.uniform(0.35, 0.50), 4))
+                    ndmi_row.append(round(rng.uniform(0.1, 0.3), 4))
+            ndvi_vals.append(ndvi_row)
+            evi_vals.append(evi_row)
+            ndmi_vals.append(ndmi_row)
+        return _make_raster(ndvi_vals), _make_raster(evi_vals), _make_raster(ndmi_vals)
+
+    def test_bench_small_field_10x10(self):
+        """10x10 grid (1 ha at 10m) should complete in < 50ms."""
+        ndvi, evi, ndmi = self._make_field(10, 10)
+        alpha = _uniform_alpha(10, 10)
+        valid = _uniform_valid(10, 10)
+
+        wsr, elapsed = self._timed_run(
+            compute_weakness_raster, ndvi, alpha, valid,
+            ndmi_raster=ndmi, evi_raster=evi,
+        )
+        assert elapsed < 0.05, f"10x10 took {elapsed:.3f}s, expected < 0.05s"
+        assert wsr.valid_pixel_count == 100
+
+    def test_bench_medium_field_50x50(self):
+        """50x50 grid (25 ha at 10m) should complete in < 500ms."""
+        ndvi, evi, ndmi = self._make_field(50, 50)
+        alpha = _uniform_alpha(50, 50)
+        valid = _uniform_valid(50, 50)
+
+        wsr, elapsed = self._timed_run(
+            compute_weakness_raster, ndvi, alpha, valid,
+            ndmi_raster=ndmi, evi_raster=evi,
+        )
+        assert elapsed < 0.5, f"50x50 took {elapsed:.3f}s, expected < 0.5s"
+        assert wsr.valid_pixel_count == 2500
+
+    def test_bench_large_field_100x100(self):
+        """100x100 grid (100 ha at 10m) should complete in < 3s."""
+        ndvi, evi, ndmi = self._make_field(100, 100)
+        alpha = _uniform_alpha(100, 100)
+        valid = _uniform_valid(100, 100)
+
+        wsr, elapsed = self._timed_run(
+            compute_weakness_raster, ndvi, alpha, valid,
+            ndmi_raster=ndmi, evi_raster=evi,
+        )
+        assert elapsed < 3.0, f"100x100 took {elapsed:.3f}s, expected < 3s"
+        assert wsr.valid_pixel_count == 10000
+
+    def test_bench_zone_derivation_100x100(self):
+        """Zone derivation from a 100x100 WSR should complete in < 2s."""
+        ndvi, _, _ = self._make_field(100, 100)
+        alpha = _uniform_alpha(100, 100)
+        valid = _uniform_valid(100, 100)
+
+        wsr = compute_weakness_raster(ndvi, alpha, valid)
+        result, elapsed = self._timed_run(derive_zones_from_weakness, wsr, alpha)
+
+        assert elapsed < 2.0, f"Zone derivation took {elapsed:.3f}s, expected < 2s"
+        assert result.n_zones >= 2
+
+    def test_bench_evi_switch_overhead(self):
+        """EVI switch should add minimal overhead vs NDVI-only."""
+        h, w = 50, 50
+        rng = random.Random(99)
+        # Saturated NDVI field
+        ndvi_vals = [[round(rng.uniform(0.82, 0.90), 4) for _ in range(w)] for _ in range(h)]
+        evi_vals = [[round(rng.uniform(0.20, 0.55), 4) for _ in range(w)] for _ in range(h)]
+        ndvi = _make_raster(ndvi_vals)
+        evi = _make_raster(evi_vals)
+        alpha = _uniform_alpha(h, w)
+        valid = _uniform_valid(h, w)
+
+        _, t_ndvi = self._timed_run(compute_weakness_raster, ndvi, alpha, valid)
+        _, t_evi = self._timed_run(compute_weakness_raster, ndvi, alpha, valid, evi_raster=evi)
+
+        overhead = t_evi - t_ndvi
+        assert overhead < 0.1, f"EVI overhead {overhead:.4f}s too high"
+
+    def test_bench_full_pipeline_end_to_end(self):
+        """Full pipeline: WSR compute + zone derivation for 50x50."""
+        ndvi, evi, ndmi = self._make_field(50, 50)
+        alpha = _uniform_alpha(50, 50)
+        valid = _uniform_valid(50, 50)
+
+        t0 = time.perf_counter()
+        wsr = compute_weakness_raster(ndvi, alpha, valid, ndmi_raster=ndmi, evi_raster=evi)
+        result = derive_zones_from_weakness(wsr, alpha)
+        elapsed = time.perf_counter() - t0
+
+        assert elapsed < 1.0, f"Full pipeline took {elapsed:.3f}s, expected < 1s"
+        assert wsr.valid_pixel_count == 2500
+        assert result.n_zones >= 2

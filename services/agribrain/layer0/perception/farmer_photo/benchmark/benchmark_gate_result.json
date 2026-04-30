@@ -2,7 +2,7 @@
   "engine": "farmer_photo",
   "aggregate_failures": 0,
   "critical_failures": 0,
-  "soft_failures": 0,
+  "soft_failures": 1,
   "gate_passed": true,
   "failing_metrics": [],
   "failing_cases": [],
@@ -306,7 +306,7 @@
     },
     {
       "case_id": "edge_seedling_closeup",
-      "passed": true,
+      "passed": false,
       "critical": false,
       "soft_fail": true
     }
