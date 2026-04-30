@@ -1,6 +1,6 @@
 {
   "version": "satrgb_benchmark_v1",
-  "timestamp": "2026-04-30T14:40:45.479179",
+  "timestamp": "2026-04-30T17:20:41.458814",
   "n_cases": 30,
   "gate_result": {
     "engine": "satellite_rgb",
@@ -248,7 +248,7 @@
       "anomaly_fraction": 0.0147,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.7,
+      "elapsed_ms": 6.0,
       "error": null
     },
     {
@@ -268,7 +268,7 @@
       "anomaly_fraction": 0.0156,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.5,
+      "elapsed_ms": 6.6,
       "error": null
     },
     {
@@ -288,7 +288,7 @@
       "anomaly_fraction": 0.013,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.4,
+      "elapsed_ms": 5.8,
       "error": null
     },
     {
@@ -308,7 +308,7 @@
       "anomaly_fraction": 0.0138,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.8,
+      "elapsed_ms": 5.5,
       "error": null
     },
     {
@@ -328,7 +328,7 @@
       "anomaly_fraction": 0.0017,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.8,
+      "elapsed_ms": 6.3,
       "error": null
     },
     {
@@ -348,7 +348,7 @@
       "anomaly_fraction": 0.0017,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.9,
+      "elapsed_ms": 6.0,
       "error": null
     },
     {
@@ -368,7 +368,7 @@
       "anomaly_fraction": 0.0,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.9,
+      "elapsed_ms": 6.2,
       "error": null
     },
     {
@@ -388,7 +388,7 @@
       "anomaly_fraction": 0.0199,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.7,
+      "elapsed_ms": 6.0,
       "error": null
     },
     {
@@ -408,7 +408,7 @@
       "anomaly_fraction": 0.0069,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.4,
+      "elapsed_ms": 5.8,
       "error": null
     },
     {
@@ -428,7 +428,7 @@
       "anomaly_fraction": 0.0147,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 8.9,
+      "elapsed_ms": 6.1,
       "error": null
     },
     {
@@ -448,7 +448,7 @@
       "anomaly_fraction": 0.013,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 9.6,
+      "elapsed_ms": 5.8,
       "error": null
     },
     {
@@ -468,7 +468,7 @@
       "anomaly_fraction": 0.019,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.4,
+      "elapsed_ms": 6.0,
       "error": null
     },
     {
@@ -488,7 +488,7 @@
       "anomaly_fraction": 0.0009,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.6,
+      "elapsed_ms": 6.3,
       "error": null
     },
     {
@@ -508,7 +508,7 @@
       "anomaly_fraction": 0.0112,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.9,
+      "elapsed_ms": 5.8,
       "error": null
     },
     {
@@ -528,7 +528,7 @@
       "anomaly_fraction": 0.0026,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.8,
+      "elapsed_ms": 6.2,
       "error": null
     },
     {
@@ -548,7 +548,7 @@
       "anomaly_fraction": 0.0087,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.3,
+      "elapsed_ms": 6.8,
       "error": null
     },
     {
@@ -568,7 +568,7 @@
       "anomaly_fraction": 0.0147,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.8,
+      "elapsed_ms": 6.4,
       "error": null
     },
     {
@@ -588,7 +588,7 @@
       "anomaly_fraction": 0.0,
       "boundary_score": 0.0,
       "n_packets": 0,
-      "elapsed_ms": 3.1,
+      "elapsed_ms": 3.4,
       "error": null
     },
     {
@@ -608,7 +608,7 @@
       "anomaly_fraction": 0.0112,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.8,
+      "elapsed_ms": 6.6,
       "error": null
     },
     {
@@ -628,7 +628,7 @@
       "anomaly_fraction": 0.0087,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.4,
+      "elapsed_ms": 7.1,
       "error": null
     },
     {
@@ -708,7 +708,7 @@
       "anomaly_fraction": 0.0129,
       "boundary_score": 0.1736,
       "n_packets": 5,
-      "elapsed_ms": 9.0,
+      "elapsed_ms": 11.7,
       "error": null
     },
     {
@@ -728,7 +728,7 @@
       "anomaly_fraction": 0.0138,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.7,
+      "elapsed_ms": 6.2,
       "error": null
     },
     {
@@ -748,7 +748,7 @@
       "anomaly_fraction": 0.0,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.7,
+      "elapsed_ms": 6.2,
       "error": null
     },
     {
@@ -768,7 +768,7 @@
       "anomaly_fraction": 0.0087,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.7,
+      "elapsed_ms": 6.6,
       "error": null
     },
     {
@@ -788,7 +788,7 @@
       "anomaly_fraction": 0.0121,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 5.8,
+      "elapsed_ms": 7.5,
       "error": null
     },
     {
@@ -808,7 +808,7 @@
       "anomaly_fraction": 0.0035,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 6.1,
+      "elapsed_ms": 7.0,
       "error": null
     },
     {
@@ -828,7 +828,7 @@
       "anomaly_fraction": 0.0138,
       "boundary_score": 0.2215,
       "n_packets": 5,
-      "elapsed_ms": 9.1,
+      "elapsed_ms": 7.3,
       "error": null
     }
   ]

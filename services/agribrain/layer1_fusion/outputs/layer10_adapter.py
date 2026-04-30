@@ -151,11 +151,27 @@ def _build_sensor_markers(pkg: Layer1ContextPackage) -> List[Dict[str, Any]]:
 
 
 def _build_confidence_data(pkg: Layer1ContextPackage) -> Dict[str, Any]:
-    """Build confidence data for heatmap rendering."""
+    """Build confidence data for heatmap rendering.
+
+    Computes real per-zone confidence from zone-scoped fused features.
+    """
+    per_zone: Dict[str, float] = {}
+    for z in pkg.spatial_index.zones:
+        zone_confs: List[float] = []
+        for group in [
+            pkg.fused_features.water_context,
+            pkg.fused_features.vegetation_context,
+            pkg.fused_features.stress_evidence_context,
+        ]:
+            for ff in group:
+                if ff.spatial_scope == "zone" and ff.scope_id == z.zone_id:
+                    zone_confs.append(ff.confidence)
+        per_zone[z.zone_id] = (
+            round(sum(zone_confs) / len(zone_confs), 3)
+            if zone_confs else 0.0
+        )
+
     return {
         "plot_level": pkg.state_summary.confidence_ceiling,
-        "per_zone": {
-            z.zone_id: 0.0  # populated when zone-level confidence is computed
-            for z in pkg.spatial_index.zones
-        },
+        "per_zone": per_zone,
     }

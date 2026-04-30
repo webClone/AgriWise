@@ -13,10 +13,12 @@ Rules:
 - Weighted average uses weight = confidence × reliability
 - Every fused feature MUST have source_evidence_ids (no orphans)
 - Forecast evidence only fuses into forecast-scoped features
+- Uncertainty propagated via inverse-variance weighting
 """
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional, Tuple
 
 from .schemas import EvidenceItem, FusedFeature, FusedFeatureSet
@@ -91,6 +93,7 @@ def _fuse_group(
                     freshness=e.freshness_score,
                     source_evidence_ids=[e.evidence_id],
                     source_weights={e.source_family: 1.0},
+                    diagnostic_only=True,
                     flags=["DIAGNOSTIC_ONLY"],
                 ))
             continue
@@ -113,6 +116,14 @@ def _fuse_group(
             avg_freshness = sum(e.freshness_score for e in numeric) / len(numeric)
             max_confidence = min(0.95, max(e.confidence for e in numeric))
 
+            # Uncertainty propagation: inverse-variance weighting
+            # fused_sigma = 1 / sqrt(sum(1 / sigma_i²))
+            fused_uncertainty = None
+            sigmas = [e.sigma for e in numeric if e.sigma is not None and e.sigma > 0]
+            if sigmas:
+                inv_var_sum = sum(1.0 / (s * s) for s in sigmas)
+                fused_uncertainty = round(1.0 / math.sqrt(inv_var_sum), 4)
+
             features.append(FusedFeature(
                 name=var,
                 value=round(fused_value, 4),
@@ -121,6 +132,7 @@ def _fuse_group(
                 scope_id=scope_id,
                 temporal_scope=temporal_scope,
                 confidence=max_confidence,
+                uncertainty=fused_uncertainty,
                 freshness=avg_freshness,
                 source_evidence_ids=[e.evidence_id for e in all_items],
                 source_weights=source_weights,

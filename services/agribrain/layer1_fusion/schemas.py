@@ -277,6 +277,9 @@ class FusedFeature:
     source_weights: Dict[str, float] = field(default_factory=dict)
     conflict_status: Literal["none", "minor", "major", "unresolved"] = "none"
 
+    # Propagated from evidence: diagnostic features should not drive state updates
+    diagnostic_only: bool = False
+
     flags: List[str] = field(default_factory=list)
     explanation_basis: List[str] = field(default_factory=list)
 
@@ -438,6 +441,9 @@ class Layer1Provenance:
 
     generated_at: Optional[datetime] = None
 
+    # Invariant violations (from context_invariants.enforce_context_invariants)
+    invariant_violations: List[Dict[str, Any]] = field(default_factory=list)
+
 
 # ============================================================================
 # Diagnostics
@@ -515,6 +521,12 @@ class Layer1InputBundle:
     user_events: List[Any] = field(default_factory=list)
     historical_layer1_package: Any = None
 
+    # Pre-fetched raster composites from orchestrator (optional).
+    # Dict mapping variable name → raster dict with keys:
+    #   pixel_array (List[List[float]]), grid_spec, valid_pixel_count, resolution_m
+    # Layer 1 never fetches rasters — orchestrator provides them.
+    raster_composites: Dict[str, Any] = field(default_factory=dict)
+
 
 # ============================================================================
 # Layer 2 input context (downstream payload)
@@ -537,8 +549,10 @@ class Layer2InputContext:
     conflicts: List[EvidenceConflict] = field(default_factory=list)
     gaps: List[EvidenceGap] = field(default_factory=list)
     confidence: Dict[str, float] = field(default_factory=dict)
+    uncertainty: Dict[str, float] = field(default_factory=dict)
     provenance_ref: str = ""
 
+    spatial_index_ref: Optional[SpatialIndex] = None
     data_health: DataHealthScore = field(default_factory=DataHealthScore)
 
 
@@ -579,6 +593,9 @@ class Layer1ContextPackage:
     # Provenance and diagnostics
     provenance: Layer1Provenance = field(default_factory=Layer1Provenance)
     diagnostics: Layer1Diagnostics = field(default_factory=Layer1Diagnostics)
+
+    # Fusion audit log (per-decision trace)
+    audit_log: List[Dict[str, Any]] = field(default_factory=list)
 
     # Downstream payloads
     layer2_input: Any = None

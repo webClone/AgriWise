@@ -1,7 +1,7 @@
 """
 Layer 1 Fusion Context Engine V1.
 
-18-step deterministic pipeline:
+21-step deterministic pipeline:
   1. Validate input bundle
   2. Build source envelopes
   3. Run adapters → EvidenceItems
@@ -10,6 +10,8 @@ Layer 1 Fusion Context Engine V1.
   6. Build EvidenceLedger
   7. Run temporal alignment
   8. Run spatial alignment
+  8.5 Raster grid ingestion (optional — if composites provided)
+  8.7 Zone segmentation (optional — if rasters have ≥16 valid NDVI pixels)
   9. Compute freshness
   10. Run conflict resolver
   11. Run gap analyzer
@@ -19,7 +21,9 @@ Layer 1 Fusion Context Engine V1.
   15. Build Layer2 input payload (real adapter)
   16. Build Layer10 spatial payload (real adapter)
   17. Build diagnostics/provenance (computed prohibitions)
-  18. Return Layer1ContextPackage (with evidence_items)
+  17.5 Enforce context invariants (runtime safety)
+  18. Record audit log
+  19. Return Layer1ContextPackage (with evidence_items)
 
 Layer 1 never performs live data acquisition.
 """
@@ -65,6 +69,12 @@ from .gap_analyzer import detect_gaps
 from .confidence_model import compute_confidence_batch
 from .fusion_rules import fuse_features
 from .diagnostics import build_diagnostics
+from .context_invariants import (
+    enforce_context_invariants,
+    compute_spatial_fidelity,
+    compute_provenance_completeness,
+)
+from .raster_ingest import ingest_raster_composites
 from .outputs.layer2_adapter import build_layer2_context
 from .outputs.layer10_adapter import build_layer10_payload
 
@@ -149,8 +159,30 @@ class Layer1FusionEngine:
             item.temporal_scope = assign_temporal_window(item, bundle.run_timestamp)
         compute_stale_flags(ledger.all_items, bundle.run_timestamp)
 
-        # 8. Spatial alignment
-        spatial_index = build_spatial_index(ledger.all_items, bundle.plot_id)
+        # 8. Spatial alignment (enriched with L0 WSR data if available)
+        spatial_index = build_spatial_index(
+            ledger.all_items, bundle.plot_id,
+            layer0_state=bundle.layer0_state_package,
+        )
+
+        # 8.5 Raster grid ingestion (optional — pixel-level fidelity)
+        raster_audit_count = 0
+        if bundle.raster_composites:
+            raster_evidence, raster_refs = ingest_raster_composites(
+                bundle.raster_composites, bundle.plot_id, bundle.run_timestamp,
+            )
+            for re in raster_evidence:
+                ledger.add(re)
+            for rr in raster_refs:
+                spatial_index.raster_refs.append(rr)
+            raster_audit_count = len(raster_evidence)
+
+        # 8.7 Zone segmentation (optional — when NDVI rasters have ≥16 valid cells)
+        zone_seg_audit = None
+        if bundle.raster_composites:
+            zone_seg_audit = self._try_zone_segmentation(
+                bundle, ledger, spatial_index,
+            )
 
         # 9. Freshness
         compute_freshness_batch(ledger.all_items, bundle.run_timestamp)
@@ -234,7 +266,53 @@ class Layer1FusionEngine:
         pkg.layer2_input = build_layer2_context(pkg)
         pkg.layer10_payload = build_layer10_payload(pkg)
 
-        # 18. Return context package
+        # 17.5 Enforce context invariants (runtime safety — modeled on L0)
+        ctx_violations = enforce_context_invariants(pkg)
+        pkg.provenance.invariant_violations = [
+            v.to_dict() for v in ctx_violations
+        ]
+
+        # Compute real health scores (replace hardcoded 1.0)
+        pkg.diagnostics.data_health.spatial_fidelity = compute_spatial_fidelity(pkg)
+        pkg.diagnostics.data_health.provenance_completeness = compute_provenance_completeness(pkg)
+
+        # 18. Record audit log
+        audit: list = []
+        if all_quarantined:
+            audit.append({
+                "step": "quarantine",
+                "count": len(all_quarantined),
+                "detail": [q.evidence_id for q in all_quarantined],
+            })
+        if conflicts:
+            audit.append({
+                "step": "conflict_resolution",
+                "count": len(conflicts),
+                "detail": [c.conflict_type for c in conflicts],
+            })
+        if gaps:
+            audit.append({
+                "step": "gap_detection",
+                "count": len(gaps),
+                "detail": [g.gap_type for g in gaps],
+            })
+        if ctx_violations:
+            audit.append({
+                "step": "invariant_enforcement",
+                "count": len(ctx_violations),
+                "auto_fixed": sum(1 for v in ctx_violations if v.auto_fixed),
+            })
+        if raster_audit_count > 0:
+            audit.append({
+                "step": "raster_grid_ingestion",
+                "count": raster_audit_count,
+                "composites": list(bundle.raster_composites.keys()),
+            })
+        if zone_seg_audit is not None:
+            audit.append(zone_seg_audit)
+        pkg.audit_log = audit
+
+        # 19. Return context package
         return pkg
 
     def _gather_packages(self, bundle: Layer1InputBundle) -> Dict[str, List[Any]]:
@@ -322,3 +400,91 @@ class Layer1FusionEngine:
             unresolved_major_conflicts=major_conflicts,
             data_health=diagnostics.data_health,
         )
+
+    def _try_zone_segmentation(
+        self,
+        bundle: Layer1InputBundle,
+        ledger: EvidenceLedger,
+        spatial_index,
+    ) -> Optional[Dict]:
+        """Conditionally run zone segmentation from NDVI rasters.
+
+        Fires only when NDVI composite has ≥16 valid pixels.
+        Uses the pure-python quantile-based engine (no numpy required).
+        Returns an audit dict if segmentation ran, else None.
+        """
+        ndvi_composite = bundle.raster_composites.get("NDVI")
+        if not ndvi_composite or not isinstance(ndvi_composite, dict):
+            return None
+
+        pixel_array = ndvi_composite.get("pixel_array")
+        if not pixel_array or not pixel_array[0]:
+            return None
+
+        valid_count = ndvi_composite.get("valid_pixel_count", 0)
+        if valid_count < 16:
+            return None
+
+        try:
+            from .zone_engine import generate_management_zones_pure_python
+
+            H = len(pixel_array)
+            W = len(pixel_array[0]) if H > 0 else 0
+            grid_spec = {"height": H, "width": W, "resolution": ndvi_composite.get("resolution_m", 10.0)}
+
+            # Zone engine expects [T, H, W] — wrap single composite as T=1
+            ndvi_stack = [pixel_array]
+            sar_stack = []
+            sar_composite = bundle.raster_composites.get("SAR")
+            if sar_composite and isinstance(sar_composite, dict):
+                sar_array = sar_composite.get("pixel_array")
+                if sar_array:
+                    sar_stack = [sar_array]
+
+            zones = generate_management_zones_pure_python(
+                bundle.plot_id, ndvi_stack, sar_stack, grid_spec,
+            )
+
+            # Convert zone output to SpatialIndex ZoneRefs
+            from .schemas import ZoneRef
+            for z_id, z_data in zones.items():
+                area_frac = z_data.get("area_pct", 0.0) / 100.0
+                if z_id not in {z.zone_id for z in spatial_index.zones}:
+                    spatial_index.zones.append(ZoneRef(
+                        zone_id=z_id,
+                        label=z_data.get("label", z_id),
+                        area_fraction=area_frac,
+                    ))
+
+            # Create zone-scoped evidence from zone signatures
+            for z_id, z_data in zones.items():
+                sig = z_data.get("signature", {})
+                ndvi_med = sig.get("ndvi_median")
+                if ndvi_med is not None:
+                    from .schemas import EvidenceItem as _EI
+                    ledger.add(_EI(
+                        evidence_id=f"zone_seg_{z_id}_ndvi",
+                        plot_id=bundle.plot_id,
+                        variable="ndvi",
+                        value=ndvi_med,
+                        unit="index",
+                        source_family="zone_segmentation",
+                        source_id=f"zone_seg_{bundle.run_id}",
+                        observation_type="derived",
+                        spatial_scope="zone",
+                        scope_id=z_id,
+                        observed_at=bundle.run_timestamp,
+                        confidence=0.7,
+                        reliability=0.7,
+                        freshness_score=1.0,
+                        provenance_ref=f"zone_seg_{bundle.run_id}_{z_id}",
+                    ))
+
+            return {
+                "step": "zone_segmentation",
+                "zone_count": len(zones),
+                "method": "quantile_pure_python",
+                "zones": list(zones.keys()),
+            }
+        except Exception:
+            return None

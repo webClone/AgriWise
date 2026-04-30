@@ -100,6 +100,19 @@ class SensorPackage:
     window_start: datetime = field(default_factory=lambda: _TS - timedelta(hours=6))
     window_end: datetime = field(default_factory=lambda: _TS)
 
+@dataclass
+class ForecastDay:
+    date: str
+    precipitation_mm: float = 0.0
+    et0_mm: float = 4.0
+    temp_max: float = 28.0
+    temp_min: float = 15.0
+
+@dataclass
+class ForecastPackage:
+    plot_id: str = "test_plot"
+    forecast_process_forcing: List[ForecastDay] = field(default_factory=list)
+
 
 def _bundle(**kw):
     defaults = dict(
@@ -370,6 +383,146 @@ class TestScenarioEmptyPlot:
         assert time.perf_counter() - t0 < 0.2
 
 
+# ── Scenario 7: Zone-Aware Field ────────────────────────────────────────────
+
+class TestScenarioZoneAware:
+    """S2 with multiple zones, point sensors. Tests zone spatial index."""
+
+    def _build(self):
+        s2 = S2Package(
+            zone_summaries=[
+                S2ZoneSummary(zone_id="z_north", ndvi_mean=0.8),
+                S2ZoneSummary(zone_id="z_south", ndvi_mean=0.4),
+            ]
+        )
+        sensor = SensorPackage(
+            readings=[SensorReading(variable="soil_moisture_vwc", value=0.25)]
+        )
+        return _bundle(
+            plot_id="zone_aware",
+            run_id="run_zone",
+            sentinel2_packages=[s2],
+            sensor_context_package=sensor,
+        )
+
+    def test_spatial_index_zones_and_points(self):
+        engine = Layer1FusionEngine()
+        pkg = engine.fuse(self._build())
+        zone_ids = {z.zone_id for z in pkg.spatial_index.zones}
+        assert "z_north" in zone_ids
+        assert "z_south" in zone_ids
+        assert len(pkg.spatial_index.points) >= 1
+
+    def test_zone_features_fused_separately(self):
+        engine = Layer1FusionEngine()
+        pkg = engine.fuse(self._build())
+        veg = pkg.fused_features.vegetation_context
+        # Should have plot level + 2 zones
+        ndvi_features = [f for f in veg if f.name == "ndvi"]
+        assert len(ndvi_features) == 3
+
+
+# ── Scenario 8: Edge-Contaminated Field ─────────────────────────────────────
+
+class TestScenarioEdgeContaminated:
+    """Field with edge contamination evidence. Tests edge spatial index."""
+
+    def _build(self):
+        return _bundle(
+            plot_id="edge_field",
+            run_id="run_edge",
+            layer0_state_package={
+                "edge_contamination": [
+                    {"edge_id": "edge_east", "contamination_score": 0.85},
+                    {"edge_id": "edge_west", "contamination_score": 0.12},
+                ]
+            }
+        )
+
+    def test_edge_regions_indexed(self):
+        engine = Layer1FusionEngine()
+        pkg = engine.fuse(self._build())
+        edge_ids = {e.edge_id for e in pkg.spatial_index.edge_regions}
+        assert "edge_east" in edge_ids
+        assert "edge_west" in edge_ids
+
+    def test_contamination_scores_propagated(self):
+        engine = Layer1FusionEngine()
+        pkg = engine.fuse(self._build())
+        east = [e for e in pkg.spatial_index.edge_regions if e.edge_id == "edge_east"][0]
+        assert east.contamination_score == 0.85
+
+
+# ── Scenario 9: Forecast-Heavy Field ────────────────────────────────────────
+
+class TestScenarioForecastHeavy:
+    """5-day forecast, minimal current observations."""
+
+    def _build(self):
+        fc = ForecastPackage(
+            forecast_process_forcing=[
+                ForecastDay(date=f"day_{i}", precipitation_mm=2.0 * i)
+                for i in range(5)
+            ]
+        )
+        return _bundle(
+            plot_id="forecast_field",
+            run_id="run_forecast",
+            weather_forecast_package=fc,
+        )
+
+    def test_forecast_features_have_forecast_scope(self):
+        engine = Layer1FusionEngine()
+        pkg = engine.fuse(self._build())
+        fc_features = [f for f in pkg.fused_features.water_context if f.name == "forecast_precip"]
+        assert len(fc_features) == 5
+        for f in fc_features:
+            assert f.temporal_scope.startswith("forecast_day_")
+
+
+# ── Scenario 10: WSR-Enriched Field ─────────────────────────────────────────
+
+class TestScenarioWSREnriched:
+    """Layer 0 state package with zone weakness scores."""
+
+    def _build(self):
+        s2 = S2Package(
+            zone_summaries=[
+                S2ZoneSummary(zone_id="z1", ndvi_mean=0.6),
+                S2ZoneSummary(zone_id="z2", ndvi_mean=0.4),
+            ]
+        )
+        return _bundle(
+            plot_id="wsr_field",
+            run_id="run_wsr",
+            sentinel2_packages=[s2],
+            layer0_state_package={
+                "zone_summaries": [
+                    {"zone_id": "z1", "label": "healthy", "area_fraction": 0.7},
+                    {"zone_id": "z2", "label": "weak", "area_fraction": 0.3},
+                ]
+            }
+        )
+
+    def test_wsr_metadata_propagated(self):
+        engine = Layer1FusionEngine()
+        pkg = engine.fuse(self._build())
+        z1 = [z for z in pkg.spatial_index.zones if z.zone_id == "z1"][0]
+        z2 = [z for z in pkg.spatial_index.zones if z.zone_id == "z2"][0]
+        assert z1.label == "healthy"
+        assert z1.area_fraction == 0.7
+        assert z2.label == "weak"
+
+    def test_layer10_zone_confidence(self):
+        engine = Layer1FusionEngine()
+        pkg = engine.fuse(self._build())
+        # L10 payload should have per_zone confidence
+        per_zone = pkg.layer10_payload.get("confidence_data", {}).get("per_zone", {})
+        assert "z1" in per_zone
+        assert "z2" in per_zone
+        assert per_zone["z1"] > 0.0
+
+
 # ── Cross-Scenario Invariants ───────────────────────────────────────────────
 
 class TestCrossScenarioInvariants:
@@ -377,7 +530,8 @@ class TestCrossScenarioInvariants:
 
     @pytest.fixture(params=[
         "fullstack", "sensor_only", "sat_only", "multi_scene",
-        "stale_field", "empty_plot",
+        "stale_field", "empty_plot", "zone_aware", "edge_contam",
+        "forecast_heavy", "wsr_enriched"
     ])
     def scenario_pkg(self, request):
         builders = {
@@ -387,6 +541,10 @@ class TestCrossScenarioInvariants:
             "multi_scene": TestScenarioMultiScene()._build,
             "stale_field": TestScenarioStaleData()._build,
             "empty_plot": TestScenarioEmptyPlot()._build,
+            "zone_aware": TestScenarioZoneAware()._build,
+            "edge_contam": TestScenarioEdgeContaminated()._build,
+            "forecast_heavy": TestScenarioForecastHeavy()._build,
+            "wsr_enriched": TestScenarioWSREnriched()._build,
         }
         engine = Layer1FusionEngine()
         return request.param, engine.fuse(builders[request.param]())
@@ -432,6 +590,10 @@ class TestCalibrationReport:
             ("Multi-scene", TestScenarioMultiScene()._build),
             ("Stale data", TestScenarioStaleData()._build),
             ("Empty plot", TestScenarioEmptyPlot()._build),
+            ("Zone-aware", TestScenarioZoneAware()._build),
+            ("Edge-contaminated", TestScenarioEdgeContaminated()._build),
+            ("Forecast-heavy", TestScenarioForecastHeavy()._build),
+            ("WSR-enriched", TestScenarioWSREnriched()._build),
         ]
 
         engine = Layer1FusionEngine()

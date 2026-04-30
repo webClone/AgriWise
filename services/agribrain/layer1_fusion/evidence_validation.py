@@ -3,10 +3,21 @@ Layer 1 Evidence Validation.
 
 Validates evidence items before admission to the ledger.
 Quarantines invalid evidence with structured reasons.
+
+Checks:
+  - ID, plot_id, variable non-empty
+  - Source family, observation type, spatial scope canonical
+  - Unit canonical (if provided)
+  - Confidence/reliability bounds [0, 1]
+  - Forecast source consistency
+  - Provenance ref present
+  - NaN/Inf in numeric values
+  - Physical value bounds for known variables
 """
 
 from __future__ import annotations
 
+import math
 from typing import List
 
 from .schemas import (
@@ -53,6 +64,24 @@ def validate_evidence(item: EvidenceItem) -> List[str]:
     # Provenance ref should be present
     if not item.provenance_ref:
         violations.append("MISSING_PROVENANCE_REF")
+
+    # NaN/Inf check on numeric values
+    if isinstance(item.value, float) and (math.isnan(item.value) or math.isinf(item.value)):
+        violations.append(f"NAN_INF_VALUE:{item.value}")
+
+    # Physical value bounds for known variables
+    _BOUNDS = {
+        "ndvi": (-1.0, 1.0), "ndmi": (-1.0, 1.0), "ndre": (-1.0, 1.0),
+        "evi": (-1.0, 1.0), "bsi": (-1.0, 1.0),
+        "soil_moisture_vwc": (0.0, 1.0), "vegetation_fraction": (0.0, 1.0),
+        "bare_soil_fraction": (0.0, 1.0), "canopy_cover": (0.0, 1.0),
+    }
+    if isinstance(item.value, (int, float)) and item.variable in _BOUNDS:
+        lo, hi = _BOUNDS[item.variable]
+        if item.value < lo or item.value > hi:
+            violations.append(
+                f"VALUE_OUT_OF_BOUNDS:{item.variable}={item.value:.4f} not in [{lo},{hi}]"
+            )
 
     return violations
 

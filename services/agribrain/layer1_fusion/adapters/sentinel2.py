@@ -48,6 +48,9 @@ class Sentinel2Adapter:
         # Confidence penalty for cloud/shadow
         base_confidence = max(0.0, min(0.85, reliability * (1.0 - cloud_frac)))
 
+        # Uncertainty (sigma): higher cloud + lower reliability → higher sigma
+        base_sigma = round((1.0 - reliability) * (1.0 + cloud_frac), 4)
+
         ps = getattr(package, "plot_summary", None)
         if ps is None:
             return items
@@ -75,6 +78,7 @@ class Sentinel2Adapter:
                     spatial_scope="plot",
                     observed_at=acq_dt,
                     confidence=base_confidence,
+                    sigma=base_sigma,
                     reliability=reliability,
                     freshness_score=0.0,  # set by freshness engine
                     provenance_ref=f"s2_scene_{scene_id}",
@@ -111,6 +115,7 @@ class Sentinel2Adapter:
             z_reliability = getattr(zs, "reliability", reliability)
             z_cloud = getattr(zs, "cloud_fraction", cloud_frac)
             z_conf = max(0.0, min(0.85, z_reliability * (1.0 - z_cloud)))
+            z_sigma = round((1.0 - z_reliability) * (1.0 + z_cloud), 4)
 
             for attr, var in [("ndvi_mean", "ndvi"), ("ndmi_mean", "ndmi"), ("ndre_mean", "ndre")]:
                 val = getattr(zs, attr, None)
@@ -128,6 +133,7 @@ class Sentinel2Adapter:
                         scope_id=zone_id,
                         observed_at=acq_dt,
                         confidence=z_conf,
+                        sigma=z_sigma,
                         reliability=z_reliability,
                         freshness_score=0.0,
                         provenance_ref=f"s2_scene_{scene_id}_zone_{zone_id}",

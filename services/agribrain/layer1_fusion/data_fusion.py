@@ -2,7 +2,21 @@
 Layer 1.1: Multi-Source Data Fusion Engine (Production Spec)
 Implements the 8-Step Fusion Pipeline with Evidence Validation.
 Supports degradation to Pure Python if Pandas/Numpy are missing.
+
+.. deprecated::
+    This module is DEPRECATED. Use `layer1_fusion.engine.Layer1FusionEngine`
+    (the V1 contract-driven pipeline) instead. This legacy engine remains for
+    backward compatibility only and will be removed in a future release.
 """
+
+import warnings
+warnings.warn(
+    "layer1_fusion.data_fusion is DEPRECATED. "
+    "Use layer1_fusion.engine.Layer1FusionEngine instead. "
+    "This legacy module will be removed in a future release.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta

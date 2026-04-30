@@ -95,6 +95,7 @@ def run_layer1_fusion_v1(
         run_timestamp=ts,
         window_start=_parse_date(inputs.date_range.get("start", ""), ts),
         window_end=_parse_date(inputs.date_range.get("end", ""), ts),
+        layer0_state_package=l0.get("layer0_state_package"),
         sentinel2_packages=l0.get("sentinel2_packages", []),
         sentinel1_packages=l0.get("sentinel1_packages", []),
         environment_package=l0.get("environment_package"),

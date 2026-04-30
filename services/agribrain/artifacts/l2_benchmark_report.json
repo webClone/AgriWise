@@ -1,0 +1,45 @@
+{
+  "engine_version": "layer2_intelligence_v1",
+  "timestamp": 1777567961.708101,
+  "benchmarks": [
+    {
+      "scenario": "plot_only",
+      "zones": 0,
+      "iterations": 1000,
+      "ops_per_sec": 29566.99,
+      "latency_ms": {
+        "p50": 0.03,
+        "p90": 0.048,
+        "p99": 0.069,
+        "mean": 0.034,
+        "max": 0.385
+      }
+    },
+    {
+      "scenario": "10_zones",
+      "zones": 10,
+      "iterations": 500,
+      "ops_per_sec": 4366.63,
+      "latency_ms": {
+        "p50": 0.177,
+        "p90": 0.358,
+        "p99": 0.758,
+        "mean": 0.229,
+        "max": 1.959
+      }
+    },
+    {
+      "scenario": "100_zones",
+      "zones": 100,
+      "iterations": 100,
+      "ops_per_sec": 282.41,
+      "latency_ms": {
+        "p50": 3.058,
+        "p90": 5.152,
+        "p99": 9.056,
+        "mean": 3.54,
+        "max": 9.056
+      }
+    }
+  ]
+}

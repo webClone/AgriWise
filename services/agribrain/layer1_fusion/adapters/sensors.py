@@ -84,6 +84,7 @@ class SensorAdapter:
                 scope_id=scope_id,
                 observed_at=timestamp,
                 confidence=min(0.95, reliability),
+                sigma=round(1.0 - reliability, 4),
                 reliability=reliability,
                 freshness_score=0.0,
                 provenance_ref=f"sensor_{device_id}_{plot_id}",
