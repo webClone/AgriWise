@@ -3,13 +3,13 @@
   "engine_version": "layer2_intelligence_v1",
   "contract_version": "1.0.0",
   "timestamp": "2026-05-01T12:00:00+00:00",
-  "scenario_count": 8,
-  "pass_count": 8,
+  "scenario_count": 12,
+  "pass_count": 12,
   "fail_count": 0,
   "layer0_test_count": 1083,
   "layer1_test_count": 582,
-  "layer2_test_count": 59,
-  "cross_layer_test_count": 1724,
+  "layer2_test_count": 126,
+  "cross_layer_test_count": 1791,
   "scenarios": [
     {
       "name": "Full-stack",
@@ -36,7 +36,7 @@
       "invariant_violations": 1,
       "invariant_errors": 0,
       "hash": "00250de04503",
-      "elapsed_ms": 0.2,
+      "elapsed_ms": 0.4,
       "result": "PASS",
       "stress_types": [
         "THERMAL",
@@ -191,7 +191,7 @@
       "invariant_violations": 0,
       "invariant_errors": 0,
       "hash": "20de6be695ab",
-      "elapsed_ms": 0.1,
+      "elapsed_ms": 0.2,
       "result": "PASS",
       "stress_types": [
         "WATER"
@@ -256,6 +256,130 @@
       "elapsed_ms": 0.0,
       "result": "PASS",
       "stress_types": []
+    },
+    {
+      "name": "Multi-stress",
+      "stress_count": 2,
+      "veg_count": 1,
+      "pheno_count": 3,
+      "zone_count": 1,
+      "health_overall": 0.7,
+      "status": "ok",
+      "prohibition_pass": 10,
+      "prohibition_total": 10,
+      "prohibition_matrix": {
+        "no_prescription_vocabulary": true,
+        "no_action_recommendations": true,
+        "no_stress_from_diagnostic_only": true,
+        "no_stress_without_evidence": true,
+        "no_zone_stress_without_zone_ref": true,
+        "no_severity_above_confidence": true,
+        "uncertainty_propagated": true,
+        "data_health_inherited": true,
+        "no_fabricated_evidence_ids": true,
+        "content_hash_deterministic": true
+      },
+      "invariant_violations": 1,
+      "invariant_errors": 0,
+      "hash": "67b82614f4e7",
+      "elapsed_ms": 0.1,
+      "result": "PASS",
+      "stress_types": [
+        "THERMAL",
+        "WATER"
+      ]
+    },
+    {
+      "name": "Borderline-NDMI",
+      "stress_count": 0,
+      "veg_count": 1,
+      "pheno_count": 3,
+      "zone_count": 0,
+      "health_overall": 0.7,
+      "status": "ok",
+      "prohibition_pass": 10,
+      "prohibition_total": 10,
+      "prohibition_matrix": {
+        "no_prescription_vocabulary": true,
+        "no_action_recommendations": true,
+        "no_stress_from_diagnostic_only": true,
+        "no_stress_without_evidence": true,
+        "no_zone_stress_without_zone_ref": true,
+        "no_severity_above_confidence": true,
+        "uncertainty_propagated": true,
+        "data_health_inherited": true,
+        "no_fabricated_evidence_ids": true,
+        "content_hash_deterministic": true
+      },
+      "invariant_violations": 0,
+      "invariant_errors": 0,
+      "hash": "02f71d126e07",
+      "elapsed_ms": 0.1,
+      "result": "PASS",
+      "stress_types": []
+    },
+    {
+      "name": "Senescence",
+      "stress_count": 2,
+      "veg_count": 1,
+      "pheno_count": 3,
+      "zone_count": 1,
+      "health_overall": 0.7,
+      "status": "ok",
+      "prohibition_pass": 10,
+      "prohibition_total": 10,
+      "prohibition_matrix": {
+        "no_prescription_vocabulary": true,
+        "no_action_recommendations": true,
+        "no_stress_from_diagnostic_only": true,
+        "no_stress_without_evidence": true,
+        "no_zone_stress_without_zone_ref": true,
+        "no_severity_above_confidence": true,
+        "uncertainty_propagated": true,
+        "data_health_inherited": true,
+        "no_fabricated_evidence_ids": true,
+        "content_hash_deterministic": true
+      },
+      "invariant_violations": 1,
+      "invariant_errors": 0,
+      "hash": "d236b5d3dcb0",
+      "elapsed_ms": 0.1,
+      "result": "PASS",
+      "stress_types": [
+        "THERMAL",
+        "WATER"
+      ]
+    },
+    {
+      "name": "Zone-conflict",
+      "stress_count": 1,
+      "veg_count": 5,
+      "pheno_count": 3,
+      "zone_count": 1,
+      "health_overall": 0.7,
+      "status": "ok",
+      "prohibition_pass": 10,
+      "prohibition_total": 10,
+      "prohibition_matrix": {
+        "no_prescription_vocabulary": true,
+        "no_action_recommendations": true,
+        "no_stress_from_diagnostic_only": true,
+        "no_stress_without_evidence": true,
+        "no_zone_stress_without_zone_ref": true,
+        "no_severity_above_confidence": true,
+        "uncertainty_propagated": true,
+        "data_health_inherited": true,
+        "no_fabricated_evidence_ids": true,
+        "content_hash_deterministic": true
+      },
+      "invariant_violations": 0,
+      "invariant_errors": 0,
+      "hash": "7786f3f67e5c",
+      "elapsed_ms": 0.1,
+      "result": "PASS",
+      "stress_types": [
+        "WATER"
+      ]
     }
   ]
 }

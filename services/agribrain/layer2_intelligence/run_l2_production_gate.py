@@ -164,6 +164,51 @@ def _build_scenarios() -> List[tuple]:
         data_health=DataHealthScore(overall=0.3, confidence_ceiling=0.5, status="degraded"),
     ))
 
+    # 9. Multi-stress co-occurrence (water + thermal)
+    scenarios.append(_ctx("Multi-stress",
+        water={
+            "ndmi_mean": {"value": 0.08, "confidence": 0.7, "source_weights": {}},
+            "soil_moisture_vwc": {"value": 0.09, "confidence": 0.6, "source_weights": {}},
+        },
+        veg={"ndvi_mean": {"value": 0.28, "confidence": 0.7, "source_weights": {}}},
+        stress={
+            "temp_max": {"value": 41.0, "confidence": 0.8, "source_weights": {}},
+            "vpd": {"value": 3.8, "confidence": 0.7, "source_weights": {}},
+        },
+        operational={"precipitation_mm": {"value": 0.0, "confidence": 0.8, "source_weights": {}}},
+    ))
+
+    # 10. Borderline threshold (NDMI=0.20 exactly → no water stress)
+    scenarios.append(_ctx("Borderline-NDMI",
+        water={"ndmi_mean": {"value": 0.20, "confidence": 0.7, "source_weights": {}}},
+        veg={"ndvi_mean": {"value": 0.55, "confidence": 0.7, "source_weights": {}}},
+    ))
+
+    # 11. Deep senescence (reduced stress sensitivity)
+    scenarios.append(_ctx("Senescence",
+        water={"ndmi_mean": {"value": 0.15, "confidence": 0.7, "source_weights": {}}},
+        veg={"ndvi_mean": {"value": 0.30, "confidence": 0.7, "source_weights": {}}},
+        stress={"temp_max": {"value": 38.0, "confidence": 0.8, "source_weights": {}}},
+        crop_context=CropCycleContext(current_stage="senescence", gdd_accumulated=2500),
+    ))
+
+    # 12. Conflicting zone data (z1 wet, z2 dry)
+    scenarios.append(_ctx("Zone-conflict",
+        water={
+            "ndmi_mean": {"value": 0.30, "confidence": 0.7, "source_weights": {}},
+            "ndmi_z1": {"value": 0.50, "confidence": 0.7, "scope_id": "z1", "source_weights": {}},
+            "ndmi_z2": {"value": 0.06, "confidence": 0.7, "scope_id": "z2", "source_weights": {}},
+        },
+        veg={
+            "ndvi_mean": {"value": 0.50, "confidence": 0.7, "source_weights": {}},
+            "ndvi_z1": {"value": 0.68, "confidence": 0.7, "scope_id": "z1", "source_weights": {}},
+            "ndvi_z2": {"value": 0.22, "confidence": 0.7, "scope_id": "z2", "source_weights": {}},
+        },
+        spatial_index=SpatialIndex(plot_id="gate_plot", zones=[
+            ZoneRef(zone_id="z1"), ZoneRef(zone_id="z2"),
+        ]),
+    ))
+
     return scenarios
 
 
@@ -201,11 +246,12 @@ def _run_gate():
         inv_count = len(pkg.provenance.invariant_violations)
         inv_errors = sum(1 for v in pkg.provenance.invariant_violations if v.get("severity") == "error")
 
-        # Pass/fail
-        scenario_pass = (
-            prohib_pass >= prohib_total - 2  # allow up to 2 non-critical failures
-            and inv_errors == 0
-        )
+        # Pass/fail — strict: 100% prohibition pass for data-bearing scenarios
+        has_data = len(pkg.stress_context) > 0 or len(pkg.vegetation_intelligence) > 0
+        if has_data:
+            scenario_pass = (prohib_pass == prohib_total and inv_errors == 0)
+        else:
+            scenario_pass = (prohib_pass >= prohib_total - 1 and inv_errors == 0)
         if not scenario_pass:
             all_pass = False
 
@@ -296,3 +342,11 @@ def _count_tests(package: str) -> int:
 
 if __name__ == "__main__":
     _run_gate()
+    # Exit with code for CI integration
+    import json
+    from pathlib import Path
+    report_path = Path(__file__).resolve().parent.parent / "artifacts" / "l2_production_gate_report.json"
+    if report_path.exists():
+        with open(report_path) as f:
+            report = json.load(f)
+        sys.exit(0 if report.get("gate_passed") else 1)

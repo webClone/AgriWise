@@ -271,7 +271,7 @@ def _assess_thermal_stress(
     """High temperature + VPD exceeding crop tolerance."""
     if temp_max is None:
         return None
-    if temp_max < 35.0:
+    if temp_max <= 35.0:
         return None
 
     severity = min(1.0, (temp_max - 35.0) / 10.0 * 0.5)

@@ -1,45 +1,63 @@
 {
   "engine_version": "layer2_intelligence_v1",
-  "timestamp": 1777567961.708101,
+  "timestamp": 1777575923.0254626,
+  "determinism_check": true,
   "benchmarks": [
     {
       "scenario": "plot_only",
       "zones": 0,
       "iterations": 1000,
-      "ops_per_sec": 29566.99,
+      "ops_per_sec": 5600.68,
       "latency_ms": {
-        "p50": 0.03,
-        "p90": 0.048,
-        "p99": 0.069,
-        "mean": 0.034,
-        "max": 0.385
-      }
+        "p50": 0.153,
+        "p90": 0.292,
+        "p99": 0.401,
+        "mean": 0.179,
+        "max": 0.64
+      },
+      "memory_delta_kb": 37.7
     },
     {
       "scenario": "10_zones",
       "zones": 10,
       "iterations": 500,
-      "ops_per_sec": 4366.63,
+      "ops_per_sec": 1504.25,
       "latency_ms": {
-        "p50": 0.177,
-        "p90": 0.358,
-        "p99": 0.758,
-        "mean": 0.229,
-        "max": 1.959
-      }
+        "p50": 0.572,
+        "p90": 1.025,
+        "p99": 1.414,
+        "mean": 0.665,
+        "max": 2.048
+      },
+      "memory_delta_kb": 18.5
     },
     {
       "scenario": "100_zones",
       "zones": 100,
       "iterations": 100,
-      "ops_per_sec": 282.41,
+      "ops_per_sec": 149.42,
       "latency_ms": {
-        "p50": 3.058,
-        "p90": 5.152,
-        "p99": 9.056,
-        "mean": 3.54,
-        "max": 9.056
-      }
+        "p50": 6.024,
+        "p90": 9.035,
+        "p99": 12.043,
+        "mean": 6.692,
+        "max": 12.043
+      },
+      "memory_delta_kb": 11.0
+    },
+    {
+      "scenario": "stress_heavy",
+      "zones": 0,
+      "iterations": 500,
+      "ops_per_sec": 2593.21,
+      "latency_ms": {
+        "p50": 0.347,
+        "p90": 0.508,
+        "p99": 0.797,
+        "mean": 0.386,
+        "max": 0.802
+      },
+      "memory_delta_kb": 15.7
     }
   ]
 }
