@@ -611,15 +611,16 @@ def _extract_top_findings(results: Dict, gq) -> list:
                         findings.append(f"Low soil moisture at {depth} ({val:.2f} m³/m³).")
                         break
 
-    # L3: Diagnoses
+    # L3: Diagnoses (canonical schema: problem_id, severity 0-1, confidence 0-1)
     l3 = results.get(LayerId.L3)
     if l3 and l3.output:
         for diag in getattr(l3.output, "diagnoses", [])[:3]:
-            cond = getattr(diag, "condition", "")
-            sev = getattr(diag, "severity", 0)
-            conf = getattr(diag, "confidence", 0)
-            if cond and sev >= 5:
-                findings.append(f"Diagnosis: {cond} (severity {sev}/10, confidence {conf:.0%}).")
+            pid = getattr(diag, "problem_id", "")
+            sev = getattr(diag, "severity", 0.0)
+            conf = getattr(diag, "confidence", 0.0)
+            prob = getattr(diag, "probability", 0.0)
+            if pid and prob >= 0.5:
+                findings.append(f"Diagnosis: {pid} (severity {sev:.0%}, confidence {conf:.0%}).")
 
     # L5: Bio threats
     l5 = results.get(LayerId.L5)

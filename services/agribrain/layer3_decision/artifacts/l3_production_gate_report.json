@@ -1,0 +1,143 @@
+{
+  "timestamp": "2026-05-01T09:24:24.662619+00:00",
+  "result": "ALL PASS",
+  "scenarios": [
+    {
+      "scenario": "Water Stress - Dry Spell",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "PASS",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.2,
+      "diagnoses": [
+        "WATER_STRESS"
+      ]
+    },
+    {
+      "scenario": "Heat Stress - Extreme Temps",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "PASS",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": [
+        "HEAT_STRESS"
+      ]
+    },
+    {
+      "scenario": "Healthy Plot - No Stress",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "N/A",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": []
+    },
+    {
+      "scenario": "Fungal Risk - Wet Conditions",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "N/A",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": []
+    },
+    {
+      "scenario": "Data Gap - Missing All",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "PASS",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": [
+        "DATA_GAP"
+      ]
+    },
+    {
+      "scenario": "Rain Forecast Blocks Irrigation",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "PASS",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": [
+        "WATER_STRESS"
+      ]
+    },
+    {
+      "scenario": "SAR Missing - Degraded Mode",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "N/A",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": [
+        "DATA_GAP"
+      ]
+    },
+    {
+      "scenario": "Maturity + Structure Change -> Harvest",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "N/A",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": [
+        "HARVEST_EVENT",
+        "LOGGING_CLEARING"
+      ]
+    },
+    {
+      "scenario": "Cold Stress - Frost",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "PASS",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": [
+        "COLD_STRESS"
+      ]
+    },
+    {
+      "scenario": "Multi-Zone Heterogeneous",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "N/A",
+      "hash_check": "N/A",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": []
+    },
+    {
+      "scenario": "Content Hash Determinism",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "N/A",
+      "hash_check": "PASS",
+      "lineage_check": "N/A",
+      "elapsed_ms": 0.1,
+      "diagnoses": [
+        "WATER_STRESS"
+      ]
+    },
+    {
+      "scenario": "Full Pipeline Lineage",
+      "status": "PASS",
+      "prohibitions": "10/10",
+      "diagnosis_check": "N/A",
+      "hash_check": "N/A",
+      "lineage_check": "PASS",
+      "elapsed_ms": 0.1,
+      "diagnoses": []
+    }
+  ]
+}

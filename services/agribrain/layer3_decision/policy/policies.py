@@ -126,8 +126,8 @@ class PolicyEngine:
         
         # Quota
         if "WaterQuota" in action_def.prerequisites:
-             quota = context.constraints.get("water_quota_mm", 9999)
-             if quota < 25.0: # Hardcoded assumption for IS_ALLOWED check implies volume check
+             quota = context.constraints.get("water_quota_mm")
+             if quota is not None and quota < 25.0:
                  is_allowed = False
                  blocked_reasons.append(f"Insufficient Quota ({quota}mm)")
                  
