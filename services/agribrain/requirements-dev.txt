@@ -1,0 +1,16 @@
+# AgriBrain Development Dependencies
+# Install: pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+# Testing
+pytest>=7.4.0,<9.0.0
+pytest-cov>=4.1.0
+pytest-xdist>=3.5.0
+
+# Linting & Formatting
+ruff>=0.3.0
+black>=24.0.0
+
+# Type checking
+mypy>=1.8.0

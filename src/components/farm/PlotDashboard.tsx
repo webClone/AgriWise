@@ -1,27 +1,39 @@
 "use client";
 
 /**
- * PlotDashboard V3 — Restored Intelligence Surfaces
+ * PlotDashboard V4 — Full Intelligence Operating Surface
  *
- * Three screen states:
- *   observe  → cinematic map + HUD + Legend + FieldInsightBar + Histogram toggle
- *   diagnose → focused map + ZoneSheet
- *   decide   → AgriBrainWorkspace fullscreen
+ * Uses TWO hooks:
+ *   - useLayer10 → map surfaces, zones, histograms (proven, working)
+ *   - usePlotIntelligence → engines, timeline, raw data (new overlay)
  *
- * Fix: map container uses visibility/overflow instead of display:none
- * to prevent canvas resize regression.
+ * Layout:
+ *   ┌────────────────────────────────────────────────────────┐
+ *   │  PlotContextBand (rendered by layout)                  │
+ *   ├──────┬────────────────────────────────┬────────────────┤
+ *   │Engine│      Satellite Map             │  Analysis      │
+ *   │Panel │   (surfaces + zones)           │  Sidebar       │
+ *   │      │  [HUD]             [Histogram] │                │
+ *   ├──────┴────────────────────────────────┴────────────────┤
+ *   │  TimelineStrip (7 past ← TODAY → 7 future)            │
+ *   ├────────────────────────────────────────────────────────┤
+ *   │  FieldInsightBar                                       │
+ *   └────────────────────────────────────────────────────────┘
  */
 
 import { useState, useEffect, useMemo, useCallback } from "react";
 import dynamic from "next/dynamic";
 import { useLayer10, MODE_CONFIG } from "@/hooks/useLayer10";
+import { usePlotIntelligence } from "@/hooks/usePlotIntelligence";
 import FieldInsightBar from "@/components/farm/intelligence/FieldInsightBar";
 import FieldSnapshotHUD from "@/components/farm/intelligence/FieldSnapshotHUD";
-import SurfaceLegendBar from "@/components/farm/map/SurfaceLegendBar";
 import HistogramDrawer from "@/components/farm/intelligence/HistogramDrawer";
-import ZoneSheet from "@/components/farm/intelligence/ZoneSheet";
+import ZoneDetailStrip from "@/components/farm/intelligence/ZoneDetailStrip";
 import MethodologyDrawer from "@/components/farm/intelligence/MethodologyDrawer";
 import AgriBrainWorkspace from "@/components/farm/intelligence/AgriBrainWorkspace";
+import EnginePipelinePanel from "@/components/farm/intelligence/EnginePipelinePanel";
+import TimelineStrip from "@/components/farm/intelligence/TimelineStrip";
+import RawDataSidebar from "@/components/farm/intelligence/RawDataSidebar";
 
 const PlotMapShell = dynamic(() => import("@/components/farm/map/PlotMapShell"), {
   ssr: false,
@@ -46,11 +58,15 @@ export default function PlotDashboard({ farm, plot, cropName, context }: PlotDas
   const [mounted, setMounted] = useState(false);
   const [methodologyMetric, setMethodologyMetric] = useState<string | null>(null);
 
+  // ── PRIMARY: useLayer10 for map surfaces (proven, working) ──────────────
   const l10 = useLayer10();
+  
+  // ── SECONDARY: usePlotIntelligence for engines, timeline, raw data ──────
+  const pi = usePlotIntelligence();
 
   useEffect(() => { setMounted(true); }, []);
 
-  // Fetch L10 data on mount
+  // Fetch L10 data (map surfaces) on mount — this is the working pipeline
   useEffect(() => {
     if (plot?.id && farm?.id) {
       l10.fetchLayer10(String(plot.id), String(farm.id), undefined, undefined, cropName);
@@ -58,28 +74,82 @@ export default function PlotDashboard({ farm, plot, cropName, context }: PlotDas
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plot?.id, farm?.id, cropName]);
 
-  // ── Derive screen state from existing app state ──────────────────────────
-  const screenState = useMemo<"observe" | "diagnose" | "decide">(() => {
-    if (l10.isDecideMode) return "decide";
-    if (l10.selectedZone) return "diagnose";
-    return "observe";
-  }, [l10.isDecideMode, l10.selectedZone]);
+  // Fetch intelligence data (engines, timeline) — independent of L10 surfaces
+  useEffect(() => {
+    if (plot?.id && farm?.id) {
+      pi.fetchIntelligence(String(plot.id), String(farm.id));
 
-  // Selected zone data
+      // Fire-and-forget: trigger full satellite vision pipeline (tile → vision → save)
+      // This ensures the LLM vision cache is populated for the orchestrator
+      const lat = typeof plot.lat === "number" ? plot.lat : parseFloat(String(plot.lat || "0"));
+      const lng = typeof plot.lng === "number" ? plot.lng : parseFloat(String(plot.lng || "0"));
+      if (lat && lng) {
+        const plotIdStr = String(plot.id);
+        (async () => {
+          try {
+            // Step 1: Fetch the tile (cached for 7 days server-side)
+            const tileRes = await fetch("/api/agribrain/satellite-tile", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                plot_id: plotIdStr,
+                lat, lng,
+                polygon: plot.polygon || plot.coordinates || null,
+              }),
+            });
+            const tileData = await tileRes.json();
+            if (tileData.status !== "fetched" && tileData.status !== "cached") return;
+
+            // Step 2: Run LLM vision analysis
+            let vision = null;
+            try {
+              const visionRes = await fetch("/api/agribrain/satellite-vision", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ plot_id: plotIdStr, lat, lng }),
+              });
+              const visionData = await visionRes.json();
+              if (visionData.status === "analyzed") {
+                vision = visionData.vision;
+              }
+            } catch { /* Vision is best-effort */ }
+
+            // Step 3: Save tile + LLM observation to DB
+            try {
+              await fetch(`/api/agribrain/satellite-tile-save/${plotIdStr}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  fetched_date: tileData.metadata?.fetched_date || new Date().toISOString(),
+                  vision,
+                }),
+              });
+            } catch { /* Save is best-effort */ }
+          } catch { /* Entire pipeline is best-effort */ }
+        })();
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plot?.id, farm?.id]);
+
+  // ── Screen state (from L10 — the working hook) ─────────────────────────
+  // Simplified: no more "diagnose" state that hides everything
+  const screenState = useMemo<"observe" | "decide">(() => {
+    if (l10.isDecideMode) return "decide";
+    return "observe";
+  }, [l10.isDecideMode]);
+
   const selectedZoneData = useMemo(() => {
     if (!l10.selectedZone || !l10.data) return null;
     return l10.data.zones.find((z) => z.zone_id === l10.selectedZone) ?? null;
   }, [l10.selectedZone, l10.data]);
 
-  // Histogram toggle
   const handleHistogramToggle = useCallback(() => {
     l10.setHistogramExpanded(!l10.histogramExpanded);
   }, [l10]);
 
-  // Surface grounding class from active surface
   const groundingClass = l10.activeSurface?.grounding_class ?? "UNIFORM";
 
-  // Coverage ratio from surface
   const coverageRatio = useMemo(() => {
     if (!l10.activeSurface || !l10.data) return null;
     const totalCells = l10.data.grid.height * l10.data.grid.width;
@@ -97,12 +167,9 @@ export default function PlotDashboard({ farm, plot, cropName, context }: PlotDas
   const modeLabel = MODE_CONFIG[l10.activeMode]?.label ?? "Surface";
 
   return (
-    <div className="aw-dashboard" id="plot-dashboard">
+    <div className="aw-dashboard" id="plot-dashboard" style={{ direction: "ltr" }}>
 
-      {/* ── Map Canvas ────────────────────────────────────────────────────
-           Uses visibility + overflow instead of display:none to prevent
-           Mapbox/canvas resize regression when returning from Decide mode.
-      */}
+      {/* ── Map Canvas ──────────────────────────────────────────────── */}
       <div
         className="aw-dashboard__map"
         style={{
@@ -123,8 +190,8 @@ export default function PlotDashboard({ farm, plot, cropName, context }: PlotDas
             confidenceSurface={l10.spatialSurfaceAvailable ? l10.activeConfidenceSurface : null}
             reliabilitySurface={l10.spatialSurfaceAvailable ? l10.activeReliabilitySurface : null}
             deviationSurface={
-              (l10.activeMode === "veg_attention" && l10.spatialSurfaceAvailable) 
-                ? (l10.data?.surfaces.find(s => s.type === "NDVI_DEVIATION") ?? null) 
+              (l10.activeMode === "veg_attention" && l10.spatialSurfaceAvailable)
+                ? (l10.data?.surfaces.find(s => s.type === "NDVI_DEVIATION") ?? null)
                 : null
             }
             gridHeight={l10.data?.grid.height}
@@ -137,37 +204,47 @@ export default function PlotDashboard({ farm, plot, cropName, context }: PlotDas
         )}
       </div>
 
-      {/* ── OBSERVE: Intelligence Surfaces ─────────────────────────────── */}
-      {screenState === "observe" && l10.data && (
+      {/* ── OBSERVE: Intelligence Surfaces ─────────────────────────── */}
+      {screenState === "observe" && (
         <>
-          {/* Field Snapshot HUD — top-left floating card */}
-          <FieldSnapshotHUD data={l10.data} activeMode={l10.activeMode} activeSurfaceType={l10.activeSurfaceType} />
+          {/* Engine Pipeline Panel — left sidebar (from usePlotIntelligence) */}
+          <EnginePipelinePanel />
 
-          {/* Surface Legend Bar — bottom-left */}
-          <SurfaceLegendBar
-            activeMode={l10.activeMode}
-            detailMode={l10.detailMode}
-            groundingClass={groundingClass}
-            coverageRatio={coverageRatio}
-          />
+          {/* Field Snapshot HUD — offset from engine panel */}
+          {l10.data && (
+            <div style={{
+              position: "absolute", top: "104px",
+              left: pi.showEnginePanel ? "304px" : "60px",
+              zIndex: 15, transition: "all 0.25s ease",
+            }}>
+              <FieldSnapshotHUD
+                data={l10.data}
+                activeMode={l10.activeMode}
+                activeSurfaceType={l10.activeSurfaceType}
+              />
+            </div>
+          )}
 
-          {/* Histogram Drawer — bottom-right floating */}
-          <div className="absolute bottom-24 right-4 z-10 w-72">
-            <HistogramDrawer
-              histogram={l10.activeHistogram}
-              delta={l10.activeDelta}
-              colors={l10.activeColors}
-              expanded={l10.histogramExpanded}
-              onToggle={handleHistogramToggle}
-              surfaceLabel={modeLabel}
+          {/* Analysis Sidebar — right (from usePlotIntelligence) */}
+          <RawDataSidebar />
+
+
+          {/* Zone Detail Strip — appears above timeline when a zone is selected */}
+          {l10.selectedZone && selectedZoneData && (
+            <ZoneDetailStrip
+              zone={selectedZoneData}
+              allZones={l10.data?.zones ?? []}
+              onClose={() => l10.setSelectedZone(null)}
+              onAskAgriBrain={(query) => l10.openDecideMode(query)}
             />
-          </div>
+          )}
+
+          {/* Timeline Strip — bottom bar (from usePlotIntelligence) */}
+          <TimelineStrip />
         </>
       )}
 
-      {/* ModeLens moved to PlotContextBand */}
-
-      {/* ── Loading / Error state ─────────────────────────────────────── */}
+      {/* ── Loading / Error state ─────────────────────────────────── */}
       {mounted && !l10.data && (
         <div className="aw-dashboard__status">
           {l10.error ? (
@@ -184,9 +261,12 @@ export default function PlotDashboard({ farm, plot, cropName, context }: PlotDas
         </div>
       )}
 
-      {/* ── OBSERVE: FieldInsightBar (bottom edge) ────────────────────── */}
+      {/* ── FieldInsightBar ─────────────────────────── */}
       {screenState === "observe" && l10.data && (
-        <div className="aw-dashboard__insight-bar">
+        <div style={{
+          position: "absolute", top: "106px", left: "50%", transform: "translateX(-50%)",
+          zIndex: 15, width: "100%", display: "flex", justifyContent: "center", pointerEvents: "none"
+        }}>
           <FieldInsightBar
             data={l10.data}
             activeMode={l10.activeMode}
@@ -196,21 +276,9 @@ export default function PlotDashboard({ farm, plot, cropName, context }: PlotDas
         </div>
       )}
 
-      {/* ── DIAGNOSE: ZoneSheet (right panel) ─────────────────────────── */}
-      {screenState === "diagnose" && (
-        <div className="aw-dashboard__zone-sheet">
-          <ZoneSheet
-            zone={selectedZoneData}
-            allZones={l10.data?.zones ?? []}
-            onClose={() => l10.setSelectedZone(null)}
-            onAskAgriBrain={() => l10.setIsDecideMode(true)}
-          />
-        </div>
-      )}
+      {/* Zone detail is now inline above the timeline — no separate diagnose screen */}
 
-      {/* AgriBrain FAB removed to reduce floating button clutter */}
-
-      {/* ── DECIDE: AgriBrainWorkspace ─────────────────────────────────── */}
+      {/* ── DECIDE: AgriBrainWorkspace ─────────────────────────────── */}
       <AgriBrainWorkspace
         isOpen={l10.isDecideMode}
         onClose={() => l10.setIsDecideMode(false)}
@@ -218,6 +286,7 @@ export default function PlotDashboard({ farm, plot, cropName, context }: PlotDas
         activeMode={l10.activeMode}
         data={l10.data}
         plotName={plot?.name ? String(plot.name) : undefined}
+        initialQuery={l10.decideModeQuery}
       />
 
       <MethodologyDrawer
@@ -228,4 +297,3 @@ export default function PlotDashboard({ farm, plot, cropName, context }: PlotDas
     </div>
   );
 }
-

@@ -15,7 +15,7 @@ export default function PlotControls({ plot, farmId }: PlotControlsProps) {
   const [isDeleting, setIsDeleting] = useState(false);
 
   const handleDelete = async () => {
-    if (!window.confirm("هل أنت متأكد من حذف هذه القطعة؟ لا يمكن التراجع عن هذا الإجراء.")) {
+    if (!window.confirm("Are you sure you want to delete this plot? This action cannot be undone.")) {
       return;
     }
 
@@ -29,11 +29,11 @@ export default function PlotControls({ plot, farmId }: PlotControlsProps) {
         router.push(`/farm/${farmId}`);
         router.refresh();
       } else {
-        alert("حدث خطأ أثناء الحذف");
+        alert("An error occurred while deleting");
       }
     } catch (err) {
       console.error(err);
-      alert("حدث خطأ أثناء الحذف");
+      alert("An error occurred while deleting");
     } finally {
       setIsDeleting(false);
     }
@@ -47,7 +47,7 @@ export default function PlotControls({ plot, farmId }: PlotControlsProps) {
           className="btn btn-secondary"
           style={{ padding: "0.5rem 1rem", fontSize: "0.875rem" }}
         >
-          ✏️ تعديل
+          ✏️ Edit
         </button>
         <button
           onClick={handleDelete}
@@ -61,7 +61,7 @@ export default function PlotControls({ plot, farmId }: PlotControlsProps) {
             border: "1px solid #fecaca" 
           }}
         >
-          {isDeleting ? "جاري الحذف..." : "🗑️ حذف"}
+          {isDeleting ? "Deleting..." : "🗑️ Delete"}
         </button>
       </div>
 

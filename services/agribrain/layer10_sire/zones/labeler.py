@@ -14,6 +14,18 @@ _ZONE_NOUNS = {
     "NUTRIENT_RISK":    "nutrient-risk zone",
     "DISEASE_RISK":     "disease-pressure zone",
     "LOW_CONFIDENCE":   "low-confidence area",
+    "HIGH_VIGOR":       "high-vigor patch",
+    "YIELD_GAP":        "yield-gap zone",
+    # Decision / Execution zones
+    "SCOUT_ZONE":       "priority scouting zone",
+    "IRRIGATE_ZONE":    "irrigation-priority zone",
+    "FERTILIZE_ZONE":   "fertilization-priority zone",
+    "SPRAY_ZONE":       "spray-priority zone",
+    "BLOCKED_ZONE":     "blocked-execution zone",
+    "WAIT_ZONE":        "hold-for-timing zone",
+    # Trust
+    "STALE_DATA":       "stale-data area",
+    "HIGH_CONFLICT":    "conflicting-evidence area",
 }
 
 _SEVERITY_ADJ = [

@@ -7,25 +7,25 @@ def get_fallback_guidance(surface_type: str, state: str, has_plot_data: bool) ->
     has_plot_data: boolean indicating if plot-level fallback metrics exist
     """
     
-    # Case A: Localized zones exist
-    if state == "localized":
+    # Case A: Localized zones exist (includes management zone engine output like "produced_5_zones")
+    if state == "localized" or state.startswith("produced_"):
         return None
         
-    # Case B: Spatial uniform (field-wide or none)
-    if state in ["field_wide", "none"]:
+    # Case B-1: Field-wide — threshold breached everywhere (data exists, is spatial, but no localized hotspot)
+    if state == "field_wide":
         if "WATER" in surface_type or "MOISTURE" in surface_type:
             why = "Moisture conditions appear broadly uniform across the plot"
             next_step = "Use whole-field irrigation judgment rather than zone targeting"
         elif "NUTRIENT" in surface_type:
-            why = "Nutrient risk appears broadly uniform"
+            why = "Nutrient risk appears elevated field-wide"
             next_step = "Prefer field-wide sampling or uniform management review rather than variable-rate action"
         elif "RISK" in surface_type:
-            why = "Composite risk is uniform across the field"
+            why = "Composite risk is elevated across the entire field"
             next_step = "Prioritize whole-field inspection and verify the main driver"
         elif "UNCERTAINTY" in surface_type or "RELIABILITY" in surface_type:
-            why = "Confidence signal is uniform"
+            why = "Confidence signal is broadly consistent — no high-confidence zones stand out"
             next_step = "Interpret all plot recommendations with the same trust level across the field"
-        else: # VEGETATION / CANOPY
+        else:  # VEGETATION / CANOPY
             why = "Vegetation and canopy signal is spatially valid but broadly uniform across the plot"
             next_step = "Inspect the field as a whole and verify expected phenology-related growth"
 
@@ -34,7 +34,33 @@ def get_fallback_guidance(surface_type: str, state: str, has_plot_data: bool) ->
             "recommended_next_step": next_step,
             "why": why,
             "confidence": 0.85,
-            "data_basis": "spatial_uniform_surface"
+            "data_basis": "field_wide_threshold"
+        }
+
+    # Case B-2: No threshold breached — surface has data but no concerning zones
+    if state == "none":
+        if "WATER" in surface_type or "MOISTURE" in surface_type:
+            why = "No significant water stress detected across the field"
+            next_step = "Continue current irrigation schedule; no zones require attention"
+        elif "NUTRIENT" in surface_type:
+            why = "Nutrient levels appear adequate — no deficiency zones detected"
+            next_step = "Maintain current fertilization plan"
+        elif "RISK" in surface_type:
+            why = "Overall risk is low — no high-risk zones identified"
+            next_step = "Continue standard monitoring"
+        elif "UNCERTAINTY" in surface_type or "RELIABILITY" in surface_type:
+            why = "Data quality is good across the field — no low-confidence zones"
+            next_step = "All spatial recommendations can be trusted at face value"
+        else:
+            why = "Vegetation signal is healthy — no anomaly zones detected"
+            next_step = "No action needed; field is performing within expectations"
+
+        return {
+            "action_mode": "field_wide",
+            "recommended_next_step": next_step,
+            "why": why,
+            "confidence": 0.90,
+            "data_basis": "no_concerning_zones"
         }
         
     # Case C/D: Map is invalid (no_data, low_confidence, unknown)
@@ -80,8 +106,23 @@ def build_fallback_guidance_map(zone_state_by_surface: Dict[str, str], has_plot_
         "UNCERTAINTY_SIGMA", "DATA_RELIABILITY"
     ]
     
+    # Inheritance: some surfaces don't have their own zone configs but should
+    # inherit from their derived surface (e.g. NDVI_CLEAN → NDVI_DEVIATION)
+    _STATE_INHERITANCE = {
+        "NDVI_CLEAN": "NDVI_DEVIATION",
+        "GROWTH_VELOCITY": "NDVI_DEVIATION",
+        "STABILITY_CLASS": "NDVI_DEVIATION",
+    }
+    
     for stype in core_surfaces:
-        state = zone_state_by_surface.get(stype, "no_data")
+        state = zone_state_by_surface.get(stype)
+        if state is None:
+            # Try inheriting from parent surface
+            parent = _STATE_INHERITANCE.get(stype)
+            if parent:
+                state = zone_state_by_surface.get(parent, "no_data")
+            else:
+                state = "no_data"
         guidance = get_fallback_guidance(stype, state, has_plot_data)
         if guidance:
             guidance_map[stype] = guidance

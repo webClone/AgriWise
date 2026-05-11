@@ -52,6 +52,9 @@ def attribute_stress(
     temp_max = _fv(environment_features, "temp_max", "temperature_max")
     vpd = _fv(environment_features, "vpd", "vapor_pressure_deficit")
     et0 = _fv(environment_features, "et0_mm", "et0")
+    sif = _fv(vegetation_features, "sif", "sif_mean")
+    pri = _fv(vegetation_features, "pri", "pri_mean")
+    anomaly_score = _fv(vegetation_features, "anomaly_score")
 
     # Confidence ceiling from data health
     conf_ceiling = min(1.0, data_health.confidence_ceiling or 1.0)
@@ -65,27 +68,30 @@ def attribute_stress(
         elif c.severity == "moderate":
             conflict_penalty += 0.08
 
-    # ── Water stress ─────────────────────────────────────────────────
+    # -- Water stress --
     water_stress = _assess_water_stress(
         ndmi, soil_moisture, precip, vpd, et0,
         conf_ceiling, base_uncertainty, conflict_penalty,
         water_features, plot_id, run_id, spatial_scope, scope_id,
+        canopy_cover=_fv(vegetation_features, "canopy_cover_fraction"),
+        bare_soil=_fv(vegetation_features, "bare_soil_fraction"),
     )
     if water_stress:
         stress_items.append(water_stress)
 
-    # ── Nutrient stress ──────────────────────────────────────────────
+    # -- Nutrient stress --
     nutrient_stress = _assess_nutrient_stress(
         ndvi, evi, ndmi, soil_moisture,
         conf_ceiling, base_uncertainty, conflict_penalty,
         vegetation_features, water_features,
         plot_id, run_id, spatial_scope, scope_id,
         has_water_stress=(water_stress is not None),
+        canopy_uniformity_cv=_fv(vegetation_features, "canopy_uniformity_cv"),
     )
     if nutrient_stress:
         stress_items.append(nutrient_stress)
 
-    # ── Thermal stress ───────────────────────────────────────────────
+    # -- Thermal stress --
     thermal_stress = _assess_thermal_stress(
         temp_max, vpd, ndvi,
         conf_ceiling, base_uncertainty, conflict_penalty,
@@ -95,7 +101,19 @@ def attribute_stress(
     if thermal_stress:
         stress_items.append(thermal_stress)
 
-    # ── Biotic stress (inferred when vegetation drops without abiotic cause) ─
+    # -- Photosynthetic shutdown (SIF/PRI early warning) --
+    photo_shutdown = _assess_photosynthetic_shutdown(
+        sif, pri, ndvi, evi, temp_max, vpd,
+        conf_ceiling, base_uncertainty, conflict_penalty,
+        vegetation_features, environment_features,
+        plot_id, run_id, spatial_scope, scope_id,
+        has_water_stress=(water_stress is not None),
+        has_thermal_stress=(thermal_stress is not None),
+    )
+    if photo_shutdown:
+        stress_items.append(photo_shutdown)
+
+    # -- Biotic stress (inferred when vegetation drops without abiotic cause) --
     biotic_stress = _assess_biotic_stress(
         ndvi, evi, veg_fraction,
         conf_ceiling, base_uncertainty, conflict_penalty,
@@ -103,9 +121,41 @@ def attribute_stress(
         plot_id, run_id, spatial_scope, scope_id,
         has_water_stress=(water_stress is not None),
         has_thermal_stress=(thermal_stress is not None),
+        weed_pressure=_fv(vegetation_features, "weed_pressure_index"),
+        in_row_weed=_fv(vegetation_features, "in_row_weed_fraction"),
+        inter_row_weed=_fv(vegetation_features, "inter_row_weed_fraction"),
     )
     if biotic_stress:
         stress_items.append(biotic_stress)
+
+    # -- Mechanical stress (drone structural damage detection) --
+    mechanical_stress = _assess_mechanical_stress(
+        row_continuity=_fv(operational_features, "row_continuity_mean"),
+        row_break_count=_fv(operational_features, "row_break_count"),
+        canopy_cover=_fv(vegetation_features, "canopy_cover_fraction"),
+        ndvi=ndvi,
+        conf_ceiling=conf_ceiling,
+        base_unc=base_uncertainty,
+        conflict_penalty=conflict_penalty,
+        operational_features=operational_features,
+        vegetation_features=vegetation_features,
+        plot_id=plot_id,
+        run_id=run_id,
+        spatial_scope=spatial_scope,
+        scope_id=scope_id,
+        has_water_stress=(water_stress is not None),
+        has_thermal_stress=(thermal_stress is not None),
+    )
+    if mechanical_stress:
+        stress_items.append(mechanical_stress)
+
+    # -- EO Foundation Model anomaly corroboration --
+    if anomaly_score is not None:
+        _apply_eo_anomaly_corroboration(
+            anomaly_score, stress_items, vegetation_features,
+            conf_ceiling, base_uncertainty, conflict_penalty,
+            plot_id, run_id, spatial_scope, scope_id,
+        )
 
     return stress_items
 
@@ -148,6 +198,7 @@ def _assess_water_stress(
     ndmi, soil_moisture, precip, vpd, et0,
     conf_ceiling, base_unc, conflict_penalty,
     water_features, plot_id, run_id, spatial_scope, scope_id,
+    canopy_cover=None, bare_soil=None,
 ) -> Optional[StressEvidence]:
     """Low NDMI + low soil moisture + corroborating weather = water stress."""
     if ndmi is None and soil_moisture is None:
@@ -188,6 +239,20 @@ def _assess_water_stress(
     if severity < 0.2:
         return None
 
+    # Drone structural corroboration: low canopy cover strengthens water signal
+    if canopy_cover is not None and canopy_cover < 0.4:
+        severity += 0.08
+        evidence_chain.append(
+            f"Drone canopy_cover={canopy_cover:.2f} corroborates reduced vegetation cover"
+        )
+
+    # Drone structural corroboration: high bare soil fraction
+    if bare_soil is not None and bare_soil > 0.5:
+        severity += 0.06
+        evidence_chain.append(
+            f"Drone bare_soil={bare_soil:.2f} indicates exposed soil consistent with water deficit"
+        )
+
     severity = min(1.0, severity)
     confidence = min(conf_ceiling, 0.4 + 0.1 * len(evidence_chain))
     uncertainty = round(base_unc + conflict_penalty, 4)
@@ -215,6 +280,7 @@ def _assess_nutrient_stress(
     veg_features, water_features,
     plot_id, run_id, spatial_scope, scope_id,
     has_water_stress: bool,
+    canopy_uniformity_cv=None,
 ) -> Optional[StressEvidence]:
     """Declining NDVI without water deficit suggests nutrient limitation."""
     if ndvi is None or has_water_stress:
@@ -239,6 +305,13 @@ def _assess_nutrient_stress(
     if evi is not None and evi < 0.3:
         severity += 0.1
         evidence_chain.append(f"EVI={evi:.2f} corroborates low canopy chlorophyll")
+
+    # Drone structural: high canopy uniformity CV suggests patchy nutrient depletion
+    if canopy_uniformity_cv is not None and canopy_uniformity_cv > 0.3:
+        severity += 0.08
+        evidence_chain.append(
+            f"Drone canopy_uniformity_cv={canopy_uniformity_cv:.2f} indicates patchy growth consistent with nutrient variability"
+        )
 
     severity = min(1.0, severity)
     confidence = min(conf_ceiling, 0.3 + 0.1 * len(evidence_chain))
@@ -318,28 +391,74 @@ def _assess_biotic_stress(
     plot_id, run_id, spatial_scope, scope_id,
     has_water_stress: bool,
     has_thermal_stress: bool,
+    weed_pressure=None,
+    in_row_weed=None,
+    inter_row_weed=None,
 ) -> Optional[StressEvidence]:
-    """Vegetation decline not explained by abiotic factors."""
-    if ndvi is None:
-        return None
-    if ndvi > 0.4:
-        return None
-    if has_water_stress or has_thermal_stress:
-        return None
+    """Vegetation decline not explained by abiotic factors.
 
-    severity = max(0.0, 0.4 - ndvi) * 2.0
-    evidence_chain = [
-        f"NDVI={ndvi:.2f} indicates vegetation decline",
-        "No water or thermal stress detected — biotic cause possible",
-    ]
+    Enhanced with drone weed detection: high weed pressure is a direct
+    biotic indicator that can trigger this stress even when abiotic
+    stresses are present.
+    """
+    # Drone weed pressure overrides exclusion logic — weed competition
+    # is biotic regardless of other stresses
+    weed_triggered = False
+    weed_severity = 0.0
+    weed_evidence: List[str] = []
+    weed_ids: List[str] = []
+
+    if weed_pressure is not None and weed_pressure > 0.15:
+        weed_triggered = True
+        weed_severity = min(0.6, weed_pressure * 0.8)
+        weed_evidence.append(
+            f"Drone weed_pressure_index={weed_pressure:.2f} indicates biotic competition"
+        )
+        weed_ids = _collect_evidence_ids(veg_features, "weed_pressure_index")
+
+        if in_row_weed is not None and in_row_weed > 0.1:
+            weed_severity += 0.08
+            weed_evidence.append(
+                f"In-row weed ratio={in_row_weed:.2f} — competition at plant base"
+            )
+        if inter_row_weed is not None and inter_row_weed > 0.15:
+            weed_severity += 0.06
+            weed_evidence.append(
+                f"Inter-row weed ratio={inter_row_weed:.2f} — competition between rows"
+            )
+
+    if ndvi is None and not weed_triggered:
+        return None
+    if not weed_triggered:
+        if ndvi is not None and ndvi > 0.4:
+            return None
+        if has_water_stress or has_thermal_stress:
+            return None
+
+    severity = max(0.0, 0.4 - ndvi) * 2.0 if ndvi is not None else 0.0
+    evidence_chain = []
+    if ndvi is not None:
+        evidence_chain.append(f"NDVI={ndvi:.2f} indicates vegetation decline")
+    if not weed_triggered:
+        evidence_chain.append("No water or thermal stress detected — biotic cause possible")
     evidence_ids = _collect_evidence_ids(veg_features, "ndvi_mean", "ndvi")
+
+    # Merge weed-triggered evidence
+    if weed_triggered:
+        severity += weed_severity
+        evidence_chain.extend(weed_evidence)
+        evidence_ids.extend(weed_ids)
 
     if evi is not None and evi < 0.25:
         severity += 0.1
         evidence_chain.append(f"EVI={evi:.2f} corroborates canopy degradation")
 
     severity = min(1.0, severity)
-    confidence = min(conf_ceiling, 0.25)  # lower confidence — exclusion-based
+    # Weed-triggered biotic stress has higher confidence (direct observation)
+    if weed_triggered:
+        confidence = min(conf_ceiling, 0.45 + 0.08 * len(evidence_chain))
+    else:
+        confidence = min(conf_ceiling, 0.25)  # lower confidence — exclusion-based
     uncertainty = round(base_unc + conflict_penalty + 0.1, 4)
 
     if severity < 0.1:
@@ -353,8 +472,270 @@ def _assess_biotic_stress(
         uncertainty=uncertainty,
         spatial_scope=spatial_scope,
         scope_id=scope_id,
-        primary_driver="unexplained_vegetation_decline",
+        primary_driver="weed_pressure_detected" if weed_triggered else "unexplained_vegetation_decline",
         contributing_evidence_ids=evidence_ids,
         explanation_basis=evidence_chain,
         data_health_at_attribution=0.0,
     )
+
+
+def _assess_photosynthetic_shutdown(
+    sif, pri, ndvi, evi, temp_max, vpd,
+    conf_ceiling, base_unc, conflict_penalty,
+    veg_features, env_features,
+    plot_id, run_id, spatial_scope, scope_id,
+    has_water_stress: bool,
+    has_thermal_stress: bool,
+) -> Optional[StressEvidence]:
+    """SIF drop with stable NDVI indicates acute stomatal closure.
+
+    This is the key early-warning signal: photosynthesis shuts down
+    days/weeks before visible canopy changes (NDVI drop, wilting).
+
+    Trigger: SIF < 0.3 AND NDVI > 0.55 (green canopy, dead photosynthesis).
+    Corroboration: PRI drop, high VPD, high temperature.
+    """
+    # Requires SIF data to make this diagnosis
+    if sif is None:
+        return None
+
+    # Core signal: low SIF with healthy-looking canopy
+    if sif >= 0.3:
+        return None  # SIF is still active — no shutdown
+    if ndvi is not None and ndvi < 0.55:
+        return None  # NDVI already low — this is a structural problem, not SIF-specific
+
+    severity = 0.0
+    evidence_chain = []
+    evidence_ids = _collect_evidence_ids(veg_features, "sif", "sif_mean")
+
+    # Primary signal: SIF drop
+    severity += 0.3 + max(0.0, (0.3 - sif) * 2.0)
+    evidence_chain.append(
+        f"SIF={sif:.2f} indicates photosynthetic shutdown"
+    )
+
+    # NDVI still healthy — the key divergence
+    if ndvi is not None and ndvi > 0.6:
+        severity += 0.15
+        evidence_chain.append(
+            f"NDVI={ndvi:.2f} shows canopy structure intact — "
+            f"acute stomatal closure rather than structural decline"
+        )
+        evidence_ids.extend(_collect_evidence_ids(veg_features, "ndvi_mean", "ndvi"))
+
+    # Corroboration: PRI drop
+    if pri is not None and pri < -0.01:
+        severity += 0.1
+        evidence_chain.append(
+            f"PRI={pri:.3f} corroborates reduced light-use efficiency"
+        )
+        evidence_ids.extend(_collect_evidence_ids(veg_features, "pri", "pri_mean"))
+
+    # Corroboration: high VPD (stomatal closure driver)
+    if vpd is not None and vpd > 2.5:
+        severity += 0.1
+        evidence_chain.append(
+            f"VPD={vpd:.1f}kPa indicates high atmospheric demand — stomatal closure likely"
+        )
+        evidence_ids.extend(_collect_evidence_ids(env_features, "vpd"))
+
+    # Corroboration: high temperature
+    if temp_max is not None and temp_max > 33.0:
+        severity += 0.05
+        evidence_chain.append(
+            f"Temperature={temp_max:.1f}°C consistent with heat-induced stomatal regulation"
+        )
+
+    # Context: if water or thermal stress already flagged, this is a refinement
+    if has_water_stress or has_thermal_stress:
+        evidence_chain.append(
+            "SIF confirms active photosynthetic impairment corroborating detected stress"
+        )
+
+    if severity < 0.2:
+        return None
+
+    severity = min(1.0, severity)
+    # Confidence: moderate — SIF is physically powerful but spatially coarse
+    confidence = min(conf_ceiling, 0.45 + 0.08 * len(evidence_chain))
+    # Cap due to coarse SIF resolution
+    confidence = min(confidence, 0.70)
+    uncertainty = round(base_unc + conflict_penalty + 0.03, 4)
+
+    return StressEvidence(
+        stress_id=f"photosynthetic_shutdown_{plot_id}_{scope_id or 'plot'}",
+        stress_type="PHOTOSYNTHETIC_SHUTDOWN",
+        severity=round(severity, 3),
+        confidence=round(confidence, 3),
+        uncertainty=uncertainty,
+        spatial_scope=spatial_scope,
+        scope_id=scope_id,
+        primary_driver="sif_drop_ndvi_stable",
+        contributing_evidence_ids=evidence_ids,
+        explanation_basis=evidence_chain,
+        data_health_at_attribution=0.0,
+    )
+
+
+# -- Mechanical Stress (Drone structural damage detection) --
+
+def _assess_mechanical_stress(
+    row_continuity, row_break_count, canopy_cover, ndvi,
+    conf_ceiling, base_unc, conflict_penalty,
+    operational_features, vegetation_features,
+    plot_id, run_id, spatial_scope, scope_id,
+    has_water_stress: bool,
+    has_thermal_stress: bool,
+) -> Optional[StressEvidence]:
+    """Structural damage detected by drone row geometry analysis.
+
+    Trigger conditions:
+      - row_continuity_mean < 0.65 (broken/incomplete rows)
+      - AND/OR row_break_count >= 3 (multiple visible breaks)
+    Exclusion:
+      - Not triggered if water or thermal stress fully explains canopy drop
+        (unless breaks are severe: row_break_count >= 5)
+    Attribution:
+      - Mechanical damage (equipment, animal, hail) or structural planting failure
+    """
+    if row_continuity is None and row_break_count is None:
+        return None
+
+    # Only fire if row continuity is degraded or many breaks detected
+    has_low_continuity = row_continuity is not None and row_continuity < 0.65
+    has_many_breaks = row_break_count is not None and row_break_count >= 3
+
+    if not has_low_continuity and not has_many_breaks:
+        return None
+
+    # Exclusion: if abiotic stress explains the damage, skip unless severe
+    severe_breaks = row_break_count is not None and row_break_count >= 5
+    if (has_water_stress or has_thermal_stress) and not severe_breaks:
+        return None
+
+    severity = 0.0
+    evidence_chain = []
+    evidence_ids = _collect_evidence_ids(
+        operational_features, "row_continuity_mean", "row_break_count",
+    )
+
+    if has_low_continuity:
+        severity += 0.25 + max(0.0, (0.65 - row_continuity) * 1.5)
+        evidence_chain.append(
+            f"Drone row_continuity={row_continuity:.2f} indicates structural disruption in crop rows"
+        )
+
+    if has_many_breaks:
+        severity += min(0.3, row_break_count * 0.05)
+        evidence_chain.append(
+            f"Drone row_break_count={row_break_count} detected — multiple structural discontinuities"
+        )
+
+    # Corroboration: low canopy cover confirms visible damage
+    if canopy_cover is not None and canopy_cover < 0.5:
+        severity += 0.08
+        evidence_chain.append(
+            f"Drone canopy_cover={canopy_cover:.2f} corroborates reduced structural integrity"
+        )
+        evidence_ids.extend(
+            _collect_evidence_ids(vegetation_features, "canopy_cover_fraction")
+        )
+
+    # Corroboration: low NDVI confirms the visible damage is biologically significant
+    if ndvi is not None and ndvi < 0.4:
+        severity += 0.06
+        evidence_chain.append(
+            f"NDVI={ndvi:.2f} consistent with mechanically-induced vegetation loss"
+        )
+
+    if severity < 0.15:
+        return None
+
+    severity = min(1.0, severity)
+    # Moderate confidence — drone structural is high fidelity but diagnostic
+    confidence = min(conf_ceiling, 0.40 + 0.08 * len(evidence_chain))
+    uncertainty = round(base_unc + conflict_penalty + 0.05, 4)
+
+    return StressEvidence(
+        stress_id=f"mechanical_{plot_id}_{scope_id or 'plot'}",
+        stress_type="MECHANICAL",
+        severity=round(severity, 3),
+        confidence=round(confidence, 3),
+        uncertainty=uncertainty,
+        spatial_scope=spatial_scope,
+        scope_id=scope_id,
+        primary_driver="row_structural_damage",
+        contributing_evidence_ids=evidence_ids,
+        explanation_basis=evidence_chain,
+        data_health_at_attribution=0.0,
+        flags=["DRONE_STRUCTURAL"],
+    )
+
+
+# -- EO Foundation Model Anomaly Corroboration --
+
+def _apply_eo_anomaly_corroboration(
+    anomaly_score: float,
+    stress_items: List[StressEvidence],
+    vegetation_features: Dict[str, Any],
+    conf_ceiling: float,
+    base_unc: float,
+    conflict_penalty: float,
+    plot_id: str,
+    run_id: str,
+    spatial_scope: str,
+    scope_id: Optional[str],
+) -> None:
+    """Apply EO Foundation Model anomaly corroboration.
+
+    Two modes:
+      1. Corroborate: When anomaly_score > 0.6 AND existing stress is detected,
+         boost severity and confidence of existing stress items.
+      2. Novel anomaly: When anomaly_score > 0.8 AND no existing stress is found,
+         create an UNKNOWN stress item (the model sees something indices miss).
+
+    This is purely additive — never overrides hand-crafted attribution.
+    """
+    if anomaly_score < 0.4:
+        return  # Score too low to be meaningful
+
+    evidence_ids = _collect_evidence_ids(vegetation_features, "anomaly_score")
+
+    # Mode 1: Corroborate existing stress
+    if stress_items and anomaly_score > 0.6:
+        boost = min(0.15, (anomaly_score - 0.6) * 0.375)  # 0.6→0, 0.8→0.075, 1.0→0.15
+        for item in stress_items:
+            item.severity = min(1.0, round(item.severity + boost, 3))
+            item.confidence = min(conf_ceiling, round(item.confidence + boost * 0.5, 3))
+            item.explanation_basis.append(
+                f"EO Foundation Model anomaly_score={anomaly_score:.2f} corroborates {item.stress_type}"
+            )
+            item.contributing_evidence_ids.extend(evidence_ids)
+        return
+
+    # Mode 2: Novel anomaly — the model sees something indices miss
+    if not stress_items and anomaly_score > 0.8:
+        severity = min(1.0, (anomaly_score - 0.8) * 2.5 + 0.3)  # 0.8→0.3, 1.0→0.8
+        confidence = min(conf_ceiling, min(0.60, anomaly_score * 0.5))
+        uncertainty = round(base_unc + conflict_penalty + 0.10, 4)
+
+        stress_items.append(StressEvidence(
+            stress_id=f"eo_anomaly_{plot_id}_{scope_id or 'plot'}",
+            stress_type="UNKNOWN",
+            severity=round(severity, 3),
+            confidence=round(confidence, 3),
+            uncertainty=uncertainty,
+            spatial_scope=spatial_scope,
+            scope_id=scope_id,
+            primary_driver="eo_anomaly_detected",
+            contributing_evidence_ids=evidence_ids,
+            explanation_basis=[
+                f"EO Foundation Model anomaly_score={anomaly_score:.2f} indicates"
+                " spectral deviation not captured by standard indices",
+                "Anomaly detected in learned embedding space — further investigation"
+                " recommended (crop stress, soil change, or management event)",
+            ],
+            data_health_at_attribution=0.0,
+            flags=["EO_ANOMALY", "REQUIRES_INVESTIGATION"],
+        ))

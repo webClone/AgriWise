@@ -13,7 +13,7 @@ from layer10_sire.schema import (
 )
 from layer10_sire.adapters.l1_adapter import L1SpatialData
 
-CANOPY_THRESHOLD = 0.35  # NDVI above this = canopy
+CANOPY_THRESHOLD = 0.20  # Lowered from 0.35 to avoid misclassifying patchy early emergence as bare soil
 
 
 def compute_stand_density(

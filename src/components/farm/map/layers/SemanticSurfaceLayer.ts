@@ -1,6 +1,7 @@
 "use client";
 
-import { BitmapLayer } from "@deck.gl/layers";
+import { BitmapLayer, TextLayer } from "@deck.gl/layers";
+import { MaskExtension } from "@deck.gl/extensions";
 import { SurfaceData } from "@/hooks/useLayer10";
 import { buildPolygonMask } from "../utils/buildPolygonMask";
 
@@ -44,7 +45,7 @@ function createSurfaceImage(
   
   // ColorBrewer-derived ramps — colorblind-safe, semantically distinct from satellite
   const MODE_RAMPS: Record<string, {low: number[], mid: number[], high: number[]}> = {
-    vegetation:     { low: [166, 97, 26],  mid: [245, 235, 150], high: [1, 133, 113]  }, // Richer contrast: warm brown → bright straw → vivid teal-green
+    vegetation:     { low: [255, 0, 0],  mid: [255, 255, 0], high: [0, 204, 0]  }, // Vivid contrast: pure red → bright yellow → bright green
     water_stress:   { low: [33, 102, 172], mid: [253, 212, 158], high: [178, 24, 43]  }, // Blue→warm→red (diverging)
     nutrient_risk:  { low: [26, 152, 80],  mid: [254, 224, 139], high: [215, 48, 39]  }, // Green→yellow→red
     composite_risk: { low: [255, 255, 191], mid: [252, 141, 89], high: [215, 48, 39]  }, // Yellow→orange→red
@@ -61,34 +62,40 @@ function createSurfaceImage(
   // Use the extracted and cached polygon mask
   const mask = buildPolygonMask(plotId, w, h, plotGeoJson);
 
-  // 2b. Compute Render Range mapping (OneSoil-style per-field contrast stretch)
+  // 2b. Compute Render Range
+  // For vegetation/canopy modes: use ABSOLUTE NDVI range [0, 1]
+  // NDVI has universal agronomic meaning: 0=bare soil, 0.5=sparse, 1.0=dense healthy
+  // Percentile stretch would make a uniformly healthy field (0.6-0.8) look red-to-green.
+  // For other modes (water_stress, nutrient_risk, etc.): use percentile stretch
+  // since those are relative probability values without universal thresholds.
+  const isAbsoluteMode = ["vegetation", "canopy", "veg_attention"].includes(safeMode);
   let [minV, maxV] = surface.render_range || [0, 1];
   
-  // Gather valid values strictly within the plot boundary to compute local percentiles
-  const validVals: number[] = [];
-  let statPtr = 0;
-  for (let r = 0; r < h; r++) {
-    for (let c = 0; c < w; c++) {
-      const val = surface.values[r][c];
-      if (val !== null && val !== undefined && !isNaN(val) && (!mask || mask.data[statPtr] === 1)) {
-        validVals.push(val);
+  if (!isAbsoluteMode) {
+    // Gather valid values strictly within the plot boundary to compute local percentiles
+    const validVals: number[] = [];
+    let statPtr = 0;
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        const val = surface.values[r][c];
+        if (val !== null && val !== undefined && !isNaN(val) && (!mask || mask.data[statPtr] === 1)) {
+          validVals.push(val);
+        }
+        statPtr++;
       }
-      statPtr++;
     }
-  }
 
-  // Apply P02 - P98 stretch to maximize intra-field contrast and ignore outliers (Farmer)
-  // Or P01 - P99 stretch for highest detail (Expert)
-  if (validVals.length > 10) {
-    validVals.sort((a, b) => a - b);
-    const bottomSlice = detailMode === "expert" ? 0.01 : 0.02;
-    const topSlice = detailMode === "expert" ? 0.99 : 0.98;
-    const p02 = validVals[Math.floor(validVals.length * bottomSlice)];
-    const p98 = validVals[Math.floor(validVals.length * topSlice)];
-    // Only override if the local contrast is meaningful
-    if (p98 > p02) {
-      minV = p02;
-      maxV = p98;
+    // Apply P02 - P98 stretch for non-vegetation modes
+    if (validVals.length > 10) {
+      validVals.sort((a, b) => a - b);
+      const bottomSlice = detailMode === "expert" ? 0.01 : 0.02;
+      const topSlice = detailMode === "expert" ? 0.99 : 0.98;
+      const p02 = validVals[Math.floor(validVals.length * bottomSlice)];
+      const p98 = validVals[Math.floor(validVals.length * topSlice)];
+      if (p98 > p02) {
+        minV = p02;
+        maxV = p98;
+      }
     }
   }
 
@@ -101,16 +108,9 @@ function createSurfaceImage(
   for (let r = 0; r < h; r++) {
     for (let c = 0; c < w; c++) {
       const val = surface.values[r][c];
-      const isOutsideField = mask && mask.data[maskPtr] === 0;
       const isNoData = val === null || val === undefined || isNaN(val);
 
-      if (isOutsideField) {
-        // Outside field polygon → fully transparent
-        imgData.data[ptr++] = 0;
-        imgData.data[ptr++] = 0;
-        imgData.data[ptr++] = 0;
-        imgData.data[ptr++] = 0;
-      } else if (isNoData) {
+      if (isNoData) {
         // Inside field but no data → gray diagonal hatch pattern
         // Creates a 4px repeating diagonal stripe so "no data" is visually distinct
         const hatchPhase = (r + c) % 4;
@@ -162,31 +162,25 @@ function createSurfaceImage(
         // Simple luminance approx
         const lum = 0.299 * rawR + 0.587 * rawG + 0.114 * rawB;
 
-        // V2.3 Cinematic Fusion
-        // By modulating the alpha logarithmically against luminance, dark terrain spots
-        // punch through and bright pixel overlays feel like organic light instead of a wash.
-        const lumNorm = Math.min(lum / 255, 1.0);
-        // We let the lowest values drop their opacity more, while preserving high-luminance vibrancy.
-        // Reduced attenuation strength (0.50, 0.9) to keep overlays visible on pale backgrounds
-        let organicAlpha = opacity * Math.pow(lumNorm + 0.50, 0.9) * (0.60 + 0.40 * trust);
+        // For the 'painted' filter effect requested by the user, we want solid, opaque pixels
+        // so that the CSS mix-blend-mode: multiply can do the actual color filtering.
+        // We only use the base opacity passed down from the layer control, ignoring luminance/trust attenuation.
+        let filterAlpha = opacity;
 
         // ── Hybrid Vegetation Attention: emphasis from |NDVI_DEVIATION| ──
-        // Only in veg_attention mode. Uniform areas fade; anomalies pop.
         if (safeMode === "veg_attention" && deviationSurface) {
           const devVal = deviationSurface.values[r]?.[c];
           if (devVal !== null && devVal !== undefined && !isNaN(devVal)) {
-            // |deviation| typically 0–0.3 for most fields.
-            // Map to emphasis of [0.35, 1.0]: uniform fades hard, anomalies pop.
             const absDev = Math.min(Math.abs(devVal), 0.3);
             const emphasisBoost = 0.35 + (absDev / 0.3) * 0.65;
-            organicAlpha *= emphasisBoost;
+            filterAlpha *= emphasisBoost;
           }
         }
         
         imgData.data[ptr++] = Math.round(rawR);
         imgData.data[ptr++] = Math.round(rawG);
         imgData.data[ptr++] = Math.round(rawB);
-        imgData.data[ptr++] = Math.round(Math.min(1.0, organicAlpha) * 255);
+        imgData.data[ptr++] = Math.round(Math.min(1.0, filterAlpha) * 255);
       }
       maskPtr++;
     }
@@ -245,11 +239,19 @@ export function getSemanticSurfaceLayerLayer({
   });
 
   const bounds: [number, number, number, number] = [minLng, minLat, maxLng, maxLat];
+  
+  const w = surfaceData?.values?.[0]?.length || 8;
+  const h = surfaceData?.values?.length || 8;
+  const mask = buildPolygonMask(plotId, w, h, plotGeoJson);
+
+
+
+
   const imageUrl = createSurfaceImage(plotId, surfaceData, surfaceColors, plotGeoJson, confidenceSurface, opacity, detailMode, quantizeBands, mode, reliabilitySurface, deviationSurface);
 
   if (!imageUrl) return null;
 
-  return new BitmapLayer({
+  const bitmapLayer = new BitmapLayer({
     id,
     bounds,
     image: imageUrl,
@@ -259,6 +261,12 @@ export function getSemanticSurfaceLayerLayer({
     textureParameters: {
       minFilter: "linear",
       magFilter: "linear"
-    }
+    },
+    extensions: [new MaskExtension()],
+    maskId: 'plot-clip-mask'
   });
+
+
+
+  return [bitmapLayer];
 }

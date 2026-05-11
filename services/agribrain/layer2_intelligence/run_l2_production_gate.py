@@ -208,6 +208,47 @@ def _build_scenarios() -> List[tuple]:
             ZoneRef(zone_id="z1"), ZoneRef(zone_id="z2"),
         ]),
     ))
+    # 13. Drone-enriched water stress (canopy + bare soil corroboration)
+    scenarios.append(_ctx("Drone-water",
+        water={
+            "ndmi_mean": {"value": 0.10, "confidence": 0.7, "source_weights": {"s2": 0.8}},
+            "soil_moisture_vwc": {"value": 0.12, "confidence": 0.6, "source_weights": {"iot": 0.9}},
+        },
+        veg={
+            "ndvi_mean": {"value": 0.35, "confidence": 0.7, "source_weights": {"s2": 0.8}},
+            "canopy_cover_fraction": {"value": 0.28, "confidence": 0.75, "source_weights": {"drone": 1.0}},
+            "bare_soil_fraction": {"value": 0.62, "confidence": 0.75, "source_weights": {"drone": 1.0}},
+        },
+        operational={"precipitation_mm": {"value": 0.5, "confidence": 0.8, "source_weights": {}}},
+    ))
+
+    # 14. Weed-pressure biotic stress (drone weed detection)
+    scenarios.append(_ctx("Weed-pressure",
+        water={
+            "ndmi_mean": {"value": 0.38, "confidence": 0.7, "source_weights": {}},
+        },
+        veg={
+            "ndvi_mean": {"value": 0.55, "confidence": 0.7, "source_weights": {}},
+            "weed_pressure_index": {"value": 0.45, "confidence": 0.75, "source_weights": {"drone": 1.0}},
+            "in_row_weed_fraction": {"value": 0.22, "confidence": 0.70, "source_weights": {"drone": 1.0}},
+            "inter_row_weed_fraction": {"value": 0.30, "confidence": 0.70, "source_weights": {"drone": 1.0}},
+        },
+    ))
+
+    # 15. Mechanical damage (row breaks + low continuity)
+    scenarios.append(_ctx("Mechanical-damage",
+        water={
+            "ndmi_mean": {"value": 0.35, "confidence": 0.7, "source_weights": {}},
+        },
+        veg={
+            "ndvi_mean": {"value": 0.32, "confidence": 0.7, "source_weights": {}},
+            "canopy_cover_fraction": {"value": 0.38, "confidence": 0.75, "source_weights": {"drone": 1.0}},
+        },
+        operational={
+            "row_continuity_mean": {"value": 0.42, "confidence": 0.80, "source_weights": {"drone": 1.0}},
+            "row_break_count": {"value": 7, "confidence": 0.80, "source_weights": {"drone": 1.0}},
+        },
+    ))
 
     return scenarios
 

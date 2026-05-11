@@ -1,7 +1,7 @@
 """
 Layer 1 — Gap Analyzer Unit Tests.
 
-Tests all 11 gap detection rules, variable-specific gaps,
+Tests all 12 gap detection rules, variable-specific gaps,
 source-present-but-variable-missing cases, and empty evidence.
 """
 
@@ -33,7 +33,7 @@ def _ev(source_family, variable="generic", **kw):
 
 class TestEmptyEvidence:
     def test_all_gaps_detected_on_empty(self):
-        """No evidence at all → all 11 gap rules should fire."""
+        """No evidence at all → all 12 gap rules should fire."""
         gaps = detect_gaps([])
         assert len(gaps) == len(_GAP_RULES)
 
@@ -182,6 +182,8 @@ class TestFullCoverageNoGaps:
         evidence = [
             _ev("sentinel2", "ndvi"),
             _ev("sentinel1", "sar_wetness"),
+            _ev("sentinel5p", "sif"),
+            _ev("eo_foundation", "anomaly_score"),
             _ev("sensor", "soil_moisture_vwc"),
             _ev("sensor", "rain_mm"),
             _ev("sensor", "irrigation_flow"),

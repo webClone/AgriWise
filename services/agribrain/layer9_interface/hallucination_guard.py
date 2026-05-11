@@ -130,7 +130,11 @@ class HallucinationGuard:
         cleaned, date_flags = self._check_dates(cleaned)
         flags.extend(date_flags)
         
-        # 3. Check blocked actions presented as suggested
+        # 3. Check zone mentions against upstream zone_plan
+        cleaned, zone_flags = self._check_zones(cleaned)
+        flags.extend(zone_flags)
+        
+        # 4. Check blocked actions presented as suggested
         cleaned, action_flags = self._check_blocked_actions(cleaned)
         flags.extend(action_flags)
         
@@ -202,6 +206,28 @@ class HallucinationGuard:
                             action="flagged",
                         ))
                         break
+        
+        return text, flags
+    
+    def _check_zones(self, text: str) -> tuple:
+        """Flag zone IDs mentioned in text that are not in upstream zone_plan."""
+        flags: List[HallucinationFlag] = []
+        if not self.upstream_zones:
+            return text, flags
+        
+        # Match zone_X, zone-X, zone X patterns
+        zone_pattern = r'\bzone[_\s-]?([A-Za-z0-9]+)\b'
+        matches = re.finditer(zone_pattern, text, re.IGNORECASE)
+        
+        for match in matches:
+            zone_id = f"zone_{match.group(1)}"
+            if zone_id not in self.upstream_zones:
+                flags.append(HallucinationFlag(
+                    claim_type="zone",
+                    claim_value=zone_id,
+                    context=text[max(0, match.start()-20):match.end()+20],
+                    action="flagged",
+                ))
         
         return text, flags
     

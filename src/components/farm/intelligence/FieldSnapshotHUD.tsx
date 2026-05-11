@@ -3,6 +3,11 @@
 import { useMemo } from "react";
 import type { Layer10Result, MapMode } from "@/hooks/useLayer10";
 
+let _usePlotIntelligence: any = null;
+try {
+  _usePlotIntelligence = require("@/hooks/usePlotIntelligence").usePlotIntelligence;
+} catch { /* not available */ }
+
 interface FieldSnapshotHUDProps {
   data: Layer10Result;
   activeMode: MapMode;
@@ -40,7 +45,7 @@ function computeSurfaceStats(data: Layer10Result, surfaceType: string) {
   return { mean, std, p10, p90, coverage, count: vals.length };
 }
 
-function getModeFacts(data: Layer10Result, mode: MapMode, activeSurfaceType?: string): HUDFact[] {
+function getModeFacts(data: Layer10Result, mode: MapMode, activeSurfaceType?: string, weatherFallbackFacts?: HUDFact[]): HUDFact[] {
   const quality = data.quality;
   const reliabilityScore = quality?.reliability_score ?? 0;
   const reliabilityLabel =
@@ -52,7 +57,10 @@ function getModeFacts(data: Layer10Result, mode: MapMode, activeSurfaceType?: st
     case "canopy":
     case "vegetation": {
       const stats = computeSurfaceStats(data, "NDVI_CLEAN");
-      if (!stats) return [{ label: "Status", value: "No data" }];
+      if (!stats) {
+        // Fallback: show current conditions from intelligence data
+        return weatherFallbackFacts || [{ label: "Status", value: "Awaiting data" }];
+      }
       const vigorColor =
         stats.mean > 0.6 ? "text-emerald-400" : stats.mean > 0.35 ? "text-amber-400" : "text-rose-400";
       return [
@@ -185,12 +193,36 @@ function getWhyLine(data: Layer10Result, mode: MapMode): string {
 }
 
 export default function FieldSnapshotHUD({ data, activeMode, activeSurfaceType }: FieldSnapshotHUDProps) {
-  const facts = useMemo(() => getModeFacts(data, activeMode, activeSurfaceType), [data, activeMode, activeSurfaceType]);
+  // Try to get current conditions from intelligence data
+  let piData: any = null;
+  try {
+    if (_usePlotIntelligence) {
+      const pi = _usePlotIntelligence();
+      piData = pi?.data;
+    }
+  } catch { /* not inside provider */ }
+
+  const weatherFallbackFacts = useMemo((): HUDFact[] => {
+    const weather = piData?.current?.weather;
+    if (!weather) return [{ label: "Status", value: "Awaiting data" }];
+    const temp = weather?.temperature?.current ?? weather?.temp;
+    const humidity = weather?.humidity;
+    const wind = weather?.wind?.speed_ms;
+    const condition = weather?.weather?.condition ?? weather?.weather?.description;
+    return [
+      { label: "Temperature", value: temp != null ? `${Number(temp).toFixed(1)}°C` : "—", accent: "text-amber-400" },
+      { label: "Humidity", value: humidity != null ? `${humidity}%` : "—" },
+      { label: "Wind", value: wind != null ? `${Number(wind).toFixed(1)} m/s` : "—" },
+      { label: "Condition", value: condition || "—", accent: "text-sky-400" },
+    ];
+  }, [piData]);
+
+  const facts = useMemo(() => getModeFacts(data, activeMode, activeSurfaceType, weatherFallbackFacts), [data, activeMode, activeSurfaceType, weatherFallbackFacts]);
   const whyLine = useMemo(() => getWhyLine(data, activeMode), [data, activeMode]);
 
   return (
     <div className="absolute top-24 left-4 z-10 pointer-events-none select-none" id="field-snapshot-hud">
-      <div className="bg-slate-900/80 backdrop-blur-md border border-slate-700/50 rounded-xl p-3 shadow-xl w-56 pointer-events-auto">
+      <div className="bg-slate-900/40 backdrop-blur-[32px] border border-white/12 rounded-xl p-3 shadow-[0_8px_32px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.06)] w-56 pointer-events-auto">
         {/* Facts grid */}
         <div className="grid grid-cols-2 gap-2 mb-2">
           {facts.map((fact) => (

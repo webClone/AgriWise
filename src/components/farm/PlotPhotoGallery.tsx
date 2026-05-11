@@ -78,8 +78,10 @@ export default function PlotPhotoGallery({ plotId, photos: initialPhotos }: Plot
 
                     {/* Overlay */}
                     <div className="absolute inset-0 bg-linear-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity p-3 flex flex-col justify-end">
-                        <span className="text-white text-xs font-medium px-2 py-0.5 bg-blue-600/80 rounded-md self-start mb-1">
-                            {photo.type}
+                        <span className={`text-white text-xs font-medium px-2 py-0.5 rounded-md self-start mb-1 ${
+                            (photo.type === 'SATELLITE' || photo.source === 'satellite') ? 'bg-indigo-600/80' : 'bg-blue-600/80'
+                        }`}>
+                            {(photo.type === 'SATELLITE' || photo.source === 'satellite') ? '🛰️ Satellite' : photo.type}
                         </span>
                         {photo.notes && (
                             <p className="text-white/90 text-xs line-clamp-2 mb-1">{photo.notes}</p>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { MapContainer, TileLayer, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet-draw/dist/leaflet.draw.css";
@@ -17,28 +17,32 @@ L.Marker.prototype.options.icon = icon;
 interface MapDrawerProps {
   center: [number, number];
   onDrawCreated: (geoJson: any, area: number) => void;
+  initialGeoJson?: any;
 }
 
 function ChangeView({ center }: { center: [number, number] }) {
   const map = useMap();
-  map.setView(center, 15);
+  useEffect(() => {
+    map.setView(center, 16);
+  }, [center, map]);
   return null;
 }
 
 function DrawControl({ onCreated }: { onCreated: (geoJson: any, area: number) => void }) {
   const map = useMap();
+  const drawnItemsRef = useRef<L.FeatureGroup | null>(null);
 
   useEffect(() => {
-    // Initialize FeatureGroup to store drawn items
     const drawnItems = new L.FeatureGroup();
+    drawnItemsRef.current = drawnItems;
     map.addLayer(drawnItems);
 
-    // Initialize Draw Control
     const drawControl = new L.Control.Draw({
+      position: "topleft",
       edit: {
         featureGroup: drawnItems,
         remove: true,
-        edit: false // Disable editing for simplicity or enable if needed
+        edit: {},
       },
       draw: {
         rectangle: false,
@@ -49,37 +53,63 @@ function DrawControl({ onCreated }: { onCreated: (geoJson: any, area: number) =>
         polygon: {
           allowIntersection: false,
           showArea: true,
+          drawError: {
+            color: "#ef4444",
+            message: "لا يمكن للخطوط أن تتقاطع!",
+          },
           shapeOptions: {
-            color: "#97009c"
-          }
-        }
-      }
+            color: "#22c55e",
+            weight: 2,
+            fillColor: "#22c55e",
+            fillOpacity: 0.15,
+          },
+        },
+      },
     });
 
     map.addControl(drawControl);
 
-    // Event Handler
     const handleCreated = (e: any) => {
+      // Clear any existing drawn layers first (single polygon mode)
+      drawnItems.clearLayers();
       const layer = e.layer;
       drawnItems.addLayer(layer);
 
       const geoJson = layer.toGeoJSON();
-
-      // Calculate area
       const latlngs = layer.getLatLngs()[0];
       let area = 0;
       if (latlngs) {
-         area = L.GeometryUtil.geodesicArea(latlngs) / 10000; // Convert sq meters to hectares
+        area = L.GeometryUtil.geodesicArea(latlngs) / 10000;
       }
-
       onCreated(geoJson, parseFloat(area.toFixed(2)));
     };
 
+    const handleEdited = (e: any) => {
+      const layers = e.layers;
+      layers.eachLayer((layer: any) => {
+        const geoJson = layer.toGeoJSON();
+        const latlngs = layer.getLatLngs()[0];
+        let area = 0;
+        if (latlngs) {
+          area = L.GeometryUtil.geodesicArea(latlngs) / 10000;
+        }
+        onCreated(geoJson, parseFloat(area.toFixed(2)));
+      });
+    };
+
+    const handleDeleted = () => {
+      onCreated(null, 0);
+    };
+
     map.on(L.Draw.Event.CREATED, handleCreated);
+    map.on(L.Draw.Event.EDITED, handleEdited);
+    map.on(L.Draw.Event.DELETED, handleDeleted);
 
     return () => {
       map.removeControl(drawControl);
       map.off(L.Draw.Event.CREATED, handleCreated);
+      map.off(L.Draw.Event.EDITED, handleEdited);
+      map.off(L.Draw.Event.DELETED, handleDeleted);
       map.removeLayer(drawnItems);
     };
   }, [map, onCreated]);
@@ -87,30 +117,69 @@ function DrawControl({ onCreated }: { onCreated: (geoJson: any, area: number) =>
   return null;
 }
 
-export default function MapDrawer({ center, onDrawCreated }: MapDrawerProps) {
+export default function MapDrawer({ center, onDrawCreated, initialGeoJson }: MapDrawerProps) {
   const [mapReady, setMapReady] = useState(false);
 
   useEffect(() => {
     setMapReady(true);
   }, []);
 
-  if (!mapReady) return <div className="h-[300px] w-full bg-gray-100 flex items-center justify-center">Loading Drawing Tools...</div>;
+  if (!mapReady) {
+    return (
+      <div style={{
+        height: "100%", width: "100%",
+        background: "linear-gradient(135deg, #0c1224, #131b36)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        color: "#64748b",
+      }}>
+        جاري تحميل أدوات الرسم...
+      </div>
+    );
+  }
 
   return (
-    <div style={{ height: "300px", width: "100%", borderRadius: "0.5rem", overflow: "hidden", border: "1px solid #ccc" }}>
+    <div style={{ height: "100%", width: "100%", position: "relative" }}>
       <MapContainer 
         center={center} 
-        zoom={15} 
+        zoom={16} 
         style={{ height: "100%", width: "100%" }}
-        scrollWheelZoom={false}
+        scrollWheelZoom={true}
+        zoomControl={false}
       >
         <ChangeView center={center} />
+        
+        {/* Satellite imagery as base layer */}
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution='Tiles &copy; Esri'
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
         />
+        
+        {/* Transparent labels overlay on top of satellite */}
+        <TileLayer
+          attribution='Labels &copy; Esri'
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+          opacity={0.7}
+        />
+
+        {/* Zoom control in bottom-left */}
+        <div style={{ position: "absolute", bottom: "12px", left: "12px", zIndex: 1000 }}>
+          {/* Handled by leaflet */}
+        </div>
+
         <DrawControl onCreated={onDrawCreated} />
       </MapContainer>
+
+      {/* Crosshair center indicator */}
+      <div style={{
+        position: "absolute", top: "50%", left: "50%",
+        transform: "translate(-50%, -50%)",
+        pointerEvents: "none", zIndex: 500, opacity: 0.3,
+      }}>
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="1">
+          <line x1="12" y1="4" x2="12" y2="20" />
+          <line x1="4" y1="12" x2="20" y2="12" />
+        </svg>
+      </div>
     </div>
   );
 }

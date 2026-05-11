@@ -97,6 +97,8 @@ class Driver(Enum):
     SAR_VH = "SAR_VH"
     GDD = "GDD"
     NDVI_UNC = "NDVI_UNC"
+    LST = "LST"              # Land Surface Temperature (Landsat/ECOSTRESS)
+    ET0 = "ET0"              # Reference evapotranspiration (FAO-56)
 
 
 # ============================================================================
@@ -113,6 +115,17 @@ class PlotContext:
     management_goal: str = "yield_max"   # "yield_max", "cost_min", "sustainable"
     constraints: Dict[str, Any] = field(default_factory=dict)
     # e.g. {"water_quota_mm": 500, "budget_limit": 1000}
+
+    # Plot geometry (from user registration via L0 adapter)
+    polygon_wkt: Optional[str] = None
+    area_ha: Optional[float] = None
+
+    # Soil properties (from user soil analysis via L0 adapter)
+    soil_texture_class: str = ""         # "clay", "loam", "sandy_loam", etc.
+    soil_clay_pct: Optional[float] = None
+    soil_om_pct: Optional[float] = None
+    soil_ph: Optional[float] = None
+    soil_ec_ds_m: Optional[float] = None
 
 
 # ============================================================================

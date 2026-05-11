@@ -7,16 +7,16 @@ def compute_yield_distribution(profile: CropProfile, window_state: SuitabilitySt
     Engine F: Yield Potential & Variability Engine (YVE)
     Produces yield distributions considering downside risk from weather, biotic limits, and soil constraints.
     """
-    base_mean = profile.target_gdd / 100.0 # Just a proxy heuristic. Profile could hold explicit base yields.
-    
-    # Let's derive a better target yield if it's explicitly available, or use a sane default.
-    # The CropProfile currently assumes standard target_yield logic based on constraints.
-    if hasattr(profile, "target_yield_t_ha"):
+    # Derive base yield from the CropProfile's varieties (set via factory base_yield param).
+    # This ensures consistency between the crop library and invariant checks.
+    base_mean = 15.0  # Conservative fallback
+    if hasattr(profile, "target_yield_t_ha") and profile.target_yield_t_ha:
         base_mean = profile.target_yield_t_ha
-    else:
-        # Fallback dictionary
-        yields = {"potato": 40.0, "wheat": 5.0}
-        base_mean = yields.get(profile.id, 20.0)
+    elif profile.varieties:
+        base_mean = max(v.base_yield_t_ha for v in profile.varieties if v.base_yield_t_ha > 0)
+    # Final guard: use GDD heuristic only if no variety data at all
+    if base_mean <= 0:
+        base_mean = profile.target_gdd / 100.0
         
     p50 = base_mean
     p90 = base_mean * 1.15 # Up to 15% better purely through optimal management

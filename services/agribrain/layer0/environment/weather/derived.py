@@ -59,9 +59,21 @@ def compute_daily_forcing(
     # GDD
     gdd = compute_gdd(temp_min, temp_max, t_base)
 
-    # ET₀
+    # ET₀ — full PM cascade (provider → PM → Hargreaves)
+    rh_mean = _get_consensus_value(consensus, "relative_humidity_mean")
+    wind_max = _get_consensus_value(consensus, "wind_speed_max")
+    # Convert wind from 10m (station) to 2m if available
+    wind_2m = None
+    if wind_max is not None:
+        from layer0.environment.weather.et0 import wind_speed_at_2m
+        wind_2m = wind_speed_at_2m(wind_max, measurement_height=10.0)
+
     et0, et0_source = select_et0(
-        provider_et0, temp_min, temp_max, latitude_deg, day_of_year
+        provider_et0, temp_min, temp_max, latitude_deg, day_of_year,
+        temp_mean=temp_mean,
+        relative_humidity_mean=rh_mean,
+        wind_speed_2m=wind_2m,
+        shortwave_radiation_mj=radiation,
     )
 
     # Water balance

@@ -84,6 +84,29 @@ def _make_dag_stress_context() -> Layer3InputContext:
         usable_for_layer3=True
     )
 
+def _make_all_drivers_missing_context() -> Layer3InputContext:
+    """All data sources missing — worst-case degradation."""
+    return Layer3InputContext(
+        plot_id="bench_degraded",
+        layer1_run_id="l1_d", layer2_run_id="l2_d",
+        stress_summary={},
+        phenology_stage="unknown",
+        operational_signals={
+            "sar_available": False, "optical_available": False,
+            "rain_available": False, "temp_available": False,
+            "optical_obs_count": 0, "sar_obs_count": 0,
+            "water_deficit_severity": 0.0,
+            "thermal_severity": 0.0,
+            "has_anomaly": False,
+            "anomaly_severity": 0.0,
+            "anomaly_type": "NONE",
+            "growth_velocity": 0.0,
+        },
+        data_health=DataHealthScore(overall=0.1, confidence_ceiling=0.3, status="degraded"),
+        confidence_ceiling=0.3,
+        usable_for_layer3=True,
+    )
+
 
 def benchmark_latency(label: str, ctx: Layer3InputContext, iterations: int = 100) -> Dict:
     times = []
@@ -142,6 +165,8 @@ def run_benchmarks():
     ctx_stress = _make_context(severity=0.7, zones=0)
     ctx_zones = _make_context(severity=0.5, zones=5)
     ctx_dag = _make_dag_stress_context()
+    ctx_degraded = _make_all_drivers_missing_context()
+    ctx_10zone = _make_context(severity=0.5, zones=10)
 
     # Latency
     print("\n--- Latency ---")
@@ -150,6 +175,8 @@ def run_benchmarks():
         ("Plot-only (no stress)", ctx_simple),
         ("Stress-heavy", ctx_stress),
         ("5-zone aware", ctx_zones),
+        ("10-zone scaling", ctx_10zone),
+        ("All Drivers Missing", ctx_degraded),
         ("DAG Combinatorial", ctx_dag),
     ]:
         r = benchmark_latency(label, ctx)
@@ -163,6 +190,8 @@ def run_benchmarks():
         ("Plot-only", ctx_simple),
         ("Stress-heavy", ctx_stress),
         ("5-zone aware", ctx_zones),
+        ("10-zone scaling", ctx_10zone),
+        ("All Drivers Missing", ctx_degraded),
         ("DAG Combinatorial", ctx_dag),
     ]:
         r = benchmark_memory(label, ctx)

@@ -72,7 +72,7 @@ class ProcessForcing:
     weather_confidence: float = 0.5
 
     # ET₀ source
-    et0_source: Literal["open_meteo", "hargreaves", "unknown"] = "unknown"
+    et0_source: Literal["open_meteo", "penman_monteith", "penman_monteith_reduced", "hargreaves", "unknown"] = "unknown"
 
     def to_process_model_weather_dict(self) -> Dict[str, float]:
         """Convert to the existing ProcessModel.predict() weather format."""

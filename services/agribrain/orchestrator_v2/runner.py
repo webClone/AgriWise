@@ -161,25 +161,69 @@ def run_orchestrator(
     results[LayerId.L6] = l6_res
     
     # --- Layer 7 (Planning) ---
-    l7_res = _safe_run(LayerId.L7, inputs, l1_res.output, l5_res.output if l5_res else None, None)
+    # GAP 10+15: pass L3 decisions and L6 execution state to avoid plan conflicts
+    l7_res = _safe_run(LayerId.L7, inputs, l1_res.output,
+                       l5_res.output if l5_res else None, None,
+                       l3_res.output if l3_res else None,
+                       l6_res.output if l6_res else None)
     results[LayerId.L7] = l7_res
 
     # --- Layer 8 (Prescriptive) ---
-    l1_forecast = getattr(l1_res.output, "plot_timeseries", []) if l1_res and l1_res.output else []
+    # Use forecast_7d (populated by Fix 2) as primary forecast source.
+    # Fall back to last 7 entries of plot_timeseries if forecast_7d is empty.
+    l1_forecast_7d = getattr(l1_res.output, "forecast_7d", []) if l1_res and l1_res.output else []
+    l1_timeseries = getattr(l1_res.output, "plot_timeseries", []) if l1_res and l1_res.output else []
+    l8_forecast = l1_forecast_7d if l1_forecast_7d else l1_timeseries[-7:]
     
+    # Extract real crop type from inputs (instead of defaulting to "corn")
+    crop_cfg = inputs.crop_config if isinstance(inputs.crop_config, dict) else {}
+    real_crop = crop_cfg.get("crop", crop_cfg.get("crop_type", "corn"))
+    
+    # Extract real soil static from L1 tensor (instead of hardcoded defaults)
+    real_soil_static = {"soil_clay": 22.0, "soil_ph": 6.5, "soil_org_carbon": 1.8}
+    if l1_res and l1_res.output:
+        l1_static = getattr(l1_res.output, "static", {}) or {}
+        if isinstance(l1_static, dict):
+            for key in ("soil_clay", "soil_ph", "soil_org_carbon", "soil_sand", "texture_class"):
+                val = l1_static.get(key)
+                if val is not None and isinstance(val, (int, float)):
+                    real_soil_static[key] = float(val)
+    
+    # GAP 12: Enrich soil_static from L4 SoilWaterBalance when L1.static is sparse
+    # L4's SWB engine extracts/refines soil clay/pH/OC from SAR + soil APIs.
+    if l4_res and l4_res.output:
+        l4_soil = getattr(l4_res.output, "soil_props", {}) or {}
+        if isinstance(l4_soil, dict):
+            _l4_to_l8_soil = {
+                "clay_pct": "soil_clay",
+                "ph": "soil_ph",
+                "organic_matter_pct": "soil_org_carbon",  # OM -> SOC approx
+            }
+            for l4_key, l8_key in _l4_to_l8_soil.items():
+                v = l4_soil.get(l4_key)
+                if v is not None and isinstance(v, (int, float)):
+                    # Don't overwrite real L1 values, only fill gaps
+                    if real_soil_static.get(l8_key) in (22.0, 6.5, 1.8):
+                        real_soil_static[l8_key] = round(float(v), 3)
+
     l8_input = Layer8Input(
         diagnoses=getattr(l3_res.output, "diagnoses", []) if l3_res.output else [],
         nutrient_states=_normalize_nutrient_states(l4_res.output),
         bio_threats=_normalize_threat_states(l5_res.output),
-        weather_forecast=l1_forecast,
+        weather_forecast=l8_forecast,
         zone_ids=_extract_zone_ids(l1_res),
         audit_grade=_derive_audit_grade_from_provenance(l1_res),
         source_reliability=_derive_source_reliability_from_provenance(l1_res),
         conflicts=_extract_conflicts_from_provenance(l1_res),
         phenology_stage=_derive_phenology_stage(l2_res, inputs),
-        horizon_days=7
+        horizon_days=7,
+        crop=real_crop,
+        soil_static=real_soil_static,
     )
-    l8_res = _safe_run(LayerId.L8, l8_input, l1_forecast, None)
+    # GAP 17 NOTE: L8 uses non-standard call convention:
+    # _safe_run(L8, Layer8Input, forecast, None) where forecast is positional arg 2.
+    # run_layer8(l8_input, forecast=None, start_date=None) handles this correctly.
+    l8_res = _safe_run(LayerId.L8, l8_input, l8_forecast, None)
     results[LayerId.L8] = l8_res
 
     # --- Layer 10 (SIRE — Spatial Intelligence & Rendering) ---
@@ -217,6 +261,8 @@ def run_orchestrator(
     # --- Layer 9 (Interface) ---
     # Pass L1 conflicts directly — L8Output does not expose conflicts,
     # so we pass them from the orchestrator's L1 extraction.
+    # GAP 14: also pass L4 nutrient output so advisory/coach engines can
+    # narrate WHY a nutrition prescription was made (confidence, deficiency driver).
     l1_conflicts = _extract_conflicts_from_provenance(l1_res)
     l9_res = _safe_run(LayerId.L9, inputs,
                        l8_res.output if l8_res else None,
@@ -307,9 +353,9 @@ def _normalize_threat_states(l5_output) -> Dict[str, Any]:
             result[k] = {
                 "probability": getattr(state, "probability", 0.0),
                 "confidence": getattr(state, "confidence", 0.5),
-                "severity": getattr(state, "severity", "LOW"),
-                "spread_pattern": getattr(state, "spread_pattern", "UNKNOWN"),
-                "threat_class": getattr(state, "threat_class", ""),
+                "severity": getattr(getattr(state, "severity", "LOW"), "value", getattr(state, "severity", "LOW")),
+                "spread_pattern": getattr(getattr(state, "spread_pattern", "UNKNOWN"), "value", getattr(state, "spread_pattern", "UNKNOWN")),
+                "threat_class": getattr(getattr(state, "threat_class", ""), "value", getattr(state, "threat_class", "")),
             }
         elif isinstance(state, dict):
             result[k] = state
@@ -366,25 +412,54 @@ def _derive_audit_grade_from_provenance(l1_res) -> str:
 
 def _derive_source_reliability_from_provenance(l1_res) -> Dict[str, float]:
     """
-    Read source-level reliability from L1 provenance.
-    Source: tensor.provenance["layer0_reliability"] if it is a dict of source→score.
-    
-    IMPORTANT: This returns SOURCE-SCOPED reliability (e.g. sentinel2, sentinel1,
-    weather, sensor), NOT per-zone reliability. Layer 8's ZonePrioritizer receives
-    these values but cannot map them to individual zones without a separate
-    zone→source mapping (which does not exist yet). Zone prioritization therefore
-    remains approximate — this is a known architectural gap, not a bug.
+    Read source-level reliability from L1 provenance + derive zone-level
+    reliability from zone_stats observation density.
+
+    Returns a merged dict with both source-scoped keys (sentinel2, weather)
+    AND zone-scoped keys (zone_a, zone_b, ...) so L8's ZonePrioritizer
+    can access per-zone reliability directly.
+
+    Zone reliability = weighted average of:
+      - Source reliability mean (50%)
+      - Zone NDVI observation density (50%) — fraction of non-null values
     """
     if not l1_res or not l1_res.output:
         return {}
     prov = getattr(l1_res.output, "provenance", {})
     if not isinstance(prov, dict):
-        return {}
+        prov = {}
+
+    result: Dict[str, float] = {}
+
+    # Source-scoped reliability from L0
     l0_rel = prov.get("layer0_reliability", {})
     if isinstance(l0_rel, dict):
-        # Source-scoped: {"sentinel2": 0.9, "weather": 0.7, ...}
-        return {str(k): float(v) for k, v in l0_rel.items() if isinstance(v, (int, float))}
-    return {}
+        for k, v in l0_rel.items():
+            if isinstance(v, (int, float)):
+                result[str(k)] = float(v)
+
+    # Source reliability mean (for zone blending)
+    source_values = [v for v in result.values() if isinstance(v, (int, float))]
+    source_mean = sum(source_values) / len(source_values) if source_values else 0.6
+
+    # Zone-scoped reliability from zone_stats observation density
+    tensor = l1_res.output
+    zone_stats = getattr(tensor, "zone_stats", {})
+    if isinstance(zone_stats, dict) and "ndvi" in zone_stats:
+        ndvi_zone_data = zone_stats["ndvi"]
+        if isinstance(ndvi_zone_data, dict):
+            for zone_id, zone_ts in ndvi_zone_data.items():
+                if isinstance(zone_ts, list) and zone_ts:
+                    # Compute observation density: fraction of non-null values
+                    total = len(zone_ts)
+                    non_null = sum(1 for v in zone_ts if v is not None)
+                    obs_density = non_null / total if total > 0 else 0.0
+
+                    # Blend: 50% source reliability + 50% observation density
+                    zone_reliability = (source_mean * 0.5) + (obs_density * 0.5)
+                    result[str(zone_id)] = round(zone_reliability, 3)
+
+    return result
 
 
 def _extract_conflicts_from_provenance(l1_res) -> List[Dict[str, Any]]:
@@ -510,6 +585,7 @@ def run_for_chat(
     store: Optional[LocalJsonStore] = None,
     user_query: Optional[str] = None,
     history: Optional[List[Dict[str, str]]] = None,
+    user_mode: str = "farmer",
 ) -> Tuple[ChatPayload, RunArtifact]:
     """
     Optimized entrypoint for Chat/LLM interactions.
@@ -551,7 +627,7 @@ def run_for_chat(
              if any(t.type == "INTERVENE" for t in artifact.final_execution_plan.tasks):
                  raise RuntimeError("SAFETY VIOLATION: DATA_QUERY intent produced INTERVENE tasks.")
                  
-    return build_chat_payload(artifact, user_query, intent=intent, history=history), artifact
+    return build_chat_payload(artifact, user_query, intent=intent, history=history, user_mode=user_mode), artifact
 
 
 def _extract_top_findings(results: Dict, gq) -> list:
@@ -633,7 +709,7 @@ def _extract_top_findings(results: Dict, gq) -> list:
 
     # Degradation warnings
     if gq.critical_failure:
-        findings.insert(0, "⚠️ Critical data failure — results may be unreliable.")
+        findings.insert(0, "[WARN] Critical data failure — results may be unreliable.")
     elif gq.missing_drivers:
         drivers = ", ".join(gq.missing_drivers[:3])
         findings.append(f"Data gaps: {drivers}.")

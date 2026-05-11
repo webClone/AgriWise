@@ -78,7 +78,7 @@ class ZonalSegmentationEngine:
                 k = self.find_optimal_k(X)
                 self.n_zones = k # Update state
             except Exception as e:
-                print(f"⚠️ Auto-K failed: {e}")
+                print(f"[WARN] Auto-K failed: {e}")
                 
         # Fit logic
         labels = np.zeros(len(X))

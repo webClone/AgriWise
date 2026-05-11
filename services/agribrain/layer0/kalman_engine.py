@@ -194,6 +194,22 @@ class ZoneKalmanFilter:
         # Update variance from covariance diagonal
         self.state.variance = self.covariance.diagonal()
         
+        # Clamp physically-bounded state variables after update
+        # (Kalman update can push values out of physical range)
+        from layer0.state_vector import (
+            IDX_LAI, IDX_BIOMASS, IDX_SM_0_10, IDX_SM_10_40,
+            IDX_CANOPY_STRESS, IDX_PHENO_STAGE, IDX_STRESS_THERMAL,
+            IDX_PHOTO_EFF,
+        )
+        self.state.values[IDX_LAI] = max(0.0, min(8.0, self.state.values[IDX_LAI]))
+        self.state.values[IDX_BIOMASS] = max(0.0, self.state.values[IDX_BIOMASS])
+        self.state.values[IDX_SM_0_10] = max(0.0, min(1.0, self.state.values[IDX_SM_0_10]))
+        self.state.values[IDX_SM_10_40] = max(0.0, min(1.0, self.state.values[IDX_SM_10_40]))
+        self.state.values[IDX_CANOPY_STRESS] = max(0.0, min(1.0, self.state.values[IDX_CANOPY_STRESS]))
+        self.state.values[IDX_PHENO_STAGE] = max(0.0, min(4.0, self.state.values[IDX_PHENO_STAGE]))
+        self.state.values[IDX_STRESS_THERMAL] = max(0.0, min(1.0, self.state.values[IDX_STRESS_THERMAL]))
+        self.state.values[IDX_PHOTO_EFF] = max(0.0, min(1.0, self.state.values[IDX_PHOTO_EFF]))
+        
         if observations:
             self.last_obs_day = self.state.day
             self.days_since_obs = 0

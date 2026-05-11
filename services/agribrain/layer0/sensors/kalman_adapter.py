@@ -37,8 +37,10 @@ def map_to_kalman_observations(
         if sm_10_40_frac > 0.3:
             obs.append({"state_var": "root_zone_moisture", "value": value, "sigma": dynamic_sigma / sm_10_40_frac})
 
-    elif variable == "soil_temperature_c":
-        obs.append({"state_var": "root_zone_temperature", "value": value, "sigma": dynamic_sigma})
+    # soil_temperature_c: No Kalman state observation.
+    # The 9-variable state vector has no soil temperature state.
+    # Soil temp is available as process forcing via map_to_process_forcing()
+    # and through the environment package's reanalysis data.
         
     return obs
 

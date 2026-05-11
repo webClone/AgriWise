@@ -29,6 +29,20 @@ _GAP_RULES = [
         "action": "SAR data may have 6-12 day revisit gap",
     },
     {
+        "type": "NO_SIF_DATA",
+        "requires_source": "sentinel5p",
+        "severity": "info",
+        "affected": ["photosynthetic_efficiency", "sif_stress_detection"],
+        "action": "No TROPOMI SIF data — photosynthetic shutdown detection unavailable",
+    },
+    {
+        "type": "NO_EO_EMBEDDING",
+        "requires_source": "eo_foundation",
+        "severity": "info",
+        "affected": ["anomaly_embedding", "spectral_intelligence"],
+        "action": "No EO Foundation Model embedding — advanced spectral anomaly detection unavailable",
+    },
+    {
         "type": "NO_SENSOR_FOR_ROOT_ZONE",
         "requires_source": "sensor",
         "requires_variable_contains": "moisture",

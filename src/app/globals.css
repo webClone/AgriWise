@@ -11,7 +11,7 @@
   --aw-surface: rgba(10, 16, 32, 0.88);
   --aw-surface-solid: #0c1224;
   --aw-glass: rgba(6, 10, 22, 0.82);
-  --aw-glass-panel: rgba(8, 13, 28, 0.85);
+  --aw-glass-panel: rgba(8, 12, 25, 0.92);
   --aw-border: rgba(71, 85, 105, 0.12);
   --aw-text-primary: #e8ecf4;
   --aw-text-secondary: #94a3b8;
@@ -173,16 +173,34 @@ body {
   z-index: 0;
 }
 
-/* Scrollbar */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
+/* Scrollbar — sleek and minimal */
+.custom-scrollbar::-webkit-scrollbar,
+[role="dialog"] *::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
 }
-.custom-scrollbar::-webkit-scrollbar-track {
+.custom-scrollbar::-webkit-scrollbar-track,
+[role="dialog"] *::-webkit-scrollbar-track {
   background: transparent;
 }
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: rgba(156, 163, 175, 0.5);
+.custom-scrollbar::-webkit-scrollbar-thumb,
+[role="dialog"] *::-webkit-scrollbar-thumb {
+  background-color: rgba(99, 102, 241, 0.18);
   border-radius: 20px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover,
+[role="dialog"] *::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(99, 102, 241, 0.4);
+}
+.custom-scrollbar,
+[role="dialog"] * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99, 102, 241, 0.18) transparent;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Masonry Layout Styles */
@@ -996,10 +1014,16 @@ body {
   pointer-events: auto;
 }
 
+[dir="rtl"] .aw-dashboard__mode-lens {
+  left: auto;
+  right: 50%;
+  transform: translateX(50%);
+}
+
 .aw-dashboard__status {
   position: absolute;
   top: 120px;
-  left: 16px;
+  inset-inline-start: 16px;
   z-index: 10;
 }
 
@@ -1049,16 +1073,16 @@ body {
 .aw-dashboard__insight-bar {
   position: absolute;
   bottom: 16px;
-  left: 16px;
-  right: 16px;
+  inset-inline-start: 16px;
+  inset-inline-end: 16px;
   z-index: 10;
   pointer-events: auto;
 }
 
 .aw-dashboard__zone-sheet {
   position: absolute;
-  top: 120px;    /* V2.2: below top bar + context band */
-  right: 12px;
+  top: 120px;
+  inset-inline-end: 12px;
   bottom: 12px;
   z-index: 15;
   width: 360px;
@@ -1261,7 +1285,7 @@ body {
 .aw-insight-bar__legend-label {
   font-size: 10px;
   color: var(--aw-text-muted);
-  margin-right: 8px;
+  margin-inline-end: 8px;
   letter-spacing: 0.03em;
 }
 

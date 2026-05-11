@@ -12,6 +12,7 @@ class ProblemType(Enum):
     COLD_STRESS = "COLD_STRESS"
     NUTRIENT_DEFICIENCY_N = "N_DEFICIENCY_RISK"
     SALINITY_RISK = "SALINITY_RISK"
+    TRANSPIRATION_FAILURE = "TRANSPIRATION_FAILURE"  # Canopy overheating (ESI > 0.7)
     
     # Biotic
     FUNGAL_DISEASE_RISK = "FUNGAL_DISEASE_RISK"
@@ -23,6 +24,10 @@ class ProblemType(Enum):
     LODGING = "LODGING"
     LOGGING_CLEARING = "LOGGING_CLEARING"
     
+    # Drone Structural (from L0 RGB → L1 → L2 → L3)
+    WEED_PRESSURE = "WEED_PRESSURE"
+    MECHANICAL_DAMAGE = "MECHANICAL_DAMAGE"
+
     # Data / System
     DATA_GAP = "DATA_GAP"
     DATA_ARTIFACT = "DATA_ARTIFACT"
@@ -161,7 +166,31 @@ PROBLEM_DB = {
         typical_duration=1,
         risk_level="LOW",
         problem_class=ProblemClass.SYSTEM
-    )
+    ),
+    ProblemType.WEED_PRESSURE: ProblemDefinition(
+        type=ProblemType.WEED_PRESSURE,
+        description="Weed infestation detected via drone RGB analysis. Competing for light, water, and nutrients.",
+        symptoms=["Low canopy uniformity", "Bare soil patches", "Spectral heterogeneity"],
+        typical_duration=21,
+        risk_level="MEDIUM",
+        problem_class=ProblemClass.DIAGNOSIS
+    ),
+    ProblemType.MECHANICAL_DAMAGE: ProblemDefinition(
+        type=ProblemType.MECHANICAL_DAMAGE,
+        description="Structural crop damage detected via drone. May indicate equipment, hail, or lodging impact.",
+        symptoms=["Row discontinuity", "Canopy gaps", "Structural irregularity"],
+        typical_duration=14,
+        risk_level="HIGH",
+        problem_class=ProblemClass.DIAGNOSIS
+    ),
+    ProblemType.TRANSPIRATION_FAILURE: ProblemDefinition(
+        type=ProblemType.TRANSPIRATION_FAILURE,
+        description="Plant transpiration cooling has failed. Canopy overheating detected via satellite LST.",
+        symptoms=["High Canopy Temp", "ESI > 0.7", "ET Deficit", "Stomatal Closure"],
+        typical_duration=5,
+        risk_level="HIGH",
+        problem_class=ProblemClass.DIAGNOSIS
+    ),
 }
 
 ACTIONS = {
@@ -250,6 +279,32 @@ ACTIONS = {
         description="Check leaves for lesions/spores.",
         risk_if_wrong=RiskIfWrong.LOW
     ),
+
+    # -- Drone Structural --
+    "SCOUT_WEEDS": ActionDefinition(
+        action_id="SCOUT_WEEDS",
+        type="VERIFY",
+        title="Scout: Verify Weed Infestation",
+        description="Ground-truth drone-detected weed pressure. Identify species and coverage.",
+        required_drivers=[],  # Drone-based, no satellite driver requirement
+        min_confidence=0.4,
+        fallback_action_id=None,
+        cost_index=2,
+        time_index=1,
+        risk_if_wrong=RiskIfWrong.LOW
+    ),
+    "ASSESS_MECHANICAL": ActionDefinition(
+        action_id="ASSESS_MECHANICAL",
+        type="VERIFY",
+        title="Assess Structural Damage",
+        description="Ground-truth drone-detected structural damage. Determine cause (equipment, hail, lodging).",
+        required_drivers=[],
+        min_confidence=0.4,
+        fallback_action_id=None,
+        cost_index=2,
+        time_index=1,
+        risk_if_wrong=RiskIfWrong.MEDIUM
+    ),
     
     # -- Data --
     "WAIT_FOR_DATA": ActionDefinition(
@@ -258,6 +313,24 @@ ACTIONS = {
         title="Wait for Clear Data",
         description="Defer decision until better signals available.",
         risk_if_wrong=RiskIfWrong.MEDIUM 
+    ),
+    
+    # -- Energy Balance --
+    "APPLY_DEFICIT_IRRIGATION": ActionDefinition(
+        action_id="APPLY_DEFICIT_IRRIGATION",
+        type="INTERVENE",
+        title="Apply Deficit Irrigation (Canopy Cooling)",
+        description="Apply targeted water to reduce canopy temperature and restore transpiration. "
+                    "Unlike full irrigation, deficit irrigation delivers the minimum water needed "
+                    "to re-open stomata and restart evaporative cooling.",
+        prerequisites=["IrrigationSystem"],
+        contraindications=["SoilMoisture>FC"],
+        required_drivers=["LST", "ET0"],
+        min_confidence=0.5,
+        fallback_action_id="IRRIGATE_FULL",
+        cost_index=2,
+        time_index=1,
+        risk_if_wrong=RiskIfWrong.MEDIUM
     )
 }
     

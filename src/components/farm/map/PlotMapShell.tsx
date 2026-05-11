@@ -84,7 +84,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   // 4. Build Layers dynamically using pure external helper
   const plotId = (primaryPlot?._id || primaryPlot?.id) as string | undefined;
   
-  const layers = useMemo(() => buildLayerStack({
+  const { surfaceLayers, zoneLayers } = useMemo(() => buildLayerStack({
     plotId,
     activeMode,
     surfaceData,
@@ -101,12 +101,15 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     onZoneHover: handleZoneHover,
   }), [plotId, activeMode, surfaceData, surfaceColors, confidenceSurface, reliabilitySurface, deviationSurface, plotGeoJson, l10Zones, selectedZone, hoveredZoneId, detailMode, onZoneClick, handleZoneHover]);
 
+  // Combine all layers — zones render on top of surfaces
+  const allLayers = useMemo(() => [...surfaceLayers, ...zoneLayers], [surfaceLayers, zoneLayers]);
+
   // 5. Compute hovered zone centroid for floating chip
   const hoveredZoneData = useMemo(() => {
     if (!hoveredZoneId || !l10Zones || !surfaceData || !plotGeoJson) return null;
     
     const zone = l10Zones.find(z => z.zone_id === hoveredZoneId);
-    if (!zone || zone.zone_id === selectedZone) return null; // Don't show chip for selected zone (has its own pinned chip)
+    if (!zone || zone.zone_id === selectedZone) return null;
 
     const fc = formatZoneGeoJson(
       [zone],
@@ -164,11 +167,12 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   return (
     <div ref={containerRef} className="absolute inset-0 w-full h-full bg-slate-950 overflow-hidden">
       <DeckGL
+        style={{ mixBlendMode: 'multiply' }}
         viewState={viewState}
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onViewStateChange={({ viewState }) => setViewState(viewState as any)}
         controller={true}
-        layers={layers}
+        layers={allLayers}
         getCursor={({ isHovering }) => isHovering ? "pointer" : "grab"}
       >
         <Map

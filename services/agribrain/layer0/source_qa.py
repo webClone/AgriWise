@@ -396,6 +396,9 @@ class WeatherQA:
         rain_sigma = 2.0  # mm/day base
         temp_sigma = 0.5  # °C base
         wind_sigma = 1.0  # m/s base
+        et0_sigma = 0.5
+        rh_sigma = 5.0    # %
+        rad_sigma = 20.0  # W/m²
         
         if station_distance_km:
             dist_factor = 1.0 + station_distance_km / 100.0
@@ -408,15 +411,26 @@ class WeatherQA:
         if max_rain > 20:
             rain_sigma *= 1.5  # convective events are spatially localized
         
+        # NASA POWER: coarse spatial (~50km) and 2-day temporal latency
+        # Inflate uncertainty BEFORE building the UncertaintyModel
+        if source_name == "nasa_power":
+            rain_sigma *= 2.0   # ~50km pixels miss localized rainfall
+            temp_sigma *= 1.5   # smoothed over large area
+            wind_sigma *= 1.8   # wind is highly localized
+            et0_sigma *= 1.5    # ET0 derived from coarse inputs
+            rad_sigma *= 1.5    # radiation smoothed regionally
+            if QAFlag.LOW_CONFIDENCE not in flags:
+                flags.append(QAFlag.LOW_CONFIDENCE)
+        
         uncertainty = UncertaintyModel(
             sigmas={
                 "precipitation": rain_sigma,
                 "temperature_2m_max": temp_sigma,
                 "temperature_2m_min": temp_sigma,
-                "et0": 0.5,
+                "et0": et0_sigma,
                 "wind_speed_10m": wind_sigma,
-                "relative_humidity_2m": 5.0,  # %
-                "shortwave_radiation": 20.0,  # W/m²
+                "relative_humidity_2m": rh_sigma,
+                "shortwave_radiation": rad_sigma,
             }
         )
         
@@ -426,10 +440,15 @@ class WeatherQA:
         )
         qa.compute_scene_score()
         
+        # Cap scene score for coarse-resolution sources
+        if source_name == "nasa_power":
+            qa.scene_score = min(qa.scene_score, 0.65)
+        
         obs_source = {
             "open_meteo": ObservationSource.WEATHER_REANALYSIS,
             "station": ObservationSource.WEATHER_STATION,
             "forecast": ObservationSource.WEATHER_FORECAST,
+            "nasa_power": ObservationSource.NASA_POWER,
         }.get(source_name, ObservationSource.WEATHER_REANALYSIS)
         
         # Build daily payload

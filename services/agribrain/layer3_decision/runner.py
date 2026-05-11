@@ -168,8 +168,8 @@ class DecisionIntelligenceEngine:
             "blocked": sum(1 for r in recommendations if not r.is_allowed),
         })
 
-        # 5. Execution plan
-        execution_plan = self._build_execution_plan(recommendations, diagnosed_list)
+        # 5. Execution plan (uses run_timestamp for determinism)
+        execution_plan = self._build_execution_plan(recommendations, diagnosed_list, ts)
 
         # 6. Quality metrics
         metrics = self._calculate_quality_metrics(features, diagnosed_list, l3_context)
@@ -182,19 +182,6 @@ class DecisionIntelligenceEngine:
             "l1_run_id": getattr(l3_context, "layer1_run_id", ""),
             "l2_run_id": getattr(l3_context, "layer2_run_id", ""),
         }
-
-        # Build data health (inherited from L2)
-        data_health = DataHealthScore(
-            overall=l3_context.data_health.overall,
-            source_completeness=l3_context.data_health.source_completeness,
-            provenance_completeness=l3_context.data_health.provenance_completeness,
-            freshness=l3_context.data_health.freshness,
-            spatial_fidelity=l3_context.data_health.spatial_fidelity,
-            conflict_penalty=l3_context.data_health.conflict_penalty,
-            gap_penalty=l3_context.data_health.gap_penalty,
-            confidence_ceiling=l3_context.data_health.confidence_ceiling,
-            status=l3_context.data_health.status,
-        )
 
         # Build output
         out = DecisionOutput(
@@ -277,8 +264,16 @@ class DecisionIntelligenceEngine:
         return is_usable, flags
 
     def _build_execution_plan(
-        self, recs: List[Recommendation], diagnosed_list: List[Diagnosis]
+        self, recs: List[Recommendation], diagnosed_list: List[Diagnosis],
+        run_ts: datetime.datetime = None,
     ) -> ExecutionPlan:
+        """Build the execution DAG from allowed recommendations.
+
+        Uses ``run_ts`` for deterministic start/review dates instead of
+        calling ``datetime.now()`` (which would break content-hash
+        reproducibility).
+        """
+        ts = run_ts or datetime.datetime.now(timezone.utc)
         tasks = []
         diag_map = {d.problem_id: d for d in diagnosed_list}
 
@@ -307,10 +302,8 @@ class DecisionIntelligenceEngine:
         return ExecutionPlan(
             tasks=tasks,
             edges=[],
-            recommended_start_date=datetime.datetime.now(timezone.utc).isoformat(),
-            review_date=(
-                datetime.datetime.now(timezone.utc) + datetime.timedelta(days=1)
-            ).isoformat(),
+            recommended_start_date=ts.isoformat(),
+            review_date=(ts + datetime.timedelta(days=1)).isoformat(),
         )
 
     def _calculate_quality_metrics(
@@ -355,10 +348,12 @@ class DecisionIntelligenceEngine:
                 "sar_obs_count": float(feat.sar_obs_count),
                 "rain_available": 1.0 if feat.rain_available else 0.0,
                 "sar_available": 1.0 if feat.sar_available else 0.0,
+                "lst_available": 1.0 if feat.lst_available else 0.0,
             },
             l2_confidence_summary={
                 "phenology_conf": feat.stage_confidence,
                 "data_health_overall": round(l3_context.data_health.overall, 3),
+                "energy_balance_method": feat.energy_balance_method,
             },
             degradation_mode=mode,
         )
@@ -393,6 +388,16 @@ class DecisionIntelligenceEngine:
                 "sar_available": feat.sar_available,
                 "optical_available": feat.optical_available,
                 "missing_inputs": [d.value for d in feat.missing_inputs],
+                # Energy Balance fields
+                "lst_available": feat.lst_available,
+                "esi": feat.esi,
+                "cwsi": feat.cwsi,
+                "canopy_air_delta_c": feat.canopy_air_delta_c,
+                "et_potential_mm": feat.et_potential_mm,
+                "et_actual_mm": feat.et_actual_mm,
+                "et_deficit_mm": feat.et_deficit_mm,
+                "transpiration_efficiency": feat.transpiration_efficiency,
+                "energy_balance_method": feat.energy_balance_method,
             },
             log_odds_table=logs,
             policy_checks=[],
@@ -566,20 +571,52 @@ def _extract_plot_context(inputs: Any) -> PlotContext:
 
 
 def _extract_weather_forecast(l1_output: Any) -> List[Dict]:
-    """Extract weather forecast from L1 FieldTensor output."""
+    """Extract weather forecast from L1 FieldTensor output.
+
+    Priority:
+      1. forecast_7d (populated by persistence forecast or API)
+      2. Last 3-7 days of plot_timeseries (fallback)
+
+    Returns list of dicts with keys: rain, temp_max, temp_min, et0, date.
+    """
     if l1_output is None:
         return []
 
-    # Try to get forecast from plot_timeseries (last few days)
+    # Priority 1: Use forecast_7d if available (populated by _build_persistence_forecast)
+    forecast_7d = getattr(l1_output, "forecast_7d", [])
+    if forecast_7d and isinstance(forecast_7d, list):
+        forecast = []
+        for entry in forecast_7d:
+            if isinstance(entry, dict):
+                rain = entry.get("precipitation", entry.get("rain", 0.0))
+                forecast.append({
+                    "rain": float(rain) if rain is not None else 0.0,
+                    "temp_max": float(entry.get("temp_max", 25.0) or 25.0),
+                    "temp_min": float(entry.get("temp_min", 12.0) or 12.0),
+                    "et0": float(entry.get("et0", 4.0) or 4.0),
+                    "date": entry.get("date", ""),
+                    "rain_prob": float(entry.get("rain_prob", 0.0) or 0.0),
+                })
+        if forecast:
+            return forecast
+
+    # Priority 2: Fallback to last entries of plot_timeseries
     ts = getattr(l1_output, "plot_timeseries", [])
     if not ts or not isinstance(ts, list):
         return []
 
     forecast = []
-    for entry in ts[-3:]:  # Last 3 days as forecast proxy
+    for entry in ts[-7:]:
         if isinstance(entry, dict):
-            rain = entry.get("precipitation", entry.get("rainfall_mm", entry.get("rain", 0.0)))
-            forecast.append({"rain": float(rain) if rain is not None else 0.0})
+            rain = entry.get("precipitation", entry.get("rainfall_mm",
+                   entry.get("rain", 0.0)))
+            forecast.append({
+                "rain": float(rain) if rain is not None else 0.0,
+                "temp_max": float(entry.get("temp_max", entry.get("tmax", 25.0)) or 25.0),
+                "temp_min": float(entry.get("temp_min", entry.get("tmin", 12.0)) or 12.0),
+                "et0": float(entry.get("et0", entry.get("ET0", 4.0)) or 4.0),
+                "date": entry.get("date", ""),
+            })
 
     return forecast
 
@@ -589,15 +626,18 @@ def _build_legacy_l3_context(
 ) -> Layer3InputContext:
     """Build Layer3InputContext from legacy VegIntOutput + FieldTensor.
 
-    This is the fallback path for when L2 hasn't been upgraded to
-    the canonical Layer2Output schema yet.
+    Enhanced bridge: extracts all available intelligence from VegIntOutput
+    (curve quality, growth velocity, phenology confidence, zone metrics,
+    spatial heterogeneity, anomaly attribution) to close the signal gap
+    between the legacy VegIntOutput and canonical Layer2Output paths.
     """
     from layer1_fusion.schemas import DataHealthScore
 
     plot_id = getattr(inputs, "plot_id", "unknown") if inputs else "unknown"
 
-    # Extract stress signals from VegIntOutput anomalies
+    # ── Stress signals from VegIntOutput anomalies ──────────────────────
     stress_summary: Dict[str, float] = {}
+    stress_detail: Dict[str, Dict[str, Any]] = {}
     operational_signals: Dict[str, Any] = {
         "sar_available": False, "optical_available": False,
         "rain_available": False, "temp_available": False,
@@ -605,71 +645,276 @@ def _build_legacy_l3_context(
         "water_deficit_severity": 0.0, "thermal_severity": 0.0,
         "has_anomaly": False, "anomaly_severity": 0.0,
         "anomaly_type": "NONE", "growth_velocity": 0.0,
+        "has_water_evidence": False, "conflict_count": 0,
+        "gap_types": [],
     }
 
-    # Parse L2 anomalies if present
     if l2_output:
         anomalies = getattr(l2_output, "anomalies", [])
         for a in (anomalies or []):
             cause = getattr(a, "likely_cause", "") or ""
             sev = getattr(a, "severity", 0.0)
-            if "water" in cause.lower():
-                stress_summary["WATER"] = max(stress_summary.get("WATER", 0.0), sev)
-                operational_signals["water_deficit_severity"] = sev
-            if "heat" in cause.lower() or "thermal" in cause.lower():
-                stress_summary["THERMAL"] = max(stress_summary.get("THERMAL", 0.0), sev)
-                operational_signals["thermal_severity"] = sev
+            conf = getattr(a, "confidence", 0.5)
+            atype_raw = getattr(a, "type", None)
+            atype_str = (atype_raw.value if hasattr(atype_raw, "value")
+                         else str(atype_raw)) if atype_raw else "UNKNOWN"
+
+            # Map anomaly causes to canonical stress types
+            stress_type = None
+            if "water" in cause.lower() or "drought" in cause.lower():
+                stress_type = "WATER"
+                operational_signals["water_deficit_severity"] = max(
+                    operational_signals["water_deficit_severity"], sev)
+                operational_signals["has_water_evidence"] = True
+            elif "heat" in cause.lower() or "thermal" in cause.lower():
+                stress_type = "THERMAL"
+                operational_signals["thermal_severity"] = max(
+                    operational_signals["thermal_severity"], sev)
+            elif "nutrient" in cause.lower() or "nitrogen" in cause.lower():
+                stress_type = "NUTRIENT"
+            elif "disease" in cause.lower() or "biotic" in cause.lower():
+                stress_type = "BIOTIC"
+            elif cause:
+                stress_type = cause.upper().replace(" ", "_")
+
+            if stress_type and sev > 0:
+                if sev >= stress_summary.get(stress_type, 0.0):
+                    stress_summary[stress_type] = sev
+                    stress_detail[stress_type] = {
+                        "severity": sev,
+                        "confidence": conf,
+                        "uncertainty": 1.0 - conf,
+                        "primary_driver": cause,
+                        "evidence_count": 1,
+                        "explanation_basis": [f"Anomaly: {atype_str} — {cause}"],
+                        "spatial_scope": "plot",
+                        "diagnostic_only": False,
+                    }
+
             if sev > 0:
                 operational_signals["has_anomaly"] = True
                 operational_signals["anomaly_severity"] = max(
-                    operational_signals["anomaly_severity"], sev
-                )
-                atype = getattr(a, "type", None)
-                if atype:
-                    operational_signals["anomaly_type"] = (
-                        atype.value if hasattr(atype, "value") else str(atype)
-                    )
+                    operational_signals["anomaly_severity"], sev)
+                operational_signals["anomaly_type"] = atype_str
 
-    # Parse L1 data availability
+        # ── Growth velocity from curve derivative ───────────────────────
+        curve = getattr(l2_output, "curve", None)
+        if curve:
+            d1 = getattr(curve, "ndvi_fit_d1", [])
+            if d1 and isinstance(d1, list) and len(d1) > 0:
+                operational_signals["growth_velocity"] = float(d1[-1])
+
+        # ── Spatial heterogeneity from stability ────────────────────────
+        stability = getattr(l2_output, "stability", None)
+        if stability:
+            sc = getattr(stability, "stability_class", "STABLE")
+            sc_val = sc.value if hasattr(sc, "value") else str(sc)
+            if sc_val in ("HETEROGENEOUS", "TRANSIENT_VAR"):
+                operational_signals["spatial_heterogeneity"] = True
+                mean_var = getattr(stability, "mean_spatial_var", 0.0)
+                operational_signals["spatial_variance"] = float(mean_var)
+            else:
+                operational_signals["spatial_heterogeneity"] = False
+
+    # ── L1 data availability ────────────────────────────────────────────
+    sar_obs = 0
     if l1_output:
         ts = getattr(l1_output, "plot_timeseries", [])
         if ts and isinstance(ts, list):
             operational_signals["optical_available"] = True
             operational_signals["optical_obs_count"] = len(ts)
 
-            # Check specific channels
+            # ── GAP 6: Compute cumulative water deficit (ET0 - precip) ──
+            cumulative_deficit_mm = 0.0
+            deficit_days = 0
             for entry in ts:
                 if isinstance(entry, dict):
                     if entry.get("vv") is not None:
                         operational_signals["sar_available"] = True
-                        operational_signals["sar_obs_count"] += 1
-                    if entry.get("precipitation") is not None or entry.get("rain") is not None:
+                        sar_obs += 1
+                    rain = entry.get("precipitation", entry.get("rain", entry.get("rainfall_mm")))
+                    et0  = entry.get("et0", entry.get("ET0"))
+                    if (rain is not None or et0 is not None):
                         operational_signals["rain_available"] = True
+                        r = float(rain) if rain is not None else 0.0
+                        e = float(et0)  if et0  is not None else 0.0
+                        daily_deficit = max(0.0, e - r)
+                        cumulative_deficit_mm += daily_deficit
+                        if daily_deficit > 0:
+                            deficit_days += 1
                     if entry.get("temp_max") is not None:
                         operational_signals["temp_available"] = True
 
-    # Phenology from L2
+            # Normalise: severity 0-1 where 50mm cumulative deficit = 1.0
+            if cumulative_deficit_mm > 0 and not operational_signals["water_deficit_severity"]:
+                raw_severity = min(1.0, cumulative_deficit_mm / 50.0)
+                operational_signals["water_deficit_severity"] = round(raw_severity, 3)
+                operational_signals["has_water_evidence"] = raw_severity > 0.2
+                operational_signals["cumulative_deficit_mm"] = round(cumulative_deficit_mm, 1)
+                operational_signals["deficit_days"] = deficit_days
+
+            operational_signals["sar_obs_count"] = sar_obs
+
+        # Conflicts and gaps from provenance
+        prov = getattr(l1_output, "provenance", {}) or {}
+        if isinstance(prov, dict):
+            conflicts = prov.get("layer0_conflicts", [])
+            operational_signals["conflict_count"] = (
+                len(conflicts) if isinstance(conflicts, list) else 0)
+            # Gap types from provenance
+            gaps = prov.get("data_gaps", [])
+            if isinstance(gaps, list):
+                operational_signals["gap_types"] = sorted(
+                    {str(g.get("type", "")) for g in gaps if isinstance(g, dict)})
+
+    # ── Phenology + GDD from L2 ────────────────────────────────────────
     phenology_stage = "unknown"
+    gdd_adjusted_vigor = None
+    gdd_accumulated = 0.0
+
     if l2_output:
         pheno = getattr(l2_output, "phenology", None)
         if pheno:
             stages = getattr(pheno, "stage_by_day", [])
             if stages:
-                # Last non-unknown stage
                 for s in reversed(stages):
                     val = s.value if hasattr(s, "value") else str(s)
                     if val.upper() != "UNKNOWN":
                         phenology_stage = val.lower()
                         break
 
+            # GDD from phenology confidence
+            conf_by_day = getattr(pheno, "confidence_by_day", [])
+            if conf_by_day and isinstance(conf_by_day, list):
+                # Average phenology confidence → GDD vigor proxy
+                valid_confs = [c for c in conf_by_day
+                               if isinstance(c, (int, float))]
+                if valid_confs:
+                    gdd_adjusted_vigor = sum(valid_confs) / len(valid_confs)
+
+            # Key dates for GDD accumulation
+            key_dates = getattr(pheno, "key_dates", {})
+            if isinstance(key_dates, dict):
+                gdd_val = key_dates.get("gdd_accumulated")
+                if gdd_val is not None:
+                    gdd_accumulated = float(gdd_val)
+
+    # ── Zone status from zone_metrics ───────────────────────────────────
+    zone_status: Dict[str, Dict[str, Any]] = {}
+    if l2_output:
+        zone_metrics = getattr(l2_output, "zone_metrics", {})
+        if zone_metrics and isinstance(zone_metrics, dict):
+            for zone_id, zm in zone_metrics.items():
+                z_curve = getattr(zm, "curve", zm.get("curve", None)
+                                  if isinstance(zm, dict) else None)
+                z_pheno = getattr(zm, "phenology", zm.get("phenology", None)
+                                  if isinstance(zm, dict) else None)
+                z_info: Dict[str, Any] = {
+                    "dominant_stress_type": "NONE",
+                    "severity": 0.0,
+                    "confidence": 0.5,
+                    "stress_count": 0,
+                }
+                if z_curve:
+                    quality = getattr(z_curve, "quality", None)
+                    if quality:
+                        rmse = getattr(quality, "rmse", None)
+                        if rmse is not None and float(rmse) > 0.15:
+                            z_info["dominant_stress_type"] = "VARIABILITY"
+                            z_info["severity"] = min(1.0, float(rmse) * 3.0)
+                            z_info["stress_count"] = 1
+                if z_pheno:
+                    z_stage = getattr(z_pheno, "stage_by_day", [])
+                    if z_stage:
+                        last = z_stage[-1]
+                        z_info["phenology_stage"] = (
+                            last.value if hasattr(last, "value") else str(last))
+                zone_status[str(zone_id)] = z_info
+
+    # ── Vegetation status from curve ────────────────────────────────────
+    vegetation_status: Dict[str, Any] = {}
+    if l2_output:
+        curve = getattr(l2_output, "curve", None)
+        if curve:
+            ndvi_fit = getattr(curve, "ndvi_fit", [])
+            if ndvi_fit and isinstance(ndvi_fit, list):
+                vegetation_status["ndvi_current"] = {
+                    "value": float(ndvi_fit[-1]),
+                    "unit": "index",
+                    "confidence": 0.8,
+                }
+            quality = getattr(curve, "quality", None)
+            if quality:
+                rmse = getattr(quality, "rmse", None)
+                if rmse is not None:
+                    vegetation_status["curve_rmse"] = {
+                        "value": float(rmse),
+                        "unit": "index",
+                        "confidence": 1.0,
+                    }
+
+    # ── Data health — derived from real L2 curve quality, not hardcoded ─
+    overall_health = 0.4  # base
+    confidence_ceiling = 0.5  # base
+
+    if l2_output:
+        curve = getattr(l2_output, "curve", None)
+        if curve:
+            quality = getattr(curve, "quality", None)
+            if quality:
+                rmse = getattr(quality, "rmse", 0.1)
+                if rmse is not None:
+                    # Low RMSE → high health. RMSE 0.0=perfect, 0.2=poor
+                    curve_health = max(0.2, 1.0 - float(rmse) * 4.0)
+                    overall_health = max(overall_health, curve_health)
+                    confidence_ceiling = max(confidence_ceiling, curve_health)
+
+        # Boost health if we have real phenology
+        if phenology_stage != "unknown":
+            overall_health = min(1.0, overall_health + 0.1)
+
+    # Boost from L1 data richness
+    if operational_signals["optical_available"]:
+        overall_health = min(1.0, overall_health + 0.1)
+    if operational_signals["sar_available"]:
+        overall_health = min(1.0, overall_health + 0.05)
+    if operational_signals["rain_available"]:
+        overall_health = min(1.0, overall_health + 0.05)
+
+    confidence_ceiling = min(1.0, max(confidence_ceiling, overall_health))
+
+    health_status = ("ok" if overall_health > 0.5
+                     else "degraded" if overall_health > 0.2
+                     else "unusable")
+
+    usable = overall_health > 0.2
+
+    flags = []
+    if not operational_signals["sar_available"]:
+        flags.append("NO_SAR_DATA")
+    if not operational_signals["rain_available"]:
+        flags.append("NO_RAIN_DATA")
+    if phenology_stage == "unknown":
+        flags.append("PHENOLOGY_UNKNOWN")
+
     return Layer3InputContext(
         plot_id=plot_id,
         layer1_run_id=getattr(l1_output, "run_id", "") if l1_output else "",
         layer2_run_id=getattr(l2_output, "run_id", "") if l2_output else "",
         stress_summary=stress_summary,
+        stress_detail=stress_detail,
+        zone_status=zone_status,
+        vegetation_status=vegetation_status,
         phenology_stage=phenology_stage,
+        gdd_adjusted_vigor=gdd_adjusted_vigor,
+        gdd_accumulated=gdd_accumulated,
         operational_signals=operational_signals,
-        data_health=DataHealthScore(overall=0.5, confidence_ceiling=0.7, status="ok"),
-        confidence_ceiling=0.7,
-        usable_for_layer3=True,
+        data_health=DataHealthScore(
+            overall=round(overall_health, 3),
+            confidence_ceiling=round(confidence_ceiling, 3),
+            status=health_status,
+        ),
+        confidence_ceiling=round(confidence_ceiling, 3),
+        usable_for_layer3=usable,
+        flags=flags,
     )

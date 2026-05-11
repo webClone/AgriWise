@@ -36,6 +36,9 @@ PERCEPTION_OBS_TYPE_MAP = {
     # IP Camera engine V1
     "visible_stress_prob": "stress_proxy",
     "phenology_stage_camera": "phenology_stage_camera",
+    # Sentinel-5P / Sentinel-2 photosynthetic activity V1
+    "sif": "sif",
+    "pri": "pri",
 }
 
 # Base sigma for each perception type (before QA inflation)
@@ -52,6 +55,9 @@ BASE_SIGMA = {
     "farmer_photo_symptom": 0.35,  # symptom-first, not disease diagnosis
     # IP Camera engine V1
     "phenology_stage_camera": 0.50,
+    # Sentinel-5P SIF / Sentinel-2 PRI
+    "sif": 0.15,               # coarse spatial resolution but strong physical signal
+    "pri": 0.08,               # pseudo-PRI from S2 bands, moderate noise
 }
 
 

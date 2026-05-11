@@ -1,5 +1,5 @@
 """
-Layer 8.3: Zone Prioritization Engine
+Layer 8.3: Zone Prioritization Engine v8.1.0
 
 Maps ActionCards to specific management zones with allocation fractions.
 Uses per-zone reliability from L0 to avoid prescribing into unreliable zones.
@@ -7,7 +7,10 @@ Uses per-zone reliability from L0 to avoid prescribing into unreliable zones.
 Output: Dict[zone_id, ZoneActionPlan]
 """
 
+import logging
 from typing import Dict, List, Any
+
+logger = logging.getLogger(__name__)
 
 from layer8_prescriptive.schema import (
     ActionCard, ZoneActionPlan, ActionType,
@@ -85,6 +88,9 @@ class ZonePrioritizer:
                 reason=reason,
             )
         
+        logger.debug("Zone plan: %d zones (%s)",
+                     len(plans),
+                     ", ".join(f"{z}={p.priority}" for z, p in plans.items()))
         return plans
 
 

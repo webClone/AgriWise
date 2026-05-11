@@ -22,7 +22,8 @@ import math
 from layer0.state_vector import (
     N_STATES, STATE_NAMES,
     IDX_LAI, IDX_BIOMASS, IDX_SM_0_10, IDX_SM_10_40,
-    IDX_CANOPY_STRESS, IDX_PHENO_GDD, IDX_PHENO_STAGE, IDX_STRESS_THERMAL
+    IDX_CANOPY_STRESS, IDX_PHENO_GDD, IDX_PHENO_STAGE, IDX_STRESS_THERMAL,
+    IDX_PHOTO_EFF,
 )
 
 
@@ -459,6 +460,114 @@ class ObservationModel:
 
         return predicted, H, R
 
+    # ================================================================
+    # Sentinel-5P / TROPOMI observation models
+    # ================================================================
+
+    @staticmethod
+    def sentinel5p_sif(state_values: List[float]) -> Tuple[float, List[float], float]:
+        """
+        Solar-Induced Chlorophyll Fluorescence (SIF) from TROPOMI.
+
+        SIF directly measures the faint glow emitted during photosynthesis.
+        It scales with both:
+          - Active photosynthesis (photosynthetic_efficiency)
+          - Canopy size (LAI — more leaves = more glow)
+
+        Model: SIF = SIF_max * photo_eff * LAI_factor
+        Where LAI_factor = 1 - exp(-k * LAI), saturating at high LAI.
+
+        Resolution: ~7km (regional) — high sigma reflects coarse spatial
+        resolution, but the physical signal is extremely powerful:
+        SIF drops to zero days/weeks before NDVI during acute stress.
+        """
+        photo_eff = state_values[IDX_PHOTO_EFF]
+        lai = state_values[IDX_LAI]
+
+        # Parameters (TROPOMI SIF, mW/m²/sr/nm)
+        sif_max = 2.0       # Peak SIF for healthy dense canopy
+        k_lai = 0.5          # Light absorption extinction coefficient
+
+        lai_factor = 1.0 - math.exp(-k_lai * lai)
+        predicted = sif_max * photo_eff * lai_factor
+
+        H = [0.0] * N_STATES
+        H[IDX_PHOTO_EFF] = sif_max * lai_factor
+        H[IDX_LAI] = sif_max * photo_eff * k_lai * math.exp(-k_lai * lai)
+
+        # Higher R due to coarse spatial resolution (~7km pixel)
+        R = 0.15 ** 2
+
+        return predicted, H, R
+
+    @staticmethod
+    def sentinel2_pri(state_values: List[float]) -> Tuple[float, List[float], float]:
+        """
+        Photochemical Reflectance Index (PRI) — pseudo-PRI from S2 bands.
+
+        PRI tracks xanthophyll cycle pigment changes, which correlate
+        with light-use efficiency (photosynthetic activity). True PRI
+        requires 531nm/570nm; we approximate from S2 B3 (560nm) / B11.
+
+        Drops with photosynthetic_efficiency but also modulated by LAI
+        (bare soil has no PRI signal).
+
+        Model: PRI = PRI_ref * photo_eff_factor * LAI_factor
+        """
+        photo_eff = state_values[IDX_PHOTO_EFF]
+        lai = state_values[IDX_LAI]
+
+        # Parameters
+        pri_healthy = 0.02    # Typical PRI for healthy vegetation
+        pri_stressed = -0.05  # PRI for stressed vegetation
+        k_lai = 0.4
+
+        lai_factor = min(1.0, lai / 3.0)  # Saturates at LAI=3
+        # PRI scales linearly with efficiency between stressed and healthy
+        predicted = (pri_stressed + (pri_healthy - pri_stressed) * photo_eff) * lai_factor
+
+        H = [0.0] * N_STATES
+        H[IDX_PHOTO_EFF] = (pri_healthy - pri_stressed) * lai_factor
+        H[IDX_LAI] = (pri_stressed + (pri_healthy - pri_stressed) * photo_eff) / max(3.0, lai) if lai < 3 else 0.0
+
+        # Moderate sigma — better resolution than SIF but noisier signal
+        R = 0.08 ** 2
+
+        return predicted, H, R
+
+    # ================================================================
+    # Drone weed detection observation models
+    # ================================================================
+
+    @staticmethod
+    def drone_weed_fraction(state_values: List[float]) -> Tuple[float, List[float], float]:
+        """
+        Weed fraction from drone RGB structural analysis.
+
+        Weeds compete with the crop for light and water. A high weed
+        fraction acts as a weak proxy for increased canopy_stress
+        (competition-driven) and reduced photosynthetic efficiency
+        (as the observed photosynthesis includes weed + crop).
+
+        Model: weed_fraction ~ stress * 0.3 + (1 - photo_eff) * 0.2
+        This is a very weak informational observation — high R.
+        """
+        stress = state_values[IDX_CANOPY_STRESS]
+        photo_eff = state_values[IDX_PHOTO_EFF]
+
+        # Weeds correlate with competition stress and reduced efficiency
+        predicted = stress * 0.3 + (1.0 - photo_eff) * 0.2
+        predicted = max(0.0, min(1.0, predicted))
+
+        H = [0.0] * N_STATES
+        H[IDX_CANOPY_STRESS] = 0.3
+        H[IDX_PHOTO_EFF] = -0.2
+
+        # Very high R — weed fraction is a weak, indirect proxy
+        R = 0.25 ** 2
+
+        return predicted, H, R
+
 # ============================================================================
 # Observation Dispatcher — routes observation type to the right model
 # ============================================================================
@@ -489,9 +598,14 @@ def get_observation_model(obs_type: str, **kwargs):
         # Sentinel-1 SAR Engine V1 observation types
         "sar_rvi": ObservationModel.sar_rvi,
         "sar_moisture_proxy": ObservationModel.sar_moisture_proxy,
+        # Drone RGB engine V1 observation types
+        "weed_fraction": ObservationModel.drone_weed_fraction,
         # Farmer Photo engine V1 observation types
         "local_canopy_cover": ObservationModel.farmer_photo_canopy,
         "symptom_evidence": ObservationModel.farmer_photo_symptom,
+        # SIF / PRI photosynthetic activity V1
+        "sif": ObservationModel.sentinel5p_sif,
+        "pri": ObservationModel.sentinel2_pri,
     }
     
     if obs_type == "soil_moisture":

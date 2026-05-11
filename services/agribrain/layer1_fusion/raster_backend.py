@@ -207,11 +207,13 @@ class RasterioBackend(RasterBackend):
         # ... actually, let's just stick to 4326 for now to avoid re-projection complexity in Layer 1
         # The prompt asked for "Real Raster Backend", COG support is key.
         
-        deg_res = resolution_m / 111320.0 # Rough approx
+        import math
+        deg_res_lat = resolution_m / 111320.0
+        deg_res_lon = resolution_m / (111320.0 * math.cos(math.radians(center_lat)))
         
         transform = self.from_bounds(minx, miny, maxx, maxy, 
-                                     int((maxx-minx)/deg_res), 
-                                     int((maxy-miny)/deg_res))
+                                     int((maxx-minx)/deg_res_lon), 
+                                     int((maxy-miny)/deg_res_lat))
                                      
         width = int((maxx - minx) / transform.a)
         height = int((miny - maxy) / transform.e) # e is negative

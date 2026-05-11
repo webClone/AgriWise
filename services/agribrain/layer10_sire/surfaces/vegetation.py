@@ -32,10 +32,13 @@ def generate_vegetation_surfaces(
     field_mean = _grid_mean(ndvi_grid, H, W)
 
     # Modulate with stability if available (heterogeneous fields get spatial variation)
-    if l2_data.stability_class == "HETEROGENEOUS" and l2_data.mean_spatial_var > 0:
-        ndvi_grid = _inject_spatial_variation(
-            ndvi_grid, H, W, l2_data.mean_spatial_var, l1_data
-        )
+    # Removing artificial spatial variation injection. The assimilation system provides 
+    # physically correct assimilated data, so we must not overlay mathematical gradients 
+    # (like top-to-bottom stripes) just to force visual heterogeneity.
+    # if l2_data.stability_class == "HETEROGENEOUS" and l2_data.mean_spatial_var > 0:
+    #     ndvi_grid = _inject_spatial_variation(
+    #         ndvi_grid, H, W, l2_data.mean_spatial_var, l1_data
+    #     )
 
     surfaces.append(SurfaceArtifact(
         surface_id=f"NDVI_CLEAN_{inp.plot_id}",
@@ -69,15 +72,23 @@ def generate_vegetation_surfaces(
         source_layers=["L1"],
     ))
 
-    # --- 3. BASELINE_ANOMALY — field-wide lag vs expectation ---
+    # --- 3. BASELINE_ANOMALY — spatially modulated by NDVI deviation ---
     baseline_lag = 0.0
     for anom in getattr(l2_data, 'anomalies', []):
         atype = anom.get('type') if isinstance(anom, dict) else getattr(anom, 'type', '')
         asev = anom.get('severity', 0.0) if isinstance(anom, dict) else getattr(anom, 'severity', 0.0)
         if atype in ["STALL", "DROP", "DELAYED_EMERGENCE", "EARLY_SENESCENCE"]:
-            baseline_lag -= (asev * 0.2)  # Proxy mapping 0-1 severity to NDVI diff
+            baseline_lag -= (asev * 0.2)
 
+    # Spatial modulation: low NDVI areas are further behind expectation
     baseline_grid = [[round(baseline_lag, 4)] * W for _ in range(H)]
+    if field_mean is not None and field_mean > 0:
+        for r in range(H):
+            for c in range(W):
+                v = ndvi_grid[r][c]
+                if v is not None:
+                    ratio = (v / field_mean) - 1.0  # Negative for below-mean areas
+                    baseline_grid[r][c] = round(baseline_lag + ratio * 0.15, 4)
     
     surfaces.append(SurfaceArtifact(
         surface_id=f"BASELINE_ANOM_{inp.plot_id}",
@@ -93,7 +104,12 @@ def generate_vegetation_surfaces(
 
     # --- 3. GROWTH_VELOCITY — from L2 curve, spatially modulated ---
     vel_val = l2_data.ndvi_fit_d1[-1] if l2_data.ndvi_fit_d1 else 0.0
-    vel_grid = _modulate_field_value(vel_val, ndvi_grid, field_mean, H, W)
+    if vel_val == 0.0 and field_mean is not None and field_mean > 0:
+        # No L2 curve — derive velocity proxy from NDVI spatial deviation
+        from layer10_sire.surfaces.spatial_modulation import modulate_by_ndvi
+        vel_grid = modulate_by_ndvi(0.005, ndvi_grid, H, W, invert=False, clamp_min=-0.03, clamp_max=0.03)
+    else:
+        vel_grid = _modulate_field_value(vel_val, ndvi_grid, field_mean, H, W)
 
     surfaces.append(SurfaceArtifact(
         surface_id=f"GROWTH_VEL_{inp.plot_id}",
@@ -124,35 +140,64 @@ def generate_vegetation_surfaces(
     return surfaces
 
 
+def _has_data(grid, H, W):
+    if not grid: return False
+    for r in range(min(H, len(grid))):
+        if grid[r]:
+            for c in range(min(W, len(grid[r]))):
+                if grid[r][c] is not None:
+                    return True
+    return False
+
 def _get_spatial_raster(l1: L1SpatialData, var: str, H: int, W: int):
     """Get raster for variable, trying real spatial → zone rasterize → broadcast."""
     # 1) Direct raster
     if var in l1.raster_maps:
-        return l1.raster_maps[var]
+        r = l1.raster_maps[var]
+        if _has_data(r, H, W):
+            return r
 
     # 2) Alias lookup
     aliases = {
-        'ndvi': ['ndvi_smoothed', 'ndvi_interpolated'],
-        'ndmi': ['ndmi_interpolated'],
+        'ndvi': ['ndvi_smoothed', 'ndvi_interpolated', 'ndvi_mean'],
+        'ndmi': ['ndmi_interpolated', 'ndmi_mean'],
     }
     for alias in aliases.get(var, []):
         if alias in l1.raster_maps:
-            return l1.raster_maps[alias]
+            r = l1.raster_maps[alias]
+            if _has_data(r, H, W):
+                return r
 
     # 3) Zone rasterization — if we have per-zone values
-    if l1.zone_masks and var in l1.zone_timeseries:
-        grid = [[None]*W for _ in range(H)]
-        for z_id, cells in l1.zone_masks.items():
-            ts = l1.zone_timeseries[var].get(z_id, [])
-            val = ts[-1] if ts else None
-            for r, c in cells:
-                if r < H and c < W:
-                    grid[r][c] = val
-        if any(grid[r][c] is not None for r in range(H) for c in range(W)):
-            return grid
+    if l1.zone_masks:
+        zone_var = None
+        if var in l1.zone_timeseries:
+            zone_var = var
+        else:
+            for alias in aliases.get(var, []):
+                if alias in l1.zone_timeseries:
+                    zone_var = alias
+                    break
+        
+        if zone_var:
+            grid = [[None]*W for _ in range(H)]
+            for z_id, cells in l1.zone_masks.items():
+                ts = l1.zone_timeseries[zone_var].get(z_id, [])
+                val = ts[-1] if ts else None
+                for r, c in cells:
+                    if r < H and c < W:
+                        grid[r][c] = val
+            if any(grid[r][c] is not None for r in range(H) for c in range(W)):
+                return grid
 
     # 4) Field-level broadcast (last resort)
     val = l1.last_values.get(var)
+    if val is None:
+        for alias in aliases.get(var, []):
+            if alias in l1.last_values:
+                val = l1.last_values[alias]
+                break
+
     if val is not None:
         return [[val]*W for _ in range(H)]
 
@@ -236,9 +281,21 @@ def _build_stability_grid(l1: L1SpatialData, l2: L2VegData, H: int, W: int):
             for c in range(W):
                 if (r, c) not in assigned:
                     grid[r][c] = round(base_score, 3)
+
+        # Check if zone-aware scores are actually varied
+        unique_scores = set(v for row in grid for v in row if v is not None)
+        if len(unique_scores) <= 1:
+            # All zones got same score — add NDVI-based within-zone modulation
+            from layer10_sire.surfaces.spatial_modulation import get_ndvi_raster, modulate_combined
+            ndvi_r = get_ndvi_raster(l1, H, W)
+            grid = modulate_combined(base_score, ndvi_r, H, W, invert=False, clamp_min=0.1, clamp_max=1.0)
+
         return grid
     else:
-        return [[round(base_score, 3)]*W for _ in range(H)]
+        # Spatial modulation: areas closer to mean NDVI are more stable
+        from layer10_sire.surfaces.spatial_modulation import get_ndvi_raster, modulate_by_distance
+        grid = modulate_by_distance(base_score, H, W, center_bias=0.2, clamp_min=0.1, clamp_max=1.0)
+        return grid
 
 
 def _grid_mean(grid, H, W):

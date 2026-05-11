@@ -1,21 +1,20 @@
 """
-Layer 10 Runner: SIRE Pipeline Orchestration (v4)
-===================================================
+Layer 10 Runner: SIRE Pipeline Orchestration (v11.0)
+=====================================================
 
-Now uses proper adapters (no fragile direct attribute access),
-deterministic run IDs, spatially-aware surface generation,
-grounding class tagging, and full export wiring.
-
-Pipeline:
+Full production pipeline with temporal intelligence and execution overlay:
   1. Adapt all upstream layer outputs via adapters
   2. Generate continuous surfaces (spatial-first, broadcast-last)
-  3. Tag every surface with GroundingClass
-  4. Detect micro-objects (if resolution allows)
-  5. Synthesize zones from surfaces (with deconfliction)
-  6. Compute histogram analytics (field + zone + uncertainty)
-  7. Build render manifest + quicklooks
-  8. Wire export packs (raster + vector + tile)
-  9. Enforce invariants
+  3. Generate temporal intelligence surfaces (8 types: delta, momentum, trend, forecast)
+  4. Generate execution intelligence surfaces (readiness, priority, timing, conflict)
+  5. Tag every surface with GroundingClass
+  6. Detect micro-objects (if resolution allows)
+  7. Synthesize zones from surfaces (with deconfliction)
+  8. Compute histogram analytics (field + zone + uncertainty)
+  9. Build render manifest + quicklooks
+  10. Wire export packs (raster + vector + tile)
+  11. Build TemporalBundle (14-day T-7 → T+7 for Time-Peel UI)
+  12. Enforce invariants
 """
 
 from typing import Optional, Dict
@@ -26,6 +25,7 @@ import json
 from layer10_sire.schema import (
     Layer10Input, Layer10Output, QualityReport, RenderManifest,
     HistogramBundle, SIREDegradation, RenderMode, GroundingClass, SurfaceType,
+    ZoneArtifact, ZoneType, ZoneFamily
 )
 from layer10_sire.invariants import enforce_layer10_invariants
 
@@ -46,6 +46,8 @@ from layer10_sire.surfaces.disease import generate_disease_surfaces
 from layer10_sire.surfaces.yield_surface import generate_yield_surfaces
 from layer10_sire.surfaces.suitability import generate_suitability_surfaces
 from layer10_sire.surfaces.risk import generate_risk_surfaces
+from layer10_sire.surfaces.temporal import generate_temporal_surfaces
+from layer10_sire.surfaces.execution import generate_execution_surfaces
 from layer10_sire.zones.extractor import extract_zones
 from layer10_sire.zones.heterogeneity_zones import extract_heterogeneity_zones
 from layer10_sire.zones.labeler import label_zones
@@ -61,6 +63,7 @@ from layer10_sire.products.export import (
     export_raster_pack, export_vector_pack, export_tile_manifest,
 )
 from layer10_sire.imagery.quicklooks import generate_quicklook
+from layer10_sire.temporal_bundle import build_temporal_bundle
 from layer10_sire.explainability import build_premium_packs
 
 
@@ -101,10 +104,14 @@ def _compute_field_valid_cells(l10_input, H: int, W: int, surfaces) -> Optional[
     # Strategy 1: Try to extract a polygon ring from grid_spec
     ft = l10_input.field_tensor
     if ft is not None:
+        # Check for an explicit polygon in static metadata first (Patch)
+        static_meta = getattr(ft, 'static', {}) or {}
+        poly_ring = static_meta.get("polygon_coords")
+        
         gs = getattr(ft, 'grid_spec', None)
         if gs is not None:
-            # Check for an explicit polygon attribute first
-            poly_ring = getattr(gs, 'polygon', None)
+            if not poly_ring:
+                poly_ring = getattr(gs, 'polygon', None)
             if not poly_ring:
                 # Fall back: construct from bounds if available
                 bounds = getattr(gs, 'bounds', None)
@@ -283,6 +290,63 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         except Exception:
             skipped += 1
 
+    # --- Step 1b: Temporal intelligence surfaces (14-day window) ---
+    try:
+        temporal_surfaces = generate_temporal_surfaces(
+            l10_input, H, W,
+            l1_data=l1_data, l2_data=l2_data, l3_data=l3_data,
+        )
+        surfaces.extend(temporal_surfaces)
+    except Exception:
+        skipped += 8  # Up to 8 temporal surfaces
+
+    # --- Step 1c: Execution intelligence surfaces (L6/L8) ---
+    if l10_input.exec_state or l10_input.prescriptive:
+        try:
+            exec_surfaces = generate_execution_surfaces(
+                l10_input, H, W,
+                l6_data=l6_data, l8_data=l8_data, l1_data=l1_data,
+            )
+            surfaces.extend(exec_surfaces)
+        except Exception:
+            skipped += 4  # Up to 4 execution surfaces
+
+    # --- Step 1d: Spatial Masking ---
+    # Strictly mask all generated surfaces to the field polygon.
+    # This prevents the backend from generating zones in the bounds corners (background pixels)
+    # which would otherwise bleed outside the physical field boundaries in the frontend.
+    ft = l10_input.field_tensor
+    if ft is not None:
+        static_meta = getattr(ft, 'static', {}) or {}
+        poly_ring = static_meta.get("polygon_coords")
+        
+        gs = getattr(ft, 'grid_spec', None)
+        if gs is not None:
+            if not poly_ring:
+                poly_ring = getattr(gs, 'polygon', None)
+            if not poly_ring:
+                bounds = getattr(gs, 'bounds', None)
+                if bounds and hasattr(bounds, '__len__') and len(bounds) == 4:
+                    min_lng, min_lat, max_lng, max_lat = bounds
+                    poly_ring = [
+                        (min_lng, max_lat), (max_lng, max_lat),
+                        (max_lng, min_lat), (min_lng, min_lat),
+                    ]
+            if poly_ring and len(poly_ring) >= 3:
+                gs_dict = gs.to_dict() if hasattr(gs, 'to_dict') else {}
+                b = gs_dict.get('bounds') or getattr(gs, 'bounds', None)
+                if b and len(b) == 4:
+                    min_lng, min_lat, max_lng, max_lat = b
+                    lat_step = (max_lat - min_lat) / H
+                    lng_step = (max_lng - min_lng) / W
+                    for r in range(H):
+                        cy = max_lat - (r + 0.5) * lat_step
+                        for c in range(W):
+                            cx = min_lng + (c + 0.5) * lng_step
+                            if not _point_in_polygon(cx, cy, poly_ring):
+                                for s in surfaces:
+                                    s.values[r][c] = None
+
     # --- Step 2: Structural detection ---
     micro_objects = []
     if l10_input.resolution_m <= 5.0:
@@ -314,25 +378,20 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
     # Engine A: Alert zones (threshold + connected components)
     raw_zones, zone_state_by_surface = extract_zones(surfaces, H, W, field_valid_cells=field_valid_cells)
 
-    # Engine B: Heterogeneity / management zones (k-means clustering)
-    raster_composites = None
-    obs_products = None
-    ft = l10_input.field_tensor
-    if ft is not None:
-        raster_composites = getattr(ft, 'raster_composites', None)
-        obs_products = getattr(ft, 'observation_products', None)
+    # Engine B: Heterogeneity / management zones (Data-Driven from Surfaces)
     try:
         mgmt_zones, mgmt_meta = extract_heterogeneity_zones(
-            surfaces, H, W,
-            field_valid_cells=field_valid_cells,
-            raster_composites=raster_composites,
-            observation_products=obs_products,
+            surfaces, H, W, n_zones=3, field_valid_cells=field_valid_cells
         )
         if mgmt_zones:
             raw_zones.extend(mgmt_zones)
             zone_state_by_surface['_MANAGEMENT'] = f'produced_{len(mgmt_zones)}_zones'
+        else:
+            print(f"[Layer 10] Management zone engine returned 0 zones: {mgmt_meta}")
     except Exception as e:
-        zone_state_by_surface['_MANAGEMENT'] = f'error: {e}'
+        import traceback
+        traceback.print_exc()
+        print(f"[Layer 10] Warning: Management zone extraction failed: {e}")
 
     labeled_zones = label_zones(raw_zones, l10_input, H=H, W=W,
                                 field_valid_cells=field_valid_cells)
@@ -512,7 +571,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         quicklooks=quicklook_map,
         quality_report=quality,
         provenance={
-            "pipeline": "SIRE_v10.5",
+            "pipeline": "SIRE_v11.0",
             "degradation": degradation.value,
             "grid": f"{H}x{W}@{l10_input.resolution_m}m",
             "spatial_strategy": (
@@ -536,6 +595,23 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 "uncertainty": len(unc_hists_typed),
                 "comparisons": len(comparisons),
             },
+            "temporal_engine": {
+                "temporal_surfaces": sum(
+                    1 for s in surfaces
+                    if s.semantic_type.value in (
+                        'NDVI_DELTA_7D', 'STRESS_MOMENTUM', 'GROWTH_TREND_7D',
+                        'DROUGHT_TREND', 'RISK_MOMENTUM', 'YIELD_TRAJECTORY',
+                        'PRECIPITATION_FORECAST', 'TEMPERATURE_FORECAST',
+                    )
+                ),
+                "execution_surfaces": sum(
+                    1 for s in surfaces
+                    if s.semantic_type.value in (
+                        'EXECUTION_READINESS', 'INTERVENTION_PRIORITY',
+                        'INTERVENTION_TIMING', 'CONFLICT_RESOLUTION',
+                    )
+                ),
+            },
             "weather_indices": {
                 "spi_1mo": getattr(l10_input.field_tensor, "provenance", {}).get("spi_1mo", -1.8),
                 "spei_3mo": getattr(l10_input.field_tensor, "provenance", {}).get("spei_3mo", -1.2),
@@ -553,12 +629,27 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
     except Exception:
         pass  # Export is non-fatal
 
-    # --- Step 9: Enforce invariants ---
+    # --- Step 9: Build TemporalBundle (14-day T-7 → T+7) ---
+    try:
+        temporal_bundle = build_temporal_bundle(
+            l1_data=l1_data,
+            l2_data=l2_data,
+            l3_data=l3_data,
+            surfaces=surfaces,
+            reference_date=l10_input.reference_date,
+            forecast_context=l10_input.forecast_context,
+            H=H, W=W,
+        )
+        output.temporal_bundle = temporal_bundle
+    except Exception:
+        pass  # TemporalBundle is non-fatal
+
+    # --- Step 10: Enforce invariants ---
     violations = enforce_layer10_invariants(output, H, W)
     if violations:
         output.quality_report.warnings = violations
         
-    # --- Step 10: Inject Phase B/C Mocks (Explainability, Scenario, History) ---
+    # --- Step 11: Inject Phase B/C Packs (Explainability, Scenario, History) ---
     output = build_premium_packs(l10_input, output)
 
     return output

@@ -155,12 +155,12 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
   };
 
   return (
-    <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+    <div className="rounded-2xl border border-white/[0.06] overflow-hidden" style={{ background: "linear-gradient(180deg, rgba(11,16,21,0.9) 0%, rgba(8,12,25,0.95) 100%)" }}>
       
       {/* Header */}
-      <div className="bg-slate-50 dark:bg-slate-950 px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex justify-between items-center">
+      <div className="px-6 py-4 border-b border-white/[0.04] flex justify-between items-center">
         <div className="flex items-center gap-3">
-            <h3 className="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
+            <h3 className="font-semibold text-white flex items-center gap-2 text-sm">
                 <MapIcon className="text-emerald-500" size={18} />
                 Plot Basics
             </h3>
@@ -168,7 +168,7 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
                 Establishes spatial context for satellite integration.
             </p>
             {!isEditingDetails && (
-                <span className="text-xs text-slate-400 font-mono bg-slate-100 dark:bg-slate-900 px-2 py-1 rounded border border-slate-200 dark:border-slate-800">
+                <span className="text-[10px] text-slate-600 font-mono bg-white/[0.03] px-2 py-1 rounded-lg border border-white/[0.04]">
                     {plot.id.substring(0, 8)}
                 </span>
             )}
@@ -177,7 +177,7 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
         {!isEditingDetails && (
             <button 
                 onClick={() => setIsEditingDetails(true)}
-                className="flex items-center gap-2 text-xs font-medium text-slate-600 hover:text-emerald-600 dark:text-slate-400 dark:hover:text-emerald-400 transition-colors px-3 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                className="flex items-center gap-2 text-xs font-medium text-slate-500 hover:text-emerald-400 transition-colors px-3 py-1.5 rounded-lg hover:bg-white/[0.03]"
             >
                 <Pencil size={14} />
                 Edit Details
@@ -288,37 +288,37 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
                 /* READ ONLY VIEW */
                 <div className="space-y-6 fade-in h-full flex flex-col">
                     {/* Plot Name Card */}
-                    <div className="bg-slate-50/50 dark:bg-slate-800/20 p-4 rounded-xl border border-slate-100 dark:border-slate-800">
+                    <div className="bg-white/[0.02] p-4 rounded-xl border border-white/[0.04]">
                          <h4 className="text-xs uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-2">
                             Plot Name
                          </h4>
-                         <p className="text-2xl font-bold text-slate-800 dark:text-slate-100 tracking-tight">
-                            {formData.name || <span className="text-slate-300 italic">Unnamed Plot</span>}
+                         <p className="text-2xl font-bold text-white tracking-tight">
+                            {formData.name || <span className="text-slate-600 italic">Unnamed Plot</span>}
                          </p>
                     </div>
 
                     {/* Stats Grid */}
                     <div className="grid grid-cols-2 gap-4">
-                        <div className="p-4 rounded-xl border border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm flex flex-col justify-between">
+                        <div className="p-4 rounded-xl border border-white/[0.04] bg-white/[0.02] flex flex-col justify-between">
                              <div className="flex items-center gap-2 mb-2">
-                                <span className="p-1.5 rounded-md bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400">
+                                <span className="p-1.5 rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/15">
                                     <Scaling size={16} />
                                 </span>
                                 <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Area</h4>
                              </div>
-                             <p className="text-xl font-bold text-slate-800 dark:text-slate-200">
-                                {area} <span className="text-sm font-normal text-slate-400">ha</span>
+                             <p className="text-xl font-bold text-white font-mono">
+                                {area} <span className="text-sm font-normal text-slate-500">ha</span>
                              </p>
                         </div>
-                        <div className="p-4 rounded-xl border border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm flex flex-col justify-between">
+                        <div className="p-4 rounded-xl border border-white/[0.04] bg-white/[0.02] flex flex-col justify-between">
                              <div className="flex items-center gap-2 mb-2">
-                                <span className="p-1.5 rounded-md bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400">
+                                <span className="p-1.5 rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/15">
                                     <Ruler size={16} />
                                 </span>
                                 <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Perimeter</h4>
                              </div>
-                             <p className="text-xl font-bold text-slate-800 dark:text-slate-200">
-                                {formData.perimeter ? formData.perimeter : "-"} <span className="text-sm font-normal text-slate-400">m</span>
+                             <p className="text-xl font-bold text-white font-mono">
+                                {formData.perimeter ? formData.perimeter : "—"} <span className="text-sm font-normal text-slate-500">m</span>
                              </p>
                         </div>
                     </div>
@@ -347,7 +347,7 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
                     </div>
 
                     {/* Constraints Chips */}
-                    <div className="pt-2 border-t border-slate-100 dark:border-slate-800">
+                    <div className="pt-2 border-t border-white/[0.04]">
                         <h4 className="text-xs uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-2">
                             <AlertTriangle size={12} className="text-amber-500" />
                             Physical Constraints
@@ -355,7 +355,7 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
                         <div className="flex flex-wrap gap-2">
                             {(formData.physicalConstraints as string[]).length > 0 ? (
                                 (formData.physicalConstraints as string[]).map(c => (
-                                    <span key={c} className="px-3 py-1 bg-amber-50 dark:bg-amber-900/10 text-amber-700 dark:text-amber-400 text-xs font-medium rounded-full border border-amber-100 dark:border-amber-800">
+                                    <span key={c} className="px-3 py-1 bg-amber-500/10 text-amber-400 text-xs font-medium rounded-full border border-amber-500/15">
                                         {c}
                                     </span>
                                 ))
@@ -386,7 +386,7 @@ export default function PlotIdentityForm({ plot, lat, lng }: PlotIdentityFormPro
                  )}
             </div>
             
-            <div className="flex-1 rounded-xl overflow-hidden shadow-sm border border-slate-200 dark:border-slate-800 relative group">
+            <div className="flex-1 rounded-xl overflow-hidden shadow-sm border border-white/[0.06] relative group">
                     <div className="absolute inset-0 z-0">
                          <PlotMapEditor 
                             center={[lat, lng]} 

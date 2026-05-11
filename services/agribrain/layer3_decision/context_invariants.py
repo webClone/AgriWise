@@ -178,22 +178,36 @@ def _check_zone_variance(ctx: Layer3InputContext) -> List[InputViolation]:
     for z_id, z_data in list(ctx.zone_status.items()):
         if not isinstance(z_data, dict):
             continue
-            
+
+        # --- Severity ---
         sev = z_data.get("severity", 0.0)
-        conf = z_data.get("confidence", 0.0)
-        
-        if sev < 0.0 or sev > 1.0:
+        if not isinstance(sev, (int, float)) or math.isnan(sev) or math.isinf(sev):
+            z_data["severity"] = 0.0
+            violations.append(InputViolation(
+                "zone_bounds", "warning",
+                f"Zone {z_id} severity was invalid ({sev}), reset to 0.0", auto_fixed=True,
+            ))
+        elif sev < 0.0 or sev > 1.0:
             z_data["severity"] = max(0.0, min(1.0, sev))
             violations.append(InputViolation(
                 "zone_bounds", "warning",
                 f"Zone {z_id} severity {sev} clamped to {z_data['severity']}", auto_fixed=True,
             ))
-            
-        if conf < 0.0 or conf > 1.0:
+
+        # --- Confidence ---
+        conf = z_data.get("confidence", 0.0)
+        if not isinstance(conf, (int, float)) or math.isnan(conf) or math.isinf(conf):
+            z_data["confidence"] = 0.0
+            violations.append(InputViolation(
+                "zone_bounds", "warning",
+                f"Zone {z_id} confidence was invalid ({conf}), reset to 0.0", auto_fixed=True,
+            ))
+        elif conf < 0.0 or conf > 1.0:
             z_data["confidence"] = max(0.0, min(1.0, conf))
             violations.append(InputViolation(
                 "zone_bounds", "warning",
                 f"Zone {z_id} confidence {conf} clamped to {z_data['confidence']}", auto_fixed=True,
             ))
-            
+
     return violations
+

@@ -39,8 +39,8 @@ def compute_soil_workability(profile: CropProfile, l1_out: Any, soil_texture: st
     
     # Forecast ingestion
     forecasts = getattr(l1_out, "forecast_7d", [])
-    fc_prob_3d = sum(f.get("precipitation_probability_max", 0.0) for f in forecasts[:3]) / max(1, min(len(forecasts), 3)) if forecasts else 0.0
-    fc_prob_7d = sum(f.get("precipitation_probability_max", 0.0) for f in forecasts) / max(1, len(forecasts)) if forecasts else 0.0
+    fc_prob_3d = sum(f.get("rain_prob", 0.0) * 100.0 for f in forecasts[:3]) / max(1, min(len(forecasts), 3)) if forecasts else 0.0
+    fc_prob_7d = sum(f.get("rain_prob", 0.0) * 100.0 for f in forecasts) / max(1, len(forecasts)) if forecasts else 0.0
     
     fc_note_3d = ""
     fc_note_7d = ""

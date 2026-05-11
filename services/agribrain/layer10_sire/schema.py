@@ -83,6 +83,28 @@ class SurfaceType(str, Enum):
     SOURCE_DOMINANCE = "SOURCE_DOMINANCE"
     CONFLICT_DENSITY = "CONFLICT_DENSITY"
 
+    # Temporal Surfaces (14-day window: T-7 → T+7)
+    NDVI_DELTA_7D = "NDVI_DELTA_7D"                      # 7-day NDVI change per pixel
+    STRESS_MOMENTUM = "STRESS_MOMENTUM"                   # Water stress acceleration vector
+    DISEASE_SPREAD_FORECAST = "DISEASE_SPREAD_FORECAST"   # 7-day biotic spread projection
+    YIELD_TRAJECTORY = "YIELD_TRAJECTORY"                 # Yield trend (biomass proxy)
+    RISK_MOMENTUM = "RISK_MOMENTUM"                       # Risk acceleration/deceleration
+    DROUGHT_TREND = "DROUGHT_TREND"                       # Consecutive dry-day trend
+    NUTRIENT_DEPLETION_RATE = "NUTRIENT_DEPLETION_RATE"   # Nutrient burn-down rate
+    GROWTH_TREND_7D = "GROWTH_TREND_7D"                   # 7-day growth velocity trend
+    PRECIPITATION_FORECAST = "PRECIPITATION_FORECAST"     # 7-day precipitation forecast
+    TEMPERATURE_FORECAST = "TEMPERATURE_FORECAST"         # 7-day temperature forecast
+
+    # Execution & Intervention (L6/L8)
+    EXECUTION_READINESS = "EXECUTION_READINESS"           # Intervention readiness score
+    INTERVENTION_PRIORITY = "INTERVENTION_PRIORITY"       # Action priority heatmap
+    INTERVENTION_TIMING = "INTERVENTION_TIMING"           # Optimal timing overlay
+    CONFLICT_RESOLUTION = "CONFLICT_RESOLUTION"           # Cross-layer conflict heatmap
+
+    # Planning Temporal (L7)
+    SUITABILITY_WINDOW = "SUITABILITY_WINDOW"             # Planting window countdown
+    SEASON_PROGRESS = "SEASON_PROGRESS"                   # Season progression index
+
 
 class GroundingClass(str, Enum):
     """How a surface's spatial pattern was derived."""
@@ -150,6 +172,9 @@ class RenderMode(str, Enum):
     CAUSAL_LENS = "CAUSAL_LENS"
     TIME_PEEL = "TIME_PEEL"
     PLANT_NEAR = "PLANT_NEAR"
+    EXECUTION = "EXECUTION"               # L6/L8 execution overlay
+    TEMPORAL_DELTA = "TEMPORAL_DELTA"     # 14-day temporal change
+    FORECAST = "FORECAST"                 # 7-day forecast overlay
 
 
 class PaletteId(str, Enum):
@@ -415,7 +440,9 @@ class QualityReport:
 class DriverWeight:
     name: str
     value: float
-    role: str  # "positive", "negative", "uncertainty"
+    role: str = "neutral"  # "positive", "negative", "uncertainty", "neutral"
+    description: str = ""
+    formatted_value: str = ""
 
 @dataclass
 class ModelEquation:
@@ -451,6 +478,56 @@ class ExplainabilityPack:
     provenance: ExplainabilityProvenance
     confidence: ExplainabilityConfidence
 
+
+# ============================================================================
+# TEMPORAL INTELLIGENCE (14-day window: T-7 → T+7)
+# ============================================================================
+
+@dataclass
+class TemporalSlice:
+    """A single time-step spatial snapshot for the temporal bundle."""
+    date: str                                        # ISO date string
+    day_offset: int                                  # -7 to +7 relative to T₀
+    surface_type: SurfaceType
+    values: List[List[Optional[float]]]              # [H][W] raster grid
+    is_forecast: bool = False                        # True for T+1 to T+7
+    confidence: float = 1.0                          # Degrades for forecast
+    source: str = ""                                 # e.g. "L1_TENSOR", "L2_CURVE", "FORECAST_API"
+
+
+@dataclass
+class TemporalBundle:
+    """Full 14-day temporal context for time-peel mode (T-7 retrospective + T+7 forecast)."""
+    slices: List[TemporalSlice] = field(default_factory=list)
+    reference_date: str = ""                         # T₀ date
+    lookback_days: int = 7
+    lookahead_days: int = 7
+    trend_summary: Dict[str, str] = field(default_factory=dict)
+    # e.g. {"NDVI": "IMPROVING", "WATER_STRESS": "WORSENING", "RISK": "STABLE"}
+    temporal_quality: float = 1.0                    # Degrades if fewer real observations
+    forecast_source: str = ""                        # "L7_PLANNING", "WEATHER_API", "EXTRAPOLATION"
+
+
+@dataclass
+class ForecastContext:
+    """Advanced weather + agronomic forecast for 7-day look-ahead."""
+    # Weather forecast (daily for T+1 to T+7)
+    precipitation_forecast: List[float] = field(default_factory=list)  # mm/day
+    temperature_max_forecast: List[float] = field(default_factory=list)  # °C
+    temperature_min_forecast: List[float] = field(default_factory=list)  # °C
+    humidity_forecast: List[float] = field(default_factory=list)  # % RH
+    wind_speed_forecast: List[float] = field(default_factory=list)  # m/s
+    evapotranspiration_forecast: List[float] = field(default_factory=list)  # mm/day
+    # Risk indices
+    frost_risk_days: List[bool] = field(default_factory=list)
+    heat_stress_days: List[bool] = field(default_factory=list)
+    leaf_wetness_hours_forecast: List[float] = field(default_factory=list)
+    # Source metadata
+    forecast_source: str = "ECMWF_ERA5"              # or "OPEN_METEO", "GFS"
+    forecast_issued_at: str = ""                     # ISO timestamp
+    forecast_confidence: float = 0.7                 # Degrades with horizon
+
+
 # ============================================================================
 # I/O
 # ============================================================================
@@ -476,6 +553,11 @@ class Layer10Input:
     planning: Any = None                         # L7 Layer7Output
     prescriptive: Any = None                     # L8 Layer8Output
     interface: Any = None                        # L9 InterfaceOutput
+
+    # Temporal context (14-day window: T-7 → T+7)
+    temporal_window: Optional[Dict[str, Any]] = None    # Historical context
+    forecast_context: Optional[Any] = None              # ForecastContext or dict
+    reference_date: str = ""                            # T₀ anchor date (ISO)
 
     # Scene references (for imagery compositing)
     scene_refs: Dict[str, Any] = field(default_factory=dict)
@@ -537,6 +619,13 @@ class Layer10Output:
         detail_conservation_ok=True,
     ))
     provenance: Dict[str, Any] = field(default_factory=dict)
-    
+
     # Phase B OS Contracts
     explainability_pack: Dict[str, ExplainabilityPack] = field(default_factory=dict)
+
+    # Temporal Intelligence (14-day: T-7 → T+7)
+    temporal_bundle: TemporalBundle = field(default_factory=TemporalBundle)
+
+    # Scenario & History Packs (Phase C)
+    scenario_pack: List[Dict[str, Any]] = field(default_factory=list)
+    history_pack: List[Dict[str, Any]] = field(default_factory=list)

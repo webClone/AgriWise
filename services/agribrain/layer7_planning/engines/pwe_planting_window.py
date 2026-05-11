@@ -60,7 +60,7 @@ def compute_planting_window(date: datetime, profile: CropProfile, l1_out: Any, r
         source_lbl = "L1_Weather"
         
         if forecasts and len(forecasts) > 0:
-            t_min_avg = sum(f.get("temperature_2m_min", f.get("temperature_2m_mean", 15.0)) for f in forecasts) / len(forecasts)
+            t_min_avg = sum(f.get("temp_min", 15.0) for f in forecasts) / len(forecasts)
             source_lbl = "L1_Forecast"
         else:
             ts = l1_out.plot_timeseries

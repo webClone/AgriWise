@@ -100,10 +100,13 @@ export async function updatePlotDetails(plotId: string, data: {
 
 export async function addPlotPhoto(plotId: string, data: {
   url: string;
-  type: 'CROP' | 'SOIL' | 'OVERVIEW' | 'DAMAGE' | 'OTHER';
+  type: 'CROP' | 'SOIL' | 'OVERVIEW' | 'DAMAGE' | 'SATELLITE' | 'OTHER';
   tags?: string[];
   notes?: string;
   date: Date;
+  source?: string;
+  aiTags?: string[];
+  aiConfidence?: number;
 }) {
     try {
         const photo = await prisma.plotPhoto.create({
@@ -113,7 +116,10 @@ export async function addPlotPhoto(plotId: string, data: {
                 type: data.type,
                 tags: data.tags || [],
                 notes: data.notes,
-                date: data.date
+                date: data.date,
+                source: data.source || "farmer",
+                aiTags: data.aiTags || [],
+                aiConfidence: data.aiConfidence ?? 0.0,
             }
         });
         revalidatePath(`/farm/[id]/plot/${plotId}/user-inputs`);

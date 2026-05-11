@@ -14,6 +14,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from layer3_decision.schema import PlotContext, Driver
+from layer3_decision.features.evapotranspiration import (
+    compute_water_budget,
+    get_kc_for_stage,
+)
 
 
 @dataclass
@@ -64,6 +68,31 @@ class DecisionFeatures:
     heat_stress_days: int = 0
     cold_stress_days: int = 0
     saturation_days: int = 0
+
+    # Energy Balance Context (from L3 evapotranspiration engine)
+    lst_canopy_c: Optional[float] = None      # Land Surface Temp (°C)
+    t_air_c: Optional[float] = None           # Ambient air temp (°C)
+    canopy_air_delta_c: float = 0.0           # T_canopy - T_air (°C). Positive = overheating
+    esi: float = 0.0                          # Evaporative Stress Index [0=healthy, 1=shutdown]
+    cwsi: float = 0.0                         # Crop Water Stress Index [0=well-watered, 1=stressed]
+    et_potential_mm: float = 0.0              # FAO-56 ET₀ × Kc
+    et_actual_mm: float = 0.0                 # Energy-balance actual ET
+    et_deficit_mm: float = 0.0                # Potential - Actual (water gap)
+    transpiration_efficiency: float = 1.0     # Fraction of potential transpiration [0-1]
+    lst_available: bool = False               # Whether satellite LST data exists
+    energy_balance_method: str = "none"       # "fao56_only" | "energy_balance_fused"
+
+    # Drone Structural Intelligence (from L0 RGB → L1 → L2 → L3 adapter)
+    has_drone_structural: bool = False        # Whether drone structural data exists
+    canopy_cover_ratio: float = 0.0           # Canopy cover [0-1] from drone RGB
+    bare_soil_ratio: float = 0.0              # Bare soil [0-1] from drone RGB
+    weed_pressure_index: float = 0.0          # Weed pressure severity [0-1]
+    weed_pressure_severity: float = 0.0       # L2-attributed biotic weed severity [0-1]
+    canopy_uniformity_cv: float = 0.0         # Coefficient of variation of canopy cover
+    mechanical_damage_detected: bool = False  # Mechanical/structural damage from L2
+    mechanical_damage_severity: float = 0.0   # Severity of mechanical damage [0-1]
+    missing_tree_count: int = 0               # Orchard: count of missing trees
+    tree_count: int = 0                       # Orchard: total tree count
 
 
 def build_decision_features(
@@ -215,7 +244,7 @@ def build_decision_features(
 
     low_sar_cadence = sar_available and sar_obs_count <= 5
 
-    return DecisionFeatures(
+    features = DecisionFeatures(
         rain_sum_7d=rain_sum_7d,
         rain_sum_14d=rain_sum_14d,
         days_since_rain=days_since_rain,
@@ -252,9 +281,114 @@ def build_decision_features(
         saturation_days=saturation_days,
     )
 
+    # --- 10. Energy Balance (Surface Energy Balance fusion) ---
+    features = _apply_energy_balance(features, ops, context)
+
+    # --- 11. Drone Structural Intelligence ---
+    features = _apply_drone_structural(features, ops)
+
+    return features
+
 
 def _empty_features() -> DecisionFeatures:
     """Return empty features for null/missing context."""
     return DecisionFeatures(
         missing_inputs=[Driver.RAIN, Driver.TEMP, Driver.SAR_VV, Driver.NDVI],
     )
+
+
+def _apply_energy_balance(
+    features: DecisionFeatures,
+    ops: Dict[str, Any],
+    context: PlotContext,
+) -> DecisionFeatures:
+    """Compute energy balance from L0→L1→L2 signals.
+
+    LST and ET0 arrive through the L0 thermal adapter,
+    flow through L1 environment evidence, get interpreted by L2,
+    and surface here via operational_signals.
+    """
+    from layer3_decision.knowledge.crops import get_crop_profile
+
+    # Extract energy balance inputs from operational signals
+    lst_canopy_c = ops.get("lst_canopy_c")
+    t_air_c = ops.get("t_air_c")
+    vpd_kpa = ops.get("vpd_kpa")
+    et0_mm = ops.get("et0_mm")
+    ndvi = ops.get("ndvi_mean")
+    wind_speed = ops.get("wind_speed_ms")
+
+    # Determine Kc from crop profile + phenological stage
+    crop_profile = get_crop_profile(context.crop_type)
+    kc = get_kc_for_stage(
+        crop_type=context.crop_type,
+        stage=features.current_stage,
+        kc_init=crop_profile.kc_init,
+        kc_mid=crop_profile.kc_mid,
+        kc_end=crop_profile.kc_end,
+    )
+
+    # Compute water budget
+    wb = compute_water_budget(
+        et0_mm=et0_mm,
+        kc=kc,
+        lst_canopy_c=lst_canopy_c,
+        t_air_c=t_air_c,
+        vpd_kpa=vpd_kpa,
+        ndvi=ndvi,
+        wind_speed_ms=wind_speed,
+    )
+
+    # Populate features
+    features.lst_canopy_c = lst_canopy_c
+    features.t_air_c = t_air_c
+    features.canopy_air_delta_c = wb.canopy_air_delta_c
+    features.esi = wb.esi
+    features.cwsi = wb.cwsi
+    features.et_potential_mm = wb.et_potential_mm
+    features.et_actual_mm = wb.et_actual_mm
+    features.et_deficit_mm = wb.deficit_mm
+    features.transpiration_efficiency = wb.transpiration_efficiency
+    features.lst_available = lst_canopy_c is not None and t_air_c is not None
+    features.energy_balance_method = wb.method
+
+    # Update missing drivers if no LST/ET0
+    if lst_canopy_c is None:
+        if Driver.LST not in features.missing_inputs:
+            features.missing_inputs.append(Driver.LST)
+    if et0_mm is None:
+        if Driver.ET0 not in features.missing_inputs:
+            features.missing_inputs.append(Driver.ET0)
+
+    return features
+
+
+def _apply_drone_structural(
+    features: DecisionFeatures,
+    ops: Dict[str, Any],
+) -> DecisionFeatures:
+    """Populate drone structural fields from L2→L3 adapter operational_signals.
+
+    Data path: L0 (DroneRGBEngine)
+             → L1 (drone structural adapter → vegetation/operational evidence)
+             → L2 (stress attribution: BIOTIC/weed, MECHANICAL/row damage)
+             → L3 adapter (operational_signals keys)
+             → here
+    """
+    has_drone = ops.get("has_drone_structural", False)
+    features.has_drone_structural = has_drone
+
+    if not has_drone:
+        return features
+
+    features.canopy_cover_ratio = ops.get("canopy_cover_fraction", 0.0)
+    features.bare_soil_ratio = ops.get("bare_soil_fraction", 0.0)
+    features.weed_pressure_index = ops.get("weed_pressure_index", 0.0)
+    features.weed_pressure_severity = ops.get("weed_pressure_severity", 0.0)
+    features.canopy_uniformity_cv = ops.get("canopy_uniformity_cv", 0.0)
+    features.mechanical_damage_detected = ops.get("mechanical_damage_detected", False)
+    features.mechanical_damage_severity = ops.get("mechanical_damage_severity", 0.0)
+    features.missing_tree_count = ops.get("missing_tree_count", 0)
+    features.tree_count = ops.get("tree_count", 0)
+
+    return features

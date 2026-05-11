@@ -1,5 +1,5 @@
 """
-Layer 8.1: Reliability-Aware Action Ranking Engine
+Layer 8.1: Reliability-Aware Action Ranking Engine v8.1.0
 
 Ranks interventions using multi-objective scoring with evidence trace.
 Reads L0 audit grade and upstream confidence to adjust behavior:
@@ -8,9 +8,12 @@ Reads L0 audit grade and upstream confidence to adjust behavior:
   - Grade D/F: restrict to SCOUT/WAIT/MONITOR, avoid irreversible actions
 """
 
+import logging
+import hashlib
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-import hashlib
+
+logger = logging.getLogger(__name__)
 
 from layer8_prescriptive.schema import (
     ActionCard, ActionType, PriorityBreakdown, RateRange, TimeWindow,
@@ -86,6 +89,8 @@ class ActionRankingEngine:
         # Apply reliability-aware adjustments
         candidates = self._apply_trust_adjustments(candidates, degradation, confidence_level)
         
+        logger.debug("Ranked %d candidates (degradation=%s, confidence=%s)",
+                     len(candidates), degradation.value, confidence_level.value)
         return candidates
     
     def _assess_degradation(self, l8_input: Layer8Input) -> PrescriptiveDegradation:

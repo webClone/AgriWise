@@ -2,7 +2,17 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { WebMercatorViewport } from "@deck.gl/core";
-// import type { GeoJsonObject } from 'geojson';
+import * as turf from '@turf/turf';
+
+// Clean the plot geometry
+const simplifyPlotGeometry = (geojson: any) => {
+  if (!geojson || !geojson.type) return geojson;
+  
+  return turf.simplify(geojson, {
+    tolerance: 0.00001,     // Perfect for typical Algerian field sizes (adjust 0.00001–0.00005 if needed)
+    highQuality: true
+  });
+};
 
 interface ViewState {
   longitude: number;
@@ -43,7 +53,7 @@ export function usePlotFit({ primaryPlot, paddingPct = 0.15, defaultZoom = 15, a
           : primaryPlot.geoJson;
         
         if (parsed?.geometry?.coordinates) {
-          geo = parsed;
+          geo = simplifyPlotGeometry(parsed);
         }
         
         const coords = geo?.geometry?.type === 'MultiPolygon' 

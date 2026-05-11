@@ -22,12 +22,13 @@ interface RunRequest {
   mode?: "chat" | "full" | "surfaces";
   history?: Array<{ role: string; content: string }>;
   experienceLevel?: string;
+  userMode?: string;
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body: RunRequest = await request.json();
-    const { plotId, query, mode = "chat", history, experienceLevel } = body;
+    const { plotId, query, mode = "chat", history, experienceLevel, userMode = "farmer" } = body;
 
     if (!plotId) {
       return NextResponse.json(
@@ -89,17 +90,45 @@ export async function POST(request: NextRequest) {
     }
 
     if (plot?.sensors?.length) {
-      const sensorData: Record<string, number> = {};
-      for (const s of plot.sensors) {
-        if (s.readings.length > 0) {
+      // Per-sensor array preserves multi-sensor spatial diversity
+      const sensorArray = plot.sensors
+        .filter((s: any) => s.readings.length > 0)
+        .map((s: any) => {
           const r = s.readings[0];
-          if (r.soilMoisture !== null) sensorData.soil_moisture = Number(r.soilMoisture);
-          if (r.temperature !== null) sensorData.temperature = Number(r.temperature);
-          if (r.humidity !== null) sensorData.humidity = Number(r.humidity);
-          if (r.rainfall !== null) sensorData.rainfall = Number(r.rainfall);
-        }
+          return {
+            id: s.id,
+            deviceId: s.deviceId,
+            type: s.type,
+            lastSync: s.lastSync?.toISOString() || new Date().toISOString(),
+            soilMoisture: r.soilMoisture != null ? Number(r.soilMoisture) : null,
+            temperature: r.temperature != null ? Number(r.temperature) : null,
+            humidity: r.humidity != null ? Number(r.humidity) : null,
+            rainfall: r.rainfall != null ? Number(r.rainfall) : null,
+            ec: r.ec != null ? Number(r.ec) : null,
+            windSpeed: r.windSpeed != null ? Number(r.windSpeed) : null,
+            battery: r.battery != null ? Number(r.battery) : null,
+            rssi: r.rssi != null ? Number(r.rssi) : null,
+          };
+        });
+
+      // Flat summary for backward compatibility (L3 features, etc.)
+      const sensorSummary: Record<string, number> = {};
+      const moistureValues: number[] = [];
+      for (const s of sensorArray) {
+        if (s.soilMoisture != null) moistureValues.push(s.soilMoisture);
+        if (s.temperature != null) sensorSummary.temperature = s.temperature;
+        if (s.humidity != null) sensorSummary.humidity = s.humidity;
+        if (s.rainfall != null) sensorSummary.rainfall = s.rainfall;
+        if (s.ec != null) sensorSummary.ec = s.ec;
+        if (s.windSpeed != null) sensorSummary.wind_speed = s.windSpeed;
       }
-      context.sensors = sensorData;
+      // Average across all moisture sensors instead of last-writer-wins
+      if (moistureValues.length > 0) {
+        sensorSummary.soil_moisture = moistureValues.reduce((a, b) => a + b, 0) / moistureValues.length;
+      }
+
+      context.sensors = sensorArray;
+      context.sensor_summary = sensorSummary;
     }
 
     // 3. Encode context
@@ -115,7 +144,8 @@ export async function POST(request: NextRequest) {
       query: query || "",
       mode: mode || "chat",
       history: historyB64,
-      exp: experienceLevel || "INTERMEDIATE"
+      exp: experienceLevel || "INTERMEDIATE",
+      userMode: userMode
     };
 
     const apiUrl = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
@@ -143,6 +173,52 @@ export async function POST(request: NextRequest) {
         { success: false, error: result.error, details: result.type },
         { status: 500 }
       );
+    }
+
+    // GAP 2 fix: When surfaces mode returns L10 data, update the latest
+    // IntelligenceSnapshot with surface stats + compressed grids
+    if (mode === "surfaces" && result.data?.surfaces) {
+      try {
+        const { extractSurfaceStats, computeSurfaceDigest } = await import("@/lib/ml-features");
+        const { gzipSync } = await import("zlib");
+
+        const l10Data = result.data;
+        const surfaceStats = extractSurfaceStats(l10Data);
+        const surfaceDigest = await computeSurfaceDigest(l10Data);
+
+        // Find the latest snapshot for this plot
+        const latestSnap = await prisma.intelligenceSnapshot.findFirst({
+          where: { plotId },
+          orderBy: { capturedAt: "desc" },
+          select: { id: true, surfaceDigest: true },
+        });
+
+        if (latestSnap) {
+          const gridsChanged = !latestSnap.surfaceDigest || latestSnap.surfaceDigest !== surfaceDigest;
+          let surfaceGridsGz: string | null = null;
+          if (gridsChanged && Array.isArray(l10Data.surfaces)) {
+            const gridData = l10Data.surfaces.map((s: any) => ({
+              type: s.semantic_type || s.type,
+              grid_ref: s.grid_ref,
+              values: s.values,
+            }));
+            const compressed = gzipSync(Buffer.from(JSON.stringify(gridData)));
+            surfaceGridsGz = compressed.toString("base64");
+          }
+
+          await prisma.intelligenceSnapshot.update({
+            where: { id: latestSnap.id },
+            data: {
+              surfaceStats: surfaceStats as any,
+              surfaceDigest,
+              ...(surfaceGridsGz ? { surfaceGridsGz } : {}),
+            },
+          });
+          console.log(`[AgriBrain Run] Updated snapshot ${latestSnap.id} with L10 surface stats`);
+        }
+      } catch (surfaceErr) {
+        console.warn("[AgriBrain Run] Failed to update surface stats:", surfaceErr);
+      }
     }
 
     return NextResponse.json(result);

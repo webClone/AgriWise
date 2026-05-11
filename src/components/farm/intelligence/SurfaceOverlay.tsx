@@ -46,7 +46,7 @@ function interpolateRgb(t: number, colors: [string, string, string]): [number, n
 }
 
 // ============================================================================
-// BILINEAR INTERPOLATION (smooth upsampling)
+// BILINEAR INTERPOLATION (smooth upsampling matching real satellite imagery)
 // ============================================================================
 
 function bilinearSample(
@@ -269,7 +269,7 @@ function renderSurfaceToCanvas(
   const range = max - min || 1;
   const mean = (min + max) / 2;
 
-  // Step 1: Bilinear upsample to smooth grid
+  // Step 1: Bilinear upsample (smooth, organic gradients like real satellite imagery)
   const upsampled = new Float32Array(canvasW * canvasH);
   for (let y = 0; y < canvasH; y++) {
     for (let x = 0; x < canvasW; x++) {
@@ -279,8 +279,8 @@ function renderSurfaceToCanvas(
     }
   }
 
-  // Step 2: Edge-aware smoothing (bilateral filter approximation)
-  const smoothed = edgeAwareSmooth(upsampled, canvasW, canvasH, 2);
+  // Step 2: Direct render — no additional smoothing needed
+  const smoothed = upsampled;
 
   // Step 3: Compute confidence grid (upsampled)
   let confidenceGrid: Float32Array | null = null;
@@ -312,11 +312,11 @@ function renderSurfaceToCanvas(
       const t = (val - min) / range;
       const [r, g, b] = interpolateRgb(t, colors);
 
-      // Confidence-modulated opacity
+      // Confidence-modulated opacity — keep bold, only slightly reduce for very low confidence
       let alpha = baseOpacity * 255;
       if (confidenceGrid) {
         const conf = confidenceGrid[y * canvasW + x];
-        alpha *= (0.4 + 0.6 * Math.max(0, Math.min(1, conf)));
+        alpha *= (0.7 + 0.3 * Math.max(0, Math.min(1, conf)));
       }
 
       data[idx]     = r;
@@ -367,15 +367,7 @@ function renderSurfaceToCanvas(
   // Draw the rendered surface (clipped to polygon)
   ctx.drawImage(tempCanvas, 0, 0);
 
-  // Step 8: Subtle vignette within the clip
-  const gradient = ctx.createRadialGradient(
-    canvasW / 2, canvasH / 2, Math.min(canvasW, canvasH) * 0.25,
-    canvasW / 2, canvasH / 2, Math.min(canvasW, canvasH) * 0.55
-  );
-  gradient.addColorStop(0, "rgba(0,0,0,0)");
-  gradient.addColorStop(1, "rgba(0,0,0,0.12)");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, canvasW, canvasH);
+  // No vignette — clean agronomic overlay
 
   return canvas.toDataURL("image/png");
 }
@@ -391,7 +383,7 @@ export default function SurfaceOverlay({
   gridWidth,
   bounds,
   colors,
-  opacity = 0.65,
+  opacity = 0.85,
   clipPolygon,
 }: SurfaceOverlayProps) {
   const [imageUrl, setImageUrl] = useState<string | null>(null);

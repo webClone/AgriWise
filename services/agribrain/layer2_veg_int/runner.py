@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from layer2_veg_int.schema import (
     VegIntOutput, VegIntInput, ModeledCurveOutput, CurveQuality, 
-    PhenologyOutput, VegetationAnomaly
+    PhenologyOutput, VegetationAnomaly, SpatialMetrics
 )
 from layer2_veg_int.growth_engine import GrowthCurveEngine
 from layer2_veg_int.phenology_engine import PhenologyEngine
@@ -19,6 +19,10 @@ from layer1_fusion.schema import FieldTensor, FieldTensorChannels
 
 from layer2_veg_int.anomaly_engine import TemporalAnomalyEngine
 from layer2_veg_int.spatial_engine import SpatialProxyStabilityEngine
+from layer2_veg_int.invariants import enforce_layer2_invariants
+
+import logging
+logger = logging.getLogger(__name__)
 
 class VegetationIntelligenceEngine:
     
@@ -32,9 +36,37 @@ class VegetationIntelligenceEngine:
         """
         Main Entry Point for Layer 2.
         Strict Contract: FieldTensor -> VegIntInput -> VegIntOutput
+
+        Gracefully degrades when plot_timeseries is empty — returns a
+        minimal output so downstream layers can still run in diagnostic mode.
         """
         if not tensor.plot_timeseries:
-            raise ValueError("FieldTensor missing plot_timeseries summary.")
+            logger.warning(
+                "[Layer 2] FieldTensor has empty plot_timeseries — "
+                "returning degraded output (no curve/phenology data)."
+            )
+            return VegIntOutput(
+                run_id=f"vegint_{tensor.run_id}_degraded",
+                layer1_run_id=tensor.run_id,
+                curve=ModeledCurveOutput(
+                    ndvi_fit=[], ndvi_fit_d1=[], ndvi_fit_unc=[],
+                    quality=CurveQuality(rmse=0.0, outlier_frac=0.0, obs_coverage=0.0),
+                ),
+                phenology=PhenologyOutput(
+                    stage_by_day=[], confidence_by_day=[], key_dates={},
+                ),
+                anomalies=[],
+                stability=SpatialMetrics(
+                    mean_spatial_var=0.0, std_spatial_var=0.0,
+                    stability_class="UNKNOWN", confidence=0.0,
+                ),
+                provenance={
+                    "engine_version": "2.2.0-uncertainty",
+                    "execution_time": datetime.now(timezone.utc).isoformat(),
+                    "status": "degraded",
+                    "reason": "empty_plot_timeseries",
+                },
+            )
             
         # 1. Map to Strict Input Schema
         inputs: List[VegIntInput] = []
@@ -195,7 +227,7 @@ class VegetationIntelligenceEngine:
                     )
                 }
 
-        return VegIntOutput(
+        output = VegIntOutput(
             run_id=f"vegint_{tensor.run_id}",
             layer1_run_id=tensor.run_id,
             curve=curve_out,
@@ -214,6 +246,19 @@ class VegetationIntelligenceEngine:
                 }
             }
         )
+
+        # Invariant Enforcement (Mandatory Gate)
+        violations = enforce_layer2_invariants(output)
+        errors = [v for v in violations if v.severity == "error"]
+        if errors:
+            logger.error(
+                f"[Layer 2] {len(errors)} invariant error(s) detected — "
+                f"output returned with violations logged"
+            )
+        elif violations:
+            logger.info(f"[Layer 2] {len(violations)} invariant warning(s)")
+
+        return output
 
 # Singleton
 veg_int_engine = VegetationIntelligenceEngine()

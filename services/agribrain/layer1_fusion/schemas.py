@@ -24,6 +24,8 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 SOURCE_FAMILIES = (
     "sentinel2",
     "sentinel1",
+    "sentinel5p",
+    "eo_foundation",
     "environment",
     "weather_forecast",
     "geo_context",
@@ -31,6 +33,8 @@ SOURCE_FAMILIES = (
     "perception",
     "user_event",
     "history",
+    "drone_structural",
+    "l0_state",
 )
 
 OBSERVATION_TYPES = (
@@ -229,6 +233,8 @@ class EvidenceConflict:
 GAP_TYPES = (
     "NO_RECENT_SENTINEL2",
     "NO_RECENT_SENTINEL1",
+    "NO_SIF_DATA",
+    "NO_EO_EMBEDDING",
     "NO_SENSOR_FOR_ROOT_ZONE",
     "NO_RAIN_GAUGE",
     "NO_IRRIGATION_FLOW_SENSOR",
@@ -486,6 +492,11 @@ class CropCycleContext:
     gdd_base_temp: float = 10.0
     gdd_accumulated: float = 0.0
 
+    # User-declared context (from L0 UserInputAdapter)
+    irrigation_type: str = "rainfed"       # "drip", "pivot", "flood", "rainfed"
+    soil_texture_class: str = ""            # "clay", "loam", "sandy_loam", etc.
+    soil_ec_ds_m: Optional[float] = None   # Electrical conductivity
+
 
 # ============================================================================
 # Layer 1 input bundle
@@ -519,13 +530,21 @@ class Layer1InputBundle:
     perception_packages: List[Any] = field(default_factory=list)
 
     user_events: List[Any] = field(default_factory=list)
+    user_input_package: Any = None         # UserInputPackage from L0 user adapter
     historical_layer1_package: Any = None
+    sentinel5p_packages: List[Any] = field(default_factory=list)
+    drone_structural_packages: List[Any] = field(default_factory=list)
 
     # Pre-fetched raster composites from orchestrator (optional).
     # Dict mapping variable name → raster dict with keys:
     #   pixel_array (List[List[float]]), grid_spec, valid_pixel_count, resolution_m
     # Layer 1 never fetches rasters — orchestrator provides them.
     raster_composites: Dict[str, Any] = field(default_factory=dict)
+
+    # Optional path to an ONNX-exported EO Foundation Model.
+    # When provided, the engine runs learned spectral embedding inference.
+    # When absent, falls back to pure-Python spectral encoder.
+    eo_model_path: Optional[str] = None
 
 
 # ============================================================================

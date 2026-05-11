@@ -42,6 +42,7 @@ class ObservationSource(str, Enum):
     MODIS_FIRMS = "modis_firms"
     SATELLITE_RGB = "satellite_rgb"    # High-res RGB structural intelligence
     FARMER_PHOTO = "farmer_photo"      # Close-range plant recognition + symptom evidence
+    SENTINEL5P = "sentinel5p"          # TROPOMI — Solar-Induced Fluorescence (SIF)
 
 
 class ObservationType(str, Enum):

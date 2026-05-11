@@ -73,14 +73,14 @@ export default async function UserInputsPage({ params }: PageProps) {
     <div className="min-h-screen p-6 pb-24 space-y-5 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
       
       {/* Header */}
-      <div className="space-y-1">
-        <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-100 flex items-center gap-3">
+      <div className="space-y-2">
+        <h1 className="text-2xl font-semibold text-white flex items-center gap-3">
           🏗️ Plot Configuration
-          <span className="text-sm font-normal text-slate-500 bg-slate-100 dark:bg-slate-800 px-3 py-1 rounded-full border border-slate-200 dark:border-slate-700">
+          <span className="text-[10px] font-bold text-indigo-400 bg-indigo-500/10 px-3 py-1 rounded-full border border-indigo-500/20 uppercase tracking-wider">
             Phase 1: Identity & Geometry
           </span>
         </h1>
-        <p className="text-slate-600 dark:text-slate-400 max-w-2xl">
+        <p className="text-sm text-slate-500 max-w-2xl">
           Establish the Ground Truth for your field. Accurate geometry and soil profiles ensure high-fidelity satellite analysis.
         </p>
       </div>
@@ -95,7 +95,7 @@ export default async function UserInputsPage({ params }: PageProps) {
               
               <PlotIdentityForm plot={plot} lat={lat} lng={lng} />
               
-              <PlotVisualGroundTruth plot={plot} />
+              <PlotVisualGroundTruth plot={plot} lat={lat} lng={lng} polygon={plot.geoJson || null} />
               
               <PlotSoilData 
                   plotId={plot.id} 

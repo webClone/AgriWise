@@ -64,7 +64,7 @@ def detect_intent(query: str, has_context: bool = False) -> Intent:
     
     is_general_question = any(p in q for p in general_patterns) and any(t in q for t in general_topics)
     # If they say "what is ndvi in my field", that's DATA_QUERY/DIAGNOSIS, not GENERAL.
-    is_explicit_my_field = _has_field_context(q) or ("my field" in q) or ("my plot" in q)
+    is_explicit_my_field = _has_field_context(q) or ("my field" in q) or ("my plot" in q) or ("current status" in q) or ("findings" in q)
     
     if is_general_question and not is_explicit_my_field:
         return Intent.GENERAL

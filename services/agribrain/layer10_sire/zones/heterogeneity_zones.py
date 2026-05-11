@@ -297,10 +297,12 @@ def extract_heterogeneity_zones(
     
     if coverage < MIN_VALID_COVERAGE:
         meta["reason"] = f"insufficient_coverage ({coverage:.1%} < {MIN_VALID_COVERAGE:.0%})"
+        print(f"DEBUG MGMT ZONES: {meta}")
         return zones, meta
     
     if len(band_names) < 1:
         meta["reason"] = "no_valid_feature_bands"
+        print(f"DEBUG MGMT ZONES: {meta}")
         return zones, meta
     
     meta["attempted"] = True
@@ -320,56 +322,71 @@ def extract_heterogeneity_zones(
     # Cluster
     labels = _kmeans_cluster(features, H, W, k)
     
-    # Extract connected components per cluster and build zones
+    # Management zones: each k-means cluster = one zone containing ALL its cells.
+    # Unlike alert zones, management zones don't require contiguity —
+    # they represent agronomic behavior classes across the whole field.
     zone_counter = 0
     for cluster_id in range(k):
-        components = _connected_components(labels, H, W, cluster_id)
+        # Collect ALL cells assigned to this cluster
+        cells = []
+        for r in range(H):
+            for c in range(W):
+                if labels[r][c] == cluster_id:
+                    cells.append((r, c))
         
-        # Rank components by size (largest first), take only the main body
-        components.sort(key=lambda comp: len(comp), reverse=True)
+        if len(cells) < MIN_MGMT_ZONE_CELLS:
+            continue
         
-        for comp_idx, cells in enumerate(components):
-            if zone_counter >= MAX_MGMT_ZONES:
-                break
-            
-            area_pct = len(cells) / total_cells if total_cells > 0 else 0
-            zone_stats = _compute_zone_stats(cells, surfaces)
-            zone_type = _classify_zone_type(zone_stats, cluster_id)
-            
-            # Compute bounding box for the zone
-            rows = [r for r, c in cells]
-            cols = [c for r, c in cells]
-            bbox_r = (min(rows), max(rows))
-            bbox_c = (min(cols), max(cols))
-            
-            zone_id = f"MZ_{cluster_id}_{comp_idx}"
-            
-            zone = ZoneArtifact(
-                zone_id=zone_id,
-                zone_type=zone_type,
-                zone_family=ZoneFamily.AGRONOMIC,
-                cell_indices=cells,
-                area_pct=round(area_pct, 4),
-                area_m2=round(area_pct * total_cells * 100, 1),  # approximate m²
-                severity=0.5,  # Management zones are neutral severity
-                confidence=round(min(0.95, coverage * 0.9 + 0.1), 3),
-                top_drivers=[band_names[0]] if band_names else [],
-                label=f"Management Zone {chr(65 + zone_counter)}",
-                source_surface_type=SurfaceType.NDVI_CLEAN.value,
-                linked_findings=[
-                    {"type": "clustering", "detail": f"k-means cluster {cluster_id}"},
-                    {"type": "contiguity", "detail": f"component {comp_idx}"},
-                ],
-                confidence_reasons=[
-                    f"based on {len(band_names)} spectral bands",
-                    f"coverage {coverage:.0%}",
-                ],
-                bbox=(bbox_r[0], bbox_c[0], bbox_r[1], bbox_c[1]),
-                surface_stats={k: {"mean": v} for k, v in zone_stats.items()},
-            )
-            zones.append(zone)
-            zone_counter += 1
+        zone = _build_zone_artifact(
+            cluster_id, 0, cells, total_cells, surfaces,
+            band_names, coverage, zone_counter,
+        )
+        zones.append(zone)
+        zone_counter += 1
     
     meta["zones_produced"] = len(zones)
     meta["k_used"] = k
+    print(f"DEBUG MGMT ZONES: {meta}")
     return zones, meta
+
+
+def _build_zone_artifact(
+    cluster_id: int, comp_idx: int, cells: List[Tuple[int, int]],
+    total_cells: int, surfaces: List[SurfaceArtifact],
+    band_names: List[str], coverage: float, zone_counter: int,
+) -> ZoneArtifact:
+    """Build a single ZoneArtifact from a connected component."""
+    area_pct = len(cells) / total_cells if total_cells > 0 else 0
+    zone_stats = _compute_zone_stats(cells, surfaces)
+    zone_type = _classify_zone_type(zone_stats, cluster_id)
+    
+    rows = [r for r, c in cells]
+    cols = [c for r, c in cells]
+    bbox_r = (min(rows), max(rows))
+    bbox_c = (min(cols), max(cols))
+    
+    zone_id = f"MZ_{cluster_id}_{comp_idx}"
+    
+    return ZoneArtifact(
+        zone_id=zone_id,
+        zone_type=zone_type,
+        zone_family=ZoneFamily.AGRONOMIC,
+        cell_indices=cells,
+        area_pct=round(area_pct, 4),
+        area_m2=round(area_pct * total_cells * 100, 1),
+        severity=0.5,
+        confidence=round(min(0.95, coverage * 0.9 + 0.1), 3),
+        top_drivers=[band_names[0]] if band_names else [],
+        label=f"Management Zone {chr(65 + zone_counter)}",
+        source_surface_type=SurfaceType.NDVI_CLEAN.value,
+        linked_findings=[
+            {"type": "clustering", "detail": f"k-means cluster {cluster_id}"},
+            {"type": "contiguity", "detail": f"component {comp_idx}"},
+        ],
+        confidence_reasons=[
+            f"based on {len(band_names)} spectral bands",
+            f"coverage {coverage:.0%}",
+        ],
+        bbox=(bbox_r[0], bbox_c[0], bbox_r[1], bbox_c[1]),
+        surface_stats={sk: {"mean": sv} for sk, sv in zone_stats.items()},
+    )

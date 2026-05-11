@@ -115,9 +115,31 @@ class DiagnosisEngine:
         d_till = self._diagnose_tillage(features)
         if d_till: diagnoses.append(d_till)
 
-        # --- 9. Data Gaps ---
+        # --- 9. Biotic Risks (Extended) ---
+        d_salt = self._diagnose_salinity_risk(features)
+        if d_salt: diagnoses.append(d_salt)
+
+        d_insect = self._diagnose_insect_pressure(features)
+        if d_insect: diagnoses.append(d_insect)
+
+        # --- 10. Data Quality ---
+        d_artifact = self._diagnose_data_artifact(features)
+        if d_artifact: diagnoses.append(d_artifact)
+
         d_gap = self._diagnose_data_gap(features)
         if d_gap: diagnoses.append(d_gap)
+
+        # --- 11. Transpiration Failure (Energy Balance) ---
+        d_tf = self._diagnose_transpiration_failure(features, d_ws.probability if d_ws else 0.0)
+        if d_tf: diagnoses.append(d_tf)
+
+        # --- 12. Drone: Weed Pressure ---
+        d_weed = self._diagnose_weed_pressure(features)
+        if d_weed: diagnoses.append(d_weed)
+
+        # --- 13. Drone: Mechanical Damage ---
+        d_mech = self._diagnose_mechanical_damage(features)
+        if d_mech: diagnoses.append(d_mech)
         
         # Sort by Probability (Belief)
         diagnoses.sort(key=lambda x: x.probability, reverse=True)
@@ -130,7 +152,7 @@ class DiagnosisEngine:
         lo = self._to_log_odds(0.1)
         trace = []
         
-        # Evidence
+        # Evidence: Rain deficit
         if f.rain_sum_14d < 5.0:
             lo += self._add_evidence("rain_sum_14d", "14d", f.rain_sum_14d, 1.0, 2.0, trace)
         elif f.rain_sum_14d > 30.0:
@@ -147,15 +169,57 @@ class DiagnosisEngine:
         # Contraindication: Waterlogging signals
         if f.saturation_days > 2:
             lo += self._add_evidence("saturation_days", "7d", f.saturation_days, -1.0, 3.0, trace)
+
+        # ── Energy Balance Evidence (LST from L0→L1→L2) ──
+        # These signals come from satellite thermal data ingested at L0
+
+        if f.lst_available:
+            # Canopy-air temperature differential: plant overheating
+            if f.canopy_air_delta_c > 3.0:
+                score = min(1.0, (f.canopy_air_delta_c - 3.0) / 7.0)
+                lo += self._add_evidence(
+                    "canopy_air_delta", "current", f.canopy_air_delta_c,
+                    score, 2.0, trace
+                )
+            elif f.canopy_air_delta_c < -1.0:
+                # Plant is cooler than air → transpiring well (contraindication)
+                lo += self._add_evidence(
+                    "canopy_air_delta", "current", f.canopy_air_delta_c,
+                    -0.8, 1.5, trace
+                )
+
+        # ESI: direct evaporative stress signal
+        if f.esi > 0.1:
+            if f.esi > 0.4:
+                score = min(1.0, f.esi / 0.8)
+                weight = 1.5 if f.lst_available else 0.5  # Much weaker if VPD-only proxy
+                lo += self._add_evidence("esi", "current", f.esi, score, weight, trace)
+            elif f.esi < 0.1:
+                lo += self._add_evidence("esi", "current", f.esi, -0.5, 1.0, trace)
+
+        # Transpiration efficiency: below 50% = stomatal distress
+        if f.transpiration_efficiency < 0.5 and f.lst_available:
+            score = min(1.0, (0.5 - f.transpiration_efficiency) / 0.4)
+            lo += self._add_evidence(
+                "transpiration_efficiency", "current", f.transpiration_efficiency,
+                score, 1.5, trace
+            )
             
         prob = self._to_prob(lo)
         
         # Confidence Calculation (Lock: only subtract)
-        # Drivers: RAIN, NDVI, TEMP
+        # Drivers: RAIN, NDVI, TEMP, LST, ET0
         conf = 1.0
         if Driver.RAIN in f.missing_inputs: conf -= 0.5
         if not f.optical_available: conf -= 0.2
+        # LST boosts confidence when available (doesn't penalize when missing)
+        if f.lst_available:
+            conf = min(1.0, conf + 0.1)
         conf = max(0.0, conf)
+        
+        drivers_used = [Driver.RAIN, Driver.NDVI, Driver.TEMP]
+        if f.lst_available:
+            drivers_used.extend([Driver.LST, Driver.ET0])
         
         if prob > 0.2:
             return self._build_diagnosis(
@@ -165,7 +229,7 @@ class DiagnosisEngine:
                 conf=conf,
                 trace=trace,
                 features=f,
-                drivers_used=[Driver.RAIN, Driver.NDVI, Driver.TEMP]
+                drivers_used=drivers_used
             )
         return None
 
@@ -368,9 +432,14 @@ class DiagnosisEngine:
         return None
 
     def _diagnose_data_gap(self, f: DecisionFeatures) -> Optional[Diagnosis]:
-        if not f.missing_inputs: return None
+        # Only count CORE drivers for data gap diagnosis.
+        # Enhancement drivers (LST, ET0) improve confidence when present
+        # but their absence is not a data gap — it's normal degradation.
+        CORE_DRIVERS = {Driver.RAIN, Driver.TEMP, Driver.SAR_VV, Driver.NDVI}
+        core_missing = [d for d in f.missing_inputs if d in CORE_DRIVERS]
+        if not core_missing: return None
         
-        count = len(f.missing_inputs)
+        count = len(core_missing)
         
         # User spec: "Confidence must be computed from data quality only"
         # If we have degraded components (e.g. valid checks failed elsewhere), reduce conf.
@@ -380,7 +449,7 @@ class DiagnosisEngine:
         conf = 1.0
         # If we have critical missing inputs (SAR/RAIN), we reduce confidence slightly
         # to ensure it doesn't look like a "perfect" diagnosis in a broken system.
-        if Driver.SAR_VV in f.missing_inputs or Driver.RAIN in f.missing_inputs:
+        if Driver.SAR_VV in core_missing or Driver.RAIN in core_missing:
              conf = 0.8
              
         return self._build_diagnosis(
@@ -406,4 +475,232 @@ class DiagnosisEngine:
                 f,
                 [Driver.SAR_VV]
              )
+        return None
+
+    def _diagnose_transpiration_failure(self, f: DecisionFeatures, prob_water_stress: float) -> Optional[Diagnosis]:
+        """Diagnose transpiration cooling failure from satellite LST.
+
+        The plant's primary cooling mechanism is transpiration (sweating).
+        When it fails, the canopy heats up above ambient air temperature.
+        This is a DIRECT physical observation of water stress — not a proxy.
+
+        Fires when:
+          - ESI > 0.6 (evaporation significantly below potential)
+          - Canopy temp > air temp by 5°C+ (stomata closed, cooling failed)
+          - LST satellite data is actually available
+
+        Data source: L0 Landsat/ECOSTRESS thermal → L1 environment → L2 → L3
+        """
+        if not f.lst_available:
+            return None  # Cannot diagnose without satellite thermal data
+
+        lo = self._to_log_odds(0.05)  # Low prior — needs strong physical evidence
+        trace = []
+
+        # Primary evidence: canopy overheating (T_canopy >> T_air)
+        if f.canopy_air_delta_c > 5.0:
+            score = min(1.0, (f.canopy_air_delta_c - 5.0) / 5.0)
+            lo += self._add_evidence(
+                "canopy_overheating", "current", f.canopy_air_delta_c,
+                score, 3.0, trace
+            )
+
+        # Corroborating evidence: ESI confirms evaporative shutdown
+        if f.esi > 0.6:
+            score = min(1.0, (f.esi - 0.4) / 0.5)
+            lo += self._add_evidence(
+                "esi_shutdown", "current", f.esi,
+                score, 2.5, trace
+            )
+
+        # Corroborating: CWSI > 0.6 (crop water stress confirmed)
+        if f.cwsi > 0.6:
+            lo += self._add_evidence(
+                "cwsi", "current", f.cwsi,
+                min(1.0, f.cwsi), 1.5, trace
+            )
+
+        # Corroborating: existing water stress boosts probability
+        if prob_water_stress > 0.5:
+            lo += self._add_evidence(
+                "water_stress_corroboration", "current", prob_water_stress,
+                0.5, 1.0, trace
+            )
+
+        # Contraindication: If canopy is cooler than air, transpiration is working
+        if f.canopy_air_delta_c < 0:
+            lo += self._add_evidence(
+                "canopy_cooling_ok", "current", f.canopy_air_delta_c,
+                -1.0, 4.0, trace  # Strong contraindication
+            )
+
+        # ET deficit magnitude (mm/day gap)
+        if f.et_deficit_mm > 2.0:
+            lo += self._add_evidence(
+                "et_deficit", "current", f.et_deficit_mm,
+                min(1.0, f.et_deficit_mm / 5.0), 1.0, trace
+            )
+
+        prob = self._to_prob(lo)
+
+        # Severity: proportional to ESI (direct measure of cooling failure)
+        severity = min(1.0, f.esi * 1.2) if f.esi > 0.4 else 0.3
+
+        # Confidence: high when we have LST + corroborating rain data
+        conf = 0.7  # LST is direct physical observation
+        if Driver.RAIN not in f.missing_inputs:
+            conf += 0.15  # Rain corroborates water availability
+        if f.et_potential_mm > 0:
+            conf += 0.10  # ET0 from weather station available
+        conf = min(1.0, conf)
+
+        if prob > 0.4:
+            return self._build_diagnosis(
+                problem_id=ProblemType.TRANSPIRATION_FAILURE.value,
+                prob=prob,
+                severity=severity,
+                conf=conf,
+                trace=trace,
+                features=f,
+                drivers_used=[Driver.LST, Driver.ET0, Driver.TEMP, Driver.RAIN]
+            )
+        return None
+
+    def _diagnose_weed_pressure(self, f: DecisionFeatures) -> Optional[Diagnosis]:
+        """Diagnose weed competition from drone structural intelligence.
+
+        Fires when drone RGB analysis detected weed patches via L0→L1→L2.
+        Primary drivers:
+          - weed_pressure_severity (from L2 BIOTIC stress with weed driver)
+          - canopy_uniformity_cv (high CV = patchy growth = possible weed zones)
+          - bare_soil_ratio (exposed soil in crop rows = weed opportunity)
+
+        Data source: L0 DroneRGBEngine → L1 structural adapter → L2 stress → L3
+        """
+        if not f.has_drone_structural:
+            return None  # Cannot diagnose without drone structural data
+
+        lo = self._to_log_odds(0.05)  # Low prior — needs drone evidence
+        trace = []
+
+        # Primary evidence: L2-attributed weed pressure severity
+        if f.weed_pressure_severity > 0.1:
+            score = min(1.0, f.weed_pressure_severity / 0.7)
+            lo += self._add_evidence(
+                "weed_pressure_severity", "current", f.weed_pressure_severity,
+                score, 3.0, trace
+            )
+
+        # Corroborating: high canopy non-uniformity
+        if f.canopy_uniformity_cv > 0.3:
+            score = min(1.0, (f.canopy_uniformity_cv - 0.2) / 0.5)
+            lo += self._add_evidence(
+                "canopy_uniformity_cv", "current", f.canopy_uniformity_cv,
+                score, 1.5, trace
+            )
+
+        # Corroborating: bare soil patches (weeds often found in gaps)
+        if f.bare_soil_ratio > 0.15:
+            score = min(1.0, (f.bare_soil_ratio - 0.1) / 0.4)
+            lo += self._add_evidence(
+                "bare_soil_ratio", "current", f.bare_soil_ratio,
+                score, 1.0, trace
+            )
+
+        # Contraindication: if stage is BARE_SOIL or SENESCENCE, suppress
+        if f.current_stage in ["BARE_SOIL", "SENESCENCE"]:
+            lo += self._add_evidence(
+                "stage_suppression", "current", 0.0,
+                -1.0, 3.0, trace
+            )
+
+        prob = self._to_prob(lo)
+
+        # Severity: proportional to weed pressure index
+        severity = min(1.0, f.weed_pressure_severity * 1.2) if f.weed_pressure_severity > 0.1 else 0.2
+
+        # Confidence: drone data is direct observation, moderately high
+        conf = 0.70
+        if f.weed_pressure_severity > 0.3:
+            conf += 0.15  # Stronger L2 attribution
+        conf = min(1.0, conf)
+
+        if prob > 0.3:
+            return self._build_diagnosis(
+                problem_id=ProblemType.WEED_PRESSURE.value,
+                prob=prob,
+                severity=severity,
+                conf=conf,
+                trace=trace,
+                features=f,
+                drivers_used=[Driver.NDVI]  # Drone-derived, NDVI is the closest driver enum
+            )
+        return None
+
+    def _diagnose_mechanical_damage(self, f: DecisionFeatures) -> Optional[Diagnosis]:
+        """Diagnose structural/mechanical crop damage from drone data.
+
+        Fires when drone detected structural damage (row breaks, gaps,
+        equipment tracks, hail damage) via L0→L1→L2 MECHANICAL stress.
+
+        Primary drivers:
+          - mechanical_damage_severity (from L2 MECHANICAL stress type)
+          - NDVI anomaly correlation (vegetation decline confirms physical damage)
+
+        Data source: L0 DroneRGBEngine → L1 structural adapter → L2 stress → L3
+        """
+        if not f.has_drone_structural:
+            return None
+
+        if not f.mechanical_damage_detected:
+            return None  # No mechanical damage signal from L2
+
+        lo = self._to_log_odds(0.10)  # Moderate prior when L2 already detected it
+        trace = []
+
+        # Primary evidence: L2-attributed mechanical damage severity
+        if f.mechanical_damage_severity > 0.1:
+            score = min(1.0, f.mechanical_damage_severity / 0.6)
+            lo += self._add_evidence(
+                "mechanical_damage_severity", "current", f.mechanical_damage_severity,
+                score, 3.5, trace
+            )
+
+        # Corroborating: NDVI anomaly confirms vegetation loss at damage site
+        if f.has_anomaly and f.anomaly_type == "DROP":
+            lo += self._add_evidence(
+                "ndvi_drop_corroboration", "current", f.anomaly_severity,
+                min(1.0, f.anomaly_severity), 1.5, trace
+            )
+
+        # Corroborating: missing trees in orchard mode
+        if f.missing_tree_count > 0 and f.tree_count > 0:
+            missing_pct = f.missing_tree_count / max(1, f.tree_count)
+            if missing_pct > 0.02:  # >2% missing
+                lo += self._add_evidence(
+                    "missing_trees", "current", f.missing_tree_count,
+                    min(1.0, missing_pct * 10.0), 2.0, trace
+                )
+
+        prob = self._to_prob(lo)
+
+        # Severity: direct from damage magnitude
+        severity = min(1.0, f.mechanical_damage_severity)
+
+        # Confidence: high (drone is direct observation)
+        conf = 0.75
+        if f.has_anomaly and f.anomaly_type == "DROP":
+            conf += 0.10  # NDVI corroborates
+        conf = min(1.0, conf)
+
+        if prob > 0.3:
+            return self._build_diagnosis(
+                problem_id=ProblemType.MECHANICAL_DAMAGE.value,
+                prob=prob,
+                severity=severity,
+                conf=conf,
+                trace=trace,
+                features=f,
+                drivers_used=[Driver.NDVI, Driver.SAR_VV]
+            )
         return None

@@ -12,11 +12,11 @@ interface PlotSoilDataProps {
 
 export default function PlotSoilData({ plotId, soilAnalyses, sensors }: PlotSoilDataProps) {
   return (
-    <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+    <div className="rounded-2xl border border-white/[0.06] overflow-hidden" style={{ background: "linear-gradient(180deg, rgba(11,16,21,0.9) 0%, rgba(8,12,25,0.95) 100%)" }}>
       
       {/* Header */}
-      <div className="bg-slate-50 dark:bg-slate-950 px-6 py-4 border-b border-slate-100 dark:border-slate-800">
-        <h3 className="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
+      <div className="px-6 py-4 border-b border-white/[0.04]">
+        <h3 className="font-semibold text-white flex items-center gap-2 text-sm">
            <Leaf className="text-amber-500" size={18} />
            Soil & Physical Properties
         </h3>
@@ -32,7 +32,7 @@ export default function PlotSoilData({ plotId, soilAnalyses, sensors }: PlotSoil
             <SoilAnalysisHistory plotId={plotId} analyses={soilAnalyses || []} />
         </section>
 
-        <hr className="border-slate-100 dark:border-slate-800" />
+        <hr className="border-white/[0.04]" />
 
         {/* Sensors */}
         <section>

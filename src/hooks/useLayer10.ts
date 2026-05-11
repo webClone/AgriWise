@@ -174,6 +174,13 @@ export interface Layer10Result {
   scenario_pack?: ScenarioDefinition[];
   history_pack?: HistoryEvent[];
   fallback_guidance?: Record<string, FallbackGuidance>;
+  
+  // Plot Intelligence Injections
+  timeline?: any;
+  engines?: any[];
+  current?: any;
+  rawData?: any;
+  assimilation?: any;
 }
 
 export interface FallbackGuidance {
@@ -214,7 +221,7 @@ export const MODE_ZONE_SURFACE_MAP: Record<MapMode, string> = {
   veg_attention: "NDVI_DEVIATION",
   water_stress: "WATER_STRESS_PROB",
   nutrient_risk: "NUTRIENT_STRESS_PROB",
-  composite_risk: "BIOTIC_PRESSURE",
+  composite_risk: "COMPOSITE_RISK",
   uncertainty: "UNCERTAINTY_SIGMA",
 };
 
@@ -225,12 +232,12 @@ export const MODE_CONFIG: Record<
   vegetation: {
     label: "Canopy",
     icon: "🌿",
-    colors: ["#8B0000", "#FFD700", "#006400"],
+    colors: ["#FF0000", "#FFFF00", "#00CC00"],
   },
   canopy: {
     label: "Canopy",
     icon: "🌿",
-    colors: ["#8B0000", "#FFD700", "#006400"],
+    colors: ["#FF0000", "#FFFF00", "#00CC00"],
   },
   veg_attention: {
     label: "Vegetation Attention",
@@ -367,6 +374,8 @@ interface Layer10ContextType {
   setSelectedZone: (zoneId: string | null) => void;
   setHistogramExpanded: (exp: boolean) => void;
   setIsDecideMode: (exp: boolean) => void;
+  decideModeQuery: string | null;
+  openDecideMode: (query?: string) => void;
   fetchLayer10: (plotId: string, farmId: string, lat?: number, lng?: number, crop?: string) => Promise<void>;
   activeSurface: SurfaceData | null;
   activeConfidenceSurface: SurfaceData | null;
@@ -394,17 +403,16 @@ export function Layer10Provider({ children }: { children: ReactNode }) {
   const [selectedZone, setSelectedZone] = useState<string | null>(null);
   const [histogramExpanded, setHistogramExpanded] = useState(false);
   const [isDecideMode, setIsDecideMode] = useState(false);
-  const cacheRef = useRef<Record<string, Layer10Result>>({});
+  const [decideModeQuery, setDecideModeQuery] = useState<string | null>(null);
+
+
+  const openDecideMode = useCallback((query?: string) => {
+    setDecideModeQuery(query || null);
+    setIsDecideMode(true);
+  }, []);
 
   const fetchLayer10 = useCallback(
     async (plotId: string, _farmId: string, _lat?: number, _lng?: number, _crop?: string) => {
-      const cacheKey = `${plotId}`;
-      if (cacheRef.current[cacheKey]) {
-        if (data !== cacheRef.current[cacheKey]) {
-          setData(cacheRef.current[cacheKey]);
-        }
-        return;
-      }
 
       setLoading(true);
       setError(null);
@@ -486,17 +494,23 @@ export function Layer10Provider({ children }: { children: ReactNode }) {
           explainability_pack: runData.explainability_pack ?? {},
           scenario_pack: runData.scenario_pack ?? [],
           history_pack: runData.history_pack ?? [],
+          fallback_guidance: runData.fallback_guidance ?? {},
+
+          timeline: runData.timeline,
+          engines: runData.engines,
+          current: runData.current,
+          rawData: runData.rawData,
+          assimilation: runData.assimilation,
         };
 
         setData(mapped);
-        cacheRef.current[cacheKey] = mapped;
       } catch (e) {
         setError(e instanceof Error ? e.message : "Unknown error");
       } finally {
         setLoading(false);
       }
     },
-    [data]
+    [] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   // Derived state
@@ -592,11 +606,13 @@ export function Layer10Provider({ children }: { children: ReactNode }) {
         selectedZone,
         histogramExpanded,
         isDecideMode,
+        decideModeQuery,
         setActiveMode,
         setDetailMode,
         setSelectedZone,
         setHistogramExpanded,
         setIsDecideMode,
+        openDecideMode,
         fetchLayer10,
         activeSurface,
         activeConfidenceSurface,

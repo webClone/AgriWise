@@ -23,12 +23,14 @@ from layer1_fusion.schemas import (
 )
 
 
+from layer1_fusion.schema_legacy import FieldTensor
+
 def build_legacy_fieldtensor(
     pkg: Layer1ContextPackage,
-) -> Dict[str, Any]:
-    """Build a backward-compatible FieldTensor dict from Layer1ContextPackage.
+) -> FieldTensor:
+    """Build a backward-compatible FieldTensor from Layer1ContextPackage.
 
-    Returns a dict matching the FieldTensor schema that existing layers
+    Returns a FieldTensor matching the schema that existing layers
     consume. This is a COMPATIBILITY output — not a replacement for
     Layer1ContextPackage.
 
@@ -55,39 +57,32 @@ def build_legacy_fieldtensor(
         "data_health_overall": pkg.diagnostics.data_health.overall,
     }
 
-    return {
-        "plot_id": pkg.plot_id,
-        "run_id": pkg.run_id,
-        "version": "2.0.0-compat",
+    return FieldTensor(
+        plot_id=pkg.plot_id,
+        run_id=pkg.run_id,
+        version="2.0.0-compat",
 
-        "time_index": [],
-        "channels": [],
-        "data": [],
+        time_index=[],
+        channels=[],
+        data=[],
 
-        "grid": {},
-        "maps": {},
-        "zones": {},
-        "zone_stats": {},
+        grid={},
+        maps={},
+        zones={},
+        zone_stats={},
 
-        "plot_timeseries": plot_ts,
-        "forecast_7d": _build_forecast(pkg),
+        plot_timeseries=plot_ts,
+        forecast_7d=_build_forecast(pkg),
 
-        "static": static,
-        "provenance": provenance,
+        static=static,
+        provenance=provenance,
 
-        "daily_state": {},
-        "state_uncertainty": {},
-        "provenance_log": [],
-        "spatial_reliability": {},
-        "boundary_info": {},
-
-        # Compatibility flags
-        "_compatibility_mode": True,
-        "_source_context_package_ref": pkg.run_id,
-        "_missing_values_preserved": True,
-        "_gaps_ref": [g.gap_type for g in pkg.gaps],
-        "_conflicts_ref": [c.conflict_type for c in pkg.conflicts],
-    }
+        daily_state={},
+        state_uncertainty={},
+        provenance_log=[],
+        spatial_reliability={},
+        boundary_info={}
+    )
 
 
 def _build_plot_timeseries(pkg: Layer1ContextPackage) -> List[Dict]:

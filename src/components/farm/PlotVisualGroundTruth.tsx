@@ -3,6 +3,7 @@
 import { Camera, AlertTriangle } from "lucide-react";
 import PlotPhotoGallery from "./PlotPhotoGallery";
 import IPCameraManager from "./IPCameraManager";
+import SatelliteTileCard from "./SatelliteTileCard";
 
 interface PlotPhoto {
   id: string;
@@ -19,9 +20,12 @@ interface PlotVisualGroundTruthProps {
       cameras?: any[];
       [key: string]: any;
   };
+  lat?: number;
+  lng?: number;
+  polygon?: any;
 }
 
-export default function PlotVisualGroundTruth({ plot }: PlotVisualGroundTruthProps) {
+export default function PlotVisualGroundTruth({ plot, lat, lng, polygon }: PlotVisualGroundTruthProps) {
   const photos = plot.photos || [];
   const sortedPhotos = [...photos].sort((a: PlotPhoto, b: PlotPhoto) => new Date(b.date).getTime() - new Date(a.date).getTime());
   const lastPhoto = sortedPhotos[0];
@@ -36,12 +40,12 @@ export default function PlotVisualGroundTruth({ plot }: PlotVisualGroundTruthPro
   }
 
   return (
-    <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+    <div className="rounded-2xl border border-white/[0.06] overflow-hidden" style={{ background: "linear-gradient(180deg, rgba(11,16,21,0.9) 0%, rgba(8,12,25,0.95) 100%)" }}>
       
       {/* Header */}
-      <div className="bg-slate-50 dark:bg-slate-950 px-6 py-4 border-b border-slate-100 dark:border-slate-800 flex justify-between items-start">
+      <div className="px-6 py-4 border-b border-white/[0.04] flex justify-between items-start">
         <div>
-            <h3 className="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-2">
+            <h3 className="font-semibold text-white flex items-center gap-2 text-sm">
             <Camera className="text-blue-500" size={18} />
             Visual Ground Truth
             </h3>
@@ -51,7 +55,7 @@ export default function PlotVisualGroundTruth({ plot }: PlotVisualGroundTruthPro
         </div>
         
         {showMotivationalWarning && (
-            <div className="flex items-center gap-2 bg-amber-50 dark:bg-amber-900/20 px-3 py-1.5 rounded-lg border border-amber-100 dark:border-amber-800/50">
+            <div className="flex items-center gap-2 bg-amber-500/10 px-3 py-1.5 rounded-lg border border-amber-500/15">
                 <AlertTriangle size={14} className="text-amber-500" />
                 <div className="flex flex-col">
                     <p className="text-[10px] font-bold text-amber-600 dark:text-amber-400 leading-tight">
@@ -67,12 +71,19 @@ export default function PlotVisualGroundTruth({ plot }: PlotVisualGroundTruthPro
 
       <div className="p-6 space-y-8">
         
-        {/* Photos Section */}
+        {/* Satellite RGB Tile — Auto-captured from Sentinel-2 */}
+        <section>
+            <SatelliteTileCard plotId={plot.id} lat={lat} lng={lng} polygon={polygon} />
+        </section>
+
+        <hr className="border-white/[0.04]" />
+
+        {/* User-Uploaded Photos */}
         <section>
             <PlotPhotoGallery plotId={plot.id} photos={plot.photos || []} />
         </section>
 
-        <hr className="border-slate-100 dark:border-slate-800" />
+        <hr className="border-white/[0.04]" />
 
         {/* Cameras Section */}
         <section>

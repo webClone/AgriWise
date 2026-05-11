@@ -110,7 +110,7 @@ class DataFusionEngine:
         tracker.log_event("START_RUN", metadata={"plot_id": plot_id, "start": start_date, "end": end_date})
 
         mode = "Pandas" if HAS_PANDAS else "PurePython"
-        print(f"🔄 [Layer 1] Starting Production Fusion Run: {run_id} ({mode} Mode)")
+        print(f"[SYNC] [Layer 1] Starting Production Fusion Run: {run_id} ({mode} Mode)")
 
         # --- Step 1: Acquire Evidence (Catalog) ---
         evidence_pool, acquisition_snapshot = self._acquire_all_evidence(lat, lng, start_date, end_date, polygon_coords)
@@ -141,9 +141,9 @@ class DataFusionEngine:
             
             obs_count = len(perception_bundle.observation_products)
             spatial_count = len(perception_bundle.spatially_supported_observations)
-            print(f"🔬 [Layer 0] Perception bundle: {obs_count} observations ({spatial_count} spatially supported)")
+            print(f"[SCOPE] [Layer 0] Perception bundle: {obs_count} observations ({spatial_count} spatially supported)")
         except Exception as e:
-            print(f"⚠️ [Layer 0] Perception adapter skipped: {e}")
+            print(f"[WARN] [Layer 0] Perception adapter skipped: {e}")
         
         # Merge structured user evidence down from Orchestrator Layer
         if user_evidence:
@@ -165,7 +165,7 @@ class DataFusionEngine:
                         payload=item.get("payload", {})
                     ))
                 except Exception as e:
-                    print(f"⚠️ Failed to parse user evidence item: {e}")
+                    print(f"[WARN] Failed to parse user evidence item: {e}")
 
         tracker.log_event(
             "ACQUIRED_EVIDENCE",
@@ -215,10 +215,10 @@ class DataFusionEngine:
                     tensor, valid_evidence, daily_records,
                     start_date, end_date, tracker
                 )
-                print(f"✅ [Layer 0] Daily state assimilation complete: "
+                print(f"[OK] [Layer 0] Daily state assimilation complete: "
                       f"{len(tensor.daily_state)} zones")
             except Exception as e:
-                print(f"⚠️ [Layer 0] Assimilation failed, falling back to interpolation: {e}")
+                print(f"[WARN] [Layer 0] Assimilation failed, falling back to interpolation: {e}")
         # =====================================================================
 
         # Attach plot timeseries
@@ -249,11 +249,11 @@ class DataFusionEngine:
                 if composites:
                     raster_composites = composites
                     self._pending_raster_composites = composites  # Hand off to _perform_spatial_fusion
-                    print(f"🛰️ [Layer 1] Raster composites acquired: {list(composites.keys())}")
+                    print(f"[SAT] [Layer 1] Raster composites acquired: {list(composites.keys())}")
                 else:
-                    print(f"⚠️ [Layer 1] No valid raster composites for this window")
+                    print(f"[WARN] [Layer 1] No valid raster composites for this window")
             except Exception as e:
-                print(f"⚠️ [Layer 1] Raster composite acquisition skipped: {e}")
+                print(f"[WARN] [Layer 1] Raster composite acquisition skipped: {e}")
 
         # 5. Spatial Fusion (build tensor.data from daily_records — now includes rain)
         self._perform_spatial_fusion(
@@ -292,7 +292,7 @@ class DataFusionEngine:
             }
         }
 
-        print(f"✅ [Layer 1] Fusion Complete. Run ID: {run_id}")
+        print(f"[OK] [Layer 1] Fusion Complete. Run ID: {run_id}")
 
         # Serialize perception bundle for downstream layers
         obs_products = None
@@ -306,7 +306,7 @@ class DataFusionEngine:
                     "has_row_features": perception_bundle.row_features is not None and perception_bundle.row_features.confidence > 0,
                 }
             except Exception as e:
-                print(f"⚠️ [Layer 0] Observation product serialization failed: {e}")
+                print(f"[WARN] [Layer 0] Observation product serialization failed: {e}")
 
         return FusionOutput(
             tensor=tensor,
@@ -364,30 +364,80 @@ class DataFusionEngine:
 
     def _acquire_all_evidence(self, lat: float, lng: float, start: str, end: str, polygon_coords: Optional[list] = None) -> tuple[List["EvidenceItem"], Dict[str, Any]]:
         pool: List[EvidenceItem] = []
-        snapshot: Dict[str, Any] = {"sar": {}, "optical": {}, "weather": {}}
+        snapshot: Dict[str, Any] = {"sar": {}, "optical": {}, "weather": {}, "forecast": {}}
 
         start_dt = datetime.strptime(start, "%Y-%m-%d")
         end_dt = datetime.strptime(end, "%Y-%m-%d")
+        sar_days = max(1, (end_dt - start_dt).days + 1)
 
-        # 1. Optical (Sentinel-2)
-        try:
-            opt_resp = fetch_ndvi_timeseries(lat, lng, polygon_coords=polygon_coords)
-            opt_raw = opt_resp.get("data", []) or []
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _fetch_opt():
+            try:
+                opt_resp = fetch_ndvi_timeseries(lat, lng, polygon_coords=polygon_coords)
+                return "opt", opt_resp, None
+            except Exception as e:
+                return "opt", None, str(e)
+                
+        def _fetch_sar():
+            try:
+                sar_resp = fetch_sar_timeseries(lat, lng, days=sar_days, polygon_coords=polygon_coords) or {}
+                return "sar", sar_resp, None
+            except Exception as e:
+                return "sar", None, str(e)
+                
+        def _fetch_wx():
+            try:
+                wx_raw = fetch_historical_weather(lat, lng, start, end)
+                return "wx", wx_raw, None
+            except Exception as e:
+                return "wx", None, str(e)
+                
+        def _fetch_fc():
+            try:
+                forecast_raw = fetch_openweather_forecast(lat, lng)
+                return "fc", forecast_raw, None
+            except Exception as e:
+                return "fc", None, str(e)
+                
+        def _fetch_soil():
+            try:
+                soil_raw = fetch_soil_properties(lat, lng)
+                return "soil", soil_raw, None
+            except Exception as e:
+                return "soil", None, str(e)
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [
+                executor.submit(_fetch_opt),
+                executor.submit(_fetch_sar),
+                executor.submit(_fetch_wx),
+                executor.submit(_fetch_fc),
+                executor.submit(_fetch_soil),
+            ]
+            for future in futures:
+                k, data, err = future.result()
+                results[k] = (data, err)
+
+        # 1. Optical
+        opt_data, opt_err = results["opt"]
+        opt_raw = []
+        if opt_err:
+            snapshot["optical"] = {"status": "ERROR", "error": opt_err}
+        else:
+            opt_raw = opt_data.get("data", []) or []
             snapshot["optical"] = {
                 "status": "OK",
                 "count": len(opt_raw),
-                "keys_seen": list(opt_resp.keys()) if isinstance(opt_resp, dict) else [],
+                "keys_seen": list(opt_data.keys()) if isinstance(opt_data, dict) else [],
                 "sample_keys": list(opt_raw[0].keys()) if opt_raw else []
             }
-        except Exception as e:
-            opt_raw = []
-            snapshot["optical"] = {"status": "ERROR", "error": str(e)}
-
+        
         for rec in opt_raw:
             ts = self._safe_parse_date(rec.get("date"))
             if not self._in_range(ts, start_dt, end_dt):
                 continue
-
             scene_id = rec.get("scene_id") or rec.get("id") or self._hash_payload(rec)
             pool.append(EvidenceItem(
                 id=f"s2_{ts.strftime('%Y-%m-%d')}_{scene_id}",
@@ -397,32 +447,27 @@ class DataFusionEngine:
                 payload=rec
             ))
 
-        # 2. SAR (Sentinel-1) — respect requested window
-        sar_days = max(1, (end_dt - start_dt).days + 1)
-        
-        try:
-            sar_resp = fetch_sar_timeseries(lat, lng, days=sar_days, polygon_coords=polygon_coords) or {}
-            sar_raw = sar_resp.get("timeseries", []) or sar_resp.get("data", []) or []  # accept both shapes
-            
+        # 2. SAR
+        sar_data, sar_err = results["sar"]
+        sar_raw = []
+        if sar_err:
+            snapshot["sar"] = {"status": "ERROR", "error": sar_err}
+        else:
+            sar_raw = sar_data.get("timeseries", []) or sar_data.get("data", []) or []
             snapshot["sar"] = {
                 "status": "OK",
                 "count": len(sar_raw),
-                "keys_seen": list(sar_resp.keys()) if isinstance(sar_resp, dict) else [],
+                "keys_seen": list(sar_data.keys()) if isinstance(sar_data, dict) else [],
                 "params": {"lat": lat, "lng": lng, "days": sar_days},
-                "provider": "earthengine-api" # Assumption
+                "provider": "earthengine-api"
             }
-            if not sar_raw and "error" in sar_resp:
-                 snapshot["sar"]["provider_error"] = sar_resp["error"]
-
-        except Exception as e:
-            sar_raw = []
-            snapshot["sar"] = {"status": "ERROR", "error": str(e)}
-
+            if not sar_raw and "error" in sar_data:
+                 snapshot["sar"]["provider_error"] = sar_data["error"]
+                 
         for rec in sar_raw:
             ts = self._safe_parse_date(rec.get("date"))
             if not self._in_range(ts, start_dt, end_dt):
                 continue
-
             scene_id = rec.get("scene_id") or rec.get("id") or self._hash_payload(rec)
             pool.append(EvidenceItem(
                 id=f"s1_{ts.strftime('%Y-%m-%d')}_{scene_id}",
@@ -432,98 +477,85 @@ class DataFusionEngine:
                 payload=rec
             ))
 
-        # 3. Weather (modeled)
-        try:
-            wx_raw = fetch_historical_weather(lat, lng, start, end)
-            snapshot["weather"] = {"status": "OK", "keys": list(wx_raw.keys()) if isinstance(wx_raw, dict) else []}
-        except Exception as e:
-            wx_raw = {}
-            snapshot["weather"] = {"status": "ERROR", "error": str(e)}
+        # 3. Weather
+        wx_data, wx_err = results["wx"]
+        if wx_err:
+            snapshot["weather"] = {"status": "ERROR", "error": wx_err}
+        else:
+            snapshot["weather"] = {"status": "OK", "keys": list(wx_data.keys()) if isinstance(wx_data, dict) else []}
+            if wx_data:
+                if "records" in wx_data:
+                    for rec in wx_data.get("records", []):
+                        t = rec.get("date")
+                        ts = self._safe_parse_date(t)
+                        if not self._in_range(ts, start_dt, end_dt):
+                            continue
+                        payload = {
+                            "date": t,
+                            "temperature_mean": rec.get("temp_mean"),
+                            "temperature_max": rec.get("temp_max"),
+                            "temperature_min": rec.get("temp_min"),
+                            "precipitation": rec.get("precipitation"),
+                            "rain": rec.get("rain"),
+                            "et0": rec.get("et0"),
+                            "wind_max": rec.get("wind_max"),
+                            "solar_radiation": rec.get("solar_radiation"),
+                        }
+                        pool.append(EvidenceItem(
+                            id=f"wx_{t}",
+                            source_type=EvidenceSourceType.WEATHER,
+                            timestamp=ts,
+                            location_scope="point",
+                            payload=payload
+                        ))
+                elif "daily" in wx_data:
+                    d = wx_data.get("daily", {}) or {}
+                    times = d.get("time", []) or []
+                    for i, t in enumerate(times):
+                        ts = self._safe_parse_date(t)
+                        if not self._in_range(ts, start_dt, end_dt):
+                            continue
+                        payload = {
+                            "date": t,
+                            "temperature_mean": (d.get("temperature_2m_mean", [None]) or [None])[i],
+                            "precipitation": (d.get("precipitation_sum", [None]) or [None])[i],
+                            "rain": (d.get("rain_sum", [None]) or [None])[i] if "rain_sum" in d else None,
+                            "et0": (d.get("et0_fao_evapotranspiration", [None]) or [None])[i] if "et0_fao_evapotranspiration" in d else None,
+                        }
+                        pool.append(EvidenceItem(
+                            id=f"wx_{t}",
+                            source_type=EvidenceSourceType.WEATHER,
+                            timestamp=ts,
+                            location_scope="point",
+                            payload=payload
+                        ))
 
-        if wx_raw:
-            # New schema: "records"
-            if "records" in wx_raw:
-                for rec in wx_raw.get("records", []):
-                    t = rec.get("date")
-                    ts = self._safe_parse_date(t)
-                    if not self._in_range(ts, start_dt, end_dt):
-                        continue
-
-                    payload = {
-                        "date": t,
-                        "temperature_mean": rec.get("temp_mean"),
-                        "precipitation": rec.get("precipitation"),
-                        "rain": rec.get("rain"),
-                        "et0": rec.get("et0"),
-                    }
-
-                    pool.append(EvidenceItem(
-                        id=f"wx_{t}",
-                        source_type=EvidenceSourceType.WEATHER,
-                        timestamp=ts,
-                        location_scope="point",
-                        payload=payload
-                    ))
-
-            # Old schema support (if "daily")
-            elif "daily" in wx_raw:
-                d = wx_raw.get("daily", {}) or {}
-                times = d.get("time", []) or []
-
-                for i, t in enumerate(times):
-                    ts = self._safe_parse_date(t)
-                    if not self._in_range(ts, start_dt, end_dt):
-                        continue
-
-                    payload = {
-                        "date": t,
-                        "temperature_mean": (d.get("temperature_2m_mean", [None]) or [None])[i],
-                        "precipitation": (d.get("precipitation_sum", [None]) or [None])[i],
-                        "rain": (d.get("rain_sum", [None]) or [None])[i] if "rain_sum" in d else None,
-                        "et0": (d.get("et0_fao_evapotranspiration", [None]) or [None])[i] if "et0_fao_evapotranspiration" in d else None,
-                    }
-
-                    pool.append(EvidenceItem(
-                        id=f"wx_{t}",
-                        source_type=EvidenceSourceType.WEATHER,
-                        timestamp=ts,
-                        location_scope="point",
-                        payload=payload
-                    ))
-
-        # 4. Forecast (Open-Meteo)
-        try:
-            forecast_raw = fetch_openweather_forecast(lat, lng)
-            fc_list = forecast_raw.get("forecast", []) if forecast_raw else []
+        # 4. Forecast
+        fc_data, fc_err = results["fc"]
+        if fc_err:
+            snapshot["forecast"] = {"status": "ERROR", "error": fc_err}
+        else:
+            fc_list = fc_data.get("forecast", []) if fc_data else []
             snapshot["forecast"] = {"status": "OK", "count": len(fc_list)} if fc_list else {"status": "EMPTY"}
-        except Exception as e:
-            forecast_raw = []
-            fc_list = []
-            snapshot["forecast"] = {"status": "ERROR", "error": str(e)}
+            if fc_list:
+                for i, day_fc in enumerate(fc_list):
+                    pool.append(EvidenceItem(
+                        id=f"wx_fc_{day_fc.get('date', i)}",
+                        source_type=EvidenceSourceType.WEATHER_FORECAST,
+                        timestamp=datetime.now(),
+                        location_scope="point",
+                        payload=day_fc
+                    ))
 
-        if fc_list:
-            for i, day_fc in enumerate(fc_list):
-                pool.append(EvidenceItem(
-                    id=f"wx_fc_{day_fc.get('date', i)}",
-                    source_type=EvidenceSourceType.WEATHER_FORECAST,
-                    timestamp=datetime.now(),
-                    location_scope="point",
-                    payload=day_fc
-                ))
-
-        # 5. Soil (Static)
-        try:
-            soil_raw = fetch_soil_properties(lat, lng)
-        except Exception:
-            soil_raw = {}
-            
-        if soil_raw:
+        # 5. Soil
+        soil_data, soil_err = results["soil"]
+        if soil_data and not soil_err:
             pool.append(EvidenceItem(
-                id=f"soil_grids_static_{self._hash_payload(soil_raw)}",
+                id=f"soil_grids_static_{self._hash_payload(soil_data)}",
                 source_type=EvidenceSourceType.SOIL,
                 timestamp=datetime.now(),
                 location_scope="point",
-                payload=soil_raw
+                payload=soil_data
             ))
 
         return pool, snapshot
@@ -756,20 +788,28 @@ class DataFusionEngine:
         # Initialize Backend (Try Scientific, Fallback to Pure Python)
         try:
             backend = RasterioBackend()
-            print("🗺️ [Spatial] Using RasterioBackend (Scientific Mode)")
+            print("[MAP] [Spatial] Using RasterioBackend (Scientific Mode)")
         except ImportError:
             backend = TileStoreBackend()
-            print("⚠️ [Spatial] Rasterio not found. Using TileStoreBackend (Restricted Mode)")
+            print("[WARN] [Spatial] Rasterio not found. Using TileStoreBackend (Restricted Mode)")
 
         # Create GridSpec from Plot Geometry or generate a fallback bbox
-        if polygon_coords and (isinstance(polygon_coords, list) and isinstance(polygon_coords[0], list)):
-            print("🗺️ [Spatial] Using real polygon coordinates from caller")
+        target_polygon = None
+        if polygon_coords and isinstance(polygon_coords, list) and isinstance(polygon_coords[0], list):
+            print("[MAP] [Spatial] Using real polygon coordinates from caller")
             target_polygon = polygon_coords
-        elif polygon_coords and isinstance(polygon_coords, dict) and "features" in polygon_coords:
-             print("🗺️ [Spatial] Using real GeoJSON feature from caller")
-             target_polygon = polygon_coords["features"][0]["geometry"]["coordinates"][0] # simple extractor
-        else:
-            print("⚠️ [Spatial] No polygon provided. Generating 100x100m fallback bbox around centroid.")
+        elif polygon_coords and isinstance(polygon_coords, dict):
+             if "features" in polygon_coords:
+                 print("[MAP] [Spatial] Using real GeoJSON FeatureCollection from caller")
+                 target_polygon = polygon_coords["features"][0]["geometry"]["coordinates"][0] # simple extractor
+             elif polygon_coords.get("type") == "Feature":
+                 print("[MAP] [Spatial] Using real GeoJSON Feature from caller")
+                 target_polygon = polygon_coords["geometry"]["coordinates"][0]
+             else:
+                 print("[WARN] [Spatial] Unknown polygon dict format")
+        
+        if not polygon_coords or target_polygon is None:
+            print("[WARN] [Spatial] No polygon provided. Generating 100x100m fallback bbox around centroid.")
             offset = 0.00045 # roughly 50m
             target_polygon = [
                 (lng - offset, lat + offset),
@@ -780,6 +820,11 @@ class DataFusionEngine:
             ]
             
         tensor.grid_spec = backend.create_grid(target_polygon, resolution_m=10.0)
+        
+        # Save polygon to static metadata so downstream layers (like Layer 10) can use it for exact masking
+        if not hasattr(tensor, 'static') or tensor.static is None:
+            tensor.static = {}
+        tensor.static["polygon_coords"] = target_polygon
 
         w = tensor.grid_spec.width
         h = tensor.grid_spec.height
@@ -795,7 +840,13 @@ class DataFusionEngine:
             day = row.get("date", "")
             t_grid = []  # [H][W][C]
 
-            ndvi = row.get("ndvi_smoothed", 0.0) or 0.0
+            import math
+            ndvi_raw = row.get("ndvi_smoothed")
+            if ndvi_raw is None or (isinstance(ndvi_raw, float) and math.isnan(ndvi_raw)):
+                ndvi = None
+            else:
+                ndvi = ndvi_raw
+
             vv = row.get("vv_interpolated", row.get("vv", 0.0)) or 0.0
             vh = row.get("vh_interpolated", row.get("vh", 0.0)) or 0.0
             rain = row.get("rain", 0.0) or 0.0
@@ -806,8 +857,15 @@ class DataFusionEngine:
                 for x in range(w):
                     pixel = [0.0] * len(channels)
 
+                    # The assimilation system provides physically correct assimilated data at the plot level.
+                    # We no longer add artificial deterministic noise (checkerboard patterns) because it misrepresents the agronomic reality.
+                    variation = 0.0
+
                     if FieldTensorChannels.NDVI in c_map:
-                        pixel[c_map[FieldTensorChannels.NDVI]] = None  # Stop flat spatial broadcast
+                        if ndvi is not None:
+                            pixel[c_map[FieldTensorChannels.NDVI]] = max(0.0, min(1.0, ndvi + variation))
+                        else:
+                            pixel[c_map[FieldTensorChannels.NDVI]] = None
 
                     if FieldTensorChannels.NDVI_UNC in c_map:
                         pixel[c_map[FieldTensorChannels.NDVI_UNC]] = float(unc)
@@ -815,11 +873,10 @@ class DataFusionEngine:
                     if FieldTensorChannels.PRECIPITATION in c_map:
                         pixel[c_map[FieldTensorChannels.PRECIPITATION]] = float(rain)
 
-                    # Populate SAR channels if present in enum
                     if hasattr(FieldTensorChannels, "VV") and FieldTensorChannels.VV in c_map:
-                        pixel[c_map[FieldTensorChannels.VV]] = None  # Stop flat spatial broadcast
+                        pixel[c_map[FieldTensorChannels.VV]] = vv + variation * 2
                     if hasattr(FieldTensorChannels, "VH") and FieldTensorChannels.VH in c_map:
-                        pixel[c_map[FieldTensorChannels.VH]] = None  # Stop flat spatial broadcast
+                        pixel[c_map[FieldTensorChannels.VH]] = vh + variation * 2
 
                     row_grid.append(pixel)
                 t_grid.append(row_grid)
@@ -849,7 +906,7 @@ class DataFusionEngine:
                 if not hasattr(tensor, 'maps') or tensor.maps is None:
                     tensor.maps = {}
                 tensor.maps["ndvi"] = ndvi_map
-                print(f"🛰️ [Spatial] NDVI raster injected: {rc_h}×{rc_w}")
+                print(f"[SAT] [Spatial] NDVI raster injected: {rc_h}×{rc_w}")
 
             # NDMI raster → maps["ndmi"]
             ndmi_rc = raster_composites.get("NDMI")
@@ -913,13 +970,13 @@ class DataFusionEngine:
             tensor.zones = generate_management_zones(tensor.plot_id, ndvi_stack, sar_stack, tensor.grid_spec.to_dict())
             tensor.zone_stats = compute_zone_stats(ndvi_stack, sar_stack, tensor.zones, tensor.time_index)
         except Exception as e:
-            print(f"⚠️ [Spatial] Numpy zone engine failed: {e}. Using Pure Python fallback.")
+            print(f"[WARN] [Spatial] Numpy zone engine failed: {e}. Using Pure Python fallback.")
             try:
                 from layer1_fusion.zone_engine import generate_management_zones_pure_python, compute_zone_stats_pure_python
                 tensor.zones = generate_management_zones_pure_python(tensor.plot_id, ndvi_stack, sar_stack, tensor.grid_spec.to_dict())
                 tensor.zone_stats = compute_zone_stats_pure_python(ndvi_stack, sar_stack, tensor.zones, tensor.time_index)
             except Exception as e2:
-                print(f"⚠️ [Spatial] Pure Python zone engine also failed: {e2}")
+                print(f"[WARN] [Spatial] Pure Python zone engine also failed: {e2}")
         
         # Phase A: Build Research-Grade ZoneStats (p10/p90, uncertainty, polygon-aware labels)
         try:
@@ -934,7 +991,7 @@ class DataFusionEngine:
                 soil_static=soil_static
             )
         except Exception as e:
-            print(f"⚠️ [Spatial] ZoneStats builder failed: {e}")
+            print(f"[WARN] [Spatial] ZoneStats builder failed: {e}")
             tensor.spatial_zone_stats = []
 
         # Phase A.1: Inject GeoJSON geometries into zones (mask → lat/lng polygons)
@@ -943,7 +1000,7 @@ class DataFusionEngine:
             # Prefer the real polygon; fall back to grid_spec bounds only if absent
             if polygon_coords:
                 zone_polygon = polygon_coords
-                print(f"✅ [Spatial] Zone geometries injected from real plot polygon")
+                print(f"[OK] [Spatial] Zone geometries injected from real plot polygon")
             else:
                 gs = tensor.grid_spec.to_dict()
                 bounds = gs.get("bounds", ())
@@ -956,18 +1013,22 @@ class DataFusionEngine:
                         [min_lng, min_lat],  # SW
                         [min_lng, max_lat],  # close ring
                     ]
-                    print(f"⚠️ [Spatial] Zone geometries injected from grid_spec bounds (no real polygon)")
+                    print(f"[WARN] [Spatial] Zone geometries injected from grid_spec bounds (no real polygon)")
                 else:
                     zone_polygon = None
-                    print(f"⚠️ [Spatial] No bounds in grid_spec — zone geometries skipped")
+                    print(f"[WARN] [Spatial] No bounds in grid_spec — zone geometries skipped")
 
             if zone_polygon:
                 tensor.zones = inject_zone_geometries(tensor.zones, zone_polygon)
         except Exception as e:
-            print(f"⚠️ [Spatial] Zone geometry injection failed: {e}")
+            print(f"[WARN] [Spatial] Zone geometry injection failed: {e}")
 
     def _merge_weather_into_records(self, records: List[Dict], evidence: List["EvidenceItem"]):
-        """Step 6: Weather Fusion into daily records BEFORE tensor build."""
+        """Step 6: Weather Fusion into daily records BEFORE tensor build.
+        
+        Now propagates real temp_max/temp_min instead of just temp_mean,
+        so downstream Kalman drivers and L4 SWB receive accurate diurnal range.
+        """
         wx_items = [e for e in evidence if e.source_type == EvidenceSourceType.WEATHER and e.timestamp]
         wx_map = {e.timestamp.strftime("%Y-%m-%d"): e.payload for e in wx_items}
 
@@ -979,14 +1040,25 @@ class DataFusionEngine:
                 w = wx_map[d] or {}
                 rain = w.get("precipitation", 0.0)
                 tmean = w.get("temperature_mean", 20.0)
+                tmax = w.get("temperature_max")
+                tmin = w.get("temperature_min")
+                et0 = w.get("et0")
                 row["rain"] = float(rain) if rain is not None else 0.0
                 row["tmean"] = float(tmean) if tmean is not None else 20.0
+                # Propagate real temp extremes (no synthetic ±5°C)
+                row["temp_max"] = float(tmax) if tmax is not None else None
+                row["temp_min"] = float(tmin) if tmin is not None else None
+                row["et0"] = float(et0) if et0 is not None else None
+                row["wind_speed"] = float(w.get("wind_max", 0.0) or 0.0)
                 # Pure Python GDD (base 10C default; crop-specific base can be added later)
                 row["gdd"] = max(0.0, row["tmean"] - 10.0)
             else:
                 # Ensure keys exist for downstream consumers
                 row.setdefault("rain", 0.0)
                 row.setdefault("tmean", 20.0)
+                row.setdefault("temp_max", None)
+                row.setdefault("temp_min", None)
+                row.setdefault("et0", None)
                 row.setdefault("gdd", max(0.0, row["tmean"] - 10.0))
 
     def _merge_static(self, tensor: "FieldTensor", evidence: List["EvidenceItem"]):
@@ -1029,7 +1101,7 @@ class DataFusionEngine:
                     
                 texture_class = str(raw.get("texture_class", "unknown"))
             except (ValueError, TypeError) as e:
-                print(f"⚠️ [Spatial] Error parsing static soil data: {e}")
+                print(f"[WARN] [Spatial] Error parsing static soil data: {e}")
                 data_source = "defaults_parse_error"
 
         tensor.static = {
@@ -1073,6 +1145,7 @@ class DataFusionEngine:
         (daily_state, state_uncertainty, provenance_log) into the tensor.
         """
         # ---- A) Build daily weather dict from weather evidence ----
+        # Use real temp_max/temp_min from Open-Meteo (no synthetic ±5°C)
         daily_weather = {}
         for rec in daily_records:
             d = rec.get("date")
@@ -1081,14 +1154,17 @@ class DataFusionEngine:
             tmean = rec.get("tmean", 20.0)
             rain = rec.get("rain", 0.0)
             et0 = rec.get("et0", 3.0)
+            # Use real temp extremes if available, otherwise derive from tmean
+            tmax = rec.get("temp_max")
+            tmin = rec.get("temp_min")
             daily_weather[d] = {
-                "temp_max": tmean + 5.0,   # Approximate from mean
-                "temp_min": tmean - 5.0,
+                "temp_max": float(tmax) if tmax is not None else tmean + 5.0,
+                "temp_min": float(tmin) if tmin is not None else tmean - 5.0,
                 "precipitation": rain,
                 "et0": float(et0) if et0 is not None else 3.0,
             }
         
-        # If weather evidence has explicit temp_max/min, use them
+        # If weather evidence has explicit temp_max/min, always prefer them
         for e in evidence:
             if e.source_type == EvidenceSourceType.WEATHER and e.timestamp:
                 d = e.timestamp.strftime("%Y-%m-%d")
@@ -1263,7 +1339,7 @@ class DataFusionEngine:
                 tensor.provenance["layer0_conflicts"] = conflicts
                 tensor.provenance["layer0_reliability"] = dict(validator.source_reliability)
         except Exception as ve:
-            print(f"⚠️ [Layer 0] Validation graph failed: {ve}")
+            print(f"[WARN] [Layer 0] Validation graph failed: {ve}")
 
         # ---- H) Boundary info placeholder ----
         tensor.boundary_info = {
@@ -1310,7 +1386,7 @@ class DataFusionEngine:
             alerts = audit_result.get("trust_report", {}).get("alerts", [])
             print(f"📊 [Layer 0] Audit: Grade={grade} Score={score:.2f} Alerts={len(alerts)}")
         except Exception as ae:
-            print(f"⚠️ [Layer 0] Audit failed: {ae}")
+            print(f"[WARN] [Layer 0] Audit failed: {ae}")
 
         # ---- J) Runtime Invariants — auto-clamp + log violations ----
         try:
@@ -1328,7 +1404,7 @@ class DataFusionEngine:
                 n_fixed = sum(1 for v in violations if v.auto_fixed)
                 print(f"🔒 [Layer 0] Invariants: {len(violations)} issues ({n_fixed} auto-fixed)")
         except Exception as ie:
-            print(f"⚠️ [Layer 0] Invariant check failed: {ie}")
+            print(f"[WARN] [Layer 0] Invariant check failed: {ie}")
 
         # ---- K) Persist engine state for continuity ----
         try:
@@ -1347,7 +1423,7 @@ class DataFusionEngine:
                 validation_state=vg_state,
             )
         except Exception as pe:
-            print(f"⚠️ [Layer 0] State persist failed: {pe}")
+            print(f"[WARN] [Layer 0] State persist failed: {pe}")
 
     def _generate_health_report(self, evidence_pool: List["EvidenceItem"], records: List[Dict]) -> Dict:
         """Step 9: Monitoring & QA"""

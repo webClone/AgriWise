@@ -77,7 +77,7 @@ class ChatPayload:
     memory: Dict[str, Any] = field(default_factory=dict) # Farmer level, open loops, known context
     ui_hints: Dict[str, Any] = field(default_factory=dict) # Display config
     visuals: List[ChatVisual] = field(default_factory=list) # Rich charts
-    data_inventory: Dict[str, str] = field(default_factory=dict) # ✅/⚠️/❌ summary
+    data_inventory: Dict[str, str] = field(default_factory=dict) # [OK]/[WARN]/❌ summary
 
 from orchestrator_v2.intents import Intent
 
@@ -86,15 +86,15 @@ def build_chat_payload(
     user_query: Optional[str] = None,
     intent: Intent = Intent.DECISION,
     history: Optional[List[Dict[str, str]]] = None,
+    user_mode: str = "farmer",
 ) -> ChatPayload:
     """
     Transform the massive RunArtifact into a clean ChatPayload.
     """
-    if intent == Intent.DATA_QUERY:
-        return _build_data_only_payload(artifact, user_query)
-        
     # Determine Assistant Mode based on Intent
-    if intent == Intent.DIAGNOSIS:
+    if intent == Intent.DATA_QUERY:
+        assistant_mode = "DATA_ONLY"
+    elif intent == Intent.DIAGNOSIS:
         assistant_mode = "MONITORING" # Focus on threats
     elif intent == Intent.NUTRIENT:
         assistant_mode = "NUTRIENT"
@@ -222,8 +222,6 @@ def build_chat_payload(
             ))
             
     # L7 Actions (Season Planning)
-    print("DEBUG L7_MAP type:", type(artifact.layer_7.output if artifact.layer_7 else None))
-    print("DEBUG L7_MAP keys/attrs:", dir(artifact.layer_7.output) if artifact.layer_7 and artifact.layer_7.output else "N/A")
     if artifact.layer_7 and artifact.layer_7.output:
          l7_rec = getattr(artifact.layer_7.output, "chosen_plan", None)
          l7_options = getattr(artifact.layer_7.output, "options", [])
@@ -354,7 +352,9 @@ def build_chat_payload(
         user_query=user_query,
         mode=mode,
         quality=quality_summary,
-        history=history
+        history=history,
+        artifact=artifact,
+        user_mode=user_mode
     )
     
     # Add low-impact to limitations if ARF succeeded
@@ -420,6 +420,25 @@ def build_chat_payload(
              snapshot["soil_sand"] = f"{static_props.get('soil_sand_mean', 'N/A')}%"
              snapshot["soil_ph"] = static_props.get("soil_ph_mean", "N/A")
              snapshot["soil_soc"] = static_props.get("soil_org_c_mean", "N/A")
+
+             # IoT sensor data from ground-truth injection
+             sensor_summary = static_props.get("sensor_summary", {})
+             if sensor_summary:
+                 sm = sensor_summary.get("soil_moisture")
+                 if sm is not None:
+                     snapshot["iot_soil_moisture"] = f"{sm:.1f}%"
+                 temp = sensor_summary.get("temperature")
+                 if temp is not None:
+                     snapshot["iot_temperature"] = f"{temp:.1f}°C"
+                 hum = sensor_summary.get("humidity")
+                 if hum is not None:
+                     snapshot["iot_humidity"] = f"{hum:.0f}%"
+                 ec = sensor_summary.get("ec")
+                 if ec is not None:
+                     snapshot["iot_ec"] = f"{ec:.2f} mS/cm"
+             iot_sensors = static_props.get("iot_sensors", [])
+             if iot_sensors:
+                 snapshot["iot_sensor_count"] = len(iot_sensors)
              
         # Extract 7-Day Forecast Extremes
         forecast_7d = getattr(artifact.layer_1.output, "forecast_7d", [])
@@ -506,16 +525,27 @@ def build_chat_payload(
         "Optical": "❌ Missing", 
         "Historical Weather": "❌ Missing",
         "Forecast": "❌ Missing",
-        "Soil Data": "❌ Missing"
+        "Soil Data": "❌ Missing",
+        "IoT Sensors": "❌ No sensors"
     }
     
     if artifact.layer_1 and artifact.layer_1.output:
         l1o = artifact.layer_1.output
-        if any(r.get("vv_db") is not None for r in getattr(l1o, "plot_timeseries", [])): data_inv["SAR"] = "✅ Present"
-        if any(r.get("ndvi") is not None for r in getattr(l1o, "plot_timeseries", [])): data_inv["Optical"] = "✅ Present"
-        if any(r.get("rain") is not None for r in getattr(l1o, "plot_timeseries", [])): data_inv["Historical Weather"] = "✅ Present"
-        if getattr(l1o, "forecast_7d", []): data_inv["Forecast"] = "✅ Present"
-        if getattr(l1o, "static", {}).get("soil_clay_mean"): data_inv["Soil Data"] = "✅ Present"
+        if any(r.get("vv_db") is not None for r in getattr(l1o, "plot_timeseries", [])): data_inv["SAR"] = "[OK] Present"
+        if any(r.get("ndvi") is not None for r in getattr(l1o, "plot_timeseries", [])): data_inv["Optical"] = "[OK] Present"
+        if any(r.get("rain") is not None for r in getattr(l1o, "plot_timeseries", [])): data_inv["Historical Weather"] = "[OK] Present"
+        if getattr(l1o, "forecast_7d", []): data_inv["Forecast"] = "[OK] Present"
+        if getattr(l1o, "static", {}).get("soil_clay_mean"): data_inv["Soil Data"] = "[OK] Present"
+        # IoT sensor status
+        l1_static = getattr(l1o, "static", {}) or {}
+        iot_sensors = l1_static.get("iot_sensors", [])
+        sensor_summary = l1_static.get("sensor_summary", {})
+        if iot_sensors:
+            sm_val = sensor_summary.get("soil_moisture")
+            sm_str = f", moisture={sm_val:.1f}%" if sm_val is not None else ""
+            data_inv["IoT Sensors"] = f"[OK] {len(iot_sensors)} active{sm_str}"
+        elif sensor_summary:
+            data_inv["IoT Sensors"] = "[OK] Summary available"
 
     return ChatPayload(
         run_id=artifact.meta.orchestrator_run_id,
@@ -545,6 +575,8 @@ def _generate_arf_v2(
     mode: str = "MONITORING",
     quality: Dict[str, Any] = None,
     history: Optional[List[Dict[str, str]]] = None,
+    artifact: Any = None,
+    user_mode: str = "farmer"
 ) -> Dict[str, Any]:
     """
     Calls OpenRouter to generate ARF-v2 strict JSON response.
@@ -639,92 +671,30 @@ def _generate_arf_v2(
     - Quality Issues: {quality.get('degradation_modes', []) if quality else []}
     """
     
-    memory_str = f"""
-    [FARMER PROFILE]
-    - Experience Level: {memory.experience_level}
-    - Known Field Traits: {json.dumps(memory.known_context)}
-    - Open Loops (Pending tasks we asked them to do): {memory.open_loops}
-    - Recent Follow-ups Asked: {memory.asked_followups[-5:] if memory.asked_followups else []}
-    """
+    try:
+        from layer9_interface.conversation_memory import ConversationMemoryManager
+        memory_str = ConversationMemoryManager.format_farmer_profile(memory)
+    except Exception as e:
+        memory_str = f"[FARMER PROFILE] Error loading memory format: {e}"
 
-    system_prompt = f"""
-    You are AgriBrain, an expert agronomist + teacher + safety-first AI.
-    
-    INPUT CONTEXT:
-    {context_str}
-    {memory_str}
-    
-    CRITICAL RULES:
-    1. Respond ONLY in valid JSON matching the schema below. No markdown outside the JSON.
-    2. Adapt teaching depth to Farmer Experience Level ({memory.experience_level}).
-    3. DECOUPLE SUITABILITY FROM CONFIDENCE: You must separate pure agronomic feasibility from epistemic certainty.
-       - "Suitability Score" is the sheer mathematical probability of success based on knowns.
-       - "Confidence Badge" represents how much data is missing.
-       - If Quality Issues include NO_SAR or PARTIAL_DATA, your Confidence is LOW or MED. But DO NOT say "Not advisable due to data gaps".
-       - DECISION RULES:
-         a) Suitability > 70% & Confidence is HIGH/MED -> "Proceed"
-         b) Suitability 50-70% OR (High Suitability but LOW Confidence) -> "Proceed with verification" (Advise caution, list verifications as prerequisites).
-         c) Suitability < 50% -> "Delay" 
-       - NEVER block a decision purely because of missing data if the calculated Suitability remains > 50%. Instead, recommend proceeding *after* verifying the missing variable.
-    4. Provide contextual follow-up questions but DO NOT repeat 'Recent Follow-ups Asked'.
-    5. ELITE AGRONOMIST TONE: Act as a senior, highly-paid agronomic consultant. You MUST use conversational, advisory phrasing (e.g., "Before planting, I recommend confirming soil moisture..."). YOU ARE STRICTLY FORBIDDEN from using robotic, capitalized prefixes like "VERIFY: " or "MONITOR: " in your recommendation titles. Make them sound human.
-    6. CAUSAL FORECAST NARRATIVE: You MUST explicitly link the *future* 7-day forecast variables (temperature, rain, frost) found in the L7 DRIVER COVERAGE MATRIX to your final feasibility score. Do not just list static facts. State *why* the score shifted (e.g., "The forecasted 30mm rain degrades seedbed trafficability and pushes feasibility down to 65%").
-    7. ECONOMIC SENSITIVITY: Explicitly incorporate economic variance into your narrative. You MUST clearly state how data gaps or harsh forecasts impact the downside risk (p10) or break-even margin (e.g., "Under current water quota constraints, expected yield variance widens. Downside risk increases if irrigation efficiency falls.").
-    8. AVOID REDUNDANT DATA REQUESTS: Since you are already receiving the 7-day forecast evaluations (Rain risk, Frost risk) in the L7 MATRIX, DO NOT recommend that the user "check the weather forecast". You already did that.
-    9. HYPER-LOCAL GEOGRAPHIC SPECIFICITY: You MUST cite exact numeric values from the "Hyper-Local Variables" block in your reasoning cards.
-       - SOIL: If soil_clay, soil_sand, or soil_silt values are present, you MUST write them as evidence (e.g., "Clay: 34%, Sand: 48% (SoilGrids 250m)"). Do not say "loam" without backing it up with numbers.
-       - FORECAST: If forecast_min_temp_7d, forecast_max_wind_7d, or forecast_max_rain_probability are present, you MUST reference them (e.g., "Next 7 nights stay above 8°C — frost is unlikely", "Max wind exposure reaches 35 km/h — consider windbreak for young seedlings").
-       - If these values are "N/A", acknowledge the missing data source explicitly and state impact on confidence.
-    10. SPATIAL AWARENESS (HETEROGENEITY): If the MANAGEMENT ZONES block is present, you MUST speak in spatial terms. NEVER say "the field is stressed" — say "the south-east corner (Zone C, 31%) is showing severe lag, while Zone A remains vigorous". Call out patchiness and recommend targeted interventions rather than blanket applications.
-    11. ZONE-SPECIFIC REASONING: When zone suitability data is available for each zone, EVERY reasoning card MUST reference the specific zone it applies to. Example: "Zone C (south-west, 31%) has a suitability of 45% vs Zone A's 72% — the 27-point gap is driven by lower water probability (0.52 vs 0.78)."
-    12. ZONE CARDS IN RECOMMENDATIONS: Show worst 1 zone and best 1 zone in detail. Collapse others into a summary sentence. For the worst zone, always include: (a) its spatial label, (b) the primary limiting factor, (c) a targeted action for that specific zone, (d) confidence level.
-    13. WEAKEST ZONE PROTOCOL: If the user asks "which part is weakest" or "where is the problem", you MUST respond with: zone identifier, spatial descriptor, primary limiting driver with numeric evidence, targeted zone-specific action, and confidence statement tied to data coverage in that zone. Example: "Zone C (south-west, 31% of your field) is the weakest right now — suitability is only 45% (confidence: LOW). The bottleneck is water availability (0.52 probability) compounded by sparse SAR coverage. I'd recommend checking soil moisture at 10cm depth specifically in that zone first."
-    
+    arf_schema_rules = """
     RESPONSE JSON SCHEMA:
-    {{
-        "headline": "1 sentence title summarizing field status",
-        "direct_answer": "Direct answer to user's specific question",
-        "suitability_score": "Pure agronomic feasibility percentage e.g., '65%'",
-        "confidence_badge": "HIGH" | "MED" | "LOW",
-        "confidence_reason": "Why the confidence badge is what it is (e.g., 'Missing SAR data')",
-        "what_it_means": "Agronomic interpretation of the situation",
-        "reasoning_cards": [
-            {{
-                "type": "EVIDENCE" | "THREAT",
-                "claim": "Summary of finding (e.g., High fungal risk)",
-                "evidence": "What data supports this",
-                "uncertainty": "What could be wrong/missing"
-            }}
-        ],
-        "recommendations": [
-            {{
-                "type": "VERIFY" | "MONITOR" | "INTERVENE",
-                "title": "Natural human sentence (e.g., 'Confirm soil moisture at 10cm depth')",
-                "is_allowed": true/false (must match INPUT CONTEXT),
-                "blocked_reasons": ["if not allowed, why"],
-                "why_it_matters": "Benefit of doing this",
-                "how_to_do_it_steps": ["step 1", "step 2"],
-                "risk_if_wrong": "LOW" | "MED" | "HIGH"
-            }}
-        ],
-        "learning": {{
-            "level": "BEGINNER" | "INTERMEDIATE" | "EXPERT",
-            "micro_lesson": "A 3-8 line educational snippet tailored to the user's level about the core concepts involved today.",
-            "definitions": {{"Term": "Meaning"}}
-        }},
-        "followups": [
-            {{
-                "question": "Ask a relevant question to clarify context or progress. Exclude already known context.",
-                "why": "Why are you asking this?"
-            }}
-        ],
-        "internal_memory_updates": {{
+    {
+        "conversational_response": "The full, rich markdown response directly addressing the user. Speak naturally as a human agronomist colleague. Use paragraphs, bullet points, and bold text for readability. NEVER use fixed, rigid section headings like 'Evidence & Findings' or 'Recommended Actions'.",
+        "internal_memory_updates": {
             "experience_level_upgrade": "Optional string (INTERMEDIATE or EXPERT) if they demonstrate higher knowledge, else null",
-            "new_known_facts": {{"FactKey": "FactValue learned in this turn"}},
+            "new_known_facts": {"FactKey": "FactValue learned in this turn"},
             "closed_loops": ["IDs or names of pending tasks the user just confirmed they did"]
-        }}
-    }}
+        }
+    }
     """
+    
+    from orchestrator_v2.chat_context_builder import build_rich_chat_context
+    rich_context = build_rich_chat_context(artifact, user_mode, history, user_query) + "\n\n" + context_str
+    
+    from layer9_interface.prompts.chat_advisor_prompt import get_chat_advisor_system_prompt
+    system_prompt = get_chat_advisor_system_prompt(rich_context, arf_schema_rules, memory_str)
+
     
     user_prompt = user_query if user_query else "Acknowledge the context and ask the user what they would like to know about their field."
     
@@ -744,33 +714,86 @@ def _generate_arf_v2(
     messages.append({"role": "user", "content": user_prompt})
 
     try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://agriwise.app", 
-                "X-Title": "AgriWise"
-            },
-            json={
-                "model": "qwen/qwen-2.5-72b-instruct", 
-                "messages": messages,
-                "temperature": 0.4, # Lower temperature for stable JSON structure
-                "max_tokens": 1500, # Large structure needs tokens
-                "response_format": {"type": "json_object"}
-            },
-            timeout=20
-        )
-        
-        if resp.status_code == 200:
-            content = resp.json()["choices"][0]["message"]["content"].strip()
+        rj = {}
+        choices = None
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://agriwise.app", 
+                    "X-Title": "AgriWise"
+                },
+                json={
+                    "model": "meta-llama/llama-3.3-70b-instruct:free",
+                    "messages": messages,
+                    "temperature": 0.4,
+                },
+                timeout=15
+            )
+            if resp.status_code == 200:
+                rj = resp.json()
+                choices = rj.get("choices")
+            else:
+                print(f"[LLM] OpenRouter returned {resp.status_code}")
+        except Exception as e:
+            print(f"[LLM] OpenRouter network error: {e}")
+
+        if not choices and os.getenv("GEMINI_API_KEY"):
+            print("[LLM] Falling back to Gemini API...")
+            try:
+                gemini_resp = requests.post(
+                    "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                    headers={"Authorization": f"Bearer {os.getenv('GEMINI_API_KEY')}", "Content-Type": "application/json"},
+                    json={"model": "gemini-flash-latest", "messages": messages, "temperature": 0.4},
+                    timeout=20
+                )
+                print(f"[LLM-DEBUG] Gemini chat output HTTP {gemini_resp.status_code}")
+                if gemini_resp.status_code == 200:
+                    rj = gemini_resp.json()
+                    choices = rj.get("choices")
+                else:
+                    print(f"[LLM-ERROR] Gemini fallback returned {gemini_resp.status_code}: {gemini_resp.text}")
+            except Exception as e:
+                print(f"[LLM-ERROR] Gemini chat output fallback failed/timeout: {e}")
+
+        if choices and len(choices) > 0:
+            msg = choices[0].get("message", {})
+            content = msg.get("content") or ""
+            
             # Clean possible markdown block wrappers
             if content.startswith("```json"):
                 content = content[7:]
             if content.endswith("```"):
                 content = content[:-3]
+            
+            if not content.strip():
+                content = "{}"
                 
-            raw_json = json.loads(content)
+            try:
+                raw_json = json.loads(content)
+            except json.JSONDecodeError as e:
+                # Fallback for Nemotron which might drop the closing brace
+                print(f"DEBUG: JSON parse error: {e}. Trying to fix...")
+                if not content.strip().endswith("}"):
+                    content += '"}'
+                try:
+                    raw_json = json.loads(content)
+                except Exception:
+                    # Regex fallback if it's completely broken
+                    import re
+                    match = re.search(r'"conversational_response"\s*:\s*"([^"]+)"', content, re.DOTALL)
+                    if match:
+                        raw_json = {
+                            "conversational_response": match.group(1).replace("\\n", "\n"),
+                            "internal_memory_updates": {}
+                        }
+                    else:
+                        raw_json = {
+                            "conversational_response": content,
+                            "internal_memory_updates": {}
+                        }
             
             # --- ARF Sanitizer ---
             # 1. Fix strings in recommendations
@@ -830,8 +853,17 @@ def _generate_arf_v2(
             elif not learning or not isinstance(learning, dict):
                 raw_json["learning"] = {
                     "level": "INTERMEDIATE",
-                    "micro_lesson": "No learning module provided.",
-                    "definitions": {}
+                    "micro_lesson": (
+                        f"The AgriBrain pipeline fuses satellite (Sentinel-2 optical + Sentinel-1 SAR), "
+                        f"weather (OpenMeteo), and soil (SoilGrids) data through a Kalman filter to "
+                        f"estimate daily crop state even when cloud cover blocks direct observation. "
+                        f"When satellite passes are unavailable, the system relies on weather-driven "
+                        f"model predictions, which is why some values carry higher uncertainty."
+                    ),
+                    "definitions": {
+                        "Kalman Filter": "A state-space estimator that fuses noisy, irregular observations into a continuous daily estimate.",
+                        "NDVI": "Normalized Difference Vegetation Index — a proxy for canopy health (0=bare soil, 1=dense canopy)."
+                    }
                 }
             
             # STRIKE: Strict Pydantic Validation
@@ -841,26 +873,19 @@ def _generate_arf_v2(
                 return validated_arf.dict() # Return valid dict representing ARF
             except Exception as e:
                 print(f"DEBUG: LLM schema validation failed even after sanitization: {e}")
-                # Safe Fallback Payload
+                # Safe Conversational Fallback
                 return {
-                    "headline": summary.get("headline", "Analysis available"),
-                    "direct_answer": summary.get("explanation", "I analyzed the field, but the response format was incomplete."),
-                    "suitability_score": "N/A",
-                    "confidence_badge": "MED",
-                    "confidence_reason": "Structured explanation formatting failed",
-                    "what_it_means": "Core pipeline ran, but the natural-language formatter needs fallback shaping.",
-                    "reasoning_cards": [],
-                    "recommendations": [],
-                    "learning": {
-                        "level": "INTERMEDIATE",
-                        "micro_lesson": "You can still use the map and layer diagnostics while the explanation formatter is repaired.",
-                        "definitions": {}
-                    },
-                    "followups": [],
-                    "internal_memory_updates": None
+                    "conversational_response": summary.get("explanation", "I have analyzed the field data, but there was an issue formatting my response. The core pipeline is running normally. Please let me know what specific insights you're looking for."),
+                    "internal_memory_updates": {}
                 }
         else:
-            return {"error": f"AI unavailable: {resp.status_code}"}
+            err_detail = rj.get("error", {}) if resp.status_code == 200 else {}
+            print(f"[LLM] No choices in response. status={resp.status_code}, error={err_detail}")
+            return {
+                "conversational_response": "The AI model is temporarily unavailable (rate limit or provider error). Please try again in a moment.",
+                "internal_memory_updates": {}
+            }
+
             
     except Exception as e:
         print(f"DEBUG: LLM Error: {e}")
@@ -973,7 +998,7 @@ def _build_data_only_payload(artifact: RunArtifact, user_query: Optional[str] = 
                     if t.get("0_7cm") is not None:
                         signals.append(ChatSignal("Soil Temp 0-7cm", f"{t['0_7cm']:.1f} °C", SignalDirection.NORMAL))
         except Exception as e:
-            print(f"⚠️ [Chat] Soil moisture fetch failed: {e}")
+            print(f"[WARN] [Chat] Soil moisture fetch failed: {e}")
 
     summary["key_signals"] = [s.__dict__ for s in signals]
     
@@ -1229,29 +1254,66 @@ Now produce ARF-v1 JSON output.
 """
 
     try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://agriwise.app", 
-                "X-Title": "AgriWise"
-            },
-            json={
-                "model": "qwen/qwen-2.5-72b-instruct", 
-                "messages": [
-                    {"role": "system", "content": ARF_V1_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "temperature": 0.5, # Lower temp for JSON stability
-                "max_tokens": 1000,
-                "response_format": {"type": "json_object"} # Force JSON if supported
-            },
-            timeout=15
-        )
-        
-        if resp.status_code == 200:
-            content = resp.json()["choices"][0]["message"]["content"]
+        rj2 = {}
+        choices2 = None
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://agriwise.app", 
+                    "X-Title": "AgriWise"
+                },
+                json={
+                    "model": "meta-llama/llama-3.3-70b-instruct:free", 
+                    "messages": [
+                        {"role": "system", "content": ARF_V1_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "temperature": 0.5, # Lower temp for JSON stability
+                    "max_tokens": 1000,
+                    "response_format": {"type": "json_object"} # Force JSON if supported
+                },
+                timeout=15
+            )
+            if resp.status_code == 200:
+                rj2 = resp.json()
+                choices2 = rj2.get("choices")
+            else:
+                print(f"[LLM] OpenRouter returned {resp.status_code}")
+        except Exception as e:
+            print(f"[LLM] OpenRouter network error: {e}")
+
+        if not choices2 and os.getenv("GEMINI_API_KEY"):
+            print("[LLM] Falling back to Gemini API...")
+            try:
+                gemini_resp = requests.post(
+                    "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                    headers={"Authorization": f"Bearer {os.getenv('GEMINI_API_KEY')}", "Content-Type": "application/json"},
+                    json={
+                        "model": "gemini-flash-latest", 
+                        "messages": [
+                            {"role": "system", "content": ARF_V1_SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "temperature": 0.5,
+                        "max_tokens": 1000,
+                        "response_format": {"type": "json_object"}
+                    },
+                    timeout=20
+                )
+                print(f"[LLM-DEBUG] Gemini ARF HTTP {gemini_resp.status_code}")
+                if gemini_resp.status_code == 200:
+                    rj2 = gemini_resp.json()
+                    choices2 = rj2.get("choices")
+                else:
+                    print(f"[LLM-ERROR] Gemini ARF fallback returned {gemini_resp.status_code}: {gemini_resp.text}")
+            except Exception as e:
+                print(f"[LLM-ERROR] Gemini ARF fallback failed/timeout: {e}")
+
+        if choices2 and len(choices2) > 0:
+            content = choices2[0].get("message", {}).get("content", "")
             try:
                 # Clean markdown code blocks if any
                 if "```json" in content:

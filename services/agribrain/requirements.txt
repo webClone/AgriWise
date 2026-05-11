@@ -1,10 +1,22 @@
+# AgriBrain Production Dependencies
+# All versions pinned for reproducible builds
+
+# Web framework
 fastapi==0.109.2
 uvicorn==0.27.1
 pydantic==2.6.1
 python-dotenv==1.0.1
-numpy
-pandas
-scikit-learn
-shapely
-requests
-tifffile
+
+# Core scientific
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0,<3.0.0
+scikit-learn>=1.3.0,<2.0.0
+
+# Geospatial
+shapely>=2.0.0,<3.0.0
+
+# HTTP
+requests>=2.31.0,<3.0.0
+
+# Raster I/O
+tifffile>=2023.7.0

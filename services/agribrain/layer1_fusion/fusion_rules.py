@@ -159,7 +159,8 @@ def _fuse_group(
 def _fuse_water(evidence: List[EvidenceItem]) -> List[FusedFeature]:
     return _fuse_group(
         evidence,
-        ["moisture", "wetness", "precip", "rain", "irrigation", "water", "whc", "field_capacity", "wilting"],
+        ["moisture", "wetness", "precip", "rain", "irrigation", "water", "whc", "field_capacity", "wilting",
+         "l0_sm_"],  # L0 Kalman soil moisture state vectors
         "water",
     )
 
@@ -167,7 +168,8 @@ def _fuse_water(evidence: List[EvidenceItem]) -> List[FusedFeature]:
 def _fuse_vegetation(evidence: List[EvidenceItem]) -> List[FusedFeature]:
     return _fuse_group(
         evidence,
-        ["ndvi", "ndmi", "ndre", "evi", "lai", "vegetation", "canopy", "chlorophyll", "bsi", "bare_soil"],
+        ["ndvi", "ndmi", "ndre", "evi", "lai", "vegetation", "canopy", "chlorophyll", "bsi", "bare_soil", "sif", "pri", "anomaly_embedding", "anomaly_score",
+         "weed", "biomass", "tree_count", "missing_tree"],  # Drone structural + L0 biomass
         "vegetation",
     )
 
@@ -183,7 +185,8 @@ def _fuse_phenology(evidence: List[EvidenceItem]) -> List[FusedFeature]:
 def _fuse_stress(evidence: List[EvidenceItem]) -> List[FusedFeature]:
     return _fuse_group(
         evidence,
-        ["stress", "frost", "thermal", "drought", "flood", "disease_weather", "vpd"],
+        ["stress", "frost", "thermal", "drought", "flood", "disease_weather", "vpd",
+         "temp_max", "temperature_max"],  # Environment thermal signals
         "stress_evidence",
     )
 
@@ -199,7 +202,8 @@ def _fuse_soil_site(evidence: List[EvidenceItem]) -> List[FusedFeature]:
 def _fuse_operational(evidence: List[EvidenceItem]) -> List[FusedFeature]:
     return _fuse_group(
         evidence,
-        ["user_", "sensor_event", "forecast_risk"],
+        ["user_", "sensor_event", "forecast_risk",
+         "row_", "break_count"],  # Drone structural row geometry
         "operational",
     )
 
@@ -216,7 +220,7 @@ def _fuse_data_quality(evidence: List[EvidenceItem], run_id: str = "") -> List[F
 
     # Source completeness
     sources_present = set(e.source_family for e in evidence)
-    completeness = len(sources_present) / 9.0
+    completeness = len(sources_present) / 10.0
 
     features.append(FusedFeature(
         name="source_completeness",

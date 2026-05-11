@@ -1,5 +1,5 @@
 """
-Layer 8.2: Constraint-Driven Scheduler
+Layer 8.2: Constraint-Driven Scheduler v8.1.0
 
 Places ranked ActionCards onto a calendar respecting:
   - Weather constraints (spray: wind < 15 km/h, no rain; fertilize: no heavy rain)
@@ -10,8 +10,11 @@ Places ranked ActionCards onto a calendar respecting:
 Output: List[ScheduledAction] with ScheduleStatus (CONFIRMED / TENTATIVE / BLOCKED)
 """
 
+import logging
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 from layer8_prescriptive.schema import (
     ActionCard, ActionType, ScheduledAction, ScheduleStatus,
@@ -193,6 +196,11 @@ class ConstraintScheduler:
                     weather_ok=False,
                 ))
         
+        logger.debug("Scheduled %d actions: %d confirmed, %d tentative, %d blocked",
+                     len(scheduled),
+                     sum(1 for s in scheduled if s.status == ScheduleStatus.CONFIRMED),
+                     sum(1 for s in scheduled if s.status == ScheduleStatus.TENTATIVE),
+                     sum(1 for s in scheduled if s.status == ScheduleStatus.BLOCKED))
         return scheduled
 
 

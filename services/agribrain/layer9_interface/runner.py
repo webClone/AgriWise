@@ -1,17 +1,39 @@
 """
-Layer 9 Interface Runner
-========================
+Layer 9 Interface Runner v9.6.1 -- 15-Engine Pipeline
+=====================================================
 
-Pipeline entry point that wraps PolicyRouter into a standard runner.
-
-Usage:
-    from layer9_interface.runner import run_layer9
-    output = run_layer9(orch_inputs, l8_output, l3_output, l6_output, l10_output)
+Orchestrates the full engine pipeline with intent-based dispatch.
+Preserves run_layer9() function signature for backward compatibility.
 """
+import time, logging
 from typing import Any, Optional, Dict, List
 from dataclasses import asdict
-from layer9_interface.schema import Layer9Input, InterfaceOutput
-from layer9_interface.policy_router import PolicyRouter
+
+from layer9_interface.schema import (
+    Layer9Input, InterfaceOutput, PersonaConfig, ExpertiseLevel,
+    ConversationTurn, ResponseEnvelope, UserIntent,
+)
+
+# --- Engine imports ---
+from layer9_interface.engines.context_assembly import context_assembly
+from layer9_interface.engines.intent_router import intent_router
+from layer9_interface.engines.conversation_memory import conversation_memory
+from layer9_interface.engines.advisory_engine import advisory_engine
+from layer9_interface.engines.qa_engine import qa_engine
+from layer9_interface.engines.report_engine import report_engine
+from layer9_interface.engines.alert_engine import alert_engine
+from layer9_interface.engines.coach_engine import coach_engine
+from layer9_interface.engines.spatial_narrator import spatial_narrator
+from layer9_interface.engines.task_manager import task_manager
+from layer9_interface.engines.data_request import data_request_engine
+from layer9_interface.engines.reminder_engine import reminder_engine
+from layer9_interface.engines.policy_enforcer import policy_enforcer
+from layer9_interface.engines.response_quality import response_quality_engine
+from layer9_interface.engines.telemetry_collector import telemetry_collector
+from layer9_interface.hallucination_guard import HallucinationGuard
+from layer9_interface.engines import INTENT_ENGINE_MAP
+
+logger = logging.getLogger(__name__)
 
 
 def run_layer9(
@@ -23,229 +45,197 @@ def run_layer9(
     l1_conflicts: Optional[List[Dict[str, Any]]] = None,
 ) -> InterfaceOutput:
     """
-    Run Layer 9 interface rendering.
+    Run Layer 9 interface rendering -- 15-engine pipeline.
 
-    Assembles Layer9Input from L3/L6/L8/L10 outputs, then calls PolicyRouter.
-
-    Args:
-        orch_inputs: OrchestratorInput (for plot_id, config)
-        l8_output: Layer8Output (actions, schedule, zone_plan)
-        l3_output: DecisionOutput (diagnoses)
-        l6_output: Layer6Output (execution state)
-        l10_output: Layer10Output (spatial zones, surfaces, explainability)
-        l1_conflicts: Cross-source conflicts from L1 provenance (passed directly
-                      from orchestrator because L8Output does not expose conflicts)
-
-    Returns:
-        InterfaceOutput with zone_cards, alerts, explanations, etc.
+    Signature is BACKWARD COMPATIBLE with the orchestrator.
     """
-    # --- Extract audit grade + conflicts ---
-    # Conflicts come directly from orchestrator (L1 provenance extraction).
-    # This is the definitive path — no fallback needed.
-    audit_grade = "C"  # Default fallback
-    source_reliability = {}
-    conflicts = l1_conflicts if isinstance(l1_conflicts, list) else []
+    t0 = time.time()
+    engine_trace: List[str] = []
+    latencies: Dict[str, float] = {}
 
-    if l8_output:
-        quality = getattr(l8_output, 'quality', None)
-        if quality:
-            audit_grade = getattr(quality, 'audit_grade', 'C')
-            source_reliability = getattr(quality, 'upstream_confidence', {})
+    # ==================================================================
+    # 1. Context Assembly Engine
+    # ==================================================================
+    t1 = time.time()
+    l9_input, spatial_explanations = context_assembly.assemble(
+        orch_inputs, l8_output, l3_output, l6_output, l10_output, l1_conflicts,
+    )
+    latencies["context_assembly"] = (time.time() - t1) * 1000
+    engine_trace.append("context_assembly")
 
-    # --- Extract diagnoses ---
-    diagnoses = []
-    if l3_output:
-        raw_diags = getattr(l3_output, 'diagnoses', [])
-        for d in raw_diags:
-            diagnoses.append({
-                "problem_id": getattr(d, 'problem_id', 'UNKNOWN'),
-                "probability": getattr(d, 'probability', 0.0),
-                "severity": getattr(d, 'severity', 0.0),
-                "confidence": getattr(d, 'confidence', 0.0),
-                "affected_area_pct": getattr(d, 'affected_area_pct', 0.0),
-            })
+    # ==================================================================
+    # 2. Intent Router Engine (if user query present)
+    # ==================================================================
+    classification = None
+    persona = PersonaConfig()  # default
 
-    # --- Extract actions/schedule/zone_plan ---
-    actions = []
-    schedule = []
-    zone_plan = {}
+    if l9_input.user_query:
+        t2 = time.time()
+        classification = intent_router.classify(l9_input.user_query)
+        persona = intent_router.build_persona(classification.detected_expertise)
+        latencies["intent_router"] = (time.time() - t2) * 1000
+        engine_trace.append("intent_router")
 
-    if l8_output:
-        for a in getattr(l8_output, 'actions', []):
-            actions.append({
-                "action_id": getattr(a, 'action_id', ''),
-                "action_type": getattr(getattr(a, 'action_type', None), 'value', 'UNKNOWN'),
-                "priority_score": getattr(a, 'priority_score', 0.0),
-                "is_allowed": getattr(a, 'is_allowed', True),
-                "confidence": getattr(getattr(a, 'confidence', None), 'value', 'MODERATE'),
-            })
-        # ScheduledAction: actual fields are scheduled_date, status, blocking_constraints
-        for s in getattr(l8_output, 'schedule', []):
-            action_type = getattr(s, 'action_type', None)
-            status = getattr(s, 'status', None)
-            schedule.append({
-                "action_id": getattr(s, 'action_id', ''),
-                "action_type": action_type.value if hasattr(action_type, 'value') else str(action_type or ''),
-                "scheduled_date": getattr(s, 'scheduled_date', None),
-                "status": status.value if hasattr(status, 'value') else str(status or ''),
-                "blocking_constraints": getattr(s, 'blocking_constraints', []),
-                "priority_score": getattr(s, 'priority_score', 0.0),
-                "weather_ok": getattr(s, 'weather_ok', True),
-                "phenology_ok": getattr(s, 'phenology_ok', True),
-            })
-        # ZoneActionPlan: serialize dataclasses into dicts for safe enrichment
-        zone_plan = _serialize_zone_plan(getattr(l8_output, 'zone_plan', {}))
+    # ==================================================================
+    # 3. Conversation Memory
+    # ==================================================================
+    session = conversation_memory.get_or_create()
+    engine_trace.append("conversation_memory")
 
-    # --- Enrich zone_plan with L10 spatial intelligence ---
-    spatial_zones = []
-    spatial_explanations = []
-    if l10_output:
-        spatial_zones, spatial_explanations = _extract_l10_spatial(l10_output)
-        zone_plan = _enrich_zone_plan_with_l10(zone_plan, spatial_zones)
+    # ==================================================================
+    # 4. Policy Enforcer -- build core output (always runs)
+    # ==================================================================
+    t4 = time.time()
+    output = policy_enforcer.build_output(l9_input, spatial_explanations)
+    latencies["policy_enforcer"] = (time.time() - t4) * 1000
+    engine_trace.append("policy_enforcer")
 
-    # --- Assemble Layer9Input ---
-    l9_input = Layer9Input(
-        audit_grade=audit_grade,
-        source_reliability=source_reliability,
-        conflicts=conflicts,
-        diagnoses=diagnoses,
-        actions=actions,
-        schedule=schedule,
-        zone_plan=zone_plan,
+    # ==================================================================
+    # 5. Hallucination Guard
+    # ==================================================================
+    t5 = time.time()
+    guard = HallucinationGuard.from_layer9_input({
+        "actions": l9_input.actions,
+        "schedule": l9_input.schedule,
+        "zone_plan": l9_input.zone_plan,
+        "diagnoses": l9_input.diagnoses,
+        "outcome_forecast": l9_input.outcome_forecast,
+    })
+    _, flags = guard.validate(output.summary)
+    n_flags = len(flags)
+    latencies["hallucination_guard"] = (time.time() - t5) * 1000
+    engine_trace.append("hallucination_guard")
+
+    # ==================================================================
+    # 6. Intent-based specialized engine dispatch
+    # ==================================================================
+    phrasing = output.phrasing_mode
+    engine_payload: Dict[str, Any] = {}
+
+    if classification:
+        intent = classification.primary_intent
+        t6 = time.time()
+
+        if intent in (UserIntent.OVERVIEW, UserIntent.DIAGNOSE,
+                      UserIntent.ACTION_DETAIL, UserIntent.COMPARE,
+                      UserIntent.SCHEDULE):
+            engine_payload = advisory_engine.generate(l9_input, persona, phrasing)
+            engine_trace.append("advisory")
+
+        elif intent == UserIntent.REPORT:
+            engine_payload = report_engine.generate(l9_input, persona)
+            engine_trace.append("report")
+
+        elif intent == UserIntent.SPATIAL:
+            engine_payload = spatial_narrator.narrate(l9_input, persona)
+            engine_trace.append("spatial_narrator")
+
+        elif intent == UserIntent.COACHING:
+            engine_payload = coach_engine.generate_coaching(l9_input, persona)
+            engine_trace.append("coach")
+
+        elif intent == UserIntent.TASK_MGMT:
+            # task_manager runs below for everyone, but we mark intent
+            engine_trace.append("task_manager_intent")
+
+        elif intent == UserIntent.DATA_REQUEST:
+            engine_trace.append("data_request_intent")
+
+        elif intent == UserIntent.REMINDER:
+            engine_trace.append("reminder_intent")
+
+        elif intent in (UserIntent.GREETING, UserIntent.UNKNOWN):
+            engine_payload = qa_engine.answer(
+                l9_input.user_query or "", l9_input, persona)
+            engine_trace.append("qa")
+
+        latencies["dispatch"] = (time.time() - t6) * 1000
+
+        # Also run alert engine when there's a query
+        t_alert = time.time()
+        persona_alerts = alert_engine.generate_alerts(l9_input, persona)
+        latencies["alert_engine"] = (time.time() - t_alert) * 1000
+        engine_trace.append("alert")
+
+    # Attach engine payload to output for downstream use
+    output.llm_response = str(engine_payload) if engine_payload else ""
+
+    # ==================================================================
+    # 7. Task Manager Sync (background -- every invocation)
+    # ==================================================================
+    t7 = time.time()
+    task_board = task_manager.sync(l9_input, persona)
+    output.task_board = task_board
+    latencies["task_manager"] = (time.time() - t7) * 1000
+    engine_trace.append("task_manager")
+
+    # ==================================================================
+    # 8. Data Request Scan (background -- every invocation)
+    # ==================================================================
+    t8 = time.time()
+    data_requests = data_request_engine.scan(l9_input, persona)
+    output.data_requests = data_requests
+    latencies["data_request"] = (time.time() - t8) * 1000
+    engine_trace.append("data_request")
+
+    # ==================================================================
+    # 9. Reminder Check (background -- every invocation)
+    # ==================================================================
+    t9 = time.time()
+    reminders = reminder_engine.check(
+        l9_input, persona, task_store=task_manager._task_store,
+    )
+    output.reminders = reminders
+    latencies["reminder"] = (time.time() - t9) * 1000
+    engine_trace.append("reminder")
+
+    # ==================================================================
+    # 10. Response Quality Scoring
+    # ==================================================================
+    t10 = time.time()
+    quality = response_quality_engine.score(l9_input, output, n_flags, persona)
+    latencies["response_quality"] = (time.time() - t10) * 1000
+    engine_trace.append("response_quality")
+
+    # ==================================================================
+    # 11. Telemetry Collection
+    # ==================================================================
+    t11 = time.time()
+    telemetry = telemetry_collector.collect(
+        l9_input, classification, quality, latencies,
+    )
+    latencies["telemetry"] = (time.time() - t11) * 1000
+    engine_trace.append("telemetry")
+
+    # Emit telemetry to persistent JSONL file
+    telemetry_collector.emit(telemetry, session_id=session.session_id)
+
+    # ==================================================================
+    # Record conversation turn
+    # ==================================================================
+    if l9_input.user_query and classification:
+        turn = ConversationTurn(
+            user_query=l9_input.user_query,
+            resolved_intent=classification.primary_intent,
+            engine_used=INTENT_ENGINE_MAP.get(classification.primary_intent, "qa"),
+            response_latency_ms=(time.time() - t0) * 1000,
+            quality_score=quality.groundedness_score,
+            detected_expertise=classification.detected_expertise,
+        )
+        conversation_memory.record_turn(session, turn)
+
+    total_ms = (time.time() - t0) * 1000
+    logger.info(
+        "L9 pipeline: %d engines, %.0fms, quality=%.2f",
+        len(engine_trace), total_ms, quality.groundedness_score,
     )
 
-    # --- Run PolicyRouter ---
-    router = PolicyRouter()
-    output = router.build_output(l9_input, spatial_explanations=spatial_explanations)
+    # Attach metadata for test inspection
+    output._engine_trace = engine_trace
+    output._engine_payload = engine_payload
+    output._classification = classification
+    output._quality = quality
+    output._telemetry = telemetry
+    output._latencies = latencies
 
     return output
-
-
-# ============================================================================
-# L10 Spatial Translation Helpers
-# ============================================================================
-
-def _extract_l10_spatial(l10_output) -> tuple:
-    """
-    Translate L10's zone_pack and explainability_pack into L9-consumable dicts.
-    
-    Returns:
-        (spatial_zones, spatial_explanations)
-        spatial_zones: list of dicts with zone metrics for enriching zone_plan
-        spatial_explanations: list of dicts for spatial evidence-backed explanations
-    """
-    spatial_zones: List[Dict[str, Any]] = []
-    spatial_explanations: List[Dict[str, Any]] = []
-    
-    # --- Zone Pack ---
-    for zone in getattr(l10_output, 'zone_pack', []):
-        zone_id = getattr(zone, 'zone_id', '')
-        zone_type = getattr(zone, 'zone_type', None)
-        zone_type_str = zone_type.value if hasattr(zone_type, 'value') else str(zone_type or '')
-        
-        spatial_zones.append({
-            "zone_id": zone_id,
-            "zone_type": zone_type_str,
-            "severity": getattr(zone, 'severity', 0.0),
-            "confidence": getattr(zone, 'confidence', 0.0),
-            "area_pct": getattr(zone, 'area_pct', 0.0),
-            "top_drivers": getattr(zone, 'top_drivers', []),
-            "surface_stats": getattr(zone, 'surface_stats', {}),
-            "linked_actions": getattr(zone, 'linked_actions', []),
-            "label": getattr(zone, 'label', ''),
-            "description": getattr(zone, 'description', ''),
-            "source_surface_type": getattr(zone, 'source_surface_type', ''),
-        })
-    
-    # --- Explainability Pack ---
-    for surface_key, pack in getattr(l10_output, 'explainability_pack', {}).items():
-        summary = getattr(pack, 'summary', '')
-        if summary:
-            spatial_explanations.append({
-                "statement": summary,
-                "evidence_id": f"L10_{surface_key}",
-                "source_layer": "L10",
-                "confidence": getattr(getattr(pack, 'confidence', None), 'score', 0.7),
-            })
-        # Add top drivers as individual explanations
-        for driver in getattr(pack, 'top_drivers', [])[:2]:
-            name = getattr(driver, 'name', '')
-            value = getattr(driver, 'value', 0.0)
-            role = getattr(driver, 'role', '')
-            if name:
-                spatial_explanations.append({
-                    "statement": f"Spatial driver: {name} ({role}, contribution={value:.2f})",
-                    "evidence_id": f"L10_{surface_key}_{name}",
-                    "source_layer": "L10",
-                    "confidence": 0.7,
-                })
-    
-    return spatial_zones, spatial_explanations
-
-
-def _enrich_zone_plan_with_l10(
-    zone_plan: Dict[str, Any],
-    spatial_zones: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """
-    Merge L10 spatial zone intelligence into L8's zone_plan.
-    
-    For each L10 zone, either enrich an existing zone_plan entry
-    or create a new one with spatial metrics.
-    """
-    enriched = dict(zone_plan) if zone_plan else {}
-    
-    for sz in spatial_zones:
-        zid = sz["zone_id"]
-        existing = enriched.get(zid, {})
-        if not isinstance(existing, dict):
-            existing = {}
-        
-        # Inject spatial metrics without overwriting L8 prescriptive data
-        existing["spatial_severity"] = sz["severity"]
-        existing["spatial_confidence"] = sz["confidence"]
-        existing["area_pct"] = sz["area_pct"]
-        existing["zone_type"] = sz["zone_type"]
-        existing["top_drivers"] = sz["top_drivers"]
-        existing["surface_stats"] = sz["surface_stats"]
-        existing["linked_actions"] = sz.get("linked_actions", [])
-        existing["label"] = sz.get("label", "")
-        existing["description"] = sz.get("description", "")
-        existing["source_surface_type"] = sz.get("source_surface_type", "")
-        
-        enriched[zid] = existing
-    
-    return enriched
-
-
-def _serialize_zone_plan(zone_plan) -> Dict[str, Any]:
-    """
-    Convert ZoneActionPlan dataclasses into plain dicts.
-    
-    Layer8Output.zone_plan is Dict[str, ZoneActionPlan] — dataclass objects.
-    L10 enrichment and PolicyRouter both need dicts, so we serialize here
-    to preserve L8 prescriptive fields (actions, priority, reason, etc.).
-    """
-    if not zone_plan or not isinstance(zone_plan, dict):
-        return {}
-    result = {}
-    for zone_id, plan in zone_plan.items():
-        if isinstance(plan, dict):
-            result[zone_id] = plan
-        elif hasattr(plan, '__dataclass_fields__'):
-            # Proper dataclass → dict conversion
-            try:
-                result[zone_id] = asdict(plan)
-            except Exception:
-                # Fallback: manual extraction
-                result[zone_id] = {
-                    "zone_id": getattr(plan, "zone_id", zone_id),
-                    "actions": getattr(plan, "actions", []),
-                    "allocation_fraction": getattr(plan, "allocation_fraction", 0.0),
-                    "priority": getattr(plan, "priority", "MEDIUM"),
-                    "reason": getattr(plan, "reason", ""),
-                }
-        else:
-            result[zone_id] = {"zone_id": zone_id}
-    return result
-

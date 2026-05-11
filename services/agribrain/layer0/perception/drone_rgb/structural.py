@@ -146,9 +146,23 @@ class DroneStructuralAnalyzer:
             res.bare_soil_fraction = soil_count / total_pixels
             res.weed_pressure_index = weed_count / total_pixels
             
-        # 4. Row Extraction (projection angle with max variance)
-        res.row_azimuth_deg = self._extract_row_angle(canopy_map)
-        res.row_spacing_cm = 75.0 # Simulated default 75cm (30-inch) rows
+        # 4. Row Extraction — FFT-based detection (Phase D)
+        #    Falls back to projection-variance if grid is too small for FFT
+        meta = inp.orthomosaic_metadata or {}
+        gsd_cm = meta.get("achieved_gsd_cm", 2.0)
+        
+        fft_result = row_analysis.fft_detect_rows(
+            canopy_map, gsd_cm=gsd_cm, block_size=block_size,
+        )
+        
+        if fft_result.confidence > 0.3:
+            # FFT detected strong row pattern — use FFT results
+            res.row_azimuth_deg = fft_result.azimuth_deg
+            res.row_spacing_cm = fft_result.spacing_cm
+        else:
+            # Fallback to projection-variance for angle, default spacing
+            res.row_azimuth_deg = self._extract_row_angle(canopy_map)
+            res.row_spacing_cm = 75.0  # Default 75cm (30-inch) rows
         
         # 5. Populate Spatial Maps
         meta = inp.orthomosaic_metadata or {}

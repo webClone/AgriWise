@@ -268,36 +268,115 @@ export default function SatelliteMissionControl({ lat, lng, cropCode, geoJson }:
            )}
         </div>
 
-        {isIndexLayer && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-           <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800">
-              <h4 className="text-[11px] font-bold text-slate-400 uppercase mb-2">Trend Analysis</h4>
-              <div className="h-32">
-                <Line data={chartData} options={{ responsive: true, maintainAspectRatio: false }} />
+        {isIndexLayer && (() => {
+          // Compute real vigor zones from trend data
+          const trendVals = (data.trend || []).map(d => {
+            if (activeMetric === 'moisture-index' || activeMetric === 'moisture-stress') return (d as any).ndmi || 0;
+            return (d as any)[activeMetric] || 0;
+          }).filter(v => v > 0);
+
+          const low = trendVals.filter(v => v < 0.35).length;
+          const mid = trendVals.filter(v => v >= 0.35 && v < 0.6).length;
+          const high = trendVals.filter(v => v >= 0.6).length;
+          const total = Math.max(low + mid + high, 1);
+          const lowPct = Math.round((low / total) * 100);
+          const midPct = Math.round((mid / total) * 100);
+          const highPct = 100 - lowPct - midPct;
+
+          // Compute trend direction
+          const currentVal = ((currentLayer as any)[(activeMetric === 'moisture-index' || activeMetric === 'moisture-stress') ? 'ndmi' : activeMetric] || 0);
+          const avgVal = trendVals.length > 0 ? trendVals.reduce((a, b) => a + b, 0) / trendVals.length : 0;
+          const recentVals = trendVals.slice(-3);
+          const earlyVals = trendVals.slice(0, 3);
+          const recentAvg = recentVals.length > 0 ? recentVals.reduce((a, b) => a + b, 0) / recentVals.length : 0;
+          const earlyAvg = earlyVals.length > 0 ? earlyVals.reduce((a, b) => a + b, 0) / earlyVals.length : 0;
+          const trendDir = recentAvg > earlyAvg + 0.02 ? 'improving' : recentAvg < earlyAvg - 0.02 ? 'declining' : 'stable';
+
+          // Generate real insights
+          const insights: { text: string; type: 'info' | 'warn' | 'good' }[] = [];
+          if (currentVal > 0.6) insights.push({ text: `Strong ${activeMetric.toUpperCase()} (${currentVal.toFixed(2)}) — healthy canopy detected.`, type: 'good' });
+          else if (currentVal > 0.35) insights.push({ text: `Moderate ${activeMetric.toUpperCase()} (${currentVal.toFixed(2)}) — growth in progress.`, type: 'info' });
+          else if (currentVal > 0) insights.push({ text: `Low ${activeMetric.toUpperCase()} (${currentVal.toFixed(2)}) — sparse canopy or bare soil.`, type: 'warn' });
+
+          if (trendDir === 'improving') insights.push({ text: `Trend is improving (+${((recentAvg - earlyAvg) * 100).toFixed(0)}%) over the observation window.`, type: 'good' });
+          else if (trendDir === 'declining') insights.push({ text: `Trend is declining (${((recentAvg - earlyAvg) * 100).toFixed(0)}%) — potential stress.`, type: 'warn' });
+          else insights.push({ text: `Index values are stable across the observation window.`, type: 'info' });
+
+          if (trendVals.length > 0) {
+            const maxVal = Math.max(...trendVals);
+            const minVal = Math.min(...trendVals);
+            insights.push({ text: `Range: ${minVal.toFixed(2)} – ${maxVal.toFixed(2)} (${trendVals.length} observations).`, type: 'info' });
+          }
+
+          const insightStyles = {
+            good: 'bg-emerald-500/8 border-emerald-500/15 text-emerald-400',
+            warn: 'bg-amber-500/8 border-amber-500/15 text-amber-400',
+            info: 'bg-indigo-500/8 border-indigo-500/15 text-indigo-400',
+          };
+
+          return (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-[#0B1015]/60 backdrop-blur-xl p-4 rounded-xl border border-white/5">
+                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Trend Analysis</h4>
+                <div className="h-32">
+                  <Line data={chartData} options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                      x: { ticks: { color: '#475569', font: { size: 8 } }, grid: { color: 'rgba(255,255,255,0.03)' } },
+                      y: { ticks: { color: '#475569', font: { size: 9 } }, grid: { color: 'rgba(255,255,255,0.03)' } },
+                    },
+                  }} />
+                </div>
+                <div className="flex items-center justify-between mt-2 text-[9px] text-slate-600 font-mono">
+                  <span>{trendVals.length} obs</span>
+                  <span>avg: {avgVal.toFixed(3)}</span>
+                  <span className={trendDir === 'improving' ? 'text-emerald-500' : trendDir === 'declining' ? 'text-rose-500' : 'text-slate-400'}>
+                    {trendDir === 'improving' ? '↑' : trendDir === 'declining' ? '↓' : '→'} {trendDir}
+                  </span>
+                </div>
               </div>
-           </div>
-           <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800">
-              <h4 className="text-[11px] font-bold text-slate-400 uppercase mb-2">Field Vigor zones</h4>
-              <div className="flex h-3 rounded-full overflow-hidden bg-slate-800 mb-2">
-                  <div style={{width: '30%'}} className="bg-red-500/80"></div>
-                  <div style={{width: '40%'}} className="bg-yellow-500/80"></div>
-                  <div style={{width: '30%'}} className="bg-emerald-500/80"></div>
+
+              <div className="bg-[#0B1015]/60 backdrop-blur-xl p-4 rounded-xl border border-white/5">
+                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Field Vigor Distribution</h4>
+                <div className="flex h-3 rounded-full overflow-hidden bg-slate-800/50 mb-3">
+                  {lowPct > 0 && <div style={{ width: `${lowPct}%` }} className="bg-rose-500/80 transition-all duration-500" />}
+                  {midPct > 0 && <div style={{ width: `${midPct}%` }} className="bg-amber-500/80 transition-all duration-500" />}
+                  {highPct > 0 && <div style={{ width: `${highPct}%` }} className="bg-emerald-500/80 transition-all duration-500" />}
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div>
+                    <div className="text-lg font-mono font-bold text-rose-400">{lowPct}%</div>
+                    <div className="text-[9px] text-slate-600 uppercase tracking-widest">Stressed</div>
+                  </div>
+                  <div>
+                    <div className="text-lg font-mono font-bold text-amber-400">{midPct}%</div>
+                    <div className="text-[9px] text-slate-600 uppercase tracking-widest">Moderate</div>
+                  </div>
+                  <div>
+                    <div className="text-lg font-mono font-bold text-emerald-400">{highPct}%</div>
+                    <div className="text-[9px] text-slate-600 uppercase tracking-widest">Healthy</div>
+                  </div>
+                </div>
+                <div className="mt-3 pt-2 border-t border-white/5 text-[9px] text-slate-600 font-mono text-center">
+                  Based on {total} temporal observations
+                </div>
               </div>
-              <div className="flex justify-between text-[10px] text-slate-400 font-mono">
-                  <span>LOW</span>
-                  <span className="text-blue-400">INTELLIGENCE</span>
-                  <span>HIGH</span>
+
+              <div className="bg-[#0B1015]/60 backdrop-blur-xl p-4 rounded-xl border border-white/5">
+                <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-3">Automated Insights</h4>
+                <div className="space-y-2">
+                  {insights.map((ins, i) => (
+                    <div key={i} className={`p-2 rounded-lg border text-[10px] leading-relaxed ${insightStyles[ins.type]}`}>
+                      {ins.text}
+                    </div>
+                  ))}
+                </div>
               </div>
-           </div>
-           <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-800">
-              <h4 className="text-[11px] font-bold text-slate-400 uppercase mb-2">Automated Insights</h4>
-              <div className="space-y-1 text-[10px] text-slate-400">
-                 <div className="p-1 bg-blue-500/5 border border-blue-500/10 rounded">Optimal growth pattern detected.</div>
-                 <div className="p-1 bg-amber-500/5 border border-amber-500/10 rounded">Review moisture stress in SE corner.</div>
-              </div>
-           </div>
-        </div>
-        )}
+            </div>
+          );
+        })()}
 
         {activeMetric === 'nir-r-g' && (
            <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-800 mt-4 backdrop-blur-sm">

@@ -1,8 +1,11 @@
 import math
+import logging
 from typing import Any
 
 from layer7_planning.schema import SuitabilityState, EvidenceLogit, SuitabilityDriver
 from layer7_planning.engines.ccl_crop_library import CropProfile
+
+logger = logging.getLogger(__name__)
 
 def compute_biotic_risk(profile: CropProfile, l1_out: Any, l5_out: Any, chat_memory: Any) -> SuitabilityState:
     """
@@ -44,12 +47,12 @@ def compute_biotic_risk(profile: CropProfile, l1_out: Any, l5_out: Any, chat_mem
          fc_rain_sum = 0.0
          fc_temp_mean = 15.0
          if l1_out and getattr(l1_out, "forecast_7d", []):
-             fc_rain_sum = sum(day.get("precipitation_sum", 0.0) for day in l1_out.forecast_7d)
-             temps = [day.get("temperature_2m_mean", 15.0) for day in l1_out.forecast_7d]
+             fc_rain_sum = sum(day.get("precipitation", day.get("rain", 0.0)) for day in l1_out.forecast_7d)
+             temps = [(day.get("temp_max", 15.0) + day.get("temp_min", 15.0)) / 2 for day in l1_out.forecast_7d]
              if temps:
                  fc_temp_mean = sum(temps) / len(temps)
                  
-         print(f"DEBUG BRF: rain_sum={fc_rain_sum}, temp_mean={fc_temp_mean}")
+         logger.debug(f"BRF: rain_sum={fc_rain_sum}, temp_mean={fc_temp_mean}")
          
          if fc_rain_sum > 25.0 and fc_temp_mean > 12.0:
              pathogen = "Rhizoctonia / Late Blight" if "potato" in profile.display_name.lower() else "Fusarium / Septoria"

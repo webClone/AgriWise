@@ -70,17 +70,17 @@ LAYER_REGISTRY: Dict[LayerId, LayerSpec] = {
     LayerId.L5: LayerSpec(
         id=LayerId.L5,
         name="BioThreat",
-        version="5.0.0",
+        version="6.0.0",
         runner=run_layer5_bio,
-        depends_on=[LayerId.L1, LayerId.L2],
+        depends_on=[LayerId.L1, LayerId.L2, LayerId.L3, LayerId.L4],
         required=False
     ),
     LayerId.L6: LayerSpec(
         id=LayerId.L6,
         name="Execution",
-        version="6.0.0",
+        version="7.0.0",
         runner=run_layer6_exec,
-        depends_on=[LayerId.L3], # Technically consumes L4/L5 too if present
+        depends_on=[LayerId.L1, LayerId.L2, LayerId.L3, LayerId.L4, LayerId.L5],
         required=True
     ),
     LayerId.L7: LayerSpec(
@@ -94,7 +94,7 @@ LAYER_REGISTRY: Dict[LayerId, LayerSpec] = {
     LayerId.L8: LayerSpec(
         id=LayerId.L8,
         name="Prescriptive",
-        version="8.0.0",
+        version="8.1.0",
         runner=run_layer8,
         depends_on=[LayerId.L3, LayerId.L4, LayerId.L5, LayerId.L6, LayerId.L7],
         required=False

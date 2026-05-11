@@ -62,7 +62,7 @@ class RGBApproximator:
         Placeholder for loading a trained CNN (PyTorch/TensorFlow).
         Format: RGB Image -> Vegetation Vigor Map
         """
-        print(f"🔄 Loading RGB-to-Veg CNN from {model_path}...")
+        print(f"[SYNC] Loading RGB-to-Veg CNN from {model_path}...")
         # self.model = torch.load(model_path)
         pass
 

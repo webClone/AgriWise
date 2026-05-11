@@ -1,9 +1,9 @@
-import FloatingActionMenu from "@/components/farm/FloatingActionMenu";
 import PlotContextBand from "@/components/farm/PlotContextBand";
 import PlotControls from "@/components/farm/PlotControls";
 import { getPlot, getFarm, getCropCycles, getPlotCenter } from "@/lib/farm-services";
 import { getFAOLandIntelligence } from "@/lib/agribrain/fao-data-service";
 import { Layer10Provider } from "@/hooks/useLayer10";
+import { PlotIntelligenceProvider } from "@/hooks/usePlotIntelligence";
 import PlotLayoutClient from "./PlotLayoutClient";
 
 export default async function PlotLayout({
@@ -48,6 +48,7 @@ export default async function PlotLayout({
   // as headers() is unreliable during client-side navigation.
   return (
     <Layer10Provider>
+      <PlotIntelligenceProvider>
       <PlotLayoutClient 
         farmId={farmId}
         topBarMap={
@@ -78,8 +79,8 @@ export default async function PlotLayout({
         }
       >
         {children}
-        <FloatingActionMenu />
       </PlotLayoutClient>
+      </PlotIntelligenceProvider>
     </Layer10Provider>
   );
 }

@@ -243,4 +243,146 @@ def _extract_operational_signals(pkg: Layer2Output) -> Dict[str, Any]:
     signals["conflict_count"] = len(pkg.conflicts_inherited)
     signals["gap_types"] = sorted(gap_types)
 
+    # --- Drone Structural Intelligence ---
+    # These originate from drone RGB analysis (L0 → L1 → L2) and surface
+    # structural field metrics for L3 decision-making.
+    _extract_drone_structural_signals(pkg, signals)
+
+    # --- Energy Balance signals (from L0 thermal → L1 environment → L2) ---
+    # These originate from satellite thermal sensors (Landsat 8/9, ECOSTRESS)
+    # ingested at Layer 0, flowing through L1 environment evidence into L2.
+    _extract_energy_balance_signals(pkg, signals)
+
     return signals
+
+
+def _extract_drone_structural_signals(
+    pkg: Layer2Output, signals: Dict[str, Any]
+) -> None:
+    """Extract drone structural intelligence for L3 decision-making.
+
+    Data path: L0 (DroneRGBEngine)
+             → L1 (drone structural adapter → vegetation/operational evidence)
+             → L2 (stress attribution: BIOTIC/weed, MECHANICAL/row damage)
+             → L3 (this adapter → operational_signals)
+
+    Signals surfaced:
+      - has_drone_structural: bool
+      - canopy_cover_fraction: float (0-1)
+      - bare_soil_fraction: float (0-1)
+      - weed_pressure_severity: float (from BIOTIC stress with weed driver)
+      - row_continuity_mean: float (0-1, from vegetation features)
+      - mechanical_damage_detected: bool (from MECHANICAL stress)
+      - mechanical_damage_severity: float
+      - missing_tree_count: int (orchard mode)
+    """
+    has_drone = False
+
+    # Scan vegetation intelligence for drone-originated features
+    for vf in pkg.vegetation_intelligence:
+        name_lower = vf.name.lower()
+
+        if "canopy_cover_fraction" in name_lower:
+            signals["canopy_cover_fraction"] = vf.value
+            has_drone = True
+
+        if "bare_soil_fraction" in name_lower:
+            signals["bare_soil_fraction"] = vf.value
+            has_drone = True
+
+        if "weed_pressure" in name_lower:
+            signals["weed_pressure_index"] = vf.value
+            has_drone = True
+
+        if "canopy_uniformity_cv" in name_lower:
+            signals["canopy_uniformity_cv"] = vf.value
+            has_drone = True
+
+        if "missing_tree" in name_lower:
+            signals["missing_tree_count"] = int(vf.value)
+            has_drone = True
+
+        if "tree_count" in name_lower and "missing" not in name_lower:
+            signals["tree_count"] = int(vf.value)
+            has_drone = True
+
+    # Extract weed pressure severity from BIOTIC stress with weed driver
+    weed_severity = 0.0
+    for s in pkg.stress_context:
+        if s.stress_type == "BIOTIC" and s.primary_driver == "weed_pressure_detected":
+            weed_severity = max(weed_severity, s.severity)
+            has_drone = True
+    signals["weed_pressure_severity"] = weed_severity
+
+    # Extract mechanical damage from MECHANICAL stress
+    mechanical_detected = False
+    mechanical_severity = 0.0
+    for s in pkg.stress_context:
+        if s.stress_type == "MECHANICAL":
+            mechanical_detected = True
+            mechanical_severity = max(mechanical_severity, s.severity)
+            has_drone = True
+    signals["mechanical_damage_detected"] = mechanical_detected
+    signals["mechanical_damage_severity"] = mechanical_severity
+
+    signals["has_drone_structural"] = has_drone
+
+
+def _extract_energy_balance_signals(
+    pkg: Layer2Output, signals: Dict[str, Any]
+) -> None:
+    """Extract LST, ET0, VPD, and related signals for energy balance.
+
+    Data path: L0 (Landsat/ECOSTRESS thermal adapter)
+             → L1 (environment evidence: lst_canopy, et0, vpd, t_air)
+             → L2 (vegetation/water features)
+             → L3 (this adapter → operational_signals)
+    """
+    # Scan vegetation intelligence for energy balance features
+    for vf in pkg.vegetation_intelligence:
+        name_lower = vf.name.lower()
+
+        if "lst" in name_lower or "land_surface_temp" in name_lower:
+            signals["lst_canopy_c"] = vf.value
+
+        if "et0" in name_lower or "reference_et" in name_lower:
+            signals["et0_mm"] = vf.value
+
+        if "vpd" in name_lower:
+            signals["vpd_kpa"] = vf.value
+
+        if name_lower == "ndvi_mean":
+            signals["ndvi_mean"] = vf.value
+
+        if "wind" in name_lower:
+            signals["wind_speed_ms"] = vf.value
+            
+        if "t_air" in name_lower or "air_temp" in name_lower:
+            signals["t_air_c"] = vf.value
+
+    # Scan water features for temperature signals
+    for wf in getattr(pkg, "water_features", []):
+        name_lower = getattr(wf, "name", "").lower()
+
+        if "t_air" in name_lower or "air_temp" in name_lower:
+            signals["t_air_c"] = wf.value
+
+        if "et0" in name_lower and "et0_mm" not in signals:
+            signals["et0_mm"] = wf.value
+
+    # If t_air not found in water features, check stress evidence drivers
+    if "t_air_c" not in signals:
+        for s in pkg.stress_context:
+            if s.stress_type == "THERMAL" and s.primary_driver:
+                driver_lower = s.primary_driver.lower()
+                if "temp" in driver_lower:
+                    # Extract air temp from explanation basis if available
+                    for basis in s.explanation_basis:
+                        if "temp" in basis.lower() and "°c" in basis.lower():
+                            # Try to parse: "Air temp 38°C" → 38.0
+                            import re
+                            match = re.search(r'(\d+\.?\d*)\s*[°]', basis)
+                            if match:
+                                signals["t_air_c"] = float(match.group(1))
+                                break
+

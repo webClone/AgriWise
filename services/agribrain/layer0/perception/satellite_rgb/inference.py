@@ -27,6 +27,12 @@ from layer0.perception.satellite_rgb.preprocess import PlotImageContext
 from layer0.perception.common.contracts import PerceptionVariable, PerceptionArtifact, ZoneOutput
 from layer0.perception.common.base_types import FeasibilityGate
 
+try:
+    from layer0.perception.satellite_rgb.llm_vision import LLMVisionResult, analyze_tile
+except ImportError:
+    LLMVisionResult = None
+    analyze_tile = None
+
 
 # ============================================================================
 # Inference Output
@@ -66,6 +72,9 @@ class SatelliteRGBInferenceResult:
     vegetation_mask: Optional[List[List[float]]] = None
     anomaly_heatmap: Optional[List[List[float]]] = None
     confidence_map: Optional[List[List[float]]] = None
+
+    # LLM Vision overlay (parallel path)
+    llm_vision: Optional[Any] = None  # LLMVisionResult when available
 
     # Feasibility gates
     feasibility_gates: List[FeasibilityGate] = field(default_factory=list)
@@ -112,6 +121,7 @@ class SatelliteRGBInference:
         ctx: PlotImageContext,
         resolution_m: float = 10.0,
         n_zones: int = 4,
+        image_bytes: Optional[bytes] = None,
     ) -> SatelliteRGBInferenceResult:
         """
         Run full structural inference pipeline.
@@ -184,6 +194,43 @@ class SatelliteRGBInference:
             FeasibilityGate.block("row_direction", "Deferred to V1.5"),
             FeasibilityGate.block("row_spacing", "Deferred to V1.5"),
         ]
+
+        # --- LLM Vision Overlay (Parallel Path) ---
+        if image_bytes and analyze_tile is not None:
+            try:
+                llm_result = analyze_tile(image_bytes)
+                if llm_result and llm_result.confidence > 0.5:
+                    result.llm_vision = llm_result
+                    llm_veg = llm_result.vegetation_pct / 100.0
+                    llm_soil = llm_result.bare_soil_pct / 100.0
+                    
+                    # Weighted merge: 60% traditional CV + 40% LLM vision
+                    w_cv = 0.6
+                    w_llm = 0.4
+                    if llm_result.confidence > 0.7:
+                        w_cv = 0.5
+                        w_llm = 0.5
+                    
+                    result.vegetation_fraction = w_cv * veg_fraction + w_llm * llm_veg
+                    result.bare_soil_fraction = w_cv * soil_fraction + w_llm * llm_soil
+                    
+                    # Override density class if LLM is confident
+                    result.canopy_density_class = self._classify_density(result.vegetation_fraction)
+                    
+                    # Override phenology from LLM when confident
+                    stage_map = {
+                        "bare_soil": 0.0, "early_emergence": 0.5,
+                        "vegetative": 1.5, "reproductive": 2.0, "senescence": 3.5,
+                    }
+                    if llm_result.emergence_stage in stage_map and llm_result.confidence > 0.6:
+                        llm_pheno = stage_map[llm_result.emergence_stage]
+                        result.coarse_phenology_stage = w_cv * result.coarse_phenology_stage + w_llm * llm_pheno
+                    
+                    print(f"[LLM_VISION] Merged: veg={result.vegetation_fraction:.2f}, "
+                          f"soil={result.bare_soil_fraction:.2f}, "
+                          f"density={result.canopy_density_class}")
+            except Exception as e:
+                print(f"[LLM_VISION] Overlay failed (non-blocking): {e}")
 
         return result
 

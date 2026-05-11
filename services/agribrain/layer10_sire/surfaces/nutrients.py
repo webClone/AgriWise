@@ -1,5 +1,5 @@
 """
-Nutrient Surface Engine (v3) — Source-grounded from L4 + L1 soil + confounders
+Nutrient Surface Engine (v4) — Spatially-aware from L4 + L1 soil + NDVI + SAR
 ==============================================================================
 
 Multi-evidence spatial nutrient surfaces:
@@ -7,7 +7,12 @@ Multi-evidence spatial nutrient surfaces:
   - L1 soil priors (soil_clay, soil_ph, soil_org_carbon)
   - L4 confounders (water stress, disease, salinity)
   - L4 zone_metrics (per-zone if available)
-  - NDVI as final modulation if no other spatial source
+  - NDVI spatial modulation — ALWAYS applied as VRA proxy
+  - SAR backscatter spatial texture (soil moisture → nutrient availability)
+
+v4 Change: NDVI modulation is no longer "last resort". It is always blended
+into the surface to ensure spatial heterogeneity even when soil rasters are
+spatially uniform (e.g. SoilGrids single-point lookups broadcast to grid).
 """
 from typing import List, Optional, Dict, Any
 from layer10_sire.schema import (
@@ -65,13 +70,51 @@ def generate_nutrient_surfaces(
     return surfaces
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _is_spatially_uniform(raster, H: int, W: int) -> bool:
+    """Check if a raster has the same value everywhere (e.g. SoilGrids broadcast).
+
+    Returns True if all non-None pixels share exactly the same value,
+    meaning the raster provides no spatial differentiation.
+    """
+    first_val = None
+    for r in range(min(H, len(raster))):
+        row = raster[r]
+        for c in range(min(W, len(row))):
+            v = row[c]
+            if v is not None:
+                if first_val is None:
+                    first_val = v
+                elif abs(v - first_val) > 1e-6:
+                    return False
+    return True
+
+
+def _raster_stats(raster, H: int, W: int):
+    """Pre-compute mean, min, max for a raster. Returns (mean, mn, mx, count)."""
+    vals = []
+    for r in range(min(H, len(raster))):
+        row = raster[r]
+        for c in range(min(W, len(row))):
+            v = row[c]
+            if v is not None:
+                vals.append(v)
+    if not vals:
+        return 0.0, 0.0, 0.0, 0
+    return sum(vals) / len(vals), min(vals), max(vals), len(vals)
+
+
 def _build_nutrient_stress_surface(l4: L4NutrientData, l1: L1SpatialData, H: int, W: int):
     """
     Build nutrient stress surface from:
-      1. L4 per-nutrient deficiency probabilities
-      2. Soil texture priors (clay, pH, organic carbon)
-      3. Zone rasterization if per-zone metrics available
-      4. NDVI modulation as final spatial proxy
+      1. L4 per-nutrient deficiency probabilities (field-level base)
+      2. Zone rasterization if per-zone metrics available
+      3. Soil texture priors (clay, pH, organic carbon)
+      4. NDVI-based spatial modulation (always applied as VRA proxy)
+      5. SAR backscatter modulation (soil moisture → nutrient availability)
     """
     # Aggregate deficiency: max across N, P, K
     max_def = 0.0
@@ -97,21 +140,57 @@ def _build_nutrient_stress_surface(l4: L4NutrientData, l1: L1SpatialData, H: int
             for c in range(W):
                 if (r, c) not in assigned:
                     grid[r][c] = round(max_def, 4)
-        return _apply_soil_modulation(grid, l1, H, W)
+        return _apply_spatial_modulation(grid, l1, H, W)
 
-    # --- Priority 2: Soil-texture modulated stress ---
+    # --- Priority 2: Uniform base → spatially modulated ---
     grid = [[round(max_def, 4)] * W for _ in range(H)]
-    return _apply_soil_modulation(grid, l1, H, W)
+    return _apply_spatial_modulation(grid, l1, H, W)
 
 
-def _apply_soil_modulation(grid, l1: L1SpatialData, H: int, W: int):
-    """Modulate nutrient stress by soil properties — sandy/low-OC → more stress."""
+def _apply_spatial_modulation(grid, l1: L1SpatialData, H: int, W: int):
+    """Modulate nutrient stress spatially using all available evidence.
+
+    Combines:
+      - Soil property rasters (clay, pH, SOC) — only if spatially heterogeneous
+      - NDVI raster — always applied (VRA principle: low NDVI → higher stress)
+      - SAR VH/VV backscatter — soil moisture proxy (wet → better nutrient transport)
+
+    NDVI modulation was previously gated behind `not has_soil`, which made the
+    surface spatially uniform whenever SoilGrids provided data (uniform values).
+    Now NDVI is always blended, with its weight increased when soil data is
+    spatially homogeneous.
+    """
     soil_clay = l1.raster_maps.get('soil_clay')
     soil_ph = l1.raster_maps.get('soil_ph')
     soil_oc = l1.raster_maps.get('soil_org_carbon')
     ndvi = l1.raster_maps.get('ndvi')
+    sar_vh = l1.raster_maps.get('vh') or l1.raster_maps.get('VH')
 
-    has_soil = soil_clay or soil_ph or soil_oc
+    # Detect spatially-uniform soil rasters (SoilGrids single-point broadcast)
+    soil_has_spatial_info = False
+    if soil_clay and not _is_spatially_uniform(soil_clay, H, W):
+        soil_has_spatial_info = True
+    if soil_ph and not _is_spatially_uniform(soil_ph, H, W):
+        soil_has_spatial_info = True
+    if soil_oc and not _is_spatially_uniform(soil_oc, H, W):
+        soil_has_spatial_info = True
+
+    # Pre-compute NDVI statistics (avoids O(H²W²) recomputation per pixel)
+    ndvi_mean, ndvi_min, ndvi_max, ndvi_count = 0.5, 0.0, 1.0, 0
+    ndvi_range = 0.0
+    if ndvi:
+        ndvi_mean, ndvi_min, ndvi_max, ndvi_count = _raster_stats(ndvi, H, W)
+        ndvi_range = ndvi_max - ndvi_min
+
+    # Pre-compute SAR VH statistics (soil moisture spatial proxy)
+    sar_mean, sar_min, sar_max, sar_count = 0.0, 0.0, 0.0, 0
+    sar_range = 0.0
+    if sar_vh:
+        sar_mean, sar_min, sar_max, sar_count = _raster_stats(sar_vh, H, W)
+        sar_range = sar_max - sar_min
+
+    # NDVI modulation weight — stronger when soil is spatially uniform
+    ndvi_mod_weight = 0.5 if soil_has_spatial_info else 0.7
 
     for r in range(H):
         for c in range(W):
@@ -120,8 +199,10 @@ def _apply_soil_modulation(grid, l1: L1SpatialData, H: int, W: int):
             base = grid[r][c]
             modifier = 1.0
 
+            # --- Soil property modulation (unchanged, always applied) ---
+
             # Sandy soil → higher nutrient stress (clay < 15%)
-            if soil_clay and soil_clay[r][c] is not None:
+            if soil_clay and r < len(soil_clay) and c < len(soil_clay[r]) and soil_clay[r][c] is not None:
                 clay = soil_clay[r][c]
                 if clay < 15:
                     modifier *= 1.3  # More leaching
@@ -129,7 +210,7 @@ def _apply_soil_modulation(grid, l1: L1SpatialData, H: int, W: int):
                     modifier *= 0.8  # Better retention
 
             # Low organic carbon → higher stress
-            if soil_oc and soil_oc[r][c] is not None:
+            if soil_oc and r < len(soil_oc) and c < len(soil_oc[r]) and soil_oc[r][c] is not None:
                 oc = soil_oc[r][c]
                 if oc < 1.0:
                     modifier *= 1.2
@@ -137,18 +218,35 @@ def _apply_soil_modulation(grid, l1: L1SpatialData, H: int, W: int):
                     modifier *= 0.7
 
             # Extreme pH → nutrient lockout
-            if soil_ph and soil_ph[r][c] is not None:
+            if soil_ph and r < len(soil_ph) and c < len(soil_ph[r]) and soil_ph[r][c] is not None:
                 ph = soil_ph[r][c]
                 if ph < 5.5 or ph > 8.0:
                     modifier *= 1.3  # Nutrient availability drops
 
-            # NDVI proxy (last resort spatial differentiation)
-            if not has_soil and ndvi and ndvi[r][c] is not None:
-                ndvi_vals = [ndvi[rr][cc] for rr in range(H) for cc in range(W) if ndvi[rr][cc] is not None]
-                if ndvi_vals:
-                    ndvi_mean = sum(ndvi_vals) / len(ndvi_vals)
-                    if ndvi_mean > 0:
-                        modifier *= max(0.5, 2.0 - ndvi[r][c] / ndvi_mean)
+            # --- NDVI spatial modulation (ALWAYS applied) ---
+            # VRA principle: low NDVI relative to field mean indicates
+            # reduced canopy vigor, which correlates with nutrient stress.
+            # Higher NDVI → healthier canopy → lower nutrient stress.
+            if ndvi and ndvi_count > 0 and ndvi_range > 0.02 and ndvi_mean > 0:
+                pixel_ndvi = ndvi[r][c] if r < len(ndvi) and c < len(ndvi[r]) else None
+                if pixel_ndvi is not None:
+                    # Normalize pixel NDVI relative to field: [-1, +1]
+                    ndvi_deviation = (pixel_ndvi - ndvi_mean) / ndvi_range
+                    # Invert: low NDVI → positive stress modifier
+                    # Scale: ±ndvi_mod_weight of the base value
+                    ndvi_factor = 1.0 - (ndvi_deviation * ndvi_mod_weight)
+                    modifier *= max(0.4, min(1.8, ndvi_factor))
+
+            # --- SAR VH spatial modulation (soil moisture proxy) ---
+            # Higher VH backscatter → wetter soil → better nutrient transport
+            # Lower VH → drier soil → reduced nutrient mobility → more stress
+            if sar_vh and sar_count > 0 and sar_range > 0.5:
+                pixel_vh = sar_vh[r][c] if r < len(sar_vh) and c < len(sar_vh[r]) else None
+                if pixel_vh is not None:
+                    sar_deviation = (pixel_vh - sar_mean) / sar_range
+                    # Invert: low VH (dry) → higher stress
+                    sar_factor = 1.0 - (sar_deviation * 0.25)
+                    modifier *= max(0.7, min(1.3, sar_factor))
 
             grid[r][c] = round(max(0.0, min(1.0, base * modifier)), 4)
 
@@ -156,7 +254,13 @@ def _apply_soil_modulation(grid, l1: L1SpatialData, H: int, W: int):
 
 
 def _build_fertility_limitation(l4: L4NutrientData, l1: L1SpatialData, H: int, W: int):
-    """Build fertility limitation surface: soil quality + L4 confidence + confounders."""
+    """Build fertility limitation surface: soil quality + L4 confidence + confounders.
+
+    Always uses NDVI spatial modulation for spatial differentiation, regardless
+    of whether soil rasters exist.
+    """
+    from layer10_sire.surfaces.spatial_modulation import get_ndvi_raster, modulate_by_ndvi
+
     # Base limitation from L4 confidence (lower confidence → higher limitation)
     min_conf = 1.0
     has_water_confounder = False
@@ -168,19 +272,24 @@ def _build_fertility_limitation(l4: L4NutrientData, l1: L1SpatialData, H: int, W
 
     base_limitation = round(1.0 - min_conf, 4)
 
-    grid = [[base_limitation] * W for _ in range(H)]
+    # Start with NDVI-modulated base (always, not gated behind missing soil)
+    ndvi_r = get_ndvi_raster(l1, H, W)
+    grid = modulate_by_ndvi(
+        base_limitation, ndvi_r, H, W,
+        invert=True, clamp_min=0.0, clamp_max=1.0,
+    )
 
-    # Soil texture adds limitation: sandy + low OC → more limited
+    # Overlay soil texture penalties on top of NDVI-modulated surface
     soil_clay = l1.raster_maps.get('soil_clay')
     soil_oc = l1.raster_maps.get('soil_org_carbon')
 
     for r in range(H):
         for c in range(W):
             soil_penalty = 0.0
-            if soil_clay and soil_clay[r][c] is not None:
+            if soil_clay and r < len(soil_clay) and c < len(soil_clay[r]) and soil_clay[r][c] is not None:
                 if soil_clay[r][c] < 10:
                     soil_penalty += 0.15
-            if soil_oc and soil_oc[r][c] is not None:
+            if soil_oc and r < len(soil_oc) and c < len(soil_oc[r]) and soil_oc[r][c] is not None:
                 if soil_oc[r][c] < 1.0:
                     soil_penalty += 0.10
             grid[r][c] = round(min(1.0, grid[r][c] + soil_penalty), 4)

@@ -39,69 +39,69 @@ function getZoneMaterial(zoneType: string, zoneFamily: string): ZoneMaterial {
   // Trust/uncertainty — cool gray-lavender, sparse and quiet
   if (zoneFamily === "trust") {
     return {
-      fill: [130, 125, 155],   // slate-lavender
-      edge: [145, 135, 175],   // muted violet
-      halo: [115, 110, 148],   // deep cool gray
-      fillMul: 0.50, edgeMul: 0.55, haloMul: 0.40,
+      fill: [160, 155, 195],   // brighter slate-lavender
+      edge: [200, 190, 230],   // bright violet
+      halo: [140, 135, 180],   // cool gray
+      fillMul: 0.60, edgeMul: 0.70, haloMul: 0.50,
     };
   }
 
-  // Disease / Pathogen — muted rust/ochre, NOT magenta/purple
+  // Disease / Pathogen — bright rust for visibility
   if (t.includes("disease") || t.includes("pest") || t.includes("pathogen")) {
     return {
-      fill: [195, 105, 80],    // muted rust
-      edge: [205, 115, 90],    // warm terracotta
-      halo: [175, 95, 70],     // deep rust
-      fillMul: 0.80, edgeMul: 0.85, haloMul: 0.70,
+      fill: [255, 140, 100],   // bright rust-orange
+      edge: [255, 160, 120],   // warm orange
+      halo: [220, 120, 80],    // rust
+      fillMul: 0.90, edgeMul: 1.0, haloMul: 0.80,
     };
   }
 
-  // Nutrient — warm ochre/sandstone, not bright yellow
+  // Nutrient — bright ochre/gold
   if (t.includes("nutrient") || t.includes("nitrogen") || t.includes("fertiliz")) {
     return {
-      fill: [185, 150, 75],    // warm ochre
-      edge: [195, 165, 90],    // sandstone
-      halo: [165, 135, 70],    // muted clay
-      fillMul: 0.70, edgeMul: 0.85, haloMul: 0.70,
+      fill: [230, 190, 90],    // bright gold
+      edge: [245, 210, 110],   // warm gold
+      halo: [200, 170, 80],    // ochre
+      fillMul: 0.85, edgeMul: 1.0, haloMul: 0.80,
     };
   }
 
-  // Water stress — slate-blue teal, not bright cyan
+  // Water stress — bright cyan-teal for visibility through multiply blend
   if (t.includes("water") || t.includes("dry") || t.includes("moisture") || t.includes("irrigat")) {
     return {
-      fill: [70, 130, 155],    // slate teal
-      edge: [85, 148, 170],    // muted steel-blue
-      halo: [60, 115, 140],    // deep slate
-      fillMul: 0.75, edgeMul: 0.85, haloMul: 0.75,
+      fill: [100, 200, 240],   // bright cyan
+      edge: [140, 220, 255],   // vivid sky blue
+      halo: [80, 180, 220],    // teal
+      fillMul: 0.85, edgeMul: 1.0, haloMul: 0.85,
     };
   }
 
-  // Composite risk — warm terracotta, not bright amber
+  // Composite risk — bright amber
   if (t.includes("composite") || t.includes("risk") || t.includes("alert")) {
     return {
-      fill: [185, 115, 65],    // terracotta
-      edge: [195, 130, 75],    // warm clay
-      halo: [165, 100, 55],    // deep rust
+      fill: [240, 160, 80],    // bright amber
+      edge: [255, 180, 100],   // warm amber
+      halo: [210, 140, 60],    // deep amber
+      fillMul: 0.90, edgeMul: 1.0, haloMul: 0.85,
+    };
+  }
+
+  // Action zones — bright emerald
+  if (zoneFamily === "action") {
+    return {
+      fill: [100, 200, 130],   // bright emerald
+      edge: [130, 230, 160],   // vivid green
+      halo: [80, 180, 110],    // green
       fillMul: 0.80, edgeMul: 0.90, haloMul: 0.80,
     };
   }
 
-  // Action zones — sage/muted green, not neon emerald
-  if (zoneFamily === "action") {
-    return {
-      fill: [85, 145, 100],    // sage
-      edge: [100, 160, 115],   // muted green
-      halo: [75, 130, 90],     // forest
-      fillMul: 0.70, edgeMul: 0.80, haloMul: 0.70,
-    };
-  }
-
-  // Default diagnostic — warm clay-red, not bright red
+  // Default diagnostic — bright warm clay
   return {
-    fill: [175, 95, 80],     // warm clay
-    edge: [190, 110, 95],    // terracotta-rose
-    halo: [155, 85, 70],     // deep clay
-    fillMul: 0.80, edgeMul: 0.90, haloMul: 0.75,
+    fill: [240, 140, 110],   // bright coral
+    edge: [255, 165, 130],   // warm coral
+    halo: [210, 120, 90],    // deep coral
+    fillMul: 0.90, edgeMul: 1.0, haloMul: 0.85,
   };
 }
 
@@ -175,14 +175,14 @@ export function getUnifiedZoneLayer({
         return [...mat.fill, 0] as [number, number, number, number];
       }
 
-      // V2.3: zones must be visible in observe mode — "are there zones here or not?"
+      // V3: zones render in their own normal-blend canvas — moderate opacity
       let baseAlpha: number;
       if (isSelected) {
-        baseAlpha = 70;   // ~0.27 — present and clear
+        baseAlpha = 90;   // ~0.35 — bold and clear
       } else if (isHovered) {
-        baseAlpha = 55;   // ~0.22 — confirmation lift
+        baseAlpha = 70;   // ~0.27 — confirmation lift
       } else {
-        baseAlpha = 38;   // ~0.15 — visible tint, readable at a glance
+        baseAlpha = 45;   // ~0.18 — visible tint, non-obtrusive
       }
 
       const alpha = Math.round(baseAlpha * mat.fillMul * conf.fillScale);
@@ -208,11 +208,11 @@ export function getUnifiedZoneLayer({
 
       let baseAlpha: number;
       if (isSelected) {
-        baseAlpha = 155;   // ~0.60 — firm and clear
+        baseAlpha = 200;   // ~0.78 — crisp and bold
       } else if (isHovered) {
-        baseAlpha = 100;   // ~0.39 — soft confirmation
+        baseAlpha = 160;   // ~0.63 — strong confirmation
       } else {
-        baseAlpha = 55;    // ~0.22 — readable contour even in observe mode
+        baseAlpha = 120;   // ~0.47 — clearly visible edge
       }
 
       const alpha = Math.round(baseAlpha * mat.edgeMul * conf.edgeScale);
@@ -225,9 +225,9 @@ export function getUnifiedZoneLayer({
       const { isSelected, isHovered, confidence } = feat.properties;
       const conf = confidenceScale(confidence);
 
-      if (isSelected) return 2.5 * conf.widthScale;
-      if (isHovered) return 2.0 * conf.widthScale;
-      return 1.0 * conf.widthScale;
+      if (isSelected) return 3.5 * conf.widthScale;
+      if (isHovered) return 3.0 * conf.widthScale;
+      return 2.0 * conf.widthScale;
     },
 
     onHover,

@@ -1,10 +1,14 @@
 """
-L1 Adapter — Extract spatial data from FieldTensor
-====================================================
+L1 Adapter — Extract spatial data from FieldTensor (v2 Temporal)
+=================================================================
 
 Normalizes L1 FieldTensor into Layer 10 internal structures.
+Now extracts FULL temporal history (all time steps from 4D tensor)
+for 14-day temporal awareness (T-7 retrospective + T+7 forecast).
+
 Handles: 4D tensor data, maps, zones, zone_stats, daily_state,
-         provenance_log, spatial_reliability, grid_spec.
+         provenance_log, spatial_reliability, grid_spec,
+         raster_composites, observation_products, forecast context.
 """
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
@@ -12,14 +16,22 @@ from dataclasses import dataclass, field
 
 @dataclass
 class L1SpatialData:
-    """Normalized L1 spatial extraction for Layer 10."""
+    """Normalized L1 spatial extraction for Layer 10 (v2 — Temporal)."""
     # Grid dimensions (from grid_spec or tensor shape)
     height: int = 10
     width: int = 10
     resolution_m: float = 10.0
 
-    # Raster maps — variable→2D array [H][W]
+    # Raster maps — variable→2D array [H][W] (LATEST time step)
     raster_maps: Dict[str, List[List[Optional[float]]]] = field(default_factory=dict)
+
+    # === TEMPORAL EXTRACTION (14-day window) ===
+    # Full temporal raster history: date→variable→2D grid [H][W]
+    temporal_rasters: Dict[str, Dict[str, List[List[Optional[float]]]]] = field(default_factory=dict)
+    # Ordered date index from FieldTensor.time_index
+    time_index: List[str] = field(default_factory=list)
+    # Per-date metadata (source, quality, cloud cover)
+    temporal_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # Zone structure — zone_id→cell mask
     zone_masks: Dict[str, List[Tuple[int, int]]] = field(default_factory=dict)
@@ -38,19 +50,117 @@ class L1SpatialData:
     # Spatial reliability raster [H][W]
     reliability_map: Optional[List[List[float]]] = None
 
+    # === WEATHER / FORECAST CONTEXT ===
+    # Daily weather observations (from daily_state or plot_timeseries)
+    weather_history: List[Dict[str, Any]] = field(default_factory=list)
+    # {date, precipitation_mm, temp_max, temp_min, humidity, et0, ...}
+
     # Run ID
     run_id: str = ""
 
 
+def _extract_temporal_rasters(
+    tensor_data: list, channels: list, time_index: list,
+    H: int, W: int
+) -> Tuple[
+    Dict[str, Dict[str, List[List[Optional[float]]]]],
+    Dict[str, List[List[Optional[float]]]]
+]:
+    """
+    Extract ALL time-step rasters from 4D tensor [T, H, W, C].
+
+    Returns:
+        temporal_rasters: date→channel→[H][W] grid
+        latest_rasters: channel→[H][W] grid (last time step)
+    """
+    temporal = {}
+    latest = {}
+    n_steps = len(tensor_data)
+
+    for t_idx in range(n_steps):
+        t_slice = tensor_data[t_idx]
+        if not isinstance(t_slice, list) or len(t_slice) == 0:
+            continue
+
+        # Use time_index date or synthesize one
+        date_key = time_index[t_idx] if t_idx < len(time_index) else f"T{t_idx}"
+        actual_h = len(t_slice)
+        actual_w = len(t_slice[0]) if t_slice[0] else 0
+
+        date_rasters = {}
+        for ci, ch in enumerate(channels):
+            ch_name = ch.value if hasattr(ch, 'value') else str(ch)
+            raster = [[None] * W for _ in range(H)]
+            for r in range(min(H, actual_h)):
+                for c in range(min(W, actual_w)):
+                    try:
+                        val = t_slice[r][c][ci]
+                        raster[r][c] = float(val) if val is not None else None
+                    except (IndexError, TypeError):
+                        pass
+            date_rasters[ch_name] = raster
+
+            # Keep track of latest
+            if t_idx == n_steps - 1:
+                latest[ch_name] = raster
+
+        temporal[date_key] = date_rasters
+
+    return temporal, latest
+
+
+def _extract_weather_history(field_tensor: Any) -> List[Dict[str, Any]]:
+    """Extract daily weather observations from daily_state or plot_timeseries."""
+    weather = []
+
+    # Try daily_state first
+    ds = getattr(field_tensor, 'daily_state', {}) or {}
+    if isinstance(ds, dict):
+        # Look for weather-related keys in daily state
+        weather_keys = {
+            'precipitation', 'precipitation_mm', 'rain_mm',
+            'temp_max', 'temp_min', 'temperature',
+            'humidity', 'rh', 'et0', 'evapotranspiration',
+            'wind_speed', 'solar_radiation',
+        }
+        # Try to reconstruct daily weather from per-variable daily_state
+        daily_map = {}  # date → {var: val}
+        for var_name, values in ds.items():
+            if isinstance(values, list):
+                for i, entry in enumerate(values):
+                    if isinstance(entry, dict):
+                        day = entry.get('day', entry.get('date', f'day_{i}'))
+                        if day not in daily_map:
+                            daily_map[day] = {'date': day}
+                        for k, v in entry.items():
+                            if k not in ('day', 'date') and isinstance(v, (int, float)):
+                                daily_map[day][k] = float(v)
+        weather = list(daily_map.values())
+
+    # Supplement from plot_timeseries
+    if not weather:
+        pts = getattr(field_tensor, 'plot_timeseries', []) or []
+        for entry in pts:
+            if isinstance(entry, dict):
+                weather.append({
+                    k: float(v) if isinstance(v, (int, float)) else v
+                    for k, v in entry.items()
+                })
+
+    return weather
+
+
 def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10) -> L1SpatialData:
     """
-    Extract all spatial intelligence from FieldTensor.
+    Extract all spatial intelligence from FieldTensor (v2 — Full Temporal).
+
+    Now extracts ALL time steps for 14-day temporal awareness.
 
     Priority:
-      1. Real 4D tensor data (spatial truth)
+      1. Real 4D tensor data (spatial truth) — ALL time steps
       2. maps dict (raster refs)
       3. zone_stats (per-zone timeseries)
-      4. daily_state (per-zone daily state)
+      4. daily_state (per-zone daily state + weather)
       5. plot_timeseries (field-level fallback)
     """
     if field_tensor is None:
@@ -75,27 +185,39 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10) -> L1Spa
 
     H, W = result.height, result.width
 
-    # --- Strategy 1: Extract from 4D tensor data [T, H, W, C] ---
+    # --- Extract time index ---
+    time_index = getattr(field_tensor, 'time_index', []) or []
+    result.time_index = [str(t) for t in time_index]
+
+    # --- Strategy 1: Extract from 4D tensor data [T, H, W, C] — ALL TIME STEPS ---
     tensor_data = getattr(field_tensor, 'data', [])
     channels = getattr(field_tensor, 'channels', [])
     if tensor_data and isinstance(tensor_data, list) and len(tensor_data) > 0:
         try:
-            last_t = tensor_data[-1]  # Latest time step
-            if isinstance(last_t, list) and len(last_t) > 0:
-                actual_h = len(last_t)
-                actual_w = len(last_t[0]) if last_t[0] else 0
-                for ci, ch in enumerate(channels):
-                    ch_name = ch.value if hasattr(ch, 'value') else str(ch)
-                    raster = [[None]*W for _ in range(H)]
-                    for r in range(min(H, actual_h)):
-                        for c in range(min(W, actual_w)):
-                            try:
-                                raster[r][c] = float(last_t[r][c][ci])
-                            except (IndexError, TypeError):
-                                pass
-                    result.raster_maps[ch_name] = raster
+            temporal, latest = _extract_temporal_rasters(
+                tensor_data, channels, result.time_index, H, W
+            )
+            result.temporal_rasters = temporal
+            result.raster_maps.update(latest)
         except (IndexError, TypeError):
-            pass
+            # Fallback to last-only extraction
+            try:
+                last_t = tensor_data[-1]
+                if isinstance(last_t, list) and len(last_t) > 0:
+                    actual_h = len(last_t)
+                    actual_w = len(last_t[0]) if last_t[0] else 0
+                    for ci, ch in enumerate(channels):
+                        ch_name = ch.value if hasattr(ch, 'value') else str(ch)
+                        raster = [[None]*W for _ in range(H)]
+                        for r in range(min(H, actual_h)):
+                            for c in range(min(W, actual_w)):
+                                try:
+                                    raster[r][c] = float(last_t[r][c][ci])
+                                except (IndexError, TypeError):
+                                    pass
+                        result.raster_maps[ch_name] = raster
+            except (IndexError, TypeError):
+                pass
 
     # --- Strategy 2: Extract from maps dict ---
     maps = getattr(field_tensor, 'maps', {}) or {}
@@ -119,7 +241,7 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10) -> L1Spa
         elif rc_key == 'NDMI': target_keys = ['ndmi', 'NDMI']
         elif rc_key == 'QUALITY': target_keys = ['quality_mask']
         elif rc_key == 'SAR': target_keys = ['vv', 'vh', 'VV', 'VH']
-        
+
         for ch_key in target_keys:
             if ch_key not in result.raster_maps and "values" in rc_data:
                 # If it's SAR, we ideally want both VV and VH, but if only 'values' exists, it's VV.
@@ -159,9 +281,13 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10) -> L1Spa
             result.zone_timeseries[var_name] = {}
             for z_id, ts in zone_data.items():
                 if isinstance(ts, list):
-                    result.zone_timeseries[var_name][z_id] = [
-                        float(v) for v in ts if isinstance(v, (int, float))
-                    ]
+                    parsed_ts = []
+                    for v in ts:
+                        if isinstance(v, (int, float)):
+                            parsed_ts.append(float(v))
+                        elif isinstance(v, dict) and "mean" in v and v["mean"] is not None:
+                            parsed_ts.append(float(v["mean"]))
+                    result.zone_timeseries[var_name][z_id] = parsed_ts
 
     # --- Strategy 5: Field-level fallback from daily_state/plot_timeseries ---
     ds = getattr(field_tensor, 'daily_state', {}) or {}
@@ -205,8 +331,43 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10) -> L1Spa
                     rmap[r][c] = float(rel_raster[r][c])
         result.reliability_map = rmap
 
+    # --- Extract weather history ---
+    result.weather_history = _extract_weather_history(field_tensor)
+
+    # --- Extract temporal metadata (per-date quality) ---
+    prov_log = getattr(field_tensor, 'provenance_log', []) or []
+    for entry in prov_log:
+        if isinstance(entry, dict):
+            date = entry.get('date', '')
+            if date:
+                result.temporal_metadata[date] = {
+                    'source': entry.get('source', 'UNKNOWN'),
+                    'cloud_pct': entry.get('cloud_pct', 0.0),
+                    'quality': entry.get('quality', 1.0),
+                }
+
     # --- Broadcast field-level values to raster if no spatial data exists ---
     # Fix C: Stop L1 contradiction, we no longer broadcast fake spatial rasters.
     # _broadcast_missing(result, H, W)
+    
+    # Prune empty rasters so downstream broadcast fallbacks can trigger
+    empty_keys = []
+    for k, rmap in result.raster_maps.items():
+        if not rmap:
+            empty_keys.append(k)
+            continue
+        has_val = False
+        for r in range(min(H, len(rmap))):
+            if rmap[r]:
+                for c in range(min(W, len(rmap[r]))):
+                    if rmap[r][c] is not None:
+                        has_val = True
+                        break
+            if has_val: break
+        if not has_val:
+            empty_keys.append(k)
+            
+    for k in empty_keys:
+        del result.raster_maps[k]
 
     return result

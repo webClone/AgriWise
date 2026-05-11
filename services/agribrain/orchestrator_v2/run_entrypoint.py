@@ -85,17 +85,38 @@ def _build_inputs(ctx: dict, query: str = ""):
         except: pass
 
     # 3. Sensors -> Sensor Evidence
-    for sensor in ctx.get("sensors", []):
-        try:
-            ts = sensor.get("lastSync") or datetime.now(timezone.utc).isoformat()
-            user_evidence.append({
-                "id": str(sensor.get("id", uuid.uuid4())),
-                "source_type": "sensor",
-                "timestamp": ts,
-                "location_scope": "point",
-                "payload": sensor
-            })
-        except: pass
+    sensors_raw = ctx.get("sensors", [])
+    # Handle legacy flat dict format: wrap in list
+    if isinstance(sensors_raw, dict):
+        sensors_raw = [sensors_raw]
+    # Only iterate if it's a list of sensor objects
+    if isinstance(sensors_raw, list):
+        for sensor in sensors_raw:
+            if not isinstance(sensor, dict):
+                continue
+            try:
+                ts = sensor.get("lastSync") or datetime.now(timezone.utc).isoformat()
+                user_evidence.append({
+                    "id": str(sensor.get("id", uuid.uuid4())),
+                    "source_type": "sensor",
+                    "timestamp": ts,
+                    "location_scope": "point",
+                    "payload": sensor
+                })
+            except: pass
+
+    # Merge sensor_summary (flat dict) for backward compat in operational_context
+    sensor_summary = ctx.get("sensor_summary", {})
+    if isinstance(sensors_raw, list) and sensors_raw and not sensor_summary:
+        # Build summary from the array if route didn't provide one
+        for s in sensors_raw:
+            if isinstance(s, dict):
+                if s.get("soilMoisture") is not None:
+                    sensor_summary["soil_moisture"] = s["soilMoisture"]
+                if s.get("temperature") is not None:
+                    sensor_summary["temperature"] = s["temperature"]
+                if s.get("humidity") is not None:
+                    sensor_summary["humidity"] = s["humidity"]
 
     return OrchestratorInput(
         plot_id=ctx.get("plot_id", "UNKNOWN"),
@@ -111,7 +132,8 @@ def _build_inputs(ctx: dict, query: str = ""):
         operational_context={
             "lat": ctx.get("lat", 0.0),
             "lng": ctx.get("lng", 0.0),
-            "sensors": ctx.get("sensors", {}),
+            "sensors": sensors_raw,
+            "sensor_summary": sensor_summary,
             "soil_type": ctx.get("soil_type"),
             "irrigation_type": ctx.get("irrigation_type"),
             "polygon_coords": poly,  # Pass through the real polygon
@@ -161,7 +183,7 @@ def run_chat_mode(ctx: dict, query: str, args) -> dict:
 
     f = io.StringIO()
     with redirect_stdout(f):
-        chat_payload, artifact = run_for_chat(inputs, user_query=query, history=history)
+        chat_payload, artifact = run_for_chat(inputs, user_query=query, history=history, user_mode=getattr(args, "userMode", "farmer"))
 
     cp_dict = json.loads(json.dumps(chat_payload, default=lambda o: o.__dict__))
 
@@ -185,7 +207,7 @@ def run_full_mode(ctx: dict, query: str = "") -> dict:
         from orchestrator_v2.runner import run_for_chat
         f = io.StringIO()
         with redirect_stdout(f):
-            cp, artifact = run_for_chat(inputs, user_query=query)
+            cp, artifact = run_for_chat(inputs, user_query=query, user_mode=getattr(args, "userMode", "farmer") if 'args' in locals() else "farmer")
         chat_payload = json.loads(json.dumps(cp, default=lambda o: o.__dict__))
     else:
         f = io.StringIO()
@@ -306,7 +328,7 @@ def _serialize_l10_output(l10_out):
         explainability_pack[key] = {
             "summary": pack.summary,
             "top_drivers": [
-                {"name": d.name, "value": d.value, "role": d.role}
+                {"name": d.name, "value": d.value, "role": d.role, "description": d.description, "formatted_value": d.formatted_value}
                 for d in pack.top_drivers
             ],
             "equations": [
@@ -396,7 +418,7 @@ def run_surfaces_mode(ctx: dict, query: str = "") -> dict:
     if artifact.layer_10 and artifact.layer_10.output:
         l10_payload = _serialize_l10_output(artifact.layer_10.output)
 
-    run = artifact_to_run(artifact, surfaces=l10_payload["surfaces"])
+    run = artifact_to_run(artifact, surfaces=l10_payload["surfaces"], layer10_detail=l10_payload)
 
     # Enrich canonical run with Layer 10 frontend bundle
     run["timestamp"] = l10_payload["timestamp"] or run["audit"].get("timestamp_utc", "")
@@ -522,24 +544,63 @@ Respond ONLY in valid JSON matching this schema:
   "internal_memory_updates": null
 }}"""
     try:
-        resp = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "qwen/qwen-2.5-72b-instruct",
-                "messages": [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": query},
-                ],
-                "temperature": 0.3,
-                "response_format": {"type": "json_object"},
-            },
-            timeout=15,
-        )
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        rj_run = {}
+        choices_run = None
+        try:
+            resp = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "meta-llama/llama-3.3-70b-instruct:free",
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": query},
+                    ],
+                    "temperature": 0.3,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                rj_run = resp.json()
+                choices_run = rj_run.get("choices")
+            else:
+                print(f"[LLM] OpenRouter returned {resp.status_code}")
+        except Exception as e:
+            print(f"[LLM] OpenRouter network error: {e}")
+
+        if not choices_run and os.environ.get("GEMINI_API_KEY"):
+            print("[LLM] Falling back to Gemini API")
+            try:
+                gemini_resp = requests.post(
+                    "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                    headers={"Authorization": f"Bearer {os.environ.get('GEMINI_API_KEY')}", "Content-Type": "application/json"},
+                    json={
+                        "model": "gemini-flash-latest",
+                        "messages": [
+                            {"role": "system", "content": sys_prompt},
+                            {"role": "user", "content": query},
+                        ],
+                        "temperature": 0.3,
+                        "response_format": {"type": "json_object"}
+                    },
+                    timeout=15
+                )
+                print(f"[LLM-DEBUG] Gemini RUN HTTP {gemini_resp.status_code}")
+                if gemini_resp.status_code == 200:
+                    rj_run = gemini_resp.json()
+                    choices_run = rj_run.get("choices")
+                else:
+                    print(f"[LLM-ERROR] Gemini RUN fallback returned {gemini_resp.status_code}: {gemini_resp.text}")
+            except Exception as e:
+                print(f"[LLM-ERROR] Gemini RUN fallback failed/timeout: {e}")
+
+        if not choices_run:
+            raise ValueError(f"No choices in LLM response: {rj_run.get('error', resp.status_code)}")
+        raw = choices_run[0].get("message", {}).get("content", "{}").strip()
         raw_json = json.loads(raw)
         
         # --- ARF Sanitizer (General) ---
@@ -560,6 +621,17 @@ Respond ONLY in valid JSON matching this schema:
                 elif isinstance(r, dict):
                     sanitized_recs.append(r)
             raw_json["recommendations"] = sanitized_recs
+            
+        # Fix Gemini string followups
+        f_ups = raw_json.get("followups", [])
+        if isinstance(f_ups, list):
+            sanitized_f = []
+            for f in f_ups:
+                if isinstance(f, str):
+                    sanitized_f.append({"question": f, "why": "Context discovery"})
+                elif isinstance(f, dict):
+                    sanitized_f.append(f)
+            raw_json["followups"] = sanitized_f
                 
         fups = raw_json.get("followups", [])
         if isinstance(fups, list):
@@ -596,8 +668,17 @@ Respond ONLY in valid JSON matching this schema:
         elif not learning or not isinstance(learning, dict):
             raw_json["learning"] = {
                 "level": exp_level,
-                "micro_lesson": "No learning module provided.",
-                "definitions": {}
+                "micro_lesson": (
+                    "AgriBrain uses a multi-source data fusion approach: Sentinel-2 optical imagery "
+                    "provides NDVI and canopy indices; Sentinel-1 SAR provides all-weather structural "
+                    "signals; OpenMeteo provides ET0 and rainfall; SoilGrids provides root-zone "
+                    "properties. A Kalman filter assimilates these into a continuous daily crop state, "
+                    "interpolating through cloud gaps and missing passes."
+                ),
+                "definitions": {
+                    "ET0": "Reference evapotranspiration — atmospheric water demand independent of crop type.",
+                    "SAR": "Synthetic Aperture Radar — penetrates clouds and measures canopy structure and soil moisture."
+                }
             }
 
         from orchestrator_v2.arf_schema import ARFResponse

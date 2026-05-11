@@ -107,6 +107,23 @@ def artifact_to_run(artifact: RunArtifact,
     # ---- Fallback Guidance ----
     zone_states = layer10_detail.get("quality", {}).get("zone_state_by_surface", {}) if layer10_detail else {}
     has_plot_data = len(surfaces or []) > 0 or layer_summaries.get("layer_1", {}).get("status") == "OK"
+
+    # ── Satellite Vision Evidence Upgrade ──
+    # If the LLM satellite vision pipeline has analyzed this plot's tile,
+    # upgrade vegetation zone states from "no_data"/"low_confidence" to
+    # "field_wide" — we have real satellite ground-truth even if raster zones
+    # didn't form due to confidence thresholds.
+    try:
+        from layer0.perception.satellite_rgb.tile_runtime import get_cached_vision
+        vision = get_cached_vision(artifact.inputs.plot_id)
+        if vision and vision.get("confidence", 0) > 0.3:
+            veg_keys = ["NDVI_CLEAN", "NDVI_DEVIATION", "BASELINE_ANOMALY"]
+            for vkey in veg_keys:
+                if zone_states.get(vkey) in ("no_data", "low_confidence", "unknown"):
+                    zone_states[vkey] = "field_wide"
+    except Exception:
+        pass  # Vision cache is non-fatal enrichment
+
     fallback_guidance = build_fallback_guidance_map(zone_states, has_plot_data)
 
     return {

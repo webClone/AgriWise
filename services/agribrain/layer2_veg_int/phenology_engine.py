@@ -42,7 +42,8 @@ class PhenologyEngine:
         velocity: List[float], 
         dates: List[str],
         cumulative_gdd: List[float],
-        uncertainty: List[float] = None
+        uncertainty: List[float] = None,
+        high_res_visual_check: List[bool] = None
     ) -> Tuple[List[PhenologyStage], List[float]]:
         """
         Infers stage and calculates confidence based on signal-to-noise.
@@ -99,17 +100,23 @@ class PhenologyEngine:
             calc_conf = 1.0
             
             if current_stage == PhenologyStage.BARE_SOIL:
-                # Rule: NDVI > 0.25 AND V > 0.005
-                # Confidence is min(P(NDVI>0.25), P(V>0.005))
-                p_ndvi = get_prob(ndvi, 0.25, sigma)
+                # Rule: NDVI > 0.20 AND V > 0.005 (Lowered threshold from 0.25)
+                # Confidence is min(P(NDVI>0.20), P(V>0.005))
+                p_ndvi = get_prob(ndvi, 0.20, sigma)
                 # For velocity, uncertainty is sqrt(2)*sigma_ndvi technically (diff of two points)
                 p_v = get_prob(v, 0.005, sigma * 1.414)
                 
                 cond_met = p_ndvi > 0.5 and p_v > 0.5 and gdd_acc > priors["emergence_min_gdd"]
                 
+                # Secondary visual check from higher-resolution sources (e.g. Drone RGB / Planet)
+                has_visual_emergence = high_res_visual_check and i < len(high_res_visual_check) and high_res_visual_check[i]
+                if has_visual_emergence:
+                    cond_met = True
+                    p_ndvi = max(p_ndvi, 0.8)
+                
                 if cond_met: 
                     potential_next = PhenologyStage.EMERGENCE
-                    calc_conf = min(p_ndvi, p_v)
+                    calc_conf = min(p_ndvi, p_v) if not has_visual_emergence else p_ndvi
                 else:
                     # Confidence in staying Bare Soil = 1 - transition_probability
                     calc_conf = 1.0 - min(p_ndvi, p_v)

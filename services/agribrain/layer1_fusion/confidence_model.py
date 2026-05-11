@@ -19,12 +19,16 @@ ROLE_CEILINGS: Dict[str, float] = {
     "sensor": 0.95,
     "sentinel2": 0.85,
     "sentinel1": 0.65,
+    "sentinel5p": 0.70,
+    "eo_foundation": 0.75,
     "environment": 0.70,
     "weather_forecast": 0.60,
     "geo_context": 0.75,
     "perception": 0.60,
     "user_event": 0.90,
     "history": 0.35,
+    "drone_structural": 0.80,
+    "l0_state": 0.55,
 }
 
 # Weak evidence categories (capped lower)

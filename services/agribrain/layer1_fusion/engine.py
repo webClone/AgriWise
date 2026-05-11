@@ -4,14 +4,15 @@ Layer 1 Fusion Context Engine V1.
 21-step deterministic pipeline:
   1. Validate input bundle
   2. Build source envelopes
-  3. Run adapters → EvidenceItems
+  3. Run adapters -> EvidenceItems
   4. Validate units/scopes/provenance
   5. Quarantine invalid evidence
   6. Build EvidenceLedger
   7. Run temporal alignment
   8. Run spatial alignment
-  8.5 Raster grid ingestion (optional — if composites provided)
-  8.7 Zone segmentation (optional — if rasters have ≥16 valid NDVI pixels)
+  8.5 Raster grid ingestion (optional -- if composites provided)
+  8.6 EO Foundation Model embedding (optional -- multi-spectral bands)
+  8.7 Zone segmentation (optional -- if rasters have >=16 valid NDVI pixels)
   9. Compute freshness
   10. Run conflict resolver
   11. Run gap analyzer
@@ -59,6 +60,9 @@ from .adapters.sensors import SensorAdapter
 from .adapters.perception import PerceptionAdapter
 from .adapters.user_events import UserEventsAdapter
 from .adapters.history import HistoryAdapter
+from .adapters.sentinel5p import Sentinel5PAdapter
+from .adapters.drone import DroneStructuralAdapter
+from .adapters.l0_state import Layer0StateAdapter
 from .evidence_ledger import EvidenceLedger
 from .evidence_validation import validate_evidence, quarantine_evidence
 from .temporal_alignment import assign_temporal_window, compute_stale_flags
@@ -75,6 +79,7 @@ from .context_invariants import (
     compute_provenance_completeness,
 )
 from .raster_ingest import ingest_raster_composites
+from .eo_foundation_model import EOFoundationModel, EmbeddingResult
 from .outputs.layer2_adapter import build_layer2_context
 from .outputs.layer10_adapter import build_layer10_payload
 
@@ -88,6 +93,7 @@ class Layer1FusionEngine:
     def __init__(self) -> None:
         self._registry = SourceRegistry()
         self._register_adapters()
+        self._eo_model: Optional[EOFoundationModel] = None  # Lazy-loaded
 
     def _register_adapters(self) -> None:
         self._registry.register(Sentinel2Adapter())
@@ -99,6 +105,9 @@ class Layer1FusionEngine:
         self._registry.register(PerceptionAdapter())
         self._registry.register(UserEventsAdapter())
         self._registry.register(HistoryAdapter())
+        self._registry.register(Sentinel5PAdapter())
+        self._registry.register(DroneStructuralAdapter())
+        self._registry.register(Layer0StateAdapter())
 
     def fuse(self, bundle: Layer1InputBundle) -> Layer1ContextPackage:
         """Execute the 18-step fusion pipeline."""
@@ -179,7 +188,14 @@ class Layer1FusionEngine:
 
         # 8.7 Zone segmentation (optional — when NDVI rasters have ≥16 valid cells)
         zone_seg_audit = None
+        eo_embedding_audit = None
         if bundle.raster_composites:
+            # 8.6 EO Foundation Model embedding
+            eo_embedding_audit = self._try_eo_embedding(
+                bundle, ledger,
+            )
+
+            # 8.7 Zone segmentation
             zone_seg_audit = self._try_zone_segmentation(
                 bundle, ledger, spatial_index,
             )
@@ -310,6 +326,8 @@ class Layer1FusionEngine:
             })
         if zone_seg_audit is not None:
             audit.append(zone_seg_audit)
+        if eo_embedding_audit is not None:
+            audit.append(eo_embedding_audit)
         pkg.audit_log = audit
 
         # 19. Return context package
@@ -365,6 +383,18 @@ class Layer1FusionEngine:
             packages["history"] = [bundle.historical_layer1_package]
         else:
             packages["history"] = [None]
+
+        # Sentinel-5P (TROPOMI SIF)
+        packages["sentinel5p"] = bundle.sentinel5p_packages or []
+
+        # Drone structural (DroneRGBOutput packages)
+        packages["drone_structural"] = bundle.drone_structural_packages or []
+
+        # Layer 0 state (ValidationGraph + Kalman state vectors)
+        if bundle.layer0_state_package is not None:
+            packages["l0_state"] = [bundle.layer0_state_package]
+        else:
+            packages["l0_state"] = [None]
 
         return packages
 
@@ -485,6 +515,102 @@ class Layer1FusionEngine:
                 "zone_count": len(zones),
                 "method": "quantile_pure_python",
                 "zones": list(zones.keys()),
+            }
+        except Exception:
+            return None
+
+    def _try_eo_embedding(
+        self,
+        bundle: Layer1InputBundle,
+        ledger: EvidenceLedger,
+    ) -> Optional[Dict]:
+        """Run EO Foundation Model embedding on multi-spectral rasters.
+
+        Fires when raster composites contain spectral band data.
+        Creates evidence items for anomaly_score and anomaly_embedding.
+        Returns an audit dict if embedding ran, else None.
+        """
+        # Check for multi-spectral band data in raster composites
+        band_mapping = {
+            "B2": "B2", "B3": "B3", "B4": "B4",
+            "B8": "B8", "B11": "B11", "B12": "B12",
+            # Also accept uppercase index names from some pipelines
+            "BLUE": "B2", "GREEN": "B3", "RED": "B4",
+            "NIR": "B8", "SWIR1": "B11", "SWIR2": "B12",
+        }
+
+        band_arrays: Dict[str, Any] = {}
+        for key, raster_data in bundle.raster_composites.items():
+            mapped = band_mapping.get(key.upper())
+            if mapped and isinstance(raster_data, dict):
+                pixel_array = raster_data.get("pixel_array")
+                if pixel_array and pixel_array[0]:
+                    band_arrays[mapped] = pixel_array
+
+        if len(band_arrays) < 3:
+            return None  # Not enough spectral bands
+
+        try:
+            # Lazy-load the model
+            if self._eo_model is None:
+                self._eo_model = EOFoundationModel(
+                    model_path=bundle.eo_model_path,
+                )
+
+            result = self._eo_model.infer(band_arrays)
+            if result is None:
+                return None
+
+            # Create anomaly_score evidence
+            ledger.add(EvidenceItem(
+                evidence_id=f"eo_anomaly_score_{result.tile_hash[:8]}",
+                plot_id=bundle.plot_id,
+                variable="anomaly_score",
+                value=result.anomaly_score,
+                unit="score",
+                source_family="eo_foundation",
+                source_id=f"eo_{result.model_id}",
+                observation_type="derived_feature",
+                spatial_scope="plot",
+                observed_at=bundle.run_timestamp,
+                confidence=result.confidence,
+                reliability=min(0.75, result.confidence),
+                freshness_score=1.0,
+                provenance_ref=f"eo_foundation_{result.tile_hash}",
+                flags=[f"MODEL_{result.model_id.upper()}"],
+            ))
+
+            # Create anomaly_embedding evidence (embedding as value)
+            ledger.add(EvidenceItem(
+                evidence_id=f"eo_embedding_{result.tile_hash[:8]}",
+                plot_id=bundle.plot_id,
+                variable="anomaly_embedding",
+                value=result.embedding,
+                unit="index",
+                source_family="eo_foundation",
+                source_id=f"eo_{result.model_id}",
+                observation_type="derived_feature",
+                spatial_scope="plot",
+                observed_at=bundle.run_timestamp,
+                confidence=result.confidence,
+                reliability=min(0.75, result.confidence),
+                freshness_score=1.0,
+                provenance_ref=f"eo_foundation_{result.tile_hash}",
+                flags=[f"MODEL_{result.model_id.upper()}", f"DIM_{len(result.embedding)}"],
+                # Embedding is informational — downstream uses anomaly_score for decisions
+                diagnostic_only=True,
+            ))
+
+            return {
+                "step": "eo_foundation_embedding",
+                "model_id": result.model_id,
+                "mode": self._eo_model.mode,
+                "embedding_dim": len(result.embedding),
+                "anomaly_score": result.anomaly_score,
+                "confidence": result.confidence,
+                "bands_used": result.band_count,
+                "valid_pixels": result.valid_pixels,
+                "tile_hash": result.tile_hash,
             }
         except Exception:
             return None

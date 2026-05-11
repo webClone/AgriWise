@@ -42,7 +42,7 @@ def build_input_from_context(ctx: dict) -> Layer10Input:
     crop = ctx.get('crop', 'wheat')
 
     H, W = 8, 8
-    T, C = 3, 5
+    T, C = 15, 5  # 15 time steps for full 14-day window testing
     random.seed(hash(plot_id) % 2**31)
 
     # Build synthetic field tensor from plot location
@@ -67,7 +67,7 @@ def build_input_from_context(ctx: dict) -> Layer10Input:
             bounds=(lng, lat - H * 0.00009, lng + W * 0.00009, lat),
             resolution=10.0
         ),
-        time_index=['2025-06-28', '2025-06-29', '2025-06-30'],
+        time_index=[f'2025-06-{16 + i:02d}' for i in range(T)],  # 15-day window
         channels=[
             FieldTensorChannels.NDVI, FieldTensorChannels.NDVI_UNC,
             FieldTensorChannels.VV, FieldTensorChannels.VH,
@@ -78,8 +78,8 @@ def build_input_from_context(ctx: dict) -> Layer10Input:
             'zone_a': {'mask': [[r < 4 for c in range(W)] for r in range(H)], 'area_pct': 50, 'label': 'North'},
             'zone_b': {'mask': [[r >= 4 for c in range(W)] for r in range(H)], 'area_pct': 50, 'label': 'South'},
         },
-        daily_state={'ndvi': [0.6]*30, 'precipitation': [5.0]*20 + [0.0]*10},
-        provenance_log=[{'day': '2025-06-30', 'sources': {'s2': 0.5, 's1': 0.2, 'weather': 0.2, 'soil': 0.1}}],
+        daily_state={'ndvi': [0.5 + 0.01 * d for d in range(T)], 'precipitation': [5.0]*10 + [0.0]*5},
+        provenance_log=[{'day': f'2025-06-{16 + T - 1}', 'sources': {'s2': 0.5, 's1': 0.2, 'weather': 0.2, 'soil': 0.1}}],
     )
 
     vi = VegIntOutput(
@@ -137,10 +137,23 @@ def build_input_from_context(ctx: dict) -> Layer10Input:
         schedule=[],
     )
 
+    # Inject ForecastContext for temporal engine testing
+    from layer10_sire.schema import ForecastContext
+    fc = ForecastContext(
+        precipitation_forecast=[3.0, 5.0, 0.0, 0.0, 2.0, 8.0, 1.0],
+        temperature_max_forecast=[32.0, 33.0, 35.0, 34.0, 31.0, 29.0, 30.0],
+        temperature_min_forecast=[18.0, 19.0, 21.0, 20.0, 18.0, 17.0, 18.0],
+        humidity_forecast=[45.0, 50.0, 35.0, 40.0, 55.0, 60.0, 50.0],
+        forecast_source='SYNTHETIC',
+        forecast_confidence=0.75,
+    )
+
     return Layer10Input(
         field_tensor=ft, veg_int=vi,
         decision=l3, nutrients=l4, bio=l5, planning=l7, prescriptive=l8,
         plot_id=plot_id, grid_height=H, grid_width=W, resolution_m=10.0,
+        forecast_context=fc,
+        reference_date=f'2025-06-{16 + T - 1:02d}',
     )
 
 
@@ -257,7 +270,7 @@ def serialize_output(out) -> dict:
         explainability_pack[key] = {
             'summary': pack.summary,
             'top_drivers': [
-                {'name': d.name, 'value': d.value, 'role': d.role}
+                {'name': d.name, 'value': d.value, 'role': d.role, 'description': d.description, 'formatted_value': d.formatted_value}
                 for d in pack.top_drivers
             ],
             'equations': [
@@ -282,6 +295,31 @@ def serialize_output(out) -> dict:
             }
         }
 
+    # Temporal Bundle
+    temporal_bundle = None
+    tb = getattr(out, 'temporal_bundle', None)
+    if tb and tb.slices:
+        temporal_bundle = {
+            'reference_date': tb.reference_date,
+            'lookback_days': tb.lookback_days,
+            'lookahead_days': tb.lookahead_days,
+            'trend_summary': tb.trend_summary,
+            'temporal_quality': tb.temporal_quality,
+            'forecast_source': tb.forecast_source,
+            'slices': [
+                {
+                    'date': s.date,
+                    'day_offset': s.day_offset,
+                    'surface_type': s.surface_type.value,
+                    'values': s.values,
+                    'is_forecast': s.is_forecast,
+                    'confidence': s.confidence,
+                    'source': s.source,
+                }
+                for s in tb.slices
+            ],
+        }
+
     return {
         'run_id': out.run_id,
         'timestamp': out.timestamp,
@@ -295,6 +333,9 @@ def serialize_output(out) -> dict:
         'quality': quality,
         'provenance': out.provenance,
         'explainability_pack': explainability_pack,
+        'temporal_bundle': temporal_bundle,
+        'scenario_pack': getattr(out, 'scenario_pack', []),
+        'history_pack': getattr(out, 'history_pack', []),
     }
 
 

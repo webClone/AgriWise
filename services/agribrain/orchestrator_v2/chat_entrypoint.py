@@ -144,26 +144,65 @@ def main():
                 """
                 
                 try:
-                    resp = requests.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {API_KEY}",
-                            "Content-Type": "application/json",
-                            "HTTP-Referer": "https://agriwise.app", 
-                            "X-Title": "AgriWise"
-                        },
-                        json={
-                            "model": "qwen/qwen-2.5-72b-instruct", 
-                            "messages": [
-                                {"role": "system", "content": sys_prompt},
-                                {"role": "user", "content": prompt}
-                            ],
-                            "temperature": 0.3, 
-                            "response_format": {"type": "json_object"}
-                        },
-                        timeout=15
+                    rj_gen = {}
+                    choices_gen = None
+                    try:
+                        resp = requests.post(
+                            "https://openrouter.ai/api/v1/chat/completions",
+                            headers={
+                                "Authorization": f"Bearer {API_KEY}",
+                                "Content-Type": "application/json",
+                                "HTTP-Referer": "https://agriwise.app", 
+                                "X-Title": "AgriWise"
+                            },
+                            json={
+                                "model": "meta-llama/llama-3.3-70b-instruct:free",
+                                "messages": [
+                                    {"role": "system", "content": sys_prompt},
+                                    {"role": "user", "content": prompt}
+                                ],
+                                "temperature": 0.3, 
+                                "response_format": {"type": "json_object"}
+                            },
+                            timeout=15
+                        )
+                        if resp.status_code == 200:
+                            rj_gen = resp.json()
+                            choices_gen = rj_gen.get("choices")
+                        else:
+                            print(f"[LLM] OpenRouter returned {resp.status_code}")
+                    except Exception as e:
+                        print(f"[LLM] OpenRouter network error: {e}")
+
+                    if not choices_gen and os.environ.get("GEMINI_API_KEY"):
+                        print("[LLM] Falling back to Gemini API...")
+                        try:
+                            gemini_resp = requests.post(
+                                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                                headers={"Authorization": f"Bearer {os.environ.get('GEMINI_API_KEY')}", "Content-Type": "application/json"},
+                                json={
+                                    "model": "gemini-flash-latest",
+                                    "messages": [
+                                        {"role": "system", "content": sys_prompt},
+                                        {"role": "user", "content": prompt}
+                                    ],
+                                    "temperature": 0.3,
+                                    "response_format": {"type": "json_object"}
+                                },
+                                timeout=15
+                            )
+                            if gemini_resp.status_code == 200:
+                                rj_gen = gemini_resp.json()
+                                choices_gen = rj_gen.get("choices")
+                        except Exception as e:
+                            print(f"[LLM] Gemini fallback failed: {e}")
+
+                    if not choices_gen:
+                        raise ValueError(f"No choices in LLM response: {rj_gen.get('error', resp.status_code if 'resp' in locals() else 'unknown')}")
+                    raw_json = json.loads(
+                        choices_gen[0].get("message", {}).get("content", "{}")
+                        .strip().replace('```json', '').replace('```', '')
                     )
-                    raw_json = json.loads(resp.json()["choices"][0]["message"]["content"].strip().replace('```json', '').replace('```', ''))
                     
                     from orchestrator_v2.arf_schema import ARFResponse
                     arf_dict = ARFResponse(**raw_json).dict()

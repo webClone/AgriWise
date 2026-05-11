@@ -1,8 +1,41 @@
+"""
+Layer 7 Schema — Season Planning & Crop Suitability Intelligence (v7.1)
+
+Production-grade data contracts for the Season Planning engine.
+Follows L4/L5/L6 architecture standard: strict typing, full provenance,
+belief/trust separation, deterministic content_hash().
+
+Architecture:
+  L1 FieldTensor (weather + soil)
+  L5 BioThreatOutput (optional — biotic pressure)
+  ChatMemory (optional — rotation / disease history)
+    → CCL (Crop Library)
+    → PWE (Planting Window)
+    → STE (Seedbed / Workability)
+    → WFE (Water Feasibility)
+    → BRF (Biotic Risk Forecast)
+    → YVE (Yield Distribution)
+    → EOE (Economics)
+    → PED (Planner & DAG Builder)
+    → Layer7Output (with content_hash)
+
+Contract version: 7.1.0
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Dict, Any, Optional
 
-# --- Enums (Strict Taxonomy) ---
+from layer3_decision.schema import ExecutionPlan
+
+
+# ============================================================================
+# Enums (Locked)
+# ============================================================================
 
 class PlanningDecisionId(str, Enum):
     PLANT_NOW = "PLANT_NOW"
@@ -36,7 +69,9 @@ class OptionRankReason(str, Enum):
     LOW_DISEASE_RISK = "LOW_DISEASE_RISK"
 
 
-# --- Core Data Structures (Probability vs Confidence Doctrine) ---
+# ============================================================================
+# Core Data Structures (Probability vs Confidence Doctrine)
+# ============================================================================
 
 @dataclass
 class EvidenceLogit:
@@ -48,10 +83,10 @@ class EvidenceLogit:
 
 @dataclass
 class SuitabilityState:
-    id: str # e.g. "WINDOW_STATE", "WORKABILITY_STATE"
-    probability_ok: float # Derived from evidence logits (0.0 to 1.0)
-    confidence: float # Trust score based on data quality (0.0 to 1.0)
-    severity: str # "CRITICAL", "MODERATE", "LOW"
+    id: str                          # e.g. "WINDOW_STATE", "WORKABILITY_STATE"
+    probability_ok: float            # Derived from evidence logits (0.0 to 1.0)
+    confidence: float                # Trust score based on data quality (0.0 to 1.0)
+    severity: str                    # "CRITICAL", "MODERATE", "LOW"
     drivers_used: List[str]
     evidence_trace: List[EvidenceLogit]
     notes: List[str]
@@ -63,10 +98,10 @@ class SuitabilityState:
 @dataclass
 class YieldDistribution:
     mean: float
-    p10: float # Downside risk 
-    p50: float # Median
-    p90: float # Upside potential
-    contributors: List[str] # e.g. "Water constraint limited p90", "Biotic risk lowered p10"
+    p10: float                       # Downside risk
+    p50: float                       # Median
+    p90: float                       # Upside potential
+    contributors: List[str]          # e.g. "Water constraint limited p90"
 
 @dataclass
 class EconomicOutcome:
@@ -75,7 +110,7 @@ class EconomicOutcome:
     profit_p50: float
     profit_p90: float
     break_even_yield: float
-    sensitivities: Dict[str, str] # e.g. {"price_-10%": "-$200", "yield_drop": "-$400"}
+    sensitivities: Dict[str, str]    # e.g. {"price_-10%": "-$200"}
 
 @dataclass
 class CropOptionEvaluation:
@@ -88,7 +123,7 @@ class CropOptionEvaluation:
     econ: EconomicOutcome
     overall_rank_score: float
     suitability_percentage: float = 0.0
-    # L10 explainability fields (optional, populated by planning engine when available)
+    # L10 explainability fields (optional, populated by planning engine)
     name: str = ""
     strategy_id: str = ""
     description: str = ""
@@ -103,12 +138,89 @@ class PlanningRecommendation:
     risk_if_wrong: str
     preconditions: List[str]
 
-# --- Master Output Container ---
+
+# ============================================================================
+# Run Metadata (Production Standard)
+# ============================================================================
+
+@dataclass
+class RunMetaL7:
+    """Layer 7 run metadata — follows L6 RunMeta standard."""
+    layer: str = "L7"
+    run_id: str = ""
+    parent_run_ids: Dict[str, str] = field(default_factory=dict)
+    generated_at: str = ""
+    degradation_mode: PlanningDegradationMode = PlanningDegradationMode.NORMAL
+    engine_version: str = "7.1.0"
+
+
+# ============================================================================
+# Quality Metrics (Production Standard)
+# ============================================================================
+
+@dataclass
+class QualityMetricsL7:
+    """Governance and reliability metrics for Layer 7 output."""
+    decision_reliability: float = 0.0
+    data_completeness: Dict[str, float] = field(default_factory=dict)
+    upstream_confidence_floor: float = 0.0
+    missing_drivers: List[str] = field(default_factory=list)
+    degradation_mode: PlanningDegradationMode = PlanningDegradationMode.NORMAL
+    penalties_applied: List[Dict[str, Any]] = field(default_factory=list)
+
+
+# ============================================================================
+# Audit Snapshot (Production Standard)
+# ============================================================================
+
+@dataclass
+class AuditSnapshotL7:
+    """Full reproducibility trace for Layer 7."""
+    crop_profiles_evaluated: int = 0
+    dag_task_count: int = 0
+    economic_inputs: Dict[str, Any] = field(default_factory=dict)
+    engine_versions: Dict[str, str] = field(default_factory=dict)
+    upstream_digest: Dict[str, Any] = field(default_factory=dict)
+
+
+# ============================================================================
+# Master Output Container (Production Standard)
+# ============================================================================
 
 @dataclass
 class Layer7Output:
-    run_meta: Dict[str, str] # Run ID, execution time
-    options: List[CropOptionEvaluation]
-    chosen_plan: PlanningRecommendation
-    quality_metrics: Dict[str, str] # Degradation modes, global confidence
-    audit_snapshot: Dict[str, Any] # Retain intermediate matrices
+    """The canonical output of the Layer 7 Season Planning engine.
+
+    Deterministic: same upstream inputs → same Layer7Output + content_hash().
+    """
+    run_meta: RunMetaL7
+
+    # Core outputs
+    options: List[CropOptionEvaluation] = field(default_factory=list)
+    chosen_plan: Optional[PlanningRecommendation] = None
+    execution_plan: Optional[ExecutionPlan] = None
+
+    # Zone-aware suitability (populated when spatial data available)
+    plot_suitability: Optional[Any] = None  # PlotSuitability from zone_suitability
+
+    # Governance
+    quality_metrics: QualityMetricsL7 = field(default_factory=QualityMetricsL7)
+    audit: AuditSnapshotL7 = field(default_factory=AuditSnapshotL7)
+
+    def content_hash(self) -> str:
+        """Deterministic hash for reproducibility verification."""
+        payload = {
+            "run_id": self.run_meta.run_id,
+            "options_count": len(self.options),
+            "option_crops": sorted(o.crop for o in self.options),
+            "option_scores": [round(o.overall_rank_score, 4) for o in self.options],
+            "suitability_pcts": [round(o.suitability_percentage, 2) for o in self.options],
+            "chosen_crop": self.chosen_plan.crop if self.chosen_plan else "",
+            "chosen_decision": self.chosen_plan.decision_id.value if self.chosen_plan else "",
+            "chosen_allowed": self.chosen_plan.is_allowed if self.chosen_plan else False,
+            "dag_tasks": len(self.execution_plan.tasks) if self.execution_plan else 0,
+            "reliability": round(self.quality_metrics.decision_reliability, 4),
+            "degradation": self.quality_metrics.degradation_mode.value,
+        }
+        raw = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()

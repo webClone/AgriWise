@@ -41,11 +41,49 @@ ZONE_CONFIGS = {
         "zone_type": ZoneType.DISEASE_RISK,
         "family": ZoneFamily.AGRONOMIC,
     },
+    SurfaceType.COMPOSITE_RISK: {
+        "threshold": 0.5,
+        "compare": "gt",
+        "zone_type": ZoneType.SCOUT_ZONE,
+        "family": ZoneFamily.DECISION,
+    },
     SurfaceType.UNCERTAINTY_SIGMA: {
-        "threshold": 0.2,
+        "threshold": 0.4,       # v5: raised from 0.2 to only flag genuinely uncertain areas
         "compare": "gt",
         "zone_type": ZoneType.LOW_CONFIDENCE,
         "family": ZoneFamily.TRUST,
+    },
+    # Temporal zones (from temporal engine surfaces)
+    SurfaceType.STRESS_MOMENTUM: {
+        "threshold": 0.3,
+        "compare": "gt",
+        "zone_type": ZoneType.WATER_STRESS,
+        "family": ZoneFamily.AGRONOMIC,
+    },
+    SurfaceType.RISK_MOMENTUM: {
+        "threshold": 0.3,
+        "compare": "gt",
+        "zone_type": ZoneType.DISEASE_RISK,
+        "family": ZoneFamily.AGRONOMIC,
+    },
+    SurfaceType.DROUGHT_TREND: {
+        "threshold": 7.0,       # >7 consecutive dry days = drought zone
+        "compare": "gt",
+        "zone_type": ZoneType.WATER_STRESS,
+        "family": ZoneFamily.AGRONOMIC,
+    },
+    # Execution zones (from execution engine surfaces)
+    SurfaceType.EXECUTION_READINESS: {
+        "threshold": 0.3,       # Low readiness zones
+        "compare": "lt",
+        "zone_type": ZoneType.BLOCKED_ZONE,
+        "family": ZoneFamily.DECISION,
+    },
+    SurfaceType.INTERVENTION_PRIORITY: {
+        "threshold": 0.7,       # High-priority intervention zones
+        "compare": "gt",
+        "zone_type": ZoneType.SCOUT_ZONE,
+        "family": ZoneFamily.DECISION,
     },
 }
 
@@ -72,6 +110,7 @@ def _compute_adaptive_threshold(surface: 'SurfaceArtifact', H: int, W: int) -> f
     return max(adaptive, -0.08)  # Never easier than -0.08
 
 MIN_ZONE_CELLS = 2  # Minimum cells to form a zone
+MIN_ZONE_CONFIDENCE = 0.30  # Floor for zone survival (was 0.45 — too aggressive for real raster data)
 
 
 # ── Confidence scoring (WS9) ──────────────────────────────────────────────────
@@ -130,13 +169,17 @@ def _compute_zone_confidence(
             base = sum(conf_vals) / len(conf_vals)
 
     # Size factor: scaled dynamically by plot size
+    # Softened for small fields (< 1000 cells) where 10m pixels produce
+    # naturally small but meaningful anomaly clusters.
     if denom and denom > 0:
-        # A zone needs to cover at least ~2% of the field, but at least 4 cells, to avoid penalty
-        expected_cells = max(4, int(denom * 0.02))
+        if denom < 1000:
+            # Small field: a zone only needs ~1% or 3 cells minimum
+            expected_cells = max(3, int(denom * 0.01))
+        else:
+            expected_cells = max(4, int(denom * 0.02))
         size_factor = min(1.0, n / expected_cells)
     else:
-        # Softer absolute fallback
-        size_factor = min(1.0, n / 10.0)
+        size_factor = min(1.0, n / 6.0)
 
     if size_factor < 0.7:
         reasons.append("reduced by small zone size relative to field")
@@ -157,11 +200,13 @@ def _compute_zone_confidence(
             if mean_sigma > 0.3:
                 reasons.append("reduced by high local uncertainty")
 
-    # Edge penalty
+    # Edge penalty — softened for small zones where most cells are inherently edges
     edge_count = _count_edge_cells(cells, surface)
     edge_frac = edge_count / max(1, n)
-    edge_penalty = edge_frac * 0.4
-    if edge_frac > 0.5:
+    # Small zones (< 10 cells) are inherently edge-heavy — reduce penalty
+    edge_weight = 0.25 if n < 10 else 0.4
+    edge_penalty = edge_frac * edge_weight
+    if edge_frac > 0.5 and n >= 10:
         reasons.append("reduced by edge adjacency")
 
     # Multi-cell agreement boost
@@ -264,7 +309,7 @@ def extract_zones(
             # WS9: real confidence with reasons
             conf, conf_reasons = _compute_zone_confidence(cells, surface, sigma_surface, denom)
 
-            if conf < 0.45:
+            if conf < MIN_ZONE_CONFIDENCE:
                 # Weak evidence is suppressed - don't draw faked shapes
                 continue
 

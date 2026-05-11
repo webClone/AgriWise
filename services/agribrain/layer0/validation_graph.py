@@ -19,6 +19,55 @@ import math
 
 
 # ============================================================================
+# Agro-Climatic Profiles — parameterize decay/recovery per region
+# ============================================================================
+
+@dataclass(frozen=True)
+class AgroClimaticProfile:
+    """
+    Regional parameterization for the ValidationGraph reliability dynamics.
+
+    - decay_rate: How much reliability drops per violation (× severity).
+      Lower values are more tolerant of noisy/volatile sensor readings.
+    - recovery_rate: How much reliability recovers per clean day.
+    - min_reliability: Floor for reliability weight (prevents division-by-zero
+      in R_eff computation).
+    """
+    name: str
+    decay_rate: float
+    recovery_rate: float
+    min_reliability: float = 0.05
+
+
+# Preset profiles
+CLIMATE_PROFILES: Dict[str, AgroClimaticProfile] = {
+    "default": AgroClimaticProfile(
+        name="default", decay_rate=0.15, recovery_rate=0.05),
+    "temperate": AgroClimaticProfile(
+        name="temperate", decay_rate=0.12, recovery_rate=0.05),
+    "mediterranean": AgroClimaticProfile(
+        name="mediterranean", decay_rate=0.08, recovery_rate=0.06),
+    "semi_arid": AgroClimaticProfile(
+        name="semi_arid", decay_rate=0.08, recovery_rate=0.07),
+    "tropical": AgroClimaticProfile(
+        name="tropical", decay_rate=0.10, recovery_rate=0.06),
+    "continental": AgroClimaticProfile(
+        name="continental", decay_rate=0.13, recovery_rate=0.05),
+}
+
+
+def get_climate_profile(name: str) -> AgroClimaticProfile:
+    """Retrieve a preset climate profile by name (case-insensitive)."""
+    key = name.lower().strip()
+    if key not in CLIMATE_PROFILES:
+        raise ValueError(
+            f"Unknown climate profile '{name}'. "
+            f"Available: {list(CLIMATE_PROFILES.keys())}"
+        )
+    return CLIMATE_PROFILES[key]
+
+
+# ============================================================================
 # Consistency Check Definitions
 # ============================================================================
 
@@ -46,16 +95,25 @@ class ValidationGraph:
     Updates dynamic reliability weights for each source.
     """
     
-    def __init__(self):
+    def __init__(self, climate_profile: Optional[AgroClimaticProfile] = None):
+        # Agro-climatic tuning (defaults to the 'default' preset)
+        self.climate_profile: AgroClimaticProfile = (
+            climate_profile or CLIMATE_PROFILES["default"]
+        )
+        
         # Global reliability weights per source (backward-compatible)
         self.source_reliability: Dict[str, float] = {
             "sentinel2": 1.0,
             "sentinel1": 1.0,
+            "sentinel5p": 1.0,
             "weather": 1.0,
             "sensor": 1.0,
             "user": 1.0,
             "camera": 1.0,
             "ip_camera": 1.0,
+            "satellite_rgb": 1.0,
+            "farmer_photo": 1.0,
+            "drone": 1.0,
         }
         
         # Per-zone reliability: {zone_id: {source: weight}}
@@ -168,6 +226,14 @@ class ValidationGraph:
                     # (the affected upstream source gets the main penalty via _update_reliability_weights)
                     current_ipc = self.source_reliability.get("ip_camera", 1.0)
                     self.source_reliability["ip_camera"] = max(0.05, current_ipc - 0.03 * severity)
+                    
+                    # Prevent immediate recovery in _update_reliability_weights
+                    results.append(ConsistencyResult(
+                        check_name="ip_camera_mild_penalty_marker",
+                        passed=False,
+                        severity=0.0,
+                        affected_sources=["ip_camera"]
+                    ))
         
         # ---- Update reliability weights (global + zone-level) ----
         self._update_reliability_weights(results, zone_id)
@@ -532,9 +598,9 @@ class ValidationGraph:
         - Passed checks slowly restore reliability
         - Reliability is bounded [0.05, 1.0] (never 0, prevents R division by zero)
         """
-        DECAY_RATE = 0.15
-        RECOVERY_RATE = 0.05
-        MIN_RELIABILITY = 0.05
+        DECAY_RATE = self.climate_profile.decay_rate
+        RECOVERY_RATE = self.climate_profile.recovery_rate
+        MIN_RELIABILITY = self.climate_profile.min_reliability
         
         # Initialize zone reliability if needed
         if zone_id not in self.zone_reliability:
@@ -605,6 +671,7 @@ class ValidationGraph:
     def to_state_dict(self) -> Dict[str, Any]:
         """Serialize validation graph state for persistence."""
         return {
+            "climate_profile": self.climate_profile.name,
             "source_reliability": dict(self.source_reliability),
             "zone_reliability": {k: dict(v) for k, v in self.zone_reliability.items()},
             "obs_reliability": {k: dict(v) for k, v in self.obs_reliability.items()},
@@ -615,7 +682,9 @@ class ValidationGraph:
     @classmethod
     def from_state_dict(cls, state: Dict[str, Any]) -> "ValidationGraph":
         """Restore validation graph from persisted state."""
-        vg = cls()
+        profile_name = state.get("climate_profile", "default")
+        profile = CLIMATE_PROFILES.get(profile_name, CLIMATE_PROFILES["default"])
+        vg = cls(climate_profile=profile)
         if "source_reliability" in state:
             vg.source_reliability.update(state["source_reliability"])
         if "zone_reliability" in state:

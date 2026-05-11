@@ -2,7 +2,7 @@
 Layer 0.3: StateVector — Daily State Representation + Process Model
 
 Defines:
-  - StateVector: the 8-variable latent state estimated daily per zone/pixel
+  - StateVector: the 9-variable latent state estimated daily per zone/pixel
   - ProcessModel: physics-inspired daily evolution rules
   - StateCovariance: manages uncertainty propagation
 
@@ -10,14 +10,15 @@ The state vector represents "what we believe the field looks like today"
 and evolves daily via the process model, corrected by observations.
 
 State variables:
-  0: lai_proxy        — Leaf Area Index (from NDVI/EVI/SAR)
-  1: biomass_proxy    — Canopy structure (from SAR VH)  
-  2: sm_0_10          — Soil moisture 0–10cm (from SAR VV + sensors + water balance)
-  3: sm_10_40         — Soil moisture 10–40cm (from water balance + sensors)
-  4: canopy_stress    — Water stress index 0–1 (from NDMI + deficit + VPD)
-  5: phenology_gdd    — Accumulated GDD since sowing
-  6: phenology_stage  — Discrete stage as float: 0=dormant, 1=veg, 2=flower, 3=ripen, 4=senescence
-  7: stress_thermal   — Temperature stress index 0–1
+  0: lai_proxy               — Leaf Area Index (from NDVI/EVI/SAR)
+  1: biomass_proxy           — Canopy structure (from SAR VH)
+  2: sm_0_10                 — Soil moisture 0–10cm (from SAR VV + sensors + water balance)
+  3: sm_10_40                — Soil moisture 10–40cm (from water balance + sensors)
+  4: canopy_stress           — Water stress index 0–1 (from NDMI + deficit + VPD)
+  5: phenology_gdd           — Accumulated GDD since sowing
+  6: phenology_stage         — Discrete stage as float: 0=dormant, 1=veg, 2=flower, 3=ripen, 4=senescence
+  7: stress_thermal          — Temperature stress index 0–1
+  8: photosynthetic_efficiency — Active photosynthesis 0–1 (from SIF + PRI)
 """
 
 from __future__ import annotations
@@ -39,12 +40,14 @@ IDX_CANOPY_STRESS = 4
 IDX_PHENO_GDD = 5
 IDX_PHENO_STAGE = 6
 IDX_STRESS_THERMAL = 7
+IDX_PHOTO_EFF = 8
 
-N_STATES = 8
+N_STATES = 9
 
 STATE_NAMES = [
     "lai_proxy", "biomass_proxy", "sm_0_10", "sm_10_40",
-    "canopy_stress", "phenology_gdd", "phenology_stage", "stress_thermal"
+    "canopy_stress", "phenology_gdd", "phenology_stage", "stress_thermal",
+    "photosynthetic_efficiency",
 ]
 
 # Phenology stages (represented as float for smooth transitions)
@@ -79,7 +82,7 @@ DEFAULT_CROP_PARAMS = {
 @dataclass
 class StateVector:
     """
-    The 8-variable daily latent state for a zone or pixel.
+    The 9-variable daily latent state for a zone or pixel.
     
     This is what the Kalman filter estimates. It represents our best
     belief about the field state on a given day.
@@ -107,6 +110,8 @@ class StateVector:
     def phenology_stage(self) -> float: return self.values[IDX_PHENO_STAGE]
     @property
     def stress_thermal(self) -> float: return self.values[IDX_STRESS_THERMAL]
+    @property
+    def photosynthetic_efficiency(self) -> float: return self.values[IDX_PHOTO_EFF]
     
     @classmethod
     def initial(cls, day: str, soil_props: Optional[Dict] = None) -> "StateVector":
@@ -133,6 +138,7 @@ class StateVector:
                 0.0,           # GDD = 0 (start)
                 STAGE_DORMANT, # Dormant
                 0.0,           # No thermal stress
+                0.8,           # Photosynthetic efficiency — moderate prior
             ],
             day=day,
             variance=[
@@ -144,6 +150,7 @@ class StateVector:
                 10.0,  # GDD
                 0.5,   # Stage
                 0.2,   # Thermal stress
+                0.3,   # Photosynthetic efficiency — moderate uncertainty
             ],
         )
         return state
@@ -367,7 +374,31 @@ class ProcessModel:
             stress_t = min(1.0, abs(t_min) / 10.0)
         x.values[IDX_STRESS_THERMAL] = 0.8 * x.values[IDX_STRESS_THERMAL] + 0.2 * stress_t
         
-        # ---- 8. Clamp all values ----
+        # ---- 8. Photosynthetic efficiency ----
+        # Efficiency decays when stomata close (heat/water stress).
+        # Recovers slowly when stress subsides. This gives the Kalman
+        # filter a physics prior even without SIF/PRI observations.
+        current_eff = x.values[IDX_PHOTO_EFF]
+        thermal_shutdown = max(0.0, x.values[IDX_STRESS_THERMAL] - 0.3) / 0.7
+        water_shutdown = max(0.0, x.values[IDX_CANOPY_STRESS] - 0.4) / 0.6
+        shutdown_pressure = min(1.0, thermal_shutdown + water_shutdown)
+        
+        if shutdown_pressure > 0.1:
+            # Rapid decline when stress is active
+            target_eff = max(0.0, 1.0 - shutdown_pressure)
+            new_eff = 0.6 * current_eff + 0.4 * target_eff
+        else:
+            # Slow recovery when stress subsides (plants take time to reopen stomata)
+            recovery_target = min(1.0, 0.9 + 0.1 * (1.0 - x.values[IDX_CANOPY_STRESS]))
+            new_eff = 0.9 * current_eff + 0.1 * recovery_target
+        
+        # Senescence naturally reduces efficiency
+        if stage >= STAGE_SENESCENCE:
+            new_eff *= 0.95
+        
+        x.values[IDX_PHOTO_EFF] = new_eff
+        
+        # ---- 9. Clamp all values ----
         x.values[IDX_LAI] = _clamp(x.values[IDX_LAI], 0, p["lai_max"])
         x.values[IDX_BIOMASS] = _clamp(x.values[IDX_BIOMASS], 0, 10)
         x.values[IDX_SM_0_10] = _clamp(x.values[IDX_SM_0_10], 0, 1)
@@ -375,6 +406,7 @@ class ProcessModel:
         x.values[IDX_CANOPY_STRESS] = _clamp(x.values[IDX_CANOPY_STRESS], 0, 1)
         x.values[IDX_PHENO_STAGE] = _clamp(x.values[IDX_PHENO_STAGE], 0, 4)
         x.values[IDX_STRESS_THERMAL] = _clamp(x.values[IDX_STRESS_THERMAL], 0, 1)
+        x.values[IDX_PHOTO_EFF] = _clamp(x.values[IDX_PHOTO_EFF], 0, 1)
         
         # ---- Process noise Q ----
         # Model uncertainty: how much we don't trust the prediction
@@ -387,6 +419,7 @@ class ProcessModel:
             1.0,    # GDD: temperature measurement uncertainty
             0.01,   # Stage
             0.01,   # Thermal stress
+            0.02,   # Photosynthetic efficiency: moderate model uncertainty
         ]
         
         # Higher process noise when weather uncertainty is high

@@ -38,9 +38,31 @@ token_cache = {
     "expires_at": 0
 }
 
-# Fast-fail guard: once auth fails, skip re-attempts in this process
+# Fast-fail guard: per-API failure isolation so S1 failure doesn't block S2
+# Each satellite API tracks its own failure state independently
 _auth_failed = False
 _auth_fail_reason = ""
+_auth_fail_time = 0.0
+_AUTH_COOLDOWN_SECONDS = 120  # Retry auth after 2 minutes (was 5 — too aggressive)
+
+# Per-API failure isolation: track which specific API calls failed
+# so a Stats API failure for S1 doesn't block S2 raster calls
+_api_failures = {}  # {"fetch_name": {"failed": bool, "reason": str, "time": float}}
+_API_CALL_COOLDOWN = 60  # Per-call cooldown (1 minute)
+
+def _check_api_cooldown(call_name: str) -> bool:
+    """Check if a specific API call is in cooldown. Returns True if blocked."""
+    entry = _api_failures.get(call_name)
+    if not entry or not entry.get("failed"):
+        return False
+    if (time.time() - entry.get("time", 0)) > _API_CALL_COOLDOWN:
+        _api_failures[call_name] = {"failed": False, "reason": "", "time": 0}
+        return False
+    return True
+
+def _record_api_failure(call_name: str, reason: str):
+    """Record a per-API failure with cooldown."""
+    _api_failures[call_name] = {"failed": True, "reason": reason, "time": time.time()}
 
 
 # ============================================================================
@@ -50,13 +72,20 @@ _auth_fail_reason = ""
 def get_access_token():
     """
     Retrieves OAuth2 token from Copernicus Dataspace Ecosystem.
-    Fast-fail: if auth has failed once this session, returns None immediately.
+    Fast-fail with 5-minute cooldown: if auth failed recently, skip retries.
+    Auto-resets after cooldown to recover from transient errors.
     """
-    global token_cache, _auth_failed, _auth_fail_reason
+    global token_cache, _auth_failed, _auth_fail_reason, _auth_fail_time
 
-    # Fast-fail guard: don't retry broken auth in the same process
+    # Fast-fail guard with time-based reset
     if _auth_failed:
-        raise ConnectionError(f"Copernicus auth previously failed: {_auth_fail_reason}")
+        if (time.time() - _auth_fail_time) > _AUTH_COOLDOWN_SECONDS:
+            _auth_failed = False
+            _auth_fail_reason = ""
+            print("[AUTH] Fast-fail cooldown expired, retrying Copernicus auth...")
+        else:
+            remaining = int(_AUTH_COOLDOWN_SECONDS - (time.time() - _auth_fail_time))
+            raise ConnectionError(f"Copernicus auth recently failed ({_auth_fail_reason}). Retry in {remaining}s.")
 
     if token_cache["access_token"] and time.time() < token_cache["expires_at"]:
         return token_cache["access_token"]
@@ -68,6 +97,7 @@ def get_access_token():
     
     if not client_id or not client_secret:
         _auth_failed = True
+        _auth_fail_time = time.time()
         _auth_fail_reason = "Missing credentials"
         print(f"DEBUG: CLIENT_ID present: {bool(client_id)}")
         print(f"DEBUG: CLIENT_SECRET present: {bool(client_secret)}")
@@ -99,6 +129,7 @@ def get_access_token():
         if response.status_code != 200:
             print(f"Sentinel Auth Error ({response.status_code}): {response.text}")
             _auth_failed = True
+            _auth_fail_time = time.time()
             _auth_fail_reason = f"HTTP {response.status_code}"
             raise Exception(f"Sentinel Auth Failed: {response.text}")
 
@@ -110,8 +141,9 @@ def get_access_token():
         
     except Exception as e:
         _auth_failed = True
+        _auth_fail_time = time.time()
         _auth_fail_reason = str(e)
-        print(f"⚠️ Sentinel Auth Failed (fast-fail enabled for this session): {e}")
+        print(f"[WARN] Sentinel Auth Failed (cooldown {_AUTH_COOLDOWN_SECONDS}s): {e}")
         raise
 
 
@@ -124,19 +156,28 @@ def _build_process_bounds(polygon_coords: Optional[Any], lat: float, lng: float,
     """Build bounds dict for the Process API — polygon preferred, bbox fallback."""
     coords = None
     if isinstance(polygon_coords, dict):
-        if "coordinates" in polygon_coords:
-            # Handle standard GeoJSON dict
-            if polygon_coords["type"] == "Polygon":
-                coords = polygon_coords["coordinates"][0]  # Take outer ring
-            elif polygon_coords["type"] == "MultiPolygon":
-                coords = polygon_coords["coordinates"][0][0]
+        geom = polygon_coords.get("geometry", polygon_coords) if polygon_coords.get("type") == "Feature" else polygon_coords
+        if "coordinates" in geom:
+            if geom.get("type") == "Polygon":
+                coords = geom["coordinates"][0]  # Take outer ring
+            elif geom.get("type") == "MultiPolygon":
+                coords = geom["coordinates"][0][0]
     elif isinstance(polygon_coords, list):
         if len(polygon_coords) > 0 and isinstance(polygon_coords[0], list):
             # Nested list [[lng, lat], ...]
             coords = polygon_coords[0] if isinstance(polygon_coords[0][0], list) else polygon_coords
             
     if coords and len(coords) >= 3:
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        
+        # Ensure the polygon ring is closed for GeoJSON validity
+        if coords[0] != coords[-1]:
+            coords = list(coords)
+            coords.append(coords[0])
+            
         return {
+            "bbox": [min(xs), min(ys), max(xs), max(ys)],
             "geometry": {"type": "Polygon", "coordinates": [coords]},
             "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
         }
@@ -148,16 +189,17 @@ def _build_process_bounds(polygon_coords: Optional[Any], lat: float, lng: float,
 
 
 def _compute_raster_dimensions(polygon_coords: Optional[Any], lat: float, lng: float,
-                                target_resolution_m: float = 10.0, max_dim: int = 64) -> tuple:
+                                target_resolution_m: float = 10.0, max_dim: int = 512) -> tuple:
     """Compute pixel width/height for a polygon bbox at a target GSD."""
     import math
     coords = None
     if isinstance(polygon_coords, dict):
-        if "coordinates" in polygon_coords:
-            if polygon_coords["type"] == "Polygon":
-                coords = polygon_coords["coordinates"][0]
-            elif polygon_coords["type"] == "MultiPolygon":
-                coords = polygon_coords["coordinates"][0][0]
+        geom = polygon_coords.get("geometry", polygon_coords) if polygon_coords.get("type") == "Feature" else polygon_coords
+        if "coordinates" in geom:
+            if geom.get("type") == "Polygon":
+                coords = geom["coordinates"][0]
+            elif geom.get("type") == "MultiPolygon":
+                coords = geom["coordinates"][0][0]
     elif isinstance(polygon_coords, list):
         if len(polygon_coords) > 0 and isinstance(polygon_coords[0], list):
             coords = polygon_coords[0] if isinstance(polygon_coords[0][0], list) else polygon_coords
@@ -187,7 +229,7 @@ def _parse_raster_tar(content: bytes, w: int, h: int, index_name: str,
         try:
             import tifffile
         except ImportError:
-            print("⚠️ [Raster] 'tifffile' not installed. Please pip install tifffile.")
+            print("[WARN] [Raster] 'tifffile' not installed. Please pip install tifffile.")
             return None
             
         tar = tarfile.open(fileobj=io.BytesIO(content))
@@ -244,7 +286,7 @@ def _parse_raster_tar(content: bytes, w: int, h: int, index_name: str,
             
         return result
     except Exception as e:
-        print(f"⚠️ [Raster] TAR parse error for {index_name}: {e}")
+        print(f"[WARN] [Raster] TAR parse error for {index_name}: {e}")
         return {
             "width": w, "height": h,
             "values": [[None] * w for _ in range(h)],
@@ -292,11 +334,11 @@ def fetch_ndvi_raster_composite(lat: float, lng: float, start_date: str, end_dat
         headers = {"Authorization":f"Bearer {token}","Content-Type":"application/json","Accept":"application/tar"}
         resp = requests.post(SENTINEL_PROCESS_URL, json=payload, headers=headers, timeout=30)
         if resp.status_code != 200:
-            print(f"⚠️ [Raster] NDVI composite: {resp.status_code}")
+            print(f"[WARN] [Raster] NDVI composite: {resp.status_code}")
             return None
         return _parse_raster_tar(resp.content, w, h, "NDVI", start_date, end_date)
     except Exception as e:
-        print(f"⚠️ [Raster] NDVI error: {e}")
+        print(f"[WARN] [Raster] NDVI error: {e}")
         return None
 
 
@@ -329,7 +371,7 @@ def fetch_ndmi_raster_composite(lat: float, lng: float, start_date: str, end_dat
         if resp.status_code != 200: return None
         return _parse_raster_tar(resp.content, w, h, "NDMI", start_date, end_date)
     except Exception as e:
-        print(f"⚠️ [Raster] NDMI error: {e}")
+        print(f"[WARN] [Raster] NDMI error: {e}")
         return None
 
 
@@ -364,7 +406,7 @@ def fetch_sar_raster_composite(lat: float, lng: float, start_date: str, end_date
         if resp.status_code != 200: return None
         return _parse_raster_tar(resp.content, w, h, "SAR_VV_VH", start_date, end_date)
     except Exception as e:
-        print(f"⚠️ [Raster] SAR error: {e}")
+        print(f"[WARN] [Raster] SAR error: {e}")
         return None
 
 
@@ -396,7 +438,7 @@ def fetch_quality_mask(lat: float, lng: float, start_date: str, end_date: str,
         if resp.status_code != 200: return None
         return _parse_raster_tar(resp.content, w, h, "QUALITY_MASK", start_date, end_date)
     except Exception as e:
-        print(f"⚠️ [Raster] Quality mask error: {e}")
+        print(f"[WARN] [Raster] Quality mask error: {e}")
         return None
 
 
@@ -469,19 +511,42 @@ def fetch_ndvi_timeseries(lat: float, lng: float, days: int = 180, polygon_coord
         result = response.json()
         data = result.get("data", [])
         
+        def _first_band_stats(bands_val):
+            """Stats API returns bands as dict {'B0': {'stats': {...}}} or list."""
+            if not bands_val:
+                return {}
+            if isinstance(bands_val, dict):
+                return next(iter(bands_val.values()), {}).get("stats", {})
+            return bands_val[0].get("stats", {})
+
         valid_observations = []
         for item in data:
-            outputs = item.get("outputs", {}).get("default", {}).get("bands", [])
-            data_mask = item.get("outputs", {}).get("dataMask", {}).get("bands", [])
-            
-            if data_mask and data_mask[0].get("stats", {}).get("min") == 1:
-                 stats = outputs[0].get("stats", {})
-                 mean_ndvi = stats.get("mean")
-                 if mean_ndvi is not None:
-                     valid_observations.append({
-                         "date": item["interval"]["from"].split("T")[0],
-                         "ndvi": mean_ndvi
-                     })
+            out = item.get("outputs", {})
+            default_bands = out.get("default", {}).get("bands") or {}
+            mask_bands   = out.get("dataMask", {}).get("bands") or {}
+
+            default_stats = _first_band_stats(default_bands)
+            mask_stats    = _first_band_stats(mask_bands)
+
+            # Accept pixel if data mask min == 1 (all valid) OR >=30% clear
+            # Lowered from 0.5 to 0.3 — accept partially cloudy scenes
+            # because even 30% clear pixels give useful plot-level NDVI means
+            mask_mean = mask_stats.get("mean", 0)
+            mask_ok = (
+                mask_stats.get("min") == 1
+                or mask_mean > 0.3
+                or default_stats.get("sampleCount", 0) > 0
+            )
+            if mask_ok:
+                mean_ndvi = default_stats.get("mean")
+                if mean_ndvi is not None:
+                    # Include cloud_cover for downstream reliability weighting
+                    cloud_cover = round((1.0 - mask_mean) * 100, 1) if mask_mean > 0 else 100.0
+                    valid_observations.append({
+                        "date": item["interval"]["from"].split("T")[0],
+                        "ndvi": mean_ndvi,
+                        "cloud_cover": cloud_cover,
+                    })
         
         return {"data": valid_observations}
 
@@ -599,12 +664,19 @@ def fetch_vegetation_indices(lat: float, lng: float) -> Optional[Dict]:
         item = data[-1]  # Latest aggregation
         outputs = item.get("outputs", {})
         
+        def _band_mean(out, key):
+            # Stats API returns bands as dict {"B0": {"stats": {...}}}, not a list
+            bands = out.get(key, {}).get("bands") or {}
+            if not bands:
+                return None
+            first_band = next(iter(bands.values())) if isinstance(bands, dict) else bands[0]
+            return first_band.get("stats", {}).get("mean")
         return {
             "date": item["interval"]["from"].split("T")[0],
-            "ndvi": outputs.get("ndvi", {}).get("bands", [{}])[0].get("stats", {}).get("mean"),
-            "evi": outputs.get("evi", {}).get("bands", [{}])[0].get("stats", {}).get("mean"),
-            "ndwi": outputs.get("ndwi", {}).get("bands", [{}])[0].get("stats", {}).get("mean"),
-            "ndmi": outputs.get("ndmi", {}).get("bands", [{}])[0].get("stats", {}).get("mean"),
+            "ndvi": _band_mean(outputs, "ndvi"),
+            "evi": _band_mean(outputs, "evi"),
+            "ndwi": _band_mean(outputs, "ndwi"),
+            "ndmi": _band_mean(outputs, "ndmi"),
             "source": "sentinel-2-l2a"
         }
 
@@ -708,11 +780,19 @@ def fetch_soil_moisture_proxy(lat: float, lng: float) -> Optional[Dict]:
 
         item = data[-1]
         outputs = item.get("outputs", {})
-        
-        vv = outputs.get("vv", {}).get("bands", [{}])[0].get("stats", {}).get("mean")
-        vh = outputs.get("vh", {}).get("bands", [{}])[0].get("stats", {}).get("mean")
-        ratio = outputs.get("ratio", {}).get("bands", [{}])[0].get("stats", {}).get("mean")
-        
+
+        def _sar_band_mean(out, key):
+            # Stats API returns bands as dict {"B0": {"stats": {...}}}, not a list
+            bands = out.get(key, {}).get("bands") or {}
+            if not bands:
+                return None
+            first_band = next(iter(bands.values())) if isinstance(bands, dict) else bands[0]
+            return first_band.get("stats", {}).get("mean")
+
+        vv = _sar_band_mean(outputs, "vv")
+        vh = _sar_band_mean(outputs, "vh")
+        ratio = _sar_band_mean(outputs, "ratio")
+
         # Estimate soil moisture (simplified model)
         # Lower VV/VH ratio = more moisture
         if ratio:
@@ -724,7 +804,7 @@ def fetch_soil_moisture_proxy(lat: float, lng: float) -> Optional[Dict]:
                 moisture_level = "dry"
         else:
             moisture_level = "unknown"
-        
+
         return {
             "date": item["interval"]["from"].split("T")[0],
             "vv_db": round(vv, 2) if vv else None,
@@ -736,10 +816,6 @@ def fetch_soil_moisture_proxy(lat: float, lng: float) -> Optional[Dict]:
 
     except Exception as e:
         print(f"SAR fetch error: {e}")
-    
-    except Exception as e:
-        print(f"SAR fetch error: {e}")
-    
     return None
 
 
@@ -821,7 +897,7 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30, polygon_coords:
         data = result.get("data", [])
         
         if not data:
-            print(f"⚠️ SAR Timeseries Empty Data. Raw Response: {result}")
+            print(f"[WARN] SAR Timeseries Empty Data. Raw Response: {result}")
         
         timeseries = []
         for item in data:
@@ -849,7 +925,7 @@ def fetch_sar_timeseries(lat: float, lng: float, days: int = 30, polygon_coords:
         }
 
     except Exception as e:
-        print(f"⚠️ SAR timeseries fetch gracefully degraded: {e}")
+        print(f"[WARN] SAR timeseries fetch gracefully degraded: {e}")
         return {"data": [], "timeseries": []}
 
 
@@ -1164,7 +1240,7 @@ def fetch_historical_weather(lat: float, lng: float,
         clamped_end = min(end_date, yesterday)
         if clamped_end < start_date:
             # Entire requested range is in the future
-            print(f"⚠️ [Weather] Requested range ({start_date} to {end_date}) is entirely future. No archive data.")
+            print(f"[WARN] [Weather] Requested range ({start_date} to {end_date}) is entirely future. No archive data.")
             return None
         
         params = {
@@ -1751,9 +1827,9 @@ def fetch_openweather_data(lat: float, lng: float) -> Optional[Dict]:
         
         # Debug: Check if key is loaded
         if api_key:
-            print(f"🔑 OpenWeather API Key loaded: {api_key[:8]}...{api_key[-4:]}")
+            print(f"[KEY] OpenWeather API Key loaded: {api_key[:8]}...{api_key[-4:]}")
         else:
-            print("❌ OpenWeather API Key NOT FOUND in environment")
+            print("[ERROR] OpenWeather API Key NOT FOUND in environment")
         
         if not api_key:
             return {
@@ -1905,13 +1981,14 @@ def fetch_openweather_forecast(lat: float, lng: float) -> Optional[Dict]:
         params = {
             "latitude": lat,
             "longitude": lng,
-            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max",
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,precipitation_sum",
             "hourly": "relative_humidity_2m", # Needed to approximate daily humidity
             "timezone": "auto",
             "forecast_days": 8  # precise 7 days sometimes excludes today if late
         }
         
-        response = requests.get(url, params=params, timeout=15)
+        headers = {"Cache-Control": "no-cache"}
+        response = requests.get(url, params=params, headers=headers, timeout=15)
         
         if response.status_code != 200:
             print(f"Open-Meteo Forecast Error: {response.text}")
@@ -1970,11 +2047,14 @@ def fetch_openweather_forecast(lat: float, lng: float) -> Optional[Dict]:
             if "relative_humidity_2m" in hourly and len(hourly["relative_humidity_2m"]) > hum_idx:
                 humidity = hourly["relative_humidity_2m"][hum_idx]
 
-            pop = daily["precipitation_probability_max"][i]
-            if pop is not None:
-                pop = pop / 100.0 # Convert % to 0-1
+            pop = daily.get("precipitation_probability_max", [])
+            if i < len(pop) and pop[i] is not None:
+                pop_val = pop[i] / 100.0 # Convert % to 0-1
             else:
-                pop = 0.0
+                pop_val = 0.0
+                
+            precip = daily.get("precipitation_sum", [])
+            precip_val = precip[i] if i < len(precip) and precip[i] is not None else 0.0
 
             forecast_list.append({
                 "date": date_str,
@@ -1985,7 +2065,8 @@ def fetch_openweather_forecast(lat: float, lng: float) -> Optional[Dict]:
                 "description": desc,
                 "icon": icon,
                 "wind_speed": daily["wind_speed_10m_max"][i],
-                "pop": pop
+                "pop": pop_val,
+                "precipitation": precip_val
             })
         
         return {
@@ -2846,7 +2927,7 @@ def fetch_water_balance(lat: float, lng: float, days_past: int = 30, days_future
             "timezone": "auto"
         }
         
-        hist_res = requests.get(OPEN_METEO_ARCHIVE_URL, params=history_params, timeout=15)
+        hist_res = requests.get(OPEN_METEO_ARCHIVE_URL, params=history_params, timeout=8)
         hist_data = hist_res.json() if hist_res.status_code == 200 else {}
         
         # 2. Fetch Forecast Data (Current)
@@ -3210,13 +3291,14 @@ def fetch_ndvi_max(lat: float, lng: float, days: int = 90) -> float:
 def fetch_soil_properties(lat: float, lng: float) -> Dict[str, Any]:
     """
     Fetches base soil properties from ISRIC SoilGrids REST API.
-    Provides fallback static data if the parcel lacks uploaded soil tests.
+    If the centroid is an unmapped pixel (e.g. coast/urban), recursively searches nearby pixels.
+    Provides fallback static data if the parcel lacks uploaded soil tests and all nearby pixels are unmapped.
     """
-    url = f"https://rest.isric.org/soilgrids/v2.0/properties/query?lon={lng}&lat={lat}&property=clay&property=sand&property=soc&property=phh2o&depth=0-5cm&value=mean"
-    try:
-        resp = requests.get(url, headers={"Accept": "application/json"}, timeout=10)
+    def _fetch_point(t_lat: float, t_lng: float):
+        url = f"https://rest.isric.org/soilgrids/v2.0/properties/query?lon={t_lng}&lat={t_lat}&property=clay&property=sand&property=silt&property=soc&property=phh2o&property=nitrogen&property=cec&property=bdod&depth=0-5cm&value=mean"
+        resp = requests.get(url, headers={"Accept": "application/json"}, timeout=15)
         if resp.status_code != 200:
-            return {}
+            return None, False  # None data, API down/error
         
         data = resp.json()
         layers = data.get("properties", {}).get("layers", [])
@@ -3227,47 +3309,90 @@ def fetch_soil_properties(lat: float, lng: float) -> Dict[str, Any]:
             unit = layer.get("unit_measure", {})
             d_factor = unit.get("d_factor", 10)
             
-            # Extract mean from first depth (0-5cm)
             depths = layer.get("depths", [])
-            if not depths:
-                continue
+            if not depths: continue
             
             mean_val = depths[0].get("values", {}).get("mean")
-            if mean_val is None:
-                continue
+            if mean_val is None: continue
                 
-            # Scale by d_factor
             scaled_val = mean_val / float(d_factor)
             
-            if name == "clay":
-                parsed["clay"] = scaled_val 
-            elif name == "sand":
-                parsed["sand"] = scaled_val
-            elif name == "phh2o":
-                parsed["ph"] = scaled_val
-            elif name == "soc":
-                parsed["organic_carbon"] = scaled_val
+            if name == "clay": parsed["clay"] = scaled_val
+            elif name == "sand": parsed["sand"] = scaled_val
+            elif name == "silt": parsed["silt"] = scaled_val
+            elif name == "phh2o": parsed["ph"] = scaled_val
+            elif name == "soc": parsed["organic_carbon"] = scaled_val
+            elif name == "nitrogen": parsed["nitrogen"] = scaled_val
+            elif name == "cec": parsed["cec"] = scaled_val
+            elif name == "bdod": parsed["bdod"] = scaled_val
 
         if not parsed:
-            return {}
+            return None, True  # None data, but API is up (unmapped pixel)
             
-        # Basic texture classification
         clay = parsed.get("clay", 0)
         sand = parsed.get("sand", 0)
-        silt = 100 - (clay + sand)
+        silt = parsed.get("silt", 100 - (clay + sand))
         
         texture = "loam"
-        if clay >= 40:
-            texture = "clay"
-        elif sand >= 70:
-            texture = "sand"
-        elif silt >= 40 and clay < 27 and sand < 50:
-            texture = "silt"
+        if clay >= 40: texture = "clay"
+        elif sand >= 70: texture = "sand"
+        elif silt >= 40 and clay < 27 and sand < 50: texture = "silt"
             
         parsed["texture_class"] = texture
-        return parsed
-        
-    except Exception as e:
-        print(f"⚠️ [SoilGrids] Failed to fetch: {e}")
-        return {}
+        parsed["is_generic_fallback"] = False
+        return parsed, True
+
+    # Spatial offsets: Center, N, S, E, W (250m), then diagonals/500m
+    offsets = [
+        (0, 0),
+        (0.0025, 0), (-0.0025, 0), (0, 0.0025), (0, -0.0025),
+        (0.005, 0), (-0.005, 0), (0, 0.005), (0, -0.005)
+    ]
+    
+    for dlat, dlng in offsets:
+        try:
+            parsed_data, api_is_up = _fetch_point(lat + dlat, lng + dlng)
+            if parsed_data:
+                return parsed_data
+            if not api_is_up:
+                break  # API is failing, don't loop
+        except Exception as e:
+            print(f"SoilGrids offset fetch error: {e}")
+            break  # Timeout or network error, don't loop
+            
+    # Fallback for coastal, urban, or no-data polygons where ISRIC returns None everywhere
+    return {
+        "clay": 25.0,
+        "sand": 40.0,
+        "silt": 35.0,
+        "ph": 6.5,
+        "organic_carbon": 20.0,
+        "nitrogen": 1.5,
+        "cec": 15.0,
+        "bdod": 1.3,
+        "texture_class": "loam",
+        "is_generic_fallback": True
+    }
+
+
+# ============================================================================
+# Re-exports for backward compatibility
+# These functions have been extracted into dedicated modules.
+# Import them here so `from eo.sentinel import fetch_X` still works.
+# ============================================================================
+
+from eo.auth import get_access_token, EO_REQUEST_TIMEOUT  # noqa: F811,E402
+from eo.weather import (  # noqa: F811,E402
+    fetch_openweather_data,
+    fetch_openweather_forecast,
+    fetch_historical_weather,
+)
+from eo.soilgrids import fetch_soil_properties  # noqa: F811,E402
+from eo.water import (  # noqa: F811,E402
+    fetch_water_balance,
+    fetch_rainfall_climatology,
+    fetch_rainfall_history,
+    calculate_drought_frequency,
+    get_current_rainfall_anomaly,
+)
 

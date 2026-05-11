@@ -31,14 +31,15 @@ class InternalMemoryUpdate(BaseModel):
     closed_loops: List[str] = Field(default_factory=list, description="IDs or names of pending tasks the user just confirmed they did")
 
 class ARFResponse(BaseModel):
-    headline: str = Field(description="1 sentence title summarizing field status")
-    direct_answer: str = Field(description="Direct answer to user's specific question")
-    suitability_score: str = Field(description="Pure agronomic feasibility percentage e.g., '65%'")
-    confidence_badge: str = Field(description="HIGH, MED, or LOW")
-    confidence_reason: str = Field(description="Why the confidence badge is what it is")
-    what_it_means: str = Field(description="Agronomic interpretation of the situation")
+    conversational_response: Optional[str] = Field(None, description="The full, rich markdown response directly addressing the user")
+    headline: Optional[str] = Field(None, description="1 sentence title summarizing field status")
+    direct_answer: Optional[str] = Field(None, description="Direct answer to user's specific question")
+    suitability_score: Optional[str] = Field(None, description="Pure agronomic feasibility percentage e.g., '65%'")
+    confidence_badge: Optional[str] = Field(None, description="HIGH, MED, or LOW")
+    confidence_reason: Optional[str] = Field(None, description="Why the confidence badge is what it is")
+    what_it_means: Optional[str] = Field(None, description="Agronomic interpretation of the situation")
     reasoning_cards: List[ReasoningCard] = Field(default_factory=list)
     recommendations: List[Recommendation] = Field(default_factory=list)
-    learning: LearningModule
+    learning: Optional[LearningModule] = None
     followups: List[FollowUp] = Field(default_factory=list)
     internal_memory_updates: Optional[InternalMemoryUpdate] = None

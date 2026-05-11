@@ -94,6 +94,9 @@ class PolicyEngine:
         if problem_id == ProblemType.FUNGAL_DISEASE_RISK.value: return ACTIONS.get("SCOUT_DISEASE")
         if problem_id == ProblemType.INSECT_PRESSURE_RISK.value: return ACTIONS.get("SCOUT_PESTS")
         if problem_id == ProblemType.HARVEST_EVENT.value: return ACTIONS.get("VERIFY_FIELD_STATUS")
+        if problem_id == ProblemType.TRANSPIRATION_FAILURE.value: return ACTIONS.get("APPLY_DEFICIT_IRRIGATION")
+        if problem_id == ProblemType.WEED_PRESSURE.value: return ACTIONS.get("SCOUT_WEEDS")
+        if problem_id == ProblemType.MECHANICAL_DAMAGE.value: return ACTIONS.get("ASSESS_MECHANICAL")
         
         return None
 

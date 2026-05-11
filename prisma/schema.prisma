@@ -143,6 +143,13 @@ model PlotPhoto {
   tags  String[]
   notes String?
 
+  // [NEW] Fields for AI & Evidence Pipeline
+  zoneId       String?   @db.ObjectId
+  aiTags       String[]
+  aiConfidence Float?    @default(0.0)
+  isProcessed  Boolean   @default(false)
+  source       String?   @default("farmer") // "farmer", "drone", "ip_camera"
+
   plot   Plot   @relation(fields: [plotId], references: [id], onDelete: Cascade)
   plotId String @db.ObjectId
 
@@ -154,6 +161,7 @@ enum PhotoType {
   SOIL
   OVERVIEW
   DAMAGE
+  SATELLITE
   OTHER
 }
 
@@ -745,4 +753,123 @@ model RegionalStats {
   createdAt DateTime @default(now())
 
   @@unique([wilayaCode, period, startDate])
+}
+
+// ============================================
+// AGRIBRAIN INTELLIGENCE CACHE & ML STORAGE
+// ============================================
+
+// Per-run intelligence snapshot — cached for instant page load
+// Rolling retention: auto-cleanup via expiresAt TTL index
+// But ML features are permanently archived in PlotDNA
+model IntelligenceSnapshot {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  plotId    String   @db.ObjectId
+  farmId    String   @db.ObjectId
+
+  // Temporal context
+  capturedAt  DateTime @default(now())
+  dataAgeHrs  Float    @default(0)       // Hours since last external API fetch
+
+  // === FULL INTELLIGENCE PAYLOAD ===
+  engines      Json    // Engine status cards (L0-L10)
+  timeline     Json    // 14-day weather/NDVI/SAR timeline
+  current      Json    // Current conditions snapshot
+  assimilation Json    // Data provenance metadata
+
+  // === SURFACE STATISTICS (lightweight, always stored) ===
+  // Per-surface: { id, type, mean, p10, p50, p90, min, max, spread, grounding }
+  surfaceStats   Json   // Array of surface stat objects (~10KB)
+  surfaceDigest  String? // SHA-256 of surface grid values — skip re-render if unchanged
+
+  // === COMPRESSED SURFACE GRIDS (full spatial data, gzip+base64) ===
+  // Only stored when grids actually change (checked via surfaceDigest)
+  surfaceGridsGz String? // gzip-compressed JSON of all 25 surface grids, base64-encoded
+
+  // === ML FEATURE VECTOR (flat numerics, query-ready) ===
+  mlFeatures   Json    // { ndvi_mean, water_stress_prob, biotic_pressure, ... }
+
+  // === CROP & ENVIRONMENTAL CONTEXT (denormalized for ML) ===
+  cropCode      String?
+  cropStage     String?
+  dap           Int?       // Days After Planting
+  lat           Float
+  lng           Float
+  areaHa        Float?
+
+  // === SENSOR SNAPSHOT ===
+  sensorSnapshot Json?    // Frozen IoT readings at capture time
+
+  // === CROP PHENOLOGY ===
+  phenology     Json?     // { stage, dap, plant_date, basis }
+
+  // === USER INPUTS SNAPSHOT ===
+  userInputs    Json?     // Irrigation type, soil analysis, constraints
+
+  // === RAW DATA (expert mode) ===
+  rawData       Json?     // Raw API responses for expert panels
+
+  // Lifecycle
+  expiresAt DateTime     // capturedAt + 14 days
+
+  @@index([plotId, capturedAt(sort: Desc)])
+  @@index([expiresAt])
+  @@index([plotId, cropCode, capturedAt])
+}
+
+// Permanent plot learning profile — NEVER deleted
+// Accumulates knowledge over every AgriBrain run
+// This is the "Plot DNA" — location fingerprint + historical patterns
+model PlotDNA {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  plotId String @unique @db.ObjectId
+
+  // === LOCATION FINGERPRINT (set once, refined over time) ===
+  lat           Float
+  lng           Float
+  areaHa        Float?
+  elevation     Float?
+  slope         Float?
+  aspect        Float?     // Compass bearing of dominant slope
+  climateZone   String?    // mediterranean, semi-arid, arid, saharan
+  soilTextureClass String? // Latest known: sandy, loam, clay...
+
+  // === HISTORICAL BASELINES (rolling statistical profiles) ===
+  // Updated on every snapshot: exponential moving averages
+  ndviBaseline       Json?  // { ema_mean, ema_std, seasonal_profile: [12 monthly means], peak_ndvi, trough_ndvi }
+  waterStressProfile Json?  // { ema_prob, max_observed, seasonal_risk: [12 monthly means] }
+  nutrientProfile    Json?  // { ema_n_def, ema_p_def, ema_k_def, soil_fertility_trend }
+  bioticProfile      Json?  // { ema_pressure, disease_history: [{date, type, severity}] }
+  yieldProfile       Json?  // { historical_yields: [{season, crop, yield_kg_ha}], avg, trend }
+
+  // === TEMPORAL PATTERN MEMORY ===
+  // Compressed time-series features for CNN/LSTM training
+  // Each entry: { date, ndvi, ndvi_d1, water_stress, nutrient_stress, temp, precip, risk }
+  featureTimeline    Json?  // Last 365 daily feature vectors (rolling window)
+  seasonalSignature  Json?  // Fourier decomposition of NDVI curve: { harmonics: [{amp, phase, freq}] }
+
+  // === ANOMALY ARCHIVE (permanent, never pruned) ===
+  anomalyLog         Json?  // Array of { date, type, severity, description, duration_days }
+
+  // === CNN SPATIAL FEATURES ===
+  // Compressed spatial fingerprints from L10 surfaces
+  // Updated weekly: low-rank approximation of surface grids
+  spatialFingerprint Json?  // { ndvi_pca: [5 components], risk_pca: [5 components], cluster_centers: [...] }
+
+  // === DATA QUALITY PROFILE ===
+  totalSnapshots     Int    @default(0)
+  firstSeen          DateTime @default(now())
+  lastSeen           DateTime @default(now())
+  avgFreshness       Float  @default(0)
+  sourceDiversity    Json?  // { s2_count, s1_count, weather_count, iot_count, user_input_count }
+
+  // === CROSS-PLOT LINKAGE (for regional ML) ===
+  nearbyPlotIds      String[] @db.ObjectId  // Plots within 5km for spatial correlation
+  regionCluster      String?                // Assigned cluster ID from regional analysis
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([lat, lng])
+  @@index([regionCluster])
 }
