@@ -1,0 +1,22 @@
+{
+  "version": "V41_native_safe_geometry_feasibility_probe",
+  "generated_at": "2026-05-29T13:02:03.726919+00:00",
+  "status": "implementation_script_created",
+  "script_path": "/mnt/data/v41_native_safe_geometry_probe.py",
+  "purpose": "Probe whether native STAC/SAFE/JP2 assets expose geometry residuals that Process API hides.",
+  "run_commands": {
+    "dry_run": "cd services/agribrain && PYTHONPATH=. python scripts/v41_native_safe_geometry_probe.py --dry-run",
+    "live_metadata_probe": "cd services/agribrain && PYTHONPATH=. python scripts/v41_native_safe_geometry_probe.py --max-scenes 12 --max-cloud 20",
+    "live_with_download_fallback": "cd services/agribrain && PYTHONPATH=. python scripts/v41_native_safe_geometry_probe.py --max-scenes 12 --max-cloud 20 --download-assets"
+  },
+  "expected_output": "artifacts/v41_native_safe_geometry_probe_report.json",
+  "decision_logic": {
+    "if_native_transform_variance_nonzero": "continue to V42 native JP2 residual-shift holdout test",
+    "if_native_geometry_still_grid_locked": "proceed with production-safe adaptive 2m-to-10m Process API MicroZone"
+  },
+  "safety": {
+    "allow_strong_1m_export": false,
+    "controlled_1m_research_mode": true,
+    "natural_1m_research_mode": "only if native residual geometry is detected; still not production"
+  }
+}

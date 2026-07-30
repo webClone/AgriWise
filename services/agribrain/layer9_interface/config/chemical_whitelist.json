@@ -1,0 +1,15 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2026-05-03",
+  "approved_chemicals": [
+    "glyphosate",
+    "atrazine",
+    "metolachlor",
+    "chlorpyrifos",
+    "mancozeb",
+    "copper_hydroxide",
+    "bacillus_thuringiensis"
+  ],
+  "restricted_chemicals": [],
+  "notes": "Managed by compliance team. Update requires review. Add new chemicals here — no code change needed."
+}

@@ -1,0 +1,43 @@
+{
+  "plot_id": "P-309",
+  "session_id": "eb06947d8480",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {},
+    "interests": [],
+    "vocabulary_complexity": 0.4,
+    "total_interactions": 5,
+    "first_interaction": 1779829272.290499,
+    "last_interaction": 1779829272.343334
+  },
+  "topic_threads": [
+    {
+      "topic": "UNKNOWN_soil",
+      "first_mentioned": 1779829272.2905343,
+      "last_mentioned": 1779829272.2905343,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_general",
+      "first_mentioned": 1779829272.3033283,
+      "last_mentioned": 1779829272.3433568,
+      "turn_count": 4,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "UNKNOWN",
+    "UNKNOWN",
+    "UNKNOWN",
+    "UNKNOWN",
+    "UNKNOWN"
+  ],
+  "turn_count": 5,
+  "created_at": 1779829272.2904952,
+  "last_updated": 1779829272.3433769
+}

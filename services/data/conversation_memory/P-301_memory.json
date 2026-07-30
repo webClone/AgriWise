@@ -1,0 +1,69 @@
+{
+  "plot_id": "P-301",
+  "session_id": "a41e57f78d79",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {
+      "crop_variety": "a wheat"
+    },
+    "interests": [],
+    "vocabulary_complexity": 0.45,
+    "total_interactions": 5,
+    "first_interaction": 1779829271.652197,
+    "last_interaction": 1779829271.7195532
+  },
+  "topic_threads": [
+    {
+      "topic": "ACTION_DETAIL_soil",
+      "first_mentioned": 1779829271.6526542,
+      "last_mentioned": 1779829271.6526542,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_general",
+      "first_mentioned": 1779829271.6717072,
+      "last_mentioned": 1779829271.6717072,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_nutrient",
+      "first_mentioned": 1779829271.6881785,
+      "last_mentioned": 1779829271.6881785,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "OVERVIEW_soil",
+      "first_mentioned": 1779829271.7051148,
+      "last_mentioned": 1779829271.7051148,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "ACTION_DETAIL_general",
+      "first_mentioned": 1779829271.7195842,
+      "last_mentioned": 1779829271.7195842,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "ACTION_DETAIL",
+    "UNKNOWN",
+    "UNKNOWN",
+    "OVERVIEW",
+    "ACTION_DETAIL"
+  ],
+  "turn_count": 5,
+  "created_at": 1779829271.652193,
+  "last_updated": 1779829271.7196026
+}

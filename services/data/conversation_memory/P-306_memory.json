@@ -1,0 +1,59 @@
+{
+  "plot_id": "P-306",
+  "session_id": "d08f39d9d41d",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {},
+    "interests": [],
+    "vocabulary_complexity": 0.35000000000000003,
+    "total_interactions": 5,
+    "first_interaction": 1779829272.0629961,
+    "last_interaction": 1779829272.1220157
+  },
+  "topic_threads": [
+    {
+      "topic": "OVERVIEW_soil",
+      "first_mentioned": 1779829272.063033,
+      "last_mentioned": 1779829272.063033,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "DIAGNOSE_general",
+      "first_mentioned": 1779829272.07664,
+      "last_mentioned": 1779829272.107649,
+      "turn_count": 2,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_general",
+      "first_mentioned": 1779829272.0916357,
+      "last_mentioned": 1779829272.0916357,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "COACHING_general",
+      "first_mentioned": 1779829272.122052,
+      "last_mentioned": 1779829272.122052,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "OVERVIEW",
+    "DIAGNOSE",
+    "UNKNOWN",
+    "DIAGNOSE",
+    "COACHING"
+  ],
+  "turn_count": 5,
+  "created_at": 1779829272.062994,
+  "last_updated": 1779829272.1220772
+}

@@ -1,0 +1,59 @@
+{
+  "plot_id": "P-308",
+  "session_id": "1451d1dbfa9a",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {},
+    "interests": [],
+    "vocabulary_complexity": 0.45,
+    "total_interactions": 5,
+    "first_interaction": 1779829272.2151184,
+    "last_interaction": 1779829272.2763703
+  },
+  "topic_threads": [
+    {
+      "topic": "UNKNOWN_weather",
+      "first_mentioned": 1779829272.215146,
+      "last_mentioned": 1779829272.2282252,
+      "turn_count": 2,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "OVERVIEW_soil",
+      "first_mentioned": 1779829272.2436323,
+      "last_mentioned": 1779829272.2436323,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_general",
+      "first_mentioned": 1779829272.259633,
+      "last_mentioned": 1779829272.259633,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "SCHEDULE_water",
+      "first_mentioned": 1779829272.2763937,
+      "last_mentioned": 1779829272.2763937,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "UNKNOWN",
+    "UNKNOWN",
+    "OVERVIEW",
+    "UNKNOWN",
+    "SCHEDULE"
+  ],
+  "turn_count": 5,
+  "created_at": 1779829272.215116,
+  "last_updated": 1779829272.2764099
+}

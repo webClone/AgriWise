@@ -1,0 +1,7 @@
+{
+  "baseline_policy_version": "v90_7_1_baseline_policy",
+  "baseline_doy_mean": {
+    "180": 0.45,
+    "181": 0.46
+  }
+}

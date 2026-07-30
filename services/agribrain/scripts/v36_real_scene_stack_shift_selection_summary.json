@@ -1,0 +1,29 @@
+{
+  "version": "V36_real_sentinel_scene_stack_shift_selection",
+  "generated_at": "2026-05-29T10:58:04.068023+00:00",
+  "status": "script_created_dry_run_packaged",
+  "what_v36_adds": [
+    "real per-date Sentinel-2 scene stack fetcher using existing AgriBrain eo.sentinel auth and Process API",
+    "candidate scene selection from existing fetch_ndvi_timeseries",
+    "per-scene NDVI, NDMI, structure proxy, valid mask",
+    "metadata/zero baseline, global phase-style, local tile-based, and hybrid-gated shift models",
+    "internal validation selection plus final holdout evaluation",
+    "Layer 1 adapter preview rasters"
+  ],
+  "why_not_live_run_here": "This environment is not guaranteed to have the user's Sentinel Hub/CDSE credentials or external network. The script is designed to run locally from services/agribrain where the user's .env works.",
+  "run_command": "cd services/agribrain && PYTHONPATH=. python scripts/v36_real_scene_stack_shift_selection.py --days 1800 --max-scenes 72",
+  "dry_run_command": "cd services/agribrain && PYTHONPATH=. python scripts/v36_real_scene_stack_shift_selection.py --dry-run",
+  "expected_outputs": {
+    "report": "artifacts/v36_real_scene_stack_shift_selection_report.json",
+    "selected_shift_model": "metadata | global_phase | local_multiband | hybrid_gated",
+    "layer1_adapter_preview": [
+      "microzone_ndvi_like_value",
+      "microzone_uncertainty",
+      "microzone_resolution_m",
+      "microzone_retrovalidation_score",
+      "microzone_registration_uncertainty_m",
+      "microzone_shift_model_selected"
+    ]
+  },
+  "v36_verdict": "Implementation-ready real-data prototype. Full scientific verdict requires running the script locally with Sentinel access."
+}

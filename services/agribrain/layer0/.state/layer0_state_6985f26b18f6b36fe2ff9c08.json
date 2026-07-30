@@ -1,0 +1,70 @@
+{
+  "version": "layer0-v2.0",
+  "plot_id": "6985f26b18f6b36fe2ff9c08",
+  "saved_at": "2026-05-17T16:51:15.031775",
+  "crop_params_hash": "44136fa355b3",
+  "kalman_zones": {
+    "plot": {
+      "state_values": {
+        "day": "2026-05-17",
+        "lai_proxy": 0.5613,
+        "biomass_proxy": 0.3625,
+        "sm_0_10": 0.1685,
+        "sm_10_40": 0.2166,
+        "canopy_stress": 0.1971,
+        "phenology_gdd": 311.95,
+        "phenology_stage": 1.1866,
+        "stress_thermal": 0.044,
+        "photosynthetic_efficiency": 0.952
+      },
+      "last_day": "2026-05-17"
+    }
+  },
+  "validation": {
+    "climate_profile": "default",
+    "source_reliability": {
+      "sentinel2": 1.0,
+      "sentinel1": 1.0,
+      "sentinel5p": 1.0,
+      "weather": 1.0,
+      "sensor": 1.0,
+      "user": 1.0,
+      "camera": 1.0,
+      "ip_camera": 1.0,
+      "satellite_rgb": 1.0,
+      "farmer_photo": 1.0,
+      "drone": 1.0
+    },
+    "zone_reliability": {
+      "plot": {
+        "sentinel2": 1.0,
+        "sentinel1": 1.0,
+        "sentinel5p": 1.0,
+        "weather": 1.0,
+        "sensor": 1.0,
+        "user": 1.0,
+        "camera": 1.0,
+        "ip_camera": 1.0,
+        "satellite_rgb": 1.0,
+        "farmer_photo": 1.0,
+        "drone": 1.0
+      }
+    },
+    "obs_reliability": {},
+    "violation_counts": {
+      "sentinel2": 0,
+      "sentinel1": 0,
+      "sentinel5p": 0,
+      "weather": 0,
+      "sensor": 0,
+      "user": 0,
+      "camera": 0,
+      "ip_camera": 0,
+      "satellite_rgb": 0,
+      "farmer_photo": 0,
+      "drone": 0
+    },
+    "history_len": 15
+  },
+  "metadata": {}
+}

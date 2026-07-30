@@ -1,0 +1,67 @@
+{
+  "plot_id": "P-304",
+  "session_id": "1d59763d3ac7",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {},
+    "interests": [],
+    "vocabulary_complexity": 0.4,
+    "total_interactions": 5,
+    "first_interaction": 1779829271.885859,
+    "last_interaction": 1779829271.958415
+  },
+  "topic_threads": [
+    {
+      "topic": "DIAGNOSE_disease",
+      "first_mentioned": 1779829271.885892,
+      "last_mentioned": 1779829271.885892,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_general",
+      "first_mentioned": 1779829271.9023356,
+      "last_mentioned": 1779829271.9023356,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_disease",
+      "first_mentioned": 1779829271.9205797,
+      "last_mentioned": 1779829271.9205797,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "OVERVIEW_pest",
+      "first_mentioned": 1779829271.9370646,
+      "last_mentioned": 1779829271.9370646,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "ACTION_DETAIL_general",
+      "first_mentioned": 1779829271.9584415,
+      "last_mentioned": 1779829271.9584415,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "DIAGNOSE",
+    "UNKNOWN",
+    "UNKNOWN",
+    "OVERVIEW",
+    "ACTION_DETAIL"
+  ],
+  "turn_count": 5,
+  "created_at": 1779829271.8858569,
+  "last_updated": 1779829271.9584615
+}

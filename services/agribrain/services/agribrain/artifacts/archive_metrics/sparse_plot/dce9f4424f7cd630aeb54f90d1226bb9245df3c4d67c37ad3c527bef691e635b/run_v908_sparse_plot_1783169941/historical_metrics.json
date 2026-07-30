@@ -1,0 +1,9 @@
+{
+  "archive_policy_version": "v90_7_1_archive_policy",
+  "retrovalidation_score": 0.0,
+  "bma_disagreement": 0.15,
+  "baseline_doy_mean": {
+    "180": 0.45,
+    "181": 0.46
+  }
+}

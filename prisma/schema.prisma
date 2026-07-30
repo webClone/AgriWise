@@ -1,0 +1,1120 @@
+// AgriWise - Algeria Agricultural Intelligence Platform
+// Complete Database Schema - All Phases
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// USER & AUTHENTICATION
+// ============================================
+
+model User {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  phone      String   @unique
+  name       String
+  nameAr     String?
+  email      String?
+  role       UserRole @default(SMALL_FARMER)
+  wilaya     String
+  wilayaCode String
+  commune    String?
+  language   String   @default("ar")
+  isVerified Boolean  @default(false)
+  isActive   Boolean  @default(true)
+
+  // Role-specific profile data
+  profile Json?
+
+  // Relations
+  farms         Farm[]
+  pestReports   PestReport[]
+  notifications Notification[]
+  cooperative   CooperativeMember?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum UserRole {
+  SMALL_FARMER
+  MEDIUM_FARMER
+  LARGE_FARMER
+  COOPERATIVE_MANAGER
+  AGRONOMIST
+  INPUT_SUPPLIER
+  TRANSPORTER
+  STORAGE_OPERATOR
+  RESEARCHER
+  LOCAL_GOV
+  NATIONAL_GOV
+  ADMIN
+}
+
+model OtpCode {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  phone     String
+  code      String
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([phone])
+}
+
+// ============================================
+// FARM & PLOT MANAGEMENT
+// ============================================
+
+model Farm {
+  id     String  @id @default(auto()) @map("_id") @db.ObjectId
+  name   String
+  nameAr String?
+
+  // Location
+  latitude  Float?
+  longitude Float?
+  wilaya    String
+  commune   String?
+  address   String?
+  geoJson   Json? // Farm boundary polygon
+
+  // Farm details
+  totalArea      Float // hectares
+  waterSource    WaterSource?
+  irrigationType IrrigationType?
+  soilType       SoilType?
+
+  // Equipment inventory (Structured)
+  equipment Equipment[]
+
+  plots  Plot[]
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String @db.ObjectId
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Plot {
+  id     String  @id @default(auto()) @map("_id") @db.ObjectId
+  name   String
+  nameAr String?
+  area   Float // hectares
+
+  // Detailed Characteristics
+  soilType   SoilType?
+  irrigation IrrigationType?
+  geoJson    Json? // Plot boundary polygon
+
+  // [NEW] Enhanced Fields
+  perimeter           Float?
+  ownership           String?
+  irrigationDistrict  String?
+  physicalConstraints String[]
+
+  // Lifecycle & History
+  cropCycles CropCycle[]
+
+  // [NEW] User Inputs Relations
+  photos       PlotPhoto[]
+  cameras      IPCamera[]
+  soilAnalyses SoilAnalysis[]
+  sensors      Sensor[]
+
+  farm   Farm   @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  farmId String @db.ObjectId
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Tenant-scoped production rollout authority for ASMAE. Local JSON rollout
+/// files are reserved for development and tests.
+model AsmaeRollout {
+  id                      String   @id @default(auto()) @map("_id") @db.ObjectId
+  plotId                  String   @db.ObjectId
+  farmId                  String   @db.ObjectId
+  tenantId                String   @db.ObjectId
+  backendEnabled          Boolean  @default(false)
+  diagnosticShadowEnabled Boolean  @default(false)
+  visualsEnabled          Boolean  @default(false)
+  phase                   String   @default("disabled")
+  approvedBy              String?
+  approvedAt              DateTime?
+  contractVersion         String
+  reason                  String
+  revision                Int      @default(1)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@unique([tenantId, farmId, plotId])
+  @@index([plotId, farmId])
+}
+
+// [NEW] Visual Ground Truth
+model PlotPhoto {
+  id    String    @id @default(auto()) @map("_id") @db.ObjectId
+  url   String
+  type  PhotoType
+  date  DateTime
+  tags  String[]
+  notes String?
+
+  // [NEW] Fields for AI & Evidence Pipeline
+  zoneId       String?   @db.ObjectId
+  aiTags       String[]
+  aiConfidence Float?    @default(0.0)
+  isProcessed  Boolean   @default(false)
+  source       String?   @default("farmer") // "farmer", "drone", "ip_camera"
+
+  plot   Plot   @relation(fields: [plotId], references: [id], onDelete: Cascade)
+  plotId String @db.ObjectId
+
+  createdAt DateTime @default(now())
+}
+
+enum PhotoType {
+  CROP
+  SOIL
+  OVERVIEW
+  DAMAGE
+  SATELLITE
+  OTHER
+}
+
+model IPCamera {
+  id     String       @id @default(auto()) @map("_id") @db.ObjectId
+  name   String
+  url    String
+  type   CameraType
+  status DeviceStatus @default(OFFLINE)
+
+  plot   Plot   @relation(fields: [plotId], references: [id], onDelete: Cascade)
+  plotId String @db.ObjectId
+
+  createdAt DateTime @default(now())
+}
+
+enum CameraType {
+  FIXED
+  PTZ
+  DRONE_FEED
+}
+
+// [NEW] Soil & Physical Properties
+model SoilAnalysis {
+  id      String   @id @default(auto()) @map("_id") @db.ObjectId
+  date    DateTime
+  fileUrl String?
+
+  // Sampling context
+  depthFrom        Int? // Start depth in cm (e.g. 0)
+  depthTo          Int? // End depth in cm (e.g. 30)
+  samplingLocation String? // "Whole Plot", "Zone A", "GPS: 36.75, 3.04" etc.
+  notes            String?
+
+  // Parsed Data
+  ph            Float?
+  ec            Float?
+  organicMatter Float?
+  nitrogen      Float?
+  phosphorus    Float?
+  potassium     Float?
+  texture       String?
+
+  plot   Plot   @relation(fields: [plotId], references: [id], onDelete: Cascade)
+  plotId String @db.ObjectId
+
+  createdAt DateTime @default(now())
+}
+
+// [NEW] Sensors & Infrastructure
+model Sensor {
+  id       String       @id @default(auto()) @map("_id") @db.ObjectId
+  type     SensorType
+  vendor   String?
+  deviceId String       @unique
+  lastSync DateTime?
+  status   DeviceStatus @default(ACTIVE)
+  battery  Float? // Latest battery level 0-100%
+  rssi     Int? // Latest signal strength in dBm
+  apiKey   String? // Device authentication key
+
+  plot   Plot   @relation(fields: [plotId], references: [id], onDelete: Cascade)
+  plotId String @db.ObjectId
+
+  readings SensorReading[]
+
+  createdAt DateTime @default(now())
+}
+
+model SensorReading {
+  id       String @id @default(auto()) @map("_id") @db.ObjectId
+  sensor   Sensor @relation(fields: [sensorId], references: [id], onDelete: Cascade)
+  sensorId String @db.ObjectId
+
+  // Core telemetry
+  temperature  Float?
+  humidity     Float?
+  soilMoisture Float?
+  ec           Float? // Electrical conductivity
+  windSpeed    Float?
+  rainfall     Float?
+
+  // Device meta snapshot
+  battery Float?
+  rssi    Int?
+
+  timestamp DateTime @default(now())
+}
+
+enum SensorType {
+  MOISTURE
+  TEMP
+  EC
+  WEATHER
+  OTHER
+}
+
+enum DeviceStatus {
+  ACTIVE
+  OFFLINE
+  MAINTENANCE
+}
+
+model Equipment {
+  id        String        @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  type      EquipmentType
+  condition String? // new, good, fair, poor, broken
+  quantity  Int           @default(1)
+
+  farm   Farm   @relation(fields: [farmId], references: [id], onDelete: Cascade)
+  farmId String @db.ObjectId
+}
+
+enum WaterSource {
+  WELL
+  DAM
+  RIVER
+  RAINFED
+  DESALINATED
+}
+
+enum IrrigationType {
+  DRIP
+  SPRINKLER
+  PIVOT
+  FLOOD
+  RAINFED
+}
+
+enum SoilType {
+  CLAY
+  SANDY
+  LOAM
+  SILT
+  PEAT
+  CHALKY
+}
+
+enum EquipmentType {
+  TRACTOR
+  HARVESTER
+  PUMP
+  IRRIGATION_SYSTEM
+  PLOW
+  SPRAYER
+  TRUCK
+  STORAGE
+  OTHER
+}
+
+// ============================================
+// CROP LIFECYCLE MANAGEMENT
+// ============================================
+
+model CropCycle {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+
+  // Crop info
+  cropCode   String
+  cropNameAr String?
+  variety    String?
+
+  // Timeline
+  plantDate       DateTime
+  expectedHarvest DateTime?
+  actualHarvest   DateTime?
+  status          CropStatus @default(PLANNED)
+
+  // Yield tracking
+  estimatedYield Float? // kg/hectare
+  actualYield    Float?
+  yieldQuality   String? // excellent, good, average, poor
+
+  // Cost tracking
+  totalCost Float?
+  revenue   Float?
+
+  notes String?
+
+  // Relations
+  tasks        CropTask[]
+  inputs       InputLog[]
+  observations CropObservation[]
+
+  plot   Plot   @relation(fields: [plotId], references: [id], onDelete: Cascade)
+  plotId String @db.ObjectId
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum CropStatus {
+  PLANNED
+  PLANTED
+  GROWING
+  FLOWERING
+  FRUITING
+  READY_TO_HARVEST
+  HARVESTED
+  FAILED
+}
+
+model CropTask {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  type        TaskType
+  title       String
+  titleAr     String?
+  description String?
+  dueDate     DateTime
+  completed   Boolean   @default(false)
+  completedAt DateTime?
+
+  cropCycle   CropCycle @relation(fields: [cropCycleId], references: [id], onDelete: Cascade)
+  cropCycleId String    @db.ObjectId
+  createdAt   DateTime  @default(now())
+}
+
+enum TaskType {
+  PLANTING
+  IRRIGATION
+  FERTILIZING
+  PEST_CONTROL
+  PRUNING
+  WEEDING
+  HARVEST
+  SOIL_PREP
+  OTHER
+}
+
+model InputLog {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  type      InputType
+  name      String
+  nameAr    String?
+  brand     String?
+  quantity  Float
+  unit      String // kg, liters, units
+  cost      Float?
+  currency  String    @default("DZD")
+  appliedAt DateTime
+  notes     String?
+
+  cropCycle   CropCycle @relation(fields: [cropCycleId], references: [id], onDelete: Cascade)
+  cropCycleId String    @db.ObjectId
+  createdAt   DateTime  @default(now())
+}
+
+enum InputType {
+  SEED
+  FERTILIZER
+  PESTICIDE
+  HERBICIDE
+  FUNGICIDE
+  WATER
+  FUEL
+  LABOR
+  EQUIPMENT
+  OTHER
+}
+
+model CropObservation {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  type        String // growth, health, pest, disease, weather_impact
+  title       String
+  description String?
+  severity    String? // info, warning, critical
+  photos      String[]
+
+  cropCycle   CropCycle @relation(fields: [cropCycleId], references: [id], onDelete: Cascade)
+  cropCycleId String    @db.ObjectId
+  createdAt   DateTime  @default(now())
+}
+
+// ============================================
+// WEATHER & CLIMATE
+// ============================================
+
+model WeatherCache {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  wilayaCode String
+  latitude   Float
+  longitude  Float
+  data       Json // Cached weather data
+  fetchedAt  DateTime @default(now())
+  expiresAt  DateTime
+
+  @@unique([wilayaCode])
+}
+
+model WeatherAlert {
+  id             String    @id @default(auto()) @map("_id") @db.ObjectId
+  wilayaCode     String
+  type           AlertType
+  severity       Severity
+  titleAr        String
+  titleFr        String?
+  messageAr      String
+  messageFr      String?
+  recommendation String?
+  startDate      DateTime
+  endDate        DateTime
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+
+  @@index([wilayaCode, isActive])
+}
+
+enum AlertType {
+  FROST
+  HEAT_WAVE
+  HEAVY_RAIN
+  DROUGHT
+  WIND
+  SANDSTORM
+  HAIL
+  FLOOD
+}
+
+enum Severity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+// ============================================
+// PEST & DISEASE NETWORK
+// ============================================
+
+model PestReport {
+  id     String  @id @default(auto()) @map("_id") @db.ObjectId
+  type   String // pest, disease, unknown
+  name   String?
+  nameAr String?
+
+  // Location
+  latitude   Float
+  longitude  Float
+  wilayaCode String
+  commune    String?
+
+  // Details
+  severity     Severity
+  description  String?
+  photos       String[]
+  cropAffected String?
+  spreadArea   Float? // hectares
+
+  // Status
+  status     ReportStatus @default(REPORTED)
+  verifiedBy String?      @db.ObjectId
+  treatment  String?
+
+  reporter   User   @relation(fields: [reporterId], references: [id])
+  reporterId String @db.ObjectId
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([wilayaCode, status])
+}
+
+enum ReportStatus {
+  REPORTED
+  VERIFIED
+  INVESTIGATING
+  RESOLVED
+  FALSE_ALARM
+}
+
+model PestAlert {
+  id         String  @id @default(auto()) @map("_id") @db.ObjectId
+  pestName   String
+  pestNameAr String?
+  type       String // pest, disease
+
+  wilayaCode String
+  severity   Severity
+
+  titleAr        String
+  messageAr      String
+  treatment      String?
+  preventionTips String[]
+
+  affectedCrops String[]
+  reportCount   Int      @default(1)
+
+  isActive  Boolean   @default(true)
+  startDate DateTime  @default(now())
+  endDate   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([wilayaCode, isActive])
+}
+
+// ============================================
+// MARKET & PRICES
+// ============================================
+
+model MarketPrice {
+  id         String @id @default(auto()) @map("_id") @db.ObjectId
+  cropCode   String
+  cropNameAr String
+  price      Float
+  unit       String // kg, quintal, ton
+  currency   String @default("DZD")
+
+  market     String // market name
+  wilayaCode String
+
+  priceType  String // wholesale, retail, farm_gate
+  recordedAt DateTime @default(now())
+  source     String? // who reported
+
+  @@index([cropCode, wilayaCode])
+  @@index([recordedAt])
+}
+
+model MarketTrend {
+  id         String  @id @default(auto()) @map("_id") @db.ObjectId
+  cropCode   String
+  wilayaCode String? // null for national
+
+  period      String // daily, weekly, monthly
+  avgPrice    Float
+  minPrice    Float
+  maxPrice    Float
+  priceChange Float // percentage
+  trend       String // up, down, stable
+
+  startDate DateTime
+  endDate   DateTime
+
+  createdAt DateTime @default(now())
+
+  @@index([cropCode, period])
+}
+
+// ============================================
+// COOPERATIVES
+// ============================================
+
+model Cooperative {
+  id     String  @id @default(auto()) @map("_id") @db.ObjectId
+  name   String
+  nameAr String?
+
+  wilaya  String
+  commune String?
+  address String?
+  phone   String?
+
+  // Stats (denormalized for performance)
+  memberCount Int   @default(0)
+  totalArea   Float @default(0)
+
+  members CooperativeMember[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model CooperativeMember {
+  id       String   @id @default(auto()) @map("_id") @db.ObjectId
+  role     String // manager, member
+  joinedAt DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id])
+  userId String @unique @db.ObjectId
+
+  cooperative   Cooperative @relation(fields: [cooperativeId], references: [id])
+  cooperativeId String      @db.ObjectId
+}
+
+// ============================================
+// NOTIFICATIONS
+// ============================================
+
+model Notification {
+  id        String  @id @default(auto()) @map("_id") @db.ObjectId
+  type      String // weather, pest, task, market, system
+  title     String
+  titleAr   String?
+  message   String
+  messageAr String?
+
+  priority String    @default("normal") // low, normal, high, urgent
+  isRead   Boolean   @default(false)
+  readAt   DateTime?
+
+  data      Json? // Additional data
+  actionUrl String? // Deep link
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String @db.ObjectId
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+}
+
+// ============================================
+// REFERENCE DATA
+// ============================================
+
+// DYNAMIC CROP REFERENCE DATA
+model Crop {
+  id       String  @id @default(auto()) @map("_id") @db.ObjectId
+  code     String  @unique // wheat, barley, tomato
+  nameAr   String
+  nameFr   String
+  nameEn   String
+  icon     String?
+  category String // cereals, fruits, vegetables, legumes, tree_crops
+
+  // Growth Cycle & Stages (Dynamic)
+  // Example: [{ stage: "planting", startDay: 0, endDay: 7 }, { stage: "vegetative", startDay: 8, endDay: 45 }]
+  stages Json?
+
+  // Detailed Requirements
+  waterRequirements Json? // { early: "low", mid: "high", late: "low" }
+  nutrientNeeds     Json? // { N: "high", P: "medium", K: "medium" }
+  soilPreferences   SoilType[]
+  minTemp           Float?
+  maxTemp           Float?
+
+  // Seasonality by Region Type
+  // { "mediterranean": { plant: [10, 11], harvest: [5, 6] }, "saharan": { ... } }
+  seasonality Json?
+
+  // Best Practices & Risks
+  recommendations Json?
+  commonPests     String[]
+  commonDiseases  String[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Wilaya {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  code      String    @unique
+  nameAr    String
+  nameFr    String
+  nameEn    String
+  latitude  Float
+  longitude Float
+  climate   String // mediterranean, semi-arid, arid, saharan
+  communes  Commune[]
+}
+
+model Commune {
+  id       String @id @default(auto()) @map("_id") @db.ObjectId
+  code     String @unique
+  nameAr   String
+  nameFr   String
+  wilaya   Wilaya @relation(fields: [wilayaId], references: [id])
+  wilayaId String @db.ObjectId
+}
+
+// ============================================
+// ANALYTICS & AGGREGATIONS (for dashboards)
+// ============================================
+
+model RegionalStats {
+  id         String @id @default(auto()) @map("_id") @db.ObjectId
+  wilayaCode String
+  period     String // daily, weekly, monthly, yearly
+
+  // Farm stats
+  farmCount   Int
+  farmerCount Int
+  totalArea   Float
+
+  // Crop stats
+  cropDistribution Json // { wheat: 1000, barley: 500, ... }
+
+  // Yield stats
+  avgYield Json? // { wheat: 25, barley: 20, ... }
+
+  // Risk indicators
+  pestReports   Int
+  weatherAlerts Int
+
+  startDate DateTime
+  endDate   DateTime
+
+  createdAt DateTime @default(now())
+
+  @@unique([wilayaCode, period, startDate])
+}
+
+// ============================================
+// AGRIBRAIN INTELLIGENCE CACHE & ML STORAGE
+// ============================================
+
+// Per-run intelligence snapshot — cached for instant page load
+// Rolling retention: auto-cleanup via expiresAt TTL index
+// But ML features are permanently archived in PlotDNA
+model IntelligenceSnapshot {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  plotId    String   @db.ObjectId
+  farmId    String   @db.ObjectId
+
+  // Temporal context
+  capturedAt  DateTime @default(now())
+  dataAgeHrs  Float    @default(0)       // Hours since last external API fetch
+
+  // === FULL INTELLIGENCE PAYLOAD ===
+  engines      Json    // Engine status cards (L0-L10)
+  timeline     Json    // 14-day weather/NDVI/SAR timeline
+  current      Json    // Current conditions snapshot
+  assimilation Json    // Data provenance metadata
+
+  // === SURFACE STATISTICS (lightweight, always stored) ===
+  // Per-surface: { id, type, mean, p10, p50, p90, min, max, spread, grounding }
+  surfaceStats   Json   // Array of surface stat objects (~10KB)
+  surfaceDigest  String? // SHA-256 of surface grid values — skip re-render if unchanged
+
+  // === COMPRESSED SURFACE GRIDS (full spatial data, gzip+base64) ===
+  // Only stored when grids actually change (checked via surfaceDigest)
+  surfaceGridsGz String? // gzip-compressed JSON of all 25 surface grids, base64-encoded
+  surfaceGridsByPolicy Json? // Map of policy to compressed JSON string
+  surfaceDigestByPolicy Json? // Map of policy to SHA-256 digest
+
+  // === ML FEATURE VECTOR (flat numerics, query-ready) ===
+  mlFeatures   Json    // { ndvi_mean, water_stress_prob, biotic_pressure, ... }
+
+  // === CROP & ENVIRONMENTAL CONTEXT (denormalized for ML) ===
+  cropCode      String?
+  cropStage     String?
+  dap           Int?       // Days After Planting
+  lat           Float
+  lng           Float
+  areaHa        Float?
+
+  // === SENSOR SNAPSHOT ===
+  sensorSnapshot Json?    // Frozen IoT readings at capture time
+
+  // === CROP PHENOLOGY ===
+  phenology     Json?     // { stage, dap, plant_date, basis }
+
+  // === USER INPUTS SNAPSHOT ===
+  userInputs    Json?     // Irrigation type, soil analysis, constraints
+
+  // === RAW DATA (expert mode) ===
+  rawData       Json?     // Raw API responses for expert panels
+
+  // Lifecycle
+  expiresAt DateTime     // capturedAt + 14 days
+
+  @@index([plotId, capturedAt(sort: Desc)])
+  @@index([expiresAt])
+  @@index([plotId, cropCode, capturedAt])
+}
+
+// Permanent plot learning profile — NEVER deleted
+// Accumulates knowledge over every AgriBrain run
+// This is the "Plot DNA" — location fingerprint + historical patterns
+model PlotDNA {
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  plotId String @unique @db.ObjectId
+
+  // === LOCATION FINGERPRINT (set once, refined over time) ===
+  lat           Float
+  lng           Float
+  areaHa        Float?
+  elevation     Float?
+  slope         Float?
+  aspect        Float?     // Compass bearing of dominant slope
+  climateZone   String?    // mediterranean, semi-arid, arid, saharan
+  soilTextureClass String? // Latest known: sandy, loam, clay...
+
+  // === HISTORICAL BASELINES (rolling statistical profiles) ===
+  // Updated on every snapshot: exponential moving averages
+  ndviBaseline       Json?  // { ema_mean, ema_std, seasonal_profile: [12 monthly means], peak_ndvi, trough_ndvi }
+  waterStressProfile Json?  // { ema_prob, max_observed, seasonal_risk: [12 monthly means] }
+  nutrientProfile    Json?  // { ema_n_def, ema_p_def, ema_k_def, soil_fertility_trend }
+  bioticProfile      Json?  // { ema_pressure, disease_history: [{date, type, severity}] }
+  yieldProfile       Json?  // { historical_yields: [{season, crop, yield_kg_ha}], avg, trend }
+
+  // === TEMPORAL PATTERN MEMORY ===
+  // Compressed time-series features for CNN/LSTM training
+  // Each entry: { date, ndvi, ndvi_d1, water_stress, nutrient_stress, temp, precip, risk }
+  featureTimeline    Json?  // Last 365 daily feature vectors (rolling window)
+  seasonalSignature  Json?  // Fourier decomposition of NDVI curve: { harmonics: [{amp, phase, freq}] }
+
+  // === ANOMALY ARCHIVE (permanent, never pruned) ===
+  anomalyLog         Json?  // Array of { date, type, severity, description, duration_days }
+
+  // === CNN SPATIAL FEATURES ===
+  // Compressed spatial fingerprints from L10 surfaces
+  // Updated weekly: low-rank approximation of surface grids
+  spatialFingerprint Json?  // { ndvi_pca: [5 components], risk_pca: [5 components], cluster_centers: [...] }
+
+  // === DATA QUALITY PROFILE ===
+  totalSnapshots     Int    @default(0)
+  firstSeen          DateTime @default(now())
+  lastSeen           DateTime @default(now())
+  avgFreshness       Float  @default(0)
+  sourceDiversity    Json?  // { s2_count, s1_count, weather_count, iot_count, user_input_count }
+
+  // === OBSERVATION MATURITY (tracks data accumulation for ML readiness) ===
+  observationCounts  Json?  // { sentinel2: 45, sentinel1: 38, weather: 1200, soilgrids: 2, sensor: 890, total: 2175 }
+  seasonsTracked     Int    @default(0)         // Number of complete growing seasons observed
+  mlReadinessScore   Float  @default(0)         // 0-1 score: how ready this plot is for ML inference
+  mlReadinessReason  String?                    // Human-readable explanation of readiness level
+
+  // === CROSS-PLOT LINKAGE (for regional ML) ===
+  nearbyPlotIds      String[] @db.ObjectId  // Plots within 5km for spatial correlation
+  regionCluster      String?                // Assigned cluster ID from regional analysis
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([lat, lng])
+  @@index([regionCluster])
+}
+
+// ============================================
+// CONFIRMED CROP LABELS — ML Training Ground Truth
+// ============================================
+// v6.0B: Every farmer/admin confirmation creates a reusable training sample.
+// MongoDB collection ConfirmedCropLabel is the source of truth.
+// Python reads/writes the same collection via PyMongo and maps
+// documents into dataclasses.
+// Prisma defines the frontend/admin schema.
+
+model ConfirmedCropLabel {
+  id              String   @id @default(auto()) @map("_id") @db.ObjectId
+
+  // Stable external ID (UUID, separate from Mongo _id)
+  labelId         String   @unique
+
+  // Plot identity
+  plotId          String   @db.ObjectId
+  geometryHash    String   // SHA256 of canonical GeoJSON at label time
+
+  // Crop identity
+  cropCode        String   // From 212-crop registry (validated, no defaults)
+  cropGroup       String   // From CROP_GROUP_MAP
+
+  // Temporal bounds
+  plantingDate    DateTime?
+  harvestDate     DateTime?
+
+  // Label provenance
+  labelSource     String   // "farmer_confirmed" | "admin_verified" | "historical_record" | "imported_dataset"
+  labelConfidence String   // "HIGH" | "MEDIUM" | "LOW"
+  createdBy       String?  // User ID
+  notes           String?
+
+  // Feature vector link
+  layer1RunId            String?   // L1 run that produced features
+  featureVectorVersion   String    @default("6.0.0")
+  featureVectorSnapshot  Json?     // Flattened CropFeatureVector at label time
+
+  // Schema versioning
+  labelSchemaVersion     String    @default("6.0B")
+
+  // Quality
+  qualityScore    Float?   // 0.0-1.0 composite quality
+  qualityTier     String?  // "A" | "B" | "C" | "D"
+  qualityDetails  Json?    // Full LabelQualityScore
+
+  // Lifecycle
+  isActive        Boolean  @default(true)
+  supersededBy    String?  // Label ID if corrected
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([plotId, isActive])
+  @@index([cropCode, cropGroup])
+  @@index([labelSource])
+  @@index([qualityTier])
+  @@index([plotId, plantingDate])
+}
+
+// ============================================
+// PLOT OBSERVATION ARCHIVE — Permanent ML Dataset
+// ============================================
+// Every satellite pass, weather reading, soil measurement, and sensor observation
+// is archived here PERMANENTLY. This is the raw ML training dataset.
+//
+// Design principles:
+//   - Append-only: never delete observations
+//   - Deduplicated: unique on [plotId, source, obsDate, obsType]
+//   - Pre-computed features: denormalized for fast ML export
+//   - Temporal resolution: individual observations (not aggregated)
+//
+// After 1-3 seasons (~180-540 observations per source), the accumulated
+// data enables high-accuracy ML models for yield prediction, anomaly
+// detection, and management zone optimization.
+
+model PlotObservation {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  plotId    String   @db.ObjectId
+  source    String   // "sentinel2", "sentinel1", "soilgrids", "weather", "sensor", "forecast"
+  obsType   String   // "ndvi", "indices", "sar_backscatter", "soil_properties", "current_weather", "sensor_reading"
+  obsDate   DateTime // Actual observation/acquisition date (NOT the fetch timestamp)
+
+  // === CORE OBSERVATION DATA ===
+  data      Json     // Full raw observation payload (preserved for future reprocessing)
+
+  // === PRE-COMPUTED ML FEATURES (flat numerics, query-ready) ===
+  // Vegetation indices (from Sentinel-2)
+  ndvi      Float?
+  evi       Float?
+  ndwi      Float?
+  ndmi      Float?
+
+  // SAR backscatter (from Sentinel-1)
+  vv        Float?   // VV polarization (dB)
+  vh        Float?   // VH polarization (dB)
+  vvVhRatio Float?   // VV/VH ratio (soil moisture proxy)
+
+  // Weather
+  tempC     Float?   // Temperature (°C)
+  tempMin   Float?
+  tempMax   Float?
+  precipMm  Float?   // Precipitation (mm)
+  humidity  Float?   // Relative humidity (%)
+  windMs    Float?   // Wind speed (m/s)
+  et0       Float?   // Reference evapotranspiration (mm/day)
+  solarRad  Float?   // Solar radiation (MJ/m²/day)
+
+  // Soil
+  soilMoisture Float? // Soil moisture (%)
+  soilPh       Float?
+  soilOC       Float? // Organic carbon
+  soilN        Float? // Nitrogen
+  soilClay     Float? // Clay content (%)
+  soilSand     Float? // Sand content (%)
+
+  // Sensor (IoT)
+  sensorEc     Float? // Electrical conductivity (dS/m)
+  sensorBattery Float? // Battery level (%)
+
+  // === QUALITY METADATA ===
+  cloudCover  Float?   // Cloud cover percentage (S2 only)
+  quality     Float?   // 0-1 quality score (source-specific)
+  isReliable  Boolean  @default(true) // Flagged false if quality check fails
+
+  // === SPATIAL CONTEXT (denormalized for fast queries) ===
+  lat       Float
+  lng       Float
+
+  // === PROVENANCE ===
+  fetchedAt DateTime @default(now()) // When the data was fetched from the API
+  cacheKey  String?                  // Reference to eo_cache entry that produced this
+
+  @@unique([plotId, source, obsDate, obsType])
+  @@index([plotId, obsDate])
+  @@index([plotId, source, obsDate])
+  @@index([source, obsDate])
+  @@index([plotId, obsType, obsDate])
+}
+
+// ============================================
+// PLOT OBSERVATION AGGREGATES — Temporal Rollups
+// ============================================
+// Pre-computed statistical summaries at multiple temporal resolutions.
+// These power seasonal trend analysis, climate correlation, and
+// multi-pattern ML without scanning the raw observation table.
+//
+// Temporal hierarchy:
+//   daily    → smoothed daily features (gap-filled via Kalman)
+//   weekly   → 7-day statistical summaries
+//   monthly  → 30-day summaries with seasonal context
+//   seasonal → complete growing season summaries (the "Plot DNA" building blocks)
+
+model PlotObservationAggregate {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  plotId     String   @db.ObjectId
+
+  // === TEMPORAL KEY ===
+  period     String   // "daily", "weekly", "monthly", "seasonal"
+  periodKey  String   // "2026-05-17", "2026-W20", "2026-05", "2026-S1" (season 1 = spring)
+  startDate  DateTime
+  endDate    DateTime
+
+  // === CROP CONTEXT (denormalized for ML) ===
+  cropCode   String?
+  cropStage  String?
+  dap        Int?     // Days after planting at period midpoint
+
+  // === VEGETATION STATISTICS ===
+  ndviMean   Float?
+  ndviMin    Float?
+  ndviMax    Float?
+  ndviStd    Float?
+  ndviTrend  Float?   // Linear slope over the period (positive = greening)
+  eviMean    Float?
+  ndmiMean   Float?   // Moisture stress indicator
+
+  // === SAR STATISTICS ===
+  vvMean     Float?
+  vhMean     Float?
+  sarCv      Float?   // Coefficient of variation (spatial variability proxy)
+
+  // === WEATHER STATISTICS ===
+  tempMean   Float?
+  tempMin    Float?
+  tempMax    Float?
+  precipTotal Float?  // Total precipitation over the period (mm)
+  precipDays  Int?    // Number of days with precipitation
+  et0Total    Float?  // Total ET0 over the period (mm)
+  gddAccum   Float?  // Growing Degree Days accumulated
+  heatStressDays Int? // Days with temp > 35°C
+  coldStressDays Int? // Days with temp < 5°C
+
+  // === DERIVED INDICATORS ===
+  waterBalanceMm Float?   // precipTotal - et0Total
+  waterStressProb Float?  // Probability of water stress (from model)
+  bioticPressure  Float?  // Disease/pest pressure index
+  riskComposite   Float?  // Overall risk score
+
+  // === DATA QUALITY ===
+  observationCount Int    @default(0) // Number of raw observations in this period
+  sourceBreakdown  Json?  // { sentinel2: 3, weather: 7, sensor: 168 }
+  gapDays          Int    @default(0) // Days with no observations
+  reliability      Float  @default(0) // 0-1 aggregate reliability score
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([plotId, period, periodKey])
+  @@index([plotId, period, startDate])
+  @@index([plotId, cropCode, period])
+  @@index([period, startDate])
+}

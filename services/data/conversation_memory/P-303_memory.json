@@ -1,0 +1,67 @@
+{
+  "plot_id": "P-303",
+  "session_id": "41aebff79b5e",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {},
+    "interests": [],
+    "vocabulary_complexity": 0.45,
+    "total_interactions": 5,
+    "first_interaction": 1779829271.8101933,
+    "last_interaction": 1779829271.8732147
+  },
+  "topic_threads": [
+    {
+      "topic": "UNKNOWN_soil",
+      "first_mentioned": 1779829271.8102474,
+      "last_mentioned": 1779829271.8102474,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "ACTION_DETAIL_water",
+      "first_mentioned": 1779829271.8237998,
+      "last_mentioned": 1779829271.8237998,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_water",
+      "first_mentioned": 1779829271.8411355,
+      "last_mentioned": 1779829271.8411355,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "OVERVIEW_general",
+      "first_mentioned": 1779829271.858102,
+      "last_mentioned": 1779829271.858102,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "SCHEDULE_water",
+      "first_mentioned": 1779829271.8732376,
+      "last_mentioned": 1779829271.8732376,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "UNKNOWN",
+    "ACTION_DETAIL",
+    "UNKNOWN",
+    "OVERVIEW",
+    "SCHEDULE"
+  ],
+  "turn_count": 5,
+  "created_at": 1779829271.810189,
+  "last_updated": 1779829271.873254
+}

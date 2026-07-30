@@ -1,0 +1,32 @@
+{
+  "plot_id": "P-101",
+  "session_id": "d5666983c343",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {},
+    "interests": [],
+    "vocabulary_complexity": 0.5,
+    "total_interactions": 2,
+    "first_interaction": 1779828329.1404772,
+    "last_interaction": 1779829126.6554062
+  },
+  "topic_threads": [
+    {
+      "topic": "UNKNOWN_general",
+      "first_mentioned": 1779828329.140935,
+      "last_mentioned": 1779829126.6558464,
+      "turn_count": 2,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "UNKNOWN",
+    "UNKNOWN"
+  ],
+  "turn_count": 2,
+  "created_at": 1779828329.1404724,
+  "last_updated": 1779829126.6558654
+}

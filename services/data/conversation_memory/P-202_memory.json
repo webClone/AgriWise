@@ -1,0 +1,52 @@
+{
+  "plot_id": "P-202",
+  "session_id": "64ca3463ae97",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {
+      "irrigation_type": "drip",
+      "crop_variety": "a wheat"
+    },
+    "interests": [],
+    "vocabulary_complexity": 0.5499999999999999,
+    "total_interactions": 3,
+    "first_interaction": 1779828944.2539794,
+    "last_interaction": 1779828944.285156
+  },
+  "topic_threads": [
+    {
+      "topic": "COMPARE_water",
+      "first_mentioned": 1779828944.254424,
+      "last_mentioned": 1779828944.254424,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_general",
+      "first_mentioned": 1779828944.2709699,
+      "last_mentioned": 1779828944.2709699,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_water",
+      "first_mentioned": 1779828944.285183,
+      "last_mentioned": 1779828944.285183,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "COMPARE",
+    "UNKNOWN",
+    "UNKNOWN"
+  ],
+  "turn_count": 3,
+  "created_at": 1779828944.2539763,
+  "last_updated": 1779828944.2851999
+}

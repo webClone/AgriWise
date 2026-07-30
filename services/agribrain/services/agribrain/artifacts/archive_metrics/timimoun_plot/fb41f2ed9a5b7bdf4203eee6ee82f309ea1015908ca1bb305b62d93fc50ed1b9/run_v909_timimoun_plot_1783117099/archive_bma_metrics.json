@@ -1,0 +1,8 @@
+{
+  "archive_bma_policy_version": "v90_7_1_bma_policy",
+  "bma_disagreement": 0.15,
+  "weights": {
+    "model_1": 0.6,
+    "model_2": 0.4
+  }
+}

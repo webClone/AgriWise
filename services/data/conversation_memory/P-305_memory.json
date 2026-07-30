@@ -1,0 +1,61 @@
+{
+  "plot_id": "P-305",
+  "session_id": "1c6163ba297b",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {
+      "crop_variety": "a wheat"
+    },
+    "interests": [],
+    "vocabulary_complexity": 0.4,
+    "total_interactions": 5,
+    "first_interaction": 1779829271.976094,
+    "last_interaction": 1779829272.0448675
+  },
+  "topic_threads": [
+    {
+      "topic": "UNKNOWN_nutrient",
+      "first_mentioned": 1779829271.9761524,
+      "last_mentioned": 1779829271.9945734,
+      "turn_count": 2,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "ACTION_DETAIL_general",
+      "first_mentioned": 1779829272.0124042,
+      "last_mentioned": 1779829272.0124042,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "OVERVIEW_nutrient",
+      "first_mentioned": 1779829272.0310163,
+      "last_mentioned": 1779829272.0310163,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "ACTION_DETAIL_nutrient",
+      "first_mentioned": 1779829272.044907,
+      "last_mentioned": 1779829272.044907,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "UNKNOWN",
+    "UNKNOWN",
+    "ACTION_DETAIL",
+    "OVERVIEW",
+    "ACTION_DETAIL"
+  ],
+  "turn_count": 5,
+  "created_at": 1779829271.9760914,
+  "last_updated": 1779829272.0449276
+}

@@ -1,0 +1,12 @@
+{
+  "name": "disease_risk",
+  "schema": "disease_risk",
+  "schema_version": "1.0.0",
+  "schema_hash": "f935362f",
+  "created": "2026-02-05T19:11:02.850717",
+  "updated": "2026-02-05T19:39:34.918479",
+  "sample_count": 2,
+  "partitions": [
+    "2026-02-05"
+  ]
+}

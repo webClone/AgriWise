@@ -1,0 +1,906 @@
+/* ═══ AGRIBRAIN THEME SYSTEM ═══════════════════════════════
+   Uses [data-theme="light"] on the page wrapper to override
+   all inline-style colors without touching component code.
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Root theme variables ──────────────────────────────── */
+[data-theme="dark"] {
+  --ab-bg: #050a14;
+  --ab-bg-card: rgba(15,23,42,0.4);
+  --ab-bg-card2: rgba(15,23,42,0.5);
+  --ab-bg-code: rgba(8,12,25,0.4);
+  --ab-bg-nav: rgba(5,10,20,0.82);
+  --ab-border: rgba(71,85,105,0.06);
+  --ab-border2: rgba(71,85,105,0.08);
+  --ab-text-primary: #f8fafc;
+  --ab-text-body: #e2e8f0;
+  --ab-text-secondary: #94a3b8;
+  --ab-text-muted: #64748b;
+  --ab-text-dim: #475569;
+  --ab-text-faint: #334155;
+}
+
+[data-theme="light"] {
+  --ab-bg: #f8fafc;
+  --ab-bg-card: rgba(241,245,249,0.8);
+  --ab-bg-card2: rgba(241,245,249,0.9);
+  --ab-bg-code: rgba(241,245,249,0.6);
+  --ab-bg-nav: rgba(255,255,255,0.88);
+  --ab-border: rgba(203,213,225,0.4);
+  --ab-border2: rgba(203,213,225,0.5);
+  --ab-text-primary: #0f172a;
+  --ab-text-body: #1e293b;
+  --ab-text-secondary: #475569;
+  --ab-text-muted: #64748b;
+  --ab-text-dim: #94a3b8;
+  --ab-text-faint: #cbd5e1;
+}
+
+/* ── PAGE BACKGROUND ───────────────────────────────────── */
+[data-theme="light"] {
+  background: #f8fafc !important;
+  color: #1e293b !important;
+}
+
+/* ── NAV ───────────────────────────────────────────────── */
+[data-theme="light"] > nav {
+  background: rgba(255,255,255,0.88) !important;
+  border-bottom-color: rgba(203,213,225,0.4) !important;
+}
+[data-theme="light"] > nav span[style*="color: #f8fafc"],
+[data-theme="light"] > nav span[style*="color: rgb(248, 250, 252)"] {
+  color: #0f172a !important;
+}
+[data-theme="light"] > nav a[style*="color: #94a3b8"],
+[data-theme="light"] > nav a[style*="color: rgb(148, 163, 184)"] {
+  color: #475569 !important;
+}
+
+/* ── SECTION BACKGROUNDS ───────────────────────────────── */
+[data-theme="light"] section {
+  border-color: rgba(203,213,225,0.3) !important;
+}
+
+/* ── HEADINGS ──────────────────────────────────────────── */
+[data-theme="light"] h1,
+[data-theme="light"] h2,
+[data-theme="light"] h3 {
+  color: #1e293b !important;
+}
+[data-theme="light"] h1 span[style*="fontWeight: 800"],
+[data-theme="light"] h1 span[style*="font-weight: 800"],
+[data-theme="light"] h2 span[style*="fontWeight: 800"],
+[data-theme="light"] h2 span[style*="font-weight: 800"],
+[data-theme="light"] h3 span[style*="fontWeight: 800"],
+[data-theme="light"] h3 span[style*="font-weight: 800"] {
+  color: #0f172a !important;
+}
+/* Preserve gradient text */
+[data-theme="light"] h1 span[style*="background-clip"],
+[data-theme="light"] h1 span[style*="WebkitBackgroundClip"] {
+  color: unset !important;
+}
+
+/* ── BODY TEXT ──────────────────────────────────────────── */
+[data-theme="light"] p[style*="color: #64748b"],
+[data-theme="light"] p[style*="color: rgb(100, 116, 139)"] {
+  color: #475569 !important;
+}
+[data-theme="light"] p[style*="color: #94a3b8"],
+[data-theme="light"] p[style*="color: rgb(148, 163, 184)"],
+[data-theme="light"] span[style*="color: #94a3b8"],
+[data-theme="light"] span[style*="color: rgb(148, 163, 184)"] {
+  color: #475569 !important;
+}
+[data-theme="light"] p[style*="color: #e2e8f0"],
+[data-theme="light"] p[style*="color: rgb(226, 232, 240)"] {
+  color: #1e293b !important;
+}
+
+/* ── SMALL/DIM TEXT ────────────────────────────────────── */
+[data-theme="light"] span[style*="color: #475569"],
+[data-theme="light"] span[style*="color: rgb(71, 85, 105)"],
+[data-theme="light"] div[style*="color: #475569"],
+[data-theme="light"] div[style*="color: rgb(71, 85, 105)"] {
+  color: #64748b !important;
+}
+[data-theme="light"] div[style*="color: #64748b"],
+[data-theme="light"] div[style*="color: rgb(100, 116, 139)"] {
+  color: #475569 !important;
+}
+[data-theme="light"] span[style*="color: #334155"],
+[data-theme="light"] span[style*="color: rgb(51, 65, 85)"] {
+  color: #94a3b8 !important;
+}
+
+/* ── CARDS ──────────────────────────────────────────────── */
+[data-theme="light"] .hp-fcard,
+[data-theme="light"] div[style*="background: rgba(15, 23, 42"],
+[data-theme="light"] div[style*="background: rgba(15,23,42"] {
+  background: rgba(255,255,255,0.85) !important;
+  border-color: rgba(203,213,225,0.35) !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+[data-theme="light"] .hp-fcard:hover {
+  border-color: rgba(148,163,184,0.4) !important;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.08) !important;
+}
+
+/* ── CODE BLOCKS ───────────────────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(8, 12, 25"],
+[data-theme="light"] div[style*="background: rgba(8,12,25"] {
+  background: rgba(241,245,249,0.8) !important;
+  border-color: rgba(203,213,225,0.3) !important;
+}
+
+/* ── RING / CIRCLE ELEMENTS ────────────────────────────── */
+[data-theme="light"] svg circle[stroke*="15"] {
+  stroke: currentColor;
+  opacity: 0.08;
+}
+
+/* ── BADGES ────────────────────────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(71,85,105,0.1"],
+[data-theme="light"] div[style*="background: rgba(71, 85, 105, 0.1"],
+[data-theme="light"] span[style*="background: rgba(71,85,105,0.1"],
+[data-theme="light"] span[style*="background: rgba(71, 85, 105, 0.1"] {
+  background: rgba(203,213,225,0.3) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+}
+
+/* ── BUTTONS ───────────────────────────────────────────── */
+[data-theme="light"] button[style*="background: rgba(15,23,42"],
+[data-theme="light"] button[style*="background: rgba(15, 23, 42"] {
+  background: rgba(255,255,255,0.9) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+}
+
+/* ── AB LAYER NODES ────────────────────────────────────── */
+[data-theme="light"] .ab-node {
+  background: rgba(255,255,255,0.85) !important;
+}
+[data-theme="light"] .ab-source-node {
+  background: rgba(255,255,255,0.8) !important;
+}
+
+/* ── ANIMATED BAR TRACK ────────────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(71,85,105,0.12"],
+[data-theme="light"] div[style*="background: rgba(71, 85, 105, 0.12"] {
+  background: rgba(203,213,225,0.35) !important;
+}
+
+/* ── PROGRESS BAR TRACKS ───────────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(71,85,105,0.1)"],
+[data-theme="light"] div[style*="background: rgba(71, 85, 105, 0.1)"] {
+  background: rgba(203,213,225,0.25) !important;
+}
+
+/* ── HEATMAP GRID ──────────────────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(15,23,42,0.5"] {
+  background: rgba(255,255,255,0.9) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+}
+
+/* ── IMAGE OVERLAYS ────────────────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(15,23,42,0.8"] {
+  background: rgba(255,255,255,0.85) !important;
+}
+[data-theme="light"] div[style*="background: linear-gradient(transparent, rgba(5,10,20"] {
+  background: linear-gradient(transparent, rgba(255,255,255,0.9)) !important;
+}
+
+/* ── CTA SECTION ───────────────────────────────────────── */
+[data-theme="light"] div[style*="background: linear-gradient(135deg, rgba(129,140,248,0.06"] {
+  background: linear-gradient(135deg, rgba(129,140,248,0.06), rgba(34,197,94,0.04)) !important;
+  border-color: rgba(129,140,248,0.15) !important;
+}
+
+/* ── LABEL COLORS ──────────────────────────────────────── */
+[data-theme="light"] div[style*="color: #f1f5f9"],
+[data-theme="light"] div[style*="color: rgb(241, 245, 249)"],
+[data-theme="light"] span[style*="color: #f1f5f9"],
+[data-theme="light"] span[style*="color: rgb(241, 245, 249)"],
+[data-theme="light"] div[style*="color: #f8fafc"],
+[data-theme="light"] span[style*="color: #f8fafc"],
+[data-theme="light"] div[style*="color: #e2e8f0"],
+[data-theme="light"] span[style*="color: #e2e8f0"] {
+  color: #1e293b !important;
+}
+
+/* ── TRANSITION ────────────────────────────────────────── */
+[data-theme] {
+  transition: background 0.4s ease, color 0.3s ease;
+}
+[data-theme] nav,
+[data-theme] section,
+[data-theme] div,
+[data-theme] span,
+[data-theme] p {
+  transition: background 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+}
+
+/* ── CANVAS PARTICLES ──────────────────────────────────── */
+/* Exclude map canvases — MapLibre + DeckGL must stay at full opacity */
+[data-theme="light"] canvas:not(.maplibregl-canvas):not(#deckgl-overlay) {
+  opacity: 0.4;
+}
+
+/* ── ORBIT RINGS ───────────────────────────────────────── */
+[data-theme="light"] svg[style*="animation: spin"] {
+  opacity: 0.06;
+}
+
+/* ── SCROLLBAR ─────────────────────────────────────────── */
+[data-theme="light"]::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+[data-theme="light"]::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+
+/* ── HOME: IMAGE GRADIENT OVERLAYS ─────────────────────── */
+[data-theme="light"] div[style*="linear-gradient(90deg, transparent 60%, rgba(15,23,42"] {
+  background: linear-gradient(90deg, transparent 60%, rgba(255,255,255,0.95) 100%) !important;
+}
+[data-theme="light"] div[style*="linear-gradient(270deg, transparent 60%, rgba(15,23,42"] {
+  background: linear-gradient(270deg, transparent 60%, rgba(255,255,255,0.95) 100%) !important;
+}
+
+/* ── HOME: IMAGE CONTAINER SHADOWS ─────────────────────── */
+[data-theme="light"] div[style*="boxShadow: 0 16px 60px"],
+[data-theme="light"] div[style*="box-shadow: 0 16px 60px"] {
+  box-shadow: 0 8px 30px rgba(0,0,0,0.08) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+}
+
+/* ── HOME: GHOST BUTTONS ───────────────────────────────── */
+[data-theme="light"] .hp-cta-ghost:hover {
+  background: rgba(203,213,225,0.2) !important;
+  color: #1e293b !important;
+}
+
+/* ── HOME: SHIMMER ─────────────────────────────────────── */
+[data-theme="light"] .hp-shimmer {
+  background: linear-gradient(90deg, transparent, rgba(0,0,0,0.03), transparent) !important;
+}
+
+/* ── HOME: SECTION BORDERS ─────────────────────────────── */
+[data-theme="light"] section[style*="borderTop"],
+[data-theme="light"] section[style*="border-top"],
+[data-theme="light"] section[style*="borderBottom"],
+[data-theme="light"] section[style*="border-bottom"] {
+  border-color: rgba(203,213,225,0.35) !important;
+}
+
+/* ── HOME: STAT COLORS ─────────────────────────────────── */
+[data-theme="light"] div[style*="color: #4ade80"][style*="fontSize: clamp"],
+[data-theme="light"] div[style*="color: #4ade80"][style*="font-size: clamp"] {
+  color: #16a34a !important;
+}
+
+/* ── HOME: GRADIENT BADGE BACKGROUNDS ──────────────────── */
+[data-theme="light"] span[style*="background: linear-gradient(135deg, rgba(34,197,94,0.1"] {
+  background: linear-gradient(135deg, rgba(34,197,94,0.08), rgba(129,140,248,0.06)) !important;
+}
+
+/* ── HOME: H3 INSIDE FEATURE CARDS ─────────────────────── */
+[data-theme="light"] h3[style*="color: #f1f5f9"],
+[data-theme="light"] h3[style*="color: rgb(241, 245, 249)"] {
+  color: #1e293b !important;
+}
+
+/* ── HOME: FOOTER TEXT ─────────────────────────────────── */
+[data-theme="light"] p[style*="color: #334155"],
+[data-theme="light"] p[style*="color: rgb(51, 65, 85)"] {
+  color: #94a3b8 !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   FARM PAGES — LIGHT MODE OVERRIDES
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── CSS VARIABLE OVERRIDES ───────────────────────────────── */
+[data-theme="light"] {
+  --background-secondary: rgba(241,245,249,0.8);
+  --background-tertiary: rgba(203,213,225,0.4);
+  --color-neutral-400: #94a3b8;
+  --color-neutral-500: #64748b;
+  --color-neutral-600: #475569;
+  --color-neutral-700: #334155;
+  --foreground: #1e293b;
+}
+
+/* ── GRADIENT BACKGROUNDS (with spaces) ───────────────────── */
+[data-theme="light"] div[style*="linear-gradient(135deg, rgba(15, 23, 42"] {
+  background: rgba(255,255,255,0.8) !important;
+}
+
+/* ── TABLE ROWS ───────────────────────────────────────────── */
+[data-theme="light"] tr[style*="background: var(--background-secondary)"] {
+  background: rgba(241,245,249,0.6) !important;
+}
+
+/* ── PLOTS/EQUIPMENT CONTAINERS ───────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(51, 65, 85"],
+[data-theme="light"] div[style*="background: rgba(51,65,85"] {
+  background: rgba(226,232,240,0.5) !important;
+}
+
+/* ── PLOT CARD HOVER JS INLINE (override via specificity) ── */
+[data-theme="light"] div[style*="background: rgba(15, 23, 42, 0.6)"] {
+  background: rgba(241,245,249,0.95) !important;
+}
+
+/* ── COORDINATE BADGES ────────────────────────────────────── */
+[data-theme="light"] span[style*="background: rgba(8, 12, 25"],
+[data-theme="light"] span[style*="background: rgba(8,12,25"] {
+  background: rgba(255,255,255,0.9) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+  color: #475569 !important;
+}
+
+/* ── FARM DETAIL: HERO LOGO BADGE ─────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(10,15,30"],
+[data-theme="light"] div[style*="background: rgba(10, 15, 30"] {
+  background: rgba(255,255,255,0.9) !important;
+  border-color: rgba(203,213,225,0.3) !important;
+}
+
+/* ── MAP CONTAINER ────────────────────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(15, 23, 42, 0.35)"],
+[data-theme="light"] div[style*="background: rgba(15,23,42,0.35)"] {
+  background: rgba(255,255,255,0.7) !important;
+  border-color: rgba(203,213,225,0.35) !important;
+}
+
+/* ── FARM HERO PARTICLES TAME ─────────────────────────────── */
+/* Exclude map canvases */
+[data-theme="light"] canvas[style*="position: absolute"]:not(.maplibregl-canvas):not(#deckgl-overlay) {
+  opacity: 0.3;
+}
+
+/* ── FIXED AMBIENT MESH ───────────────────────────────────── */
+[data-theme="light"] div[style*="position: fixed"][style*="pointer-events: none"] {
+  opacity: 0.4;
+}
+
+/* ── GLOBAL .card CLASS ───────────────────────────────────── */
+[data-theme="light"] .card {
+  background: rgba(255,255,255,0.9) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04) !important;
+}
+
+/* ── INTELLIGENCE PANELS ──────────────────────────────────── */
+[data-theme="light"] .intelligence-panel,
+[data-theme="light"] .glass-panel {
+  background: rgba(255,255,255,0.92) !important;
+  border-color: rgba(203,213,225,0.35) !important;
+}
+
+/* ── MODE SWITCHER ────────────────────────────────────────── */
+[data-theme="light"] .mode-switcher,
+[data-theme="light"] .analysis-strip {
+  background: rgba(241,245,249,0.9) !important;
+  border-color: rgba(203,213,225,0.35) !important;
+}
+
+/* ── PLOT ROWS WITH HOVER JS ──────────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(15, 23, 42, 0.4)"] {
+  background: rgba(241,245,249,0.7) !important;
+  border-color: rgba(203,213,225,0.35) !important;
+}
+
+/* ── AREA BADGES ──────────────────────────────────────────── */
+[data-theme="light"] span[style*="background: rgba(51, 65, 85, 0.4)"],
+[data-theme="light"] span[style*="background: rgba(51,65,85,0.4)"] {
+  background: rgba(226,232,240,0.6) !important;
+  color: #475569 !important;
+}
+
+/* ── FARM TEXT COLORS ─────────────────────────────────────── */
+[data-theme="light"] h4[style*="color: #e8ecf4"],
+[data-theme="light"] p[style*="color: #e8ecf4"] {
+  color: #1e293b !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   PLOT DASHBOARD — LIGHT MODE OVERRIDES
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Plot Immersive Wrapper ───────────────────────────────── */
+[data-theme="light"] .plot-immersive {
+  background: #f1f5f9 !important;
+}
+
+/* ── Floating Glass Buttons (evidence, drone, sensors, chat) */
+[data-theme="light"] button[style*="background: rgba(8,12,25,0.92)"],
+[data-theme="light"] button[style*="background: rgba(8, 12, 25, 0.92)"] {
+  background: rgba(255,255,255,0.92) !important;
+  border-color: rgba(203,213,225,0.5) !important;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.06), 0 0 0 1px rgba(203,213,225,0.2) inset !important;
+  color: #475569 !important;
+}
+
+/* ── Zone Chip Body ───────────────────────────────────────── */
+[data-theme="light"] .zone-chip-body {
+  background: rgba(255,255,255,0.95) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.08) !important;
+}
+[data-theme="light"] .zone-chip-label {
+  color: #334155 !important;
+}
+[data-theme="light"] .zone-chip-meta {
+  color: #64748b !important;
+}
+[data-theme="light"] .zone-chip-driver {
+  color: #94a3b8 !important;
+}
+
+/* ── Context Band (top bar) ───────────────────────────────── */
+[data-theme="light"] div[style*="background: rgba(6, 10, 22"],
+[data-theme="light"] div[style*="background: rgba(6,10,22"],
+[data-theme="light"] div[style*="background: var(--aw-glass)"] {
+  background: rgba(255,255,255,0.9) !important;
+  border-color: rgba(203,213,225,0.35) !important;
+}
+
+/* ── Engine Pipeline / Raw Data Sidebar ───────────────────── */
+[data-theme="light"] div[style*="background: var(--aw-glass-panel)"],
+[data-theme="light"] div[style*="background: var(--aw-surface)"] {
+  background: rgba(255,255,255,0.92) !important;
+  border-color: rgba(203,213,225,0.35) !important;
+}
+
+/* ── Loading background ───────────────────────────────────── */
+[data-theme="light"] .bg-slate-950 {
+  background: #f1f5f9 !important;
+}
+[data-theme="light"] .text-slate-500 {
+  color: #64748b !important;
+}
+
+/* ── Zone Tooltip ─────────────────────────────────────────── */
+[data-theme="light"] .zone-tooltip {
+  background: rgba(255,255,255,0.96) !important;
+  border-color: rgba(203,213,225,0.5) !important;
+  color: #1e293b !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.08) !important;
+}
+
+/* ── AW Dashboard ─────────────────────────────────────────── */
+[data-theme="light"] .aw-dashboard {
+  background: transparent !important;
+  color: #1e293b;
+}
+[data-theme="light"] .aw-dashboard span[style*="color: #94a3b8"],
+[data-theme="light"] .aw-dashboard span[style*="color: #cbd5e1"] {
+  color: #475569 !important;
+}
+[data-theme="light"] .aw-dashboard span[style*="color: #e2e8f0"],
+[data-theme="light"] .aw-dashboard span[style*="color: #f8fafc"] {
+  color: #1e293b !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ENGINE PIPELINE PANEL — LIGHT MODE (class-based)
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Main panel + toggle button ───────────────────────────── */
+[data-theme="light"] .epp-panel,
+[data-theme="light"] .epp-toggle {
+  background: rgba(255,255,255,0.97) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.06) !important;
+  color: #1e293b !important;
+  /* Boost base font size for entire panel */
+  font-size: 13px !important;
+}
+
+/* ── NUCLEAR: Force ALL inline-color text dark, then restore accents ───── */
+
+/* Step 1: Force every element with an inline color to be dark */
+[data-theme="light"] .epp-panel *[style*="color"] {
+  color: #1e293b !important;
+}
+
+/* Step 2: Restore green (OK / good) — same specificity, later in file = wins */
+[data-theme="light"] .epp-panel *[style*="color: #4ade80"],
+[data-theme="light"] .epp-panel *[style*="color: #22c55e"],
+[data-theme="light"] .epp-panel *[style*="color: #10b981"] {
+  color: #15803d !important;
+}
+
+/* Step 3: Restore amber / warning */
+[data-theme="light"] .epp-panel *[style*="color: #fbbf24"],
+[data-theme="light"] .epp-panel *[style*="color: #f59e0b"] {
+  color: #92400e !important;
+}
+
+/* Step 4: Restore red / error */
+[data-theme="light"] .epp-panel *[style*="color: #f87171"],
+[data-theme="light"] .epp-panel *[style*="color: #ef4444"] {
+  color: #b91c1c !important;
+}
+
+/* Step 5: Restore purple / indigo accents */
+[data-theme="light"] .epp-panel *[style*="color: #818cf8"],
+[data-theme="light"] .epp-panel *[style*="color: #a5b4fc"],
+[data-theme="light"] .epp-panel *[style*="color: #6366f1"] {
+  color: #4338ca !important;
+}
+
+/* Step 6: Restore blue accents */
+[data-theme="light"] .epp-panel *[style*="color: #60a5fa"],
+[data-theme="light"] .epp-panel *[style*="color: #93c5fd"],
+[data-theme="light"] .epp-panel *[style*="color: #38bdf8"] {
+  color: #1d4ed8 !important;
+}
+
+/* Step 7: Boost base font-size for entire panel */
+[data-theme="light"] .epp-panel {
+  font-size: 14px;
+}
+
+/* Step 8: Make tiny inline font-sizes readable */
+[data-theme="light"] .epp-panel *[style*="font-size: 0.6rem"],
+[data-theme="light"] .epp-panel *[style*="font-size: 7px"],
+[data-theme="light"] .epp-panel *[style*="font-size: 8px"] {
+  font-size: 11px !important;
+}
+[data-theme="light"] .epp-panel *[style*="font-size: 9px"],
+[data-theme="light"] .epp-panel *[style*="font-size: 0.65rem"],
+[data-theme="light"] .epp-panel *[style*="font-size: 10px"],
+[data-theme="light"] .epp-panel *[style*="font-size: 0.7rem"] {
+  font-size: 13px !important;
+}
+[data-theme="light"] .epp-panel *[style*="font-size: 11px"],
+[data-theme="light"] .epp-panel *[style*="font-size: 0.72rem"],
+[data-theme="light"] .epp-panel *[style*="font-size: 0.75rem"] {
+  font-size: 14px !important;
+}
+
+/* ── StatusChip backgrounds ───────────────────────────────── */
+[data-theme="light"] .epp-status-chip {
+  background: rgba(241,245,249,0.8) !important;
+  border-color: rgba(203,213,225,0.3) !important;
+}
+
+/* ── ContextPill backgrounds ──────────────────────────────── */
+[data-theme="light"] .epp-context-pill {
+  background: rgba(241,245,249,0.7) !important;
+  border-color: rgba(203,213,225,0.25) !important;
+  color: #334155 !important;
+}
+
+/* ── Close button ─────────────────────────────────────────── */
+[data-theme="light"] .epp-close-btn {
+  background: rgba(226,232,240,0.6) !important;
+  color: #475569 !important;
+}
+
+/* ── Timeline strip panel ─────────────────────────────────── */
+[data-theme="light"] .tl-panel {
+  background: rgba(255,255,255,0.95) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.06) !important;
+  color: #1e293b !important;
+}
+
+/* ── Timeline tooltip ─────────────────────────────────────── */
+[data-theme="light"] .tl-tooltip {
+  background: rgba(255,255,255,0.96) !important;
+  border-color: rgba(203,213,225,0.5) !important;
+  color: #1e293b !important;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important;
+}
+
+/* ── FieldInsightBar (Tailwind bg-[#080C19]/92) ───────────── */
+[data-theme="light"] #field-insight-bar {
+  background: rgba(255,255,255,0.92) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.06) !important;
+}
+[data-theme="light"] #field-insight-bar .text-white\/90,
+[data-theme="light"] #field-insight-bar .text-white {
+  color: #1e293b !important;
+}
+[data-theme="light"] #field-insight-bar .text-slate-400 {
+  color: #64748b !important;
+}
+[data-theme="light"] #field-insight-bar .bg-white\/5 {
+  background: rgba(241,245,249,0.6) !important;
+}
+[data-theme="light"] #field-insight-bar .border-white\/10,
+[data-theme="light"] #field-insight-bar .border-white\/5 {
+  border-color: rgba(203,213,225,0.35) !important;
+}
+[data-theme="light"] #field-insight-bar .bg-slate-800 {
+  background: rgba(226,232,240,0.8) !important;
+  color: #475569 !important;
+}
+
+/* ── RawDataSidebar (right panel) ─────────────────────────── */
+[data-theme="light"] .aw-raw-sidebar {
+  background: rgba(255,255,255,0.95) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.06) !important;
+}
+
+/* ── PlotContextBand ──────────────────────────────────────── */
+[data-theme="light"] #plot-context-band {
+  background: rgba(255,255,255,0.92) !important;
+  border-color: rgba(203,213,225,0.4) !important;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.06) !important;
+}
+[data-theme="light"] #plot-context-band .text-zinc-100,
+[data-theme="light"] #plot-context-band .text-white {
+  color: #1e293b !important;
+}
+[data-theme="light"] #plot-context-band .text-zinc-500 {
+  color: #94a3b8 !important;
+}
+[data-theme="light"] #plot-context-band .text-slate-400,
+[data-theme="light"] #plot-context-band .text-zinc-400 {
+  color: #64748b !important;
+}
+[data-theme="light"] #plot-context-band .bg-white\/5 {
+  background: rgba(241,245,249,0.6) !important;
+}
+[data-theme="light"] #plot-context-band .bg-white\/10,
+[data-theme="light"] #plot-context-band .border-white\/10 {
+  border-color: rgba(203,213,225,0.35) !important;
+  background: rgba(203,213,225,0.15) !important;
+}
+[data-theme="light"] #plot-context-band .hover\:bg-white\/5:hover {
+  background: rgba(226,232,240,0.4) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ENGINE FARMER VIEW — LIGHT MODE (high contrast)
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── GroupCard background ─────────────────────────────────── */
+[data-theme="light"] .efv-group-card {
+  background: #ffffff !important;
+  border-color: rgba(203,213,225,0.5) !important;
+  box-shadow: 0 1px 8px rgba(0,0,0,0.06) !important;
+}
+
+/* ── All text inside cards → high contrast ────────────────── */
+[data-theme="light"] .efv-group-card div[style*="color: #f1f5f9"],
+[data-theme="light"] .efv-group-card span[style*="color: #f1f5f9"] {
+  color: #0f172a !important;
+}
+[data-theme="light"] .efv-group-card div[style*="color: #e2e8f0"],
+[data-theme="light"] .efv-group-card span[style*="color: #e2e8f0"],
+[data-theme="light"] .efv-group-card div[style*="color: #cbd5e1"],
+[data-theme="light"] .efv-group-card span[style*="color: #cbd5e1"] {
+  color: #1e293b !important;
+}
+[data-theme="light"] .efv-group-card div[style*="color: #94a3b8"],
+[data-theme="light"] .efv-group-card span[style*="color: #94a3b8"],
+[data-theme="light"] .efv-group-card div[style*="color: #64748b"],
+[data-theme="light"] .efv-group-card span[style*="color: #64748b"] {
+  color: #475569 !important;
+}
+
+/* ── Font size boost for card text ───────────────────────── */
+[data-theme="light"] .efv-group-card div[style*="font-size: 10px"],
+[data-theme="light"] .efv-group-card span[style*="font-size: 10px"],
+[data-theme="light"] .efv-group-card div[style*="font-size: 8px"],
+[data-theme="light"] .efv-group-card span[style*="font-size: 8px"],
+[data-theme="light"] .efv-group-card div[style*="font-size: 9px"],
+[data-theme="light"] .efv-group-card span[style*="font-size: 9px"] {
+  font-size: 12px !important;
+}
+
+/* ── Summary / Why boxes ──────────────────────────────────── */
+[data-theme="light"] .efv-summary-box {
+  background: #f1f5f9 !important;
+  color: #334155 !important;
+  font-size: 13px !important;
+}
+[data-theme="light"] .efv-why-box {
+  background: #f8fafc !important;
+  color: #475569 !important;
+  font-size: 12px !important;
+  border-left-color: rgba(99,102,241,0.3) !important;
+}
+[data-theme="light"] .efv-why-box span[style*="color: #e2e8f0"],
+[data-theme="light"] .efv-why-box span[style*="color: #f1f5f9"] {
+  color: #0f172a !important;
+}
+
+/* ── Metric chips ─────────────────────────────────────────── */
+[data-theme="light"] .efv-metric-chip {
+  background: #f1f5f9 !important;
+  border-color: rgba(203,213,225,0.4) !important;
+}
+[data-theme="light"] .efv-metric-chip div[style*="color: #64748b"],
+[data-theme="light"] .efv-metric-chip div[style*="color: #94a3b8"] {
+  color: #64748b !important;
+  font-size: 11px !important;
+}
+
+/* ── Warning / alert boxes inside cards ───────────────────── */
+[data-theme="light"] .efv-group-card div[style*="rgba(251,191,36,0.06)"],
+[data-theme="light"] .efv-group-card div[style*="rgba(248,113,113,0.06)"] {
+  background: #fefce8 !important;
+  border-color: rgba(234,179,8,0.25) !important;
+}
+[data-theme="light"] .efv-group-card div[style*="rgba(248,113,113,0.06)"] {
+  background: #fef2f2 !important;
+  border-color: rgba(239,68,68,0.2) !important;
+}
+
+/* ── Zone alerts section ──────────────────────────────────── */
+[data-theme="light"] .epp-panel div[style*="rgba(248,113,113,0.04)"] {
+  background: #fef2f2 !important;
+  border-color: rgba(239,68,68,0.2) !important;
+}
+[data-theme="light"] .epp-panel span[style*="color: #e2e8f0"] {
+  color: #1e293b !important;
+}
+[data-theme="light"] .epp-panel span[style*="color: #94a3b8"] {
+  color: #475569 !important;
+}
+
+/* ── Ask Brain buttons ────────────────────────────────────── */
+[data-theme="light"] .epp-panel button[style*="rgba(99,102,241,0.08)"] {
+  background: rgba(99,102,241,0.07) !important;
+  color: #4f46e5 !important;
+  font-size: 13px !important;
+  border: 1px solid rgba(99,102,241,0.15) !important;
+}
+[data-theme="light"] .epp-panel button[style*="rgba(248,113,113,0.08)"] {
+  background: rgba(239,68,68,0.06) !important;
+  color: #dc2626 !important;
+  font-size: 13px !important;
+  border: 1px solid rgba(239,68,68,0.15) !important;
+}
+[data-theme="light"] .epp-panel button[style*="linear-gradient(135deg, rgba(99,102,241"] {
+  background: linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.08)) !important;
+  color: #4f46e5 !important;
+  font-size: 14px !important;
+  border: 1px solid rgba(99,102,241,0.15) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ENGINE EXPERT VIEW — LIGHT MODE
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Quality strip ────────────────────────────────────────── */
+[data-theme="light"] .eev-quality-strip {
+  background: #f1f5f9 !important;
+  border-color: rgba(203,213,225,0.4) !important;
+}
+
+/* ── Metric rows ──────────────────────────────────────────── */
+[data-theme="light"] .eev-metric-row {
+  background: #f8fafc !important;
+  border-color: rgba(203,213,225,0.3) !important;
+}
+
+/* ── Meta chips (confidence / freshness / version) ────────── */
+[data-theme="light"] .eev-meta-chip {
+  background: #f1f5f9 !important;
+  border-color: rgba(203,213,225,0.3) !important;
+  color: #475569 !important;
+}
+
+/* ── Raw data box ─────────────────────────────────────────── */
+[data-theme="light"] .eev-raw-box {
+  background: #f8fafc !important;
+  border-color: rgba(203,213,225,0.25) !important;
+  color: #334155 !important;
+}
+
+/* ── Why it matters box ───────────────────────────────────── */
+[data-theme="light"] .eev-why-box {
+  background: #f8fafc !important;
+  color: #475569 !important;
+}
+
+/* ── Warnings strip ───────────────────────────────────────── */
+[data-theme="light"] .eev-warnings {
+  background: #fffbeb !important;
+  border-color: rgba(234,179,8,0.25) !important;
+}
+
+/* ── Expanded section text ────────────────────────────────── */
+[data-theme="light"] .eev-expanded p[style*="color: #cbd5e1"] {
+  color: #334155 !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SIDEBAR FARMER VIEW — LIGHT MODE
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── SVG gauge text ───────────────────────────────────────── */
+[data-theme="light"] .sfv-gauge-text {
+  fill: #1e293b !important;
+}
+
+/* ── Generic dark cards → white ───────────────────────────── */
+[data-theme="light"] .sfv-card,
+[data-theme="light"] .sfv-sparkline,
+[data-theme="light"] .sfv-condition-card,
+[data-theme="light"] .sfv-scenario-card {
+  background: #ffffff !important;
+  border-color: rgba(203,213,225,0.45) !important;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.05) !important;
+}
+
+/* ── Why card → warm light ────────────────────────────────── */
+[data-theme="light"] .sfv-why-card {
+  background: #fefce8 !important;
+  border-color: rgba(234,179,8,0.2) !important;
+}
+
+/* ── Zone card → white with colored left border kept ─────── */
+[data-theme="light"] .sfv-zone-card {
+  background: #ffffff !important;
+  box-shadow: 0 1px 8px rgba(0,0,0,0.06) !important;
+}
+
+/* ── Zone why/todo sub-cards ──────────────────────────────── */
+[data-theme="light"] .sfv-zone-why {
+  background: rgba(99,102,241,0.04) !important;
+  border-color: rgba(99,102,241,0.15) !important;
+}
+[data-theme="light"] .sfv-zone-todo {
+  background: rgba(34,197,94,0.04) !important;
+  border-color: rgba(34,197,94,0.15) !important;
+}
+
+/* ── Apply nuclear text rules to the right sidebar panel ───── */
+/* The .epp-panel nuclear rules already cover it.              */
+/* Extra: ensure SVG track bg works in light mode             */
+[data-theme="light"] .epp-panel svg path[stroke="rgba(71,85,105,0.3)"] {
+  stroke: rgba(203,213,225,0.5) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   SIDEBAR EXPERT VIEW — LIGHT MODE
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Generic card backgrounds ─────────────────────────────── */
+[data-theme="light"] .sev-card {
+  background: #ffffff !important;
+  border-color: rgba(203,213,225,0.4) !important;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.05) !important;
+}
+
+/* ── Stat cells (M MEAN, STD, CV%, P10, P90, PIXELS) ──────── */
+[data-theme="light"] .sev-stat-cell {
+  background: #f1f5f9 !important;
+  border-color: rgba(203,213,225,0.3) !important;
+}
+
+/* ── Code / monospace expression boxes ────────────────────── */
+[data-theme="light"] .sev-code {
+  background: #f8fafc !important;
+  color: #334155 !important;
+  border: 1px solid rgba(203,213,225,0.3);
+}
+
+/* ── Zone root-cause sub-cards ────────────────────────────── */
+[data-theme="light"] .sev-cause {
+  background: rgba(99,102,241,0.04) !important;
+  border-color: rgba(99,102,241,0.15) !important;
+}
+[data-theme="light"] .sev-directive {
+  background: rgba(34,197,94,0.04) !important;
+  border-color: rgba(34,197,94,0.15) !important;
+}
+[data-theme="light"] .sev-hypothesis {
+  background: #fffbeb !important;
+  border-color: rgba(234,179,8,0.2) !important;
+}
+
+/* ── SVG bar chart text labels ────────────────────────────── */
+[data-theme="light"] .epp-panel svg text[fill="#94a3b8"] {
+  fill: #475569 !important;
+}

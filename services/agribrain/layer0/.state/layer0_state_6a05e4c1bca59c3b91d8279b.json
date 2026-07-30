@@ -1,0 +1,26 @@
+{
+  "version": "layer0-v2.0",
+  "plot_id": "6a05e4c1bca59c3b91d8279b",
+  "saved_at": "2026-06-01T17:11:24.641098",
+  "crop_params_hash": "44136fa355b3",
+  "dna_hash": null,
+  "kalman_zones": {
+    "plot": {
+      "state_values": {
+        "day": "2026-06-01",
+        "lai_proxy": 1.3618,
+        "biomass_proxy": 1.1769,
+        "sm_0_10": 0.4064,
+        "sm_10_40": 0.4116,
+        "canopy_stress": 0,
+        "phenology_gdd": 244.25,
+        "phenology_stage": 1.0737,
+        "stress_thermal": 0,
+        "photosynthetic_efficiency": 0.9588
+      },
+      "last_day": "2026-06-01"
+    }
+  },
+  "validation": {},
+  "metadata": {}
+}

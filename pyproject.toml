@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agriwise-agribrain"
+version = "0.1.0"
+description = "AgriWise AgriBrain scientific backend"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["services", "services.*"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["services/agribrain/requirements.txt"] }
+
+[tool.pytest.ini_options]
+testpaths = ["services/agribrain/tests"]
+python_files = ["test_*.py"]
+pythonpath = ["services/agribrain", "."]
+addopts = ["--import-mode=importlib"]

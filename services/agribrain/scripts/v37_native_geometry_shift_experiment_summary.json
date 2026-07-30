@@ -1,0 +1,23 @@
+{
+  "version": "V37_native_controlled_geometry_shift_experiment",
+  "generated_at": "2026-05-29T12:06:51.175826+00:00",
+  "status": "implementation_script_created",
+  "script": "/mnt/data/v37_native_geometry_shift_experiment.py",
+  "implements": [
+    "V37A controlled grid-shift + buffered registration",
+    "V37B natural scene geometry evidence diagnostics placeholder",
+    "V37C controlled H_t reconstruction holdout",
+    "UTM bbox shift with degree fallback",
+    "stable-band registration using B04/B08/B11/bare-soil/edge magnitude",
+    "cloud adjacency masking",
+    "strict acceptance thresholds",
+    "honest science diagnostics"
+  ],
+  "run_commands": {
+    "real": "cd services/agribrain && PYTHONPATH=. python scripts/v37_native_geometry_shift_experiment.py --max-cloud 100",
+    "dry_run": "cd services/agribrain && PYTHONPATH=. python scripts/v37_native_geometry_shift_experiment.py --dry-run",
+    "specific_date": "cd services/agribrain && PYTHONPATH=. python scripts/v37_native_geometry_shift_experiment.py --date 2026-05-27 --max-cloud 100"
+  },
+  "expected_output": "artifacts/v37_native_geometry_shift_experiment_report.json",
+  "scientific_note": "Passing V37A/V37C validates controlled H_t behavior, not natural satellite drift. Strong 1m export stays blocked until V37B or later native geometry evidence validates natural shifts."
+}

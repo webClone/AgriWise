@@ -1,0 +1,197 @@
+{
+  "test-farm-001:test-plot-001": {
+    "farm_id": "test-farm-001",
+    "plot_id": "test-plot-001",
+    "coordinates": {
+      "lat": 36.5667,
+      "lng": 2.9167
+    },
+    "crop": "tomato",
+    "area": 2.5,
+    "registered_at": "2026-02-06T14:28:15.090313",
+    "last_weather_collection": "2026-02-06T14:28:16.736082",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "697ddd3bd4195b809226a67d:6985f26b18f6b36fe2ff9c08": {
+    "farm_id": "697ddd3bd4195b809226a67d",
+    "plot_id": "6985f26b18f6b36fe2ff9c08",
+    "coordinates": {
+      "lat": 33.5493858,
+      "lng": 6.879555399999999
+    },
+    "crop": "SANDY",
+    "area": 0.46,
+    "registered_at": "2026-02-06T14:53:47.689671",
+    "last_weather_collection": "2026-02-06T14:53:48.695629",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "697ddd3bd4195b809226a680:69de624047f8c01c4979d381": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "69de624047f8c01c4979d381",
+    "coordinates": {
+      "lat": 36.61948112499999,
+      "lng": 2.9713791250000003
+    },
+    "crop": "CLAY",
+    "area": 42.08,
+    "registered_at": "2026-04-14T16:50:24.391629",
+    "last_weather_collection": "2026-05-03T15:47:43.461707",
+    "last_satellite_collection": null,
+    "collection_count": 3,
+    "active": true
+  },
+  "697ddd3bd4195b809226a680:69f728389f7a9bd552b1881c": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "69f728389f7a9bd552b1881c",
+    "coordinates": {
+      "lat": 36.5621246,
+      "lng": 2.9365876
+    },
+    "crop": "CLAY",
+    "area": 9.3,
+    "registered_at": "2026-05-03T11:49:28.961973",
+    "last_weather_collection": "2026-05-03T15:38:47.024871",
+    "last_satellite_collection": null,
+    "collection_count": 3,
+    "active": true
+  },
+  "697ddd3bd4195b809226a680:69fa65f65d7b1084c584c77b": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "69fa65f65d7b1084c584c77b",
+    "coordinates": {
+      "lat": 36.5788925,
+      "lng": 2.9586805000000003
+    },
+    "crop": "CLAY",
+    "area": 40.97,
+    "registered_at": "2026-05-05T22:49:42.469002",
+    "last_weather_collection": "2026-05-05T22:49:43.649991",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "697ddd3bd4195b809226a680:69fb73062ab4b04e9f00394b": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "69fb73062ab4b04e9f00394b",
+    "coordinates": {
+      "lat": 36.5774976,
+      "lng": 2.9532661999999994
+    },
+    "crop": "SANDY",
+    "area": 2.26,
+    "registered_at": "2026-05-06T17:57:42.742222",
+    "last_weather_collection": null,
+    "last_satellite_collection": null,
+    "collection_count": 0,
+    "active": true
+  },
+  "697ddd3bd4195b809226a680:69fb754f2ab4b04e9f00394c": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "69fb754f2ab4b04e9f00394c",
+    "coordinates": {
+      "lat": 36.578488199999995,
+      "lng": 2.9539441999999996
+    },
+    "crop": "SANDY",
+    "area": 1.27,
+    "registered_at": "2026-05-06T18:07:27.928440",
+    "last_weather_collection": null,
+    "last_satellite_collection": null,
+    "collection_count": 0,
+    "active": true
+  },
+  "697ddd3bd4195b809226a67d:69fdd3c4e22db98386465aea": {
+    "farm_id": "697ddd3bd4195b809226a67d",
+    "plot_id": "69fdd3c4e22db98386465aea",
+    "coordinates": {
+      "lat": 33.505233399999995,
+      "lng": 6.844107600000001
+    },
+    "crop": "SANDY",
+    "area": 7.12,
+    "registered_at": "2026-05-08T13:15:01.381168",
+    "last_weather_collection": "2026-05-08T13:15:02.560018",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "697ddd3bd4195b809226a680:6a05e4c1bca59c3b91d8279b": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "6a05e4c1bca59c3b91d8279b",
+    "coordinates": {
+      "lat": 49.84683357142857,
+      "lng": 2.906805142857143
+    },
+    "crop": "LOAM",
+    "area": 25.03,
+    "registered_at": "2026-05-14T16:05:37.799729",
+    "last_weather_collection": "2026-05-14T16:05:38.964650",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "69ad7b6f7e6843e8234afcf6:6a09d9e91dd0c7ed6fce7d50": {
+    "farm_id": "69ad7b6f7e6843e8234afcf6",
+    "plot_id": "6a09d9e91dd0c7ed6fce7d50",
+    "coordinates": {
+      "lat": 36.509081,
+      "lng": 2.6592686666666663
+    },
+    "crop": "LOAM",
+    "area": 20.28,
+    "registered_at": "2026-05-17T16:08:26.104854",
+    "last_weather_collection": null,
+    "last_satellite_collection": null,
+    "collection_count": 0,
+    "active": true
+  },
+  "69ad7b6f7e6843e8234afcf6:6a09e03e93aea71acebb6473": {
+    "farm_id": "69ad7b6f7e6843e8234afcf6",
+    "plot_id": "6a09e03e93aea71acebb6473",
+    "coordinates": {
+      "lat": 36.50906191666667,
+      "lng": 2.672111083333333
+    },
+    "crop": "LOAM",
+    "area": 16.01,
+    "registered_at": "2026-05-17T16:35:26.350780",
+    "last_weather_collection": "2026-05-17T16:35:27.352704",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "697ddd3bd4195b809226a680:6a1dec37c645fc20253af5bb": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "6a1dec37c645fc20253af5bb",
+    "coordinates": {
+      "lat": 27.108340949999995,
+      "lng": 0.00506745
+    },
+    "crop": "SANDY",
+    "area": 28.68,
+    "registered_at": "2026-06-01T21:31:51.711190",
+    "last_weather_collection": "2026-06-01T21:31:52.891791",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "69ad7b6f7e6843e8234afcf6:6a21e94637a8e72e6c7b2d65": {
+    "farm_id": "69ad7b6f7e6843e8234afcf6",
+    "plot_id": "6a21e94637a8e72e6c7b2d65",
+    "coordinates": {
+      "lat": 28.048598000000005,
+      "lng": 0.07621640000000002
+    },
+    "crop": "SANDY",
+    "area": 25.65,
+    "registered_at": "2026-06-04T22:08:23.106314",
+    "last_weather_collection": "2026-06-04T22:08:27.971786",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  }
+}

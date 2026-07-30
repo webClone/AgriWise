@@ -1,0 +1,63 @@
+{
+  "test": "V63A_LIVE_PLOT_SMOKE_TEST",
+  "timestamp": "2026-06-05T13:46:41Z",
+  "fastapi_smoke": {
+    "tier": "fastapi",
+    "url": "http://127.0.0.1:8000/v2/run",
+    "executed": true,
+    "passed": true,
+    "gates": {
+      "audit_primary_acquisition_serialized": true,
+      "audit_fallback_metadata_serialized": true,
+      "fastapi_primary_acquisition_layer0": true,
+      "fastapi_fallback_used_false": true,
+      "fastapi_pipeline_mode_correct": true,
+      "fastapi_fusion_engine_layer1_v1": true,
+      "fastapi_surfaces_non_empty": true,
+      "fastapi_quality_surfaces_generated_gt_zero": true,
+      "fastapi_run_id_valid": true,
+      "cache_bypassed_or_fresh_run_confirmed": true
+    },
+    "error": null,
+    "primary_acquisition": "layer0",
+    "fallback_used": false,
+    "pipeline_mode": "layer0_layer1_v1_primary",
+    "surfaces_count": 32,
+    "run_id": "AGB2-f4a3c9b5759e",
+    "elapsed_s": 14.06,
+    "cache": {
+      "hit": false,
+      "schema_version": "v62b"
+    }
+  },
+  "nextjs_proxy_smoke": {
+    "tier": "nextjs_proxy",
+    "url": "http://localhost:3000/api/agribrain/run",
+    "executed": false,
+    "passed": null,
+    "gates": {},
+    "error": "Next.js or MongoDB dev stack not running",
+    "status": "skipped_not_available",
+    "primary_acquisition": null,
+    "fallback_used": null,
+    "pipeline_mode": null,
+    "surfaces_count": 0,
+    "run_id": null,
+    "elapsed_s": 0.0
+  },
+  "overall_gates": {
+    "fastapi_smoke_executed": true,
+    "audit_primary_acquisition_serialized": true,
+    "audit_fallback_metadata_serialized": true,
+    "fastapi_primary_acquisition_layer0": true,
+    "fastapi_fallback_used_false": true,
+    "fastapi_pipeline_mode_correct": true,
+    "fastapi_fusion_engine_layer1_v1": true,
+    "fastapi_surfaces_non_empty": true,
+    "fastapi_quality_surfaces_generated_gt_zero": true,
+    "fastapi_run_id_valid": true,
+    "cache_bypassed_or_fresh_run_confirmed": true,
+    "nextjs_proxy_smoke_executed_or_explicitly_skipped": true
+  },
+  "gate_status": "PASSED"
+}

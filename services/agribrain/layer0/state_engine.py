@@ -1,0 +1,410 @@
+"""
+Layer 0 State Engine — Standalone daily state assimilation.
+
+Extracted from legacy Layer 1 ``data_fusion.py:_run_layer0_assimilation()``
+so that Layer 0 owns its own state estimation lifecycle.
+
+Entry point:
+    Layer0StateEngine.run(plot_id, ...) -> Layer0StatePackage
+
+Layer 1 (both legacy and modern) should call this instead of
+manually building Kalman observations.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
+from services.agribrain.layer0.observation_packet import DataStatus
+
+
+@dataclass
+class _WeatherDay:
+    """Internal weather representation for a single day."""
+    temp_max: float = 25.0
+    temp_min: float = 15.0
+    precipitation: float = 0.0
+    et0: float = 3.0
+
+
+class Layer0StateEngine:
+    """Standalone Layer 0 state estimation engine.
+
+    Accepts observation packets, weather, and user events, then runs
+    the Kalman-based daily assimilation + validation graph + invariants.
+
+    This is the canonical owner of Layer 0 state estimation.
+    Legacy ``data_fusion.py`` should delegate here.
+    """
+
+    def __init__(self):
+        self._has_kalman = False
+        try:
+            from services.agribrain.layer0.kalman_engine import (
+                DailyAssimilationEngine, KalmanObservation
+            )
+            from services.agribrain.layer0.validation_graph import ValidationGraph
+            from services.agribrain.layer0.monitoring import run_audit as layer0_audit
+            from services.agribrain.layer0.invariants import enforce_all_invariants
+            from services.agribrain.layer0.state_persistence import save_engine_state
+            self._DailyAssimilationEngine = DailyAssimilationEngine
+            self._KalmanObservation = KalmanObservation
+            self._ValidationGraph = ValidationGraph
+            self._layer0_audit = layer0_audit
+            self._enforce_all_invariants = enforce_all_invariants
+            self._save_engine_state = save_engine_state
+            self._has_kalman = True
+        except ImportError:
+            pass
+
+    def run(
+        self,
+        plot_id: str,
+        start_date: str,
+        end_date: str,
+        daily_weather: Dict[str, Dict[str, Any]],
+        observations_by_day: Dict[str, Dict[str, List[Any]]],
+        events_by_day: Dict[str, List[Dict[str, Any]]],
+        soil_props: Optional[Dict[str, Any]] = None,
+        zone_ids: Optional[List[str]] = None,
+        run_timestamp: Optional[datetime] = None,
+        geometry_hash: str = "",
+        geometry_version: Optional[int] = None,
+    ) -> Layer0StatePackage:
+        """Run daily state assimilation and return a Layer0StatePackage.
+
+        Args:
+            plot_id: Plot identifier.
+            start_date: YYYY-MM-DD start of assimilation window.
+            end_date: YYYY-MM-DD end of assimilation window.
+            daily_weather: {date_str: {temp_max, temp_min, precipitation, et0}}.
+            observations_by_day: {date_str: {zone_id: [KalmanObservation, ...]}}.
+            events_by_day: {date_str: [event_payload, ...]}.
+            soil_props: {clay_pct, sand_pct} or None.
+            zone_ids: Extra zone IDs beyond "plot".
+            run_timestamp: Injected timestamp for deterministic replay.
+
+        Returns:
+            Layer0StatePackage with daily_state, state_uncertainty, provenance,
+            validation conflicts, and health report.
+        """
+        if not self._has_kalman:
+            return Layer0StatePackage(
+                plot_id=plot_id,
+                geometry_hash=geometry_hash,
+                geometry_version=geometry_version,
+                run_id=f"layer0_{plot_id}_{start_date}_{end_date}",
+                health_report={"kalman_available": False},
+                provenance={"error": "Kalman engine not available"},
+            )
+
+        now = run_timestamp or datetime.utcnow()
+
+        # Initialize assimilation engine
+        engine = self._DailyAssimilationEngine()
+        primary_zone = "plot"
+        engine.add_zone(primary_zone, soil_props=soil_props, start_day=start_date)
+
+        # Add extra zones
+        for zid in (zone_ids or []):
+            if zid != primary_zone:
+                engine.add_zone(zid, soil_props=soil_props, start_day=start_date)
+                # Duplicate plot-level obs for extra zones (until per-zone α-weighting)
+                for d, zone_obs in observations_by_day.items():
+                    if primary_zone in zone_obs and zid not in zone_obs:
+                        zone_obs[zid] = zone_obs[primary_zone]
+
+        # Run assimilation
+        engine.run_period(
+            start_date, end_date,
+            daily_weather, observations_by_day, events_by_day
+        )
+
+        # Extract outputs
+        daily_state, state_uncertainty, provenance_log = engine.to_field_tensor_outputs()
+
+        # Cross-source validation
+        validation_conflicts = []
+        source_reliability = {}
+        try:
+            validator = self._ValidationGraph()
+            for d_rec in provenance_log:
+                day = d_rec.get("day", "")
+                for zid, zdata in d_rec.get("zones", {}).items():
+                    state_dict = zdata.get("state", {})
+                    obs_dict = {}
+                    day_obs = observations_by_day.get(day, {}).get(zid, [])
+                    for o in day_obs:
+                        obs_dict[o.obs_type] = o.value
+                    wx = daily_weather.get(day, {})
+                    validator.validate_day(day, zid, state_dict, obs_dict, wx)
+
+            conflicts = validator.get_conflict_summary(last_n_days=len(provenance_log))
+            if conflicts:
+                validation_conflicts = conflicts
+                source_reliability = dict(validator.source_reliability)
+        except Exception as ve:
+            validation_conflicts = [{"error": str(ve)}]
+
+        # Self-audit
+        audit_report = {}
+        try:
+            boundary_info = {
+                "source": "user_drawn",
+                "confidence": 0.8,
+                "geometry_hash": geometry_hash,
+                "geometry_version": geometry_version,
+            }
+            audit_report = self._layer0_audit(
+                plot_id=plot_id,
+                tensor_daily_state=daily_state,
+                tensor_state_uncertainty=state_uncertainty,
+                tensor_provenance_log=provenance_log,
+                tensor_boundary_info=boundary_info,
+                source_reliability=source_reliability,
+                conflicts=validation_conflicts,
+                expected_days=len(provenance_log),
+            )
+        except Exception as ex_audit:
+            print(f"[WARN] [Layer 0] StateEngine audit failed: {ex_audit}")
+
+        # Build stable content-addressed run_id
+        import hashlib
+        run_key = f"{plot_id}:{geometry_hash}:{geometry_version}:{start_date}:{end_date}:{now.isoformat()}"
+        run_id = f"layer0_{hashlib.sha256(run_key.encode()).hexdigest()[:16]}"
+
+        return Layer0StatePackage(
+            plot_id=plot_id,
+            geometry_hash=geometry_hash,
+            geometry_version=geometry_version,
+            run_id=run_id,
+            daily_state=daily_state,
+            state_uncertainty=state_uncertainty,
+            validation_conflicts=validation_conflicts,
+            health_report={
+                "kalman_available": True,
+                "zones": list(daily_state.keys()),
+                "days": len(provenance_log),
+                "obs_days": sum(
+                    1 for d in provenance_log
+                    for zd in d.get("zones", {}).values()
+                    if zd.get("provenance", {}).get("n_obs", 0) > 0
+                ),
+                "source_reliability": source_reliability,
+                "audit": audit_report,
+            },
+            provenance={
+                "run_id": run_id,
+                "start_date": start_date,
+                "end_date": end_date,
+                "run_timestamp": now.isoformat(),
+                "engine": "Layer0StateEngine",
+                "provenance_log": provenance_log,
+            },
+        )
+
+    # ================================================================
+    # Packet-driven entrypoint (canonical Layer 0 contract)
+    # ================================================================
+
+    def run_from_packets(
+        self,
+        plot_id: str,
+        packets: List[Any],
+        start_date: str,
+        end_date: str,
+        soil_props: Optional[Dict[str, Any]] = None,
+        zone_ids: Optional[List[str]] = None,
+        run_timestamp: Optional[datetime] = None,
+        geometry_hash: str = "",
+        geometry_version: Optional[int] = None,
+    ) -> Layer0StatePackage:
+        """Run assimilation from ObservationPacket[] — the canonical entrypoint.
+
+        Internally converts packets into daily_weather, observations_by_day,
+        and events_by_day, then delegates to self.run().
+
+        Args:
+            plot_id: Plot identifier.
+            packets: List[ObservationPacket] from all Layer 0 sources.
+            start_date: YYYY-MM-DD start.
+            end_date: YYYY-MM-DD end.
+            soil_props: Soil texture properties.
+            zone_ids: Extra zone IDs.
+            run_timestamp: Injected timestamp for replay.
+            geometry_hash: Geometry identity hash.
+            geometry_version: Geometry version number.
+
+        Returns:
+            Layer0StatePackage.
+        """
+        from services.agribrain.layer0.observation_packet import ObservationSource, ObservationType
+
+        geometry_hash = geometry_hash or next((p.geometry_hash for p in packets if getattr(p, "geometry_hash", None)), "")
+        geometry_version = geometry_version or next((p.geometry_version for p in packets if getattr(p, "geometry_version", None) is not None), None)
+
+        daily_weather: Dict[str, Dict[str, Any]] = {}
+        observations_by_day: Dict[str, Dict[str, List[Any]]] = {}
+        events_by_day: Dict[str, List[Dict[str, Any]]] = {}
+
+        excluded_counts = {
+            "unavailable": 0,
+            "simulated": 0,
+            "fallback": 0,
+            "skipped_proxy": 0,
+            "skipped_diagnostic_only": 0,
+            "skipped_non_production": 0,
+            "skipped_non_provider": 0,
+        }
+        filtered_packets = []
+        for pkt in packets:
+            status = getattr(pkt, "data_status", None)
+            if status in (DataStatus.UNAVAILABLE, DataStatus.SIMULATED, DataStatus.FALLBACK):
+                if status == DataStatus.UNAVAILABLE:
+                    excluded_counts["unavailable"] += 1
+                elif status == DataStatus.SIMULATED:
+                    excluded_counts["simulated"] += 1
+                elif status == DataStatus.FALLBACK:
+                    excluded_counts["fallback"] += 1
+                continue
+            
+            payload = getattr(pkt, "payload", {}) or {}
+            if payload.get("source_reality") == "raster_composite_proxy":
+                excluded_counts["skipped_proxy"] += 1
+                continue
+            if payload.get("diagnostic_only") is True:
+                excluded_counts["skipped_diagnostic_only"] += 1
+                continue
+            if payload.get("production_usable") is False:
+                excluded_counts["skipped_non_production"] += 1
+                continue
+            
+            source_type = payload.get("source_type") or getattr(getattr(pkt, "source", None), "value", None) or str(getattr(pkt, "source", ""))
+            is_admitted_plot_statistic = False
+            if payload.get("source_reality") == "provider_daily_statistical_aggregate":
+                from services.agribrain.layer0.temporal_evidence import is_admitted_temporal_record
+                is_admitted_plot_statistic = is_admitted_temporal_record(payload)
+            if (
+                payload.get("real_provider_product") is False
+                and not is_admitted_plot_statistic
+                and source_type != "user_observation"
+                and source_type != "user_event"
+            ):
+                excluded_counts["skipped_non_provider"] += 1
+                continue
+
+            filtered_packets.append(pkt)
+
+        for pkt in filtered_packets:
+            day = pkt.timestamp.strftime("%Y-%m-%d") if pkt.timestamp else ""
+            if not day:
+                continue
+
+            payload = pkt.payload or {}
+            packet_type = payload.get("packet_type", "")
+
+            # Weather forecast packets -> do not mix forecast with historical truth
+            if pkt.source == ObservationSource.WEATHER_FORECAST:
+                continue
+
+            # Weather packets → daily_weather
+            if pkt.source in (
+                ObservationSource.WEATHER_REANALYSIS,
+                ObservationSource.WEATHER_STATION,
+                ObservationSource.NASA_POWER,
+            ):
+                if day not in daily_weather:
+                    daily_weather[day] = {}
+                # Normalize weather aliases
+                weather_aliases = {
+                    "temperature_2m_max": "temp_max",
+                    "temperature_2m_min": "temp_min",
+                    "precipitation_sum": "precipitation",
+                    "et0_fao_penman": "et0",
+                }
+                for src_key, dst_key in weather_aliases.items():
+                    if src_key in payload:
+                        daily_weather[day][dst_key] = payload[src_key]
+                # Merge weather fields directly
+                for k in ("temp_max", "temp_min", "precipitation", "et0"):
+                    if k in payload:
+                        daily_weather[day][k] = payload[k]
+                continue
+
+            # Event packets → events_by_day
+            if pkt.source in (
+                ObservationSource.USER_EVENT,
+                ObservationSource.SENSOR_IOT,
+            ) and payload.get("event_type"):
+                if day not in events_by_day:
+                    events_by_day[day] = []
+                events_by_day[day].append(payload)
+                continue
+
+            # Observation packets → convert to KalmanObservation
+            if self._has_kalman and pkt.obs_type in (
+                ObservationType.TABULAR,
+                ObservationType.RASTER,
+            ):
+                # Try to extract kalman-compatible values
+                if pkt.spatial_scope == "zone":
+                    zone_id = payload.get("zone_id") or payload.get("zone") or "zone_unknown"
+                else:
+                    zone_id = "plot"
+                if day not in observations_by_day:
+                    observations_by_day[day] = {}
+                if zone_id not in observations_by_day[day]:
+                    observations_by_day[day][zone_id] = []
+
+                # Map common packet types to Kalman observations
+                for var_key in ("ndvi_mean", "evi_mean", "ndmi_mean",
+                                 "ndre_mean", "bsi_mean",
+                                 "vv_db_mean", "vh_db_mean",
+                                 "surface_wetness_proxy_mean",
+                                 "soil_moisture_vwc",
+                                 "vegetation_fraction"):
+                    if var_key in payload and payload[var_key] is not None:
+                        obs_type = var_key.replace("_mean", "")
+                        sigma = 0.05  # default
+                        if pkt.uncertainty and pkt.uncertainty.sigmas:
+                            sigma = next(iter(pkt.uncertainty.sigmas.values()), 0.05)
+                        try:
+                            obs = self._KalmanObservation(
+                                obs_type=obs_type,
+                                value=float(payload[var_key]),
+                                sigma=sigma,
+                                reliability=max(pkt.reliability_weight, 0.05),
+                                source=pkt.source.value,
+                            )
+                            observations_by_day[day][zone_id].append(obs)
+                        except (ValueError, TypeError):
+                            pass
+
+        # Build the state package through the lower-level run()
+        state_pkg = self.run(
+            plot_id=plot_id,
+            start_date=start_date,
+            end_date=end_date,
+            daily_weather=daily_weather,
+            observations_by_day=observations_by_day,
+            events_by_day=events_by_day,
+            soil_props=soil_props,
+            zone_ids=zone_ids,
+            run_timestamp=run_timestamp,
+            geometry_hash=geometry_hash,
+            geometry_version=geometry_version,
+        )
+
+        # Attach the source packets to the state package
+        state_pkg.all_packets = list(packets)
+        state_pkg.output_hash = state_pkg._generate_output_hash()
+
+        # Add diagnostic count for excluded packets
+        if state_pkg.health_report is None:
+            state_pkg.health_report = {}
+        state_pkg.health_report["state_packets_excluded_by_status"] = excluded_counts
+
+        return state_pkg

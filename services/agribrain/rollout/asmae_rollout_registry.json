@@ -1,0 +1,60 @@
+{
+  "version": "v86_rollout_registry_v2",
+  "plots": {
+    "plot_test_001": {
+      "enabled": true,
+      "backend_enabled": true,
+      "l10_visuals_enabled": false,
+      "phase": "backend_observation",
+      "owner": "internal",
+      "crop": "generic",
+      "region": "internal_test",
+      "created_at": "2026-07-13T18:17:36.372918+00:00",
+      "notes": "Migrated or added as production plot"
+    },
+    "oued_souf_plot": {
+      "enabled": true,
+      "backend_enabled": true,
+      "l10_visuals_enabled": false,
+      "phase": "backend_observation",
+      "owner": "internal",
+      "crop": "generic",
+      "region": "internal_test",
+      "created_at": "2026-07-13T18:17:36.372933+00:00",
+      "notes": "Migrated or added as production plot"
+    },
+    "timimoun_plot": {
+      "enabled": true,
+      "backend_enabled": true,
+      "l10_visuals_enabled": false,
+      "phase": "backend_observation",
+      "owner": "internal",
+      "crop": "generic",
+      "region": "internal_test",
+      "created_at": "2026-07-13T18:17:36.372939+00:00",
+      "notes": "Migrated or added as production plot"
+    },
+    "boufarik_plot": {
+      "enabled": true,
+      "backend_enabled": true,
+      "l10_visuals_enabled": false,
+      "phase": "backend_observation",
+      "owner": "internal",
+      "crop": "generic",
+      "region": "internal_test",
+      "created_at": "2026-07-13T18:17:36.372944+00:00",
+      "notes": "Migrated or added as production plot"
+    },
+    "v50b_oued_souf_10ha": {
+      "enabled": true,
+      "backend_enabled": true,
+      "l10_visuals_enabled": false,
+      "phase": "backend_observation",
+      "owner": "internal",
+      "crop": "generic",
+      "region": "internal_test",
+      "created_at": "2026-07-13T18:17:36.372948+00:00",
+      "notes": "Migrated or added as production plot"
+    }
+  }
+}

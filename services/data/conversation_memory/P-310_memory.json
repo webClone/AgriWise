@@ -1,0 +1,59 @@
+{
+  "plot_id": "P-310",
+  "session_id": "2f2f1005722e",
+  "farmer_profile": {
+    "experience_level": "INTERMEDIATE",
+    "preferred_language": "en",
+    "known_facts": {},
+    "interests": [],
+    "vocabulary_complexity": 0.35000000000000003,
+    "total_interactions": 5,
+    "first_interaction": 1779829272.357235,
+    "last_interaction": 1779829272.417696
+  },
+  "topic_threads": [
+    {
+      "topic": "ACTION_DETAIL_soil",
+      "first_mentioned": 1779829272.357266,
+      "last_mentioned": 1779829272.357266,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "UNKNOWN_general",
+      "first_mentioned": 1779829272.371121,
+      "last_mentioned": 1779829272.3875296,
+      "turn_count": 2,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "OVERVIEW_nutrient",
+      "first_mentioned": 1779829272.3999307,
+      "last_mentioned": 1779829272.3999307,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    },
+    {
+      "topic": "ACTION_DETAIL_nutrient",
+      "first_mentioned": 1779829272.4177198,
+      "last_mentioned": 1779829272.4177198,
+      "turn_count": 1,
+      "resolved": false,
+      "summary": ""
+    }
+  ],
+  "open_loops": [],
+  "recent_intents": [
+    "ACTION_DETAIL",
+    "UNKNOWN",
+    "UNKNOWN",
+    "OVERVIEW",
+    "ACTION_DETAIL"
+  ],
+  "turn_count": 5,
+  "created_at": 1779829272.3572328,
+  "last_updated": 1779829272.4177368
+}

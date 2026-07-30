@@ -1,0 +1,494 @@
+{
+  "run_id": "AGB2-2b8c6ce148aa",
+  "plot_id": "69fb754f2ab4b04e9f00394c",
+  "time_window": {
+    "start": "2026-05-09",
+    "end": "2026-05-23"
+  },
+  "intent": "MONITORING",
+  "layer_results": {
+    "layer_1": {
+      "status": "OK",
+      "run_id": "c8b39ff374f9390f",
+      "errors": [],
+      "degradation_flags": [],
+      "confidence": 1,
+      "quality_scored": false,
+      "sources": [
+        "Open-Meteo (ERA5-Land)"
+      ]
+    },
+    "layer_2": {
+      "status": "OK",
+      "run_id": "vegint_c8b39ff374f9390f",
+      "errors": [],
+      "degradation_flags": [],
+      "confidence": 1,
+      "quality_scored": false,
+      "sources": [
+        "Vegetation indices (computed from L1)"
+      ]
+    },
+    "layer_3": {
+      "status": "OK",
+      "run_id": "",
+      "errors": [],
+      "degradation_flags": [],
+      "confidence": 1,
+      "quality_scored": true,
+      "sources": [
+        "Decision engine (L1+L2 fusion)"
+      ]
+    },
+    "layer_4": {
+      "status": "OK",
+      "run_id": "L4-b09b62a4045f",
+      "errors": [],
+      "degradation_flags": [],
+      "confidence": 0.5,
+      "quality_scored": true,
+      "sources": [
+        "Nutrient model (L1+L2+L3)"
+      ]
+    },
+    "layer_5": {
+      "status": "OK",
+      "run_id": "L5-fac6032b9030",
+      "errors": [],
+      "degradation_flags": [],
+      "confidence": 1,
+      "quality_scored": true,
+      "sources": [
+        "Bio-threat model (L1+L2+L3+L4)"
+      ]
+    },
+    "layer_6": {
+      "status": "SKIPPED",
+      "errors": [],
+      "confidence": 0
+    },
+    "layer_7": {
+      "status": "SKIPPED",
+      "errors": [],
+      "confidence": 0
+    },
+    "layer_8": {
+      "status": "SKIPPED",
+      "errors": [],
+      "confidence": 0
+    },
+    "layer_9": {
+      "status": "SKIPPED",
+      "errors": [],
+      "confidence": 0
+    },
+    "layer_10": {
+      "status": "SKIPPED",
+      "errors": [],
+      "confidence": 0
+    }
+  },
+  "global_quality": {
+    "reliability": 0.947,
+    "degradation_modes": [
+      "NORMAL"
+    ],
+    "missing_drivers": [
+      "LayerId.L3.Driver.LST",
+      "LayerId.L3.Driver.ET0"
+    ],
+    "critical_errors": [],
+    "critical_failure": false,
+    "alerts": []
+  },
+  "unified_plan": {
+    "tasks": [
+      {
+        "id": "TASK-ef99e7c51bf7",
+        "type": "VERIFY_PHOTOS",
+        "instructions": "photos for BORERS",
+        "required_inputs": [],
+        "completion_signal": "USER_CONFIRM",
+        "depends_on": [
+          "VERIFY_SCOUT_BORERS"
+        ],
+        "target_zones": [
+          "Zone A",
+          "Zone B",
+          "Zone C"
+        ],
+        "target_points": []
+      },
+      {
+        "id": "TASK-abd146d3e817",
+        "type": "VERIFY_PHOTOS",
+        "instructions": "photos for SUCKING_INSECTS",
+        "required_inputs": [],
+        "completion_signal": "USER_CONFIRM",
+        "depends_on": [
+          "VERIFY_SCOUT_SUCKING_INSECTS"
+        ],
+        "target_zones": [
+          "Zone A",
+          "Zone B",
+          "Zone C"
+        ],
+        "target_points": []
+      },
+      {
+        "id": "TASK-f46c56242c0c",
+        "type": "VERIFY_PHOTOS",
+        "instructions": "photos for CHEWING_INSECTS",
+        "required_inputs": [],
+        "completion_signal": "USER_CONFIRM",
+        "depends_on": [
+          "VERIFY_SCOUT_CHEWING_INSECTS"
+        ],
+        "target_zones": [
+          "Zone A",
+          "Zone B",
+          "Zone C"
+        ],
+        "target_points": []
+      }
+    ],
+    "edges": [],
+    "total_tasks": 3,
+    "recommended_start_date": "2026-05-23T00:00:00+00:00",
+    "review_date": "2026-05-24T00:00:00+00:00"
+  },
+  "surfaces": [],
+  "layer10": {},
+  "fallback_guidance": {
+    "NDVI_CLEAN": {
+      "action_mode": "plot_level_only",
+      "recommended_next_step": "Use whole-field trend interpretation, not spatial targeting.",
+      "why": "Plot-level vegetation evidence exists, but no trustworthy spatial anomaly map is available for this period.",
+      "confidence": 0.65,
+      "data_basis": "plot_stats_only"
+    },
+    "NDVI_DEVIATION": {
+      "action_mode": "plot_level_only",
+      "recommended_next_step": "Use whole-field trend interpretation, not spatial targeting.",
+      "why": "Plot-level vegetation evidence exists, but no trustworthy spatial anomaly map is available for this period.",
+      "confidence": 0.65,
+      "data_basis": "plot_stats_only"
+    },
+    "BASELINE_ANOMALY": {
+      "action_mode": "plot_level_only",
+      "recommended_next_step": "Use trend-based whole-field judgment or provide additional field evidence.",
+      "why": "Plot-level data exists for BASELINE_ANOMALY, but no trustworthy spatial surface is available.",
+      "confidence": 0.65,
+      "data_basis": "plot_stats_only"
+    },
+    "WATER_STRESS_PROB": {
+      "action_mode": "plot_level_only",
+      "recommended_next_step": "Use whole-field irrigation review rather than intra-field zoning.",
+      "why": "Plot-level water indicators are available, but spatial map is invalid.",
+      "confidence": 0.65,
+      "data_basis": "plot_stats_only"
+    },
+    "NUTRIENT_STRESS_PROB": {
+      "action_mode": "plot_level_only",
+      "recommended_next_step": "Use trend-based whole-field judgment or provide additional field evidence.",
+      "why": "Plot-level data exists for NUTRIENT_STRESS_PROB, but no trustworthy spatial surface is available.",
+      "confidence": 0.65,
+      "data_basis": "plot_stats_only"
+    },
+    "COMPOSITE_RISK": {
+      "action_mode": "plot_level_only",
+      "recommended_next_step": "Use trend-based whole-field judgment or provide additional field evidence.",
+      "why": "Plot-level data exists for COMPOSITE_RISK, but no trustworthy spatial surface is available.",
+      "confidence": 0.65,
+      "data_basis": "plot_stats_only"
+    },
+    "UNCERTAINTY_SIGMA": {
+      "action_mode": "plot_level_only",
+      "recommended_next_step": "Use trend-based whole-field judgment or provide additional field evidence.",
+      "why": "Plot-level data exists for UNCERTAINTY_SIGMA, but no trustworthy spatial surface is available.",
+      "confidence": 0.65,
+      "data_basis": "plot_stats_only"
+    },
+    "DATA_RELIABILITY": {
+      "action_mode": "plot_level_only",
+      "recommended_next_step": "Use trend-based whole-field judgment or provide additional field evidence.",
+      "why": "Plot-level data exists for DATA_RELIABILITY, but no trustworthy spatial surface is available.",
+      "confidence": 0.65,
+      "data_basis": "plot_stats_only"
+    }
+  },
+  "explanations": {
+    "run_id": "AGB2-2b8c6ce148aa",
+    "global_quality": {
+      "reliability": 0.947,
+      "degradation_modes": [
+        "NORMAL"
+      ],
+      "alerts": [
+        "LayerId.L3.Driver.LST",
+        "LayerId.L3.Driver.ET0"
+      ]
+    },
+    "summary": {
+      "headline": "Analysis Complete",
+      "period": "2026-05-09 to 2026-05-23",
+      "stage": "DORMANCY",
+      "key_signals": [
+        {
+          "name": "Rain (14d)",
+          "value": "4.5 mm",
+          "direction": "LOW"
+        },
+        {
+          "name": "NDVI Trend",
+          "value": "STABLE",
+          "direction": "STABLE"
+        }
+      ],
+      "feature_snapshot": {
+        "rain_14d": "4.5 mm",
+        "soil_moisture": "N/A",
+        "sar_vv": 0,
+        "ndvi": "N/A",
+        "kalman_uncertainty": "N/A",
+        "ndwi": "N/A",
+        "et0": 5.7,
+        "tmean": "20.0°C",
+        "soil_texture": "loam",
+        "soil_clay": "28.2%",
+        "soil_sand": "36.6%",
+        "soil_ph": 6.8,
+        "soil_soc": 32.9,
+        "iot_soil_moisture": "48.0%",
+        "iot_temperature": "25.0°C",
+        "iot_humidity": "62%",
+        "iot_ec": "0.36 mS/cm",
+        "iot_sensor_count": 5,
+        "forecast_min_temp_7d": "13.9°C",
+        "forecast_max_wind_7d": "15.6 km/h",
+        "forecast_max_rain_probability": "0%"
+      },
+      "management_zones": {
+        "Zone A": {
+          "label": "High Vigor Zone",
+          "area_pct": 33.3,
+          "spatial_label": "north",
+          "ndvi_median": 0.05,
+          "geometry": null
+        },
+        "Zone B": {
+          "label": "Average Vigor Zone",
+          "area_pct": 33.3,
+          "spatial_label": "central",
+          "ndvi_median": 0,
+          "geometry": null
+        },
+        "Zone C": {
+          "label": "Lagging / Stress Zone",
+          "area_pct": 33.3,
+          "spatial_label": "south",
+          "ndvi_median": -0.05,
+          "geometry": null
+        }
+      },
+      "_zone_context_str": "    - Zone A (north, 33.3% of field): High Vigor Zone | NDVI median: 0.05\n    - Zone B (central, 33.3% of field): Average Vigor Zone | NDVI median: 0.0\n    - Zone C (south, 33.3% of field): Lagging / Stress Zone | NDVI median: -0.05"
+    },
+    "diagnoses": [],
+    "actions": [],
+    "plan": {
+      "tasks": [
+        {
+          "task": "VERIFY_PHOTOS: photos for BORERS",
+          "when": "Pending",
+          "depends_on": [
+            "VERIFY_SCOUT_BORERS"
+          ]
+        },
+        {
+          "task": "VERIFY_PHOTOS: photos for SUCKING_INSECTS",
+          "when": "Pending",
+          "depends_on": [
+            "VERIFY_SCOUT_SUCKING_INSECTS"
+          ]
+        },
+        {
+          "task": "VERIFY_PHOTOS: photos for CHEWING_INSECTS",
+          "when": "Pending",
+          "depends_on": [
+            "VERIFY_SCOUT_CHEWING_INSECTS"
+          ]
+        }
+      ]
+    },
+    "citations": [],
+    "assistant_mode": "MONITORING",
+    "assistant_style": "TUTOR",
+    "questions_for_user": [
+      "Do you use irrigation (drip, pivot) or is this rainfed?"
+    ],
+    "arf": {
+      "conversational_response": "",
+      "internal_memory_updates": {}
+    },
+    "memory": {
+      "experience_level": "EXPERT",
+      "known_context": {
+        "RainProbability95%": "95.0%",
+        "RainAmount48mm14d": "48.0 mm",
+        "FusionEngineActive1of3": "1/3 Active",
+        "KalmanStateUnavailable": "Unavailable",
+        "DataFusionStatus": "Degraded (1/3 Active)",
+        "PrimaryConstraint": "Cloud cover and missing SAR pass",
+        "FungalRiskDriver": "High cumulative rain (48mm) + 95% forecast probability",
+        "PrimaryDriver": "Water Balance (80% Weight)",
+        "EvidenceTraceConflict": "Positive NDVI vs Bare Soil Phenology",
+        "NutrientStatus": "Inactive due to BARE_SOIL stage",
+        "LeachingRisk": "High due to 48mm cumulative rain and 95% forecast",
+        "FieldWideLowVigor": "100% coverage, moderate intensity",
+        "PrimaryDriverConfirmation": "Water Balance (80% weight) confirmed by user observation of vigor changes",
+        "ConfirmedCrop": "Orange",
+        "CurrentStage": "EMERGENCE",
+        "SoilTempConstraint": "14.1C is sub-optimal for Citrus root activity",
+        "CropCorrection": "User explicitly corrected Date Palm to Orange",
+        "BioticPressureFocus": "Weed competition and fungal risk post-48mm rain",
+        "L5_Status": "Active with 20.6% Weed Probability",
+        "DiagnosticTasks": "Powdery Mildew, Chewing Insects, Weed Pressure",
+        "SensorConfidence": "High for IoT, Low for Spatial Fusion",
+        "MoistureVariance": "30.9% delta between VS-MOISTURE-01 and 02"
+      },
+      "open_loops": []
+    },
+    "ui_hints": {
+      "show_reliability_banner": false,
+      "show_blocked_banner": false,
+      "card_ordering": []
+    },
+    "visuals": [
+      {
+        "id": "rain_daily",
+        "type": "BAR",
+        "title": "Daily Rainfall (mm)",
+        "data": [
+          {
+            "x": "2026-05-09",
+            "y": 0.4
+          },
+          {
+            "x": "2026-05-10",
+            "y": 0
+          },
+          {
+            "x": "2026-05-11",
+            "y": 0
+          },
+          {
+            "x": "2026-05-12",
+            "y": 0
+          },
+          {
+            "x": "2026-05-13",
+            "y": 0.2
+          },
+          {
+            "x": "2026-05-14",
+            "y": 0
+          },
+          {
+            "x": "2026-05-15",
+            "y": 2.9
+          },
+          {
+            "x": "2026-05-16",
+            "y": 1.4
+          },
+          {
+            "x": "2026-05-17",
+            "y": 0
+          },
+          {
+            "x": "2026-05-18",
+            "y": 0
+          },
+          {
+            "x": "2026-05-19",
+            "y": 0
+          },
+          {
+            "x": "2026-05-20",
+            "y": 0
+          },
+          {
+            "x": "2026-05-21",
+            "y": 0
+          },
+          {
+            "x": "2026-05-22",
+            "y": 0
+          },
+          {
+            "x": "2026-05-23",
+            "y": 0
+          }
+        ],
+        "axis_label": "mm",
+        "color_hint": "BLUE"
+      }
+    ],
+    "data_inventory": {
+      "SAR": "❌ Missing",
+      "Optical": "❌ Missing",
+      "Historical Weather": "[OK] Present",
+      "Forecast": "[OK] Present",
+      "Soil Data": "[OK] Present",
+      "IoT Sensors": "[OK] 5 active, moisture=48.0%"
+    }
+  },
+  "recommendations": [],
+  "top_findings": [
+    "Very low rainfall (4.9mm) — potential dryness.",
+    "Data gaps: LayerId.L3.Driver.LST, LayerId.L3.Driver.ET0."
+  ],
+  "interface": {},
+  "audit": {
+    "orchestrator_run_id": "AGB2-2b8c6ce148aa",
+    "artifact_hash": "2910bff41714fcb6bd7531e8eed66313f8bafcce2088036a6ef5d6e38a9d23c0",
+    "timestamp_utc": "2026-05-23T20:31:32.067411+00:00Z",
+    "orchestrator_version": "2.1.0",
+    "layer_versions": {
+      "L1": "1.0.0",
+      "L2": "2.0.0",
+      "L3": "3.0.0",
+      "L4": "4.0.0",
+      "L5": "6.0.0",
+      "L6": "7.0.0",
+      "L7": "7.0.0",
+      "L8": "8.1.0",
+      "L10": "10.5.0",
+      "L9": "9.0.0"
+    },
+    "lineage_map": {
+      "L1": "c8b39ff374f9390f",
+      "L2": "vegint_c8b39ff374f9390f",
+      "L3": "",
+      "L4": "L4-b09b62a4045f",
+      "L5": "L5-fac6032b9030"
+    },
+    "provenance": {
+      "data_sources": [
+        "Bio-threat model (L1+L2+L3+L4)",
+        "Decision engine (L1+L2 fusion)",
+        "Nutrient model (L1+L2+L3)",
+        "Open-Meteo (ERA5-Land)",
+        "Vegetation indices (computed from L1)"
+      ],
+      "quality_scored_layers": [
+        "layer_3",
+        "layer_4",
+        "layer_5"
+      ],
+      "degraded_layers": [],
+      "failed_layers": [],
+      "total_sources": 5
+    }
+  }
+}

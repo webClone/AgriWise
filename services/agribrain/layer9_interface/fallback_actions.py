@@ -1,0 +1,154 @@
+from typing import Dict, Any
+
+def get_fallback_guidance(surface_type: str, state: str, has_plot_data: bool,
+                          surface_mean: float = None) -> Dict[str, Any]:
+    """
+    Computes the deterministic fallback action guidance given a surface type and its state.
+    state: "localized", "field_wide", "none", "no_data", "low_confidence", "unknown"
+    has_plot_data: boolean indicating if plot-level fallback metrics exist
+    surface_mean: optional mean value of the surface (0-1 for probability surfaces)
+    """
+    
+    # Case A: Localized zones exist (includes management zone engine output like "produced_5_zones")
+    if state == "localized" or state.startswith("produced_"):
+        return None
+        
+    # Case B-1: Field-wide — threshold breached everywhere (data exists, is spatial, but no localized hotspot)
+    if state == "field_wide":
+        if "WATER" in surface_type or "MOISTURE" in surface_type:
+            why = "Moisture conditions appear broadly uniform across the plot"
+            next_step = "Use whole-field irrigation judgment rather than zone targeting"
+        elif "NUTRIENT" in surface_type:
+            why = "Nutrient risk appears elevated field-wide"
+            next_step = "Prefer field-wide sampling or uniform management review rather than variable-rate action"
+        elif "RISK" in surface_type:
+            why = "Composite risk is elevated across the entire field"
+            next_step = "Prioritize whole-field inspection and verify the main driver"
+        elif "UNCERTAINTY" in surface_type or "RELIABILITY" in surface_type:
+            why = "Confidence signal is broadly consistent — no high-confidence zones stand out"
+            next_step = "Interpret all plot recommendations with the same trust level across the field"
+        else:  # VEGETATION / CANOPY
+            why = "Vegetation and canopy signal is spatially valid but broadly uniform across the plot"
+            next_step = "Inspect the field as a whole and verify expected phenology-related growth"
+
+        return {
+            "action_mode": "field_wide",
+            "recommended_next_step": next_step,
+            "why": why,
+            "confidence": 0.85,
+            "data_basis": "field_wide_threshold"
+        }
+
+    # Case B-2: No threshold breached — surface has data but no concerning zones
+    if state == "none":
+        if "WATER" in surface_type or "MOISTURE" in surface_type:
+            # Cross-reference surface mean to avoid contradicting the sidebar
+            # (zone engine may miss stress if it's uniform, but deficit can be severe)
+            if surface_mean is not None and surface_mean > 0.5:
+                why = f"Field-wide water stress detected (mean probability {surface_mean:.0%}). Stress is broadly distributed — no localized hotspots."
+                next_step = "Increase irrigation frequency or volume; check soil moisture sensors if available"
+            elif surface_mean is not None and surface_mean > 0.25:
+                why = f"Moderate water stress indicated (mean probability {surface_mean:.0%}). Soil moisture may be declining."
+                next_step = "Monitor soil moisture closely; consider advancing next irrigation"
+            else:
+                why = "No significant water stress detected across the field"
+                next_step = "Continue current irrigation schedule; no zones require attention"
+        elif "NUTRIENT" in surface_type:
+            why = "Nutrient levels appear adequate — no deficiency zones detected"
+            next_step = "Maintain current fertilization plan"
+        elif "RISK" in surface_type:
+            why = "Overall risk is low — no high-risk zones identified"
+            next_step = "Continue standard monitoring"
+        elif "UNCERTAINTY" in surface_type or "RELIABILITY" in surface_type:
+            why = "Data quality is good across the field — no low-confidence zones"
+            next_step = "All spatial recommendations can be trusted at face value"
+        else:
+            why = "Vegetation signal is healthy — no anomaly zones detected"
+            next_step = "No action needed; field is performing within expectations"
+
+        return {
+            "action_mode": "field_wide",
+            "recommended_next_step": next_step,
+            "why": why,
+            "confidence": 0.90,
+            "data_basis": "no_concerning_zones"
+        }
+        
+    # Case C/D: Map is invalid (no_data, low_confidence, unknown)
+    if has_plot_data:
+        # Case C: Plot level only
+        if "WATER" in surface_type or "MOISTURE" in surface_type:
+            why = "Plot-level water indicators are available, but spatial map is invalid."
+            next_step = "Use whole-field irrigation review rather than intra-field zoning."
+        elif "VEG" in surface_type or "NDVI" in surface_type or "CANOPY" in surface_type:
+            why = "Plot-level vegetation evidence exists, but no trustworthy spatial anomaly map is available for this period."
+            next_step = "Use whole-field trend interpretation, not spatial targeting."
+        else:
+            why = f"Plot-level data exists for {surface_type}, but no trustworthy spatial surface is available."
+            next_step = "Use trend-based whole-field judgment or provide additional field evidence."
+            
+        return {
+            "action_mode": "plot_level_only",
+            "recommended_next_step": next_step,
+            "why": why,
+            "confidence": 0.65,
+            "data_basis": "plot_stats_only"
+        }
+    else:
+        # Case D: True No Data
+        return {
+            "action_mode": "insufficient_data",
+            "recommended_next_step": "Wait for the next valid satellite pass or add field evidence such as a photo, sensor reading, or drone image.",
+            "why": "No usable spatial or plot-level evidence is available for this mode.",
+            "confidence": 0.1,
+            "data_basis": "none"
+        }
+
+def build_fallback_guidance_map(zone_state_by_surface: Dict[str, str], has_plot_data: bool,
+                                surface_means: Dict[str, float] = None) -> Dict[str, Dict[str, Any]]:
+    """
+    Builds a dictionary of fallback guidance objects keyed by surface type.
+    surface_means: optional dict of surface_type -> field-mean value (for cross-referencing)
+    """
+    guidance_map = {}
+    if surface_means is None:
+        surface_means = {}
+    
+    # We always ensure the primary types are mapped even if missing from zone_state_by_surface
+    core_surfaces = [
+        "NDVI_CLEAN", "NDVI_DEVIATION", "BASELINE_ANOMALY",
+        "WATER_STRESS_PROB", "NUTRIENT_STRESS_PROB", "COMPOSITE_RISK",
+        "UNCERTAINTY_SIGMA", "DATA_RELIABILITY"
+    ]
+    
+    # Inheritance: some surfaces don't have their own zone configs but should
+    # inherit from their derived surface (e.g. NDVI_CLEAN → NDVI_DEVIATION)
+    _STATE_INHERITANCE = {
+        "NDVI_CLEAN": "NDVI_DEVIATION",
+        "GROWTH_VELOCITY": "NDVI_DEVIATION",
+        "STABILITY_CLASS": "NDVI_DEVIATION",
+    }
+    
+    for stype in core_surfaces:
+        state = zone_state_by_surface.get(stype)
+        if state is None:
+            # Try inheriting from parent surface
+            parent = _STATE_INHERITANCE.get(stype)
+            if parent:
+                state = zone_state_by_surface.get(parent, "no_data")
+            else:
+                state = "no_data"
+        guidance = get_fallback_guidance(stype, state, has_plot_data,
+                                         surface_mean=surface_means.get(stype))
+        if guidance:
+            guidance_map[stype] = guidance
+            
+    # Add any dynamic surfaces found in the dictionary
+    for stype, state in zone_state_by_surface.items():
+        if stype not in guidance_map:
+            guidance = get_fallback_guidance(stype, state, has_plot_data,
+                                             surface_mean=surface_means.get(stype))
+            if guidance:
+                guidance_map[stype] = guidance
+                
+    return guidance_map
