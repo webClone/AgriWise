@@ -1,1 +1,0 @@
-{"source": "sentinel1_sar", "lat": 36.5795, "lng": 2.958, "data": {"date": "2026-05-01", "vv_db": -9.25, "vh_db": -16.0, "vv_vh_ratio": 4.73, "moisture_estimate": "moist", "source": "sentinel-1-grd"}, "fetched_at": "2026-07-30T14:56:22.016169+00:00", "expires_at": "2026-07-30T17:19:11.016169+00:00", "ttl_seconds": 8569, "param_hash": "", "plot_id": "69fa65f65d7b1084c584c77b"}

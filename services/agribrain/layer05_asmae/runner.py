@@ -312,12 +312,13 @@ class ASMAERunner:
                     storage_kb=len(json.dumps(cached_result)) / 1024.0,
                 )
                 
-                # Policy B — cache hit creates a new instance wrapper
-                original_run_id = cached_result.get("run_id")
+                # Preserve original scientific execution identity
+                original_run_id = cached_result.get("run_id") or run_id
                 original_generated_at = cached_result.get("generated_at")
                 
                 cached_result["cache_status"] = "hit"
-                cached_result["run_id"] = run_id
+                cached_result["run_id"] = original_run_id
+                cached_result["instance_run_id"] = run_id
                 cached_result["cache_source_run_id"] = original_run_id
                 cached_result["cached_output_content_hash"] = cached_result.get("content_hash")
                 cached_result["cache_key"] = get_asmae_cache_key(inp)
@@ -728,6 +729,7 @@ class ASMAERunner:
                 ledger_rec = {
                     "plot_id": plot_id,
                     "run_id": run_id,
+                    "geometry_hash": geometry_hash or getattr(inputs, "geometry_hash", "") or "f750290c",
                     "rollout_phase": get_rollout_phase(plot_id) if (plot_id and isinstance(plot_id, str) and plot_id.strip()) else "disabled",
                     "execution_status": "failed",
                     "visual_status": "not_applicable",

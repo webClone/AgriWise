@@ -50,6 +50,7 @@ diag.log
 ids.json
 *.zip
 services/agribrain/artifacts/
+services/agribrain/data/cache/
 surfaces_cache/
 historical_surfaces_cache/
 asmae_cache/

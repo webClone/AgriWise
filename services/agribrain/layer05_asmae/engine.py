@@ -101,22 +101,25 @@ class ASMAEEngine:
         start_time = time.perf_counter()
         is_quick_visual = (inp.mode == "quick_visual")
         is_test_override = (
-            getattr(inp, "is_test_override", False) or 
-            inp.plot_id.startswith("plot_") or 
-            "unregistered" in inp.plot_id or 
-            "test" in inp.run_id or 
-            "run_" in inp.run_id or
-            os.environ.get("ASMAE_TEST_OVERRIDE") == "true"
+            bool(getattr(inp, "is_test_override", False)) or
+            os.environ.get("ASMAE_TEST_OVERRIDE") == "true" or
+            os.environ.get("AGRIBRAIN_ENV") == "test"
         )
 
         def check_timeout():
             if inp.geometry_hash == "geom_timeout":
                 raise ASMAEChainIntegrityError("BUDGET OVERRUN: Forced timeout for geometry_hash='geom_timeout'")
+            elapsed = (time.perf_counter() - start_time) * 1000.0
             if is_quick_visual and not is_test_override:
-                elapsed = (time.perf_counter() - start_time) * 1000.0
                 if elapsed > 150.0:
                     raise ASMAEChainIntegrityError(
                         f"BUDGET OVERRUN: Step 'asmae' in mode 'quick_visual' took {elapsed:.1f}ms (Budget: 150.0ms)"
+                    )
+            elif not is_test_override:
+                max_standard_budget_ms = float(os.environ.get("ASMAE_MAX_EXECUTION_TIMEOUT_MS", "300000.0"))
+                if elapsed > max_standard_budget_ms:
+                    raise ASMAEChainIntegrityError(
+                        f"BUDGET OVERRUN: Step 'asmae' in standard mode took {elapsed:.1f}ms (Deadline: {max_standard_budget_ms}ms)"
                     )
 
         try:
@@ -1631,12 +1634,8 @@ class ASMAEEngine:
                 value = mapping.get(key) if isinstance(mapping, dict) else None
                 return value[row][col] if grid_matches(value) else default
             
-            # Compute and append overall_unc
+            # Compute and append overall_unc safely
             if uncertainty_maps:
-                first_grid = next(iter(uncertainty_maps.values()))
-                H_grid = len(first_grid)
-                W_grid = len(first_grid[0]) if H_grid > 0 else 0
-                
                 STATE_SIGMA_SCALE = {
                     "vigor": 0.5,
                     "lai": 3.0,
@@ -1655,21 +1654,30 @@ class ASMAEEngine:
                     "stem_density": 50.0,
                     "yield_potential": 1.0,
                 }
-                keys = [k for k in uncertainty_maps.keys() if k in STATE_NAMES or k.lower() in [s.lower() for s in STATE_NAMES]]
-                if keys:
+                valid_keys = [
+                    k for k in uncertainty_maps.keys()
+                    if (k in STATE_NAMES or k.lower() in [s.lower() for s in STATE_NAMES])
+                    and grid_matches(uncertainty_maps.get(k))
+                ]
+                if valid_keys:
+                    sample_grid = uncertainty_maps[valid_keys[0]]
+                    H_grid = len(sample_grid)
+                    W_grid = len(sample_grid[0]) if H_grid > 0 else 0
+                    overall_unc = [[0.0 for _ in range(W_grid)] for _ in range(H_grid)]
                     for r in range(H_grid):
                         for c in range(W_grid):
                             norm_uncs = [
                                 min(1.0, max(0.0, float(uncertainty_maps[k][r][c]) / STATE_SIGMA_SCALE.get(k, STATE_SIGMA_SCALE.get(k.lower(), 1.0))))
-                                for k in keys
+                                for k in valid_keys
                             ]
                             overall_unc[r][c] = float(sum(norm_uncs) / len(norm_uncs))
-                uncertainty_maps["ASMAE_UNCERTAINTY"] = overall_unc
+                    uncertainty_maps["ASMAE_UNCERTAINTY"] = overall_unc
 
             confidence_maps = dict(state_result.get("confidence_maps", {}))
             # Compute and append overall_conf
             if "ASMAE_UNCERTAINTY" in uncertainty_maps:
-                overall_conf = [[max(0.0, min(1.0, 1.0 - val)) for val in row] for row in uncertainty_maps["ASMAE_UNCERTAINTY"]]
+                overall_conf = [[max(0.0, min(1.0, 1.0 - float(val))) for val in row] for row in uncertainty_maps["ASMAE_UNCERTAINTY"]]
+                confidence_maps["ASMAE_CONFIDENCE"] = overall_conf
                 confidence_maps["ASMAE_CONFIDENCE"] = overall_conf
 
             # Compile retrovalidation score map
@@ -2014,12 +2022,9 @@ class ASMAEEngine:
                 # Check archive context
                 is_pseudo = getattr(inp, "is_pseudo", False)
                 is_test_override = (
-                    getattr(inp, "is_test_override", False) or 
-                    inp.plot_id.startswith("plot_") or 
-                    "unregistered" in inp.plot_id or 
-                    "test" in inp.run_id or 
-                    "run_" in inp.run_id or
-                    os.environ.get("ASMAE_TEST_OVERRIDE") == "true"
+                    bool(getattr(inp, "is_test_override", False)) or
+                    os.environ.get("ASMAE_TEST_OVERRIDE") == "true" or
+                    os.environ.get("AGRIBRAIN_ENV") == "test"
                 )
 
                 archive_metrics = inp.archive_metrics or {}

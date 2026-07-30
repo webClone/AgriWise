@@ -246,6 +246,8 @@ def classify_package(pkg: Any, source_family: str) -> Tuple[EvidenceCapability, 
             reasons.append("missing_band_or_provider_receipt")
         if any(token in reality for token in ("proxy", "synthetic", "simulated")):
             reasons.append("non_provider_spatial_reality")
+        if d.get("diagnostic_only") or d.get("spatial_visualization_unavailable") or d.get("data_status") == "unusable":
+            reasons.append("diagnostic_only_package_not_spatial_provider_scene")
         if reasons:
             return EvidenceCapability.UNKNOWN_OR_INVALID, reasons, signals
         return EvidenceCapability.SPATIAL_PROVIDER_SCENE, [], signals
@@ -277,17 +279,34 @@ def _sensor_for(d: Mapping[str, Any], family: str) -> Optional[str]:
 
 
 def _stable_node_hash(value: Any, family: str, path: Sequence[str], parent_id: Optional[str]) -> str:
+    """Canonical path-independent scientific observation content hash."""
+    d = _merged_public(value)
+    canon_id = (
+        d.get("packet_id")
+        or d.get("observation_id")
+        or d.get("provider_product_id")
+        or d.get("scene_id")
+        or d.get("content_hash")
+    )
+    acq_time = d.get("timestamp") or d.get("date") or d.get("acquisition_time") or d.get("time")
+    sensor = _sensor_for(d, family)
+    signals = _extract_scalar_signals(d)
+    
+    if canon_id or acq_time:
+        canon_obj = {
+            "canon_id": str(canon_id or ""),
+            "acq_time": str(acq_time or ""),
+            "sensor": str(sensor or ""),
+            "signals": {k: float(v) for k, v in sorted(signals.items()) if v is not None},
+        }
+        return hashlib.sha256(json.dumps(canon_obj, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
     try:
         from .job_manifest import scientific_value_hash
-        return scientific_value_hash({
-            "family": family,
-            "path": list(path),
-            "parent": parent_id,
-            "value": value,
-        })
+        return scientific_value_hash({"value": value})
     except Exception:
         payload = json.dumps(_merged_public(value), sort_keys=True, default=str, separators=(",", ":"))
-        return hashlib.sha256(f"{family}:{'/'.join(path)}:{parent_id or ''}:{payload}".encode()).hexdigest()
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _looks_like_atomic_scene(value: Any) -> bool:

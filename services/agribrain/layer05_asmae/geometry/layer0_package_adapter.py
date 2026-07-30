@@ -60,9 +60,9 @@ def adapt_layer0_package_to_scene_candidate(
     meta = _attr(pkg, "metadata", None) or pkg
     
     # 1. Recover metadata either from direct attribute or provenance
-    asmae_meta = prov.get("asmae_scene_metadata", {})
-    
+    asmae_meta = prov.get("asmae_scene_metadata", {}) or {}
     scene_id = _attr(meta, "scene_id", asmae_meta.get("scene_id"))
+    prov_pid = _attr(pkg, "provider_product_id", None) or asmae_meta.get("provider_product_id") or prov.get("provider_product_id")
     
     acq_dt = _attr(meta, "acquisition_datetime", None) or _attr(meta, "acquisition_time", None)
     if isinstance(acq_dt, str):
@@ -75,6 +75,12 @@ def adapt_layer0_package_to_scene_candidate(
             acq_dt = datetime.datetime.fromisoformat(asmae_meta["acquisition_datetime"].replace('Z', '+00:00'))
         except Exception:
             acq_dt = None
+
+    if not scene_id:
+        if prov_pid:
+            scene_id = f"{source}_{str(prov_pid)[:28]}"
+        elif acq_dt:
+            scene_id = f"{source}_{acq_dt.strftime('%Y%m%dT%H%M%S')}"
 
     crs = _attr(meta, "crs", asmae_meta.get("crs"))
     transform = _attr(meta, "transform", asmae_meta.get("transform"))

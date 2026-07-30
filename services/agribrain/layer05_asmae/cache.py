@@ -65,16 +65,25 @@ HAS_NUMPY = np is not None
 HAS_SCIPY = sp is not None
 HAS_NUMPY_SCIPY = HAS_NUMPY and HAS_SCIPY  # compatibility export
 
-# Define central paths relative to this file
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ARTIFACTS_DIR = os.path.join(BASE_DIR, "artifacts")
+# Define central paths relative to runtime directory or configured root
+RUN_ROOT = os.environ.get("AGRIBRAIN_RUNTIME_DIR") or os.environ.get("AGRIBRAIN_ARTIFACTS_DIR")
+if RUN_ROOT:
+    ARTIFACTS_DIR = os.path.abspath(RUN_ROOT)
+else:
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ARTIFACTS_DIR = os.path.join(BASE_DIR, "artifacts")
+
 CACHE_DIR = os.path.join(ARTIFACTS_DIR, "asmae_cache")
 OPERATORS_DIR = os.path.join(ARTIFACTS_DIR, "asmae_operators")
 RASTERS_DIR = os.path.join(ARTIFACTS_DIR, "asmae_rasters")
 
-# Ensure directories exist
-for d in (CACHE_DIR, OPERATORS_DIR, RASTERS_DIR):
-    os.makedirs(d, exist_ok=True)
+def ensure_cache_directories_exist() -> None:
+    """Safe lazily-called directory initializer."""
+    for d in (CACHE_DIR, OPERATORS_DIR, RASTERS_DIR):
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
 
 _RASTER_FIELDS: Tuple[str, ...] = (
     "raster_maps", "uncertainty_maps", "confidence_maps",
@@ -430,6 +439,7 @@ def save_ht_matrix_artifact(operator_id: str, h_matrix: Any) -> str:
     if not HAS_NUMPY_SCIPY or h_matrix is None:
         return ""
 
+    ensure_cache_directories_exist()
     rel_ref = f"asmae_operators/ht_{operator_id}.npz"
     full_path = os.path.join(ARTIFACTS_DIR, rel_ref)
 

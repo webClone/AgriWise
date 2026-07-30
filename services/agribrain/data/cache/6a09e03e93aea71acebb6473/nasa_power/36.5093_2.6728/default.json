@@ -1,1 +1,0 @@
-{"source": "nasa_power", "lat": 36.5093, "lng": 2.6728, "data": {"annualRainfall": 558.45, "solarInsolation": 17.42, "droughtRiskIndex": 5, "source": "nasa-power"}, "fetched_at": "2026-07-30T16:34:12.970167+00:00", "expires_at": "2026-07-30T17:29:08.970167+00:00", "ttl_seconds": 3296, "param_hash": "", "plot_id": "6a09e03e93aea71acebb6473"}

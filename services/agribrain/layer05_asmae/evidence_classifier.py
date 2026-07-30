@@ -3,6 +3,11 @@ from typing import Any, Dict, List, Optional
 import os
 
 
+def _attr(obj: Any, key: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 @dataclass
 class ASMAEEvidenceClassification:
     state: str  # "full_scene_stack" | "archive_backed_asmae" | "composite_assimilated_asmae" | "plot_level_observation_evidence" | "unavailable"
@@ -68,42 +73,47 @@ def classify_asmae_evidence(
     
     for s_item in scenes:
         if isinstance(s_item, dict):
-            s = s_item.get("runtime")
+            s = s_item.get("runtime") or s_item
+            reality = s_item.get("source_reality") or getattr(s, "source_reality", "unknown")
+            is_test = s_item.get("test_override", getattr(s, "test_override", False))
+            is_prod_usable = bool(s_item.get("production_usable", getattr(s, "production_usable", False)))
+            is_real_prov = bool(s_item.get("real_provider_product", getattr(s, "real_provider_product", False)))
+            is_diag_only = bool(s_item.get("diagnostic_only", getattr(s, "diagnostic_only", False)))
         else:
             s = s_item
+            reality = getattr(s, "source_reality", "unknown")
+            is_test = getattr(s, "test_override", False)
+            is_prod_usable = bool(getattr(s, "production_usable", False))
+            is_real_prov = bool(getattr(s, "real_provider_product", False))
+            is_diag_only = bool(getattr(s, "diagnostic_only", False))
             
         if not s:
             continue
             
-        sensor = getattr(s, "sensor", "")
-        # Never default missing source_reality to real_raster
-        reality = getattr(s, "source_reality", "unknown")
+        sensor = _attr(s, "sensor", "")
         if reality != "real_raster":
             continue
             
-        # Do not let test override unlock browser ASMAE unless test override mode is active
-        is_test = getattr(s, "test_override", False)
-        is_prod_usable = bool(getattr(s, "production_usable", False))
         if is_test and not test_override:
             continue
             
         # Verify basic geometry and timestamp presence
-        w = getattr(s, "width", 0) or 0
-        h = getattr(s, "height", 0) or 0
-        crs = getattr(s, "crs", "") or ""
-        transform = getattr(s, "transform", None)
-        acq_time = getattr(s, "acquisition_time", getattr(s, "acquisition_datetime", None))
+        w = _attr(s, "width", 0) or 0
+        h = _attr(s, "height", 0) or 0
+        crs = _attr(s, "crs", "") or ""
+        transform = _attr(s, "transform", None)
+        acq_time = _attr(s, "acquisition_time", _attr(s, "acquisition_datetime", None))
         
         has_geom = w > 0 and h > 0 and crs and transform and len(transform) == 6 and acq_time is not None
         if not has_geom:
             continue
             
         # Quality score >= 0.60
-        qa_score = getattr(s, "qa_score", 0.0)
+        qa_score = _attr(s, "qa_score", 0.0)
         if qa_score < 0.60:
             continue
             
-        bands = getattr(s, "bands", {}) or {}
+        bands = _attr(s, "bands", {}) or {}
         # S2: B04 + B08 loaded
         if sensor == "S2":
             if "B04" in bands and "B08" in bands:
@@ -221,17 +231,27 @@ def classify_asmae_evidence(
     composite_fusion_allowed = False
     authority = "none"
  
+    has_certification_proof = any(
+        bool(_attr(s, "holdout_proof", None)) and bool(_attr(s, "registration_proof", None)) and bool(_attr(s, "field_approval", False))
+        for s in scenes
+    )
+
     if state == "full_scene_stack":
         real_asmae_evidence = True
-        current_1m_approval_allowed = True
+        current_1m_approval_allowed = has_certification_proof
         visual_fusion_allowed = True
         archive_context_allowed = True
         experimental_visual_allowed = True
         source_reality = "real_raster"
-        allowed_outputs = ["ASMAE_VISUAL_FUSION_CANOPY", "ASMAE_1M_ADVISORY_MASK", "canopy_water", "vigor"]
-        blocked_outputs = []
-        reason = "ok"
-        authority = "asmae_certified"
+        allowed_outputs = ["ASMAE_VISUAL_FUSION_CANOPY", "canopy_water", "vigor"]
+        if has_certification_proof:
+            allowed_outputs.append("ASMAE_1M_ADVISORY_MASK")
+            authority = "asmae_certified"
+            reason = "ok"
+        else:
+            blocked_outputs = ["ASMAE_1M_ADVISORY_MASK"]
+            authority = "advisory_only"
+            reason = "1m_approval_unavailable_certification_proof_missing"
     elif state == "diagnostic_scene_stack":
         real_asmae_evidence = True
         current_1m_approval_allowed = False
@@ -332,15 +352,18 @@ def classify_asmae_evidence(
             current_1m_approval_allowed_val = False
         else:
             res_production_usable = True
-            res_diagnostic_only = False
+            res_diagnostic_only = not has_certification_proof
             res_real_provider_product = True
             
             state_update_allowed = True
             visualization_allowed = True
             composite_advisory_allowed = True
             scientific_surface_allowed = True
-            prescription_driver_allowed = True
-            current_1m_approval_allowed_val = True
+            prescription_driver_allowed = has_certification_proof
+            current_1m_approval_allowed_val = has_certification_proof
+            if not has_certification_proof:
+                authority = "advisory_only"
+                reason = "1m_approval_unavailable_certification_proof_missing"
     elif state == "diagnostic_scene_stack":
         res_test_override = has_test_override
         res_real_provider_product = has_real_provider_product

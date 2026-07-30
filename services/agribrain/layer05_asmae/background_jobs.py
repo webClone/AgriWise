@@ -1405,6 +1405,36 @@ def _commit_job_evidence(
     return event.get("event_id")
 
 
+def _commit_job_failure_event(
+    result: Dict[str, Any], payload: Dict[str, Any], saved: Dict[str, Any]
+) -> Optional[str]:
+    from .history.worldline_service import PlotWorldlineService
+    context = dict(saved.get("context") or {})
+    valid_time = datetime.now(timezone.utc).isoformat()
+    try:
+        event = PlotWorldlineService().commit_event(
+            plot_id=str(payload.get("plot_id", "")),
+            event_type="ASMAE_SPATIAL_REFRESH_FAILED",
+            geometry_hash=str(payload.get("geometry_hash", "") or context.get("geometry_hash") or "f750290c"),
+            authority="FAIL_CLOSED",
+            effective_at=valid_time,
+            observation_or_valid_time=valid_time,
+            tenant_id=str(context.get("tenant_id") or "default_tenant"),
+            namespace=str(context.get("worldline_namespace") or "default"),
+            payload={
+                "job_id": payload.get("job_id"),
+                "manifest_hash": payload.get("manifest_hash"),
+                "result_status": result.get("status") or "error",
+                "reason": result.get("reason") or "execution_failed",
+                "failure_diagnostics": result.get("failure_diagnostics") or {},
+            },
+        )
+        return event.get("event_id")
+    except Exception as exc:
+        logger.warning("Could not commit ASMAE_SPATIAL_REFRESH_FAILED to worldline: %s", exc)
+        return None
+
+
 def _run_reintegration(
     *,
     result: Dict[str, Any],
@@ -1598,9 +1628,13 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
         elif result_status == "unavailable":
             reintegration = {"status": "not_applicable"}
             terminal = 'failed'
+            _commit_job_failure_event(result, payload, saved)
+            _append_job_event(job_path, "worker_execution_failed", status="failed", result_status=result_status, reason=result.get("reason"))
         else:
             reintegration = {"status": "not_applicable"}
             terminal = "failed"
+            _commit_job_failure_event(result, payload, saved)
+            _append_job_event(job_path, "worker_execution_failed", status="failed", result_status=result_status, reason=result.get("reason"))
 
         stop_heartbeat.set()
         if heartbeat_thread:

@@ -204,9 +204,9 @@ def build_real_asmae_scene_stack(inp: ASMAEInput) -> SceneStack:
     sensor_counter = Counter(s["runtime"].sensor for s in included)
     stack.sensor_counts = dict(sensor_counter)
 
-    # Determine mode
-    n_s2 = loadable_s2_count
-    n_s1 = loadable_s1_count
+    # Determine mode from quality-admitted included scenes
+    n_s2 = sensor_counter.get("S2", 0)
+    n_s1 = sensor_counter.get("S1", 0)
 
     if n_s2 + n_s1 > 0:
         if n_s2 >= MIN_S2_SCENES_OPTICAL_MODE and n_s1 >= MIN_S1_SCENES_SAR_ASSISTED:
