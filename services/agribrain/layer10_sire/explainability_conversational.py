@@ -106,7 +106,7 @@ def generate_layer_explainability(layer_id: str, data: dict, status: str) -> dic
         expert_summary = f"Overall quality {(data.get('overall_quality_score', 0.82) * 100):.0f}%. Spatial anomaly map not fully trustworthy this period (cloud + early growth). Recommend whole-field interpretation for now."
         why_it_matters = "L10 ensures that the intelligence provided is safe, verified, and mapped correctly to your field boundaries."
         confidence_level = data.get("overall_quality_score", 0.82)
-        confidence_reason = "Cloud cover + early crop stage limits spatial fidelity."
+        confidence_reason = "Cloud cover and limited spatial evidence reduce fidelity; no growth stage is inferred."
         
     else:
         farmer_summary = "This layer is running normally to keep your field intelligence up to date."

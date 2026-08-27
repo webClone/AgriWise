@@ -82,7 +82,6 @@ function HealthGauge({ score, ciLow, ciHigh }: { score: number; ciLow: number; c
   const pct = Math.round(score * 100);
   const ciPctLow = Math.round(ciLow * 100);
   const ciPctHigh = Math.round(ciHigh * 100);
-  const halfWidth = Math.round((ciHigh - ciLow) * 50); // ± half-width
   const { text, color } = healthLabel(score);
   const r = 44, cx = 50, cy = 50;
   const circ = Math.PI * r; // half circle
@@ -109,12 +108,14 @@ function HealthGauge({ score, ciLow, ciHigh }: { score: number; ciLow: number; c
           fill="none" stroke={color} strokeWidth="7" strokeLinecap="round"
           strokeDasharray={circ} strokeDashoffset={offset}
           style={{ transition: "stroke-dashoffset 0.6s ease" }} />
-        <text x={cx} y={cy - 8} textAnchor="middle" className="sfv-gauge-text" fill="#f1f5f9" fontSize="18" fontWeight="700" fontFamily="monospace">{pct}%</text>
+        <text x={cx} y={cy - 8} textAnchor="middle" className="sfv-gauge-text" fill="#f1f5f9" fontSize="18" fontWeight="700" fontFamily="monospace">{pct}/100</text>
       </svg>
       <div style={{ fontSize: "13px", color, fontWeight: 600, marginTop: "2px" }}>{text}</div>
       <div style={{ fontSize: "11px", color: "#64748b", marginTop: "2px" }}>
-        Field Health Score
-        <span style={{ marginLeft: "4px", color: "#94a3b8" }}>±{halfWidth}%</span>
+        Field condition screening index
+        <span style={{ marginLeft: "4px", color: "#94a3b8" }}>
+          Indicative range {ciPctLow}–{ciPctHigh}
+        </span>
       </div>
     </div>
   );
@@ -217,7 +218,7 @@ function PhenologyBadge() {
     REPRODUCTIVE: { icon: "🌾", label: "Reproductive", tip: "Critical window! Water stress now directly reduces grain count." },
     SENESCENCE: { icon: "🍂", label: "Senescence", tip: "Natural decline. Reduce inputs and plan harvest timing." },
     HARVESTED: { icon: "✅", label: "Harvested", tip: "Post-harvest. Consider cover cropping for soil health." },
-    UNKNOWN: { icon: "❓", label: "Unknown", tip: "Growth stage not determined — more satellite passes needed." },
+    UNKNOWN: { icon: "❓", label: "Unknown", tip: resolved.userLabel },
   };
   const info = stageMap[stage] || stageMap.UNKNOWN;
 
@@ -240,6 +241,11 @@ function PhenologyBadge() {
         <div style={{ fontSize: "11px", color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Growth Stage</div>
         <div style={{ fontSize: "14px", color: "#e2e8f0", fontWeight: 700 }}>{info.label}</div>
         <div style={{ fontSize: "12px", color: "#a5b4fc", marginTop: "2px", lineHeight: 1.4 }}>{info.tip}</div>
+        {resolved.receiptValid && resolved.posteriorHash && (
+          <div style={{ fontSize: "9px", color: "#64748b", marginTop: "3px", fontFamily: "monospace" }}>
+            Layer 2 {resolved.authority} · {resolved.posteriorHash.slice(0, 12)}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -249,24 +255,50 @@ function PhenologyBadge() {
 function VPDAlert({ data }: { data: Layer10Result }) {
   const vpd = data.surfaces.find(s => s.type === "VPD_STRESS");
   if (!vpd) return null;
-  const vpdKpa = (vpd.provenance as any)?.vpd_kpa;
+  const prov = (vpd.provenance as any) || {};
+  const vpdKpa = prov.vpd_kpa;
   if (vpdKpa == null || vpdKpa < 1.5) return null;
+
+  const physiologicalClaimAllowed = prov.physiological_claim_allowed === true;
+  const humiditySource = prov.humidity_source || "unknown";
+  const cropApplicability = prov.crop_applicability || "applicable";
+
   const severity = vpdKpa > 3.0 ? "Severe" : vpdKpa > 2.0 ? "Moderate" : "Mild";
   const color = vpdKpa > 3.0 ? "#ef4444" : vpdKpa > 2.0 ? "#f97316" : "#facc15";
+
+  const titleText = physiologicalClaimAllowed
+    ? `${severity} Heat Stress — VPD ${vpdKpa.toFixed(1)} kPa`
+    : `${severity} Atmospheric Demand — VPD ${vpdKpa.toFixed(1)} kPa`;
+
+  let bodyText = "";
+  if (physiologicalClaimAllowed) {
+    bodyText = vpdKpa > 3.0
+      ? "Stomata are closing even with adequate irrigation. Crops cannot cool themselves. Consider shade netting or misting if possible."
+      : vpdKpa > 2.0
+      ? "Transpiration is elevated — plants are losing water faster than roots can supply. Monitor wilting and increase irrigation frequency."
+      : "Atmospheric drying is slightly above normal. Keep irrigation on schedule.";
+  } else {
+    bodyText = vpdKpa > 3.0
+      ? "Atmospheric drying demand is very high. Crop-specific physiological impact depends on growth stage and crop type."
+      : vpdKpa > 2.0
+      ? "Atmospheric drying demand is elevated. Monitor crop condition and soil moisture levels."
+      : "Atmospheric drying is slightly above normal.";
+  }
+
+  const footerExtra = humiditySource === "imputed_default" ? " (humidity estimated)" : "";
+
   return (
     <div style={{ padding: "8px 10px", borderRadius: "8px", background: `${color}08`, border: `1px solid ${color}20` }}>
       <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
         <span style={{ fontSize: "1.1rem" }}>🌡️</span>
-        <span style={{ fontSize: "12px", color, fontWeight: 700 }}>{severity} Heat Stress — VPD {vpdKpa.toFixed(1)} kPa</span>
+        <span style={{ fontSize: "12px", color, fontWeight: 700 }}>{titleText}</span>
       </div>
       <div style={{ fontSize: "10px", color: "#94a3b8", lineHeight: 1.4 }}>
-        {vpdKpa > 3.0
-          ? "Stomata are closing even with adequate irrigation. Crops cannot cool themselves. Consider shade netting or misting if possible."
-          : vpdKpa > 2.0
-          ? "Transpiration is elevated — plants are losing water faster than roots can supply. Monitor wilting and increase irrigation frequency."
-          : "Atmospheric drying is slightly above normal. Keep irrigation on schedule."}
+        {bodyText}
       </div>
-      <div style={{ fontSize: "9px", color: "#475569", marginTop: "4px" }}>VPD = atmospheric drying power (Tetens eq., FAO-56)</div>
+      <div style={{ fontSize: "9px", color: "#475569", marginTop: "4px" }}>
+        VPD = atmospheric drying power (Tetens eq., FAO-56){footerExtra}
+      </div>
     </div>
   );
 }
@@ -476,7 +508,10 @@ export default function SidebarFarmerView({ data, activeMode, surfaceType, expla
     //          reduce penalty weight when phenology stage implies structural heterogeneity.
     //        - If mean NDVI <= 0.35 (patchy/low-canopy): full penalty applies.
     //
-    const phenoStage = (data.provenance as any)?.phenology_stage as string | undefined;
+    const phenoStage = data.phenology_context?.phenology_receipt_valid === true
+      && data.phenology_context?.phenology_source === "layer2_canonical_phenology"
+      ? data.resolved_crop_stage
+      : "UNKNOWN";
     const isMixedField = (
       ndviMean != null && ndviMean < 0.35 &&  // low mean = large bare fraction
       ndviStd != null && ndviStd > 0.15       // high std = confirmed mix
@@ -586,35 +621,39 @@ export default function SidebarFarmerView({ data, activeMode, surfaceType, expla
   // Diagnosis blocks (health gauge, mode insight, advisory card, zone alerts,
   // risk decomposition, scenario pack) are gated behind a valid authority proof.
   // The frontend MUST NOT promote backend authority — it may only demote.
-  // If the payload lacks the canonical v924_bc10_18_render_auth_v1 version OR
+  // If the payload lacks the current canonical render-authorization version OR
   // render_authorizations is empty/missing, we suppress diagnosis and show a
   // calibration notice so the user knows data is pending re-authorisation.
-  const isDiagnosisAuthorized = useMemo(() => {
+  const isRasterCommitted = useMemo(() => {
+    return isRenderedMaterialization(l10Context.renderPlan.baseMaterialization, surfaceType);
+  }, [l10Context.renderPlan, surfaceType]);
+
+  const hasCurrentAuthorizationContract = useMemo(() => {
     const authVersion = l10Context.data?.render_authorization_version;
     const authMap = l10Context.data?.render_authorizations;
     if (authVersion !== RENDER_AUTHORIZATION_VERSION) return false;
     if (!authMap || typeof authMap !== "object") return false;
     if (Object.keys(authMap).length === 0) return false;
-    return isRenderedMaterialization(l10Context.renderPlan.baseMaterialization, surfaceType);
+    return true;
   }, [
     l10Context.data?.render_authorization_version,
     l10Context.data?.render_authorizations,
-    l10Context.renderPlan,
-    surfaceType,
   ]);
 
   // ── Mode-Specific Authorization Check ────────────────────────────────────
   // Verify that the active mode is authorized for diagnosis by checking the
   // render authorization map. Returns false if mode is not in the map (deny-by-default).
   const isModeAuthorizedForDiagnosis = useMemo(() => {
-    if (!isDiagnosisAuthorized) return false;
+    if (!isRasterCommitted || !hasCurrentAuthorizationContract) return false;
     const renderAuths = l10Context.data?.render_authorizations;
     if (!renderAuths || typeof renderAuths !== "object") return false;
     const policy = l10Context.canopySource || "satellite";
     const role = "inspector";
     const auth = getRenderAuthorization(surfaceType, policy, normalizeMode(activeMode), role, renderAuths);
-    return !!auth?.authorized && auth.inspectorAllowed === true;
-  }, [isDiagnosisAuthorized, activeMode, surfaceType, l10Context.data?.render_authorizations, l10Context.canopySource]);
+    return l10Context.canInterpretDiagnostically === true
+      && !!auth?.authorized
+      && auth.inspectorAllowed === true;
+  }, [isRasterCommitted, hasCurrentAuthorizationContract, activeMode, surfaceType, l10Context.data?.render_authorizations, l10Context.canopySource, l10Context.canInterpretDiagnostically]);
 
   // Delta / trend from actual delta histogram
   const delta = data.histograms.delta.find(d => d.surface_type === surfaceType);
@@ -735,8 +774,8 @@ export default function SidebarFarmerView({ data, activeMode, surfaceType, expla
   const highlightMode = activeMode;
 
   // ── BC.10.19 P0.6 — Authorization Pending Notice ───────────────────────
-  // Shown in place of all diagnosis cards when the authority contract is not met.
-  if (!isDiagnosisAuthorized || !isModeAuthorizedForDiagnosis) {
+  // No browser render receipt means there is no committed spatial evidence.
+  if (!isRasterCommitted) {
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
         {/* Phenology Badge is always safe to show (source-agnostic) */}
@@ -757,17 +796,46 @@ export default function SidebarFarmerView({ data, activeMode, surfaceType, expla
           <div style={{ fontSize: "12px", fontWeight: 700, color: "#94a3b8" }}>Spatial evidence unavailable</div>
           <div style={{ fontSize: "11px", color: "#64748b", lineHeight: 1.5 }}>
             The active surface was not placed on the map, so its zones, pixel statistics,
-            and diagnosis cards are hidden. Reason: {(
-              !isDiagnosisAuthorized
-                ? l10Context.renderPlan.baseMaterialization.reason || "missing render authorization"
-                : "inspector authorization missing"
-            ).replace(/_/g, " ")}.
+            and diagnosis cards are hidden. Reason: {(l10Context.renderPlan.baseMaterialization.reason || "missing render authorization").replace(/_/g, " ")}.
           </div>
         </div>
         {/* Ask button is always available */}
         <button onClick={() => onAskBrain("The current map evidence is not render-authorized. Do not diagnose or recommend actions. Explain which evidence/proof is missing and what field verification steps are needed.")}
           style={{ width: "100%", padding: "10px", borderRadius: "10px", border: "none", background: "linear-gradient(135deg, rgba(99,102,241,0.15), rgba(139,92,246,0.15))", color: "#a5b4fc", fontSize: "12px", fontWeight: 700, cursor: "pointer", transition: "all 0.15s" }}>
           🧠 Ask AgriBrain for full report
+        </button>
+      </div>
+    );
+  }
+
+  // A committed raster remains valid for display and pixel sampling even when
+  // the backend denies certified interpretation for the inspector role.
+  if (!isModeAuthorizedForDiagnosis) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        <PhenologyBadge />
+        <div style={{
+          padding: "16px",
+          borderRadius: "10px",
+          background: "rgba(245,158,11,0.08)",
+          border: "1px solid rgba(245,158,11,0.22)",
+          display: "flex",
+          flexDirection: "column",
+          gap: "8px",
+          alignItems: "center",
+          textAlign: "center",
+        }}>
+          <div style={{ fontSize: "22px", lineHeight: 1 }}>🔎</div>
+          <div style={{ fontSize: "12px", fontWeight: 700, color: "#fbbf24" }}>Certified diagnostic interpretation unavailable</div>
+          <div style={{ fontSize: "11px", color: "#94a3b8", lineHeight: 1.5 }}>
+            The scouting raster is committed and remains visible. Pixel values may be sampled as scouting hints,
+            but diagnostic classes, management cards, localized prescriptions, and certified interpretation are withheld.
+            Reason: {hasCurrentAuthorizationContract ? "inspector authorization missing" : "authorization contract unavailable"}.
+          </div>
+        </div>
+        <button onClick={() => onAskBrain("The committed raster is available for scouting, but certified inspector interpretation is not authorized. Explain the visible evidence as a scouting signal only, without diagnosis, localized prescription, or management claims.")}
+          style={{ width: "100%", padding: "10px", borderRadius: "10px", border: "none", background: "linear-gradient(135deg, rgba(99,102,241,0.15), rgba(139,92,246,0.15))", color: "#a5b4fc", fontSize: "12px", fontWeight: 700, cursor: "pointer", transition: "all 0.15s" }}>
+          🧠 Ask AgriBrain for scouting context
         </button>
       </div>
     );

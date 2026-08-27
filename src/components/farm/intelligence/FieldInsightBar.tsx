@@ -136,6 +136,11 @@ export default function FieldInsightBar({
         let guidanceWhy = l10.fallbackGuidance.why;
         let guidanceStep = l10.fallbackGuidance.recommended_next_step;
         let guidanceBasis = l10.fallbackGuidance.data_basis;
+        const separateGuidance = l10.fallbackGuidance.guidance_relation === "separate_operational_surface";
+        const guidanceSurfaceLabel = String(l10.fallbackGuidance.guidance_surface_type || "plot-level indicator")
+          .replace(/_/g, " ").toLowerCase();
+        const displayedSurfaceLabel = String(l10.fallbackGuidance.displayed_surface_type || "displayed raster")
+          .replace(/_/g, " ").toLowerCase();
         
         if (activeMode === "water_stress" && data) {
           const waterSurf = data.surfaces?.find(s => s.type === "WATER_STRESS_PROB");
@@ -158,8 +163,15 @@ export default function FieldInsightBar({
         <div className="flex items-center gap-4">
           <div className="flex flex-col max-w-[450px] min-w-0" dir="ltr">
             <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400 mb-0.5 text-left">
-              {l10.fallbackGuidance.action_mode.replace(/_/g, " ")} • {guidanceBasis.replace(/_/g, " ")}
+              {separateGuidance
+                ? `Operational guidance • ${guidanceSurfaceLabel}`
+                : `${l10.fallbackGuidance.action_mode.replace(/_/g, " ")} • ${guidanceBasis.replace(/_/g, " ")}`}
             </span>
+            {separateGuidance && (
+              <span className="text-[9px] text-cyan-300/80 text-left">
+                Displayed scouting raster: {displayedSurfaceLabel}
+              </span>
+            )}
             <p className="text-sm font-medium text-white/90 truncate text-left w-full" title={guidanceWhy}>
               {guidanceWhy}
             </p>

@@ -173,7 +173,7 @@ class AnomalyDetector:
                     category="vegetation", metric="ndvi",
                     current_value=ndvi,
                     expected_range=(0.3, 0.8),
-                    message=f"Low NDVI ({ndvi}). Below healthy crop threshold for this stage",
+                    message=f"Low NDVI ({ndvi}). Below a generic vegetation reference range; current phenology is not implied",
                     recommendation="Monitor closely. Check irrigation and nutrient status",
                     timestamp=now, confidence=0.8
                 ))

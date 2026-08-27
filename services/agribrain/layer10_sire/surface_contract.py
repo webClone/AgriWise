@@ -10,10 +10,10 @@ from typing import Any, Mapping, Tuple
 
 
 # Old entries did not bind publication authority or scientific run identity.
-SURFACES_SCHEMA_VERSION = "v924_bc10_21r5_publication_authority_v1"
+SURFACES_SCHEMA_VERSION = "v925_bc10_24r5_phenology_authority_v2"
 
 # Render authorization contract version — must be present and non-empty on every cached payload.
-RENDER_AUTHORIZATION_VERSION = "v924_bc10_18_render_auth_v1"
+RENDER_AUTHORIZATION_VERSION = "v924_bc10_22r5_render_identity_v1"
 
 RENDER_POLICIES = ("satellite", "experimental", "asmae_diagnostic", "hybrid")
 RENDER_MODES = (
@@ -63,6 +63,105 @@ def _non_empty_mapping(value: Any) -> bool:
     return isinstance(value, Mapping) and bool(value)
 
 
+def _enum_value(value: Any) -> Any:
+    return value.value if hasattr(value, "value") else value
+
+
+def _grid_spec_dict(value: Any) -> Any:
+    """Return a JSON-safe grid specification without importing schema types."""
+    if value is None or isinstance(value, Mapping):
+        return dict(value) if isinstance(value, Mapping) else None
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    fields = ("crs", "transform", "width", "height", "bounds", "resolution")
+    result = {
+        name: getattr(value, name)
+        for name in fields
+        if getattr(value, name, None) is not None
+    }
+    return result or None
+
+
+def _surface_value(surface: Any, provenance: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        value = _field(surface, name, None)
+        if value is not None:
+            return value
+    for name in names:
+        value = provenance.get(name)
+        if value is not None:
+            return value
+    return None
+
+
+def serialize_surface_artifact(surface: Any) -> dict:
+    """Serialize one surface with mandatory immutable artifact identity.
+
+    This is the sole serializer used by both normal Layer 10 responses and
+    canonical ASMAE reintegration. Missing identity is a producer error; a
+    consumer must never derive it from semantic type, ordering, or provenance.
+    """
+    surface_id = str(_field(surface, "surface_id", "") or "").strip()
+    if not surface_id:
+        raise ValueError("Layer 10 surface is missing mandatory surface_id")
+    semantic_type = str(_enum_value(_field(surface, "semantic_type", "")) or "").strip()
+    if not semantic_type:
+        raise ValueError(f"Layer 10 surface {surface_id!r} is missing semantic_type")
+    provenance = _field(surface, "provenance", {}) or {}
+    if not isinstance(provenance, Mapping):
+        raise ValueError(f"Layer 10 surface {surface_id!r} provenance is not a mapping")
+    surface_role = _surface_value(surface, provenance, "surface_role", "surfaceRole")
+    if not surface_role:
+        surface_role = (
+            "render_dependency"
+            if semantic_type in {
+                "OBSERVED_DATA_MASK_NDVI",
+                "GAP_FILL_MASK_NDVI",
+                "VALID_DATA_MASK_NDVI",
+            }
+            else "agronomic_surface"
+        )
+    return {
+        "surface_id": surface_id,
+        "type": semantic_type,
+        "semantic_type": semantic_type,
+        "values": _field(surface, "values", []) or [],
+        "grounding_class": _field(surface, "grounding_class", None) or "UNIFORM",
+        "raster_basis": list(_field(surface, "raster_basis", []) or []),
+        "observed_ratio": float(_field(surface, "observed_ratio", 0.0) or 0.0),
+        "units": _field(surface, "units", "") or "",
+        "render_range": list(_field(surface, "render_range", [0, 1]) or [0, 1]),
+        "palette_id": _enum_value(_field(surface, "palette_id", "viridis")),
+        "source_layers": list(_field(surface, "source_layers", []) or []),
+        "provenance": dict(provenance),
+        "grid_spec": _grid_spec_dict(_field(surface, "grid_spec", None)),
+        "render_kind": _surface_value(surface, provenance, "render_kind", "renderKind"),
+        "display_level": _surface_value(surface, provenance, "display_level", "displayLevel"),
+        "display_grid_spec": _grid_spec_dict(
+            _surface_value(surface, provenance, "display_grid_spec", "displayGridSpec")
+        ),
+        "source_grid_spec": _grid_spec_dict(
+            _surface_value(surface, provenance, "source_grid_spec", "sourceGridSpec")
+        ),
+        "source_reality": _surface_value(surface, provenance, "source_reality", "sourceReality"),
+        "diagnostic_only": _surface_value(surface, provenance, "diagnostic_only", "diagnosticOnly"),
+        "state_update_allowed": _surface_value(surface, provenance, "state_update_allowed", "stateUpdateAllowed"),
+        "prescription_driver_allowed": _surface_value(
+            surface, provenance, "prescription_driver_allowed", "prescriptionDriverAllowed"
+        ),
+        "confidence": _surface_value(surface, provenance, "confidence"),
+        "uncertainty": _surface_value(surface, provenance, "uncertainty"),
+        "authority_block_reason": _surface_value(
+            surface, provenance, "authority_block_reason", "authorityBlockReason"
+        ),
+        "surface_role": surface_role,
+        "grid_ref": _field(surface, "grid_ref", None),
+        "cog_ref": _field(surface, "cog_ref", None),
+        "tile_ref": _field(surface, "tile_ref", None),
+        "stac_item_ref": _field(surface, "stac_item_ref", None),
+    }
+
+
 def classify_surface_publication(payload: Any) -> Tuple[str, str]:
     """Derive status solely from the publication envelope.
 
@@ -86,6 +185,14 @@ def classify_surface_publication(payload: Any) -> Tuple[str, str]:
     if not isinstance(surfaces, (list, tuple)):
         return PublicationStatus.INVALID_PUBLICATION.value, "surfaces_not_a_sequence"
     has_surfaces = bool(surfaces)
+    surface_ids = []
+    for surface in surfaces:
+        surface_id = str(_field(surface, "surface_id", "") or "").strip()
+        if not surface_id:
+            return PublicationStatus.INVALID_PUBLICATION.value, "surface_id_missing"
+        surface_ids.append(surface_id)
+    if len(surface_ids) != len(set(surface_ids)):
+        return PublicationStatus.INVALID_PUBLICATION.value, "surface_id_duplicate"
 
     quality = _field(payload, "quality", None)
     if quality is None:
@@ -157,12 +264,47 @@ def classify_surface_publication(payload: Any) -> Tuple[str, str]:
         return PublicationStatus.INVALID_PUBLICATION.value, "surface_schema_version_invalid"
 
     demotion = _field(payload, "publication_demotion", {}) or {}
+    comp_failures = _field(quality, "component_failures", []) or []
+    degradation_codes = _field(quality, "degradation_codes", []) or []
+    phenology_context = _field(payload, "phenology_context", {}) or {}
+    resolved_crop_stage = str(
+        _field(payload, "resolved_crop_stage", "")
+        or _field(phenology_context, "resolved_crop_stage", "")
+        or ""
+    ).strip().upper()
+    # UNKNOWN is a valid, truthful publication state.  NDVI or a declared crop
+    # must never force a phenology inference.  Conversely, a known stage must
+    # carry the canonical Layer-2 receipt and its authority.
+    if resolved_crop_stage not in {"", "UNKNOWN", "UNDEFINED"}:
+        phenology_source = str(_field(phenology_context, "phenology_source", ""))
+        phenology_authority = str(
+            _field(phenology_context, "phenology_authority", "")
+            or _field(phenology_context, "phenology_evidence_class", "")
+        ).lower()
+        phenology_hash = str(
+            _field(phenology_context, "phenology_posterior_hash", "")
+        ).lower()
+        if (
+            phenology_source != "layer2_canonical_phenology"
+            or phenology_authority not in {"diagnostic", "calibrated"}
+            or len(phenology_hash) != 64
+            or any(ch not in "0123456789abcdef" for ch in phenology_hash)
+            or _field(phenology_context, "phenology_receipt_valid", True) is not True
+        ):
+            return PublicationStatus.INVALID_PUBLICATION.value, "phenology_receipt_invalid"
+    has_materialization_failure = any(
+        (isinstance(f, dict) and f.get("component") == "asmae_spatial_materialization")
+        or (hasattr(f, "component") and getattr(f, "component") == "asmae_spatial_materialization")
+        for f in comp_failures
+    ) or "ASMAE_SURFACE_MATERIALIZATION_FAILED" in degradation_codes
+
     degraded = (
         terminal_no_data
         or explicit_state == "degraded"
         or _field(payload, "placeholder_only", False) is True
         or degradation not in {"", "NORMAL"}
         or _field(demotion, "applied", False) is True
+        or has_materialization_failure
     )
     return (
         PublicationStatus.VALID_DEGRADED.value

@@ -11,13 +11,19 @@ Modules:
   - crop_feature_vector: Unified feature vector assembly
 """
 
-from .crop_feature_vector import CropFeatureVector, extract_crop_features, plot_observations_to_crop_feature_input
+from .crop_feature_vector import (
+    CropFeatureVector,
+    crop_feature_transform_manifest,
+    extract_crop_features,
+    plot_observations_to_crop_feature_input,
+)
 from .phenology_features import PhenologyFeatures, extract_phenology_features
 from .red_edge_features import RedEdgeFeatures, extract_red_edge_features
 from .sar_temporal_features import SARTemporalFeatures, extract_sar_temporal_features
 
 __all__ = [
-    "CropFeatureVector", "extract_crop_features", "plot_observations_to_crop_feature_input",
+    "CropFeatureVector", "crop_feature_transform_manifest", "extract_crop_features",
+    "plot_observations_to_crop_feature_input",
     "PhenologyFeatures", "extract_phenology_features",
     "RedEdgeFeatures", "extract_red_edge_features",
     "SARTemporalFeatures", "extract_sar_temporal_features",

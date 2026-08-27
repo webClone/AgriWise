@@ -7,12 +7,12 @@
  * (same style as AddEvidenceModal) showing crop intelligence results.
  *
  * Features:
- *  - Crop Likelihood Engine: calibrated probabilities, inference modes
+ *  - Canonical crop identity: declarations, uncalibrated group support, abstention
  *  - Crop Suitability Engine: rainfed/irrigated rankings
- *  - Ambiguity detection and hierarchical crop groups
- *  - "Try Again" to re-run detection
+ *  - Ambiguity disclosure and hierarchical crop groups
+ *  - "Refresh" to reload the canonical posterior
  *  - "Declare Manually" to type a custom crop name
- *  - Confirm top candidate or pick from list
+ *  - Declare a candidate without inventing a planting date
  */
 
 import { useState, useCallback, useEffect } from "react";
@@ -38,6 +38,11 @@ import {
   Mountain,
   HelpCircle,
 } from "lucide-react";
+import {
+  buildCropLabelConfirmationPayload,
+  getCropCandidateRankingShare,
+  humanizeCropAuthority,
+} from "@/lib/agribrain/crop-identity-contract.mjs";
 
 interface CropCandidate {
   code: string;
@@ -45,8 +50,7 @@ interface CropCandidate {
   name_ar: string;
   architecture: string;
   score: number;
-  softmax_candidate_share?: number | null;  // v5.1: ranking share (NOT probability)
-  calibrated_probability?: number | null;   // DEPRECATED — v5.0 compat alias
+  ranking_share?: number | null;          // Ranking diagnostic, NOT probability
   crop_group?: string;
   data_quality_tier?: string;
   breakdown?: {
@@ -58,9 +62,43 @@ interface CropCandidate {
   };
 }
 
-/** Backward-compatible accessor: reads v5.1 key, falls back to deprecated v5.0 key */
-function getCandidateShare(c: CropCandidate): number | null {
-  return c.softmax_candidate_share ?? c.calibrated_probability ?? null;
+interface DeclaredCropIdentity {
+  code: string;
+  name: string;
+  name_ar: string;
+  architecture: string;
+}
+
+interface EoGroupSupport {
+  available: boolean;
+  code: string | null;
+  label: string | null;
+  ranking_share: number | null;
+  calibrated: false;
+  calibration_status: string;
+  deepest_supported_level: string;
+  status?: string;
+  source_class?: string | null;
+  admitted_physical_acquisition_count?: number;
+  admitted_ndvi_count?: number;
+  context_features_may_be_included?: boolean;
+}
+
+interface ContextConditionedGroupRanking {
+  available: boolean;
+  code: string | null;
+  label: string | null;
+  ranking_share: number | null;
+  calibrated: false;
+  includes_registry_declaration: boolean;
+  includes_temporal_prior: boolean;
+  role: string;
+}
+
+interface SpeciesConfirmation {
+  available: boolean;
+  code: string | null;
+  reason: string;
 }
 
 interface AmbiguityInfo {
@@ -121,27 +159,26 @@ const BREAKDOWN_METRICS = [
 
 export default function CropIdentityBanner({
   plotId,
-  farmId,
-  currentCropCode,
-  currentCropName,
   onCropDeclared,
 }: CropIdentityBannerProps) {
   const [state, setState] = useState<"idle" | "detecting" | "detected" | "declaring">("idle");
   const [candidates, setCandidates] = useState<CropCandidate[]>([]);
-  const [topCrop, setTopCrop] = useState("");
-  const [confidence, setConfidence] = useState(0);
-  const [confidenceLabel, setCLabel] = useState("");
-  const [totalEvaluated, setTotalEval] = useState(0);
   const [isOpen, setIsOpen] = useState(false);
   const [showBreakdown, setShowBreakdown] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [manualCrop, setManualCrop] = useState("");
   const [error, setError] = useState("");
   const [mounted, setMounted] = useState(false);
-  // Crop Intelligence v5.0 state
-  const [inferenceMode, setInferenceMode] = useState("");
+  // Canonical crop-identity authority state
   const [evidenceStrength, setEvidenceStrength] = useState("");
-  const [topGroup, setTopGroup] = useState("");
+  const [evidenceQualityScore, setEvidenceQualityScore] = useState<number | null>(null);
+  const [identityAuthority, setIdentityAuthority] = useState("UNKNOWN");
+  const [declaredCrop, setDeclaredCrop] = useState<DeclaredCropIdentity | null>(null);
+  const [groupSupport, setGroupSupport] = useState<EoGroupSupport | null>(null);
+  const [conditionedGroupRanking, setConditionedGroupRanking] = useState<ContextConditionedGroupRanking | null>(null);
+  const [speciesConfirmation, setSpeciesConfirmation] = useState<SpeciesConfirmation | null>(null);
+  const [identitySummary, setIdentitySummary] = useState("");
+  const [confirmationNote, setConfirmationNote] = useState("");
   const [ambiguity, setAmbiguity] = useState<AmbiguityInfo>({ is_ambiguous: false, between: [], reason: "" });
   const [recommendation, setRecommendation] = useState("");
   // Suitability state
@@ -150,29 +187,19 @@ export default function CropIdentityBanner({
   const [suitability, setSuitability] = useState<SuitabilityResult | null>(null);
   const [suitabilityTab, setSuitabilityTab] = useState<"rainfed" | "irrigated">("rainfed");
 
-  const [userRole, setUserRole] = useState<string>("farmer");
 
   useEffect(() => {
     setMounted(true);
-    fetch("/api/auth/me")
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.authenticated && data.role) {
-          setUserRole(data.role);
-        }
-      })
-      .catch((e) => console.error("Error fetching user role", e));
   }, []);
 
-  const hasCrop = !!currentCropCode && currentCropCode !== "No Crop" && currentCropCode !== "unknown";
-
-  // Auto-detect on mount if no crop declared
+  // Load the canonical posterior for every plot.  A registry declaration must
+  // still be shown separately from EO group support and species confirmation.
   useEffect(() => {
-    if (!hasCrop && plotId && state === "idle") {
+    if (plotId && state === "idle") {
       runDetection();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasCrop, plotId]);
+  }, [plotId]);
 
   const runDetection = useCallback(async () => {
     setState("detecting");
@@ -190,56 +217,70 @@ export default function CropIdentityBanner({
         return;
       }
       setCandidates(data.candidates || []);
-      setTopCrop(data.top_crop || "unknown");
-      setConfidence(data.top_confidence || 0);
-      setCLabel(data.confidence_label || "UNKNOWN");
-      setTotalEval(data.total_crops_evaluated || 0);
-      // Crop Intelligence v5.0 fields
-      setInferenceMode(data.inference_mode || "prior_only");
-      setEvidenceStrength(data.evidence_strength || "LOW");
-      setTopGroup(data.top_group || "unknown");
+      const qualityScore = Number(data.evidence_quality?.score);
+      const finiteQuality = Number.isFinite(qualityScore) ? qualityScore : null;
+      setEvidenceQualityScore(finiteQuality);
+      setEvidenceStrength(
+        finiteQuality == null ? "UNAVAILABLE"
+          : finiteQuality >= 0.70 ? "HIGH"
+          : finiteQuality >= 0.35 ? "MEDIUM"
+          : "LOW",
+      );
+      setIdentityAuthority(data.identity_authority || data.authority || "UNKNOWN");
+      setDeclaredCrop(data.declared_crop || null);
+      setGroupSupport(data.eo_group_support || null);
+      setConditionedGroupRanking(data.context_conditioned_group_ranking || null);
+      setSpeciesConfirmation(data.independent_species_confirmation || null);
+      setIdentitySummary(data.identity_summary || "");
       setAmbiguity(data.ambiguity || { is_ambiguous: false, between: [], reason: "" });
       setRecommendation(data.recommendation || "");
       setState("detected");
     } catch {
-      setError("Detection failed — check connection");
+      setError("Crop evidence could not be loaded — check connection");
       setState("idle");
     }
   }, [plotId]);
 
   const acceptCrop = useCallback(async (cropCode: string) => {
     setState("declaring");
+    setConfirmationNote("");
     try {
-      const source = userRole === "admin" || userRole === "agronomist" ? "admin_verified" : "farmer_confirmed";
-      
-      try {
-        await fetch("/api/agribrain/crop-label", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            plotId,
-            cropCode: cropCode.toLowerCase().replace(/\s+/g, '_'),
-            labelSource: source,
-            plantingDate: new Date().toISOString().split('T')[0],
-            synthetic: false
-          })
-        });
-      } catch (err) {
-        console.warn("Best effort label creation failed:", err);
-      }
-
-      await fetch(`/api/plots/${plotId}/cycle`, {
+      const payload = buildCropLabelConfirmationPayload({
+        plotId,
+        cropCode,
+      });
+      const response = await fetch("/api/agribrain/crop-label", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cropName: cropCode, startDate: new Date().toISOString() }),
+        body: JSON.stringify(payload),
       });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || result.success === false) {
+        throw new Error(result.error || "Crop identity confirmation failed");
+      }
+
+      const matched = candidates.find((candidate) => candidate.code === payload.cropCode);
+      setDeclaredCrop({
+        code: payload.cropCode,
+        name: matched?.name || cropCode.replace(/_/g, " "),
+        name_ar: matched?.name_ar || "",
+        architecture: matched?.architecture || "unknown",
+      });
+      setIdentityAuthority("FARMER_CONFIRMED");
+      setConfirmationNote(
+        "Crop identity saved. Planting date remains unknown until you provide it explicitly.",
+      );
       onCropDeclared?.();
-      window.location.reload();
-    } catch {
-      setError("Failed to set crop");
+      setState("detected");
+    } catch (confirmationError) {
+      setError(
+        confirmationError instanceof Error
+          ? confirmationError.message
+          : "Failed to set crop",
+      );
       setState("detected");
     }
-  }, [plotId, onCropDeclared, userRole]);
+  }, [candidates, plotId, onCropDeclared]);
 
   const handleManualSubmit = useCallback(() => {
     if (manualCrop.trim()) {
@@ -271,14 +312,12 @@ export default function CropIdentityBanner({
     setSuitabilityLoading(false);
   }, [plotId, suitability, suitabilityLoading]);
 
-  // Note: removed early return when hasCrop — FAB is always visible so users
-  // can re-detect or update their crop. Auto-detect on mount still only fires
-  // when no crop is declared (line 104).
+  // The FAB remains available for both declared and undeclared plots.
 
   const isDetecting = state === "detecting";
-  const isDetected = state === "detected" && candidates.length > 0;
+  const isDetected = state === "detected" && (candidates.length > 0 || declaredCrop !== null);
   const top = isDetected ? candidates[0] : null;
-  const confColor = confidenceLabel === "HIGH" ? "#10b981" : confidenceLabel === "MODERATE" ? "#f59e0b" : "#ef4444";
+  const confColor = speciesConfirmation?.available ? "#10b981" : declaredCrop ? "#818cf8" : "#f59e0b";
 
   // ── Modal Content (portalled to body) ─────────────────────────────
   const modalContent = (
@@ -297,7 +336,7 @@ export default function CropIdentityBanner({
             </div>
             <div>
               <h2 className="text-lg font-bold text-white">Crop Intelligence</h2>
-              <p className="text-xs text-slate-400 mt-0.5">Scientific crop likelihood & suitability analysis</p>
+              <p className="text-xs text-slate-400 mt-0.5">Canonical crop identity and suitability evidence</p>
             </div>
           </div>
           <button onClick={() => setIsOpen(false)} className="p-2 bg-slate-800 rounded-full text-slate-400 hover:text-white transition-colors">
@@ -315,8 +354,8 @@ export default function CropIdentityBanner({
                 <Loader2 className="w-8 h-8 text-indigo-400 animate-spin" />
               </div>
               <div className="text-center">
-                <p className="text-sm font-semibold text-white">Analyzing satellite data…</p>
-                <p className="text-xs text-slate-400 mt-1">Scoring {totalEvaluated || 212} crop types against NDVI, SAR, phenology & climate</p>
+                <p className="text-sm font-semibold text-white">Loading canonical crop evidence…</p>
+                <p className="text-xs text-slate-400 mt-1">Reading the latest published crop posterior; no live species scoring is performed.</p>
               </div>
             </div>
           )}
@@ -328,9 +367,9 @@ export default function CropIdentityBanner({
                 <AlertTriangle className="w-8 h-8 text-amber-400" />
               </div>
               <div className="text-center">
-                <p className="text-sm font-semibold text-white">No crop declared for this plot</p>
+                <p className="text-sm font-semibold text-white">Crop evidence unavailable</p>
                 <p className="text-xs text-slate-400 mt-1 max-w-[280px]">
-                  {error || "The pipeline needs a crop type for accurate analysis. Detect from satellite data or declare manually."}
+                  {error || "No canonical crop posterior is available yet. Run plot intelligence or declare the crop manually."}
                 </p>
               </div>
               <div className="flex gap-3 mt-2">
@@ -339,7 +378,7 @@ export default function CropIdentityBanner({
                   className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold rounded-xl flex items-center gap-2 shadow-lg shadow-indigo-500/20 transition-all"
                 >
                   <Search className="w-4 h-4" />
-                  Run Crop Intelligence
+                  Refresh Crop Evidence
                 </button>
                 <button
                   onClick={() => setShowManual(true)}
@@ -352,6 +391,86 @@ export default function CropIdentityBanner({
             </div>
           )}
 
+          {/* Declaration, EO support and species confirmation are distinct
+              authority claims.  Do not collapse them into one crop score. */}
+          {state === "detected" && (declaredCrop || groupSupport || conditionedGroupRanking || speciesConfirmation) && (
+            <div className="space-y-2.5">
+              <div className="p-3 rounded-xl border border-indigo-500/20 bg-indigo-500/5">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-300">
+                  Registry / confirmation authority
+                </p>
+                {declaredCrop ? (
+                  <>
+                    <p className="text-sm font-bold text-white mt-1">
+                      {declaredCrop.name}
+                      {declaredCrop.name_ar ? (
+                        <span className="text-slate-400 font-normal"> · {declaredCrop.name_ar}</span>
+                      ) : null}
+                    </p>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      {humanizeCropAuthority(identityAuthority)}. This is not an independent satellite species detection.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-400 mt-1">No crop species is declared for this plot.</p>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div className="p-3 rounded-xl border border-amber-500/20 bg-amber-500/5">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-amber-300">EO group support</p>
+                  <p className="text-xs font-semibold text-white mt-1">
+                    {groupSupport?.available && groupSupport.label ? groupSupport.label : "Unavailable"}
+                  </p>
+                  <p className="text-[9px] text-slate-500 mt-1">
+                    {groupSupport?.available && groupSupport.ranking_share != null
+                      ? `${(groupSupport.ranking_share * 100).toFixed(1)}% EO-informed model share · ${groupSupport.admitted_physical_acquisition_count || 0} physical acquisitions`
+                      : "No independent group support from admitted physical observations"}
+                  </p>
+                </div>
+                <div className="p-3 rounded-xl border border-slate-600/30 bg-slate-800/30">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-300">Species confirmation</p>
+                  <p className={`text-xs font-semibold mt-1 ${speciesConfirmation?.available ? "text-emerald-400" : "text-amber-400"}`}>
+                    {speciesConfirmation?.available && speciesConfirmation.code
+                      ? speciesConfirmation.code.replaceAll("_", " ")
+                      : "Not available"}
+                  </p>
+                  <p className="text-[9px] text-slate-500 mt-1">
+                    {speciesConfirmation?.reason || "No validated species posterior is published."}
+                  </p>
+                </div>
+              </div>
+
+              {conditionedGroupRanking?.available && (
+                <div className="p-3 rounded-xl border border-slate-600/30 bg-slate-800/20">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Context-conditioned pipeline ranking
+                  </p>
+                  <p className="text-xs font-semibold text-slate-200 mt-1">
+                    {conditionedGroupRanking.label || "Unresolved"}
+                    {conditionedGroupRanking.ranking_share != null
+                      ? ` · ${(conditionedGroupRanking.ranking_share * 100).toFixed(1)}%`
+                      : ""}
+                  </p>
+                  <p className="text-[9px] text-slate-500 mt-1">
+                    Used for ASMAE conditioning; not independent EO evidence.
+                    {conditionedGroupRanking.includes_registry_declaration ? " Includes the crop declaration prior." : ""}
+                    {conditionedGroupRanking.includes_temporal_prior ? " Includes a previous-cycle-bounded belief prior." : ""}
+                  </p>
+                </div>
+              )}
+
+              {identitySummary && (
+                <p className="text-[11px] leading-relaxed text-slate-300 px-1">{identitySummary}</p>
+              )}
+              {confirmationNote && (
+                <div className="p-2.5 rounded-lg border border-emerald-500/20 bg-emerald-500/8 text-[10px] text-emerald-300">
+                  {confirmationNote}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* ── DETECTED ──────────────────────── */}
           {isDetected && top && (() => {
             const ArchIcon = ARCH_ICONS[top.architecture] || Sprout;
@@ -359,25 +478,19 @@ export default function CropIdentityBanner({
 
             return (
               <>
-                {/* Inference Mode Badge */}
+                {/* Published-evidence badge */}
                 <div className="flex items-center gap-2 mb-3">
-                  <span className={`text-[10px] font-bold px-2.5 py-1 rounded-lg border ${
-                    inferenceMode === "observed_timeseries" 
-                      ? "text-emerald-400 border-emerald-500/30 bg-emerald-500/10" 
-                      : inferenceMode === "context_only"
-                      ? "text-amber-400 border-amber-500/30 bg-amber-500/10"
-                      : "text-slate-400 border-slate-600/30 bg-slate-700/30"
-                  }`}>
-                    {inferenceMode === "observed_timeseries" ? "🔭 Observed" 
-                     : inferenceMode === "context_only" ? "🌍 Context Only" 
-                     : "📍 Regional Prior"}
+                  <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg border text-slate-300 border-slate-600/30 bg-slate-700/30">
+                    Canonical posterior
                   </span>
                   <span className="text-[10px] text-slate-500">
-                    Evidence: <span className={`font-bold ${
+                    EO evidence: <span className={`font-bold ${
                       evidenceStrength === "HIGH" ? "text-emerald-400" 
                       : evidenceStrength === "MEDIUM" ? "text-amber-400" 
                       : "text-red-400"
-                    }`}>{evidenceStrength}</span>
+                    }`}>
+                      {evidenceStrength}{evidenceQualityScore != null ? ` (${evidenceQualityScore.toFixed(2)})` : ""}
+                    </span>
                   </span>
                 </div>
 
@@ -388,7 +501,11 @@ export default function CropIdentityBanner({
                   </p>
                 )}
 
-                {/* Top Result Card */}
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500 px-1">
+                  Heuristic species ranking — not an independent confirmation
+                </p>
+
+                {/* Top ranking diagnostic */}
                 <div className="p-4 rounded-xl border border-slate-700/50 bg-slate-800/30">
                   <div className="flex items-center gap-3 mb-3">
                     <div
@@ -402,17 +519,17 @@ export default function CropIdentityBanner({
                         <span className="text-base font-bold" style={{ color: archColor }}>{top.name}</span>
                         {/* Show candidate share when available, ranking score as fallback */}
                         {(() => {
-                          const share = getCandidateShare(top);
+                          const share = getCropCandidateRankingShare(top);
                           return share != null ? (
                             <span
                               className="text-[10px] font-bold px-2 py-0.5 rounded-md border uppercase tracking-wider"
                               style={{ color: confColor, borderColor: `${confColor}44`, background: `${confColor}10` }}
                             >
-                              Candidate share: {(share * 100).toFixed(0)}%
+                              Ranking share: {(share * 100).toFixed(0)}%
                             </span>
                           ) : (
                             <span className="text-[10px] font-bold px-2 py-0.5 rounded-md border text-slate-400 border-slate-600/30 bg-slate-700/30 uppercase tracking-wider">
-                              Regional likelihood
+                              Uncalibrated ranking
                             </span>
                           );
                         })()}
@@ -422,7 +539,7 @@ export default function CropIdentityBanner({
                         {top.crop_group && top.crop_group !== "unknown" && (
                           <> • <span className="text-indigo-400">{top.crop_group.replace(/_/g, ' ')}</span> group</>
                         )}
-                        {' '} • {totalEvaluated} crops evaluated
+                        {' '} • not a calibrated species probability
                       </p>
                       {/* Ranking score as secondary detail */}
                       <p className="text-[10px] text-slate-500 mt-0.5">
@@ -492,7 +609,7 @@ export default function CropIdentityBanner({
                 {/* All Candidates */}
                 <div>
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 block">
-                    Top Candidates
+                    Heuristic species ranking (not calibrated)
                   </label>
                   <div className="space-y-1.5">
                     {candidates.map((c, i) => {
@@ -511,7 +628,7 @@ export default function CropIdentityBanner({
                           </div>
                           {/* Show candidate share bar or ranking score bar */}
                           {(() => {
-                            const share = getCandidateShare(c);
+                            const share = getCropCandidateRankingShare(c);
                             const displayVal = share != null ? share : c.score;
                             const maxVal = share != null ? 1.0 : (candidates[0]?.score || 1);
                             const barPct = (displayVal / maxVal) * 100;
@@ -530,7 +647,7 @@ export default function CropIdentityBanner({
                             onClick={() => acceptCrop(c.code)}
                             className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-slate-700/50 border border-slate-600/30 text-slate-400 hover:bg-emerald-500/15 hover:border-emerald-500/30 hover:text-emerald-400 transition-all opacity-0 group-hover:opacity-100"
                           >
-                            Use
+                            Declare
                           </button>
                         </div>
                       );
@@ -658,14 +775,14 @@ export default function CropIdentityBanner({
                   </AnimatePresence>
                 </div>
 
-                {/* Action buttons: Try Again + Declare Manually */}
+                {/* Action buttons: refresh canonical evidence + manual declaration */}
                 <div className="flex gap-3 pt-1">
                   <button
                     onClick={runDetection}
                     className="flex-1 py-2.5 rounded-xl text-sm font-bold flex items-center justify-center gap-2 bg-slate-800 border border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white transition-all"
                   >
                     <RefreshCw className="w-4 h-4" />
-                    Try Again
+                    Refresh
                   </button>
                   <button
                     onClick={() => setShowManual(!showManual)}
@@ -726,7 +843,7 @@ export default function CropIdentityBanner({
         </div>
 
         {/* Footer */}
-        {(state === "detected" || state === "declaring") && top && (
+        {(state === "detected" || state === "declaring") && top && !declaredCrop && (
           <div className="p-4 border-t border-slate-800 bg-slate-900/50 space-y-2">
             <button
               disabled={state === "declaring"}
@@ -740,9 +857,12 @@ export default function CropIdentityBanner({
               {state === "declaring" ? (
                 <><Loader2 className="w-5 h-5 animate-spin" /> Setting crop…</>
               ) : (
-                <><CheckCircle2 className="w-5 h-5" /> Confirm {top.name}</>
+                <><CheckCircle2 className="w-5 h-5" /> Declare {top.name}</>
               )}
             </button>
+            <p className="text-[10px] text-slate-500 text-center">
+              This records crop identity only. Planting date remains unknown unless you provide it separately.
+            </p>
             <div className="flex gap-2">
               <button
                 disabled={state === "declaring"}

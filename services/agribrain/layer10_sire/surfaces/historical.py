@@ -42,7 +42,9 @@ def generate_historical_surfaces(
         return []
 
     # 1. Fetch metrics from the metrics store
-    from layer05_asmae.history.archive_metrics_store import ArchiveMetricsStore
+    from services.agribrain.layer05_asmae.history.archive_metrics_store import (
+        ArchiveMetricsStore,
+    )
     store = ArchiveMetricsStore()
     
     status = "success"

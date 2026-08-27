@@ -4,7 +4,11 @@ import { BitmapLayer, TextLayer } from "@deck.gl/layers";
 import { MaskExtension } from "@deck.gl/extensions";
 import { SurfaceData } from "@/hooks/useLayer10";
 import { buildPolygonMask } from "../utils/buildPolygonMask";
-import { getRenderAuthorization, isAsmaeSurfaceType } from "@/lib/agribrain/source-policy-display-resolver";
+import { getRenderAuthorization, isAsmaeSurfaceType, isCompositeAdvisorySurface } from "@/lib/agribrain/source-policy-display-resolver";
+import {
+  resolveSurfaceDisplayScale,
+  resolveSurfacePalette,
+} from "@/lib/agribrain/surface-legend-meta.mjs";
 import {
   canMaterializeMask,
   validateSurfaceGrid,
@@ -129,12 +133,18 @@ function createSurfaceImage(
   if (!ctx) return null;
   const imgData = ctx.createImageData(w, h);
   
-  const hexToRgb = (hex: string) => {
-    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-    return result ? {
-      r: parseInt(result[1], 16),
-      g: parseInt(result[2], 16),
-      b: parseInt(result[3], 16)
+  const cssColorToRgb = (color: string) => {
+    const hex = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(color);
+    if (hex) return {
+      r: parseInt(hex[1], 16),
+      g: parseInt(hex[2], 16),
+      b: parseInt(hex[3], 16)
+    };
+    const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(color);
+    return rgb ? {
+      r: Number(rgb[1]),
+      g: Number(rgb[2]),
+      b: Number(rgb[3]),
     } : { r: 0, g: 0, b: 0 };
   };
   
@@ -153,96 +163,30 @@ function createSurfaceImage(
 
   const recognizedMode = layerMode && MODE_RAMPS[layerMode.toLowerCase()] ? layerMode.toLowerCase() : null;
   const safeMode = recognizedMode || "vegetation";
-  const overrideRamp = recognizedMode ? MODE_RAMPS[recognizedMode] : null;
+  // The committed surface contract owns the quantitative direction. Mode
+  // ramps are only a fallback for surfaces without an exact/palette contract.
+  // This prevents water/chlorophyll pixels from contradicting their legend.
+  const committedSurfaceColors = resolveSurfacePalette(surface, null, paletteId || "standard");
+  const overrideRamp = committedSurfaceColors
+    ? null
+    : recognizedMode ? MODE_RAMPS[recognizedMode] : null;
+  const resolvedColors = committedSurfaceColors || colors;
 
-  let cLow = overrideRamp ? { r: overrideRamp.low[0], g: overrideRamp.low[1], b: overrideRamp.low[2] } : hexToRgb(colors?.[0] || "#000000");
-  let cMid = overrideRamp ? { r: overrideRamp.mid[0], g: overrideRamp.mid[1], b: overrideRamp.mid[2] } : hexToRgb(colors?.[1] || "#000000");
-  let cHigh = overrideRamp ? { r: overrideRamp.high[0], g: overrideRamp.high[1], b: overrideRamp.high[2] } : hexToRgb(colors?.[2] || "#000000");
-
-  const isCategorical =
-    surface.type === "RESOLUTION_COVERAGE" ||
-    surface.type === "ZONE_POLICY" ||
-    surface.type === "FALLBACK_REASON" ||
-    surface.type === "GROWTH_STAGE_CLASS" ||
-    (surface as any).semantic_type === "RESOLUTION_COVERAGE" ||
-    (surface as any).semantic_type === "ZONE_POLICY" ||
-    (surface as any).semantic_type === "FALLBACK_REASON" ||
-    (surface as any).semantic_type === "GROWTH_STAGE_CLASS";
-
-  if (!isCategorical && paletteId) {
-    const pId = paletteId.toLowerCase();
-    if (pId === "thermal") {
-      cLow = { r: 255, g: 0, b: 0 };
-      cMid = { r: 255, g: 255, b: 0 };
-      cHigh = { r: 0, g: 204, b: 0 };
-    } else if (pId === "health") {
-      cLow = { r: 217, g: 119, b: 6 };
-      cMid = { r: 253, g: 224, b: 71 };
-      cHigh = { r: 22, g: 163, b: 74 };
-    } else if (pId === "chlorophyll" || pId === "chluoro") {
-      cLow = { r: 20, g: 40, b: 160 };
-      cMid = { r: 40, g: 180, b: 40 };
-      cHigh = { r: 230, g: 230, b: 20 };
-    } else if (pId === "chroma") {
-      cLow = { r: 99, g: 102, b: 241 };
-      cMid = { r: 236, g: 72, b: 153 };
-      cHigh = { r: 234, g: 179, b: 8 };
-    }
-  }
+  let cLow = overrideRamp ? { r: overrideRamp.low[0], g: overrideRamp.low[1], b: overrideRamp.low[2] } : cssColorToRgb(resolvedColors?.[0] || "#000000");
+  let cMid = overrideRamp ? { r: overrideRamp.mid[0], g: overrideRamp.mid[1], b: overrideRamp.mid[2] } : cssColorToRgb(resolvedColors?.[1] || "#000000");
+  let cHigh = overrideRamp ? { r: overrideRamp.high[0], g: overrideRamp.high[1], b: overrideRamp.high[2] } : cssColorToRgb(resolvedColors?.[2] || "#000000");
 
   const materializationGrid = validateSurfaceGrid(surface, plotGeoJson);
   if (!materializationGrid.valid || !materializationGrid.bounds) return null;
   const mask = buildPolygonMask(plotId, w, h, plotGeoJson, materializationGrid.bounds);
 
   const prov = (surface.provenance as any) || {};
-  const isAsmaeDiag = prov.source_class === "asmae_diagnostic" || surface.type?.includes("ASMAE") || surface.semantic_type?.includes("ASMAE");
-  const isExperimentalVisualSurface = surface.type?.includes("EXPERIMENTAL") || surface.semantic_type?.includes("EXPERIMENTAL");
-
-  const isAbsoluteMode = ["vegetation", "canopy"].includes(safeMode);
-  const isDivergingDeviationMode = safeMode === "veg_attention";
-  let [minV, maxV] = surface.render_range || [0, 1];
-  
-  const shouldApplyLocalPercentile =
-    !isAbsoluteMode ||
-    isAsmaeDiag ||
-    isExperimentalVisualSurface;
-
-  if (shouldApplyLocalPercentile) {
-    const validVals: number[] = [];
-    let statPtr = 0;
-    for (let r = 0; r < h; r++) {
-      for (let c = 0; c < w; c++) {
-        const val = valuesToRender[r][c];
-        if (val !== null && val !== undefined && !isNaN(val) && (!mask || mask.data[statPtr] === 1)) {
-          validVals.push(val);
-        }
-        statPtr++;
-      }
-    }
-
-    if (isDivergingDeviationMode) {
-      if (validVals.length > 10) {
-        validVals.sort((a, b) => a - b);
-        const p02 = validVals[Math.floor(validVals.length * 0.02)];
-        const p98 = validVals[Math.floor(validVals.length * 0.98)];
-        const maxAbs = Math.max(Math.abs(p02), Math.abs(p98));
-        minV = -maxAbs;
-        maxV = maxAbs;
-      }
-    } else {
-      if (validVals.length > 10) {
-        validVals.sort((a, b) => a - b);
-        const bottomSlice = isAbsoluteMode ? 0.05 : (detailMode === "expert" ? 0.01 : 0.02);
-        const topSlice = isAbsoluteMode ? 0.95 : (detailMode === "expert" ? 0.99 : 0.98);
-        const pLow = validVals[Math.floor(validVals.length * bottomSlice)];
-        const pHigh = validVals[Math.floor(validVals.length * topSlice)];
-        if (pHigh > pLow) {
-          minV = pLow;
-          maxV = pHigh;
-        }
-      }
-    }
-  }
+  const displayScale = resolveSurfaceDisplayScale(surface, {
+    activeMode: safeMode,
+    detailMode,
+  });
+  const minV = displayScale.min;
+  const maxV = displayScale.max;
 
   const range = maxV - minV === 0 ? 1 : maxV - minV;
   const clamp = (num: number, min: number, max: number) => Math.min(Math.max(num,min),max);
@@ -631,7 +575,7 @@ export function getSemanticSurfaceLayerLayer({
 
   // If backend requires an observed mask, observed_ratio is not sufficient proof.
   // A real aligned binary mask must be present so unobserved cells stay transparent.
-  const isAsmaeDiag = (policy as string) === "asmae_diagnostic" || effectiveRenderKind === "diagnostic_overlay" || isAsmaeSurfaceType(surfaceType);
+  const isAsmaeDiag = (policy as string) === "asmae_diagnostic" || effectiveRenderKind === "diagnostic_overlay" || isAsmaeSurfaceType(surfaceType) || isCompositeAdvisorySurface(surfaceType);
 
   if (!isAsmaeDiag && auth && auth.requiresObservedMask) {
     if (!canMaterializeMask(

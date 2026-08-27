@@ -130,6 +130,48 @@ def normalize_feature_snapshot(fv: Dict, version: str = "6.0.0") -> Dict:
     }
 
 
+def _validate_training_feature_attachment(
+    label: CropLabel,
+    feature_vector: Dict,
+    version: str,
+    crop_model_input_receipt: Optional[Dict],
+) -> Tuple[Dict, Dict, str]:
+    """Return a receipt-bound snapshot or fail closed.
+
+    ``attach_feature_vector`` is the mutable bridge by which an audit label
+    can become a dataset candidate.  It must therefore accept only the exact
+    tensor represented by a hash-verified ``CropModelInputReceipt`` bound to
+    the label namespace and crop cycle.
+    """
+
+    normalized = normalize_feature_snapshot(feature_vector, version)
+    receipt = (
+        dict(crop_model_input_receipt)
+        if isinstance(crop_model_input_receipt, dict)
+        else {}
+    )
+    receipt_hash = str(receipt.get("content_hash") or "").strip()
+    from services.agribrain.app.crop_training_snapshot_authority import (
+        assess_crop_training_snapshot,
+    )
+
+    assessment = assess_crop_training_snapshot(
+        feature_vector_snapshot=normalized,
+        crop_model_input_receipt=receipt,
+        tenant_id=label.tenant_id,
+        farm_id=label.farm_id,
+        plot_id=label.plot_id,
+        crop_cycle_id=label.crop_cycle_id,
+        expected_receipt_hash=receipt_hash,
+    )
+    if not assessment.eligible:
+        raise ValueError(
+            "Feature attachment requires a valid CropModelInputReceipt: "
+            + ",".join(assessment.reasons)
+        )
+    return normalized, receipt, receipt_hash
+
+
 def dates_overlap(
     label_a: CropLabel,
     label_b: CropLabel,
@@ -241,9 +283,14 @@ class LabelStoreBase(abc.ABC):
 
     @abc.abstractmethod
     def attach_feature_vector(
-        self, label_id: str, feature_vector: Dict, version: str = "6.0.0"
+        self,
+        label_id: str,
+        feature_vector: Dict,
+        version: str = "6.0.0",
+        *,
+        crop_model_input_receipt: Optional[Dict] = None,
     ) -> bool:
-        """Attach a CropFeatureVector snapshot to an existing label."""
+        """Attach an exact receipt-bound crop-model tensor to a label."""
 
     @abc.abstractmethod
     def get_label_stats(self) -> Dict:
@@ -377,15 +424,29 @@ class InMemoryLabelStore(LabelStoreBase):
         return True
 
     def attach_feature_vector(
-        self, label_id: str, feature_vector: Dict, version: str = "6.0.0"
+        self,
+        label_id: str,
+        feature_vector: Dict,
+        version: str = "6.0.0",
+        *,
+        crop_model_input_receipt: Optional[Dict] = None,
     ) -> bool:
         label = self._labels.get(label_id)
         if label is None:
             return False
         try:
-            normalized = normalize_feature_snapshot(feature_vector, version)
+            normalized, receipt, receipt_hash = (
+                _validate_training_feature_attachment(
+                    label,
+                    feature_vector,
+                    version,
+                    crop_model_input_receipt,
+                )
+            )
             label.feature_vector_snapshot = normalized
             label.feature_vector_version = normalized["feature_vector_version"]
+            label.crop_model_input_receipt = receipt
+            label.crop_model_input_receipt_hash = receipt_hash
             return True
         except Exception as e:
             import warnings
@@ -424,16 +485,18 @@ class MongoLabelStore(LabelStoreBase):
     def __init__(self, db_uri: Optional[str] = None):
         import os
         from pymongo import MongoClient
+        from pymongo.errors import ConfigurationError
         uri = db_uri or os.environ.get("MONGODB_URI") or os.environ.get("DATABASE_URL", "")
         if not uri:
             raise ValueError("MongoDB URI must be provided or set in environment variables.")
         
         self.client = MongoClient(uri, serverSelectionTimeoutMS=3000)
-        # Parse database name from URI
-        db_name = uri.split("/")[-1].split("?")[0] if "/" in uri else "agriwise"
-        if not db_name or db_name == uri:
-            db_name = "agriwise"
-        self.db = self.client[db_name]
+        # Let PyMongo parse escaped database names and URI query parameters.
+        # A URI without a database remains supported for local development.
+        try:
+            self.db = self.client.get_default_database()
+        except ConfigurationError:
+            self.db = self.client["agriwise"]
         self.collection = self.db["ConfirmedCropLabel"]
 
         # Ensure indexes (matching Prisma and query requirements)
@@ -456,9 +519,14 @@ class MongoLabelStore(LabelStoreBase):
         d = dict(doc)
         if "_id" in d:
             del d["_id"]
-        # Convert BSON plotId ObjectId back to str
-        if "plotId" in d and not isinstance(d["plotId"], str):
-            d["plotId"] = str(d["plotId"])
+        # Convert BSON authority-partition identifiers back to stable strings.
+        for field_name in ("plotId", "farmId", "cropCycleId"):
+            if (
+                field_name in d
+                and d[field_name] is not None
+                and not isinstance(d[field_name], str)
+            ):
+                d[field_name] = str(d[field_name])
         # Convert supersededBy back to str if it's an ObjectId or anything else
         if "supersededBy" in d and d["supersededBy"] is not None and not isinstance(d["supersededBy"], str):
             d["supersededBy"] = str(d["supersededBy"])
@@ -499,15 +567,25 @@ class MongoLabelStore(LabelStoreBase):
                 doc[f] = _parse_date(doc[f])
         doc["updatedAt"] = datetime.now(timezone.utc)
 
-        # Convert plotId to ObjectId (or fallback with warning)
+        # Keep Prisma @db.ObjectId fields BSON-native.
         warnings_list = []
-        try:
-            from bson import ObjectId
-            plot_oid = ObjectId(label.plot_id)
-            doc["plotId"] = plot_oid
-        except Exception:
-            doc["plotId"] = label.plot_id
-            warnings_list.append("plot_id_not_objectid_string_fallback")
+        from bson import ObjectId
+        for field_name, value, warning_name in (
+            ("plotId", label.plot_id, "plot_id_not_objectid_string_fallback"),
+            ("farmId", label.farm_id, "farm_id_not_objectid_string_fallback"),
+            (
+                "cropCycleId",
+                label.crop_cycle_id,
+                "crop_cycle_id_not_objectid_string_fallback",
+            ),
+        ):
+            if value is None:
+                continue
+            try:
+                doc[field_name] = ObjectId(str(value))
+            except Exception:
+                doc[field_name] = str(value)
+                warnings_list.append(warning_name)
 
         self.collection.insert_one(doc)
         if warnings_list:
@@ -570,10 +648,25 @@ class MongoLabelStore(LabelStoreBase):
         return res.modified_count > 0
 
     def attach_feature_vector(
-        self, label_id: str, feature_vector: Dict, version: str = "6.0.0"
+        self,
+        label_id: str,
+        feature_vector: Dict,
+        version: str = "6.0.0",
+        *,
+        crop_model_input_receipt: Optional[Dict] = None,
     ) -> bool:
+        label = self.get_label_by_id(label_id)
+        if label is None:
+            return False
         try:
-            normalized = normalize_feature_snapshot(feature_vector, version)
+            normalized, receipt, receipt_hash = (
+                _validate_training_feature_attachment(
+                    label,
+                    feature_vector,
+                    version,
+                    crop_model_input_receipt,
+                )
+            )
         except Exception as e:
             import warnings
             warnings.warn(f"Feature attachment failed validation: {e}")
@@ -585,6 +678,8 @@ class MongoLabelStore(LabelStoreBase):
                 "$set": {
                     "featureVectorSnapshot": normalized,
                     "featureVectorVersion": normalized["feature_vector_version"],
+                    "cropModelInputReceipt": receipt,
+                    "cropModelInputReceiptHash": receipt_hash,
                     "updatedAt": datetime.now(timezone.utc)
                 }
             }

@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..schema import ASMAESceneRuntime
+from ..scene_admission import scene_quality_admission
 from .mask_builder import build_mask_set
 from .scene_quality import (
     SceneQualityResult,
@@ -88,6 +89,11 @@ def _process_s2_package(
         if os.environ.get("ASMAE_TEST_OVERRIDE") != "true":
             logger.warning("S2 candidate is %s — skipping loader", candidate.reality)
             return None
+
+    admitted, admission_reason, _ = scene_quality_admission(candidate)
+    if not admitted:
+        logger.warning("S2 candidate rejected by shared scene admission: %s", admission_reason)
+        return None
 
     scene_id = candidate.scene_id or ""
     acq_dt = candidate.acquisition_datetime
@@ -414,7 +420,7 @@ def _process_s2_package(
     runtime.provider_orbit_pass = getattr(candidate, "provider_orbit_pass", None)
     runtime.product_binding = getattr(candidate, "product_binding", "unknown")
     runtime.binding_proof = dict(getattr(candidate, "binding_proof", {}) or {})
-    if runtime.production_usable and runtime.product_binding != "exact_catalog_item":
+    if (runtime.production_usable and runtime.product_binding != "exact_catalog_item") or (valid_fraction is not None and valid_fraction <= 0.0) or (cloud_cover is not None and cloud_cover >= 1.0):
         runtime.production_usable = False
         runtime.real_provider_product = False
         runtime.diagnostic_only = True

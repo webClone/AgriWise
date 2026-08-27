@@ -13,13 +13,26 @@ Attribution rules:
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 from .schemas import (
     DataHealthScore,
     EvidenceConflict,
     StressEvidence,
+    StressEvidenceFactory,
     STRESS_TYPES,
+)
+from layer2_contracts.state_contracts import (
+    UncertaintyBudget,
+    StressHypothesisState,
+    CANONICAL_HYPOTHESES,
+)
+from layer2_uncertainty.retrieval_models import (
+    NDMIWaterStressModel,
+    TemperatureThermalStressModel,
+    SalinityECModel,
+    UncertaintyPropagator,
 )
 from layer1_fusion.outputs.asmae_feature_view import (
     get_asmae_state_feature,
@@ -217,13 +230,53 @@ def attribute_stress(
     # -- v3.2: Compound Stress Interaction Model (Mittler 2006) --
     _apply_compound_stress_synergy(stress_items)
 
-    # -- v3.2: Naive Bayes Stress Confidence Fusion --
-    _bayesian_stress_confidence(
+    # -- v3.2: Grouped Tempered Naive Bayes Stress Confidence Fusion --
+    posteriors = _bayesian_stress_confidence(
         stress_items,
         ndmi=ndmi, soil_moisture=soil_moisture, ndvi=ndvi, evi=evi,
         temp_max=temp_max, vpd=vpd, precip=precip, sif=sif,
         conf_ceiling=conf_ceiling,
     )
+
+    # -- Operational UNRESOLVED hypothesis: continuous competing diagnostic state --
+    if posteriors:
+        p_unresolved = posteriors.get("UNRESOLVED", 0.0)
+        has_decline = (ndvi is not None and ndvi < 0.45) or (veg_fraction is not None and veg_fraction < 0.40) or (_fv(vegetation_features, "veg_growth_anomaly") is not None)
+
+        # Case A: No specific stress triggers, absorb unexplained decline
+        if not stress_items and has_decline and p_unresolved >= 0.15:
+            unresolved_sev = round(min(1.0, 0.45 - (ndvi or 0.45) * 0.5 + 0.2), 3)
+            stress_items.append(StressEvidenceFactory.create(
+                stress_id=f"unresolved_{plot_id}_{scope_id or 'plot'}",
+                stress_type="UNRESOLVED",
+                severity=unresolved_sev,
+                confidence=round(min(conf_ceiling, p_unresolved), 3),
+                uncertainty=round(base_uncertainty + conflict_penalty + 0.12, 4),
+                magnitude_uncertainty=round(base_uncertainty + 0.08, 4),
+                spatial_scope=spatial_scope,
+                scope_id=scope_id,
+                primary_driver="unexplained_vegetation_decline",
+                explanation_basis=[
+                    f"Vegetation decline observed (NDVI={ndvi}) without dominant abiotic or biotic driver; "
+                    f"Bayesian posterior P(UNRESOLVED|E)={p_unresolved:.3f}"
+                ],
+                data_health_at_attribution=0.0,
+                diagnostic_only=True,
+                hypothesis_posterior=round(p_unresolved, 3),
+                posterior_status="COMPUTED",
+                stress_magnitude=unresolved_sev,
+                raw_biological_impact=unresolved_sev,
+                normalized_impact=unresolved_sev,
+                flags=["UNRESOLVED_RESIDUAL_DECLINE"],
+            ))
+        # Case B: Stresses exist but high residual uncertainty / competing UNRESOLVED hypothesis
+        elif stress_items and p_unresolved >= 0.30 and any(s.confidence < 0.55 or conflict_penalty > 0.05 for s in stress_items):
+            for s in stress_items:
+                if "HIGH_EPISTEMIC_RESIDUAL" not in s.flags:
+                    s.flags.append("HIGH_EPISTEMIC_RESIDUAL")
+                s.explanation_basis.append(
+                    f"Competing background hypothesis: P(UNRESOLVED|E)={p_unresolved:.3f} indicates substantial unmodeled residual"
+                )
 
     return stress_items
 
@@ -306,16 +359,20 @@ def _assess_water_stress(
     context=None,
 ) -> Optional[StressEvidence]:
     """Low NDMI + low soil moisture + corroborating weather = water stress."""
+    is_anomaly_only = False
     veg_water_anomaly = _fv(water_features, "veg_water_anomaly")
     if ndmi is None and soil_moisture is None and veg_water_anomaly is None:
         return None
 
-    # Check for independent water evidence (excluding the anomaly itself)
+    vpd_diagnostic = _is_diagnostic(water_features, "vpd")
+
+    # Check for independent water evidence (excluding the anomaly itself).
+    # Diagnostic-only VPD and transient surface wetness are not independent
+    # evidence of root-zone water deficit.
     has_independent = (
         (ndmi is not None) or
         (soil_moisture is not None) or
-        (precip is not None and precip < 5.0) or
-        (vpd is not None and vpd > 2.0)
+        (vpd is not None and vpd > 2.0 and not vpd_diagnostic)
     )
 
     severity = 0.0
@@ -376,7 +433,8 @@ def _assess_water_stress(
                 derived_ids.append(did)
         if force_diag:
             is_anomaly_only = True
-        has_independent = True
+        # Preserve surface wetness as context only.  It can coexist with a dry
+        # root zone and therefore cannot corroborate a deficit independently.
 
     # NDMI check
     if ndmi is not None and ndmi < 0.2:
@@ -392,11 +450,10 @@ def _assess_water_stress(
             f"Soil moisture={soil_moisture:.2f} consistent with water deficit"
         )
 
-    # Corroborating: low precipitation
+    # Contextual: low precipitation (contextual evidence, not direct physiological water stress)
     if precip is not None and precip < 5.0:
-        severity += 0.1
         evidence_chain.append(
-            f"Recent precipitation={precip:.1f}mm corroborates dry conditions"
+            f"Precipitation context: recent rainfall={precip:.1f}mm indicates dry meteorological conditions"
         )
 
     # Corroborating: high VPD
@@ -407,7 +464,6 @@ def _assess_water_stress(
         )
 
     # Apply anomaly corroboration rule
-    is_anomaly_only = False
     if veg_water_anomaly is not None:
         if has_independent:
             severity += veg_water_anomaly * 0.15
@@ -451,14 +507,21 @@ def _assess_water_stress(
     if is_anomaly_only:
         confidence = min(confidence, 0.35)
     uncertainty = round(base_unc + conflict_penalty, 4)
-    is_diag = _is_diagnostic(water_features, "ndmi_mean") or _is_diagnostic(water_features, "ndmi") or _is_diagnostic(water_features, "veg_fit_ndmi") or is_anomaly_only
+    is_diag = (
+        _is_diagnostic(water_features, "ndmi_mean")
+        or _is_diagnostic(water_features, "ndmi")
+        or _is_diagnostic(water_features, "veg_fit_ndmi")
+        or (vpd is not None and vpd > 2.0 and vpd_diagnostic)
+        or is_anomaly_only
+    )
 
-    return StressEvidence(
+    return StressEvidenceFactory.create(
         stress_id=f"water_{plot_id}_{scope_id or 'plot'}",
         stress_type="WATER",
         severity=round(severity, 3),
         confidence=round(confidence, 3),
         uncertainty=uncertainty,
+        magnitude_uncertainty=round(math.sqrt(base_unc**2 + conflict_penalty**2 + (0.04 if is_anomaly_only else 0.02)**2), 4),
         spatial_scope=spatial_scope,
         scope_id=scope_id,
         primary_driver="low_ndmi_low_soil_moisture" if soil_moisture is not None else "low_ndmi",
@@ -468,6 +531,7 @@ def _assess_water_stress(
         explanation_basis=evidence_chain,
         data_health_at_attribution=0.0,
         diagnostic_only=is_diag,
+        stress_magnitude=round(severity, 3),
     )
 
 
@@ -520,13 +584,29 @@ def _assess_nutrient_stress(
         if not water_ok:
             return None
 
-    # Check for independent nutrient support
+    # ASMAE Chlorophyll check
+    chlorophyll_confounded = False
+    asmae_chloro = _get_usable_asmae_feature(context, "ASMAE_CHLOROPHYLL")
+    if asmae_chloro is not None and (has_water_stress or has_biotic_confounder):
+        chlorophyll_confounded = True
+
+    # Check for positive nutrient indicators (chlorophyll deficit, chlorosis, patchy growth, or anomaly)
+    has_nutrient_indicator = (
+        (asmae_chloro is not None) or
+        (veg_nutrient_anomaly is not None) or
+        (canopy_uniformity_cv is not None and canopy_uniformity_cv > 0.3) or
+        (evi is not None and evi < 0.22)
+    )
+    if not has_nutrient_indicator:
+        return None
+
     has_independent = (
-        (ndvi is not None and ndvi <= 0.45) or
-        (evi is not None and evi < 0.3) or
+        (asmae_chloro is not None and not chlorophyll_confounded) or
+        (evi is not None and evi < 0.22) or
         (canopy_uniformity_cv is not None and canopy_uniformity_cv > 0.3)
     )
 
+    is_anomaly_only = False
     severity = max(0.0, 0.5 - ndvi) * 2.0 if ndvi is not None else 0.0
     evidence_chain = []
     if ndvi is not None:
@@ -548,9 +628,6 @@ def _assess_nutrient_stress(
     lineage_ids = _collect_lineage_source_ids(veg_features, "veg_fit_ndvi", "veg_fit_lai", "ndvi_mean", "ndvi", "evi_mean", "evi")
     lineage_ids.extend(_collect_lineage_source_ids(water_features, "veg_fit_ndmi", "ndmi_mean", "ndmi"))
 
-    # ASMAE Chlorophyll integration
-    chlorophyll_confounded = False
-    asmae_chloro = _get_usable_asmae_feature(context, "ASMAE_CHLOROPHYLL")
     if asmae_chloro is not None:
         if asmae_chloro.value < 0.45:
             severity += 0.2 + max(0.0, (0.45 - asmae_chloro.value) * 1.5)
@@ -586,7 +663,6 @@ def _assess_nutrient_stress(
         )
 
     # Apply anomaly corroboration
-    is_anomaly_only = False
     if veg_nutrient_anomaly is not None:
         if has_independent:
             severity += veg_nutrient_anomaly * 0.15
@@ -627,12 +703,13 @@ def _assess_nutrient_stress(
     if severity < min_threshold:
         return None
 
-    return StressEvidence(
+    return StressEvidenceFactory.create(
         stress_id=f"nutrient_{plot_id}_{scope_id or 'plot'}",
         stress_type="NUTRIENT",
         severity=round(severity, 3),
         confidence=round(confidence, 3),
         uncertainty=uncertainty,
+        magnitude_uncertainty=round(math.sqrt(base_unc**2 + conflict_penalty**2 + (0.05 if is_anomaly_only else 0.03)**2), 4),
         spatial_scope=spatial_scope,
         scope_id=scope_id,
         primary_driver="low_ndvi_adequate_water",
@@ -643,6 +720,7 @@ def _assess_nutrient_stress(
         data_health_at_attribution=0.0,
         diagnostic_only=water_confounds or chlorophyll_confounded or is_anomaly_only,
         flags=flags,
+        stress_magnitude=round(severity, 3),
     )
 
 
@@ -667,6 +745,8 @@ def _assess_thermal_stress(
         (temp_max is not None and temp_max > 35.0) or
         (vpd is not None and vpd > 3.0)
     )
+
+    is_anomaly_only = False
 
     # Initialize ASMAE thermal
     asmae_thermal = _get_usable_asmae_feature(context, "ASMAE_THERMAL_STRESS")
@@ -699,8 +779,7 @@ def _assess_thermal_stress(
             if force_diag:
                 is_anomaly_only = True
 
-    # Apply anomaly corroboration
-    is_anomaly_only = False
+    # Apply anomaly corroboration (without resetting prior ASMAE authority demotion)
     if veg_thermal_anomaly is not None:
         if has_independent:
             severity += veg_thermal_anomaly * 0.15
@@ -741,12 +820,13 @@ def _assess_thermal_stress(
         confidence = min(confidence, 0.35)
     uncertainty = round(base_unc + conflict_penalty, 4)
 
-    return StressEvidence(
+    return StressEvidenceFactory.create(
         stress_id=f"thermal_{plot_id}_{scope_id or 'plot'}",
         stress_type="THERMAL",
         severity=round(severity, 3),
         confidence=round(confidence, 3),
         uncertainty=uncertainty,
+        magnitude_uncertainty=round(math.sqrt(base_unc**2 + conflict_penalty**2 + (0.04 if is_anomaly_only else 0.02)**2), 4),
         spatial_scope=spatial_scope,
         scope_id=scope_id,
         primary_driver="high_temperature_vpd",
@@ -756,6 +836,7 @@ def _assess_thermal_stress(
         explanation_basis=evidence_chain,
         data_health_at_attribution=0.0,
         diagnostic_only=is_anomaly_only,
+        stress_magnitude=round(severity, 3),
     )
 
 
@@ -803,88 +884,82 @@ def _assess_biotic_stress(
                 f"Inter-row weed ratio={inter_row_weed:.2f} — competition between rows"
             )
 
-    # Standard triggered logic
-    standard_triggered = (ndvi is not None and ndvi <= 0.4 and not has_water_stress and not has_thermal_stress)
-
     # ASMAE Biotic risk checks
     asmae_biotic = _get_usable_asmae_feature(context, "ASMAE_BIOTIC_CONFOUNDER_RISK")
 
-    # Check if we should trigger biotic stress
-    if not standard_triggered and not weed_triggered:
-        # ASMAE alone!
-        if asmae_biotic is not None and asmae_biotic.value > 0.3:
-            # Map value to primary driver name
-            if asmae_biotic.value > 0.7:
-                driver = "biotic_pattern_suspicion"
-            elif asmae_biotic.value >= 0.5:
-                driver = "biotic_scout_priority"
-            else:
-                driver = "biotic_confounder_possible"
+    # Positive biotic evidence check: weed competition or ASMAE pathogen pattern
+    if not weed_triggered and (asmae_biotic is None or asmae_biotic.value <= 0.3):
+        # Absence of abiotic stress does NOT imply biotic stress -> UNRESOLVED/None
+        return None
 
-            severity = round(asmae_biotic.value, 3)
-            confidence = round(asmae_biotic.confidence, 3)
-            uncertainty = round(base_unc + conflict_penalty + 0.1, 4)
-            evidence_chain = [
-                f"ASMAE biotic risk={asmae_biotic.value:.2f} (cautious interpretation: {driver})"
-            ]
-            flags = ["BIOTIC_CONFOUNDER_POSSIBLE", "BIOTIC_SCOUT_PRIORITY", "BIOTIC_PATTERN_SUSPICION"]
-            biotic_derived_ids = _collect_derived_artifact_ids(veg_features, "veg_fit_ndvi", "veg_fit_fvc")
-            lineage_ids = _collect_lineage_source_ids(veg_features, "veg_fit_ndvi", "veg_fit_fvc", "ndvi_mean", "ndvi", "veg_fraction")
-
-            eid, did, force_diag = _asmae_evidence_id(asmae_biotic)
-            ev_ids = []
-            if eid:
-                ev_ids.append(eid)
-            if did:
-                if did not in biotic_derived_ids:
-                    biotic_derived_ids.append(did)
-
-            return StressEvidence(
-                stress_id=f"biotic_{plot_id}_{scope_id or 'plot'}",
-                stress_type="BIOTIC",
-                severity=severity,
-                confidence=confidence,
-                uncertainty=uncertainty,
-                spatial_scope=spatial_scope,
-                scope_id=scope_id,
-                primary_driver=driver,
-                contributing_evidence_ids=ev_ids,
-                derived_artifact_ids=biotic_derived_ids,
-                lineage_source_evidence_ids=lineage_ids,
-                explanation_basis=evidence_chain,
-                data_health_at_attribution=0.0,
-                diagnostic_only=True,
-                flags=flags,
-            )
+    # ASMAE alone!
+    if not weed_triggered and asmae_biotic is not None and asmae_biotic.value > 0.3:
+        if asmae_biotic.value > 0.7:
+            driver = "biotic_pattern_suspicion"
+        elif asmae_biotic.value >= 0.5:
+            driver = "biotic_scout_priority"
         else:
-            return None
+            driver = "biotic_confounder_possible"
 
+        severity = round(asmae_biotic.value, 3)
+        confidence = round(asmae_biotic.confidence, 3)
+        uncertainty = round(base_unc + conflict_penalty + 0.1, 4)
+        evidence_chain = [
+            f"ASMAE biotic risk={asmae_biotic.value:.2f} (cautious interpretation: {driver})"
+        ]
+        flags = ["BIOTIC_CONFOUNDER_POSSIBLE", "BIOTIC_SCOUT_PRIORITY", "BIOTIC_PATTERN_SUSPICION"]
+        biotic_derived_ids = _collect_derived_artifact_ids(veg_features, "veg_fit_ndvi", "veg_fit_fvc")
+        lineage_ids = _collect_lineage_source_ids(veg_features, "veg_fit_ndvi", "veg_fit_fvc", "ndvi_mean", "ndvi", "veg_fraction")
+
+        eid, did, force_diag = _asmae_evidence_id(asmae_biotic)
+        ev_ids = []
+        if eid:
+            ev_ids.append(eid)
+        if did:
+            if did not in biotic_derived_ids:
+                biotic_derived_ids.append(did)
+
+        return StressEvidenceFactory.create(
+            stress_id=f"biotic_{plot_id}_{scope_id or 'plot'}",
+            stress_type="BIOTIC",
+            severity=severity,
+            confidence=confidence,
+            uncertainty=uncertainty,
+            magnitude_uncertainty=round(math.sqrt(base_unc**2 + conflict_penalty**2 + 0.06**2), 4),
+            spatial_scope=spatial_scope,
+            scope_id=scope_id,
+            primary_driver=driver,
+            contributing_evidence_ids=ev_ids,
+            derived_artifact_ids=biotic_derived_ids,
+            lineage_source_evidence_ids=lineage_ids,
+            explanation_basis=evidence_chain,
+            data_health_at_attribution=0.0,
+            diagnostic_only=True,
+            flags=flags,
+            stress_magnitude=round(severity, 3),
+        )
+
+    # Weed-triggered positive evidence
     force_biotic_diag = False
-    severity = max(0.0, 0.4 - ndvi) * 2.0 if ndvi is not None else 0.0
-    evidence_chain = []
-    if ndvi is not None:
-        evidence_chain.append(f"NDVI={ndvi:.2f} indicates vegetation decline")
-    if not weed_triggered:
-        evidence_chain.append("No water or thermal stress detected — biotic cause possible")
-    evidence_ids = _collect_evidence_ids(veg_features, "ndvi_mean", "ndvi", "veg_fit_ndvi")
+    severity = weed_severity
+    evidence_chain = list(weed_evidence)
+    evidence_ids = list(weed_ids)
     biotic_derived_ids = _collect_derived_artifact_ids(veg_features, "veg_fit_ndvi", "veg_fit_fvc")
     lineage_ids = _collect_lineage_source_ids(veg_features, "veg_fit_ndvi", "veg_fit_fvc", "ndvi_mean", "ndvi", "veg_fraction")
 
-    # Merge weed-triggered evidence
-    if weed_triggered:
-        severity += weed_severity
-        evidence_chain.extend(weed_evidence)
-        evidence_ids.extend(weed_ids)
+    if ndvi is not None and ndvi < 0.4:
+        severity += max(0.0, (0.4 - ndvi) * 0.5)
+        evidence_chain.append(f"NDVI={ndvi:.2f} consistent with weed-induced canopy competition")
 
     if evi is not None and evi < 0.25:
-        severity += 0.1
-        evidence_chain.append(f"EVI={evi:.2f} corroborates canopy degradation")
+        severity += 0.05
+        evidence_chain.append(f"EVI={evi:.2f} corroborates canopy competition")
 
     # Add ASMAE biotic risk as supporting evidence if present
     if asmae_biotic is not None:
         severity += asmae_biotic.value * 0.15
         evidence_chain.append(
-            f"ASMAE biotic risk={asmae_biotic.value:.2f} corroborates biotic observations"
+            f"ASMAE biotic risk={asmae_biotic.value:.2f} corroborates weed/biotic observations"
         )
         eid, did, force_diag = _asmae_evidence_id(asmae_biotic)
         if eid:
@@ -897,31 +972,29 @@ def _assess_biotic_stress(
             force_biotic_diag = True
 
     severity = min(1.0, severity)
-    # Weed-triggered biotic stress has higher confidence (direct observation)
-    if weed_triggered:
-        confidence = min(conf_ceiling, 0.45 + 0.08 * len(evidence_chain))
-    else:
-        confidence = min(conf_ceiling, 0.25 + 0.05 * len(evidence_chain))  # lower confidence — exclusion-based
+    confidence = min(conf_ceiling, 0.45 + 0.08 * len(evidence_chain))
     uncertainty = round(base_unc + conflict_penalty + 0.1, 4)
 
     if severity < 0.1:
         return None
 
-    return StressEvidence(
+    return StressEvidenceFactory.create(
         stress_id=f"biotic_{plot_id}_{scope_id or 'plot'}",
         stress_type="BIOTIC",
         severity=round(severity, 3),
         confidence=round(confidence, 3),
         uncertainty=uncertainty,
+        magnitude_uncertainty=round(math.sqrt(base_unc**2 + conflict_penalty**2 + 0.05**2), 4),
         spatial_scope=spatial_scope,
         scope_id=scope_id,
-        primary_driver="weed_pressure_detected" if weed_triggered else "unexplained_vegetation_decline",
+        primary_driver="weed_pressure_detected",
         contributing_evidence_ids=evidence_ids,
         derived_artifact_ids=biotic_derived_ids,
         lineage_source_evidence_ids=lineage_ids,
         explanation_basis=evidence_chain,
         data_health_at_attribution=0.0,
         diagnostic_only=force_biotic_diag,
+        stress_magnitude=round(severity, 3),
     )
 
 
@@ -1011,12 +1084,13 @@ def _assess_photosynthetic_shutdown(
     confidence = min(confidence, 0.70)
     uncertainty = round(base_unc + conflict_penalty + 0.03, 4)
 
-    return StressEvidence(
+    return StressEvidenceFactory.create(
         stress_id=f"photosynthetic_shutdown_{plot_id}_{scope_id or 'plot'}",
         stress_type="PHOTOSYNTHETIC_SHUTDOWN",
         severity=round(severity, 3),
         confidence=round(confidence, 3),
         uncertainty=uncertainty,
+        magnitude_uncertainty=round(math.sqrt(base_unc**2 + conflict_penalty**2 + 0.04**2), 4),
         spatial_scope=spatial_scope,
         scope_id=scope_id,
         primary_driver="sif_drop_ndvi_stable",
@@ -1025,6 +1099,8 @@ def _assess_photosynthetic_shutdown(
         lineage_source_evidence_ids=lineage_ids,
         explanation_basis=evidence_chain,
         data_health_at_attribution=0.0,
+        stress_magnitude=round(severity, 3),
+        biological_impact=round(severity, 3),
     )
 
 
@@ -1115,12 +1191,13 @@ def _assess_mechanical_stress(
     confidence = min(conf_ceiling, 0.40 + 0.08 * len(evidence_chain))
     uncertainty = round(base_unc + conflict_penalty + 0.05, 4)
 
-    return StressEvidence(
+    return StressEvidenceFactory.create(
         stress_id=f"mechanical_{plot_id}_{scope_id or 'plot'}",
         stress_type="MECHANICAL",
         severity=round(severity, 3),
         confidence=round(confidence, 3),
         uncertainty=uncertainty,
+        magnitude_uncertainty=round(math.sqrt(base_unc**2 + conflict_penalty**2 + 0.04**2), 4),
         spatial_scope=spatial_scope,
         scope_id=scope_id,
         primary_driver="row_structural_damage",
@@ -1130,6 +1207,8 @@ def _assess_mechanical_stress(
         explanation_basis=evidence_chain,
         data_health_at_attribution=0.0,
         flags=["DRONE_STRUCTURAL"],
+        stress_magnitude=round(severity, 3),
+        biological_impact=round(severity, 3),
     )
 
 
@@ -1192,26 +1271,27 @@ def _apply_eo_anomaly_corroboration(
         derived_ids = _collect_derived_artifact_ids(vegetation_features, "anomaly_score")
         lineage_ids = _collect_lineage_source_ids(vegetation_features, "anomaly_score")
 
-        stress_items.append(StressEvidence(
-            stress_id=f"eo_anomaly_{plot_id}_{scope_id or 'plot'}",
+        stress_items.append(StressEvidenceFactory.create(
+            stress_id=f"unknown_{plot_id}_{scope_id or 'plot'}",
             stress_type="UNKNOWN",
             severity=round(severity, 3),
             confidence=round(confidence, 3),
             uncertainty=uncertainty,
+            magnitude_uncertainty=round(base_unc + 0.08, 4),
             spatial_scope=spatial_scope,
             scope_id=scope_id,
-            primary_driver="eo_anomaly_detected",
+            primary_driver="eo_foundation_anomaly",
             contributing_evidence_ids=evidence_ids,
             derived_artifact_ids=derived_ids,
             lineage_source_evidence_ids=lineage_ids,
             explanation_basis=[
-                f"EO Foundation Model anomaly_score={anomaly_score:.2f} indicates"
-                " spectral deviation not captured by standard indices",
-                "Anomaly detected in learned embedding space — further investigation"
-                " recommended (crop stress, soil change, or management event)",
+                f"EO Foundation Model anomaly_score={anomaly_score:.2f} indicates "
+                "unattributed spectral anomaly"
             ],
             data_health_at_attribution=0.0,
             flags=["EO_ANOMALY", "REQUIRES_INVESTIGATION"],
+            stress_magnitude=round(severity, 3),
+            biological_impact=round(severity, 3),
         ))
 
 
@@ -1368,12 +1448,13 @@ def _assess_salinity_stress(
     lineage_ids.extend(_collect_lineage_source_ids(water_features, "veg_fit_ndmi", "ndmi_mean", "ndmi"))
     lineage_ids.extend(_collect_lineage_source_ids(vegetation_features, "veg_fit_ndvi", "veg_fit_evi", "ndvi_mean", "ndvi", "evi_mean", "evi"))
 
-    return StressEvidence(
+    return StressEvidenceFactory.create(
         stress_id=f"salinity_{plot_id}_{scope_id or 'plot'}",
         stress_type="SALINITY",
         severity=round(severity, 3),
         confidence=round(confidence, 3),
         uncertainty=uncertainty,
+        magnitude_uncertainty=round(math.sqrt(base_unc**2 + conflict_penalty**2 + (0.06 if diagnostic_only else 0.03)**2), 4),
         spatial_scope=spatial_scope,
         scope_id=scope_id,
         primary_driver="soil_ec_elevated" if soil_ec is not None else "spectral_salinity_signature",
@@ -1384,6 +1465,8 @@ def _assess_salinity_stress(
         data_health_at_attribution=0.0,
         diagnostic_only=diagnostic_only or force_salinity_diag,
         flags=["SALINITY_MENA"] if not (diagnostic_only or force_salinity_diag) else ["SALINITY_MENA", "DIAGNOSTIC_ONLY"],
+        stress_magnitude=round(severity, 3),
+        biological_impact=round(severity, 3),
     )
 
 
@@ -1413,10 +1496,9 @@ def _apply_compound_stress_synergy(
 ) -> None:
     """Apply supra-additive synergy when multiple stresses co-occur.
 
-    When two stress types are present simultaneously, the physiological
-    impact is worse than the sum of individual effects. This function
-    applies severity multipliers based on the Mittler (2006) interaction
-    model and tags each stress with its compound partner.
+    Physiological Principle:
+      - S_k (physical stress magnitude) is UNMUTATED.
+      - Synergy factor β_ij amplifies biological impact I_k.
 
     Modification is in-place on the stress_items list.
     """
@@ -1453,19 +1535,21 @@ def _apply_compound_stress_synergy(
                 target, partner = item_b, item_a
 
             old_severity = target.severity
-            target.severity = min(1.0, round(target.severity * synergy, 3))
             target.compound_synergy_factor = synergy
             target.compound_partner = partner.stress_type
+            # Scale biological impact without modifying physical stress_magnitude
+            target.biological_impact = min(1.0, round(target.stress_magnitude * synergy, 3))
+            target.severity = target.biological_impact  # Backwards compatibility
             target.explanation_basis.append(
                 f"Compound stress synergy: {target.stress_type}+{partner.stress_type} "
-                f"→ severity ×{synergy} (Mittler 2006), "
+                f"→ biological impact ×{synergy} (Mittler 2006), "
                 f"{old_severity:.3f}→{target.severity:.3f}"
             )
             target.flags.append("COMPOUND_STRESS")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# v3.2: Naive Bayes Stress Confidence Fusion
+# v3.2: Grouped Tempered Naive Bayes Stress Confidence Fusion
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # Per-stress-type Gaussian likelihood parameters: (mean, sigma) for each feature
@@ -1502,15 +1586,23 @@ _BAYES_LIKELIHOODS: Dict[str, Dict[str, tuple]] = {
         "temp_max": (28.0, 6.0), "vpd":          (2.0, 1.0),
         "precip": (5.0, 5.0),   "sif":           (0.2, 0.2),
     },
+    # Operational UNRESOLVED hypothesis: ambient background / uncharacterized baseline
+    "UNRESOLVED": {
+        "ndmi":  (0.30, 0.15),  "soil_moisture": (0.25, 0.15),
+        "ndvi":  (0.45, 0.15),  "evi":           (0.30, 0.15),
+        "temp_max": (26.0, 7.0), "vpd":          (1.8, 1.2),
+        "precip": (5.0, 5.0),   "sif":           (0.3, 0.20),
+    },
 }
 
-# Regional priors — MENA arid zone weighting
+# Regional priors — MENA arid zone weighting with operational UNRESOLVED hypothesis
 _BAYES_PRIORS: Dict[str, float] = {
-    "WATER": 0.35,
-    "THERMAL": 0.25,
+    "WATER": 0.28,
+    "THERMAL": 0.20,
     "SALINITY": 0.15,
     "NUTRIENT": 0.15,
     "BIOTIC": 0.10,
+    "UNRESOLVED": 0.12,
 }
 
 
@@ -1533,80 +1625,127 @@ def _bayesian_stress_confidence(
     precip: Optional[float],
     sif: Optional[float],
     conf_ceiling: float,
-) -> None:
-    """Adjust stress confidence using Naive Bayes posterior probabilities.
+) -> Dict[str, float]:
+    """Adjust stress confidence using bidirectional Bayesian posterior probabilities.
 
-    For each existing stress item, compute P(stress_type | observed_features)
-    using Gaussian likelihoods and regional priors. The Bayesian posterior
-    is used to BOOST confidence of well-supported stresses, not to override
-    the rule-based severity.
+    Groups observations into sensor/physical evidence families to prevent
+    spurious probability inflation from collinear optical/weather features.
+
+    Evidence Families:
+      - Optical / Canopy: [ndmi, ndvi, evi] (shared variance factor)
+      - Water State: [soil_moisture, sif]
+      - Atmospheric / Weather: [temp_max, vpd, precip]
 
     Algorithm:
-        P(type | features) ∝ P(type) × Π P(feature_i | type)
-        confidence_new = max(rule_confidence, min(conf_ceiling, bayes_posterior))
+        P(type | features) ∝ P(type) × Π_family P(E_family | type)
+        confidence_new = blend(rule_confidence, bayes_posterior)
 
-    In-place modification of stress_items.
+    Returns:
+        Full posterior distribution dictionary {hypothesis: P(H_k | E)}.
     """
     import math
 
-    # Build observed feature vector (skip None values)
-    observed: Dict[str, float] = {}
+    # Group observed features by evidence family to mitigate conditional dependence
+    families: Dict[str, Dict[str, float]] = {
+        "optical": {},
+        "water_state": {},
+        "weather": {},
+    }
     if ndmi is not None:
-        observed["ndmi"] = ndmi
-    if soil_moisture is not None:
-        observed["soil_moisture"] = soil_moisture
+        families["optical"]["ndmi"] = ndmi
     if ndvi is not None:
-        observed["ndvi"] = ndvi
+        families["optical"]["ndvi"] = ndvi
     if evi is not None:
-        observed["evi"] = evi
-    if temp_max is not None:
-        observed["temp_max"] = temp_max
-    if vpd is not None:
-        observed["vpd"] = vpd
-    if precip is not None:
-        observed["precip"] = precip
+        families["optical"]["evi"] = evi
+
+    if soil_moisture is not None:
+        families["water_state"]["soil_moisture"] = soil_moisture
     if sif is not None:
-        observed["sif"] = sif
+        families["water_state"]["sif"] = sif
 
-    if len(observed) < 3 or not stress_items:
-        return  # Not enough features for meaningful Bayesian update
+    if temp_max is not None:
+        families["weather"]["temp_max"] = temp_max
+    if vpd is not None:
+        families["weather"]["vpd"] = vpd
+    if precip is not None:
+        families["weather"]["precip"] = precip
 
-    # Compute log-posteriors for each stress type
+    total_obs = sum(len(f) for f in families.values())
+    if total_obs < 2:
+        # Default uninformative simplex when observations are sparse
+        default_simplex = {
+            "WATER": 0.15,
+            "THERMAL": 0.15,
+            "NUTRIENT": 0.15,
+            "SALINITY": 0.10,
+            "BIOTIC": 0.15,
+            "UNRESOLVED": 0.30,
+        }
+        for item in stress_items:
+            item.hypothesis_posterior = default_simplex.get(item.stress_type, 0.15)
+            item.posterior_status = "COMPUTED"
+        return default_simplex
+
+    # Compute log-posteriors for each stress type (including UNRESOLVED)
     log_posteriors: Dict[str, float] = {}
     for stress_type, likelihoods in _BAYES_LIKELIHOODS.items():
         prior = _BAYES_PRIORS.get(stress_type, 0.1)
         log_post = math.log(max(prior, 1e-10))
-        for feat_name, feat_val in observed.items():
-            if feat_name in likelihoods:
-                mean, sigma = likelihoods[feat_name]
-                log_post += _gaussian_log_likelihood(feat_val, mean, sigma)
+
+        # Sum family log-likelihoods with conditional-dependence tempering
+        for fam_name, fam_feats in families.items():
+            if not fam_feats:
+                continue
+            fam_ll = 0.0
+            n_in_fam = len(fam_feats)
+            for feat_name, feat_val in fam_feats.items():
+                if feat_name in likelihoods:
+                    mean, sigma = likelihoods[feat_name]
+                    fam_ll += _gaussian_log_likelihood(feat_val, mean, sigma)
+            # Effective sample size scaling for collinear family members (tempered naive Bayes)
+            effective_weight = 1.0 / math.sqrt(n_in_fam)
+            log_post += fam_ll * effective_weight
+
         log_posteriors[stress_type] = log_post
 
-    # Normalize to probabilities via log-sum-exp
-    if not log_posteriors:
-        return
+    # Normalize to probabilities via log-sum-exp to guarantee strict simplex
     max_lp = max(log_posteriors.values())
     exp_sum = sum(math.exp(lp - max_lp) for lp in log_posteriors.values())
     posteriors: Dict[str, float] = {}
-    for stype, lp in log_posteriors.items():
-        posteriors[stype] = math.exp(lp - max_lp) / exp_sum
+    for stype in CANONICAL_HYPOTHESES:
+        lp = log_posteriors.get(stype, -10.0)
+        posteriors[stype] = round(math.exp(lp - max_lp) / exp_sum, 4)
 
-    # Apply to existing stress items
+    # Re-normalize to exact sum 1.0
+    tot = sum(posteriors.values())
+    if tot > 0:
+        posteriors = {k: round(v / tot, 4) for k, v in posteriors.items()}
+
+    # Apply bidirectional update to existing stress items
     for item in stress_items:
         bayes_conf = posteriors.get(item.stress_type)
-        if bayes_conf is not None and bayes_conf > item.confidence:
+        if bayes_conf is not None:
             old_conf = item.confidence
-            # ML-4 FIX: Use weighted blend instead of pure replacement.
-            # Rule confidence accounts for data availability (e.g., "no SAR → conf ≤ 0.3")
-            # that the Bayes posterior doesn't know about. A pure override can raise
-            # confidence of poorly-evidenced stresses.
+            # Record diagnostic hypothesis posterior P(H_k | E)
+            item.hypothesis_posterior = round(bayes_conf, 3)
+            item.posterior_status = "COMPUTED"
             # Blend: 70% Bayes posterior + 30% rule confidence
             blended = bayes_conf * 0.7 + old_conf * 0.3
-            item.confidence = min(conf_ceiling, round(blended, 3))
-            item.explanation_basis.append(
-                f"Bayesian posterior P({item.stress_type}|features)="
-                f"{bayes_conf:.3f} > rule_confidence={old_conf:.3f} — "
-                f"blended to {item.confidence:.3f}"
-            )
-            item.flags.append("BAYES_BOOSTED")
+            item.confidence = min(conf_ceiling, max(0.05, round(blended, 3)))
+            if bayes_conf > old_conf:
+                item.explanation_basis.append(
+                    f"Bayesian posterior P({item.stress_type}|features)="
+                    f"{bayes_conf:.3f} > rule_confidence={old_conf:.3f} — "
+                    f"blended to {item.confidence:.3f}"
+                )
+                item.flags.append("BAYES_BOOSTED")
+            elif bayes_conf < old_conf - 0.1:
+                item.explanation_basis.append(
+                    f"Bayesian posterior P({item.stress_type}|features)="
+                    f"{bayes_conf:.3f} < rule_confidence={old_conf:.3f} — "
+                    f"moderated to {item.confidence:.3f}"
+                )
+                item.flags.append("BAYES_MODERATED")
+
+    return posteriors
 

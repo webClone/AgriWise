@@ -27,6 +27,7 @@ from __future__ import annotations
 import math
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("agribrain.v6.sar_temporal_features")
@@ -209,11 +210,15 @@ def _rolling_median(series: List[float], window: int = 5) -> List[float]:
 # Linear trend slope
 # ============================================================================
 
-def _linear_slope(series: List[float]) -> Optional[float]:
+def _linear_slope(
+    series: List[float], coordinates: Optional[List[float]] = None,
+) -> Optional[float]:
     """Compute simple linear regression slope.
 
     Args:
-        series: Values at equally-spaced time steps
+        series: Values to regress.
+        coordinates: Optional physical time coordinates.  When supplied the
+            result is in units per coordinate (calendar day in crop use).
 
     Returns:
         Slope (units per step), or None if < 3 values.
@@ -221,13 +226,66 @@ def _linear_slope(series: List[float]) -> Optional[float]:
     n = len(series)
     if n < 3:
         return None
-    x_mean = (n - 1) / 2.0
+    x = list(coordinates) if coordinates is not None else [float(i) for i in range(n)]
+    if len(x) != n or any(not math.isfinite(value) for value in x):
+        return None
+    x_mean = sum(x) / n
     y_mean = sum(series) / n
-    num = sum((i - x_mean) * (series[i] - y_mean) for i in range(n))
-    denom = sum((i - x_mean) ** 2 for i in range(n))
+    num = sum((x[i] - x_mean) * (series[i] - y_mean) for i in range(n))
+    denom = sum((value - x_mean) ** 2 for value in x)
     if abs(denom) < 1e-12:
         return None
     return num / denom
+
+
+def _parse_datetime(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _calendar_coordinates(dates: List[str]) -> Optional[List[float]]:
+    parsed = [_parse_datetime(value) for value in dates]
+    if any(value is None for value in parsed):
+        return None
+    assert parsed and parsed[0] is not None
+    origin = parsed[0]
+    values = [
+        (value - origin).total_seconds() / 86400.0  # type: ignore[operator]
+        for value in parsed
+    ]
+    if any(values[index] <= values[index - 1] for index in range(1, len(values))):
+        return None
+    return values
+
+
+def _calendar_rolling_median(
+    series: List[float], coordinates: List[float], window_days: float = 30.0,
+) -> List[float]:
+    if len(series) != len(coordinates):
+        return []
+    half_window = window_days / 2.0
+    result = []
+    for center in coordinates:
+        values = sorted(
+            value for value, coordinate in zip(series, coordinates)
+            if abs(coordinate - center) <= half_window
+        )
+        if not values:
+            continue
+        middle = len(values) // 2
+        median = (
+            (values[middle - 1] + values[middle]) / 2.0
+            if len(values) % 2 == 0 else values[middle]
+        )
+        result.append(round(median, 4))
+    return result
 
 
 # ============================================================================
@@ -309,8 +367,8 @@ def extract_sar_temporal_features(
     Each entry is a dict with keys like:
       vv_mean, vh_mean, vv_vh_ratio_mean, date
 
-    VV/VH values can be in dB (typical from L0 packetizer) or linear power.
-    The function auto-detects domain: if values are negative, assumes dB.
+    Ledger-derived VV/VH values must declare dB or linear-power units and S1
+    orbit geometry.  Legacy callers retain a labelled inference fallback.
 
     Args:
         plot_timeseries: List of per-timestep dicts from FieldTensor
@@ -328,6 +386,112 @@ def extract_sar_temporal_features(
         return feat
 
     # ── Extract VV/VH series ──
+    samples: List[Dict] = []
+    for entry in plot_timeseries:
+        if isinstance(entry, dict):
+            vv = entry.get("vv_mean")
+            if vv is None:
+                vv = entry.get("vv")
+            vh = entry.get("vh_mean")
+            if vh is None:
+                vh = entry.get("vh")
+            date_str = entry.get("date", entry.get("timestamp", ""))
+            ndwi = entry.get("ndwi_mean")
+            if ndwi is None:
+                ndwi = entry.get("ndwi")
+            orbit_direction = str(
+                entry.get("orbit_direction") or entry.get("orbit_pass") or ""
+            ).strip().upper()
+            relative_orbit = str(
+                entry.get("relative_orbit") or entry.get("orbit_reference") or ""
+            ).strip().upper()
+            unit = str(entry.get("backscatter_unit") or "").strip().lower()
+        else:
+            vv = getattr(entry, "vv_mean", None)
+            vh = getattr(entry, "vh_mean", None)
+            date_str = getattr(entry, "date", "")
+            ndwi = getattr(entry, "ndwi_mean", None)
+            orbit_direction = str(
+                getattr(entry, "orbit_direction", "") or ""
+            ).strip().upper()
+            relative_orbit = str(
+                getattr(entry, "relative_orbit", "") or ""
+            ).strip().upper()
+            unit = str(getattr(entry, "backscatter_unit", "") or "").strip().lower()
+        if vv is None or vh is None:
+            continue
+        try:
+            vv_value = float(vv)
+            vh_value = float(vh)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(vv_value) or not math.isfinite(vh_value):
+            continue
+        parsed_date = _parse_datetime(str(date_str))
+        if parsed_date is None:
+            feat.extraction_warnings.append("sar_observation_timestamp_invalid")
+            continue
+        if unit in {"db", "decibel", "decibels"}:
+            vv_db, vh_db = vv_value, vh_value
+            vv_lin, vh_lin = db_to_linear(vv_value), db_to_linear(vh_value)
+        elif unit in {"linear", "linear_power", "power"}:
+            if vv_value <= 0.0 or vh_value <= 0.0:
+                feat.extraction_warnings.append("sar_linear_backscatter_nonpositive")
+                continue
+            vv_lin, vh_lin = vv_value, vh_value
+            vv_db, vh_db = linear_to_db(vv_value), linear_to_db(vh_value)
+        else:
+            # Compatibility only. Ledger tokens always declare the unit.
+            if vv_value < 0.0 and vh_value < 0.0:
+                vv_db, vh_db = vv_value, vh_value
+                vv_lin, vh_lin = db_to_linear(vv_value), db_to_linear(vh_value)
+                feat.extraction_warnings.append("sar_unit_inferred_legacy_db")
+            elif vv_value > 0.0 and vh_value > 0.0:
+                vv_lin, vh_lin = vv_value, vh_value
+                vv_db, vh_db = linear_to_db(vv_value), linear_to_db(vh_value)
+                feat.extraction_warnings.append("sar_unit_inferred_legacy_linear")
+            else:
+                feat.extraction_warnings.append("sar_backscatter_unit_ambiguous")
+                continue
+        track = (
+            f"{orbit_direction}:{relative_orbit}"
+            if orbit_direction in {"ASCENDING", "DESCENDING"} and relative_orbit
+            else ""
+        )
+        samples.append({
+            "vv_db": vv_db, "vh_db": vh_db,
+            "vv_lin": vv_lin, "vh_lin": vh_lin,
+            "date": parsed_date,
+            "date_text": parsed_date.date().isoformat(),
+            "ndwi": ndwi,
+            "track": track,
+        })
+
+    explicit_tracks: Dict[str, List[Dict]] = {}
+    for sample in samples:
+        if sample["track"]:
+            explicit_tracks.setdefault(sample["track"], []).append(sample)
+    if explicit_tracks:
+        selected_track, selected_samples = max(
+            explicit_tracks.items(),
+            key=lambda item: (
+                len(item[1]),
+                (max(row["date"] for row in item[1]) - min(
+                    row["date"] for row in item[1]
+                )).total_seconds(),
+                item[0],
+            ),
+        )
+        excluded_count = len(samples) - len(selected_samples)
+        samples = selected_samples
+        if len(explicit_tracks) > 1 or excluded_count:
+            feat.extraction_warnings.append(
+                f"sar_single_orbit_track_selected:{selected_track}:excluded={excluded_count}"
+            )
+    elif samples:
+        feat.extraction_warnings.append("sar_orbit_geometry_unavailable")
+    samples.sort(key=lambda item: item["date"])
+
     vv_db_series: List[float] = []
     vh_db_series: List[float] = []
     vv_lin_series: List[float] = []
@@ -335,50 +499,23 @@ def extract_sar_temporal_features(
     dates: List[str] = []
     ndwi_series: List[Optional[float]] = []
 
-    for entry in plot_timeseries:
-        if isinstance(entry, dict):
-            vv = entry.get("vv_mean") or entry.get("vv")
-            vh = entry.get("vh_mean") or entry.get("vh")
-            date_str = entry.get("date", entry.get("timestamp", ""))
-            ndwi = entry.get("ndwi_mean") or entry.get("ndwi")
-        else:
-            vv = getattr(entry, "vv_mean", None)
-            vh = getattr(entry, "vh_mean", None)
-            date_str = getattr(entry, "date", "")
-            ndwi = getattr(entry, "ndwi_mean", None)
-
-        if vv is None or vh is None:
-            continue
-
-        vv = float(vv)
-        vh = float(vh)
-
-        # Auto-detect domain: negative values → dB
-        if vv < 0:
-            vv_db = vv
-            vv_lin = db_to_linear(vv)
-        else:
-            vv_lin = vv
-            vv_db = linear_to_db(vv)
-
-        if vh < 0:
-            vh_db = vh
-            vh_lin = db_to_linear(vh)
-        else:
-            vh_lin = vh
-            vh_db = linear_to_db(vh)
-
-        vv_db_series.append(round(vv_db, 4))
-        vh_db_series.append(round(vh_db, 4))
-        vv_lin_series.append(vv_lin)
-        vh_lin_series.append(vh_lin)
-        dates.append(str(date_str)[:10] if date_str else "")
-        ndwi_series.append(ndwi)
+    for sample in samples:
+        vv_db_series.append(round(sample["vv_db"], 4))
+        vh_db_series.append(round(sample["vh_db"], 4))
+        vv_lin_series.append(sample["vv_lin"])
+        vh_lin_series.append(sample["vh_lin"])
+        dates.append(sample["date_text"])
+        ndwi_series.append(sample["ndwi"])
 
     feat.n_observations = len(vv_db_series)
 
     if feat.n_observations < 5:
         feat.extraction_warnings.append("insufficient_sar_observations")
+        return feat
+
+    elapsed_days = _calendar_coordinates(dates)
+    if elapsed_days is None:
+        feat.extraction_warnings.append("sar_calendar_axis_invalid")
         return feat
 
     # ── dB domain statistics ──
@@ -406,7 +543,7 @@ def extract_sar_temporal_features(
 
     if ratios:
         feat.vv_vh_ratio_mean = round(sum(ratios) / len(ratios), 4)
-        feat.vv_vh_ratio_trend = _linear_slope(ratios)
+        feat.vv_vh_ratio_trend = _linear_slope(ratios, elapsed_days)
         if feat.vv_vh_ratio_trend is not None:
             feat.vv_vh_ratio_trend = round(feat.vv_vh_ratio_trend, 6)
 
@@ -435,20 +572,23 @@ def extract_sar_temporal_features(
         feat.last_change_point_doy = cp_doys[-1]
 
     # ── Rolling median (30-day equivalent ≈ 5 observations at 6-day revisit) ──
-    window = min(5, feat.n_observations)
-    vv_rolling = _rolling_median(vv_db_series, window)
-    vh_rolling = _rolling_median(vh_db_series, window)
+    vv_rolling = _calendar_rolling_median(
+        vv_db_series, elapsed_days, window_days=30.0,
+    )
+    vh_rolling = _calendar_rolling_median(
+        vh_db_series, elapsed_days, window_days=30.0,
+    )
     feat._vv_rolling_median_30d = vv_rolling
     feat._vh_rolling_median_30d = vh_rolling
 
     if vv_rolling:
         feat.vv_rolling_median_mean = round(sum(vv_rolling) / len(vv_rolling), 3)
-        slope = _linear_slope(vv_rolling)
+        slope = _linear_slope(vv_rolling, elapsed_days)
         feat.vv_rolling_median_slope = round(slope, 6) if slope is not None else None
 
     if vh_rolling:
         feat.vh_rolling_median_mean = round(sum(vh_rolling) / len(vh_rolling), 3)
-        slope = _linear_slope(vh_rolling)
+        slope = _linear_slope(vh_rolling, elapsed_days)
         feat.vh_rolling_median_slope = round(slope, 6) if slope is not None else None
 
     # ── Flood signature count (adjustment #4) ──

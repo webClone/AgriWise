@@ -108,6 +108,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
   const [isEvidenceModalOpen, setIsEvidenceModalOpen] = useState(false);
   const [isRefreshingVision, setIsRefreshingVision] = useState(false);
   const [visionRefreshStatus, setVisionRefreshStatus] = useState<string | null>(null);
+  const [mapVisualLens, setMapVisualLens] = useState<"standard" | "thermal" | "chlorophyll" | "chroma">("standard");
 
   // ── PRIMARY: useLayer10 for map surfaces (proven, working) ──────────────
   const l10 = useLayer10();
@@ -233,6 +234,44 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
 
   const isMapVisible = !l10.isDecideMode;
   const modeLabel = MODE_CONFIG[l10.activeMode]?.label ?? "Surface";
+  const asmaeWorkerState = l10.data?.source_policy_display_state?.asmaePlotState ?? null;
+  const asmaeWorkerStatus = String(
+    asmaeWorkerState?.activeSpatialJobStatus || "",
+  ).toLowerCase();
+  const asmaePublicationRelation = String(
+    asmaeWorkerState?.publicationRelation || "",
+  ).toLowerCase();
+  const asmaeWorkerRequestError = Boolean(
+    l10.error
+    && /asmae|canonical publication|spatial refresh|worker|reintegration/i.test(l10.error),
+  );
+  const showAsmaeWorkerProgress = Boolean(
+    !l10.data
+    || l10.loading
+    || asmaeWorkerRequestError
+    || [
+      "queued",
+      "running",
+      "stalled",
+      "completed_reintegration_pending",
+      "failed",
+      "error",
+      "cancelled",
+    ].includes(asmaeWorkerStatus)
+    || (asmaeWorkerStatus === "completed" && asmaePublicationRelation !== "published"),
+  );
+  const handleAsmaeWorkerRetry = useCallback(() => {
+    if (!plotId || l10.loading) return;
+    l10.setCanopySource("asmae_diagnostic");
+    void l10.fetchLayer10(
+      plotId,
+      farmId,
+      undefined,
+      undefined,
+      cropName,
+      { forceRefresh: true, sourcePolicy: "asmae_diagnostic" },
+    );
+  }, [cropName, farmId, l10, plotId]);
 
   return (
     <div className="aw-dashboard" id="plot-dashboard" style={{ direction: "ltr" }} suppressHydrationWarning={true}>
@@ -274,6 +313,8 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
             showCandidateMask={l10.showCandidateMask}
             experimental1mSurface={l10.activeExperimentalSurface}
             candidateMaskSurface={l10.candidateMaskSurface}
+            paletteId={mapVisualLens}
+            onPaletteChange={setMapVisualLens}
           />
         )}
       </div>
@@ -293,7 +334,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
           >
             {/* Engine Pipeline Panel — left sidebar (from usePlotIntelligence) */}
             <motion.div variants={slideLeft} style={{ pointerEvents: "auto" }}>
-              <EnginePipelinePanel />
+              <EnginePipelinePanel visualLens={mapVisualLens} />
             </motion.div>
 
 
@@ -660,24 +701,26 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
 
       {/* ── Loading / Error state ─────────────────────────────────── */}
       <AnimatePresence>
-        {mounted && !l10.data && (
+        {mounted && showAsmaeWorkerProgress && (
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0, scale: 0.96, filter: "blur(10px)" }}
-            transition={{ duration: 0.45, ease: "easeInOut" }}
-            className="absolute inset-0 z-50 flex items-center justify-center pointer-events-none bg-slate-950/45 backdrop-blur-sm"
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.25, ease: "easeOut" }}
+            className="absolute left-0 right-0 top-[270px] z-50 flex justify-center px-4 pointer-events-none"
           >
-            {l10.error ? (
-              <div className="aw-dashboard__error pointer-events-auto">
-                <span className="aw-dashboard__error-icon">⚠</span>
-                <span>{l10.error}</span>
-              </div>
-            ) : (
-              <div className="pointer-events-auto w-full max-w-lg px-4 flex justify-center">
-                <PlotLoadingSequence plotId={plot?.id ? String(plot.id) : undefined} />
-              </div>
-            )}
+            <div className="pointer-events-auto w-full max-w-lg px-4 flex justify-center">
+              <PlotLoadingSequence
+                key={plot?.id ? String(plot.id) : "plot-missing"}
+                plotId={plot?.id ? String(plot.id) : undefined}
+                compact={Boolean(l10.data)}
+                hasCanonicalFallback={Boolean(l10.data?.surfaces?.length)}
+                initialWorkerState={asmaeWorkerState}
+                loading={l10.loading}
+                onRetry={handleAsmaeWorkerRetry}
+                requestError={l10.error}
+              />
+            </div>
           </motion.div>
         )}
       </AnimatePresence>

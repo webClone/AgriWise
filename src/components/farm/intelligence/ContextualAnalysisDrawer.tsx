@@ -416,17 +416,19 @@ export default function ContextualAnalysisDrawer({
               onOpenMethodology={onOpenMethodology}
               label="Stability Class"
               value={
-                provenance.phenology_stage ? (
+                data.phenology_context?.phenology_receipt_valid === true &&
+                data.phenology_context?.phenology_source === "layer2_canonical_phenology" &&
+                data.resolved_crop_stage && data.resolved_crop_stage !== "UNKNOWN" ? (
                   <span className="font-semibold text-slate-300">
-                    {provenance.phenology_stage.toString().replace(/_/g, " ")}
+                    {data.resolved_crop_stage.replace(/_/g, " ")}
                   </span>
                 ) : (
-                  <Unavailable reason="no phenology data" />
+                  <Unavailable reason={data.phenology_context?.phenology_evidence_needed_reason || "canonical Layer 2 receipt required"} />
                 )
               }
               subtext="Phenological context"
               metricKey="phenology_stability"
-              state={provenance.phenology_stage ? "estimated" : "unavailable"}
+              state={data.phenology_context?.phenology_receipt_valid === true && data.resolved_crop_stage && data.resolved_crop_stage !== "UNKNOWN" ? "estimated" : "unavailable"}
             />
           </>
         )}

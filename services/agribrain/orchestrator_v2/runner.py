@@ -71,7 +71,17 @@ def _object_mapping(value: Any) -> Dict[str, Any]:
     return {}
 
 
-def _canonical_crop_temporal_records(layer0_output: Any) -> List[Dict[str, Any]]:
+def _canonical_crop_temporal_records(
+    layer0_output: Any,
+    *,
+    plot_geometry: Any = None,
+    geometry_hash: str = "",
+    plot_geometry_crs: Any = None,
+    plot_namespace: Any = None,
+    crop_cycle_id: Optional[str] = None,
+    weather_records: Optional[List[Any]] = None,
+    season_start: Any = None,
+) -> List[Dict[str, Any]]:
     """Extract only evidence-bearing L0 packets for crop inference.
 
     Layer 1 daily interpolation is deliberately excluded: crop identity must
@@ -82,67 +92,84 @@ def _canonical_crop_temporal_records(layer0_output: Any) -> List[Dict[str, Any]]
         getattr(layer0_output, "layer0_source_packages", {}) or {}
         if layer0_output is not None else {}
     )
-    records: List[Dict[str, Any]] = []
-    for package_group in source_packages.values():
-        packages = (
-            list(package_group)
-            if isinstance(package_group, (list, tuple))
-            else [package_group]
-        )
-        for package in packages:
-            package_map = _object_mapping(package)
-            metadata = _object_mapping(
-                package_map.get("metadata")
-                or getattr(package, "metadata", None)
+    from services.agribrain.layer2_veg_int.crop_observations import (
+        build_canonical_crop_observations,
+    )
+
+    return build_canonical_crop_observations(
+        source_packages,
+        plot_geometry=plot_geometry,
+        geometry_hash=geometry_hash,
+        plot_geometry_crs=plot_geometry_crs,
+        plot_namespace=plot_namespace,
+        crop_cycle_id=crop_cycle_id,
+        weather_records=weather_records or [],
+        season_start=season_start,
+    )
+
+
+def _crop_influence_evidence_ids(
+    records: List[Dict[str, Any]], *, independent_only: bool,
+) -> Tuple[str, ...]:
+    """Return the physical IDs shared by crop inference and ASMAE.
+
+    ASMAE receives the same Layer-0 scene stack.  Using the physical
+    acquisition key (and never a processing-product hash) makes reprocessed
+    copies collapse to the same dependency identity.
+    """
+    values = set()
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        if independent_only:
+            explicitly_independent = record.get("independent_evidence") is True
+            legacy_independent = int(
+                record.get("independent_observation_count") or 0
+            ) > 0
+            admitted = (
+                record.get("admission_status") == "admitted"
+                or record.get("quality_admitted") is True
+                or record.get("usable") is True
             )
-            packets = (
-                package_map.get("packets")
-                or getattr(package, "packets", None)
-                or []
-            )
-            for packet in packets:
-                row = _object_mapping(packet)
-                if not row:
-                    continue
-                row.setdefault("source_reality", metadata.get("source_reality"))
-                row.setdefault("content_hash", metadata.get("content_hash"))
-                row.setdefault(
-                    "provider_product_id",
-                    metadata.get("provider_product_id")
-                    or metadata.get("scene_id"),
-                )
-                row.setdefault(
-                    "real_provider_product",
-                    metadata.get("real_provider_product"),
-                )
-                row.setdefault(
-                    "production_usable",
-                    metadata.get("production_usable"),
-                )
-                row.setdefault(
-                    "diagnostic_only",
-                    metadata.get("diagnostic_only"),
-                )
-                row.setdefault(
-                    "temporal_basis",
-                    metadata.get("temporal_basis"),
-                )
-                row.setdefault(
-                    "geometry_hash",
-                    metadata.get("plot_geometry_hash"),
-                )
-                row.setdefault("ndvi", row.get("ndvi_mean"))
-                row.setdefault("evi", row.get("evi_mean"))
-                row.setdefault("ndmi", row.get("ndmi_mean"))
-                row.setdefault("ndwi", row.get("ndwi_mean"))
-                row.setdefault(
-                    "vv", row.get("vv_db_mean", row.get("vv_db"))
-                )
-                row.setdefault(
-                    "vh", row.get("vh_db_mean", row.get("vh_db"))
-                )
-                records.append(row)
-    return records
+            if not ((explicitly_independent or legacy_independent) and admitted):
+                continue
+        identity = str(
+            record.get("physical_acquisition_key")
+            or record.get("independence_cluster_id")
+            or record.get("observation_id")
+            or ""
+        ).strip()
+        if identity:
+            values.add(identity)
+    return tuple(sorted(values))
+
+
+def _crop_ledger_independent_evidence_ids(
+    ledger_payload: Dict[str, Any],
+) -> Tuple[str, ...]:
+    """Return exactly the admitted physical clusters authorized by the ledger.
+
+    The raw temporal record collection also contains provider daily statistics.
+    Those records may retain legacy ``usable`` or
+    ``independent_observation_count`` flags for non-crop consumers, but the
+    canonical crop ledger deliberately rejects them when they cannot prove a
+    physical acquisition identity.  Building the influence manifest from the
+    raw collection therefore gives ASMAE a different evidence set from the
+    ledger it is bound to and causes strict ASMAEInput validation to fail.
+
+    The ledger is the authority for independence.  Keep this derivation small
+    and fail closed on malformed rows; ASMAEInput independently rehydrates and
+    verifies the complete ledger and manifest hashes.
+    """
+    values = {
+        str(cluster.get("cluster_id") or "").strip()
+        for cluster in (ledger_payload or {}).get("independence_clusters", [])
+        if isinstance(cluster, dict)
+        and cluster.get("independence_eligible") is True
+        and cluster.get("admitted") is True
+        and str(cluster.get("cluster_id") or "").strip()
+    }
+    return tuple(sorted(values))
 
 
 def _crop_operational_context(
@@ -202,6 +229,40 @@ def _parse_provider_datetime(value: Any) -> Optional[datetime]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _freeze_previous_phenology_event(
+    event: Dict[str, Any], *, as_of: Any,
+) -> Dict[str, Any]:
+    """Bind the latest as-of phenology receipt when no new evidence is admitted."""
+    if not isinstance(event, dict):
+        raise ValueError("previous phenology event is unavailable")
+    event_id = str(event.get("event_id") or "").strip()
+    event_time = _parse_provider_datetime(
+        event.get("observation_or_valid_time") or event.get("effective_at")
+    )
+    as_of_time = _parse_provider_datetime(as_of)
+    if not event_id or event_time is None or as_of_time is None:
+        raise ValueError("previous phenology event has incomplete temporal identity")
+    if event_time.date() > as_of_time.date():
+        raise ValueError("previous phenology event is later than the run as-of date")
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    posterior = payload.get("phenology_posterior")
+    posterior = dict(posterior) if isinstance(posterior, dict) else {}
+    posterior_hash = str(posterior.get("content_hash") or "").strip()
+    if not posterior or not posterior_hash:
+        raise ValueError("previous phenology event has no hashed posterior")
+    return {
+        "pre_asmae_layer2a_status": "available",
+        "pre_asmae_layer2a_reason": (
+            "latest_canonical_event_no_new_admitted_physical_evidence"
+        ),
+        "phenology_posterior": posterior,
+        "phenology_posterior_hash": posterior_hash,
+        "phenology_worldline_event_id": event_id,
+        "phenology_evidence_reuse": "exact_as_of_worldline_event",
+    }
 
 
 def _is_affirmatively_real_raster_record(
@@ -269,10 +330,36 @@ def to_layer0_sentinel2_package(raw: dict) -> List[Any]:
         metadata = SimpleNamespace(
             scene_id=rec.get("scene_id", f"s2_{dt_str}"),
             acquisition_datetime=dt,
-            plot_geometry_hash=raw.get("plot_geometry_hash", ""),
+            plot_geometry_hash=(
+                rec.get("plot_geometry_hash")
+                or rec.get("geometry_hash")
+                or raw.get("plot_geometry_hash", "")
+            ),
+            plot_geometry=(
+                rec.get("plot_geometry")
+                or raw.get("plot_geometry")
+                or raw.get("polygon_geojson")
+                or raw.get("polygon_coords")
+            ),
+            plot_geometry_crs=(
+                rec.get("plot_geometry_crs")
+                or raw.get("plot_geometry_crs")
+                or raw.get("polygon_crs")
+            ),
+            tenant_id=str(rec.get("tenant_id") or raw.get("tenant_id") or ""),
+            farm_id=str(rec.get("farm_id") or raw.get("farm_id") or ""),
+            plot_id=str(rec.get("plot_id") or raw.get("plot_id") or ""),
+            source_family="sentinel2",
             provider="copernicus",
-            crs=rec.get("crs", "EPSG:4326"),
-            band_list=["B02", "B03", "B04", "B08"],
+            # Raster coordinates have no safe implicit CRS.  Crop-observation
+            # admission will reject real arrays when the gateway did not
+            # declare this field.
+            crs=rec.get("crs"),
+            band_list=sorted(
+                str(name) for name in (
+                    (rec.get("band_refs") or rec.get("band_arrays") or {}).keys()
+                )
+            ) or ["B02", "B03", "B04", "B08"],
         )
         metadata.width = rec.get("width")
         metadata.height = rec.get("height")
@@ -306,6 +393,18 @@ def to_layer0_sentinel2_package(raw: dict) -> List[Any]:
         metadata.source_reality = source_reality
         metadata.content_hash = rec.get("content_hash")
         metadata.provider_product_id = rec.get("provider_product_id", rec.get("scene_id"))
+        metadata.catalog_item_id = rec.get("catalog_item_id")
+        metadata.provider_tile_id = rec.get("provider_tile_id")
+        metadata.provider_orbit_id = rec.get("provider_orbit_id")
+        metadata.provider_orbit_pass = rec.get("provider_orbit_pass")
+        metadata.relative_orbit = rec.get("relative_orbit")
+        metadata.sensing_timestamp = rec.get("sensing_timestamp")
+        metadata.mgrs_tile_id = rec.get("mgrs_tile_id")
+        metadata.processing_baseline = rec.get("processing_baseline")
+        metadata.process_request_hash = rec.get("process_request_hash")
+        metadata.provider_response_hash = rec.get("provider_response_hash")
+        metadata.product_binding = rec.get("product_binding")
+        metadata.binding_proof = rec.get("binding_proof") or {}
         temporal_basis = rec.get("temporal_basis") or (
             "daily_plot_statistic"
             if source_reality == "provider_daily_statistical_aggregate"
@@ -375,6 +474,7 @@ def to_layer0_sentinel2_package(raw: dict) -> List[Any]:
         
         pkg = SimpleNamespace(
             plot_id=raw.get("plot_id", ""),
+            source_family="sentinel2",
             metadata=metadata,
             packets=[packet],
             qa=qa,
@@ -402,6 +502,33 @@ def to_layer0_sentinel1_package(raw: dict) -> List[Any]:
     records = raw.get("timeseries", []) or raw.get("data", []) or []
     packages = []
     for rec in records:
+        provider_relative_orbit = (
+            rec.get("provider_relative_orbit")
+            or rec.get("relative_orbit")
+            or rec.get("relative_orbit_number")
+        )
+        provider_absolute_orbit = (
+            rec.get("provider_absolute_orbit")
+            or rec.get("absolute_orbit")
+            or rec.get("orbit_number")
+        )
+        process_metadata = (
+            rec.get("process_metadata")
+            or rec.get("process_api_metadata")
+            or {}
+        )
+        catalog_metadata = (
+            rec.get("catalog_metadata")
+            or rec.get("stac_metadata")
+            or rec.get("catalog_properties")
+            or {}
+        )
+        process_metadata = (
+            process_metadata if isinstance(process_metadata, dict) else {}
+        )
+        catalog_metadata = (
+            catalog_metadata if isinstance(catalog_metadata, dict) else {}
+        )
         raw_datetime = rec.get("acquisition_datetime") or rec.get("date")
         dt = _parse_provider_datetime(raw_datetime)
         if dt is None:
@@ -412,14 +539,59 @@ def to_layer0_sentinel1_package(raw: dict) -> List[Any]:
         metadata = SimpleNamespace(
             scene_id=rec.get("scene_id", f"s1_{dt_str}"),
             acquisition_datetime=dt,
-            plot_geometry_hash=raw.get("plot_geometry_hash", ""),
-            provider="copernicus",
-            crs=rec.get("crs", "EPSG:4326"),
+            sensing_timestamp=rec.get("sensing_timestamp") or dt.isoformat(),
+            plot_geometry_hash=(
+                rec.get("plot_geometry_hash")
+                or rec.get("geometry_hash")
+                or raw.get("plot_geometry_hash", "")
+            ),
+            plot_geometry=(
+                rec.get("plot_geometry")
+                or raw.get("plot_geometry")
+                or raw.get("polygon_geojson")
+                or raw.get("polygon_coords")
+            ),
+            plot_geometry_crs=(
+                rec.get("plot_geometry_crs")
+                or raw.get("plot_geometry_crs")
+                or raw.get("polygon_crs")
+            ),
+            tenant_id=str(rec.get("tenant_id") or raw.get("tenant_id") or ""),
+            farm_id=str(rec.get("farm_id") or raw.get("farm_id") or ""),
+            plot_id=str(rec.get("plot_id") or raw.get("plot_id") or ""),
+            source_family="sentinel1",
+            provider=str(rec.get("provider") or "copernicus"),
+            sensor=str(rec.get("sensor") or "C-SAR"),
+            mission=rec.get("mission") or rec.get("platform"),
+            # Raster coordinates have no safe implicit CRS.
+            crs=rec.get("crs"),
             band_list=["VV", "VH"],
         )
         metadata.width = rec.get("width")
         metadata.height = rec.get("height")
         metadata.transform = rec.get("transform")
+        metadata.catalog_item_id = rec.get("catalog_item_id")
+        metadata.provider_tile_id = rec.get("provider_tile_id")
+        metadata.provider_orbit_id = rec.get("provider_orbit_id")
+        metadata.provider_orbit_pass = (
+            rec.get("provider_orbit_pass")
+            or rec.get("orbit_pass")
+            or rec.get("orbit_direction")
+        )
+        metadata.provider_relative_orbit = provider_relative_orbit
+        metadata.provider_absolute_orbit = provider_absolute_orbit
+        metadata.relative_orbit = provider_relative_orbit
+        metadata.orbit_number = provider_absolute_orbit
+        metadata.process_metadata = process_metadata
+        metadata.catalog_metadata = catalog_metadata
+        metadata.processing_timestamp = rec.get("processing_timestamp")
+        metadata.processing_baseline = rec.get("processing_baseline")
+        metadata.process_request_hash = (
+            rec.get("process_request_hash") or rec.get("request_hash")
+        )
+        metadata.provider_response_hash = rec.get("provider_response_hash")
+        metadata.product_binding = rec.get("product_binding")
+        metadata.binding_proof = rec.get("binding_proof") or {}
         
         is_real_temporal_observation = _is_affirmatively_real_temporal_record(
             rec,
@@ -471,8 +643,22 @@ def to_layer0_sentinel1_package(raw: dict) -> List[Any]:
             "surface_wetness_proxy_mean": rec.get("surface_wetness_proxy_mean"),
             "content_hash": rec.get("content_hash"),
             "provider_product_id": rec.get("provider_product_id", rec.get("scene_id")),
+            "catalog_item_id": rec.get("catalog_item_id"),
             "observation_id": rec.get("observation_id"),
             "request_hash": rec.get("request_hash"),
+            "process_request_hash": rec.get("process_request_hash"),
+            "provider_response_hash": rec.get("provider_response_hash"),
+            "provider_orbit_id": rec.get("provider_orbit_id"),
+            "provider_orbit_pass": (
+                rec.get("provider_orbit_pass")
+                or rec.get("orbit_pass")
+                or rec.get("orbit_direction")
+            ),
+            "provider_relative_orbit": provider_relative_orbit,
+            "provider_absolute_orbit": provider_absolute_orbit,
+            "relative_orbit": provider_relative_orbit,
+            "process_metadata": process_metadata,
+            "catalog_metadata": catalog_metadata,
             "geometry_hash": rec.get("geometry_hash", raw.get("plot_geometry_hash")),
             "temporal_basis": temporal_basis,
             "quality_admitted": rec.get("quality_admitted") is True,
@@ -510,14 +696,43 @@ def to_layer0_sentinel1_package(raw: dict) -> List[Any]:
                 else quality.get("valid_fraction", 0.0)
             ),
         )
+
+        raw_provenance = (
+            raw.get("provenance")
+            if isinstance(raw.get("provenance"), dict)
+            else {}
+        )
+        record_provenance = (
+            rec.get("provenance")
+            if isinstance(rec.get("provenance"), dict)
+            else {}
+        )
+        provenance = {
+            **raw_provenance,
+            **record_provenance,
+            "source_reality": source_reality,
+            "provider_product_id": metadata.provider_product_id,
+            "content_hash": metadata.content_hash,
+            "process_request_hash": metadata.process_request_hash,
+            "provider_response_hash": metadata.provider_response_hash,
+            "provider_orbit_id": metadata.provider_orbit_id,
+            "provider_orbit_pass": metadata.provider_orbit_pass,
+            "provider_relative_orbit": metadata.provider_relative_orbit,
+            "provider_absolute_orbit": metadata.provider_absolute_orbit,
+            "relative_orbit": metadata.relative_orbit,
+            "process_metadata": metadata.process_metadata,
+            "catalog_metadata": metadata.catalog_metadata,
+        }
         
         pkg = SimpleNamespace(
             plot_id=raw.get("plot_id", ""),
+            source_family="sentinel1",
             metadata=metadata,
             packets=[packet],
             qa=qa,
             kalman_observations=[],
-            provenance={},
+            provenance=provenance,
+            provenance_report=provenance,
             diagnostics={},
             source_reality=source_reality,
             test_override=rec.get("test_override", False),
@@ -646,6 +861,8 @@ def to_layer0_environment_package(raw: dict) -> Any:
             "temp_min": rec.get("temp_min"),
             "precipitation": rec.get("precipitation"),
             "et0": rec.get("et0"),
+            "humidity": rec.get("humidity_mean_pct", rec.get("humidity")),
+            "wind_speed": rec.get("wind_speed_m_s", rec.get("wind_speed")),
             "data_status": "estimated",
         })
         
@@ -682,6 +899,135 @@ def _weather_records_from_source_package(package: Any) -> List[Any]:
         return list(package.get("weather_consensus") or [])
     return list(getattr(package, "weather_consensus", None) or [])
 
+
+_REPLAY_WEATHER_KEYS = (
+    "temp_max", "temp_min", "temp_mean", "precipitation", "et0",
+    "humidity", "wind_speed",
+)
+
+
+def _weather_records_from_reintegration_context(
+    operational_context: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Recover frozen, admitted process forcings for worker reintegration.
+
+    This path is deliberately enabled only for the completion-triggered worker
+    replay.  It never upgrades authority and never treats a forcing as a direct
+    crop-state observation.
+    """
+    context = operational_context or {}
+    if context.get("asmae_worker_reintegration") is not True:
+        return []
+    result: List[Dict[str, Any]] = []
+    for raw in context.get("asmae_replay_plot_timeseries") or []:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("observation_role") not in (None, "process_forcing"):
+            continue
+        values = {key: raw.get(key) for key in _REPLAY_WEATHER_KEYS}
+        if not any(value is not None for value in values.values()):
+            continue
+        timestamp = str(raw.get("timestamp") or raw.get("date") or "")
+        record = {
+            "date": timestamp[:10],
+            **values,
+            "data_status": raw.get("data_status") or "estimated",
+            "source": raw.get("source") or "frozen_asmae_process_forcing",
+            "content_hash": raw.get("content_hash"),
+            "observation_role": "process_forcing",
+            "direct_observation": False,
+            "capability_plan_hash": context.get(
+                "asmae_replay_capability_plan_hash"
+            ),
+        }
+        result.append(record)
+    return result
+
+
+def _load_frozen_reintegration_event(
+    service: Any,
+    *,
+    inputs: Any,
+    event_id: str,
+    event_type: str,
+    payload_key: str,
+    expected_content_hash: str,
+    rehydrate_generated_at: bool = False,
+) -> Dict[str, Any]:
+    """Load one exact job-frozen crop/phenology event, or fail closed.
+
+    Looking up the latest event is intentionally forbidden here: a worker may
+    finish after another request has advanced the worldline.  Reintegration is
+    a replay of its admitted evidence, not a new crop-inference observation.
+    """
+    event_id = str(event_id or "").strip()
+    expected_content_hash = str(expected_content_hash or "").strip()
+    if not event_id or not expected_content_hash:
+        raise ValueError(f"frozen {event_type} identity is unavailable")
+    event = service.load_event(
+        plot_id=inputs.plot_id,
+        event_id=event_id,
+        tenant_id=inputs.tenant_id,
+        namespace=inputs.farm_id,
+    )
+    if not event or str(event.get("event_id") or "") != event_id:
+        raise ValueError(f"frozen {event_type} event was not found")
+    if (
+        event.get("event_type") != event_type
+        or event.get("tenant_id") != inputs.tenant_id
+        or event.get("namespace") != inputs.farm_id
+        or event.get("plot_id") != inputs.plot_id
+    ):
+        raise ValueError(f"frozen {event_type} namespace/type mismatch")
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, dict) else {}
+    declared_namespace = payload.get("plot_namespace")
+    expected_namespace = {
+        "tenant_id": inputs.tenant_id,
+        "farm_id": inputs.farm_id,
+        "plot_id": inputs.plot_id,
+    }
+    if declared_namespace != expected_namespace:
+        raise ValueError(f"frozen {event_type} payload namespace mismatch")
+    scientific = payload.get(payload_key)
+    if not isinstance(scientific, dict):
+        raise ValueError(f"frozen {event_type} scientific payload is missing")
+    if str(scientific.get("content_hash") or "") != expected_content_hash:
+        raise ValueError(f"frozen {event_type} content hash mismatch")
+    result = dict(scientific)
+    if rehydrate_generated_at:
+        effective_at = str(
+            event.get("effective_at")
+            or event.get("observation_or_valid_time")
+            or ""
+        ).strip()
+        if not effective_at:
+            raise ValueError(f"frozen {event_type} effective time is unavailable")
+        result["generated_at"] = effective_at
+    return result
+
+
+def _worldline_scientific_payload_matches(
+    declared: Any, persisted: Any,
+) -> bool:
+    """Compare scientific payloads using canonical worldline persistence rules."""
+    from services.agribrain.world_model.canonical_worldline import (
+        VOLATILE_IDENTITY_KEYS,
+    )
+
+    def canonical(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): canonical(item)
+                for key, item in value.items()
+                if str(key) not in VOLATILE_IDENTITY_KEYS
+            }
+        if isinstance(value, (list, tuple)):
+            return [canonical(item) for item in value]
+        return value
+
+    return canonical(declared) == canonical(persisted)
+
 from services.agribrain.orchestrator_v2.schema import (
     OrchestratorInput, RunArtifact, RunMeta, LayerResult, LayerStatus, GlobalQuality
 )
@@ -692,6 +1038,7 @@ from services.agribrain.orchestrator_v2.storage import LocalJsonStore
 from services.agribrain.orchestrator_v2.chat_adapter import ChatPayload, build_chat_payload
 from services.agribrain.layer10_sire.schema import Layer10Input
 from services.agribrain.layer8_prescriptive.schema import Layer8Input
+from services.agribrain.common.plot_namespace import namespace_payload
 
 ORCHESTRATOR_VERSION = "2.1.0"
 
@@ -825,6 +1172,20 @@ def run_orchestrator(
         stage_started = time.perf_counter()
         raw_soil = broker.get("soilgrids", plot_id, lat, lng) or {}
         stage_timings_ms["gateway_soil"] = round((time.perf_counter() - stage_started) * 1000.0, 3)
+
+        replay_weather = _weather_records_from_reintegration_context(
+            inputs.operational_context
+        )
+        if replay_weather:
+            raw_env = dict(raw_env)
+            raw_env["weather_consensus"] = replay_weather
+            raw_env["provenance"] = {
+                **dict(raw_env.get("provenance") or {}),
+                "replay_source": "frozen_asmae_process_forcing",
+                "capability_plan_hash": (inputs.operational_context or {}).get(
+                    "asmae_replay_capability_plan_hash"
+                ),
+            }
 
         # Merge soil and forecast into raw_env
         raw_env["soilgrids"] = raw_soil
@@ -1059,42 +1420,180 @@ def run_orchestrator(
     ) or op_ctx.get("soil_context", {})
     crop_pre_posterior: Dict[str, Any] = {}
     crop_worldline_event_id = None
+    phenology_worldline_event_id = None
+    canonical_worldline = None
     asmae_scientific_run_id = run_id
-    canonical_temporal_records = _canonical_crop_temporal_records(l0_output)
+    crop_influence_manifest: Dict[str, Any] = {}
+    crop_config_for_observations = inputs.crop_config or {}
+    reintegration_evidence_replay = (
+        op_ctx.get("asmae_worker_reintegration") is True
+    )
+    canonical_temporal_records = _canonical_crop_temporal_records(
+        l0_output,
+        plot_geometry=(
+            op_ctx.get("polygon_geojson")
+            or op_ctx.get("polygon_coords")
+            or op_ctx.get("geometry")
+        ),
+        geometry_hash=inputs.geometry_hash or "",
+        # Operational plot polygons are stored as RFC 7946/WGS84 coordinates.
+        # Passing the declaration explicitly also covers the legacy bare-ring
+        # representation, which carries no embedded CRS metadata.
+        plot_geometry_crs=(
+            op_ctx.get("polygon_crs")
+            or op_ctx.get("geometry_crs")
+            or "EPSG:4326"
+        ),
+        plot_namespace={
+            "tenant_id": inputs.tenant_id,
+            "farm_id": inputs.farm_id,
+            "plot_id": inputs.plot_id,
+        },
+        crop_cycle_id=(
+            crop_config_for_observations.get("crop_cycle_id")
+            or op_ctx.get("crop_cycle_id")
+        ),
+        weather_records=coarse_weather,
+        season_start=(
+            crop_config_for_observations.get("planting_date")
+            or crop_config_for_observations.get("plantingDate")
+            or crop_config_for_observations.get("start_date")
+            or crop_config_for_observations.get("startDate")
+        ),
+    )
+    crop_evidence_ledger_payload: Dict[str, Any] = {}
     try:
-        from layer2_veg_int.crop_posterior import (
+        from services.agribrain.layer2_veg_int.crop_observations import (
+            build_crop_evidence_ledger,
+        )
+        crop_evidence_ledger_payload = build_crop_evidence_ledger(
+            canonical_temporal_records,
+            plot_namespace=inputs.plot_namespace,
+        ).to_dict()
+        crop_config_for_observations = {
+            **crop_config_for_observations,
+            "crop_evidence_ledger": crop_evidence_ledger_payload,
+            "crop_evidence_ledger_hash": crop_evidence_ledger_payload.get(
+                "ledger_hash"
+            ),
+        }
+        inputs = replace(
+            inputs,
+            crop_config=crop_config_for_observations,
+        )
+    except Exception as crop_ledger_exc:
+        # Crop inference can still publish an unavailable/prior-only state, but
+        # it cannot claim physical EO support without a verified ledger.
+        logger.exception(
+            "Canonical crop evidence ledger construction failed: %s",
+            crop_ledger_exc,
+        )
+    try:
+        from services.agribrain.layer2_veg_int.crop_posterior import (
             condition_crop_context,
             infer_crop_posterior,
         )
-        from layer05_asmae.history.worldline_service import PlotWorldlineService
+        from services.agribrain.orchestrator_v2.pre_asmae_layer2a import (
+            commit_crop_posterior_worldline,
+            load_latest_crop_posterior,
+        )
+        from services.agribrain.world_model.canonical_worldline import (
+            CanonicalWorldlineService,
+        )
 
-        worldline = PlotWorldlineService()
-        previous_crop_event = worldline.latest_payload(
-            inputs.plot_id, "CROP_POSTERIOR"
-        )
-        crop_operational = _crop_operational_context(
-            op_ctx,
-            weather_records=coarse_weather,
-            soil_context=coarse_soil,
-        )
-        crop_pre_posterior = infer_crop_posterior(
-            plot_id=inputs.plot_id,
-            run_id=run_id,
-            plot_timeseries=canonical_temporal_records,
-            crop_config=inputs.crop_config or {},
-            operational_context=crop_operational,
-            archive_context={
-                **dict(op_ctx.get("crop_archive_context") or {}),
-                "previous_crop_posterior": previous_crop_event.get(
-                    "crop_posterior", {}
+        canonical_worldline = CanonicalWorldlineService()
+        if reintegration_evidence_replay:
+            replay_lineage = str(
+                op_ctx.get("asmae_replay_crop_posterior_lineage") or ""
+            )
+            crop_pre_posterior = _load_frozen_reintegration_event(
+                canonical_worldline,
+                inputs=inputs,
+                event_id=str(
+                    op_ctx.get("asmae_replay_crop_worldline_event_id") or ""
                 ),
-                "previous_crops": (
-                    op_ctx.get("previous_crops")
-                    or op_ctx.get("crop_rotation")
-                    or []
+                event_type="CROP_POSTERIOR",
+                payload_key="crop_posterior",
+                expected_content_hash=replay_lineage,
+                rehydrate_generated_at=True,
+            )
+            declared_replay = op_ctx.get("asmae_replay_crop_posterior")
+            if (
+                not isinstance(declared_replay, dict)
+                or not _worldline_scientific_payload_matches(
+                    declared_replay, crop_pre_posterior
+                )
+            ):
+                raise ValueError("frozen crop posterior payload mismatch")
+            replay_lineage_id = str(
+                op_ctx.get("asmae_replay_crop_lineage_id") or ""
+            )
+            if (
+                replay_lineage_id
+                and str(crop_pre_posterior.get("lineage_id") or "")
+                != replay_lineage_id
+            ):
+                raise ValueError("frozen crop posterior lineage ID mismatch")
+            crop_worldline_event_id = str(
+                op_ctx.get("asmae_replay_crop_worldline_event_id") or ""
+            )
+            replay_ledger = op_ctx.get("asmae_replay_crop_evidence_ledger")
+            replay_ledger = (
+                dict(replay_ledger) if isinstance(replay_ledger, dict) else {}
+            )
+            expected_ledger_hash = str(
+                op_ctx.get("asmae_replay_crop_evidence_ledger_hash") or ""
+            )
+            if (
+                not replay_ledger
+                or str(replay_ledger.get("ledger_hash") or "")
+                != expected_ledger_hash
+                or str(crop_pre_posterior.get("crop_evidence_ledger_hash") or "")
+                != expected_ledger_hash
+            ):
+                raise ValueError("frozen crop evidence ledger mismatch")
+            crop_evidence_ledger_payload = replay_ledger
+            crop_config_for_observations = {
+                **(inputs.crop_config or {}),
+                "crop_evidence_ledger": replay_ledger,
+                "crop_evidence_ledger_hash": expected_ledger_hash,
+            }
+            inputs = replace(
+                inputs,
+                crop_config=crop_config_for_observations,
+            )
+        else:
+            previous_crop_posterior = load_latest_crop_posterior(
+                canonical_worldline,
+                plot_namespace=inputs.plot_namespace,
+            )
+            crop_operational = _crop_operational_context(
+                op_ctx,
+                weather_records=coarse_weather,
+                soil_context=coarse_soil,
+            )
+            crop_operational.update({
+                "crop_evidence_ledger": crop_evidence_ledger_payload,
+                "crop_evidence_ledger_hash": crop_evidence_ledger_payload.get(
+                    "ledger_hash"
                 ),
-            },
-        )
+            })
+            crop_pre_posterior = infer_crop_posterior(
+                plot_id=inputs.plot_id,
+                run_id=run_id,
+                plot_timeseries=canonical_temporal_records,
+                crop_config=inputs.crop_config or {},
+                operational_context=crop_operational,
+                archive_context={
+                    **dict(op_ctx.get("crop_archive_context") or {}),
+                    "previous_crop_posterior": previous_crop_posterior or {},
+                    "previous_crops": (
+                        op_ctx.get("previous_crops")
+                        or op_ctx.get("crop_rotation")
+                        or []
+                    ),
+                },
+            )
         conditioned_crop = condition_crop_context(
             inputs.crop_config or {}, crop_pre_posterior
         )
@@ -1109,31 +1608,264 @@ def run_orchestrator(
             raise ValueError("pre-ASMAE crop posterior has no generated_at")
         if not crop_pre_authority:
             raise ValueError("pre-ASMAE crop posterior has no authority")
-        crop_event = worldline.commit_event(
-            plot_id=inputs.plot_id,
-            event_type="CROP_POSTERIOR",
-            geometry_hash=inputs.geometry_hash or "",
-            authority=crop_pre_authority,
-            effective_at=crop_pre_time,
-            observation_or_valid_time=crop_pre_time,
-            payload={
-                "crop_posterior": crop_pre_posterior,
-                "parent_orchestrator_run_id": run_id,
-                "pass": "PRE_ASMAE",
-            },
-        )
-        crop_worldline_event_id = crop_event.get("event_id")
+        if not reintegration_evidence_replay:
+            crop_event = commit_crop_posterior_worldline(
+                canonical_worldline,
+                plot_namespace=inputs.plot_namespace,
+                crop_posterior=crop_pre_posterior,
+                geometry_version=inputs.geometry_hash or "UNKNOWN_GEO",
+                effective_at=crop_pre_time,
+                observation_or_valid_time=(
+                    crop_pre_posterior.get("observation_or_valid_time")
+                    or crop_pre_posterior.get("as_of")
+                    or crop_pre_time
+                ),
+                parent_orchestrator_run_id=run_id,
+                pass_name="PRE_ASMAE",
+            )
+            crop_worldline_event_id = crop_event.get("event_id")
         asmae_scientific_run_id = "AGB2-ASMAE-" + hashlib.sha256(
             (
                 run_id
-                + ":"
-                + str(crop_pre_posterior.get("content_hash", ""))
+                + ":" + str(crop_pre_posterior.get("content_hash", ""))
             ).encode("utf-8")
         ).hexdigest()[:24]
+        from services.agribrain.scientific_contracts.crop_governance import (
+            CropInfluenceManifestV1,
+        )
+        if reintegration_evidence_replay:
+            replay_manifest = op_ctx.get(
+                "asmae_replay_crop_influence_manifest"
+            )
+            crop_influence_manifest = (
+                dict(replay_manifest)
+                if isinstance(replay_manifest, dict) else {}
+            )
+            expected_manifest_hash = str(
+                op_ctx.get("asmae_replay_crop_influence_manifest_hash") or ""
+            )
+            if (
+                not crop_influence_manifest
+                or crop_influence_manifest.get("content_hash")
+                != expected_manifest_hash
+                or crop_influence_manifest.get("crop_posterior_parent_hash")
+                != crop_pre_posterior.get("content_hash")
+            ):
+                raise ValueError("frozen crop influence manifest mismatch")
+        else:
+            crop_source_ids = _crop_influence_evidence_ids(
+                canonical_temporal_records, independent_only=False,
+            )
+            # Independence is owned by the verified crop-evidence ledger.  Do not
+            # reconstruct it from legacy temporal flags: provider daily statistics
+            # can be usable by temporal consumers without representing independent
+            # physical acquisitions.
+            crop_independent_ids = _crop_ledger_independent_evidence_ids(
+                crop_evidence_ledger_payload
+            )
+            crop_influence_manifest = CropInfluenceManifestV1(
+                namespace=inputs.plot_namespace,
+                crop_cycle_id=(
+                    crop_config_for_observations.get("crop_cycle_id")
+                    or op_ctx.get("crop_cycle_id")
+                ),
+                independent_evidence_ids=crop_independent_ids,
+                # These are the physical observations in the Layer-0 stack being
+                # handed to ASMAE, not a second independent evidence collection.
+                asmae_source_observation_ids=crop_source_ids,
+                dependent_refinement_features=(),
+                maximum_allowed_posterior_influence=0.15,
+                actual_posterior_change=0.0,
+                lineage_parent_id=str(
+                    crop_pre_posterior.get("lineage_id")
+                    or crop_pre_posterior.get("content_hash")
+                ),
+                lineage_child_id=None,
+                crop_posterior_parent_hash=str(
+                    crop_pre_posterior.get("content_hash") or ""
+                ),
+                crop_posterior_child_hash="",
+                asmae_run_id=asmae_scientific_run_id,
+                child_asmae_run_scheduled=False,
+                refinement_iteration=0,
+            ).to_dict()
     except Exception as crop_exc:
+        if reintegration_evidence_replay:
+            raise RuntimeError(
+                "exact crop evidence replay failed"
+            ) from crop_exc
         logger.exception(
             "Canonical pre-ASMAE crop posterior failed: %s", crop_exc
         )
+
+    # --- Canonical Layer 2A crop/phenology pass (pre-ASMAE) ---
+    # This pass is deliberately built from the verified ledger's selected
+    # physical representatives. Generic/fill-interpolated Layer 1 rows cannot
+    # become additional crop evidence through this seam.
+    pre_asmae_layer2a_context: Dict[str, Any] = {
+        "pre_asmae_layer2a_status": "unavailable",
+        "pre_asmae_layer2a_reason": "not_attempted",
+    }
+    previous_phenology_event = None
+    try:
+        if l1_coarse_output is None:
+            raise ValueError("coarse Layer 1 tensor is unavailable")
+        from services.agribrain.orchestrator_v2.pre_asmae_layer2a import (
+            build_pre_asmae_layer2a_input,
+            commit_phenology_posterior_worldline,
+            load_latest_crop_phenology_event,
+            run_pre_asmae_layer2a,
+            PHENOLOGY_POSTERIOR_EVENT_TYPE,
+        )
+        from services.agribrain.world_model.canonical_worldline import (
+            CanonicalWorldlineService,
+        )
+
+        canonical_worldline = canonical_worldline or CanonicalWorldlineService()
+        if reintegration_evidence_replay:
+            phenology_worldline_event_id = str(
+                op_ctx.get("asmae_replay_phenology_worldline_event_id") or ""
+            )
+            expected_phenology_hash = str(
+                op_ctx.get("asmae_replay_phenology_posterior_hash") or ""
+            )
+            canonical_phenology = _load_frozen_reintegration_event(
+                canonical_worldline,
+                inputs=inputs,
+                event_id=phenology_worldline_event_id,
+                event_type=PHENOLOGY_POSTERIOR_EVENT_TYPE,
+                payload_key="phenology_posterior",
+                expected_content_hash=expected_phenology_hash,
+            )
+            declared_phenology = op_ctx.get(
+                "asmae_replay_phenology_posterior"
+            )
+            if (
+                not isinstance(declared_phenology, dict)
+                or not _worldline_scientific_payload_matches(
+                    declared_phenology, canonical_phenology
+                )
+            ):
+                raise ValueError("frozen phenology posterior payload mismatch")
+            inputs = replace(
+                inputs,
+                crop_config={
+                    **(inputs.crop_config or {}),
+                    "previous_phenology_event_id": phenology_worldline_event_id,
+                },
+            )
+            replay_layer2a = op_ctx.get(
+                "asmae_replay_pre_asmae_layer2a_context"
+            )
+            pre_asmae_layer2a_context = (
+                dict(replay_layer2a)
+                if isinstance(replay_layer2a, dict) else {}
+            )
+            pre_asmae_layer2a_context.update({
+                "pre_asmae_layer2a_status": (
+                    pre_asmae_layer2a_context.get(
+                        "pre_asmae_layer2a_status"
+                    ) or "available"
+                ),
+                "phenology_posterior": canonical_phenology,
+                "phenology_posterior_hash": expected_phenology_hash,
+                "phenology_worldline_event_id": phenology_worldline_event_id,
+                "evidence_replay": "exact_frozen_worldline_event",
+            })
+        else:
+            previous_phenology_event = load_latest_crop_phenology_event(
+                canonical_worldline,
+                plot_namespace=inputs.plot_namespace,
+                event_type=PHENOLOGY_POSTERIOR_EVENT_TYPE,
+            )
+            if previous_phenology_event:
+                inputs = replace(
+                    inputs,
+                    crop_config={
+                        **(inputs.crop_config or {}),
+                        "previous_phenology_event_id": previous_phenology_event.get(
+                            "event_id"
+                        ),
+                    },
+                )
+            layer2a_bundle = build_pre_asmae_layer2a_input(
+                inputs,
+                l1_coarse_output,
+                weather_records=coarse_weather,
+            )
+            layer2a_result = run_pre_asmae_layer2a(layer2a_bundle)
+            inputs = layer2a_result.bundle.inputs
+            pre_asmae_layer2a_context = dict(layer2a_result.asmae_context)
+            canonical_phenology = pre_asmae_layer2a_context.get(
+                "phenology_posterior"
+            )
+            if isinstance(canonical_phenology, dict) and canonical_phenology.get(
+                "content_hash"
+            ):
+                phenology_time = str(
+                    canonical_phenology.get("effective_at")
+                    or canonical_phenology.get("generated_at")
+                    or ""
+                ).strip()
+                if not phenology_time:
+                    raise ValueError(
+                        "pre-ASMAE phenology posterior has no effective_at"
+                    )
+                phenology_event = commit_phenology_posterior_worldline(
+                    canonical_worldline,
+                    plot_namespace=inputs.plot_namespace,
+                    phenology_posterior=canonical_phenology,
+                    geometry_version=inputs.geometry_hash or "UNKNOWN_GEO",
+                    effective_at=phenology_time,
+                    observation_or_valid_time=phenology_time,
+                    parent_event_ids=(
+                        (crop_worldline_event_id,)
+                        if crop_worldline_event_id else ()
+                    ),
+                    parent_orchestrator_run_id=run_id,
+                )
+                phenology_worldline_event_id = phenology_event.get("event_id")
+                pre_asmae_layer2a_context[
+                    "phenology_worldline_event_id"
+                ] = phenology_worldline_event_id
+    except Exception as layer2a_exc:
+        if reintegration_evidence_replay:
+            raise RuntimeError(
+                "exact phenology evidence replay failed"
+            ) from layer2a_exc
+        can_reuse_as_of = (
+            previous_phenology_event is not None
+            and "requires admitted physical evidence" in str(layer2a_exc)
+        )
+        if can_reuse_as_of:
+            try:
+                pre_asmae_layer2a_context = _freeze_previous_phenology_event(
+                    previous_phenology_event,
+                    as_of=(inputs.date_range or {}).get("end"),
+                )
+                phenology_worldline_event_id = pre_asmae_layer2a_context[
+                    "phenology_worldline_event_id"
+                ]
+                logger.info(
+                    "Pre-ASMAE Layer 2A reused exact canonical phenology event %s",
+                    phenology_worldline_event_id,
+                )
+            except Exception as reuse_exc:
+                pre_asmae_layer2a_context = {
+                    "pre_asmae_layer2a_status": "unavailable",
+                    "pre_asmae_layer2a_reason": str(reuse_exc),
+                }
+                logger.exception(
+                    "Canonical phenology fallback failed: %s", reuse_exc
+                )
+        else:
+            pre_asmae_layer2a_context = {
+                "pre_asmae_layer2a_status": "unavailable",
+                "pre_asmae_layer2a_reason": str(layer2a_exc),
+            }
+            logger.exception(
+                "Canonical pre-ASMAE Layer 2A pass failed: %s", layer2a_exc
+            )
 
     # --- ASMAE Execution ---
     asmae_output = None
@@ -1153,7 +1885,17 @@ def run_orchestrator(
         
     try:
         from layer05_asmae.runner import ASMAERunner
+        from layer05_asmae.reintegration import REINTEGRATION_CONTRACT_VERSION
         asmae_runner = ASMAERunner()
+
+        if not str(crop_worldline_event_id or "").strip():
+            raise ValueError(
+                "ASMAE submission requires an exact crop worldline event"
+            )
+        if not str(phenology_worldline_event_id or "").strip():
+            raise ValueError(
+                "ASMAE submission requires an exact phenology worldline event"
+            )
         
         if asmae_runner.is_enabled(inputs.plot_id):
             if asmae_mode == "quick_visual":
@@ -1200,6 +1942,11 @@ def run_orchestrator(
                     return str(d)
 
                 asmae_context = {
+                    "plot_namespace": namespace_payload(inputs.plot_namespace),
+                    "tenant_id": inputs.tenant_id,
+                    "farm_id": inputs.farm_id,
+                    "plot_id": inputs.plot_id,
+                    "worldline_namespace": inputs.farm_id,
                     "polygon_geojson": op_ctx.get("polygon_coords") or {},
                     "geometry_hash": inputs.geometry_hash or "",
                     "start_date": _to_date_str(start_date),
@@ -1219,6 +1966,10 @@ def run_orchestrator(
                     "coarse_layer_outputs": coarse_evidence_priors,
                     "crop_context": inputs.crop_config or {},
                     "crop_posterior": crop_pre_posterior,
+                    "crop_evidence_ledger": crop_evidence_ledger_payload,
+                    "crop_evidence_ledger_hash": crop_evidence_ledger_payload.get(
+                        "ledger_hash"
+                    ),
                     "crop_posterior_lineage": crop_pre_posterior.get(
                         "content_hash"
                     ),
@@ -1226,6 +1977,12 @@ def run_orchestrator(
                         "lineage_id"
                     ),
                     "crop_worldline_event_id": crop_worldline_event_id,
+                    "phenology_worldline_event_id": phenology_worldline_event_id,
+                    **pre_asmae_layer2a_context,
+                    "crop_influence_manifest": crop_influence_manifest,
+                    "crop_influence_manifest_hash": crop_influence_manifest.get(
+                        "content_hash"
+                    ),
                     "orchestrator_parent_run_id": run_id,
                     "management_events": op_ctx.get("management_events", []),
                     "user_observations": op_ctx.get("user_observations", []),
@@ -1255,9 +2012,7 @@ def run_orchestrator(
                         if l0_output and hasattr(l0_output, "metadata") else None
                     ),
                     "orchestrator_reintegration": {
-                        "contract_version": (
-                            "asmae_orchestrator_reintegration_v1"
-                        ),
+                        "contract_version": REINTEGRATION_CONTRACT_VERSION,
                         "input": asdict(inputs),
                         "intent": "UNKNOWN",
                     },
@@ -1283,11 +2038,16 @@ def run_orchestrator(
                         "error": None
                     }
                 elif status_val == "error":
+                    asmae_failure_code = str(
+                        asmae_output.get("failure_code") or "execution_error"
+                    )
                     asmae_run_record = {
                         "requested": True,
                         "status": "failed",
-                        "reason": "execution_error",
-                        "error": asmae_output.get("reason", "unknown error")
+                        "reason": asmae_failure_code,
+                        "failure_code": asmae_failure_code,
+                        "error": asmae_output.get("reason", "unknown error"),
+                        "error_type": asmae_output.get("error_type"),
                     }
                 else:
                     cache_key = asmae_output.get("cache_key") or ""
@@ -1314,6 +2074,11 @@ def run_orchestrator(
                     or op_ctx.get("plot_timeseries", [])
                 )
                 standard_context = {
+                    "plot_namespace": namespace_payload(inputs.plot_namespace),
+                    "tenant_id": inputs.tenant_id,
+                    "farm_id": inputs.farm_id,
+                    "plot_id": inputs.plot_id,
+                    "worldline_namespace": inputs.farm_id,
                     "polygon_geojson": op_ctx.get("polygon_coords") or {},
                     "geometry_hash": inputs.geometry_hash or "",
                     "start_date": start_date.isoformat() if hasattr(start_date, "isoformat") else str(start_date),
@@ -1329,6 +2094,10 @@ def run_orchestrator(
                     "coarse_layer_outputs": coarse_evidence_priors,
                     "crop_context": inputs.crop_config or {},
                     "crop_posterior": crop_pre_posterior,
+                    "crop_evidence_ledger": crop_evidence_ledger_payload,
+                    "crop_evidence_ledger_hash": crop_evidence_ledger_payload.get(
+                        "ledger_hash"
+                    ),
                     "crop_posterior_lineage": crop_pre_posterior.get(
                         "content_hash"
                     ),
@@ -1336,6 +2105,12 @@ def run_orchestrator(
                         "lineage_id"
                     ),
                     "crop_worldline_event_id": crop_worldline_event_id,
+                    "phenology_worldline_event_id": phenology_worldline_event_id,
+                    **pre_asmae_layer2a_context,
+                    "crop_influence_manifest": crop_influence_manifest,
+                    "crop_influence_manifest_hash": crop_influence_manifest.get(
+                        "content_hash"
+                    ),
                     "orchestrator_parent_run_id": run_id,
                     "management_events": op_ctx.get("management_events", []),
                     "user_observations": op_ctx.get("user_observations", []),
@@ -1362,23 +2137,22 @@ def run_orchestrator(
                         if l0_output and hasattr(l0_output, "metadata") else None
                     ),
                     "orchestrator_reintegration": {
-                        "contract_version": (
-                            "asmae_orchestrator_reintegration_v1"
-                        ),
+                        "contract_version": REINTEGRATION_CONTRACT_VERSION,
                         "input": asdict(inputs),
                         "intent": "UNKNOWN",
                     },
                 }
                 asmae_submission_context = standard_context
                 job = asmae_runner._run_background_standard_asmae(
-                    inputs.plot_id, asmae_scientific_run_id, standard_context
+                    inputs.plot_namespace, asmae_scientific_run_id, standard_context
                 )
                 asmae_run_record = {
                     "requested": True,
                     "status": "queued",
                     "reason": None,
                     "mode": "standard",
-                    "run_id": asmae_scientific_run_id,
+                    "run_id": job.get("run_id") or asmae_scientific_run_id,
+                    "request_lineage_id": job.get("request_lineage_id") or asmae_scientific_run_id,
                     "job_id": job.get("job_id"),
                     "output_ref": job.get("job_ref"),
                     "error": None
@@ -1452,15 +2226,21 @@ def run_orchestrator(
     # ASMAE feedback is dependent on pass-A evidence, so refinement is bounded
     # and allowed only when the ASMAE artifact carries the same crop lineage.
     crop_final_posterior = crop_pre_posterior
-    crop_refinement_status = "not_attempted"
-    if crop_pre_posterior:
+    crop_refinement_status = (
+        "skipped_exact_reintegration_replay"
+        if reintegration_evidence_replay else "not_attempted"
+    )
+    if crop_pre_posterior and not reintegration_evidence_replay:
         try:
-            from layer2_veg_int.crop_posterior import (
+            from services.agribrain.layer2_veg_int.crop_posterior import (
                 condition_crop_context,
                 refine_crop_posterior,
             )
-            from layer05_asmae.history.worldline_service import (
-                PlotWorldlineService,
+            from services.agribrain.orchestrator_v2.pre_asmae_layer2a import (
+                commit_crop_posterior_worldline,
+            )
+            from services.agribrain.world_model.canonical_worldline import (
+                CanonicalWorldlineService,
             )
             plot_state = (
                 dict(asmae_output.get("plot_state_artifact") or {})
@@ -1470,10 +2250,17 @@ def run_orchestrator(
                 asmae_output.get("crop_posterior_lineage")
                 if isinstance(asmae_output, dict) else None
             )
+            output_influence_hash = (
+                asmae_output.get("crop_influence_manifest_hash")
+                if isinstance(asmae_output, dict) else None
+            )
             lineage_matches = (
                 bool(plot_state)
                 and output_crop_lineage
                 == crop_pre_posterior.get("content_hash")
+                and bool(crop_influence_manifest.get("content_hash"))
+                and output_influence_hash
+                == crop_influence_manifest.get("content_hash")
             )
             if lineage_matches:
                 crop_final_posterior = refine_crop_posterior(
@@ -1507,7 +2294,9 @@ def run_orchestrator(
                     inputs.crop_config or {}, crop_final_posterior
                 ),
             )
-            worldline = PlotWorldlineService()
+            canonical_worldline = (
+                canonical_worldline or CanonicalWorldlineService()
+            )
             crop_final_time = str(
                 crop_final_posterior.get("generated_at") or ""
             ).strip()
@@ -1522,33 +2311,92 @@ def run_orchestrator(
                 raise ValueError(
                     "post-ASMAE crop posterior has no authority"
                 )
-            final_crop_event = worldline.commit_event(
-                plot_id=inputs.plot_id,
-                event_type=(
-                    "CROP_POSTERIOR"
-                    if lineage_matches
-                    else "CROP_REFINEMENT_EVALUATED"
-                ),
-                geometry_hash=inputs.geometry_hash or "",
-                authority=crop_final_authority,
-                effective_at=crop_final_time,
-                observation_or_valid_time=crop_final_time,
-                parent_event_ids=(
-                    [crop_worldline_event_id]
-                    if crop_worldline_event_id else []
-                ),
-                payload={
-                    "crop_posterior": crop_final_posterior,
-                    "parent_orchestrator_run_id": run_id,
-                    "asmae_run_id": asmae_run_record.get("run_id"),
-                    "asmae_plot_state_hash": plot_state.get("content_hash"),
-                    "pass": crop_final_posterior.get(
-                        "pass", "PRE_ASMAE"
-                    ),
-                    "refinement_status": crop_refinement_status,
-                },
+            from services.agribrain.scientific_contracts.crop_governance import (
+                CropInfluenceManifestV1,
             )
-            crop_worldline_event_id = final_crop_event.get("event_id")
+            dependent_features = tuple(
+                key for key in ("structure", "phenology_progress", "vigor")
+                if isinstance(
+                    dict(plot_state.get("posterior") or {}).get(key), dict
+                )
+            ) if lineage_matches else ()
+            parent_posterior_hash = str(
+                crop_pre_posterior.get("content_hash") or ""
+            )
+            final_posterior_hash = str(
+                crop_final_posterior.get("content_hash") or ""
+            )
+            crop_influence_manifest = CropInfluenceManifestV1(
+                namespace=inputs.plot_namespace,
+                crop_cycle_id=(
+                    crop_config_for_observations.get("crop_cycle_id")
+                    or op_ctx.get("crop_cycle_id")
+                ),
+                independent_evidence_ids=tuple(
+                    crop_influence_manifest.get(
+                        "independent_evidence_ids", ()
+                    )
+                ),
+                asmae_source_observation_ids=tuple(
+                    crop_influence_manifest.get(
+                        "asmae_source_observation_ids", ()
+                    )
+                ),
+                dependent_refinement_features=dependent_features,
+                maximum_allowed_posterior_influence=float(
+                    crop_final_posterior.get(
+                        "dependent_feedback_weight_cap", 0.15
+                    )
+                ),
+                actual_posterior_change=float(
+                    crop_final_posterior.get(
+                        "posterior_change_total_variation", 0.0
+                    )
+                ),
+                lineage_parent_id=parent_posterior_hash,
+                lineage_child_id=(
+                    final_posterior_hash
+                    if final_posterior_hash != parent_posterior_hash
+                    else None
+                ),
+                crop_posterior_parent_hash=parent_posterior_hash,
+                crop_posterior_child_hash=(
+                    final_posterior_hash
+                    if final_posterior_hash != parent_posterior_hash
+                    else ""
+                ),
+                asmae_run_id=(
+                    asmae_run_record.get("run_id")
+                    or asmae_scientific_run_id
+                ),
+                child_asmae_run_scheduled=False,
+                refinement_iteration=0,
+            ).to_dict()
+            # An evaluation with no independently materialized posterior must
+            # not advance the scientific CROP_POSTERIOR head. Only a verified
+            # lineage-changing refinement is committed canonically.
+            if lineage_matches and final_posterior_hash != parent_posterior_hash:
+                final_crop_event = commit_crop_posterior_worldline(
+                    canonical_worldline,
+                    plot_namespace=inputs.plot_namespace,
+                    crop_posterior=crop_final_posterior,
+                    geometry_version=inputs.geometry_hash or "UNKNOWN_GEO",
+                    effective_at=crop_final_time,
+                    observation_or_valid_time=(
+                        crop_final_posterior.get("observation_or_valid_time")
+                        or crop_final_posterior.get("as_of")
+                        or crop_final_time
+                    ),
+                    parent_event_ids=(
+                        (crop_worldline_event_id,)
+                        if crop_worldline_event_id else ()
+                    ),
+                    parent_orchestrator_run_id=run_id,
+                    pass_name=str(
+                        crop_final_posterior.get("pass") or "POST_ASMAE"
+                    ),
+                )
+                crop_worldline_event_id = final_crop_event.get("event_id")
             if isinstance(asmae_output, dict):
                 asmae_output["refined_crop_posterior"] = (
                     crop_final_posterior
@@ -1567,6 +2415,9 @@ def run_orchestrator(
                     and crop_final_posterior.get("lineage_id")
                     == crop_pre_posterior.get("lineage_id")
                 )
+                asmae_output["crop_influence_manifest"] = (
+                    crop_influence_manifest
+                )
             if (
                 crop_final_posterior.get("material_change") is True
                 and crop_final_posterior.get("child_run_id")
@@ -1575,6 +2426,57 @@ def run_orchestrator(
                     "disable_crop_refinement_reschedule", False
                 )
             ):
+                scheduled_manifest = CropInfluenceManifestV1(
+                    namespace=inputs.plot_namespace,
+                    crop_cycle_id=crop_influence_manifest.get(
+                        "crop_cycle_id"
+                    ),
+                    independent_evidence_ids=tuple(
+                        crop_influence_manifest.get(
+                            "independent_evidence_ids", ()
+                        )
+                    ),
+                    asmae_source_observation_ids=tuple(
+                        crop_influence_manifest.get(
+                            "asmae_source_observation_ids", ()
+                        )
+                    ),
+                    dependent_refinement_features=tuple(
+                        crop_influence_manifest.get(
+                            "dependent_refinement_features", ()
+                        )
+                    ),
+                    maximum_allowed_posterior_influence=float(
+                        crop_influence_manifest[
+                            "maximum_allowed_posterior_influence"
+                        ]
+                    ),
+                    actual_posterior_change=float(
+                        crop_influence_manifest["actual_posterior_change"]
+                    ),
+                    lineage_parent_id=str(
+                        crop_influence_manifest["lineage_parent_id"]
+                    ),
+                    lineage_child_id=str(
+                        crop_influence_manifest.get("lineage_child_id")
+                        or crop_final_posterior["child_run_id"]
+                    ),
+                    crop_posterior_parent_hash=str(
+                        crop_influence_manifest.get(
+                            "crop_posterior_parent_hash", ""
+                        )
+                    ),
+                    crop_posterior_child_hash=str(
+                        crop_influence_manifest.get(
+                            "crop_posterior_child_hash", ""
+                        )
+                    ),
+                    asmae_run_id=str(
+                        crop_influence_manifest.get("asmae_run_id") or ""
+                    ),
+                    child_asmae_run_scheduled=True,
+                    refinement_iteration=1,
+                ).to_dict()
                 refinement_context = dict(asmae_submission_context)
                 refinement_context.update({
                     "crop_context": inputs.crop_config or {},
@@ -1589,30 +2491,26 @@ def run_orchestrator(
                         asmae_run_record.get("run_id")
                     ),
                     "is_crop_refinement": True,
+                    "crop_influence_manifest": scheduled_manifest,
+                    "crop_influence_manifest_hash": scheduled_manifest.get(
+                        "content_hash"
+                    ),
                 })
                 refinement_job = (
                     asmae_runner._run_background_standard_asmae(
-                        inputs.plot_id,
+                        inputs.plot_namespace,
                         crop_final_posterior["child_run_id"],
                         refinement_context,
                     )
                 )
-                worldline.commit_event(
-                    plot_id=inputs.plot_id,
-                    event_type="CROP_REFINEMENT_REQUESTED",
-                    geometry_hash=inputs.geometry_hash or "",
-                    authority="DIAGNOSTIC",
-                    effective_at=crop_final_time,
-                    observation_or_valid_time=crop_final_time,
-                    parent_event_ids=[crop_worldline_event_id],
-                    payload={
-                        "child_run_id": crop_final_posterior["child_run_id"],
-                        "job_id": refinement_job.get("job_id"),
-                        "crop_posterior_hash": crop_final_posterior.get(
-                            "content_hash"
-                        ),
-                    },
-                )
+                crop_influence_manifest = scheduled_manifest
+                if isinstance(asmae_output, dict):
+                    asmae_output["crop_influence_manifest"] = (
+                        crop_influence_manifest
+                    )
+                # Job scheduling is operational state. It is deliberately not
+                # written as a scientific worldline event before the child
+                # run produces and validates a new posterior.
         except Exception as crop_refine_exc:
             logger.exception(
                 "Canonical post-ASMAE crop refinement failed: %s",
@@ -1638,11 +2536,10 @@ def run_orchestrator(
         l5_res = _safe_run(LayerId.L5, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, progress_cb=progress_cb)
         results[LayerId.L5] = l5_res
         
-        plan_l3 = l3_res.output.execution_plan if l3_res.output else None
-        plan_l4 = getattr(l4_res.output, "verification_plan", None) if l4_res.output else None
-        plan_l5 = l5_res.output.execution_plan if l5_res.output else None
-        
-        unified_plan = merge_execution_plans(plan_l3, plan_l5, plan_l4)
+        # L3-L5 are diagnostic/state contributors on the canonical path.
+        # Their legacy action-shaped fields are ignored; L8 is the sole action
+        # owner after a full contribution tribunal.
+        unified_plan = merge_execution_plans(None, None, None)
         prov_gq = evaluate_global_quality(results)
         unified_plan = filter_unsafe_actions(unified_plan, prov_gq)
         
@@ -1662,15 +2559,26 @@ def run_orchestrator(
         l5_res = _safe_run(LayerId.L5, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, progress_cb=progress_cb)
         results[LayerId.L5] = l5_res
         
-        plan_l3 = l3_res.output.execution_plan if l3_res.output else None
-        plan_l4 = getattr(l4_res.output, "verification_plan", None) if l4_res.output else None
-        plan_l5 = l5_res.output.execution_plan if l5_res.output else None
-        
-        unified_plan = merge_execution_plans(plan_l3, plan_l5, plan_l4)
+        unified_plan = merge_execution_plans(None, None, None)
         prov_gq = evaluate_global_quality(results)
         unified_plan = filter_unsafe_actions(unified_plan, prov_gq)
-        
-        l6_res = _safe_run(LayerId.L6, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, l5_res.output, progress_cb=progress_cb)
+        try:
+            from services.agribrain.diagnostic_integration import InfluenceUse
+            decision_manifest = _build_diagnostic_integration(
+                results, run_id, ts_now, InfluenceUse.PRESCRIPTION_DRIVER,
+            )
+            decision_entries = (
+                decision_manifest.get("influence_manifest", {}).get("entries", [])
+            )
+        except Exception:
+            decision_entries = []
+        if decision_entries:
+            l6_res = _safe_run(LayerId.L6, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, l5_res.output, progress_cb=progress_cb)
+        else:
+            l6_res = LayerResult(
+                layer_id="L6", status=LayerStatus.DEGRADED, output=None,
+                errors=["execution_blocked:prescription_influence_manifest_unavailable"],
+            )
         results[LayerId.L6] = l6_res
         
         if l3_res.output: l3_res.output.execution_plan = unified_plan
@@ -1684,9 +2592,7 @@ def run_orchestrator(
     # --- Intent Gating (NUTRIENT) ---
     if intent == Intent.NUTRIENT:
         # L1 -> L2 -> L3 -> L4.
-        plan_l3 = l3_res.output.execution_plan if l3_res.output else None
-        plan_l4 = getattr(l4_res.output, "verification_plan", None) if l4_res.output else None
-        unified_plan = merge_execution_plans(plan_l3, None, plan_l4)
+        unified_plan = merge_execution_plans(None, None, None)
         prov_gq = evaluate_global_quality(results)
         unified_plan = filter_unsafe_actions(unified_plan, prov_gq)
         
@@ -1705,10 +2611,26 @@ def run_orchestrator(
         from services.agribrain.orchestrator_v2.chat_memory import load_memory
         mem = load_memory(inputs.plot_id)
         
-        l7_res = _safe_run(LayerId.L7, inputs, l1_res.output, l5_res.output if l5_res else None, mem, progress_cb=progress_cb)
+        try:
+            from services.agribrain.diagnostic_integration import InfluenceUse
+            planning_manifest = _build_diagnostic_integration(
+                results, run_id, ts_now, InfluenceUse.PRESCRIPTION_DRIVER,
+            )
+            planning_entries = (
+                planning_manifest.get("influence_manifest", {}).get("entries", [])
+            )
+        except Exception:
+            planning_entries = []
+        if planning_entries:
+            l7_res = _safe_run(LayerId.L7, inputs, l1_res.output, l5_res.output if l5_res else None, mem, progress_cb=progress_cb)
+        else:
+            l7_res = LayerResult(
+                layer_id="L7", status=LayerStatus.DEGRADED, output=None,
+                errors=["planning_blocked:prescription_influence_manifest_unavailable"],
+            )
         results[LayerId.L7] = l7_res
-        
-        unified_plan = l7_res.output.execution_plan if (l7_res.output and hasattr(l7_res.output, "execution_plan")) else None
+
+        unified_plan = merge_execution_plans(None, None, None)
         prov_gq = evaluate_global_quality(results)
         unified_plan = filter_unsafe_actions(unified_plan, prov_gq)
         
@@ -1718,12 +2640,30 @@ def run_orchestrator(
     l5_res = _safe_run(LayerId.L5, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, progress_cb=progress_cb)
     results[LayerId.L5] = l5_res
     
-    # --- Intermission: Plan Merging (Full Run) ---
-    plan_l3 = l3_res.output.execution_plan if l3_res.output else None
-    plan_l5 = l5_res.output.execution_plan if l5_res.output else None
-    plan_l4 = getattr(l4_res.output, "verification_plan", None) if l4_res.output else None
-    
-    unified_plan = merge_execution_plans(plan_l3, plan_l5, plan_l4)
+    # --- Full diagnostic ledger and tribunal, before any action consumer ---
+    try:
+        from services.agribrain.diagnostic_integration import InfluenceUse
+        pre_action_diagnostic = _build_diagnostic_integration(
+            results, run_id, ts_now, InfluenceUse.PRESCRIPTION_DRIVER,
+        )
+        pre_action_manifest = pre_action_diagnostic.get("influence_manifest", {})
+        pre_action_entries = pre_action_manifest.get("entries", [])
+        action_manifest_allowed = bool(
+            pre_action_diagnostic.get("status") == "completed"
+            and pre_action_manifest.get("requested_use") == "PRESCRIPTION_DRIVER"
+            and pre_action_entries
+        )
+    except Exception as diagnostic_exc:
+        logger.warning("Pre-action diagnostic integration failed closed: %s", diagnostic_exc)
+        pre_action_diagnostic = {
+            "status": "failed_closed",
+            "errors": [{"layer_id": "L2-L5", "error": str(diagnostic_exc)}],
+        }
+        action_manifest_allowed = False
+
+    # Legacy L3/L4/L5 plans are never canonical action inputs.  Keep an empty
+    # plan for compatibility while L8 remains gated by the influence manifest.
+    unified_plan = merge_execution_plans(None, None, None)
     
     # --- Safety Gating ---
     prov_gq = evaluate_global_quality(results)
@@ -1735,19 +2675,43 @@ def run_orchestrator(
     
     # --- Layer 6 ---
     # EXECUTION or DEFAULT run includes L6
-    l6_res = _safe_run(LayerId.L6, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, l5_res.output, progress_cb=progress_cb)
+    if action_manifest_allowed:
+        l6_res = _safe_run(LayerId.L6, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, l5_res.output, progress_cb=progress_cb)
+    else:
+        l6_res = LayerResult(
+            layer_id="L6", status=LayerStatus.DEGRADED, output=None,
+            errors=["execution_blocked:prescription_influence_manifest_unavailable"],
+        )
     results[LayerId.L6] = l6_res
     
+    # --- Pre-Decision Governance Tribunal ---
+    try:
+        from services.agribrain.diagnostic_integration import pre_decision_tribunal
+        tribunal_ctx = {
+            "authority_level": getattr(l1_res.output, "authority_level", "none") if l1_res.output else "none",
+            "evidence_tier": getattr(l1_res.output, "evidence_tier", "unknown") if l1_res.output else "unknown",
+            "plot_id": inputs.plot_id,
+        }
+        pre_verdict, pre_findings = pre_decision_tribunal(run_id, tribunal_ctx)
+        logger.info("Pre-decision tribunal verdict for %s: %d findings, blocked=%s", run_id, len(pre_findings), pre_verdict.blocked_contribution_ids)
+    except Exception as tribunal_exc:
+        logger.warning("Pre-decision tribunal execution warning: %s", tribunal_exc)
+
     # --- Layer 7 (Planning) ---
     # GAP 10+15: pass L3 decisions and L6 execution state to avoid plan conflicts
+    tribunal_blocked = set(pre_verdict.blocked_contribution_ids) if 'pre_verdict' in locals() else set()
+    full_verdict = pre_action_diagnostic.get("tribunal_verdict", {})
+    tribunal_blocked.update(full_verdict.get("blocked_contribution_ids", []))
     tier0_degraded = (
         l1_res.status in (LayerStatus.DEGRADED, LayerStatus.FAILED)
         or l2_res.status in (LayerStatus.DEGRADED, LayerStatus.FAILED)
+        or "l7_planning" in tribunal_blocked
+        or not action_manifest_allowed
     )
     if tier0_degraded:
         l7_res = LayerResult(
             layer_id="L7", status=LayerStatus.DEGRADED, output=None,
-            errors=["planning_blocked:degraded_tier0_inputs"],
+            errors=["planning_blocked:degraded_tier0_or_tribunal_block"],
         )
     else:
         l7_res = _safe_run(LayerId.L7, inputs, l1_res,
@@ -1757,15 +2721,28 @@ def run_orchestrator(
     results[LayerId.L7] = l7_res
 
     # --- Layer 8 (Prescriptive) ---
-    # Use forecast_7d (populated by Fix 2) as primary forecast source.
-    # Fall back to last 7 entries of plot_timeseries if forecast_7d is empty.
+    # Use only a real forecast.  Historical observations are evidence about
+    # the past and must never be relabelled as a future forecast.
     l1_forecast_7d = getattr(l1_res.output, "forecast_7d", []) if l1_res and l1_res.output else []
-    l1_timeseries = getattr(l1_res.output, "plot_timeseries", []) if l1_res and l1_res.output else []
-    l8_forecast = l1_forecast_7d if l1_forecast_7d else l1_timeseries[-7:]
+    l8_forecast = l1_forecast_7d
     
-    # Extract real crop type from inputs (instead of defaulting to "corn")
+    # Resolve the canonical Layer-2 crop/phenology receipts.  The registered
+    # crop remains useful as a planning label but never authorizes L8 rates or
+    # timing by itself.
     crop_cfg = inputs.crop_config if isinstance(inputs.crop_config, dict) else {}
-    real_crop = str(crop_cfg.get("crop") or crop_cfg.get("crop_type") or "").strip()
+    from services.agribrain.common.downstream_crop_context import (
+        resolve_downstream_crop_phenology,
+    )
+    crop_semantics = resolve_downstream_crop_phenology(
+        inputs=inputs,
+        l2_output=l2_res.output if l2_res else None,
+    )
+    declared_crop = str(
+        crop_cfg.get("crop") or crop_cfg.get("crop_type") or ""
+    ).strip()
+    real_crop = str(
+        crop_semantics.selected_crop or declared_crop or "unknown"
+    ).strip()
     
     # Extract real soil static from L1 tensor (instead of hardcoded defaults)
     real_soil_static = {}
@@ -1785,7 +2762,6 @@ def run_orchestrator(
             _l4_to_l8_soil = {
                 "clay_pct": "soil_clay",
                 "ph": "soil_ph",
-                "organic_matter_pct": "soil_org_carbon",  # OM -> SOC approx
             }
             for l4_key, l8_key in _l4_to_l8_soil.items():
                 v = l4_soil.get(l4_key)
@@ -1793,6 +2769,17 @@ def run_orchestrator(
                     # Don't overwrite real L1 values, only fill gaps
                     if l8_key not in real_soil_static:
                         real_soil_static[l8_key] = round(float(v), 3)
+            # Soil organic carbon is not interchangeable with organic matter.
+            # Use the conventional van Bemmelen conversion only when the L4
+            # value explicitly represents organic matter percentage.
+            om_pct = l4_soil.get("organic_matter_pct")
+            if (
+                "soil_org_carbon" not in real_soil_static
+                and isinstance(om_pct, (int, float))
+            ):
+                real_soil_static["soil_org_carbon"] = round(
+                    max(0.0, float(om_pct)) / 1.724, 3
+                )
 
     l8_input = Layer8Input(
         diagnoses=getattr(l3_res.output, "diagnoses", []) if l3_res.output else [],
@@ -1803,9 +2790,44 @@ def run_orchestrator(
         audit_grade=_derive_audit_grade_from_provenance(l1_res),
         source_reliability=_derive_source_reliability_from_provenance(l1_res),
         conflicts=_extract_conflicts_from_provenance(l1_res),
-        phenology_stage=_derive_phenology_stage(l2_res, inputs),
+        phenology_stage=crop_semantics.stage_for_discrete_engine,
         horizon_days=7,
         crop=real_crop,
+        crop_posterior_hash=crop_semantics.crop_posterior_hash,
+        phenology_posterior_hash=crop_semantics.phenology_posterior_hash,
+        crop_resolution=crop_semantics.crop_resolution,
+        crop_authority=crop_semantics.crop_authority,
+        phenology_authority=crop_semantics.phenology_authority,
+        crop_evidence_class=(
+            "canonical_species_posterior"
+            if crop_semantics.species_specific_allowed
+            else "canonical_group_mixture"
+            if crop_semantics.crop_resolution == "group_only"
+            else "unresolved"
+        ),
+        phenology_evidence_class=(
+            "canonical_stage_posterior"
+            if crop_semantics.stage_specific_allowed
+            else "unresolved"
+        ),
+        species_specific_allowed=crop_semantics.species_specific_allowed,
+        stage_specific_allowed=crop_semantics.stage_specific_allowed,
+        crop_mixture=dict(crop_semantics.crop_mixture),
+        stage_posterior=dict(crop_semantics.stage_posterior),
+        semantic_demotion_reasons=list(crop_semantics.demotion_reasons),
+        input_belief_id=str(pre_action_diagnostic.get("input_belief_id") or ""),
+        tribunal_content_hash=str(
+            pre_action_diagnostic.get("tribunal_verdict", {}).get("content_hash") or ""
+        ),
+        prescription_manifest_hash=str(pre_action_manifest.get("content_hash") or ""),
+        prescription_manifest_entry_ids=[
+            str(entry.get("contribution_id") or "")
+            for entry in pre_action_entries
+            if isinstance(entry, dict) and entry.get("contribution_id")
+        ],
+        policy_snapshot_hash=hashlib.sha256(
+            _canonical_json(inputs.policy_snapshot).encode("utf-8")
+        ).hexdigest(),
         soil_static=real_soil_static,
     )
     # GAP 17 NOTE: L8 uses non-standard call convention:
@@ -1820,8 +2842,10 @@ def run_orchestrator(
     l8_blockers = []
     if tier0_degraded or not l7_res or l7_res.status != LayerStatus.OK:
         l8_blockers.append("upstream_planning_or_tier0_degraded")
-    if not real_crop or real_crop.lower() == "unknown":
-        l8_blockers.append("missing_crop_identity")
+    if "l8_prescriptive" in tribunal_blocked:
+        l8_blockers.append("tribunal_blocked_l8_prescriptive")
+    if not action_manifest_allowed:
+        l8_blockers.append("prescription_influence_manifest_unavailable")
     if not live_forecast:
         l8_blockers.append("weather_unavailable")
     if not all(isinstance(real_soil_static.get(key), (int, float)) for key in ("soil_clay", "soil_ph", "soil_org_carbon")):
@@ -2025,6 +3049,9 @@ def run_orchestrator(
             geom_canon = canonicalize_geometry(geom_context)
 
             l10_input = Layer10Input(
+                plot_namespace=getattr(inputs, "plot_namespace", None),
+                tenant_id=getattr(inputs, "tenant_id", ""),
+                farm_id=getattr(inputs, "farm_id", ""),
                 field_tensor=ft, veg_int=vi,
                 decision=l3_res.output,
                 nutrients=l4_res.output,
@@ -2373,9 +3400,13 @@ def _extract_conflicts_from_provenance(l1_res) -> List[Dict[str, Any]]:
     return []
 
 
-def _derive_phenology_stage(l2_res, inputs) -> str:
+def _legacy_derive_phenology_stage_for_migration(l2_res, inputs) -> str:
     """
-    Resolve crop phenology stage with layered precedence + physical NDVI reconciliation.
+    Removed migration-only phenology inference path.
+
+    Layer 2 is the sole biological phenology owner.  Keeping this symbol makes
+    accidental legacy callers fail loudly during migration instead of silently
+    manufacturing a stage from NDVI or CropCycle administrative status.
 
     Algorithm:
     1. Extract Kalman best-estimate NDVI from L2 ndvi_records (NOT raw raster NDVI)
@@ -2393,6 +3424,14 @@ def _derive_phenology_stage(l2_res, inputs) -> str:
     - Tucker et al. (1979): original NDVI-LAI relationships
     """
     # ── Step 1: Extract Kalman NDVI (best estimate, cloud-corrected) ──────────
+    del l2_res, inputs
+    raise RuntimeError(
+        "legacy downstream phenology inference is disabled; consume the "
+        "canonical Layer 2 phenology receipt"
+    )
+
+    # Historical implementation retained below temporarily for source-level
+    # migration archaeology; it is unreachable by construction.
     kalman_ndvi: float | None = None
 
     if l2_res and l2_res.output:
@@ -2563,10 +3602,33 @@ def _derive_phenology_stage(l2_res, inputs) -> str:
     return "VEGETATIVE"
 
 
+def _derive_phenology_stage(l2_res, inputs) -> str:
+    """Consume Layer 2's stage; never infer a replacement downstream.
+
+    CropCycle administrative status and NDVI envelopes are intentionally not
+    consulted here.  The canonical posterior is authoritative.  A legacy
+    Layer-2 Viterbi output may be consumed during migration, but remains owned
+    by Layer 2 and is never reclassified by the orchestrator.
+    """
+    if not l2_res or not getattr(l2_res, "output", None):
+        return "UNKNOWN"
+
+    del inputs  # Administrative crop-cycle status is never stage evidence.
+    from services.agribrain.scientific_contracts.crop_phenology import (
+        consume_canonical_phenology_output,
+    )
+    return str(
+        consume_canonical_phenology_output(l2_res.output).get(
+            "resolved_crop_stage", "UNKNOWN"
+        )
+    )
+
+
 def _build_diagnostic_integration(
     results: Dict[LayerId, LayerResult],
     orchestrator_run_id: str,
     timestamp: str,
+    requested_use: Any = None,
 ) -> Dict[str, Any]:
     """Adapt every completed L2-L8 result into one immutable belief ledger."""
     from services.agribrain.diagnostic_integration import (
@@ -2576,8 +3638,12 @@ def _build_diagnostic_integration(
     )
     from services.agribrain.scientific_contracts.authority import AuthorityVector
 
+    requested_use = requested_use or InfluenceUse.DIAGNOSIS
+
     l1_result = results.get(LayerId.L1)
     l1_output = getattr(l1_result, "output", None) if l1_result else None
+    l2_result = results.get(LayerId.L2)
+    l2_output = getattr(l2_result, "output", None) if l2_result else None
     l5_result = results.get(LayerId.L5)
     l5_output = getattr(l5_result, "output", None) if l5_result else None
     asmae_snapshot_id = (
@@ -2587,7 +3653,8 @@ def _build_diagnostic_integration(
         or (l5_output.get("intelligence_snapshot_id") if isinstance(l5_output, dict) else None)
     )
     belief_id = str(
-        asmae_snapshot_id
+        getattr(l2_output, "belief_id", None)
+        or asmae_snapshot_id
         or getattr(l1_output, "intelligence_snapshot_id", None)
         or getattr(l1_output, "run_id", None)
         or getattr(l1_result, "run_id", None)
@@ -2693,7 +3760,7 @@ def _build_diagnostic_integration(
             }],
             "diagnosis_allowed": False,
         }
-    result = runtime.finalize(belief_id, InfluenceUse.DIAGNOSIS)
+    result = runtime.finalize(belief_id, requested_use)
     payload = result.to_dict()
     payload.update({
         "status": (
@@ -2913,6 +3980,9 @@ def _finalize_artifact(
                 geom_canon = canonicalize_geometry(geom_context)
 
                 l10_input = Layer10Input(
+                    plot_namespace=getattr(inputs, "plot_namespace", None),
+                    tenant_id=getattr(inputs, "tenant_id", ""),
+                    farm_id=getattr(inputs, "farm_id", ""),
                     field_tensor=ft, veg_int=vi,
                     decision=results.get(LayerId.L3).output if results.get(LayerId.L3) else None,
                     nutrients=results.get(LayerId.L4).output if results.get(LayerId.L4) else None,
@@ -2967,6 +4037,10 @@ def _finalize_artifact(
     try:
         diagnostic_integration = _build_diagnostic_integration(
             results, run_id, ts,
+        )
+        from services.agribrain.diagnostic_integration import InfluenceUse
+        diagnostic_integration["prescription_gate"] = _build_diagnostic_integration(
+            results, run_id, ts, InfluenceUse.PRESCRIPTION_DRIVER,
         )
     except Exception as exc:
         diagnostic_integration = {

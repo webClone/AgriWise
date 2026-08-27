@@ -1,4 +1,3 @@
-
 """
 Layer 2 Schema: Vegetation Intelligence Data Structures (v3.1)
 
@@ -68,7 +67,7 @@ class CropHealthIndex:
     """
     overall_score: float = 0.5              # 0.0 (dead) to 1.0 (optimal)
     ndvi_health: float = 0.5                # NDVI vs crop-specific optimal range
-    water_stress_index: float = 0.0         # CWSI: 0=no stress, 1=severe
+    water_stress_index: Optional[float] = 0.0  # CWSI: 0=no stress, 1=severe, None if unknown
     lai_estimate: float = 0.0              # Leaf Area Index (current)
     lai_peak: float = 0.0                  # Peak LAI this season
     biomass_proxy: float = 0.0              # Normalized AUC (0-1)
@@ -86,6 +85,9 @@ class CropHealthIndex:
     crop_water_productivity: float = 0.0    # Yield / ET_total (kg/m³)
     # v3.2: Vernalization tracking (Richardson 1974)
     vernalization_progress: float = 0.0     # 0.0-1.0 (1.0 = fully vernalized)
+    # v4.0: Dynamic component weighting and missingness coverage
+    health_component_coverage: float = 1.0  # Weight fraction of available components [0, 1]
+    component_state_mask: Dict[str, str] = field(default_factory=dict)  # {component: OBSERVED/UNKNOWN}
 
 @dataclass
 class AttributionEvidence:
@@ -123,9 +125,9 @@ class SpatialMetrics:
     std_spatial_var: float                  # Volatility of spatial std dev
     stability_class: str                    # STABLE, HETEROGENEOUS, TRANSIENT_VAR
     confidence: float = 1.0
-    # v3.0 additions
     morans_i: float = 0.0                  # Global Moran's I (-1 to 1)
     morans_p: float = 1.0                  # Pseudo-significance p-value
+    morans_status: str = "AVAILABLE"       # AVAILABLE | UNAVAILABLE (no topology)
     spatial_trend: str = "STABLE"           # INCREASING, STABLE, DECREASING
     spatial_trend_p: float = 1.0            # Mann-Kendall p-value
     worst_zone_id: str = ""                 # Zone with lowest health
@@ -179,12 +181,19 @@ class ModeledCurveOutput:
     fpar_series: List[float] = field(default_factory=list)   # fPAR per timestep [0-1]
     fvc_series: List[float] = field(default_factory=list)    # Fractional Vegetation Cover [0-1]
     npp_series: List[float] = field(default_factory=list)    # NPP proxy (gC/m²/day)
+    # Explicit NPP decomposition (Field et al. 1995, CASA)
+    npp_light_temperature_series: List[float] = field(default_factory=list)      # Potential NPP (gC/m²/day)
+    npp_spectral_water_adjusted_series: List[float] = field(default_factory=list) # Water-adjusted NPP
+    water_constraint_source: str = "NONE"   # SPECTRAL_PROXY | MODEL_DERIVED | NONE
+    water_constraint_applied: bool = False
 
 @dataclass
 class PhenologyOutput:
     stage_by_day: List[str]
     key_dates: Dict[str, str]               # {Stage -> Date}
     confidence_by_day: List[float] = field(default_factory=list)
+    sub_stages_by_day: List[str] = field(default_factory=list)
+    canonical_posterior: Optional[Dict[str, Any]] = None
 
 @dataclass
 class VegIntOutput:
@@ -205,6 +214,10 @@ class VegIntOutput:
     # --- SPATIAL EXTENSIONS (Phase 11) ---
     zone_metrics: Dict[str, Any] = field(default_factory=dict)
 
+    # Scientific receipts
+    crop_season_evidence_receipt: Optional[Dict[str, Any]] = None
+    crop_active_acquisition_plan: Optional[Dict[str, Any]] = None
+
     # Provenance
     provenance: Dict[str, Any] = field(default_factory=dict)
 
@@ -213,12 +226,12 @@ class VegIntOutput:
             "run_id": self.run_id,
             "layer1_run_id": self.layer1_run_id,
             "curve": {
-                # "ndvi_fit": self.curve.ndvi_fit, # Omitted for summary brevity
                 "quality": self.curve.quality.__dict__
             },
             "phenology": {
                 "key_dates": self.phenology.key_dates,
-                # "stage_by_day": self.phenology.stage_by_day # Omitted
+                "canonical_posterior": self.phenology.canonical_posterior,
+                "sub_stages_by_day": self.phenology.sub_stages_by_day,
             },
             "anomalies": [
                 {
@@ -265,6 +278,8 @@ class VegIntOutput:
                 "wue": self.health_index.wue,
                 "crop_water_productivity": self.health_index.crop_water_productivity,
                 "vernalization_progress": self.health_index.vernalization_progress,
+                "coverage": self.health_index.health_component_coverage,
+                "component_state_mask": self.health_index.component_state_mask,
             },
             "growth_metrics": {
                 "peak_ndvi": self.growth_metrics.peak_ndvi,
@@ -275,5 +290,7 @@ class VegIntOutput:
                 "los_days": self.growth_metrics.los_days,
             },
             "zone_metrics": {k: {"quality": v.get("curve", {}).get("quality")} for k, v in self.zone_metrics.items()},
+            "crop_season_evidence_receipt": self.crop_season_evidence_receipt,
+            "crop_active_acquisition_plan": self.crop_active_acquisition_plan,
             "provenance": self.provenance
         }

@@ -40,6 +40,9 @@ def redistribute_to_objects(
             continue
 
         for surface in surfaces:
+            prov = getattr(surface, "provenance", {}) or {}
+            if prov.get("zone_statistics_eligible") is False or getattr(surface, "zone_statistics_eligible", True) is False:
+                continue
             vals = []
             for r, c in cells:
                 if 0 <= r < H and 0 <= c < W:
@@ -81,6 +84,9 @@ def redistribute_to_zones(
             continue
 
         for surface in surfaces:
+            prov = getattr(surface, "provenance", {}) or {}
+            if prov.get("zone_statistics_eligible") is False or getattr(surface, "zone_statistics_eligible", True) is False:
+                continue
             vals = []
             for r, c in cells:
                 if 0 <= r < H and 0 <= c < W:

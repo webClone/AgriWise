@@ -94,7 +94,9 @@ _QUALITY_MULTIPLIERS = {
 
 # Inference mode → explicit language (user modification #6)
 _INFERENCE_MODE_LANGUAGE = {
-    "observed_timeseries": "Likely current crop based on observed vegetation/SAR behavior.",
+    "observed_timeseries": "Observed vegetation supports an uncalibrated candidate ranking only.",
+    "sparse_timeseries": "Observed satellite sequence supports ranking only; exact crop identity is unresolved.",
+    "sar_ranking_only": "Observed SAR context supports ranking only; exact crop identity is unresolved.",
     "context_only": "Likely candidates based on soil, climate, and location. Satellite time-series evidence is insufficient.",
     "prior_only": "No detected crop. These are regional likelihood candidates.",
 }
@@ -153,10 +155,10 @@ class CropIdentificationResult:
     recommendation: str                   # Human-readable action hint
     evidence: Dict[str, Any] = field(default_factory=dict)
     # Crop Intelligence v5.1 fields
-    inference_mode: str = "prior_only"    # observed_timeseries | context_only | prior_only
+    inference_mode: str = "prior_only"    # production ML or uncalibrated ranking mode
     evidence_strength: str = "LOW"        # LOW | MEDIUM | HIGH
     top_group: str = "unknown"            # Hierarchical group of top candidate
-    detected_crop: bool = False           # True ONLY when inference_mode == observed_timeseries
+    detected_crop: bool = False           # True only for a production-eligible validated ML artifact
     prediction_depth: str = "L0"
     detected_crop_group: bool = False
     ambiguity_is_ambiguous: bool = False
@@ -298,10 +300,11 @@ class CropIdentificationEngine:
     """
     Biophysical Crop Intelligence Engine.
 
-    Scores every crop in the 212-entry registry plus 5 non-crop classes
-    against observed biophysical signals, returning ranked candidates with
-    calibrated probabilities, inference mode classification, ambiguity
-    detection, and hierarchical crop groups.
+    Scores registry and non-crop entries against available biophysical
+    signals, returning heuristic ranking shares, inference-mode metadata,
+    ambiguity detection, and hierarchical crop groups.  Ranking shares are
+    not calibrated species probabilities.  Calibration may be claimed only
+    by a separately loaded and validated ML artifact.
     """
 
     VERSION = "5.1.0"
@@ -351,21 +354,14 @@ class CropIdentificationEngine:
         # IMP-5: Cache last identification result per plot for feedback endpoint
         self._last_results: Dict[str, Dict] = {}  # plot_id → {phenology, ndvi, ...}
         
-        # Apply learned priors/sigmas if enough feedback exists
-        learned_priors = self._feedback.compute_learned_priors()
-        if learned_priors:
-            # Merge learned priors with MENA priors (learned takes priority)
-            for k, v in learned_priors.items():
-                self._bayesian.priors[k] = v
-            logger.info("[CropID] Applied learned priors from %d feedback entries",
-                       len(learned_priors))
-        
-        # FIX BUG-1: Store learned sigmas PER-CROP (not global override)
-        learned_sigmas = self._feedback.compute_learned_sigmas()
-        if learned_sigmas:
-            self._bayesian.crop_sigmas = learned_sigmas
-            logger.info("[CropID] Applied per-crop learned sigmas for %d crops",
-                       len(learned_sigmas))
+        # Feedback is audit-only until an explicit tenant/region/sensor
+        # partition and authoritative label cohort is supplied. Mutating this
+        # singleton here would leak one farm's clicks into every plot.
+        self._feedback_learning_status = {
+            "applied": False,
+            "reason": "explicit_validated_partition_required",
+            "farmer_feedback_is_training_label": False,
+        }
 
         # Initialize and load HierarchicalCropClassifier
         self._ml_classifier = HierarchicalCropClassifier()
@@ -439,7 +435,13 @@ class CropIdentificationEngine:
         Now integrates PlotDNA biophysical traits for soil-aware scoring.
         """
         # ── Assess data availability ──
-        has_ndvi = ndvi_series is not None and len(ndvi_series) > 5
+        ndvi_observation_count = len(ndvi_series or [])
+        # Four independent physical acquisitions can support a weak temporal
+        # ranking.  Shape, phase and species-detection paths still require at
+        # least six observations.
+        has_ndvi = ndvi_observation_count >= 6
+        has_sparse_ndvi = 4 <= ndvi_observation_count < 6
+        has_ndvi_signal = has_ndvi or has_sparse_ndvi
         has_phenology = peak_doy is not None or season_length_days is not None
         has_sar = sar_vh_mean is not None
         has_spectral = evi_mean is not None or ndmi_mean is not None
@@ -450,7 +452,7 @@ class CropIdentificationEngine:
         has_rotation = previous_crops is not None and len(previous_crops) > 0
         has_dna = dna_vigor is not None
 
-        data_signals = sum([has_ndvi, has_phenology, has_sar, has_spectral,
+        data_signals = sum([has_ndvi_signal, has_phenology, has_sar, has_spectral,
                            has_location, has_thermal, has_context, has_rotation,
                            has_dna])
         data_quality = "HIGH" if data_signals >= 5 else "MODERATE" if data_signals >= 3 else "LOW"
@@ -460,6 +462,22 @@ class CropIdentificationEngine:
         import hashlib
         _force_rule_engine = kwargs.get("_force_rule_engine", False)
         ml_enabled = (os.environ.get("AGRIBRAIN_CROP_ML_ENABLED", "false").lower() == "true") and not _force_rule_engine
+        runtime_environment = str(
+            os.environ.get("AGRIBRAIN_ENV")
+            or os.environ.get("ENVIRONMENT")
+            or os.environ.get("NODE_ENV")
+            or "development"
+        ).strip().lower()
+        development_ml_override = bool(
+            os.environ.get(
+                "AGRIBRAIN_CROP_ML_ALLOW_NONPRODUCTION_ARTIFACT", "false"
+            ).lower() == "true"
+            and runtime_environment not in {"production", "prod"}
+        )
+        production_ml_artifact = bool(self._ml_classifier.production_eligible)
+        ml_artifact_runtime_allowed = (
+            production_ml_artifact or development_ml_override
+        )
         field_tensor = kwargs.get("field_tensor")
         feature_vector_snapshot = kwargs.get("feature_vector_snapshot")
         koppen_zone = kwargs.get("koppen_zone")
@@ -469,8 +487,10 @@ class CropIdentificationEngine:
         
         if (
             ml_enabled
+            and not has_sparse_ndvi
             and bool(self._ml_load_status)
             and self._ml_classifier.models is not None
+            and ml_artifact_runtime_allowed
             and (field_tensor is not None or feature_vector_snapshot is not None)
         ):
             try:
@@ -660,6 +680,11 @@ class CropIdentificationEngine:
                             "ml_production_eligible": bool(
                                 self._ml_classifier.production_eligible
                             ),
+                            "ml_runtime_authority": (
+                                "production_validated"
+                                if production_ml_artifact
+                                else "development_nonproduction_override"
+                            ),
                         }
                         
                         # Determine prediction depth and flags for ML path
@@ -688,6 +713,19 @@ class CropIdentificationEngine:
                             pred_depth = "L0"
                             det_group = False
                             det_crop = False
+
+                        if not production_ml_artifact:
+                            # Development overrides expose rankings for testing
+                            # but can never publish a crop/group detection.
+                            top_crop = None
+                            top_prob = 0.0
+                            confidence_label = "LOW"
+                            det_group = False
+                            det_crop = False
+                            rec = (
+                                "Development-only ML ranking; artifact has not "
+                                "passed the production validation contract."
+                            )
                         
                         return CropIdentificationResult(
                             top_crop=top_crop,
@@ -699,8 +737,15 @@ class CropIdentificationEngine:
                             data_quality=data_quality,
                             recommendation=rec,
                             evidence=evidence,
-                            inference_mode="observed_timeseries",
-                            evidence_strength="HIGH" if data_signals >= 4 else "MEDIUM",
+                            inference_mode=(
+                                "observed_timeseries"
+                                if production_ml_artifact
+                                else "development_ml_nonproduction"
+                            ),
+                            evidence_strength=(
+                                "HIGH" if production_ml_artifact and data_signals >= 4
+                                else "LOW"
+                            ),
                             top_group=ml_output.get("L2", {}).get("prediction") or "unknown",
                             detected_crop=det_crop,
                             prediction_depth=pred_depth,
@@ -714,9 +759,15 @@ class CropIdentificationEngine:
 
         # ── Inference mode classification (Crop Intelligence v5.0) ──
         # Drives confidence capping and explicit language
-        if has_ndvi or has_sar:
+        if has_ndvi:
             inference_mode = "observed_timeseries"
             evidence_strength = "HIGH" if has_ndvi and data_signals >= 4 else "MEDIUM"
+        elif has_sparse_ndvi:
+            inference_mode = "sparse_timeseries"
+            evidence_strength = "LOW"
+        elif has_sar:
+            inference_mode = "sar_ranking_only"
+            evidence_strength = "LOW"
         elif has_thermal or has_context or has_spectral:
             inference_mode = "context_only"
             evidence_strength = "MEDIUM" if data_signals >= 3 else "LOW"
@@ -742,7 +793,7 @@ class CropIdentificationEngine:
             )
 
         # ── Derive extra features from NDVI series ──
-        if has_ndvi:
+        if has_ndvi_signal:
             if peak_ndvi is None:
                 peak_ndvi = max(ndvi_series)
             if trough_ndvi is None:
@@ -765,7 +816,6 @@ class CropIdentificationEngine:
             try:
                 peak_idx = ndvi_series.index(peak_ndvi)
                 if peak_idx < len(ndvi_dates):
-                    from datetime import datetime
                     dt = datetime.strptime(ndvi_dates[peak_idx][:10], "%Y-%m-%d")
                     peak_doy = dt.timetuple().tm_yday
                     has_phenology = True
@@ -821,7 +871,11 @@ class CropIdentificationEngine:
 
         # ── Dynamic weight redistribution ──
         w = {
-            'ndvi_sig':   self.W_NDVI_SIGNATURE if has_ndvi else 0.0,
+            'ndvi_sig':   (
+                self.W_NDVI_SIGNATURE
+                if has_ndvi else self.W_NDVI_SIGNATURE * 0.5
+                if has_sparse_ndvi else 0.0
+            ),
             'calendar':   self.W_CROP_CALENDAR if has_location and has_phenology else 0.0,
             'spectral':   self.W_SPECTRAL if has_spectral else 0.0,
             'koppen':     self.W_KOPPEN if has_location else 0.0,
@@ -847,7 +901,7 @@ class CropIdentificationEngine:
             # Module A: NDVI Reference Signature Match
             # FIX BUG-9 + IMP-2: Pass SMOOTHED NDVI to Module A for consistency
             _ndvi_for_scoring = smoothed_list if smoothed_list else ndvi_series
-            a_score = self._score_ndvi_signature(crop, _ndvi_for_scoring, peak_ndvi, trough_ndvi) if has_ndvi else 0.5
+            a_score = self._score_ndvi_signature(crop, _ndvi_for_scoring, peak_ndvi, trough_ndvi) if has_ndvi_signal else 0.5
 
             # Module B: Crop Calendar Window
             b_score = self._score_crop_calendar(crop, peak_doy, calendar_region) if (has_location and has_phenology) else 0.5
@@ -1012,9 +1066,9 @@ class CropIdentificationEngine:
         # ── Rank by weighted module score descending ──
         candidates.sort(key=lambda c: c.score, reverse=True)
 
-        # ── BAYESIAN POSTERIOR FUSION (v4.1 — state-of-the-art) ──
-        # Compute P(crop | data) using Gaussian likelihoods + priors
-        # This runs IN PARALLEL with the weighted scoring and is blended
+        # ── STATIC REFERENCE-LIKELIHOOD FUSION (v4.1) ──
+        # Compare features to fixed Gaussian reference likelihoods and static
+        # priors. These values are not empirically calibrated probabilities.
         bayesian_posteriors = {}
         if advanced_phenology and shape_descriptors:
             # Collect per-crop module scores for Bayesian integration
@@ -1042,8 +1096,10 @@ class CropIdentificationEngine:
         # ── BLEND: Weighted Score + Bayesian Posterior (v4.1) ──
         # IMP-7: Adaptive Bayesian weight based on feedback sample count
         # More feedback → Bayesian sigmas are more accurate → increase weight
-        n_feedback = len(self._feedback.load_all_samples())
-        ALPHA_BAYESIAN = min(0.40, 0.20 + n_feedback * 0.002)  # 20% → 40% max
+        # Unscoped feedback must never change scientific weights. Contextual
+        # learning requires a separately validated, partition-bound artifact.
+        n_feedback = 0
+        ALPHA_BAYESIAN = 0.20
         ALPHA_WEIGHTED = 1.0 - ALPHA_BAYESIAN
         
         if bayesian_posteriors:
@@ -1085,10 +1141,18 @@ class CropIdentificationEngine:
         # ── INFERENCE-MODE CONFIDENCE CAPPING (v5.1) ──
         # prior_only:  no softmax share, no detected crop — regional priors only
         # context_only: cap softmax share at 0.30, no detected crop
-        # observed_timeseries: full share, detected_crop = True
+        # observed_timeseries: full ranking share, but no rule-based species detection
         if inference_mode == "prior_only":
             for c in candidates:
                 c.softmax_candidate_share = None
+        elif inference_mode == "sparse_timeseries":
+            for c in candidates:
+                if c.softmax_candidate_share is not None:
+                    c.softmax_candidate_share = min(0.20, c.softmax_candidate_share)
+        elif inference_mode == "sar_ranking_only":
+            for c in candidates:
+                if c.softmax_candidate_share is not None:
+                    c.softmax_candidate_share = min(0.20, c.softmax_candidate_share)
         elif inference_mode == "context_only":
             for c in candidates:
                 if c.softmax_candidate_share is not None:
@@ -1151,12 +1215,24 @@ class CropIdentificationEngine:
         second_name = top[1].name if len(top) > 1 else None
 
         if inference_mode == "observed_timeseries":
-            if confidence_label == "HIGH":
-                recommendation = f"Likely current crop based on observed satellite time series. Strongest candidate: {top_name}."
-            elif confidence_label == "MODERATE":
-                recommendation = f"Likely {top_name}" + (f", possibly {second_name}" if second_name else "") + ". Observed vegetation behavior is consistent but not conclusive."
-            else:
-                recommendation = f"Best candidate from observed data: {top_name}. Evidence is weak — consider farmer confirmation."
+            recommendation = (
+                "Observed satellite time series supports a reference-guided, "
+                f"uncalibrated ranking led by {top_name}"
+                + (f" and {second_name}" if second_name else "")
+                + ". It does not independently confirm crop species."
+            )
+        elif inference_mode == "sparse_timeseries":
+            recommendation = (
+                f"Sparse observed sequence ranks {top_name} highest, but four to five "
+                "acquisitions cannot independently confirm crop species. Use the "
+                f"{top_group_label} group as a low-authority ranking only."
+            )
+        elif inference_mode == "sar_ranking_only":
+            recommendation = (
+                f"SAR context ranks {top_name} highest, but radar summaries "
+                "cannot independently confirm crop species. Treat the result "
+                "as a low-authority group ranking only."
+            )
         elif inference_mode == "context_only":
             recommendation = f"Plausible candidates based on soil, climate, and location. No satellite time-series evidence. Top candidate: {top_name}."
         else:  # prior_only
@@ -1172,6 +1248,10 @@ class CropIdentificationEngine:
         evidence = {
             "data_signals_available": data_signals,
             "engine_version": self.VERSION,
+            "ndvi_observation_count": ndvi_observation_count,
+            "sparse_temporal_ranking": has_sparse_ndvi,
+            "species_detection_allowed": False,
+            "validated_ml_species_detection_required": True,
             "koppen_zone": koppen_zone,
             "calendar_region": calendar_region,
             "weights": {k: round(v, 3) for k, v in w.items() if v > 0},
@@ -1182,7 +1262,15 @@ class CropIdentificationEngine:
                 "bayesian_posterior": bool(bayesian_posteriors),
                 "entropy_confidence": entropy_val,
                 "feedback_samples": n_feedback,
+                "feedback_learning": dict(self._feedback_learning_status),
                 "bayesian_weight": round(ALPHA_BAYESIAN, 3),
+            },
+            "ml_runtime_gate": {
+                "enabled": ml_enabled,
+                "model_loaded": bool(self._ml_load_status),
+                "production_eligible": production_ml_artifact,
+                "development_override": development_ml_override,
+                "runtime_allowed": ml_artifact_runtime_allowed,
             },
         }
         
@@ -1198,38 +1286,38 @@ class CropIdentificationEngine:
             result_top_crop = None
             result_top_confidence = 0.0
             result_confidence_label = "LOW"
+        elif inference_mode in {"sparse_timeseries", "sar_ranking_only"}:
+            result_top_crop = None
+            result_top_confidence = 0.0
+            result_confidence_label = "LOW"
         elif inference_mode == "context_only":
             result_top_crop = None
             result_top_confidence = 0.0
-            result_confidence_label = confidence_label  # keep engine assessment
-        else:  # observed_timeseries
-            result_top_crop = top[0].code if top else "unknown"
-            result_top_confidence = display_confidence
-            result_confidence_label = confidence_label
+            result_confidence_label = "LOW"
+        else:  # uncalibrated observed-timeseries rule ranking
+            result_top_crop = None
+            result_top_confidence = 0.0
+            result_confidence_label = "LOW"
 
         # Determine prediction depth and group/crop detection flags for rule-based path
         if inference_mode == "prior_only":
             pred_depth = "L0"
             det_group = False
             det_crop = False
+        elif inference_mode in {"sparse_timeseries", "sar_ranking_only"}:
+            pred_depth = "L2"
+            det_group = False
+            det_crop = False
         elif inference_mode == "context_only":
             pred_depth = "L1" if calendar_region else "L0"
             det_group = False
             det_crop = False
-        else: # observed_timeseries
-            # Do not let observed_timeseries alone imply detected_crop=True
-            if result_top_crop is not None and result_top_crop != "unknown" and result_confidence_label in ("HIGH", "MODERATE"):
-                pred_depth = "L3"
-                det_group = True
-                det_crop = True
-            elif result_top_crop is not None and result_top_crop != "unknown":
-                pred_depth = "L2"
-                det_group = True
-                det_crop = False
-            else:
-                pred_depth = "L0"
-                det_group = False
-                det_crop = False
+        else: # observed_timeseries heuristic
+            # The reference-guided rule engine is an uncalibrated ranking
+            # path.  Only validated production ML may publish L3/species.
+            pred_depth = "L2" if top else "L0"
+            det_group = False
+            det_crop = False
 
         result = CropIdentificationResult(
             top_crop=result_top_crop,

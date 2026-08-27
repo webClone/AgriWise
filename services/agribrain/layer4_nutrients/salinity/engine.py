@@ -56,8 +56,8 @@ class SalinityResult:
     """Salinity assessment output."""
     # Classification
     ec_ds_m: float = 0.0                  # Measured or estimated EC (dS/m)
-    severity_class: str = "NONE"          # NONE, LOW, MODERATE, HIGH, CRITICAL
-    salinity_source: str = "measured_ec"  # measured_ec | inferred_asmae | corroborated_asmae
+    severity_class: str = "UNKNOWN"       # UNKNOWN, NONE, LOW, MODERATE, HIGH, CRITICAL
+    salinity_source: str = "unavailable"  # measured_ec | irrigation_water_estimate | unavailable
     inferred_salinity_pressure: float = 0.0
 
     # Maas-Hoffman yield impact
@@ -68,7 +68,7 @@ class SalinityResult:
 
     # Sodicity (SAR)
     sar: float = 0.0                      # Sodium Adsorption Ratio
-    sodicity_risk: str = "LOW"            # LOW, MODERATE, HIGH
+    sodicity_risk: str = "UNKNOWN"        # UNKNOWN, LOW, MODERATE, HIGH
     structural_degradation: bool = False  # Clay dispersion risk
 
     # Ion toxicity
@@ -130,45 +130,28 @@ class SalinityEngine:
         slope = spec.ec_slope_pct
 
         # 2. Determine salinity source and effective EC
-        salinity_source = "measured_ec"
-        effective_ec = ec_ds_m
+        salinity_source = "measured_ec" if ec_ds_m > 0 else "unavailable"
+        effective_ec = max(0.0, ec_ds_m)
 
         if effective_ec <= 0:
-            if inferred_salinity_pressure > 0.0:
-                corroborated = (
-                    irrigation_water_ec > 0.0
-                    or historical_salinity_zones
-                    or farmer_validation
-                    or persistent_retrovalidation
-                )
-                if corroborated:
-                    salinity_source = "corroborated_asmae"
-                else:
-                    salinity_source = "inferred_asmae"
-                
-                if irrigation_water_ec > 0.0:
-                    effective_ec = irrigation_water_ec * 1.5
-                else:
-                    # Map 0.0-1.0 pressure to 0.0-8.0 EC dS/m
-                    effective_ec = inferred_salinity_pressure * 8.0
-            elif irrigation_water_ec > 0.0:
+            if irrigation_water_ec > 0.0:
                 effective_ec = irrigation_water_ec * 1.5
+                salinity_source = "irrigation_water_estimate"
 
         # 3. Maas-Hoffman yield response
         rel_yield, yield_loss = self._maas_hoffman_yield(
             effective_ec, ec_thresh, slope,
         )
 
-        if salinity_source == "inferred_asmae":
-            yield_loss = min(35.0, yield_loss)
-            rel_yield = 1.0 - yield_loss / 100.0
-
         # 4. Severity classification
-        severity = self._classify_severity(effective_ec)
+        severity = (
+            self._classify_severity(effective_ec)
+            if salinity_source != "unavailable" else "UNKNOWN"
+        )
 
         # 5. SAR and sodicity
         sar_val = 0.0
-        sodicity_risk = "LOW"
+        sodicity_risk = "UNKNOWN"
         structural_deg = False
         if na_mmol is not None and ca_mmol is not None:
             mg_val = mg_mmol or 0.0
@@ -191,8 +174,15 @@ class SalinityEngine:
         )
 
         notes_parts = []
+        if inferred_salinity_pressure > 0.0 and salinity_source == "unavailable":
+            notes_parts.append(
+                "ASMAE salinity pressure retained as diagnostic evidence only; "
+                "it was not converted to physical ECe"
+            )
         if effective_ec <= 0:
-            notes_parts.append("No salinity data available — assuming non-saline")
+            notes_parts.append(
+                "Salinity was not assessed because no measured soil or irrigation-water EC is available"
+            )
         elif yield_loss > 5:
             notes_parts.append(
                 f"Salinity EC={effective_ec:.1f} dS/m causes {yield_loss:.0f}% yield loss "
@@ -254,9 +244,11 @@ class SalinityEngine:
     ) -> float:
         """SAR = Na⁺ / sqrt((Ca²⁺ + Mg²⁺) / 2)
 
-        All concentrations in mmol/L (or meq/L for monovalent).
+        All concentrations are mmol/L.  Ca and Mg are divalent, so converting
+        them to meq/L cancels the conventional /2 term and the denominator is
+        sqrt(Ca_mmol + Mg_mmol).
         """
-        denom = math.sqrt(max(0.01, (ca + mg) / 2.0))
+        denom = math.sqrt(max(0.01, ca + mg))
         return na / denom
 
     def _classify_sodicity(self, sar: float, ec: float) -> tuple:

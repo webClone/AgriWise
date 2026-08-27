@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Optional, Tuple, Union
 
 from .job_manifest import (
     EVIDENCE_CAPABILITY_CONTRACT_VERSION,
@@ -30,6 +31,13 @@ from .job_manifest import (
     scientific_job_id,
     write_job_manifest,
 )
+from .evidence_capability import CapabilityPlanIdentityError
+from .code_lineage import operational_build_receipt, scientific_source_digest
+from services.agribrain.common.plot_namespace import (
+    PlotNamespace,
+    _coerce_namespace,
+    namespace_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +48,14 @@ LEASE_SECONDS = 180
 LAUNCH_COOLDOWN_SECONDS = 15
 RESERVATION_STALE_SECONDS = 30
 MAX_EXECUTION_ATTEMPTS = 3
+PROCESS_HARD_TIMEOUT_SECONDS = float(
+    os.environ.get("ASMAE_PROCESS_HARD_TIMEOUT_SECONDS", "305")
+)
+PROCESS_TERMINATE_GRACE_SECONDS = float(
+    os.environ.get("ASMAE_PROCESS_TERMINATE_GRACE_SECONDS", "5")
+)
 _UNSET = object()
+_ENQUEUE_THREAD_LOCK = threading.RLock()
 
 QUEUED_STATUSES: FrozenSet[str] = frozenset(
     {'queued', 'stalled', 'completed_reintegration_pending'}
@@ -214,17 +229,21 @@ def _manifest_for_job(job_path: Path, payload: Dict[str, Any]) -> Path:
     if job_path.resolve() != expected_job.resolve():
         raise ManifestError("job record path does not match its identity")
     supplied = Path(str(payload.get("manifest_ref", "")))
+    if not supplied.is_absolute():
+        supplied = JOBS_DIR / supplied
     if supplied.resolve() != expected_manifest.resolve():
         raise ManifestError("job manifest path does not match its identity")
     return expected_manifest
 
 
 def _requires_reintegration(context: Dict[str, Any]) -> bool:
+    from .reintegration import REINTEGRATION_CONTRACT_VERSION
+
     value = context.get("orchestrator_reintegration")
     return bool(
         isinstance(value, dict)
         and value.get("contract_version")
-        == "asmae_orchestrator_reintegration_v1"
+        == REINTEGRATION_CONTRACT_VERSION
     )
 
 
@@ -269,6 +288,18 @@ def _completed_compatible(
 _TERMINAL_NON_RETRYABLE = {"manual_review", "permanent_contract", "permanent_failure"}
 
 
+def classify_execution_failure(exc: BaseException, attempts: int) -> Tuple[str, str]:
+    """Return retry class and stage without retrying deterministic contracts."""
+    deterministic_contract_failure = isinstance(exc, CapabilityPlanIdentityError) or (
+        "CAPABILITY_PLAN_IDENTITY_MISMATCH" in str(exc)
+    )
+    if deterministic_contract_failure:
+        return "permanent_contract", "contract_validation_failed"
+    if attempts < MAX_EXECUTION_ATTEMPTS:
+        return "retryable_execution", "execution_failed"
+    return "manual_review", "execution_failed"
+
+
 def resolve_retry_decision(
     existing: Dict[str, Any],
     new_contract_version: str,
@@ -286,6 +317,8 @@ def resolve_retry_decision(
         if old_capability_version != new_contract_version:
             return "enqueue_successor_contract_changed"
         return "return_existing_manual_review"
+    if retry_class == "permanent_contract" and old_capability_version != new_contract_version:
+        return "enqueue_successor_contract_changed"
     if retry_class in ("permanent_contract", "permanent_failure"):
         return "return_existing_permanent"
     if retry_class in {"retryable", "retryable_execution", "retryable_launch"}:
@@ -300,12 +333,14 @@ def resolve_retry_decision(
 
 def _enqueue_successor(
     predecessor: Dict[str, Any],
-    plot_id: str,
+    namespace: PlotNamespace,
     run_id: str,
     context: Dict[str, Any],
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Write and spawn a new job that supersedes a failed predecessor."""
+    namespace = _coerce_namespace(namespace)
+    plot_id = namespace.plot_id
     # Stamp the predecessor as superseded (immutable audit trail)
     predecessor_job_id = str(predecessor.get("job_id", ""))
     if predecessor_job_id:
@@ -327,7 +362,9 @@ def _enqueue_successor(
     )
     context["supersedes_job_id"] = predecessor_job_id
 
-    identity = build_job_identity(plot_id, context, config)
+    context.update(namespace_payload(namespace))
+    context["plot_namespace"] = namespace_payload(namespace)
+    identity = build_job_identity(namespace, context, config)
     # Embed the capability version into the identity for hash differentiation
     identity["evidence_capability_contract_version"] = (
         EVIDENCE_CAPABILITY_CONTRACT_VERSION
@@ -339,6 +376,7 @@ def _enqueue_successor(
         manifest_path,
         job_id=job_id,
         plot_id=plot_id,
+        namespace=namespace,
         run_id=run_id,
         context=context,
         config=config,
@@ -348,6 +386,9 @@ def _enqueue_successor(
         job_path,
         {
             "job_id": job_id,
+            "plot_namespace": namespace_payload(namespace),
+            "tenant_id": namespace.tenant_id,
+            "farm_id": namespace.farm_id,
             "plot_id": plot_id,
             "run_id": run_id,
             "mode": "standard",
@@ -355,7 +396,7 @@ def _enqueue_successor(
             "stage": "manifest_persisted",
             "progress_pct": 5,
             "attempts": 0,
-            "manifest_ref": str(manifest_path),
+            "manifest_ref": manifest_path.name,
             "manifest_hash": manifest.get("manifest_hash"),
             "manifest_contract_version": JOB_MANIFEST_CONTRACT_VERSION,
             "worker_contract_version": JOB_RUNNER_CONTRACT_VERSION,
@@ -379,7 +420,7 @@ def _enqueue_successor(
         "job_id": job_id,
         "status": "queued",
         "job_ref": str(job_path),
-        "manifest_ref": str(manifest_path),
+        "manifest_ref": manifest_path.name,
         "deduplicated": False,
         "compatibility": "current",
         "progress_pct": 5,
@@ -391,19 +432,24 @@ def _enqueue_successor(
 # ── Compatible-job lookup ────────────────────────────────────────────────────
 
 def latest_compatible_job(
-    plot_id: str,
+    namespace: PlotNamespace,
     geometry_hash: Optional[str] = None,
     capability_plan_hash: Optional[str] = None,
     worker_contract_version: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return the most recent job whose identity matches the current capability
     contract, geometry, and worker version. Returns None when no match exists."""
+    namespace = _coerce_namespace(namespace)
     if not JOBS_DIR.exists():
         return None
     matches = []
     for job_path in JOBS_DIR.glob("*.job.json"):
         payload = _read_json(job_path)
-        if str(payload.get("plot_id", "")) != str(plot_id):
+        try:
+            payload_namespace = _coerce_namespace(payload.get("plot_namespace"))
+        except ValueError:
+            continue
+        if payload_namespace != namespace:
             continue
         if geometry_hash and str(payload.get("geometry_hash", "")) != geometry_hash:
             continue
@@ -426,15 +472,82 @@ def latest_compatible_job(
 
 
 def enqueue_standard_job(
-    plot_id: str,
+    namespace: PlotNamespace,
     run_id: str,
     context: Dict[str, Any],
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Persist a validated manifest before making a job visible to workers."""
+    """Serialize same-process publication before the cross-process fence.
+
+    Windows can transiently return EACCES rather than EEXIST when two request
+    threads race an O_EXCL create.  A process-local reentrant lock removes that
+    ambiguity; the durable reservation below remains the authority fence
+    between separate API processes.
+    """
+    with _ENQUEUE_THREAD_LOCK:
+        return _enqueue_standard_job_locked(namespace, run_id, context, config)
+
+
+def _enqueue_standard_job_locked(
+    namespace: PlotNamespace,
+    run_id: str,
+    context: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist a namespaced, validated manifest before exposing a job."""
+    namespace = _coerce_namespace(namespace)
+    plot_id = namespace.plot_id
+    context = dict(context or {})
+    for key, expected in (
+        ("tenant_id", namespace.tenant_id),
+        ("farm_id", namespace.farm_id),
+        ("plot_id", namespace.plot_id),
+    ):
+        current = str(context.get(key) or "").strip()
+        if current and current != expected:
+            raise ValueError(f"durable job namespace mismatch for {key}")
+    if context.get("plot_namespace"):
+        if _coerce_namespace(context["plot_namespace"]) != namespace:
+            raise ValueError("durable job context PlotNamespace mismatch")
+    context.update(namespace_payload(namespace))
+    context["plot_namespace"] = namespace_payload(namespace)
+    spatial_summary = dict(
+        (context.get("capability_plan_summary") or {}).get(
+            "spatial_scene_capability"
+        ) or {}
+    )
+    if spatial_summary and int(spatial_summary.get("accepted_count", 0) or 0) <= 0:
+        return {
+            "job_id": None,
+            "plot_id": str(plot_id),
+            "run_id": str(run_id),
+            "status": "not_eligible",
+            "stage": "spatial_eligibility_preflight",
+            "terminal": True,
+            "reason": "NOT_ELIGIBLE_NO_EXECUTABLE_SPATIAL_SCENE",
+            "failure_code": "NOT_ELIGIBLE_NO_EXECUTABLE_SPATIAL_SCENE",
+            "retry_classification": "acquisition_required",
+            "retry_eligible": False,
+            "acquisition_required": True,
+            "temporal_diagnostic_available": bool(
+                ((context.get("capability_plan_summary") or {}).get(
+                    "temporal_capability", {}
+                ) or {}).get("accepted_count", 0)
+                or ((context.get("capability_plan_summary") or {}).get(
+                    "composite_raster_capability", {}
+                ) or {}).get("accepted_count", 0)
+            ),
+            "capability_plan_hash": context.get("capability_plan_hash"),
+            "execution_plan_hash": context.get("execution_plan_hash"),
+            "quarantine_ledger_hash": context.get("quarantine_ledger_hash"),
+            "accepted_spatial_scene_count": 0,
+            "deduplicated": False,
+        }
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    identity = build_job_identity(plot_id, context, config)
+    identity = build_job_identity(namespace, context, config)
     job_id = scientific_job_id(identity)
+    request_lineage_id = str(run_id)
+    execution_run_id = f"ASMAE-RUN-{job_id}"
     job_path, manifest_path = _paths(job_id)
     existing = _read_json(job_path)
     owns_reservation = False
@@ -445,8 +558,12 @@ def enqueue_standard_job(
     if not existing and not job_path.exists():
         reservation = {
             "job_id": job_id,
+            "plot_namespace": namespace_payload(namespace),
+            "tenant_id": namespace.tenant_id,
+            "farm_id": namespace.farm_id,
             "plot_id": plot_id,
-            "run_id": run_id,
+            "run_id": execution_run_id,
+            "request_lineage_id": request_lineage_id,
             "status": "reserving",
             "stage": "identity_reserved",
             "created_at": _now().isoformat(),
@@ -461,18 +578,26 @@ def enqueue_standard_job(
                 os.fsync(handle.fileno())
             existing = reservation
             owns_reservation = True
-        except FileExistsError:
+        except OSError:
+            # Windows may report EACCES/WinError 5 instead of EEXIST when
+            # another thread/process has just created and is still flushing
+            # the O_EXCL reservation.  It is contention only when the target
+            # now exists; genuine filesystem failures must still surface.
+            if not job_path.exists():
+                raise
             for _ in range(200):
                 time.sleep(0.025)
                 existing = _read_json(job_path)
                 if existing and existing.get("status") != "reserving":
-                    return enqueue_standard_job(plot_id, run_id, context, config)
+                    return enqueue_standard_job(namespace, run_id, context, config)
             return {
                 "job_id": job_id,
+                "run_id": execution_run_id,
+                "request_lineage_id": request_lineage_id,
                 "status": "queued",
                 "stage": "identity_reserved",
                 "job_ref": str(job_path),
-                "manifest_ref": str(manifest_path),
+                "manifest_ref": manifest_path.name,
                 "deduplicated": True,
                 "compatibility": "reservation_pending",
                 "progress_pct": 0,
@@ -492,10 +617,12 @@ def enqueue_standard_job(
         if not existing:
             return {
                 "job_id": job_id,
+                "run_id": execution_run_id,
+                "request_lineage_id": request_lineage_id,
                 "status": "queued",
                 "stage": "identity_reserved",
                 "job_ref": str(job_path),
-                "manifest_ref": str(manifest_path),
+                "manifest_ref": manifest_path.name,
                 "deduplicated": True,
                 "compatibility": "reservation_pending",
                 "progress_pct": 0,
@@ -514,13 +641,15 @@ def enqueue_standard_job(
             time.sleep(0.025)
             published = _read_json(job_path)
             if published and published.get("status") != "reserving":
-                return enqueue_standard_job(plot_id, run_id, context, config)
+                return enqueue_standard_job(namespace, run_id, context, config)
         return {
             "job_id": job_id,
+            "run_id": execution_run_id,
+            "request_lineage_id": request_lineage_id,
             "status": "queued",
             "stage": "identity_reserved",
             "job_ref": str(job_path),
-            "manifest_ref": str(manifest_path),
+            "manifest_ref": manifest_path.name,
             "deduplicated": True,
             "compatibility": "reservation_pending",
             "progress_pct": 0,
@@ -539,9 +668,11 @@ def enqueue_standard_job(
         if compatible:
             return {
                 "job_id": job_id,
+                "run_id": existing.get("run_id") or execution_run_id,
+                "request_lineage_id": existing.get("request_lineage_id") or request_lineage_id,
                 "status": _canonical_status(existing.get('status')),
                 "job_ref": str(job_path),
-                "manifest_ref": str(manifest_path),
+                "manifest_ref": manifest_path.name,
                 "deduplicated": True,
                 "compatibility": "compatible",
                 "progress_pct": existing.get("progress_pct", 0),
@@ -561,7 +692,7 @@ def enqueue_standard_job(
         return {
             **_public_job_payload(superseded),
             'job_ref': str(job_path),
-            'manifest_ref': str(manifest_path),
+            'manifest_ref': manifest_path.name,
             'deduplicated': True,
         }
 
@@ -572,9 +703,11 @@ def enqueue_standard_job(
         if compatible:
             return {
                 "job_id": job_id,
+                "run_id": existing.get("run_id") or execution_run_id,
+                "request_lineage_id": existing.get("request_lineage_id") or request_lineage_id,
                 "status": "completed",
                 "job_ref": str(job_path),
-                "manifest_ref": str(manifest_path),
+                "manifest_ref": manifest_path.name,
                 "deduplicated": True,
                 "compatibility": "compatible",
                 "progress_pct": 100,
@@ -594,7 +727,7 @@ def enqueue_standard_job(
         return {
             **_public_job_payload(superseded),
             'job_ref': str(job_path),
-            'manifest_ref': str(manifest_path),
+            'manifest_ref': manifest_path.name,
             'deduplicated': True,
         }
 
@@ -615,7 +748,7 @@ def enqueue_standard_job(
                 "failure_code": existing.get("reason", ""),
                 "retry_classification": "manual_review",
                 "job_ref": str(job_path),
-                "manifest_ref": str(manifest_path),
+                "manifest_ref": manifest_path.name,
                 "deduplicated": True,
                 "superseded": False,
                 "progress_pct": int(existing.get("progress_pct", 100)),
@@ -629,7 +762,7 @@ def enqueue_standard_job(
                 "failure_code": existing.get("reason", ""),
                 "retry_classification": existing.get("retry_classification", "permanent"),
                 "job_ref": str(job_path),
-                "manifest_ref": str(manifest_path),
+                "manifest_ref": manifest_path.name,
                 "deduplicated": True,
                 "superseded": False,
                 "progress_pct": int(existing.get("progress_pct", 100)),
@@ -637,7 +770,7 @@ def enqueue_standard_job(
             }
         if decision == "enqueue_successor_contract_changed":
             return _enqueue_successor(
-                existing, plot_id, run_id, context, config
+                existing, namespace, run_id, context, config
             )
         # retry_transient — fall through to normal write below
 
@@ -645,7 +778,7 @@ def enqueue_standard_job(
         return {
             **_public_job_payload(existing),
             'job_ref': str(job_path),
-            'manifest_ref': str(manifest_path),
+            'manifest_ref': manifest_path.name,
             'deduplicated': True,
         }
 
@@ -654,7 +787,8 @@ def enqueue_standard_job(
             manifest_path,
             job_id=job_id,
             plot_id=plot_id,
-            run_id=run_id,
+            namespace=namespace,
+            run_id=execution_run_id,
             context=context,
             config=config,
             identity=identity,
@@ -663,33 +797,37 @@ def enqueue_standard_job(
         _atomic_json(
             job_path,
             {
-            "job_id": job_id,
-            "plot_id": plot_id,
-            "run_id": run_id,
-            "mode": "standard",
-            "status": "queued",
-            "stage": "manifest_persisted",
-            "progress_pct": 5,
-            "attempts": attempts,
-            "manifest_ref": str(manifest_path),
-            "manifest_hash": manifest.get("manifest_hash"),
-            "manifest_contract_version": JOB_MANIFEST_CONTRACT_VERSION,
-            "worker_contract_version": JOB_RUNNER_CONTRACT_VERSION,
-            "scientific_identity": identity,
-            "context_hash": identity.get("context_hash"),
-            "geometry_hash": identity.get("geometry_hash"),
-            "crop_posterior_lineage": identity.get(
-                "crop_posterior_lineage"
-            ),
-            "crop_lineage_id": identity.get("crop_lineage_id"),
-            "reintegration_required": _requires_reintegration(context),
-            "created_at": existing.get("created_at") or _now().isoformat(),
-            "updated_at": _now().isoformat(),
-            "restart_recoverable": True,
-            "compatibility": "current",
-            "evidence_capability_contract_version": EVIDENCE_CAPABILITY_CONTRACT_VERSION,
-            "capability_plan_hash": identity.get("capability_plan_hash"),
-            "revision": int(existing.get("revision", 0) or 0) + 1,
+                "job_id": job_id,
+                "plot_namespace": namespace_payload(namespace),
+                "tenant_id": namespace.tenant_id,
+                "farm_id": namespace.farm_id,
+                "plot_id": plot_id,
+                "run_id": execution_run_id,
+                "request_lineage_id": request_lineage_id,
+                "mode": "standard",
+                "status": "queued",
+                "stage": "manifest_persisted",
+                "progress_pct": 5,
+                "attempts": attempts,
+                "manifest_ref": manifest_path.name,
+                "manifest_hash": manifest.get("manifest_hash"),
+                "manifest_contract_version": JOB_MANIFEST_CONTRACT_VERSION,
+                "worker_contract_version": JOB_RUNNER_CONTRACT_VERSION,
+                "scientific_identity": identity,
+                "context_hash": identity.get("context_hash"),
+                "geometry_hash": identity.get("geometry_hash"),
+                "crop_posterior_lineage": identity.get(
+                    "crop_posterior_lineage"
+                ),
+                "crop_lineage_id": identity.get("crop_lineage_id"),
+                "reintegration_required": _requires_reintegration(context),
+                "created_at": existing.get("created_at") or _now().isoformat(),
+                "updated_at": _now().isoformat(),
+                "restart_recoverable": True,
+                "compatibility": "current",
+                "evidence_capability_contract_version": EVIDENCE_CAPABILITY_CONTRACT_VERSION,
+                "capability_plan_hash": identity.get("capability_plan_hash"),
+                "revision": int(existing.get("revision", 0) or 0) + 1,
             },
         )
     except Exception as exc:
@@ -705,9 +843,11 @@ def enqueue_standard_job(
     spawn_worker(job_path)
     return {
         "job_id": job_id,
+        "run_id": execution_run_id,
+        "request_lineage_id": request_lineage_id,
         "status": "queued",
         "job_ref": str(job_path),
-        "manifest_ref": str(manifest_path),
+        "manifest_ref": manifest_path.name,
         "deduplicated": False,
         "compatibility": "current",
         "progress_pct": 5,
@@ -828,14 +968,56 @@ def _reserve_launch(job_path: Path) -> Optional[str]:
         ):
             return None
         launch_token = uuid.uuid4().hex
+        launch_generation = int(payload.get('launch_attempts', 0) or 0) + 1
+        identity = dict(payload.get('scientific_identity') or {})
+        phase = 'reintegration' if payload.get('resume_phase') == 'reintegration' else 'scientific'
+        identity_source_digest = str(identity.get('scientific_source_digest', ''))
+        current_source_digest = scientific_source_digest()
+        receipt = operational_build_receipt(
+            source_bundle_digest=current_source_digest,
+            config_hash=str(identity.get('config_hash', '')),
+            manifest_hash=str(payload.get('manifest_hash', '')),
+            phase=phase,
+            launch_generation=launch_generation,
+            input_snapshot_id=str(payload.get('final_snapshot_id', '') or ''),
+        )
+        receipt['scientific_identity_source_digest'] = identity_source_digest
+        receipt['source_matches_scientific_identity'] = (
+            not identity_source_digest or current_source_digest == identity_source_digest
+        )
+        operational_attempts = list(payload.get('operational_attempts') or [])
+        operational_attempts.append(receipt)
+        if phase == 'scientific' and identity_source_digest and current_source_digest != identity_source_digest:
+            receipt['launch_permitted'] = False
+            receipt['block_reason'] = 'scientific_source_changed_before_launch'
+            payload.update(
+                status='superseded',
+                stage='source_bundle_changed_before_launch',
+                compatibility='obsolete',
+                compatibility_reason='scientific_source_digest_mismatch',
+                retry_classification='new_scientific_identity_required',
+                recoverable=False,
+                operational_attempts=operational_attempts,
+                active_operational_attempt_id=receipt['operational_attempt_id'],
+                source_build_digest=current_source_digest,
+            )
+            payload['revision'] = int(payload.get('revision', 0) or 0) + 1
+            payload['updated_at'] = _now().isoformat()
+            _atomic_json(job_path, payload)
+            return None
+        receipt['launch_permitted'] = True
         stdout_path, event_path = _job_log_paths(job_path)
         payload.update(
             launch_token=launch_token,
             launch_reserved_at=_now().isoformat(),
             launch_state='reserved',
-            launch_attempts=int(payload.get('launch_attempts', 0) or 0) + 1,
-            worker_log_ref=str(stdout_path),
-            worker_event_log_ref=str(event_path),
+            launch_attempts=launch_generation,
+            operational_attempts=operational_attempts,
+            active_operational_attempt_id=receipt['operational_attempt_id'],
+            source_build_digest=receipt['source_bundle_digest'],
+            worker_executable_sha256=receipt['worker_executable_sha256'],
+            worker_log_ref=stdout_path.name,
+            worker_event_log_ref=event_path.name,
             recoverable=True,
         )
         payload['revision'] = int(payload.get('revision', 0) or 0) + 1
@@ -867,6 +1049,7 @@ def spawn_worker(job_path: Path) -> bool:
                     sys.executable,
                     '-m',
                     'services.agribrain.layer05_asmae.background_jobs',
+                    '--supervise',
                     str(job_path),
                     launch_token,
                 ],
@@ -883,6 +1066,7 @@ def spawn_worker(job_path: Path) -> bool:
             job_path,
             expected_launch_token=launch_token,
             worker_pid=process.pid,
+            supervisor_pid=process.pid,
             launch_state='started',
             launched_at=_now().isoformat(),
         )
@@ -1079,100 +1263,6 @@ def _supersede_recovery_candidate(
             break
         except (LeaseLostError, ValueError):
             current = _read_json(job_path)
-    if superseded is None:
-        return current
-
-    lifecycle_event_id = _commit_job_lifecycle_event(
-        job_path,
-        superseded,
-        'ASMAE_JOB_SUPERSEDED',
-        superseded_by_job_id=winner.get('job_id'),
-        superseded_by_run_id=winner.get('run_id'),
-    )
-    _append_job_event(
-        job_path,
-        'worker_job_superseded',
-        superseded_by_job_id=winner.get('job_id'),
-        superseded_by_run_id=winner.get('run_id'),
-        worldline_event_id=lifecycle_event_id,
-    )
-    return superseded
-
-
-def recover_pending_jobs(
-    *, plot_id: Optional[str] = None, job_id: Optional[str] = None
-) -> int:
-    """Recover at most the newest unsuperseded request for each plot."""
-    if not JOBS_DIR.exists():
-        return 0
-    records = []
-    for job_path in JOBS_DIR.glob("*.job.json"):
-        payload = _read_json(job_path)
-        if not payload:
-            continue
-        if plot_id is not None and str(payload.get('plot_id')) != str(plot_id):
-            continue
-        payload = _mark_stalled_if_expired(job_path, payload)
-        records.append((job_path, payload))
-
-    if job_id is not None:
-        requested = next((
-            payload for _, payload in records
-            if str(payload.get('job_id')) == str(job_id)
-        ), None)
-        if requested is None:
-            return 0
-        requested_plot_id = str(requested.get('plot_id'))
-        records = [
-            pair for pair in records
-            if str(pair[1].get('plot_id')) == requested_plot_id
-        ]
-
-    active_statuses = {
-        'queued', 'stalled', 'running', 'completed_reintegration_pending',
-    }
-    active_by_plot: Dict[str, list[Tuple[Path, Dict[str, Any]]]] = {}
-    for job_path, payload in records:
-        if payload.get('superseded') or str(payload.get('status')) not in active_statuses:
-            continue
-        active_by_plot.setdefault(str(payload.get('plot_id')), []).append(
-            (job_path, payload)
-        )
-
-    resumed = 0
-    for candidates in active_by_plot.values():
-        winner_path, winner = max(
-            candidates,
-            key=lambda pair: (
-                _job_created_at(pair[1]),
-                str(pair[1].get('job_id') or ''),
-            ),
-        )
-        for candidate_path, candidate in candidates:
-            if candidate_path != winner_path:
-                _supersede_recovery_candidate(candidate_path, candidate, winner)
-
-        if job_id is not None and str(winner.get('job_id')) != str(job_id):
-            continue
-        status = str(winner.get('status'))
-        if status == 'completed_reintegration_pending':
-            winner = _update_job(
-                winner_path,
-                status='stalled',
-                stage='downstream_reintegration_retry',
-                resume_phase='reintegration',
-                recovery_reason='reintegration_pending',
-                recoverable=True,
-            )
-            status = 'stalled'
-        if status in {'queued', 'stalled'} and spawn_worker(winner_path):
-            resumed += 1
-            lifecycle_event_id = _commit_job_lifecycle_event(
-                winner_path,
-                _read_json(winner_path) or winner,
-                'ASMAE_JOB_RECOVERED',
-                recovery_reason=winner.get('recovery_reason'),
-            )
             _append_job_event(
                 winner_path,
                 'worker_recovery_launched',
@@ -1272,6 +1362,7 @@ def _begin_lease(
             ).isoformat(),
             last_heartbeat_at=_now().isoformat(),
             worker_started_at=_now().isoformat(),
+            worker_pid=os.getpid(),
             recoverable=True,
             launch_state='claimed',
             resume_phase='reintegration' if resume_reintegration else 'scientific',
@@ -1319,7 +1410,7 @@ def _validate_result(
     if str(result.get("plot_id", "")) != str(payload.get("plot_id", "")):
         raise ManifestError("worker result plot identity mismatch")
     status = str(result.get("status", ""))
-    if status not in {"success", "partial", "unavailable", "error"}:
+    if status not in {"success", "partial", "unavailable", "error", "failed_spatial_timeout"}:
         raise ManifestError(f"worker result has invalid status: {status}")
     if status in {"success", "partial"}:
         if not isinstance(result.get("plot_state_artifact"), dict):
@@ -1338,6 +1429,20 @@ def _validate_result(
             raise ManifestError(
                 "completed worker result has no compatible canonical snapshot"
             )
+    # P0-D: Capability-plan-hash identity validation
+    import os
+    allow_drift = os.environ.get("ASMAE_ALLOW_PLAN_HASH_DRIFT") == "true"
+    result_plan_hash = str(result.get("capability_plan_hash", "") or "")
+    job_plan_hash = str(identity.get("capability_plan_hash", "") or "")
+    if result_plan_hash and job_plan_hash and result_plan_hash != job_plan_hash:
+        msg = (
+            f"CAPABILITY_PLAN_IDENTITY_MISMATCH: "
+            f"frozen={job_plan_hash}, executed={result_plan_hash}"
+        )
+        if allow_drift:
+            logger.warning("Plan hash drift (migration mode): %s", msg)
+        else:
+            raise ManifestError(msg)
 
 
 def _required_scientific_valid_time(
@@ -1370,16 +1475,15 @@ def _commit_job_evidence(
 
     context = dict(saved.get("context") or {})
     valid_time = _required_scientific_valid_time(result, context, payload)
-    authority = result.get("authority_level")
-    if not str(authority or "").strip():
-        authority = (
-            "PRODUCTION_ASSIMILATED"
-            if result.get("production_usable") is True
-            else "DIAGNOSTIC_NO_STATE_UPDATE"
-        )
+    authority = (
+        str(result.get("authority_level") or "PRODUCTION_ASSIMILATED")
+        if result.get("production_usable") is True
+        else "DIAGNOSTIC_NO_STATE_UPDATE"
+    )
+    event_type = _completed_result_event_type(result)
     event = PlotWorldlineService().commit_event(
         plot_id=str(payload.get("plot_id", "")),
-        event_type="ASMAE_JOB_COMPLETED",
+        event_type=event_type,
         geometry_hash=str(payload.get("geometry_hash", "") or ""),
         authority=str(authority),
         effective_at=valid_time,
@@ -1400,18 +1504,55 @@ def _commit_job_evidence(
                 "crop_posterior_lineage"
             ),
             "result_status": result.get("status"),
+            "execution_status": "completed",
+            "spatial_available": event_type != "ASMAE_TEMPORAL_DIAGNOSTIC_COMPLETED",
+            "production_usable": result.get("production_usable") is True,
         },
     )
     return event.get("event_id")
 
 
+def _completed_result_event_type(result: Dict[str, Any]) -> str:
+    """Classify a successful execution without conflating authority with failure."""
+    evidence = result.get("asmae_evidence_state")
+    if not isinstance(evidence, dict):
+        evidence = {}
+    plot_state = result.get("plot_state_artifact")
+    if not isinstance(plot_state, dict):
+        plot_state = {}
+    spatial = bool(
+        result.get("current_spatial_assimilation")
+        or result.get("spatial_raster_available")
+        or evidence.get("current_spatial_assimilation")
+        or evidence.get("spatial_raster_available")
+        or plot_state.get("spatial_raster_available")
+    )
+    if not spatial:
+        try:
+            spatial = int(result.get("scene_count") or evidence.get("scene_count") or 0) > 0
+        except (TypeError, ValueError):
+            spatial = False
+    if spatial and result.get("production_usable") is True:
+        return "ASMAE_SPATIAL_PRODUCTION_COMPLETED"
+    if spatial:
+        return "ASMAE_SPATIAL_DIAGNOSTIC_COMPLETED"
+    return "ASMAE_TEMPORAL_DIAGNOSTIC_COMPLETED"
+
+
 def _commit_job_failure_event(
     result: Dict[str, Any], payload: Dict[str, Any], saved: Dict[str, Any]
-) -> Optional[str]:
-    from .history.worldline_service import PlotWorldlineService
-    context = dict(saved.get("context") or {})
-    valid_time = datetime.now(timezone.utc).isoformat()
+) -> Tuple[str, Optional[str]]:
     try:
+        from .history.worldline_service import PlotWorldlineService
+        context = dict(saved.get("context") or {})
+        valid_time = datetime.now(timezone.utc).isoformat()
+        job_id = str(payload.get("job_id", ""))
+        run_id = str(payload.get("run_id") or context.get("run_id") or "")
+        reason = str(result.get("reason") or "execution_failed")
+        idempotency_key = (
+            f"{job_id}:{run_id}:"
+            f"{hashlib.sha256(reason.encode('utf-8')).hexdigest()[:16]}"
+        )
         event = PlotWorldlineService().commit_event(
             plot_id=str(payload.get("plot_id", "")),
             event_type="ASMAE_SPATIAL_REFRESH_FAILED",
@@ -1422,17 +1563,134 @@ def _commit_job_failure_event(
             tenant_id=str(context.get("tenant_id") or "default_tenant"),
             namespace=str(context.get("worldline_namespace") or "default"),
             payload={
-                "job_id": payload.get("job_id"),
+                "job_id": job_id,
+                "run_id": run_id,
                 "manifest_hash": payload.get("manifest_hash"),
                 "result_status": result.get("status") or "error",
-                "reason": result.get("reason") or "execution_failed",
+                "execution_status": "failed",
+                "reason": reason,
                 "failure_diagnostics": result.get("failure_diagnostics") or {},
+                "idempotency_key": idempotency_key,
             },
         )
-        return event.get("event_id")
+        return "committed", event.get("event_id")
     except Exception as exc:
         logger.warning("Could not commit ASMAE_SPATIAL_REFRESH_FAILED to worldline: %s", exc)
-        return None
+        return "lineage_commit_failed", None
+
+
+def _finalize_supervised_timeout(
+    job_path: Path, launch_token: str, elapsed_seconds: float
+) -> None:
+    """Publish typed timeout truth after the supervised child is confirmed dead."""
+    primary_reason = "PROCESS_HARD_TIMEOUT"
+    current = _read_json(job_path)
+    if not current or str(current.get("status")) in TERMINAL_STATUSES:
+        return
+    diagnostics = {
+        "failure_code": primary_reason,
+        "elapsed_ms": round(elapsed_seconds * 1000.0, 3),
+        "deadline_ms": round(PROCESS_HARD_TIMEOUT_SECONDS * 1000.0, 3),
+        "supervision_contract": "asmae_process_watchdog_v1",
+        "cooperative_cancellation": True,
+        "terminate_attempted": True,
+    }
+    try:
+        terminal = _update_job(
+            job_path,
+            expected_launch_token=launch_token,
+            expected_statuses=frozenset({"queued", "stalled", "running"}),
+            status="failed",
+            stage="process_hard_timeout",
+            progress_pct=100,
+            result_status="failed_spatial_timeout",
+            reason=primary_reason,
+            error=(
+                "ASMAE worker exceeded process hard timeout "
+                f"({PROCESS_HARD_TIMEOUT_SECONDS:.1f}s)"
+            ),
+            error_type="ProcessHardTimeout",
+            failure_diagnostics=diagnostics,
+            retry_classification="manual_review",
+            recoverable=False,
+            lease_expires_at=None,
+            lease_token=None,
+            lease_owner=None,
+        )
+    except LeaseLostError:
+        return
+    _append_job_event(
+        job_path, "worker_process_hard_timeout", status="failed", **diagnostics
+    )
+    result = {
+        "status": "failed_spatial_timeout",
+        "reason": primary_reason,
+        "failure_diagnostics": diagnostics,
+    }
+    try:
+        saved = load_job_manifest(_manifest_for_job(job_path, terminal))
+    except Exception as exc:
+        logger.warning("Could not load manifest for timeout lineage: %s", exc)
+        saved = {}
+    _commit_job_failure_event(result, terminal, saved)
+
+
+def supervise_job(job_path: Path, launch_token: str) -> None:
+    """Own a monotonic deadline and kill a non-cooperative scientific child."""
+    environment = dict(os.environ)
+    environment["ASMAE_SUPERVISED_CHILD"] = "1"
+    started = time.monotonic()
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "services.agribrain.layer05_asmae.background_jobs",
+            "--execute",
+            str(job_path),
+            str(launch_token),
+        ],
+        cwd=str(REPO_ROOT),
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=None,
+        stderr=None,
+        close_fds=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        start_new_session=(os.name != "nt"),
+    )
+    try:
+        _update_job(
+            job_path,
+            expected_launch_token=launch_token,
+            supervisor_pid=os.getpid(),
+            worker_pid=child.pid,
+            watchdog_timeout_seconds=PROCESS_HARD_TIMEOUT_SECONDS,
+            watchdog_contract="asmae_process_watchdog_v1",
+        )
+    except Exception:
+        child.terminate()
+        child.wait(timeout=max(1.0, PROCESS_TERMINATE_GRACE_SECONDS))
+        raise
+    try:
+        child.wait(timeout=PROCESS_HARD_TIMEOUT_SECONDS)
+        return
+    except subprocess.TimeoutExpired:
+        child.terminate()
+    try:
+        child.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait(timeout=max(1.0, PROCESS_TERMINATE_GRACE_SECONDS))
+    lock_path = job_path.with_suffix(".lock")
+    try:
+        lock_value = _read_json(lock_path)
+        if int(lock_value.get("pid") or -1) == child.pid:
+            lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    _finalize_supervised_timeout(
+        job_path, launch_token, time.monotonic() - started
+    )
 
 
 def _run_reintegration(
@@ -1448,6 +1706,7 @@ def _run_reintegration(
         context=saved["context"],
         job_id=str(payload.get("job_id", "")),
         manifest_hash=str(saved.get("manifest_hash", "")),
+        parent_event_id=str(payload.get("evidence_event_id") or ""),
     )
 
 
@@ -1482,6 +1741,16 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
             payload.get('manifest_hash', '')
         ):
             raise ManifestError('job record and manifest hash do not match')
+        try:
+            job_namespace = _coerce_namespace(payload.get("plot_namespace"))
+            manifest_namespace = _coerce_namespace(saved.get("plot_namespace"))
+        except ValueError as exc:
+            raise ManifestError("durable job has no valid PlotNamespace") from exc
+        if job_namespace != manifest_namespace:
+            raise ManifestError("job record and manifest PlotNamespace do not match")
+        for key, expected in namespace_payload(job_namespace).items():
+            if str(payload.get(key) or "") != expected:
+                raise ManifestError(f"job record {key} does not match PlotNamespace")
         identity = dict(saved.get("identity") or {})
         resume_reintegration = payload.get('resume_phase') == 'reintegration'
 
@@ -1504,15 +1773,27 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
 
         if resume_reintegration:
             assert_worker_commit_fence(job_path, lease)
-            from .snapshot_store import load_latest_snapshot
-
-            result = load_latest_snapshot(
-                str(payload.get("plot_id", "")),
-                str(identity.get("geometry_hash", "")),
+            from .snapshot_store import (
+                SnapshotIntegrityError,
+                load_snapshot_exact,
             )
-            if not result or result.get("snapshot_id") != payload.get(
-                "final_snapshot_id"
-            ):
+
+            try:
+                result = load_snapshot_exact(
+                    plot_id=str(payload.get("plot_id", "")),
+                    geometry_hash=str(identity.get("geometry_hash", "")),
+                    snapshot_ref=str(
+                        payload.get("asmae_snapshot_ref")
+                        or payload.get("final_snapshot_ref")
+                        or ""
+                    ),
+                    snapshot_id=str(payload.get("final_snapshot_id") or ""),
+                )
+            except SnapshotIntegrityError as exc:
+                raise ManifestError(
+                    "pending reintegration has no valid immutable snapshot binding"
+                ) from exc
+            if not result:
                 raise ManifestError(
                     "pending reintegration snapshot is no longer compatible"
                 )
@@ -1521,6 +1802,43 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
 
             config = dict(saved.get("config") or {})
             config["disable_job_recovery"] = True
+            progress_by_step = {
+                "scene_stack": 24,
+                "observation_operators": 34,
+                "resolution_ladder": 41,
+                "selected_operator_bundle": 48,
+                "microzone_graph": 52,
+                "layer_priors": 55,
+                "state_estimation": 71,
+                "radiometric_consistency": 75,
+                "retrovalidation": 80,
+                "causal_tracking": 82,
+                "bma_ensemble": 83,
+                "weak_labels": 84,
+                "invariants": 84,
+                "pipeline": 85,
+            }
+
+            def publish_scientific_progress(
+                step: str, status: str, details: Dict[str, Any],
+            ) -> None:
+                target = progress_by_step.get(step)
+                if target is None:
+                    return
+                progress = (
+                    max(15, target - 3) if status == "starting" else target
+                )
+                _fenced_update_job(
+                    job_path,
+                    lease,
+                    stage=f"scientific_{step}",
+                    progress_pct=progress,
+                    scientific_phase=step,
+                    scientific_phase_status=status,
+                    scientific_phase_details=dict(details or {}),
+                )
+
+            config["_worker_progress_callback"] = publish_scientific_progress
             context = dict(saved.get("context") or {})
             context["is_background_run"] = True
             context['_worker_commit_fence'] = lambda: assert_worker_commit_fence(
@@ -1539,7 +1857,14 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
             _validate_result(result, payload, identity)
 
         result_status = str(result.get("status", "error"))
-        if result_status in {"success", "partial"}:
+        # P0-C: Detect spatial execution failure inside partial results
+        _result_diag = result.get("diagnostics") or {}
+        is_spatial_failure = (
+            _result_diag.get("chain_integrity_error") is True
+            or _result_diag.get("failure_code") == "STATE_ESTIMATION_TIMEOUT"
+            or result_status in ("failed_spatial_timeout", "failed_spatial_fallback")
+        )
+        if result_status == "success" or (result_status == "partial" and not is_spatial_failure):
             assert_worker_commit_fence(job_path, lease)
             reintegration_required = bool(payload.get('reintegration_required'))
             reintegration_attempt = int(
@@ -1565,6 +1890,9 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
                 lease,
                 evidence_event_id=evidence_event_id,
             )
+            # Keep the in-memory record aligned with the durable update so the
+            # first reintegration attempt and every retry use the same parent.
+            payload["evidence_event_id"] = evidence_event_id
             if reintegration_required:
                 try:
                     assert_worker_commit_fence(job_path, lease)
@@ -1625,6 +1953,17 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
                     "snapshot_ref": result.get("snapshot_ref"),
                 }
             terminal = "completed"
+        elif result_status == "partial" and is_spatial_failure:
+            # Spatial execution failed (timeout/chain integrity) — durable job is FAILED
+            reintegration = {"status": "not_applicable"}
+            terminal = "failed"
+            _commit_job_failure_event(result, payload, saved)
+            _append_job_event(
+                job_path, "worker_spatial_execution_failed",
+                status="failed", result_status=result_status,
+                failure_code=_result_diag.get("failure_code", "SPATIAL_EXECUTION_FAILURE"),
+                reason=result.get("reason") or _result_diag.get("reason"),
+            )
         elif result_status == "unavailable":
             reintegration = {"status": "not_applicable"}
             terminal = 'failed'
@@ -1639,6 +1978,14 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
         stop_heartbeat.set()
         if heartbeat_thread:
             heartbeat_thread.join(timeout=2.0)
+        terminal_record = _read_json(job_path)
+        operational_attempts = list(terminal_record.get('operational_attempts') or [])
+        attempt_summary = {
+            "scientific_execution_attempts": int(terminal_record.get('attempts', 0) or 0),
+            "reintegration_attempts": int(terminal_record.get('reintegration_attempts', 0) or 0),
+            "total_worker_launches": int(terminal_record.get('launch_attempts', 0) or 0),
+            "operational_receipt_count": len(operational_attempts),
+        }
         _fenced_update_job(
             job_path,
             lease,
@@ -1658,7 +2005,19 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
             reintegration_worldline_event_id=reintegration.get(
                 "worldline_event_id"
             ),
+            publication_receipt_ref=reintegration.get(
+                "publication_receipt_ref"
+            ),
+            publication_receipt_hash=reintegration.get(
+                "publication_receipt_hash"
+            ),
             downstream_layer_run_ids=reintegration.get("layer_run_ids", {}),
+            crop_worldline_event_id=reintegration.get(
+                "crop_worldline_event_id"
+            ) or result.get("crop_worldline_event_id"),
+            phenology_worldline_event_id=reintegration.get(
+                "phenology_worldline_event_id"
+            ) or result.get("phenology_worldline_event_id"),
             compatibility="current",
             retry_classification=(
                 "none" if terminal == "completed" else "manual_review"
@@ -1667,7 +2026,54 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
             lease_token=None,
             lease_owner=None,
             recoverable=False,
+            attempt_summary=attempt_summary,
         )
+        _append_job_event(
+            job_path,
+            'worker_finished',
+            status=terminal,
+            result_status=result_status,
+        )
+        logger.info(
+            "Standard ASMAE job %s finished with %s",
+            payload.get("job_id"),
+            terminal,
+        )
+    except LeaseLostError as exc:
+        stop_heartbeat.set()
+        if heartbeat_thread:
+            heartbeat_thread.join(timeout=2.0)
+        _append_job_event(
+            job_path,
+            'stale_worker_commit_rejected',
+            error=str(exc),
+            lease_generation=lease.generation if lease else None,
+        )
+        logger.warning('Stale ASMAE worker commit rejected: %s', exc)
+    except ManifestError as exc:
+        stop_heartbeat.set()
+        if heartbeat_thread:
+            heartbeat_thread.join(timeout=2.0)
+        if lease is not None:
+            _fenced_update_job(
+                job_path,
+                lease,
+                status='failed',
+                stage='contract_validation_failed',
+                error=str(exc),
+                retry_classification='permanent_contract',
+                lease_expires_at=None,
+                lease_token=None,
+                lease_owner=None,
+                recoverable=False,
+            )
+        _append_job_event(
+            job_path,
+            'worker_contract_rejected',
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        logger.error("ASMAE job contract rejected: %s", exc)
         _append_job_event(
             job_path,
             'worker_finished',
@@ -1720,11 +2126,8 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
             heartbeat_thread.join(timeout=2.0)
         current = _read_json(job_path)
         attempts = int(current.get("attempts", 0) or 0)
-        classification = (
-            "retryable_execution"
-            if attempts < MAX_EXECUTION_ATTEMPTS
-            else "manual_review"
-        )
+        classification, failure_stage = classify_execution_failure(exc, attempts)
+        deterministic_contract_failure = classification == "permanent_contract"
         try:
             if lease is None:
                 raise LeaseLostError('worker failed before acquiring a lease')
@@ -1732,7 +2135,7 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
                 job_path,
                 lease,
                 status='failed',
-                stage='execution_failed',
+                stage=failure_stage,
                 error=str(exc),
                 error_type=type(exc).__name__,
                 retry_classification=classification,
@@ -1769,7 +2172,11 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
                 payload={
                     "job_id": current.get("job_id"),
                     "manifest_hash": current.get("manifest_hash"),
-                    "failure_class": "WORKER_EXECUTION_FAILURE",
+                    "failure_class": (
+                        "CAPABILITY_PLAN_IDENTITY_MISMATCH"
+                        if deterministic_contract_failure
+                        else "WORKER_EXECUTION_FAILURE"
+                    ),
                     "error": str(exc),
                     "retryable": classification == "retryable_execution",
                 },
@@ -1806,22 +2213,37 @@ def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def latest_job_for_plot(
-    plot_id: str, run_id: Optional[str] = None
+    plot_id: Union[PlotNamespace, str],
+    run_id: Optional[str] = None,
+    tenant_id: str = "",
+    farm_id: str = "",
 ) -> Optional[Dict[str, Any]]:
+    if isinstance(plot_id, PlotNamespace):
+        target_plot_id = plot_id.plot_id
+        target_tenant_id = plot_id.tenant_id
+        target_farm_id = plot_id.farm_id
+    else:
+        target_plot_id = str(plot_id)
+        target_tenant_id = tenant_id.strip()
+        target_farm_id = farm_id.strip()
+
     if not JOBS_DIR.exists():
         return None
     matches = []
     for job_path in JOBS_DIR.glob("*.job.json"):
         payload = _read_json(job_path)
-        if (
-            str(payload.get("plot_id", "")) == str(plot_id)
-            and (
-                run_id is None
-                or str(payload.get("run_id", "")) == str(run_id)
-            )
-        ):
-            payload = _mark_stalled_if_expired(job_path, payload)
-            matches.append(_public_job_payload(payload))
+        if str(payload.get("plot_id", "")) != target_plot_id:
+            continue
+        if target_tenant_id and str(payload.get("tenant_id", "")) != target_tenant_id:
+            continue
+        if target_farm_id and str(payload.get("farm_id", "")) != target_farm_id:
+            continue
+        if run_id is not None and str(payload.get("run_id", "")) != str(run_id):
+            continue
+
+        payload = _mark_stalled_if_expired(job_path, payload)
+        matches.append(_public_job_payload(payload))
+
     if not matches:
         return None
     if run_id is None:
@@ -1839,13 +2261,121 @@ def latest_job_for_plot(
     )
 
 
+
+def recover_pending_jobs(
+    namespace: Optional[PlotNamespace] = None,
+    plot_id: Optional[str] = None,
+    tenant_id: str = "",
+    farm_id: str = "",
+) -> int:
+    """Recover stalled/pending ASMAE background jobs for a plot or namespace."""
+    if not JOBS_DIR.exists():
+        return 0
+
+    target_plot_id = namespace.plot_id if isinstance(namespace, PlotNamespace) else (plot_id or "")
+    target_tenant_id = namespace.tenant_id if isinstance(namespace, PlotNamespace) else tenant_id
+    target_farm_id = namespace.farm_id if isinstance(namespace, PlotNamespace) else farm_id
+
+    recovered = 0
+
+    matching_jobs = []
+    for job_path in JOBS_DIR.glob("*.job.json"):
+        payload = _read_json(job_path)
+        if not payload:
+            continue
+        if target_plot_id and str(payload.get("plot_id", "")) != target_plot_id:
+            continue
+        if target_tenant_id and str(payload.get("tenant_id", "")) != target_tenant_id:
+            continue
+        if target_farm_id and str(payload.get("farm_id", "")) != target_farm_id:
+            continue
+
+        payload = _mark_stalled_if_expired(job_path, payload)
+        status = _canonical_status(payload.get("status"))
+        if status in ("queued", "stalled", "running"):
+            matching_jobs.append((job_path, payload))
+
+    if not matching_jobs:
+        return 0
+
+    matching_jobs.sort(
+        key=lambda item: _job_created_at(item[1]),
+        reverse=True,
+    )
+
+    newest_job_path, newest_payload = matching_jobs[0]
+
+    for old_path, old_payload in matching_jobs[1:]:
+        old_status = _canonical_status(old_payload.get("status"))
+        if old_status in ("queued", "stalled", "running"):
+            _update_job(
+                old_path,
+                status="superseded",
+                stage="superseded_by_newer_run",
+                superseded_by_job_id=newest_payload.get("job_id"),
+                recoverable=False,
+            )
+
+
+    attempts = _recovery_attempt_count(newest_payload)
+    if attempts >= MAX_EXECUTION_ATTEMPTS:
+        _update_job(
+            newest_job_path,
+            status="failed",
+            stage="max_attempts_exceeded",
+            error=f"Recovery attempt ceiling reached ({MAX_EXECUTION_ATTEMPTS})",
+            recoverable=False,
+        )
+        return 0
+
+    if spawn_worker(newest_job_path):
+        recovered += 1
+
+    return recovered
+
+
+
+def recover_all_pending_jobs(namespace: Optional[Union[PlotNamespace, str]] = None) -> int:
+    """Recover all pending jobs across all plots/namespaces on application startup, or for a specific namespace."""
+    if namespace:
+        return recover_pending_jobs(namespace=namespace)
+    if not JOBS_DIR.exists():
+        return 0
+    total = 0
+    namespaces = set()
+    for job_path in JOBS_DIR.glob("*.job.json"):
+        payload = _read_json(job_path)
+        if payload and payload.get("plot_id"):
+            t_id = str(payload.get("tenant_id") or "").strip()
+            f_id = str(payload.get("farm_id") or "").strip()
+            p_id = str(payload.get("plot_id") or "").strip()
+            if p_id:
+                namespaces.add((t_id, f_id, p_id))
+
+    from services.agribrain.common.plot_namespace import PlotNamespace
+    for t_id, f_id, p_id in namespaces:
+        if t_id and f_id:
+            ns = PlotNamespace(tenant_id=t_id, farm_id=f_id, plot_id=p_id)
+            total += recover_pending_jobs(namespace=ns)
+        else:
+            total += recover_pending_jobs(plot_id=p_id, tenant_id=t_id, farm_id=f_id)
+    return total
+
+
+
 if __name__ == "__main__":
-    if len(sys.argv) not in {2, 3}:
+
+    if len(sys.argv) == 4 and sys.argv[1] == "--supervise":
+        supervise_job(Path(sys.argv[2]).resolve(), sys.argv[3])
+    elif len(sys.argv) == 4 and sys.argv[1] == "--execute":
+        run_job(Path(sys.argv[2]).resolve(), launch_token=sys.argv[3])
+    elif len(sys.argv) in {2, 3}:
+        run_job(
+            Path(sys.argv[1]).resolve(),
+            launch_token=sys.argv[2] if len(sys.argv) == 3 else None,
+        )
+    else:
         raise SystemExit(
             "usage: python -m layer05_asmae.background_jobs "
-            "<job.json> [launch-token]"
+            "[--supervise|--execute] <job.json> [launch-token]"
         )
-    run_job(
-        Path(sys.argv[1]).resolve(),
-        launch_token=sys.argv[2] if len(sys.argv) == 3 else None,
-    )

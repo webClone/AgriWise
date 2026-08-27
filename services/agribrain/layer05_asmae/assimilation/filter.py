@@ -17,7 +17,10 @@ import random
 from datetime import datetime, time, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from typing import Callable
+
 from ..config import (
+    ENSEMBLE_SIZE_CERTIFICATION,
     ENSEMBLE_SIZE_LARGE_PLOT,
     ENSEMBLE_SIZE_OFFLINE,
     ENSEMBLE_SIZE_SHADOW,
@@ -33,8 +36,10 @@ logger = logging.getLogger(__name__)
 
 def select_ensemble_size(mode: str, n_microzones: int) -> int:
     """Select ensemble size based on mode and plot size."""
-    if mode in ("training_export", "certification"):
+    if mode in ("training_export",):
         return ENSEMBLE_SIZE_OFFLINE
+    if mode in ("certification", "calibration", "reference_comparison"):
+        return ENSEMBLE_SIZE_CERTIFICATION
     if n_microzones > LARGE_PLOT_MICROZONE_THRESHOLD:
         return ENSEMBLE_SIZE_LARGE_PLOT
     if mode == "shadow":
@@ -158,6 +163,7 @@ def run_enkf(
     soil_context: Optional[dict] = None,
     management_events: Optional[List[dict]] = None,
     initial_posterior: Optional[Dict[str, Any]] = None,
+    deadline_check: Optional[Callable[[], None]] = None,
 ) -> dict:
     """Run Ensemble Kalman Filter on the scene stack.
 
@@ -263,7 +269,9 @@ def run_enkf(
         if has_real_ht:
             try:
                 # V79A: Real Hₜ-aware update (ensemble-space projection)
-                ensemble, scene_reports = update_step_ht(ensemble, scene, op, rng)
+                ensemble, scene_reports = update_step_ht(
+                    ensemble, scene, op, rng, deadline_check=deadline_check,
+                )
                 accepted_reports = [
                     rep for rep in scene_reports
                     if isinstance(rep, dict) and rep.get("update_applied") is True
@@ -280,6 +288,15 @@ def run_enkf(
                     update_mode = "ht_update_excluded"
                     has_enkf_proxy_fallback = True
             except Exception as e:
+                # A deadline/lease fence is not a recoverable observation
+                # failure.  Let it terminate the obsolete or over-budget run
+                # instead of spending the rest of the scene stack before the
+                # next outer deadline check notices it.
+                if (
+                    getattr(e, "worker_lease_lost", False)
+                    or "BUDGET OVERRUN" in str(e)
+                ):
+                    raise
                 logger.warning("H_t update failed; scene excluded: %s", e)
                 scene_reports = [{
                     "mode": "ht_update_excluded",
@@ -316,9 +333,14 @@ def run_enkf(
             from ..graph.spatial_regularization import apply_ensemble_graph_regularization
             ensemble, graph_report = apply_ensemble_graph_regularization(
                 ensemble, graph, accepted_target_states,
+                deadline_check=deadline_check,
             )
             graph_report["scene_id"] = getattr(scene, "scene_id", f"scene_{t}")
             graph_regularization_reports.append(graph_report)
+
+        # Check deadline between scene iterations
+        if deadline_check is not None:
+            deadline_check()
 
         # Clamp to physical bounds
         ensemble = clamp_ensemble(ensemble)
@@ -546,29 +568,84 @@ def initialize_ensemble(
 
     Uses deterministic seeded RNG for reproducibility.
     """
-    ensemble: Dict[str, List[List[float]]] = {}
-
     l2_prior = priors.get("layer2", {})
     growth_pos = l2_prior.get("growth_position", 0.5) if isinstance(l2_prior, dict) and l2_prior.get("usable_as_prior") else 0.5
+    import numpy as np
 
-    for nid in node_ids:
-        members = []
-        for _ in range(n_ensemble):
-            state = _sample_initial_state(growth_pos, crop_context, rng)
-            for state_index, state_name in enumerate(STATE_NAMES):
-                posterior = (initial_posterior or {}).get(state_name, {})
-                if not isinstance(posterior, dict):
-                    continue
-                mean = posterior.get("mean")
-                sigma = posterior.get("sigma")
-                if not isinstance(mean, (int, float)):
-                    continue
-                if not isinstance(sigma, (int, float)) or sigma <= 0.0:
-                    sigma = (STATE_BOUNDS[state_name][1] - STATE_BOUNDS[state_name][0]) * 0.05
-                lo, hi = STATE_BOUNDS[state_name]
-                state[state_index] = max(lo, min(hi, rng.gauss(float(mean), float(sigma))))
-            members.append(state)
-        ensemble[nid] = members
+    mixture_bounds = (
+        crop_context.get("crop_mixture_bounds", {})
+        if isinstance(crop_context, dict) else {}
+    )
+    mids = []
+    lows = []
+    highs = []
+    spreads = []
+    for name in STATE_NAMES:
+        lo, hi = STATE_BOUNDS[name]
+        mid = (lo + hi) / 2.0
+        if name == "vigor":
+            mid = 0.3 + 0.4 * growth_pos
+        elif name == "lai":
+            bounds = mixture_bounds.get("lai_bounds")
+            if (
+                isinstance(bounds, (list, tuple)) and len(bounds) == 2
+                and all(isinstance(value, (int, float)) for value in bounds)
+            ):
+                mid = float(bounds[0]) + (float(bounds[1]) - float(bounds[0])) * growth_pos
+            else:
+                mid = 0.5 + 4.0 * growth_pos
+        elif name == "chlorophyll":
+            bounds = mixture_bounds.get("chlorophyll_bounds")
+            if (
+                isinstance(bounds, (list, tuple)) and len(bounds) == 2
+                and all(isinstance(value, (int, float)) for value in bounds)
+            ):
+                mid = float(bounds[0]) + (float(bounds[1]) - float(bounds[0])) * growth_pos
+            else:
+                mid = 10 + 40 * growth_pos
+        elif name == "bare_soil_fraction":
+            mid = max(0.0, 0.8 - 0.7 * growth_pos)
+        elif name == "phenology_progress":
+            mid = growth_pos
+        lows.append(float(lo))
+        highs.append(float(hi))
+        mids.append(float(mid))
+        spreads.append(float(hi - lo) * 0.1)
+
+    # One seed draw preserves deterministic orchestration while NumPy performs
+    # the millions of independent Gaussian samples in native code.
+    generator = np.random.default_rng(rng.getrandbits(128))
+    shape = (len(node_ids), n_ensemble, N_STATES)
+    values = (
+        np.asarray(mids, dtype=float)[None, None, :]
+        + generator.standard_normal(shape)
+        * np.asarray(spreads, dtype=float)[None, None, :]
+    )
+    values = np.clip(
+        values,
+        np.asarray(lows, dtype=float)[None, None, :],
+        np.asarray(highs, dtype=float)[None, None, :],
+    )
+    for state_index, state_name in enumerate(STATE_NAMES):
+        posterior = (initial_posterior or {}).get(state_name, {})
+        if not isinstance(posterior, dict):
+            continue
+        mean = posterior.get("mean")
+        sigma = posterior.get("sigma")
+        if not isinstance(mean, (int, float)):
+            continue
+        if not isinstance(sigma, (int, float)) or sigma <= 0.0:
+            sigma = (STATE_BOUNDS[state_name][1] - STATE_BOUNDS[state_name][0]) * 0.05
+        lo, hi = STATE_BOUNDS[state_name]
+        values[:, :, state_index] = np.clip(
+            generator.normal(float(mean), float(sigma), size=shape[:2]),
+            lo,
+            hi,
+        )
+    ensemble: Dict[str, List[List[float]]] = {
+        node_id: values[position].tolist()
+        for position, node_id in enumerate(node_ids)
+    }
 
     # Blend plot learning memory prior
     ensemble, memory_blend_weight = blend_learning_memory(
@@ -721,81 +798,82 @@ def forecast_step(
     normalized_daily_water_delta = daily_water_balance / storage_mm
     irrigation_impulse = irrigation / storage_mm
     missing_driver_scale = 1.0 if has_water_drivers else 1.8
-    for nid, members in ensemble.items():
-        for m in range(len(members)):
-            state = members[m]
-            new_state = list(state)
+    import numpy as np
 
-            for i, name in enumerate(STATE_NAMES):
-                lo, hi = STATE_BOUNDS[name]
+    node_ids = list(ensemble)
+    values = np.asarray([ensemble[node] for node in node_ids], dtype=float)
+    generator = np.random.default_rng(rng.getrandbits(128))
+    member_shape = values.shape[:2]
+    for i, name in enumerate(STATE_NAMES):
+        lo, hi = STATE_BOUNDS[name]
+        current = values[:, :, i]
+        if name == "surface_wetness_event":
+            wetting = effective_rain * delta_days + irrigation
+            rain_pulse = min(1.0, max(0.0, wetting / 20.0)) if wetting > 0.0 else 0.0
+            updated = current * (0.65 ** delta_days) + rain_pulse + generator.normal(
+                0.0, 0.05 * missing_driver_scale * sqrt_delta_days, member_shape,
+            )
+        elif name == "root_zone_water":
+            drainage = np.maximum(0.0, current - 0.8) * max(
+                0.0, min(1.0, drainage_fraction or 0.0),
+            )
+            updated = (
+                current + normalized_daily_water_delta * delta_days
+                + irrigation_impulse - drainage * delta_days
+                + generator.normal(0.0, 0.02 * missing_driver_scale * sqrt_delta_days, member_shape)
+            )
+        elif name == "canopy_water":
+            updated = (
+                current * (0.97 ** delta_days)
+                + 0.6 * (normalized_daily_water_delta * delta_days + irrigation_impulse)
+                + generator.normal(0.0, 0.02 * missing_driver_scale * sqrt_delta_days, member_shape)
+            )
+        elif name == "thermal_stress":
+            heat = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if isinstance(temp_max, (int, float)) else current
+            decay = 0.8 ** delta_days
+            updated = decay * current + (1.0 - decay) * heat + generator.normal(
+                0.0, 0.02 * (1.0 if temp_max is not None else 1.8) * sqrt_delta_days, member_shape,
+            )
+        elif name == "phenology_progress" and temp_mean is not None:
+            degree_day_progress = max(0.0, temp_mean - base_temperature) / 1800.0
+            updated = current + degree_day_progress * delta_days + generator.normal(
+                0.0, 0.005 * sqrt_delta_days, member_shape,
+            )
+        elif name == "biotic_confounder_risk" and humidity is not None and temp_mean is not None:
+            humidity_pressure = max(0.0, min(1.0, (humidity - 60.0) / 35.0))
+            temperature_pressure = max(0.0, 1.0 - abs(temp_mean - 24.0) / 16.0)
+            decay = 0.85 ** delta_days
+            updated = decay * current + (1.0 - decay) * humidity_pressure * temperature_pressure
+        elif name == "salinity_stress" and soil_salinity is not None:
+            baseline = max(0.0, min(1.0, soil_salinity / 8.0))
+            leaching = max(0.0, daily_water_balance * delta_days + irrigation) / max(storage_mm, 1.0)
+            decay = 0.9 ** delta_days
+            updated = decay * current + (1.0 - decay) * max(0.0, baseline - leaching)
+        elif name == "chlorophyll" and fertilization > 0.0:
+            updated = current + min(3.0, fertilization / 20.0) + generator.normal(
+                0.0, 0.5 * sqrt_delta_days, member_shape,
+            )
+        elif name == "vigor" and radiation is not None:
+            radiation_factor = max(0.0, min(1.0, radiation / 25.0))
+            updated = current + delta_days * (
+                0.01 * radiation_factor - 0.01 * max(0.0, -normalized_daily_water_delta)
+            )
+        elif name == "stress_memory":
+            heat_signal = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if temp_max is not None else 0.0
+            water_signal = max(0.0, -normalized_daily_water_delta * 5.0)
+            decay = 0.97 ** delta_days
+            updated = decay * current + (1.0 - decay) * max(heat_signal, water_signal)
+        else:
+            sigma_q = (hi - lo) * 0.02 * missing_driver_scale
+            updated = current + generator.normal(
+                0.0, sigma_q * sqrt_delta_days, member_shape,
+            )
+        values[:, :, i] = np.clip(updated, lo, hi)
 
-                if name == "surface_wetness_event":
-                    wetting = effective_rain * delta_days + irrigation
-                    rain_pulse = min(1.0, max(0.0, wetting / 20.0)) if wetting > 0.0 else 0.0
-                    decay = 0.65 ** delta_days
-                    new_state[i] = state[i] * decay + rain_pulse + rng.gauss(
-                        0, 0.05 * missing_driver_scale * sqrt_delta_days,
-                    )
-                elif name == "root_zone_water":
-                    drainage = max(0.0, state[i] - 0.8) * max(0.0, min(1.0, drainage_fraction or 0.0))
-                    new_state[i] = state[i] + normalized_daily_water_delta * delta_days + irrigation_impulse - drainage * delta_days + rng.gauss(
-                        0, 0.02 * missing_driver_scale * sqrt_delta_days,
-                    )
-                elif name == "canopy_water":
-                    decay = 0.97 ** delta_days
-                    new_state[i] = state[i] * decay + 0.6 * (
-                        normalized_daily_water_delta * delta_days + irrigation_impulse
-                    ) + rng.gauss(
-                        0, 0.02 * missing_driver_scale * sqrt_delta_days,
-                    )
-                elif name == "thermal_stress":
-                    heat = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if isinstance(temp_max, (int, float)) else state[i]
-                    decay = 0.8 ** delta_days
-                    new_state[i] = decay * state[i] + (1.0 - decay) * heat + rng.gauss(
-                        0, 0.02 * (1.0 if temp_max is not None else 1.8) * sqrt_delta_days,
-                    )
-                elif name == "phenology_progress" and temp_mean is not None:
-                    degree_day_progress = max(0.0, temp_mean - base_temperature) / 1800.0
-                    new_state[i] = state[i] + degree_day_progress * delta_days + rng.gauss(
-                        0, 0.005 * sqrt_delta_days,
-                    )
-                elif name == "biotic_confounder_risk" and humidity is not None and temp_mean is not None:
-                    humidity_pressure = max(0.0, min(1.0, (humidity - 60.0) / 35.0))
-                    temperature_pressure = max(0.0, 1.0 - abs(temp_mean - 24.0) / 16.0)
-                    decay = 0.85 ** delta_days
-                    new_state[i] = decay * state[i] + (1.0 - decay) * humidity_pressure * temperature_pressure
-                elif name == "salinity_stress" and soil_salinity is not None:
-                    baseline = max(0.0, min(1.0, soil_salinity / 8.0))
-                    leaching = max(
-                        0.0,
-                        daily_water_balance * delta_days + irrigation,
-                    ) / max(storage_mm, 1.0)
-                    decay = 0.9 ** delta_days
-                    new_state[i] = decay * state[i] + (1.0 - decay) * max(0.0, baseline - leaching)
-                elif name == "chlorophyll" and fertilization > 0.0:
-                    new_state[i] = state[i] + min(3.0, fertilization / 20.0) + rng.gauss(
-                        0, 0.5 * sqrt_delta_days,
-                    )
-                elif name == "vigor" and radiation is not None:
-                    radiation_factor = max(0.0, min(1.0, radiation / 25.0))
-                    new_state[i] = state[i] + delta_days * (
-                        0.01 * radiation_factor
-                        - 0.01 * max(0.0, -normalized_daily_water_delta)
-                    )
-                elif name == "stress_memory":
-                    heat_signal = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if temp_max is not None else 0.0
-                    water_signal = max(0.0, -normalized_daily_water_delta * 5.0)
-                    decay = 0.97 ** delta_days
-                    new_state[i] = decay * state[i] + (1.0 - decay) * max(heat_signal, water_signal)
-                else:
-                    sigma_q = (hi - lo) * 0.02 * missing_driver_scale
-                    new_state[i] = state[i] + rng.gauss(0, sigma_q * sqrt_delta_days)
-
-                new_state[i] = max(lo, min(hi, new_state[i]))
-
-            members[m] = new_state
-
-    return ensemble
+    return {
+        node_id: values[position].tolist()
+        for position, node_id in enumerate(node_ids)
+    }
 
 
 # ── Update Step: Hₜ-Aware (V79A) ────────────────────────────────────────────
@@ -810,24 +888,16 @@ def _state_variance_summary(
     result: Dict[str, float] = {}
     if not ensemble:
         return result
-    for state_index in state_indices:
-        node_vars = []
-        for node_id, members in ensemble.items():
-            vals = [
-                float(member[state_index])
-                for member in members
-                if state_index < len(member)
-            ]
-            if len(vals) >= 2:
-                n_mean = sum(vals) / len(vals)
-                n_var = sum((v - n_mean) ** 2 for v in vals) / len(vals)
-                node_vars.append(n_var)
-            elif len(vals) == 1:
-                node_vars.append(0.0)
+    import numpy as np
 
-        if node_vars:
-            state_name = STATE_NAMES[state_index] if state_index < len(STATE_NAMES) else f"state_{state_index}"
-            result[state_name] = sum(node_vars) / len(node_vars)
+    values = np.asarray(list(ensemble.values()), dtype=float)
+    if values.ndim != 3 or values.shape[1] == 0:
+        return result
+    for state_index in state_indices:
+        if state_index < 0 or state_index >= values.shape[2]:
+            continue
+        state_name = STATE_NAMES[state_index] if state_index < len(STATE_NAMES) else f"state_{state_index}"
+        result[state_name] = float(np.mean(np.var(values[:, :, state_index], axis=1)))
     return result
 
 
@@ -1135,11 +1205,177 @@ def _etkf_target_update(
     return ensemble
 
 
+def _batch_scalar_etkf_target_update(
+    ensemble: Dict[str, List[List[float]]],
+    node_ids: List[str],
+    target_indices: List[int],
+    predicted_observations: Any,
+    observed_values: Any,
+    observation_variance: float,
+    node_positions: Any,
+) -> Dict[str, List[List[float]]]:
+    """Apply independent scalar ETKF updates without per-zone eigensolves.
+
+    The local H_t contract collapses correlated pixels to one weighted scalar
+    observation per microzone.  For that rank-one observation, the ETKF
+    transform has a closed form: only the ensemble-anomaly direction parallel
+    to the predicted observation is contracted.  Batching that exact transform
+    avoids thousands of identical-size ``eigh`` calls on large plots while
+    preserving the result of :func:`_etkf_target_update` for every zone.
+    """
+    import numpy as np
+
+    positions = np.asarray(node_positions, dtype=int).reshape(-1)
+    n_ensemble = len(next(iter(ensemble.values()), []))
+    if n_ensemble < 2 or not target_indices or positions.size == 0:
+        return ensemble
+
+    predicted = np.asarray(predicted_observations, dtype=float)
+    observed = np.asarray(observed_values, dtype=float).reshape(-1)
+    if predicted.shape != (positions.size, n_ensemble):
+        raise ValueError("batched_scalar_etkf_prediction_shape_mismatch")
+    if observed.shape != (positions.size,):
+        raise ValueError("batched_scalar_etkf_observation_shape_mismatch")
+
+    forecast = np.asarray(
+        [
+            [
+                [
+                    float(ensemble[node_ids[position]][member][state_index])
+                    for member in range(n_ensemble)
+                ]
+                for state_index in target_indices
+            ]
+            for position in positions
+        ],
+        dtype=float,
+    )
+    forecast_mean = np.mean(forecast, axis=2)
+    state_anomalies = forecast - forecast_mean[:, :, None]
+    predicted_mean = np.mean(predicted, axis=1)
+    observation_anomalies = predicted - predicted_mean[:, None]
+    innovation = observed - predicted_mean
+
+    inverse_r = 1.0 / max(float(observation_variance), 1e-12)
+    anomaly_energy = np.einsum(
+        "zn,zn->z", observation_anomalies, observation_anomalies,
+    )
+    cross_anomaly = np.einsum(
+        "ztn,zn->zt", state_anomalies, observation_anomalies,
+    )
+    denominator = (n_ensemble - 1) + inverse_r * anomaly_energy
+    analysis_mean = forecast_mean + (
+        cross_anomaly
+        * (inverse_r * innovation / denominator)[:, None]
+    )
+
+    contraction = np.sqrt((n_ensemble - 1) / denominator)
+    projection_scale = np.zeros_like(anomaly_energy)
+    nonzero = anomaly_energy > 1e-15
+    projection_scale[nonzero] = (
+        contraction[nonzero] - 1.0
+    ) / anomaly_energy[nonzero]
+    analysis_anomalies = state_anomalies + (
+        projection_scale[:, None, None]
+        * cross_anomaly[:, :, None]
+        * observation_anomalies[:, None, :]
+    )
+    analysis = analysis_mean[:, :, None] + analysis_anomalies
+
+    # Publish only after the entire analysis has been calculated from the
+    # frozen forecast, retaining ensemble-member order equivariance.
+    for zone_offset, position in enumerate(positions):
+        node_id = node_ids[int(position)]
+        for target_offset, state_index in enumerate(target_indices):
+            for member_index in range(n_ensemble):
+                ensemble[node_id][member_index][state_index] = float(
+                    analysis[zone_offset, target_offset, member_index]
+                )
+    return ensemble
+
+
+def _predict_observation_array(
+    observation_name: str,
+    states: Any,
+    sensor: str,
+):
+    """Evaluate the scalar forward-model equations over a state cube.
+
+    ``states`` has shape ``(..., N_STATES)``.  This is deliberately kept in
+    this assimilation module so the hot path does not perform a Python call
+    for every zone/member pair.  The equations and clipping are identical to
+    the authoritative S1/S2 scalar forward models.
+    """
+    import numpy as np
+
+    values = np.asarray(states, dtype=float)
+    if values.ndim < 2 or values.shape[-1] < N_STATES:
+        raise ValueError("forward_model_state_cube_shape_mismatch")
+
+    indices = {name: index for index, name in enumerate(STATE_NAMES)}
+    name = str(observation_name or "").lower()
+    sensor_name = str(sensor or "").upper()
+
+    if sensor_name == "S1":
+        surface_wetness = values[..., indices["surface_wetness_event"]]
+        root_zone_water = values[..., indices["root_zone_water"]]
+        structure = values[..., indices["structure"]]
+        bare_soil = values[..., indices["bare_soil_fraction"]]
+        if name == "sar_vv":
+            prediction = (
+                0.4 * surface_wetness
+                + 0.3 * root_zone_water
+                + 0.15 * bare_soil
+                + 0.1
+            )
+        elif name == "sar_vh":
+            prediction = 0.6 * structure + 0.2 * surface_wetness + 0.1
+        elif name == "sar_ratio":
+            prediction = 0.65 * structure + 0.10 * surface_wetness + 0.05
+        elif name == "delta_sar":
+            prediction = 0.5 * surface_wetness + 0.3 * bare_soil
+        else:
+            return None
+        return np.clip(prediction, 0.0, 1.0)
+
+    vigor = values[..., indices["vigor"]]
+    lai = values[..., indices["lai"]]
+    chlorophyll = values[..., indices["chlorophyll"]]
+    canopy_water = values[..., indices["canopy_water"]]
+    surface_wetness = values[..., indices["surface_wetness_event"]]
+    bare_soil = values[..., indices["bare_soil_fraction"]]
+    if name == "ndvi":
+        prediction = (
+            0.7 * vigor + 0.2 * np.minimum(lai / 5.0, 1.0)
+            - 0.3 * bare_soil + 0.1
+        )
+    elif name == "evi":
+        prediction = (
+            0.6 * vigor + 0.3 * np.minimum(lai / 6.0, 1.0)
+            - 0.2 * bare_soil + 0.05
+        )
+    elif name == "ndre":
+        prediction = (
+            0.5 * np.minimum(chlorophyll / 60.0, 1.0)
+            + 0.3 * np.minimum(lai / 5.0, 1.0) + 0.05
+        )
+    elif name == "ndmi":
+        prediction = 0.6 * canopy_water + 0.2 * np.minimum(lai / 5.0, 1.0) + 0.05
+    elif name == "ndwi":
+        prediction = 0.7 * surface_wetness + 0.1 * bare_soil - 0.2
+    elif name == "bsi":
+        prediction = 0.6 * bare_soil - 0.3 * vigor + 0.2
+    else:
+        return None
+    return np.clip(prediction, -1.0, 1.0)
+
+
 def update_step_ht(
     ensemble: Dict[str, List[List[float]]],
     scene: Any,
     operator: Any,
     rng: random.Random,
+    deadline_check: Optional[Callable[[], None]] = None,
 ) -> Tuple[Dict[str, List[List[float]]], List[Dict[str, Any]]]:
     import numpy as np
 
@@ -1148,8 +1384,6 @@ def update_step_ht(
     )
     from ..observation.observation_noise import compute_observation_noise
     from ..observation.pixel_extraction import extract_pixel_observations
-    from ..observation.s1_sar_model import predict_sar_observation
-    from ..observation.s2_forward_model import predict_observation
 
     if str(getattr(operator, 'scene_id', '')) != str(getattr(scene, 'scene_id', '')):
         raise ValueError('scene_operator_identity_mismatch')
@@ -1166,6 +1400,8 @@ def update_step_ht(
     n_ensemble = len(next(iter(ensemble.values()), []))
     reports: List[Dict[str, Any]] = []
     for obs_name in sorted(observations):
+        if deadline_check is not None:
+            deadline_check()
         pixel_observation = observations[obs_name]
         mapping = INDEX_STATE_REGISTRY.get(obs_name)
         if mapping is None:
@@ -1189,24 +1425,13 @@ def update_step_ht(
             })
             continue
 
-        predicted_by_zone = []
-        missing_forward_model = False
-        for node_id in node_ids:
-            predictions = []
-            for member in ensemble[node_id]:
-                prediction = (
-                    predict_sar_observation(obs_name, member)
-                    if mapping.sensor == 'S1'
-                    else predict_observation(obs_name, member)
-                )
-                if prediction is None or not math.isfinite(float(prediction)):
-                    missing_forward_model = True
-                    break
-                predictions.append(float(prediction))
-            if missing_forward_model:
-                break
-            predicted_by_zone.append(predictions)
-        if missing_forward_model or len(predicted_by_zone) != n_nodes:
+        state_cube = np.asarray(
+            [ensemble[node_id] for node_id in node_ids], dtype=float,
+        )
+        zone_predictions = _predict_observation_array(
+            obs_name, state_cube, mapping.sensor,
+        )
+        if zone_predictions is None or not np.all(np.isfinite(zone_predictions)):
             reports.append({
                 'obs_name': obs_name,
                 'sensor': mapping.sensor,
@@ -1217,7 +1442,7 @@ def update_step_ht(
             })
             continue
 
-        zone_predictions = np.asarray(predicted_by_zone, dtype=float)
+        zone_predictions = np.asarray(zone_predictions, dtype=float)
         if h_matrix.shape[1] != n_nodes:
             raise ValueError('h_matrix_node_count_mismatch')
         pixel_predictions = np.asarray(h_matrix @ zone_predictions, dtype=float)
@@ -1258,33 +1483,45 @@ def update_step_ht(
         # whose immutable H_t support overlaps that zone. Pixels are collapsed
         # to one H-weighted observation per zone, avoiding the false precision
         # of treating adjacent raster pixels as independent measurements.
-        localized_updates = 0
-        for node_position, node_id in enumerate(node_ids):
-            column = h_matrix[valid_indices, node_position]
-            weights = np.asarray(
-                column.toarray() if hasattr(column, "toarray") else column,
-                dtype=float,
+        # Aggregate every zone's immutable H_t support in two sparse/dense
+        # matrix products, then apply the exact scalar ETKF transform in one
+        # batch. This is mathematically identical to the former per-zone loop
+        # but bounded for interactive worker execution.
+        local_support = h_matrix[valid_indices, :]
+        if hasattr(local_support, "maximum") and hasattr(local_support, "tocsr"):
+            local_support = local_support.maximum(0.0).tocsr()
+            support_sums = np.asarray(local_support.sum(axis=0)).reshape(-1)
+        else:
+            local_support = np.maximum(np.asarray(local_support, dtype=float), 0.0)
+            support_sums = np.sum(local_support, axis=0)
+        active_positions = np.flatnonzero(support_sums > 1e-12)
+        localized_updates = int(active_positions.size)
+        if localized_updates:
+            weighted_predictions = np.asarray(
+                local_support.T @ valid_predictions, dtype=float,
+            )
+            weighted_observed = np.asarray(
+                local_support.T @ valid_observed, dtype=float,
             ).reshape(-1)
-            weights = np.maximum(weights, 0.0)
-            weight_sum = float(np.sum(weights))
-            if weight_sum <= 1e-12:
-                continue
-            weights /= weight_sum
-            local_predictions = np.sum(
-                valid_predictions * weights[:, None], axis=0,
-            ).reshape(1, -1)
-            local_observed = np.asarray([
-                float(np.sum(valid_observed * weights))
-            ])
-            ensemble = _etkf_target_update(
+            active_sums = support_sums[active_positions]
+            local_predictions = (
+                weighted_predictions[active_positions, :]
+                / active_sums[:, None]
+            )
+            local_observed = (
+                weighted_observed[active_positions] / active_sums
+            )
+            ensemble = _batch_scalar_etkf_target_update(
                 ensemble,
-                [node_id],
+                node_ids,
                 target_indices,
                 local_predictions,
                 local_observed,
                 sigma_observation * sigma_observation,
+                active_positions,
             )
-            localized_updates += 1
+        if deadline_check is not None:
+            deadline_check()
         posterior_variance = _state_variance_summary(ensemble, target_indices)
         information_gain = {
             state: max(0.0, prior - posterior_variance.get(state, prior))

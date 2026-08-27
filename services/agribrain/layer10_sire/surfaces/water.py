@@ -17,72 +17,99 @@ spatial sources distribute that probability across pixels.
 """
 import logging
 import sys
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 from services.agribrain.layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, PaletteId, GroundingClass,
 )
 from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
 from services.agribrain.layer10_sire.adapters.l3_adapter import L3DiagnosticData
+from services.agribrain.scientific_contracts.crop_phenology import (
+    consume_canonical_phenology_output,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def generate_water_surfaces(
-    inp: Layer10Input, H: int, W: int,
-    l1_data: Optional[L1SpatialData] = None,
-    l3_data: Optional[L3DiagnosticData] = None,
-) -> List[SurfaceArtifact]:
-    """Generate water surfaces from L1/L3 adapter data (multi-source spatial)."""
-    surfaces = []
-    if l1_data is None:
-        from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
-        l1_data = adapt_l1(inp.field_tensor, H, W)
-    if l3_data is None:
-        from services.agribrain.layer10_sire.adapters.l3_adapter import adapt_l3
-        l3_data = adapt_l3(inp.decision)
+def _first_not_none(*values: Any) -> Any:
+    """Return the first value that is not None, avoiding falsey drops for 0.0 or 0."""
+    for v in values:
+        if v is not None:
+            return v
+    return None
 
-    # --- 1. WATER_STRESS_PROB — multi-source spatial ---
-    stress_grid, grounding, source_layers = _compute_spatial_water_stress(
+
+@dataclass(frozen=True)
+class VPDStressResult:
+    grid: Optional[List[List[float]]]
+    vpd_kpa: Optional[float]
+    computed_stress_probability: float
+    phenology_stage: str
+    stage_sensitivity: float
+    crop_applicability: str
+    humidity_value: Optional[float]
+    humidity_source: str
+    temp_max_value: Optional[float]
+    temp_max_source: str
+    temp_min_value: Optional[float]
+    temp_min_source: str
+    physiological_claim_allowed: bool
+
+
+def generate_water_surfaces(
+    inp: Layer10Input,
+    l1_data: L1SpatialData,
+    l3_data: L3DiagnosticData,
+    H: int,
+    W: int,
+) -> List[SurfaceArtifact]:
+    surfaces: List[SurfaceArtifact] = []
+
+    # --- 1. WATER_STRESS_PROB — Primary Water Stress Map ---
+    prob_grid, grounding_class, basis, prov = _compute_water_stress_prob(
         inp, l1_data, l3_data, H, W
     )
-    surfaces.append(SurfaceArtifact(
-        surface_id=f"WATER_STRESS_{inp.plot_id}",
-        semantic_type=SurfaceType.WATER_STRESS_PROB,
-        grid_ref=f"{H}x{W}",
-        values=stress_grid,
-        units="probability",
-        native_resolution_m=inp.resolution_m,
-        render_range=(0.0, 1.0),
-        palette_id=PaletteId.STRESS_RED,
-        source_layers=source_layers,
-        grounding_class=grounding,
-    ))
+    if prob_grid is not None:
+        surfaces.append(SurfaceArtifact(
+            surface_id=f"WATER_STRESS_PROB_{inp.plot_id}",
+            semantic_type=SurfaceType.WATER_STRESS_PROB,
+            grid_ref=f"{H}x{W}",
+            values=prob_grid,
+            units="probability",
+            native_resolution_m=inp.resolution_m,
+            render_range=(0.0, 1.0),
+            palette_id=PaletteId.STRESS_WATER,
+            source_layers=["L1", "L3", "L4"],
+            grounding_class=grounding_class,
+            provenance=prov,
+        ))
 
-    # --- 2. DROUGHT_ACCUMULATION — from L1 precipitation ---
-    drought_grid = _compute_spatial_drought(l1_data, H, W)
-    surfaces.append(SurfaceArtifact(
-        surface_id=f"DROUGHT_{inp.plot_id}",
-        semantic_type=SurfaceType.DROUGHT_ACCUMULATION,
-        grid_ref=f"{H}x{W}",
-        values=drought_grid,
-        units="days",
-        native_resolution_m=inp.resolution_m,
-        render_range=(0.0, 30.0),
-        palette_id=PaletteId.STRESS_RED,
-        source_layers=["L1"],
-    ))
+    # --- 2. DRAINAGE_DEFICIT_MM — Waterlogging / Anoxia Risk ---
+    drainage_grid = _compute_drainage_deficit(l1_data, H, W)
+    if drainage_grid is not None:
+        surfaces.append(SurfaceArtifact(
+            surface_id=f"DRAINAGE_DEFICIT_MM_{inp.plot_id}",
+            semantic_type=SurfaceType.DRAINAGE_DEFICIT_MM,
+            grid_ref=f"{H}x{W}",
+            values=drainage_grid,
+            units="mm",
+            native_resolution_m=inp.resolution_m,
+            render_range=(0.0, 30.0),
+            palette_id=PaletteId.STRESS_RED,
+            source_layers=["L1"],
+        ))
 
     # --- 3. VPD_STRESS — Vapor Pressure Deficit stomatal stress ---
     # VPD is the atmospheric drying power. At VPD > 3.0 kPa, most C3 crops
     # close stomata regardless of soil water. This is the ONLY indicator that
     # catches "well-irrigated but heat-stressed" scenarios.
-    vpd_grid, vpd_kpa = _compute_vpd_stress(l1_data, inp, H, W)
-    if vpd_grid is not None:
+    vpd_res = _compute_vpd_stress(l1_data, inp, H, W)
+    if vpd_res.grid is not None:
         surfaces.append(SurfaceArtifact(
             surface_id=f"VPD_STRESS_{inp.plot_id}",
             semantic_type=SurfaceType.VPD_STRESS,
             grid_ref=f"{H}x{W}",
-            values=vpd_grid,
+            values=vpd_res.grid,
             units="probability",
             native_resolution_m=inp.resolution_m,
             render_range=(0.0, 1.0),
@@ -90,7 +117,18 @@ def generate_water_surfaces(
             source_layers=["L1"],
             grounding_class=GroundingClass.PROXY_SPATIAL.value,
             provenance={
-                "vpd_kpa": round(vpd_kpa, 2) if vpd_kpa else None,
+                "vpd_kpa": round(vpd_res.vpd_kpa, 2) if vpd_res.vpd_kpa is not None else None,
+                "computed_stress_probability": round(vpd_res.computed_stress_probability, 4),
+                "phenology_stage": vpd_res.phenology_stage,
+                "stage_sensitivity": vpd_res.stage_sensitivity,
+                "crop_applicability": vpd_res.crop_applicability,
+                "humidity_source": vpd_res.humidity_source,
+                "humidity_value": vpd_res.humidity_value,
+                "temp_max_source": vpd_res.temp_max_source,
+                "temp_max_value": vpd_res.temp_max_value,
+                "temp_min_source": vpd_res.temp_min_source,
+                "temp_min_value": vpd_res.temp_min_value,
+                "physiological_claim_allowed": vpd_res.physiological_claim_allowed,
                 "method": "TETENS_EQUATION",
                 "reference": "Allen et al. 1998, FAO-56 Eq. 11-12",
             },
@@ -360,15 +398,7 @@ def _get_stage_kc(inp) -> float:
     Higher Kc during reproductive stage means the crop is more vulnerable
     to the same raw deficit — this is agronomically critical.
     """
-    stage = "UNKNOWN"
-    vi = inp.veg_int
-    if vi is not None:
-        pheno = getattr(vi, 'phenology', None)
-        if pheno:
-            stages = getattr(pheno, 'stage_by_day', [])
-            if stages:
-                raw = stages[-1]
-                stage = raw.value if hasattr(raw, 'value') else str(raw).upper()
+    stage = consume_canonical_phenology_output(inp.veg_int)["resolved_crop_stage"]
 
     return _KC_BY_STAGE.get(stage, _KC_BY_STAGE["UNKNOWN"])
 
@@ -713,38 +743,60 @@ def _tetens_es(temp_c: float) -> float:
     return 0.6108 * (2.71828 ** (17.27 * temp_c / (temp_c + 237.3)))
 
 
-def _compute_vpd_stress(l1, inp, H: int, W: int):
+def _compute_vpd_stress(l1, inp, H: int, W: int) -> VPDStressResult:
     """Compute VPD-based stomatal stress surface.
 
-    VPD = es(Tmax) - ea
-    where ea = es(Tmin) × (RH/100) (approximate for daily values)
-
-    Stress mapping (phenology-modulated):
-      VPD < 1.0 kPa: 0.0 (no stress)
-      VPD 1.0-2.0:   0.0-0.3 (mild, transpiration elevated)
-      VPD 2.0-3.5:   0.3-0.7 (moderate, partial stomatal closure)
-      VPD > 3.5:     0.7-1.0 (severe, full stomatal closure)
-
-    Returns: (grid, vpd_kpa) or (None, None)
+    Returns VPDStressResult containing grid, vpd_kpa, and full provenance receipt.
     """
-    # Extract weather data
-    temp_max = l1.last_values.get('temperature_max') or l1.last_values.get('temp_max')
-    temp_min = l1.last_values.get('temperature_min') or l1.last_values.get('temp_min')
-    humidity = l1.last_values.get('humidity') or l1.last_values.get('relative_humidity')
+    last_vals = l1.last_values if l1 else {}
+    last_hist = l1.weather_history[-1] if (l1 and l1.weather_history) else {}
 
-    # Try weather_history as fallback
-    if temp_max is None and l1.weather_history:
-        last = l1.weather_history[-1]
-        temp_max = last.get('temperature_max') or last.get('temp_max') or last.get('temperature_2m_max')
-        temp_min = last.get('temperature_min') or last.get('temp_min') or last.get('temperature_2m_min')
-        humidity = last.get('humidity') or last.get('relative_humidity') or last.get('relative_humidity_2m')
+    temp_max_raw = _first_not_none(
+        last_vals.get('temperature_max'), last_vals.get('temp_max'),
+        last_hist.get('temperature_max'), last_hist.get('temp_max'), last_hist.get('temperature_2m_max')
+    )
+    temp_min_raw = _first_not_none(
+        last_vals.get('temperature_min'), last_vals.get('temp_min'),
+        last_hist.get('temperature_min'), last_hist.get('temp_min'), last_hist.get('temperature_2m_min')
+    )
+    humidity_raw = _first_not_none(
+        last_vals.get('humidity'), last_vals.get('relative_humidity'),
+        last_hist.get('humidity'), last_hist.get('relative_humidity'), last_hist.get('relative_humidity_2m')
+    )
 
-    if temp_max is None:
-        return None, None
+    if temp_max_raw is None:
+        return VPDStressResult(
+            grid=None,
+            vpd_kpa=None,
+            computed_stress_probability=0.0,
+            phenology_stage="UNKNOWN",
+            stage_sensitivity=0.8,
+            crop_applicability="unknown_stage",
+            humidity_value=None,
+            humidity_source="unknown",
+            temp_max_value=None,
+            temp_max_source="unknown",
+            temp_min_value=None,
+            temp_min_source="unknown",
+            physiological_claim_allowed=False,
+        )
 
-    temp_max = float(temp_max)
-    temp_min = float(temp_min) if temp_min is not None else temp_max - 10.0
-    humidity = float(humidity) if humidity is not None else 50.0
+    temp_max = float(temp_max_raw)
+    temp_max_source = "provider_current" if (last_vals.get('temperature_max') is not None or last_vals.get('temp_max') is not None) else "provider_archive"
+
+    if temp_min_raw is not None:
+        temp_min = float(temp_min_raw)
+        temp_min_source = "provider_current" if (last_vals.get('temperature_min') is not None or last_vals.get('temp_min') is not None) else "provider_archive"
+    else:
+        temp_min = temp_max - 10.0
+        temp_min_source = "imputed_delta"
+
+    if humidity_raw is not None:
+        humidity = float(humidity_raw)
+        humidity_source = "provider_current" if (last_vals.get('humidity') is not None or last_vals.get('relative_humidity') is not None) else "provider_archive"
+    else:
+        humidity = 50.0
+        humidity_source = "imputed_default"
 
     # Tetens equation
     es_max = _tetens_es(temp_max)
@@ -758,15 +810,9 @@ def _compute_vpd_stress(l1, inp, H: int, W: int):
     vpd = max(0.0, es_mean - ea)
 
     # Get phenology stage sensitivity
-    stage = "UNKNOWN"
-    vi = inp.veg_int
-    if vi is not None:
-        pheno = getattr(vi, 'phenology', None)
-        if pheno:
-            stages = getattr(pheno, 'stage_by_day', [])
-            if stages:
-                raw = stages[-1]
-                stage = raw.value if hasattr(raw, 'value') else str(raw).upper()
+    stage = consume_canonical_phenology_output(
+        inp.veg_int if inp else None
+    )["resolved_crop_stage"]
 
     sensitivity = _VPD_STAGE_SENSITIVITY.get(stage, 0.8)
 
@@ -774,20 +820,45 @@ def _compute_vpd_stress(l1, inp, H: int, W: int):
     if vpd < 0.8:
         base_stress = 0.0
     elif vpd < 2.0:
-        base_stress = (vpd - 0.8) / 1.2 * 0.3   # 0.0 → 0.3
+        base_stress = (vpd - 0.8) / 1.2 * 0.3
     elif vpd < 3.5:
-        base_stress = 0.3 + (vpd - 2.0) / 1.5 * 0.4  # 0.3 → 0.7
+        base_stress = 0.3 + (vpd - 2.0) / 1.5 * 0.4
     else:
-        base_stress = min(1.0, 0.7 + (vpd - 3.5) / 2.0 * 0.3)  # 0.7 → 1.0
+        base_stress = min(1.0, 0.7 + (vpd - 3.5) / 2.0 * 0.3)
 
     # Apply phenology sensitivity
     stress = min(1.0, base_stress * sensitivity)
 
+    crop_applicability = "applicable"
+    if stage == "BARE_SOIL":
+        crop_applicability = "bare_soil"
+    elif stage in ("UNKNOWN", "HARVESTED"):
+        crop_applicability = "unknown_stage"
+
+    physiological_claim_allowed = (
+        humidity_source != "imputed_default"
+        and temp_min_source != "imputed_delta"
+        and crop_applicability == "applicable"
+    )
+
     if stress < 0.01:
-        return None, vpd  # No meaningful stress
+        return VPDStressResult(
+            grid=None,
+            vpd_kpa=vpd,
+            computed_stress_probability=stress,
+            phenology_stage=stage,
+            stage_sensitivity=sensitivity,
+            crop_applicability=crop_applicability,
+            humidity_value=humidity,
+            humidity_source=humidity_source,
+            temp_max_value=temp_max,
+            temp_max_source=temp_max_source,
+            temp_min_value=temp_min,
+            temp_min_source=temp_min_source,
+            physiological_claim_allowed=physiological_claim_allowed,
+        )
 
     # Spatial modulation: NDVI inversely correlates with VPD impact
-    # (denser canopy has more transpiration demand, so MORE VPD stress)
     from services.agribrain.layer10_sire.surfaces.spatial_modulation import get_ndvi_raster, ndvi_stats
     ndvi_r = get_ndvi_raster(l1, H, W)
     mean, mn, mx, valid = ndvi_stats(ndvi_r, H, W)
@@ -800,10 +871,23 @@ def _compute_vpd_stress(l1, inp, H: int, W: int):
             for c in range(W):
                 v = ndvi_r[r][c] if r < len(ndvi_r) and c < len(ndvi_r[r]) else None
                 if v is not None:
-                    # Higher NDVI → more transpiration demand → more VPD stress
                     norm = (v - mean) / rng
                     modulated = stress * (1.0 + norm * 0.25)
                     grid[r][c] = round(max(0.0, min(1.0, modulated)), 4)
 
     print(f"[WATER] VPD: {vpd:.2f} kPa, stage={stage}, sensitivity={sensitivity:.1f}, stress={stress:.3f}", file=sys.stderr)
-    return grid, vpd
+    return VPDStressResult(
+        grid=grid,
+        vpd_kpa=vpd,
+        computed_stress_probability=stress,
+        phenology_stage=stage,
+        stage_sensitivity=sensitivity,
+        crop_applicability=crop_applicability,
+        humidity_value=humidity,
+        humidity_source=humidity_source,
+        temp_max_value=temp_max,
+        temp_max_source=temp_max_source,
+        temp_min_value=temp_min,
+        temp_min_source=temp_min_source,
+        physiological_claim_allowed=physiological_claim_allowed,
+    )

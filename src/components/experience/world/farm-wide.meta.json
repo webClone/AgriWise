@@ -1,0 +1,15 @@
+{
+  "bounds": [
+    2.997,
+    36.492,
+    3.037,
+    36.514
+  ],
+  "width": 1376,
+  "height": 768,
+  "asset": "/r2/farm-wide.webp",
+  "spatialMode": "GEOREGISTERED",
+  "demoStatus": "ILLUSTRATIVE",
+  "generationFamilyId": "pass6-mitidja-v1",
+  "parentAsset": "/r2/hero-field-master.webp"
+}

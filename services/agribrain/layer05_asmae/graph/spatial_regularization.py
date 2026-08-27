@@ -14,7 +14,7 @@ Methods:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..config import GRAPH_BASE_LAPLACIAN_STRENGTH
 
@@ -23,6 +23,7 @@ def apply_ensemble_graph_regularization(
     ensemble: Dict[str, List[List[float]]],
     graph: Any,
     state_names: List[str],
+    deadline_check: Optional[Callable[[], None]] = None,
 ) -> tuple[Dict[str, List[List[float]]], Dict[str, Any]]:
     """Apply weak, state-specific graph smoothing to actual ensemble members.
 
@@ -30,12 +31,16 @@ def apply_ensemble_graph_regularization(
     cross-node mean is restored per state/member so graph smoothing cannot
     manufacture a field-wide radiometric shift.
     """
+    import numpy as np
+
     from ..config import STATE_BOUNDS, STATE_NAMES
 
     node_ids = list(ensemble)
     if not node_ids or graph is None or not hasattr(graph, "neighbors"):
         return ensemble, {"applied": False, "reason": "graph_unavailable"}
-    target_indices = [STATE_NAMES.index(name) for name in state_names if name in STATE_NAMES]
+    target_indices = list(dict.fromkeys(
+        STATE_NAMES.index(name) for name in state_names if name in STATE_NAMES
+    ))
     if not target_indices:
         return ensemble, {"applied": False, "reason": "no_observation_updated_states"}
 
@@ -53,67 +58,97 @@ def apply_ensemble_graph_regularization(
     if ensemble_size == 0:
         return ensemble, {"applied": False, "reason": "empty_ensemble"}
 
-    before_tv = {STATE_NAMES[index]: 0.0 for index in target_indices}
-    after_tv = {STATE_NAMES[index]: 0.0 for index in target_indices}
-    updated = {node: [list(member) for member in ensemble[node]] for node in node_ids}
+    if deadline_check is not None:
+        deadline_check()
 
-    def variation(values: Dict[str, List[float]], state_index: int) -> float:
-        total = 0.0
-        seen = set()
-        for node in node_ids:
-            for edge in graph.neighbors(node):
-                neighbor = edge.target if edge.source == node else edge.source
-                edge_key = tuple(sorted((str(node), str(neighbor))))
-                if neighbor not in values or edge_key in seen:
-                    continue
-                seen.add(edge_key)
-                weight = max(0.0, float(getattr(edge, "combined_weight", 0.0) or 0.0))
-                total += weight * abs(values[node][state_index] - values[neighbor][state_index])
-        return total
+    values = np.asarray([ensemble[node] for node in node_ids], dtype=float)
+    if values.shape != (len(node_ids), ensemble_size, len(STATE_NAMES)):
+        return ensemble, {"applied": False, "reason": "ensemble_shape_mismatch"}
+    node_positions = {node: position for position, node in enumerate(node_ids)}
+    sources: List[int] = []
+    targets: List[int] = []
+    weights: List[float] = []
+    for edge in graph.edges():
+        source = node_positions.get(str(getattr(edge, "source", "")))
+        target = node_positions.get(str(getattr(edge, "target", "")))
+        weight = max(0.0, float(getattr(edge, "combined_weight", 0.0) or 0.0))
+        if source is None or target is None or weight <= 1e-12:
+            continue
+        sources.append(source)
+        targets.append(target)
+        weights.append(weight)
+    if not weights:
+        return ensemble, {"applied": False, "reason": "graph_has_no_weighted_edges"}
 
-    for member_index in range(ensemble_size):
-        current = {node: ensemble[node][member_index] for node in node_ids}
-        proposed = {node: list(current[node]) for node in node_ids}
-        for state_index in target_indices:
-            state = STATE_NAMES[state_index]
-            alpha = strengths.get(state, 0.025)
-            before_tv[state] += variation(current, state_index)
-            original_mean = sum(current[node][state_index] for node in node_ids) / len(node_ids)
-            for node in node_ids:
-                weighted_sum = 0.0
-                weight_total = 0.0
-                for edge in graph.neighbors(node):
-                    neighbor = edge.target if edge.source == node else edge.source
-                    if neighbor not in current:
-                        continue
-                    weight = max(0.0, float(getattr(edge, "combined_weight", 0.0) or 0.0))
-                    if weight <= 1e-12:
-                        continue
-                    weighted_sum += weight * current[neighbor][state_index]
-                    weight_total += weight
-                if weight_total > 0.0:
-                    neighbor_mean = weighted_sum / weight_total
-                    proposed[node][state_index] = (
-                        (1.0 - alpha) * current[node][state_index] + alpha * neighbor_mean
-                    )
-            proposed_mean = sum(proposed[node][state_index] for node in node_ids) / len(node_ids)
-            correction = original_mean - proposed_mean
-            lo, hi = STATE_BOUNDS[state]
-            for node in node_ids:
-                proposed[node][state_index] = max(
-                    lo, min(hi, proposed[node][state_index] + correction)
-                )
-            after_tv[state] += variation(proposed, state_index)
-        for node in node_ids:
-            updated[node][member_index] = proposed[node]
+    source_array = np.asarray(sources, dtype=int)
+    target_array = np.asarray(targets, dtype=int)
+    weight_array = np.asarray(weights, dtype=float)
+    selected = values[:, :, target_indices]
+
+    # Compute weighted neighbour means for every member and selected state in
+    # one edge pass. MicrozoneGraph stores each undirected edge once in
+    # ``edges()``; accumulate both directions to match ``neighbors()``.
+    weighted_sum = np.zeros_like(selected)
+    weighted_degree = np.zeros(len(node_ids), dtype=float)
+    edge_weights = weight_array[:, None, None]
+    np.add.at(weighted_sum, source_array, edge_weights * selected[target_array])
+    np.add.at(weighted_sum, target_array, edge_weights * selected[source_array])
+    np.add.at(weighted_degree, source_array, weight_array)
+    np.add.at(weighted_degree, target_array, weight_array)
+
+    neighbour_mean = selected.copy()
+    active = weighted_degree > 1e-12
+    neighbour_mean[active] = (
+        weighted_sum[active] / weighted_degree[active, None, None]
+    )
+    alpha = np.asarray(
+        [strengths.get(STATE_NAMES[index], 0.025) for index in target_indices],
+        dtype=float,
+    )[None, None, :]
+    proposed = (1.0 - alpha) * selected + alpha * neighbour_mean
+
+    # Restore each state/member's cross-node mean exactly as the scalar
+    # implementation did, then enforce physical state bounds.
+    proposed += (
+        np.mean(selected, axis=0, keepdims=True)
+        - np.mean(proposed, axis=0, keepdims=True)
+    )
+    lows = np.asarray(
+        [STATE_BOUNDS[STATE_NAMES[index]][0] for index in target_indices],
+        dtype=float,
+    )[None, None, :]
+    highs = np.asarray(
+        [STATE_BOUNDS[STATE_NAMES[index]][1] for index in target_indices],
+        dtype=float,
+    )[None, None, :]
+    proposed = np.clip(proposed, lows, highs)
+
+    before_edge_delta = np.abs(selected[source_array] - selected[target_array])
+    after_edge_delta = np.abs(proposed[source_array] - proposed[target_array])
+    before_totals = np.sum(edge_weights * before_edge_delta, axis=(0, 1))
+    after_totals = np.sum(edge_weights * after_edge_delta, axis=(0, 1))
+
+    values[:, :, target_indices] = proposed
+    updated = {
+        node: values[position].tolist()
+        for position, node in enumerate(node_ids)
+    }
+    if deadline_check is not None:
+        deadline_check()
 
     return updated, {
         "applied": True,
         "method": "state_specific_mean_conserving_graph_laplacian",
         "states": [STATE_NAMES[index] for index in target_indices],
         "ensemble_members": ensemble_size,
-        "total_variation_before": {key: round(value / ensemble_size, 8) for key, value in before_tv.items()},
-        "total_variation_after": {key: round(value / ensemble_size, 8) for key, value in after_tv.items()},
+        "total_variation_before": {
+            STATE_NAMES[index]: round(float(before_totals[offset]) / ensemble_size, 8)
+            for offset, index in enumerate(target_indices)
+        },
+        "total_variation_after": {
+            STATE_NAMES[index]: round(float(after_totals[offset]) / ensemble_size, 8)
+            for offset, index in enumerate(target_indices)
+        },
     }
 
 

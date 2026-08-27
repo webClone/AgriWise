@@ -638,15 +638,15 @@ def resolve_mode_surface_plan(
     s_rel = surface_map.get("DATA_RELIABILITY")
     s_conf = surface_map.get("DATA_CONFIDENCE")
     s_sigma = surface_map.get("UNCERTAINTY_SIGMA")
-    s_aconf = surface_map.get("CONFIDENCE_ASMAE")
+    s_aconf = surface_map.get("ASMAE_POSTERIOR_CONCENTRATION")
 
     if prefer_asmae and s_aconf and is_spatial(s_aconf):
         conf_plan = {
-            "selected_surface_type": "CONFIDENCE_ASMAE",
+            "selected_surface_type": "ASMAE_POSTERIOR_CONCENTRATION",
             "source_class": "asmae",
             "spatial": True,
             "fallback_rank": 1.1,
-            "reason": "Using CONFIDENCE_ASMAE diagnostic confidence per policy",
+            "reason": "Using canonical ASMAE posterior concentration per policy",
             "trust_badges": ["ASMAE diagnostic", "not direct observation"]
         }
     elif prefer_asmae and s_comp_conf and is_spatial(s_comp_conf):
@@ -687,11 +687,11 @@ def resolve_mode_surface_plan(
         }
     elif not prefer_asmae and s_aconf and is_spatial(s_aconf):
         conf_plan = {
-            "selected_surface_type": "CONFIDENCE_ASMAE",
+            "selected_surface_type": "ASMAE_POSTERIOR_CONCENTRATION",
             "source_class": "asmae",
             "spatial": True,
             "fallback_rank": 3,
-            "reason": "Using CONFIDENCE_ASMAE diagnostic confidence",
+            "reason": "Using canonical ASMAE posterior concentration",
             "trust_badges": ["ASMAE diagnostic", "not direct observation"]
         }
     elif engine_status.get("L2") == "COMPLETED":

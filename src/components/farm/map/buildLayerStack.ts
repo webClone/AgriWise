@@ -400,12 +400,12 @@ const OVERLAY_COLOR_RAMPS: Record<string, [string, string, string]> = {
   DATA_RELIABILITY:     ["#e74c3c", "#f1c40f", "#2ecc71"],  // red → yellow → green
   // ASMAE aliases mapping
   CANOPY_ASMAE_VIGOR:               ["#8B0000", "#FFD700", "#006400"],
-  WATER_ASMAE_CANOPY_WATER:         ["#1a5276", "#f39c12", "#e74c3c"],
-  WATER_ASMAE_ROOT_ZONE_WATER:      ["#1a5276", "#f39c12", "#e74c3c"],
-  NUTRIENT_ASMAE_CHLOROPHYLL_PROXY: ["#27ae60", "#f1c40f", "#c0392b"],
+  WATER_ASMAE_CANOPY_WATER:         ["#c0392b", "#f1c40f", "#1a5276"],
+  WATER_ASMAE_ROOT_ZONE_WATER:      ["#c0392b", "#f1c40f", "#1a5276"],
+  NUTRIENT_ASMAE_CHLOROPHYLL_PROXY: ["#c0392b", "#f1c40f", "#27ae60"],
   SALINITY_ASMAE_STRESS:            ["#0d9488", "#22d3ee", "#ef4444"],
   RISK_ASMAE_DIAGNOSTIC:            ["#2ecc71", "#e67e22", "#e74c3c"],
-  CONFIDENCE_ASMAE:                 ["#e74c3c", "#f1c40f", "#2ecc71"],
+  ASMAE_POSTERIOR_CONCENTRATION:    ["#e74c3c", "#f1c40f", "#2ecc71"],
   RESOLUTION_ASMAE_EFFECTIVE:       ["#06b6d4", "#f59e0b", "#64748b"],
   // V92.4-BC.2: Veg Attention ASMAE aliases
   VEG_ATTENTION_ASMAE_DIAGNOSTIC:   ["#8B4513", "#FFDEAD", "#228B22"],
@@ -431,7 +431,7 @@ const SURFACE_TYPE_TO_MODE: Record<string, string> = {
   NUTRIENT_ASMAE_CHLOROPHYLL_PROXY: "nutrient_risk",
   SALINITY_ASMAE_STRESS: "salinity",
   RISK_ASMAE_DIAGNOSTIC: "composite_risk",
-  CONFIDENCE_ASMAE: "uncertainty",
+  ASMAE_POSTERIOR_CONCENTRATION: "uncertainty",
   RESOLUTION_ASMAE_EFFECTIVE: "resolution_coverage",
   // V92.4-BC.2: Veg Attention ASMAE aliases
   VEG_ATTENTION_ASMAE_DIAGNOSTIC: "veg_attention",
@@ -597,7 +597,7 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
     )
     && matchesActiveType
   );
-  const basePreflight = resolveRenderMaterialization({
+  const basePreflight = suppliedBaseMaterialization || resolveRenderMaterialization({
     surface: surfaceData,
     plotGeoJson,
     policy: canopySource || "satellite",
@@ -643,21 +643,11 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
         role: "base",
       })
     : null;
-  const baseMaterialization = finalizeRenderMaterialization(basePreflight, baseRasterLayer, baseLayerId, {
-    publicationId: String(plotId ? `pub_${plotId}` : "pub_canonical"),
-    renderKind: activeDisplay?.renderKind || "full_raster",
-  });
-
-  if (
-    canopySource === "asmae_diagnostic" &&
-    activeSurfaceType === "CANOPY_ASMAE_VIGOR" &&
-    baseMaterialization.status !== "rendered"
-  ) {
-    console.error(
-      "[R1 FAILURE] ASMAE candidate selected but not materialized",
-      baseMaterialization
-    );
-  }
+  const baseMaterialization = finalizeRenderMaterialization(
+    basePreflight,
+    baseRasterLayer,
+    baseLayerId,
+  );
 
   const experimentalEnabled = overlayToggles?.experimentalDetail
     ?? (canopySource === "experimental" || canopySource === "hybrid");
@@ -711,6 +701,101 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
           reason: "overlay_not_requested",
           layerId: null,
         } : experimentalPreflight));
+
+  // Hybrid is a set of independently authorized and independently committed
+  // overlays.  Keep the concrete DeckGL layers paired with preflight receipts
+  // so the browser can later attest exactly which subset reached the map.
+  const hybridOverlayLayers: NonNullable<ReturnType<typeof getSemanticSurfaceLayerLayer>>[] = [];
+  const hybridOverlayMaterializations: RenderMaterializationResult[] = [];
+  const hybridBaseType = surfaceData?.semantic_type || surfaceData?.type || "";
+  if (
+    activeMode === "canopy"
+    && canopySource === "hybrid"
+    && hybridBaseType !== "ASMAE_VISUAL_FUSION_CANOPY"
+  ) {
+    const hybridCandidates: Array<{
+      surface: SurfaceData | null | undefined;
+      mode: string;
+      layerId: string;
+      opacity: number;
+      colors: [string, string, string];
+    }> = [
+      {
+        surface: overlaySurfaces["CANOPY_ASMAE_VIGOR"],
+        mode: "canopy",
+        layerId: "l10-surface-hybrid-vigor",
+        opacity: 0.5,
+        colors: OVERLAY_COLOR_RAMPS["CANOPY_ASMAE_VIGOR"] || defaultColors,
+      },
+      {
+        surface: overlaySurfaces["ASMAE_POSTERIOR_CONCENTRATION"],
+        mode: "uncertainty",
+        layerId: "l10-surface-hybrid-confidence",
+        opacity: 0.3,
+        colors: OVERLAY_COLOR_RAMPS["ASMAE_POSTERIOR_CONCENTRATION"] || defaultColors,
+      },
+      {
+        surface: overlaySurfaces["ASMAE_BMA_DISAGREEMENT"]
+          || overlaySurfaces["VEG_ATTENTION_ASMAE_DISAGREEMENT"],
+        mode: "veg_attention",
+        layerId: "l10-surface-hybrid-disagreement",
+        opacity: 0.35,
+        colors: OVERLAY_COLOR_RAMPS["VEG_ATTENTION_ASMAE_DISAGREEMENT"] || defaultColors,
+      },
+    ];
+
+    for (const candidate of hybridCandidates) {
+      if (!candidate.surface || !hybridOverlayAllowed(candidate.surface, candidate.mode)) continue;
+      const authorization = getOverlayAuthorization(candidate.surface, candidate.mode);
+      const preflight = resolveRenderMaterialization({
+        surface: candidate.surface,
+        plotGeoJson,
+        policy: canopySource,
+        mode: normalizeMode(candidate.mode),
+        role: "overlay",
+        renderAuthorizationVersion,
+        renderAuthorizations,
+        observedMaskSurface,
+        gapFillMaskSurface,
+        modeDisplayState: {
+          spatial: true,
+          canRenderPixels: true,
+          renderKind: authorization.renderKind,
+        },
+        layerId: candidate.layerId,
+      });
+      const layer = preflight.reason === "image_layer_not_created" || preflight.status === "rendered"
+        ? getSemanticSurfaceLayerLayer({
+            id: candidate.layerId,
+            plotId,
+            surfaceData: candidate.surface,
+            surfaceColors: candidate.colors,
+            plotGeoJson: plotGeoJson || undefined,
+            opacity: candidate.opacity,
+            detailMode: policy.detailMode,
+            quantizeBands: null,
+            mode: candidate.mode,
+            paletteId: "standard",
+            renderMode: resolveOverlayRenderMode(candidate.surface),
+            zoom,
+            gapFillSurface: gapFillMaskSurface,
+            observedMaskSurface,
+            renderKind: authorization.renderKind,
+            displayLevel: "asmae_diagnostic",
+            renderAuthorizations,
+            policy: canopySource,
+            role: "overlay",
+          })
+        : null;
+      const materialization = finalizeRenderMaterialization(
+        preflight,
+        layer,
+        candidate.layerId,
+      );
+      hybridOverlayMaterializations.push(materialization);
+      if (layer) hybridOverlayLayers.push(layer);
+    }
+  }
 
   const renderable = getRenderableZonesForMode({
     zones: l10Zones || [],
@@ -858,105 +943,8 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
         : null;
     })(),
 
-    // 1d. ASMAE Hybrid Mode overlays: CANOPY_ASMAE_VIGOR, CONFIDENCE_ASMAE, and disagreement overlays
-    ...((): any[] => {
-      const baseType = surfaceData?.semantic_type || surfaceData?.type || "";
-      if (baseType === "ASMAE_VISUAL_FUSION_CANOPY") {
-        return [];
-      }
-      if (activeMode === "canopy" && canopySource === "hybrid") {
-        const extraLayers = [];
-        
-        // CANOPY_ASMAE_VIGOR (opacity: 0.5)
-        const vigorSurf = overlaySurfaces["CANOPY_ASMAE_VIGOR"];
-        if (vigorSurf && hybridOverlayAllowed(vigorSurf, "canopy")) {
-          const vigorAuth = getOverlayAuthorization(vigorSurf, "canopy");
-          extraLayers.push(
-            getSemanticSurfaceLayerLayer({
-              id: "l10-surface-hybrid-vigor",
-              plotId,
-              surfaceData: vigorSurf,
-              surfaceColors: OVERLAY_COLOR_RAMPS["CANOPY_ASMAE_VIGOR"] || defaultColors,
-              plotGeoJson: plotGeoJson || undefined,
-              opacity: 0.5,
-              detailMode: policy.detailMode,
-              quantizeBands: null,
-              mode: "canopy",
-              paletteId: "standard",
-              renderMode: resolveOverlayRenderMode(vigorSurf),
-              zoom,
-              gapFillSurface: gapFillMaskSurface,
-              observedMaskSurface,
-              renderKind: vigorAuth.renderKind,
-              displayLevel: "asmae_diagnostic",
-              renderAuthorizations: renderAuthorizations,
-              policy: canopySource || "satellite",
-              role: "overlay",
-            })
-          );
-        }
-
-        // CONFIDENCE_ASMAE (opacity: 0.3)
-        const confSurf = overlaySurfaces["CONFIDENCE_ASMAE"];
-        if (confSurf && hybridOverlayAllowed(confSurf, "uncertainty")) {
-          const confAuth = getOverlayAuthorization(confSurf, "uncertainty");
-          extraLayers.push(
-            getSemanticSurfaceLayerLayer({
-              id: "l10-surface-hybrid-confidence",
-              plotId,
-              surfaceData: confSurf,
-              surfaceColors: OVERLAY_COLOR_RAMPS["CONFIDENCE_ASMAE"] || defaultColors,
-              plotGeoJson: plotGeoJson || undefined,
-              opacity: 0.3,
-              detailMode: policy.detailMode,
-              quantizeBands: null,
-              mode: "uncertainty",
-              paletteId: "standard",
-              renderMode: resolveOverlayRenderMode(confSurf),
-              zoom,
-              gapFillSurface: gapFillMaskSurface,
-              observedMaskSurface,
-              renderKind: confAuth.renderKind,
-              displayLevel: "asmae_diagnostic",
-              renderAuthorizations: renderAuthorizations,
-              policy: canopySource || "satellite",
-              role: "overlay",
-            })
-          );
-        }
-
-        // ASMAE_BMA_DISAGREEMENT / VEG_ATTENTION_ASMAE_DISAGREEMENT (opacity: 0.35)
-        const bmaSurf = overlaySurfaces["ASMAE_BMA_DISAGREEMENT"] || overlaySurfaces["VEG_ATTENTION_ASMAE_DISAGREEMENT"];
-        if (bmaSurf && hybridOverlayAllowed(bmaSurf, "veg_attention")) {
-          const bmaAuth = getOverlayAuthorization(bmaSurf, "veg_attention");
-          extraLayers.push(
-            getSemanticSurfaceLayerLayer({
-              id: "l10-surface-hybrid-disagreement",
-              plotId,
-              surfaceData: bmaSurf,
-              surfaceColors: OVERLAY_COLOR_RAMPS["VEG_ATTENTION_ASMAE_DISAGREEMENT"] || defaultColors,
-              plotGeoJson: plotGeoJson || undefined,
-              opacity: 0.35,
-              detailMode: policy.detailMode,
-              quantizeBands: null,
-              mode: "veg_attention",
-              paletteId: "standard",
-              renderMode: resolveOverlayRenderMode(bmaSurf),
-              zoom,
-              gapFillSurface: gapFillMaskSurface,
-              observedMaskSurface,
-              renderKind: bmaAuth.renderKind,
-              displayLevel: "asmae_diagnostic",
-              renderAuthorizations: renderAuthorizations,
-              policy: canopySource || "satellite",
-              role: "overlay",
-            })
-          );
-        }
-        return extraLayers;
-      }
-      return [];
-    })(),
+    // 1d. Independently authorized ASMAE hybrid overlays.
+    ...hybridOverlayLayers,
 
     // 1c. V92.3-C: Analytical overlay semantic layers (water, nutrients, risk, salinity)
     // Each visible overlay gets its own DeckGL layer with unique ID and color ramp
@@ -1122,6 +1110,7 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
         zoneLayers: [],
         materialization: baseMaterialization,
         experimentalMaterialization,
+        hybridOverlayMaterializations,
       };
       gMinLng = minLng; gMaxLng = maxLng; gMaxLat = maxLat;
       gLatStep = (maxLat - minLat) / gridH;
@@ -1430,5 +1419,6 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
     zoneLayers,
     materialization: baseMaterialization,
     experimentalMaterialization,
+    hybridOverlayMaterializations,
   };
 }

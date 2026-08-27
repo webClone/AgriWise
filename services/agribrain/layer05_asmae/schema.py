@@ -95,6 +95,10 @@ class ASMAEInput:
     crop_context: dict = field(default_factory=dict)
     crop_posterior: dict = field(default_factory=dict)
     crop_posterior_lineage: Optional[str] = None
+    crop_evidence_ledger: dict = field(default_factory=dict)
+    crop_evidence_ledger_hash: Optional[str] = None
+    crop_influence_manifest: dict = field(default_factory=dict)
+    crop_influence_manifest_hash: Optional[str] = None
     soil_context: dict = field(default_factory=dict)
     management_events: List[dict] = field(default_factory=list)
     user_observations: List[dict] = field(default_factory=list)
@@ -132,6 +136,52 @@ class ASMAEInput:
                 f"Invalid ASMAE mode '{self.mode}'. "
                 f"Must be one of: {ASMAE_MODES}"
             )
+        ledger = None
+        if self.crop_evidence_ledger:
+            from services.agribrain.scientific_contracts.crop_evidence import CropEvidenceLedgerV2
+            ledger = CropEvidenceLedgerV2.from_dict(self.crop_evidence_ledger)
+            if ledger.plot_namespace.plot_id != str(self.plot_id):
+                raise ValueError("Crop evidence ledger plot namespace mismatch")
+            if (
+                self.crop_evidence_ledger_hash
+                and ledger.ledger_hash != str(self.crop_evidence_ledger_hash)
+            ):
+                raise ValueError("Crop evidence ledger hash mismatch")
+            self.crop_evidence_ledger = ledger.to_dict()
+            self.crop_evidence_ledger_hash = ledger.ledger_hash
+        if self.crop_influence_manifest:
+            from services.agribrain.scientific_contracts.crop_governance import (
+                CropInfluenceManifestV1,
+            )
+            manifest = CropInfluenceManifestV1.from_dict(
+                self.crop_influence_manifest
+            )
+            if manifest.namespace.plot_id != str(self.plot_id):
+                raise ValueError("Crop influence manifest plot namespace mismatch")
+            if (
+                self.crop_posterior_lineage
+                and manifest.crop_posterior_parent_hash
+                != str(self.crop_posterior_lineage)
+            ):
+                raise ValueError("Crop influence manifest posterior lineage mismatch")
+            if (
+                self.crop_influence_manifest_hash
+                and manifest.content_hash
+                != str(self.crop_influence_manifest_hash)
+            ):
+                raise ValueError("Crop influence manifest hash mismatch")
+            if ledger is not None:
+                admitted_cluster_ids = {
+                    cluster.cluster_id
+                    for cluster in ledger.independence_clusters
+                    if cluster.independence_eligible and cluster.admitted
+                }
+                if set(manifest.independent_evidence_ids) != admitted_cluster_ids:
+                    raise ValueError(
+                        "Crop influence manifest independent evidence does not match ledger"
+                    )
+            self.crop_influence_manifest = manifest.to_dict()
+            self.crop_influence_manifest_hash = manifest.content_hash
 
 
 # ============================================================================

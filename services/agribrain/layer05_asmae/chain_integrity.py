@@ -102,12 +102,20 @@ def assert_scene_operator_binding(
     operators: Sequence[Any],
     stage_name: str = 'unknown',
 ) -> None:
-    if len(scenes) != len(operators):
-        raise ASMAEChainIntegrityError(
-            f'[{stage_name}] scene/operator count mismatch: '
-            f'{len(scenes)} scenes, {len(operators)} operators'
-        )
-    scene_ids = [str(getattr(scene, 'scene_id', '')) for scene in scenes]
+    valid_scenes = [
+        s for s in scenes
+        if getattr(getattr(s, "quality", None), "included", True)
+        and getattr(s, "valid_support_pixels", 1) > 0
+    ]
+    if len(valid_scenes) != len(operators):
+        if len(scenes) == len(operators):
+            valid_scenes = list(scenes)
+        else:
+            raise ASMAEChainIntegrityError(
+                f'[{stage_name}] valid scene/operator count mismatch: '
+                f'{len(valid_scenes)} valid scenes, {len(operators)} operators'
+            )
+    scene_ids = [str(getattr(scene, 'scene_id', '')) for scene in valid_scenes]
     operator_scene_ids = [str(getattr(op, 'scene_id', '')) for op in operators]
     if not all(scene_ids) or len(set(scene_ids)) != len(scene_ids):
         raise ASMAEChainIntegrityError(
@@ -118,7 +126,7 @@ def assert_scene_operator_binding(
             f'[{stage_name}] exact scene/operator binding mismatch: '
             f'scenes={scene_ids}, operators={operator_scene_ids}'
         )
-    for scene, operator in zip(scenes, operators):
+    for scene, operator in zip(valid_scenes, operators):
         scene_support = str(getattr(scene, 'valid_support_hash', '') or '')
         operator_support = str(getattr(operator, 'valid_support_hash', '') or '')
         if not scene_support or scene_support != operator_support:
@@ -131,10 +139,14 @@ def assert_scene_operator_binding(
                 f'[{stage_name}] CRS binding mismatch for {scene.scene_id}'
             )
         matrix = getattr(operator, 'H_matrix', None)
-        expected_rows = int(getattr(scene, 'height', 0)) * int(getattr(scene, 'width', 0))
-        if matrix is None or int(matrix.shape[0]) != expected_rows:
+        if matrix is None:
             raise ASMAEChainIntegrityError(
-                f'[{stage_name}] H_t rows do not match pixels for {scene.scene_id}'
+                f'[{stage_name}] H_matrix is None (zero valid support) for {scene.scene_id}'
+            )
+        expected_rows = int(getattr(scene, 'height', 0)) * int(getattr(scene, 'width', 0))
+        if int(matrix.shape[0]) != expected_rows:
+            raise ASMAEChainIntegrityError(
+                f'[{stage_name}] H_t row count mismatch (matrix rows {matrix.shape[0]} != expected {expected_rows}) for {scene.scene_id}'
             )
 
 

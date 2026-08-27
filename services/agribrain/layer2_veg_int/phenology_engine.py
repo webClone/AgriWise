@@ -1,20 +1,21 @@
-
 """
-Layer 2.2: Phenology Inference Engine (v3.1)
+Layer 2.2: Phenology Inference Engine (v3.2)
 
 Infers the biological stage of the crop using a Hidden Markov Model
 with Viterbi decoding.
 
-Enhancements over v3.0:
+Enhancements:
+  - Development rate explicit decomposition: GDD, photoperiod, thermal stress (Phase 3)
+  - Semi-Markov duration penalties on HMM transitions (Phase 3)
   - Crop-specific emission tuning from CROP_NDVI_SIGNATURES
   - Photoperiod-aware transition gating (latitude + DOY → day length)
-  - Improved confidence calibration
+  - Calibrated vernalization gating (Richardson 1974)
 
 Algorithm:
   - States: BARE_SOIL, EMERGENCE, VEGETATIVE, REPRODUCTIVE, SENESCENCE,
             HARVESTED, DORMANCY (perennials only)
   - Emissions: Multivariate Gaussian on (NDVI, velocity, GDD_frac, NDWI, photoperiod)
-  - Transitions: GDD-gated probability matrix with min-duration penalty
+  - Transitions: GDD-gated probability matrix with semi-Markov duration penalties
   - Decoding: Viterbi (log-space) with O(n × S²) complexity
 
 References:
@@ -24,8 +25,18 @@ References:
 """
 
 import math
-from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import List, Dict, Optional, Tuple, Any
 from layer2_veg_int.schema import PhenologyStage
+
+
+@dataclass
+class DevelopmentIncrement:
+    """Explicit decomposition of daily biological development."""
+    raw_gdd: float           # max(0, T_mean - T_base)
+    photo_factor: float      # Photoperiod scaling [0.1, 1.0]
+    heat_penalty: float      # Thermal stress inhibition [0.0, 1.0]
+    delta_development: float # Product: raw_gdd * photo_factor * heat_penalty
 
 
 # =========================================================================
@@ -90,7 +101,9 @@ class PhenologyEngine:
 
     def __init__(self, crop_config: Optional[Dict] = None, is_perennial: bool = False,
                  crop_ndvi_signature: Optional[Dict] = None,
-                 latitude: Optional[float] = None):
+                 latitude: Optional[float] = None,
+                 requires_vernalization: bool = True,
+                 stage_graph: Optional[Any] = None):
         """Initialize the phenology engine.
 
         Args:
@@ -99,6 +112,8 @@ class PhenologyEngine:
             crop_ndvi_signature: NDVI signature dict (peak_ndvi, trough_ndvi, etc.)
                 from CROP_NDVI_SIGNATURES for crop-specific emission tuning.
             latitude: Field latitude in degrees for photoperiod computation.
+            requires_vernalization: Whether the crop has an obligate chill unit requirement.
+            stage_graph: Optional CropStageGraph for biological sub-stage decoding.
         """
         # Default Wheat/Barley Priors (Generic Cereal)
         self.crop_priors = crop_config or {
@@ -114,6 +129,8 @@ class PhenologyEngine:
         }
         self.is_perennial = is_perennial
         self.latitude = latitude
+        self.requires_vernalization = requires_vernalization
+        self.stage_graph = stage_graph
 
         # State list
         self.states = list(_ANNUAL_STATES)
@@ -136,7 +153,7 @@ class PhenologyEngine:
         # Build transition matrix
         self._build_transition_matrix()
 
-        # Minimum duration per state (in timesteps, ~days)
+        # Minimum and expected duration per state (in timesteps, ~days)
         self.min_duration = {
             PhenologyStage.BARE_SOIL: 5,
             PhenologyStage.EMERGENCE: 7,
@@ -146,15 +163,21 @@ class PhenologyEngine:
             PhenologyStage.HARVESTED: 5,
             PhenologyStage.DORMANCY: 14,
         }
+        self.expected_duration = {
+            PhenologyStage.BARE_SOIL: 20,
+            PhenologyStage.EMERGENCE: 14,
+            PhenologyStage.VEGETATIVE: 45,
+            PhenologyStage.REPRODUCTIVE: 35,
+            PhenologyStage.SENESCENCE: 25,
+            PhenologyStage.HARVESTED: 20,
+            PhenologyStage.DORMANCY: 60,
+        }
 
     def _build_emission_params(self, crop_sig: Optional[Dict]) -> Dict:
         """Build crop-specific emission parameters from NDVI signature.
 
         Uses CROP_NDVI_SIGNATURES (peak_ndvi, trough_ndvi) to adapt the
         HMM emission means so that the phenology detection is crop-aware.
-
-        For example, olive at NDVI=0.55 is REPRODUCTIVE (peak), but wheat
-        at NDVI=0.55 is only VEGETATIVE (growing phase).
         """
         params = {}
         for stage, defaults in _DEFAULT_EMISSION_PARAMS.items():
@@ -242,9 +265,11 @@ class PhenologyEngine:
                 d = dt_date(int(parts[0]), int(parts[1]), int(parts[2]))
                 doy = d.timetuple().tm_yday
             else:
-                doy = 172  # Default to summer solstice
+                # P0 FIX: Invalid date should not silently default to summer solstice.
+                # Returning None causes photoperiod emission to be skipped (marginalized).
+                return None
         except Exception:
-            doy = 172
+            return None
 
         lat_rad = math.radians(self.latitude)
         # Solar declination
@@ -270,28 +295,54 @@ class PhenologyEngine:
         initial_stage: Optional[str] = None,
         initial_gdd: float = 0.0,
         ndwi_series: Optional[List[Optional[float]]] = None,
+        vernalization_progress: float = 1.0,
+        vernalization_series: Optional[List[float]] = None,
     ) -> Tuple[List[PhenologyStage], List[float]]:
         """
         Infers phenological stage using Viterbi decoding on the HMM.
 
         Multivariate emission features: (NDVI, velocity, GDD_frac, NDWI, photoperiod)
+
+        Args:
+            vernalization_progress: Scalar vernalization fraction (fallback).
+            vernalization_series: Daily cumulative vernalization fraction V_t. Gates
+                the VEGETATIVE → REPRODUCTIVE transition causally per day.
         """
         T = len(modeled_ndvi)
         if T == 0:
             return [], []
 
         S = self.n_states
-        priors = self.crop_priors["transitions"]
+        priors = self.crop_priors.get("transitions", {}) if isinstance(self.crop_priors, dict) else {}
         total_gdd = priors.get("harvest_min_gdd", 1800)
+
+        try:
+            season_initial_gdd = max(0.0, float(initial_gdd))
+            if not math.isfinite(season_initial_gdd):
+                season_initial_gdd = 0.0
+        except (TypeError, ValueError):
+            season_initial_gdd = 0.0
+
+        def _season_gdd(index: int) -> float:
+            window_gdd = cumulative_gdd[index] if index < len(cumulative_gdd) else 0.0
+            try:
+                window_gdd = max(0.0, float(window_gdd))
+            except (TypeError, ValueError):
+                window_gdd = 0.0
+            return season_initial_gdd + window_gdd
 
         # ── Compute emission log-likelihoods ──
         log_emit = []  # T x S
         for t in range(T):
             ndvi = modeled_ndvi[t]
             vel = velocity[t] if t < len(velocity) else 0.0
-            gdd_frac = min(2.0, cumulative_gdd[t] / max(1, total_gdd)) if t < len(cumulative_gdd) else 0.0
+            gdd_at_t = _season_gdd(t)
+            gdd_frac = min(2.0, gdd_at_t / max(1, total_gdd))
             sigma = uncertainty[t] if uncertainty and t < len(uncertainty) else 0.05
-            ndwi = ndwi_series[t] if ndwi_series and t < len(ndwi_series) and ndwi_series[t] is not None else (ndvi * 0.5 - 0.3)
+            
+            # P0 FIX: When NDWI is missing, do NOT fabricate a pseudo-value.
+            # Instead, skip the NDWI emission term (marginalize over missing modality).
+            ndwi = ndwi_series[t] if ndwi_series and t < len(ndwi_series) and ndwi_series[t] is not None else None
 
             # Photoperiod (day length)
             date_str = dates[t] if t < len(dates) else ""
@@ -300,28 +351,20 @@ class PhenologyEngine:
             row = []
             for s in self.states:
                 ep = self._emission_params[s]
-                # Multivariate log-likelihood (diagonal covariance — features independent)
+                # Multivariate log-likelihood on physical/spectral observations ONLY
+                # (Thermal/photoperiod forcing is moved strictly into Markov transition dynamics)
                 ll = 0.0
                 ll += _log_gaussian(ndvi, ep["ndvi"][0], max(sigma, ep["ndvi"][1]))
                 ll += _log_gaussian(vel, ep["velocity"][0], ep["velocity"][1])
-                ll += _log_gaussian(gdd_frac, ep["gdd_frac"][0], ep["gdd_frac"][1])
-                ll += _log_gaussian(ndwi, ep["ndwi"][0], ep["ndwi"][1])
+                
+                # Only include NDWI emission when data is present (marginalize when missing)
+                if ndwi is not None:
+                    ll += _log_gaussian(ndwi, ep["ndwi"][0], ep["ndwi"][1])
 
-                # Photoperiod emission (soft feature, lower weight via wider sigma)
-                if photoperiod is not None:
-                    ll += 0.5 * _log_gaussian(
-                        photoperiod,
-                        ep["photoperiod"][0],
-                        ep["photoperiod"][1],
-                    )
-
-                # GDD gate: penalize states that are chronologically impossible
-                ll += self._gdd_gate_penalty(s, cumulative_gdd[t] if t < len(cumulative_gdd) else 0, priors)
-
-                # Visual emergence boost
+                # Visual emergence boost (independent physical evidence)
                 if high_res_visual_check and t < len(high_res_visual_check) and high_res_visual_check[t]:
                     if s == PhenologyStage.EMERGENCE:
-                        ll += 2.0  # Strong boost
+                        ll += 2.0
 
                 row.append(ll)
             log_emit.append(row)
@@ -337,10 +380,13 @@ class PhenologyEngine:
             except (ValueError, AttributeError):
                 pass
 
-        if start_state in self.state_idx:
-            log_pi[self.state_idx[start_state]] = 0.0  # log(1.0)
-        else:
-            log_pi[0] = 0.0
+        gdd_0 = _season_gdd(0)
+        for s in range(S):
+            penalty = self._gdd_gate_penalty(self.states[s], gdd_0, priors)
+            if self.states[s] == start_state:
+                log_pi[s] = penalty
+            else:
+                log_pi[s] = -10.0 + penalty
 
         # ── Viterbi forward pass ──
         V = [[0.0] * S for _ in range(T)]
@@ -354,17 +400,55 @@ class PhenologyEngine:
 
         # Forward
         for t in range(1, T):
+            gdd_at_t = _season_gdd(t)
+            v_t = (
+                vernalization_series[t]
+                if vernalization_series and t < len(vernalization_series) and vernalization_series[t] is not None
+                else vernalization_progress
+            )
             for s in range(S):
                 best_val = -1e30
                 best_prev = 0
                 for s_prev in range(S):
                     trans = self.log_trans[s_prev][s]
 
-                    # Min-duration penalty
+                    # GDD transition dynamics (developmental readiness in transition model)
+                    gdd_thresholds = {
+                        PhenologyStage.EMERGENCE: priors.get("emergence_min_gdd", 100),
+                        PhenologyStage.VEGETATIVE: priors.get("vegetative_min_gdd", 300),
+                        PhenologyStage.REPRODUCTIVE: priors.get("reproductive_min_gdd", 800),
+                        PhenologyStage.SENESCENCE: priors.get("senescence_min_gdd", 1400),
+                        PhenologyStage.HARVESTED: priors.get("harvest_min_gdd", 1800),
+                    }
+                    target_gdd = gdd_thresholds.get(self.states[s], 0.0)
+                    if s > s_prev:
+                        if gdd_at_t >= target_gdd:
+                            trans += min(3.5, 1.5 * (gdd_at_t - target_gdd) / max(50.0, target_gdd * 0.3))
+                        else:
+                            trans += self._gdd_gate_penalty(self.states[s], gdd_at_t, priors)
+                    elif s == s_prev:
+                        if target_gdd > 0.0 and gdd_at_t < target_gdd * 0.5:
+                            trans += self._gdd_gate_penalty(self.states[s], gdd_at_t, priors)
+                        elif s + 1 < S:
+                            next_gdd = gdd_thresholds.get(self.states[s + 1], 99999.0)
+                            if gdd_at_t > next_gdd * 1.1:
+                                trans -= min(3.0, (gdd_at_t - next_gdd * 1.1) / max(50.0, next_gdd * 0.3))
+
+                    # Vernalization transition gate (P0-1 FIX: completely bypassed for non-vernalizing crops)
+                    if self.states[s] == PhenologyStage.REPRODUCTIVE and (self.states[s_prev] != PhenologyStage.REPRODUCTIVE or v_t < 0.5):
+                        if self.requires_vernalization:
+                            trans += compute_vernalization_gate(v_t)
+
+                    # Min-duration penalty & duration constraint
                     if s != s_prev:
                         min_dur = self.min_duration.get(self.states[s_prev], 7)
                         if duration[t-1][s_prev] < min_dur:
                             trans -= 5.0  # Strong penalty for premature transition
+                    else:
+                        # Self-loop duration penalty if state exceeds 2.5x expected duration
+                        exp_dur = self.expected_duration.get(self.states[s], 30)
+                        if duration[t-1][s] > exp_dur * 2.5:
+                            trans -= 0.1 * (duration[t-1][s] - exp_dur * 2.5)
 
                     val = V[t-1][s_prev] + trans
                     if val > best_val:
@@ -400,12 +484,33 @@ class PhenologyEngine:
             sorted_v = sorted(V[t], reverse=True)
             if len(sorted_v) >= 2:
                 margin = sorted_v[0] - sorted_v[1]
-                conf = 1.0 / (1.0 + math.exp(-margin))
+                conf = 1.0 - math.exp(-max(0.0, margin))
             else:
                 conf = 1.0
-            confidences.append(max(0.5, min(1.0, conf)))
+            confidences.append(max(0.0, min(1.0, conf)))
 
         return stages, confidences
+
+    def decode_sub_stages(
+        self,
+        canonical_stages: List[PhenologyStage],
+        cumulative_gdd: List[float],
+        total_gdd: float = 1800.0,
+    ) -> List[str]:
+        """Decode fine-grained biological sub-stages using CropStageGraph."""
+        if not self.stage_graph or not hasattr(self.stage_graph, "nodes"):
+            return [s.value for s in canonical_stages]
+        sub_stages = []
+        nodes = self.stage_graph.nodes
+        for idx, c_stage in enumerate(canonical_stages):
+            gdd_frac = (cumulative_gdd[idx] / max(1.0, total_gdd)) if idx < len(cumulative_gdd) else 0.0
+            matching_nodes = [n for n in nodes if n.canonical_stage == c_stage]
+            if matching_nodes:
+                best_node = min(matching_nodes, key=lambda n: abs(n.expected_gdd_fraction - gdd_frac))
+                sub_stages.append(best_node.stage_id)
+            else:
+                sub_stages.append(c_stage.value)
+        return sub_stages
 
     def _gdd_gate_penalty(
         self,
@@ -430,10 +535,10 @@ class PhenologyEngine:
             return 0.0
 
         if current_gdd < min_gdd * 0.5:
-            return -10.0
+            return -50.0  # Biologically impossible transition prior to minimal thermal competence
         elif current_gdd < min_gdd:
             frac = current_gdd / max(1, min_gdd)
-            return -5.0 * (1.0 - frac)
+            return -20.0 * (1.0 - frac)
         else:
             return 0.0
 
@@ -541,14 +646,56 @@ def compute_vernalization_gate(
 
     # Strong penalty if vernalization < 50%, moderate if 50-80%
     if vernalization_progress < 0.5:
-        return -15.0  # Almost impossible
+        return -50.0  # Biologically impossible transition
     else:
-        return -8.0 * (1.0 - vernalization_progress)
+        return -20.0 * (1.0 - vernalization_progress)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# v3.2: Effective GDD with Stress Penalties
+# v3.2: Effective GDD & Development Rate with Stress Penalties
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def compute_development_rate(
+    t_mean: float,
+    t_max: float,
+    t_base: float = 10.0,
+    t_opt_max: float = 35.0,
+    day_length: Optional[float] = None,
+    is_short_day: bool = False,
+    p_critical: float = 13.0,
+) -> DevelopmentIncrement:
+    """Compute biologically decomposed development rate increment.
+
+    Separates thermal time (GDD) from photoperiodic and thermal stress forcing.
+
+    Returns:
+        DevelopmentIncrement dataclass with raw_gdd, photo_factor, heat_penalty,
+        and delta_development.
+    """
+    raw_gdd = max(0.0, t_mean - t_base)
+
+    # Photoperiod factor
+    if is_short_day and day_length is not None:
+        k = 1.5  # steepness parameter
+        photo_factor = 1.0 / (1.0 + math.exp(k * (day_length - p_critical)))
+        photo_factor = max(0.1, min(1.0, photo_factor))
+    else:
+        photo_factor = 1.0
+
+    # Heat penalty (Sánchez et al. 2014)
+    if t_max > t_opt_max:
+        heat_penalty = max(0.0, 1.0 - (t_max - t_opt_max) / 10.0)
+    else:
+        heat_penalty = 1.0
+
+    delta_dev = round(raw_gdd * photo_factor * heat_penalty, 2)
+    return DevelopmentIncrement(
+        raw_gdd=round(raw_gdd, 2),
+        photo_factor=round(photo_factor, 3),
+        heat_penalty=round(heat_penalty, 3),
+        delta_development=delta_dev,
+    )
+
 
 def compute_effective_gdd(
     t_mean: float,
@@ -558,41 +705,13 @@ def compute_effective_gdd(
     day_length: Optional[float] = None,
     is_short_day: bool = False,
 ) -> float:
-    """Compute stress-corrected GDD for a single day.
-
-    Effective GDD = max(0, T_mean - T_base) × photoperiod_factor × heat_penalty
-
-    Photoperiod factor:
-        - Long-day crops: factor = 1.0 (always)
-        - Short-day crops: factor = min(1.0, day_length / 14.0)
-
-    Heat penalty (Sánchez et al. 2014):
-        - If T_max > T_opt_max, penalty = max(0, 1 - (T_max - T_opt_max) / 10)
-        - This reduces effective GDD when crops are heat-stressed
-
-    Args:
-        t_mean: Daily mean temperature (°C)
-        t_max: Daily maximum temperature (°C)
-        t_base: Crop-specific base temperature (°C)
-        t_opt_max: Optimal maximum temperature (°C)
-        day_length: Day length in hours
-        is_short_day: True for short-day crops (rice, millet)
-
-    Returns:
-        Effective GDD for this day.
-    """
-    raw_gdd = max(0.0, t_mean - t_base)
-
-    # Photoperiod factor
-    if is_short_day and day_length is not None:
-        photo_factor = min(1.0, day_length / 14.0)
-    else:
-        photo_factor = 1.0
-
-    # Heat penalty
-    if t_max > t_opt_max:
-        heat_penalty = max(0.0, 1.0 - (t_max - t_opt_max) / 10.0)
-    else:
-        heat_penalty = 1.0
-
-    return round(raw_gdd * photo_factor * heat_penalty, 2)
+    """Compute stress-corrected GDD for a single day (backward compatibility)."""
+    inc = compute_development_rate(
+        t_mean=t_mean,
+        t_max=t_max,
+        t_base=t_base,
+        t_opt_max=t_opt_max,
+        day_length=day_length,
+        is_short_day=is_short_day,
+    )
+    return inc.delta_development

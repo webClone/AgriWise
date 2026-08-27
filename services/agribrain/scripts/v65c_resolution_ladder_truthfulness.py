@@ -152,7 +152,11 @@ def run_all_validation_gates():
     # -------------------------------------------------------------------------
     # Verify that GroundingClass is determined by observed ratio (e.g. RASTER_GROUNDED if ratio >= 0.90),
     # even when the resolution values are uniform (e.g. 10m everywhere).
-    l10_in = Layer10Input(field_tensor=None, veg_int=None, plot_id="g6_plot")
+    l10_in = Layer10Input(
+        plot_namespace=PlotNamespace(tenant_id="t_test", farm_id="f_test", plot_id="g6_plot"),
+        tenant_id="t_test", farm_id="f_test", plot_id="g6_plot",
+        field_tensor=None, veg_int=None
+    )
     
     l1_g6_uniform = MockL1Data(
         raster_maps={

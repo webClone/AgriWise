@@ -1,0 +1,251 @@
+{
+  "manifest": {
+    "runId": "RUN-2026-ALG-DEMO-001",
+    "timestamp": "2026-03-28T08:15:00Z",
+    "demoStatus": "ILLUSTRATIVE",
+    "plotId": "PLOT-ALGERIA-WHEAT-ZONE-4",
+    "anonymizedLocation": {
+      "label": "Anonymized Durum Wheat Plot, Mitidja Plain, Algeria",
+      "latitude": 36.502,
+      "longitude": 3.015,
+      "boundingPolygon": [
+        [36.501, 3.013],
+        [36.503, 3.013],
+        [36.503, 3.017],
+        [36.501, 3.017]
+      ]
+    },
+    "cropContext": {
+      "cropName": "Durum Wheat",
+      "cropCode": "WHEAT_DURUM",
+      "seasonYear": 2026,
+      "sowingDate": "2025-11-15",
+      "expectedHarvest": "2026-06-05"
+    }
+  },
+  "evidenceGraph": {
+    "nodes": [
+      {
+        "id": "EV-S2-OPTICAL",
+        "label": "Sentinel-2 MSI",
+        "family": "Earth Observation",
+        "icon": "Satellite",
+        "provider": "Copernicus Hub",
+        "acquisitionTime": "2026-03-24T10:30:00Z",
+        "nativeResolution": "10m",
+        "effectiveResolution": "10m (Native)",
+        "measurementReality": "DIRECT_OBSERVATION",
+        "transformationClass": "ATMOSPHERIC_CORRECTION",
+        "authorityCeiling": { "stateUpdate": true, "diagnostic": true, "prescription": false, "visual": true }
+      },
+      {
+        "id": "EV-S1-SAR",
+        "label": "Sentinel-1 C-SAR",
+        "family": "Microwave Radar",
+        "icon": "Radio",
+        "provider": "Copernicus Hub",
+        "acquisitionTime": "2026-03-26T05:45:00Z",
+        "nativeResolution": "20m x 22m",
+        "effectiveResolution": "10m (Native C-SAR Spatial Support)",
+        "measurementReality": "DIRECT_OBSERVATION",
+        "transformationClass": "RADIOMETRIC_CLOSURE",
+        "authorityCeiling": { "stateUpdate": true, "diagnostic": true, "prescription": false, "visual": true }
+      },
+      {
+        "id": "EV-WEATHER-GRID",
+        "label": "Station + Reanalysis Grid",
+        "family": "Atmospheric",
+        "icon": "CloudSun",
+        "provider": "ONM Algeria + ECMWF",
+        "acquisitionTime": "Continuous hourly",
+        "nativeResolution": "9km",
+        "effectiveResolution": "1km (Topographic Downscaling)",
+        "measurementReality": "PHYSIO_ASSIMILATION",
+        "transformationClass": "SPATIOTEMPORAL_INTERPOLATION",
+        "authorityCeiling": { "stateUpdate": true, "diagnostic": true, "prescription": false, "visual": true }
+      },
+      {
+        "id": "EV-SOIL-IOT",
+        "label": "Multi-Depth Soil IoT Probe",
+        "family": "In-Situ Sensor",
+        "icon": "Activity",
+        "provider": "AgriWise Telemetry Node",
+        "acquisitionTime": "15-min Telemetry Stream",
+        "nativeResolution": "Point sensor (10cm/30cm/60cm)",
+        "effectiveResolution": "Point Calibration Target",
+        "measurementReality": "DIRECT_OBSERVATION",
+        "transformationClass": "RAW_PROVIDER_TILE",
+        "authorityCeiling": { "stateUpdate": true, "diagnostic": true, "prescription": true, "visual": true }
+      },
+      {
+        "id": "EV-FARMER-LOG",
+        "label": "Farmer Sowing & Irrigation Log",
+        "family": "Operational",
+        "icon": "ClipboardList",
+        "provider": "AgriWise Mobile App",
+        "acquisitionTime": "2025-11-15T08:00:00Z",
+        "nativeResolution": "Plot Boundary",
+        "effectiveResolution": "Plot Boundary",
+        "measurementReality": "POLICY_CONSTRAINT",
+        "transformationClass": "RAW_PROVIDER_TILE",
+        "authorityCeiling": { "stateUpdate": true, "diagnostic": true, "prescription": true, "visual": true }
+      }
+    ],
+    "edges": [
+      { "source": "EV-S2-OPTICAL", "target": "EV-S1-SAR", "relationship": "Spectral-Microwave Cross Validation" },
+      { "source": "EV-WEATHER-GRID", "target": "EV-SOIL-IOT", "relationship": "ET0 Assimilation & In-Situ Soil Calibration" },
+      { "source": "EV-SOIL-IOT", "target": "EV-S2-OPTICAL", "relationship": "Point-to-Raster Ground Truth Anchor" }
+    ]
+  },
+  "fieldCube": {
+    "dimensions": { "x": 10, "y": 10, "timeSteps": 12 },
+    "cells": [
+      {
+        "voxelId": "VX-01",
+        "coordinate": [0, 0],
+        "layer": "L2 Vegetation",
+        "valueLabel": "High Canopy Reflectance",
+        "observedMask": true,
+        "reconstructionMask": false,
+        "uncertaintyValue": 0.04,
+        "supportType": "OBSERVED",
+        "authority": "Observed"
+      },
+      {
+        "voxelId": "VX-02",
+        "coordinate": [1, 2],
+        "layer": "L3 Water Deficit",
+        "valueLabel": "Sub-Grid Moisture Stress",
+        "observedMask": true,
+        "reconstructionMask": true,
+        "uncertaintyValue": 0.12,
+        "supportType": "RECONSTRUCTED",
+        "authority": "Assimilated"
+      },
+      {
+        "voxelId": "VX-03",
+        "coordinate": [3, 4],
+        "layer": "L5 Bio Threat",
+        "valueLabel": "Biological Risk Evaluated",
+        "observedMask": false,
+        "reconstructionMask": true,
+        "uncertaintyValue": 0.28,
+        "supportType": "BROAD_SUPPORT",
+        "authority": "Diagnostic"
+      }
+    ]
+  },
+  "worldline": {
+    "events": [
+      {
+        "id": "EVT-01",
+        "date": "Nov 15, 2025",
+        "stage": "Sowing",
+        "title": "Durum Wheat Sowing Registered",
+        "evidenceSourceRef": "EV-FARMER-LOG",
+        "authority": "Observed",
+        "description": "Sowing registered with basal nutrient application.",
+        "provenanceHash": "0x8f2d...c41a"
+      },
+      {
+        "id": "EVT-02",
+        "date": "Dec 20, 2025",
+        "stage": "Emergence",
+        "title": "Canopy Emergence Verification",
+        "evidenceSourceRef": "EV-S2-OPTICAL",
+        "authority": "Observed",
+        "description": "Canopy emergence trajectory verified across parcel boundary.",
+        "provenanceHash": "0x3a1b...e92f"
+      },
+      {
+        "id": "EVT-03",
+        "date": "Feb 22, 2026",
+        "stage": "Stem Elongation",
+        "title": "Sub-Grid Water Deficit Reconstructed",
+        "evidenceSourceRef": "EV-S1-SAR",
+        "authority": "Assimilated",
+        "description": "ASMAE inverse reconstruction isolated drip line pressure deficit.",
+        "provenanceHash": "0x7c4e...110d"
+      },
+      {
+        "id": "EVT-04",
+        "date": "Mar 28, 2026",
+        "stage": "Heading",
+        "title": "Prescriptive Irrigation Completed",
+        "evidenceSourceRef": "EV-SOIL-IOT",
+        "authority": "Prescriptive Execution",
+        "description": "Targeted supplemental irrigation restored root-zone moisture.",
+        "provenanceHash": "0x9e8a...331b"
+      }
+    ]
+  },
+  "layerExecutions": [],
+  "asmae": {
+    "algorithm": "ASMAE Sub-Grid Inverse Reconstruction (Physically Constrained)",
+    "parentObservation": "Sentinel-2 10m Optical Band (B04/B08)",
+    "microzoneCount": 16,
+    "closureSteps": [
+      {
+        "stepIndex": 1,
+        "stepName": "Native Observation Support",
+        "description": "Ingests native 10m Sentinel-2 optical reflectance and cloud/shadow mask.",
+        "nativeSupportLabel": "10m Raw Grid",
+        "effectiveResolutionLabel": "10m",
+        "radiometricResidualNormalized": 0.08,
+        "posteriorUncertaintyLabel": "Low (Direct Observation)",
+        "authorityAssigned": "Observed"
+      },
+      {
+        "stepIndex": 2,
+        "stepName": "Candidate Microzone Reconstruction",
+        "description": "Evaluates topography, Sentinel-1 SAR micro-roughness, and historic zone boundaries.",
+        "nativeSupportLabel": "10m Parent Cell",
+        "effectiveResolutionLabel": "Sub-Grid Microzone Candidate",
+        "radiometricResidualNormalized": 0.06,
+        "posteriorUncertaintyLabel": "Model Interpolated",
+        "authorityAssigned": "Reconstructed"
+      },
+      {
+        "stepIndex": 3,
+        "stepName": "Observation Operator Aggregation",
+        "description": "Aggregates sub-grid candidate microzones back through the satellite point-spread function.",
+        "nativeSupportLabel": "Parent Cell Integration",
+        "effectiveResolutionLabel": "Operator Verified",
+        "radiometricResidualNormalized": 0.03,
+        "posteriorUncertaintyLabel": "Operator Constrained",
+        "authorityAssigned": "Assimilated"
+      },
+      {
+        "stepIndex": 4,
+        "stepName": "Parent-Cell Radiometric Conservation",
+        "description": "Verifies that total energy/reflectance of microzones equals parent cell observation.",
+        "nativeSupportLabel": "Parent Cell Bound",
+        "effectiveResolutionLabel": "Radiometrically Conserved",
+        "radiometricResidualNormalized": 0.01,
+        "posteriorUncertaintyLabel": "Energy Balanced",
+        "authorityAssigned": "Assimilated"
+      },
+      {
+        "stepIndex": 5,
+        "stepName": "Held-Out Retrovalidation & Disagreement",
+        "description": "Evaluates Bayesian model disagreement against held-out Sentinel-1 acquisitions.",
+        "nativeSupportLabel": "Multi-Modal Test",
+        "effectiveResolutionLabel": "BMA Evaluated",
+        "radiometricResidualNormalized": 0.02,
+        "posteriorUncertaintyLabel": "Calibrated Posterior Raster",
+        "authorityAssigned": "Reconstructed"
+      },
+      {
+        "stepIndex": 6,
+        "stepName": "Effective Resolution & Authority Ceiling",
+        "description": "Assigns effective scientific resolution and limits prescriptive authority to verified sub-zones.",
+        "nativeSupportLabel": "10m Native / Sub-Grid Reconstructed",
+        "effectiveResolutionLabel": "Effective Scientific Resolution: Verified",
+        "radiometricResidualNormalized": 0.01,
+        "posteriorUncertaintyLabel": "Quantified Bounds",
+        "authorityAssigned": "Governed Reconstructed State"
+      }
+    ]
+  },
+  "claims": []
+}

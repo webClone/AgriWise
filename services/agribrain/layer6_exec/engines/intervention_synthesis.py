@@ -58,6 +58,70 @@ def build_upstream_digest(
     d = UpstreamDigest()
     confidences = []
 
+    from services.agribrain.common.downstream_crop_context import resolve_downstream_crop_phenology
+
+    semantics = resolve_downstream_crop_phenology(l2_output=veg_int)
+    upstream_lineages = []
+    for output in (bio_l5, nutrient_l4, decision_l3):
+        audit = getattr(output, "audit", None)
+        policy = getattr(audit, "policy_snapshot", {}) if audit else {}
+        if isinstance(policy, dict):
+            candidate = policy.get("crop_phenology_lineage") or policy.get("crop_phenology_gate")
+            if isinstance(candidate, dict) and candidate:
+                upstream_lineages.append(candidate)
+
+    def valid_hash(value: Any) -> bool:
+        token = str(value or "").lower()
+        return len(token) == 64 and all(char in "0123456789abcdef" for char in token)
+
+    crop_hash = str(semantics.crop_posterior_hash or "")
+    phenology_hash = str(semantics.phenology_posterior_hash or "")
+    crop_conflict = any(
+        lineage.get("crop_posterior_hash")
+        and str(lineage.get("crop_posterior_hash")) != crop_hash
+        for lineage in upstream_lineages
+    )
+    phenology_conflict = any(
+        lineage.get("phenology_posterior_hash")
+        and str(lineage.get("phenology_posterior_hash")) != phenology_hash
+        for lineage in upstream_lineages
+    )
+
+    d.phenology_stage = semantics.stage_for_discrete_engine
+    d.phenology_confidence = semantics.stage_confidence
+    d.phenology_posterior_hash = phenology_hash
+    d.stage_specific_allowed = bool(
+        semantics.stage_specific_allowed
+        and valid_hash(phenology_hash)
+        and not phenology_conflict
+    )
+    if not d.stage_specific_allowed:
+        d.phenology_stage = "UNKNOWN"
+    d.crop_posterior_hash = crop_hash
+    d.crop_resolution = str(semantics.crop_resolution or "unknown")
+    d.species_specific_allowed = bool(
+        semantics.species_specific_allowed
+        and valid_hash(crop_hash)
+        and not crop_conflict
+    )
+    d.crop_mixture = dict(semantics.crop_mixture)
+    d.stage_posterior = dict(semantics.stage_posterior)
+    d.crop_evidence_class = (
+        "canonical_species_posterior" if d.species_specific_allowed
+        else "canonical_group_mixture" if semantics.crop_resolution == "group_only"
+        else "unresolved"
+    )
+    d.phenology_evidence_class = (
+        "canonical_stage_posterior" if d.stage_specific_allowed else "unresolved"
+    )
+    d.crop_phenology_demotion_reasons = list(dict.fromkeys(
+        list(semantics.demotion_reasons)
+        + (["crop_posterior_hash_missing_or_invalid"] if not valid_hash(crop_hash) else [])
+        + (["phenology_posterior_hash_missing_or_invalid"] if not valid_hash(phenology_hash) else [])
+        + (["crop_posterior_lineage_conflict"] if crop_conflict else [])
+        + (["phenology_posterior_lineage_conflict"] if phenology_conflict else [])
+    ))
+
     # ── L1: Environmental ────────────────────────────────────────────────
     if tensor:
         ts = getattr(tensor, "plot_timeseries", []) or []
@@ -118,14 +182,17 @@ def build_upstream_digest(
 
         phenology = getattr(veg_int, "phenology", None)
         if phenology:
-            sbd = getattr(phenology, "stage_by_day", []) or []
+            sbd = []  # canonical posterior was resolved above
             if sbd:
                 last_stage = sbd[-1]
                 if hasattr(last_stage, "value"):
                     d.phenology_stage = last_stage.value
                 elif isinstance(last_stage, str):
                     d.phenology_stage = last_stage.upper()
-        confidences.append(0.7)
+        confidences.append(
+            min(0.7, semantics.stage_confidence)
+            if semantics.stage_specific_allowed else 0.35
+        )
 
     # ── L3: Decision Diagnoses ───────────────────────────────────────────
     if decision_l3:

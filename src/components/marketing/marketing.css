@@ -1,0 +1,775 @@
+/* ═══ AgriWise Marketing Design System ═════════════════════════
+   Semantic design tokens for the redesigned homepage.
+   Dark-only. No inline styles on marketing components.
+   
+   Color is semantic:
+   - Field green    → field/vegetation state
+   - Cyan           → observed evidence
+   - Violet/indigo  → inferred/model states
+   - Amber          → uncertainty/attention
+   - Red            → material risk only
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── Foundation tokens ───────────────────────────────────── */
+.marketing-root {
+  /* Surfaces */
+  --surface-base: #050a14;
+  --surface-elevated: rgba(15, 23, 42, 0.4);
+  --surface-elevated-solid: #0c1224;
+  --surface-nav: rgba(5, 10, 20, 0.88);
+  --surface-modal: rgba(8, 12, 25, 0.96);
+  --surface-code: rgba(8, 12, 25, 0.5);
+
+  /* Borders */
+  --border-subtle: rgba(71, 85, 105, 0.06);
+  --border-default: rgba(71, 85, 105, 0.1);
+  --border-interactive: rgba(71, 85, 105, 0.15);
+
+  /* Text */
+  --text-primary: #f8fafc;
+  --text-body: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --text-dim: #475569;
+  --text-faint: #334155;
+
+  /* Semantic colors — field mode */
+  --field-green: #4ade80;
+  --field-green-dim: rgba(74, 222, 128, 0.08);
+  --field-green-glow: rgba(34, 197, 94, 0.3);
+
+  /* Evidence colors */
+  --evidence-observed: #22d3ee;
+  --evidence-observed-dim: rgba(34, 211, 238, 0.08);
+  --evidence-inferred: #818cf8;
+  --evidence-inferred-dim: rgba(129, 140, 248, 0.08);
+  --evidence-sensor: #60a5fa;
+  --evidence-sensor-dim: rgba(96, 165, 250, 0.08);
+
+  /* Authority colors */
+  --authority-observed: #22d3ee;
+  --authority-reconstructed: #60a5fa;
+  --authority-estimated: #818cf8;
+  --authority-diagnostic: #a78bfa;
+  --authority-advisory: #fbbf24;
+  --authority-prescriptive: #f87171;
+
+  /* Functional */
+  --uncertainty-amber: #fbbf24;
+  --uncertainty-amber-dim: rgba(251, 191, 36, 0.08);
+  --risk-red: #f87171;
+  --risk-red-dim: rgba(248, 113, 113, 0.08);
+  --agribrain-violet: #a78bfa;
+  --agribrain-violet-dim: rgba(167, 139, 250, 0.08);
+
+  /* Additional stakeholder accent colors */
+  --accent-enterprise: #818cf8;
+  --accent-cooperative: #34d399;
+  --accent-bank: #60a5fa;
+  --accent-insurance: #f59e0b;
+  --accent-government: #a78bfa;
+  --accent-agribusiness: #fb923c;
+  --accent-research: #e879f9;
+
+  /* Layout */
+  --content-width: 1200px;
+  --content-narrow: 800px;
+  --section-gap: clamp(80px, 12vw, 140px);
+  --section-padding-x: clamp(16px, 4vw, 24px);
+
+  /* Radius */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --radius-2xl: 28px;
+
+  /* Shadows */
+  --shadow-card: 0 8px 40px rgba(0, 0, 0, 0.3);
+  --shadow-elevated: 0 16px 60px rgba(0, 0, 0, 0.4);
+  --shadow-hero: 0 24px 100px rgba(0, 0, 0, 0.6), 0 0 150px rgba(34, 197, 94, 0.04);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* Typography */
+  --font-body: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+
+  /* Page defaults */
+  font-family: var(--font-body);
+  background: var(--surface-base);
+  color: var(--text-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+
+/* ── Semantic component classes ──────────────────────────── */
+
+/* Sections */
+.marketing-section {
+  position: relative;
+  padding: var(--section-gap) 0;
+}
+
+.marketing-section--full {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.marketing-container {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 0 var(--section-padding-x);
+  position: relative;
+}
+
+.marketing-container--narrow {
+  max-width: var(--content-narrow);
+}
+
+/* Section headers */
+.marketing-section-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px;
+  border-radius: 24px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 18px;
+}
+
+.marketing-section-title {
+  font-size: clamp(2rem, 4.5vw, 3.2rem);
+  font-weight: 200;
+  margin: 0 0 14px;
+  line-height: 1.1;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+}
+
+.marketing-section-title strong {
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.marketing-section-subtitle {
+  font-size: clamp(16px, 2vw, 20px);
+  color: var(--text-muted);
+  max-width: 650px;
+  line-height: 1.7;
+  margin: 0;
+}
+
+/* Cards */
+.marketing-card {
+  padding: 24px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  transition: border-color 0.25s var(--ease-out),
+              transform 0.25s var(--ease-out),
+              box-shadow 0.25s var(--ease-out);
+}
+
+.marketing-card:hover {
+  border-color: var(--border-interactive);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-card);
+}
+
+.marketing-card--interactive {
+  cursor: pointer;
+}
+
+.marketing-card--active {
+  border-color: var(--field-green);
+  box-shadow: 0 0 20px var(--field-green-dim);
+}
+
+/* CTAs */
+.marketing-cta-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 32px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  text-decoration: none;
+  border: none;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 4px 24px var(--field-green-glow),
+              inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  transition: transform 0.2s var(--ease-out),
+              box-shadow 0.2s var(--ease-out);
+}
+
+.marketing-cta-primary:hover {
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 8px 40px var(--field-green-glow),
+              inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.marketing-cta-primary:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.marketing-cta-primary:focus-visible {
+  outline: 2px solid var(--field-green);
+  outline-offset: 2px;
+}
+
+.marketing-cta-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 32px;
+  border-radius: var(--radius-md);
+  background: rgba(71, 85, 105, 0.08);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  font-size: 16px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.2s var(--ease-out);
+}
+
+.marketing-cta-secondary:hover {
+  background: rgba(71, 85, 105, 0.15);
+  color: var(--text-primary);
+  transform: translateY(-2px);
+}
+
+.marketing-cta-secondary:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 2px;
+}
+
+.marketing-cta-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.2s ease;
+}
+
+.marketing-cta-ghost:hover {
+  color: var(--text-secondary);
+}
+
+.marketing-cta-ghost:focus-visible {
+  outline: 2px solid var(--text-muted);
+  outline-offset: 2px;
+}
+
+/* Role chips */
+.marketing-role-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 24px;
+  background: rgba(71, 85, 105, 0.06);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s var(--ease-out);
+}
+
+.marketing-role-chip:hover {
+  border-color: var(--border-interactive);
+  background: rgba(71, 85, 105, 0.12);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+}
+
+.marketing-role-chip[aria-pressed="true"],
+.marketing-role-chip--active {
+  border-color: var(--field-green);
+  background: var(--field-green-dim);
+  color: var(--field-green);
+}
+
+.marketing-role-chip:focus-visible {
+  outline: 2px solid var(--field-green);
+  outline-offset: 2px;
+}
+
+/* Illustrative label — required on institutional mockups */
+.marketing-illustrative-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: rgba(71, 85, 105, 0.08);
+  border: 1px solid var(--border-subtle);
+  letter-spacing: 0.03em;
+}
+
+/* Grid layouts */
+.marketing-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+}
+
+.marketing-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
+.marketing-grid-4 {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+/* Gradient text utility */
+.marketing-gradient-text {
+  background: linear-gradient(135deg, #4ade80 0%, #22d3ee 40%, #818cf8 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Navigation ──────────────────────────────────────────── */
+.marketing-nav {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  padding: 14px var(--section-padding-x);
+  background: var(--surface-nav);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+
+.marketing-nav__inner {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.marketing-nav__links {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.marketing-nav__link {
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.15s ease;
+  padding: 4px 0;
+}
+
+.marketing-nav__link:hover {
+  color: var(--text-primary);
+}
+
+.marketing-nav__link--active {
+  color: var(--field-green);
+  font-weight: 600;
+}
+
+.marketing-nav__link:focus-visible {
+  outline: 2px solid var(--field-green);
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+
+/* Mobile nav toggle */
+.marketing-nav__mobile-toggle {
+  display: none;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  cursor: pointer;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  transition: all 0.2s ease;
+}
+
+.marketing-nav__mobile-toggle:hover {
+  background: rgba(71, 85, 105, 0.1);
+  color: var(--text-primary);
+}
+
+.marketing-nav__mobile-toggle:focus-visible {
+  outline: 2px solid var(--field-green);
+  outline-offset: 2px;
+}
+
+/* ── Hero specifics ──────────────────────────────────────── */
+.marketing-hero {
+  position: relative;
+  padding-top: 140px;
+  padding-bottom: 80px;
+  overflow: hidden;
+  text-align: center;
+}
+
+.marketing-hero__title {
+  font-size: clamp(2.4rem, 5.5vw, 4.2rem);
+  font-weight: 200;
+  margin: 0 auto 16px;
+  max-width: 950px;
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  color: var(--text-primary);
+}
+
+.marketing-hero__title strong {
+  font-weight: 800;
+}
+
+.marketing-hero__description {
+  font-size: clamp(16px, 2vw, 19px);
+  color: var(--text-muted);
+  max-width: 720px;
+  margin: 0 auto 36px;
+  line-height: 1.7;
+}
+
+.marketing-hero__actions {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.marketing-hero__roles {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 32px;
+}
+
+/* ── Authority ladder ────────────────────────────────────── */
+.authority-step {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+  transition: all 0.3s var(--ease-out);
+}
+
+.authority-step--active {
+  border-color: currentColor;
+  transform: translateX(8px);
+}
+
+/* ── ASMAE comparison slider ─────────────────────────────── */
+.asmae-slider {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border-default);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.asmae-slider:active {
+  cursor: grabbing;
+}
+
+.asmae-slider:focus-visible {
+  outline: 2px solid var(--evidence-observed);
+  outline-offset: 2px;
+}
+
+/* ── Responsive ──────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  .marketing-grid-4 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .marketing-grid-3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .marketing-nav__links {
+    display: none;
+  }
+
+  .marketing-nav__mobile-toggle {
+    display: flex;
+  }
+
+  .marketing-nav__links--open {
+    display: flex;
+    flex-direction: column;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--surface-nav);
+    padding: 16px var(--section-padding-x);
+    border-bottom: 1px solid var(--border-default);
+    gap: 12px;
+  }
+
+  .marketing-grid-2,
+  .marketing-grid-3,
+  .marketing-grid-4 {
+    grid-template-columns: 1fr;
+  }
+
+  .marketing-hero__title {
+    font-size: clamp(1.8rem, 7vw, 2.8rem);
+  }
+
+  .marketing-hero__roles {
+    gap: 6px;
+  }
+
+  .marketing-role-chip {
+    font-size: 12px;
+    padding: 6px 12px;
+  }
+
+  .marketing-cta-primary,
+  .marketing-cta-secondary {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .marketing-hero__actions {
+    flex-direction: column;
+    align-items: stretch;
+    max-width: 320px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .marketing-hero {
+    padding-top: 100px;
+    padding-bottom: 48px;
+  }
+
+  .marketing-hero__roles {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+}
+
+/* ── Reduced motion ──────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Focus visible ───────────────────────────────────────── */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--field-green);
+  outline-offset: 2px;
+}
+
+/* ── Scrollbar ───────────────────────────────────────────── */
+.marketing-root {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(71, 85, 105, 0.2) transparent;
+}
+
+.marketing-root::-webkit-scrollbar {
+  width: 6px;
+}
+
+.marketing-root::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.marketing-root::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.2);
+  border-radius: 3px;
+}
+
+/* ── Utility ─────────────────────────────────────────────── */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ── R2 Spatial Engine & HUD Token Suite ───────────────────── */
+
+.r2-hero-section {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-top: 120px;
+  padding-bottom: 60px;
+}
+
+.r2-spatial-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+.r2-tag-observed {
+  background: rgba(34, 211, 238, 0.12);
+  border: 1px solid rgba(34, 211, 238, 0.3);
+  color: var(--evidence-observed);
+}
+
+.r2-tag-reconstructed {
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.3);
+  color: var(--agribrain-violet);
+}
+
+.r2-tag-field {
+  background: rgba(74, 222, 128, 0.12);
+  border: 1px solid rgba(74, 222, 128, 0.3);
+  color: var(--field-green);
+}
+
+.r2-edge-hud {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 18px;
+  border-radius: var(--radius-lg);
+  background: rgba(5, 10, 20, 0.88);
+  border: 1px solid var(--border-interactive);
+  backdrop-filter: blur(20px);
+  box-shadow: var(--shadow-elevated);
+}
+
+.r2-hud-metric {
+  display: flex;
+  flex-direction: column;
+}
+
+.r2-hud-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.r2-hud-val {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.r2-narrative-step {
+  padding: 28px;
+  border-radius: var(--radius-xl);
+  background: rgba(5, 10, 20, 0.75);
+  border: 1px solid var(--border-default);
+  backdrop-filter: blur(16px);
+  transition: border-color 0.3s var(--ease-out), background 0.3s var(--ease-out);
+}
+
+.r2-narrative-step:hover,
+.r2-narrative-step[aria-selected="true"] {
+  border-color: rgba(34, 211, 238, 0.3);
+  background: rgba(15, 23, 42, 0.85);
+}
+
+.r2-scale-sequence {
+  position: relative;
+  min-height: 300vh;
+}
+
+.r2-pinned-narrative {
+  position: sticky;
+  top: 140px;
+  max-width: 480px;
+}
+
+.r2-worldline-rail {
+  position: relative;
+  padding-left: 28px;
+  border-left: 2px solid var(--border-subtle);
+}
+
+.r2-sovereign-overlay {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-top: 32px;
+}

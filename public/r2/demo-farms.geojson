@@ -1,0 +1,39 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": { "id": "FARM-CLUSTER-1", "name": "Mitidja North Cluster" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [3.010, 36.498],
+            [3.025, 36.495],
+            [3.032, 36.505],
+            [3.020, 36.512],
+            [3.008, 36.508],
+            [3.010, 36.498]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": { "id": "FARM-CLUSTER-2", "name": "Blida East Cluster" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [3.035, 36.510],
+            [3.050, 36.508],
+            [3.058, 36.520],
+            [3.042, 36.524],
+            [3.032, 36.518],
+            [3.035, 36.510]
+          ]
+        ]
+      }
+    }
+  ]
+}

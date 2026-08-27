@@ -1,0 +1,12 @@
+{
+  "version": "asmae_surface_alias_v1",
+  "canonical_target": "ASMAE_POSTERIOR_CONCENTRATION",
+  "aliases": {
+    "ASMAE_CONFIDENCE": "ASMAE_POSTERIOR_CONCENTRATION",
+    "CONFIDENCE_ASMAE": "ASMAE_POSTERIOR_CONCENTRATION"
+  },
+  "deprecated_keys": [
+    "ASMAE_CONFIDENCE",
+    "CONFIDENCE_ASMAE"
+  ]
+}

@@ -93,7 +93,7 @@ def _deterministic_run_id(plot_id: str, l3_run_id: str, policy: Dict) -> str:
 
 def run_layer4_standalone(
     plot_id: str = "P1",
-    crop_type: str = "corn",
+    crop_type: str = "unknown",
     management_goal: str = "yield_max",
     irrigation_type: str = "rainfed",
     planting_date: str = "",
@@ -140,6 +140,10 @@ def run_layer4_standalone(
     slope_pct: float = 2.0,
     # v8.1: ASMAE Features from central accessor
     asmae_features: Optional[Dict[str, Any]] = None,
+    # Canonical Layer 2 crop/phenology authority and hashes.  When supplied,
+    # production prescriptions fail closed unless both species and stage are
+    # authorized; standalone research calls may omit it.
+    semantic_lineage: Optional[Dict[str, Any]] = None,
 ) -> NutrientIntelligenceOutput:
     """Run the full Layer 4 pipeline standalone.
 
@@ -147,6 +151,10 @@ def run_layer4_standalone(
     """
     constraints = constraints or {}
     soil_props = soil_props or {}
+    semantic_lineage = dict(semantic_lineage or {})
+    semantic_gate_active = bool(semantic_lineage)
+    species_allowed = bool(semantic_lineage.get("species_specific_allowed"))
+    stage_allowed = bool(semantic_lineage.get("stage_specific_allowed"))
 
     # v8.1: Calibrate LAI from ASMAE if available
     if asmae_features:
@@ -169,7 +177,7 @@ def run_layer4_standalone(
     soc_source = "user_lab" if "organic_matter_pct" in soil_props else "estimated"
     clay_pct = soil_props.get("clay_pct", 22.0)
     avg_temp = 22.0  # Default seasonal average
-    if daily_weather:
+    if daily_weather and (not semantic_gate_active or (species_allowed and stage_allowed)):
         temps = [w.get("t_max") for w in daily_weather if w.get("t_max") is not None]
         avg_temp = sum(temps) / len(temps) if temps else 22.0
 
@@ -211,10 +219,17 @@ def run_layer4_standalone(
     cdu_engine = CropDemandUptakeEngine()
     weather_len = len(daily_weather) if daily_weather else 0
     stg = stages or ["unknown"] * weather_len
-    demands = cdu_engine.compute_demand(
-        crop_type=crop_type, stages=stg,
-        management_goal=management_goal,
-    )
+    if semantic_gate_active:
+        demands = cdu_engine.compute_posterior_demand(
+            stages=stg,
+            semantic_lineage=semantic_lineage,
+            management_goal=management_goal,
+        )
+    else:
+        demands = cdu_engine.compute_demand(
+            crop_type=crop_type, stages=stg,
+            management_goal=management_goal,
+        )
 
     # 5. NOP (Proxies)
     nop_engine = NutrientObservationProxyEngine()
@@ -509,11 +524,53 @@ def run_layer4_standalone(
                 residual_credit=residual_credits.total_n_credit_kg_ha if nut == Nutrient.N else 0,
             )
 
+    # Downstream crop/phenology authority gate.  Nutrient states remain useful
+    # diagnostics, but crop-demand rates and timing cannot become executable
+    # prescriptions from a declaration, crop group, or UNKNOWN stage.
+    semantic_penalties = []
+    if semantic_gate_active and not species_allowed:
+        semantic_penalties.append({
+            "driver": "crop_identity",
+            "penalty": 0.40,
+            "reason": "species-specific crop demand not authorized",
+        })
+    if semantic_gate_active and not stage_allowed:
+        semantic_penalties.append({
+            "driver": "phenology",
+            "penalty": 0.35,
+            "reason": "stage-specific nutrient timing not authorized",
+        })
+    if semantic_penalties:
+        for state in states.values():
+            state.confidence = min(float(state.confidence), 0.30)
+            qualifier = (
+                "Generic/mixture crop demand only; species-specific deficiency "
+                "interpretation is unavailable until canonical crop and stage "
+                "authority are present."
+            )
+            state.notes = f"{state.notes} {qualifier}".strip()
+        for prescription in prescriptions:
+            prescription.is_allowed = False
+            for reason in (
+                "crop_identity_uncertain" if not species_allowed else None,
+                "phenology_unknown_or_uncertain" if not stage_allowed else None,
+            ):
+                if reason and reason not in prescription.blocked_reason:
+                    prescription.blocked_reason.append(reason)
+
     # 10. Quality metrics
     user_soil_available = any(k in soil_props for k in ("nitrogen_ppm", "phosphorus_ppm", "potassium_ppm"))
     quality = QualityMetricsL4(
-        decision_reliability=min(s.confidence for s in states.values()) if states else 0.0,
-        missing_drivers=[],
+        decision_reliability=(
+            (min(s.confidence for s in states.values()) if states else 0.0)
+            * (1.0 if not semantic_gate_active else (1.0 if species_allowed and stage_allowed else 0.4))
+        ),
+        missing_drivers=([
+            reason for reason, missing in (
+                ("CROP_SPECIES_AUTHORITY", not species_allowed),
+                ("PHENOLOGY_POSTERIOR", not stage_allowed),
+            ) if semantic_gate_active and missing
+        ]),
         data_completeness={
             "soil_analysis": 1.0 if user_soil_available else 0.0,
             "spectral": 1.0 if ndvi is not None and ndvi > 0 else 0.0,
@@ -523,15 +580,15 @@ def run_layer4_standalone(
             "previous_crop": 1.0 if previous_crop else 0.0,
             "vra_zones": 1.0 if zone_data else 0.0,
         },
-        penalties_applied=[],
+        penalties_applied=semantic_penalties,
         user_soil_analysis_available=user_soil_available,
         sar_tillage_available=tillage.detected,
     )
 
     # 11. Audit
     audit = AuditSnapshot(
-        features_snapshot=evidence,
-        policy_snapshot=constraints,
+        features_snapshot={**evidence, "crop_phenology_lineage": semantic_lineage},
+        policy_snapshot={**constraints, "crop_phenology_gate": semantic_lineage},
         model_versions=ENGINE_VERSIONS,
         nutrient_budgets={k.value: {
             "supply": v.total_supply, "demand": v.total_demand,
@@ -543,7 +600,10 @@ def run_layer4_standalone(
     )
 
     # 12. Run meta
-    run_id = _deterministic_run_id(plot_id, l3_run_id, constraints)
+    run_id = _deterministic_run_id(
+        plot_id, l3_run_id,
+        {**constraints, "crop_phenology_lineage": semantic_lineage},
+    )
     meta = RunMeta(
         run_id=run_id,
         parent_run_ids=ParentRunIds(l3=l3_run_id),
@@ -583,6 +643,11 @@ def run_layer4_standalone(
         dh_status = "degraded"
 
     if crop_type == "unknown":
+        dh_overall = min(dh_overall, 0.3)
+        dh_ceiling = min(dh_ceiling, 0.3)
+        dh_status = "degraded"
+
+    if semantic_penalties:
         dh_overall = min(dh_overall, 0.3)
         dh_ceiling = min(dh_ceiling, 0.3)
         dh_status = "degraded"
@@ -678,8 +743,12 @@ def run_layer4_nutrients(
     op_ctx = getattr(inputs, "operational_context", {}) or {}
     policy = getattr(inputs, "policy_snapshot", {}) or {}
 
-    raw_crop = crop_cfg.get("crop") or crop_cfg.get("crop_type") or "unknown"
-    crop_type = raw_crop.lower()
+    from services.agribrain.common.downstream_crop_context import resolve_downstream_crop_phenology
+
+    crop_semantics = resolve_downstream_crop_phenology(
+        inputs=inputs, l2_output=l2_output,
+    )
+    crop_type = crop_semantics.crop_for_species_engine.lower()
     planting_date = crop_cfg.get("planting_date", "")
     irrigation_type = op_ctx.get("irrigation_type", "rainfed")
     management_goal = op_ctx.get("management_goal", "yield_max")
@@ -882,7 +951,7 @@ def run_layer4_nutrients(
     if l2_output:
         pheno = getattr(l2_output, "phenology", None)
         if pheno:
-            sbd = getattr(pheno, "stage_by_day", [])
+            sbd = []  # canonical posterior below is the only stage authority
             if sbd:
                 stages = [s.value if hasattr(s, "value") else str(s) for s in sbd]
 
@@ -965,11 +1034,11 @@ def run_layer4_nutrients(
 
     # If no stages from L2, use crop config stage if available
     if not stages:
-        config_stage = crop_cfg.get("stage", crop_cfg.get("crop_stage"))
+        config_stage = crop_semantics.stage_for_discrete_engine
         if config_stage and config_stage.lower() != "unknown":
             n = max(len(daily_weather), 30) if daily_weather else 30
             stages = [config_stage.lower()] * n
-            print(f"[L4] Using crop config stage '{config_stage}' (no L2 phenology)")
+            print(f"[L4] Using canonical Layer 2 stage '{config_stage}'")
         else:
             n = max(len(daily_weather), 30) if daily_weather else 30
             stages = ["unknown"] * n
@@ -1009,5 +1078,18 @@ def run_layer4_nutrients(
         l2_biophysical=l2_biophysical if l2_biophysical else None,
         # v8.1: ASMAE features
         asmae_features=asmae_features,
+        semantic_lineage={
+            **crop_semantics.lineage(),
+            "selected_crop": crop_semantics.selected_crop,
+            "selected_group": crop_semantics.selected_group,
+            "phenology_stage": crop_semantics.phenology_stage,
+            "crop_mixture": dict(crop_semantics.crop_mixture),
+            "stage_posterior": dict(crop_semantics.stage_posterior),
+            "crop_stage_evidence_class": (
+                "species_stage_posterior" if crop_semantics.prescriptive_ready
+                else "group_mixture" if crop_semantics.crop_resolution == "group_only"
+                else "generic_bounded_mixture"
+            ),
+        },
     )
 

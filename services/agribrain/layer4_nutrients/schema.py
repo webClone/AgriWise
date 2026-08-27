@@ -300,6 +300,16 @@ class CropDemandOutput:
     # Peak daily demand (kg/ha/day)
     peak_daily_demand: Dict[str, float] = field(default_factory=dict)
 
+    # Canonical Layer 2 uncertainty transport.  Variance is expressed in
+    # (kg/ha)^2 and bounds in kg/ha for each nutrient.
+    demand_variance: Dict[str, float] = field(default_factory=dict)
+    demand_bounds: Dict[str, Tuple[float, float]] = field(default_factory=dict)
+    crop_stage_evidence_class: str = "legacy_scenario"
+    crop_posterior_hash: str = ""
+    phenology_posterior_hash: str = ""
+    hypothesis_weights: Dict[str, float] = field(default_factory=dict)
+    production_eligible: bool = False
+
 
 # ============================================================================
 # Nutrient Budget

@@ -323,16 +323,14 @@ def compute_hard_prohibitions(
     radiometric_pass_val = 1.0 if asmae_diag.get("radiometric_overall_pass") is True else 0.0
     retro_score = float(asmae_diag.get("retro_mean_score") or 0.0)
     bma_disagreement = float(asmae_diag.get("bma_mean_disagreement") or 0.0)
-    confidence_item = next((e for e in evidence if e.variable == "ASMAE_CONFIDENCE"), None)
-    confidence_val = float(confidence_item.value) if confidence_item else 0.5
     source_reality_score = 1.0 if scene_mode == "real_raster" else (0.5 if scene_mode == "degraded_mean_only" else 0.0)
     
+    # Note: Uncalibrated posterior concentration is excluded from trust score calculation
     trust_score = (
-        0.25 * scientific_pass_val
-        + 0.20 * radiometric_pass_val
-        + 0.20 * retro_score
-        + 0.15 * (1.0 - bma_disagreement)
-        + 0.10 * confidence_val
+        0.30 * scientific_pass_val
+        + 0.25 * radiometric_pass_val
+        + 0.25 * retro_score
+        + 0.10 * (1.0 - bma_disagreement)
         + 0.10 * source_reality_score
     )
     results["no_low_confidence_asmae_to_layer2"] = not (trust_score < 0.25 and any_state_update)

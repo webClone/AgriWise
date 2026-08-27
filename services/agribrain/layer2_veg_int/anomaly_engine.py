@@ -323,7 +323,9 @@ class TemporalAnomalyEngine:
         if n < 10:
             return [0.0] * n
 
-        # Build feature matrix
+        # Build feature matrix with explicit missingness indicators.
+        # P0 FIX: Missing features get indicator flags instead of zeros,
+        # which would bias the isolation forest toward false anomalies.
         features = []
         for i in range(n):
             obs = observed_ndvi[i] if observed_ndvi[i] is not None else 0.0
@@ -335,16 +337,25 @@ class TemporalAnomalyEngine:
             else:
                 vel = 0.0
 
+            # NDWI: use actual value or median of observed NDWI as neutral fill
             ndwi = 0.0
+            ndwi_missing = 1.0  # missingness indicator
             if ndwi_series and i < len(ndwi_series) and ndwi_series[i] is not None:
                 ndwi = ndwi_series[i]
+                ndwi_missing = 0.0
 
+            # P0 FIX: SAR cross-pol ratio in dB domain.
+            # VH and VV are stored as backscatter in dB. The cross-pol ratio
+            # is VH/VV in linear power, which equals VH_dB - VV_dB in log domain.
+            # The old code computed VH_dB / VV_dB which is dimensionally wrong.
             sar_ratio = 0.0
+            sar_missing = 1.0
             if sar_vh and sar_vv and i < len(sar_vh) and i < len(sar_vv):
-                if sar_vh[i] is not None and sar_vv[i] is not None and sar_vv[i] != 0:
-                    sar_ratio = sar_vh[i] / (abs(sar_vv[i]) + 1e-6)
+                if sar_vh[i] is not None and sar_vv[i] is not None:
+                    sar_ratio = sar_vh[i] - sar_vv[i]  # dB difference = linear ratio
+                    sar_missing = 0.0
 
-            features.append([residual, vel, ndwi, sar_ratio])
+            features.append([residual, vel, ndwi, sar_ratio, ndwi_missing, sar_missing])
 
         rng = random.Random(42)
         avg_path_lengths = [0.0] * n
@@ -456,18 +467,32 @@ class TemporalAnomalyEngine:
         attr = AttributionEvidence()
 
         # 1. Water stress: rain analysis (7d, 14d, 30d windows)
-        rain_7d, rain_14d, rain_30d = 0.0, 0.0, 0.0
+        # P0 FIX: When rainfall data is missing (None/absent), we MUST NOT
+        # assume rain=0 and trigger drought attribution. Missing data ≠ no rain.
+        # Rainfall thresholds only fire when we have actual observations.
+        rain_7d, rain_14d, rain_30d = None, None, None
+        rainfall_available = False
         if rainfall:
-            rain_7d = sum(filter(None, rainfall[max(0, start-7):end]))
-            rain_14d = sum(filter(None, rainfall[max(0, start-14):end]))
-            rain_30d = sum(filter(None, rainfall[max(0, start-30):end]))
+            rain_window_7 = [v for v in rainfall[max(0, start-7):end] if v is not None]
+            rain_window_14 = [v for v in rainfall[max(0, start-14):end] if v is not None]
+            rain_window_30 = [v for v in rainfall[max(0, start-30):end] if v is not None]
+            if rain_window_7:
+                rain_7d = sum(rain_window_7)
+                rainfall_available = True
+            if rain_window_14:
+                rain_14d = sum(rain_window_14)
+                rainfall_available = True
+            if rain_window_30:
+                rain_30d = sum(rain_window_30)
+                rainfall_available = True
 
-        if rain_30d < 10.0:
-            attr.water_stress = 0.85
-        elif rain_14d < 5.0:
-            attr.water_stress = 0.65
-        elif rain_7d < 2.0:
-            attr.water_stress = 0.45
+        if rainfall_available:
+            if rain_30d is not None and rain_30d < 10.0:
+                attr.water_stress = 0.85
+            elif rain_14d is not None and rain_14d < 5.0:
+                attr.water_stress = 0.65
+            elif rain_7d is not None and rain_7d < 2.0:
+                attr.water_stress = 0.45
 
         # 2. NDWI decline without NDVI drop → early water stress
         if ndwi_series:
@@ -479,9 +504,9 @@ class TemporalAnomalyEngine:
                     attr.water_stress = max(attr.water_stress, min(1.0, ndwi_drop * 5))
 
         # 3. Excess moisture: high rainfall + NDWI spike
-        if rain_14d > 80.0:
+        if rain_14d is not None and rain_14d > 80.0:
             attr.excess_moisture = 0.70
-        elif rain_7d > 50.0:
+        elif rain_7d is not None and rain_7d > 50.0:
             attr.excess_moisture = 0.50
 
         # 4. Heat stress: temperature above crop optimum
@@ -509,7 +534,7 @@ class TemporalAnomalyEngine:
                 elif coldest < crop_temp_min:
                     attr.frost_stress = 0.3
 
-        # 6. Nutrient deficiency: EVI drops faster than NDVI
+        # 6. Canopy/Chlorophyll anomaly: EVI drops faster than NDVI
         if evi_z:
             mean_evi_z = statistics.mean(evi_z[start:end]) if evi_z[start:end] else 0.0
             if abs(mean_evi_z) > abs(mean_z) * 1.3 and mean_evi_z < -1.5:
@@ -525,20 +550,22 @@ class TemporalAnomalyEngine:
 
             if vv_before and vv_during:
                 delta_vv = statistics.mean(vv_during) - statistics.mean(vv_before)
-                if delta_vv > 0.5:
-                    attr.structural_damage = min(1.0, delta_vv * 0.8)
+                if delta_vv > 1.5:
+                    attr.structural_damage = min(1.0, (delta_vv - 1.0) * 0.4)
 
             if vh_before and vh_during:
                 delta_vh = statistics.mean(vh_during) - statistics.mean(vh_before)
-                if abs(delta_vh) > 0.3:
-                    attr.structural_damage = max(attr.structural_damage, min(1.0, abs(delta_vh) * 0.6))
+                if abs(delta_vh) > 1.0:
+                    attr.structural_damage = max(attr.structural_damage, min(1.0, (abs(delta_vh) - 0.5) * 0.3))
 
-        # 8. Disease/pest: residual — no abiotic explanation
+        # 8. Unresolved anomaly: Absence of abiotic cause defaults strictly to UNRESOLVED.
+        # Biotic / disease causes require independent scouting or pathology evidence.
         abiotic_max = max(attr.water_stress, attr.excess_moisture,
                          attr.heat_stress, attr.frost_stress,
                          attr.nutrient_deficiency, attr.structural_damage)
-        if abiotic_max < 0.30 and severity > 0.3:
-            attr.disease_or_pest = min(1.0, severity * 1.5)
+        if abiotic_max < 0.30:
+            attr.unresolved_anomaly = severity
+            attr.disease_or_pest = 0.0
 
         # Determine primary cause
         causes = {
@@ -546,16 +573,15 @@ class TemporalAnomalyEngine:
             "EXCESS_MOISTURE": attr.excess_moisture,
             "HEAT_STRESS": attr.heat_stress,
             "FROST_DAMAGE": attr.frost_stress,
-            "NUTRIENT_DEFICIENCY": attr.nutrient_deficiency,
+            "CANOPY_CHLOROPHYLL_ANOMALY": attr.nutrient_deficiency,
             "STRUCTURAL_DAMAGE": attr.structural_damage,
-            "POSSIBLE_DISEASE_OR_PEST": attr.disease_or_pest,
         }
         if is_positive:
             causes = {"POSITIVE_ANOMALY": 0.8}
 
         attr.primary_cause = max(causes, key=causes.get)
-        if max(causes.values()) < 0.20:
-            attr.primary_cause = "GROWTH_STALL" if not is_positive else "POSITIVE_ANOMALY"
+        if abiotic_max < 0.30 or max(causes.values()) < 0.20:
+            attr.primary_cause = "UNRESOLVED" if not is_positive else "POSITIVE_ANOMALY"
 
         # ─── Anomaly Type ───
         if is_positive:
@@ -570,7 +596,7 @@ class TemporalAnomalyEngine:
             a_type = AnomalyType.NUTRIENT_DEFICIENCY
         elif attr.excess_moisture > 0.5:
             a_type = AnomalyType.EXCESS_MOISTURE
-        elif attr.structural_damage > 0.5 and rain_7d < 5:
+        elif attr.structural_damage > 0.5 and rain_7d is not None and rain_7d < 5:
             a_type = AnomalyType.WIND_DAMAGE
         elif abs(mean_z) < 3.0:
             a_type = AnomalyType.STALL

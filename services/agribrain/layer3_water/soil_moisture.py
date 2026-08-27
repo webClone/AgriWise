@@ -3,6 +3,7 @@ Layer 3.2: Soil Moisture Modeing Engine (Bucket Model)
 Tracks root-zone water storage (S_t).
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 from typing import Dict, Any, List
@@ -10,6 +11,12 @@ from typing import Dict, Any, List
 class SoilMoistureModel:
     
     def __init__(self):
+        warnings.warn(
+            "SoilMoistureModel is deprecated as of Layer 3.0. "
+            "Use layer3_water.soil.LayeredWaterBalanceEngine for canonical water balance.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # Default Soil Properties (Volumetric Water Content)
         # Field Capacity (fc), Wilting Point (wp)
         self.soil_defaults = {

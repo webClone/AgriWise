@@ -93,13 +93,19 @@ class PlotWorldlineService:
     def _event_path(self, plot_id: str, event_id: str) -> Path:
         return self._canonical._event_path(plot_id, event_id)
 
-    def load_head(self, plot_id: str) -> Dict[str, Any]:
+    def load_head(
+        self, plot_id: str, tenant_id: str = "default_tenant",
+        namespace: str = "default",
+    ) -> Dict[str, Any]:
         """Delegate head read to canonical service."""
-        return self._canonical.load_head(plot_id)
+        return self._canonical.load_head(plot_id, tenant_id, namespace)
 
-    def load_event(self, plot_id: str, event_id: str) -> Dict[str, Any]:
+    def load_event(
+        self, plot_id: str, event_id: str,
+        tenant_id: str = "default_tenant", namespace: str = "default",
+    ) -> Dict[str, Any]:
         """Delegate event read to canonical service."""
-        return self._canonical.load_event(plot_id, event_id)
+        return self._canonical.load_event(plot_id, event_id, tenant_id, namespace)
 
     def commit_event(
         self,
@@ -161,11 +167,17 @@ class PlotWorldlineService:
             namespace=namespace,
         )
 
-    def latest_payload(self, plot_id: str, event_type: str) -> Dict[str, Any]:
+    def latest_payload(
+        self, plot_id: str, event_type: str,
+        tenant_id: str = "default_tenant", namespace: str = "default",
+    ) -> Dict[str, Any]:
         """Retrieve latest payload for a specific event_type."""
-        head = self.load_head(plot_id)
+        head = self.load_head(plot_id, tenant_id, namespace)
         event_id = (head.get("latest_by_type") or {}).get(event_type)
-        event = self.load_event(plot_id, str(event_id)) if event_id else {}
+        event = (
+            self.load_event(plot_id, str(event_id), tenant_id, namespace)
+            if event_id else {}
+        )
         payload = event.get("payload")
         if not isinstance(payload, dict):
             return {}
@@ -180,7 +192,11 @@ class PlotWorldlineService:
     ) -> Dict[str, Any]:
         """Hydrate missing live inputs from one geometry-compatible worldline."""
         geometry_hash = str(context.get("geometry_hash", "") or "")
-        archive_event = self.latest_payload(plot_id, "ARCHIVE_POSTERIOR_VALIDATED")
+        tenant_id = str(context.get("tenant_id") or "default_tenant")
+        namespace = str(context.get("worldline_namespace") or "default")
+        archive_event = self.latest_payload(
+            plot_id, "ARCHIVE_POSTERIOR_VALIDATED", tenant_id, namespace
+        )
         archive = archive_event.get("archive_posterior")
         if (
             not context.get("archive_posterior")
@@ -204,7 +220,9 @@ class PlotWorldlineService:
                 "_worldline_event_id"
             )
 
-        crop_payload = self.latest_payload(plot_id, "CROP_POSTERIOR")
+        crop_payload = self.latest_payload(
+            plot_id, "CROP_POSTERIOR", tenant_id, namespace
+        )
         if crop_payload and not context.get("crop_posterior"):
             crop_posterior = crop_payload.get("crop_posterior", {})
             context["crop_posterior"] = crop_posterior
@@ -216,7 +234,9 @@ class PlotWorldlineService:
             context["crop_lineage_id"] = crop_posterior.get(
                 "lineage_id"
             )
-        context["plot_worldline_head"] = self.load_head(plot_id)
+        context["plot_worldline_head"] = self.load_head(
+            plot_id, tenant_id, namespace
+        )
         return context
 
     def commit_asmae_result(
@@ -225,6 +245,8 @@ class PlotWorldlineService:
         *,
         geometry_hash: str,
         snapshot_ref: str = "",
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
     ) -> Dict[str, Any]:
         artifact = dict(result.get("plot_state_artifact") or {})
         if not artifact:
@@ -253,6 +275,8 @@ class PlotWorldlineService:
             effective_at=artifact_time,
             observation_or_valid_time=artifact_time,
             authority=artifact_authority,
+            tenant_id=tenant_id,
+            namespace=namespace,
             payload={
                 "plot_state_artifact": artifact,
                 "output_content_hash": result.get("content_hash"),
@@ -269,6 +293,8 @@ class PlotWorldlineService:
         plot_id: str,
         geometry_hash: str,
         reason: str,
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
     ) -> Dict[str, Any]:
         event_time = datetime.now(timezone.utc)
         return self.commit_event(
@@ -278,6 +304,8 @@ class PlotWorldlineService:
             authority="DIAGNOSTIC",
             effective_at=event_time,
             observation_or_valid_time=event_time,
+            tenant_id=tenant_id,
+            namespace=namespace,
             payload={
                 "status": "needs_observations",
                 "reason": reason,
@@ -292,8 +320,16 @@ class PlotWorldlineService:
         plot_id: str,
         geometry_hash: str,
         context: Mapping[str, Any],
+        tenant_id: str = "",
+        namespace: str = "",
     ) -> Dict[str, Any]:
         """Run historical filter from admitted real archive records."""
+        tenant_id = str(
+            tenant_id or context.get("tenant_id") or "default_tenant"
+        )
+        namespace = str(
+            namespace or context.get("worldline_namespace") or "default"
+        )
         raw_records = (
             context.get("historical_scene_records")
             or context.get("archive_scene_records")
@@ -305,6 +341,8 @@ class PlotWorldlineService:
                 plot_id=plot_id,
                 geometry_hash=geometry_hash,
                 reason="no_admitted_historical_scene_records",
+                tenant_id=tenant_id,
+                namespace=namespace,
             )
             return {"status": "acquisition_required", "event_id": event.get("event_id")}
 
@@ -329,6 +367,8 @@ class PlotWorldlineService:
                 plot_id=plot_id,
                 geometry_hash=geometry_hash,
                 reason="fewer_than_three_content_distinct_admitted_scenes",
+                tenant_id=tenant_id,
+                namespace=namespace,
             )
             return {
                 "status": "insufficient_archive_evidence",
@@ -445,6 +485,8 @@ class PlotWorldlineService:
                 "last_update_date"
             ),
             authority="RETROVALIDATED" if validation_pass else "DIAGNOSTIC",
+            tenant_id=tenant_id,
+            namespace=namespace,
             parent_event_ids=[
                 str(value) for value in [
                     context.get("archive_trigger_event_id")

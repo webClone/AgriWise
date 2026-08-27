@@ -140,7 +140,11 @@ class QABot:
     def _compute_biophysical_metrics(self, context: Dict[str, Any]) -> Dict[str, Any]:
         plot_data = context.get("plot", {}) or {}
         crop = plot_data.get("crop", "Wheat")
-        stage = plot_data.get("stage", "Vegetative")
+        stage = (
+            plot_data.get("stage", "UNKNOWN")
+            if plot_data.get("phenology_receipt_valid") is True
+            else "UNKNOWN"
+        )
         
         sensors = context.get("sensors", {}) or {}
         sm_val = sensors.get("soil_moisture", sensors.get("soil_moisture_pct", 32.0))

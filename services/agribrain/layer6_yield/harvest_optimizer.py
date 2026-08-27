@@ -13,16 +13,36 @@ class HarvestOptimizer:
                         current_date: pd.Timestamp,
                         phenology_stage: str,
                         forecast_weather: List[Dict],
-                        disease_risk_prob: float) -> Dict[str, Any]:
+                        disease_risk_prob: float,
+                        semantic_context: Any = None) -> Dict[str, Any]:
         """
         Score next 7 days for harvest suitability.
         Score = w1*Readiness + w2*Weather + w3*DiseasePenalty
         """
-        if "maturity" not in phenology_stage.lower() and "fruiter" not in phenology_stage.lower():
+        stage_allowed = bool(
+            semantic_context is not None
+            and getattr(semantic_context, "stage_specific_allowed", False)
+            and getattr(semantic_context, "phenology_posterior_hash", "")
+        )
+        canonical_stage = (
+            str(getattr(semantic_context, "phenology_stage", "UNKNOWN"))
+            if stage_allowed else "UNKNOWN"
+        )
+        if not stage_allowed:
+             return {
+                "action": "verify_stage",
+                "reason": "Canonical Layer 2 phenology receipt is missing or uncertain",
+                "window": None,
+                "phenology_posterior_hash": "",
+                "production_eligible": False,
+             }
+        if "maturity" not in canonical_stage.lower() and "fruiter" not in canonical_stage.lower():
              return {
                 "action": "wait",
-                "reason": f"Crop not mature ({phenology_stage})",
-                "window": None
+                "reason": f"Canonical posterior is not mature ({canonical_stage})",
+                "window": None,
+                "phenology_posterior_hash": semantic_context.phenology_posterior_hash,
+                "production_eligible": False,
             }
             
         # Evaluate next 5 days
@@ -68,13 +88,17 @@ class HarvestOptimizer:
                 "window_end": (best_day + timedelta(days=2)).strftime("%Y-%m-%d"),
                 "quality_prediction": "High" if max_score > 80 else "Medium",
                 "risk_notes": ["Rain forecast matches harvest" if max_score < 60 else "Good conditions"],
-                "daily_scores": scores
+                "daily_scores": scores,
+                "phenology_posterior_hash": semantic_context.phenology_posterior_hash,
+                "production_eligible": True,
             }
         else:
             return {
                 "action": "hold",
                 "reason": "No suitable weather window in next 7 days",
-                "window": None
+                "window": None,
+                "phenology_posterior_hash": semantic_context.phenology_posterior_hash,
+                "production_eligible": True,
             }
 
 # Singleton

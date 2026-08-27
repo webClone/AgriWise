@@ -103,6 +103,12 @@ ZONE_CONFIGS = {
         "zone_type": ZoneType.DISEASE_RISK,
         "family": ZoneFamily.AGRONOMIC,
     },
+    SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: {
+        "threshold": 0.6,
+        "compare": "lt",
+        "zone_type": ZoneType.LOW_CONFIDENCE,
+        "family": ZoneFamily.TRUST,
+    },
     SurfaceType.ASMAE_CONFIDENCE: {
         "threshold": 0.6,
         "compare": "lt",
@@ -133,23 +139,20 @@ ZONE_CONFIGS = {
 def _compute_adaptive_threshold(surface: 'SurfaceArtifact', H: int, W: int) -> float:
     """Compute an adaptive vegetation anomaly threshold from field deviation statistics.
 
-    Strategy: use mean - 1.2*std as the threshold, floored at -0.08.
-    This means uniform orchards (tight std) get a lower bar, while
-    high-variance fields still need meaningful negative deviation.
+    Returns float threshold, or static default if values are uniform/invalid.
     """
-    vals = []
-    for r in range(H):
-        for c in range(W):
-            v = surface.values[r][c]
-            if v is not None and not (isinstance(v, float) and math.isnan(v)):
-                vals.append(v)
-    if len(vals) < 4:
-        return -0.08  # Minimum floor
-    mean_v = sum(vals) / len(vals)
-    std_v = math.sqrt(sum((x - mean_v) ** 2 for x in vals) / len(vals))
-    # For mean-centered deviation: mean ~0, so threshold = -1.2*std, floor -0.08
-    adaptive = -(1.2 * std_v)
-    return max(adaptive, -0.08)  # Never easier than -0.08
+    vals = [v for row in surface.values for v in row if v is not None]
+    if not vals or len(vals) < 4:
+        return 0.15  # Fallback to static threshold
+    import numpy as np
+    arr = np.array(vals)
+    std = float(np.std(arr))
+    if std < 0.01:
+        return 0.15  # Near-uniform field — fallback to static
+    # Threshold at 1.0 standard deviation below field mean
+    adaptive = float(np.mean(arr) - 1.0 * std)
+    # Clamp to reasonable bounds for NDVI deviation
+    return max(0.08, min(0.35, adaptive))
 
 MIN_ZONE_CELLS = 2  # Minimum cells to form a zone
 MIN_ZONE_CONFIDENCE = 0.30  # Floor for zone survival (was 0.45 — too aggressive for real raster data)
@@ -158,15 +161,16 @@ MIN_ZONE_CONFIDENCE = 0.30  # Floor for zone survival (was 0.45 — too aggressi
 # ── Confidence scoring (WS9) ──────────────────────────────────────────────────
 
 def _count_edge_cells(cells: List, surface: SurfaceArtifact) -> int:
-    """Count cells that have at least one None neighbor (boundary/edge cells)."""
+    """Count how many cells in a zone touch the boundary of valid data."""
     H = len(surface.values)
     W = len(surface.values[0]) if H > 0 else 0
-    cell_set = set((r, c) for r, c in cells)
+    cell_set = set(cells)
     edge_count = 0
     for r, c in cells:
+        # Check 4-neighbors
+        is_edge = False
         for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             nr, nc = r + dr, c + dc
-            # Neighbour is outside grid OR a null cell → this is an edge cell
             if not (0 <= nr < H and 0 <= nc < W):
                 edge_count += 1
                 break
@@ -211,22 +215,20 @@ def _compute_zone_confidence(
             base = sum(conf_vals) / len(conf_vals)
 
     # Size factor: scaled dynamically by plot size
-    # Softened for small fields (< 1000 cells) where 10m pixels produce
-    # naturally small but meaningful anomaly clusters.
     if denom and denom > 0:
         if denom < 1000:
             # Small field: a zone only needs ~1% or 3 cells minimum
             expected_cells = max(3, int(denom * 0.01))
         else:
-            expected_cells = max(4, int(denom * 0.02))
+            expected_cells = 20
         size_factor = min(1.0, n / expected_cells)
     else:
-        size_factor = min(1.0, n / 6.0)
+        size_factor = min(1.0, n / 20)
 
-    if size_factor < 0.7:
-        reasons.append("reduced by small zone size relative to field")
+    if size_factor < 0.5:
+        reasons.append("reduced by small zone size")
 
-    # Sigma factor
+    # Uncertainty factor from SIGMA surface
     sigma_factor = 1.0
     if sigma_surface is not None:
         sigma_vals = [
@@ -268,16 +270,7 @@ def extract_zones(
     W: int,
     field_valid_cells: Optional[int] = None,
 ) -> Tuple[List[ZoneArtifact], Dict[str, str]]:
-    """Extract zones from surfaces using thresholding + connected components.
-
-    Parameters
-    ----------
-    surfaces          : list of SurfaceArtifact produced by the pipeline
-    H, W              : raster grid dimensions
-    field_valid_cells : count of non-null cells inside the actual field polygon.
-                       If provided, used as area denominator instead of H*W so
-                       that area_pct reflects the true field footprint, not bbox.
-    """
+    """Extract zones from surfaces using thresholding + connected components."""
     zones = []
     zone_state_by_surface: Dict[str, str] = {}
 
@@ -290,12 +283,16 @@ def extract_zones(
     denom = field_valid_cells if (field_valid_cells is not None and field_valid_cells > 0) else (H * W)
 
     for surface in surfaces:
+        # P0-D: Filter out prior-constrained or ineligible surfaces from operational zone extraction
+        prov = getattr(surface, "provenance", {}) or {}
+        if prov.get("zone_statistics_eligible") is False or getattr(surface, "zone_statistics_eligible", True) is False:
+            continue
+
         config = ZONE_CONFIGS.get(surface.semantic_type)
         if config is None:
             continue
 
         # Skip zone extraction for placeholder ASMAE surfaces
-        prov = getattr(surface, "provenance", {}) or {}
         if surface.semantic_type.value.startswith("ASMAE_"):
             if not prov.get("has_spatial_grid", True):
                 continue

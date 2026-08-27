@@ -23,9 +23,19 @@ export function buildRenderViewIdentity(input: {
   sourcePolicy: SourcePolicy;
   mode: string;
   surfaceType?: string | null;
+  surfaceId?: string | null;
   overlaySurfaceType?: string | null;
+  overlaySurfaceId?: string | null;
   overlayEnabled: boolean;
 }): string;
+
+export function hasCompleteCommittedRenderIdentity(input: {
+  publicationId?: string | null;
+  snapshotId?: string | null;
+  surfaceInventoryHash?: string | null;
+  renderAuthorizationVersion?: string | null;
+  surfaceId?: string | null;
+}): boolean;
 
 export function shouldRetainLastKnownGood<
   T extends { plot_id: string; surfaces: unknown[] },
@@ -36,6 +46,17 @@ export function isLatestLayer10Request(
   candidateSequence: number,
   aborted?: boolean,
 ): boolean;
+
+export function classifyCanonicalHeadValidation(
+  validation?: Record<string, unknown> | null,
+): "valid" | "stale" | "corrupt";
+
+export function resolveCompoundRenderAttribution(input: {
+  baseRendered: boolean;
+  overlayRendered: boolean;
+  baseSourceLabel: string;
+  baseAuthorityLabel: string;
+}): { sourceLabel: string; authorityLabel: string };
 
 export function browserRenderReceiptSignature(
   receipt?: BrowserRenderReceipt | null,

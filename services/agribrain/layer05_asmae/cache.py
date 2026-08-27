@@ -49,7 +49,16 @@ except ImportError:
                 raise ImportError("NumPy is required for ASMAE raster artifacts")
             return np.load(file, allow_pickle=False, fix_imports=fix_imports, encoding=encoding)
 
-from .config import ASMAE_VERSION
+from .config import (
+    ASMAE_VERSION,
+    ENSEMBLE_SIZE_CERTIFICATION,
+    ENSEMBLE_SIZE_LARGE_PLOT,
+    ENSEMBLE_SIZE_OFFLINE,
+    ENSEMBLE_SIZE_SHADOW,
+    ENSEMBLE_SIZE_STANDARD,
+    LARGE_PLOT_MICROZONE_THRESHOLD,
+    LOCALIZATION_HALF_WIDTH,
+)
 from .schema import ASMAEInput
 
 ASMAE_PROOF_CONTRACT_VERSION = "v1_bc10_17"
@@ -60,6 +69,7 @@ ASMAE_WEATHER_FEATURE_VERSION = "v1_variable_completeness"
 ASMAE_HASH_SCHEMA_VERSION = "v2_exact_dtype_complete_authority"
 ASMAE_CACHE_SCHEMA_VERSION = "v10_atomic_manifest_authority"
 ASMAE_CACHE_COMMIT_SCHEMA_VERSION = "v1_atomic_npz_json"
+ENSEMBLE_POLICY_CONTRACT_VERSION = "asmae_ensemble_policy_v1"
 
 HAS_NUMPY = np is not None
 HAS_SCIPY = sp is not None
@@ -266,6 +276,8 @@ def compute_source_hash(inp: ASMAEInput) -> str:
     summary. This covers future admission, validation, provenance, and reality
     fields without relying on a selective allow-list.
     """
+    from .artifact_identity import canonicalize_artifact_references
+
     scene_contracts: List[Dict[str, Any]] = []
     if isinstance(inp.layer0_source_packages, dict):
         packages = sorted(inp.layer0_source_packages.items(), key=lambda pair: str(pair[0]))
@@ -277,20 +289,28 @@ def compute_source_hash(inp: ASMAEInput) -> str:
                     "scene_index": index,
                     "scene_id": str(_scene_field(scene, "scene_id", "")),
                     "authority_contract_hash": stable_value_hash(_scene_authority_contract(scene)),
-                    "complete_scene_hash": stable_value_hash(scene),
+                    "complete_scene_hash": stable_value_hash(
+                        canonicalize_artifact_references(scene)
+                    ),
                 })
 
     input_contract = {
-        field.name: stable_value_hash(getattr(inp, field.name))
+        field.name: stable_value_hash(
+            canonicalize_artifact_references(getattr(inp, field.name))
+        )
         for field in fields(inp)
         if field.name != "run_id"
     }
     payload = {
         "hash_schema_version": ASMAE_HASH_SCHEMA_VERSION,
         "input_contract": input_contract,
-        "layer0_source_packages_hash": stable_value_hash(inp.layer0_source_packages),
+        "layer0_source_packages_hash": stable_value_hash(
+            canonicalize_artifact_references(inp.layer0_source_packages)
+        ),
         "scene_contracts": scene_contracts,
-        "raster_composites_hash": stable_value_hash(inp.raster_composites),
+        "raster_composites_hash": stable_value_hash(
+            canonicalize_artifact_references(inp.raster_composites)
+        ),
     }
     return hashlib.sha256(_json_bytes(payload)).hexdigest()
 
@@ -304,6 +324,16 @@ def get_asmae_cache_key(inp: ASMAEInput) -> str:
         "model_version": ASMAE_VERSION,
         "cache_schema_version": ASMAE_CACHE_SCHEMA_VERSION,
         "hash_schema_version": ASMAE_HASH_SCHEMA_VERSION,
+        "ensemble_policy_contract_version": ENSEMBLE_POLICY_CONTRACT_VERSION,
+        "ensemble_policy": {
+            "shadow": ENSEMBLE_SIZE_SHADOW,
+            "standard": ENSEMBLE_SIZE_STANDARD,
+            "certification": ENSEMBLE_SIZE_CERTIFICATION,
+            "large_plot": ENSEMBLE_SIZE_LARGE_PLOT,
+            "offline": ENSEMBLE_SIZE_OFFLINE,
+            "large_plot_microzone_threshold": LARGE_PLOT_MICROZONE_THRESHOLD,
+            "localization_half_width": LOCALIZATION_HALF_WIDTH,
+        },
         "source_hash": source_hash,
         "mode": inp.mode,
         "source_policy": inp.source_policy or "satellite",
@@ -318,6 +348,11 @@ def get_asmae_cache_key(inp: ASMAEInput) -> str:
         "archive_posterior_hash": stable_value_hash(inp.archive_posterior),
         "soil_context_hash": stable_value_hash(inp.soil_context),
         "coarse_prior_hash": stable_value_hash(inp.coarse_layer_outputs),
+        "crop_context_hash": stable_value_hash(inp.crop_context),
+        "crop_posterior_hash": stable_value_hash(inp.crop_posterior),
+        "crop_posterior_lineage": inp.crop_posterior_lineage,
+        "crop_evidence_ledger_hash": inp.crop_evidence_ledger_hash,
+        "crop_influence_manifest_hash": inp.crop_influence_manifest_hash,
         "permission_contract_version": inp.permission_contract_version,
         "authority_phase": inp.authority_phase,
         "rollout_state": inp.rollout_state,
@@ -608,6 +643,17 @@ def serialize_and_cache_asmae(inp: ASMAEInput, output_dict: Dict[str, Any]) -> b
     JSON is the final commit point. A raster write or validation failure leaves
     no new completed-looking JSON entry.
     """
+    diagnostics = output_dict.get("diagnostics") or {}
+    reason_str = str(output_dict.get("reason") or "")
+    if (
+        diagnostics.get("chain_integrity_error")
+        or output_dict.get("result_status") in ("failed_spatial_fallback", "failed", "unavailable")
+        or "chain_integrity" in reason_str
+        or "timeout" in reason_str
+    ):
+        logger.warning("Refusing to commit failed/fallback ASMAE spatial result to canonical cache for %s", inp.plot_id)
+        return False
+
     cache_key = get_asmae_cache_key(inp)
     policy = inp.source_policy or "satellite"
     artifact_key = f"{cache_key}_{policy}"
@@ -673,6 +719,16 @@ def deserialize_cached_asmae(inp: ASMAEInput) -> Optional[Dict[str, Any]]:
                 output_dict = json.load(handle)
             if not isinstance(output_dict, dict):
                 raise ValueError("cache JSON root is not an object")
+
+            diagnostics = output_dict.get("diagnostics") or {}
+            reason_str = str(output_dict.get("reason") or "")
+            if (
+                diagnostics.get("chain_integrity_error")
+                or output_dict.get("result_status") in ("failed_spatial_fallback", "failed", "unavailable")
+                or "chain_integrity" in reason_str
+                or "timeout" in reason_str
+            ):
+                raise ValueError("cached ASMAE payload represents a failed/fallback spatial execution")
 
             commit = output_dict.get("_asmae_cache_commit")
             if not isinstance(commit, dict):

@@ -8,7 +8,7 @@ using a Crank-Nicolson finite-difference scheme.
 
 from typing import Any, Dict, List
 import math
-from layer6_exec.schema import Layer6Input, InterventionCandidate, InterventionDomain
+from layer6_exec.schema import Layer6Input, InterventionCandidate, InterventionDomain, UpstreamDigest
 
 def safe_getattr(obj: Any, attr: str, default: Any) -> Any:
     if obj is None:
@@ -20,7 +20,11 @@ def safe_getattr(obj: Any, attr: str, default: Any) -> Any:
         return default
     return val
 
-def run_nitrogen_leaching(inputs: Layer6Input, candidates: List[InterventionCandidate]) -> Dict[str, float]:
+def run_nitrogen_leaching(
+    inputs: Layer6Input,
+    candidates: List[InterventionCandidate],
+    digest: UpstreamDigest = None,
+) -> Dict[str, Any]:
     # 1. Resolve L1 Precipitation Forecast & History
     precip_history = 0.0
     precip_forecast = 0.0
@@ -43,10 +47,11 @@ def run_nitrogen_leaching(inputs: Layer6Input, candidates: List[InterventionCand
 
     # 2. Resolve L2 Crop Transpiration Demand
     ndvi = 0.5
-    pheno_stage = "MID"
+    pheno_stage = "UNKNOWN"
     if inputs.veg_int:
         ndvi = safe_getattr(inputs.veg_int, "ndvi_current", 0.5)
-        pheno_stage = safe_getattr(inputs.veg_int, "phenology_stage", "MID")
+    if digest is not None and digest.stage_specific_allowed:
+        pheno_stage = digest.phenology_stage
         
     # Standard ET0 reference (e.g. 4.0 mm/day)
     et0 = 4.0 / 1000.0  # m/day
@@ -56,8 +61,11 @@ def run_nitrogen_leaching(inputs: Layer6Input, candidates: List[InterventionCand
         kc = 0.1 + 0.8 * ndvi
     elif pheno_stage in ("MID", "FLOWERING", "FRUITING"):
         kc = 0.8 + 0.4 * ndvi
-    else:  # LATE, MATURITY
+    elif pheno_stage in ("LATE", "MATURITY", "SENESCENCE"):
         kc = 0.5 * ndvi
+    else:
+        # Generic bounded stage mixture; no DAP/NDVI stage inference.
+        kc = 0.70
         
     transpiration_demand = kc * et0  # m/day
 
@@ -209,5 +217,11 @@ def run_nitrogen_leaching(inputs: Layer6Input, candidates: List[InterventionCand
 
     return {
         "nitrogen_leaching_fraction": round(leaching_fraction, 4),
-        "runoff_risk_index": round(runoff_risk, 4)
+        "runoff_risk_index": round(runoff_risk, 4),
+        "phenology_evidence_class": (
+            digest.phenology_evidence_class if digest is not None else "unresolved"
+        ),
+        "phenology_posterior_hash": (
+            digest.phenology_posterior_hash if digest is not None else ""
+        ),
     }

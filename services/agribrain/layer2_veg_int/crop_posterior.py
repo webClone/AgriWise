@@ -3,23 +3,31 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
+import platform
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .crop_science_data import get_crop_group
 
 
-CROP_POSTERIOR_CONTRACT_VERSION = "crop_identity_posterior_v1"
+CROP_POSTERIOR_CONTRACT_VERSION = "crop_identity_posterior_v3"
+_TEMPORAL_PRIOR_CONTRACT_VERSION = "crop_cycle_temporal_prior_v1"
+_TEMPORAL_PRIOR_MAX_WEIGHT = 0.12
+_TEMPORAL_PRIOR_SUPPORT_HALF_LIFE = 2.0
+_TEMPORAL_PRIOR_AGE_HALF_LIFE_DAYS = 60.0
 _AUTHORITY_RANK = {
     "UNKNOWN": 0,
     "MODEL_SPECIES_POSTERIOR": 1,
     "MODEL_GROUP_POSTERIOR": 2,
     "ARCHIVE_STABLE_GROUP": 3,
     "REGISTRY_DECLARED": 4,
-    "AGRONOMIST_CONFIRMED": 5,
-    "USER_CONFIRMED": 6,
+    "OFFICIAL_PARCEL_LABEL": 5,
+    "AGRONOMIST_CONFIRMED": 6,
+    "USER_CONFIRMED": 7,
+    "FARMER_CONFIRMED": 7,
 }
 _ALIASES = {
     "corn": "maize",
@@ -186,9 +194,221 @@ def _stable(value: Any) -> str:
     ).hexdigest()
 
 
+def _scientific_content_hash(value: Mapping[str, Any]) -> str:
+    """Hash the immutable scientific payload, excluding envelope fields."""
+    return _stable({
+        key: item
+        for key, item in value.items()
+        if key not in {"content_hash", "generated_at"}
+    })
+
+
 def normalize_declared_crop(value: Any) -> str:
     raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     return _ALIASES.get(raw, raw)
+
+
+def _cycle_identity(
+    crop_config: Mapping[str, Any],
+    operational_context: Mapping[str, Any],
+) -> Tuple[Optional[str], str]:
+    """Resolve a real crop-cycle boundary; never invent a default season.
+
+    Explicit database cycle/season identifiers are preferred.  A declared
+    planting date is a conservative compatibility identity for deployments
+    that have not transported the database id yet.  Plot id alone is never a
+    cycle identity because it would carry a belief across rotations.
+    """
+    for source in (crop_config, operational_context):
+        for key in (
+            "crop_cycle_id", "crop_season_id", "cycle_id", "season_id",
+        ):
+            raw = source.get(key)
+            value = str(raw or "").strip()
+            if value and value.lower() not in {"unknown", "default", "default_season"}:
+                return value, key
+
+    planting = str(
+        crop_config.get("planting_date")
+        or operational_context.get("planting_date")
+        or ""
+    ).strip()
+    crop = normalize_declared_crop(
+        crop_config.get("crop") or crop_config.get("crop_type")
+    )
+    if planting and crop not in {"", "unknown"}:
+        return f"planting:{planting[:10]}:{crop}", "planting_date_crop"
+    return None, "unavailable"
+
+
+def _parse_utc(value: Any) -> Optional[datetime]:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _apply_cycle_bounded_temporal_prior(
+    current: Mapping[str, Any],
+    previous: Any,
+    *,
+    plot_id: str,
+    cycle_identity: Optional[str],
+    current_declared_crop: Optional[str],
+    current_authority: str,
+    current_physical_acquisition_count: int,
+    generated_at: datetime,
+) -> Tuple[Dict[str, float], Dict[str, Any]]:
+    """Blend a weak same-cycle memory without counting it as observation.
+
+    This is a convex prior blend, not a likelihood update.  Its absolute
+    influence is capped, decays with newly admitted independent support and
+    age, and is reset unless both posteriors carry the exact same cycle id.
+    """
+    audit: Dict[str, Any] = {
+        "contract_version": _TEMPORAL_PRIOR_CONTRACT_VERSION,
+        "role": "prior_only_not_observation",
+        "counted_as_evidence": False,
+        "applied": False,
+        "reason": "unavailable",
+        "current_cycle_identity": cycle_identity,
+        "current_declared_crop": current_declared_crop or None,
+        "current_authority": current_authority,
+        "weight": 0.0,
+        "maximum_weight": _TEMPORAL_PRIOR_MAX_WEIGHT,
+        "new_physical_acquisition_count": 0,
+    }
+    normalized_current = _normalize_distribution(
+        {
+            key: float(value)
+            for key, value in current.items()
+            if key != "unknown" and _finite(value) is not None
+        },
+        float(current.get("unknown", 0.0) or 0.0),
+    )
+    if not cycle_identity:
+        audit["reason"] = "current_cycle_identity_missing"
+        return normalized_current, audit
+    if not isinstance(previous, Mapping) or not previous:
+        audit["reason"] = "previous_posterior_missing"
+        return normalized_current, audit
+    if str(previous.get("plot_id") or "") != str(plot_id):
+        audit["reason"] = "plot_identity_mismatch"
+        return normalized_current, audit
+
+    previous_cycle = str(previous.get("crop_cycle_identity") or "").strip()
+    audit["previous_cycle_identity"] = previous_cycle or None
+    if not previous_cycle:
+        audit["reason"] = "previous_cycle_identity_missing"
+        return normalized_current, audit
+    if previous_cycle != cycle_identity:
+        audit["reason"] = "crop_cycle_changed_reset"
+        return normalized_current, audit
+
+    current_declared = normalize_declared_crop(current_declared_crop)
+    previous_declared = normalize_declared_crop(
+        previous.get("declared_crop_normalized")
+    )
+    audit["previous_declared_crop"] = previous_declared or None
+    if (
+        current_declared != previous_declared
+        and (current_declared not in {"", "unknown"}
+             or previous_declared not in {"", "unknown"})
+    ):
+        audit["reason"] = "declared_identity_changed_reset"
+        return normalized_current, audit
+    if current_authority in {
+        "USER_CONFIRMED",
+        "FARMER_CONFIRMED",
+        "AGRONOMIST_CONFIRMED",
+        "OFFICIAL_PARCEL_LABEL",
+    }:
+        audit["reason"] = "confirmed_declaration_authoritative"
+        return normalized_current, audit
+
+    previous_hash = str(previous.get("content_hash") or "").strip()
+    prior_distribution = previous.get("crop_group_posterior")
+    if not previous_hash or not isinstance(prior_distribution, Mapping):
+        audit["reason"] = "previous_prior_lineage_invalid"
+        return normalized_current, audit
+    recomputed_hash = _scientific_content_hash(previous)
+    if not hmac.compare_digest(previous_hash, recomputed_hash):
+        audit["reason"] = "previous_prior_content_hash_invalid"
+        return normalized_current, audit
+    previous_generated = _parse_utc(previous.get("generated_at"))
+    if previous_generated is None or previous_generated > generated_at:
+        audit["reason"] = "previous_prior_time_invalid"
+        return normalized_current, audit
+
+    prior = _normalize_distribution(
+        {
+            key: float(value)
+            for key, value in prior_distribution.items()
+            if key != "unknown" and _finite(value) is not None
+        },
+        float(prior_distribution.get("unknown", 0.0) or 0.0),
+    )
+    previous_quality = previous.get("evidence_quality")
+    if (
+        not isinstance(previous_quality, Mapping)
+        or previous_quality.get("physical_acquisition_count") is None
+    ):
+        audit["reason"] = "previous_physical_acquisition_count_missing"
+        return normalized_current, audit
+    previous_physical_count = int(
+        previous_quality.get("physical_acquisition_count", 0) or 0
+    )
+    current_physical_count = max(0, int(current_physical_acquisition_count))
+    new_physical_count = max(
+        0, current_physical_count - previous_physical_count
+    )
+    age_days = max(
+        0.0, (generated_at - previous_generated).total_seconds() / 86400.0,
+    )
+    support_decay = math.pow(
+        0.5, new_physical_count / _TEMPORAL_PRIOR_SUPPORT_HALF_LIFE,
+    )
+    age_decay = math.pow(
+        0.5, age_days / _TEMPORAL_PRIOR_AGE_HALF_LIFE_DAYS,
+    )
+    weight = min(
+        _TEMPORAL_PRIOR_MAX_WEIGHT,
+        _TEMPORAL_PRIOR_MAX_WEIGHT * support_decay * age_decay,
+    )
+    if weight < 0.005:
+        audit.update({
+            "reason": "prior_decayed_below_threshold",
+            "new_physical_acquisition_count": new_physical_count,
+            "age_days": round(age_days, 6),
+        })
+        return normalized_current, audit
+
+    keys = set(normalized_current) | set(prior)
+    blended = {
+        key: (1.0 - weight) * float(normalized_current.get(key, 0.0))
+        + weight * float(prior.get(key, 0.0))
+        for key in keys
+    }
+    result = _normalize_distribution(
+        {key: value for key, value in blended.items() if key != "unknown"},
+        blended.get("unknown", 0.0),
+    )
+    audit.update({
+        "applied": True,
+        "reason": "same_cycle_weak_prior",
+        "weight": round(weight, 8),
+        "previous_posterior_hash": previous_hash,
+        "previous_physical_acquisition_count": previous_physical_count,
+        "current_physical_acquisition_count": current_physical_count,
+        "new_physical_acquisition_count": new_physical_count,
+        "age_days": round(age_days, 6),
+        "support_decay": round(support_decay, 8),
+        "age_decay": round(age_decay, 8),
+    })
+    return result, audit
 
 
 def crop_authority(crop_config: Mapping[str, Any]) -> str:
@@ -196,6 +416,7 @@ def crop_authority(crop_config: Mapping[str, Any]) -> str:
     explicit = str(
         crop_config.get("crop_identity_authority")
         or crop_config.get("crop_authority")
+        or crop_config.get("declared_crop_authority")
         or ""
     ).upper()
     if explicit in _AUTHORITY_RANK:
@@ -236,12 +457,19 @@ def _admitted_records(records: Iterable[Any]) -> List[Dict[str, Any]]:
         if not isinstance(raw, Mapping):
             continue
         row = dict(raw)
+        if row.get("independence_identity_available") is False:
+            # Provider reprocessing/content identities are not independent
+            # acquisitions.  Sentinel-2 packets lacking the physical key must
+            # not inflate temporal support.
+            continue
         if not is_admitted_temporal_record(
             row,
             value_keys=(
                 "ndvi", "ndvi_mean", "evi", "evi_mean", "ndmi",
-                "ndmi_mean", "ndwi", "ndwi_mean", "vv", "vv_db",
-                "vv_db_mean", "vh", "vh_db", "vh_db_mean",
+                "ndmi_mean", "ndwi", "ndwi_mean", "ndre", "ndre_mean",
+                "cired", "cired_mean", "lswi", "lswi_mean", "psri",
+                "psri_mean", "vv", "vv_db", "vv_db_mean", "vh",
+                "vh_db", "vh_db_mean",
             ),
         ):
             continue
@@ -261,14 +489,17 @@ def _admitted_records(records: Iterable[Any]) -> List[Dict[str, Any]]:
             key: _finite(row.get(key))
             for key in (
                 "ndvi", "ndvi_mean", "ndvi_clean", "evi", "evi_mean",
-                "ndmi", "ndmi_mean", "ndwi", "ndwi_mean", "vv",
-                "vv_db", "vv_db_mean", "vh", "vh_db", "vh_db_mean",
+                "ndmi", "ndmi_mean", "ndwi", "ndwi_mean", "ndre",
+                "ndre_mean", "cired", "cired_mean", "lswi", "lswi_mean",
+                "psri", "psri_mean", "vv", "vv_db", "vv_db_mean",
+                "vh", "vh_db", "vh_db_mean",
             )
         }
         if not any(value is not None for value in signals.values()):
             continue
         support_id = str(
-            row.get("content_hash")
+            row.get("physical_acquisition_key")
+            or row.get("content_hash")
             or row.get("observation_id")
             or row.get("scene_id")
             or f"{stamp.isoformat()}:{row.get('source', 'unknown')}"
@@ -276,7 +507,17 @@ def _admitted_records(records: Iterable[Any]) -> List[Dict[str, Any]]:
         row["_parsed_date"] = stamp
         row["_signals"] = signals
         row["_support_id"] = support_id
-        admitted.setdefault(support_id, row)
+        existing = admitted.get(support_id)
+        if existing is None or (
+            float(row.get("reading_reliability") or 0.0),
+            float(row.get("valid_fraction") or 0.0),
+            str(row.get("processing_timestamp") or ""),
+        ) > (
+            float(existing.get("reading_reliability") or 0.0),
+            float(existing.get("valid_fraction") or 0.0),
+            str(existing.get("processing_timestamp") or ""),
+        ):
+            admitted[support_id] = row
     return sorted(admitted.values(), key=lambda row: row["_parsed_date"])
 
 
@@ -342,7 +583,9 @@ def _evidence_quality(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             _finite(row.get(key)) is not None
             for row in rows for key in (
                 "ndvi", "ndvi_mean", "ndvi_clean", "evi", "evi_mean",
-                "ndmi", "ndmi_mean", "ndwi", "ndwi_mean",
+                "ndmi", "ndmi_mean", "ndwi", "ndwi_mean", "ndre",
+                "ndre_mean", "cired", "cired_mean", "lswi", "lswi_mean",
+                "psri", "psri_mean",
             )
         ) else "",
         "sar" if any(
@@ -352,7 +595,14 @@ def _evidence_quality(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             )
         ) else "",
     } - {""}
-    independence = min(1.0, len({row["_support_id"] for row in rows}) / 12.0)
+    physical_count = len({row["_support_id"] for row in rows})
+    content_count = len({
+        str(row.get("content_hash")) for row in rows if row.get("content_hash")
+    })
+    processing_product_count = sum(
+        max(1, int(row.get("processing_lineage_count") or 1)) for row in rows
+    )
+    independence = min(1.0, physical_count / 12.0)
     quality = (
         0.35 * min(1.0, len(ndvi) / 12.0)
         + 0.25 * temporal_coverage
@@ -364,7 +614,9 @@ def _evidence_quality(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "score": round(quality, 6),
         "admitted_record_count": len(rows),
         "admitted_ndvi_count": len(ndvi),
-        "content_distinct_count": len({row["_support_id"] for row in rows}),
+        "content_distinct_count": content_count,
+        "physical_acquisition_count": physical_count,
+        "processing_product_count": processing_product_count,
         "temporal_span_days": span_days,
         "temporal_coverage": round(temporal_coverage, 6),
         "mean_quality": round(mean_quality, 6),
@@ -412,100 +664,301 @@ def infer_crop_posterior(
     """Run the conservative pre-ASMAE crop-group inference pass."""
     crop_config = dict(crop_config or {})
     operational = dict(operational_context or {})
-    rows = _admitted_records(plot_timeseries)
+    archive = dict(archive_context or {})
+    # Generic Layer-1 history is intentionally not parsed into observational
+    # features here.  Canonical crop evidence must be selected by the verified
+    # CropEvidenceLedgerV2; history has a separately labelled prior role.
+    rows: List[Dict[str, Any]] = []
     quality = _evidence_quality(rows)
+    evidence_ledger = None
+    evidence_ledger_payload = operational.get("crop_evidence_ledger") or {}
+    if evidence_ledger_payload:
+        from services.agribrain.scientific_contracts.crop_evidence import CropEvidenceLedgerV2
+        evidence_ledger = CropEvidenceLedgerV2.from_dict(
+            evidence_ledger_payload
+        )
+        if evidence_ledger.plot_namespace.plot_id != str(plot_id):
+            raise ValueError("Crop evidence ledger plot namespace mismatch")
+        for key, actual in (
+            ("tenant_id", evidence_ledger.plot_namespace.tenant_id),
+            ("farm_id", evidence_ledger.plot_namespace.farm_id),
+        ):
+            expected = str(operational.get(key) or "").strip()
+            if expected and expected != actual:
+                raise ValueError(
+                    f"Crop evidence ledger {key} namespace mismatch"
+                )
+        expected_ledger_hash = str(
+            operational.get("crop_evidence_ledger_hash") or ""
+        )
+        if (
+            expected_ledger_hash
+            and evidence_ledger.ledger_hash != expected_ledger_hash
+        ):
+            raise ValueError("Crop evidence ledger hash mismatch")
     declared = normalize_declared_crop(
         crop_config.get("crop") or crop_config.get("crop_type")
     )
     authority = crop_authority(crop_config)
-
-    ndvi, ndvi_dates = _series(
-        rows, ("ndvi_clean", "ndvi", "ndvi_mean")
+    cycle_identity, cycle_identity_source = _cycle_identity(
+        crop_config, operational
     )
-    vv = _mean(rows, ("vv", "vv_db", "vv_db_mean"))
-    vh = _mean(rows, ("vh", "vh_db", "vh_db_mean"))
-    temperatures: List[float] = []
-    gdd_values: List[float] = []
+
     lat = _finite(_nested(operational, "lat", "latitude"))
     lng = _finite(_nested(operational, "lng", "lon", "longitude"))
     area = _finite(_nested(operational, "area_ha", "plot_area_ha"))
     soil = _nested(operational, "soil_type", "soil_texture_class")
     irrigation = _nested(operational, "irrigation_type", "irrigation_method")
-    previous = _nested(
-        archive_context or operational,
-        "previous_crops", "crop_rotation", "crop_history",
-    )
+
+    # Build the governed engineered-expert input even while the learned model
+    # remains release-gated.  This closes the provenance path now without
+    # promoting an unvalidated RF artifact into canonical crop truth.
+    crop_model_input_receipt = None
+    crop_model_input_error = None
+    ledger_feature_vector = None
+    crop_cycle_segmentation_receipt = None
+    if evidence_ledger is not None:
+        try:
+            from .features.ledger_crop_features import (
+                build_ledger_crop_feature_input,
+                ledger_rows_for_observations,
+            )
+
+            (
+                ledger_feature_vector,
+                crop_model_input_receipt,
+                crop_cycle_segmentation_receipt,
+            ) = (
+                build_ledger_crop_feature_input(
+                    ledger=evidence_ledger,
+                    crop_cycle_hypothesis_id=(cycle_identity or "unresolved-cycle"),
+                    run_id=run_id,
+                    latitude=lat,
+                    longitude=lng,
+                    koppen_zone=_nested(
+                        operational, "climate_zone", "koppen_zone"
+                    ),
+                    aridity_index=_finite(_nested(
+                        operational, "aridity_index"
+                    )),
+                    soil_texture_class=(
+                        str(soil) if soil is not None else None
+                    ),
+                    irrigation_type=(
+                        str(irrigation) if irrigation is not None else None
+                    ),
+                    plot_area_ha=area,
+                )
+            )
+            rows = ledger_rows_for_observations(
+                evidence_ledger,
+                crop_cycle_segmentation_receipt.current_observation_ids,
+            )
+            quality = _evidence_quality(rows)
+            scoped_readiness = (
+                crop_cycle_segmentation_receipt.current_evidence_readiness
+            )
+            quality.update({
+                "physical_acquisition_count": (
+                    scoped_readiness.physical_acquisition_count
+                ),
+                "processing_product_count": len(rows),
+                "admitted_record_count": len(rows),
+                "admitted_ndvi_count": (
+                    scoped_readiness.ndvi_observation_count
+                ),
+                "temporal_span_days": (
+                    scoped_readiness.temporal_span_days or 0.0
+                ),
+                "independent_feature_families": list(
+                    scoped_readiness.feature_families
+                ),
+                "phase_coverage": list(scoped_readiness.phase_coverage),
+                "sensor_counts": dict(scoped_readiness.sensor_counts),
+                "gdd_spans": {
+                    basis: {
+                        "min": minimum,
+                        "max": maximum,
+                        "span": span,
+                        "count": count,
+                    }
+                    for basis, minimum, maximum, span, count
+                    in scoped_readiness.gdd_spans
+                },
+                "domain_compatibility": {
+                    "calibration": (
+                        scoped_readiness.calibration_domain_compatibility
+                    ),
+                    "geographical": (
+                        scoped_readiness.geographical_domain_compatibility
+                    ),
+                },
+                "segment_readiness_status": (
+                    scoped_readiness.readiness_status
+                ),
+                "segment_readiness_blockers": list(
+                    scoped_readiness.blockers
+                ),
+            })
+        except Exception as exc:
+            crop_model_input_error = (
+                f"crop_model_input_invalid:{type(exc).__name__}:{str(exc)[:160]}"
+            )
 
     species_ranking: List[Dict[str, Any]] = []
     group_scores: Dict[str, float] = {}
-    engine_evidence: Dict[str, Any] = {}
-    if len(ndvi) >= 6 or any(
-        value is not None for value in (vv, vh, lat, area)
-    ):
+    engine_evidence: Dict[str, Any] = {
+        "observation_contract": "verified_crop_evidence_ledger_v2_only",
+        "generic_plot_timeseries_consumed": False,
+        "crop_evidence_ledger_hash": (
+            evidence_ledger.ledger_hash if evidence_ledger else None
+        ),
+        "cycle_hypothesis_runs": [],
+    }
+    species_scores: Dict[str, Dict[str, Any]] = {}
+    if evidence_ledger is not None and crop_cycle_segmentation_receipt is not None:
         from .crop_identification import identify_crop
+        from .features.ledger_crop_features import ledger_rows_for_observations
 
-        result = identify_crop(
-            ndvi_series=ndvi or None,
-            ndvi_dates=ndvi_dates or None,
-            peak_ndvi=max(ndvi) if ndvi else None,
-            trough_ndvi=min(ndvi) if ndvi else None,
-            sar_vh_mean=vh,
-            sar_vv_mean=vv,
-            evi_mean=_mean(rows, ("evi", "evi_mean")),
-            ndmi_mean=_mean(rows, ("ndmi", "ndmi_mean")),
-            ndwi_mean=_mean(rows, ("ndwi", "ndwi_mean")),
-            lat=lat,
-            lng=lng,
-            climate_zone=_nested(operational, "climate_zone", "koppen_zone"),
-            elevation_m=_finite(_nested(operational, "elevation_m", "elevation")),
-            mean_temp_c=(
-                sum(temperatures) / len(temperatures)
-                if temperatures else _finite(
-                    _nested(operational, "mean_temp_c", "tmean")
-                )
-            ),
-            gdd_accumulated=(
-                sum(gdd_values) if gdd_values else _finite(
-                    _nested(operational, "gdd_accumulated")
-                )
-            ),
-            gdd_accumulation_days=quality["temporal_span_days"] or None,
-            annual_rainfall_mm=_finite(
-                _nested(operational, "annual_rainfall_mm", "rainfall_mm")
-            ),
-            et0_mm=_finite(_nested(operational, "et0_mm", "annual_et0_mm")),
-            area_ha=area,
-            soil_type=str(soil) if soil is not None else None,
-            irrigation_type=str(irrigation) if irrigation is not None else None,
-            previous_crops=previous if isinstance(previous, list) else None,
-            dna_vigor=_finite(_nested(operational, "dna_vigor", "alpha_vigor")),
-            dna_water_retention=_finite(
-                _nested(operational, "dna_water_retention", "theta_retention")
-            ),
-            plot_id=plot_id,
-            run_id=run_id,
-        )
-        engine_evidence = dict(result.evidence or {})
-        for candidate in result.candidates:
-            share = candidate.softmax_candidate_share
-            if not isinstance(share, (int, float)):
-                continue
-            species_ranking.append({
-                "code": candidate.code,
-                "crop_group": candidate.crop_group,
-                "ranking_share": round(float(share), 8),
-                "score": round(float(candidate.score), 8),
-            })
-            group_scores[candidate.crop_group] = (
-                group_scores.get(candidate.crop_group, 0.0) + float(share)
+        for hypothesis in crop_cycle_segmentation_receipt.current_cycle_hypotheses:
+            hypothesis_rows = ledger_rows_for_observations(
+                evidence_ledger, hypothesis.observation_ids,
             )
+            ndvi, ndvi_dates = _series(
+                hypothesis_rows, ("ndvi_clean", "ndvi", "ndvi_mean")
+            )
+            vv = _mean(hypothesis_rows, ("vv", "vv_db", "vv_db_mean"))
+            vh = _mean(hypothesis_rows, ("vh", "vh_db", "vh_db_mean"))
+            run_audit = {
+                "hypothesis_id": hypothesis.hypothesis_id,
+                "hypothesis_probability": hypothesis.probability,
+                "observation_ids": list(hypothesis.observation_ids),
+                "executed": False,
+            }
+            # Sparse inputs remain unresolved. Location, registry, weather,
+            # soil and generic history are deliberately absent from this EO
+            # expert call and remain separate priors.
+            if len(ndvi) < 4 and vv is None and vh is None:
+                run_audit["reason"] = "ledger_evidence_insufficient"
+                engine_evidence["cycle_hypothesis_runs"].append(run_audit)
+                continue
+            result = identify_crop(
+                ndvi_series=ndvi or None,
+                ndvi_dates=ndvi_dates or None,
+                peak_ndvi=max(ndvi) if ndvi else None,
+                trough_ndvi=min(ndvi) if ndvi else None,
+                sar_vh_mean=vh,
+                sar_vv_mean=vv,
+                evi_mean=_mean(hypothesis_rows, ("evi", "evi_mean")),
+                ndmi_mean=_mean(hypothesis_rows, ("ndmi", "ndmi_mean")),
+                ndwi_mean=_mean(hypothesis_rows, ("ndwi", "ndwi_mean")),
+                plot_id=plot_id,
+                run_id=run_id,
+            )
+            run_audit.update({
+                "executed": True,
+                "engine_version": (result.evidence or {}).get(
+                    "engine_version"
+                ),
+            })
+            engine_evidence["cycle_hypothesis_runs"].append(run_audit)
+            if not engine_evidence.get("engine_version"):
+                engine_evidence["engine_version"] = run_audit.get(
+                    "engine_version"
+                )
+            for candidate in result.candidates:
+                share = candidate.softmax_candidate_share
+                if not isinstance(share, (int, float)):
+                    continue
+                weighted_share = float(share) * hypothesis.probability
+                entry = species_scores.setdefault(candidate.code, {
+                    "code": candidate.code,
+                    "crop_group": candidate.crop_group,
+                    "ranking_share": 0.0,
+                    "score": 0.0,
+                })
+                entry["ranking_share"] += weighted_share
+                entry["score"] += float(candidate.score) * hypothesis.probability
+                group_scores[candidate.crop_group] = (
+                    group_scores.get(candidate.crop_group, 0.0)
+                    + weighted_share
+                )
+    species_ranking = sorted(
+        (
+            {
+                **entry,
+                "ranking_share": round(entry["ranking_share"], 8),
+                "score": round(entry["score"], 8),
+            }
+            for entry in species_scores.values()
+        ),
+        key=lambda entry: (-entry["ranking_share"], entry["code"]),
+    )
+
+    # Preserve the declaration-free, memory-free ledger ranking before
+    # registry authority and previous-cycle memory condition the ASMAE prior.
+    # This is an uncalibrated EO diagnostic, not species confirmation.
+    model_context_scores = dict(group_scores)
+    model_context_unknown = max(0.10, 1.0 - quality["score"])
+    model_context_sorted = sorted(
+        model_context_scores.values(), reverse=True
+    )
+    model_context_gap = (
+        model_context_sorted[0] - model_context_sorted[1]
+        if len(model_context_sorted) > 1
+        else model_context_sorted[0]
+        if model_context_sorted else 0.0
+    )
+    if quality["score"] < 0.35 or model_context_gap < 0.05:
+        model_context_unknown = max(model_context_unknown, 0.55)
+    model_context_group_posterior = _normalize_distribution(
+        model_context_scores, model_context_unknown
+    )
+    physical_support = int(quality["physical_acquisition_count"] or 0)
+    if physical_support <= 0:
+        model_context_status = "unavailable"
+    elif physical_support < 4:
+        model_context_status = "insufficient"
+    elif physical_support < 6:
+        model_context_status = "sparse_ranking_only"
+    else:
+        model_context_status = "observed_ranking_only"
+    model_context_support = {
+        "status": model_context_status,
+        "admitted_physical_acquisition_count": physical_support,
+        "admitted_ndvi_count": int(quality["admitted_ndvi_count"] or 0),
+        "registry_declaration_included": False,
+        "temporal_prior_included": False,
+        "context_features_may_be_included": False,
+        "generic_plot_timeseries_included": False,
+        "crop_evidence_ledger_required": True,
+        "crop_evidence_ledger_hash": (
+            evidence_ledger.ledger_hash if evidence_ledger else None
+        ),
+        "cycle_segmentation_status": (
+            crop_cycle_segmentation_receipt.status
+            if crop_cycle_segmentation_receipt else "unavailable"
+        ),
+        "cycle_hypothesis_marginalized": bool(
+            crop_cycle_segmentation_receipt
+            and len(
+                crop_cycle_segmentation_receipt.current_cycle_hypotheses
+            ) > 1
+        ),
+        "species_confirmation_allowed": False,
+        "role": "ledger_only_declaration_free_uncalibrated_group_ranking",
+    }
 
     # A declaration is a prior with explicit authority. Confirmed declarations
     # are authoritative; a valid group such as "cereal" is never treated as
     # missing and "corn" has already normalized to maize.
     if declared not in {"", "unknown"}:
         group = _declared_group(declared)
-        if authority in {"USER_CONFIRMED", "AGRONOMIST_CONFIRMED"}:
+        if authority in {
+            "USER_CONFIRMED",
+            "FARMER_CONFIRMED",
+            "AGRONOMIST_CONFIRMED",
+        }:
             group_scores = {group: 0.99}
             unknown = 0.01
         else:
@@ -525,6 +978,19 @@ def infer_crop_posterior(
     if quality["score"] < 0.35 or group_gap < 0.05:
         unknown = max(unknown, 0.55)
     group_posterior = _normalize_distribution(group_scores, unknown)
+    generated_at = datetime.now(timezone.utc)
+    group_posterior, temporal_prior = _apply_cycle_bounded_temporal_prior(
+        group_posterior,
+        archive.get("previous_crop_posterior"),
+        plot_id=plot_id,
+        cycle_identity=cycle_identity,
+        current_declared_crop=declared or None,
+        current_authority=authority,
+        current_physical_acquisition_count=quality[
+            "physical_acquisition_count"
+        ],
+        generated_at=generated_at,
+    )
     best_group, best_probability = max(
         group_posterior.items(), key=lambda item: item[1]
     )
@@ -532,6 +998,45 @@ def infer_crop_posterior(
         "UNKNOWN" if best_group == "unknown"
         else "CROP_GROUP"
     )
+    from services.agribrain.scientific_contracts.crop_governance import CropModelReceiptV1
+    crop_model_receipt = CropModelReceiptV1(
+        model_family="ledger-bound-legacy-temporal-diagnostic",
+        semantic_version=str(
+            engine_evidence.get("engine_version") or "5.1-diagnostic"
+        ),
+        artifact_sha256="",
+        feature_schema_version="crop-ledger-eo-ranking-v1",
+        feature_schema_hash="",
+        class_hierarchy_version="crop-taxonomy-v2",
+        training_dataset_manifest_hash="",
+        calibration_artifact_hash="",
+        validation_report_hash="",
+        region_domain_compatibility=(),
+        production_eligible=False,
+        inference_device="cpu",
+        runtime_version="python-" + platform.python_version(),
+        deterministic_preprocessing_version="crop-ledger-eo-preprocess-v1",
+        eligibility_reasons=(
+            "ledger_bound_heuristic_not_species_model",
+            "production_temporal_model_artifact_unavailable",
+            "calibration_and_external_validation_unavailable",
+        ),
+    )
+
+    posterior_observation_ids = sorted({
+        observation_id
+        for hypothesis in (
+            crop_cycle_segmentation_receipt.current_cycle_hypotheses
+            if crop_cycle_segmentation_receipt else ()
+        )
+        for observation_id in hypothesis.observation_ids
+    })
+    posterior_observation_id_set = set(posterior_observation_ids)
+    selected_hashes_for_posterior = {
+        observation.observation_hash
+        for observation in (evidence_ledger.observations if evidence_ledger else ())
+        if observation.observation_id in posterior_observation_id_set
+    }
 
     scientific = {
         "contract_version": CROP_POSTERIOR_CONTRACT_VERSION,
@@ -539,7 +1044,11 @@ def infer_crop_posterior(
         "parent_run_id": run_id,
         "pass": "PRE_ASMAE",
         "authority": authority,
+        "crop_cycle_identity": cycle_identity,
+        "crop_cycle_identity_source": cycle_identity_source,
         "declared_crop_normalized": declared or None,
+        "model_context_group_posterior": model_context_group_posterior,
+        "model_context_support": model_context_support,
         "crop_group_posterior": group_posterior,
         "asmae_mixture_conditioning": _mixture_conditioning(
             group_posterior
@@ -551,21 +1060,91 @@ def infer_crop_posterior(
         "calibration_status": "uncalibrated_group_mixture",
         "species_ranking": species_ranking,
         "species_probability_published": False,
+        "species_evidence_status": "ranking_only_not_independently_confirmed",
+        "species_science_provenance": (
+            "mixed_curated_and_architecture_default_signatures"
+        ),
+        "observational_input_policy": {
+            "authority": "verified_crop_evidence_ledger_v2_only",
+            "generic_plot_timeseries_consumed": False,
+            "generic_history_role": "prior_or_diagnostic_only",
+            "posterior_observation_ids": posterior_observation_ids,
+            "cycle_hypotheses_marginalized": bool(
+                crop_cycle_segmentation_receipt
+                and len(
+                    crop_cycle_segmentation_receipt.current_cycle_hypotheses
+                ) > 1
+            ),
+        },
         "evidence_quality": quality,
+        "crop_evidence_ledger_hash": (
+            evidence_ledger.ledger_hash if evidence_ledger else None
+        ),
+        "crop_evidence_ledger_status": (
+            "verified" if evidence_ledger else "unavailable"
+        ),
+        "independent_evidence_ids": (
+            [
+                cluster.cluster_id
+                for cluster in evidence_ledger.independence_clusters
+                if cluster.independence_eligible and cluster.admitted
+                and cluster.selected_observation_hash
+                in selected_hashes_for_posterior
+            ]
+            if evidence_ledger else []
+        ),
         "engine_evidence": engine_evidence,
+        "temporal_prior": temporal_prior,
         "ml_status": "not_claimed_without_loaded_validated_artifact",
-        "ml_production_eligible": False,
+        "ml_production_eligible": crop_model_receipt.production_eligible,
+        "crop_model_receipt": crop_model_receipt.to_dict(),
+        "crop_model_receipt_hash": crop_model_receipt.content_hash,
+        "crop_model_input_receipt": (
+            crop_model_input_receipt.to_dict()
+            if crop_model_input_receipt is not None else None
+        ),
+        "crop_model_input_receipt_hash": (
+            crop_model_input_receipt.content_hash
+            if crop_model_input_receipt is not None else None
+        ),
+        "crop_model_input_status": (
+            "ledger_bound_diagnostic"
+            if crop_model_input_receipt is not None else "unavailable"
+        ),
+        "crop_model_input_error": crop_model_input_error,
+        "crop_cycle_segmentation_receipt": (
+            crop_cycle_segmentation_receipt.to_dict()
+            if crop_cycle_segmentation_receipt is not None else None
+        ),
+        "crop_cycle_segmentation_receipt_hash": (
+            crop_cycle_segmentation_receipt.content_hash
+            if crop_cycle_segmentation_receipt is not None else None
+        ),
+        "engineered_expert_execution_eligible": bool(
+            crop_model_input_receipt is not None
+            and crop_model_input_receipt.model_execution_eligible
+        ),
+        "engineered_expert_publication_eligible": False,
     }
     scientific["lineage_id"] = "CROP-LINEAGE-" + _stable({
         "plot_id": plot_id,
         "parent_run_id": run_id,
         "declared_crop": declared or None,
-        "admitted_support": [
-            row["_support_id"] for row in rows
-        ],
+        "crop_cycle_identity": cycle_identity,
+        "previous_posterior_hash": temporal_prior.get(
+            "previous_posterior_hash"
+        ),
+        "crop_evidence_ledger_hash": (
+            evidence_ledger.ledger_hash if evidence_ledger else None
+        ),
+        "crop_cycle_segmentation_receipt_hash": (
+            crop_cycle_segmentation_receipt.content_hash
+            if crop_cycle_segmentation_receipt else None
+        ),
+        "posterior_observation_ids": posterior_observation_ids,
     })[:24]
-    scientific["content_hash"] = _stable(scientific)
-    scientific["generated_at"] = datetime.now(timezone.utc).isoformat()
+    scientific["content_hash"] = _scientific_content_hash(scientific)
+    scientific["generated_at"] = generated_at.isoformat()
     return scientific
 
 
@@ -678,14 +1257,15 @@ def refine_crop_posterior(
         "material_change": change >= material_change_threshold,
         "double_count_prevention": "asmae_feedback_treated_as_dependent",
     }
-    scientific["content_hash"] = _stable(scientific)
+    refinement_fingerprint = _scientific_content_hash(scientific)
     scientific["child_run_id"] = (
         "AGB2-CROP-" + _stable({
             "parent_run_id": parent_run_id,
-            "crop_posterior_hash": scientific["content_hash"],
+            "refinement_fingerprint": refinement_fingerprint,
         })[:20]
         if scientific["material_change"]
         else None
     )
+    scientific["content_hash"] = _scientific_content_hash(scientific)
     scientific["generated_at"] = datetime.now(timezone.utc).isoformat()
     return scientific

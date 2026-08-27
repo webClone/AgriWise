@@ -3,6 +3,7 @@
 import type { MapMode, Layer10Result } from "@/hooks/useLayer10";
 import { MODE_CONFIG, MODE_SURFACE_MAP } from "@/hooks/useLayer10";
 import { getRenderAuthorization, normalizeMode } from "@/lib/agribrain/source-policy-display-resolver";
+import { RENDER_AUTHORIZATION_VERSION } from "@/lib/agribrain/surface-contract";
 
 interface AnalysisStripProps {
   data: Layer10Result;
@@ -20,7 +21,7 @@ export default function AnalysisStrip({ data, activeMode }: AnalysisStripProps) 
     "satellite"
   );
   const auth = getRenderAuthorization(surfaceType, policy, normalizeMode(activeMode), "inspector", data.render_authorizations);
-  const authorized = data.render_authorization_version === "v924_bc10_18_render_auth_v1" &&
+  const authorized = data.render_authorization_version === RENDER_AUTHORIZATION_VERSION &&
     !!auth?.authorized &&
     auth.inspectorAllowed === true;
   const histogram = authorized ? data.histograms.field.find(h => h.surface_type === surfaceType) : null;

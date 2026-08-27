@@ -14,6 +14,12 @@ def build_rich_chat_context(artifact, user_mode: str, history: Optional[List[Dic
     - Conversation history summary
     """
     context_lines = []
+    from services.agribrain.orchestrator_v2.run_schema import (
+        _validated_authorization,
+    )
+    prescription_authorization, prescription_block_reason = (
+        _validated_authorization(artifact)
+    )
     
     # 1. User Mode
     context_lines.append(f"[USER MODE]: {user_mode.upper()}")
@@ -522,11 +528,8 @@ def build_rich_chat_context(artifact, user_mode: str, history: Optional[List[Dic
             if ndef != "N/A":
                 context_lines.append(f"  - N-Deficit (kg/ha): {ndef}")
             
-            # Split application schedule
-            split = getattr(l4.output, "split_schedule", None) or getattr(l4.output, "application_plan", None)
-            if split:
-                context_lines.append(f"  - Application Plan: {split}")
-                
+            # L4 split schedules are shadow evidence.  Only the exact action
+            # stored in an L8 authorization envelope may enter this prompt.
             l4_quality = getattr(l4.output, "quality_metrics", None)
             if l4_quality:
                 missing_drivers = getattr(l4_quality, "missing_drivers", [])
@@ -638,44 +641,25 @@ def build_rich_chat_context(artifact, user_mode: str, history: Optional[List[Dic
         # ========== Layer 8 (Prescriptive Actions) ==========
         l8 = getattr(artifact, "layer_8", None)
         show_l8 = intent in ["DECISION", "EXECUTION", "EXECUTION_STATUS", "PLANNING", "NUTRIENT", "GENERAL"] or any(k in user_query.lower() for k in ["spray", "tillage", "treatment", "prescri", "schedule", "action", "task", "drift", "frost", "lodging", "ipm", "compaction"])
-        if show_l8 and l8 and l8.output:
-            context_lines.append("Layer 8 (Prescriptive Actions):")
-            l8o = l8.output
-            # Prescribed actions
-            actions_list = getattr(l8o, "prescribed_actions", []) or getattr(l8o, "actions", [])
-            if actions_list:
-                context_lines.append(f"  - Total Prescribed Actions: {len(actions_list)}")
-                for act in actions_list[:5]:
-                    title = getattr(act, "title", getattr(act, "action_type", str(act)))
-                    title_str = getattr(title, "value", str(title))
-                    priority = getattr(act, "priority", getattr(act, "urgency", "MEDIUM"))
-                    rate = getattr(act, "rate", getattr(act, "dosage", None))
-                    timing = getattr(act, "timing", getattr(act, "window", None))
-                    line = f"  - [{priority}] {title_str}"
-                    if rate:
-                        line += f" (Rate: {rate})"
-                    if timing:
-                        line += f" (Window: {timing})"
-                    context_lines.append(line)
-            # Safety gates
-            gates = getattr(l8o, "safety_gates", []) or getattr(l8o, "blocked_actions", [])
-            if gates:
-                context_lines.append("  - Safety Gates Triggered:")
-                for g in gates[:3]:
-                    gname = getattr(g, "gate", getattr(g, "engine", str(g)))
-                    reason = getattr(g, "reason", getattr(g, "block_reason", ""))
-                    context_lines.append(f"    * {gname}: {reason}")
-            # Adoption model
-            adoption = getattr(l8o, "adoption_score", None)
-            if adoption is not None:
-                context_lines.append(f"  - Farmer Adoption Probability: {adoption}")
-            # Cognitive load
-            cog = getattr(l8o, "cognitive_load", None)
-            if cog:
-                pruned = getattr(cog, "pruned_count", 0)
-                if pruned > 0:
-                    context_lines.append(f"  - Cognitive Load: {pruned} low-priority actions pruned to reduce decision fatigue")
-
+        if show_l8:
+            context_lines.append("Layer 8 (Prescriptive Authorization):")
+            if prescription_authorization is None:
+                context_lines.append(
+                    "  - BLOCKED: no exact action, rate, timing, urgency, or "
+                    f"execution instruction may be generated ({prescription_block_reason})."
+                )
+            else:
+                context_lines.append(
+                    f"  - Authorization Envelope: {prescription_authorization.content_hash}"
+                )
+                for action in prescription_authorization.actions:
+                    context_lines.append(
+                        "  - AUTHORIZED "
+                        f"{action.action_type} ({action.action_id}); "
+                        f"priority={action.priority_score:.2f}; "
+                        f"urgency={action.urgency_score:.2f}; "
+                        f"rate={dict(action.rate)}; timing={dict(action.timing)}"
+                    )
     except Exception as e:
         context_lines.append(f"  (Failed to extract intermediate layer outputs: {e})")
 

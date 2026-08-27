@@ -183,7 +183,8 @@ RADIOMETRIC_THRESHOLDS_BY_OBS = {
 # ── V74: Adaptive Ensemble Size Policy ──────────────────────────────────────
 
 ENSEMBLE_SIZE_SHADOW = 20
-ENSEMBLE_SIZE_STANDARD = 50
+ENSEMBLE_SIZE_STANDARD = 30             # Interactive standard profile
+ENSEMBLE_SIZE_CERTIFICATION = 50        # Certification / calibration / reference
 ENSEMBLE_SIZE_LARGE_PLOT = 30           # + localization required
 ENSEMBLE_SIZE_OFFLINE = 80              # training_export / certification
 LARGE_PLOT_MICROZONE_THRESHOLD = 5000   # Above this, use large-plot policy

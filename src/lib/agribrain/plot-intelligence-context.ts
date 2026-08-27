@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getAuthoritativePlotSpatialContext } from "@/lib/agribrain/plot-geometry";
+import { activeCropCyclePrismaFilter } from "@/lib/agribrain/crop-cycle-status.mjs";
 
 export interface PlotIntelligenceContext {
   lat: number;
@@ -7,7 +8,7 @@ export interface PlotIntelligenceContext {
   crop: string;
   polygon: unknown | null;
   plant_date: string | null;
-  crop_stage_label: string | null;
+  crop_administrative_status: string | null;
   irrigation_type: string | null;
   soil_type: string | null;
   soil_analysis: Record<string, unknown> | null;
@@ -30,8 +31,8 @@ export async function loadPlotIntelligenceContext(
     include: {
       farm: true,
       cropCycles: {
-        where: { status: { not: "HARVESTED" } },
-        orderBy: { plantDate: "desc" },
+        where: { status: activeCropCyclePrismaFilter() },
+        orderBy: { updatedAt: "desc" },
         take: 1,
       },
       soilAnalyses: {
@@ -95,7 +96,7 @@ export async function loadPlotIntelligenceContext(
       plant_date: cycle?.plantDate
         ? new Date(cycle.plantDate).toISOString().split("T")[0]
         : null,
-      crop_stage_label: cycle?.status || null,
+      crop_administrative_status: cycle?.status || null,
       irrigation_type: plot.irrigation || null,
       soil_type: plot.soilType || null,
       soil_analysis: soil

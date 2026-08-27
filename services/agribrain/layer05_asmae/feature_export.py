@@ -218,7 +218,8 @@ def export_asmae_feature_pack(output: Any) -> Dict[str, Any]:
     state_stress_memory  = get_grid(raster_maps, "stress_memory",          "ASMAE_STRESS_MEMORY")
 
     # ── Diagnostic support maps ────────────────────────────────────────────────
-    diag_confidence   = get_grid(confidence_maps,      "ASMAE_CONFIDENCE",            "confidence")
+    diag_confidence   = (get_grid(confidence_maps, "ASMAE_POSTERIOR_CONCENTRATION")
+                        or get_grid(confidence_maps, "ASMAE_CONFIDENCE", "confidence"))
     diag_uncertainty  = get_grid(uncertainty_maps,     "ASMAE_UNCERTAINTY",           "uncertainty")
     diag_bma          = get_grid(bma_maps,             "ASMAE_BMA_DISAGREEMENT",      "bma_disagreement")
     diag_cross_layer  = get_grid(raster_maps,          "cross_layer_conflict",        "ASMAE_CROSS_LAYER_CONFLICT")
@@ -251,6 +252,24 @@ def export_asmae_feature_pack(output: Any) -> Dict[str, Any]:
     }
 
     feature_formula_versions = diagnostics.get("feature_formula_versions", {})
+
+    def unavailable_diagnostic(reason: str, formula_ver: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a zero-authority diagnostic entry for an unexecuted stage."""
+        return {
+            "status": "unavailable",
+            "source": None,
+            "confidence": 0.0,
+            "weight": 0.0,
+            "source_kind": "unavailable",
+            "usable_for_field_approval": False,
+            "usable_for_advisory": False,
+            "usable_for_visual_only": False,
+            "direct_observation_count": 0,
+            "proxy_observation_count": 0,
+            "prior_only": False,
+            "drop_reason": reason,
+            "feature_formula_versions": formula_ver,
+        }
 
     # ── BC.10.13 P3 — per-feature truth ───────────────────────────────────────
     def check_per_feature_status(grid_val, feature_name: str) -> Dict[str, Any]:
@@ -285,6 +304,35 @@ def export_asmae_feature_pack(output: Any) -> Dict[str, Any]:
                 "usable_for_visual_only": False,
                 "feature_formula_versions": {},
             }
+
+        # A materialized zero/support map is not proof that the scientific stage
+        # ran. Gate stage diagnostics with the canonical execution ledger before
+        # the generic real-evidence branch can grant them authority.
+        stage_requirements = {
+            "archive_support": (
+                bool(diagnostics.get("used_archive", False)),
+                "archive_stage_not_used",
+            ),
+            "ml_support": (
+                bool(diagnostics.get("used_ml", False))
+                and str(diagnostics.get("ml_state", "")).lower()
+                not in ("", "unavailable", "unavailable_silent", "disabled"),
+                "ml_stage_not_used",
+            ),
+            "bma_disagreement": (
+                bool(diagnostics.get("used_bma", False))
+                and str(diagnostics.get("bma_status", "")).lower() == "success",
+                "bma_stage_not_used",
+            ),
+            "retrovalidation_score": (
+                bool(diagnostics.get("used_retrovalidation", False)),
+                "retrovalidation_stage_not_used",
+            ),
+        }
+        if feature_name in stage_requirements:
+            stage_used, reason = stage_requirements[feature_name]
+            if not stage_used:
+                return unavailable_diagnostic(reason, formula_ver)
 
         is_state_var = feature_name in _STATE_FEATURES
         if is_state_var:

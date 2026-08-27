@@ -49,33 +49,35 @@ class SpatialAnalysisEngine:
         zone_means: Optional[Dict[str, List[float]]] = None,
         phase_variability: float = 0.0,
         n_season_observations: int = 0,
+        zone_centroids: Optional[Dict[str, Tuple[float, float]]] = None,
+        zone_adjacency: Optional[Dict[str, List[str]]] = None,
     ) -> SpatialMetrics:
         """
         Full spatial analysis: stability class + Moran's I + trend + CUSUM + zone ranking.
+        Calculates field stability and spatial variance metrics.
 
-        Args:
-            dates: ISO date strings.
-            spatial_std_series: Time series of spatial std dev of NDVI.
-            zone_means: {zone_id: [mean_ndvi_per_timestep]} for Moran's I.
-            phase_variability: HMM transition frequency [0-1] for adaptive CUSUM.
-            n_season_observations: Total observations this season for CUSUM limit scaling.
+        Spatial Invariant:
+          - Moran's I is computed ONLY when explicit zone_adjacency or physical
+            zone_centroids (x, y) are provided. If geometry is absent, Moran's I
+            returns (0.0, 1.0) with authority UNAVAILABLE.
+
+        Returns SpatialMetrics dataclass.
         """
-        if not spatial_std_series or len(spatial_std_series) < 2:
-            return SpatialMetrics(0.0, 0.0, "UNKNOWN", 0.0)
+        if not spatial_std_series or len(spatial_std_series) == 0:
+            return SpatialMetrics(
+                mean_spatial_var=0.0,
+                std_spatial_var=0.0,
+                stability_class="UNKNOWN",
+                confidence=0.0,
+                spatial_trend="STABLE",
+            )
 
-        # ─── 1. Basic Statistics ───
-        mean_var = statistics.mean(spatial_std_series)
-        std_var = statistics.stdev(spatial_std_series)
+        # ─── 1. Spatial Variance Summary ───
+        mean_var = float(statistics.mean(spatial_std_series))
+        std_var = float(statistics.stdev(spatial_std_series)) if len(spatial_std_series) > 1 else 0.0
 
-        # ─── 2. Stability Classification ───
-        stability_class = "STABLE"
-        conf = 1.0
-
-        if std_var > self.transient_threshold:
-            stability_class = "TRANSIENT_VAR"
-            dist = std_var - self.transient_threshold
-            conf = 0.5 + min(0.5, dist * 20.0)
-        elif mean_var > self.heterogeneity_threshold:
+        # ─── 2. Classification ───
+        if mean_var > self.heterogeneity_threshold:
             stability_class = "HETEROGENEOUS"
             dist = mean_var - self.heterogeneity_threshold
             conf = 0.5 + min(0.5, dist * 10.0)
@@ -84,11 +86,21 @@ class SpatialAnalysisEngine:
             dist = self.heterogeneity_threshold - mean_var
             conf = 0.5 + min(0.5, dist * 10.0)
 
-        # ─── 3. Moran's I (spatial autocorrelation) ───
+        # ─── 3. Moran's I (spatial autocorrelation with geometry gating) ───
         morans_i = 0.0
         morans_p = 1.0
+        morans_status = "UNAVAILABLE"
         if zone_means and len(zone_means) >= 3:
-            morans_i, morans_p = self._compute_morans_i(zone_means)
+            res = self._compute_morans_i(
+                zone_means,
+                zone_adjacency=zone_adjacency,
+                zone_centroids=zone_centroids,
+            )
+            if len(res) == 3:
+                morans_i, morans_p, morans_status = res
+            else:
+                morans_i, morans_p = res
+                morans_status = "AVAILABLE" if (zone_adjacency or zone_centroids) else "UNAVAILABLE"
 
         # ─── 4. Mann-Kendall Trend Test ───
         spatial_trend = "STABLE"
@@ -120,6 +132,7 @@ class SpatialAnalysisEngine:
             confidence=float(conf),
             morans_i=float(morans_i),
             morans_p=float(morans_p),
+            morans_status=morans_status,
             spatial_trend=spatial_trend,
             spatial_trend_p=float(spatial_trend_p),
             worst_zone_id=worst_zone,
@@ -225,28 +238,28 @@ class SpatialAnalysisEngine:
         self,
         zone_means: Dict[str, List[float]],
         n_permutations: int = 99,
-    ) -> Tuple[float, float]:
+        zone_adjacency: Optional[Dict[str, List[str]]] = None,
+        zone_centroids: Optional[Dict[str, Tuple[float, float]]] = None,
+    ) -> Tuple[float, float, str]:
         """Compute Global Moran's I for the latest timestep.
 
         I = (n / W) × Σᵢ Σⱼ wᵢⱼ(xᵢ - x̄)(xⱼ - x̄) / Σᵢ(xᵢ - x̄)²
 
-        Uses equal connectivity weights (all zones connected to all others)
-        since we typically don't have zone adjacency information.
-
-        Returns:
-            (morans_i, p_value) from permutation test.
+        Scientific Invariant:
+          - Requires explicit zone_adjacency or physical zone_centroids (x, y).
+          - If spatial geometry is unavailable, returns (0.0, 1.0, "UNAVAILABLE") rather than
+            fabricating pseudo-topology from list/dictionary insertion order.
         """
         zone_ids = list(zone_means.keys())
         n = len(zone_ids)
-        if n < 3:
-            return 0.0, 1.0
+        if n < 3 or (not zone_adjacency and not zone_centroids):
+            return 0.0, 1.0, "UNAVAILABLE"
 
         # Get latest timestep values
         values = []
         for zid in zone_ids:
             ts = zone_means[zid]
             if ts:
-                # Use mean of last 5 timesteps for stability
                 last_vals = [v for v in ts[-5:] if v is not None and not math.isnan(v)]
                 values.append(statistics.mean(last_vals) if last_vals else 0.0)
             else:
@@ -257,15 +270,77 @@ class SpatialAnalysisEngine:
         ss = sum(d * d for d in deviations)
 
         if ss < 1e-10:
-            return 0.0, 1.0
+            return 0.0, 1.0, "UNAVAILABLE"
 
-        # Equal weights: wij = 1 for all i≠j
-        W = n * (n - 1)  # Total weight
+        zone_id_to_idx = {zid: idx for idx, zid in enumerate(zone_ids)}
+        w_matrix = [[0.0] * n for _ in range(n)]
+
+        if zone_adjacency:
+            # Use explicit adjacency graph
+            for zid, neighbors in zone_adjacency.items():
+                i = zone_id_to_idx.get(zid)
+                if i is None:
+                    continue
+                for nid in neighbors:
+                    j = zone_id_to_idx.get(nid)
+                    if j is not None and i != j:
+                        w_matrix[i][j] = 1.0
+                        w_matrix[j][i] = 1.0
+        elif zone_centroids:
+            # Check that all zones have real physical geometry (no fabricated (0,0) default origin)
+            missing_geom = [zid for zid in zone_ids if zid not in zone_centroids]
+            if missing_geom:
+                valid_zids = [zid for zid in zone_ids if zid in zone_centroids]
+                if len(valid_zids) < 3:
+                    return 0.0, 1.0, "UNAVAILABLE"
+                zone_ids = valid_zids
+                n = len(zone_ids)
+                zone_id_to_idx = {zid: idx for idx, zid in enumerate(zone_ids)}
+                w_matrix = [[0.0] * n for _ in range(n)]
+                values = []
+                for zid in zone_ids:
+                    ts = zone_means[zid]
+                    if ts:
+                        last_vals = [v for v in ts[-5:] if v is not None and not math.isnan(v)]
+                        values.append(statistics.mean(last_vals) if last_vals else 0.0)
+                    else:
+                        values.append(0.0)
+                x_mean = statistics.mean(values)
+                deviations = [v - x_mean for v in values]
+                ss = sum(d * d for d in deviations)
+                if ss < 1e-10:
+                    return 0.0, 1.0, "UNAVAILABLE"
+
+            coords = [
+                (float(zone_centroids[zid][0]), float(zone_centroids[zid][1]))
+                for zid in zone_ids
+            ]
+            k = min(2, n - 1)
+            for i in range(n):
+                dists = []
+                for j in range(n):
+                    if i != j:
+                        d = math.hypot(coords[i][0] - coords[j][0], coords[i][1] - coords[j][1])
+                        dists.append((d, j))
+                dists.sort()
+                for _, j in dists[:k]:
+                    w_matrix[i][j] = 1.0
+                    w_matrix[j][i] = 1.0
+        else:
+            # Spatial geometry unavailable: forbid fabricating topology from container order
+            return 0.0, 1.0, "UNAVAILABLE"
+
+        # Compute total weight W
+        W = sum(w_matrix[i][j] for i in range(n) for j in range(n))
+        if W < 1e-10:
+            return 0.0, 1.0, "UNAVAILABLE"
+
+        # Compute Moran's I with proper weights
         cross_sum = 0.0
         for i in range(n):
             for j in range(n):
-                if i != j:
-                    cross_sum += deviations[i] * deviations[j]
+                if w_matrix[i][j] > 0:
+                    cross_sum += w_matrix[i][j] * deviations[i] * deviations[j]
 
         observed_i = (n / W) * cross_sum / ss
 
@@ -279,15 +354,15 @@ class SpatialAnalysisEngine:
             perm_cross = 0.0
             for i in range(n):
                 for j in range(n):
-                    if i != j:
-                        perm_cross += perm[i] * perm[j]
+                    if w_matrix[i][j] > 0:
+                        perm_cross += w_matrix[i][j] * perm[i] * perm[j]
             perm_i = (n / W) * perm_cross / ss
             if abs(perm_i) >= abs(observed_i):
                 count_extreme += 1
 
         p_value = (count_extreme + 1) / (n_permutations + 1)
 
-        return observed_i, p_value
+        return observed_i, p_value, "AVAILABLE"
 
     # =====================================================================
     # Mann-Kendall Trend Test

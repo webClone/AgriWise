@@ -3,11 +3,10 @@
 import { 
   Sprout, 
   Calendar, 
-  TrendingUp,
   Activity,
   Info
 } from "lucide-react";
-import { usePlotIntelligence } from "@/hooks/usePlotIntelligence";
+import { useLayer10 } from "@/hooks/useLayer10";
 
 interface CropCycle {
   id: string;
@@ -28,29 +27,16 @@ export default function CurrentCropStatus({
 }: CurrentCropStatusProps) {
   const currentCycle = cycles[0] || null;
 
-  // Pull REAL phenology data from backend
-  let stage = "Unknown";
-  let dap: number | null = null;
-  let plantDate: string | null = null;
-  let basis: string | null = null;
+  const l10 = useLayer10();
+  const phenology = l10.evidenceState.resolvedPhenology;
+  const stage = phenology.stage || "UNKNOWN";
+  const recordedPlantDate = currentCycle?.startDate
+    ? new Date(currentCycle.startDate).toLocaleDateString()
+    : null;
 
-  try {
-    const pi = usePlotIntelligence();
-    if (pi?.data?.cropPhenology) {
-      const pheno = pi.data.cropPhenology;
-      if (pheno.stage) stage = pheno.stage;
-      if (pheno.dap != null) dap = pheno.dap;
-      if (pheno.plant_date) plantDate = pheno.plant_date;
-      if (pheno.basis) basis = pheno.basis;
-    }
-  } catch { /* not in provider */ }
-
-  // Compute real GDD progress (approximate from DAP if available)
-  const gddProgress = dap != null ? Math.min(100, Math.round((dap / 120) * 100)) : null;
-
-  // Dynamic Yield Confidence based on Readiness
-  const yieldConfidence = Math.round(readinessScore * 0.95);
-  const confidenceTier = yieldConfidence >= 80 ? 'High' : yieldConfidence >= 50 ? 'Moderate' : 'Low';
+  // Readiness is configuration completeness, not a yield-model confidence.
+  const dataReadiness = Math.max(0, Math.min(100, Math.round(readinessScore)));
+  const readinessTier = dataReadiness >= 80 ? 'High' : dataReadiness >= 50 ? 'Moderate' : 'Low';
 
   return (
     <div className="rounded-2xl border border-white/[0.06] overflow-hidden" style={{ background: "linear-gradient(135deg, rgba(16,185,129,0.04) 0%, rgba(11,16,21,0.9) 40%)" }}>
@@ -78,12 +64,10 @@ export default function CurrentCropStatus({
                 <span className="text-xs font-bold text-emerald-400 uppercase tracking-widest">
                   {stage}
                 </span>
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                {basis && (
-                  <span className="text-[8px] text-slate-600 font-mono uppercase tracking-wider bg-white/[0.03] px-1.5 py-0.5 rounded">
-                    via {basis}
-                  </span>
-                )}
+                <span className={`w-1.5 h-1.5 rounded-full ${phenology.stage ? "bg-emerald-500" : "bg-slate-600"}`} />
+                <span className="text-[8px] text-slate-600 font-mono uppercase tracking-wider bg-white/[0.03] px-1.5 py-0.5 rounded">
+                  Layer 2 · {phenology.authority}
+                </span>
               </div>
 
               {/* Crop name */}
@@ -100,53 +84,38 @@ export default function CurrentCropStatus({
                 <span className="text-white/10">|</span>
                 <span className="flex items-center gap-1.5">
                   <Calendar size={13} className="text-slate-600" />
-                  {plantDate || (currentCycle.startDate ? new Date(currentCycle.startDate).toLocaleDateString() : "Unknown")}
+                  {recordedPlantDate || "Planting date not recorded"}
                 </span>
-                {dap != null && (
-                  <>
-                    <span className="text-white/10">|</span>
-                    <span className="text-emerald-400 font-mono font-bold text-xs">{dap} DAP</span>
-                  </>
-                )}
               </div>
 
               {/* Metrics Grid — REAL data */}
               <div className="mt-4 grid grid-cols-2 md:grid-cols-3 gap-3">
-                {/* DAP / Growth Progress */}
+                {/* Administrative start date; never converted into phenology. */}
                 <div className="bg-white/[0.02] rounded-xl p-3 border border-white/[0.04]">
                   <p className="text-[9px] uppercase font-bold text-emerald-400/70 mb-1.5 flex items-center gap-1">
-                    <Calendar size={11} /> Days After Planting
+                    <Calendar size={11} /> Recorded Start Date
                   </p>
-                  <p className="text-lg font-bold font-mono text-white">
-                    {dap != null ? (
-                      <>{dap} <span className="text-xs font-normal text-slate-500">days</span></>
-                    ) : (
-                      <span className="text-slate-600 text-sm italic">No plant date</span>
-                    )}
+                  <p className="text-sm font-bold font-mono text-white">
+                    {recordedPlantDate || <span className="text-slate-600 italic">Not recorded</span>}
                   </p>
                 </div>
 
-                {/* GDD Progress — computed from real DAP */}
+                {/* Content-addressed Layer-2 phenology publication. */}
                 <div className="bg-white/[0.02] rounded-xl p-3 border border-white/[0.04]">
                   <p className="text-[9px] uppercase font-bold text-emerald-400/70 mb-1.5 flex items-center gap-1">
-                    <TrendingUp size={11} /> Growth Progress
+                    <Info size={11} /> Layer 2 Receipt
                   </p>
-                  {gddProgress != null ? (
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                        <div className="h-full bg-emerald-500 rounded-full transition-all duration-700" style={{ width: `${gddProgress}%` }} />
-                      </div>
-                      <span className="text-xs font-bold font-mono text-white">{gddProgress}%</span>
-                    </div>
-                  ) : (
-                    <span className="text-slate-600 text-sm italic">—</span>
-                  )}
+                  <p className="text-xs font-mono text-white" title={phenology.posteriorHash || phenology.userLabel}>
+                    {phenology.receiptValid && phenology.posteriorHash
+                      ? phenology.posteriorHash.slice(0, 12)
+                      : phenology.userLabel}
+                  </p>
                 </div>
 
-                {/* Yield Confidence */}
+                {/* Configuration readiness; never presented as model confidence. */}
                 <div className="bg-white/[0.02] rounded-xl p-3 border border-white/[0.04] col-span-2 md:col-span-1 group relative">
                   <div className="absolute bottom-full mb-2 hidden group-hover:block w-48 bg-slate-800 text-slate-200 text-[10px] p-2 rounded-lg shadow-lg z-50 border border-white/10">
-                    <p className="font-bold mb-1 text-slate-100">Confidence influenced by:</p>
+                    <p className="font-bold mb-1 text-slate-100">Readiness checks:</p>
                     <ul className="list-disc pl-3 space-y-0.5 text-slate-400">
                       <li>Soil recency</li>
                       <li>Live monitoring coverage</li>
@@ -154,13 +123,13 @@ export default function CurrentCropStatus({
                     </ul>
                   </div>
                   <p className="text-[9px] uppercase font-bold text-emerald-400/70 mb-1.5 flex items-center gap-1 cursor-help">
-                    <Activity size={11} /> Yield Confidence <Info size={8} className="text-emerald-400/50" />
+                    <Activity size={11} /> Data Readiness <Info size={8} className="text-emerald-400/50" />
                   </p>
                   <div className="flex items-center gap-2">
-                    <span className={`text-lg font-bold font-mono ${yieldConfidence >= 80 ? 'text-emerald-400' : yieldConfidence >= 50 ? 'text-amber-400' : 'text-slate-400'}`}>
-                      {yieldConfidence}%
+                    <span className={`text-lg font-bold font-mono ${dataReadiness >= 80 ? 'text-emerald-400' : dataReadiness >= 50 ? 'text-amber-400' : 'text-slate-400'}`}>
+                      {dataReadiness}%
                     </span>
-                    <span className="text-[10px] text-slate-600">{confidenceTier}</span>
+                    <span className="text-[10px] text-slate-600">{readinessTier}</span>
                   </div>
                 </div>
               </div>

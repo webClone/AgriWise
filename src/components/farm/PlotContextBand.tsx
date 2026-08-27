@@ -11,7 +11,6 @@ interface PlotContextBandProps {
   plotName: string;
   plotArea: number;
   cropName: string;
-  cropStage?: string;
   telemetry?: {
     temp: number;
     humidity: number;
@@ -22,7 +21,7 @@ interface PlotContextBandProps {
   farmId?: string;
 }
 
-export default function PlotContextBand({ plotName, plotArea, cropName, cropStage, telemetry, farmId }: PlotContextBandProps) {
+export default function PlotContextBand({ plotName, plotArea, cropName, telemetry, farmId }: PlotContextBandProps) {
   const l10 = useLayer10();
 
   const BASE_LABELS: Record<string, string> = {
@@ -85,7 +84,6 @@ export default function PlotContextBand({ plotName, plotArea, cropName, cropStag
   let liveRain: number | null = null;
   let liveWind: number | null = null;
   // GAP A: real agronomic stage
-  let liveCropStage: string | null = null;
 
   try {
     pi = usePlotIntelligence();
@@ -109,10 +107,7 @@ export default function PlotContextBand({ plotName, plotArea, cropName, cropStag
       liveWind = (w.wind as any)?.speed_ms ?? (typeof w.wind_speed === "number" ? w.wind_speed : null);
     }
 
-    // GAP A: use real agronomic stage computed by the Python phenology model
-    if (pi.cropPhenology?.stage) {
-      liveCropStage = pi.cropPhenology.stage;
-    }
+    // Phenology is consumed separately from the canonical Layer-2 publication.
   } catch {
     // Not inside PlotIntelligenceProvider — that's fine, use defaults
   }
@@ -142,7 +137,6 @@ export default function PlotContextBand({ plotName, plotArea, cropName, cropStag
   const effectiveTemp = liveTemp ?? telemetry?.temp;
   const effectiveRain = liveRain ?? telemetry?.rain ?? 0;
   const effectiveWind = liveWind ?? telemetry?.windSpeed ?? 0;
-  const effectiveCropStage = liveCropStage ?? cropStage;
 
   const WeatherIcon = effectiveTemp !== undefined
     ? (effectiveRain > 0 ? CloudRain : effectiveWind > 20 ? Wind : Thermometer)
@@ -172,20 +166,18 @@ export default function PlotContextBand({ plotName, plotArea, cropName, cropStag
                 <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
                     {cropName} • {plotArea.toFixed(1)} ha
                 </span>
-                {/* GAP A: show real phenology stage if available, else DB status */}
-                 {l10.evidenceState?.resolvedPhenology ? (
+                {/* Never substitute the registry/cycle status for Layer-2 phenology. */}
+                 {l10.evidenceState?.resolvedPhenology && (
                      <span className={`text-[9px] font-medium tracking-wider px-2 py-0.5 rounded-full ${
-                       l10.evidenceState.resolvedPhenology.conflict 
-                         ? "text-red-400/70 bg-red-500/8 border border-red-500/20" 
-                         : "text-emerald-400/70 bg-emerald-500/8"
-                     }`} title={l10.evidenceState.resolvedPhenology.conflict ? l10.evidenceState.resolvedPhenology.userLabel : undefined}>
-                       {l10.evidenceState.resolvedPhenology.conflict ? "⚠️ Stage Conflict" : l10.evidenceState.resolvedPhenology.userLabel}
+                       l10.evidenceState.resolvedPhenology.stage
+                         ? "text-emerald-400/70 bg-emerald-500/8"
+                         : "text-amber-400/70 bg-amber-500/8 border border-amber-500/20"
+                     }`} title={l10.evidenceState.resolvedPhenology.userLabel}>
+                       {l10.evidenceState.resolvedPhenology.stage
+                         ? l10.evidenceState.resolvedPhenology.userLabel
+                         : "Stage UNKNOWN"}
                      </span>
-                 ) : effectiveCropStage ? (
-                     <span className="text-[9px] font-medium tracking-wider text-emerald-400/70 bg-emerald-500/8 px-2 py-0.5 rounded-full">
-                       {effectiveCropStage}
-                     </span>
-                 ) : null}
+                 )}
             </div>
         </div>
 

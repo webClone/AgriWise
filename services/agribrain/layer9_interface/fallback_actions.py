@@ -8,6 +8,40 @@ def get_fallback_guidance(surface_type: str, state: str, has_plot_data: bool,
     has_plot_data: boolean indicating if plot-level fallback metrics exist
     surface_mean: optional mean value of the surface (0-1 for probability surfaces)
     """
+
+    # A committed state raster and an operational decision surface have
+    # different authority. Never inherit an "invalid map" message from a
+    # missing decision surface when the state raster itself is rendered.
+    if surface_type in {"WATER_ASMAE_CANOPY_WATER", "WATER_ASMAE_ROOT_ZONE_WATER"}:
+        return {
+            "action_mode": "scouting_only",
+            "recommended_next_step": (
+                "Use this spatial pattern to guide field checks; base irrigation "
+                "decisions on plot-level water balance, sensors, and field verification."
+            ),
+            "why": (
+                "The displayed water-state raster is a valid model-assisted scouting "
+                "surface, but it does not authorize localized irrigation zones."
+            ),
+            "confidence": 0.55,
+            "data_basis": "committed_asmae_water_state",
+            "guidance_surface_type": surface_type,
+        }
+    if surface_type == "NUTRIENT_ASMAE_CHLOROPHYLL_PROXY":
+        return {
+            "action_mode": "scouting_only",
+            "recommended_next_step": (
+                "Use this spatial pattern to guide scouting or sampling; do not infer "
+                "fertilizer adequacy from this diagnostic raster alone."
+            ),
+            "why": (
+                "The displayed chlorophyll-state raster is a valid model-assisted "
+                "scouting surface, not a localized fertilizer prescription."
+            ),
+            "confidence": 0.55,
+            "data_basis": "committed_asmae_chlorophyll_state",
+            "guidance_surface_type": surface_type,
+        }
     
     # Case A: Localized zones exist (includes management zone engine output like "produced_5_zones")
     if state == "localized" or state.startswith("produced_"):
@@ -54,14 +88,14 @@ def get_fallback_guidance(surface_type: str, state: str, has_plot_data: bool,
                 why = "No significant water stress detected across the field"
                 next_step = "Continue current irrigation schedule; no zones require attention"
         elif "NUTRIENT" in surface_type:
-            why = "Nutrient levels appear adequate — no deficiency zones detected"
-            next_step = "Maintain current fertilization plan"
+            why = "No localized nutrient-risk zone was detected"
+            next_step = "Maintain monitoring; do not infer fertilizer adequacy from this map alone"
         elif "RISK" in surface_type:
             why = "Overall risk is low — no high-risk zones identified"
             next_step = "Continue standard monitoring"
         elif "UNCERTAINTY" in surface_type or "RELIABILITY" in surface_type:
-            why = "Data quality is good across the field — no low-confidence zones"
-            next_step = "All spatial recommendations can be trusted at face value"
+            why = "No localized low-confidence zone was detected"
+            next_step = "Continue using the publication's diagnostic and scouting limitations"
         else:
             why = "Vegetation signal is healthy — no anomaly zones detected"
             next_step = "No action needed; field is performing within expectations"
@@ -118,7 +152,9 @@ def build_fallback_guidance_map(zone_state_by_surface: Dict[str, str], has_plot_
     core_surfaces = [
         "NDVI_CLEAN", "NDVI_DEVIATION", "BASELINE_ANOMALY",
         "WATER_STRESS_PROB", "NUTRIENT_STRESS_PROB", "COMPOSITE_RISK",
-        "UNCERTAINTY_SIGMA", "DATA_RELIABILITY"
+        "UNCERTAINTY_SIGMA", "DATA_RELIABILITY",
+        "WATER_ASMAE_CANOPY_WATER", "WATER_ASMAE_ROOT_ZONE_WATER",
+        "NUTRIENT_ASMAE_CHLOROPHYLL_PROXY",
     ]
     
     # Inheritance: some surfaces don't have their own zone configs but should

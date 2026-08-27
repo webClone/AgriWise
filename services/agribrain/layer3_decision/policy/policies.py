@@ -4,15 +4,15 @@ import datetime
 
 from layer3_decision.schema import Diagnosis, Recommendation, PlotContext
 from layer3_decision.knowledge.ontology import ACTIONS, ProblemType, ActionDefinition
-from layer3_water.soil_moisture import SoilMoistureModel
+from layer3_water.soil import SoilProfileDatabase
 
 class PolicyEngine:
     """
     Deterministically maps Diagnoses -> Actions.
     Resolves trade-offs, priorities, COMPLIANCE, and SAFETY.
     """
-    # PERF-1: Singleton soil model to avoid re-instantiation per recommendation
-    _soil_model = SoilMoistureModel()
+    # PERF-1: Canonical soil profile (replaces legacy SoilMoistureModel)
+    _soil_profile_db = SoilProfileDatabase
     
     def generate_plan(
         self, 
@@ -188,21 +188,45 @@ class PolicyEngine:
     ) -> Dict[str, float]:
         """ENH-7: Compute resource estimates for irrigation recommendations.
 
-        For IRRIGATE_FULL and APPLY_DEFICIT_IRRIGATION, uses the layer3_water
-        SoilMoistureModel to compute depletion-based irrigation dose.
+        Uses canonical SoilProfileDatabase for TAW calculation and derives
+        depletion from evidence trace rather than raw severity.
+        GAP-5/GAP-19 FIX: severity is no longer misused as physical depletion.
         """
         resources: Dict[str, float] = {}
 
         if action_def.action_id in ("IRRIGATE_FULL", "APPLY_DEFICIT_IRRIGATION"):
-            soil_model = self._soil_model  # PERF-1: class-level singleton
             soil_type = context.soil_texture_class or "loam"
 
-            # Get TAW from soil properties
-            taw_mm = soil_model.get_taw(soil_type, root_depth_m=1.0)
+            # Get TAW from canonical soil profile database
+            soil_profile = SoilProfileDatabase.get_canonical_soil_profile(
+                soil_type=soil_type, initial_saturation_fraction=0.5,
+            )
+            # Compute TAW from the profile (FC - WP) across root zone
+            taw_mm = 0.0
+            prev_d = 0.0
+            root_depth_cm = 100.0  # 1m default root zone
+            for i, d in enumerate(soil_profile.layer_depths_cm):
+                if prev_d >= root_depth_cm:
+                    break
+                active_thickness_mm = (min(d, root_depth_cm) - prev_d) * 10.0
+                taw_mm += (soil_profile.field_capacity_profile[i] - soil_profile.wilting_point_profile[i]) * active_thickness_mm
+                prev_d = d
+            taw_mm = max(1.0, taw_mm)
 
-            # Estimate current depletion from diagnosis severity
-            # severity 1.0 = fully depleted, 0.0 = field capacity
-            depletion_pct = min(1.0, diagnosis.severity)
+            # GAP-19 FIX: Derive depletion from evidence-weighted rain deficit
+            # and anomaly signals, NOT from raw severity (which mixes VPD, stage, etc.)
+            rain_deficit_score = 0.0
+            anomaly_score = 0.0
+            for ev in diagnosis.evidence_trace:
+                if ev.feature_name in ("rain_sum_14d", "days_since_rain") and ev.score > 0:
+                    rain_deficit_score = max(rain_deficit_score, ev.score)
+                if ev.feature_name in ("ndvi_anomaly", "ndvi_drop", "esi") and ev.score > 0:
+                    anomaly_score = max(anomaly_score, ev.score)
+
+            # Depletion estimate: blend physical evidence signals
+            evidence_depletion = min(1.0, 0.5 * rain_deficit_score + 0.5 * anomaly_score)
+            # Floor at 30% if any diagnosis was triggered
+            depletion_pct = max(0.3, evidence_depletion) if diagnosis.probability > 0.5 else evidence_depletion
             depletion_mm = taw_mm * depletion_pct
 
             # Application efficiency
@@ -210,7 +234,6 @@ class PolicyEngine:
             eff = eff_map.get(context.irrigation_type, 0.80)
 
             if action_def.action_id == "IRRIGATE_FULL":
-                # Full refill to field capacity
                 gross_mm = depletion_mm / eff
             else:
                 # Deficit irrigation: 50-70% of full dose

@@ -84,6 +84,10 @@ def build_legacy_fieldtensor(
 
     # 8. Maps from spatial index raster refs
     maps = _rebuild_maps(pkg, grid_spec)
+    map_metadata = _rebuild_map_metadata(pkg, grid_spec)
+    _merge_authorized_raster_ndvi_observation(
+        plot_ts, maps, map_metadata, pkg.time_window.end,
+    )
 
     # 9. Provenance
     provenance = rebuild_provenance(pkg)
@@ -171,6 +175,7 @@ def build_legacy_fieldtensor(
 
         grid={},
         maps=maps,
+        map_metadata=map_metadata,
         zones=zones,
         zone_stats=zone_stats,
 
@@ -191,6 +196,79 @@ def build_legacy_fieldtensor(
     tensor.asmae_run_record = pkg.asmae_run_record
 
     return tensor
+
+
+def _merge_authorized_raster_ndvi_observation(
+    plot_ts: List[Dict[str, Any]],
+    maps: Dict[str, Any],
+    map_metadata: Dict[str, Any],
+    observed_at: Any,
+) -> bool:
+    """Expose an admitted provider NDVI raster as one typed plot observation.
+
+    This is an aggregation of the exact admitted pixels, not a synthetic fill.
+    It is added only when temporal reconstruction has no observed NDVI at that
+    date and the raster authority envelope identifies a real, production-usable
+    provider product.
+    """
+    ndvi_key = next((key for key in maps if str(key).lower() in {"ndvi", "ndvi_clean"}), None)
+    if ndvi_key is None:
+        return False
+    metadata = (
+        map_metadata.get(ndvi_key)
+        or map_metadata.get(str(ndvi_key).lower())
+        or map_metadata.get(str(ndvi_key).upper())
+        or {}
+    )
+    if not (
+        metadata.get("production_usable") is True
+        and metadata.get("real_provider_product") is True
+        and metadata.get("diagnostic_only") is not True
+    ):
+        return False
+    values: List[float] = []
+    for row in maps.get(ndvi_key) or []:
+        if not isinstance(row, (list, tuple)):
+            continue
+        for value in row:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number):
+                values.append(number)
+    if not values:
+        return False
+    date_value = (
+        observed_at.strftime("%Y-%m-%d")
+        if hasattr(observed_at, "strftime")
+        else str(observed_at or "")[:10]
+    )
+    target = next((row for row in plot_ts if str(row.get("date"))[:10] == date_value), None)
+    if target is None:
+        target = {"date": date_value}
+        plot_ts.append(target)
+        plot_ts.sort(key=lambda row: str(row.get("date") or ""))
+    existing = target.get("ndvi_mean")
+    if target.get("is_observed") is True and isinstance(existing, (int, float)):
+        return False
+    target.update({
+        "ndvi_mean": sum(values) / len(values),
+        "ndvi_smoothed": sum(values) / len(values),
+        "is_observed": True,
+        "observation_type": "provider_raster_spatial_aggregate",
+        "source": metadata.get("source_reality") or "provider_temporal_composite_raster",
+        "source_reality": metadata.get("source_reality") or "provider_temporal_composite_raster",
+        "content_hash": metadata.get("content_hash"),
+        "raster_id": metadata.get("raster_id"),
+        "coverage": float(metadata.get("observed_ratio") or 1.0),
+        "confidence": float(metadata.get("confidence") or 0.8),
+        "uncertainty": float(metadata.get("uncertainty") or 0.2),
+        "production_usable": True,
+        "real_provider_product": True,
+        "state_update_allowed": bool(metadata.get("state_update_allowed", False)),
+    })
+    return True
 
 
 def _extract_plot_exterior_ring(geometry: Any) -> Optional[List[List[float]]]:
@@ -339,6 +417,70 @@ def _rebuild_maps(
         if var_name and grid_data is not None:
             maps[var_name] = grid_data
     return maps
+
+
+def _rebuild_map_metadata(
+    pkg: Layer1ContextPackage,
+    grid_spec: Optional[GridSpec] = None,
+) -> Dict[str, Any]:
+    """Preserve the authority contract for every admitted compatibility map.
+
+    Numeric pixels and their evidence authority are one indivisible boundary
+    value. Rebuilding ``maps`` without ``map_metadata`` made a genuine
+    provider raster look like an ungrounded array in Layer 10.
+    """
+    si = pkg.spatial_index
+    if si is None:
+        return {}
+    if grid_spec is None:
+        grid_spec = _rebuild_grid_spec(pkg)
+    if grid_spec is None:
+        return {}
+
+    metadata: Dict[str, Any] = {}
+    fields_to_preserve = (
+        "raster_id", "variable", "resolution_m", "content_hash",
+        "width", "height", "observed_ratio", "truth_class",
+        "source_reality", "real_provider_product", "production_usable",
+        "grounding_class", "visualization_allowed",
+        "experimental_visual_allowed", "composite_advisory_allowed",
+        "scientific_surface_allowed", "current_1m_approval_allowed",
+        "observed_spatial_surface", "diagnostic_only",
+        "state_update_allowed", "prescription_driver_allowed",
+        "authority_block_reason", "asmae_channel", "source_basis",
+        "confidence", "uncertainty", "source_run_id",
+        "source_schema_version", "artifact_instance_hash", "retro_status",
+        "bma_status", "bma_disagreement", "cross_layer_conflict",
+        "sentinel_archive_used", "archive_scene_count", "archive_date_range",
+        "scene_stack_mode", "crs", "bounds", "transform",
+    )
+    for rr in getattr(si, "raster_refs", []):
+        if not raster_ref_has_geographic_authority(rr):
+            continue
+        if getattr(rr, "visualization_allowed", False) is not True:
+            continue
+        if (
+            rr.crs != grid_spec.crs
+            or tuple(rr.bounds) != tuple(grid_spec.bounds)
+            or tuple(rr.transform) != tuple(grid_spec.transform)
+            or rr.width != grid_spec.width
+            or rr.height != grid_spec.height
+        ):
+            continue
+        variable = str(getattr(rr, "variable", "") or "")
+        if not variable or getattr(rr, "grid", None) is None:
+            continue
+        item = {
+            name: getattr(rr, name)
+            for name in fields_to_preserve
+            if hasattr(rr, name)
+        }
+        provenance = getattr(rr, "provenance", {}) or {}
+        if isinstance(provenance, dict):
+            item = {**provenance, **item}
+        for alias in {variable, variable.lower(), variable.upper()}:
+            metadata[alias] = dict(item)
+    return metadata
 
 
 def _rebuild_boundary_info(pkg: Layer1ContextPackage) -> Dict[str, Any]:

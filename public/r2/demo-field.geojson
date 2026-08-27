@@ -1,0 +1,33 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "PLOT-ALGERIA-WHEAT-ZONE-4",
+        "name": "Durum Wheat Plot (Illustrative Demo)",
+        "crop": "Durum Wheat",
+        "status": "ILLUSTRATIVE"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [3.0128, 36.5008],
+            [3.0138, 36.5004],
+            [3.0152, 36.5005],
+            [3.0168, 36.5010],
+            [3.0172, 36.5018],
+            [3.0170, 36.5028],
+            [3.0162, 36.5034],
+            [3.0148, 36.5036],
+            [3.0135, 36.5032],
+            [3.0128, 36.5024],
+            [3.0126, 36.5016],
+            [3.0128, 36.5008]
+          ]
+        ]
+      }
+    }
+  ]
+}

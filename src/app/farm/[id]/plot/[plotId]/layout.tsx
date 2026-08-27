@@ -8,6 +8,7 @@ import PlotLayoutClient from "./PlotLayoutClient";
 import FarmThemeWrapper from "@/components/farm/FarmThemeWrapper";
 import { notFound } from "next/navigation";
 import { getSession } from "@/lib/session";
+import { isActiveCropCycleStatus } from "@/lib/agribrain/crop-cycle-status.mjs";
 
 export default async function PlotLayout({
   children,
@@ -35,7 +36,7 @@ export default async function PlotLayout({
   }
 
   const { plot, farm, cropCycles } = routeContext;
-  const currentCrop = cropCycles.find(c => c.status !== 'HARVESTED');
+  const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
   
   // Tasks not needed in layout usually, but kept in page.tsx if specific there.
   
@@ -65,7 +66,6 @@ export default async function PlotLayout({
             plotName={plot.name}
             plotArea={plot.area}
             cropName={currentCrop?.cropNameAr || currentCrop?.cropCode || "No Crop"}
-            cropStage={currentCrop?.stage}
             telemetry={faoContext?.realTime}
             farmId={farmId}
           />
@@ -77,7 +77,6 @@ export default async function PlotLayout({
                     plotName={plot.name}
                     plotArea={plot.area}
                     cropName={currentCrop?.cropNameAr || currentCrop?.cropCode || "No Crop"}
-                    cropStage={currentCrop?.stage}
                     telemetry={faoContext?.realTime}
                 />
             </div>

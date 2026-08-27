@@ -14,6 +14,7 @@ Architecture classes:
 from .registry import (
     CropSpec,
     get_crop,
+    get_crop_with_provenance,
     list_crops,
     list_crop_codes,
     resolve_crop_code,
@@ -24,6 +25,7 @@ from .registry import (
 __all__ = [
     "CropSpec",
     "get_crop",
+    "get_crop_with_provenance",
     "list_crops",
     "list_crop_codes",
     "resolve_crop_code",

@@ -127,6 +127,8 @@ class DecisionIntelligenceEngine:
                 lineage={
                     "l1_run_id": getattr(l3_context, "layer1_run_id", ""),
                     "l2_run_id": getattr(l3_context, "layer2_run_id", ""),
+                    "crop_posterior_hash": getattr(l3_context, "crop_posterior_hash", ""),
+                    "phenology_posterior_hash": getattr(l3_context, "phenology_posterior_hash", ""),
                 },
                 timestamp_utc=ts.isoformat(),
                 diagnoses=[],
@@ -198,26 +200,25 @@ class DecisionIntelligenceEngine:
                 elif z_stress == "VARIABILITY":
                     z_features.spatial_stability = "HETEROGENEOUS"
 
-                # Overlay zone phenology if available
-                z_pheno = z_data.get("phenology_stage")
-                if z_pheno and isinstance(z_pheno, str) and z_pheno.upper() != "UNKNOWN":
-                    z_features.current_stage = z_pheno.upper()
-
-                # Overlay zone confidence
+                # Zone metrics may describe spatial stress, but they are not a
+                # second phenology truth owner.  Stage and stage confidence stay
+                # bound to the canonical Layer 2 posterior used above.
                 z_conf = z_data.get("confidence", 0.5)
-                z_features.stage_confidence = min(z_features.stage_confidence, z_conf)
+                z_features.spatial_confidence = min(z_features.spatial_confidence, z_conf)
 
                 z_diagnoses = self.diagnosis_engine.diagnose(z_features, plot_context, forecast)
 
                 for d in z_diagnoses:
-                    if d.probability > 0.5:
+                    if d.probability > 0.3:
                         if d.problem_id not in all_diagnoses:
                             all_diagnoses[d.problem_id] = d
                             all_diagnoses[d.problem_id].affected_area_pct = 0.0
                             all_diagnoses[d.problem_id].hotspot_zone_ids = []
 
                         area_pct = z_data.get("area_pct", 100.0 / len(zone_status))
-                        all_diagnoses[d.problem_id].affected_area_pct += area_pct
+                        all_diagnoses[d.problem_id].affected_area_pct = min(
+                            100.0, all_diagnoses[d.problem_id].affected_area_pct + area_pct
+                        )
                         all_diagnoses[d.problem_id].hotspot_zone_ids.append(z_id)
 
                         if d.severity > all_diagnoses[d.problem_id].severity:
@@ -226,7 +227,7 @@ class DecisionIntelligenceEngine:
             # Global plot-level diagnosis
             global_diagnoses = self.diagnosis_engine.diagnose(features, plot_context, forecast)
             for d in global_diagnoses:
-                if d.probability > 0.5:
+                if d.probability > 0.3:
                     d.affected_area_pct = 100.0
                     d.hotspot_zone_ids = ["Plot-Wide"]
                     all_diagnoses[d.problem_id] = d
@@ -335,6 +336,8 @@ class DecisionIntelligenceEngine:
         lineage = {
             "l1_run_id": getattr(l3_context, "layer1_run_id", ""),
             "l2_run_id": getattr(l3_context, "layer2_run_id", ""),
+            "crop_posterior_hash": getattr(l3_context, "crop_posterior_hash", ""),
+            "phenology_posterior_hash": getattr(l3_context, "phenology_posterior_hash", ""),
         }
 
         # Build output
@@ -725,7 +728,7 @@ def run_layer3_decision(
         l3_ctx = build_layer3_context(l2_output)
 
         # Extract plot context from orchestrator inputs
-        plot_ctx = _extract_plot_context(inputs, l1_output)
+        plot_ctx = _extract_plot_context(inputs, l1_output, l2_output)
 
         # Extract weather forecast from L1 output
         forecast = _extract_weather_forecast(l1_output)
@@ -744,7 +747,7 @@ def run_layer3_decision(
         "[L3] Legacy VegIntOutput bridge used; canonical Layer2Output missing"
     )
     l3_ctx = _build_legacy_l3_context(inputs, l1_output, l2_output)
-    plot_ctx = _extract_plot_context(inputs, l1_output)
+    plot_ctx = _extract_plot_context(inputs, l1_output, l2_output)
     forecast = _extract_weather_forecast(l1_output)
 
     return run_layer3(
@@ -755,7 +758,9 @@ def run_layer3_decision(
     )
 
 
-def _extract_plot_context(inputs: Any, l1_output: Any = None) -> PlotContext:
+def _extract_plot_context(
+    inputs: Any, l1_output: Any = None, l2_output: Any = None,
+) -> PlotContext:
     """Extract PlotContext from OrchestratorInput.
 
     INT-2: Also extracts soil_texture_class from L1 static data.
@@ -767,9 +772,13 @@ def _extract_plot_context(inputs: Any, l1_output: Any = None) -> PlotContext:
     op_ctx = getattr(inputs, "operational_context", {}) or {}
     policy = getattr(inputs, "policy_snapshot", {}) or {}
 
-    crop_type = "unknown"
-    if isinstance(crop_cfg, dict):
-        crop_type = crop_cfg.get("crop", crop_cfg.get("crop_type", "unknown"))
+    from services.agribrain.common.downstream_crop_context import resolve_downstream_crop_phenology
+
+    crop_semantics = resolve_downstream_crop_phenology(
+        inputs=inputs, l2_output=l2_output,
+    )
+    crop_type = crop_semantics.crop_for_species_engine
+    declared_crop = crop_semantics.declared_crop or "unknown"
 
     irrigation = "unknown"
     if isinstance(op_ctx, dict):
@@ -798,6 +807,10 @@ def _extract_plot_context(inputs: Any, l1_output: Any = None) -> PlotContext:
 
     return PlotContext(
         crop_type=crop_type,
+        declared_crop_type=declared_crop,
+        crop_posterior_hash=crop_semantics.crop_posterior_hash,
+        crop_resolution=crop_semantics.crop_resolution,
+        species_specific_allowed=crop_semantics.species_specific_allowed,
         irrigation_type=irrigation,
         constraints=constraints,
         soil_texture_class=soil_texture,
@@ -809,52 +822,46 @@ def _extract_plot_context(inputs: Any, l1_output: Any = None) -> PlotContext:
 def _extract_weather_forecast(l1_output: Any) -> List[Dict]:
     """Extract weather forecast from L1 FieldTensor output.
 
-    Priority:
-      1. forecast_7d (populated by persistence forecast or API)
-      2. Last 3-7 days of plot_timeseries (fallback)
+    Only complete, explicitly sourced forecast days are admitted.  Historical
+    observations and persistence-filled values are not relabeled as forecasts.
 
     Returns list of dicts with keys: rain, temp_max, temp_min, et0, date.
     """
     if l1_output is None:
         return []
 
-    # Priority 1: Use forecast_7d if available (populated by _build_persistence_forecast)
+    # Use forecast_7d only when the upstream source is explicit and complete.
     forecast_7d = getattr(l1_output, "forecast_7d", [])
     if forecast_7d and isinstance(forecast_7d, list):
         forecast = []
         for entry in forecast_7d:
             if isinstance(entry, dict):
-                rain = entry.get("precipitation", entry.get("rain", 0.0))
+                rain = entry.get("precipitation", entry.get("rain"))
+                temp_max = entry.get("temp_max")
+                temp_min = entry.get("temp_min")
+                et0 = entry.get("et0")
+                source = str(entry.get("source") or "").strip()
+                if (
+                    source in ("", "persistence_forecast")
+                    or not all(
+                        isinstance(value, (int, float))
+                        for value in (rain, temp_max, temp_min, et0)
+                    )
+                ):
+                    continue
                 forecast.append({
-                    "rain": float(rain) if rain is not None else 0.0,
-                    "temp_max": float(entry.get("temp_max", 25.0) or 25.0),
-                    "temp_min": float(entry.get("temp_min", 12.0) or 12.0),
-                    "et0": float(entry.get("et0", 4.0) or 4.0),
+                    "rain": float(rain),
+                    "temp_max": float(temp_max),
+                    "temp_min": float(temp_min),
+                    "et0": float(et0),
                     "date": entry.get("date", ""),
-                    "rain_prob": float(entry.get("rain_prob", 0.0) or 0.0),
+                    "rain_prob": float(entry.get("rain_prob"))
+                    if isinstance(entry.get("rain_prob"), (int, float)) else None,
+                    "source": source,
                 })
         if forecast:
             return forecast
-
-    # Priority 2: Fallback to last entries of plot_timeseries
-    ts = getattr(l1_output, "plot_timeseries", [])
-    if not ts or not isinstance(ts, list):
-        return []
-
-    forecast = []
-    for entry in ts[-7:]:
-        if isinstance(entry, dict):
-            rain = entry.get("precipitation", entry.get("rainfall_mm",
-                   entry.get("rain", 0.0)))
-            forecast.append({
-                "rain": float(rain) if rain is not None else 0.0,
-                "temp_max": float(entry.get("temp_max", entry.get("tmax", 25.0)) or 25.0),
-                "temp_min": float(entry.get("temp_min", entry.get("tmin", 12.0)) or 12.0),
-                "et0": float(entry.get("et0", entry.get("ET0", 4.0)) or 4.0),
-                "date": entry.get("date", ""),
-            })
-
-    return forecast
+    return []
 
 
 def _build_legacy_l3_context(
@@ -970,10 +977,9 @@ def _build_legacy_l3_context(
                         sar_obs += 1
                     rain = entry.get("precipitation", entry.get("rain", entry.get("rainfall_mm")))
                     et0  = entry.get("et0", entry.get("ET0"))
-                    if (rain is not None or et0 is not None):
-                        operational_signals["rain_available"] = True
-                        r = float(rain) if rain is not None else 0.0
-                        e = float(et0)  if et0  is not None else 0.0
+                    if rain is not None and et0 is not None:
+                        r = float(rain)
+                        e = float(et0)
                         daily_deficit = max(0.0, e - r)
                         cumulative_deficit_mm += daily_deficit
                         if daily_deficit > 0:
@@ -995,19 +1001,25 @@ def _build_legacy_l3_context(
             for entry in ts:
                 if isinstance(entry, dict):
                     r = entry.get("precipitation", entry.get("rain", entry.get("rainfall_mm")))
-                    all_rain.append(float(r) if r is not None else 0.0)
-            if all_rain:
+                    all_rain.append(float(r) if r is not None else None)
+            # Do not turn missing days into zero-rain observations.  The 14-day
+            # diagnostic is admitted only for a complete recent window.
+            recent_rain = all_rain[-14:]
+            if len(recent_rain) == 14 and all(r is not None for r in recent_rain):
                 # Sum last 7 and 14 days of available rain data
-                operational_signals["real_rain_sum_7d"] = round(sum(all_rain[-7:]), 1)
-                operational_signals["real_rain_sum_14d"] = round(sum(all_rain[-14:]), 1)
+                operational_signals["real_rain_sum_7d"] = round(sum(recent_rain[-7:]), 1)
+                operational_signals["real_rain_sum_14d"] = round(sum(recent_rain), 1)
                 # Days since last significant rain (>2mm threshold)
                 dsr = 0
-                for r in reversed(all_rain):
+                for r in reversed(recent_rain):
                     if r > 2.0:
                         break
                     dsr += 1
                 operational_signals["real_days_since_rain"] = dsr
                 operational_signals["real_rain_available"] = True
+                operational_signals["rain_available"] = True
+            else:
+                operational_signals["rain_available"] = False
 
             operational_signals["sar_obs_count"] = sar_obs
 
@@ -1024,23 +1036,25 @@ def _build_legacy_l3_context(
                     {str(g.get("type", "")) for g in gaps if isinstance(g, dict)})
 
     # ── Phenology + GDD from L2 ────────────────────────────────────────
-    phenology_stage = "unknown"
+    from services.agribrain.common.downstream_crop_context import resolve_downstream_crop_phenology
+
+    crop_semantics = resolve_downstream_crop_phenology(
+        inputs=inputs, l2_output=l2_output,
+    )
+    phenology_stage = crop_semantics.stage_for_discrete_engine.lower()
+    phenology_confidence = crop_semantics.stage_confidence
+    # Phenology confidence is not a vigor measurement.  Keep the optional
+    # growth feature empty unless Layer 2 publishes an explicit value.
     gdd_adjusted_vigor = None
     gdd_accumulated = 0.0
 
     if l2_output:
         pheno = getattr(l2_output, "phenology", None)
         if pheno:
-            stages = getattr(pheno, "stage_by_day", [])
-            if stages:
-                for s in reversed(stages):
-                    val = s.value if hasattr(s, "value") else str(s)
-                    if val.upper() != "UNKNOWN":
-                        phenology_stage = val.lower()
-                        break
+            # compatibility stage_by_day is not a second truth owner
 
             # GDD from phenology confidence
-            conf_by_day = getattr(pheno, "confidence_by_day", [])
+            conf_by_day = []  # V2 confidence comes only from canonical posterior
             if conf_by_day and isinstance(conf_by_day, list):
                 # Average phenology confidence → GDD vigor proxy
                 valid_confs = [c for c in conf_by_day
@@ -1063,8 +1077,6 @@ def _build_legacy_l3_context(
             for zone_id, zm in zone_metrics.items():
                 z_curve = getattr(zm, "curve", zm.get("curve", None)
                                   if isinstance(zm, dict) else None)
-                z_pheno = getattr(zm, "phenology", zm.get("phenology", None)
-                                  if isinstance(zm, dict) else None)
                 z_info: Dict[str, Any] = {
                     "dominant_stress_type": "NONE",
                     "severity": 0.0,
@@ -1079,12 +1091,6 @@ def _build_legacy_l3_context(
                             z_info["dominant_stress_type"] = "VARIABILITY"
                             z_info["severity"] = min(1.0, float(rmse) * 3.0)
                             z_info["stress_count"] = 1
-                if z_pheno:
-                    z_stage = getattr(z_pheno, "stage_by_day", [])
-                    if z_stage:
-                        last = z_stage[-1]
-                        z_info["phenology_stage"] = (
-                            last.value if hasattr(last, "value") else str(last))
                 zone_status[str(zone_id)] = z_info
 
     # ── Vegetation status from curve ────────────────────────────────────
@@ -1162,6 +1168,12 @@ def _build_legacy_l3_context(
         zone_status=zone_status,
         vegetation_status=vegetation_status,
         phenology_stage=phenology_stage,
+        phenology_confidence=phenology_confidence,
+        phenology_posterior_hash=crop_semantics.phenology_posterior_hash,
+        stage_specific_allowed=crop_semantics.stage_specific_allowed,
+        crop_posterior_hash=crop_semantics.crop_posterior_hash,
+        crop_resolution=crop_semantics.crop_resolution,
+        species_specific_allowed=crop_semantics.species_specific_allowed,
         gdd_adjusted_vigor=gdd_adjusted_vigor,
         gdd_accumulated=gdd_accumulated,
         operational_signals=operational_signals,

@@ -18,6 +18,7 @@ import argparse
 import io
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any, List, Union, Tuple
 
 sys.path.insert(0, os.getcwd())
 
@@ -35,9 +36,106 @@ def _parse_context(raw: str) -> dict:
         return json.loads(raw)
 
 
-def _build_inputs(ctx: dict, query: str = ""):
+def _build_inputs(ctx: dict, query: str = "", authenticated_namespace: Optional['PlotNamespace'] = None):
     """Build OrchestratorInput from frontend context dict."""
     from orchestrator_v2.schema import OrchestratorInput
+    from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
+    from services.agribrain.common.crop_cycle_context import (
+        CanonicalCropCycleContextV2,
+    )
+
+    ns = authenticated_namespace
+    if not ns:
+        if ctx.get("plot_namespace"):
+            ns = _coerce_namespace(ctx["plot_namespace"], tenant_id=str(ctx.get("tenant_id") or ""), farm_id=str(ctx.get("farm_id") or ""))
+        else:
+            t_id = str(ctx.get("tenant_id") or "").strip()
+            f_id = str(ctx.get("farm_id") or "").strip()
+            p_id = str(ctx.get("plot_id") or "").strip()
+            if t_id and f_id and p_id:
+                ns = PlotNamespace(tenant_id=t_id, farm_id=f_id, plot_id=p_id)
+
+    cycle_context = None
+    raw_cycle_context = ctx.get("crop_cycle_context")
+    if raw_cycle_context is not None:
+        if not isinstance(raw_cycle_context, dict):
+            raise ValueError("crop_cycle_context must be an object")
+        cycle_context = CanonicalCropCycleContextV2.from_mapping(
+            raw_cycle_context
+        )
+        if ns is not None and cycle_context.plot_namespace != ns:
+            raise ValueError(
+                "crop_cycle_context namespace does not match authenticated namespace"
+            )
+    cycle_payload = (
+        cycle_context.to_dict() if cycle_context is not None else None
+    )
+    cycle_plant_date = (
+        cycle_context.plant_date_nominal if cycle_context is not None
+        else (ctx.get("plant_date") or ctx.get("planting_date"))
+    )
+    cycle_plant_date_status = (
+        cycle_context.plant_date_status if cycle_context is not None
+        else (ctx.get("plant_date_status") or "unknown")
+    )
+    cycle_plant_date_source = (
+        cycle_context.plant_date_source if cycle_context is not None
+        else (ctx.get("plant_date_source") or "unknown")
+    )
+    cycle_plant_date_confidence = (
+        cycle_context.plant_date_confidence if cycle_context is not None
+        else ctx.get("plant_date_confidence")
+    )
+    cycle_plant_date_min = (
+        cycle_context.plant_date_range_start if cycle_context is not None
+        else ctx.get("plant_date_min")
+    )
+    cycle_plant_date_max = (
+        cycle_context.plant_date_range_end if cycle_context is not None
+        else ctx.get("plant_date_max")
+    )
+    cycle_id = (
+        cycle_context.crop_cycle_id if cycle_context is not None
+        else ctx.get("crop_cycle_id")
+    )
+    declared_crop = (
+        cycle_context.declared_crop_code if cycle_context is not None
+        else ctx.get("crop", "unknown")
+    )
+    administrative_status = (
+        cycle_context.administrative_status if cycle_context is not None
+        else ctx.get("administrative_status")
+    )
+    cycle_irrigation_type = (
+        cycle_context.irrigation_type if cycle_context is not None
+        else (ctx.get("irrigation_type") or "unknown")
+    )
+    cycle_effective_at = (
+        cycle_context.effective_at if cycle_context is not None
+        else ctx.get("crop_cycle_effective_at")
+    )
+    declared_crop_authority = (
+        cycle_context.declared_crop_authority if cycle_context is not None
+        else (ctx.get("declared_crop_authority") or "UNKNOWN")
+    )
+    declared_crop_at = (
+        cycle_context.declared_crop_at if cycle_context is not None
+        else ctx.get("declared_crop_at")
+    )
+    declared_crop_source = (
+        cycle_context.declared_crop_source if cycle_context is not None
+        else (ctx.get("declared_crop_source") or "unknown")
+    )
+    if str(ctx.get("phenology_stage_source") or "").lower() in {
+        "administrative_status", "crop_cycle_status"
+    }:
+        raise ValueError(
+            "administrative crop-cycle status cannot supply phenology_stage"
+        )
+    # Deliberately do not fall back to legacy `stage`: the Next route used
+    # to place CropCycle.status there, which is workflow state rather than a
+    # biophysical phenology observation.
+    phenology_stage = ctx.get("phenology_stage") or "unknown"
 
     start = None
     end = None
@@ -73,7 +171,12 @@ def _build_inputs(ctx: dict, query: str = ""):
 
     import hashlib
     import json
-    poly = ctx.get("polygon")
+    # Keep the admitted field geometry as a first-class frozen input.  The
+    # operational alias is convenient for acquisition, but it is not enough:
+    # durable ASMAE reintegration serializes the OrchestratorInput and Layer 10
+    # must later reconstruct the same geospatial contract without consulting
+    # mutable application data.
+    poly = ctx.get("field_geometry") or ctx.get("polygon")
     geom_hash = ctx.get("geometry_hash")
     if not geom_hash:
         if poly:
@@ -148,15 +251,43 @@ def _build_inputs(ctx: dict, query: str = ""):
                     sensor_summary["humidity"] = s["humidity"]
 
     return OrchestratorInput(
-        plot_id=ctx.get("plot_id", "UNKNOWN"),
+        plot_namespace=ns,
+        crop_cycle_context=cycle_context,
+        plot_id=ns.plot_id if ns else str(ctx.get("plot_id") or ""),
+        tenant_id=ns.tenant_id if ns else str(ctx.get("tenant_id") or ""),
+        farm_id=ns.farm_id if ns else str(ctx.get("farm_id") or ""),
         geometry_hash=geom_hash,
         date_range={
             "start": start,
             "end": end,
         },
         crop_config={
-            "crop": ctx.get("crop", "unknown"),
-            "stage": ctx.get("stage", "unknown"),
+            "crop": declared_crop,
+            "stage": phenology_stage,
+            "crop_cycle_id": cycle_id,
+            "crop_season_id": (
+                ctx.get("crop_season_id") or cycle_id
+            ),
+            "plant_date": cycle_plant_date,
+            "planting_date": cycle_plant_date,
+            "plant_date_status": cycle_plant_date_status,
+            "plant_date_source": cycle_plant_date_source,
+            "plant_date_confidence": cycle_plant_date_confidence,
+            "plant_date_min": cycle_plant_date_min,
+            "plant_date_max": cycle_plant_date_max,
+            "irrigation_type": cycle_irrigation_type,
+            "crop_cycle_effective_at": cycle_effective_at,
+            "declared_crop_authority": declared_crop_authority,
+            "crop_identity_authority": declared_crop_authority,
+            "declared_crop_at": declared_crop_at,
+            "declared_crop_source": declared_crop_source,
+            "administrative_status": administrative_status,
+            "administrative_status_is_phenology": False,
+            "crop_cycle_context": cycle_payload,
+            "crop_cycle_context_hash": (
+                cycle_context.content_hash if cycle_context is not None
+                else None
+            ),
         },
         operational_context={
             "lat": ctx.get("lat", 0.0),
@@ -164,7 +295,29 @@ def _build_inputs(ctx: dict, query: str = ""):
             "sensors": sensors_raw,
             "sensor_summary": sensor_summary,
             "soil_type": ctx.get("soil_type"),
-            "irrigation_type": ctx.get("irrigation_type"),
+            "irrigation_type": cycle_irrigation_type,
+            "crop_cycle_id": cycle_id,
+            "crop_season_id": (
+                ctx.get("crop_season_id") or cycle_id
+            ),
+            "plant_date": cycle_plant_date,
+            "planting_date": cycle_plant_date,
+            "plant_date_status": cycle_plant_date_status,
+            "plant_date_source": cycle_plant_date_source,
+            "plant_date_confidence": cycle_plant_date_confidence,
+            "plant_date_min": cycle_plant_date_min,
+            "plant_date_max": cycle_plant_date_max,
+            "crop_cycle_effective_at": cycle_effective_at,
+            "declared_crop_authority": declared_crop_authority,
+            "declared_crop_at": declared_crop_at,
+            "declared_crop_source": declared_crop_source,
+            "administrative_status": administrative_status,
+            "administrative_status_is_phenology": False,
+            "crop_cycle_context": cycle_payload,
+            "crop_cycle_context_hash": (
+                cycle_context.content_hash if cycle_context is not None
+                else None
+            ),
             "polygon_coords": poly,  # Pass through the real polygon
             "user_evidence": user_evidence, # Pass structured evidence!
             "ground_truth_context": ctx.get("ground_truth_context", {}),  # V61B
@@ -173,6 +326,11 @@ def _build_inputs(ctx: dict, query: str = ""):
             "source_policy": ctx.get("source_policy"),
         },
         policy_snapshot={},
+        field_geometry=poly if isinstance(poly, dict) else None,
+        polygon_geojson=poly if isinstance(poly, dict) else None,
+        evidence_set_hash=str(ctx.get("evidence_set_hash") or "") or None,
+        worldline_head_hash=str(ctx.get("worldline_head_hash") or "") or None,
+        scene_manifest_hash=str(ctx.get("scene_manifest_hash") or "") or None,
     )
 
 
@@ -212,7 +370,7 @@ def _attach_snapshot_identity(run: dict, inputs, artifact) -> dict:
     return run
 
 
-def run_chat_mode(ctx: dict, query: str, args, progress_cb=None) -> dict:
+def run_chat_mode(ctx: dict, query: str, args, progress_cb=None, authenticated_namespace: Optional['PlotNamespace'] = None) -> dict:
     """
     Chat mode — runs pipeline and returns canonical AgriBrainRun.
     The ChatPayload is embedded inside explanations, not returned raw.
@@ -273,7 +431,7 @@ def run_chat_mode(ctx: dict, query: str, args, progress_cb=None) -> dict:
     from orchestrator_v2.runner import run_orchestrator, run_for_chat
     from orchestrator_v2.run_schema import artifact_to_run
 
-    inputs = _build_inputs(ctx, query)
+    inputs = _build_inputs(ctx, query, authenticated_namespace=authenticated_namespace)
 
     # Set intent routing engines to done before starting pipeline
     if progress_cb and routed_engines:
@@ -293,7 +451,7 @@ def run_chat_mode(ctx: dict, query: str, args, progress_cb=None) -> dict:
     return _attach_snapshot_identity(run, inputs, artifact)
 
 
-def run_full_mode(ctx: dict, query: str = "") -> dict:
+def run_full_mode(ctx: dict, query: str = "", authenticated_namespace: Optional['PlotNamespace'] = None) -> dict:
     """
     Full mode — runs orchestrator, returns canonical AgriBrainRun JSON.
     Used by /api/agribrain/run and /api/agribrain/analyze replacement.
@@ -302,7 +460,7 @@ def run_full_mode(ctx: dict, query: str = "") -> dict:
     from orchestrator_v2.run_schema import artifact_to_run
     from orchestrator_v2.intents import detect_intent
 
-    inputs = _build_inputs(ctx, query)
+    inputs = _build_inputs(ctx, query, authenticated_namespace=authenticated_namespace)
     intent = detect_intent(query, has_context=True) if query else None
 
     # If query exists, we use run_for_chat to get date resolution + payload in one shot
@@ -398,6 +556,7 @@ def _serialize_l10_output(l10_out):
         build_no_data_render_authorizations,
         build_no_data_source_policy_display_state,
         RENDER_AUTHORIZATION_VERSION,
+        serialize_surface_artifact,
     )
     if getattr(l10_out, "placeholder_only", False) or (isinstance(getattr(l10_out, "provenance", None), dict) and getattr(l10_out, "provenance", {}).get("placeholder_only")):
         no_data_reason = "insufficient_evidence"
@@ -443,6 +602,13 @@ def _serialize_l10_output(l10_out):
                 "rendered_scientific_surfaces": 0,
                 "placeholder_only": True
             },
+            "resolved_crop_stage": getattr(l10_out, "resolved_crop_stage", "UNKNOWN"),
+            "phenology_context": getattr(l10_out, "phenology_context", {}) or {
+                "resolved_crop_stage": "UNKNOWN",
+                "phenology_evidence_class": "unavailable",
+                "stage_available": False,
+                "contract_version": "phenology_authority_v1",
+            },
             "asmae_evidence_state": getattr(l10_out, "asmae_evidence_state", {
                 "state": "unavailable",
                 "real_asmae_evidence": False,
@@ -475,45 +641,10 @@ def _serialize_l10_output(l10_out):
             "display_trace": {},
         }
 
-    surfaces = []
-    for s in getattr(l10_out, "surface_pack", []) or []:
-        # V92.4: Serialize grid_spec on each surface for GIS alignment
-        provenance = getattr(s, "provenance", {}) or {}
-        gs_dict = _grid_spec_to_dict(getattr(s, "grid_spec", None))
-        surfaces.append({
-            "type": _enum_value(getattr(s, "semantic_type", "")),
-            "semantic_type": _enum_value(getattr(s, "semantic_type", "")),
-            "values": getattr(s, "values", []) or [],
-            "grounding_class": getattr(s, "grounding_class", None) or "UNIFORM",
-            "raster_basis": list(getattr(s, "raster_basis", []) or []),
-            "observed_ratio": float(getattr(s, "observed_ratio", 0.0) or 0.0),
-            "units": getattr(s, "units", "") or "",
-            "render_range": list(getattr(s, "render_range", [0, 1]) or [0, 1]),
-            "palette_id": _enum_value(getattr(s, "palette_id", "viridis")),
-            "source_layers": list(getattr(s, "source_layers", []) or []),
-            "provenance": provenance,
-            "grid_spec": gs_dict,
-            "render_kind": _surface_attr_or_provenance(s, provenance, "render_kind", "renderKind"),
-            "display_level": _surface_attr_or_provenance(s, provenance, "display_level", "displayLevel"),
-            "display_grid_spec": _grid_spec_to_dict(_surface_attr_or_provenance(s, provenance, "display_grid_spec", "displayGridSpec")),
-            "source_grid_spec": _grid_spec_to_dict(_surface_attr_or_provenance(s, provenance, "source_grid_spec", "sourceGridSpec")),
-            "source_reality": _surface_attr_or_provenance(s, provenance, "source_reality", "sourceReality"),
-            "diagnostic_only": _surface_attr_or_provenance(s, provenance, "diagnostic_only", "diagnosticOnly"),
-            "state_update_allowed": _surface_attr_or_provenance(s, provenance, "state_update_allowed", "stateUpdateAllowed"),
-            "prescription_driver_allowed": _surface_attr_or_provenance(s, provenance, "prescription_driver_allowed", "prescriptionDriverAllowed"),
-            "confidence": _surface_attr_or_provenance(s, provenance, "confidence"),
-            "uncertainty": _surface_attr_or_provenance(s, provenance, "uncertainty"),
-            "authority_block_reason": _surface_attr_or_provenance(s, provenance, "authority_block_reason", "authorityBlockReason"),
-            "surface_role": _surface_attr_or_provenance(
-                s, provenance, "surface_role", "surfaceRole"
-            ) or (
-                "render_dependency"
-                if _enum_value(getattr(s, "semantic_type", "")) in {
-                    "OBSERVED_DATA_MASK_NDVI", "GAP_FILL_MASK_NDVI", "VALID_DATA_MASK_NDVI"
-                }
-                else "agronomic_surface"
-            ),
-        })
+    surfaces = [
+        serialize_surface_artifact(surface)
+        for surface in (getattr(l10_out, "surface_pack", []) or [])
+    ]
 
     zones = []
     for z in getattr(l10_out, "zone_pack", []) or []:
@@ -580,6 +711,21 @@ def _serialize_l10_output(l10_out):
     }
 
     qr = getattr(l10_out, "quality_report", None)
+    component_failures = [
+        failure.to_dict() if hasattr(failure, "to_dict")
+        else dict(failure) if isinstance(failure, dict)
+        else {
+            "code": getattr(failure, "code", "COMPONENT_FAILURE"),
+            "component": getattr(failure, "component", "unknown"),
+            "stage": getattr(failure, "stage", "unknown"),
+            "message": getattr(failure, "message", str(failure)),
+            "fallback_used": bool(getattr(failure, "fallback_used", False)),
+            "affected_surface_types": list(
+                getattr(failure, "affected_surface_types", []) or []
+            ),
+        }
+        for failure in (getattr(qr, "component_failures", []) or [])
+    ]
     quality = {
         "degradation_mode": _enum_value(getattr(qr, "degradation_mode", "NORMAL")),
         "reliability_score": float(getattr(qr, "reliability_score", 0.0) or 0.0),
@@ -589,6 +735,8 @@ def _serialize_l10_output(l10_out):
         "detail_conservation_ok": bool(getattr(qr, "detail_conservation_ok", True)),
         "zone_state_by_surface": getattr(qr, "zone_state_by_surface", {}) or {},
         "warnings": list(getattr(qr, "warnings", []) or []),
+        "component_failures": component_failures,
+        "degradation_codes": list(getattr(qr, "degradation_codes", []) or []),
     }
 
     if surfaces and surfaces[0]["values"]:
@@ -671,6 +819,8 @@ def _serialize_l10_output(l10_out):
         "tile_manifest": getattr(l10_out, "tile_manifest", {}) or {},
         "quality": quality,
         "provenance": getattr(l10_out, "provenance", {}) or {},
+        "resolved_crop_stage": getattr(l10_out, "resolved_crop_stage", "UNKNOWN"),
+        "phenology_context": getattr(l10_out, "phenology_context", {}) or {},
         "grid": {"height": grid_height, "width": grid_width},
         "explainability_pack": explainability_pack,
         "scenario_pack": getattr(l10_out, "scenario_pack", []) or [],
@@ -699,7 +849,7 @@ def _serialize_l10_output(l10_out):
         "asmae_proof": _asmae_proof,
     }
 
-def run_surfaces_mode(ctx: dict, query: str = "", progress_cb=None) -> dict:
+def run_surfaces_mode(ctx: dict, query: str = "", progress_cb=None, authenticated_namespace: Optional['PlotNamespace'] = None) -> dict:
     """
     Surfaces mode — runs orchestrator and returns canonical AgriBrainRun
     enriched with full Layer 10 frontend payload.
@@ -727,7 +877,7 @@ def run_surfaces_mode(ctx: dict, query: str = "", progress_cb=None) -> dict:
     from orchestrator_v2.run_schema import artifact_to_run
     from orchestrator_v2.intents import Intent
 
-    inputs = _build_inputs(ctx, query)
+    inputs = _build_inputs(ctx, query, authenticated_namespace=authenticated_namespace)
 
     _progress("Fusing satellite & weather data", "running")
 
@@ -788,54 +938,59 @@ def run_surfaces_mode(ctx: dict, query: str = "", progress_cb=None) -> dict:
     run = artifact_to_run(artifact, surfaces=l10_payload["surfaces"], layer10_detail=l10_payload)
     # artifact_to_run also exposes every Layer 10 field at the top level. Keep
     # one canonical copy; the nested duplicate added ~10 MB to every response.
-    run.pop("layer10", None)
+    # All enrichment below must use this canonical, authorization-aware copy.
+    # Reusing raw ``l10_payload`` here would reintroduce action-shaped fields
+    # after the prescription gate had already removed them.
+    canonical_l10_payload = run.pop("layer10", {})
 
     # Enrich canonical run with Layer 10 frontend bundle
-    run["timestamp"] = l10_payload["timestamp"] or run["audit"].get("timestamp_utc", "")
-    run["zones"] = l10_payload["zones"]
-    run["histograms"] = l10_payload["histograms"]
-    run["quicklooks"] = l10_payload["quicklooks"]
-    run["raster_pack"] = l10_payload["raster_pack"]
-    run["vector_pack"] = l10_payload["vector_pack"]
-    run["tile_manifest"] = l10_payload["tile_manifest"]
-    run["quality"] = l10_payload["quality"]
-    run["provenance"] = l10_payload["provenance"]
-    run["grid"] = l10_payload["grid"]
-    run["schema_version"] = l10_payload.get("schema_version", SURFACES_SCHEMA_VERSION)
-    run["version"] = l10_payload.get("version", SURFACES_SCHEMA_VERSION)
+    run["timestamp"] = canonical_l10_payload.get("timestamp") or run["audit"].get("timestamp_utc", "")
+    run["zones"] = canonical_l10_payload.get("zones", [])
+    run["histograms"] = canonical_l10_payload.get("histograms", {})
+    run["quicklooks"] = canonical_l10_payload.get("quicklooks", {})
+    run["raster_pack"] = canonical_l10_payload.get("raster_pack", [])
+    run["vector_pack"] = canonical_l10_payload.get("vector_pack", [])
+    run["tile_manifest"] = canonical_l10_payload.get("tile_manifest", {})
+    run["quality"] = canonical_l10_payload.get("quality", {})
+    run["provenance"] = canonical_l10_payload.get("provenance", {})
+    run["resolved_crop_stage"] = canonical_l10_payload.get("resolved_crop_stage", "UNKNOWN")
+    run["phenology_context"] = canonical_l10_payload.get("phenology_context", {})
+    run["grid"] = canonical_l10_payload.get("grid", {"height": 0, "width": 0})
+    run["schema_version"] = canonical_l10_payload.get("schema_version", SURFACES_SCHEMA_VERSION)
+    run["version"] = canonical_l10_payload.get("version", SURFACES_SCHEMA_VERSION)
     # The published envelope belongs to the immutable orchestrator science
     # run. Layer 10's component run remains available in provenance.
     run["publication_run_id"] = run["run_id"]
-    run["request_run_id"] = l10_payload.get("request_run_id", "")
-    run["publication_id"] = l10_payload.get("publication_id", "")
-    run["publication_status"] = l10_payload.get("publication_status", "INVALID_PUBLICATION")
+    run["request_run_id"] = canonical_l10_payload.get("request_run_id", "")
+    run["publication_id"] = canonical_l10_payload.get("publication_id", "")
+    run["publication_status"] = canonical_l10_payload.get("publication_status", "INVALID_PUBLICATION")
     
     # Phase B & C Mock Payload Enrichment
-    run["explainability_pack"] = l10_payload.get("explainability_pack", {})
-    run["scenario_pack"] = l10_payload.get("scenario_pack", [])
-    run["history_pack"] = l10_payload.get("history_pack", [])
-    run["ground_truth_summary"] = l10_payload.get("ground_truth_summary", {})  # V61B
-    run["visual_source"] = l10_payload.get("visual_source", {})  # V61D
+    run["explainability_pack"] = canonical_l10_payload.get("explainability_pack", {})
+    run["scenario_pack"] = canonical_l10_payload.get("scenario_pack", [])
+    run["history_pack"] = canonical_l10_payload.get("history_pack", [])
+    run["ground_truth_summary"] = canonical_l10_payload.get("ground_truth_summary", {})  # V61B
+    run["visual_source"] = canonical_l10_payload.get("visual_source", {})  # V61D
     # V92.4: Thread mode_surface_plan and surface_inventory through surfaces mode
-    run["mode_surface_plan"] = l10_payload.get("mode_surface_plan", {})
-    run["surface_inventory"] = l10_payload.get("surface_inventory", {})
+    run["mode_surface_plan"] = canonical_l10_payload.get("mode_surface_plan", {})
+    run["surface_inventory"] = canonical_l10_payload.get("surface_inventory", {})
     # V92.4-BC: Thread mode_display_state
-    run["mode_display_state"] = l10_payload.get("mode_display_state", {})
-    run["asmae_evidence_state"] = l10_payload.get("asmae_evidence_state", {})
-    run["core_asmae_evidence_state"] = l10_payload.get("core_asmae_evidence_state", {}) or run["asmae_evidence_state"]
-    run["publication_surface_state"] = l10_payload.get("publication_surface_state", {})
-    run["publication_demotion"] = l10_payload.get("publication_demotion", {})
-    run["asmae_plot_state_artifact"] = l10_payload.get("asmae_plot_state_artifact", {})
-    run["asmae_feature_pack"] = l10_payload.get("asmae_feature_pack", {})
-    run["source_policy_display_state"] = l10_payload.get("source_policy_display_state", {})
-    run["surface_behavior_proof"] = l10_payload.get("surface_behavior_proof", {})
-    run["display_trace"] = l10_payload.get("display_trace", {})
+    run["mode_display_state"] = canonical_l10_payload.get("mode_display_state", {})
+    run["asmae_evidence_state"] = canonical_l10_payload.get("asmae_evidence_state", {})
+    run["core_asmae_evidence_state"] = canonical_l10_payload.get("core_asmae_evidence_state", {}) or run["asmae_evidence_state"]
+    run["publication_surface_state"] = canonical_l10_payload.get("publication_surface_state", {})
+    run["publication_demotion"] = canonical_l10_payload.get("publication_demotion", {})
+    run["asmae_plot_state_artifact"] = canonical_l10_payload.get("asmae_plot_state_artifact", {})
+    run["asmae_feature_pack"] = canonical_l10_payload.get("asmae_feature_pack", {})
+    run["source_policy_display_state"] = canonical_l10_payload.get("source_policy_display_state", {})
+    run["surface_behavior_proof"] = canonical_l10_payload.get("surface_behavior_proof", {})
+    run["display_trace"] = canonical_l10_payload.get("display_trace", {})
     # Never emit empty asmae_proof — prefer canonical default structure
-    _raw_asmae = l10_payload.get("asmae_proof", None)
+    _raw_asmae = canonical_l10_payload.get("asmae_proof", None)
     run["asmae_proof"] = _raw_asmae if (isinstance(_raw_asmae, dict) and len(_raw_asmae) > 0) else build_default_asmae_proof()
     # BC.10.18 — render authorization must be threaded through run_surfaces_mode
-    run["render_authorizations"] = l10_payload.get("render_authorizations", {})
-    run["render_authorization_version"] = l10_payload.get(
+    run["render_authorizations"] = canonical_l10_payload.get("render_authorizations", {})
+    run["render_authorization_version"] = canonical_l10_payload.get(
         "render_authorization_version", RENDER_AUTHORIZATION_VERSION
     ) or RENDER_AUTHORIZATION_VERSION
     provenance_snapshot_id = (run.get("provenance") or {}).get("intelligence_snapshot_id")
@@ -847,7 +1002,7 @@ def run_surfaces_mode(ctx: dict, query: str = "", progress_cb=None) -> dict:
     run["surface_schema_version"] = SURFACES_SCHEMA_VERSION
     run["provenance"] = dict(run.get("provenance") or {})
     run["provenance"].update({
-        "layer10_component_run_id": l10_payload.get("run_id", ""),
+        "layer10_component_run_id": canonical_l10_payload.get("run_id", ""),
         "publication_run_id": run["publication_run_id"],
         "publication_id": run["publication_id"],
         "publication_status": run["publication_status"],

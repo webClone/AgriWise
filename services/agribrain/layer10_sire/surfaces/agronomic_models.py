@@ -60,23 +60,31 @@ def _get_weather_metrics(
             rh = numeric(hums[0])
         if precips:
             precip_mm = numeric(precips[0])
-    else:
-        # Fallback to L1 weather history
+    # Fill each missing forecast metric from the canonical L1 forcing history.
+    # ForecastContext is normally present even when all of its arrays are
+    # empty, so an ``else`` here used to disconnect valid L1 weather.
+    if any(value is None for value in (temp_c, wind_m_s, rh, precip_mm)):
         if l1_data is None:
             l1_data = adapt_l1(inp.field_tensor)
         wh = getattr(l1_data, "weather_history", []) or []
         if wh:
             last = wh[-1]
             if isinstance(last, dict):
-                t_mean = last.get("temperature") or last.get("temp_mean")
+                t_mean = last.get("temperature")
+                if t_mean is None:
+                    t_mean = last.get("temp_mean", last.get("tmean"))
                 if t_mean is None:
                     t_max = numeric(last.get("temp_max"))
                     t_min = numeric(last.get("temp_min"))
                     t_mean = (t_max + t_min) / 2.0 if t_max is not None and t_min is not None else None
-                temp_c = numeric(t_mean)
-                wind_m_s = numeric(last.get("wind_speed"))
-                rh = numeric(last.get("humidity", last.get("rh")))
-                precip_mm = numeric(last.get("precipitation", last.get("precipitation_mm")))
+                if temp_c is None:
+                    temp_c = numeric(t_mean)
+                if wind_m_s is None:
+                    wind_m_s = numeric(last.get("wind_speed", last.get("wind_speed_m_s")))
+                if rh is None:
+                    rh = numeric(last.get("humidity", last.get("rh")))
+                if precip_mm is None:
+                    precip_mm = numeric(last.get("precipitation", last.get("precipitation_mm", last.get("rain"))))
 
     return temp_c, wind_m_s, rh, precip_mm
 

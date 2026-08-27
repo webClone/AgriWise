@@ -32,7 +32,7 @@ from datetime import datetime
 from layer8_prescriptive.schema import (
     Layer8Input, Layer8Output, OutcomeForecast, Tradeoff,
     PrescriptiveQuality, PrescriptiveAudit, PrescriptiveDegradation,
-    ConfidenceLevel, CognitiveLoadProfile,
+    ConfidenceLevel, CognitiveLoadProfile, ActionType, PrescriptiveEvidence,
 )
 from layer8_prescriptive.action_ranker import ActionRankingEngine
 from layer8_prescriptive.scheduler import ConstraintScheduler
@@ -86,6 +86,88 @@ def _canonical_json(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _valid_receipt_hash(value: Any) -> bool:
+    token = str(value or "").lower()
+    return len(token) == 64 and all(char in "0123456789abcdef" for char in token)
+
+
+def _semantic_authority(l8_input: Layer8Input):
+    crop_hash_ok = _valid_receipt_hash(l8_input.crop_posterior_hash)
+    phenology_hash_ok = _valid_receipt_hash(l8_input.phenology_posterior_hash)
+    species_allowed = bool(l8_input.species_specific_allowed and crop_hash_ok)
+    stage_allowed = bool(
+        l8_input.stage_specific_allowed
+        and phenology_hash_ok
+        and str(l8_input.phenology_authority or "").upper() == "CALIBRATED"
+    )
+    reasons = list(l8_input.semantic_demotion_reasons)
+    if not crop_hash_ok:
+        reasons.append("crop_posterior_hash_missing_or_invalid")
+    if not phenology_hash_ok:
+        reasons.append("phenology_posterior_hash_missing_or_invalid")
+    if not species_allowed:
+        reasons.append("species_specific_authority_unavailable")
+    if not stage_allowed:
+        reasons.append(
+            "calibrated_stage_authority_required_for_prescription"
+            if l8_input.stage_specific_allowed
+            else "stage_specific_authority_unavailable"
+        )
+    return species_allowed, stage_allowed, list(dict.fromkeys(reasons))
+
+
+def _apply_semantic_prescription_gate(action_cards, l8_input, species_allowed, stage_allowed, reasons):
+    safe_observation_types = {ActionType.SCOUT, ActionType.MONITOR, ActionType.WAIT}
+    contract = l8_input.group_recommendation_contract or {}
+    contract_valid = bool(
+        l8_input.crop_resolution == "group_only"
+        and _valid_receipt_hash(contract.get("content_hash"))
+        and _valid_receipt_hash(l8_input.crop_posterior_hash)
+    )
+    group_safe = {
+        str(value).upper() for value in (contract.get("safe_action_types") or [])
+    } if contract_valid else set()
+
+    for card in action_cards:
+        original_type = card.action_type
+        prescriptive = original_type not in safe_observation_types
+        exact_authorized = species_allowed and stage_allowed
+        group_authorized = (
+            stage_allowed and original_type.value.upper() in group_safe
+        )
+        if prescriptive and not (exact_authorized or group_authorized):
+            card.action_type = ActionType.SCOUT
+            card.rate = None
+            card.requires_confirmation = True
+            card.confidence = ConfidenceLevel.LOW
+            card.priority_breakdown.confidence_score = min(
+                card.priority_breakdown.confidence_score, 0.30
+            )
+            card.blocked_reason.extend(
+                reason for reason in reasons if reason not in card.blocked_reason
+            )
+            card.explain = (
+                f"Scout/confirm before {original_type.value.lower()}: canonical "
+                "crop and phenology authority is insufficient."
+            )
+        card.evidence.append(PrescriptiveEvidence(
+            source_layer="L2",
+            evidence_type="crop_phenology_receipt",
+            reference_id=(
+                f"crop:{l8_input.crop_posterior_hash or 'missing'}|"
+                f"phenology:{l8_input.phenology_posterior_hash or 'missing'}"
+            ),
+            contribution=0.0,
+            description=(
+                f"crop={l8_input.crop_evidence_class}; "
+                f"phenology={l8_input.phenology_evidence_class}; "
+                f"original_action={original_type.value}"
+            ),
+            source_type="canonical_receipt",
+        ))
+    return action_cards
+
+
 def _generate_run_id(l8_input):
     """Deterministic run_id from upstream content hash."""
     content = {
@@ -97,6 +179,16 @@ def _generate_run_id(l8_input):
         "phenology_stage": l8_input.phenology_stage,
         "horizon_days": l8_input.horizon_days,
         "crop": l8_input.crop,
+        "crop_posterior_hash": l8_input.crop_posterior_hash,
+        "phenology_posterior_hash": l8_input.phenology_posterior_hash,
+        "crop_evidence_class": l8_input.crop_evidence_class,
+        "phenology_evidence_class": l8_input.phenology_evidence_class,
+        "group_contract_hash": l8_input.group_recommendation_contract.get("content_hash", ""),
+        "input_belief_id": l8_input.input_belief_id,
+        "tribunal_content_hash": l8_input.tribunal_content_hash,
+        "prescription_manifest_hash": l8_input.prescription_manifest_hash,
+        "prescription_manifest_entry_ids": sorted(l8_input.prescription_manifest_entry_ids),
+        "policy_snapshot_hash": l8_input.policy_snapshot_hash,
         "engine_version": ENGINE_VERSION,
     }
     digest = hashlib.sha256(
@@ -108,11 +200,27 @@ def _generate_run_id(l8_input):
 def _generate_content_hash(output):
     """Content hash of the output for reproducibility audit."""
     content = {
-        "actions": [
-            {"id": c.action_id, "type": c.action_type.value,
-             "score": round(c.priority_score, 6), "allowed": c.is_allowed}
-            for c in output.actions
-        ],
+        "actions": [{
+            "id": c.action_id,
+            "type": c.action_type.value,
+            "score": round(c.priority_score, 6),
+            "allowed": c.is_allowed,
+            "confidence": c.confidence.value,
+            "requires_confirmation": c.requires_confirmation,
+            "zones": list(c.zone_targets),
+            "rate": ({
+                "recommended": c.rate.recommended,
+                "min_safe": c.rate.min_safe,
+                "max_safe": c.rate.max_safe,
+                "unit": c.rate.unit,
+            } if c.rate else None),
+            "timing": ({
+                "earliest": c.time_window.earliest,
+                "latest": c.time_window.latest,
+                "optimal": c.time_window.optimal,
+            } if c.time_window else None),
+            "explain": c.explain,
+        } for c in output.actions],
         "schedule": [
             {"id": s.action_id, "status": s.status.value, "date": s.scheduled_date}
             for s in output.schedule
@@ -122,6 +230,14 @@ def _generate_content_hash(output):
             "reliability": output.quality.decision_reliability,
             "degradation": output.quality.degradation_mode.value,
         },
+        "semantic_receipt": next((
+            check for check in output.audit.policy_checks
+            if check.get("check") == "crop_phenology_prescription_authority"
+        ), {}),
+        "promotion_lineage": next((
+            check for check in output.audit.policy_checks
+            if check.get("check") == "prescription_promotion_lineage"
+        ), {}),
         "engine_version": ENGINE_VERSION,
     }
     return hashlib.sha256(_canonical_json(content).encode("utf-8")).hexdigest()
@@ -151,10 +267,14 @@ def run_layer8(l8_input, forecast=None, start_date=None):
     run_id = _generate_run_id(l8_input)
     timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     grade = l8_input.audit_grade.upper()
-    crop = l8_input.crop.lower()
+    species_allowed, stage_allowed, semantic_reasons = _semantic_authority(l8_input)
+    crop = l8_input.crop.lower() if species_allowed else "unknown"
+    canonical_stage = l8_input.phenology_stage if stage_allowed else "UNKNOWN"
     degradation = _GRADE_TO_DEGRADATION.get(grade, PrescriptiveDegradation.NORMAL)
     if degradation == PrescriptiveDegradation.NORMAL and l8_input.conflicts:
         degradation = PrescriptiveDegradation.CONFLICT_FLAG
+    if not (species_allowed and stage_allowed):
+        degradation = PrescriptiveDegradation.DATA_GAP
 
     logger.debug("L8 v%s run_id=%s grade=%s crop=%s zones=%d diagnoses=%d threats=%d",
                  ENGINE_VERSION, run_id, grade, crop,
@@ -171,13 +291,14 @@ def run_layer8(l8_input, forecast=None, start_date=None):
     # ---------------------------------------------------------------
     # Step 2: Phenology-aware dosing (BBCH rate scaling)
     # ---------------------------------------------------------------
-    pheno = PhenologyDosingEngine()
-    action_cards = pheno.adjust_rates(action_cards, crop, l8_input.phenology_stage)
-    
-    # Crop Canopy Cooling evaluation
-    action_cards = crop_cooling_engine.evaluate_cooling_need(
-        action_cards, crop, l8_input.phenology_stage, forecast
-    )
+    if species_allowed and stage_allowed:
+        pheno = PhenologyDosingEngine()
+        action_cards = pheno.adjust_rates(action_cards, crop, canonical_stage)
+
+        # Crop Canopy Cooling evaluation
+        action_cards = crop_cooling_engine.evaluate_cooling_need(
+            action_cards, crop, canonical_stage, forecast
+        )
     
     # Frost protection sprinkling check
     action_cards = frost_sprinkling_engine.evaluate_frost_risk(action_cards, forecast)
@@ -186,19 +307,21 @@ def run_layer8(l8_input, forecast=None, start_date=None):
     soil_salinity = l8_input.soil_static.get("soil_salinity_ece", 0.0)
     if not soil_salinity and "salinity" in l8_input.nutrient_states:
         soil_salinity = l8_input.nutrient_states["salinity"]
-    action_cards = salinity_leaching_engine.adjust_irrigation_for_salinity(
-        action_cards, crop, soil_salinity
-    )
+    if species_allowed:
+        action_cards = salinity_leaching_engine.adjust_irrigation_for_salinity(
+            action_cards, crop, soil_salinity
+        )
     
     # Soil Compaction tillage check
     soil_bd = l8_input.soil_static.get("soil_bulk_density", 1.40)
     soil_txt = l8_input.soil_static.get("soil_texture", "loam")
-    action_cards = tillage_compaction_engine.evaluate_compaction(
-        action_cards, soil_bd, soil_txt, l8_input.phenology_stage
-    )
+    if stage_allowed:
+        action_cards = tillage_compaction_engine.evaluate_compaction(
+            action_cards, soil_bd, soil_txt, canonical_stage
+        )
     
     logger.debug("Step 2/12 PHENOLOGY: BBCH rates, crop cooling, leaching, frost protection, and tillage adjusted for %s/%s",
-                 crop, l8_input.phenology_stage)
+                 crop, canonical_stage)
 
     # ---------------------------------------------------------------
     # Step 3: Nutrient interaction check (Liebig + antagonisms)
@@ -231,9 +354,10 @@ def run_layer8(l8_input, forecast=None, start_date=None):
     canopy_height = l8_input.soil_static.get("canopy_height_m", 0.5)
     growth_velocity = l8_input.soil_static.get("growth_velocity_daily", 0.02)
     n_surplus = l8_input.soil_static.get("nitrogen_surplus_kg_ha", 0.0)
-    action_cards = lodging_pgr_engine.evaluate_lodging_risk(
-        action_cards, crop, canopy_height, growth_velocity, n_surplus, forecast
-    )
+    if species_allowed:
+        action_cards = lodging_pgr_engine.evaluate_lodging_risk(
+            action_cards, crop, canopy_height, growth_velocity, n_surplus, forecast
+        )
     
     logger.debug("Step 4/12 IPM: cascade and lodging PGR check applied (degradation=%s)", degradation.value)
 
@@ -266,6 +390,12 @@ def run_layer8(l8_input, forecast=None, start_date=None):
     action_cards.sort(key=lambda c: c.priority_score, reverse=True)
     logger.debug("Step 6/12 RESCORE: priorities recalculated post-adjustment")
 
+    # Hard production boundary: every action now carries the canonical receipt.
+    # Unsafe rates/timing are converted into evidence-gathering actions.
+    action_cards = _apply_semantic_prescription_gate(
+        action_cards, l8_input, species_allowed, stage_allowed, semantic_reasons,
+    )
+
     # ---------------------------------------------------------------
     # Step 7: Schedule (weather-constrained calendar placement)
     # ---------------------------------------------------------------
@@ -273,7 +403,7 @@ def run_layer8(l8_input, forecast=None, start_date=None):
     scheduled = sched.schedule_actions(
         action_cards, forecast, start_date,
         horizon_days=l8_input.horizon_days,
-        phenology_stage=l8_input.phenology_stage,
+        phenology_stage=canonical_stage,
     )
     logger.debug("Step 7/12 SCHEDULE: %d actions scheduled", len(scheduled))
 
@@ -309,17 +439,23 @@ def run_layer8(l8_input, forecast=None, start_date=None):
     # Step 11: Prospect-theory framing (loss/gain messaging)
     # ---------------------------------------------------------------
     framer = FramingEngine()
-    action_cards = framer.frame_actions(action_cards, crop)
+    action_cards = framer.frame_actions(
+        action_cards, crop if species_allowed else "field"
+    )
     logger.debug("Step 11/12 FRAMING: messages generated")
 
     # ---------------------------------------------------------------
     # Compute outcome forecast
     # ---------------------------------------------------------------
     allowed_cards = [c for c in action_cards if c.is_allowed]
-    total_impact = (sum(c.priority_breakdown.impact_score for c in allowed_cards)
+    outcome_cards = [
+        c for c in allowed_cards
+        if c.action_type not in {ActionType.SCOUT, ActionType.MONITOR, ActionType.WAIT}
+    ]
+    total_impact = (sum(c.priority_breakdown.impact_score for c in outcome_cards)
                     / max(1, len(action_cards)))
     total_cost = sum(c.rate.recommended * 2 if c.rate else 0
-                     for c in allowed_cards)
+                     for c in outcome_cards)
     conf = _GRADE_TO_CONFIDENCE.get(grade, ConfidenceLevel.MODERATE)
 
     outcome = OutcomeForecast(
@@ -352,10 +488,14 @@ def run_layer8(l8_input, forecast=None, start_date=None):
     # Quality metrics
     # ---------------------------------------------------------------
     quality = PrescriptiveQuality(
-        decision_reliability=max(0.0, min(1.0, _GRADE_TO_RELIABILITY.get(grade, 0.5))),
+        decision_reliability=max(0.0, min(
+            _GRADE_TO_RELIABILITY.get(grade, 0.5),
+            1.0 if species_allowed and stage_allowed else 0.30,
+        )),
         degradation_mode=degradation,
         audit_grade=grade,
         upstream_confidence=l8_input.source_reliability,
+        missing_inputs=semantic_reasons,
     )
 
     audit = PrescriptiveAudit(
@@ -367,6 +507,34 @@ def run_layer8(l8_input, forecast=None, start_date=None):
             "adoption_prob": c.adoption.adoption_probability if c.adoption else None,
             "frame_type": c.framed_message.frame_type.value if c.framed_message else None,
         } for c in action_cards],
+        policy_checks=[{
+            "check": "crop_phenology_prescription_authority",
+            "crop_posterior_hash": l8_input.crop_posterior_hash,
+            "phenology_posterior_hash": l8_input.phenology_posterior_hash,
+            "crop_resolution": l8_input.crop_resolution,
+            "crop_authority": l8_input.crop_authority,
+            "phenology_authority": l8_input.phenology_authority,
+            "crop_evidence_class": l8_input.crop_evidence_class,
+            "phenology_evidence_class": l8_input.phenology_evidence_class,
+            "species_specific_allowed": species_allowed,
+            "stage_specific_allowed": stage_allowed,
+            "crop_mixture": l8_input.crop_mixture,
+            "stage_posterior": l8_input.stage_posterior,
+            "group_recommendation_contract_hash": (
+                l8_input.group_recommendation_contract.get("content_hash", "")
+            ),
+            "demotion_reasons": semantic_reasons,
+        }, {
+            "check": "prescription_promotion_lineage",
+            "input_belief_id": l8_input.input_belief_id,
+            "tribunal_content_hash": l8_input.tribunal_content_hash,
+            "prescription_manifest_hash": l8_input.prescription_manifest_hash,
+            "prescription_manifest_entry_ids": sorted(
+                l8_input.prescription_manifest_entry_ids
+            ),
+            "policy_snapshot_hash": l8_input.policy_snapshot_hash,
+            "publication_status": "SHADOW_ONLY_PENDING_AUTHORIZATION_ENVELOPE",
+        }],
     )
 
     # ---------------------------------------------------------------
@@ -385,13 +553,6 @@ def run_layer8(l8_input, forecast=None, start_date=None):
         audit=audit,
     )
 
-    # Content hash for audit trail
-    output.audit.policy_checks.append({
-        "check": "content_hash",
-        "value": _generate_content_hash(output),
-        "engine_version": ENGINE_VERSION,
-    })
-
     # ---------------------------------------------------------------
     # Step 12: Enforce invariants (mandatory safety gate)
     # ---------------------------------------------------------------
@@ -400,6 +561,14 @@ def run_layer8(l8_input, forecast=None, start_date=None):
         logger.debug("Step 12/12 INVARIANTS: %d auto-fixed", len(violations))
     else:
         logger.debug("Step 12/12 INVARIANTS: clean pass")
+
+    # Hash the final, invariant-enforced output.  This value is later bound by
+    # the authorization envelope, so it must cover any auto-fixes.
+    output.audit.policy_checks.append({
+        "check": "content_hash",
+        "value": _generate_content_hash(output),
+        "engine_version": ENGINE_VERSION,
+    })
 
     logger.debug("L8 COMPLETE: %d actions, %d scheduled, degradation=%s, "
                  "reliability=%.2f, cognitive_load=%d/%d",

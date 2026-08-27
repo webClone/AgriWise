@@ -1,6 +1,7 @@
 import { getAuthorizedPlotRouteContext } from "@/lib/farm-services";
 import { notFound } from "next/navigation";
 import AgriBrainCommandCenterClient from "@/components/farm/intelligence/AgriBrainCommandCenterClient";
+import { isActiveCropCycleStatus } from "@/lib/agribrain/crop-cycle-status.mjs";
 
 export default async function AnalysisPage({ params }: { params: Promise<{ id: string; plotId: string }> }) {
   const { id: farmId, plotId } = await params;
@@ -9,7 +10,7 @@ export default async function AnalysisPage({ params }: { params: Promise<{ id: s
   if (!routeContext) return notFound();
 
   const { plot, farm, cropCycles } = routeContext;
-  const currentCrop = cropCycles.find(c => c.status !== 'HARVESTED') ?? null;
+  const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status)) ?? null;
 
   return (
     <div className="min-h-screen pb-32 bg-slate-50 dark:bg-[#0a0f1a] animate-in fade-in duration-500">

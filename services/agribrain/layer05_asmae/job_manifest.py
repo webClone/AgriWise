@@ -24,9 +24,24 @@ from types import SimpleNamespace
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .cache import ASMAE_CACHE_SCHEMA_VERSION
-from .config import ASMAE_SCHEMA_VERSION, ASMAE_VERSION
+from .config import (
+    ASMAE_SCHEMA_VERSION,
+    ASMAE_VERSION,
+    ENSEMBLE_SIZE_CERTIFICATION,
+    ENSEMBLE_SIZE_LARGE_PLOT,
+    ENSEMBLE_SIZE_OFFLINE,
+    ENSEMBLE_SIZE_SHADOW,
+    ENSEMBLE_SIZE_STANDARD,
+    LARGE_PLOT_MICROZONE_THRESHOLD,
+    LOCALIZATION_HALF_WIDTH,
+)
 from .geometry.support_contract import SUPPORT_CONTRACT_VERSION
 from .evidence_capability import EVIDENCE_CAPABILITY_CONTRACT_VERSION
+from services.agribrain.common.plot_namespace import (
+    PlotNamespace,
+    _coerce_namespace,
+    namespace_payload,
+)
 
 try:
     import numpy as np
@@ -40,7 +55,8 @@ except ImportError:  # pragma: no cover
 
 
 JOB_MANIFEST_CONTRACT_VERSION = "asmae_job_manifest_v2_atomic_evidence"
-JOB_RUNNER_CONTRACT_VERSION = 'asmae_external_worker_v4_fenced_leases'
+JOB_RUNNER_CONTRACT_VERSION = 'asmae_external_worker_v10_code_lineage_identity'
+ENSEMBLE_POLICY_CONTRACT_VERSION = "asmae_ensemble_policy_v1"
 _TYPE = "__asmae_manifest_type__"
 _VOLATILE_CONTEXT_KEYS = {
     "run_id",
@@ -189,32 +205,93 @@ def scientific_value_hash(value: Any) -> str:
 
 
 def build_job_identity(
-    plot_id: str,
+    plot_id: Any,
     context: Mapping[str, Any],
     config: Mapping[str, Any],
 ) -> Dict[str, Any]:
-    scientific_context = {
+    from .artifact_identity import canonicalize_artifact_references
+    from .code_lineage import scientific_source_digest
+
+    scientific_context = canonicalize_artifact_references({
         str(key): item for key, item in context.items()
         if str(key) not in _VOLATILE_CONTEXT_KEYS
-    }
+    })
+    namespace = None
+    try:
+        namespace = _coerce_namespace(
+            plot_id if isinstance(plot_id, PlotNamespace) else context.get("plot_namespace") or str(plot_id),
+            tenant_id=str(context.get("tenant_id") or ""),
+            farm_id=str(context.get("farm_id") or ""),
+        )
+    except ValueError:
+        # Legacy manifest readers may still inspect pre-namespace fixtures.
+        # Production enqueue is strict and never enters this branch.
+        namespace = None
+    resolved_plot_id = namespace.plot_id if namespace else str(plot_id)
+    crop_influence_manifest_hash = str(
+        context.get("crop_influence_manifest_hash") or ""
+    )
+    raw_crop_influence_manifest = context.get("crop_influence_manifest") or {}
+    if raw_crop_influence_manifest:
+        from services.agribrain.scientific_contracts.crop_governance import (
+            CropInfluenceManifestV1,
+        )
+        manifest = CropInfluenceManifestV1.from_dict(
+            raw_crop_influence_manifest
+        )
+        if namespace and manifest.namespace.to_tuple() != namespace.to_tuple():
+            raise ValueError("Crop influence manifest job namespace mismatch")
+        if (
+            str(context.get("crop_posterior_lineage") or "")
+            and manifest.crop_posterior_parent_hash
+            != str(context.get("crop_posterior_lineage") or "")
+        ):
+            raise ValueError("Crop influence manifest job lineage mismatch")
+        if (
+            crop_influence_manifest_hash
+            and crop_influence_manifest_hash != manifest.content_hash
+        ):
+            raise ValueError("Crop influence manifest job hash mismatch")
+        crop_influence_manifest_hash = manifest.content_hash
     return {
         "manifest_contract_version": JOB_MANIFEST_CONTRACT_VERSION,
         "worker_contract_version": JOB_RUNNER_CONTRACT_VERSION,
+        "scientific_source_digest": scientific_source_digest(),
         "asmae_version": ASMAE_VERSION,
         "asmae_schema_version": ASMAE_SCHEMA_VERSION,
         "cache_schema_version": ASMAE_CACHE_SCHEMA_VERSION,
+        "ensemble_policy_contract_version": ENSEMBLE_POLICY_CONTRACT_VERSION,
+        "ensemble_policy": {
+            "shadow": ENSEMBLE_SIZE_SHADOW,
+            "standard": ENSEMBLE_SIZE_STANDARD,
+            "certification": ENSEMBLE_SIZE_CERTIFICATION,
+            "large_plot": ENSEMBLE_SIZE_LARGE_PLOT,
+            "offline": ENSEMBLE_SIZE_OFFLINE,
+            "large_plot_microzone_threshold": LARGE_PLOT_MICROZONE_THRESHOLD,
+            "localization_half_width": LOCALIZATION_HALF_WIDTH,
+        },
         "pixel_support_contract_version": SUPPORT_CONTRACT_VERSION,
         "evidence_capability_contract_version": str(
             context.get("evidence_capability_contract_version")
             or EVIDENCE_CAPABILITY_CONTRACT_VERSION
         ),
         "capability_plan_hash": str(context.get("capability_plan_hash", "") or ""),
-        "plot_id": str(plot_id),
+        "execution_plan_hash": str(context.get("execution_plan_hash", "") or ""),
+        "quarantine_ledger_hash": str(context.get("quarantine_ledger_hash", "") or ""),
+        "plot_namespace": namespace_payload(namespace) if namespace else None,
+        "plot_namespace_key": namespace.stable_key() if namespace else "",
+        "tenant_id": namespace.tenant_id if namespace else "",
+        "farm_id": namespace.farm_id if namespace else "",
+        "plot_id": resolved_plot_id,
         "geometry_hash": str(context.get("geometry_hash", "") or ""),
         "crop_posterior_lineage": str(
             context.get("crop_posterior_lineage", "") or ""
         ),
         "crop_lineage_id": str(context.get("crop_lineage_id", "") or ""),
+        "crop_evidence_ledger_hash": str(
+            context.get("crop_evidence_ledger_hash", "") or ""
+        ),
+        "crop_influence_manifest_hash": crop_influence_manifest_hash,
         "context_hash": scientific_value_hash(scientific_context),
         "config_hash": scientific_value_hash(dict(config or {})),
     }
@@ -231,6 +308,7 @@ class _Encoder:
         self.artifact_dir = manifest_path.parent / f"{job_id}.artifacts"
         self.artifacts: list[Dict[str, Any]] = []
         self.counter = 0
+        self.external_artifacts: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     def _artifact_path(self, suffix: str, digest: str) -> Tuple[Path, str]:
         self.counter += 1
@@ -308,6 +386,46 @@ class _Encoder:
         self.artifacts.append(record)
         return {_TYPE: "artifact_ref_v1", **record}
 
+    def _encode_external_file(self, value: Any, role: str) -> Dict[str, Any]:
+        from .artifact_identity import artifact_reference_identity, referenced_path
+
+        identity = artifact_reference_identity(value, role)
+        source = referenced_path(value)
+        if source is None or not source.is_file():
+            raise ManifestError(f"referenced job artifact is unavailable: {role}")
+        digest = str(identity["file_sha256"])
+        cache_key = (digest, str(role))
+        record = self.external_artifacts.get(cache_key)
+        if record is None:
+            suffix = source.suffix if source.suffix and len(source.suffix) <= 12 else ".bin"
+            path, relative = self._artifact_path(suffix, digest)
+            self._atomic_binary(path, lambda handle: handle.write(source.read_bytes()))
+            record = {
+                "kind": "external_file_v1",
+                "relative_path": relative,
+                "file_sha256": digest,
+                "size": int(identity.get("size") or path.stat().st_size),
+                "role": str(role),
+                "logical_artifact_id": identity.get("logical_artifact_id"),
+                "portable_uri": identity.get("portable_uri"),
+            }
+            self.external_artifacts[cache_key] = record
+            self.artifacts.append(record)
+        return {_TYPE: "artifact_ref_v1", **record}
+
+    def _encode_reference_collection(self, value: Any, collection: str) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(role): self._encode_external_file(item, f"{collection}:{role}")
+                for role, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [
+                self._encode_external_file(item, f"{collection}:{index}")
+                for index, item in enumerate(value)
+            ]
+        return self._encode_external_file(value, collection)
+
     def encode(self, value: Any) -> Any:
         if value is None or isinstance(value, (str, bool, int)):
             return value
@@ -342,7 +460,15 @@ class _Encoder:
             }
         if isinstance(value, Mapping):
             if all(isinstance(key, str) for key in value):
-                return {str(key): self.encode(item) for key, item in value.items()}
+                from .artifact_identity import REFERENCE_COLLECTION_KEYS
+                return {
+                    str(key): (
+                        self._encode_reference_collection(item, str(key))
+                        if str(key) in REFERENCE_COLLECTION_KEYS and item
+                        else self.encode(item)
+                    )
+                    for key, item in value.items()
+                }
             return {
                 _TYPE: "mapping_v1",
                 "items": [[self.encode(key), self.encode(item)] for key, item in value.items()],
@@ -389,12 +515,24 @@ def write_job_manifest(
     *,
     job_id: str,
     plot_id: str,
+    namespace: Optional[PlotNamespace] = None,
     run_id: str,
     context: Mapping[str, Any],
     config: Mapping[str, Any],
     identity: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    identity_value = dict(identity or build_job_identity(plot_id, context, config))
+    resolved_namespace = namespace
+    if resolved_namespace is None:
+        try:
+            resolved_namespace = _coerce_namespace(
+                context.get("plot_namespace") or plot_id,
+                tenant_id=str(context.get("tenant_id") or ""),
+                farm_id=str(context.get("farm_id") or ""),
+            )
+        except ValueError:
+            resolved_namespace = None
+    resolved_plot_id = resolved_namespace.plot_id if resolved_namespace else str(plot_id)
+    identity_value = dict(identity or build_job_identity(resolved_namespace or resolved_plot_id, context, config))
     if scientific_job_id(identity_value) != str(job_id):
         raise ManifestError("job_id does not match the scientific job identity")
     encoder = _Encoder(Path(manifest_path), str(job_id))
@@ -404,7 +542,10 @@ def write_job_manifest(
         "contract_version": JOB_MANIFEST_CONTRACT_VERSION,
         "worker_contract_version": JOB_RUNNER_CONTRACT_VERSION,
         "job_id": str(job_id),
-        "plot_id": str(plot_id),
+        "plot_namespace": namespace_payload(resolved_namespace) if resolved_namespace else None,
+        "tenant_id": resolved_namespace.tenant_id if resolved_namespace else "",
+        "farm_id": resolved_namespace.farm_id if resolved_namespace else "",
+        "plot_id": resolved_plot_id,
         "run_id": str(run_id),
         "identity": identity_value,
         "payload": {
@@ -465,6 +606,19 @@ def validate_job_manifest(
         raise ManifestError("job scientific identity is missing")
     if scientific_job_id(identity) != manifest.get("job_id"):
         raise ManifestError("job scientific identity hash mismatch")
+    try:
+        manifest_namespace = _coerce_namespace(manifest.get("plot_namespace"))
+        identity_namespace = _coerce_namespace(identity.get("plot_namespace"))
+    except ValueError as exc:
+        raise ManifestError("job manifest has no valid PlotNamespace") from exc
+    if manifest_namespace != identity_namespace:
+        raise ManifestError("job manifest namespace does not match scientific identity")
+    if str(manifest.get("tenant_id") or "") != manifest_namespace.tenant_id:
+        raise ManifestError("job manifest tenant_id does not match PlotNamespace")
+    if str(manifest.get("farm_id") or "") != manifest_namespace.farm_id:
+        raise ManifestError("job manifest farm_id does not match PlotNamespace")
+    if str(manifest.get("plot_id") or "") != manifest_namespace.plot_id:
+        raise ManifestError("job manifest plot_id does not match PlotNamespace")
     current_versions = {
         "manifest_contract_version": JOB_MANIFEST_CONTRACT_VERSION,
         "worker_contract_version": JOB_RUNNER_CONTRACT_VERSION,
@@ -479,6 +633,10 @@ def validate_job_manifest(
             raise ManifestError(f"job identity is obsolete: {key}")
     if not str(identity.get("capability_plan_hash", "")):
         raise ManifestError("job identity has no atomic capability plan hash")
+    if not str(identity.get("execution_plan_hash", "")):
+        raise ManifestError("job identity has no accepted execution-plan hash")
+    if not str(identity.get("quarantine_ledger_hash", "")):
+        raise ManifestError("job identity has no quarantine-ledger hash")
     if expected_identity is not None and dict(identity) != dict(expected_identity):
         raise ManifestError("persisted job does not match the requested inputs")
     for record in manifest.get("artifacts", []):
@@ -525,6 +683,8 @@ class _Decoder:
             ):
                 raise ManifestError("sparse artifact scientific identity mismatch")
             return matrix
+        if kind == "external_file_v1":
+            return str(path)
         raise ManifestError(f"unsupported job artifact kind: {kind}")
 
     def decode(self, value: Any) -> Any:
@@ -587,10 +747,18 @@ def load_job_manifest(manifest_path: Path) -> Dict[str, Any]:
     config = decoder.decode(payload.get("config", {}))
     if not isinstance(context, dict) or not isinstance(config, dict):
         raise ManifestError("decoded job context/config must be mappings")
+    try:
+        context_namespace = _coerce_namespace(context.get("plot_namespace"))
+        manifest_namespace = _coerce_namespace(manifest.get("plot_namespace"))
+    except ValueError as exc:
+        raise ManifestError("decoded job context has no valid PlotNamespace") from exc
+    if context_namespace != manifest_namespace:
+        raise ManifestError("decoded context namespace does not match job manifest")
     return {
         "context": context,
         "config": config,
         "identity": dict(manifest["identity"]),
+        "plot_namespace": namespace_payload(manifest_namespace),
         "manifest_hash": manifest["manifest_hash"],
     }
 

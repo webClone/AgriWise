@@ -290,7 +290,8 @@ def _raster_grid_metadata(
 def _parse_raster_tar(content: bytes, w: int, h: int, index_name: str,
                        start_date: str, end_date: str, bounds: Any,
                        crs: str = "EPSG:4326",
-                       target_resolution_m: float = 10.0) -> Optional[Dict]:
+                       target_resolution_m: float = 10.0,
+                       raster_contract_version: str = "") -> Optional[Dict]:
     """Parse multipart tar from Sentinel Hub Process API into a grid dict.
     Securely reads TIFFs using tifffile to support LZW/Deflate compression.
     """
@@ -365,6 +366,7 @@ def _parse_raster_tar(content: bytes, w: int, h: int, index_name: str,
             "state_update_allowed": False,
             "prescription_driver_allowed": False,
             "exact_scene_claim_allowed": False,
+            "raster_contract_version": raster_contract_version,
             **grid_metadata,
         }
         for k, g in sub_grids.items():
@@ -386,13 +388,15 @@ def _parse_raster_tar(content: bytes, w: int, h: int, index_name: str,
             "production_usable": False,
             "diagnostic_only": True,
             "state_update_allowed": False,
+            "raster_contract_version": raster_contract_version,
             **grid_metadata,
         }
 
 
 def fetch_ndvi_raster_composite(lat: float, lng: float, start_date: str, end_date: str,
                                  polygon_coords: Optional[list] = None,
-                                 target_resolution_m: float = 10.0) -> Optional[Dict]:
+                                 target_resolution_m: float = 10.0,
+                                 raster_contract_version: str = "") -> Optional[Dict]:
     """Fetch NDVI median composite raster via Process API."""
     import sys as _sys
     try:
@@ -444,6 +448,7 @@ def fetch_ndvi_raster_composite(lat: float, lng: float, start_date: str, end_dat
         return _parse_raster_tar(
             resp.content, w, h, "NDVI", start_date, end_date,
             bounds, target_resolution_m=target_resolution_m,
+            raster_contract_version=raster_contract_version,
         )
     except Exception as e:
         print(f"[WARN] [Raster] NDVI error: {type(e).__name__}: {e}", file=_sys.stderr, flush=True)
@@ -452,7 +457,8 @@ def fetch_ndvi_raster_composite(lat: float, lng: float, start_date: str, end_dat
 
 def fetch_ndmi_raster_composite(lat: float, lng: float, start_date: str, end_date: str,
                                  polygon_coords: Optional[list] = None,
-                                 target_resolution_m: float = 10.0) -> Optional[Dict]:
+                                 target_resolution_m: float = 10.0,
+                                 raster_contract_version: str = "") -> Optional[Dict]:
     """Fetch NDMI (moisture) median composite raster. B08 vs B11."""
     try:
         token = get_access_token()
@@ -482,6 +488,7 @@ def fetch_ndmi_raster_composite(lat: float, lng: float, start_date: str, end_dat
         return _parse_raster_tar(
             resp.content, w, h, "NDMI", start_date, end_date,
             bounds, target_resolution_m=target_resolution_m,
+            raster_contract_version=raster_contract_version,
         )
     except Exception as e:
         print(f"[WARN] [Raster] NDMI error: {e}")
@@ -490,7 +497,8 @@ def fetch_ndmi_raster_composite(lat: float, lng: float, start_date: str, end_dat
 
 def fetch_sar_raster_composite(lat: float, lng: float, start_date: str, end_date: str,
                                 polygon_coords: Optional[list] = None,
-                                target_resolution_m: float = 10.0) -> Optional[Dict]:
+                                target_resolution_m: float = 10.0,
+                                raster_contract_version: str = "") -> Optional[Dict]:
     """Fetch VV/VH mean composite rasters from Sentinel-1 GRD."""
     try:
         token = get_access_token()
@@ -520,6 +528,7 @@ def fetch_sar_raster_composite(lat: float, lng: float, start_date: str, end_date
         res = _parse_raster_tar(
             resp.content, w, h, "SAR_VV_VH", start_date, end_date,
             bounds, target_resolution_m=target_resolution_m,
+            raster_contract_version=raster_contract_version,
         )
         if isinstance(res, dict):
             res["polarization"] = "DV"
@@ -532,7 +541,8 @@ def fetch_sar_raster_composite(lat: float, lng: float, start_date: str, end_date
 
 def fetch_quality_mask(lat: float, lng: float, start_date: str, end_date: str,
                         polygon_coords: Optional[list] = None,
-                        target_resolution_m: float = 10.0) -> Optional[Dict]:
+                        target_resolution_m: float = 10.0,
+                        raster_contract_version: str = "") -> Optional[Dict]:
     """Fetch scene classification quality mask from S2 SCL band."""
     try:
         token = get_access_token()
@@ -566,6 +576,7 @@ def fetch_quality_mask(lat: float, lng: float, start_date: str, end_date: str,
         return _parse_raster_tar(
             resp.content, w, h, "QUALITY_MASK", start_date, end_date,
             bounds, target_resolution_m=target_resolution_m,
+            raster_contract_version=raster_contract_version,
         )
     except Exception as e:
         print(f"[WARN] [Raster] Quality mask error: {e}")

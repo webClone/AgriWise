@@ -40,15 +40,25 @@ import {
   type BrowserRenderReceipt,
   type RenderMaterializationResult,
 } from "@/lib/agribrain/render-materialization";
+import { normalizeCanonicalPhenologyPublication } from "@/lib/agribrain/phenology-authority.mjs";
 import {
   browserRenderReceiptSignature,
   buildLayer10RequestIdentity,
   buildRenderViewIdentity,
+  classifyCanonicalHeadValidation,
   isLatestLayer10Request,
   normalizeSourcePolicy,
+  resolveCompoundRenderAttribution,
   shouldRetainLastKnownGood,
   type SourcePolicy,
 } from "@/lib/agribrain/layer10-request-state.mjs";
+import {
+  buildAsmaeLiveStateDetail,
+  buildAsmaeRefreshFailedDetail,
+  patchLayer10AsmaeCompletion,
+  patchLayer10AsmaeFailure,
+  patchLayer10AsmaeLiveState,
+} from "@/lib/agribrain/asmae-job-state.mjs";
 
 
 // ============================================================================
@@ -97,6 +107,7 @@ export interface SurfaceGridSpec {
 }
 
 export interface SurfaceData {
+  surface_id: string;
   type: string;
   semantic_type?: string;
   values: (number | null)[][];
@@ -281,6 +292,7 @@ export interface GroundTruthSummary {
 
 export interface Layer10Result {
   run_id: string;
+  publication_id?: string;
   plot_id: string;
   timestamp: string;
   surfaces: SurfaceData[];
@@ -318,6 +330,23 @@ export interface Layer10Result {
     sources?: string[];
   }>;
   provenance: Record<string, unknown>;
+  resolved_crop_stage?: string;
+  phenology_context?: {
+    resolved_crop_stage?: string;
+    phenology_evidence_class?: string;
+    phenology_authority?: string;
+    phenology_source?: string;
+    phenology_confidence?: number;
+    phenology_posterior_hash?: string;
+    phenology_receipt_valid?: boolean;
+    phenology_evidence_needed_reason?: string;
+    stage_available?: boolean;
+    season_anchor_status?: string;
+    calibration_status?: string;
+    effective_at?: string;
+    crop_cycle_id?: string | null;
+    contract_version?: string;
+  };
   grid: { height: number; width: number };
   explainability_pack: Record<string, ExplainabilityPack>;
   scenario_pack?: ScenarioDefinition[];
@@ -359,6 +388,7 @@ export interface Layer10Result {
     trust_badges: string[];
   }>;
   surface_inventory?: Record<string, any>;
+  surface_inventory_hash?: string;
   // V92.4-BC: Backend-authoritative display state per mode
   mode_display_state?: Record<string, any>;
   source_policy_display_state?: Record<string, any>;
@@ -382,11 +412,14 @@ export interface Layer10Result {
 }
 
 export interface FallbackGuidance {
-  action_mode: "field_wide" | "plot_level_only" | "insufficient_data";
+  action_mode: "field_wide" | "plot_level_only" | "insufficient_data" | "scouting_only";
   recommended_next_step: string;
   why: string;
   confidence: number;
   data_basis: string;
+  displayed_surface_type?: string;
+  guidance_surface_type?: string;
+  guidance_relation?: "same_surface" | "separate_operational_surface";
 }
 
 export type MapSemantics = "plot_level" | "field_wide" | "localized_alert" | "management_zone" | "no_data";
@@ -424,7 +457,7 @@ export function modeFromSurfaceType(surfaceType: string): string {
   if (cleanType.includes("NUTRIENT_STRESS") || cleanType.includes("NUTRIENT_ASMAE")) return "nutrient_risk";
   if (cleanType.includes("SALINITY")) return "salinity";
   if (cleanType.includes("COMPOSITE_RISK") || cleanType.includes("RISK_ASMAE")) return "composite_risk";
-  if (cleanType.includes("DATA_RELIABILITY") || cleanType.includes("DATA_CONFIDENCE") || cleanType.includes("UNCERTAINTY_SIGMA") || cleanType.includes("CONFIDENCE_ASMAE")) return "uncertainty";
+  if (cleanType.includes("DATA_RELIABILITY") || cleanType.includes("DATA_CONFIDENCE") || cleanType.includes("UNCERTAINTY_SIGMA") || cleanType.includes("POSTERIOR_CONCENTRATION") || cleanType.includes("CONFIDENCE_ASMAE")) return "uncertainty";
   if (cleanType.includes("RESOLUTION_COVERAGE") || cleanType.includes("RESOLUTION_ASMAE")) return "resolution_coverage";
   return "";
 }
@@ -550,6 +583,7 @@ function normalizeSurface(raw: Record<string, any>): SurfaceData {
   }
 
   return {
+    surface_id: String(raw.surface_id || "").trim(),
     type: raw.type ?? raw.semantic_type ?? "",
     semantic_type: raw.semantic_type ?? raw.type ?? "",
     values,
@@ -706,6 +740,12 @@ export function reconcileQualitySignals(localValue: unknown, globalValue: unknow
   const global = qualityRecord(globalValue);
   const localMode = String(local.degradation_mode || "NORMAL").toUpperCase();
   const globalModes = stringArray(global.degradation_modes).map((mode) => mode.toUpperCase());
+  const dataHealthStatus = String(global.data_health_status || "").trim().toLowerCase();
+  if (["unusable", "invalid", "failed", "critical"].includes(dataHealthStatus)) {
+    globalModes.push("CRITICAL_FAILURE");
+  } else if (["degraded", "partial", "stale"].includes(dataHealthStatus)) {
+    globalModes.push("DEGRADED");
+  }
   if (global.critical_failure === true && !globalModes.includes("CRITICAL_FAILURE")) {
     globalModes.push("CRITICAL_FAILURE");
   }
@@ -742,6 +782,7 @@ export interface Layer10FetchOptions {
   visualIntensity?: number;
   /** Requested local display policy; the returned publication remains canonical. */
   sourcePolicy?: SourcePolicy;
+  snapshotId?: string;
 }
 
 export interface Layer10ContextType {
@@ -763,6 +804,8 @@ export interface Layer10ContextType {
   fetchLayer10: (plotId: string, farmId: string, lat?: number, lng?: number, crop?: string, options?: Layer10FetchOptions) => Promise<void>;
   activeDisplay: any;
   activeSurface: SurfaceData | null;
+  committedSurface: SurfaceData | null;
+  activeSurfaceMaterialized: boolean;
   activeConfidenceSurface: SurfaceData | null;
   activeReliabilitySurface: SurfaceData | null;
   activeHistogram: HistogramData | null;
@@ -775,6 +818,10 @@ export interface Layer10ContextType {
   bannerState: "composite_advisory_active" | "hybrid_active" | "asmae_diagnostic_active" | null;
   canShowPixelDiagnosis: boolean;
   canShowPixelHint: boolean;
+  canSamplePixel: boolean;
+  canInterpretForScouting: boolean;
+  canInterpretDiagnostically: boolean;
+  canUseForPrescription: boolean;
   canShowExperimentalDetail: boolean;
   shouldShowNoData: boolean;
   shouldShowPlotLevel: boolean;
@@ -844,6 +891,43 @@ export interface Layer10ContextType {
   clearBrowserRenderReceipt: (viewIdentity: string) => void;
 }
 
+function canonicalPublicationToRunData(cacheJson: any, plotId: string) {
+  return {
+    run_id: cacheJson.publication_run_id || `canonical-${cacheJson.surfaceDigest || ""}`,
+    publication_id: cacheJson.publication_id || cacheJson.publicationId || "",
+    plot_id: plotId,
+    timestamp: cacheJson.capturedAt,
+    surfaces: cacheJson.surfaceGrids || [],
+    zones: cacheJson.zones || [],
+    histograms: cacheJson.histograms || {},
+    quality: cacheJson.quality || {},
+    global_quality: cacheJson.global_quality || undefined,
+    fallback_guidance: cacheJson.fallback_guidance || {},
+    explainability_pack: cacheJson.explainability_pack || {},
+    ground_truth_summary: cacheJson.ground_truth_summary || undefined,
+    visual_source: cacheJson.visual_source || undefined,
+    provenance: { source: "canonical_publication", age_ms: cacheJson.ageMs, ...cacheJson.provenance },
+    mode_surface_plan: cacheJson.mode_surface_plan || {},
+    surface_inventory: cacheJson.surface_inventory || {},
+    surface_inventory_hash: cacheJson.surface_inventory_hash || "",
+    mode_display_state: cacheJson.mode_display_state || {},
+    source_policy_display_state: cacheJson.source_policy_display_state || {},
+    asmae_evidence_state: cacheJson.asmae_evidence_state || null,
+    asmae_feature_pack: cacheJson.asmae_feature_pack || {},
+    render_authorizations: cacheJson.render_authorizations || {},
+    render_authorization_version: cacheJson.render_authorization_version || "",
+    intelligence_snapshot_id: cacheJson.intelligence_snapshot_id || cacheJson.snapshot_id || "",
+    agribrain_run_id: cacheJson.agribrain_run_id || "",
+    generated_at: cacheJson.generated_at || cacheJson.capturedAt,
+    source_window: cacheJson.source_window,
+    surface_schema_version: cacheJson.surface_schema_version || cacheJson.schema_version,
+    temporal_evidence_contract_version: cacheJson.temporal_evidence_contract_version || "",
+    asmae_proof: cacheJson.asmae_proof || {},
+    surface_behavior_proof: cacheJson.surface_behavior_proof || {},
+    display_trace: cacheJson.display_trace || {},
+  };
+}
+
 const Layer10Context = createContext<Layer10ContextType | null>(null);
 
 export function Layer10Provider({
@@ -875,6 +959,7 @@ export function Layer10Provider({
   }, []);
   const requestSequenceRef = useRef(0);
   const activeRequestControllerRef = useRef<AbortController | null>(null);
+  const canonicalCompletionFetchRef = useRef("");
   const [browserRenderReceiptState, setBrowserRenderReceiptState] = useState<BrowserRenderReceipt | null>(null);
   const renderViewIdentityRef = useRef("");
   const commitBrowserRenderReceipt = useCallback((receipt: BrowserRenderReceipt) => {
@@ -1030,58 +1115,42 @@ export function Layer10Provider({
                 plotId,
                 visualIntensity: requestedIntensity,
                 sourcePolicy: requestedPolicy,
+                snapshotId: options?.snapshotId,
               }),
             });
+            const cacheJson = await cacheRes.json();
             if (!isLatestRequest()) return;
 
-            if (cacheRes.ok) {
-              const cacheJson = await cacheRes.json();
-              if (!isLatestRequest()) return;
+            if (cacheJson.reason === "canonical_head_validation_failed" || cacheRes.status === 409) {
+              throw new Error(cacheJson.error || "Canonical publication head failed integrity validation");
+            }
 
-              if (cacheJson.status === "fresh" || cacheJson.status === "stale") {
-                // HIT or STALE — build runData from cached surfaces
-                // The cache endpoint already triggered a background refresh for STALE
-                runData = {
-                  run_id: `cached-${cacheJson.surfaceDigest || ""}`,
-                  plot_id: plotId,
-                  timestamp: cacheJson.capturedAt,
-                  surfaces: cacheJson.surfaceGrids || [],
-                  zones: cacheJson.zones || [],
-                  histograms: cacheJson.histograms || {},
-                  quality: cacheJson.quality || {},
-                  global_quality: cacheJson.global_quality || undefined,
-                  fallback_guidance: cacheJson.fallback_guidance || {},
-                  explainability_pack: cacheJson.explainability_pack || {},
-                  ground_truth_summary: cacheJson.ground_truth_summary || undefined,
-                  visual_source: cacheJson.visual_source || undefined,
-                  provenance: { source: "cache", age_ms: cacheJson.ageMs, ...cacheJson.provenance },
-                  // V92.4: Mode surface plan and surface inventory from cache
-                  mode_surface_plan: cacheJson.mode_surface_plan || {},
-                  surface_inventory: cacheJson.surface_inventory || {},
-                  // V92.4-BC: Backend-authoritative display state per mode
-                  mode_display_state: cacheJson.mode_display_state || {},
-                  source_policy_display_state: cacheJson.source_policy_display_state || {},
-                  asmae_evidence_state: cacheJson.asmae_evidence_state || null,
-                  asmae_feature_pack: cacheJson.asmae_feature_pack || {},
-                  render_authorizations: cacheJson.render_authorizations || {},
-                  render_authorization_version: cacheJson.render_authorization_version || "",
-                  intelligence_snapshot_id: cacheJson.intelligence_snapshot_id || "",
-                  agribrain_run_id: cacheJson.agribrain_run_id || "",
-                  generated_at: cacheJson.generated_at || cacheJson.capturedAt,
-                  source_window: cacheJson.source_window,
-                  surface_schema_version: cacheJson.surface_schema_version || cacheJson.schema_version,
-                  temporal_evidence_contract_version: cacheJson.temporal_evidence_contract_version || "",
-                  asmae_proof: cacheJson.asmae_proof || {},
-                  surface_behavior_proof: cacheJson.surface_behavior_proof || {},
-                  display_trace: cacheJson.display_trace || {},
-                };
-                usedCache = true;
+            if (
+              cacheRes.ok
+              && cacheJson.available !== false
+              && cacheJson.status === "fresh"
+            ) {
+              const validation = cacheJson.validation || {};
+              const validationState = classifyCanonicalHeadValidation(validation);
+              if (validationState !== "valid") {
+                throw new Error(
+                  validationState === "corrupt"
+                    ? "Canonical publication head integrity validation failed"
+                    : "Canonical publication head contract is stale",
+                );
               }
-              // "generating" status — fall through to live run below
+              runData = canonicalPublicationToRunData(cacheJson, plotId);
+              usedCache = true;
             }
           }
-        } catch {
+        } catch (cacheError) {
           if (!isLatestRequest()) return;
+          if (
+            cacheError instanceof Error
+            && cacheError.message.toLowerCase().includes("canonical publication head")
+          ) {
+            throw cacheError;
+          }
           // Cache endpoint failed — fall through to live run
         }
 
@@ -1110,20 +1179,84 @@ export function Layer10Provider({
             throw new Error(json.error || "AgriBrain surfaces pipeline failed");
           }
 
-          runData = json.data ?? json;
+          // `/run` is an execution trigger only. Scientific browser state is
+          // accepted exclusively from a validated canonical publication head.
+          for (let attempt = 0; attempt < 40 && isLatestRequest(); attempt += 1) {
+            const publicationRes = await fetch("/api/agribrain/surfaces/latest", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              cache: "no-store",
+              signal: controller.signal,
+              body: JSON.stringify({ plotId }),
+            });
+            const publicationJson = await publicationRes.json();
+            if (!isLatestRequest()) return;
+            if (
+              publicationRes.status === 409
+              || publicationJson.reason === "canonical_head_validation_failed"
+            ) {
+              throw new Error(
+                publicationJson.error
+                || "Canonical publication head failed integrity validation",
+              );
+            }
+            if (
+              publicationRes.ok
+              && publicationJson.available !== false
+              && publicationJson.status === "fresh"
+            ) {
+              const validation = publicationJson.validation || {};
+              if (classifyCanonicalHeadValidation(validation) !== "valid") {
+                throw new Error("Canonical publication head validation is incomplete");
+              }
+              runData = canonicalPublicationToRunData(publicationJson, plotId);
+              break;
+            }
+            const workerStatus = String(
+              publicationJson.workerState?.workerState?.status
+              || publicationJson.workerState?.status
+              || "",
+            ).toLowerCase();
+            if (["failed", "superseded"].includes(workerStatus)) {
+              throw new Error(
+                publicationJson.workerState?.workerState?.error
+                || publicationJson.workerState?.error
+                || `ASMAE publication failed (${workerStatus})`,
+              );
+            }
+            await new Promise<void>((resolve, reject) => {
+              const onAbort = () => {
+                clearTimeout(timer);
+                reject(new DOMException("Aborted", "AbortError"));
+              };
+              const timer = setTimeout(() => {
+                controller.signal.removeEventListener("abort", onAbort);
+                resolve();
+              }, 1500);
+              controller.signal.addEventListener("abort", onAbort, { once: true });
+            });
+          }
+          if (!runData) {
+            throw new Error("Canonical publication is still pending");
+          }
         }
         if (!isLatestRequest()) return;
 
         const surfaces = Array.isArray(runData.surfaces)
-          ? runData.surfaces.map(normalizeSurface)
+          ? runData.surfaces.map((surface: Record<string, any>) => normalizeSurface(surface))
           : [];
         const reconciledQuality = reconcileQualitySignals(
           runData.quality,
           runData.global_quality,
         );
+        const normalizedPhenology = normalizeCanonicalPhenologyPublication({
+          resolvedCropStage: runData.resolved_crop_stage,
+          phenologyContext: runData.phenology_context,
+        });
 
         const mapped: Layer10Result = {
           run_id: runData.run_id || "",
+          publication_id: runData.publication_id || "",
           plot_id: runData.plot_id || plotId,
           timestamp: runData.timestamp || runData.audit?.timestamp_utc || new Date().toISOString(),
 
@@ -1171,6 +1304,8 @@ export function Layer10Provider({
           layer_results: runData.layer_results ?? {},
 
           provenance: runData.provenance ?? runData.audit ?? {},
+          resolved_crop_stage: normalizedPhenology.resolvedCropStage,
+          phenology_context: normalizedPhenology.phenologyContext,
           grid: deriveGrid(runData.grid, surfaces),
           explainability_pack: runData.explainability_pack ?? {},
           scenario_pack: runData.scenario_pack ?? [],
@@ -1192,6 +1327,7 @@ export function Layer10Provider({
           // V92.4: Mode surface plan and surface inventory
           mode_surface_plan: runData.mode_surface_plan ?? {},
           surface_inventory: runData.surface_inventory ?? {},
+          surface_inventory_hash: runData.surface_inventory_hash ?? "",
           // V92.4-BC: Backend-authoritative display state per mode
           mode_display_state: runData.mode_display_state ?? {},
           source_policy_display_state: runData.source_policy_display_state ?? {},
@@ -1343,45 +1479,186 @@ export function Layer10Provider({
   ]);
 
   useEffect(() => {
+    const handleRefreshProgress = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      setPublication((previous) => ({
+        ...previous,
+        data: patchLayer10AsmaeLiveState(previous.data, customEvt.detail),
+      }));
+    };
     const handleRefreshCompleted = (e: Event) => {
       const customEvt = e as CustomEvent;
       const targetPlotId = customEvt.detail?.plotId;
+      const finalSnapshotId = customEvt.detail?.finalSnapshotId;
       if (targetPlotId) {
-        fetchLayer10(targetPlotId, "", undefined, undefined, undefined, { forceRefresh: false });
+        const completionIdentity = [
+          targetPlotId,
+          finalSnapshotId || `job:${customEvt.detail?.jobId || "unknown"}`,
+        ].join(":");
+        if (canonicalCompletionFetchRef.current === completionIdentity) return;
+        canonicalCompletionFetchRef.current = completionIdentity;
+        setPublication((previous) => ({
+          ...previous,
+          data: patchLayer10AsmaeCompletion(previous.data, customEvt.detail),
+        }));
+        void fetchLayer10(targetPlotId, "", undefined, undefined, undefined, {
+          forceRefresh: false,
+          snapshotId: finalSnapshotId,
+        });
       }
     };
+    const handleRefreshFailed = (e: Event) => {
+      const customEvt = e as CustomEvent;
+      setPublication((previous) => ({
+        ...previous,
+        data: patchLayer10AsmaeFailure(previous.data, customEvt.detail),
+      }));
+    };
     if (typeof window !== "undefined") {
+      window.addEventListener("agribrain:refresh_progress", handleRefreshProgress);
       window.addEventListener("agribrain:refresh_completed", handleRefreshCompleted);
+      window.addEventListener("agribrain:refresh_failed", handleRefreshFailed);
     }
     return () => {
       if (typeof window !== "undefined") {
+        window.removeEventListener("agribrain:refresh_progress", handleRefreshProgress);
         window.removeEventListener("agribrain:refresh_completed", handleRefreshCompleted);
+        window.removeEventListener("agribrain:refresh_failed", handleRefreshFailed);
       }
     };
   }, [fetchLayer10]);
 
+  // A provider publication remains visible while spatial ASMAE runs in the
+  // background. Observe that durable job here, in the persistent data owner,
+  // rather than relying on the transient initial-loading overlay.
+  const observedAsmaePlotId = String(data?.plot_id || "");
+  const observedAsmaePlotState = data?.source_policy_display_state?.asmaePlotState;
+  const observedAsmaeJobId = String(observedAsmaePlotState?.activeSpatialJobId || "");
+  const observedAsmaeJobStatus = String(
+    observedAsmaePlotState?.activeSpatialJobStatus || ""
+  ).toLowerCase();
+  const observedAsmaePublicationRelation = String(
+    observedAsmaePlotState?.publicationRelation || ""
+  ).toLowerCase();
+  useEffect(() => {
+    const awaitingCanonicalPublication = observedAsmaeJobStatus === "completed"
+      && observedAsmaePublicationRelation !== "published";
+    if (
+      !observedAsmaePlotId
+      || !observedAsmaeJobId
+      || (
+        !["queued", "running", "stalled", "completed_reintegration_pending"].includes(observedAsmaeJobStatus)
+        && !awaitingCanonicalPublication
+      )
+    ) {
+      return;
+    }
+
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const controller = new AbortController();
+    const poll = async () => {
+      try {
+        const response = await fetch(
+          `/api/agribrain/progress?plotId=${encodeURIComponent(observedAsmaePlotId)}`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        if (!response.ok || stopped) return;
+        const progress = await response.json();
+        if (stopped) return;
+
+        const live = buildAsmaeLiveStateDetail(progress, observedAsmaePlotId);
+        if (live) {
+          setPublication((previous) => ({
+            ...previous,
+            data: patchLayer10AsmaeLiveState(previous.data, live),
+          }));
+        }
+        const failure = buildAsmaeRefreshFailedDetail(
+          progress,
+          observedAsmaePlotId,
+        );
+        if (failure) {
+          setPublication((previous) => ({
+            ...previous,
+            data: patchLayer10AsmaeFailure(previous.data, failure),
+          }));
+          return;
+        }
+        if (
+          live?.status === "completed"
+          && live.publicationRelation === "published"
+        ) {
+          const completionIdentity = [
+            observedAsmaePlotId,
+            live.finalSnapshotId || `job:${live.jobId || "unknown"}`,
+          ].join(":");
+          if (canonicalCompletionFetchRef.current === completionIdentity) return;
+          canonicalCompletionFetchRef.current = completionIdentity;
+          setPublication((previous) => ({
+            ...previous,
+            data: patchLayer10AsmaeCompletion(previous.data, live),
+          }));
+          await fetchLayer10(
+            observedAsmaePlotId,
+            "",
+            undefined,
+            undefined,
+            undefined,
+            { forceRefresh: false, snapshotId: live.finalSnapshotId },
+          );
+          return;
+        }
+      } catch (error) {
+        if ((error as Error)?.name === "AbortError") return;
+      }
+      if (!stopped) timer = setTimeout(poll, 1500);
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [
+    fetchLayer10,
+    observedAsmaeJobId,
+    observedAsmaeJobStatus,
+    observedAsmaePublicationRelation,
+    observedAsmaePlotId,
+  ]);
+
   const renderViewIdentity = useMemo(() => buildRenderViewIdentity({
     publicationId: [
-      data?.intelligence_snapshot_id || data?.agribrain_run_id || data?.run_id || "unpublished",
-      data?.request_identity || "legacy_acquisition",
+      data?.publication_id || "unpublished",
+      data?.intelligence_snapshot_id || "snapshot_missing",
+      data?.surface_inventory_hash || "inventory_missing",
+      data?.render_authorization_version || "authorization_missing",
     ].join("@"),
     plotId: data?.plot_id,
     sourcePolicy: canopySource,
     mode: activeMode,
     surfaceType: rawActiveSurfaceType,
+    surfaceId: rawActiveSurfaceType ? surfaceByType[rawActiveSurfaceType]?.surface_id : "",
     overlaySurfaceType: activeExperimentalSurfaceType,
+    overlaySurfaceId: activeExperimentalSurface?.surface_id,
     overlayEnabled: experimentalOverlayEnabled,
   }), [
     activeExperimentalSurfaceType,
+    activeExperimentalSurface?.surface_id,
     activeMode,
     canopySource,
     data?.agribrain_run_id,
     data?.intelligence_snapshot_id,
     data?.plot_id,
-    data?.request_identity,
+    data?.publication_id,
+    data?.surface_inventory_hash,
+    data?.render_authorization_version,
     data?.run_id,
     experimentalOverlayEnabled,
     rawActiveSurfaceType,
+    surfaceByType,
   ]);
   renderViewIdentityRef.current = renderViewIdentity;
 
@@ -1484,11 +1761,15 @@ export function Layer10Provider({
   const {
     surface: activeSurface,
     surfaceType: resolvedActiveSurfaceType,
-    sourceLabel: activeSourceLabel,
-    authorityLabel: activeAuthorityLabel,
-    bannerState,
+    sourceLabel: candidateSourceLabel,
+    authorityLabel: candidateAuthorityLabel,
+    bannerState: candidateBannerState,
     canShowPixelDiagnosis,
     canShowPixelHint,
+    canSamplePixel,
+    canInterpretForScouting,
+    canInterpretDiagnostically,
+    canUseForPrescription,
     canShowExperimentalDetail,
     shouldShowNoData,
     shouldShowPlotLevel
@@ -1518,8 +1799,12 @@ export function Layer10Provider({
       observedMaskSurface,
       gapFillMaskSurface,
       modeDisplayState: {
-        spatial: activeDisplay?.renderKind === "full_raster" || activeDisplay?.renderKind === "diagnostic_overlay",
-        canRenderPixels: activeDisplay?.renderKind === "full_raster" || activeDisplay?.renderKind === "diagnostic_overlay",
+        spatial: activeDisplay?.renderKind === "full_raster"
+          || activeDisplay?.renderKind === "diagnostic_overlay"
+          || activeDisplay?.renderKind === "proxy_overlay",
+        canRenderPixels: activeDisplay?.renderKind === "full_raster"
+          || activeDisplay?.renderKind === "diagnostic_overlay"
+          || activeDisplay?.renderKind === "proxy_overlay",
         renderKind: activeDisplay?.renderKind,
         reason: activeDisplay?.reason,
       },
@@ -1563,6 +1848,31 @@ export function Layer10Provider({
   ]);
 
   const activeSurfaceMaterialized = isRenderedMaterialization(renderMaterialization, activeSurfaceType);
+  const compoundAttribution = resolveCompoundRenderAttribution({
+    baseRendered: activeSurfaceMaterialized,
+    overlayRendered: exactExperimentalMaterialization,
+    baseSourceLabel: candidateSourceLabel,
+    baseAuthorityLabel: candidateAuthorityLabel,
+  });
+  const activeSourceLabel = compoundAttribution.sourceLabel;
+  const activeAuthorityLabel = compoundAttribution.authorityLabel;
+  const bannerState = activeSurfaceMaterialized ? candidateBannerState : null;
+  const committedActiveDisplay = useMemo(() => activeSurfaceMaterialized
+    ? activeDisplay
+    : {
+        ...activeDisplay,
+        surface: null,
+        surfaceType: null,
+        sourceLabel: activeSourceLabel,
+        authorityLabel: activeAuthorityLabel,
+        bannerState: null,
+        shouldShowNoData: true,
+      }, [
+        activeAuthorityLabel,
+        activeDisplay,
+        activeSourceLabel,
+        activeSurfaceMaterialized,
+      ]);
   const activeHistogram = activeSurfaceMaterialized
     ? data?.histograms.field.find((h) => h.surface_type === activeSurfaceType) || null
     : null;
@@ -1610,8 +1920,8 @@ export function Layer10Provider({
         surface = data.surfaces.find((s) => s.type === "DATA_CONFIDENCE") || null;
       }
       if (!surface) {
-        // Fallback to CONFIDENCE_ASMAE
-        surface = data.surfaces.find((s) => s.type === "CONFIDENCE_ASMAE") || null;
+        // The compatibility alias never owns a second grid.
+        surface = data.surfaces.find((s) => s.type === "ASMAE_POSTERIOR_CONCENTRATION") || null;
         if (!surface) {
           const uncertaintySurf = data.surfaces.find((s) => s.type === uncertType) ||
                                   (showExperimental1m ? data.surfaces.find((s) => s.type === "UNCERTAINTY_SIGMA") : null) ||
@@ -1679,7 +1989,39 @@ export function Layer10Provider({
     };
   }, [data, activeSurfaceType, activeZoneSurfaceType, activeMode, renderMaterialization]);
 
-  const fallbackGuidance = data?.fallback_guidance?.[activeSurfaceType] || data?.fallback_guidance?.[activeZoneSurfaceType] || null;
+  const fallbackGuidance = useMemo<FallbackGuidance | null>(() => {
+    const exact = data?.fallback_guidance?.[activeSurfaceType];
+    if (exact) {
+      return {
+        ...exact,
+        displayed_surface_type: activeSurfaceType,
+        guidance_surface_type: exact.guidance_surface_type || activeSurfaceType,
+        guidance_relation: "same_surface",
+      };
+    }
+    const operational = data?.fallback_guidance?.[activeZoneSurfaceType];
+    if (!operational) return null;
+    if (!spatialSurfaceAvailable) {
+      return {
+        ...operational,
+        displayed_surface_type: activeSurfaceType,
+        guidance_surface_type: activeZoneSurfaceType,
+        guidance_relation: "separate_operational_surface",
+      };
+    }
+    const displayedName = activeSurfaceType.replace(/_/g, " ").toLowerCase();
+    const operationalName = activeZoneSurfaceType.replace(/_/g, " ").toLowerCase();
+    return {
+      ...operational,
+      action_mode: "scouting_only",
+      why: `The displayed ${displayedName} is a valid scouting raster. Operational guidance is based separately on ${operationalName}; no localized management-zone authority is implied.`,
+      recommended_next_step: "Use the displayed pattern for scouting and verify conditions in the field before management action.",
+      data_basis: `separate_operational_surface:${activeZoneSurfaceType}`,
+      displayed_surface_type: activeSurfaceType,
+      guidance_surface_type: activeZoneSurfaceType,
+      guidance_relation: "separate_operational_surface",
+    };
+  }, [data?.fallback_guidance, activeSurfaceType, activeZoneSurfaceType, spatialSurfaceAvailable]);
 
   // Compute map semantics from data grades
   const mapSemantics: MapSemantics = useMemo(() => {
@@ -1763,7 +2105,8 @@ export function Layer10Provider({
       )),
       quality: data?.quality,
       explainPack: data?.explainability_pack?.[activeSurfaceType] || {},
-      cropStage: data?.current?.crop_stage || null,
+      canonicalCropStage: data?.resolved_crop_stage || null,
+      phenologyContext: data?.phenology_context,
       visualSource: data?.visual_source,
       engines: data?.engines,
       waterStressSurfaceMean,
@@ -1976,8 +2319,10 @@ export function Layer10Provider({
         setIsDecideMode,
         openDecideMode,
         fetchLayer10,
-        activeDisplay,
+        activeDisplay: committedActiveDisplay,
         activeSurface,
+        committedSurface: activeSurfaceMaterialized ? activeSurface : null,
+        activeSurfaceMaterialized,
         activeConfidenceSurface,
         activeReliabilitySurface,
         activeHistogram,
@@ -1990,8 +2335,12 @@ export function Layer10Provider({
         bannerState,
         canShowPixelDiagnosis: canShowPixelDiagnosis && activeSurfaceMaterialized,
         canShowPixelHint: canShowPixelHint && activeSurfaceMaterialized,
+        canSamplePixel: canSamplePixel && activeSurfaceMaterialized,
+        canInterpretForScouting: canInterpretForScouting && activeSurfaceMaterialized,
+        canInterpretDiagnostically: canInterpretDiagnostically && activeSurfaceMaterialized,
+        canUseForPrescription: canUseForPrescription && activeSurfaceMaterialized,
         canShowExperimentalDetail,
-        shouldShowNoData,
+        shouldShowNoData: shouldShowNoData || !activeSurfaceMaterialized,
         shouldShowPlotLevel,
         surfaceAvailabilityByMode,
         plotDataAvailable,

@@ -58,8 +58,18 @@ _V1_VAR_TO_WEATHER_KEYS = {
     "weather_temp_min": "temp_min",
     "weather_et0_mm": "et0",
     "weather_vpd_kpa": "vpd",
-    # Direct precipitation (from some adapters)
+    "weather_humidity_mean_pct": "humidity",
+    "weather_humidity": "humidity",
+    "weather_wind_speed_m_s": "wind_speed",
+    "weather_wind_speed": "wind_speed",
+    # Direct canonical packet variables.
     "precipitation": "rain",
+    "temp_mean": "tmean",
+    "temp_max": "temp_max",
+    "temp_min": "temp_min",
+    "et0": "et0",
+    "humidity": "humidity",
+    "wind_speed": "wind_speed",
 }
 
 _V1_COVERAGE_VARS = frozenset({"vegetation_fraction", "cloud_cover"})
@@ -148,6 +158,7 @@ def rebuild_daily_timeseries(
         rec["temp_min"] = float(tmin) if tmin is not None else None
         rec["et0"] = float(et0) if et0 is not None else None
         rec["wind_speed"] = float(wx.get("wind_speed") or 0.0) if wx.get("wind_speed") is not None else None
+        rec["humidity"] = float(wx.get("humidity")) if wx.get("humidity") is not None else None
 
         # V91.2: GDD only from real observed temperature — not from defaults.
         # Zero is a real agronomic value; fabricating GDD from missing data is forbidden.

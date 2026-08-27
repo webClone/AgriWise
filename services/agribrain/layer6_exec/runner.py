@@ -183,6 +183,37 @@ def _parse_upstream_plans(inputs: Layer6Input) -> List[InterventionCandidate]:
     return candidates
 
 
+def _apply_crop_phenology_gate(
+    portfolio: List[InterventionCandidate], digest: UpstreamDigest,
+) -> List[InterventionCandidate]:
+    """Demote crop/stage-sensitive execution when semantics are unresolved."""
+    if digest.species_specific_allowed and digest.stage_specific_allowed:
+        return portfolio
+
+    reasons = list(digest.crop_phenology_demotion_reasons)
+    if not digest.species_specific_allowed and "crop_identity_uncertain" not in reasons:
+        reasons.append("crop_identity_uncertain")
+    if not digest.stage_specific_allowed and "phenology_unknown_or_uncertain" not in reasons:
+        reasons.append("phenology_unknown_or_uncertain")
+
+    for candidate in portfolio:
+        if str(candidate.action_type).upper() in {
+            "INTERVENE", "PRESCRIBE", "APPLY", "ESCALATE",
+        }:
+            candidate.action_type = "VERIFY"
+            candidate.confidence = min(candidate.confidence, 0.35)
+            candidate.utility_score = min(candidate.utility_score, 0.35)
+            candidate.feasibility_grade = FeasibilityGrade.C
+            for reason in reasons:
+                if reason not in candidate.blocked_reasons:
+                    candidate.blocked_reasons.append(reason)
+            candidate.instructions = (
+                "Verify crop identity and biological stage before execution. "
+                + candidate.instructions
+            )
+    return portfolio
+
+
 # ============================================================================
 # Production Runner
 # ============================================================================
@@ -228,9 +259,30 @@ def run_layer6(inputs: Layer6Input) -> Layer6Output:
             portfolio_ids.add(c.intervention_id)
 
     # Run New Scientific Engines & Mutate Candidates in-place
-    leaching_res = run_nitrogen_leaching(inputs, portfolio)
+    leaching_res = run_nitrogen_leaching(inputs, portfolio, digest)
     vpd_res = run_vpd_spray_window(inputs, portfolio)
     carbon_res = run_carbon_sequestration(inputs, portfolio)
+
+    portfolio = _apply_crop_phenology_gate(portfolio, digest)
+
+    # Administrative ``season_stage`` is not phenology evidence.  Feasibility
+    # timing consumes only the canonical Layer 2 stage, or UNKNOWN.
+    if digest.stage_specific_allowed:
+        stage_map = {
+            "EMERGENCE": "EARLY",
+            "INITIAL": "EARLY",
+            "VEGETATIVE": "MID",
+            "REPRODUCTIVE": "MID",
+            "FLOWERING": "MID",
+            "MATURITY": "LATE",
+            "SENESCENCE": "POST_HARVEST",
+            "HARVESTED": "POST_HARVEST",
+        }
+        inputs.op_context.season_stage = stage_map.get(
+            digest.phenology_stage.upper(), "UNKNOWN"
+        )
+    else:
+        inputs.op_context.season_stage = "UNKNOWN"
 
     # Sort portfolio by utility descending to maintain invariant 12
     portfolio.sort(key=lambda c: c.utility_score, reverse=True)
@@ -311,7 +363,7 @@ def run_layer6(inputs: Layer6Input) -> Layer6Output:
 
     quality = QualityMetricsL6(
         decision_reliability=round(reliability, 3),
-        missing_drivers=[],
+        missing_drivers=list(digest.crop_phenology_demotion_reasons),
         data_completeness={
             "L1_tensor": 1.0 if inputs.tensor else 0.0,
             "L2_veg_int": 1.0 if inputs.veg_int else 0.0,
@@ -324,6 +376,15 @@ def run_layer6(inputs: Layer6Input) -> Layer6Output:
         intervention_feasibility_score=round(mean_feasibility, 3),
         confounder_count=len(confounders) if run_full else 0,
         conflict_count=len(conflict_log),
+        penalties_applied=([
+            {
+                "driver": "crop_phenology_authority",
+                "penalty": round(1.0 - (
+                    1.0 if digest.species_specific_allowed and digest.stage_specific_allowed else 0.4
+                ), 3),
+                "reason": ",".join(digest.crop_phenology_demotion_reasons),
+            }
+        ] if digest.crop_phenology_demotion_reasons else []),
     )
 
     # ── Audit Snapshot ───────────────────────────────────────────────────
@@ -333,12 +394,26 @@ def run_layer6(inputs: Layer6Input) -> Layer6Output:
             "ndvi_trend": digest.ndvi_trend,
             "rain_7d_mm": digest.rain_7d_mm,
             "phenology_stage": digest.phenology_stage,
+            "crop_posterior_hash": digest.crop_posterior_hash,
+            "phenology_posterior_hash": digest.phenology_posterior_hash,
+            "crop_resolution": digest.crop_resolution,
+            "crop_evidence_class": digest.crop_evidence_class,
+            "phenology_evidence_class": digest.phenology_evidence_class,
+            "crop_mixture": digest.crop_mixture,
+            "stage_posterior": digest.stage_posterior,
             "fungal_pressure": digest.fungal_pressure,
         },
         policy_snapshot={
             "smart_routing": "FULL" if run_full else "FAST",
             "conflict_rules_applied": len(conflict_log),
             "feasibility_gates": len(portfolio),
+            "species_specific_allowed": digest.species_specific_allowed,
+            "stage_specific_allowed": digest.stage_specific_allowed,
+            "crop_phenology_demotion_reasons": digest.crop_phenology_demotion_reasons,
+            "crop_posterior_hash": digest.crop_posterior_hash,
+            "phenology_posterior_hash": digest.phenology_posterior_hash,
+            "crop_evidence_class": digest.crop_evidence_class,
+            "phenology_evidence_class": digest.phenology_evidence_class,
         },
         model_versions={"exec": CODE_VERSION},
         upstream_digest=digest,
@@ -360,6 +435,8 @@ def run_layer6(inputs: Layer6Input) -> Layer6Output:
         "conflict_count": len(conflict_log),
         "code": CODE_VERSION,
         "evidence_hash": _stable_hash([asdict(e) for e in norm_evidence]),
+        "crop_posterior_hash": digest.crop_posterior_hash,
+        "phenology_posterior_hash": digest.phenology_posterior_hash,
     })
     run_id = f"L6-{run_hash}"
 
@@ -498,7 +575,7 @@ def run_layer6_exec(inputs: OrchestratorInput, *args) -> Layer6Output:
             water_quota_remaining=float(constraints.get("water_quota", 1000.0)),
             budget_remaining=float(constraints.get("budget", 5000.0)),
             permissions=[],
-            season_stage=op.get("season_stage", "MID"),
+            season_stage="UNKNOWN",
             regulatory_zone=op.get("regulatory_zone", "STANDARD"),
             plot_area_ha=plot_area_ha,
         ),

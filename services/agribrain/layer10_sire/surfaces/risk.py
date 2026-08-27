@@ -13,9 +13,14 @@ v3 Changes:
   - Trust downweight threshold: 0.6 → 0.4 (less aggressive range compression)
   - Uncertainty amplification: 2.0x → 1.5x (prevent uniform signal domination)
 """
+import hashlib
+import json
 from typing import List
 from services.agribrain.layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, PaletteId,
+)
+from services.agribrain.scientific_contracts.crop_phenology import (
+    consume_canonical_phenology_output,
 )
 
 
@@ -49,15 +54,7 @@ def generate_risk_surfaces(
     surfaces = []
 
     # Determine phenology stage
-    stage = "UNKNOWN"
-    vi = inp.veg_int
-    if vi is not None:
-        pheno = getattr(vi, 'phenology', None)
-        if pheno:
-            stages = getattr(pheno, 'stage_by_day', [])
-            if stages:
-                raw_stage = stages[-1]
-                stage = raw_stage.value if hasattr(raw_stage, 'value') else str(raw_stage).upper()
+    stage = consume_canonical_phenology_output(inp.veg_int)["resolved_crop_stage"]
     weights = STAGE_WEIGHTS.get(stage, STAGE_WEIGHTS["UNKNOWN"])
 
     # Find contributing surfaces + reliability surface
@@ -153,6 +150,14 @@ def generate_risk_surfaces(
             valid = sum(1 for r in range(H) for c in range(W) if s.values[r][c] is not None)
             source_coverage[risk_key] = round(valid / (H * W), 3)
 
+    parent_ids = [s.surface_id for _, s in sorted(risk_surfaces.items())]
+    parent_hashes = [
+        hashlib.sha256(json.dumps(
+            s.values, sort_keys=True, separators=(",", ":"), default=str
+        ).encode("utf-8")).hexdigest()
+        for _, s in sorted(risk_surfaces.items())
+    ]
+
     surfaces.append(SurfaceArtifact(
         surface_id=f"RISK_COMPOSITE_{inp.plot_id}",
         semantic_type=SurfaceType.COMPOSITE_RISK,
@@ -170,6 +175,21 @@ def generate_risk_surfaces(
             "severity_class": severity_class,
             "source_coverage": source_coverage,
             "sources_contributing": len(risk_surfaces),
+            "derived_from_surface_ids": parent_ids,
+            "derived_from_content_hashes": parent_hashes,
+            "operator_model_version": "composite_risk_v4",
+            "derivation_class": "model_assisted",
+            "derivation_authority": "diagnostic",
+            "source_reality": "provider_derived",
+            "observed_support_ratio": min(source_coverage.values()) if source_coverage else 0.0,
+            "uncertainty_propagation": "parent_support_and_reliability_surface",
+            "production_usable": False,
+            "real_provider_product": False,
+            "diagnostic_only": True,
+            "state_update_allowed": False,
+            "prescription_driver_allowed": False,
+            "state_update_authority": "none",
+            "prescription_authority": "blocked_diagnostic_only",
         },
     ))
 

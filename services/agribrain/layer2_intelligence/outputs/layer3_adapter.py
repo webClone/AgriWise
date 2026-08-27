@@ -76,13 +76,15 @@ def build_layer3_context(pkg: Layer2Output) -> Layer3InputContext:
             }
 
     # Phenology
-    stage = "unknown"
+    from services.agribrain.common.downstream_crop_context import resolve_downstream_crop_phenology
+
+    semantics = resolve_downstream_crop_phenology(l2_output=pkg)
+    stage = semantics.stage_for_discrete_engine.lower()
     vigor = None
     gdd_acc = 0.0
     for pf in pkg.phenology_adjusted_indices:
         if pf.name == "gdd_adjusted_vigor":
             vigor = pf.value
-            stage = pf.crop_stage
             gdd_acc = pf.gdd_accumulated
             break
 
@@ -111,6 +113,12 @@ def build_layer3_context(pkg: Layer2Output) -> Layer3InputContext:
         zone_status=zone_status,
         vegetation_status=veg_status,
         phenology_stage=stage,
+        phenology_confidence=semantics.stage_confidence,
+        phenology_posterior_hash=semantics.phenology_posterior_hash,
+        stage_specific_allowed=semantics.stage_specific_allowed,
+        crop_posterior_hash=semantics.crop_posterior_hash,
+        crop_resolution=semantics.crop_resolution,
+        species_specific_allowed=semantics.species_specific_allowed,
         gdd_adjusted_vigor=vigor,
         gdd_accumulated=gdd_acc,
         operational_signals=operational,
@@ -203,9 +211,13 @@ def _extract_operational_signals(pkg: Layer2Output) -> Dict[str, Any]:
     for gap in pkg.gaps_inherited:
         gap_types.add(gap.gap_type)
 
-    rain_available = "NO_RAIN_GAUGE" not in gap_types
-    temp_available = True  # Assume available unless explicitly missing
-    sar_available = has_sar or "NO_RECENT_SENTINEL1" not in gap_types
+    # Absence of a recorded gap is not positive evidence.  This contract does
+    # not carry measured rainfall totals or temperatures, so it cannot declare
+    # those physical drivers available.  The legacy bridge may transport an
+    # explicit complete rain window directly from L1 during migration.
+    rain_available = False
+    temp_available = False
+    sar_available = has_sar
 
     signals["sar_available"] = sar_available
     signals["optical_available"] = has_veg

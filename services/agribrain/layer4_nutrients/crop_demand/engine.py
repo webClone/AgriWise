@@ -12,10 +12,11 @@ Science:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Mapping
+import math
 
 from layer4_nutrients.schema import CropDemandOutput
-from crop_database import get_crop
+from crop_database import get_crop, CROP_REGISTRY
 
 
 # ============================================================================
@@ -158,4 +159,144 @@ class CropDemandUptakeEngine:
             cumulative_uptake=cumulative,
             critical_windows=critical_windows,
             peak_daily_demand=peak_daily,
+        )
+
+    def compute_posterior_demand(
+        self,
+        *,
+        stages: List[str],
+        semantic_lineage: Mapping[str, Any],
+        management_goal: str = "yield_max",
+    ) -> CropDemandOutput:
+        """Marginalize crop demand over canonical crop/stage hypotheses.
+
+        This path deliberately avoids ``get_crop('unknown')`` because the
+        registry's compatibility fallback is wheat.  Group-only and unknown
+        identity are represented as mixtures with explicit variance.
+        """
+        def normalise(raw: Any) -> Dict[str, float]:
+            if not isinstance(raw, Mapping):
+                return {}
+            values: Dict[str, float] = {}
+            for key, value in raw.items():
+                try:
+                    probability = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(probability) and probability > 0.0:
+                    values[str(key).lower()] = probability
+            total = sum(values.values())
+            return ({key: value / total for key, value in values.items()}
+                    if total > 0.0 else {})
+
+        crop_mix = normalise(semantic_lineage.get("crop_mixture"))
+        species_allowed = bool(semantic_lineage.get("species_specific_allowed"))
+        crop_resolution = str(semantic_lineage.get("crop_resolution") or "unknown")
+        selected_crop = str(semantic_lineage.get("selected_crop") or "").lower()
+        if species_allowed and selected_crop and not crop_mix:
+            crop_mix = {selected_crop: 1.0}
+        elif not species_allowed and crop_resolution == "group_only":
+            expanded: Dict[str, float] = {}
+            for group, weight in crop_mix.items():
+                matches = [
+                    code for code, spec in CROP_REGISTRY.items()
+                    if str(spec.architecture).lower() == group
+                ]
+                for code in matches:
+                    expanded[code] = expanded.get(code, 0.0) + weight / max(1, len(matches))
+            crop_mix = normalise(expanded)
+        if not crop_mix:
+            representatives: Dict[str, str] = {}
+            for code, spec in CROP_REGISTRY.items():
+                representatives.setdefault(str(spec.architecture).lower(), code)
+            crop_mix = normalise({code: 1.0 for code in representatives.values()})
+
+        stage_mix = normalise(semantic_lineage.get("stage_posterior"))
+        stage_allowed = bool(semantic_lineage.get("stage_specific_allowed"))
+        selected_stage = str(semantic_lineage.get("phenology_stage") or "").lower()
+        if stage_allowed and selected_stage and not stage_mix:
+            stage_mix = {selected_stage: 1.0}
+        if not stage_mix:
+            stage_mix = {
+                "initial": 0.20, "vegetative": 0.30,
+                "reproductive": 0.30, "maturity": 0.20,
+            }
+
+        # A stage hypothesis is repeated over the requested horizon.  It is a
+        # scenario branch, never a newly inferred stage.
+        horizon = max(1, len(stages))
+        components = []
+        component_weights: Dict[str, float] = {}
+        for crop_code, crop_weight in crop_mix.items():
+            if crop_code not in CROP_REGISTRY:
+                continue
+            for stage, stage_weight in stage_mix.items():
+                weight = crop_weight * stage_weight
+                result = self.compute_demand(
+                    crop_type=crop_code,
+                    stages=[stage] * horizon,
+                    management_goal=management_goal,
+                )
+                key = f"{crop_code}:{stage}"
+                components.append((weight, result))
+                component_weights[key] = weight
+        if not components:
+            raise ValueError("no compatible crop hypotheses for nutrient demand")
+
+        total_weight = sum(weight for weight, _ in components) or 1.0
+        component_weights = {
+            key: value / total_weight for key, value in component_weights.items()
+        }
+        nutrients = ("N", "P", "K")
+        means: Dict[str, float] = {}
+        variances: Dict[str, float] = {}
+        bounds: Dict[str, tuple] = {}
+        cumulative = {nut: [0.0] * horizon for nut in nutrients}
+        peaks = {nut: 0.0 for nut in nutrients}
+        yield_mean = 0.0
+        for weight, result in components:
+            w = weight / total_weight
+            yield_mean += w * result.yield_target_t_ha
+            for nutrient in nutrients:
+                values = [item.total_demand[nutrient] for _, item in components]
+                means[nutrient] = sum(
+                    (item_weight / total_weight) * item.total_demand[nutrient]
+                    for item_weight, item in components
+                )
+                for day in range(horizon):
+                    cumulative[nutrient][day] += w * result.cumulative_uptake[nutrient][day]
+                peaks[nutrient] += w * result.peak_daily_demand[nutrient]
+                bounds[nutrient] = (min(values), max(values))
+        for nutrient in nutrients:
+            variances[nutrient] = sum(
+                (weight / total_weight)
+                * (result.total_demand[nutrient] - means[nutrient]) ** 2
+                for weight, result in components
+            )
+
+        evidence_class = (
+            "species_stage_posterior" if species_allowed and stage_allowed
+            else "group_stage_mixture" if crop_resolution == "group_only"
+            else "generic_bounded_mixture"
+        )
+        return CropDemandOutput(
+            crop_type=(selected_crop if species_allowed else crop_resolution),
+            yield_target_t_ha=round(yield_mean, 2),
+            total_demand={key: round(value, 2) for key, value in means.items()},
+            cumulative_uptake={
+                key: [round(value, 2) for value in values]
+                for key, values in cumulative.items()
+            },
+            critical_windows=[],
+            peak_daily_demand={key: round(value, 3) for key, value in peaks.items()},
+            demand_variance={key: round(value, 3) for key, value in variances.items()},
+            demand_bounds={
+                key: (round(value[0], 2), round(value[1], 2))
+                for key, value in bounds.items()
+            },
+            crop_stage_evidence_class=evidence_class,
+            crop_posterior_hash=str(semantic_lineage.get("crop_posterior_hash") or ""),
+            phenology_posterior_hash=str(semantic_lineage.get("phenology_posterior_hash") or ""),
+            hypothesis_weights=component_weights,
+            production_eligible=species_allowed and stage_allowed,
         )

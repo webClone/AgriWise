@@ -1,0 +1,15 @@
+{
+  "bounds": [
+    2.75,
+    36.25,
+    3.45,
+    36.75
+  ],
+  "width": 1376,
+  "height": 768,
+  "asset": "/r2/organization-atmosphere.webp",
+  "spatialMode": "GEOREGISTERED",
+  "demoStatus": "ILLUSTRATIVE",
+  "generationFamilyId": "pass6-mitidja-v1",
+  "parentAsset": "/r2/farm-wide.webp"
+}

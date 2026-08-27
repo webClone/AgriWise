@@ -73,6 +73,39 @@ class L1SpatialData:
     asmae_evidence_state: Optional[Dict[str, Any]] = None
     real_asmae_evidence: bool = False
     asmae_feature_pack: Optional[Dict[str, Any]] = None
+    # Structured, per-surface failures emitted when Layer 10 cannot prove a
+    # source-to-display geospatial alignment. Keeping this on the adapted
+    # value makes a missing surface auditable instead of a silent omission.
+    asmae_alignment_failures: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def _native_rectangular_float_grid(grid_data: Any) -> Optional[List[List[Optional[float]]]]:
+    """Copy a native 2-D raster without changing its row/column geometry."""
+    if hasattr(grid_data, "tolist"):
+        grid_data = grid_data.tolist()
+    if not isinstance(grid_data, (list, tuple)) or not grid_data:
+        return None
+    rows = list(grid_data)
+    if not all(isinstance(row, (list, tuple)) for row in rows):
+        return None
+    width = len(rows[0])
+    if width <= 0 or any(len(row) != width for row in rows):
+        return None
+
+    native: List[List[Optional[float]]] = []
+    try:
+        for row in rows:
+            native.append([
+                float(value) if value is not None else None
+                for value in row
+            ])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return native
+
+
+def _is_asmae_raster_key(value: Any) -> bool:
+    return str(value or "").lower().startswith("asmae_")
 
 
 def _extract_temporal_rasters(
@@ -129,43 +162,48 @@ def _extract_temporal_rasters(
 
 def _extract_weather_history(field_tensor: Any) -> List[Dict[str, Any]]:
     """Extract daily weather observations from daily_state or plot_timeseries."""
-    weather = []
+    daily_map: Dict[str, Dict[str, Any]] = {}
+    weather_keys = {
+        'precipitation', 'precipitation_mm', 'rain', 'rain_mm',
+        'temp_max', 'temp_min', 'temp_mean', 'tmean', 'temperature',
+        'humidity', 'rh', 'et0', 'evapotranspiration',
+        'wind_speed', 'wind_speed_m_s', 'solar_radiation',
+    }
 
-    # Try daily_state first
+    # Daily state contains crop and soil state as well as occasional weather.
+    # Admit only explicit weather keys; arbitrary state fields must not suppress
+    # the canonical forcing timeline below.
     ds = getattr(field_tensor, 'daily_state', {}) or {}
     if isinstance(ds, dict):
-        # Look for weather-related keys in daily state
-        weather_keys = {
-            'precipitation', 'precipitation_mm', 'rain_mm',
-            'temp_max', 'temp_min', 'temperature',
-            'humidity', 'rh', 'et0', 'evapotranspiration',
-            'wind_speed', 'solar_radiation',
+        for values in ds.values():
+            if not isinstance(values, list):
+                continue
+            for index, entry in enumerate(values):
+                if not isinstance(entry, dict):
+                    continue
+                day = str(entry.get('day') or entry.get('date') or f'day_{index}')
+                selected = {
+                    key: float(value) for key, value in entry.items()
+                    if key in weather_keys and isinstance(value, (int, float))
+                }
+                if selected:
+                    daily_map.setdefault(day, {'date': day}).update(selected)
+
+    # Merge admitted plot-timeseries forcing. Crop-state-only rows are ignored.
+    for index, entry in enumerate(
+        getattr(field_tensor, 'plot_timeseries', []) or []
+    ):
+        if not isinstance(entry, dict):
+            continue
+        day = str(entry.get('date') or entry.get('day') or f'day_{index}')
+        selected = {
+            key: float(value) for key, value in entry.items()
+            if key in weather_keys and isinstance(value, (int, float))
         }
-        # Try to reconstruct daily weather from per-variable daily_state
-        daily_map = {}  # date → {var: val}
-        for var_name, values in ds.items():
-            if isinstance(values, list):
-                for i, entry in enumerate(values):
-                    if isinstance(entry, dict):
-                        day = entry.get('day', entry.get('date', f'day_{i}'))
-                        if day not in daily_map:
-                            daily_map[day] = {'date': day}
-                        for k, v in entry.items():
-                            if k not in ('day', 'date') and isinstance(v, (int, float)):
-                                daily_map[day][k] = float(v)
-        weather = list(daily_map.values())
+        if selected:
+            daily_map.setdefault(day, {'date': day}).update(selected)
 
-    # Supplement from plot_timeseries
-    if not weather:
-        pts = getattr(field_tensor, 'plot_timeseries', []) or []
-        for entry in pts:
-            if isinstance(entry, dict):
-                weather.append({
-                    k: float(v) if isinstance(v, (int, float)) else v
-                    for k, v in entry.items()
-                })
-
-    return weather
+    return [daily_map[day] for day in sorted(daily_map)]
 
 
 def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw: bool = False) -> L1SpatialData:
@@ -265,14 +303,26 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
             raster_data = raster_data.tolist()
 
         if isinstance(raster_data, list) and len(raster_data) > 0:
-            raster = [[None]*W for _ in range(H)]
-            for r in range(min(H, len(raster_data))):
-                row = raster_data[r]
-                if hasattr(row, "tolist"):
-                    row = row.tolist()
-                if isinstance(row, list):
-                    for c in range(min(W, len(row))):
-                        raster[r][c] = float(row[c]) if row[c] is not None else None
+            # ASMAE rasters carry their own CRS/affine grid and must reach the
+            # Layer-10 geospatial aligner at native shape. Positional copy into
+            # HxW would truncate/pad values while leaving the source metadata
+            # unchanged, making a later true reprojection impossible.
+            native_raster = (
+                _native_rectangular_float_grid(raster_data)
+                if _is_asmae_raster_key(var_name)
+                else None
+            )
+            if native_raster is not None:
+                raster = native_raster
+            else:
+                raster = [[None]*W for _ in range(H)]
+                for r in range(min(H, len(raster_data))):
+                    row = raster_data[r]
+                    if hasattr(row, "tolist"):
+                        row = row.tolist()
+                    if isinstance(row, list):
+                        for c in range(min(W, len(row))):
+                            raster[r][c] = float(row[c]) if row[c] is not None else None
             result.raster_maps[var_name] = raster
             if metadata:
                 keys_to_store = {var_name, var_name.upper(), var_name.lower()}
@@ -340,8 +390,22 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
                     "crs": getattr(rr, "crs", None),
                     "bounds": getattr(rr, "bounds", None),
                     "transform": getattr(rr, "transform", None),
+                    "geographic_grid_valid": getattr(rr, "geographic_grid_valid", False),
+                    "grid_validation_reason": getattr(rr, "grid_validation_reason", "not_validated"),
                 }
                 meta_dict.update(prov)
+                # RasterRef geometry is the validated authority boundary. Its
+                # provenance may add lineage, but cannot override the bound
+                # array dimensions, CRS, affine, or bounds.
+                meta_dict.update({
+                    "width": getattr(rr, "width", 0),
+                    "height": getattr(rr, "height", 0),
+                    "crs": getattr(rr, "crs", None),
+                    "bounds": getattr(rr, "bounds", None),
+                    "transform": getattr(rr, "transform", None),
+                    "geographic_grid_valid": getattr(rr, "geographic_grid_valid", False),
+                    "grid_validation_reason": getattr(rr, "grid_validation_reason", "not_validated"),
+                })
                 
                 # Check for global ASMAE_DIAGNOSTICS values from context package if retro/bma is missing
                 diag_dict = {}
@@ -387,14 +451,22 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
             grid_data = _load_raster_from_ref_if_needed(grid_data)
             if var_name and grid_data is not None:
                 if var_name not in result.raster_maps:
-                    raster = [[None]*W for _ in range(H)]
-                    if isinstance(grid_data, list) and len(grid_data) > 0:
-                        for r in range(min(H, len(grid_data))):
-                            row = grid_data[r]
-                            if isinstance(row, list):
-                                for c in range(min(W, len(row))):
-                                    raster[r][c] = float(row[c]) if row[c] is not None else None
-                        result.raster_maps[var_name] = raster
+                    native_raster = (
+                        _native_rectangular_float_grid(grid_data)
+                        if _is_asmae_raster_key(var_name)
+                        else None
+                    )
+                    if native_raster is not None:
+                        result.raster_maps[var_name] = native_raster
+                    else:
+                        raster = [[None]*W for _ in range(H)]
+                        if isinstance(grid_data, list) and len(grid_data) > 0:
+                            for r in range(min(H, len(grid_data))):
+                                row = grid_data[r]
+                                if isinstance(row, list):
+                                    for c in range(min(W, len(row))):
+                                        raster[r][c] = float(row[c]) if row[c] is not None else None
+                            result.raster_maps[var_name] = raster
 
     # --- Strategy 3: Extract from 4D tensor data [T, H, W, C] — ALL TIME STEPS ---
     tensor_data = getattr(field_tensor, 'data', [])
@@ -643,6 +715,14 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
             # on HxW, so align the mask with nearest-neighbour sampling.
             arr = np.array(rmap, dtype=float)
             observed_native = ~np.isnan(arr)
+            if _is_asmae_raster_key(key):
+                # ASMAE is already an assimilated scientific product. Never
+                # IDW-fill it or positionally resize its support mask here;
+                # values and support stay on the source grid until the
+                # CRS/affine-aware Layer-10 alignment step.
+                result.observed_masks[key] = observed_native.tolist()
+                result.observed_ratios[key] = float(np.mean(observed_native))
+                continue
             if (native_h, native_w) == (H, W):
                 observed_aligned = observed_native
             else:
@@ -746,38 +826,155 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
         scene_mode = get_attr_or_key(asmae_out, "diagnostics", {}).get("scene_stack_mode")
         state_update_allowed = get_attr_or_key(asmae_out, "state_update_allowed", False)
         diagnostic_only = get_attr_or_key(asmae_out, "diagnostic_only", True)
+        stage_state = dict(result.asmae_evidence_state or {})
+
+        def finite_grid_mean(group_name: str, preferred_key: str) -> Optional[float]:
+            maps = get_attr_or_key(asmae_out, group_name, {}) or {}
+            grid = maps.get(preferred_key)
+            if grid is None:
+                return None
+            values = []
+            for row in grid:
+                for value in row:
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if np.isfinite(number):
+                        values.append(number)
+            return float(np.mean(values)) if values else None
+
+        posterior_concentration = finite_grid_mean("confidence_maps", "ASMAE_POSTERIOR_CONCENTRATION")
+        if posterior_concentration is None:
+            posterior_concentration = finite_grid_mean("confidence_maps", "ASMAE_CONFIDENCE")
+        posterior_uncertainty = finite_grid_mean("uncertainty_maps", "ASMAE_UNCERTAINTY")
+        diag_meta = get_attr_or_key(asmae_out, "diagnostics", {}) or {}
+        stage_metadata = {
+            "used_bma": bool(stage_state.get("used_bma", False)),
+            "used_archive": bool(stage_state.get("used_archive", False)),
+            "used_retrovalidation": bool(stage_state.get("used_retrovalidation", False)),
+            "used_ml": bool(stage_state.get("used_ml", False)),
+            "bma_status": diag_meta.get("bma_status"),
+            "retro_status": diag_meta.get("retro_status"),
+            "posterior_concentration_available": posterior_concentration is not None,
+            "posterior_uncertainty_available": posterior_uncertainty is not None,
+            "confidence_semantic": "posterior_concentration",
+            "calibrated_confidence_available": False,
+            "confidence": None,
+            "posterior_concentration": posterior_concentration,
+            "uncertainty": posterior_uncertainty if posterior_uncertainty is not None else 1.0,
+        }
+
+        def plain_grid_spec(value: Any) -> Dict[str, Any]:
+            if isinstance(value, dict):
+                return dict(value)
+            if callable(getattr(value, "to_dict", None)):
+                return dict(value.to_dict())
+            if value is None:
+                return {}
+            return {
+                key: getattr(value, key, None)
+                for key in (
+                    "crs", "bounds", "transform", "width", "height",
+                    "resolution", "resolution_m", "nodata",
+                )
+                if getattr(value, key, None) is not None
+            }
+
+        asmae_source_grid_spec = plain_grid_spec(
+            get_attr_or_key(asmae_out, "grid_spec")
+            or (result.asmae_feature_pack or {}).get("grid_spec")
+        )
+
+        def store_native_asmae_grid(
+            var_name: str,
+            grid: Any,
+            *,
+            state_allowed_for_grid: bool,
+            diagnostic_only_for_grid: bool,
+        ) -> bool:
+            """Install an ASMAE grid only at its native, metadata-bound shape."""
+            native_grid = _native_rectangular_float_grid(grid)
+            if native_grid is None:
+                return False
+            native_h = len(native_grid)
+            native_w = len(native_grid[0])
+
+            aliases = {var_name, var_name.upper(), var_name.lower()}
+            existing_meta: Dict[str, Any] = {}
+            for alias in aliases:
+                candidate = result.raster_metadata.get(alias)
+                if isinstance(candidate, dict) and candidate:
+                    existing_meta = dict(candidate)
+                    break
+
+            source_spec = dict(asmae_source_grid_spec)
+            if not source_spec and any(
+                existing_meta.get(key) is not None
+                for key in ("crs", "bounds", "transform", "width", "height")
+            ):
+                source_spec = {
+                    key: existing_meta.get(key)
+                    for key in (
+                        "crs", "bounds", "transform", "width", "height",
+                        "resolution", "resolution_m", "nodata",
+                    )
+                    if existing_meta.get(key) is not None
+                }
+
+            # A source contract that contradicts its numeric array is never
+            # repaired positionally. Keep any independently valid RasterRef
+            # already admitted and reject this replacement.
+            if source_spec:
+                try:
+                    expected_h = int(source_spec["height"])
+                    expected_w = int(source_spec["width"])
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    return False
+                if (native_h, native_w) != (expected_h, expected_w):
+                    return False
+
+            metadata = {
+                **existing_meta,
+                "resolution_m": existing_meta.get("resolution_m", res_m),
+                "content_hash": existing_meta.get("content_hash") or c_hash,
+                "artifact_instance_hash": existing_meta.get("artifact_instance_hash") or inst_hash,
+                "source_schema_version": existing_meta.get("source_schema_version") or asmae_schema_version,
+                "source_plot_id": existing_meta.get("source_plot_id") or asmae_plot_id,
+                "source_generated_at": existing_meta.get("source_generated_at") or asmae_generated_at,
+                "scene_stack_mode": existing_meta.get("scene_stack_mode") or scene_mode,
+                "state_update_allowed": bool(state_allowed_for_grid),
+                "diagnostic_only": bool(diagnostic_only_for_grid),
+                **stage_metadata,
+            }
+            if source_spec:
+                metadata.update({
+                    key: source_spec[key]
+                    for key in (
+                        "crs", "bounds", "transform", "width", "height",
+                        "resolution", "resolution_m", "nodata",
+                    )
+                    if source_spec.get(key) is not None
+                })
+
+            observed = (~np.isnan(np.asarray(native_grid, dtype=float))).tolist()
+            for alias in aliases:
+                result.raster_maps[alias] = native_grid
+                result.observed_masks[alias] = observed
+                result.raster_metadata[alias] = dict(metadata)
+            return True
 
         # 1. State/Raster maps
         r_maps = get_attr_or_key(asmae_out, "raster_maps", {}) or {}
         for var, grid in r_maps.items():
             if grid:
                 var_name = var if var.lower().startswith("asmae_") else f"asmae_{var}"
-                if var_name not in result.raster_maps:
-                    result.raster_maps[var_name] = grid
-                    result.raster_maps[var_name.upper()] = grid
-                    result.raster_maps[var_name.lower()] = grid
-                    
-                    # Compute observed mask
-                    arr_val = np.array(grid, dtype=float)
-                    obs_mask = (~np.isnan(arr_val)).tolist()
-                    result.observed_masks[var_name] = obs_mask
-                    result.observed_masks[var_name.upper()] = obs_mask
-                    result.observed_masks[var_name.lower()] = obs_mask
-                    
-                    meta_dict = {
-                        "resolution_m": res_m,
-                        "content_hash": c_hash,
-                        "artifact_instance_hash": inst_hash,
-                        "source_schema_version": asmae_schema_version,
-                        "source_plot_id": asmae_plot_id,
-                        "source_generated_at": asmae_generated_at,
-                        "scene_stack_mode": scene_mode,
-                        "state_update_allowed": state_update_allowed,
-                        "diagnostic_only": diagnostic_only,
-                    }
-                    result.raster_metadata[var_name] = meta_dict
-                    result.raster_metadata[var_name.upper()] = meta_dict
-                    result.raster_metadata[var_name.lower()] = meta_dict
+                store_native_asmae_grid(
+                    var_name,
+                    grid,
+                    state_allowed_for_grid=state_update_allowed,
+                    diagnostic_only_for_grid=diagnostic_only,
+                )
 
         # 2. Support maps
         other_maps = [
@@ -796,32 +993,12 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
                         var_name = f"asmae_{suffix.lower()}"
                     else:
                         var_name = var if var.lower().startswith("asmae_") else f"asmae_{var}_{suffix.lower()}"
-                    if var_name not in result.raster_maps:
-                        result.raster_maps[var_name] = grid
-                        result.raster_maps[var_name.upper()] = grid
-                        result.raster_maps[var_name.lower()] = grid
-                        
-                        # Compute observed mask
-                        arr_val = np.array(grid, dtype=float)
-                        obs_mask = (~np.isnan(arr_val)).tolist()
-                        result.observed_masks[var_name] = obs_mask
-                        result.observed_masks[var_name.upper()] = obs_mask
-                        result.observed_masks[var_name.lower()] = obs_mask
-                        
-                        meta_dict = {
-                            "resolution_m": res_m,
-                            "content_hash": c_hash,
-                            "artifact_instance_hash": inst_hash,
-                            "source_schema_version": asmae_schema_version,
-                            "source_plot_id": asmae_plot_id,
-                            "source_generated_at": asmae_generated_at,
-                            "scene_stack_mode": scene_mode,
-                            "state_update_allowed": False,
-                            "diagnostic_only": True,
-                        }
-                        result.raster_metadata[var_name] = meta_dict
-                        result.raster_metadata[var_name.upper()] = meta_dict
-                        result.raster_metadata[var_name.lower()] = meta_dict
+                    store_native_asmae_grid(
+                        var_name,
+                        grid,
+                        state_allowed_for_grid=False,
+                        diagnostic_only_for_grid=True,
+                    )
 
         # Ensure asmae_feature_pack is fully enriched with metadata
         if result.asmae_feature_pack is None:
@@ -838,7 +1015,7 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
                 "state_update_allowed": result.asmae_evidence_state.get("state_update_allowed", False) if result.asmae_evidence_state else False,
             }
         if "grid_spec" not in result.asmae_feature_pack:
-            result.asmae_feature_pack["grid_spec"] = get_attr_or_key(asmae_out, "grid_spec") or {}
+            result.asmae_feature_pack["grid_spec"] = asmae_source_grid_spec
         if "resolution_decision" not in result.asmae_feature_pack:
             result.asmae_feature_pack["resolution_decision"] = res_decision
         if "operator_hashes" not in result.asmae_feature_pack:

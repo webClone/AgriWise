@@ -14,7 +14,7 @@ Key v6.0 changes:
   - Legacy evidence synthesis block removed (now handled entirely by RAS + PIE)
 """
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any, Dict, Optional, List
 from datetime import datetime, timezone
 import hashlib
@@ -59,6 +59,66 @@ MODEL_VERSIONS = {
 def _stable_hash(obj: Dict[str, Any]) -> str:
     raw = json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:12]
+
+
+def _posterior_bio_priors(crop_semantics, climate_indicators, lat):
+    """Marginalize host/stage priors without selecting a hidden species."""
+    from crop_database import CROP_REGISTRY
+
+    crop_mix = dict(crop_semantics.crop_mixture)
+    if crop_semantics.species_specific_allowed:
+        if not crop_mix and crop_semantics.selected_crop:
+            crop_mix = {crop_semantics.selected_crop: 1.0}
+    elif crop_semantics.crop_resolution == "group_only":
+        expanded = {}
+        for group, weight in crop_mix.items():
+            representatives = [
+                code for code, spec in CROP_REGISTRY.items()
+                if str(spec.architecture).lower() == str(group).lower()
+            ]
+            for code in representatives:
+                expanded[code] = expanded.get(code, 0.0) + float(weight) / max(1, len(representatives))
+        crop_mix = expanded
+    else:
+        # One representative per architecture yields a broad host prior while
+        # avoiding a false wheat/default-species selection.
+        representatives = {}
+        for code, spec in CROP_REGISTRY.items():
+            representatives.setdefault(str(spec.architecture).lower(), code)
+        crop_mix = {code: 1.0 for code in representatives.values()}
+
+    stage_mix = dict(crop_semantics.stage_posterior)
+    if crop_semantics.stage_specific_allowed:
+        if not stage_mix:
+            stage_mix = {crop_semantics.phenology_stage: 1.0}
+    else:
+        stage_mix = {
+            "INITIAL": 0.20, "VEGETATIVE": 0.30,
+            "REPRODUCTIVE": 0.30, "MATURITY": 0.20,
+        }
+
+    crop_total = sum(max(0.0, float(value)) for value in crop_mix.values()) or 1.0
+    stage_total = sum(max(0.0, float(value)) for value in stage_mix.values()) or 1.0
+    aggregate = {}
+    hypothesis_weights = {}
+    for crop, crop_probability in crop_mix.items():
+        for stage, stage_probability in stage_mix.items():
+            weight = (
+                max(0.0, float(crop_probability)) / crop_total
+                * max(0.0, float(stage_probability)) / stage_total
+            )
+            if weight <= 0.0:
+                continue
+            branch = compute_dynamic_priors(
+                crop_type=str(crop),
+                phenology_stage=str(stage),
+                climate_indicators=climate_indicators,
+                lat=lat,
+            )
+            hypothesis_weights[f"{crop}:{stage}"] = weight
+            for threat_id, value in branch.items():
+                aggregate[threat_id] = aggregate.get(threat_id, 0.0) + weight * value
+    return aggregate, hypothesis_weights
 
 
 def run_layer5(
@@ -116,19 +176,52 @@ def run_layer5(
         penalties.append({"driver": "L1_Soil", "penalty": 0.2, "reason": "No soil texture data"})
 
     # ── Extract phenology stage from L2 ─────────────────────────────────
-    phenology_stage = ""
-    try:
-        phenology = getattr(veg_output, "phenology", None)
-        if phenology:
-            phenology_stage = getattr(phenology, "stage", "") or getattr(phenology, "growth_stage", "") or ""
-        if not phenology_stage:
-            phenology_stage = plot_context.get("phenology_stage", "")
-    except Exception:
-        phenology_stage = plot_context.get("phenology_stage", "")
+    from services.agribrain.common.downstream_crop_context import resolve_downstream_crop_phenology
+
+    crop_semantics = resolve_downstream_crop_phenology(
+        l2_output=veg_output,
+        crop_posterior=plot_context.get("crop_posterior"),
+        declared_crop=(
+            plot_context.get("declared_crop_type")
+            or plot_context.get("crop_type")
+            or plot_context.get("crop")
+        ),
+    )
+    phenology_stage = crop_semantics.stage_for_discrete_engine
 
     # ── Extract crop type + coordinates ─────────────────────────────────
-    crop_type = plot_context.get("crop_type", plot_context.get("crop", ""))
+    crop_type = crop_semantics.crop_for_species_engine
     lat = float(plot_context.get("lat", plot_context.get("latitude", 0.0)) or 0.0)
+
+    semantic_lineage = {
+        **crop_semantics.lineage(),
+        "selected_crop": crop_semantics.selected_crop,
+        "selected_group": crop_semantics.selected_group,
+        "phenology_stage": crop_semantics.phenology_stage,
+        "crop_mixture": dict(crop_semantics.crop_mixture),
+        "stage_posterior": dict(crop_semantics.stage_posterior),
+        "evidence_class": (
+            "species_stage_posterior" if crop_semantics.prescriptive_ready
+            else "candidate_host_mixture"
+        ),
+    }
+    features_snapshot["crop_phenology_lineage"] = semantic_lineage
+    if not crop_semantics.species_specific_allowed:
+        reliability -= 0.30
+        missing.append("CROP_SPECIES_AUTHORITY")
+        penalties.append({
+            "driver": "crop_identity",
+            "penalty": 0.30,
+            "reason": "species-specific biothreat prior disabled",
+        })
+    if not crop_semantics.stage_specific_allowed:
+        reliability -= 0.25
+        missing.append("PHENOLOGY_POSTERIOR")
+        penalties.append({
+            "driver": "phenology",
+            "penalty": 0.25,
+            "reason": "stage-specific biothreat timing disabled",
+        })
 
     # ══════════════════════════════════════════════════════════════════════
     # ENGINE CHAIN: WDP → SSS → RAS → PIE → RAP
@@ -161,13 +254,11 @@ def run_layer5(
         "tmean_7d": wp.get("tmean_7d", 20.0),
         "rain_sum_7d": wp.get("rain_sum_7d", 10.0),
     }
-    priors = compute_dynamic_priors(
-        crop_type=crop_type,
-        phenology_stage=phenology_stage,
-        climate_indicators=climate_indicators,
-        lat=lat,
+    priors, prior_hypotheses = _posterior_bio_priors(
+        crop_semantics, climate_indicators, lat,
     )
     features_snapshot["dynamic_priors"] = {tid.value: round(p, 4) for tid, p in priors.items()}
+    features_snapshot["host_stage_hypothesis_weights"] = prior_hypotheses
     features_snapshot["phenology_stage"] = phenology_stage
 
     # 5. Soil-dependent evidence (clay proxy for downy mildew)
@@ -254,6 +345,14 @@ def run_layer5(
         phenology_stage=phenology_stage,
         missing_drivers=missing,
     )
+    if not crop_semantics.prescriptive_ready:
+        for state in threat_states.values():
+            state.confidence = min(float(state.confidence), 0.35)
+            qualifier = (
+                "Candidate-host risk only: crop/stage uncertainty was "
+                "marginalized; this is not a settled species diagnosis."
+            )
+            state.notes = f"{state.notes} {qualifier}".strip()
 
     # ── Multimodal Leaf Photo Diagnostic Loop ─────────────────────────────
     image_b64 = plot_context.get("image")
@@ -284,7 +383,7 @@ def run_layer5(
                     confidence = float(vis_res.get("confidence", 0.8))
                     description = vis_res.get("description", "")
                     
-                    logger.info(f"[Layer 5] Ground Truth Visual diagnosis matching: {top_diag} with confidence {confidence:.2f}")
+                    logger.info(f"[Layer 5] Visual model diagnostic candidate: {top_diag} with confidence {confidence:.2f}")
                     
                     # Update features_snapshot and audit
                     features_snapshot["visual_diagnosis"] = {
@@ -296,14 +395,17 @@ def run_layer5(
                     
                     # Map the top class to ThreatId enum
                     threat_map = {
-                        "early_blight": ThreatId.BACTERIAL_BLIGHT,
-                        "late_blight": ThreatId.BACTERIAL_BLIGHT,
+                        "early_blight": ThreatId.FUNGAL_LEAF_SPOT,
+                        "late_blight": ThreatId.FUNGAL_LEAF_SPOT,
                         "septoria": ThreatId.FUNGAL_LEAF_SPOT
                     }
                     target_tid = threat_map.get(top_diag)
                     if target_tid in threat_states:
                         threat_states[target_tid].probability = confidence
-                        threat_states[target_tid].confidence = 0.90  # high confidence due to image ground-truth
+                        threat_states[target_tid].confidence = min(
+                            threat_states[target_tid].confidence,
+                            confidence,
+                        )
                         
         except Exception as e:
             logger.warning(f"[Layer 5] Failed to run visual diagnosis on uploaded image: {e}")
@@ -341,6 +443,37 @@ def run_layer5(
         plot_context=plot_context,
         degradation_mode=degradation
     )
+
+    # Threat probabilities remain diagnostic under uncertain crop/stage, but
+    # treatment actions must not inherit a silently selected species or stage.
+    if not crop_semantics.prescriptive_ready:
+        gated_recommendations = []
+        for recommendation in recommendations:
+            if recommendation.action_id in {
+                ActionId.INTERVENE_TREAT,
+                ActionId.INTERVENE_CULTURAL,
+            }:
+                reasons = list(recommendation.blocked_reason)
+                for reason in crop_semantics.demotion_reasons:
+                    if reason not in reasons:
+                        reasons.append(reason)
+                recommendation = replace(
+                    recommendation,
+                    is_allowed=False,
+                    blocked_reason=reasons,
+                )
+            gated_recommendations.append(recommendation)
+        recommendations = gated_recommendations
+        if plan is not None:
+            plan.tasks = [
+                task for task in plan.tasks
+                if "INTERVENE" not in str(getattr(task, "type", "")).upper()
+            ]
+            kept_task_ids = {task.task_id for task in plan.tasks}
+            plan.edges = [
+                edge for edge in plan.edges
+                if edge.get("from") in kept_task_ids and edge.get("to") in kept_task_ids
+            ]
     
     # Tag Execution Plan tasks with target zones
     if zone_metrics and plan:
@@ -361,6 +494,7 @@ def run_layer5(
         "degradation_mode": degradation.value,
         "plot_context_key": plot_context.get("crop", plot_context.get("crop_type", "UNKNOWN")),
         "policy_from_L3": l3_policy,
+        "crop_phenology_lineage": semantic_lineage,
     }
 
     run_hash = _stable_hash({
@@ -465,6 +599,8 @@ def run_layer5_bio(
             )
             plot_context = {
                 "crop_type": getattr(ctx, "crop_type", "unknown"),
+                "declared_crop_type": getattr(ctx, "declared_crop_type", "unknown"),
+                "crop_posterior": getattr(ctx, "crop_posterior", None),
                 "variety": getattr(ctx, "variety", None),
                 "planting_date": getattr(ctx, "planting_date", ""),
                 "irrigation_type": getattr(ctx, "irrigation_type", "rainfed"),
@@ -487,19 +623,10 @@ def run_layer5_bio(
         # 2. crop_config["phenology_stage"] (user-provided)
         # 3. operational_context["phenology_stage"]
         # 4. "" (fallback — dynamic priors degrade to uniform)
-        phenology_stage = cc.get("phenology_stage", oc.get("phenology_stage", ""))
-        if not phenology_stage and veg_int is not None:
-            try:
-                pheno = getattr(veg_int, "phenology", None)
-                if pheno:
-                    stages = getattr(pheno, "stage_by_day", [])
-                    for s in reversed(stages):
-                        val = s.value if hasattr(s, "value") else str(s)
-                        if val.upper() not in ("UNKNOWN", "NONE", ""):
-                            phenology_stage = val
-                            break
-            except Exception:
-                pass
+        from services.agribrain.common.downstream_crop_context import resolve_downstream_crop_phenology
+        phenology_stage = resolve_downstream_crop_phenology(
+            inputs=inputs, l2_output=veg_int,
+        ).stage_for_discrete_engine
 
         # Try to extract applied_chemicals from the lax contract dictionary
         applied_chemicals = oc.get("applied_chemicals") or cc.get("applied_chemicals")
@@ -510,6 +637,8 @@ def run_layer5_bio(
 
         plot_context = {
             "crop_type": cc.get("crop", "unknown"),
+            "declared_crop_type": cc.get("declared_crop_code", cc.get("crop", "unknown")),
+            "crop_posterior": cc.get("crop_identity_posterior", cc.get("crop_posterior")),
             "variety": cc.get("variety"),
             "planting_date": cc.get("planting_date", ""),
             "irrigation_type": oc.get("irrigation_type", "rainfed"),

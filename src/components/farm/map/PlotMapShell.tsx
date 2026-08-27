@@ -12,8 +12,15 @@ import { resolveSurfaceBounds } from "./layers/SemanticSurfaceLayer";
 import ZoneChip from "./layers/zones/ZoneChip";
 import { formatZoneGeoJson, computeZoneCentroid, DeckZoneFeature } from "./layers/zones/zoneUtils";
 import NdviDebugOverlay from "./layers/NdviDebugOverlay";
-import { hasRenderedExperimentalOverlay, isAsmaeSurfaceType, isExperimentalSurfaceType, normalizeMode } from "@/lib/agribrain/source-policy-display-resolver";
-import { isRenderedMaterialization } from "@/lib/agribrain/render-materialization";
+import { hasRenderedExperimentalOverlay, isAsmaeSurfaceType, isCompositeAdvisorySurface, isExperimentalSurfaceType } from "@/lib/agribrain/source-policy-display-resolver";
+import {
+  resolveCropStageLabels,
+  resolvePixelInspectorTitle,
+} from "@/lib/agribrain/pixel-inspector-authority.mjs";
+import {
+  createCommittedRenderReceipt,
+  isRenderedMaterialization,
+} from "@/lib/agribrain/render-materialization";
 
 function hasStaleGatewayEvidence(rawData: Record<string, unknown> | undefined): boolean {
   for (const value of Object.values(rawData || {})) {
@@ -49,6 +56,8 @@ interface PlotMapShellProps {
   showCandidateMask?: boolean;
   experimental1mSurface?: SurfaceData | null;
   candidateMaskSurface?: SurfaceData | null;
+  paletteId?: "standard" | "thermal" | "chlorophyll" | "chroma";
+  onPaletteChange?: (palette: "standard" | "thermal" | "chlorophyll" | "chroma") => void;
 }
 
 export default function PlotMapShell(props: PlotMapShellProps) {
@@ -70,6 +79,8 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     showCandidateMask = false,
     experimental1mSurface = null,
     candidateMaskSurface = null,
+    paletteId = "standard",
+    onPaletteChange,
   } = props;
 
   const primaryPlot = plots?.[0];
@@ -79,26 +90,16 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   const { commitBrowserRenderReceipt, clearBrowserRenderReceipt } = l10;
   const resolvedSurfaceType = String(l10.activeSurfaceType || surfaceData?.semantic_type || surfaceData?.type || "").toUpperCase();
   const resolvedIsAsmae = isAsmaeSurfaceType(resolvedSurfaceType);
+  const resolvedIsComposite = isCompositeAdvisorySurface(resolvedSurfaceType);
   const resolvedIsExperimental = isExperimentalSurfaceType(resolvedSurfaceType);
   const isLowConfidence = l10.data?.quality?.degradation_mode === "DEGRADED" || 
                           (l10.data?.quality?.reliability_score !== undefined && l10.data.quality.reliability_score < 0.40);
   const canShowPixelDiagnosis = l10.canShowPixelDiagnosis ?? false;
   const canShowPixelHint = l10.canShowPixelHint ?? false;
-  const inspectorDiagnosisAllowed = useMemo(() => {
-    if (!canShowPixelDiagnosis) return false;
-    // Biophysical transforms are only defined for the explicitly selected,
-    // observed satellite policy. An ASMAE/experimental request that resolves
-    // to satellite fallback must never inherit satellite inspector metrics.
-    if (l10.canopySource !== "satellite") return false;
-    const baseType = surfaceData?.semantic_type || surfaceData?.type || "";
-    if (!baseType) return false;
-    if (!isRenderedMaterialization(l10.renderPlan.baseMaterialization, baseType)) return false;
-    const policy = l10.canopySource || "satellite";
-    const modeKey = (l10.baseSurfaceMode ?? activeMode) as string;
-    const normMode = modeKey ? normalizeMode(modeKey) : "canopy";
-    const inspectorAuth = l10.data?.render_authorizations?.[policy]?.[normMode]?.["inspector"]?.[baseType];
-    return !!inspectorAuth?.authorized && inspectorAuth.inspectorAllowed === true;
-  }, [canShowPixelDiagnosis, surfaceData, l10.canopySource, l10.baseSurfaceMode, activeMode, l10.data?.render_authorizations, l10.renderPlan]);
+  const canSamplePixel = l10.canSamplePixel ?? canShowPixelHint;
+  const canInterpretForScouting = l10.canInterpretForScouting ?? canSamplePixel;
+  const canInterpretDiagnostically = l10.canInterpretDiagnostically ?? canShowPixelDiagnosis;
+  const inspectorDiagnosisAllowed = canInterpretDiagnostically;
 
   // 1. Derive scene profile from map state (no stateful toggling)
   const sceneProfile: SceneProfile = useMemo(() => {
@@ -107,7 +108,6 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   }, [surfaceData, activeMode]);
 
   // Premium Custom Spatial Map States
-  const [paletteId, setPaletteId] = useState<"standard" | "thermal" | "chlorophyll" | "chroma">("standard");
   const [transectMode, setTransectMode] = useState(false);
   const [transectPoints, setTransectPoints] = useState<[number, number][]>([]);
   const [hoverCoord, setHoverCoord] = useState<{ lng: number; lat: number } | null>(null);
@@ -117,10 +117,10 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   const lastHoverCellRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (canShowPixelDiagnosis) {
+    if (canInterpretDiagnostically) {
       setShowProxyBanner(false);
     }
-  }, [canShowPixelDiagnosis]);
+  }, [canInterpretDiagnostically]);
 
   // 2. Hover state for zone interactions
   const [hoveredZoneId, setHoveredZoneId] = useState<string | null>(null);
@@ -316,63 +316,54 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         const observed = sampleMask(observedMask);
         const gapFilled = sampleMask(gapFillMask);
         const confidence = confidenceSurface?.values?.[row]?.[col] ?? null;
+        const confidenceSemanticType = String(
+          confidenceSurface?.semantic_type || confidenceSurface?.type || "",
+        ).toUpperCase();
         const deviation = deviationSurface?.values?.[row]?.[col] ?? null;
+        const units = (surfaceData as any)?.units || (surfaceData as any)?.provenance?.units || "";
+        const surfaceProvenance = (surfaceData as any)?.provenance || {};
+        const supportClass = surfaceProvenance.evidence_class || surfaceProvenance.support_class || "";
+        const semanticType = surfaceData.semantic_type || surfaceData.type || "";
+        const asmaeCell = isAsmaeSurfaceType(semanticType);
+        const compositeCell = isCompositeAdvisorySurface(semanticType);
+        const asmaeEvidenceClass = String(
+          surfaceProvenance.support_class || surfaceProvenance.evidence_class || "unsupported",
+        ).toLowerCase().replace(/[- ]/g, "_");
         return {
           row,
           col,
           val,
           confidence,
+          confidenceSemanticType,
           deviation,
-          evidenceClass: gapFilled !== null && gapFilled > 0
+          units,
+          supportClass,
+          evidenceClass: asmaeCell || compositeCell
+            ? asmaeEvidenceClass
+            : gapFilled !== null && gapFilled > 0
             ? "gap_filled"
             : observed !== null && observed > 0
               ? "observed"
               : isExperimentalSurfaceType(surfaceData.semantic_type || surfaceData.type)
                 ? "experimental"
                 : "valid_unclassified",
+          evidenceSource: compositeCell
+            ? "Composite/model-prior feature bus"
+            : asmaeCell
+            ? asmaeEvidenceClass === "derived_diagnostic"
+              ? "ASMAE diagnostic provenance"
+              : "ASMAE state-support ledger"
+            : "Provider pixel-support masks",
         };
       }
     }
     return null;
   }, [hoverCoord, gridBounds, surfaceData, confidenceSurface, deviationSurface, l10.surfaceByType]);
 
-  // Compute live biophysical metrics from the cell reading
-  const biophysicalMetrics = useMemo(() => {
-    if (!inspectorDiagnosisAllowed) return null;
-    if (!activeCellData || activeCellData.val === null) return null;
-
-    // Check gap-filled
-    if (activeCellData.evidenceClass !== "observed") return null;
-
-    // Check base is satellite (non-experimental, non-ASMAE)
-    const baseType = surfaceData?.semantic_type || surfaceData?.type || "";
-    const isAsmae = isAsmaeSurfaceType(baseType);
-    const isExp = isExperimentalSurfaceType(baseType);
-    if (isAsmae || isExp) return null;
-
-    // Check grounding class (not PROXY_SPATIAL or MODEL_ASSISTED_RASTER)
-    const groundingClass = surfaceData?.grounding_class || "UNIFORM";
-    if (groundingClass === "PROXY_SPATIAL" || groundingClass === "MODEL_ASSISTED_RASTER") return null;
-
-    const v = activeCellData.val;
-
-    // Biophysical transformations
-    const ndvi = v;
-    const lai = 0.5 * Math.exp(2.3 * v);
-    const fapar = Math.max(0, Math.min(0.99, 1.35 * v - 0.18));
-    const ece = v * 12.0;
-    const rwc = Math.max(40, Math.min(100, 95 - v * 40));
-    const nitrogen = v * 280;
-
-    return {
-      ndvi,
-      lai,
-      fapar,
-      ece,
-      rwc,
-      nitrogen,
-    };
-  }, [activeCellData, inspectorDiagnosisAllowed, l10.surfaceByType, surfaceData]);
+  // NOTE: Browser-side biophysical transforms (LAI, FAPAR, RWC, ECE, nitrogen)
+  // were removed in R5.0 Phase 2. Those formulas lacked crop calibration,
+  // growth-stage domain, uncertainty, and scientific authority contracts.
+  // The raw NDVI value from activeCellData is the only provider measurement.
 
   // Generate 30 equidistant cross-sectional samples along the transect path
   const transectSamples = useMemo(() => {
@@ -528,22 +519,10 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   const surfaceLayers = surfaceStack.surfaceLayers;
   const renderMaterialization = surfaceStack.materialization;
   const experimentalRenderMaterialization = surfaceStack.experimentalMaterialization;
+  const hybridOverlayRenderMaterializations = surfaceStack.hybridOverlayMaterializations;
 
-  // Publish one post-commit browser receipt. Consumers must not infer spatial
-  // availability from the provider's authorization preflight alone.
-  useEffect(() => {
-    commitBrowserRenderReceipt({
-      viewIdentity: l10.renderPlan.viewIdentity,
-      baseMaterialization: renderMaterialization,
-      overlayMaterialization: experimentalRenderMaterialization,
-      committedAt: new Date().toISOString(),
-    });
-  }, [
-    experimentalRenderMaterialization,
-    commitBrowserRenderReceipt,
-    l10.renderPlan.viewIdentity,
-    renderMaterialization,
-  ]);
+  // Publish post-commit browser receipt via DeckGL onAfterRender callback.
+  // Cleanup receipt on unmount/view switch.
   useEffect(() => {
     const viewIdentity = l10.renderPlan.viewIdentity;
     return () => clearBrowserRenderReceipt(viewIdentity);
@@ -713,9 +692,12 @@ export default function PlotMapShell(props: PlotMapShellProps) {
 
   // Human readable title of active mode
   const modeTitle = useMemo(() => {
+    const exactSurfaceTitle = resolvePixelInspectorTitle(resolvedSurfaceType, activeMode);
+    if (exactSurfaceTitle) return exactSurfaceTitle;
     const isCanopy = activeMode === "vegetation" || activeMode === "canopy";
     if (isCanopy) {
       const stype = String(l10.activeSurfaceType || surfaceData?.semantic_type || surfaceData?.type || "").toUpperCase();
+      if (isCompositeAdvisorySurface(stype)) return "Composite Scouting Canopy";
       if (isAsmaeSurfaceType(stype)) return "ASMAE Advisory Canopy";
       if (isExperimentalSurfaceType(stype)) return "Experimental Visual Canopy";
       if (stype === "NDVI_CLEAN" || stype === "NDVI") {
@@ -776,7 +758,12 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     surfaceData,
     experimental1mSurface,
     experimentalRenderMaterialization,
+    resolvedSurfaceType,
   ]);
+  const cropStageLabels = useMemo(() => resolveCropStageLabels(
+    cropName,
+    l10.evidenceState.resolvedPhenology.stage,
+  ), [cropName, l10.evidenceState.resolvedPhenology.stage]);
 
   // Svg Cross-Section calculation variables
   const crossSectionChart = useMemo(() => {
@@ -837,11 +824,66 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         controller={true}
         layers={[...surfaceLayers, ...zoneLayers]}
         getCursor={({ isHovering }) => {
+
           if (transectMode) return "crosshair";
           return isHovering ? "pointer" : "grab";
         }}
         onHover={handleMapHover}
         onClick={handleMapClick}
+        onAfterRender={() => {
+          const committedLayerIds = new Set<string>();
+          for (const layer of [...surfaceLayers, ...zoneLayers].flat(Infinity) as any[]) {
+            if (layer?.id) committedLayerIds.add(String(layer.id));
+          }
+          const receiptDetails = {
+            publicationId: l10.data?.publication_id || "",
+            snapshotId: l10.data?.intelligence_snapshot_id || "",
+            surfaceInventoryHash: l10.data?.surface_inventory_hash || "",
+            renderAuthorizationVersion: l10.data?.render_authorization_version || "",
+            sourceId: [
+              l10.data?.intelligence_snapshot_id || "snapshot_missing",
+              l10.data?.surface_inventory_hash || "inventory_missing",
+            ].join("@"),
+            mapInstanceId: "deckgl-overlay",
+          };
+          const committedBase = renderMaterialization.layerId
+            ? createCommittedRenderReceipt(
+                renderMaterialization,
+                renderMaterialization.layerId,
+                committedLayerIds,
+                receiptDetails,
+              )
+            : renderMaterialization;
+          const committedOverlay = experimentalRenderMaterialization.layerId
+            ? createCommittedRenderReceipt(
+                experimentalRenderMaterialization,
+                experimentalRenderMaterialization.layerId,
+                committedLayerIds,
+                receiptDetails,
+              )
+            : experimentalRenderMaterialization;
+          const committedHybridOverlays = hybridOverlayRenderMaterializations.map((materialization) =>
+            materialization.layerId
+              ? createCommittedRenderReceipt(
+                  materialization,
+                  materialization.layerId,
+                  committedLayerIds,
+                  receiptDetails,
+                )
+              : materialization,
+          );
+          commitBrowserRenderReceipt({
+            viewIdentity: l10.renderPlan.viewIdentity,
+            baseMaterialization: committedBase,
+            overlayMaterialization: committedOverlay,
+            hybridOverlayMaterializations: committedHybridOverlays,
+            snapshotId: l10.data?.intelligence_snapshot_id || l10.data?.run_id || "",
+            publicationId: l10.data?.publication_id || "",
+            surfaceInventoryHash: l10.data?.surface_inventory_hash || "",
+            renderAuthorizationVersion: l10.data?.render_authorization_version || "",
+            committedAt: new Date().toISOString(),
+          });
+        }}
       >
         <Map
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -897,7 +939,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
             ].map(pal => (
               <button
                 key={pal.id}
-                onClick={() => setPaletteId(pal.id as any)}
+                onClick={() => onPaletteChange?.(pal.id as "standard" | "thermal" | "chlorophyll" | "chroma")}
                 className={`px-2 py-1.5 rounded-lg text-xs font-medium cursor-pointer transition-all border flex items-center gap-1.5 select-none ${paletteId === pal.id
                     ? "bg-white/15 text-white border-white/35 shadow-lg"
                     : "bg-slate-950/40 text-white/70 border-white/5 hover:bg-white/5 hover:text-white"
@@ -944,7 +986,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
       </div>
 
       {/* --- AGRONOMIC BIOPHYSICS HUD (Top-Left) --- */}
-      {activeCellData && canShowPixelHint && (
+      {activeCellData && canSamplePixel && canInterpretForScouting && (
         <div 
           className="absolute backdrop-blur-md bg-slate-950/75 border border-white/10 rounded-xl p-4 shadow-2xl min-w-[280px] pointer-events-none animate-fadeIn transition-all"
           style={{
@@ -955,7 +997,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         >
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
-              🌾 Micro-Plot Biophysics
+              🔍 Pixel Inspector
             </span>
             <span className="text-[10px] text-white/40 font-mono">
               Row {activeCellData.row} Col {activeCellData.col}
@@ -966,8 +1008,10 @@ export default function PlotMapShell(props: PlotMapShellProps) {
             {modeTitle}
           </h3>
           <div className="text-[10px] uppercase tracking-wide text-white/50 mb-2">
-            {l10.canopySource === "asmae_diagnostic" || String(l10.activeSurfaceType || "").startsWith("CANOPY_ASMAE_")
-              ? "ASMAE model-assisted diagnostic cell (Provider observation support present)"
+            {resolvedIsComposite
+              ? `Composite scouting cell (${String(activeCellData.supportClass || "unsupported").replace(/_/g, " ")})`
+              : resolvedIsAsmae
+              ? `${canInterpretDiagnostically ? "ASMAE inspector-authorized" : "ASMAE scouting"} cell (${String(activeCellData.supportClass || "unsupported").replace(/_/g, " ")})`
               : activeCellData.evidenceClass === "observed"
                 ? "Observed provider composite cell"
                 : activeCellData.evidenceClass === "gap_filled"
@@ -977,7 +1021,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
                     : "Valid field cell"}
           </div>
 
-          {!canShowPixelDiagnosis ? (
+          {!canInterpretDiagnostically ? (
             <div className="grid grid-cols-2 gap-3">
               <div className="bg-white/5 rounded-lg p-3 border border-white/5 col-span-2 text-xs">
                 <div className="text-[10px] text-white/50 uppercase mb-1">
@@ -985,7 +1029,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
                     if (resolvedIsExperimental) {
                       return "Reading (visual index / scouting only)";
                     }
-                    if (resolvedIsAsmae) {
+                    if (resolvedIsAsmae || resolvedIsComposite) {
                       return "Reading (advisory index / not certified pixel diagnosis)";
                     }
                     if (l10.canopySource === "hybrid") {
@@ -994,8 +1038,12 @@ export default function PlotMapShell(props: PlotMapShellProps) {
                     return activeMode === "veg_attention" ? "Reading (Deviation)" : "Reading (NDVI)";
                   })()}
                 </div>
-                <div className="text-lg font-bold text-white font-mono">{activeCellData.val !== null ? activeCellData.val.toFixed(3) : "N/A"}</div>
-                <div className="text-[10px] text-amber-400 mt-2 font-medium">⚠️ Estimated local signal / scouting hint only. Direct biophysical diagnostics require an authorized provider raster.</div>
+                <div className="text-lg font-bold text-white font-mono flex items-baseline gap-1.5">
+                  <span>{activeCellData.val !== null ? activeCellData.val.toFixed(3) : "N/A"}</span>
+                  {activeCellData.units && <span className="text-xs text-white/70 font-normal">{activeCellData.units}</span>}
+                  {activeCellData.supportClass && <span className="text-xs text-emerald-400/90 font-normal">({activeCellData.supportClass})</span>}
+                </div>
+                <div className="text-[10px] text-amber-400 mt-2 font-medium">Scouting sample only. The committed raster remains visible, but certified diagnostic interpretation and prescription use are not authorized.</div>
               </div>
             </div>
           ) : (
@@ -1013,7 +1061,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
                           if (resolvedIsExperimental) {
                             return "Reading (Visual Index / Scouting Only)";
                           }
-                          if (resolvedIsAsmae) {
+                          if (resolvedIsAsmae || resolvedIsComposite) {
                             return "Reading (advisory index)";
                           }
                           if (l10.canopySource === "hybrid") {
@@ -1024,27 +1072,50 @@ export default function PlotMapShell(props: PlotMapShellProps) {
                       </div>
                       <div className="text-lg font-bold text-white font-mono mt-0.5">{valStr}</div>
                     </div>
-                    <div className="bg-white/5 rounded-lg p-2 border border-white/5" style={{ opacity: biophysicalMetrics ? 1 : 0.35 }}>
-                      <div className="text-[10px] text-white/50 uppercase">Leaf Area Index</div>
-                      <div className="text-lg font-bold text-emerald-300 font-mono mt-0.5">
-                        {biophysicalMetrics?.lai?.toFixed(2) ?? "N/A"}
+                    <div className="bg-white/5 rounded-lg p-2 border border-white/5">
+                      <div className="text-[10px] text-white/50 uppercase">Evidence Class</div>
+                      <div className="text-sm font-bold text-emerald-300 font-mono mt-0.5">
+                        {activeCellData.evidenceClass === "observed" ? "Observed"
+                          : activeCellData.evidenceClass === "gap_filled" ? "Gap-filled"
+                          : activeCellData.evidenceClass === "directly_assimilated" ? "Directly assimilated"
+                          : activeCellData.evidenceClass === "proxy_assimilated" ? "Proxy-assimilated"
+                          : activeCellData.evidenceClass === "indirectly_constrained" ? "Indirectly constrained"
+                          : activeCellData.evidenceClass === "prior_constrained" ? "Prior-constrained"
+                          : activeCellData.evidenceClass === "derived_diagnostic" ? "Derived diagnostic"
+                          : activeCellData.evidenceClass === "composite_scouting" ? "Composite scouting"
+                          : activeCellData.evidenceClass === "unsupported" ? "Unsupported"
+                          : "Unclassified"}
                       </div>
-                      <div className="text-[9px] text-white/30">{biophysicalMetrics ? "m²/m²" : "locked"}</div>
+                      <div className="text-[9px] text-white/30">{activeCellData.evidenceSource}</div>
                     </div>
-                    <div className="bg-white/5 rounded-lg p-2 border border-white/5" style={{ opacity: biophysicalMetrics ? 1 : 0.35 }}>
-                      <div className="text-[10px] text-white/50 uppercase">FAPAR</div>
-                      <div className="text-lg font-bold text-yellow-300 font-mono mt-0.5">
-                        {biophysicalMetrics ? `${(biophysicalMetrics.fapar * 100).toFixed(0)}%` : "N/A"}
+                    <div className="bg-white/5 rounded-lg p-2 border border-white/5">
+                      <div className="text-[10px] text-white/50 uppercase">
+                        {activeCellData.confidenceSemanticType.includes("UNCERTAINTY_SIGMA")
+                          ? "Multi-evidence uncertainty"
+                          : activeCellData.confidenceSemanticType.includes("POSTERIOR_CONCENTRATION")
+                            ? "Posterior concentration"
+                            : "Reliability / Quality"}
                       </div>
-                      <div className="text-[9px] text-white/30">{biophysicalMetrics ? "Abs. Radiation" : "locked"}</div>
-                    </div>
-                    <div className="bg-white/5 rounded-lg p-2 border border-white/5" style={{ opacity: biophysicalMetrics ? 1 : 0.35 }}>
-                      <div className="text-[10px] text-white/50 uppercase">Relative Water</div>
-                      <div className="text-lg font-bold text-cyan-300 font-mono mt-0.5">
-                        {biophysicalMetrics?.rwc?.toFixed(1) ?? "N/A"}{biophysicalMetrics ? "%" : ""}
+                      <div className="text-sm font-bold text-yellow-300 font-mono mt-0.5">
+                        {activeCellData.confidence !== null ? activeCellData.confidence.toFixed(2) : "N/A"}
                       </div>
-                      <div className="text-[9px] text-white/30">{biophysicalMetrics ? "RWC content" : "locked"}</div>
+                      <div className="text-[9px] text-white/30">
+                        {activeCellData.confidenceSemanticType.includes("UNCERTAINTY_SIGMA")
+                          ? "Model-derived spatial uncertainty index"
+                          : activeCellData.confidenceSemanticType.includes("POSTERIOR_CONCENTRATION")
+                            ? "Posterior concentration"
+                            : "Surface quality score"}
+                      </div>
                     </div>
+                    {activeCellData.deviation !== null && (
+                      <div className="bg-white/5 rounded-lg p-2 border border-white/5">
+                        <div className="text-[10px] text-white/50 uppercase">Deviation</div>
+                        <div className="text-sm font-bold text-cyan-300 font-mono mt-0.5">
+                          {activeCellData.deviation.toFixed(3)}
+                        </div>
+                        <div className="text-[9px] text-white/30">From field mean</div>
+                      </div>
+                    )}
                   </>
                 );
               }
@@ -1072,10 +1143,13 @@ export default function PlotMapShell(props: PlotMapShellProps) {
                       <div className="text-[10px] text-white/50 uppercase">Impact Class</div>
                       <div className={`text-sm font-bold mt-0.5 ${textColor}`}>{impactClass}</div>
                     </div>
-                    {cropName && (
+                    {cropStageLabels.cropLabel && (
                       <div className="bg-white/5 rounded-lg p-2 border border-white/5 col-span-2">
                         <div className="text-[10px] text-white/50 uppercase">Crop Classification</div>
-                        <div className="text-sm font-semibold text-slate-300 mt-0.5">{cropName} Stage</div>
+                        <div className="text-sm font-semibold text-slate-300 mt-0.5">{cropStageLabels.cropLabel}</div>
+                        {cropStageLabels.growthStageLabel && (
+                          <div className="text-xs text-slate-400 mt-0.5">{cropStageLabels.growthStageLabel}</div>
+                        )}
                       </div>
                     )}
                   </>
@@ -1083,54 +1157,74 @@ export default function PlotMapShell(props: PlotMapShellProps) {
               }
               
               if (activeMode === "water_stress") {
-                const prob = v !== null ? v : 0;
+                const vRaw = v !== null ? v : 0;
+                const isProb = v !== null && v >= 0 && v <= 1.0 && (!activeCellData.units || activeCellData.units === "probability" || activeCellData.units === "index");
+                const valDisplay = isProb ? `${(vRaw * 100).toFixed(0)}%` : `${vRaw.toFixed(2)}${activeCellData.units ? " " + activeCellData.units : ""}`;
+
                 let deficiencyClass = "Optimal";
                 let textColor = "text-emerald-400";
-                if (prob > 0.7) {
-                  deficiencyClass = "Severe Deficit";
-                  textColor = "text-red-400";
-                } else if (prob > 0.4) {
-                  deficiencyClass = "Mild Deficit";
-                  textColor = "text-amber-400";
-                } else if (prob < 0.1) {
-                  deficiencyClass = "High Moisture";
-                  textColor = "text-cyan-400";
+                if (isProb) {
+                  if (vRaw > 0.7) {
+                    deficiencyClass = "Severe Deficit";
+                    textColor = "text-red-400";
+                  } else if (vRaw > 0.4) {
+                    deficiencyClass = "Mild Deficit";
+                    textColor = "text-amber-400";
+                  } else if (vRaw < 0.1) {
+                    deficiencyClass = "High Moisture";
+                    textColor = "text-cyan-400";
+                  }
+                } else {
+                  deficiencyClass = resolvedIsAsmae || resolvedIsComposite
+                    ? "Scouting state estimate"
+                    : "Biophysical observation";
+                  textColor = "text-cyan-300";
                 }
-                const ndmiProxy = 0.8 - prob * 0.9;
+                const ndmiProxy = isProb ? 0.8 - vRaw * 0.9 : vRaw;
                 return (
                   <>
                     <div className="bg-white/5 rounded-lg p-2 border border-white/5">
-                      <div className="text-[10px] text-white/50 uppercase">Stress Probability</div>
-                      <div className="text-lg font-bold text-white font-mono mt-0.5">{(prob * 100).toFixed(0)}%</div>
+                      <div className="text-[10px] text-white/50 uppercase">{isProb ? "Stress Probability" : "Water Reading"}</div>
+                      <div className="text-lg font-bold text-white font-mono mt-0.5">{valDisplay}</div>
                     </div>
                     <div className="bg-white/5 rounded-lg p-2 border border-white/5">
                       <div className="text-[10px] text-white/50 uppercase">Moisture Class</div>
                       <div className={`text-sm font-bold mt-0.5 ${textColor}`}>{deficiencyClass}</div>
                     </div>
                     <div className="bg-white/5 rounded-lg p-2 border border-white/5 col-span-2">
-                      <div className="text-[10px] text-white/50 uppercase">NDMI Basis Proxy</div>
-                      <div className="text-sm font-mono text-cyan-300 mt-0.5">{ndmiProxy.toFixed(3)}</div>
+                      <div className="text-[10px] text-white/50 uppercase">{isProb ? "NDMI Basis Proxy" : "Raw Biophysical Value"}</div>
+                      <div className="text-sm font-mono text-cyan-300 mt-0.5">{isProb ? ndmiProxy.toFixed(3) : `${vRaw.toFixed(3)} ${activeCellData.units || ""}`}</div>
                     </div>
                   </>
                 );
               }
               
               if (activeMode === "nutrient_risk") {
-                const prob = v !== null ? v : 0;
+                const vRaw = v !== null ? v : 0;
+                const isProb = v !== null && v >= 0 && v <= 1.0 && (!activeCellData.units || activeCellData.units === "probability" || activeCellData.units === "index");
+                const valDisplay = isProb ? `${(vRaw * 100).toFixed(0)}%` : `${vRaw.toFixed(2)}${activeCellData.units ? " " + activeCellData.units : ""}`;
+
                 let deficiencyClass = "Adequate";
                 let textColor = "text-emerald-400";
-                if (prob > 0.7) {
-                  deficiencyClass = "Critical Deficiency";
-                  textColor = "text-red-400";
-                } else if (prob > 0.3) {
-                  deficiencyClass = "Deficient Risk";
-                  textColor = "text-amber-400";
+                if (isProb) {
+                  if (vRaw > 0.7) {
+                    deficiencyClass = "Critical Deficiency";
+                    textColor = "text-red-400";
+                  } else if (vRaw > 0.3) {
+                    deficiencyClass = "Deficient Risk";
+                    textColor = "text-amber-400";
+                  }
+                } else {
+                  deficiencyClass = resolvedIsAsmae || resolvedIsComposite
+                    ? "Scouting state estimate"
+                    : "Biophysical observation";
+                  textColor = "text-emerald-300";
                 }
                 return (
                   <>
                     <div className="bg-white/5 rounded-lg p-2 border border-white/5">
-                      <div className="text-[10px] text-white/50 uppercase">Risk Probability</div>
-                      <div className="text-lg font-bold text-white font-mono mt-0.5">{(prob * 100).toFixed(0)}%</div>
+                      <div className="text-[10px] text-white/50 uppercase">{isProb ? "Risk Probability" : "Nutrient Reading"}</div>
+                      <div className="text-lg font-bold text-white font-mono mt-0.5">{valDisplay}</div>
                     </div>
                     <div className="bg-white/5 rounded-lg p-2 border border-white/5">
                       <div className="text-[10px] text-white/50 uppercase">Deficiency Class</div>
@@ -1141,27 +1235,35 @@ export default function PlotMapShell(props: PlotMapShellProps) {
               }
               
               if (activeMode === "salinity") {
-                const prob = v !== null ? v : 0;
+                const vRaw = v !== null ? v : 0;
+                const isProb = v !== null && v >= 0 && v <= 1.0 && (!activeCellData.units || activeCellData.units === "probability" || activeCellData.units === "index");
+                const valDisplay = isProb ? `${(vRaw * 100).toFixed(0)}%` : `${vRaw.toFixed(2)}${activeCellData.units ? " " + activeCellData.units : ""}`;
+
                 let salineClass = "Low Risk";
                 let textColor = "text-emerald-400";
-                if (prob > 0.7) {
-                  salineClass = "Severe Risk";
-                  textColor = "text-red-500";
-                } else if (prob > 0.4) {
-                  salineClass = "Moderate Risk";
-                  textColor = "text-amber-500";
-                } else if (prob > 0.1) {
-                  salineClass = "Slight Risk";
-                  textColor = "text-yellow-400";
+                if (isProb) {
+                  if (vRaw > 0.7) {
+                    salineClass = "Severe Risk";
+                    textColor = "text-red-500";
+                  } else if (vRaw > 0.4) {
+                    salineClass = "Moderate Risk";
+                    textColor = "text-amber-500";
+                  } else if (vRaw > 0.1) {
+                    salineClass = "Slight Risk";
+                    textColor = "text-yellow-400";
+                  }
+                } else {
+                  salineClass = "Salinity Measurement";
+                  textColor = "text-cyan-300";
                 }
                 return (
                   <>
                     <div className="bg-white/5 rounded-lg p-2 border border-white/5">
-                      <div className="text-[10px] text-white/50 uppercase">Salinity Stress Prob.</div>
-                      <div className="text-lg font-bold text-white font-mono mt-0.5">{(prob * 100).toFixed(0)}%</div>
+                      <div className="text-[10px] text-white/50 uppercase">{isProb ? "Salinity Stress Prob." : "Salinity Reading"}</div>
+                      <div className="text-lg font-bold text-white font-mono mt-0.5">{valDisplay}</div>
                     </div>
                     <div className="bg-white/5 rounded-lg p-2 border border-white/5">
-                      <div className="text-[10px] text-white/50 uppercase">Saline Class</div>
+                      <div className="text-[10px] text-white/50 uppercase">Salinity Risk Class</div>
                       <div className={`text-sm font-bold mt-0.5 ${textColor}`}>{salineClass}</div>
                     </div>
                   </>
@@ -1448,7 +1550,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         </div>
       )}
 
-      {showProxyBanner && !canShowPixelDiagnosis && (
+      {showProxyBanner && !canInterpretDiagnostically && (
         <div id="no-spatial-raster-banner" className="absolute bottom-4 left-4 right-4 z-50 backdrop-blur-lg bg-slate-950/85 border border-amber-500/20 rounded-xl p-4 shadow-2xl transition-all duration-300 animate-slideUp">
           <div className="flex justify-between items-center">
             <div className="flex items-center gap-2">

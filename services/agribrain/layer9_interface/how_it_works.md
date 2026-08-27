@@ -86,10 +86,10 @@ Every data element collected in AgriWise is natively wired into the core brain:
     * If $W_{\text{stress}} > 50\%$, the model adds $+0.4$ to `drought_stress` and scales down `early_blight`/`late_blight` by $0.5$ to prevent false-positive disease scoring on dry crops.
     * If $N_{\text{def}} > 50\%$, the model adds $+0.3$ to `nitrogen_def`.
   * **Bayesian State Calibrations**:
-    * Mapped diseases are paired directly with canonical Layer 5 `ThreatId` targets (`early_blight`/`late_blight` $\rightarrow$ `BACTERIAL_BLIGHT`, `septoria` $\rightarrow$ `FUNGAL_LEAF_SPOT`).
-    * The corresponding threat's probability is overridden with the visual model's confidence, and its reliability score is calibrated to a highly certain `0.90` (definitive ground-truth visual scouting) to guide subsequent prescriptive action logic.
+    * Mapped disease candidates are paired with canonical Layer 5 diagnostic targets (`early_blight`/`late_blight`/`septoria` $\rightarrow$ `FUNGAL_LEAF_SPOT`).
+    * Visual output is candidate diagnostic evidence, not ground truth. It is fused with its model confidence and provenance and cannot independently authorize a prescriptive action.
 * **Satellites**: Combines Sentinel-2 multispectral curves (NDVI Red/NIR reflectance, NDRE Red-Edge chlorophyll) with Sentinel-1 SAR radar backscatters (VV/VH structural canopy backscatter ratio) to bypass cloud-cover obstacles.
-* **IoT Sensor Networks**: Physical Lorawan telemetry (Soil moisture averages %, Field temperature °C, humidity %, and soil Electrical Conductivity EC mS/cm) acts as physical ground truth to calibrate and override satellite-derived estimates.
+* **IoT Sensor Networks**: Physical LoRaWAN telemetry (soil moisture averages %, field temperature °C, humidity %, and soil electrical conductivity EC mS/cm) provides direct in-field evidence. Its authority depends on calibration, placement, freshness, and lineage; it does not automatically override other evidence.
 * **Decadal Plot DNA 4.0**: Fuses long-term biophysical traits:
   * Soil water capacity modifier $\theta$ (WHC mm/m)
   * Canopy growth efficiency modifier $\alpha$ (LAI growth rate)

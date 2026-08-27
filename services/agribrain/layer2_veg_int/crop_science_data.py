@@ -4,7 +4,13 @@ Crop Identification Scientific Reference Data
 Per-crop NDVI signatures, regional crop calendars, multi-spectral
 discriminators, Köppen affinity matrix, and agronomic rotation rules.
 
-All data sourced from peer-reviewed literature:
+Scientific provenance is mixed and must remain explicit. A curated subset is
+based on the references below; registry coverage missing from those tables is
+filled with architecture-level agronomic defaults. Those defaults are useful
+for coarse crop-group priors, but are not measured species signatures and
+must never be presented as calibrated species evidence.
+
+References used for the curated subset include:
   - Wardlow & Egbert (2008): MODIS NDVI time-series
   - Xiao et al. (2005): Spectral indices for rice/crop mapping
   - FAO Crop Calendar & ASAP-JRC dataset
@@ -19,7 +25,8 @@ from typing import Dict, Optional, Tuple
 # =============================================================================
 # MODULE A: Per-Crop NDVI Reference Signatures
 # =============================================================================
-# Each crop has a unique phenological NDVI "fingerprint".
+# Curated entries describe reference phenological envelopes. Expanded entries
+# are shared agronomic defaults and are not unique crop fingerprints.
 # Fields:
 #   shape: "unimodal" | "bimodal" | "evergreen" | "stable" | "multi_cut"
 #   peak_ndvi: typical maximum NDVI value
@@ -711,12 +718,13 @@ def detect_crop_calendar_region(lat: float, lng: float) -> str:
 
 
 # =============================================================================
-# AUTO-EXPANSION: Generate missing science data from CropSpec attributes
+# DEFAULT EXPANSION: Fill missing group-level context from CropSpec attributes
 # =============================================================================
-# This ensures every crop in the 209-entry registry has NDVI signatures,
-# Köppen affinity, spectral signatures, and botanical family entries.
-# Values are derived from agronomic principles using the crop's architecture,
-# growing days, water needs, and optimal temperature range.
+# This gives every registered crop a structurally complete record. Expanded
+# values are architecture defaults derived from growing duration, water need,
+# and temperature range. They are deliberately NOT made unique by crop code
+# and are tagged non-discriminative so downstream products cannot mistake
+# table completeness for measured species separability.
 
 # Snapshot curated codes BEFORE auto-expansion so engine can prefer them
 _CURATED_NDVI_CODES = frozenset(CROP_NDVI_SIGNATURES.keys())
@@ -942,7 +950,12 @@ MENA_CROP_PREVALENCE = {
 }
 
 def _auto_expand_science_data():
-    """Auto-generate science data for crops missing from the curated tables."""
+    """Fill missing fields with non-discriminative architecture defaults.
+
+    These records support coarse agronomic compatibility checks only. They
+    are not observations, learned parameters, or calibrated species
+    signatures.
+    """
     try:
         from crop_database import CROP_REGISTRY
     except ImportError:
@@ -950,20 +963,15 @@ def _auto_expand_science_data():
 
     import math as _m
 
-    # ── Per-crop uniqueness seed ──
-    def _seed(code: str) -> float:
-        """Deterministic per-crop offset ±0.04 for score differentiation."""
-        h = 0
-        for i, ch in enumerate(code):
-            h += ord(ch) * (31 ** i)
-        return ((h % 1000) / 1000.0 - 0.5) * 0.08  # ±0.04
-
     # ── 1. NDVI Signature expansion ──
     for code, cr in CROP_REGISTRY.items():
         if code in CROP_NDVI_SIGNATURES:
             continue
 
-        s = _seed(code)
+        # Never manufacture per-species separation from the crop identifier.
+        # Crops with identical agronomic attributes receive identical defaults
+        # in the absence of measured crop-specific data.
+        s = 0.0
         arch = cr.architecture
         days = cr.growing_days
         water = cr.water_needs
@@ -1055,7 +1063,9 @@ def _auto_expand_science_data():
             "peak_frac": pf, "greenup_rate": gr,
             "amplitude": amp, "season_integral": round(si, 2), "n_peaks": n_p,
             "los_frac": lf,
-            "_auto_generated": True,  # Flag for engine to prefer curated data
+            "_auto_generated": True,  # Compatibility flag for existing callers
+            "_provenance": "architecture_default",
+            "_species_discriminative": False,
         }
 
     # ── 2. Köppen affinity expansion ──
@@ -1130,6 +1140,8 @@ def _auto_expand_science_data():
             "ndmi_peak": (round(ndmi_lo, 2), round(ndmi_hi, 2)),
             "ndwi_peak": (round(ndwi_lo, 2), round(ndwi_hi, 2)),
             "lswi_indicator": indicator,
+            "_provenance": "architecture_default",
+            "_species_discriminative": False,
         }
 
     # ── 4. Botanical family expansion ──
@@ -1184,3 +1196,34 @@ _auto_expand_science_data()
 
 # Tag every crop's features with provenance tiers
 _assign_quality_tiers()
+
+
+def get_crop_science_provenance() -> Dict[str, object]:
+    """Return auditable coverage counts for the rule-engine reference tables.
+
+    The counts are derived from the active registry instead of being embedded
+    in product copy, so adding a crop cannot silently make a fixed coverage
+    claim stale. ``calibrated_species_evidence`` is intentionally false: these
+    tables are reference priors, not a fitted probability model.
+    """
+    feature_families = (
+        "ndvi_signature",
+        "spectral_signature",
+        "koppen_affinity",
+        "crop_calendar",
+        "aridity_threshold",
+    )
+    coverage: Dict[str, Dict[str, int]] = {}
+    for feature in feature_families:
+        tiers: Dict[str, int] = {}
+        for crop_quality in CROP_DATA_QUALITY.values():
+            tier = crop_quality.get(feature, "missing")
+            tiers[tier] = tiers.get(tier, 0) + 1
+        coverage[feature] = tiers
+    return {
+        "registry_crop_count": len(CROP_DATA_QUALITY),
+        "feature_coverage_by_provenance": coverage,
+        "expanded_defaults_species_discriminative": False,
+        "calibrated_species_evidence": False,
+        "intended_use": "coarse_group_prior_and_rule_ranking",
+    }

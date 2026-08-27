@@ -129,6 +129,12 @@ class Layer3InputContext:
 
     # Phenology
     phenology_stage: str = "unknown"
+    phenology_confidence: float = 0.0
+    phenology_posterior_hash: Optional[str] = None
+    stage_specific_allowed: bool = False
+    crop_posterior_hash: Optional[str] = None
+    crop_resolution: str = "unknown"
+    species_specific_allowed: bool = False
     gdd_adjusted_vigor: Optional[float] = None
     gdd_accumulated: float = 0.0
 
@@ -156,6 +162,10 @@ class Layer3InputContext:
 class PlotContext:
     """Static metadata and constraints for the plot."""
     crop_type: str = "unknown"           # e.g. "corn", "wheat", "soy"
+    declared_crop_type: str = "unknown"
+    crop_posterior_hash: str = ""
+    crop_resolution: str = "unknown"
+    species_specific_allowed: bool = False
     variety: Optional[str] = None
     planting_date: str = ""              # YYYY-MM-DD
     irrigation_type: str = "rainfed"     # "drip", "pivot", "rainfed"
@@ -173,6 +183,11 @@ class PlotContext:
     soil_om_pct: Optional[float] = None
     soil_ph: Optional[float] = None
     soil_ec_ds_m: Optional[float] = None
+
+    # GAP-22 FIX: Climate context for adaptive diagnosis priors
+    # AI = Annual_Precip / Annual_ET0 (UNEP classification)
+    # Arid < 0.20, Semi-arid 0.20-0.50, Sub-humid 0.50-0.65, Humid > 0.65
+    climate_aridity_index: float = 1.0   # Default neutral/humid
 
 
 # ============================================================================
@@ -390,7 +405,20 @@ class DecisionOutput:
     diagnostics: Layer3Diagnostics = field(default_factory=Layer3Diagnostics)
 
     def content_hash(self) -> str:
-        """Deterministic hash for reproducibility verification."""
+        """Deterministic hash for reproducibility verification.
+
+        GAP-28 FIX: Now includes evidence trace signatures, execution plan
+        details, and resource estimates — not just diagnosis counts/probabilities.
+        """
+        # Build evidence fingerprint: sorted (feature_name, contribution) tuples per diagnosis
+        evidence_fingerprint = []
+        for d in self.diagnoses:
+            ev_sig = sorted(
+                (e.feature_name, round(e.contribution, 4))
+                for e in d.evidence_trace
+            )
+            evidence_fingerprint.append(ev_sig)
+
         payload = {
             "schema_version": self.schema_version,
             "diagnosis_count": len(self.diagnoses),
@@ -398,7 +426,15 @@ class DecisionOutput:
             "task_count": len(self.execution_plan.tasks),
             "diagnosis_probs": [round(d.probability, 4) for d in self.diagnoses],
             "diagnosis_ids": sorted(d.problem_id for d in self.diagnoses),
+            "diagnosis_severities": [round(d.severity, 4) for d in self.diagnoses],
+            "evidence_fingerprint": evidence_fingerprint,
             "rec_ids": sorted(r.action_id for r in self.recommendations),
+            "rec_resources": sorted(
+                (r.action_id, sorted(r.resource_est.items()))
+                for r in self.recommendations
+                if r.resource_est
+            ),
+            "task_ids": sorted(t.task_id for t in self.execution_plan.tasks),
             "health_overall": round(self.data_health.overall, 4),
             "health_status": self.data_health.status,
             "reliability": round(self.quality_metrics.decision_reliability, 4),

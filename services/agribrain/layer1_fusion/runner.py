@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 # Included in Gateway request kwargs so StorageManager's param hash changes
 # whenever the raster response contract changes.  BC.10.20R2 must not reuse
 # cached composites that predate CRS/bounds/affine preservation.
-RASTER_GATEWAY_CONTRACT_VERSION = "bc10_20r2_georef_v1"
+RASTER_GATEWAY_CONTRACT_VERSION = "bc10_24r5_provider_truth_v2"
 
 
 def is_production() -> bool:

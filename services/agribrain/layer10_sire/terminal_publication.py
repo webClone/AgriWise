@@ -78,6 +78,8 @@ def build_terminal_no_data_output(
             grid_alignment_ok=False,
             detail_conservation_ok=False,
             warnings=[reason],
+            component_failures=[],
+            degradation_codes=[reason],
         ),
         provenance={
             "status": "degraded",

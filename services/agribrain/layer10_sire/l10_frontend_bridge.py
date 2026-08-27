@@ -36,6 +36,9 @@ from services.agribrain.layer10_sire.surface_contract import (
     build_default_asmae_proof,
     build_no_data_render_authorizations,
 )
+from services.agribrain.scientific_contracts.crop_phenology import (
+    normalize_published_phenology,
+)
 
 
 def build_input_from_context(ctx: dict) -> Layer10Input:
@@ -93,7 +96,9 @@ def build_input_from_context(ctx: dict) -> Layer10Input:
             quality=CurveQuality(rmse=0.02, outlier_frac=0.01, obs_coverage=0.85),
             ndvi_fit_unc=[0.05]*30
         ),
-        phenology=PhenologyOutput(stage_by_day=['VEGETATIVE']*30, key_dates={}),
+        # Synthetic bridge inputs carry no authoritative Layer-2 phenology receipt.
+        # Do not manufacture a stage from a demo stage_by_day sequence.
+        phenology=PhenologyOutput(stage_by_day=[], key_dates={}),
         anomalies=[],
         stability=SpatialMetrics(
             mean_spatial_var=0.12, std_spatial_var=0.05,
@@ -152,14 +157,20 @@ def build_input_from_context(ctx: dict) -> Layer10Input:
         forecast_confidence=0.75,
     )
 
-    from geometry.canonicalizer import canonicalize_geometry
-    geom_context = ctx.get('polygon') or ctx.get('field_geometry')
-    geom_canon = canonicalize_geometry(geom_context)
+    t_id = ctx.get("tenant_id") or "tenant_demo"
+    f_id = ctx.get("farm_id") or "farm_demo"
+    p_id = plot_id or ctx.get("plot_id") or "plot_demo"
+    from services.agribrain.common.plot_namespace import PlotNamespace
+    ns = ctx.get("plot_namespace") or PlotNamespace(tenant_id=t_id, farm_id=f_id, plot_id=p_id)
 
     return Layer10Input(
+        plot_namespace=ns,
+        tenant_id=ns.tenant_id,
+        farm_id=ns.farm_id,
+        plot_id=ns.plot_id,
         field_tensor=ft, veg_int=vi,
         decision=l3, nutrients=l4, bio=l5, planning=l7, prescriptive=l8,
-        plot_id=plot_id, grid_height=H, grid_width=W, resolution_m=10.0,
+        grid_height=H, grid_width=W, resolution_m=10.0,
         forecast_context=fc,
         reference_date=f'2025-06-{16 + T - 1:02d}',
         crop=crop,
@@ -175,29 +186,27 @@ def build_input_from_context(ctx: dict) -> Layer10Input:
 
 def serialize_output(out) -> dict:
     """Serialize Layer10Output to a JSON-safe dict for the frontend."""
-    surfaces = []
-    for s in out.surface_pack:
-        surfaces.append({
-            'type': s.semantic_type.value,
-            'values': s.values,
-            'grounding_class': s.grounding_class or 'UNIFORM',
-            'raster_basis': getattr(s, 'raster_basis', []),
-            'observed_ratio': getattr(s, 'observed_ratio', 0.0),
-            'units': s.units,
-            'render_range': list(s.render_range),
-            'palette_id': s.palette_id.value if hasattr(s.palette_id, 'value') else str(s.palette_id),
-            'source_layers': s.source_layers,
-            'provenance': s.provenance,
-            # V92.4-BC: GIS grid specs + reference points
-            'grid_spec': getattr(s, 'grid_spec', None),
-            'grid_ref': s.grid_ref,
-            'cog_ref': getattr(s, 'cog_ref', None),
-            'tile_ref': getattr(s, 'tile_ref', None),
-            'stac_item_ref': getattr(s, 'stac_item_ref', None),
-        })
+    from services.agribrain.layer10_sire.surface_contract import serialize_surface_artifact
+
+    surfaces = [serialize_surface_artifact(surface) for surface in out.surface_pack]
 
     # Quality report
     qr = out.quality_report
+    comp_failures = [
+        f.to_dict() if hasattr(f, "to_dict")
+        else dict(f) if isinstance(f, dict)
+        else {
+            "code": getattr(f, "code", "COMPONENT_FAILURE"),
+            "component": getattr(f, "component", "unknown"),
+            "stage": getattr(f, "stage", "unknown"),
+            "message": getattr(f, "message", str(f)),
+            "fallback_used": bool(getattr(f, "fallback_used", False)),
+            "affected_surface_types": list(
+                getattr(f, "affected_surface_types", []) or []
+            ),
+        }
+        for f in getattr(qr, "component_failures", []) or []
+    ]
     quality = {
         'degradation_mode': qr.degradation_mode.value,
         'reliability_score': qr.reliability_score,
@@ -209,6 +218,8 @@ def serialize_output(out) -> dict:
         'detail_conservation_ok': qr.detail_conservation_ok,
         'warnings': qr.warnings,
         'missing_upstream': qr.missing_upstream,
+        'component_failures': comp_failures,
+        'degradation_codes': getattr(qr, 'degradation_codes', []) or [],
     }
 
     # Explainability Pack
@@ -355,6 +366,11 @@ def serialize_output(out) -> dict:
     # V60B: Ground Truth Registry Summary (pass-through from upstream)
     ground_truth_summary = getattr(out, 'ground_truth_summary', {}) or {}
 
+    resolved_crop_stage, phenology_context = normalize_published_phenology(
+        getattr(out, 'resolved_crop_stage', 'UNKNOWN'),
+        getattr(out, 'phenology_context', {}) or {},
+    )
+
     return {
         'run_id': out.run_id,
         'publication_run_id': getattr(out, 'publication_run_id', '') or out.run_id,
@@ -374,6 +390,8 @@ def serialize_output(out) -> dict:
         'tile_manifest': out.tile_manifest,
         'quality': quality,
         'provenance': out.provenance,
+        'resolved_crop_stage': resolved_crop_stage,
+        'phenology_context': phenology_context,
         'explainability_pack': explainability_pack,
         'temporal_bundle': temporal_bundle,
         'scenario_pack': getattr(out, 'scenario_pack', []),

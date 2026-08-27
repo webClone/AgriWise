@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("agribrain.v6.phenology_features")
@@ -34,7 +35,7 @@ except ImportError:
     HAS_NUMPY = False
 
 try:
-    from layer2_veg_int.crop_ml import smooth_ndvi, extract_phenology
+    from services.agribrain.layer2_veg_int.crop_ml import smooth_ndvi, extract_phenology
     HAS_CROP_ML = True
 except ImportError:
     HAS_CROP_ML = False
@@ -115,6 +116,25 @@ def _date_str_to_doy(date_str: str) -> Optional[int]:
     return None
 
 
+def _elapsed_calendar_days(dates: List[str]) -> Optional[List[float]]:
+    parsed = []
+    for value in dates:
+        try:
+            item = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if item.tzinfo is None:
+            item = item.replace(tzinfo=timezone.utc)
+        parsed.append(item.astimezone(timezone.utc))
+    if not parsed:
+        return []
+    origin = parsed[0]
+    elapsed = [(item - origin).total_seconds() / 86400.0 for item in parsed]
+    if any(elapsed[index] <= elapsed[index - 1] for index in range(1, len(elapsed))):
+        return None
+    return elapsed
+
+
 # ============================================================================
 # PhenologyFeatures dataclass
 # ============================================================================
@@ -148,6 +168,11 @@ class PhenologyFeatures:
     cv_ndvi: Optional[float] = None        # Temporal variability (std/mean)
     greenup_duration_days: Optional[int] = None    # SOS to peak (cross-year safe)
     senescence_duration_days: Optional[int] = None  # Peak to EOS (cross-year safe)
+    sos_gdd: Optional[float] = None       # Cumulative GDD at start of season
+    pos_gdd: Optional[float] = None       # Cumulative GDD at peak of season
+    eos_gdd: Optional[float] = None       # Cumulative GDD at end of season
+    growth_rate_per_gdd: Optional[float] = None
+    senescence_rate_per_gdd: Optional[float] = None
 
     # Multi-season features
     n_seasons: Optional[int] = None        # Number of growing seasons detected
@@ -187,7 +212,7 @@ def extract_phenology_features(
     Args:
         ndvi_series: NDVI values (raw or pre-smoothed)
         dates: ISO date strings corresponding to each NDVI value
-        gdd_series: Optional cumulative GDD series (not used in v6.0A)
+        gdd_series: Optional cumulative GDD series aligned with ``dates``.
 
     Returns:
         PhenologyFeatures with all extractable metrics.
@@ -197,6 +222,13 @@ def extract_phenology_features(
 
     if len(ndvi_series) < 5:
         feat.extraction_warnings.append("insufficient_observations")
+        return feat
+    if len(dates) != len(ndvi_series):
+        feat.extraction_warnings.append("ndvi_timestamp_alignment_invalid")
+        return feat
+    elapsed_days = _elapsed_calendar_days(dates)
+    if elapsed_days is None:
+        feat.extraction_warnings.append("ndvi_calendar_axis_invalid")
         return feat
 
     # ── Smooth and extract base phenology ──
@@ -236,6 +268,92 @@ def extract_phenology_features(
     feat.growth_rate = pheno.get("growth_rate")
     feat.senescence_rate = pheno.get("senescence_rate")
 
+    # Replace index-based rates and areas with physical calendar-time
+    # quantities.  Missing/rejected scenes therefore create a longer interval
+    # instead of being mistaken for one nominal timestep.
+    sos_idx = pheno.get("sos_idx")
+    pos_idx = pheno.get("pos_idx")
+    eos_idx = pheno.get("eos_idx")
+    if (
+        isinstance(sos_idx, int) and isinstance(pos_idx, int)
+        and 0 <= sos_idx < pos_idx < len(smoothed)
+    ):
+        duration = elapsed_days[pos_idx] - elapsed_days[sos_idx]
+        if duration > 0.0:
+            feat.growth_rate = round(
+                (float(smoothed[pos_idx]) - float(smoothed[sos_idx])) / duration,
+                8,
+            )
+    if (
+        isinstance(pos_idx, int) and isinstance(eos_idx, int)
+        and 0 <= pos_idx < eos_idx < len(smoothed)
+    ):
+        duration = elapsed_days[eos_idx] - elapsed_days[pos_idx]
+        if duration > 0.0:
+            feat.senescence_rate = round(
+                (float(smoothed[eos_idx]) - float(smoothed[pos_idx])) / duration,
+                8,
+            )
+
+    valid_gdd = None
+    if gdd_series is not None:
+        try:
+            candidate_gdd = [float(value) for value in gdd_series]
+        except (TypeError, ValueError):
+            candidate_gdd = []
+        if (
+            len(candidate_gdd) == len(smoothed)
+            and all(math.isfinite(value) for value in candidate_gdd)
+            and all(
+                candidate_gdd[index] >= candidate_gdd[index - 1]
+                for index in range(1, len(candidate_gdd))
+            )
+        ):
+            valid_gdd = candidate_gdd
+        else:
+            feat.extraction_warnings.append("gdd_axis_invalid_or_misaligned")
+    if valid_gdd is not None:
+        if isinstance(sos_idx, int) and 0 <= sos_idx < len(valid_gdd):
+            feat.sos_gdd = round(valid_gdd[sos_idx], 6)
+        if isinstance(pos_idx, int) and 0 <= pos_idx < len(valid_gdd):
+            feat.pos_gdd = round(valid_gdd[pos_idx], 6)
+        if isinstance(eos_idx, int) and 0 <= eos_idx < len(valid_gdd):
+            feat.eos_gdd = round(valid_gdd[eos_idx], 6)
+        if (
+            isinstance(sos_idx, int) and isinstance(pos_idx, int)
+            and 0 <= sos_idx < pos_idx < len(valid_gdd)
+        ):
+            delta_gdd = valid_gdd[pos_idx] - valid_gdd[sos_idx]
+            if delta_gdd > 0.0:
+                feat.growth_rate_per_gdd = round(
+                    (float(smoothed[pos_idx]) - float(smoothed[sos_idx])) / delta_gdd,
+                    10,
+                )
+        if (
+            isinstance(pos_idx, int) and isinstance(eos_idx, int)
+            and 0 <= pos_idx < eos_idx < len(valid_gdd)
+        ):
+            delta_gdd = valid_gdd[eos_idx] - valid_gdd[pos_idx]
+            if delta_gdd > 0.0:
+                feat.senescence_rate_per_gdd = round(
+                    (float(smoothed[eos_idx]) - float(smoothed[pos_idx])) / delta_gdd,
+                    10,
+                )
+    if len(smoothed) == len(elapsed_days):
+        base = float(feat.base_ndvi or 0.0)
+        large_integral = 0.0
+        small_integral = 0.0
+        for index in range(1, len(smoothed)):
+            delta_days = elapsed_days[index] - elapsed_days[index - 1]
+            left = float(smoothed[index - 1])
+            right = float(smoothed[index])
+            large_integral += 0.5 * (left + right) * delta_days
+            small_integral += 0.5 * (
+                max(0.0, left - base) + max(0.0, right - base)
+            ) * delta_days
+        feat.large_integral = round(large_integral, 6)
+        feat.small_integral = round(small_integral, 6)
+
     # ── DOY features with cross-year safety ──
     sos_doy = pheno.get("sos_doy")
     pos_doy = pheno.get("pos_doy")
@@ -273,7 +391,8 @@ def extract_phenology_features(
 
     # ── NDVI velocity profile ──
     if HAS_NUMPY and len(smoothed) >= 10:
-        velocity = np.diff(smoothed)
+        day_steps = np.diff(np.array(elapsed_days, dtype=float))
+        velocity = np.diff(smoothed) / day_steps
         feat.velocity_p10 = round(float(np.percentile(velocity, 10)), 6)
         feat.velocity_p25 = round(float(np.percentile(velocity, 25)), 6)
         feat.velocity_p50 = round(float(np.percentile(velocity, 50)), 6)

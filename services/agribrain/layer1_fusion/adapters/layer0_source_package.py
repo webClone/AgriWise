@@ -15,14 +15,19 @@ from layer0.observation_packet import DataStatus
 from layer1_fusion.source_family import normalize_source_family
 
 
+def is_layer0_source_package(package: Any) -> bool:
+    """Recognize canonical Layer 0 envelopes across contract revisions/import roots."""
+    version = str(getattr(package, "contract_version", "") or "")
+    return isinstance(package, Layer0SourcePackage) or version.startswith(
+        "layer0-source-package-v"
+    )
+
+
 class Layer0SourcePackageAdapter:
     """Adapter to extract evidence from a canonical Layer0SourcePackage wrapper."""
 
     def can_read(self, package: Any) -> bool:
-        return package is not None and (
-            isinstance(package, Layer0SourcePackage) or
-            getattr(package, "contract_version", None) == "layer0-source-package-v1"
-        )
+        return package is not None and is_layer0_source_package(package)
 
     def extract_evidence(
         self, package: Any, context: Layer1InputBundle

@@ -36,6 +36,91 @@ except ImportError:  # Transitional compatibility for the legacy service launche
 logger = logging.getLogger(__name__)
 
 
+def reconcile_durable_asmae_job_before_publication(
+    output: Any, plot_namespace: Any
+) -> None:
+    """Replace captured queue state with durable truth at commit time.
+
+    Layer 10 can finish after a background worker has already transitioned.
+    Publication must therefore fence its earlier queued/running observation
+    against the job record immediately before cache commit.
+    """
+    display = dict(getattr(output, "source_policy_display_state", None) or {})
+    plot_state = dict(display.get("asmaePlotState") or {})
+    active_job_id = str(plot_state.get("activeSpatialJobId") or "")
+    captured_status = str(plot_state.get("activeSpatialJobStatus") or "").lower()
+    if not active_job_id and captured_status not in {"queued", "running", "stalled"}:
+        return
+    try:
+        from services.agribrain.common.plot_namespace import _coerce_namespace
+        from services.agribrain.layer05_asmae.background_jobs import (
+            get_job_status,
+            latest_job_for_plot,
+        )
+        namespace = _coerce_namespace(plot_namespace)
+        job = get_job_status(active_job_id) if active_job_id else None
+        if job is not None:
+            job_namespace = _coerce_namespace(job.get("plot_namespace"))
+            if job_namespace != namespace:
+                raise ValueError("active ASMAE job belongs to a different PlotNamespace")
+        if job is None:
+            job = latest_job_for_plot(namespace)
+    except Exception as exc:
+        logger.warning("[L10] Durable ASMAE publication reconciliation failed: %s", exc)
+        return
+    if not job or not job.get("status"):
+        return
+
+    status = str(job.get("status") or "").lower()
+    plot_state.update({
+        "activeSpatialJobId": str(job.get("job_id") or active_job_id) or None,
+        "activeSpatialJobStatus": status,
+        "activeSpatialJobStage": str(job.get("stage") or ""),
+        "activeSpatialJobProgressPct": int(job.get("progress_pct", 0) or 0),
+    })
+    if status in {"failed", "stalled"}:
+        error = str(job.get("error") or job.get("reason") or "")
+        code = str(job.get("failure_code") or job.get("reason") or "")
+        if not code:
+            import re
+            match = re.search(r"\b[A-Z][A-Z0-9_]{4,}\b", error)
+            code = match.group(0) if match else "ASMAE_REFRESH_FAILED"
+        plot_state["spatialRefreshFailure"] = {
+            "failureCode": code,
+            "failureStage": str(job.get("stage") or "execution_failed"),
+            "retryClassification": str(
+                job.get("retry_classification") or "manual_review"
+            ),
+            "retryEligible": bool(job.get("retry_eligible", False)),
+            "error": error or "ASMAE spatial refresh failed",
+            "contractVersion": str(
+                job.get("evidence_capability_contract_version")
+                or (job.get("scientific_identity") or {}).get(
+                    "evidence_capability_contract_version", ""
+                )
+            ),
+        }
+    elif status == "completed":
+        plot_state.pop("spatialRefreshFailure", None)
+    display["asmaePlotState"] = plot_state
+    output.source_policy_display_state = display
+
+    for attribute in ("asmae_evidence_state", "core_asmae_evidence_state"):
+        evidence = getattr(output, attribute, None)
+        if not isinstance(evidence, dict):
+            continue
+        evidence = dict(evidence)
+        evidence.update({
+            "active_spatial_job_id": plot_state.get("activeSpatialJobId"),
+            "active_spatial_job_status": status,
+            "active_spatial_job_stage": plot_state.get("activeSpatialJobStage"),
+            "active_spatial_job_progress_pct": plot_state.get(
+                "activeSpatialJobProgressPct"
+            ),
+        })
+        setattr(output, attribute, evidence)
+
+
 def separate_asmae_evidence_and_publication(
     raw_evidence_state: Any,
     *,
@@ -118,12 +203,13 @@ from services.agribrain.layer10_sire.schema import (
     HistogramBundle, SIREDegradation, RenderMode, GroundingClass, SurfaceType,
     ZoneArtifact, ZoneType, ZoneFamily, MapModeDef, LegendEntry,
     HistogramArtifact, DeltaHistogram, TemporalBundle, TemporalSlice,
-    MicroObjectArtifact, ObjectType, SurfaceArtifact, PaletteId
+    MicroObjectArtifact, ObjectType, SurfaceArtifact, PaletteId, ComponentFailure
 )
 from services.agribrain.core.observability import observability_registry
 from services.agribrain.layer10_sire.invariants import enforce_layer10_invariants
 from services.agribrain.layer10_sire.surface_contract import (
     PublicationStatus,
+    RENDER_AUTHORIZATION_VERSION,
     SURFACES_SCHEMA_VERSION,
     VALID_PUBLICATION_STATUSES,
     build_default_asmae_proof,
@@ -174,6 +260,28 @@ from services.agribrain.layer10_sire.products.export import (
 from services.agribrain.layer10_sire.imagery.quicklooks import generate_quicklook
 from services.agribrain.layer10_sire.temporal_bundle import build_temporal_bundle
 from services.agribrain.layer10_sire.explainability import build_premium_packs
+
+
+def apply_composite_scouting_grounding(surface: Any, unique_count: int) -> bool:
+    """Apply truthful spatial grounding to a composite scouting artifact."""
+    provenance = getattr(surface, "provenance", None) or {}
+    support_class = provenance.get("support_class") or provenance.get("state_support_class")
+    if support_class != "composite_scouting":
+        return False
+    surface.observed_ratio = 0.0
+    surface.grounding_class = (
+        GroundingClass.MODEL_ASSISTED_RASTER.value
+        if unique_count > 1
+        else GroundingClass.UNIFORM.value
+    )
+    provenance["direct_observation"] = False
+    provenance["management_zone_eligible"] = False
+    provenance["zone_statistics_eligible"] = False
+    provenance["scope"] = (
+        "model_assisted_spatial_scouting" if unique_count > 1 else "plot_level"
+    )
+    surface.provenance = provenance
+    return True
 
 
 def validate_spatial_grid_spec(grid_spec: Any, width: int, height: int) -> tuple[bool, str]:
@@ -493,7 +601,7 @@ def _compute_field_valid_cells(l10_input, H: int, W: int, surfaces) -> Optional[
     return None
 
 
-def _resolve_phenology_stage(veg_int, ndvi_surface_mean: float = None) -> str:
+def _legacy_ndvi_phenology_stage_for_migration(veg_int, ndvi_surface_mean: float = None) -> str:
     """
     GAP 4 fix: Extract the reconciled phenology stage from L2 VegInt output.
 
@@ -579,6 +687,126 @@ def _resolve_phenology_stage(veg_int, ndvi_surface_mean: float = None) -> str:
 
     if raw_stage != corrected:
         import sys
+def _legacy_ndvi_phenology_context_for_migration(
+    veg_int: Any,
+    ndvi_surface_mean: Optional[float] = None,
+    crop: str = "",
+) -> Dict[str, Any]:
+    """Resolve the single publication-authoritative crop stage and lineage."""
+    raw_stage = "UNKNOWN"
+    phenology = getattr(veg_int, "phenology", None) if veg_int else None
+    stages = getattr(phenology, "stage_by_day", None) or []
+    if stages:
+        candidate = stages[-1]
+        candidate = candidate.value if hasattr(candidate, "value") else candidate
+        raw_stage = str(candidate or "UNKNOWN").strip().upper() or "UNKNOWN"
+
+    ndvi_value: Optional[float] = None
+    ndvi_source = "unavailable"
+    ndvi_records = (getattr(veg_int, "ndvi_records", None) or []) if veg_int else []
+    if ndvi_records:
+        record = ndvi_records[-1]
+        candidate = record.get("ndvi") if isinstance(record, dict) else getattr(record, "ndvi", None)
+        try:
+            candidate = float(candidate)
+            if math.isfinite(candidate):
+                ndvi_value = candidate
+                ndvi_source = "l2_kalman_ndvi"
+        except (TypeError, ValueError):
+            pass
+    if ndvi_value is None and ndvi_surface_mean is not None:
+        try:
+            candidate = float(ndvi_surface_mean)
+            if math.isfinite(candidate):
+                ndvi_value = candidate
+                ndvi_source = "l10_ndvi_surface_mean"
+        except (TypeError, ValueError):
+            pass
+
+    envelopes = {
+        "BARE_SOIL": (0.00, 0.20),
+        "EMERGENCE": (0.10, 0.40),
+        "VEGETATIVE": (0.25, 0.85),
+        "REPRODUCTIVE": (0.35, 0.90),
+        "SENESCENCE": (0.10, 0.60),
+        "HARVESTED": (0.00, 0.30),
+    }
+    stage = raw_stage
+    reconciled = False
+    if ndvi_value is not None:
+        low, high = envelopes.get(raw_stage, (0.0, 1.0))
+        if raw_stage == "UNKNOWN" or not (low <= ndvi_value <= high):
+            reconciled = True
+            if ndvi_value <= 0.20:
+                stage = "BARE_SOIL"
+            elif ndvi_value <= 0.40:
+                stage = "EMERGENCE"
+            elif ndvi_value <= 0.75:
+                stage = "VEGETATIVE"
+            elif ndvi_value <= 0.90:
+                stage = "REPRODUCTIVE"
+            else:
+                stage = "VEGETATIVE"
+
+    crop_value = str(crop or "").strip()
+    crop_known = crop_value.lower() not in {"", "unknown", "none", "no crop", "no_crop"}
+    if stage == "UNKNOWN":
+        evidence_class, source, confidence = "unavailable", "unavailable", 0.0
+    elif ndvi_value is None:
+        evidence_class, source, confidence = "l2_declared_unverified", "l2_phenology", 0.55
+    elif reconciled:
+        evidence_class, source = "ndvi_reconciled", ndvi_source
+        confidence = 0.70 if ndvi_source == "l2_kalman_ndvi" else 0.60
+    else:
+        evidence_class = "l2_declared_ndvi_consistent"
+        source, confidence = "l2_phenology_and_ndvi", 0.85
+
+    return {
+        "resolved_crop_stage": stage,
+        "raw_l2_crop_stage": raw_stage,
+        "phenology_evidence_class": evidence_class,
+        "phenology_source": source,
+        "phenology_confidence": confidence,
+        "ndvi_mean": ndvi_value,
+        "ndvi_source": ndvi_source,
+        "crop": crop_value,
+        "crop_known": crop_known,
+        "stage_available": stage != "UNKNOWN",
+        "contract_version": "phenology_authority_v1",
+    }
+
+
+def _resolve_phenology_context(
+    veg_int: Any,
+    ndvi_surface_mean: Optional[float] = None,
+    crop: str = "",
+) -> Dict[str, Any]:
+    """Consume the Layer-2 phenology receipt without downstream re-inference."""
+    del ndvi_surface_mean  # L10 surfaces are not independent phenology evidence.
+    crop_value = str(crop or "").strip()
+    from services.agribrain.scientific_contracts.crop_phenology import (
+        consume_canonical_phenology_output,
+    )
+    result = consume_canonical_phenology_output(veg_int)
+    result.update({
+        "raw_l2_crop_stage": result["resolved_crop_stage"],
+        "ndvi_mean": None,
+        "ndvi_source": "not_used_by_layer10",
+        "crop": crop_value,
+        "crop_known": crop_value.lower() not in {"", "unknown", "none", "no crop", "no_crop"},
+    })
+    return result
+
+
+def _resolve_phenology_stage(veg_int, ndvi_surface_mean: float = None) -> str:
+    return _resolve_phenology_context(veg_int, ndvi_surface_mean)["resolved_crop_stage"]
+
+
+def _legacy_resolve_phenology_stage(veg_int, ndvi_surface_mean: float = None) -> str:
+    """Compatibility alias; no legacy NDVI inference remains on this path."""
+    return _resolve_phenology_stage(veg_int, ndvi_surface_mean)
+
+
 L10_CACHE_SCHEMA_VERSION = f"v84_publication_authority::{SURFACES_SCHEMA_VERSION}"
 
 SURFACE_TRUTHFULNESS_POLICY_VERSION = "v82_1_truthfulness"
@@ -623,6 +851,16 @@ def align_surface_to_display_grid(surface: SurfaceArtifact, display_grid_spec: d
     import numpy as np
     
     src_spec = surface.grid_spec or {}
+    # ``source_grid_spec`` records the native scientific grid and may already
+    # differ from ``grid_spec`` because an upstream producer performed a
+    # proven reprojection onto the Layer-10 display grid.  This helper owns
+    # display alignment only; it must never replace that native lineage with
+    # the current/display grid during a later normalization pass.
+    existing_source_grid_spec = (
+        dict(surface.source_grid_spec)
+        if isinstance(surface.source_grid_spec, dict) and surface.source_grid_spec
+        else None
+    )
     src_hash = src_spec.get("grid_hash")
     tgt_hash = display_grid_spec.get("grid_hash")
     
@@ -653,9 +891,10 @@ def align_surface_to_display_grid(surface: SurfaceArtifact, display_grid_spec: d
     # trigger tens of thousands of scalar np.clip calls.  Attach the proven
     # display grid directly; retain the prior spec as source metadata.
     if same_shape and (same_bounds or not src_bounds):
-        surface.source_grid_spec = src_spec or None
+        if existing_source_grid_spec is None:
+            surface.source_grid_spec = dict(src_spec) if src_spec else None
         surface.display_grid_spec = dict(display_grid_spec)
-        surface.grid_spec = display_grid_spec
+        surface.grid_spec = dict(display_grid_spec)
         return surface
 
     src_arr = np.array([[np.nan if x is None else x for x in row] for row in surface.values], dtype=np.float32)
@@ -743,9 +982,10 @@ def align_surface_to_display_grid(surface: SurfaceArtifact, display_grid_spec: d
         "display_grid_hash": tgt_hash,
     })
     
-    surface.grid_spec = display_grid_spec
-    surface.source_grid_spec = src_spec
-    surface.display_grid_spec = display_grid_spec
+    surface.grid_spec = dict(display_grid_spec)
+    if existing_source_grid_spec is None:
+        surface.source_grid_spec = dict(src_spec) if src_spec else None
+    surface.display_grid_spec = dict(display_grid_spec)
     surface.grid_ref = f"{tgt_h}x{tgt_w}"
     
     return surface
@@ -906,7 +1146,9 @@ def get_layer10_cache_key(inp: Layer10Input, input_run_ids: Dict[str, str], l1_d
         "source_policy": inp.source_policy,
     }
     # V90.7.1: Hash metrics info if available
-    from layer05_asmae.history.archive_metrics_store import ArchiveMetricsStore
+    from services.agribrain.layer05_asmae.history.archive_metrics_store import (
+        ArchiveMetricsStore,
+    )
     try:
         metrics_store = ArchiveMetricsStore()
         info = metrics_store.get_latest_metrics_info(inp.plot_id)
@@ -1140,6 +1382,12 @@ def deserialize_l10_output(d: dict) -> Layer10Output:
         zone_state_by_surface=qr_raw.get("zone_state_by_surface", {}),
         missing_upstream=qr_raw.get("missing_upstream", []),
         warnings=qr_raw.get("warnings", []),
+        component_failures=[
+            ComponentFailure(**failure)
+            for failure in (qr_raw.get("component_failures") or [])
+            if isinstance(failure, dict)
+        ],
+        degradation_codes=list(qr_raw.get("degradation_codes") or []),
     )
     
     # Reconstruct temporal bundle
@@ -1186,6 +1434,8 @@ def deserialize_l10_output(d: dict) -> Layer10Output:
         tile_manifest=d.get("tile_manifest", {}),
         quality_report=quality_report,
         provenance=d.get("provenance", {}),
+        resolved_crop_stage=d.get("resolved_crop_stage", "UNKNOWN"),
+        phenology_context=d.get("phenology_context", {}),
         explainability_pack=d.get("explainability_pack", {}),
         temporal_bundle=temporal_bundle,
         scenario_pack=d.get("scenario_pack", []),
@@ -1210,7 +1460,7 @@ def deserialize_l10_output(d: dict) -> Layer10Output:
         asmae_proof=d.get("asmae_proof", {}) or build_default_asmae_proof(),
         render_authorizations=d.get("render_authorizations", {}),
         render_authorization_version=d.get(
-            "render_authorization_version", "v924_bc10_18_render_auth_v1"
+            "render_authorization_version", RENDER_AUTHORIZATION_VERSION
         ),
     )
 
@@ -1727,6 +1977,8 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
     # --- Determine degradation mode ---
     degradation = SIREDegradation.NORMAL if render_as_spatial else SIREDegradation.NO_SPATIAL
     missing = []
+    component_failures: List[ComponentFailure] = []
+    degradation_codes: List[str] = []
 
     def _has_renderable_raster(l1) -> bool:
         if not l1: return False
@@ -1812,19 +2064,46 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             )
             if ndvi_mask_keys:
                 observed_raw = observed_masks[ndvi_mask_keys[0]]
-        if ndvi_surface is not None and observed_raw is not None:
-            observed_arr = np.asarray(observed_raw, dtype=bool)
-            if observed_arr.shape != (H, W):
-                row_idx = np.linspace(0, observed_arr.shape[0] - 1, H).astype(int)
-                col_idx = np.linspace(0, observed_arr.shape[1] - 1, W).astype(int)
-                observed_arr = observed_arr[np.ix_(row_idx, col_idx)]
+        if ndvi_surface is not None:
             final_arr = np.asarray(ndvi_surface.values, dtype=float)
+            if final_arr.ndim != 2 or final_arr.size == 0:
+                raise ValueError("NDVI_CLEAN values must be a non-empty 2D grid")
+            if final_arr.shape != (H, W):
+                row_idx = np.linspace(0, final_arr.shape[0] - 1, H).astype(int)
+                col_idx = np.linspace(0, final_arr.shape[1] - 1, W).astype(int)
+                final_arr = final_arr[np.ix_(row_idx, col_idx)]
             final_finite_arr = np.isfinite(final_arr)
-            # A finite computational cell is not a geographically valid cell
-            # unless the source grid itself has passed the spatial contract.
-            valid_arr = final_finite_arr.copy() if render_as_spatial else np.zeros((H, W), dtype=bool)
-            observed_arr &= final_finite_arr
-            gap_arr = final_finite_arr & ~observed_arr
+
+            # Missing raw support is a meaningful fail-closed state, not a
+            # reason to omit the dependency surfaces.  Every NDVI_CLEAN
+            # publication carries the same immutable mask trio; without a
+            # source support mask none of its finite cells may be promoted to
+            # spatially valid merely because a plot-level value was broadcast.
+            source_support_available = observed_raw is not None
+            observed_arr = np.zeros((H, W), dtype=bool)
+            if source_support_available:
+                raw_arr = np.asarray(observed_raw)
+                if raw_arr.ndim != 2 or raw_arr.size == 0:
+                    source_support_available = False
+                else:
+                    if raw_arr.dtype == np.bool_:
+                        observed_arr = raw_arr.astype(bool, copy=True)
+                    else:
+                        numeric_raw = np.asarray(raw_arr, dtype=float)
+                        observed_arr = np.isfinite(numeric_raw) & (numeric_raw != 0.0)
+                    if observed_arr.shape != (H, W):
+                        row_idx = np.linspace(0, observed_arr.shape[0] - 1, H).astype(int)
+                        col_idx = np.linspace(0, observed_arr.shape[1] - 1, W).astype(int)
+                        observed_arr = observed_arr[np.ix_(row_idx, col_idx)]
+
+            spatial_support_valid = bool(render_as_spatial and source_support_available)
+            valid_arr = (
+                final_finite_arr.copy()
+                if spatial_support_valid
+                else np.zeros((H, W), dtype=bool)
+            )
+            observed_arr &= valid_arr
+            gap_arr = valid_arr & ~observed_arr
             mask_specs = (
                 (SurfaceType.OBSERVED_DATA_MASK_NDVI, observed_arr, "raw_provider_cell_before_interpolation"),
                 (SurfaceType.GAP_FILL_MASK_NDVI, gap_arr, "final_value_present_raw_cell_absent"),
@@ -1848,19 +2127,33 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                         "definition": (
                             "unavailable_without_valid_geographic_grid"
                             if mask_type == SurfaceType.VALID_DATA_MASK_NDVI and not render_as_spatial
-                            else definition
+                            else (
+                                "unavailable_without_provider_observation_support"
+                                if mask_type == SurfaceType.VALID_DATA_MASK_NDVI and not source_support_available
+                                else definition
+                            )
                         ),
                         "aligned_surface_type": "NDVI_CLEAN",
                         "surface_role": "render_dependency",
                         "render_dependency": True,
                         "selectable": False,
                         "inspector_allowed": False,
+                        "source_support_available": source_support_available,
                         "grid_validity": "valid" if render_as_spatial else f"invalid:{grid_spec_status}",
-                        "authority_block_reason": None if render_as_spatial else f"invalid_geospatial_grid:{grid_spec_status}",
+                        "authority_block_reason": (
+                            None
+                            if spatial_support_valid
+                            else (
+                                "provider_observation_support_unavailable"
+                                if render_as_spatial
+                                else f"invalid_geospatial_grid:{grid_spec_status}"
+                            )
+                        ),
                     },
                 ))
             ndvi_mask_diagnostic = {
                 "status": "generated",
+                "source_support_available": source_support_available,
                 "observed_mask_keys": sorted(str(key) for key in observed_masks.keys()),
             }
         else:
@@ -1965,26 +2258,76 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         print(f"[L10] Error running agronomic models: {e}", file=sys.stderr)
         skipped += 5
 
-    # Risk composite (L3-L8)
-    if has_downstream:
-        try:
-            risk_s = generate_risk_surfaces(l10_input, H, W, surfaces)
-            surfaces.extend(risk_s)
-        except Exception:
-            skipped += 1
+        skipped += 1
 
     asmae_s = []
     try:
         asmae_s = generate_asmae_surfaces(l10_input, H, W, l1_data=l1_data)
-        surfaces.extend(asmae_s)
-        
-        # Generate ASMAE aliases for bridging to canonical map modes
-        from services.agribrain.layer10_sire.surfaces.asmae import generate_asmae_aliases
-        asmae_aliases = generate_asmae_aliases(H, W, surfaces, l10_input, grid_spec_dict=display_grid_spec)
-        surfaces.extend(asmae_aliases)
     except Exception as e:
-        print(f"[L10] Error running ASMAE surfaces and aliases: {e}", file=sys.stderr)
+        print(f"[L10] Error running ASMAE surfaces: {e}", file=sys.stderr)
         skipped += 18
+        component_failures.append(ComponentFailure(
+            code="ASMAE_SURFACE_MATERIALIZATION_FAILED",
+            component="asmae_surfaces",
+            stage="materialization",
+            message=f"{type(e).__name__}: {e}",
+            fallback_used=True,
+            affected_surface_types=["ASMAE_*"],
+        ))
+        degradation_codes.append("ASMAE_SURFACE_MATERIALIZATION_FAILED")
+    else:
+        alignment_failures = list(
+            getattr(l1_data, "asmae_alignment_failures", None) or []
+        )
+        for failure in alignment_failures:
+            if not isinstance(failure, dict):
+                continue
+            surface_type = str(
+                failure.get("surface_type") or failure.get("variable") or "ASMAE_*"
+            )
+            reason = str(
+                failure.get("reason") or "ASMAE source/display grid alignment failed"
+            )
+            component_failures.append(ComponentFailure(
+                code="ASMAE_GRID_ALIGNMENT_FAILED",
+                component="asmae_surfaces",
+                stage="alignment",
+                message=reason,
+                fallback_used=True,
+                affected_surface_types=[surface_type],
+            ))
+        if alignment_failures:
+            skipped += len(alignment_failures)
+            degradation = SIREDegradation.DEGRADED
+            degradation_codes.append("ASMAE_GRID_ALIGNMENT_FAILED")
+
+        # Core ASMAE rasters are independently validated scientific artifacts.
+        # Commit them before building derivative display aliases so an alias-only
+        # defect cannot erase otherwise valid ASMAE evidence from the surface pack.
+        surfaces.extend(asmae_s)
+        try:
+            from services.agribrain.layer10_sire.surfaces.asmae import generate_asmae_aliases
+
+            asmae_aliases = generate_asmae_aliases(
+                H,
+                W,
+                surfaces,
+                l10_input,
+                grid_spec_dict=display_grid_spec,
+            )
+            surfaces.extend(asmae_aliases)
+        except Exception as e:
+            print(f"[L10] Error running ASMAE aliases: {e}", file=sys.stderr)
+            skipped += 1
+            component_failures.append(ComponentFailure(
+                code="ASMAE_ALIAS_MATERIALIZATION_FAILED",
+                component="asmae_aliases",
+                stage="materialization",
+                message=f"{type(e).__name__}: {e}",
+                fallback_used=True,
+                affected_surface_types=["*_ASMAE_*"],
+            ))
+            degradation_codes.append("ASMAE_ALIAS_MATERIALIZATION_FAILED")
 
 
 
@@ -2334,6 +2677,20 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         traceback.print_exc(file=sys.stderr)
 
     # --- Step 1ab: ASMAE Visual Intelligence Fusion Canopy ---
+    visual_fusion_materialization = {
+        "contract_version": "asmae_visual_fusion_materialization_v1",
+        "product": "ASMAE_VISUAL_FUSION_CANOPY",
+        "optional": True,
+        "status": "unavailable",
+        "reason": "not_evaluated",
+        "required_support_products": [
+            "ASMAE_POSTERIOR_CONCENTRATION",
+            "ASMAE_RETROVALIDATION_SCORE",
+            "ASMAE_ARCHIVE_SUPPORT",
+            "ASMAE_ML_AGREEMENT",
+            "ASMAE_BMA_DISAGREEMENT",
+        ],
+    }
     try:
         if not render_as_spatial:
             raise SpatialProcessingSkipped(grid_spec_status)
@@ -2355,6 +2712,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             has_real_asmae = True
 
         if not has_real_asmae:
+            visual_fusion_materialization["reason"] = "core_asmae_spatial_evidence_unavailable"
             print("[L10] Step 1ab skipped: No real ASMAE evidence (missing scene stack or archive products).", file=sys.stderr)
         else:
             if 'exp_H' not in locals() or 'exp_W' not in locals():
@@ -2446,7 +2804,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                     return arr
                 return _bilinear_upscale_2d(arr, target_h, target_w)
 
-            confidence_up = get_upscaled_surface_array(surfaces, "ASMAE_CONFIDENCE", exp_H, exp_W)
+            confidence_up = get_upscaled_surface_array(surfaces, "ASMAE_POSTERIOR_CONCENTRATION", exp_H, exp_W)
             retro_up = get_upscaled_surface_array(surfaces, "ASMAE_RETROVALIDATION_SCORE", exp_H, exp_W)
             archive_up = get_upscaled_surface_array(surfaces, "ASMAE_ARCHIVE_SUPPORT", exp_H, exp_W)
             ml_up = get_upscaled_surface_array(surfaces, "ASMAE_ML_AGREEMENT", exp_H, exp_W)
@@ -2471,6 +2829,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                     skip_experimental_surface = True
 
             if skip_experimental_surface:
+                visual_fusion_materialization["reason"] = "ndvi_surface_unavailable"
                 print("[L10-V92.4] No valid NDVI/NDVI_CLEAN for ASMAE Visual Fusion Canopy — skipping experimental detail surfaces only", file=sys.stderr)
             else:
                 vigor_up = get_upscaled_surface_array(surfaces, "CANOPY_ASMAE_VIGOR", exp_H, exp_W)
@@ -2518,11 +2877,25 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                     grounding_class=GroundingClass.MODEL_ASSISTED_RASTER.value,
                 )
                 surfaces.append(fusion_surf)
+                visual_fusion_materialization.update({
+                    "status": "completed",
+                    "reason": None,
+                    "surface_id": fusion_surf.surface_id,
+                })
                 print(f"[L10-V92.4] ASMAE Visual Fusion Canopy generated: {exp_H}x{exp_W}", file=sys.stderr)
-    except SpatialProcessingSkipped:
+    except SpatialProcessingSkipped as exc:
         skipped += 1
+        visual_fusion_materialization["reason"] = f"spatial_processing_unavailable:{exc}"
+    except ValueError as exc:
+        skipped += 1
+        visual_fusion_materialization["reason"] = str(exc)
+        print(f"[L10-V92.4] Optional ASMAE Visual Fusion Canopy unavailable: {exc}", file=sys.stderr)
     except Exception as e:
         import traceback
+        visual_fusion_materialization.update({
+            "status": "error",
+            "reason": f"{type(e).__name__}:{e}",
+        })
         print(f"[L10-V92.4] ASMAE Visual Fusion Canopy generation FAILED: {e}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
 
@@ -2612,9 +2985,222 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                         )
                         if ndvi_surface is not None and valid_surface is not None:
                             ndvi_values = np.asarray(ndvi_surface.values, dtype=float)
-                            valid_values = base_field_mask & np.isfinite(ndvi_values)
+                            prior_valid_values = (
+                                np.asarray(valid_surface.values, dtype=float) > 0.5
+                            )
+                            valid_values = (
+                                prior_valid_values
+                                & base_field_mask
+                                & np.isfinite(ndvi_values)
+                            )
                             valid_surface.values = valid_values.astype(float).tolist()
-                            valid_surface.provenance["definition"] = "field_geometry_intersection_finite_final_value"
+                            valid_surface.provenance["definition"] = (
+                                "trusted_source_support_intersection_field_geometry_finite_final_value"
+                            )
+                            valid_surface.provenance["field_geometry_applied"] = True
+
+                            # Reconcile all three canonical masks after the
+                            # field footprint is applied.  Coverage ratios are
+                            # field-relative; using the rectangular grid as the
+                            # denominator made a fully observed non-rectangular
+                            # plot look only 50.9% observed.
+                            observed_surface = next(
+                                (s for s in surfaces if s.semantic_type == SurfaceType.OBSERVED_DATA_MASK_NDVI), None
+                            )
+                            gap_surface = next(
+                                (s for s in surfaces if s.semantic_type == SurfaceType.GAP_FILL_MASK_NDVI), None
+                            )
+                            if observed_surface is not None and gap_surface is not None:
+                                observed_values = (
+                                    np.asarray(observed_surface.values, dtype=float) > 0.5
+                                ) & valid_values
+                                gap_values = valid_values & ~observed_values
+                                valid_count = int(np.count_nonzero(valid_values))
+                                observed_count = int(np.count_nonzero(observed_values))
+                                gap_count = int(np.count_nonzero(gap_values))
+                                field_observed_ratio = (
+                                    observed_count / valid_count if valid_count else 0.0
+                                )
+
+                                observed_surface.values = observed_values.astype(float).tolist()
+                                gap_surface.values = gap_values.astype(float).tolist()
+                                for mask_surface, count in (
+                                    (observed_surface, observed_count),
+                                    (gap_surface, gap_count),
+                                    (valid_surface, valid_count),
+                                ):
+                                    mask_surface.observed_ratio = field_observed_ratio
+                                    mask_surface.provenance["field_valid_cell_count"] = valid_count
+                                    mask_surface.provenance["active_cell_count"] = count
+                                    mask_surface.provenance["coverage_denominator"] = "field_geometry_valid_cells"
+                                ndvi_surface.observed_ratio = field_observed_ratio
+
+                                ratios = getattr(l1_data, "observed_ratios", None)
+                                if isinstance(ratios, dict):
+                                    ratios["ndvi"] = field_observed_ratio
+
+                                    # Normalize the remaining provider-mask
+                                    # ratios to the same geographic footprint.
+                                    # Preserve a ratio when no aligned source
+                                    # mask exists rather than fabricating one.
+                                    provider_masks = getattr(l1_data, "observed_masks", {}) or {}
+                                    field_count = int(np.count_nonzero(base_field_mask))
+                                    aliases = {
+                                        "vv": "sar_backscatter",
+                                        "vh": "sar_backscatter",
+                                        "sar": "sar_backscatter",
+                                    }
+                                    for ratio_key in list(ratios):
+                                        key = str(ratio_key).lower()
+                                        mask_value = provider_masks.get(ratio_key)
+                                        if mask_value is None:
+                                            mask_value = provider_masks.get(key)
+                                        if mask_value is None and key in aliases:
+                                            mask_value = provider_masks.get(aliases[key])
+                                        if mask_value is None:
+                                            continue
+                                        provider_mask = np.asarray(mask_value, dtype=bool)
+                                        if (
+                                            provider_mask.ndim != 2
+                                            or provider_mask.shape[0] == 0
+                                            or provider_mask.shape[1] == 0
+                                        ):
+                                            continue
+                                        if provider_mask.shape != (H, W):
+                                            rows = np.clip(
+                                                np.floor((np.arange(H) + 0.5) * provider_mask.shape[0] / H).astype(int),
+                                                0,
+                                                provider_mask.shape[0] - 1,
+                                            )
+                                            cols = np.clip(
+                                                np.floor((np.arange(W) + 0.5) * provider_mask.shape[1] / W).astype(int),
+                                                0,
+                                                provider_mask.shape[1] - 1,
+                                            )
+                                            provider_mask = provider_mask[np.ix_(rows, cols)]
+                                        ratios[ratio_key] = (
+                                            float(np.count_nonzero(provider_mask & base_field_mask)) / field_count
+                                            if field_count else 0.0
+                                        )
+
+                                # Experimental candidate percentages are also
+                                # field-relative.  They were generated before
+                                # polygon masking, so their cached provenance
+                                # still used the bounding rectangle even though
+                                # the serialized mask no longer did.
+                                candidate_surface = next(
+                                    (
+                                        s for s in surfaces
+                                        if s.semantic_type == SurfaceType.EXPERIMENTAL_STRICT_FINE_DETAIL_CANDIDATE_MASK
+                                    ),
+                                    None,
+                                )
+                                if candidate_surface is not None:
+                                    candidate_values = np.asarray(candidate_surface.values, dtype=float)
+                                    candidate_denominator = int(np.count_nonzero(np.isfinite(candidate_values)))
+                                    candidate_count = int(np.count_nonzero(candidate_values > 0.5))
+                                    candidate_pct = (
+                                        100.0 * candidate_count / candidate_denominator
+                                        if candidate_denominator else 0.0
+                                    )
+                                    for experimental_surface in surfaces:
+                                        provenance = experimental_surface.provenance or {}
+                                        if "candidate_coverage_pct" not in provenance:
+                                            continue
+                                        provenance["candidate_coverage_pct"] = candidate_pct
+                                        provenance["candidate_cell_count"] = candidate_count
+                                        provenance["field_valid_cell_count"] = candidate_denominator
+                                        provenance["coverage_denominator"] = "field_geometry_valid_cells"
+                                        experimental_surface.provenance = provenance
+
+                                # Recompute the categorical resolution summary
+                                # from the polygon-clipped values.  Outside-plot
+                                # cells must not remain classified as a 10 m
+                                # fallback in the percentages or unique classes.
+                                resolution_surface = next(
+                                    (s for s in surfaces if s.semantic_type == SurfaceType.RESOLUTION_COVERAGE),
+                                    None,
+                                )
+                                if resolution_surface is not None:
+                                    resolution_values = np.asarray(resolution_surface.values, dtype=float)
+                                    finite_resolution = resolution_values[np.isfinite(resolution_values)]
+                                    if finite_resolution.size:
+                                        unique_resolution = sorted(
+                                            float(value) for value in np.unique(finite_resolution)
+                                        )
+                                        resolution_total = int(finite_resolution.size)
+                                        percentage_for = lambda value: round(
+                                            100.0 * float(np.count_nonzero(np.isclose(finite_resolution, value)))
+                                            / resolution_total,
+                                            2,
+                                        )
+                                        resolution_pct = {
+                                            "three_cm_external_ground_truth_pct": percentage_for(0.0),
+                                            "one_meter_advisory_pct": percentage_for(1.0),
+                                            "two_meter_production_pct": 0.0,
+                                            "three_meter_production_pct": 0.0,
+                                            "two_meter_model_assisted_pct": percentage_for(2.0),
+                                            "three_meter_model_assisted_pct": percentage_for(3.0),
+                                            "five_meter_production_pct": 0.0,
+                                            "ten_meter_fallback_pct": percentage_for(5.0),
+                                            "five_meter_model_assisted_pct": percentage_for(4.0),
+                                        }
+                                        provenance = resolution_surface.provenance or {}
+                                        provenance["unique_resolution_class_codes"] = unique_resolution
+                            for c in range(W):
+                                cx = min_lng + (c + 0.5) * lng_step
+                                _field_mask[r][c] = _point_in_polygon(cx, cy, poly_ring)
+                        # Apply the geographic field footprint at each surface's
+                        # own shape.  High-resolution products must not receive
+                        # only the top-left HxW portion of the base mask.
+                        base_field_mask = np.asarray(_field_mask, dtype=bool)
+                        for s in surfaces:
+                            s_h = len(s.values)
+                            s_w = len(s.values[0]) if s_h else 0
+                            if not s_h or not s_w:
+                                continue
+                            if (s_h, s_w) == (H, W):
+                                surface_field_mask = base_field_mask
+                            else:
+                                rows = np.clip(
+                                    np.floor((np.arange(s_h) + 0.5) * H / s_h).astype(int),
+                                    0,
+                                    H - 1,
+                                )
+                                cols = np.clip(
+                                    np.floor((np.arange(s_w) + 0.5) * W / s_w).astype(int),
+                                    0,
+                                    W - 1,
+                                )
+                                surface_field_mask = base_field_mask[np.ix_(rows, cols)]
+                            dependency_mask = is_render_dependency_surface(s)
+                            for r in range(s_h):
+                                for c in range(s_w):
+                                    if not surface_field_mask[r, c]:
+                                        s.values[r][c] = 0.0 if dependency_mask else None
+
+                        # VALID_DATA_MASK is geometry ∩ finite final NDVI, not
+                        # merely the finite IDW rectangle.
+                        ndvi_surface = next(
+                            (s for s in surfaces if s.semantic_type == SurfaceType.NDVI_CLEAN), None
+                        )
+                        valid_surface = next(
+                            (s for s in surfaces if s.semantic_type == SurfaceType.VALID_DATA_MASK_NDVI), None
+                        )
+                        if ndvi_surface is not None and valid_surface is not None:
+                            ndvi_values = np.asarray(ndvi_surface.values, dtype=float)
+                            prior_valid_values = (
+                                np.asarray(valid_surface.values, dtype=float) > 0.5
+                            )
+                            valid_values = (
+                                prior_valid_values
+                                & base_field_mask
+                                & np.isfinite(ndvi_values)
+                            )
+                            valid_surface.values = valid_values.astype(float).tolist()
+                            valid_surface.provenance["definition"] = (
+                                "trusted_source_support_intersection_field_geometry_finite_final_value"
+                            )
                             valid_surface.provenance["field_geometry_applied"] = True
 
                             # Reconcile all three canonical masks after the
@@ -2791,6 +3377,11 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         s_h = len(s.values)
         s_w = len(s.values[0]) if s_h > 0 else 0
         if is_high_resolution_surface(s):
+            # ``source_grid_spec`` is scientific lineage, not a description of
+            # the final display array.  ASMAE surfaces may arrive here after a
+            # genuine cross-CRS reprojection, so never replace an already
+            # recorded native grid with the browser/display grid.
+            incoming_grid_spec = dict(s.grid_spec) if isinstance(s.grid_spec, dict) else None
             array_resolution_m = float(
                 (getattr(s, "provenance", None) or {}).get("display_grid_resolution_m")
                 or (getattr(s, "provenance", None) or {}).get("computational_grid_resolution_m")
@@ -2804,13 +3395,15 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 for key in ("crs", "bounds", "transform", "width", "height", "resolution_m")
             }, sort_keys=True, default=str).encode("utf-8")).hexdigest()
             s.grid_spec = exp_grid_spec
-            s.source_grid_spec = dict(display_grid_spec)
+            if not isinstance(s.source_grid_spec, dict) or not s.source_grid_spec:
+                s.source_grid_spec = incoming_grid_spec or dict(display_grid_spec)
             s.display_grid_spec = dict(exp_grid_spec)
             s.grid_ref = f"{s_h}x{s_w}"
         else:
             if s.grid_spec is None:
                 s.grid_spec = dict(display_grid_spec)
-                s.source_grid_spec = None
+                if not isinstance(s.source_grid_spec, dict) or not s.source_grid_spec:
+                    s.source_grid_spec = None
                 s.display_grid_spec = dict(display_grid_spec)
             else:
                 s_spec = s.grid_spec
@@ -2819,7 +3412,8 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                     method = "nearest" if (s.semantic_type in [SurfaceType.RESOLUTION_COVERAGE, SurfaceType.RESOLUTION_ASMAE_EFFECTIVE] or "MASK" in s.semantic_type.value) else "bilinear"
                     align_surface_to_display_grid(s, display_grid_spec, method=method)
                 else:
-                    s.source_grid_spec = s_spec
+                    if not isinstance(s.source_grid_spec, dict) or not s.source_grid_spec:
+                        s.source_grid_spec = dict(s_spec)
                     s.display_grid_spec = dict(display_grid_spec)
 
     # --- Step 2: Structural detection ---
@@ -2845,97 +3439,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         except Exception:
             pass
 
-    # --- Step 3: Zone synthesis ---
-    # Use precomputed polygon mask for field_valid_cells (no second polygon scan)
-    if _field_mask is not None:
-        field_valid_cells = sum(1 for r in range(H) for c in range(W) if _field_mask[r][c])
-    else:
-        field_valid_cells = _compute_field_valid_cells(l10_input, H, W, surfaces)
-
-    if not render_as_spatial:
-        # Cell indices have no geographic meaning without a valid affine grid.
-        # Preserve a plot-level state marker, but do not spend time extracting
-        # or serialize polygons that would later be stretched to the plot bbox.
-        raw_zones = []
-        labeled_zones = []
-        zone_state_by_surface = {
-            "_SPATIAL": f"skipped_invalid_geospatial_grid:{grid_spec_status}",
-            "_MANAGEMENT": "plot_level_heterogeneity_notice_only",
-        }
-    else:
-        # Engine A: Alert zones (threshold + connected components)
-        raw_zones, zone_state_by_surface = extract_zones(
-            surfaces, H, W, field_valid_cells=field_valid_cells
-        )
-
-        # Engine B: Heterogeneity / management zones (Data-Driven from Surfaces)
-        try:
-            if is_quick_visual:
-                mgmt_zones, mgmt_meta = [], {"reason": "skipped in quick_visual mode"}
-            else:
-                mgmt_zones, mgmt_meta = extract_heterogeneity_zones(
-                    surfaces, H, W, n_zones=3, field_valid_cells=field_valid_cells
-                )
-            if mgmt_zones:
-                raw_zones.extend(mgmt_zones)
-                zone_state_by_surface['_MANAGEMENT'] = f'produced_{len(mgmt_zones)}_zones'
-            elif not is_quick_visual:
-                print(f"[Layer 10] Management zone engine returned 0 zones: {mgmt_meta}")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"[Layer 10] Warning: Management zone extraction failed: {e}")
-
-        labeled_zones = label_zones(
-            raw_zones, l10_input, H=H, W=W, field_valid_cells=field_valid_cells
-        )
-    observed_surface = next(
-        (s for s in surfaces if s.semantic_type == SurfaceType.OBSERVED_DATA_MASK_NDVI), None
-    )
-    gap_surface = next(
-        (s for s in surfaces if s.semantic_type == SurfaceType.GAP_FILL_MASK_NDVI), None
-    )
-    # Plot-level time-series dates cannot prove persistence of a particular
-    # spatial region. Promotion remains closed until aligned, content-distinct
-    # spatial rasters and per-zone overlap/persistence scores are available.
-    for zone in labeled_zones:
-        cells = [(r, c) for r, c in zone.cell_indices if 0 <= r < H and 0 <= c < W]
-        denominator = len(cells)
-        if denominator and observed_surface is not None:
-            zone.observed_cell_share = round(sum(
-                1 for r, c in cells if (observed_surface.values[r][c] or 0) > 0
-            ) / denominator, 4)
-        if denominator and gap_surface is not None:
-            zone.gap_filled_share = round(sum(
-                1 for r, c in cells if (gap_surface.values[r][c] or 0) > 0
-            ) / denominator, 4)
-        zone.grid_validity = "valid" if render_as_spatial else f"invalid:{grid_spec_status}"
-        fully_observed = zone.observed_cell_share >= 0.999 and zone.gap_filled_share <= 0.001
-        zone.authority = "algorithmic_scouting_region"
-        zone.authority_block_reason = (
-            f"invalid_geospatial_grid:{grid_spec_status}"
-            if not render_as_spatial
-            else "observed_pixel_coverage_incomplete"
-            if not fully_observed
-            else "multi_date_spatial_zone_persistence_unavailable"
-        )
-        zone.confidence_basis = list(zone.confidence_reasons or [
-            "surface_threshold_and_connected_components"
-        ]) + [
-            "management_promotion_blocked_without_aligned_spatial_persistence"
-        ]
-        if zone.authority != "management_zone":
-            # A partially observed scouting region cannot retain management-grade
-            # confidence merely because clustering itself was deterministic.
-            evidence_factor = max(0.0, min(1.0, zone.observed_cell_share))
-            zone.confidence = round(min(float(zone.confidence), 0.70 * evidence_factor), 4)
-        if zone.authority == "algorithmic_scouting_region" and not (zone.label or "").lower().startswith("algorithmic scouting"):
-            fallback_label = zone.zone_type.value.replace("_", " ").title()
-            zone.label = f"Algorithmic scouting region — {zone.label or fallback_label}"
-    performance_timers_ms["zones"] = round((time.perf_counter() - _phase_started) * 1000.0, 3)
-    topo_ok = validate_topology(labeled_zones)
-
-    # --- Step 4: Tag grounding classes ---
+    # --- Step 3: Tag grounding classes ---
     grid_bounds = getattr(getattr(l10_input.field_tensor, "grid_spec", None), "bounds", None)
     for s in surfaces:
         # Determine raster basis and observed ratio for this surface
@@ -2958,6 +3462,15 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 obs_ratio = ratios.get("ndvi", 0.0)
         elif "SALINITY" in s_type:
             # Salinity uses both ndvi and ndmi / vv
+            basis = [k for k in ["ndvi", "ndmi", "vv"] if k in l1_data.raster_maps]
+            obs_ratio = min([ratios.get(k, 0.0) for k in basis]) if basis else 0.0
+        elif "NUTRIENT" in s_type or s_type == "FERTILITY_LIMITATION":
+            basis = [
+                k for k in ["ndvi", "vv", "vh", "soil_clay", "soil_ph", "soil_org_carbon"]
+                if k in l1_data.raster_maps
+            ]
+            obs_ratio = min([ratios.get(k, 0.0) for k in basis]) if basis else 0.0
+        elif "RISK" in s_type:
             basis = [k for k in ["ndvi", "ndmi", "vv"] if k in l1_data.raster_maps]
             obs_ratio = min([ratios.get(k, 0.0) for k in basis]) if basis else 0.0
         elif "RESOLUTION" in s_type:
@@ -2985,8 +3498,41 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             if k in ratios:
                 optical_ratio = min(optical_ratio, ratios[k])
 
-        # Assign grounding class based on raster availability and observed ratio
-        if is_high_resolution_surface(s):
+        # P0-D: ASMAE state support class overrides
+        prov = s.provenance or {}
+        supp_cls = prov.get("support_class") or prov.get("state_support_class")
+        if (
+            s_type.startswith("ASMAE_")
+            or "ASMAE" in s_type
+            or s_type.startswith("COMPOSITE_")
+        ):
+            if apply_composite_scouting_grounding(s, unique_count):
+                pass
+            elif supp_cls == "derived_diagnostic":
+                s.observed_ratio = 0.0
+                s.grounding_class = (
+                    GroundingClass.MODEL_ASSISTED_RASTER.value
+                    if unique_count > 1
+                    else GroundingClass.UNIFORM.value
+                )
+                prov["direct_observation"] = False
+                prov["management_zone_eligible"] = False
+                prov["zone_statistics_eligible"] = False
+                if unique_count <= 1:
+                    prov["scope"] = "plot_level"
+                    prov["constant_allowed"] = True
+            elif supp_cls == "prior_constrained" or prov.get("zone_statistics_eligible") is False:
+                s.observed_ratio = 0.0
+                s.grounding_class = GroundingClass.UNIFORM.value
+                prov["zone_statistics_eligible"] = False
+            elif supp_cls == "proxy_assimilated":
+                s.observed_ratio = 0.0
+                s.grounding_class = GroundingClass.PROXY_SPATIAL.value
+                prov["zone_statistics_eligible"] = True
+            elif supp_cls == "directly_assimilated":
+                s.grounding_class = GroundingClass.RASTER_GROUNDED.value
+                prov["zone_statistics_eligible"] = True
+        elif is_high_resolution_surface(s):
             s.grounding_class = GroundingClass.MODEL_ASSISTED_RASTER.value
         elif "RESOLUTION" in s_type:
             if basis:
@@ -3019,24 +3565,36 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             else:
                 s.grounding_class = GroundingClass.PROXY_SPATIAL.value
 
-        # Attach grid bounds for exact frontend coordinate alignment
-        if grid_bounds:
-            if not s.provenance:
-                s.provenance = {}
-            s.provenance["grid_bounds"] = list(grid_bounds)
+        from services.agribrain.layer10_sire.surfaces.derivation_lineage import (
+            attach_derived_surface_lineage,
+        )
+        attach_derived_surface_lineage(s, l1_data)
 
-    # --- Step 5: Histograms (field + zone + uncertainty + delta + compare) ---
-    _phase_started = time.perf_counter()
-    surfaces = sanitize_surface_values(surfaces)
-
-    field_hists = []
-    zone_hists = []
+    # --- Step 4: Extract management zones & compute histograms ---
+    field_valid_cells = _compute_field_valid_cells(l10_input, H, W, surfaces)
+    labeled_zones = []
+    zone_state_by_surface = {}
     unc_hists_typed = []
     delta_hists = []
     comparisons = []
     topo_warnings = []
+    topo_ok = True
+
+    if render_as_spatial:
+        try:
+            labeled_zones, zone_state_by_surface = extract_zones(
+                surfaces, H, W, field_valid_cells=field_valid_cells
+            )
+        except Exception as e:
+            topo_ok = False
+            logger.warning(f"Zone extraction failed: {e}")
+            topo_warnings.append(json.dumps({
+                "warning": "zone_extraction_failed",
+                "reason": str(e)
+            }))
 
     # Field Histograms
+    field_hists = []
     try:
         field_hists = compute_field_histograms(surfaces, field_valid_cells=field_valid_cells)
     except Exception as e:
@@ -3048,8 +3606,9 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         }))
 
     # Zone Histograms
+    zone_hists = []
     try:
-        if render_as_spatial:
+        if render_as_spatial and labeled_zones:
             zone_hists = compute_zone_histograms(surfaces, labeled_zones)
     except Exception as e:
         logger.warning(f"Zone histogram generation failed: {e}")
@@ -3233,6 +3792,8 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         zone_state_by_surface=zone_state_by_surface,
         missing_upstream=missing,
         warnings=topo_warnings,
+        component_failures=component_failures,
+        degradation_codes=list(dict.fromkeys(degradation_codes)),
     )
 
     # Fix A: compute NDVI surface mean for phenology stage fallback before building provenance dict
@@ -3245,7 +3806,12 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
     if _prov_ndvi_surf is not None:
         _pv = [v for row in (_prov_ndvi_surf.values or []) for v in row if v is not None]
         _prov_ndvi_mean = sum(_pv) / len(_pv) if _pv else None
-    _prov_pheno_stage = _resolve_phenology_stage(l10_input.veg_int, _prov_ndvi_mean)
+    _phenology_context = _resolve_phenology_context(
+        l10_input.veg_int,
+        _prov_ndvi_mean,
+        crop=getattr(l10_input, "crop", "") or "",
+    )
+    _prov_pheno_stage = _phenology_context["resolved_crop_stage"]
 
     output = Layer10Output(
         run_id=run_id,
@@ -3262,6 +3828,8 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         render_manifest=manifest,
         quicklooks=quicklook_map,
         quality_report=quality,
+        resolved_crop_stage=_prov_pheno_stage,
+        phenology_context=_phenology_context,
         provenance={
             "pipeline": "SIRE_v11.0",
             "agribrain_run_id": run_id,
@@ -3277,6 +3845,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             "publication_id": f"pub_{cache_key[:16]}",
             "ndvi_mask_diagnostic": ndvi_mask_diagnostic,
             "policy_model": "canonical_science_with_client_views",
+            "visual_fusion_materialization": visual_fusion_materialization,
             "degradation": degradation.value,
             "visual_intensity": getattr(l10_input, "visual_intensity", 0.40),
             "grid": f"{H}x{W}@{l10_input.resolution_m}m",
@@ -3291,7 +3860,11 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             ),
             # GAP 4 + Fix A: reconciled stage with surface-mean fallback so the
             # UI always shows an agronomically correct stage, even with empty Kalman records.
+            # Compatibility alias only. ``resolved_crop_stage`` and its context
+            # are the canonical publication/browser authority.
             "phenology_stage": _prov_pheno_stage,
+            "resolved_crop_stage": _prov_pheno_stage,
+            "phenology_context": _phenology_context,
             "grounding_summary": {
                 gc: sum(1 for s in surfaces if s.grounding_class == gc)
                 for gc in [g.value for g in GroundingClass]
@@ -3367,6 +3940,13 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
     asmae_state = dict(getattr(l1_data, "asmae_evidence_state", {}) or getattr(l10_input, "asmae_evidence_state", {}) or {})
     asmae_diag_only = bool(asmae_state.get("diagnostic_only", True))
     asmae_prod_usable = bool(asmae_state.get("production_usable", False))
+    if asmae_diag_only:
+        output.quality_report.degradation_codes.append("DIAGNOSTIC_AUTHORITY_ONLY")
+    if not asmae_prod_usable:
+        output.quality_report.degradation_codes.append("PRODUCTION_USE_NOT_AUTHORIZED")
+    output.quality_report.degradation_codes = list(dict.fromkeys(
+        output.quality_report.degradation_codes
+    ))
     if asmae_diag_only or not asmae_prod_usable:
         output.quality_report.reliability_score = min(
             output.quality_report.reliability_score, 0.48
@@ -3537,7 +4117,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             "RESOLUTION_COVERAGE", "GAP_FILL_MASK",
             "CANOPY_ASMAE_VIGOR", "WATER_ASMAE_CANOPY_WATER", "WATER_ASMAE_ROOT_ZONE_WATER",
             "NUTRIENT_ASMAE_CHLOROPHYLL_PROXY", "SALINITY_ASMAE_STRESS", "RISK_ASMAE_DIAGNOSTIC",
-            "CONFIDENCE_ASMAE", "RESOLUTION_ASMAE_EFFECTIVE", "ASMAE_VISUAL_FUSION_CANOPY",
+            "ASMAE_POSTERIOR_CONCENTRATION", "RESOLUTION_ASMAE_EFFECTIVE", "ASMAE_VISUAL_FUSION_CANOPY",
             "COMPOSITE_ADVISORY_CANOPY", "COMPOSITE_VEG_ATTENTION",
             "COMPOSITE_WATER_SUPPORT", "COMPOSITE_NUTRIENT_SUPPORT",
             "COMPOSITE_SALINITY_STRESS", "COMPOSITE_RISK_DIAGNOSTIC",
@@ -3641,10 +4221,10 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                         fallback_surf = "COMPOSITE_CONFIDENCE"
                         fallback_class = "asmae_diagnostic"
                         reason = f"{st} missing; using composite confidence"
-                    elif "CONFIDENCE_ASMAE" in surface_by_type:
-                        fallback_surf = "CONFIDENCE_ASMAE"
+                    elif "ASMAE_POSTERIOR_CONCENTRATION" in surface_by_type:
+                        fallback_surf = "ASMAE_POSTERIOR_CONCENTRATION"
                         fallback_class = "asmae_diagnostic"
-                        reason = f"{st} missing; using CONFIDENCE_ASMAE diagnostic confidence"
+                        reason = f"{st} missing; using canonical ASMAE posterior concentration"
                 elif st == "RESOLUTION_COVERAGE":
                     if "COMPOSITE_EFFECTIVE_RESOLUTION" in surface_by_type:
                         fallback_surf = "COMPOSITE_EFFECTIVE_RESOLUTION"
@@ -3707,7 +4287,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 ("raster", "DATA_RELIABILITY"),
                 ("raster", "DATA_CONFIDENCE"),
                 ("raster", "UNCERTAINTY_SIGMA"),
-                ("asmae_diagnostic", "CONFIDENCE_ASMAE"),
+                ("asmae_diagnostic", "ASMAE_POSTERIOR_CONCENTRATION"),
             ],
             "resolution_coverage": [
                 ("raster", "RESOLUTION_COVERAGE"),
@@ -3878,12 +4458,48 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             base_label = MODE_LABELS.get(mode_key, mode_key)
             level_suffix = LEVEL_LABEL_SUFFIX.get(resolved_level, "")
             label = f"{base_label} · {level_suffix}" if level_suffix else base_label
-            
+
+            resolved_provenance = (
+                getattr(resolved_surface, "provenance", {}) or {}
+                if resolved_surface is not None else {}
+            )
+            if not isinstance(resolved_provenance, dict):
+                resolved_provenance = {}
+            resolved_source_reality = str(
+                resolved_provenance.get("source_reality") or ""
+            ).lower()
+            is_authoritative_provider_raster = (
+                resolved_source_reality in {
+                    "provider_temporal_composite_raster",
+                    "real_provider_raster",
+                    "real_raster",
+                    "full_scene_stack",
+                }
+                and resolved_provenance.get("production_usable") is True
+                and resolved_provenance.get("real_provider_product") is True
+                and resolved_provenance.get("diagnostic_only") is not True
+            )
+            if is_authoritative_provider_raster:
+                raster_reason = (
+                    f"Observed provider {base_label.lower()} raster; final display "
+                    "follows source-policy authorization."
+                )
+            elif resolved_source_reality:
+                raster_reason = (
+                    f"Pixel-level {base_label.lower()} raster candidate from "
+                    f"{resolved_source_reality}; final display follows source-policy authorization."
+                )
+            else:
+                raster_reason = (
+                    f"Pixel-level {base_label.lower()} raster candidate; source "
+                    "grounding is not verified and final display requires authorization."
+                )
+
             LEVEL_REASONS = {
-                "raster": f"Certified pixel-level {base_label.lower()} raster.",
+                "raster": raster_reason,
                 "asmae_diagnostic": f"ASMAE diagnostic {base_label.lower()} layer. Not direct satellite observation.",
                 "proxy": f"Proxy {base_label.lower()} estimate.",
-                "plot_level": f"No certified pixel-level raster; using plot-level {base_label.lower()} estimate.",
+                "plot_level": f"No authorized pixel-level raster; using plot-level {base_label.lower()} estimate.",
                 "visual_only": f"No agronomic {base_label.lower()} surface available; showing visual context.",
                 "unavailable": f"No {base_label.lower()} data available.",
             }
@@ -3914,7 +4530,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 "nutrient_risk": ("ASMAE_CHLOROPHYLL", "NUTRIENT_ASMAE_CHLOROPHYLL_PROXY"),
                 "salinity": ("ASMAE_SALINITY_STRESS", "SALINITY_ASMAE_STRESS"),
                 "composite_risk": (None, "RISK_ASMAE_DIAGNOSTIC"),
-                "uncertainty": (None, "CONFIDENCE_ASMAE"),
+                "uncertainty": (None, "ASMAE_POSTERIOR_CONCENTRATION"),
                 "resolution_coverage": (None, "RESOLUTION_ASMAE_EFFECTIVE"),
                 "veg_attention": ("ASMAE_CROSS_LAYER_CONFLICT", "VEG_ATTENTION_ASMAE_DIAGNOSTIC"),
             }
@@ -4043,7 +4659,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 "nutrient_risk": {"NUTRIENT_ASMAE_CHLOROPHYLL_PROXY"},
                 "salinity": {"SALINITY_ASMAE_STRESS"},
                 "composite_risk": {"RISK_ASMAE_DIAGNOSTIC"},
-                "uncertainty": {"CONFIDENCE_ASMAE"},
+                "uncertainty": {"ASMAE_POSTERIOR_CONCENTRATION"},
                 "resolution_coverage": {"RESOLUTION_ASMAE_EFFECTIVE"},
                 "veg_attention": {"VEG_ATTENTION_ASMAE_DIAGNOSTIC", "VEG_ATTENTION_ASMAE_CONFLICT", "VEG_ATTENTION_ASMAE_DISAGREEMENT"},
             }
@@ -4414,6 +5030,204 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             "authority": "scouting_only"
         }
 
+        # ── V92.4-BC.8.1: Build source_policy_display_state ─────────────
+        requested_policy = l10_input.source_policy or "satellite"
+        if requested_policy == "asmae":
+            requested_policy = "asmae_diagnostic"
+        resolved_policy = requested_policy
+        fallback_reason = None
+        one_meter_advisory_coverage_pct = None
+        one_meter_physics_coverage_pct = None
+        model_assisted_2_5m_coverage_pct = None
+        generalized_5m_coverage_pct = None
+
+        ctx_pkg = getattr(l10_input.field_tensor, "_context_package", None) if l10_input.field_tensor else None
+        asmae_output = getattr(ctx_pkg, "asmae_output", None) if ctx_pkg else None
+        run_rec = getattr(l1_data, "asmae_run_record", None)
+        plot_state_artifact = dict(
+            getattr(output, "asmae_plot_state_artifact", {}) or {}
+        )
+        plot_state_available = bool(
+            plot_state_artifact
+            and plot_state_artifact.get("state_availability") != "UNAVAILABLE"
+        )
+
+        if requested_policy in ("asmae_diagnostic", "hybrid"):
+            # Check if ASMAE is degraded or failed
+            is_degraded = False
+            error_msg = ""
+            diag_asmae = {}
+            status_val = None
+            prod_usable = False
+
+            if asmae_output is not None:
+                if isinstance(asmae_output, dict):
+                    diag_asmae = asmae_output.get("diagnostics") or {}
+                    status_val = asmae_output.get("status")
+                    prod_usable = asmae_output.get("production_usable", True)
+                else:
+                    diag_asmae = getattr(asmae_output, "diagnostics", {}) or {}
+                    status_val = getattr(asmae_output, "status", None)
+                    prod_usable = getattr(asmae_output, "production_usable", True)
+
+                is_progressive_fallback = diag_asmae.get("progressive_fallback", False) if isinstance(diag_asmae, dict) else False
+
+                if status_val == "degraded" or not prod_usable or is_progressive_fallback or (isinstance(diag_asmae, dict) and diag_asmae.get("chain_integrity_error")):
+                    is_degraded = True
+                    error_msg = diag_asmae.get("chain_integrity_message", "") if isinstance(diag_asmae, dict) else ""
+
+                if isinstance(diag_asmae, dict):
+                    one_meter_advisory_coverage_pct = diag_asmae.get("one_meter_advisory_coverage_pct")
+                    one_meter_physics_coverage_pct = diag_asmae.get("one_meter_physics_coverage_pct")
+                    model_assisted_2_5m_coverage_pct = diag_asmae.get("model_assisted_2_5m_coverage_pct")
+                    generalized_5m_coverage_pct = diag_asmae.get("generalized_5m_coverage_pct")
+
+            # Check run record status too
+            run_status = run_rec.get("status") if isinstance(run_rec, dict) else None
+            if run_status in ("skipped", "failed"):
+                is_degraded = True
+
+            if is_degraded:
+                if error_msg:
+                    import re
+                    if "BUDGET OVERRUN" in error_msg or "timeout" in error_msg.lower():
+                        fallback_reason = "asmae_quick_visual_timeout"
+                    elif "coverage" in error_msg.lower() or "gate" in error_msg.lower():
+                        fallback_reason = "asmae_low_coverage"
+                    else:
+                        fallback_reason = "asmae_chain_integrity_violation"
+
+                    if one_meter_advisory_coverage_pct is None:
+                        match = re.search(r"coverage is ([\d\.]+)%", error_msg)
+                        if match:
+                            one_meter_advisory_coverage_pct = float(match.group(1))
+                elif isinstance(diag_asmae, dict) and diag_asmae.get("fallback_reason") == "asmae_quick_visual_timeout":
+                    fallback_reason = "asmae_quick_visual_timeout"
+                elif plot_state_available:
+                    fallback_reason = (
+                        "asmae_spatial_authority_denied_plot_state_available"
+                        if plot_state_artifact.get("spatial_raster_available")
+                        else "asmae_spatial_unavailable_plot_state_available"
+                    )
+                elif isinstance(run_rec, dict):
+                    if run_rec.get("status") == "skipped":
+                        fallback_reason = run_rec.get("reason") or "rollout_disabled"
+                    elif run_rec.get("status") == "failed":
+                        fallback_reason = "asmae_execution_error"
+                    else:
+                        fallback_reason = "asmae_not_available"
+                else:
+                    fallback_reason = "asmae_not_available"
+
+                if fallback_reason == "asmae_quick_visual_timeout":
+                    if has_real_asmae:
+                        resolved_policy = "hybrid_pending"
+                    else:
+                        resolved_policy = "satellite_fallback"
+                else:
+                    resolved_policy = "satellite_fallback"
+            else:
+                is_cache_hit = False
+                if isinstance(asmae_output, dict):
+                    is_cache_hit = asmae_output.get("cache_status") == "hit"
+                elif asmae_output:
+                    is_cache_hit = getattr(asmae_output, "cache_status", None) == "hit"
+
+                if is_quick_visual and is_cache_hit:
+                    resolved_policy = "hybrid_cached"
+                    fallback_reason = "using_last_good_asmae_cache_while_refreshing"
+                else:
+                    resolved_policy = requested_policy
+
+        # Check if real ASMAE evidence is present:
+        ev_state = output.asmae_evidence_state or {}
+
+        has_real_asmae_fusion = any(
+            (s.semantic_type.value if hasattr(s.semantic_type, "value") else str(s.semantic_type)) == "ASMAE_VISUAL_FUSION_CANOPY"
+            for s in surfaces
+        )
+        has_experimental = any(
+            _surface_type_name(s).upper().startswith("EXPERIMENTAL_")
+            or _surface_type_name(s).upper().endswith("_EXPERIMENTAL_FINE_DETAIL")
+            for s in surfaces
+        )
+
+        diagnostic_spatial_available = bool(
+            ev_state.get("spatial_raster_available") is True
+            or ev_state.get("spatial_materialization_allowed") is True
+            or ev_state.get("current_spatial_assimilation") is True
+            or ev_state.get("visualization_allowed") is True
+        )
+        has_diagnostic_asmae_surface = any(
+            _surface_type_name(surface) in ("CANOPY_ASMAE_VIGOR", "COMPOSITE_ADVISORY_CANOPY", "ASMAE_VISUAL_FUSION_CANOPY")
+            for surface in surfaces
+        )
+
+        if requested_policy in ("asmae_diagnostic", "hybrid"):
+            # Diagnostic visualization is a distinct authority tier.  A
+            # current, materialized posterior may be shown even when exact
+            # product identity, retrovalidation, BMA, or production gates are
+            # unavailable.  Those missing proofs still prohibit state or
+            # prescription authority below.
+            if diagnostic_spatial_available and has_diagnostic_asmae_surface:
+                resolved_policy = requested_policy
+                fallback_reason = None
+            elif has_real_asmae_fusion:
+                resolved_policy = requested_policy
+            elif fallback_reason is not None:
+                resolved_policy = "satellite_fallback"
+            elif has_composite_asmae:
+                resolved_policy = "composite_advisory"
+                fallback_reason = None
+            elif has_experimental:
+                resolved_policy = "experimental_fallback"
+            else:
+                resolved_policy = "satellite_fallback"
+
+        has_real_asmae_evidence = False
+        if ev_state and isinstance(ev_state, dict):
+            state = ev_state.get("state")
+            if state in ("full_scene_stack", "archive_backed_asmae", "diagnostic_spatial_posterior", "diagnostic_overlay"):
+                has_real_asmae_evidence = True
+
+        if resolved_policy == "satellite_fallback" and not (requested_policy == "asmae_diagnostic" and has_real_asmae_evidence):
+            has_real_asmae_evidence = False
+
+
+        # Experimental display ledger. Display sampling and evidence resolution
+        # are separate facts; no display grid is promoted to evidence support.
+        unvalidated_candidate_pct = 0.0
+        candidate_surf = next((s for s in surfaces if (s.semantic_type.value if hasattr(s.semantic_type, "value") else str(s.semantic_type)) == "EXPERIMENTAL_STRICT_FINE_DETAIL_CANDIDATE_MASK"), None)
+        if candidate_surf is not None:
+            candidate_provenance = candidate_surf.provenance or {}
+            unvalidated_candidate_pct = float(candidate_provenance.get("candidate_coverage_pct", 0.0) or 0.0)
+        else:
+            exp_adv_surf = next((s for s in surfaces if (s.semantic_type.value if hasattr(s.semantic_type, "value") else str(s.semantic_type)) == "EXPERIMENTAL_FINE_DETAIL_CANDIDATE"), None)
+            if exp_adv_surf is not None:
+                prov_adv = exp_adv_surf.provenance or {}
+                unvalidated_candidate_pct = float(prov_adv.get("candidate_coverage_pct", 0.0) or 0.0)
+
+        unvalidated_candidate_pct = round(float(np.clip(unvalidated_candidate_pct, 0.0, 100.0)), 1)
+        selected_highres = next((
+            s for s in surfaces
+            if _surface_type_name(s) == "NDVI_CLEAN_EXPERIMENTAL_FINE_DETAIL"
+        ), None)
+        selected_provenance = (selected_highres.provenance or {}) if selected_highres else {}
+        source_evidence_resolution_m = float(selected_provenance.get("source_evidence_resolution_m", l10_input.resolution_m))
+        display_grid_resolution_m = float(selected_provenance.get("display_grid_resolution_m", source_evidence_resolution_m))
+        display_grid_footprint_pct = 100.0 if selected_highres is not None else 0.0
+
+        experimental_visual_ladder = {
+            "sourceEvidenceResolutionM": round(source_evidence_resolution_m, 2),
+            "displayGridResolutionM": round(display_grid_resolution_m, 2),
+            "displayGridFootprintPct": display_grid_footprint_pct,
+            "textureAppliedPct": unvalidated_candidate_pct,
+            "unvalidatedCandidatePct": unvalidated_candidate_pct,
+            "validatedFineDetailPct": 0.0,
+            "fieldApproved1mPct": 0.0,
+            "authority": "scouting_only"
+        }
+
         if has_real_asmae_evidence and one_meter_advisory_coverage_pct is not None:
             asmae_approval_ladder = {
                 "oneMeterAsmaeApprovalPct": one_meter_advisory_coverage_pct,
@@ -4437,7 +5251,57 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             materialization_block_reason = "experimental_surface_absent"
             experimental_visual_ladder = None
 
+        plot_posterior = dict(plot_state_artifact.get("posterior") or {})
+        state_support_classes = {
+            "directlyAssimilated": [],
+            "proxyAssimilated": [],
+            "assimilated": [],
+            "indirectlyConstrained": [],
+            "priorConstrained": [],
+            "unsupported": [],
+        }
+        for state_name, estimate in plot_posterior.items():
+            if not isinstance(estimate, dict):
+                state_support_classes["unsupported"].append(state_name)
+                continue
+            raw_status = str(
+                estimate.get("support_status") or estimate.get("status") or ""
+            ).strip()
+            status = (
+                normalize_status(
+                    raw_status,
+                    producer="layer10_plot_state_support_classes",
+                )
+                if raw_status
+                else StateSupportStatus.PRIOR_CONSTRAINED
+            )
+            raw_accepted_updates = estimate.get(
+                "accepted_update_count", estimate.get("accepted_updates", 0)
+            )
+            accepted_updates = (
+                len(raw_accepted_updates)
+                if isinstance(raw_accepted_updates, (list, tuple, set))
+                else int(raw_accepted_updates or 0)
+            )
+            relationship = str(estimate.get("observation_relationship", "none") or "none").lower()
+            if accepted_updates > 0 and relationship == "direct":
+                state_support_classes["directlyAssimilated"].append(state_name)
+                state_support_classes["assimilated"].append(state_name)
+            elif accepted_updates > 0 and relationship == "proxy":
+                state_support_classes["proxyAssimilated"].append(state_name)
+            elif accepted_updates > 0 and relationship == "indirect":
+                state_support_classes["indirectlyConstrained"].append(state_name)
+            elif accepted_updates > 0:
+                state_support_classes["assimilated"].append(state_name)
+            elif status == StateSupportStatus.UNSUPPORTED:
+                state_support_classes["unsupported"].append(state_name)
+            else:
+                state_support_classes["priorConstrained"].append(state_name)
+
         source_policy_display_state = {
+            "scientific_execution_policy": "canonical",
+            "scientific_execution_policy_note": "One canonical scientific run; source policy selects only the browser display view.",
+            "publication_requested_display_policy": requested_policy,
             "requested_policy": requested_policy,
             "resolved_policy": resolved_policy,
             "fallback_reason": fallback_reason,
@@ -4450,6 +5314,16 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             "asmaeApprovalLadder": asmae_approval_ladder,
             "asmaePlotState": {
                 "available": plot_state_available,
+                "effectiveDate": (
+                    plot_state_artifact.get("as_of")
+                    or ev_state.get("as_of")
+                    or ev_state.get("spatial_evidence_cutoff")
+                ),
+                "belief_valid_time": (
+                    plot_state_artifact.get("as_of")
+                    or ev_state.get("as_of")
+                    or ev_state.get("spatial_evidence_cutoff")
+                ),
                 "stateAvailability": plot_state_artifact.get(
                     "state_availability", "UNAVAILABLE"
                 ),
@@ -4459,25 +5333,22 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 "spatialAvailable": bool(
                     plot_state_artifact.get("spatial_raster_available", False)
                 ),
-                "posterior": dict(plot_state_artifact.get("posterior") or {}),
-                "supportedStates": [
-                    state for state, estimate in dict(
-                        plot_state_artifact.get("posterior") or {}
-                    ).items()
-                    if isinstance(estimate, dict)
-                    and normalize_status(str(estimate.get("status", "") or ""), producer="layer10_supported_states") != StateSupportStatus.UNSUPPORTED
-                ],
-                "unsupportedStates": [
-                    state for state, estimate in dict(
-                        plot_state_artifact.get("posterior") or {}
-                    ).items()
-                    if not isinstance(estimate, dict)
-                    or normalize_status(str(estimate.get("status", "") or ""), producer="layer10_unsupported_states") == StateSupportStatus.UNSUPPORTED
-                ],
-                "effectiveDate": plot_state_artifact.get("as_of"),
-                "archiveAgeDays": plot_state_artifact.get("stale_age_days"),
-                "contentHash": plot_state_artifact.get("content_hash"),
-                "reason": plot_state_artifact.get("reason"),
+                "posterior": plot_posterior,
+                "stateSupportClasses": state_support_classes,
+                "directlyAssimilatedStates": state_support_classes["directlyAssimilated"],
+                "proxyAssimilatedStates": state_support_classes["proxyAssimilated"],
+                "assimilatedStates": state_support_classes["assimilated"],
+                "indirectlyConstrainedStates": state_support_classes["indirectlyConstrained"],
+                "priorConstrainedStates": state_support_classes["priorConstrained"],
+                # Backward-compatible, but now scientifically narrow: only states
+                # with accepted observation updates are called supported.
+                "supportedStates": (
+                    state_support_classes["directlyAssimilated"]
+                    + state_support_classes["proxyAssimilated"]
+                    + state_support_classes["assimilated"]
+                    + state_support_classes["indirectlyConstrained"]
+                ),
+                "unsupportedStates": state_support_classes["unsupported"],
                 "spatialSupersession": dict(
                     ev_state.get("spatial_supersession") or {}
                 ),
@@ -4563,7 +5434,6 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         output.surface_behavior_proof = surface_behavior_proof
         raw_asmae_proof = getattr(l1_data, "asmae_proof", None) or getattr(l10_input, "asmae_proof", None)
         if not raw_asmae_proof or not isinstance(raw_asmae_proof, dict) or len(raw_asmae_proof) == 0:
-            from services.agribrain.layer10_sire.surface_contract import build_default_asmae_proof
             raw_asmae_proof = build_default_asmae_proof()
         output.asmae_proof = raw_asmae_proof
         if not getattr(output, "asmae_feature_pack", None):
@@ -4613,7 +5483,12 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         asmae_production_usable = bool(
             output.asmae_evidence_state.get("production_usable") is True
         )
-        raw_ledger = output.asmae_proof.get("state_support_ledger")
+        feature_pack = output.asmae_feature_pack or {}
+        raw_ledger = (
+            feature_pack.get("state_support_ledger")
+            if "state_support_ledger" in feature_pack
+            else output.asmae_proof.get("state_support_ledger")
+        )
         state_support_ledger = index_state_support_ledger(raw_ledger) if raw_ledger is not None else {}
         
         sentinel_count = (output.asmae_proof.get("sentinel_proof", {}).get("s2_real_scene_count", 0) + 
@@ -4710,7 +5585,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 t.startswith("NUTRIENT_ASMAE") or
                 t.startswith("SALINITY_ASMAE") or
                 t.startswith("RISK_ASMAE") or
-                t.startswith("CONFIDENCE_ASMAE") or
+                t.startswith("ASMAE_POSTERIOR_CONCENTRATION") or
                 t.startswith("RESOLUTION_ASMAE") or
                 t.startswith("VEG_ATTENTION_ASMAE")
             )
@@ -5144,7 +6019,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                     }
 
         output.render_authorizations = render_authorizations
-        output.render_authorization_version = "v924_bc10_18_render_auth_v1"
+        output.render_authorization_version = RENDER_AUTHORIZATION_VERSION
 
         # Reconcile the summary mode cards with the same exact policy/role
         # entry that the renderer consumes.  This prevents a mode card from
@@ -5258,6 +6133,9 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
     output.provenance["publication_id"] = output.publication_id
     output.provenance["surface_schema_version"] = SURFACES_SCHEMA_VERSION
     output.provenance["layer10_publication_schema_version"] = LAYER10_PUBLICATION_SCHEMA_VERSION
+    reconcile_durable_asmae_job_before_publication(
+        output, l10_input.plot_namespace
+    )
     derived_publication_status, _publication_reason = classify_surface_publication(output)
     output.publication_status = derived_publication_status
     output.provenance["publication_status"] = derived_publication_status

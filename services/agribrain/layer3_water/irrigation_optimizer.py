@@ -3,6 +3,7 @@ Layer 3.4: Irrigation Optimization Engine
 Recommends irrigation events based on depletion thresholds.
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 from typing import Dict, Any
@@ -11,6 +12,12 @@ from datetime import timedelta
 class IrrigationOptimizer:
     
     def __init__(self):
+        warnings.warn(
+            "IrrigationOptimizer is deprecated as of Layer 3.0. "
+            "Use layer3_water.decision.MPCPrescriptiveOptimizer for canonical prescriptive optimization.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # Application Efficiencies
         self.efficiencies = {
             "drip": 0.95,

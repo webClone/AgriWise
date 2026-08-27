@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..schema import ASMAESceneRuntime
+from ..scene_admission import scene_quality_admission
 from .scene_quality import (
     SceneQualityResult,
     compute_clear_pixel_fraction,
@@ -95,6 +96,11 @@ def _process_s1_package(
     if candidate.reality in ["unavailable"]:
         if os.environ.get("ASMAE_TEST_OVERRIDE") != "true":
             return None
+
+    admitted, admission_reason, _ = scene_quality_admission(candidate)
+    if not admitted:
+        logger.warning("S1 candidate rejected by shared scene admission: %s", admission_reason)
+        return None
 
     scene_id = candidate.scene_id or ""
     acq_dt = candidate.acquisition_datetime

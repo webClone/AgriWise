@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
       crop,
       polygon,
       plant_date,
-      crop_stage_label,
+      crop_administrative_status,
       irrigation_type,
       soil_type,
       soil_analysis,
@@ -69,7 +69,7 @@ export async function POST(request: NextRequest) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        lat, lng, crop, polygon, plant_date, crop_stage_label,
+        lat, lng, crop, polygon, plant_date, crop_administrative_status,
         irrigation_type, soil_type, soil_analysis, physical_constraints,
         area_ha, sensor_readings,
         expert_mode: true,

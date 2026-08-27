@@ -30,6 +30,7 @@ from .label_schema import (
     CropLabel,
     LabelQualityScore,
     SOURCE_TRUST,
+    TRAINING_ELIGIBLE_LABEL_SOURCES,
     FEATURE_VECTOR_VERSION,
 )
 
@@ -165,6 +166,10 @@ def compute_label_quality(
 
     # 4. Source trust
     trust = SOURCE_TRUST.get(label.label_source, 0.5)
+    if label.label_source not in TRAINING_ELIGIBLE_LABEL_SOURCES:
+        warnings.append("source_not_training_eligible")
+    if not getattr(label, "authority_validated", False):
+        warnings.append("label_authority_not_validated")
 
     # 5. Freshness
     freshness = _compute_freshness(label.created_at)

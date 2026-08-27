@@ -260,7 +260,7 @@ class OptimizationEngine:
 
         if action.value.startswith("APPLY_"):
             optimal_rate, response_model_used, response_params_used = self._compute_optimal_rate(
-                nutrient, crop_lower, management_goal, constraints)
+                nutrient, crop_lower, management_goal, constraints, swb_out)
 
             # Confidence adjustment: if low confidence, reduce rate
             if state.confidence < 0.5:
@@ -340,6 +340,7 @@ class OptimizationEngine:
 
     def _compute_optimal_rate(
         self, nutrient: Nutrient, crop: str, goal: str, constraints: Dict,
+        swb_out: Any = None,
     ) -> Tuple[float, str, Dict]:
         """Compute economically optimal nutrient rate."""
         nut_rp = _get_response_params(crop, nutrient.value)
@@ -407,7 +408,7 @@ class OptimizationEngine:
             soc_ceiling = opt_rate
 
             # Environmental ceiling: reduce in high-risk conditions
-            if hasattr(swb_out, "leaching_risk_index") and swb_out is not None:
+            if swb_out is not None and hasattr(swb_out, "leaching_risk_index"):
                 leach_risk = getattr(swb_out, "leaching_risk_index", 0)
                 if leach_risk > 0.5:
                     # High leaching: cap at 80% to reduce environmental loss

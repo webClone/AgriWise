@@ -5,6 +5,7 @@ import { useLayer10 } from "@/hooks/useLayer10";
 import { usePlotIntelligence } from "@/hooks/usePlotIntelligence";
 import { OverlayKind } from "@/lib/agribrain/plot-map-evidence-state";
 import type { SourcePolicy } from "@/lib/agribrain/layer10-request-state.mjs";
+import { resolveAsmaeGenerationState } from "@/lib/agribrain/asmae-job-state.mjs";
 
 export default function MapLayerDock() {
   const l10 = useLayer10();
@@ -17,6 +18,49 @@ export default function MapLayerDock() {
   const asmaeRan = !!l10.surfaceByType?.["CANOPY_ASMAE_VIGOR"];
   const policyState = l10Data?.source_policy_display_state;
   const plotState = policyState?.asmaePlotState;
+  const asmaeGeneration = resolveAsmaeGenerationState(plotState, asmaeRan, l10.loading);
+  const committedBase = l10.browserRenderReceipt?.viewIdentity === l10.renderPlan.viewIdentity
+    ? l10.browserRenderReceipt.baseMaterialization
+    : null;
+  const committedOverlay = l10.browserRenderReceipt?.viewIdentity === l10.renderPlan.viewIdentity
+    ? l10.browserRenderReceipt.overlayMaterialization
+    : null;
+  const committedHybridCandidates = l10.browserRenderReceipt?.viewIdentity === l10.renderPlan.viewIdentity
+    ? (l10.browserRenderReceipt.hybridOverlayMaterializations || [])
+    : [];
+  const publicationMatches = (materialization: typeof committedBase) =>
+    materialization?.status === "rendered"
+    && !!l10Data?.publication_id
+    && materialization.receipt?.publicationId === l10Data.publication_id;
+  const activeBaseCommitted = publicationMatches(committedBase)
+    && committedBase?.surfaceType === l10.activeSurfaceType;
+  const activeOverlayCommitted = publicationMatches(committedOverlay);
+  const committedHybridOverlays = committedHybridCandidates.filter((item) => publicationMatches(item));
+  const committedHybridLabels = [
+    ...(activeOverlayCommitted ? ["experimental detail"] : []),
+    ...committedHybridOverlays.map((item) => ({
+      CANOPY_ASMAE_VIGOR: "ASMAE vigor",
+      ASMAE_POSTERIOR_CONCENTRATION: "posterior concentration",
+      ASMAE_BMA_DISAGREEMENT: "BMA disagreement",
+      VEG_ATTENTION_ASMAE_DISAGREEMENT: "vegetation disagreement",
+    }[item.surfaceType] || item.surfaceType.replace(/_/g, " ").toLowerCase())),
+  ];
+  const providerFallbackCommitted = committedBase?.status === "rendered"
+    && committedBase.surfaceType === "NDVI_CLEAN"
+    && publicationMatches(committedBase);
+
+  const requestAsmaeDiagnostic = () => {
+    l10.setCanopySource("asmae_diagnostic");
+    if (!l10Data?.plot_id) return;
+    void l10.fetchLayer10(
+      l10Data.plot_id,
+      String(l10Data.provenance?.farm_id || ""),
+      undefined,
+      undefined,
+      undefined,
+      { forceRefresh: true, sourcePolicy: "asmae_diagnostic" },
+    );
+  };
 
   // Base Surface modes mapping
   const baseModes = [
@@ -162,18 +206,46 @@ export default function MapLayerDock() {
                         </label>
                       ))}
                     </div>
-                    {l10.canopySource === "hybrid" && l10.bannerState !== null && l10.bannerState !== "composite_advisory_active" && (
+                    {l10.canopySource === "asmae_diagnostic" && asmaeGeneration.visible && (
+                      <button
+                        type="button"
+                        onClick={requestAsmaeDiagnostic}
+                        disabled={asmaeGeneration.disabled}
+                        style={{
+                          border: "1px solid rgba(99,102,241,0.45)",
+                          borderRadius: "6px",
+                          padding: "7px 9px",
+                          color: "#c7d2fe",
+                          background: "rgba(99,102,241,0.12)",
+                          fontSize: "0.72rem",
+                          fontWeight: 700,
+                          cursor: asmaeGeneration.disabled ? "not-allowed" : "pointer",
+                          opacity: asmaeGeneration.disabled ? 0.7 : 1,
+                        }}
+                      >
+                        {asmaeGeneration.label}
+                      </button>
+                    )}
+                    {l10.canopySource === "hybrid" && (
                       <div style={{
                         marginTop: "4px",
                         fontSize: "0.72rem",
-                        color: "#fbbf24",
-                        background: "rgba(251, 191, 36, 0.08)",
+                        color: committedHybridLabels.length > 0 ? "#34d399" : "#fbbf24",
+                        background: committedHybridLabels.length > 0
+                          ? "rgba(52, 211, 153, 0.08)"
+                          : "rgba(251, 191, 36, 0.08)",
                         padding: "6px 8px",
                         borderRadius: "4px",
-                        border: "1px solid rgba(251, 191, 36, 0.2)",
+                        border: committedHybridLabels.length > 0
+                          ? "1px solid rgba(52, 211, 153, 0.2)"
+                          : "1px solid rgba(251, 191, 36, 0.2)",
                         lineHeight: "1.2"
                       }}>
-                        ⚠️ <strong>Hybrid Mode Active:</strong> Combining experimental fine-detail texture with ASMAE vigor, confidence, and disagreement overlays. Visual representation only.
+                        {committedHybridLabels.length > 0 ? "✅" : "⚠️"}{" "}
+                        <strong>{committedHybridLabels.length > 0 ? "Hybrid overlays committed:" : "Hybrid requested:"}</strong>{" "}
+                        {committedHybridLabels.length > 0
+                          ? `${committedHybridLabels.join(", ")}. Visual representation only.`
+                          : `No hybrid overlay has been committed; showing ${committedBase?.surfaceType?.replace(/_/g, " ").toLowerCase() || "the committed base"} only.`}
                       </div>
                     )}
                     {((l10.canopySource === "asmae_diagnostic" || l10.canopySource === "hybrid") && l10.bannerState === null) && (
@@ -187,7 +259,10 @@ export default function MapLayerDock() {
                         border: "1px solid rgba(248, 113, 113, 0.2)",
                         lineHeight: "1.2"
                       }}>
-                        ⚠️ <strong>Map Fallback Active:</strong> Fell back to <strong>Satellite</strong>.{" "}
+                        ⚠️ <strong>{providerFallbackCommitted ? "Map Fallback Active:" : "ASMAE spatial view unavailable:"}</strong>{" "}
+                        {providerFallbackCommitted
+                          ? <>The browser committed the <strong>Satellite</strong> NDVI raster. </>
+                          : <>No fallback raster has been confirmed by the browser. </>}
                         {plotState?.available
                           ? `ASMAE temporal state (belief valid ${plotState.effectiveDate || "time unavailable"}) is still available. `
                           : ""}
@@ -199,7 +274,7 @@ export default function MapLayerDock() {
                           : policyState?.fallback_reason?.replace(/_/g, " ") || "ASMAE not available."}
                       </div>
                     )}
-                    {l10.bannerState === "composite_advisory_active" && (
+                    {l10.bannerState === "composite_advisory_active" && activeBaseCommitted && (
                       <div style={{
                         marginTop: "4px",
                         fontSize: "0.72rem",
@@ -213,7 +288,7 @@ export default function MapLayerDock() {
                         ✅ <strong>Composite Advisory Active</strong>
                       </div>
                     )}
-                    {(l10.bannerState === "hybrid_active" || l10.bannerState === "asmae_diagnostic_active") && (
+                    {(l10.bannerState === "asmae_diagnostic_active" && activeBaseCommitted) && (
                       <div style={{
                         marginTop: "4px",
                         fontSize: "0.72rem",
@@ -224,7 +299,7 @@ export default function MapLayerDock() {
                         border: "1px solid rgba(52, 211, 153, 0.2)",
                         lineHeight: "1.2"
                       }}>
-                        ✅ <strong>{l10.bannerState === "hybrid_active" ? "Hybrid Mode Active" : "ASMAE Diagnostic Active"}</strong>{" "}
+                        ✅ <strong>ASMAE Diagnostic Active</strong>{" "}
                         {(() => {
                           const oneMeterPct = policyState?.one_meter_advisory_coverage_pct;
                           return typeof oneMeterPct === "number"

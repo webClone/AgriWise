@@ -449,7 +449,11 @@ def interpret_kalman_state(state_values: List[float], crop: str = "wheat") -> Di
 
 
 def interpret_gdd_stage(gdd: float, crop: str = "wheat") -> Dict[str, Any]:
-    """Interpret GDD accumulation against crop phenology milestones."""
+    """Report thermal age without publishing a downstream growth stage.
+
+    GDD is an input to Layer 2.  It is not independently sufficient for Layer
+    9 to replace the canonical phenology posterior.
+    """
     thresholds = CROP_KNOWLEDGE.get(crop, CROP_KNOWLEDGE.get("wheat"))
     if not thresholds:
         return {"stage": "UNKNOWN"}
@@ -457,25 +461,11 @@ def interpret_gdd_stage(gdd: float, crop: str = "wheat") -> Dict[str, Any]:
     pct_heading = (gdd / thresholds.gdd_to_heading) * 100
     pct_maturity = (gdd / thresholds.gdd_to_maturity) * 100
     
-    if gdd < thresholds.gdd_to_heading * 0.2:
-        stage = "Early Vegetative (seedling)"
-    elif gdd < thresholds.gdd_to_heading * 0.5:
-        stage = "Active Vegetative (tillering)"
-    elif gdd < thresholds.gdd_to_heading * 0.8:
-        stage = "Late Vegetative (stem elongation)"
-    elif gdd < thresholds.gdd_to_heading:
-        stage = "Booting / Pre-heading"
-    elif gdd < thresholds.gdd_to_heading * 1.15:
-        stage = "Heading / Flowering"
-    elif gdd < thresholds.gdd_to_maturity * 0.85:
-        stage = "Grain Filling"
-    elif gdd < thresholds.gdd_to_maturity:
-        stage = "Ripening / Dough"
-    else:
-        stage = "Mature / Senescence"
-    
     return {
-        "gdd": gdd, "stage": stage,
+        "gdd": gdd,
+        "stage": "UNKNOWN",
+        "phenology_authority": "unavailable",
+        "phenology_evidence_needed_reason": "canonical_layer2_phenology_receipt_required",
         "pct_to_heading": round(min(pct_heading, 100), 1),
         "pct_to_maturity": round(min(pct_maturity, 100), 1),
     }
@@ -552,7 +542,7 @@ def estimate_yield_loss(stress_type: str, stage: str, stress_intensity: float) -
 
 def get_irrigation_recommendation(crop: str, soil_moisture: float,
                                    rain_7d: float, et0_daily: float,
-                                   growth_stage: str = "tillering") -> Dict[str, Any]:
+                                   growth_stage: str = "UNKNOWN") -> Dict[str, Any]:
     """Rule-based irrigation recommendation."""
     thresholds = CROP_KNOWLEDGE.get(crop, CROP_KNOWLEDGE.get("wheat"))
     if not thresholds:
@@ -589,7 +579,7 @@ def get_irrigation_recommendation(crop: str, soil_moisture: float,
 
 
 def get_disease_risk(crop: str, temperature: float, humidity: float,
-                     rain_7d: float, stage: str = "tillering") -> List[Dict[str, Any]]:
+                     rain_7d: float, stage: str = "UNKNOWN") -> List[Dict[str, Any]]:
     """Rule-based disease risk assessment."""
     risks = []
     for rule in DISEASE_RULES:
@@ -633,7 +623,14 @@ def get_nutrient_recommendation(crop: str, stage: str,
         "stem_elongation": {"n_fraction": 0.25, "p_fraction": 0.0, "k_fraction": 0.5},
         "heading": {"n_fraction": 0.15, "p_fraction": 0.0, "k_fraction": 0.0},
     }
-    split = splits.get(stage, splits["tillering"])
+    split = splits.get(stage)
+    if split is None:
+        return {
+            "crop": crop,
+            "stage": "UNKNOWN",
+            "recommendation_available": False,
+            "reason": "canonical_layer2_phenology_receipt_required",
+        }
     target_n = (n_min + n_max) / 2
     return {
         "crop": crop, "stage": stage,

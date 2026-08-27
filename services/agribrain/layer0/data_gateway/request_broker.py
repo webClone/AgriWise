@@ -83,6 +83,44 @@ def _temporal_candidate_valid(result: Any, expected_contract: str) -> bool:
     )
 
 
+def _raster_candidate_valid(result: Any, expected_contract: str) -> bool:
+    """Require a complete, explicitly authorized provider-raster contract.
+
+    Raster composites are allowed to drive browser pixels only when their
+    provider reality survived acquisition and cache rehydration.  Treating an
+    old cache object with missing authority fields as current would silently
+    turn a real raster into an unrenderable, unknown-grounding surface.
+    """
+    if not isinstance(result, dict):
+        return False
+    values = result.get("values")
+    valid_mask = result.get("valid_mask")
+    if not isinstance(values, list) or not values:
+        return False
+    if not isinstance(valid_mask, list) or len(valid_mask) != len(values):
+        return False
+    width = result.get("width")
+    height = result.get("height")
+    if not isinstance(width, int) or not isinstance(height, int):
+        return False
+    if height != len(values) or height <= 0 or width <= 0:
+        return False
+    if any(not isinstance(row, list) or len(row) != width for row in values):
+        return False
+    if any(not isinstance(row, list) or len(row) != width for row in valid_mask):
+        return False
+    return bool(
+        result.get("raster_contract_version") == expected_contract
+        and result.get("truth_class") == "provider_derived_composite"
+        and result.get("source_reality") == "provider_temporal_composite_raster"
+        and result.get("real_provider_product") is True
+        and result.get("production_usable") is True
+        and result.get("diagnostic_only") is False
+        and int(result.get("valid_pixel_count") or 0) > 0
+        and isinstance(result.get("grid_spec"), dict)
+    )
+
+
 def _latest_observation_at(result: Dict[str, Any]) -> Optional[str]:
     records = result.get("data") or result.get("timeseries") or result.get("records") or []
     if not isinstance(records, list):
@@ -233,6 +271,16 @@ class DataRequestBroker:
             "sentinel1_sar_ts": "s1_daily_plot_statistic_v1",
         }
         expected_contract = temporal_contracts.get(source)
+        expected_raster_contract = (
+            str(kwargs.get("raster_contract_version") or "")
+            if source in {
+                "raster_composite_ndvi",
+                "raster_composite_ndmi",
+                "raster_composite_sar",
+                "raster_quality_mask",
+            }
+            else ""
+        )
         retained_evidence = None
         refresh_attempted_at = None
         if expected_contract:
@@ -274,9 +322,46 @@ class DataRequestBroker:
             param_hash=param_hash,
             candidate_validator=(
                 (lambda value: _temporal_candidate_valid(value, expected_contract))
-                if expected_contract else None
+                if expected_contract
+                else (
+                    lambda value: _raster_candidate_valid(
+                        value, expected_raster_contract
+                    )
+                )
+                if expected_raster_contract
+                else None
             ),
         )
+
+        # Storage validators protect fetched candidates, but cache reads occur
+        # before candidate validation.  Refresh metadata-poor legacy raster
+        # entries once and fail closed if the provider cannot produce a valid
+        # replacement; never return them as current-contract evidence.
+        if (
+            expected_raster_contract
+            and not _raster_candidate_valid(result, expected_raster_contract)
+        ):
+            if result is not None and not force_refresh:
+                logger.info(
+                    "[BROKER] Refreshing stale raster authority contract for %s/%s",
+                    plot_id[:8],
+                    source,
+                )
+                result = self._storage.get_or_fetch(
+                    source=source,
+                    plot_id=plot_id,
+                    lat=lat,
+                    lng=lng,
+                    fetch_fn=guarded_fetch,
+                    force_refresh=True,
+                    context=context,
+                    param_hash=param_hash,
+                    candidate_validator=lambda value: _raster_candidate_valid(
+                        value, expected_raster_contract
+                    ),
+                )
+            if not _raster_candidate_valid(result, expected_raster_contract):
+                return None
 
         if expected_contract and result is None and isinstance(retained_evidence, dict):
             circuit_state = external_provider_circuit.state()

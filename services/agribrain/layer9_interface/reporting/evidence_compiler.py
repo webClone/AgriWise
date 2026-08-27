@@ -103,16 +103,20 @@ def compile_evidence(l9_input: Layer9Input) -> ReportEvidencePacket:
     l2_data = input_copy.l2_vegetation_data or {}
     if l2_data:
         actual_sources.append("L2_veg")
-        if "stage" in l2_data:
+        if (
+            l2_data.get("phenology_receipt_valid") is True
+            and l2_data.get("stage") not in {None, "UNKNOWN"}
+        ):
+            confidence = max(0.0, min(1.0, float(l2_data.get("phenology_confidence") or 0.0)))
             raw_items.append(EvidenceItem(
                 evidence_id="L2_phenology_stage",
                 source_layer="L2",
                 source_type="model",
                 variable="phenology_stage",
                 value=l2_data["stage"],
-                confidence=0.90,
-                uncertainty=0.10,
-                provenance_hash=hashlib.sha256(str(l2_data["stage"]).encode()).hexdigest()
+                confidence=confidence,
+                uncertainty=1.0 - confidence,
+                provenance_hash=l2_data["phenology_posterior_hash"],
             ))
 
     # 4. Layer 3 Diagnostics

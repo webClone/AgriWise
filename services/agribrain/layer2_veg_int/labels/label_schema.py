@@ -2,7 +2,10 @@
 Crop Intelligence v6.0B — Label Schema.
 
 Core dataclasses and validation for the crop-cycle labeling system.
-Every confirmed crop becomes a potential training sample.
+
+A user confirmation is feedback, not automatically ground truth.  Only labels
+from an independently verifiable source, explicitly approved by the backend,
+can enter a production-training dataset.
 
 Adjustments applied:
   1. Single MongoDB collection (no dual storage)
@@ -27,19 +30,38 @@ FEATURE_VECTOR_VERSION = "6.0.0"
 
 ALLOWED_LABEL_SOURCES = frozenset({
     "farmer_confirmed",
+    "agronomist_confirmed",
+    "field_survey",
+    "official_parcel_label",
+    "lab_ground_truth",
     "admin_verified",
     "historical_record",
     "imported_dataset",
+})
+
+# A source in this set is *capable* of becoming training evidence.  Membership
+# alone is insufficient: TrainingDatasetBuilder also requires HIGH confidence,
+# backend authority validation, immutable feature/run lineage, geometry, and
+# the partitions needed for leakage-safe release evaluation.
+TRAINING_ELIGIBLE_LABEL_SOURCES = frozenset({
+    "agronomist_confirmed",
+    "field_survey",
+    "official_parcel_label",
+    "lab_ground_truth",
 })
 
 ALLOWED_LABEL_CONFIDENCES = frozenset({"HIGH", "MEDIUM", "LOW"})
 
 # Source trust levels for quality scoring
 SOURCE_TRUST: Dict[str, float] = {
-    "admin_verified": 1.0,
-    "farmer_confirmed": 0.8,
-    "imported_dataset": 0.6,
-    "historical_record": 0.5,
+    "lab_ground_truth": 1.0,
+    "field_survey": 0.95,
+    "official_parcel_label": 0.95,
+    "agronomist_confirmed": 0.85,
+    "admin_verified": 0.60,
+    "imported_dataset": 0.50,
+    "historical_record": 0.40,
+    "farmer_confirmed": 0.35,
 }
 
 # ── Hierarchy Mapping ────────────────────────────────────────────────────────
@@ -74,7 +96,7 @@ _GROUP_TO_L0_L1: Dict[str, tuple] = {
     # Non-crop
     "non_crop":         ("non_crop", "fallow"),
     # Fallback for unknown groups
-    "unknown":          ("active_crop", "annual"),
+    "unknown":          ("unknown", "unknown"),
 }
 
 
@@ -228,15 +250,17 @@ def get_hierarchy_targets(crop_code: str, crop_group: str) -> Dict[str, str]:
     L2: crop_group (from CROP_GROUP_MAP — the actual value)
     L3: crop_code (from 212-crop registry)
 
-    Uses _GROUP_TO_L0_L1 mapping. Unknown groups default to
-    ("active_crop", "annual") with the group passed through as L2.
+    Unknown groups remain epistemically unknown at every unsupported level;
+    they never imply an active annual crop.
     """
-    l0_l1 = _GROUP_TO_L0_L1.get(crop_group, ("active_crop", "annual"))
+    normalized_group = str(crop_group or "unknown").strip() or "unknown"
+    normalized_crop = str(crop_code or "unknown").strip() or "unknown"
+    l0_l1 = _GROUP_TO_L0_L1.get(normalized_group, ("unknown", "unknown"))
     return {
         "L0": l0_l1[0],
         "L1": l0_l1[1],
-        "L2": crop_group,
-        "L3": crop_code,
+        "L2": normalized_group,
+        "L3": normalized_crop,
     }
 
 
@@ -246,8 +270,8 @@ def get_hierarchy_targets(crop_code: str, crop_group: str) -> Dict[str, str]:
 class CropLabel:
     """A single confirmed crop-cycle label.
 
-    This is the atomic unit of ground truth.
-    Every confirmed crop becomes a potential training sample.
+    This is the atomic unit of crop-label evidence.  It is not necessarily
+    ground truth and is denied production-training authority by default.
 
     Fields:
       label_id: Stable UUID (separate from MongoDB _id)
@@ -299,17 +323,39 @@ class CropLabel:
 
     feature_vector_ref: Optional[str] = None
     feature_vector_snapshot: Optional[Dict] = None
+    crop_model_input_receipt: Optional[Dict] = None
+    crop_model_input_receipt_hash: Optional[str] = None
+    runtime_declaration_receipt: Optional[Dict] = None
 
     created_at: str = ""
     superseded_by: Optional[str] = None
     is_active: bool = True
     synthetic: bool = False
 
+    # Authority and leakage-control metadata.  These values are populated by
+    # trusted backend ingestion, never accepted as authority from a browser.
+    authority_validated: bool = False
+    tenant_id: Optional[str] = None
+    farm_id: Optional[str] = None
+    crop_cycle_id: Optional[str] = None
+    region_partition: Optional[str] = None
+    season_partition: Optional[str] = None
+    sensor_regime: Optional[str] = None
+    # Partial labels train only the levels independently verified by the
+    # source. A group-level parcel label must not fabricate a species target.
+    supported_hierarchy_levels: List[str] = field(
+        default_factory=lambda: ["L0", "L1", "L2", "L3"]
+    )
+
     def __post_init__(self):
         if not self.label_id:
             self.label_id = str(uuid.uuid4())
         if not self.created_at:
             self.created_at = datetime.now(timezone.utc).isoformat()
+        levels = list(dict.fromkeys(str(level).upper() for level in self.supported_hierarchy_levels))
+        if any(level not in {"L0", "L1", "L2", "L3"} for level in levels):
+            raise ValueError("supported_hierarchy_levels contains an invalid level")
+        self.supported_hierarchy_levels = levels
 
     def to_dict(self) -> Dict:
         """Serialize to dict for MongoDB storage."""
@@ -330,10 +376,21 @@ class CropLabel:
             "notes": self.notes,
             "featureVectorRef": self.feature_vector_ref,
             "featureVectorSnapshot": self.feature_vector_snapshot,
+            "cropModelInputReceipt": self.crop_model_input_receipt,
+            "cropModelInputReceiptHash": self.crop_model_input_receipt_hash,
+            "runtimeDeclarationReceipt": self.runtime_declaration_receipt,
             "createdAt": self.created_at,
             "supersededBy": self.superseded_by,
             "isActive": self.is_active,
             "synthetic": self.synthetic,
+            "authorityValidated": self.authority_validated,
+            "tenantId": self.tenant_id,
+            "farmId": self.farm_id,
+            "cropCycleId": self.crop_cycle_id,
+            "regionPartition": self.region_partition,
+            "seasonPartition": self.season_partition,
+            "sensorRegime": self.sensor_regime,
+            "supportedHierarchyLevels": list(self.supported_hierarchy_levels),
         }
 
     @classmethod
@@ -356,10 +413,30 @@ class CropLabel:
             notes=doc.get("notes"),
             feature_vector_ref=doc.get("featureVectorRef"),
             feature_vector_snapshot=doc.get("featureVectorSnapshot"),
+            crop_model_input_receipt=doc.get("cropModelInputReceipt"),
+            crop_model_input_receipt_hash=doc.get(
+                "cropModelInputReceiptHash"
+            ),
+            runtime_declaration_receipt=doc.get(
+                "runtimeDeclarationReceipt"
+            ),
             created_at=doc.get("createdAt", ""),
             superseded_by=doc.get("supersededBy"),
             is_active=doc.get("isActive", True),
             synthetic=doc.get("synthetic", False),
+            authority_validated=doc.get("authorityValidated", False),
+            tenant_id=doc.get("tenantId"),
+            farm_id=doc.get("farmId"),
+            crop_cycle_id=doc.get("cropCycleId"),
+            region_partition=doc.get("regionPartition"),
+            season_partition=doc.get("seasonPartition"),
+            sensor_regime=doc.get("sensorRegime"),
+            # Missing legacy metadata cannot be interpreted as a fully
+            # verified species label.  Fail closed until an authority process
+            # explicitly declares which hierarchy levels were observed.
+            supported_hierarchy_levels=(
+                doc.get("supportedHierarchyLevels") or []
+            ),
         )
 
 

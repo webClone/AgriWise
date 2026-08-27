@@ -1455,7 +1455,7 @@ for code, raw in _RAW.items():
 
 _ALIASES: Dict[str, str] = {
     # Common alternative names → canonical codes
-    "maïs": "corn", "mais": "corn",
+    "maïs": "corn", "mais": "corn", "maize": "corn",
     "soy": "soybean",
     "faba": "fava_bean", "faba_bean": "fava_bean", "bean": "fava_bean", "broad_bean": "fava_bean",
     "paddy": "rice",

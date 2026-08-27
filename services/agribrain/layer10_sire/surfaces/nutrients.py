@@ -14,6 +14,8 @@ v4 Change: NDVI modulation is no longer "last resort". It is always blended
 into the surface to ensure spatial heterogeneity even when soil rasters are
 spatially uniform (e.g. SoilGrids single-point lookups broadcast to grid).
 """
+import hashlib
+import json
 from typing import List, Optional, Dict, Any
 from services.agribrain.layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, PaletteId,
@@ -42,6 +44,9 @@ def generate_nutrient_surfaces(
 
     # --- 1. NUTRIENT_STRESS_PROB — multi-evidence spatial synthesis ---
     stress_grid = _build_nutrient_stress_surface(l4_data, l1_data, H, W, phenology_stage)
+    nutrient_context_hash = hashlib.sha256(json.dumps(
+        l4_data.nutrient_states, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")).hexdigest()
     surfaces.append(SurfaceArtifact(
         surface_id=f"NUT_STRESS_{inp.plot_id}",
         semantic_type=SurfaceType.NUTRIENT_STRESS_PROB,
@@ -52,6 +57,18 @@ def generate_nutrient_surfaces(
         render_range=(0.0, 1.0),
         palette_id=PaletteId.NUTRIENT_YELLOW,
         source_layers=["L1", "L4"],
+        provenance={
+            "derivation_class": "model_assisted",
+            "operator_model_version": "nutrient_stress_v5",
+            "model_context_parent_ids": ["L4_NUTRIENT_STATES"],
+            "model_context_parent_hashes": [nutrient_context_hash],
+            "uncertainty_propagation": "parent_support_and_model_confidence",
+            "state_update_allowed": False,
+            "prescription_driver_allowed": False,
+            "state_update_authority": "none",
+            "prescription_authority": "blocked_diagnostic_only",
+            "diagnostic_only": True,
+        },
     ))
 
     # --- 2. FERTILITY_LIMITATION — soil-grounded limitation ---

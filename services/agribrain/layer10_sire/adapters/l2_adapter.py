@@ -8,6 +8,10 @@ and enhanced anomaly temporal context for 14-day awareness.
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 
+from services.agribrain.scientific_contracts.crop_phenology import (
+    consume_canonical_phenology_output,
+)
+
 
 @dataclass
 class L2VegData:
@@ -33,6 +37,10 @@ class L2VegData:
     current_stage: str = "UNKNOWN"
     key_dates: Dict[str, str] = field(default_factory=dict)
     stage_progression: List[str] = field(default_factory=list)    # Last N stages observed
+    phenology_authority: str = "unavailable"
+    phenology_posterior_hash: str = ""
+    phenology_receipt_valid: bool = False
+    phenology_evidence_needed_reason: str = "canonical_layer2_phenology_receipt_required"
 
     # Spatial stability
     stability_class: str = "UNKNOWN"
@@ -159,16 +167,16 @@ def adapt_l2(veg_int: Any) -> L2VegData:
                 round(last_vel * (decay ** i), 6) for i in range(7)
             ]
 
-    # Phenology
-    pheno = getattr(veg_int, 'phenology', None)
-    if pheno is not None:
-        stages = getattr(pheno, 'stage_by_day', [])
-        if stages:
-            raw_stage = stages[-1]
-            result.current_stage = raw_stage.value if hasattr(raw_stage, 'value') else str(raw_stage).upper()
-            # Keep last 14 stages for temporal context
-            result.stage_progression = stages[-14:] if len(stages) >= 14 else list(stages)
-        result.key_dates = getattr(pheno, 'key_dates', {})
+    # Phenology is single-owner: consume only the validated Layer-2 receipt.
+    # Raw stage_by_day arrays are diagnostic internals, not publication authority.
+    canonical_phenology = consume_canonical_phenology_output(veg_int)
+    result.current_stage = canonical_phenology["resolved_crop_stage"]
+    result.phenology_authority = canonical_phenology["phenology_authority"]
+    result.phenology_posterior_hash = canonical_phenology["phenology_posterior_hash"]
+    result.phenology_receipt_valid = canonical_phenology["phenology_receipt_valid"]
+    result.phenology_evidence_needed_reason = canonical_phenology[
+        "phenology_evidence_needed_reason"
+    ]
 
     # Stability
     stab = getattr(veg_int, 'stability', None)

@@ -14,6 +14,7 @@ Also computes phenology-adjusted vegetation indices:
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 from .schemas import (
@@ -158,30 +159,112 @@ def adjust_stress_for_phenology(
     stress_items: List[StressEvidence],
     crop_cycle: Optional[CropCycleContext],
 ) -> List[StressEvidence]:
-    """Adjust stress severity based on crop phenological stage.
+    """Scale biological impact based on crop-conditioned phenological sensitivity.
 
-    v3.2: Now handles all 7 stress types with stage-specific sensitivity
-    multipliers derived from Hsiao (2009), Maas & Hoffman (1977), and
-    Farooq et al. (2009).
+    Scientific Principle (Hsiao 2009, Farooq 2009):
+      - S_k: Physical stress deficit metric (remains in stress_magnitude)
+      - s_k(c, z): Crop- and stage-specific biological sensitivity multiplier
+      - I_k = s_k(c, z) * S_k: Stage-scaled biological impact
+      - P(H_k | E): Diagnostic support from evidence (remains in confidence)
 
     Modifies stress items in-place and returns them.
     """
     stage = _get_current_stage(crop_cycle)
+    profile = getattr(crop_cycle, "crop_response_profile", None) if crop_cycle else None
+
+    # Resolve profile if crop string is present but profile not pre-attached
+    if profile is None and crop_cycle:
+        crop_name = getattr(crop_cycle, "crop_type", None) or getattr(crop_cycle, "crop", None)
+        cultivar = getattr(crop_cycle, "variety", None) or getattr(crop_cycle, "cultivar", None)
+        if crop_name:
+            try:
+                from layer2_veg_int.crop_response_profile import CropParameterResolver
+                profile = CropParameterResolver.resolve(crop_name, cultivar=cultivar)
+            except Exception:
+                profile = None
+
+    is_unknown = profile is not None and (profile.crop_code == "UNKNOWN_VEGETATION" or profile.architecture == "UNKNOWN")
 
     for s in stress_items:
-        sensitivity_table = _SENSITIVITY_TABLES.get(s.stress_type)
-        if sensitivity_table is None:
-            continue
+        # Guarantee fallback multiplier for any stress type
+        multiplier = 1.0
 
-        multiplier = sensitivity_table.get(stage, 1.0)
-        if multiplier != 1.0:
-            old = s.severity
-            s.severity = round(min(1.0, s.severity * multiplier), 3)
-            if abs(old - s.severity) > 0.01:
-                s.explanation_basis.append(
-                    f"Severity adjusted ×{multiplier:.1f} for {stage} stage "
-                    f"{s.stress_type.lower()} sensitivity"
-                )
+        # 1. Preserve physical stress magnitude S_k
+        if s.stress_magnitude == 0.0 and s.severity > 0.0:
+            s.stress_magnitude = s.severity
+
+        found_profile_mult = False
+        stage_enum = None
+        if profile is not None:
+            try:
+                from layer2_veg_int.schema import PhenologyStage
+                stage_enum = PhenologyStage(stage.upper())
+            except Exception:
+                stage_enum = None
+
+        # 2. Unknown vegetation abstention: keep multiplier = 1.0 (unconditioned prior)
+        if is_unknown:
+            multiplier = 1.0
+            found_profile_mult = True
+            s.diagnostic_only = True
+            s.impact_authority = "UNAVAILABLE"
+            if "UNKNOWN_VEGETATION_UNCONDITIONED" not in s.flags:
+                s.flags.append("UNKNOWN_VEGETATION_UNCONDITIONED")
+        elif profile is not None and stage_enum is not None:
+            s.impact_authority = "TRANSFERRED"
+            if s.stress_type == "WATER" and stage_enum in profile.water_sensitivity:
+                multiplier = profile.water_sensitivity[stage_enum]
+                found_profile_mult = True
+            elif s.stress_type == "THERMAL" and stage_enum in profile.heat_sensitivity:
+                multiplier = profile.heat_sensitivity[stage_enum]
+                found_profile_mult = True
+            elif s.stress_type == "SALINITY" and stage_enum in profile.salinity_sensitivity:
+                multiplier = profile.salinity_sensitivity[stage_enum]
+                found_profile_mult = True
+            elif s.stress_type == "NUTRIENT" and stage_enum in profile.nutrient_sensitivity:
+                multiplier = profile.nutrient_sensitivity[stage_enum]
+                found_profile_mult = True
+
+        # 3. Fallback to generic sensitivity tables if unconditioned
+        if not found_profile_mult:
+            sensitivity_table = _SENSITIVITY_TABLES.get(s.stress_type)
+            if sensitivity_table is not None:
+                multiplier = sensitivity_table.get(stage, 1.0)
+
+        # 4. Stage-conditioned compound synergy β(c, z, a, b)
+        effective_synergy = 1.0
+        if s.compound_partner:
+            if profile is not None and stage_enum is not None and hasattr(profile, "get_compound_synergy"):
+                effective_synergy = profile.get_compound_synergy(stage_enum, s.stress_type, s.compound_partner)
+            else:
+                effective_synergy = getattr(s, "compound_synergy_factor", 1.0) or 1.0
+            s.compound_synergy_factor = effective_synergy
+
+        # 5. Compute raw biological impact & smooth damage probability
+        raw_impact = s.stress_magnitude * multiplier * effective_synergy
+        s.raw_biological_impact = round(raw_impact, 3)
+        
+        # Sigmoid damage probability P(damage) preventing saturation information loss
+        if not is_unknown:
+            s.damage_probability = round(1.0 / (1.0 + math.exp(-3.0 * (raw_impact - 0.7))), 3)
+            s.impact_uncertainty = round((s.magnitude_uncertainty or 0.04) * multiplier * effective_synergy, 4)
+        else:
+            s.damage_probability = 0.0
+            s.impact_uncertainty = None
+
+        s.normalized_impact = round(min(1.0, raw_impact), 3)
+        s.biological_impact = s.normalized_impact
+        s.display_severity = s.normalized_impact
+        s.severity = s.normalized_impact  # Backwards compatibility
+        
+        # Display priority: composite impact scaled by diagnostic confidence
+        s.display_priority = round(min(1.0, s.normalized_impact * max(0.2, s.confidence)), 3)
+
+        if multiplier != 1.0 and abs(s.stress_magnitude - s.biological_impact) > 0.01:
+            s.explanation_basis.append(
+                f"Biological impact scaled ×{multiplier:.1f} (magnitude={s.stress_magnitude:.2f} → impact={s.biological_impact:.2f}) "
+                f"for {stage} stage {s.stress_type.lower()} sensitivity"
+            )
 
     return stress_items
 

@@ -3,6 +3,7 @@ import PlotDashboard from "@/components/farm/PlotDashboard";
 import { notFound } from "next/navigation";
 import { getSession } from "@/lib/session";
 import DevelopmentSessionBootstrap from "@/components/auth/DevelopmentSessionBootstrap";
+import { isActiveCropCycleStatus } from "@/lib/agribrain/crop-cycle-status.mjs";
 
 export default async function PlotDetailsPage({ params }: { params: Promise<{ id: string; plotId: string }> }) {
   const { id: farmId, plotId } = await params;
@@ -23,7 +24,7 @@ export default async function PlotDetailsPage({ params }: { params: Promise<{ id
   }
 
   const { plot, farm, cropCycles } = routeContext;
-  const currentCrop = cropCycles.find(c => c.status !== 'HARVESTED');
+  const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
 
   return (
     <div className="w-full h-full" style={{ minHeight: 'calc(100vh - 48px)' }} suppressHydrationWarning={true}>

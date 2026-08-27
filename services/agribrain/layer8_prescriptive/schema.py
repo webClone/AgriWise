@@ -361,9 +361,33 @@ class Layer8Input:
     audit_grade: str = "B"
     source_reliability: Dict[str, float] = field(default_factory=dict)
     conflicts: List[Dict[str, Any]] = field(default_factory=list)
-    phenology_stage: str = "VEGETATIVE"
+    # Compatibility strings are never authority on their own.  The receipt
+    # fields below must authorize their scientific use.
+    phenology_stage: str = "UNKNOWN"
     horizon_days: int = 7
-    crop: str = "corn"                    # crop identifier for phenology engine
+    crop: str = "unknown"
+    crop_posterior_hash: str = ""
+    phenology_posterior_hash: str = ""
+    crop_resolution: str = "unknown"
+    crop_authority: str = "UNKNOWN"
+    phenology_authority: str = "UNKNOWN"
+    crop_evidence_class: str = "unknown"
+    phenology_evidence_class: str = "unknown"
+    species_specific_allowed: bool = False
+    stage_specific_allowed: bool = False
+    crop_mixture: Dict[str, float] = field(default_factory=dict)
+    stage_posterior: Dict[str, float] = field(default_factory=dict)
+    semantic_demotion_reasons: List[str] = field(default_factory=list)
+    # Exact promotion lineage.  Missing values mean this run is shadow-only;
+    # no serializer may publish its actions.
+    input_belief_id: str = ""
+    tribunal_content_hash: str = ""
+    prescription_manifest_hash: str = ""
+    prescription_manifest_entry_ids: List[str] = field(default_factory=list)
+    policy_snapshot_hash: str = ""
+    # Optional reviewed contract for group-safe actions.  It may authorize
+    # only the listed action types, never a species- or stage-specific rate.
+    group_recommendation_contract: Dict[str, Any] = field(default_factory=dict)
     soil_static: Dict[str, float] = field(default_factory=lambda: {
         "soil_clay": 22.0, "soil_ph": 6.5, "soil_org_carbon": 1.8,
     })
@@ -398,3 +422,6 @@ class Layer8Output:
         audit_grade="B"
     ))
     audit: PrescriptiveAudit = field(default_factory=PrescriptiveAudit)
+    # Populated only by a separate promotion/feasibility step.  Raw L8 output
+    # remains shadow evidence until this content-addressed envelope exists.
+    authorization_envelope: Optional[Dict[str, Any]] = None

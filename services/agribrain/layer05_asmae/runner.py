@@ -34,6 +34,7 @@ from .cache import (
 )
 from .evidence_capability import prepare_capability_execution_context
 from core.observability import observability_registry
+from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +55,8 @@ class ASMAERunner:
         self._engine = ASMAEEngine(config=self.config)
         if not self.config.get("disable_job_recovery", False):
             try:
-                from .background_jobs import recover_pending_jobs
-                recover_pending_jobs()
+                from .background_jobs import recover_all_pending_jobs
+                recover_all_pending_jobs()
             except Exception as exc:
                 logger.warning("ASMAE job recovery scan failed: %s", exc)
 
@@ -203,6 +204,21 @@ class ASMAERunner:
                     result["crop_lineage_id"] = context.get(
                         "crop_lineage_id"
                     )
+                    result["crop_influence_manifest"] = (
+                        inp.crop_influence_manifest
+                    )
+                    result["crop_influence_manifest_hash"] = (
+                        inp.crop_influence_manifest_hash
+                    )
+                    result["crop_evidence_ledger_hash"] = (
+                        inp.crop_evidence_ledger_hash
+                    )
+                    if isinstance(result.get("asmae_feature_pack"), dict):
+                        result["asmae_feature_pack"].update({
+                            "crop_posterior_lineage": inp.crop_posterior_lineage,
+                            "crop_evidence_ledger_hash": inp.crop_evidence_ledger_hash,
+                            "crop_influence_manifest_hash": inp.crop_influence_manifest_hash,
+                        })
                 else:
                     result.setdefault("crop_posterior_lineage", None)
                 result["orchestrator_parent_run_id"] = context.get(
@@ -211,11 +227,23 @@ class ASMAERunner:
                 return result
             except Exception as exc:
                 logger.exception("ASMAE quick visual state hydration failed")
+                message = str(exc)
+                if (
+                    "Crop influence manifest independent evidence does not match ledger"
+                    in message
+                ):
+                    failure_code = "CROP_EVIDENCE_LEDGER_MANIFEST_MISMATCH"
+                elif isinstance(exc, ValueError):
+                    failure_code = "ASMAE_INPUT_VALIDATION_FAILED"
+                else:
+                    failure_code = "ASMAE_QUICK_VISUAL_EXECUTION_FAILED"
                 return {
                     "status": "error",
                     "plot_id": plot_id,
                     "run_id": run_id,
                     "reason": "quick_visual_state_hydration_failed:{}".format(exc),
+                    "failure_code": failure_code,
+                    "error_type": type(exc).__name__,
                 }
 
         # Determine if this is an unregistered plot running diagnostic-only shadow run
@@ -265,12 +293,17 @@ class ASMAERunner:
             l0_packages.update(pseudo_data)
             context["is_pseudo"] = True
 
-        # Define budgets per mode
+        # Interactive observability targets are distinct from the scientific
+        # worker's hard safety deadline (default 300 s in ASMAEEngine).
         budget_map = {
             "quick_visual": 150.0,
-            "standard": 1000.0,
+            "standard": 15000.0,
+            "scientific_refresh": 30000.0,
         }
-        budget_ms = budget_map.get(mode, 5000.0)
+        budget_ms = budget_map.get(mode, 30000.0)
+        hard_deadline_ms = float(
+            os.environ.get("ASMAE_MAX_EXECUTION_TIMEOUT_MS", "300000.0")
+        )
 
         # ── Feature flag gate ────────────────────────────────────────
         # ── Mode validation ──────────────────────────────────────────
@@ -310,6 +343,10 @@ class ASMAERunner:
                     latency_ms=0.0,
                     budget_ms=budget_ms,
                     storage_kb=len(json.dumps(cached_result)) / 1024.0,
+                    extra_details={
+                        "budget_kind": "interactive_sla_target",
+                        "hard_safety_deadline_ms": hard_deadline_ms,
+                    },
                 )
                 
                 # Preserve original scientific execution identity
@@ -342,6 +379,21 @@ class ASMAERunner:
                 cached_result["crop_lineage_id"] = context.get(
                     "crop_lineage_id"
                 )
+                cached_result["crop_influence_manifest"] = (
+                    inp.crop_influence_manifest
+                )
+                cached_result["crop_influence_manifest_hash"] = (
+                    inp.crop_influence_manifest_hash
+                )
+                cached_result["crop_evidence_ledger_hash"] = (
+                    inp.crop_evidence_ledger_hash
+                )
+                if isinstance(cached_result.get("asmae_feature_pack"), dict):
+                    cached_result["asmae_feature_pack"].update({
+                        "crop_posterior_lineage": inp.crop_posterior_lineage,
+                        "crop_evidence_ledger_hash": inp.crop_evidence_ledger_hash,
+                        "crop_influence_manifest_hash": inp.crop_influence_manifest_hash,
+                    })
                 cached_result["orchestrator_parent_run_id"] = context.get(
                     "orchestrator_parent_run_id"
                 )
@@ -379,6 +431,8 @@ class ASMAERunner:
                             cached_result,
                             geometry_hash=inp.geometry_hash,
                             snapshot_ref=cached_result["snapshot_ref"],
+                            tenant_id=str(context.get("tenant_id") or "default_tenant"),
+                            namespace=str(context.get("worldline_namespace") or "default"),
                         )
                         cached_result["worldline_event_id"] = event.get(
                             "event_id"
@@ -427,9 +481,9 @@ class ASMAERunner:
                             "salinity_stress_mean": cached_result.get("state_summary", {}).get("salinity_stress_mean", 0.0),
                         },
                         "trust_summary": {
-                            "confidence_mean": cached_result.get("trust_summary", {}).get("confidence_mean", 1.0),
-                            "uncertainty_mean": cached_result.get("trust_summary", {}).get("uncertainty_mean", 0.0),
-                            "bma_status": cached_result.get("trust_summary", {}).get("bma_status", "success"),
+                            "confidence_mean": cached_result.get("trust_summary", {}).get("confidence_mean") if cached_result.get("diagnostics", {}).get("current_spatial_assimilation") is not False else None,
+                            "uncertainty_mean": cached_result.get("trust_summary", {}).get("uncertainty_mean") if cached_result.get("diagnostics", {}).get("current_spatial_assimilation") is not False else None,
+                            "bma_status": cached_result.get("trust_summary", {}).get("bma_status") if cached_result.get("diagnostics", {}).get("current_spatial_assimilation") is not False else "unavailable",
                             "bma_disagreement": cached_result.get("trust_summary", {}).get("bma_disagreement", 0.0),
                         },
                         "warnings": cached_result.get("warnings", []),
@@ -513,6 +567,21 @@ class ASMAERunner:
             )
             serialized["crop_posterior"] = inp.crop_posterior
             serialized["crop_lineage_id"] = context.get("crop_lineage_id")
+            serialized["crop_influence_manifest"] = (
+                inp.crop_influence_manifest
+            )
+            serialized["crop_influence_manifest_hash"] = (
+                inp.crop_influence_manifest_hash
+            )
+            serialized["crop_evidence_ledger_hash"] = (
+                inp.crop_evidence_ledger_hash
+            )
+            if isinstance(serialized.get("asmae_feature_pack"), dict):
+                serialized["asmae_feature_pack"].update({
+                    "crop_posterior_lineage": inp.crop_posterior_lineage,
+                    "crop_evidence_ledger_hash": inp.crop_evidence_ledger_hash,
+                    "crop_influence_manifest_hash": inp.crop_influence_manifest_hash,
+                })
             serialized["orchestrator_parent_run_id"] = context.get(
                 "orchestrator_parent_run_id"
             )
@@ -559,6 +628,8 @@ class ASMAERunner:
                         serialized,
                         geometry_hash=inp.geometry_hash,
                         snapshot_ref=serialized["snapshot_ref"],
+                        tenant_id=str(context.get("tenant_id") or "default_tenant"),
+                        namespace=str(context.get("worldline_namespace") or "default"),
                     )
                     serialized["worldline_event_id"] = event.get("event_id")
                 except Exception as exc:
@@ -579,7 +650,10 @@ class ASMAERunner:
 
                         worldline = PlotWorldlineService()
                         archive_head = worldline.latest_payload(
-                            inp.plot_id, "ARCHIVE_POSTERIOR_VALIDATED"
+                            inp.plot_id,
+                            "ARCHIVE_POSTERIOR_VALIDATED",
+                            str(context.get("tenant_id") or "default_tenant"),
+                            str(context.get("worldline_namespace") or "default"),
                         )
                         if not archive_head:
                             serialized["archive_refresh"] = (
@@ -587,6 +661,14 @@ class ASMAERunner:
                                     plot_id=inp.plot_id,
                                     geometry_hash=inp.geometry_hash,
                                     context=context,
+                                    tenant_id=str(
+                                        context.get("tenant_id")
+                                        or "default_tenant"
+                                    ),
+                                    namespace=str(
+                                        context.get("worldline_namespace")
+                                        or "default"
+                                    ),
                                 )
                             )
                     except Exception as archive_exc:
@@ -602,6 +684,10 @@ class ASMAERunner:
                 latency_ms=elapsed_ms,
                 budget_ms=budget_ms,
                 storage_kb=serialized_size / 1024.0,
+                extra_details={
+                    "budget_kind": "interactive_sla_target",
+                    "hard_safety_deadline_ms": hard_deadline_ms,
+                },
             )
 
             # Record in validation ledger
@@ -633,33 +719,34 @@ class ASMAERunner:
                     
                 visual_status = "visual_enabled" if should_render_l10_asmae(plot_id) else "visual_disabled"
                 
+                _has_spatial = serialized.get("diagnostics", {}).get("current_spatial_assimilation") is not False and serialized.get("diagnostics", {}).get("scene_count", 0) > 0
                 ledger_rec = {
-                    "plot_id": plot_id,
-                    "run_id": run_id,
-                    "rollout_phase": get_rollout_phase(plot_id),
-                    "execution_status": "executed",
-                    "visual_status": visual_status,
-                    "geometry_hash": inp.geometry_hash or "empty_geom_hash",
-                    "layer0_output_hash": l0_hash,
-                    "asmae_content_hash": serialized.get("content_hash"),
-                    "asmae_artifact_instance_hash": serialized.get("artifact_instance_hash"),
-                    "cache_status": cache_status,
-                    "latency_ms": elapsed_ms,
-                    "artifact_json_bytes": art_json_size,
-                    "artifact_npz_bytes": art_npz_size,
-                    "artifact_total_bytes": art_json_size + art_npz_size,
-                    "state_summary": {
-                        "vigor_mean": serialized.get("state_summary", {}).get("vigor_mean", 0.0),
-                        "canopy_water_mean": serialized.get("state_summary", {}).get("canopy_water_mean", 0.0),
-                        "salinity_stress_mean": serialized.get("state_summary", {}).get("salinity_stress_mean", 0.0),
-                    },
-                    "trust_summary": {
-                        "confidence_mean": serialized.get("trust_summary", {}).get("confidence_mean", 1.0),
-                        "uncertainty_mean": serialized.get("trust_summary", {}).get("uncertainty_mean", 0.0),
-                        "bma_status": serialized.get("trust_summary", {}).get("bma_status", "success"),
-                        "bma_disagreement": serialized.get("trust_summary", {}).get("bma_disagreement", 0.0),
-                    },
-                    "warnings": serialized.get("warnings", []),
+                        "plot_id": plot_id,
+                        "run_id": run_id,
+                        "rollout_phase": get_rollout_phase(plot_id),
+                        "execution_status": "executed",
+                        "visual_status": visual_status,
+                        "geometry_hash": inp.geometry_hash or "empty_geom_hash",
+                        "layer0_output_hash": l0_hash,
+                        "asmae_content_hash": serialized.get("content_hash"),
+                        "asmae_artifact_instance_hash": serialized.get("artifact_instance_hash"),
+                        "cache_status": cache_status,
+                        "latency_ms": elapsed_ms,
+                        "artifact_json_bytes": art_json_size,
+                        "artifact_npz_bytes": art_npz_size,
+                        "artifact_total_bytes": art_json_size + art_npz_size,
+                        "state_summary": {
+                            "vigor_mean": serialized.get("state_summary", {}).get("vigor_mean", 0.0),
+                            "canopy_water_mean": serialized.get("state_summary", {}).get("canopy_water_mean", 0.0),
+                            "salinity_stress_mean": serialized.get("state_summary", {}).get("salinity_stress_mean", 0.0),
+                        },
+                        "trust_summary": {
+                            "confidence_mean": serialized.get("trust_summary", {}).get("confidence_mean") if _has_spatial else None,
+                            "uncertainty_mean": serialized.get("trust_summary", {}).get("uncertainty_mean") if _has_spatial else None,
+                            "bma_status": serialized.get("trust_summary", {}).get("bma_status") if _has_spatial else "unavailable",
+                            "bma_disagreement": serialized.get("trust_summary", {}).get("bma_disagreement", 0.0),
+                        },
+                        "warnings": serialized.get("warnings", []),
                 }
                 record_asmae_run(ledger_rec)
             except Exception as ex:
@@ -683,7 +770,9 @@ class ASMAERunner:
                     serialize_and_cache_asmae(inp, fallback_res.copy())
                     
                     # Spawn background standard ASMAE computation
-                    self._run_background_standard_asmae(plot_id, run_id, context)
+                    self._run_background_standard_asmae(
+                        self._job_namespace(plot_id, context), run_id, context
+                    )
                     
                     # Record in validation ledger as progressive fallback
                     try:
@@ -718,7 +807,11 @@ class ASMAERunner:
                 cache_status="error",
                 latency_ms=elapsed_ms,
                 budget_ms=budget_ms,
-                extra_details={"error": str(e)},
+                extra_details={
+                    "error": str(e),
+                    "budget_kind": "interactive_sla_target",
+                    "hard_safety_deadline_ms": hard_deadline_ms,
+                },
             )
             logger.error("ASMAE engine failed: %s", e, exc_info=True)
             
@@ -805,6 +898,18 @@ class ASMAERunner:
             crop_posterior=context.get("crop_posterior", {}),
             crop_posterior_lineage=context.get(
                 "crop_posterior_lineage"
+            ),
+            crop_evidence_ledger=context.get(
+                "crop_evidence_ledger", {}
+            ),
+            crop_evidence_ledger_hash=context.get(
+                "crop_evidence_ledger_hash"
+            ),
+            crop_influence_manifest=context.get(
+                "crop_influence_manifest", {}
+            ),
+            crop_influence_manifest_hash=context.get(
+                "crop_influence_manifest_hash"
             ),
             soil_context=context.get("soil_context", {}),
             management_events=context.get("management_events", []),
@@ -1467,14 +1572,52 @@ class ASMAERunner:
             },
         }
 
-    def _run_background_standard_asmae(self, plot_id: str, run_id: str, context: Dict[str, Any]):
+    @staticmethod
+    def _job_namespace(plot_id: str, context: Dict[str, Any]) -> PlotNamespace:
+        return _coerce_namespace(
+            context.get("plot_namespace") or plot_id,
+            tenant_id=str(context.get("tenant_id") or ""),
+            farm_id=str(context.get("farm_id") or ""),
+        )
+
+    def _run_background_standard_asmae(
+        self,
+        namespace: PlotNamespace,
+        run_id: str,
+        context: Dict[str, Any],
+    ):
         """Persist and enqueue a restart-recoverable external standard job."""
         from .background_jobs import enqueue_standard_job
 
-        prepared_context, _ = prepare_capability_execution_context(context)
+        namespace = _coerce_namespace(namespace)
+        plot_id = namespace.plot_id
+        prepared_context, plan = prepare_capability_execution_context(context)
+
+        if plan.spatial_scene_count == 0:
+            return {
+                "job_id": None,
+                "plot_id": plot_id,
+                "run_id": run_id,
+                "status": "not_eligible",
+                "stage": "spatial_eligibility_preflight",
+                "terminal": True,
+                "reason": "NOT_ELIGIBLE_NO_EXECUTABLE_SPATIAL_SCENE",
+                "failure_code": "NOT_ELIGIBLE_NO_EXECUTABLE_SPATIAL_SCENE",
+                "retry_classification": "acquisition_required",
+                "retry_eligible": False,
+                "acquisition_required": True,
+                "temporal_diagnostic_available": bool(
+                    plan.temporal_observation_count
+                    or plan.composite_rasters
+                ),
+                "capability_plan_hash": plan.plan_hash(),
+                "execution_plan_hash": plan.execution_plan_hash(),
+                "quarantine_ledger_hash": plan.quarantine_ledger_hash(),
+                "accepted_spatial_scene_count": 0,
+            }
 
         return enqueue_standard_job(
-            plot_id=plot_id,
+            namespace=namespace,
             run_id=run_id,
             context=prepared_context,
             config=self.config,
@@ -1506,7 +1649,7 @@ class ASMAERunner:
         ):
             snapshot = None
         compatible_job = latest_compatible_job(
-            inp.plot_id,
+            self._job_namespace(inp.plot_id, context),
             geometry_hash=inp.geometry_hash,
             capability_plan_hash=str(context.get("capability_plan_hash", "")),
             worker_contract_version=JOB_RUNNER_CONTRACT_VERSION,
@@ -1567,7 +1710,7 @@ class ASMAERunner:
                 result["snapshot_status"] = "stale"
             if stale or context.get("force_asmae_refresh"):
                 refresh = self._run_background_standard_asmae(
-                    inp.plot_id, inp.run_id, context
+                    self._job_namespace(inp.plot_id, context), inp.run_id, context
                 )
             # A request may reference an immutable snapshot, but cannot rename
             # the execution that produced it.
@@ -1575,7 +1718,9 @@ class ASMAERunner:
             result["request_run_id"] = inp.run_id
             result["quick_visual_source"] = "completed_snapshot"
             result["refresh_job"] = refresh
-            active_job = latest_job_for_plot(inp.plot_id)
+            active_job = latest_job_for_plot(
+                self._job_namespace(inp.plot_id, context)
+            )
             attach_spatial_supersession(
                 result,
                 build_spatial_supersession_state(
@@ -1602,11 +1747,13 @@ class ASMAERunner:
             started_at=datetime.now(timezone.utc),
         )
         refresh = self._run_background_standard_asmae(
-            inp.plot_id, inp.run_id, context
+            self._job_namespace(inp.plot_id, context), inp.run_id, context
         )
-        durable_job = latest_job_for_plot(inp.plot_id)
+        durable_job = latest_job_for_plot(
+            self._job_namespace(inp.plot_id, context)
+        )
         refresh_status = str((refresh or {}).get("status", "") or (durable_job or {}).get("status", ""))
-        refresh_truth = durable_job or refresh
+        refresh_truth = refresh or durable_job
         if refresh_status in ("failed", "degraded", "error"):
             self._engine._spatial_block_reason = "spatial_refresh_failed"
             self._engine._spatial_refresh_failure_code = str(

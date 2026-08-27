@@ -132,6 +132,7 @@ def run_retrovalidation(
     expected_resolution_m: Optional[int] = None,
     evidence_context: Optional[Dict[str, Any]] = None,
     refit_identity: Optional[Dict[str, str]] = None,
+    deadline_check=None,
 ) -> Dict[str, Any]:
     """Run retrovalidation with real holdout scoring.
 
@@ -191,6 +192,8 @@ def run_retrovalidation(
     resolution_m = int(expected_resolution_m or 10)
 
     for fold_index, (training_scenes, holdout_scene) in enumerate(folds):
+        if deadline_check is not None:
+            deadline_check()
         holdout_op = _find_operator_for_scene(holdout_scene, operators)
         training_operators = _operators_for_scenes(training_scenes, operators)
         holdout_id = str(getattr(holdout_scene, "scene_id", f"fold_{fold_index}"))
@@ -273,7 +276,10 @@ def run_retrovalidation(
                 holdout_scene,
             ),
             initial_posterior=initial_posterior,
+            deadline_check=deadline_check,
         )
+        if deadline_check is not None:
+            deadline_check()
         training_state = fold_state.get("raster_maps", {})
         fold_proof["assimilation_rerun"] = bool(training_state)
         fold_proof["training_update_count"] = sum(

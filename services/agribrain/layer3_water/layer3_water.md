@@ -1,63 +1,73 @@
-# Layer 3 Audit: Water & Soil Diagnosis (layer3_water)
+# Layer 3: Transitional Water Intelligence (layer3_water)
 
-## 1. Executive Summary & Verification Status
-Layer 3 (Water) computes reference and crop evapotranspiration ($ET_0, ET_c$), dynamic crop coefficients ($Kc$) derived from satellite canopy vegetation indices, and root-zone water balance profiles.
-* **Code Integrity:** High. Evapotranspiration, soil moisture, and irrigation optimization modules compile and run cleanly.
-* **Test Status:** 151/151 unit tests passed; all 13 regression suite checks passed.
-* **Database State:** Integrates with local soil attributes and weather records.
+## 1. Executive Summary & Architectural Contract
+Layer 3 (Water) is a **TRANSITION FOUNDATION / VALID_DEGRADED** state-estimation pipeline for the soil–root–atmosphere continuum. It is not the Agricultural World Model. Its action-shaped fields are shadow outputs and are ignored by the canonical orchestrator; L8 owns action selection.
 
----
+$$\mathbb{P}(X_t^{\text{water}} \mid X_{t-1}^{\text{water}}, Y_{1:t}, \text{weather}, \text{management})$$
 
-## 2. Granular Engine Inventory & Mapping
-1. **Evapotranspiration Engine** ([evapotranspiration.py](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/evapotranspiration.py)): Computes Penman-Monteith and Hargreaves-Samani reference ET and applies dynamic crop coefficient adjustments.
-2. **Soil Moisture Engine** ([soil_moisture.py](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/soil_moisture.py)): Implements the dual-layer soil moisture balance model.
-3. **Water Stress Engine** ([water_stress.py](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/water_stress.py)): Calculates water depletion fractions and crop stress indices.
-4. **Irrigation Optimizer** ([irrigation_optimizer.py](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/irrigation_optimizer.py)): Prescribes optimal irrigation times and volumes based on soil moisture forecasts.
+* **Layer Boundary Integrity:** Consumes latent vegetation coordinates ($X_t^{\text{L2}}$: LAI, FVC, root depth proxy) and emits physical water constraints ($X_t^{\text{L3}\to\text{L4}}$: $K_s, T_{\text{deficit}}, \text{TAW}, \text{RAW}, D_r, \text{stress\_memory}$) without touching remote sensing indices or cellular biology.
+* **Validation Status:** focused contract and scientific probes exist, but the package is not certified for unrestricted prescription or machine execution.
 
 ---
 
-## 3. Inputs & Outputs (Contracts)
-* **Inputs Ingested:**
-  - Daily minimum/maximum temperatures, relative humidity, wind speed, solar radiation.
-  - Latitude, elevation, and crop type config.
-  - Soil parameters (Field Capacity, Wilting Point, Clay/Sand fractions).
-* **Outputs Generated:**
-  - `et0` reference evapotranspiration (mm/day) and `etc` crop evapotranspiration.
-  - Daily soil moisture VWC profiles and water stress index scores ($K_s \in [0.0, 1.0]$).
-  - Recommended irrigation amounts.
+## 2. Transition Engine Architecture
+
+```mermaid
+graph TD
+    subgraph Ingestion & Solver Selection
+        L2[Layer 2 Vegetation State] --> Demand
+        L0[Meteorology L0/L1] --> ET0[Penman-Monteith ET0]
+        SoilDB[USDA Soil Hydraulic DB] --> Balance[Multi-Layer Soil Balance]
+        SolverSel[Solver Selector: validated bucket only] --> Balance
+    end
+
+    subgraph Evapotranspiration & Flux Partitioning
+        ET0 --> DualKc[Dual Kc Partitioning: Kcb, Ke]
+        DualKc --> PotFlux[Potential Fluxes: Tpot, Espot]
+        PotFlux --> RootZone[Root Zone Availability & Feddes U z]
+    end
+
+    subgraph Hydrological Simulation & Assimilation
+        Balance --> ProgSoil[Prognostic Soil State X-]
+        Obs[Sensors: TDR Probes, SMAP, Thermal] --> Assim[Water State Assimilator: 1D EnKF / OI]
+        ProgSoil --> Assim
+        Assim --> PostSoil[Posterior Soil State X+]
+        PostSoil --> RootZone
+    end
+
+    subgraph Memory, Forecast & MPC
+        RootZone --> Ks[Transpiration Stress Ks & Tdeficit]
+        Ks --> Memory[Hydraulic Stress Memory Accumulator]
+        PostSoil --> Forecast[Weather Ensemble Depletion Forecast]
+        Forecast --> MPC[Receding Horizon MPC Optimizer]
+        MPC --> Decision[Water Decision & Tradeoff Ledger]
+    end
+
+    subgraph Boundary Interfaces
+        Ks --> L2Receipt[Layer 3 to Layer 2 Hydrological Constraint]
+        Memory --> L4Receipt[Layer 3 to Layer 4 Biophysical Boundary Receipt]
+        Ks --> L4Receipt
+    end
+```
 
 ---
 
-## 4. Key Mathematical Formulations
+## 3. Core Transition Modules
 
-### A. FAO-56 Penman-Monteith Reference $ET_0$
-$$ET_0 = \frac{0.408 \Delta (R_n - G) + \gamma \frac{900}{T + 273} u_2 (e_s - e_a)}{\Delta + \gamma (1 + 0.34 u_2)}$$
-Where $R_n$ is net radiation, $G$ is soil heat flux, $T$ is mean air temperature, $u_2$ is wind speed at 2m, $e_s - e_a$ is vapor pressure deficit, $\Delta$ is slope vapor pressure curve, and $\gamma$ is psychrometric constant.
-
-### B. Hargreaves-Samani Fallback $ET_0$
-Used when wind/humidity sensors are unavailable:
-$$ET_0 = 0.0023 \cdot R_a \cdot (T_{mean} + 17.8) \cdot \sqrt{T_{max} - T_{min}}$$
-Where $R_a$ is extraterrestrial radiation (mm/day equivalent).
-
-### C. FAO-56 Table 12 Crop Coefficients & Advective Adjustment (Eq. 62)
-In arid zones (low humidity, high winds), mid-season Kc is adjusted upward to account for advective energy:
-$$Kc_{mid} = Kc + \left[0.04 \cdot (u_2 - 2) - 0.004 \cdot (RH_{min} - 45)\right] \cdot \left(\frac{h}{3}\right)^{0.3}$$
-Where $u_2$ is wind speed at 2m (m/s), $RH_{min}$ is minimum relative humidity (%), and $h$ is mean crop height (m). Clamped to $[Kc_{mid}, Kc_{mid} + 0.20]$.
-
-### D. Dynamic Crop Coefficient $Kc$ (Johnson & Trout 2012)
-Relates crop cover fraction $F_c$ to dynamic $Kc$:
-$$F_c = \max\left(0, \min\left(1.0, 1.26 \cdot \text{NDVI} - 0.18\right)\right)$$
-$$Kc = Kc_{min} + (Kc_{full} - Kc_{min}) \cdot F_c$$
-
-### E. Dual-Layer Soil Moisture Model
-Models water movement through two distinct layers:
-* Surface layer (0–10cm):
-  $$\text{TopLayer}_{VWC}(t) = \text{TopLayer}_{VWC}(t-1) + \frac{\text{Rain} + \text{Irrigation} - 0.6 \cdot ET_{crop} - \text{Percolation}}{\text{WHC}_{top}}$$
-* Root layer (10–40cm):
-  $$\text{RootLayer}_{VWC}(t) = \text{RootLayer}_{VWC}(t-1) + \frac{\text{Percolation} - 0.4 \cdot ET_{crop} - \text{Drainage}}{\text{WHC}_{root}}$$
-
----
-
-## 5. Audit Recommendations
-1. **Dynamic Soil Layering:** Allow dynamic root-depth progression ($Z_r$) rather than static 10cm/40cm layer depths.
-2. **Local Canopy Calibrations:** Calibrate crop-specific albedos in net radiation ($R_n$) to improve Penman-Monteith accuracy.
+1. **Psychrometric & ET0 Engine** ([`layer3_water/et/`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/et)):
+   - Penman-Monteith daily reference ET ($ET_0$) with atmospheric provenance tracking.
+   - Dual $K_c$ canopy demand partitioning ($K_{cb}, K_e$).
+2. **Multi-Layer Soil Balance & Hydraulic Potentials** ([`layer3_water/soil/`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/soil)):
+   - Discretized 5-layer hydraulic profile.
+   - Van Genuchten water retention curve inversion ($\psi_m(z), K(\theta, z)$).
+   - Infiltration, surface runoff, and tipping-bucket/percolation cascade with exact mass balance closure error tracking.
+3. **Data Assimilation Engine** ([`layer3_water/assimilation/`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/assimilation)):
+   - 1D Optimal Interpolation / Kalman Filter ($X^+ = X^- + \mathbf{K}(y - \mathbf{H}X^-)$) ingesting in-situ probes, satellite SMAP, and thermal cooling radiometer constraints.
+4. **Historical Hydraulic Stress Memory Accumulator** ([`layer3_water/contracts/water_state.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/contracts/water_state.py)):
+   - Accumulates cumulative transpiration deficit, consecutive stress days, integrated VPD stress index, and recovery rate.
+5. **Physical Solver Selector** ([`layer3_water/solver/`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/solver)):
+   - Reports the implemented `EMPIRICAL_BUCKET`; Richards requests degrade explicitly because no validated Richards runner is installed.
+6. **Ensemble Forecast Engine** ([`layer3_water/forecast/`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/forecast)):
+   - Probabilistic depletion trajectories $P(D_r > \text{RAW})$ across calibrated NWP weather and soil parameter ensembles.
+7. **Shadow MPC Analyzer** ([`layer3_water/decision/`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/decision)):
+   - Transitional comparison output only; it does not own canonical actions.

@@ -1,0 +1,15 @@
+{
+  "bounds": [
+    1.2,
+    34.8,
+    5.8,
+    37.8
+  ],
+  "width": 1376,
+  "height": 768,
+  "asset": "/r2/region-atmosphere.webp",
+  "spatialMode": "GEOREGISTERED_ATMOSPHERE",
+  "demoStatus": "ILLUSTRATIVE",
+  "generationFamilyId": "pass6-mitidja-v1",
+  "parentAsset": "/r2/organization-atmosphere.webp"
+}

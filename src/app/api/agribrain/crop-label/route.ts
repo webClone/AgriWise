@@ -6,6 +6,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSession } from "@/lib/session";
 import { authorizePlot } from "@/lib/agribrain/authorize-plot";
+import { buildSignedInternalHeaders } from "@/lib/agribrain/internal-service-auth";
+import { normalizeCropRuntimeDeclarationReceipt } from "@/lib/agribrain/crop-runtime-declaration.mjs";
 
 export async function POST(request: NextRequest) {
   try {
@@ -16,11 +18,7 @@ export async function POST(request: NextRequest) {
     const {
       plotId,
       cropCode,
-      plantingDate,
-      harvestDate,
-      labelSource,
       notes,
-      synthetic
     } = body;
 
     if (!plotId || !cropCode) {
@@ -48,19 +46,35 @@ export async function POST(request: NextRequest) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15_000);
 
-    const response = await fetch(`${apiUrl}/v2/crop-label`, {
+    const upstreamPath = "/v2/crop-label";
+    const upstreamBody = JSON.stringify({
+      plot_id: plotId,
+      crop_code: cropCode,
+      // Identity confirmation does not assert a crop-cycle date. Planting and
+      // harvest dates require their own explicit, typed crop-cycle workflow.
+      planting_date: null,
+      harvest_date: null,
+      // The backend derives label authority from the authenticated namespace.
+      // A browser cannot promote itself to an admin/agronomist source.
+      label_source: "farmer_confirmed",
+      notes: notes || null,
+      synthetic: false,
+    });
+    const signedHeaders = buildSignedInternalHeaders(
+      "POST",
+      upstreamPath,
+      {
+        tenantId: String(userId),
+        farmId: String(access.plot.farmId),
+        plotId: String(plotId),
+      },
+      upstreamBody,
+    );
+
+    const response = await fetch(`${apiUrl}${upstreamPath}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        plot_id: plotId,
-        crop_code: cropCode,
-        planting_date: plantingDate || null,
-        harvest_date: harvestDate || null,
-        label_source: labelSource,
-        created_by: userId,
-        notes: notes || null,
-        synthetic: !!synthetic,
-      }),
+      headers: { "Content-Type": "application/json", ...signedHeaders },
+      body: upstreamBody,
       signal: controller.signal,
     }).finally(() => clearTimeout(timeoutId));
 
@@ -74,7 +88,43 @@ export async function POST(request: NextRequest) {
     }
 
     const result = await response.json();
-    return NextResponse.json({ success: true, ...result });
+    let runtimeDeclaration;
+    try {
+      runtimeDeclaration = normalizeCropRuntimeDeclarationReceipt(
+        result?.runtime_declaration,
+        {
+          tenant_id: String(userId),
+          farm_id: String(access.plot.farmId),
+          plot_id: String(plotId),
+        },
+      );
+      const requestedCropCode = String(cropCode).trim().toLowerCase()
+        .replace(/[- ]/g, "_");
+      if (
+        runtimeDeclaration.crop_code !== requestedCropCode
+        || runtimeDeclaration.authority !== "FARMER_CONFIRMED"
+        || runtimeDeclaration.source !== "authenticated_farmer_crop_identity"
+      ) {
+        throw new Error("runtime crop declaration authority mismatch");
+      }
+    } catch (receiptError) {
+      const reason = receiptError instanceof Error
+        ? receiptError.message
+        : "invalid runtime declaration receipt";
+      console.error(`[CropLabel Proxy API] ${reason}`);
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Crop declaration was not confirmed by canonical runtime state",
+        },
+        { status: 502 },
+      );
+    }
+    return NextResponse.json({
+      ...result,
+      success: true,
+      runtime_declaration: runtimeDeclaration,
+    });
 
   } catch (error: unknown) {
     if (error instanceof Error && error.name === "AbortError") {

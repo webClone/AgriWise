@@ -49,6 +49,20 @@ export async function POST(
     const safePlot = cycle.plot;
 
     // 3. Calculate Progress
+    if (
+      !cycle.plantDate
+      || !["confirmed", "estimated"].includes(
+        String(cycle.plantDateStatus || "unknown").toLowerCase(),
+      )
+    ) {
+      return NextResponse.json(
+        {
+          error: "A confirmed or estimated planting date is required before recalculation",
+          code: "planting_date_required",
+        },
+        { status: 422 },
+      );
+    }
     const plantDate = new Date(cycle.plantDate);
     const now = new Date();
     const daysElapsed = Math.max(0, Math.ceil((now.getTime() - plantDate.getTime()) / (1000 * 60 * 60 * 24)));
@@ -80,7 +94,9 @@ export async function POST(
             soilType: safePlot.soilType || "General",
             irrigationType: safePlot.irrigation || "General",
             plotArea: safePlot.area,
-            growthStage: daysElapsed < 20 ? "Emergence" : daysElapsed < 60 ? "Vegetative" : "Reproductive"
+            // Crop-cycle age is administrative scheduling context, not
+            // biological-stage evidence. Only Layer 2 may publish phenology.
+            growthStage: "UNKNOWN"
         }, faoProfile);
     } catch (e) {
         return NextResponse.json({ error: "AI Generation Failed", details: String(e) }, { status: 500 });

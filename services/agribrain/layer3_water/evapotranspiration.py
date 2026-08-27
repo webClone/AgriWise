@@ -10,7 +10,8 @@ Methods:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Any, Optional, Tuple, Mapping
 import math
 
 # Re-export the canonical ET₀ calculators from L0
@@ -22,6 +23,22 @@ from layer0.environment.weather.et0 import (
     _extraterrestrial_radiation,
     _saturation_vapour_pressure,
 )
+
+
+@dataclass(frozen=True)
+class KcPosteriorResult:
+    """Crop-coefficient distribution bound to Layer 2 semantic receipts."""
+
+    mean: pd.Series
+    standard_deviation: pd.Series
+    lower: pd.Series
+    upper: pd.Series
+    crop_posterior_hash: str
+    phenology_posterior_hash: str
+    crop_evidence_class: str
+    phenology_evidence_class: str
+    production_eligible: bool
+    hypotheses: Tuple[str, ...]
 
 
 class ETEngine:
@@ -367,6 +384,135 @@ class ETEngine:
 
         kc_dynamic = kc_min + (base_kc - kc_min) * fc
         return kc_dynamic
+
+    def calculate_posterior_kc(
+        self,
+        ndvi_series: pd.Series,
+        semantic_context: Any,
+        *,
+        rh_min: float = 45.0,
+        wind_2m: float = 2.0,
+        crop_height_m: float = 0.5,
+    ) -> KcPosteriorResult:
+        """Propagate canonical crop/stage uncertainty into Kc.
+
+        The caller must pass the resolved Layer 2 crop/phenology context.  A
+        declaration is never treated as a species observation.  Group-only
+        context is expanded across compatible registry crops; missing context
+        uses an intentionally broad generic crop/stage ensemble.
+        """
+        from crop_database import CROP_REGISTRY
+
+        def norm(raw: Any) -> Dict[str, float]:
+            if not isinstance(raw, Mapping):
+                return {}
+            clean = {}
+            for key, value in raw.items():
+                try:
+                    probability = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(probability) and probability > 0.0:
+                    clean[str(key).lower()] = probability
+            total = sum(clean.values())
+            return ({key: value / total for key, value in clean.items()}
+                    if total > 0.0 else {})
+
+        crop_mix = norm(getattr(semantic_context, "crop_mixture", {}))
+        stage_mix = norm(getattr(semantic_context, "stage_posterior", {}))
+        species_allowed = bool(
+            getattr(semantic_context, "species_specific_allowed", False)
+        )
+        stage_allowed = bool(
+            getattr(semantic_context, "stage_specific_allowed", False)
+        )
+
+        if species_allowed:
+            selected = str(getattr(semantic_context, "selected_crop", "") or "").lower()
+            if not crop_mix and selected:
+                crop_mix = {selected: 1.0}
+            crop_evidence = "species_posterior"
+        elif str(getattr(semantic_context, "crop_resolution", "")) == "group_only":
+            expanded: Dict[str, float] = {}
+            for group, group_weight in crop_mix.items():
+                compatible = [
+                    code for code, spec in CROP_REGISTRY.items()
+                    if str(getattr(spec, "architecture", "")).lower() == group
+                ]
+                for code in compatible:
+                    expanded[code] = expanded.get(code, 0.0) + group_weight / max(1, len(compatible))
+            crop_mix = norm(expanded)
+            crop_evidence = "group_mixture"
+        else:
+            # Broad, bounded prior across supported agronomic architectures.
+            representatives: Dict[str, str] = {}
+            for code, spec in CROP_REGISTRY.items():
+                representatives.setdefault(str(spec.architecture).lower(), code)
+            crop_mix = norm({code: 1.0 for code in representatives.values()})
+            crop_evidence = "generic_bounded_prior"
+
+        if stage_allowed:
+            if not stage_mix:
+                stage = str(getattr(semantic_context, "phenology_stage", "UNKNOWN"))
+                stage_mix = {stage.lower(): 1.0}
+            phenology_evidence = "canonical_stage_posterior"
+        else:
+            stage_mix = {
+                "initial": 0.20,
+                "vegetative": 0.30,
+                "reproductive": 0.30,
+                "maturity": 0.20,
+            }
+            phenology_evidence = "generic_stage_prior"
+
+        fc = (1.26 * ndvi_series.astype(float) - 0.18).clip(0, 1)
+        values: List[pd.Series] = []
+        weights: List[float] = []
+        hypotheses: List[str] = []
+        for crop_code, crop_weight in crop_mix.items():
+            spec = CROP_REGISTRY.get(crop_code)
+            if spec is None:
+                continue
+            for stage, stage_weight in stage_mix.items():
+                stage_key = stage.lower()
+                if stage_key in {"bare_soil", "emergence", "initial", "planting"}:
+                    base = float(spec.kc_init)
+                elif stage_key in {"maturity", "senescence", "harvested", "end", "harvest"}:
+                    base = float(spec.kc_end)
+                else:
+                    base = self._advective_kc_adjustment(
+                        float(spec.kc_mid), rh_min, wind_2m, crop_height_m,
+                    )
+                values.append(0.15 + (base - 0.15) * fc)
+                weights.append(crop_weight * stage_weight)
+                hypotheses.append(f"{crop_code}:{stage_key}")
+
+        if not values:
+            values = [pd.Series(0.85, index=ndvi_series.index, dtype=float)]
+            weights = [1.0]
+            hypotheses = ["generic:unknown"]
+        total_weight = sum(weights) or 1.0
+        normalised = np.asarray(weights, dtype=float) / total_weight
+        matrix = np.vstack([series.to_numpy(dtype=float) for series in values])
+        mean_values = np.average(matrix, axis=0, weights=normalised)
+        variance = np.average((matrix - mean_values) ** 2, axis=0, weights=normalised)
+        mean = pd.Series(mean_values, index=ndvi_series.index)
+        std = pd.Series(np.sqrt(np.maximum(variance, 0.0)), index=ndvi_series.index)
+        lower = pd.Series(np.min(matrix, axis=0), index=ndvi_series.index)
+        upper = pd.Series(np.max(matrix, axis=0), index=ndvi_series.index)
+
+        return KcPosteriorResult(
+            mean=mean,
+            standard_deviation=std,
+            lower=lower,
+            upper=upper,
+            crop_posterior_hash=str(getattr(semantic_context, "crop_posterior_hash", "") or ""),
+            phenology_posterior_hash=str(getattr(semantic_context, "phenology_posterior_hash", "") or ""),
+            crop_evidence_class=crop_evidence,
+            phenology_evidence_class=phenology_evidence,
+            production_eligible=species_allowed and stage_allowed,
+            hypotheses=tuple(hypotheses),
+        )
 
     # ================================================================
     # Crop Evapotranspiration (ETc)

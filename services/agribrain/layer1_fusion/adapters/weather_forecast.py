@@ -28,17 +28,18 @@ class WeatherForecastAdapter:
     source_family = "weather_forecast"
 
     def can_read(self, package: Any) -> bool:
+        from layer1_fusion.adapters.layer0_source_package import is_layer0_source_package
         return package is not None and (
             getattr(package, "forecast_process_forcing", None) is not None
             or getattr(package, "forecast_consensus", None) is not None
-            or getattr(package, "contract_version", None) == "layer0-source-package-v1"
+            or is_layer0_source_package(package)
         )
 
     def extract_evidence(
         self, package: Any, context: Layer1InputBundle
     ) -> List[EvidenceItem]:
-        if getattr(package, "contract_version", None) == "layer0-source-package-v1":
-            from layer1_fusion.adapters.layer0_source_package import Layer0SourcePackageAdapter
+        from layer1_fusion.adapters.layer0_source_package import Layer0SourcePackageAdapter, is_layer0_source_package
+        if is_layer0_source_package(package):
             return Layer0SourcePackageAdapter().extract_evidence(package, context)
 
         items: List[EvidenceItem] = []
@@ -106,8 +107,8 @@ class WeatherForecastAdapter:
         return items
 
     def source_health(self, package: Any) -> SourceEnvelope:
-        if getattr(package, "contract_version", None) == "layer0-source-package-v1":
-            from layer1_fusion.adapters.layer0_source_package import Layer0SourcePackageAdapter
+        from layer1_fusion.adapters.layer0_source_package import Layer0SourcePackageAdapter, is_layer0_source_package
+        if is_layer0_source_package(package):
             return Layer0SourcePackageAdapter().source_health(package)
 
         if package is None:

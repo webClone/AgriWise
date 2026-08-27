@@ -20,16 +20,21 @@ if env_path.exists():
     load_dotenv(env_path)
     print(f"[OK] Loaded environment from: {env_path}")
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, Header, Query, Path as FastAPIPath, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List, Union, Tuple
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
+import threading as _threading
+import time as _progress_time
+
+from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
+from services.agribrain.app.internal_service_auth import require_internal_service_request, init_mongo_nonce_indexes
 
 # Import specialized AIs
 import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.orchestrator import orchestrator, AIOrchestrator
@@ -43,8 +48,6 @@ orchestrator.register_ai("disease_risk", disease_risk_ai)
 orchestrator.register_ai("phenology", phenology_ai)
 orchestrator.register_ai("spray_window", spray_window_ai)
 orchestrator.register_ai("water_stress", water_stress_ai)
-
-from contextlib import asynccontextmanager
 
 _refresh_worker = None
 _asmae_recovery_stop = None
@@ -63,16 +66,16 @@ async def lifespan(app: FastAPI):
 
     try:
         import threading as _worker_threading
-        from layer05_asmae.background_jobs import recover_pending_jobs
+        from services.agribrain.layer05_asmae.background_jobs import recover_all_pending_jobs
 
-        recovered = recover_pending_jobs()
+        recovered = recover_all_pending_jobs()
         logger.info('[STARTUP] Launched %s recoverable ASMAE job(s)', recovered)
         _asmae_recovery_stop = _worker_threading.Event()
 
         def _asmae_recovery_loop():
             while not _asmae_recovery_stop.wait(30.0):
                 try:
-                    recover_pending_jobs()
+                    recover_all_pending_jobs()
                 except Exception as recovery_exc:
                     logger.exception(
                         '[ASMAE] Durable worker recovery scan failed: %s',
@@ -86,15 +89,22 @@ async def lifespan(app: FastAPI):
         )
         _asmae_recovery_thread.start()
     except Exception as _e:
-        logger.exception('[STARTUP] ASMAE job recovery failed: %s', _e)
+        logger.exception('[STARTUP] ASMAE job recovery failed: {_e}')
+
+    # Initialize shared Mongo nonce indexes if storage is connected
+    try:
+        from layer0.data_gateway.storage_engine import _storage_engine
+        if _storage_engine and getattr(_storage_engine, "db", None) is not None:
+            init_mongo_nonce_indexes(_storage_engine.db)
+            logger.info("[STARTUP] Initialized Mongo nonce collection indexes.")
+    except Exception as _nonce_err:
+        logger.warning(f"[STARTUP] Mongo nonce index initialization deferred: {_nonce_err}")
 
     # V65E Cache Temp Cleanup: Purge stale .tmp files and legacy cache files from the surfaces cache directory on startup.
     try:
-        import os
-        import time
-        cache_dir = os.path.join(os.path.dirname(__file__), "..", "artifacts", "surfaces_cache")
-        if os.path.exists(cache_dir) and os.path.isdir(cache_dir):
-            now = time.time()
+        cache_dir = Path(__file__).resolve().parents[1] / "artifacts" / "surfaces_cache"
+        if cache_dir.exists() and cache_dir.is_dir():
+            now = _progress_time.time()
             LEGACY_CACHE_VERSION_MARKERS = [
                 "_v62b.json",
                 "_v63d_surface_metadata.json",
@@ -102,20 +112,18 @@ async def lifespan(app: FastAPI):
                 "_v65e_categorical_integrity.json",
             ]
             for filename in os.listdir(cache_dir):
-                file_path = os.path.join(cache_dir, filename)
-                # Cleanup stale .tmp files
+                file_path = cache_dir / filename
                 if filename.endswith(".tmp"):
                     try:
-                        file_mtime = os.path.getmtime(file_path)
-                        if (now - file_mtime) > 300:  # 5 minutes (300 seconds)
-                            os.remove(file_path)
+                        file_mtime = file_path.stat().st_mtime
+                        if (now - file_mtime) > 300:
+                            file_path.unlink(missing_ok=True)
                             logger.info(f"[STARTUP] Removed stale cache temp file: {file_path}")
                     except Exception as fe:
                         logger.error(f"[STARTUP] Failed to remove stale tmp file {file_path}: {fe}")
-                # Cleanup legacy schema files
                 elif any(marker in filename for marker in LEGACY_CACHE_VERSION_MARKERS):
                     try:
-                        os.remove(file_path)
+                        file_path.unlink(missing_ok=True)
                         logger.info(f"[STARTUP] Removed legacy cache file: {file_path}")
                     except Exception as fe:
                         logger.error(f"[STARTUP] Failed to remove legacy cache file {file_path}: {fe}")
@@ -145,7 +153,6 @@ _cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
-# In production, add the real frontend origin
 _frontend_url = os.environ.get("FRONTEND_URL")
 if _frontend_url:
     _cors_origins.append(_frontend_url)
@@ -158,15 +165,10 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
-# ============================================================================
-# Pipeline Progress Store (in-memory, thread-safe)
-# ============================================================================
-import threading as _threading
-import time as _progress_time
-
+# Pipeline Progress Store (in-memory, thread-safe, PlotNamespace-keyed)
 _progress_lock = _threading.Lock()
 _progress_store: Dict[str, Dict[str, Any]] = {}  # run_id -> progress state
-_plot_run_map: Dict[str, str] = {}  # plot_id -> latest run_id
+_plot_run_map: Dict[Tuple[str, str, str], str] = {}  # (tenant_id, farm_id, plot_id) -> latest run_id
 _RUN_RESULTS_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "run_results"
 
 
@@ -176,15 +178,26 @@ def _run_result_path(run_id: str) -> Path:
     return _RUN_RESULTS_DIR / f"{safe_id}.json"
 
 
-def _persist_run_result(run_id: str, plot_id: str, payload: Dict[str, Any]) -> Path:
-    """Publish the canonical API result before progress becomes terminal."""
+def _persist_run_result(
+    run_id: str,
+    namespace: PlotNamespace,
+    payload: Dict[str, Any],
+    geometry_hash: str = "",
+) -> Path:
+    """Publish the durable result and canonical head before terminal progress."""
     import uuid
+    ns = _coerce_namespace(namespace)
     path = _run_result_path(run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     envelope = {
         "run_id": run_id,
-        "plot_id": plot_id,
+        "plot_id": ns.plot_id,
+        "plot_namespace": {
+            "tenant_id": ns.tenant_id,
+            "farm_id": ns.farm_id,
+            "plot_id": ns.plot_id,
+        },
         "published_at": datetime.utcnow().isoformat() + "Z",
         "result": payload,
     }
@@ -193,23 +206,64 @@ def _persist_run_result(run_id: str, plot_id: str, payload: Dict[str, Any]) -> P
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+    # The browser consumes only a validated canonical head.  Terminal L10
+    # provider/degraded results therefore need the same immutable publication
+    # chain as completed ASMAE reintegration; otherwise a successful run is
+    # permanently reported as "canonical publication pending".
+    from services.agribrain.layer05_asmae.plot_snapshot_store import (
+        publish_canonical_layer10_snapshot,
+    )
+    publish_canonical_layer10_snapshot(
+        namespace=ns,
+        geometry_hash=str(geometry_hash or ""),
+        frontend_payload=payload,
+        request_run_id=run_id,
+    )
     return path
 
-def _update_progress(plot_id: str, stage: str, status: str, elapsed: float = 0.0, run_id: Optional[str] = None):
-    """Thread-safe run-scoped progress update."""
+def _update_progress(
+    namespace: Union[PlotNamespace, str],
+    stage: str,
+    status: str,
+    elapsed: float = 0.0,
+    run_id: Optional[str] = None
+):
+    """Thread-safe run-scoped progress update using PlotNamespace.to_tuple() key."""
+    if isinstance(namespace, PlotNamespace):
+        ns = namespace
+    else:
+        str_val = str(namespace).strip()
+        found_ns = None
+        with _progress_lock:
+            for k_tuple in _plot_run_map:
+                if len(k_tuple) == 3 and k_tuple[2] == str_val:
+                    found_ns = PlotNamespace(tenant_id=k_tuple[0], farm_id=k_tuple[1], plot_id=k_tuple[2])
+                    break
+        if found_ns:
+            ns = found_ns
+        else:
+            # Progress is authority-bearing state.  Never manufacture a second
+            # namespace for a bare plot id; callers must supply the durable
+            # namespace or refer to an already-registered plot.
+            ns = _coerce_namespace(namespace)
+
+    ns_key = ns.to_tuple()
     with _progress_lock:
-        r_id = run_id or _plot_run_map.get(plot_id) or f"run-{plot_id}"
-        _plot_run_map[plot_id] = r_id
+        r_id = run_id or _plot_run_map.get(ns_key) or f"run-{ns.plot_id}"
+        _plot_run_map[ns_key] = r_id
         if r_id not in _progress_store:
             _progress_store[r_id] = {
                 "run_id": r_id,
-                "plot_id": plot_id,
+                "plot_id": ns.plot_id,
+                "namespace": ns,
                 "stages": [],
                 "started_at": _progress_time.time(),
                 "status": "running",
                 "active": True,
                 "terminal": False,
             }
+        _progress_store[r_id]["namespace"] = ns
         _progress_store[r_id]["updated_at"] = _progress_time.time()
         
         is_final_stage = stage.strip().lower() in {
@@ -236,185 +290,271 @@ def _update_progress(plot_id: str, stage: str, status: str, elapsed: float = 0.0
         else:
             stages.append(entry)
 
-def _terminalize_progress(plot_id: str, status: str = "failed", run_id: Optional[str] = None):
+def _terminalize_progress(namespace: Union[PlotNamespace, str], status: str = "failed", run_id: Optional[str] = None):
+    if isinstance(namespace, PlotNamespace):
+        ns = namespace
+    else:
+        str_val = str(namespace).strip()
+        found_ns = None
+        with _progress_lock:
+            for k_tuple in _plot_run_map:
+                if len(k_tuple) == 3 and k_tuple[2] == str_val:
+                    found_ns = PlotNamespace(tenant_id=k_tuple[0], farm_id=k_tuple[1], plot_id=k_tuple[2])
+                    break
+        if found_ns:
+            ns = found_ns
+        else:
+            ns = _coerce_namespace(namespace)
+
+    ns_key = ns.to_tuple()
     with _progress_lock:
-        r_id = run_id or _plot_run_map.get(plot_id)
+        r_id = run_id or _plot_run_map.get(ns_key)
         if r_id and r_id in _progress_store:
             _progress_store[r_id]["active"] = False
             _progress_store[r_id]["terminal"] = True
             _progress_store[r_id]["status"] = status
 
-def _clear_progress(plot_id: str, run_id: Optional[str] = None):
+def _clear_progress(namespace: Union[PlotNamespace, str], run_id: Optional[str] = None):
+    ns = namespace if isinstance(namespace, PlotNamespace) else _coerce_namespace(namespace)
+    ns_key = ns.to_tuple()
     with _progress_lock:
-        r_id = run_id or _plot_run_map.get(plot_id)
+        r_id = run_id or _plot_run_map.get(ns_key)
         if r_id:
             _progress_store.pop(r_id, None)
-        if _plot_run_map.get(plot_id) == r_id:
-            _plot_run_map.pop(plot_id, None)
+        if _plot_run_map.get(ns_key) == r_id:
+            _plot_run_map.pop(ns_key, None)
 
-@app.get("/v2/progress/{plot_id}")
-def api_v2_progress(plot_id: str, run_id: Optional[str] = None):
-    """Polling endpoint for request-local and durable ASMAE progress."""
-    recovery_triggered = 0
-    try:
-        from layer05_asmae.background_jobs import recover_pending_jobs
-
-        recovery_triggered = recover_pending_jobs(plot_id=plot_id)
-    except Exception as recovery_exc:
-        logger.warning('Durable ASMAE recovery failed during progress poll: %s', recovery_exc)
-    with _progress_lock:
-        target_run_id = run_id or _plot_run_map.get(plot_id)
-        data = _progress_store.get(target_run_id) if target_run_id else None
-        stages = list(data.get("stages", [])) if data else []
-        is_active = bool(data and data.get("active", True) and not data.get("terminal", False)) if data else False
-        
-        result_available = bool(target_run_id and _run_result_path(target_run_id).exists())
-
-    durable_job = None
-    final_snapshot_id = None
-    try:
-        from layer05_asmae.background_jobs import latest_job_for_plot
-        from layer05_asmae.plot_snapshot_store import (
-            load_latest_plot_snapshot,
-        )
-        durable_job = latest_job_for_plot(plot_id, run_id=run_id)
-        snapshot = load_latest_plot_snapshot(plot_id)
-        final_snapshot_id = (
-            snapshot.get("snapshot_id") if snapshot else None
-        )
-    except Exception as progress_exc:
-        logger.debug("Durable ASMAE progress unavailable: %s", progress_exc)
-    active_statuses = {
-        "queued",
-        "running",
-    }
-    durable_status = durable_job.get('status') if durable_job else None
-    durable_matches_run = bool(
-        durable_job
-        and (
-            not target_run_id
-            or str(durable_job.get('run_id', '')) == str(target_run_id)
-        )
-    )
-    terminal = bool(data and data.get('terminal', False))
-    effective_status = data.get('status', 'running') if data else 'unknown'
-    if durable_status and (not data or durable_matches_run):
-        effective_status = durable_status
-        is_active = durable_status in active_statuses
-        terminal = durable_status in {'failed', 'completed', 'superseded'}
-    effective_run_id = target_run_id or (
-        durable_job.get('run_id') if durable_job else None
-    )
-    result_envelope: Dict[str, Any] = {}
-    if effective_run_id:
-        result_path = _run_result_path(str(effective_run_id))
-        result_available = result_path.exists()
-        if result_available:
-            try:
-                loaded_envelope = json.loads(result_path.read_text(encoding="utf-8"))
-                if isinstance(loaded_envelope, dict):
-                    result_envelope = loaded_envelope
-            except (OSError, json.JSONDecodeError, TypeError):
-                result_available = False
-                result_envelope = {}
-
-    if result_available:
-        terminal = True
-        is_active = False
-        effective_status = 'completed'
-
-    final_snapshot = final_snapshot_id or (
-        durable_job.get("final_snapshot_id") if durable_job else None
-    )
-    result_url = (
-        f'/v2/runs/{effective_run_id}/result' if result_available else None
-    )
-    if result_available:
-        publication_state = 'published'
-    elif is_active or not terminal:
-        publication_state = 'pending'
-    elif effective_status in {'failed', 'superseded', 'cancelled'}:
-        publication_state = 'not_published'
-    else:
-        publication_state = 'missing_terminal_result'
-
-    request_state = {
-        'requested_run_id': run_id,
-        'run_id': effective_run_id,
-        'plot_id': plot_id,
-        'status': effective_status,
-        'active': is_active,
-        'terminal': terminal,
-        'stages': stages,
-        'durable_job_matches_request': bool(
-            durable_job
-            and (
-                run_id is None
-                or str(durable_job.get('run_id', '')) == str(run_id)
-            )
-        ),
-    }
-    publication = {
-        'state': publication_state,
-        'available': result_available,
-        'run_id': effective_run_id,
-        'result_url': result_url,
-        'published_at': result_envelope.get('published_at'),
-        'final_snapshot_id': final_snapshot,
-    }
-    response = {
-        "stages": stages,
-        "run_id": effective_run_id,
-        "active": is_active,
-        "terminal": terminal,
-        "status": effective_status,
-        "result_available": result_available,
-        "result_url": result_url,
-        "request": request_state,
-        "publication": publication,
-        "asmae_job": durable_job,
-        'recovery_triggered': recovery_triggered,
-        "final_snapshot_id": final_snapshot,
-    }
-    return response
-
-
-@app.get("/v2/runs/{run_id}/result")
-def api_v2_run_result(run_id: str):
-    """Retrieve a durably published result after request disconnection/restart."""
-    path = _run_result_path(run_id)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        raise HTTPException(status_code=404, detail="Run result not found")
-    return payload
-
-
-@app.get("/v2/asmae/jobs/{job_id}")
-def api_v2_asmae_job(job_id: str):
-    """Expose durable stage/progress and the final canonical snapshot ID."""
-    from layer05_asmae.background_jobs import get_job_status, recover_pending_jobs
-
-    recover_pending_jobs(job_id=job_id)
-    payload = get_job_status(job_id)
-    if payload is None:
-        raise HTTPException(status_code=404, detail="ASMAE job not found")
-    return payload
+@app.get("/v2/snapshots/{snapshot_id}")
+def api_v2_exact_snapshot(
+    snapshot_id: str,
+    namespace: PlotNamespace = Depends(require_internal_service_request)
+):
+    """Retrieve exact ASMAE plot snapshot by canonical snapshot ID with namespace verification."""
+    from services.agribrain.layer05_asmae.plot_snapshot_store import load_plot_snapshot_by_id
+    snapshot = load_plot_snapshot_by_id(snapshot_id, namespace=namespace)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"Exact snapshot {snapshot_id} not found for namespace")
+    return snapshot
 
 
 @app.get("/v2/plots/{plot_id}/snapshot")
-def api_v2_plot_snapshot(plot_id: str, geometry_hash: Optional[str] = None):
-    """Return the latest frontend-ready canonical plot snapshot."""
-    from layer05_asmae.plot_snapshot_store import load_latest_plot_snapshot
-
-    snapshot = load_latest_plot_snapshot(plot_id, geometry_hash)
+def api_v2_canonical_plot_snapshot(
+    plot_id: str,
+    namespace: PlotNamespace = Depends(require_internal_service_request)
+):
+    """Retrieve canonical plot snapshot head for the authenticated namespace."""
+    if namespace.plot_id != plot_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Header X-Plot-Id does not match URL path parameter plot_id"
+        )
+    from services.agribrain.layer05_asmae.plot_snapshot_store import load_latest_plot_snapshot
+    snapshot = load_latest_plot_snapshot(namespace)
     if snapshot is None:
-        raise HTTPException(status_code=404, detail="Plot snapshot not found")
+        return {
+            "available": False,
+            "reason": "canonical_head_not_published",
+            "plot_id": namespace.plot_id,
+            "tenant_id": namespace.tenant_id,
+            "farm_id": namespace.farm_id,
+        }
+    validation = snapshot.get("validation") or {}
+    integrity_keys = (
+        "nodeValid",
+        "publicationValid",
+        "receiptValid",
+        "inventoryValid",
+        "bindingValid",
+        "lineageValid",
+    )
+    contract_keys = (
+        "schemaValid",
+        "contractValid",
+        "publicationStatusValid",
+    )
+    invalid_integrity_flags = [
+        key for key in integrity_keys if validation.get(key) is not True
+    ]
+    if invalid_integrity_flags:
+        # A corrupt or incompletely bound head remains on disk as immutable
+        # audit evidence, but it is quarantined from browser/scientific
+        # authority.  Returning HTTP 200 with ``available: false`` preserves
+        # the client's last-known-good raster while a repair/refresh is
+        # requested; importantly, no payload from the invalid head is exposed
+        # as a candidate publication.
+        return {
+            "available": False,
+            "reason": "canonical_head_integrity_invalid",
+            "status": "quarantined",
+            "quarantined": True,
+            "refreshRequired": True,
+            "retainLastKnownGood": True,
+            "invalidIntegrityFlags": invalid_integrity_flags,
+            "plot_id": namespace.plot_id,
+            "tenant_id": namespace.tenant_id,
+            "farm_id": namespace.farm_id,
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "validation": validation,
+            "contract_validation": snapshot.get("contract_validation") or {},
+        }
+    if not all(validation.get(key) is True for key in contract_keys):
+        return {
+            "available": False,
+            "reason": "canonical_head_schema_stale",
+            "status": "stale",
+            "quarantined": False,
+            "refreshRequired": True,
+            "retainLastKnownGood": True,
+            "plot_id": namespace.plot_id,
+            "tenant_id": namespace.tenant_id,
+            "farm_id": namespace.farm_id,
+            "snapshot_id": snapshot.get("snapshot_id"),
+            "validation": validation,
+            "contract_validation": snapshot.get("contract_validation") or {},
+        }
+    snapshot["available"] = True
     return snapshot
 
-# Register drone mission API routes
-from app.drone_routes import router as drone_router
-app.include_router(drone_router)
+
+@app.get("/v2/progress/{plot_id}")
+def api_v2_progress(
+    plot_id: str,
+    run_id: Optional[str] = None,
+    namespace: PlotNamespace = Depends(require_internal_service_request)
+):
+    """Polling endpoint for request-local and durable ASMAE progress."""
+    if namespace.plot_id != plot_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Header X-Plot-Id does not match URL path parameter plot_id"
+        )
+
+    recovery_triggered = 0
+    try:
+        from services.agribrain.layer05_asmae.background_jobs import recover_all_pending_jobs
+        recovery_triggered = recover_all_pending_jobs(namespace=namespace)
+    except Exception as recovery_exc:
+        logger.warning('Durable ASMAE recovery failed during progress poll: %s', recovery_exc)
+
+    with _progress_lock:
+        target_run_id = run_id or _plot_run_map.get(namespace.to_tuple())
+        data = _progress_store.get(target_run_id) if target_run_id else None
+        if data and data.get("namespace") and data["namespace"] != namespace:
+            data = None
+
+    durable_job = None
+    try:
+        from services.agribrain.layer05_asmae.background_jobs import latest_job_for_plot
+        durable_job = latest_job_for_plot(namespace, run_id=run_id)
+    except Exception as progress_exc:
+        logger.debug("Durable ASMAE progress unavailable: %s", progress_exc)
+
+    durable_error = ""
+    if durable_job:
+        durable_job = dict(durable_job)
+        durable_error = str(durable_job.get("error") or durable_job.get("reason") or "")
+        scientific_identity = durable_job.get("scientific_identity")
+        if not isinstance(scientific_identity, dict):
+            scientific_identity = {}
+        if "CAPABILITY_PLAN_IDENTITY_MISMATCH" in durable_error:
+            from services.agribrain.layer05_asmae.evidence_capability import EVIDENCE_CAPABILITY_CONTRACT_VERSION
+
+            old_contract = str(
+                scientific_identity.get("evidence_capability_contract_version", "")
+                or durable_job.get("evidence_capability_contract_version", "")
+            )
+            durable_job.update({
+                "failure_code": "CAPABILITY_PLAN_IDENTITY_MISMATCH",
+                "stage": "contract_validation_failed",
+                "retry_classification": "permanent_contract",
+                "recoverable": False,
+                "retry_eligible": old_contract != EVIDENCE_CAPABILITY_CONTRACT_VERSION,
+                "current_evidence_capability_contract_version": EVIDENCE_CAPABILITY_CONTRACT_VERSION,
+            })
+
+        durable_status = str(durable_job.get("status") or "").lower()
+        old_source_digest = str(
+            scientific_identity.get("scientific_source_digest") or ""
+        )
+        if durable_status == "failed" and old_source_digest:
+            from services.agribrain.layer05_asmae.code_lineage import scientific_source_digest
+
+            try:
+                current_source_digest = scientific_source_digest()
+            except Exception as digest_exc:
+                # Retry eligibility is advisory metadata; polling the durable
+                # terminal state must remain available if lineage inspection
+                # is temporarily unavailable.
+                logger.debug(
+                    "Scientific source digest unavailable during progress poll: %s",
+                    digest_exc,
+                )
+                current_source_digest = ""
+            if current_source_digest and old_source_digest != current_source_digest:
+                # This is a response annotation only. ``durable_job`` is a
+                # copy, so the immutable terminal job record remains intact.
+                durable_job.update({
+                    "retry_eligible": True,
+                    "current_scientific_source_digest": current_source_digest,
+                })
+
+    from services.agribrain.layer05_asmae.plot_snapshot_store import load_latest_plot_snapshot
+    canonical_head = load_latest_plot_snapshot(namespace)
+
+    final_snapshot_id = None
+    if durable_job and durable_job.get("final_snapshot_id"):
+        final_snapshot_id = durable_job["final_snapshot_id"]
+    elif canonical_head and canonical_head.get("snapshot_id"):
+        final_snapshot_id = canonical_head["snapshot_id"]
+
+    stages = data.get("stages", []) if data else (durable_job.get("stages", []) if durable_job else [])
+    durable_status = str((durable_job or {}).get("status") or "").lower()
+    if durable_job is not None:
+        status_val = durable_status or "idle"
+    elif data:
+        status_val = data.get("status", "running")
+    else:
+        status_val = "idle"
+
+    head_snapshot_id = canonical_head.get("snapshot_id") if canonical_head else None
+    if status_val == "completed" and final_snapshot_id and head_snapshot_id == final_snapshot_id:
+        publication_relation = "published"
+    elif status_val == "completed":
+        publication_relation = "completed_unpublished"
+    elif durable_error or status_val in ("failed", "error"):
+        publication_relation = "failed"
+    else:
+        publication_relation = "in_progress"
+    terminal_status = status_val in ("completed", "failed", "superseded")
+    if durable_job is not None:
+        active = status_val in ("queued", "running", "stalled")
+        terminal = terminal_status
+    else:
+        active = False if terminal_status else (
+            data.get("active", True) if data else False
+        )
+        terminal = True if terminal_status else (
+            data.get("terminal", False) if data else False
+        )
+
+    return {
+        "plot_id": namespace.plot_id,
+        "tenant_id": namespace.tenant_id,
+        "farm_id": namespace.farm_id,
+        "run_id": target_run_id or (durable_job.get("run_id") if durable_job else None),
+        "active": active,
+        "terminal": terminal,
+        "status": status_val,
+        "publicationRelation": publication_relation,
+        "stages": stages,
+        "final_snapshot_id": final_snapshot_id,
+        "canonical_head_snapshot_id": head_snapshot_id,
+        "recovery_triggered": recovery_triggered,
+        "durable_job": durable_job,
+        # Compatibility name used by the browser job-state adapter. Both names
+        # reference the same durable, namespace-validated record.
+        "asmae_job": durable_job,
+    }
 
 # ============================================================================
 # Request/Response Models
@@ -1329,7 +1469,7 @@ class PlotIntelligenceRequest(BaseModel):
     days_past: int = 7
     days_future: int = 7
     plant_date: Optional[str] = None        # ISO date string (e.g. "2026-03-15")
-    crop_stage_label: Optional[str] = None  # Human label from DB crop cycle
+    crop_administrative_status: Optional[str] = None  # Workflow state, never phenology evidence
     force_refresh_weather: bool = False
     plot_id: Optional[str] = None           # Plot ID for DNA-calibrated physics injection
     # GAP 2: User-declared ground truth from frontend
@@ -2045,7 +2185,9 @@ def api_plot_intelligence(req: PlotIntelligenceRequest):
     }
 
     # Crop phenology (delegated to pi_helpers)
-    crop_phenology = compute_phenology(req.plant_date, req.crop_stage_label, ndvi_val)
+    crop_phenology = compute_phenology(
+        req.plant_date, req.crop_administrative_status, ndvi_val
+    )
 
     # ---- DNA Provenance (from Kalman engine metadata) ----
     dna_status = None
@@ -2849,8 +2991,10 @@ def api_v2_crops():
 
 class CropIdentifyRequest(BaseModel):
     plot_id: str
-    lat: float
-    lng: float
+    # Legacy context fields remain optional for backward-compatible callers;
+    # the canonical endpoint never reacquires or rescans from them.
+    lat: Optional[float] = None
+    lng: Optional[float] = None
     area_ha: Optional[float] = None
     soil_type: Optional[str] = None
     irrigation: Optional[str] = None
@@ -2858,41 +3002,81 @@ class CropIdentifyRequest(BaseModel):
     previous_crops: Optional[list] = None
 
 @app.post("/v2/crop-identify")
-def api_v2_crop_identify(req: CropIdentifyRequest):
-    """
-    Run biophysical crop identification using satellite data.
-    Returns ranked crop candidates with confidence scores.
-    
-    LIGHTWEIGHT — does NOT re-run L1 (30s+). Instead:
-    1. Tries to read cached plot-intelligence data (already computed)
-    2. Falls back to location-only detection (instant)
-    
-    Now also uses per-plot data (area, soil, irrigation, previous crops)
-    to differentiate results between plots on the same farm.
+def api_v2_crop_identify(
+    req: CropIdentifyRequest,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """Return the canonical crop-posterior public DTO.
+
+    This endpoint does not perform a live 212-species scoring run. It reads
+    the namespace-bound worldline/snapshot and separates registry authority,
+    EO crop-group support, and validated species confirmation.
     """
     try:
         # Crop identity has one truth path: the canonical plot worldline (or
         # the ASMAE snapshot that was committed from it). This endpoint never
         # reacquires a second, potentially different evidence snapshot.
-        from layer05_asmae.history.worldline_service import (
-            PlotWorldlineService,
+        from services.agribrain.orchestrator_v2.pre_asmae_layer2a import (
+            load_latest_crop_posterior_record,
         )
-        from layer05_asmae.snapshot_store import load_latest_snapshot
+        from services.agribrain.world_model.canonical_worldline import (
+            CanonicalWorldlineService,
+        )
+        from services.agribrain.layer05_asmae.plot_snapshot_store import (
+            load_latest_plot_snapshot,
+        )
+        from services.agribrain.app.crop_identify_dto import (
+            build_crop_identify_publication,
+        )
 
-        crop_event = PlotWorldlineService().latest_payload(
-            req.plot_id, "CROP_POSTERIOR"
+        if namespace.plot_id != req.plot_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Header X-Plot-Id does not match request plot_id",
+            )
+
+        crop_record = load_latest_crop_posterior_record(
+            CanonicalWorldlineService(),
+            plot_namespace=namespace,
         )
-        canonical = crop_event.get("crop_posterior")
+        canonical = (
+            dict(crop_record.posterior)
+            if crop_record is not None else None
+        )
+        crop_worldline_event_id = (
+            crop_record.worldline_event_id
+            if crop_record is not None else None
+        )
         snapshot = None
         if not isinstance(canonical, dict) or not canonical:
-            snapshot = load_latest_snapshot(req.plot_id)
+            snapshot = load_latest_plot_snapshot(namespace)
+            scientific = (
+                snapshot.get("asmae")
+                or snapshot.get("scientific_result")
+                or {}
+                if isinstance(snapshot, dict)
+                else {}
+            )
             canonical = (
-                snapshot.get("refined_crop_posterior")
-                or snapshot.get("crop_posterior")
-                if isinstance(snapshot, dict) else None
+                scientific.get("refined_crop_posterior")
+                or scientific.get("crop_posterior")
+                or (snapshot.get("frontend_payload") or {}).get(
+                    "crop_posterior"
+                )
+                if isinstance(snapshot, dict)
+                else None
+            )
+            # A legacy snapshot may predate canonical crop-worldline
+            # publication. Keep that absence explicit; never substitute the
+            # generic ASMAE worldline event for a crop-posterior event.
+            crop_worldline_event_id = (
+                scientific.get("crop_worldline_event_id")
+                or snapshot.get("crop_worldline_event_id")
+                if isinstance(snapshot, dict)
+                else None
             )
         if not isinstance(canonical, dict) or not canonical:
-            return {
+            unavailable = {
                 "status": "canonical_snapshot_unavailable",
                 "plot_id": req.plot_id,
                 "top_crop": None,
@@ -2905,365 +3089,37 @@ def api_v2_crop_identify(req: CropIdentifyRequest):
                     "evidence-bound crop posterior."
                 ),
             }
+            return build_crop_identify_publication(
+                unavailable,
+                plot_id=req.plot_id,
+                status="canonical_snapshot_unavailable",
+                canonical_snapshot=False,
+                reason=unavailable["reason"],
+            )
 
-        declared = canonical.get("declared_crop_normalized")
-        generic_groups = {
-            "cereal", "legume", "vegetable", "forage", "orchard",
-            "tuber", "industrial", "perennial", "annual", "mixed",
-            "fallow",
-        }
-        top_crop = (
-            declared
-            if declared
-            and declared not in generic_groups
-            and canonical.get("authority") in {
-                "USER_CONFIRMED", "AGRONOMIST_CONFIRMED",
-                "REGISTRY_DECLARED",
-            }
-            else None
-        )
-        return {
-            **canonical,
-            "status": "canonical",
-            "top_crop": top_crop,
-            "top_confidence": None,
-            "confidence_label": "NOT_CALIBRATED",
-            "candidates": canonical.get("species_ranking", []),
-            "canonical_snapshot": True,
-            "worldline_event_id": crop_event.get("_worldline_event_id"),
-            "snapshot_ref": (
-                snapshot.get("snapshot_ref")
+        return build_crop_identify_publication(
+            canonical,
+            plot_id=req.plot_id,
+            status="canonical",
+            canonical_snapshot=True,
+            worldline_event_id=crop_worldline_event_id,
+            snapshot_ref=(
+                snapshot.get("snapshot_ref") or snapshot.get("snapshot_id")
                 if isinstance(snapshot, dict) else None
             ),
-        }
-
-        # Legacy acquisition code below is intentionally unreachable and is
-        # retained temporarily only for migration/reference.
-        from layer2_veg_int.crop_identification import identify_crop
-        import math
-
-        # Helper: safely convert NDVI values that may be "NaN" strings
-        def _safe_float(v, default=None):
-            if v is None:
-                return default
-            if isinstance(v, str):
-                try:
-                    v = float(v)
-                except (ValueError, TypeError):
-                    return default
-            if isinstance(v, (int, float)):
-                if math.isnan(v) or math.isinf(v):
-                    return default
-                return float(v)
-            return default
-
-        def _is_admitted_temporal_record(record):
-            from layer0.temporal_evidence import is_admitted_temporal_record
-            return is_admitted_temporal_record(record)
-
-        temporal_input_count = 0
-        temporal_admitted_count = 0
-
-        kwargs = {
-            "lat": req.lat,
-            "lng": req.lng,
-        }
-
-        # Pass per-plot differentiating data
-        if req.area_ha is not None:
-            kwargs["area_ha"] = req.area_ha
-        if req.soil_type:
-            kwargs["soil_type"] = req.soil_type
-        if req.irrigation:
-            kwargs["irrigation_type"] = req.irrigation
-        if req.previous_crops:
-            kwargs["previous_crops"] = req.previous_crops
-
-        print(f"[CropID] Plot {req.plot_id[:8]}: lat={req.lat:.4f} lng={req.lng:.4f} "
-              f"area={req.area_ha}ha soil={req.soil_type} irrig={req.irrigation} "
-              f"prev_crops={len(req.previous_crops) if req.previous_crops else 0}")
-
-        _cache_hit = False
-
-        # Strategy 1: Try in-memory plot-intelligence cache (fast, from current session)
-        try:
-            cached = _progress_store.get(req.plot_id, {})
-            # Also try the in-memory plot intelligence cache if available
-            from orchestrator_v2 import run_entrypoint as _re
-            pi_cache = getattr(_re, "_pi_cache", {})
-            cached_result = pi_cache.get(req.plot_id)
-            
-            if cached_result and isinstance(cached_result, dict):
-                ts = cached_result.get("timeseries") or cached_result.get("plot_timeseries") or []
-                if ts and len(ts) > 5:
-                    temporal_input_count += len(ts)
-                    admitted_ts = [r for r in ts if _is_admitted_temporal_record(r)]
-                    temporal_admitted_count += len(admitted_ts)
-                    # Filter NDVI and dates TOGETHER to keep alignment
-                    pairs = [
-                        (r.get("date", ""), _safe_float(r.get("ndvi_interpolated", r.get("ndvi"))))
-                        for r in admitted_ts
-                    ]
-                    valid_pairs = [(d, v) for d, v in pairs if v is not None]
-                    if valid_pairs:
-                        ndvi_series = [p[1] for p in valid_pairs]
-                        kwargs["ndvi_series"] = ndvi_series
-                        kwargs["ndvi_dates"] = [p[0] for p in valid_pairs]
-                        kwargs["peak_ndvi"] = max(ndvi_series)
-                        pos_vals = [v for v in ndvi_series if v > 0]
-                        kwargs["trough_ndvi"] = min(pos_vals) if pos_vals else None
-
-                    sar_vh = [v for v in (_safe_float(r.get("vh")) for r in admitted_ts) if v is not None]
-                    sar_vv = [v for v in (_safe_float(r.get("vv")) for r in admitted_ts) if v is not None]
-                    if sar_vh:
-                        kwargs["sar_vh_mean"] = sum(sar_vh) / len(sar_vh)
-                    if sar_vv:
-                        kwargs["sar_vv_mean"] = sum(sar_vv) / len(sar_vv)
-
-                    temps = [v for v in (_safe_float(r.get("tmean")) for r in ts) if v is not None]
-                    if temps:
-                        kwargs["mean_temp_c"] = sum(temps) / len(temps)
-
-                    # Extract rainfall and ET0 if present (Component 9)
-                    rain_vals = [v for v in (_safe_float(r.get("rain", r.get("precipitation"))) for r in ts) if v is not None]
-                    if len(rain_vals) >= 30:
-                        kwargs["annual_rainfall_mm"] = sum(rain_vals) * (365.0 / len(rain_vals))
-                    
-                    et0_vals = [v for v in (_safe_float(r.get("et0")) for r in ts) if v is not None]
-                    if len(et0_vals) >= 30:
-                        kwargs["et0_mm"] = sum(et0_vals) * (365.0 / len(et0_vals))
-
-                    gdds = [r.get("gdd", 0) for r in ts]
-                    gdd_acc = sum(gdds)
-                    if gdd_acc > 0:
-                        kwargs["gdd_accumulated"] = gdd_acc
-                        kwargs["gdd_accumulation_days"] = len(ts)
-                    
-                    _cache_hit = True
-                    print(f"[CropID] Using in-memory cache: {len(ts)} records, peak_ndvi={kwargs.get('peak_ndvi')}")
-        except Exception as e:
-            print(f"[CropID] In-memory cache read failed: {e}")
-
-        # Strategy 2: Read from MongoDB PlotObservation (persisted from previous runs)
-        if not _cache_hit:
-            try:
-                from layer0.data_gateway.storage_manager import _get_db
-                db = _get_db()
-                if db is not None:
-                    # Read NDVI observations for this plot
-                    ndvi_obs = list(db.PlotObservation.find(
-                        {"plotId": req.plot_id, "obsType": "ndvi"},
-                        {"obsDate": 1, "ndvi": 1, "cloudCover": 1, "source_reality": 1,
-                         "quality_admitted": 1, "usable": 1, "production_usable": 1,
-                         "diagnostic_only": 1, "state_update_allowed": 1},
-                    ).sort("obsDate", 1).limit(60))
-
-                    if ndvi_obs and len(ndvi_obs) > 3:
-                        temporal_input_count += len(ndvi_obs)
-                        # Filter NDVI and dates TOGETHER
-                        pairs = []
-                        for o in ndvi_obs:
-                            if not _is_admitted_temporal_record(o):
-                                continue
-                            temporal_admitted_count += 1
-                            val = _safe_float(o.get("ndvi"))
-                            dt = o.get("obsDate")
-                            dstr = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt or "")
-                            if val is not None:
-                                pairs.append((dstr, val))
-                        if pairs:
-                            kwargs["ndvi_series"] = [p[1] for p in pairs]
-                            kwargs["ndvi_dates"] = [p[0] for p in pairs]
-                            kwargs["peak_ndvi"] = max(kwargs["ndvi_series"])
-                            pos_vals = [v for v in kwargs["ndvi_series"] if v > 0]
-                            kwargs["trough_ndvi"] = min(pos_vals) if pos_vals else None
-                            _cache_hit = True
-                            print(f"[CropID] Using MongoDB NDVI obs: {len(pairs)} records, peak={kwargs['peak_ndvi']:.3f}")
-
-                    # Read SAR observations
-                    sar_obs = list(db.PlotObservation.find(
-                        {"plotId": req.plot_id, "obsType": "sar_backscatter"},
-                        {"vv": 1, "vh": 1},
-                    ).limit(30))
-                    if sar_obs:
-                        sar_vh = [o["vh"] for o in sar_obs if o.get("vh") is not None]
-                        sar_vv = [o["vv"] for o in sar_obs if o.get("vv") is not None]
-                        if sar_vh:
-                            kwargs["sar_vh_mean"] = sum(sar_vh) / len(sar_vh)
-                            kwargs["sar_vh_seasonal_range"] = max(sar_vh) - min(sar_vh) if len(sar_vh) > 1 else 0
-                        if sar_vv:
-                            kwargs["sar_vv_mean"] = sum(sar_vv) / len(sar_vv)
-
-                    # Read weather observations for temperature
-                    weather_obs = list(db.PlotObservation.find(
-                        {"plotId": req.plot_id, "obsType": {"$in": ["current_weather", "historical_weather"]}},
-                        {"tempC": 1},
-                    ).limit(30))
-                    if weather_obs:
-                        temps = [o["tempC"] for o in weather_obs if o.get("tempC") is not None]
-                        if temps:
-                            kwargs["mean_temp_c"] = sum(temps) / len(temps)
-            except Exception as e:
-                print(f"[CropID] MongoDB read failed (non-critical): {e}")
-
-        # Strategy 3: Quick EO cache lookup by coordinates (last resort before location-only)
-        if not _cache_hit:
-            try:
-                from layer0.data_gateway.storage_manager import _get_db
-                db = _get_db()
-                if db is not None:
-                    # Check EO cache for any NDVI timeseries data at these coordinates
-                    eo_entry = db.eo_cache.find_one(
-                        {"cache_key": {"$regex": f"^sentinel2_ndvi_ts::{round(req.lat, 4)}"}},
-                        {"data": 1},
-                    )
-                    if eo_entry and eo_entry.get("data"):
-                        eo_data = eo_entry["data"]
-                        ts = eo_data.get("data", [])
-                        if ts and len(ts) > 3:
-                            temporal_input_count += len(ts)
-                            admitted_ts = [o for o in ts if _is_admitted_temporal_record(o)]
-                            temporal_admitted_count += len(admitted_ts)
-                            ndvi_series = [v for v in (_safe_float(o.get("ndvi")) for o in admitted_ts) if v is not None]
-                            if ndvi_series:
-                                kwargs["ndvi_series"] = ndvi_series
-                                kwargs["ndvi_dates"] = [o.get("date", "") for o in admitted_ts if _safe_float(o.get("ndvi")) is not None]
-                                kwargs["peak_ndvi"] = max(ndvi_series)
-                                pos_vals = [v for v in ndvi_series if v > 0]
-                                kwargs["trough_ndvi"] = min(pos_vals) if pos_vals else None
-                                print(f"[CropID] Using EO cache: {len(ndvi_series)} NDVI records, peak={kwargs['peak_ndvi']:.3f}")
-            except Exception as e:
-                print(f"[CropID] EO cache read failed: {e}")
-
-        # Strategy 4: Live fetch via Data Gateway (cached + consolidated)
-        if not _cache_hit and "ndvi_series" not in kwargs:
-            try:
-                from layer0.data_gateway import broker
-                print(f"[CropID] Fetching NDVI via Data Gateway for plot {req.plot_id[:8]}...")
-                ts_data = broker.get(
-                    "sentinel2_ndvi_ts", req.plot_id, req.lat, req.lng,
-                    days=180,
-                )
-                if ts_data and isinstance(ts_data, dict):
-                    records = ts_data.get("data", [])
-                    if records and len(records) > 3:
-                        temporal_input_count += len(records)
-                        admitted_records = [r for r in records if _is_admitted_temporal_record(r)]
-                        temporal_admitted_count += len(admitted_records)
-                        # Filter NDVI and dates TOGETHER to keep them aligned
-                        pairs = [(r.get("date", ""), _safe_float(r.get("ndvi")))
-                                 for r in admitted_records]
-                        valid_pairs = [(d, v) for d, v in pairs if v is not None]
-                        if valid_pairs:
-                            ndvi_dates_clean = [p[0] for p in valid_pairs]
-                            ndvi_series = [p[1] for p in valid_pairs]
-                            kwargs["ndvi_series"] = ndvi_series
-                            kwargs["ndvi_dates"] = ndvi_dates_clean
-                            kwargs["peak_ndvi"] = max(ndvi_series)
-                            pos_vals = [v for v in ndvi_series if v > 0]
-                            kwargs["trough_ndvi"] = min(pos_vals) if pos_vals else None
-                            _cache_hit = True
-                            print(f"[CropID] Gateway NDVI: {len(ndvi_series)} valid of {len(records)} total, peak={kwargs['peak_ndvi']:.3f}")
-            except Exception as e:
-                print(f"[CropID] Gateway NDVI fetch failed (non-critical): {e}")
-
-        if not _cache_hit and "ndvi_series" not in kwargs:
-            print(f"[CropID] WARNING: No satellite data available — using plot context + crop prior for plot {req.plot_id[:8]}")
-
-        # ── Fetch Multi-Spectral Indices (EVI, NDMI, NDWI) ──
-        # Uses the existing fetch_vegetation_indices function that already
-        # fetches B02/B03/B04/B08/B11/B12 from Sentinel-2.
-        try:
-            from layer0.data_gateway import broker
-            indices = broker.get("sentinel2_indices", req.plot_id, req.lat, req.lng)
-            if indices and isinstance(indices, dict):
-                for key in ("evi", "ndmi", "ndwi"):
-                    val = _safe_float(indices.get(key))
-                    if val is not None:
-                        kwargs[f"{key}_mean"] = val
-                print(f"[CropID] Spectral indices (via Gateway): EVI={indices.get('evi')}, "
-                      f"NDMI={indices.get('ndmi')}, NDWI={indices.get('ndwi')}")
-        except Exception as e:
-            print(f"[CropID] Spectral indices fetch failed (non-critical): {e}")
-
-        # ── Load PlotDNA traits (v4.0) ──
-        # PlotDNA is pre-computed by the /v2/plot-dna endpoint and cached.
-        # If available, it provides soil/vigor traits for better crop differentiation.
-        try:
-            from layer0.calibration.dna_cache import load_dna_cache
-            dna_data = load_dna_cache(req.plot_id, max_age_hours=168.0)  # 7 days
-            if dna_data and isinstance(dna_data, dict):
-                traits = dna_data.get("traits", {})
-                decadal = dna_data.get("decadal_insights", {})
-                kwargs["dna_vigor"] = _safe_float(traits.get("alpha_vigor"))
-                kwargs["dna_water_retention"] = _safe_float(traits.get("theta_retention"))
-                kwargs["dna_exhaustion"] = _safe_float(decadal.get("exhaustion_index"))
-                kwargs["dna_carbon_memory"] = _safe_float(decadal.get("carbon_memory_proxy"))
-                kwargs["dna_future_proof"] = _safe_float(decadal.get("future_proof_score"))
-                print(f"[CropID] PlotDNA loaded: vigor={kwargs.get('dna_vigor')}, "
-                      f"water={kwargs.get('dna_water_retention')}, "
-                      f"exhaust={kwargs.get('dna_exhaustion')}, "
-                      f"carbon={kwargs.get('dna_carbon_memory')}, "
-                      f"futureproof={kwargs.get('dna_future_proof')}")
-            else:
-                print(f"[CropID] No PlotDNA cache for plot {req.plot_id[:8]} (will use default scores)")
-        except Exception as e:
-            print(f"[CropID] PlotDNA load failed (non-critical): {e}")
-
-        # ── DIAGNOSTIC: Dump all data reaching the engine ──
-        print(f"\n[CropID v5.0] ======= ENGINE INPUT DUMP =======")
-        print(f"  lat={kwargs.get('lat')}, lng={kwargs.get('lng')}")
-        print(f"  area_ha={kwargs.get('area_ha')}, soil={kwargs.get('soil_type')}, irrig={kwargs.get('irrigation_type')}")
-        ndvi_s = kwargs.get('ndvi_series')
-        print(f"  ndvi_series: {len(ndvi_s) if ndvi_s else 'NONE'} values")
-        if ndvi_s:
-            print(f"    peak={max(ndvi_s):.3f}, trough={min(v for v in ndvi_s if v > 0):.3f}, range={max(ndvi_s)-min(ndvi_s):.3f}")
-            print(f"    first 5: {[f'{v:.3f}' for v in ndvi_s[:5]]}")
-            print(f"    last 5:  {[f'{v:.3f}' for v in ndvi_s[-5:]]}")
-        print(f"  ndvi_dates: {len(kwargs.get('ndvi_dates', [])) if kwargs.get('ndvi_dates') else 'NONE'} dates")
-        if kwargs.get('ndvi_dates'):
-            print(f"    first: {kwargs['ndvi_dates'][0]}, last: {kwargs['ndvi_dates'][-1]}")
-        print(f"  evi={kwargs.get('evi_mean')}, ndmi={kwargs.get('ndmi_mean')}, ndwi={kwargs.get('ndwi_mean')}")
-        print(f"  mean_temp={kwargs.get('mean_temp_c')}, gdd={kwargs.get('gdd_accumulated')}")
-        print(f"  sar_vh={kwargs.get('sar_vh_mean')}, sar_vv={kwargs.get('sar_vv_mean')}")
-        print(f"  dna_vigor={kwargs.get('dna_vigor')}, dna_water={kwargs.get('dna_water_retention')}")
-        print(f"  dna_exhaust={kwargs.get('dna_exhaustion')}, dna_carbon={kwargs.get('dna_carbon_memory')}")
-        print(f"  previous_crops={kwargs.get('previous_crops')}")
-        print(f"[CropID v5.0] ====================================\n")
-
-        result = identify_crop(**kwargs)
-
-        # ── Log top 5 results ──
-        print(f"[CropID v5.0] RESULT: {result.top_crop} ({result.confidence_label}, {result.top_confidence:.4f})")
-        print(f"  Mode: {result.inference_mode}, Strength: {result.evidence_strength}, Group: {result.top_group}")
-        print(f"  Koppen: {result.evidence.get('koppen_zone')}, Calendar: {result.evidence.get('calendar_region')}")
-        ml = result.evidence.get("ml_features", {})
-        print(f"  ML: SG-smooth={ml.get('savitzky_golay_smoothing')}, "
-              f"Bayesian={ml.get('bayesian_posterior')}, "
-              f"Entropy={ml.get('entropy_confidence')}, "
-              f"Feedback={ml.get('feedback_samples', 0)} samples")
-        if result.ambiguity_is_ambiguous:
-            print(f"  AMBIGUOUS: {result.ambiguity_between} — {result.ambiguity_reason}")
-        for c in result.candidates[:5]:
-            cal = f"cal={c.softmax_candidate_share:.4f}" if c.softmax_candidate_share is not None else "cal=None"
-            print(f"  {c.score:.4f} {cal}  {c.name:<25s} grp={c.crop_group} tier={c.data_quality_tier}")
-
-        response = result.to_dict()
-        response["temporal_evidence"] = {
-            "input_observation_count": temporal_input_count,
-            "quality_admitted_observation_count": temporal_admitted_count,
-            "contract_version": "temporal_evidence_admission_v1",
-        }
-        response["crop_group_confidence"] = result.top_confidence
-        response["species_level_confidence"] = (
-            result.top_confidence if result.evidence_strength == "HIGH" else min(result.top_confidence, 0.49)
         )
-        return response
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {"error": str(e), "top_crop": "unknown", "confidence_label": "UNKNOWN"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Canonical crop identity lookup failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "type": "CropIdentifyError",
+                "error": "Canonical crop identity lookup failed",
+            },
+        ) from exc
 
 
 class CropSuitabilityRequest(BaseModel):
@@ -3567,11 +3423,11 @@ class CropFeedbackRequest(BaseModel):
 
 @app.post("/v2/crop-feedback")
 def api_v2_crop_feedback(req: CropFeedbackRequest):
-    """Record user feedback on crop identification for self-learning.
-    
-    When a user accepts or corrects a crop identification, this endpoint
-    stores the observation in the feedback store. Over time, the engine
-    learns from these corrections to improve regional accuracy.
+    """Record crop feedback as an audit-only user assertion.
+
+    This path does not create ground truth, update a learned prior, or make a
+    record eligible for model training. Promotion requires a separate trusted
+    verification and release-governance workflow.
     
     FIX BUG-4: Now retrieves cached phenology from the engine's last
     identification result instead of storing empty {}.
@@ -3612,7 +3468,9 @@ def api_v2_crop_feedback(req: CropFeedbackRequest):
               f"phenology={'YES' if cached_phenology else 'NO'}")
         
         return {
-            "status": "recorded",
+            "status": "audit_recorded",
+            "learning_eligible": False,
+            "authority": "unverified_user_feedback",
             "total_samples": stats["total"],
             "engine_accuracy": stats.get("accuracy"),
             "has_phenology": bool(cached_phenology),
@@ -3696,7 +3554,10 @@ class FileLock:
             self.fd = None
 
 @app.post("/v2/run")
-def api_v2_run(req: V2RunRequest):
+def api_v2_run(
+    req: V2RunRequest,
+    namespace: PlotNamespace = Depends(require_internal_service_request)
+):
     """
     Unified entrypoint as a persistent FastAPI endpoint. 
     Replaces the slow subprocess.spawn("py", "run_entrypoint.py") approach.
@@ -3709,6 +3570,11 @@ def api_v2_run(req: V2RunRequest):
     _t0 = _time.perf_counter()
     try:
         ctx = _parse_context(req.context)
+        if namespace.plot_id != ctx.get("plot_id"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Header X-Plot-Id does not match request context plot_id"
+            )
         
         # Construct mock args for run_chat_mode to read history/exp
         class MockArgs:
@@ -3720,27 +3586,39 @@ def api_v2_run(req: V2RunRequest):
         query = req.query.strip() if req.query else ""
         
         if req.mode == "chat":
-            _plot_id = ctx.get("plot_id", "unknown")
-            _clear_progress(_plot_id)  # Reset stale progress
-            _update_progress(_plot_id, "Connecting to satellite network", "running")
+            _plot_id = namespace.plot_id
+            _clear_progress(namespace)  # Reset stale progress
+            _update_progress(namespace, "Connecting to satellite network", "running")
             result = run_chat_mode(
                 ctx, query, args,
-                progress_cb=lambda stage, status, elapsed=0.0: _update_progress(_plot_id, stage, status, elapsed)
+                progress_cb=lambda stage, status, elapsed=0.0: _update_progress(namespace, stage, status, elapsed),
+                authenticated_namespace=namespace
             )
-            _update_progress(_plot_id, "Complete", "done")
+            _update_progress(namespace, "Complete", "done")
             
             # Clear progress after short delay
             def _delayed_clear():
                 import time
                 time.sleep(5)
-                _clear_progress(_plot_id)
+                _clear_progress(namespace)
             _threading.Thread(target=_delayed_clear, daemon=True).start()
         elif req.mode == "full":
-            result = run_full_mode(ctx, query)
+            result = run_full_mode(ctx, query, authenticated_namespace=namespace)
         elif req.mode == "surfaces":
             # Extract plot_id & run_id for progress tracking
-            _plot_id = ctx.get("plot_id", "unknown")
+            _plot_id = namespace.plot_id
             _run_id = getattr(req, "run_id", None) or f"run-{_plot_id}"
+            _publication_geometry_hash = str(ctx.get("geometry_hash") or "")
+            if not _publication_geometry_hash:
+                geometry_value = ctx.get("field_geometry") or ctx.get("polygon")
+                if geometry_value:
+                    import hashlib as _publication_hashlib
+                    import json as _publication_json
+                    _publication_geometry_hash = _publication_hashlib.sha256(
+                        _publication_json.dumps(
+                            geometry_value, sort_keys=True, default=str
+                        ).encode("utf-8")
+                    ).hexdigest()[:8]
             
             # --- Surfaces Cache Check ---
             import os
@@ -3852,11 +3730,11 @@ def api_v2_run(req: V2RunRequest):
                 # waiting for another full synchronous pipeline run.
                 if not req.force_refresh:
                     try:
-                        from layer05_asmae.plot_snapshot_store import (
+                        from services.agribrain.layer05_asmae.plot_snapshot_store import (
                             load_latest_plot_snapshot,
                         )
                         canonical = load_latest_plot_snapshot(
-                            _plot_id, ctx.get("geometry_hash")
+                            namespace, _publication_geometry_hash or None
                         )
                         candidate = (
                             dict(canonical.get("frontend_payload") or {})
@@ -4002,9 +3880,14 @@ def api_v2_run(req: V2RunRequest):
                 )
                 committed["provenance"] = dict(committed.get("provenance") or {})
                 committed["provenance"]["request_run_id"] = _run_id
-                _persist_run_result(_run_id, _plot_id, committed)
+                _persist_run_result(
+                    _run_id,
+                    namespace,
+                    committed,
+                    _publication_geometry_hash,
+                )
                 _update_progress(
-                    _plot_id, "Complete", "done",
+                    namespace, "Complete", "done",
                     round(_time.perf_counter() - _t0, 2), run_id=_run_id,
                 )
                 return committed
@@ -4029,14 +3912,14 @@ def api_v2_run(req: V2RunRequest):
                     if cached_res:
                         return _commit_cached_result(cached_res)
                         
-                    _update_progress(_plot_id, "Connecting to satellite network", "running", run_id=_run_id)
+                    _update_progress(namespace, "Connecting to satellite network", "running", run_id=_run_id)
 
                     # L1 is the canonical source for the bridge. Starting a
                     # second provider fetch here duplicated I/O and contended
                     # with the orchestrator even when its result was unused.
                     _pi_future = None
 
-                    _update_progress(_plot_id, "Acquiring Earth Observation imagery", "running", run_id=_run_id)
+                    _update_progress(namespace, "Acquiring Earth Observation imagery", "running", run_id=_run_id)
 
                     ctx["visual_intensity"] = clamped_intensity
                     ctx["user_mode"] = getattr(req, "userMode", "farmer")
@@ -4047,7 +3930,11 @@ def api_v2_run(req: V2RunRequest):
                     ctx["requested_source_policy"] = req.source_policy or "satellite"
 
                     # Pass the progress callback to run_surfaces_mode
-                    result = run_surfaces_mode(ctx, query, progress_cb=lambda stage, status, elapsed=0.0: _update_progress(_plot_id, stage, status, elapsed, run_id=_run_id))
+                    result = run_surfaces_mode(
+                        ctx, query,
+                        progress_cb=lambda stage, status, elapsed=0.0: _update_progress(namespace, stage, status, elapsed, run_id=_run_id),
+                        authenticated_namespace=namespace
+                    )
                     _t_surfaces = _time.perf_counter()
                     print(f"[PERF] /v2/run: run_surfaces_mode = {_t_surfaces - _t0:.2f}s")
 
@@ -4058,7 +3945,7 @@ def api_v2_run(req: V2RunRequest):
                         if _pi_executor is not None:
                             _pi_executor.shutdown(wait=False)
                             _pi_executor = None
-                        _update_progress(_plot_id, "Surface authority unavailable", "failed", run_id=_run_id)
+                        _update_progress(namespace, "Surface authority unavailable", "failed", run_id=_run_id)
                         
                         l10_errors = (result.get("layer_results") or {}).get("layer_10", {}).get("errors") or []
                         if l10_errors:
@@ -4072,7 +3959,7 @@ def api_v2_run(req: V2RunRequest):
                         )
 
                     # ── Kalman NDVI Bridge ──────
-                    _update_progress(_plot_id, "Calibrating vegetation indices", "running", run_id=_run_id)
+                    _update_progress(namespace, "Calibrating vegetation indices", "running", run_id=_run_id)
                     try:
                         _l1_ndvi = result.get("_l1_kalman_ndvi")
                         _l1_sh = result.get("_l1_sh_indices")
@@ -4087,25 +3974,25 @@ def api_v2_run(req: V2RunRequest):
                         if _pi_executor is not None:
                             _pi_executor.shutdown(wait=False)
                             _pi_executor = None
-                    _update_progress(_plot_id, "Calibrating vegetation indices", "done", round(_time.perf_counter() - _t_surfaces, 2), run_id=_run_id)
+                    _update_progress(namespace, "Calibrating vegetation indices", "done", round(_time.perf_counter() - _t_surfaces, 2), run_id=_run_id)
 
                     # ── Resolution Upscale (always applied) ─────────────────
-                    _update_progress(_plot_id, "Enhancing spatial resolution", "running", run_id=_run_id)
+                    _update_progress(namespace, "Enhancing spatial resolution", "running", run_id=_run_id)
                     try:
                         # Disabled for V92.4: upscaling is handled on-demand by grid contracts
                         # _upscale_surfaces(result, scale=4)
                         pass
                     except Exception as e:
                         print(f"[API] Surface upscale failed (non-fatal): {e}")
-                    _update_progress(_plot_id, "Enhancing spatial resolution", "done", round(_time.perf_counter() - _t_surfaces, 2), run_id=_run_id)
+                    _update_progress(namespace, "Enhancing spatial resolution", "done", round(_time.perf_counter() - _t_surfaces, 2), run_id=_run_id)
 
                     # ── Zone Recalibration ──────────────────────────────────
-                    _update_progress(_plot_id, "Finalizing scouting regions", "running", run_id=_run_id)
+                    _update_progress(namespace, "Finalizing scouting regions", "running", run_id=_run_id)
                     try:
                         _recalibrate_zones(result)
                     except Exception as e:
                         print(f"[API] Zone recalibration failed (non-fatal): {e}")
-                    _update_progress(_plot_id, "Finalizing scouting regions", "done", round(_time.perf_counter() - _t_surfaces, 2), run_id=_run_id)
+                    _update_progress(namespace, "Finalizing scouting regions", "done", round(_time.perf_counter() - _t_surfaces, 2), run_id=_run_id)
                     request_perf = result.setdefault("request_performance_ms", {})
                     request_perf["api_postprocess"] = round(
                         (_time.perf_counter() - _t_surfaces) * 1000.0, 3
@@ -4183,9 +4070,14 @@ def api_v2_run(req: V2RunRequest):
                     # Result publication is the commit point. A client may now
                     # safely observe terminal progress and retrieve the exact
                     # payload even if the original HTTP response was lost.
-                    _persist_run_result(_run_id, _plot_id, result)
+                    _persist_run_result(
+                        _run_id,
+                        namespace,
+                        result,
+                        _publication_geometry_hash,
+                    )
                     _update_progress(
-                        _plot_id, "Complete", "done",
+                        namespace, "Complete", "done",
                         round(_time.perf_counter() - _t0, 2), run_id=_run_id,
                     )
 
@@ -4205,17 +4097,19 @@ def api_v2_run(req: V2RunRequest):
         return result
 
     except HTTPException:
-        if "_plot_id" in locals():
+        target_ns = locals().get("namespace") or locals().get("_plot_id")
+        if target_ns:
             _terminalize_progress(
-                _plot_id, "failed", run_id=locals().get("_run_id")
+                target_ns, "failed", run_id=locals().get("_run_id")
             )
         raise
     except Exception as e:
         import traceback
         traceback.print_exc()
-        if "_plot_id" in locals():
+        target_ns = locals().get("namespace") or locals().get("_plot_id")
+        if target_ns:
             _terminalize_progress(
-                _plot_id, "failed", run_id=locals().get("_run_id")
+                target_ns, "failed", run_id=locals().get("_run_id")
             )
         raise HTTPException(status_code=500, detail={"error": str(e), "type": "AgriBrainRunError"})
 
@@ -4481,225 +4375,177 @@ class CropLabelRequest(BaseModel):
 
 
 @app.post("/v2/crop-label")
-def api_v2_crop_label(req: CropLabelRequest):
-    """Submit a confirmed crop-cycle label.
+def api_v2_crop_label(
+    req: CropLabelRequest,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """Submit an authenticated, unverified farmer crop declaration.
 
-    Called by frontend when farmer/admin confirms a crop.
-    Every confirmation becomes a potential ML training sample.
+    Browser-supplied authority fields are ignored. This endpoint records a
+    LOW-confidence farmer declaration for audit and registry conditioning;
+    it does not create a verified or training-eligible ground-truth label.
 
-    Flow:
-      1. Validate crop_code against 212-crop registry
-      2. Validate label_source against allowed set
-      3. Resolve crop_group from CROP_GROUP_MAP
-      4. Compute geometry_hash from current plot geometry and extract feature vector best-effort
-      5. Compute label quality score
-      6. Store label (with conflict resolution)
-      7. Return label_id + quality assessment + hierarchy targets
+    The canonical runtime mutation is the authenticated ``CropCycle`` update.
+    ``ConfirmedCropLabel`` is a derivative audit/training-candidate record and
+    never becomes ground truth merely because this endpoint wrote it.
     """
+    store = None
     try:
+        if namespace.plot_id != req.plot_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Header X-Plot-Id does not match request plot_id",
+            )
+
         from layer2_veg_int.labels.label_schema import (
             CropLabel,
             validate_crop_code,
-            validate_label_source,
             canonicalize_geometry_hash,
             get_hierarchy_targets,
-            ALLOWED_LABEL_SOURCES,
         )
-        from layer2_veg_int.labels.label_store import InMemoryLabelStore
         from layer2_veg_int.labels.label_quality import compute_label_quality
         from layer2_veg_int.crop_science_data import get_crop_group
+        from services.agribrain.app.crop_label_authority import (
+            derive_farmer_crop_label_authority,
+        )
+        from services.agribrain.app.crop_runtime_declaration import (
+            normalize_declared_crop_code,
+            persist_farmer_crop_declaration,
+        )
 
-        # 1. Validate crop_code — reject unknown (no wheat default)
-        if not validate_crop_code(req.crop_code):
+        server_authority = derive_farmer_crop_label_authority(namespace)
+
+        if req.planting_date is not None or req.harvest_date is not None:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unknown crop_code '{req.crop_code}'. "
+                detail=(
+                    "Crop identity confirmation cannot assert planting or "
+                    "harvest dates; use the typed crop-cycle workflow"
+                ),
+            )
+
+        normalized_crop_code = normalize_declared_crop_code(req.crop_code)
+        # 1. Validate crop_code — reject unknown (no wheat default)
+        if not validate_crop_code(normalized_crop_code):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown crop_code '{normalized_crop_code}'. "
                        f"Must be from the 212-crop registry.",
             )
 
-        # 2. Validate label_source
-        if not validate_label_source(req.label_source):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid label_source '{req.label_source}'. "
-                       f"Allowed: {sorted(ALLOWED_LABEL_SOURCES)}",
-            )
-
         # 3. Resolve crop group
-        crop_group = get_crop_group(req.crop_code)
+        crop_group = get_crop_group(normalized_crop_code)
 
-        # 4. Get geometry hash (try MongoDB for current plot geometry) and auto-extract features
+        # 4. Bind the declaration to the canonical runtime CropCycle. Generic
+        # PlotObservation rows are not a valid crop-model tensor, so this
+        # endpoint never auto-attaches a feature snapshot.
         geometry_hash = "NO_GEOMETRY"
         warnings = []
         fv_snapshot = None
-        fv_ref = "extraction_needed"
+        fv_ref = "crop_model_input_receipt_required"
+        runtime_declaration = None
 
         try:
-            from pymongo import MongoClient
             from bson import ObjectId
-            from layer2_veg_int.features import extract_crop_features, plot_observations_to_crop_feature_input
-            from layer2_veg_int.crop_science_data import detect_koppen_zone
-            from layer2_veg_int.labels.label_store import normalize_feature_snapshot
+            from layer2_veg_int.labels.label_store import MongoLabelStore
 
             mongo_url = os.environ.get("MONGODB_URI") or os.environ.get("DATABASE_URL", "")
-            if mongo_url and "mongodb" in mongo_url:
-                client = MongoClient(mongo_url, serverSelectionTimeoutMS=3000)
-                db_name = mongo_url.split("/")[-1].split("?")[0] if "/" in mongo_url else "agriwise"
-                db = client[db_name]
-                
-                try:
-                    plot_oid = ObjectId(req.plot_id)
-                    query_id = plot_oid
-                except Exception:
-                    query_id = req.plot_id
-                    warnings.append("plot_id_not_objectid_string_fallback")
-                
-                plot_doc = db["Plot"].find_one({"_id": query_id})
-                if plot_doc:
-                    if plot_doc.get("geoJson"):
-                        geometry_hash = canonicalize_geometry_hash(plot_doc["geoJson"])
-                    
-                    # Compute coordinates from geoJson centroid if available, or fall back to Farm coordinates
-                    lat, lng = None, None
-                    geo = plot_doc.get("geoJson")
-                    if geo:
-                        geom = geo
-                        if isinstance(geo, dict):
-                            if geo.get("type") == "Feature":
-                                geom = geo.get("geometry", {})
-                            elif geo.get("type") == "FeatureCollection":
-                                features = geo.get("features", [])
-                                if features:
-                                    geom = features[0].get("geometry", {})
-                            
-                            geom_type = geom.get("type")
-                            coords = geom.get("coordinates")
-                            if geom_type == "Point" and isinstance(coords, list) and len(coords) >= 2:
-                                lng, lat = coords[0], coords[1]
-                            elif geom_type in ("Polygon", "MultiPolygon") and isinstance(coords, list):
-                                flat_points = []
-                                def recurse_coords(lst):
-                                    if isinstance(lst, list) and len(lst) == 2 and isinstance(lst[0], (int, float)):
-                                        flat_points.append(lst)
-                                    elif isinstance(lst, list):
-                                        for item in lst:
-                                            recurse_coords(item)
-                                recurse_coords(coords)
-                                if flat_points:
-                                    lng = sum(p[0] for p in flat_points) / len(flat_points)
-                                    lat = sum(p[1] for p in flat_points) / len(flat_points)
-                    
-                    if (lat is None or lng is None) and plot_doc.get("farmId"):
-                        farm_id = plot_doc.get("farmId")
-                        try:
-                            farm_oid = ObjectId(farm_id)
-                            query_farm_id = farm_oid
-                        except Exception:
-                            query_farm_id = farm_id
-                        farm_doc = db["Farm"].find_one({"_id": query_farm_id})
-                        if farm_doc:
-                            lat = farm_doc.get("latitude")
-                            lng = farm_doc.get("longitude")
+            if not mongo_url or "mongodb" not in mongo_url:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Canonical crop-cycle store is unavailable",
+                )
+            store = MongoLabelStore(mongo_url)
+            db = store.db
 
-                    # Read plot specs
-                    soil_type = str(plot_doc.get("soilType")).lower() if plot_doc.get("soilType") else None
-                    irrigation_type = str(plot_doc.get("irrigation")).lower() if plot_doc.get("irrigation") else None
-                    area_ha = plot_doc.get("area")
+            runtime_receipt = persist_farmer_crop_declaration(
+                db,
+                namespace=namespace,
+                crop_code=normalized_crop_code,
+            )
+            runtime_declaration = runtime_receipt.to_dict()
 
-                    # Best effort auto-attach of feature vector
-                    try:
-                        # Bounded observations load (maxTimeMS=1000, max 1000 observations)
-                        obs_docs = list(db.PlotObservation.find({"plotId": query_id}, maxTimeMS=1000).sort("obsDate", 1).limit(1000))
-                        
-                        # Adapter mapping
-                        timeseries, adapter_warnings = plot_observations_to_crop_feature_input(obs_docs)
-                        warnings.extend(adapter_warnings)
-
-                        if len(timeseries) >= 5:
-                            # Detect koppen zone
-                            temps = [entry["tempC"] for entry in timeseries if entry.get("tempC") is not None]
-                            mean_temp = sum(temps) / len(temps) if temps else 18.0
-                            k_zone = detect_koppen_zone(lat, lng, mean_temp) if (lat is not None and lng is not None) else None
-
-                            # Estimate aridity index
-                            aridity = None
-                            rain_entries = [entry["rain"] for entry in timeseries if entry.get("rain") is not None]
-                            et0_entries = [entry["et0"] for entry in timeseries if entry.get("et0") is not None]
-                            if rain_entries and et0_entries:
-                                total_rain = sum(rain_entries)
-                                total_et0 = sum(et0_entries)
-                                if total_et0 > 0:
-                                    aridity = total_rain / total_et0
-
-                            # Run extraction
-                            fv = extract_crop_features(
-                                plot_timeseries=timeseries,
-                                plot_id=req.plot_id,
-                                run_id="auto_label_extract",
-                                latitude=lat,
-                                longitude=lng,
-                                koppen_zone=k_zone,
-                                aridity_index=aridity,
-                                soil_texture_class=soil_type,
-                                irrigation_type=irrigation_type,
-                                plot_area_ha=area_ha,
-                            )
-                            fv_snapshot = normalize_feature_snapshot(fv.to_json())
-                            fv_ref = "auto_attached"
-                        else:
-                            fv_ref = "extraction_needed"
-                    except Exception as e:
-                        logger.warning(f"Auto-feature extraction failed (non-blocking): {e}")
-                        warnings.append("feature_extraction_failed")
-                        fv_ref = "extraction_needed"
+            try:
+                query_id = ObjectId(req.plot_id)
+            except Exception:
+                query_id = req.plot_id
+                warnings.append("plot_id_not_objectid_string_fallback")
+            plot_doc = db["Plot"].find_one({"_id": query_id})
+            if plot_doc and plot_doc.get("geoJson"):
+                geometry_hash = canonicalize_geometry_hash(plot_doc["geoJson"])
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=str(exc),
+            ) from exc
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.warning(f"Plot lookup failed (non-blocking): {e}")
-            warnings.append("feature_extraction_failed")
-            fv_ref = "extraction_needed"
+            logger.exception("Canonical crop declaration persistence failed")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Canonical crop declaration persistence failed",
+            ) from e
 
         # 5. Create label
         label = CropLabel(
             label_id="",  # Auto-generated UUID
             plot_id=req.plot_id,
             geometry_hash=geometry_hash,
-            crop_code=req.crop_code,
+            crop_code=normalized_crop_code,
             crop_group=crop_group,
-            label_source=req.label_source,
-            label_confidence="HIGH" if req.label_source in ("farmer_confirmed", "admin_verified") else "MEDIUM",
-            planting_date=req.planting_date,
-            harvest_date=req.harvest_date,
-            created_by=req.created_by,
+            label_source=server_authority["label_source"],
+            label_confidence=server_authority["label_confidence"],
+            planting_date=None,
+            harvest_date=None,
+            created_by=server_authority["created_by"],
             notes=req.notes,
             feature_vector_snapshot=fv_snapshot,
             feature_vector_ref=fv_ref,
-            synthetic=req.synthetic or False,
+            synthetic=False,
+            authority_validated=False,
+            tenant_id=namespace.tenant_id,
+            farm_id=namespace.farm_id,
+            crop_cycle_id=runtime_declaration["crop_cycle_id"],
+            runtime_declaration_receipt=runtime_declaration,
+            # This is an audit claim, not independent verification of a
+            # hierarchy target for model training.
+            supported_hierarchy_levels=[],
         )
 
         # 6. Compute quality
         quality = compute_label_quality(label)
 
         # 7. Hierarchy targets
-        hierarchy = get_hierarchy_targets(req.crop_code, crop_group)
+        hierarchy = get_hierarchy_targets(normalized_crop_code, crop_group)
 
-        # 8. Store using MongoLabelStore
-        from layer2_veg_int.labels.label_store import MongoLabelStore
-        db_uri = os.environ.get("MONGODB_URI") or os.environ.get("DATABASE_URL", "")
-        store = MongoLabelStore(db_uri)
-        
-        label_id, conflict = store.save_label(label)
-        
+        # Store a derivative audit record. Canonical runtime state has already
+        # committed, so an audit-store failure is surfaced but must not make
+        # the browser believe the CropCycle declaration failed.
+        label_id = None
         conflict_info = None
-        if conflict.conflict_type:
-            conflict_info = {
-                "conflict_type": conflict.conflict_type,
-                "existing_label_id": conflict.existing_label_id,
-                "action": conflict.action,
-                "warnings": conflict.warnings,
-            }
+        audit_record_status = "failed"
+        try:
+            label_id, conflict = store.save_label(label)
+            audit_record_status = conflict.action or "insert"
+            if conflict.conflict_type:
+                conflict_info = {
+                    "conflict_type": conflict.conflict_type,
+                    "existing_label_id": conflict.existing_label_id,
+                    "action": conflict.action,
+                    "warnings": conflict.warnings,
+                }
+        except Exception:
+            logger.exception(
+                "Crop declaration audit record persistence failed"
+            )
+            warnings.append("crop_label_audit_record_not_persisted")
 
         return {
             "label_id": label_id,
-            "crop_code": req.crop_code,
+            "crop_code": normalized_crop_code,
             "crop_group": crop_group,
             "hierarchy_targets": hierarchy,
             "quality": {
@@ -4709,19 +4555,40 @@ def api_v2_crop_label(req: CropLabelRequest):
             },
             "conflict_info": conflict_info,
             "label_schema_version": label.label_schema_version,
+            "runtime_declaration": runtime_declaration,
+            "audit_record": {
+                "status": audit_record_status,
+                "role": "unverified_training_candidate_only",
+                "label_id": label_id,
+            },
+            "hierarchy_targets_role": "registry_derived_display_only",
+            "authority": {
+                "label_source": server_authority["label_source"],
+                "label_confidence": server_authority["label_confidence"],
+                "verification_status": server_authority[
+                    "verification_status"
+                ],
+                "training_eligible": server_authority["training_eligible"],
+            },
         }
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Label creation failed: {e}")
+    finally:
+        if store is not None:
+            try:
+                store.client.close()
+            except Exception:
+                logger.warning("Crop label Mongo client close failed")
 
 
 @app.get("/v2/crop-model/readiness")
 def api_crop_model_readiness(
     x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token")
 ):
-    """Retrieve statistics on ground-truth label readiness for training.
+    """Retrieve fail-closed audit-label readiness for training.
 
     Restricted to admins using AGRIBRAIN_ADMIN_TOKEN.
     """
@@ -4742,9 +4609,16 @@ def api_crop_model_readiness(
             detail="Forbidden: Invalid Admin Token"
         )
 
+    store = None
     try:
         from layer2_veg_int.labels.label_store import MongoLabelStore
         from layer2_veg_int.labels.label_quality import compute_label_quality
+        from layer2_veg_int.labels.label_schema import (
+            TRAINING_ELIGIBLE_LABEL_SOURCES,
+        )
+        from services.agribrain.app.crop_training_snapshot_authority import (
+            assess_crop_training_snapshot,
+        )
 
         db_uri = os.environ.get("MONGODB_URI") or os.environ.get("DATABASE_URL", "")
         store = MongoLabelStore(db_uri)
@@ -4771,7 +4645,8 @@ def api_crop_model_readiness(
         labels_with_fv = sum(1 for l in real_labels_active if l.feature_vector_snapshot is not None)
         missing_fv = total_real - labels_with_fv
 
-        # Count eligible samples (quality tier A/B/C and has feature vector)
+        # Count authority- and lineage-complete dataset candidates. This is a
+        # dataset sufficiency metric, not production release authorization.
         eligible_samples = 0
         by_group = {}
         by_tier = {}
@@ -4784,16 +4659,65 @@ def api_crop_model_readiness(
             group = l.crop_group or "unknown"
             by_group[group] = by_group.get(group, 0) + 1
 
-            if tier in ("A", "B", "C") and l.feature_vector_snapshot is not None:
+            partitions = (
+                getattr(l, "tenant_id", None),
+                getattr(l, "farm_id", None),
+                getattr(l, "crop_cycle_id", None),
+                getattr(l, "region_partition", None),
+                getattr(l, "season_partition", None),
+                getattr(l, "sensor_regime", None),
+            )
+            training_input = assess_crop_training_snapshot(
+                feature_vector_snapshot=l.feature_vector_snapshot,
+                crop_model_input_receipt=getattr(
+                    l, "crop_model_input_receipt", None
+                ),
+                tenant_id=getattr(l, "tenant_id", None),
+                farm_id=getattr(l, "farm_id", None),
+                plot_id=l.plot_id,
+                crop_cycle_id=getattr(l, "crop_cycle_id", None),
+                expected_receipt_hash=getattr(
+                    l, "crop_model_input_receipt_hash", None
+                ),
+            )
+            if (
+                tier in ("A", "B", "C")
+                and l.feature_vector_snapshot is not None
+                and l.label_source in TRAINING_ELIGIBLE_LABEL_SOURCES
+                and getattr(l, "authority_validated", False) is True
+                and l.label_confidence == "HIGH"
+                and bool(l.geometry_hash)
+                and l.geometry_hash != "NO_GEOMETRY"
+                and bool(l.layer1_run_id)
+                and all(partitions)
+                and training_input.eligible
+            ):
                 eligible_samples += 1
 
-        production_model_eligible = eligible_samples >= 50
+        from services.agribrain.app.crop_label_authority import (
+            assess_crop_dataset_release_readiness,
+        )
+
+        release_readiness = assess_crop_dataset_release_readiness(
+            eligible_samples
+        )
+        dataset_training_ready = release_readiness[
+            "dataset_training_ready"
+        ]
         recommendations = []
-        if not production_model_eligible:
-            recommendations.append("Collect real farmer/admin confirmations before real evaluation.")
-            recommendations.append(f"Need at least {max(0, 50 - eligible_samples)} more active real labels (Tier C or higher with features) for production eligibility.")
+        if not dataset_training_ready:
+            recommendations.append(
+                "Collect independently verified, lineage-complete labels for dataset construction."
+            )
+            recommendations.append(
+                f"Need at least {max(0, 50 - eligible_samples)} more authority-valid "
+                "active labels (Tier C or higher with complete partitions)."
+            )
         else:
-            recommendations.append("Ready for production training and real-world evaluation!")
+            recommendations.append(
+                "Dataset threshold met; production remains blocked until "
+                "external release validation succeeds."
+            )
 
         return {
             "real_labels": total_real,
@@ -4801,7 +4725,7 @@ def api_crop_model_readiness(
             "labels_with_feature_vectors": labels_with_fv,
             "labels_missing_feature_vectors": missing_fv,
             "eligible_training_samples": eligible_samples,
-            "production_model_eligible": production_model_eligible,
+            **release_readiness,
             "recommendations": recommendations,
             "distributions": {
                 "by_crop_group": by_group,
@@ -4810,6 +4734,12 @@ def api_crop_model_readiness(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Readiness query failed: {e}")
+    finally:
+        if store is not None:
+            try:
+                store.client.close()
+            except Exception:
+                logger.warning("Crop readiness Mongo client close failed")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -4820,7 +4750,7 @@ class ModelTrainRequest(BaseModel):
     dry_run: bool = True
     min_quality_tier: str = "C"
     max_samples: Optional[int] = None
-    include_historical: bool = True
+    include_historical: bool = False
     include_synthetic: bool = False
 
 
@@ -4829,7 +4759,7 @@ def api_train_crop_model(
     req: ModelTrainRequest,
     x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token")
 ):
-    """Train the hierarchical ML crop classifier from confirmed crop labels.
+    """Train the diagnostic hierarchy from authority-validated crop labels.
     
     Restricted to admin users using AGRIBRAIN_ADMIN_TOKEN.
     """
@@ -4920,7 +4850,7 @@ def api_crop_model_status():
 
 class ModelEvaluateRequest(BaseModel):
     min_quality_tier: str = "C"
-    include_historical: bool = True
+    include_historical: bool = False
     crop_groups: Optional[List[str]] = None
     min_feature_completeness: float = 0.3
     dry_run: bool = False
@@ -4933,7 +4863,7 @@ def api_evaluate_crop_model(
     req: ModelEvaluateRequest,
     x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token")
 ):
-    """Evaluate the hierarchical ML crop classifier from confirmed crop labels.
+    """Evaluate the hierarchy on authority-validated crop labels.
     
     Restricted to admin users using AGRIBRAIN_ADMIN_TOKEN.
     """

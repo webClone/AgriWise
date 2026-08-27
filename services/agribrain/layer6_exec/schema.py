@@ -216,10 +216,21 @@ class UpstreamDigest:
     soil_moisture_status: str = "ADEQUATE"       # DRY, ADEQUATE, WET, SATURATED
 
     # L2: Crop state
-    ndvi_current: float = 0.7
+    ndvi_current: float = 0.0
     ndvi_trend: str = "STABLE"                   # RISING, STABLE, DECLINING, CRASH
     growth_velocity: float = 0.01
-    phenology_stage: str = "VEGETATIVE"
+    phenology_stage: str = "UNKNOWN"
+    phenology_confidence: float = 0.0
+    phenology_posterior_hash: str = ""
+    stage_specific_allowed: bool = False
+    crop_posterior_hash: str = ""
+    crop_resolution: str = "unknown"
+    species_specific_allowed: bool = False
+    crop_evidence_class: str = "unknown"
+    phenology_evidence_class: str = "unknown"
+    crop_mixture: Dict[str, float] = field(default_factory=dict)
+    stage_posterior: Dict[str, float] = field(default_factory=dict)
+    crop_phenology_demotion_reasons: List[str] = field(default_factory=list)
     canopy_cover_pct: float = 70.0
 
     # L3: Decision diagnoses (top 3)

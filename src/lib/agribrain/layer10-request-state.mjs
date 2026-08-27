@@ -37,7 +37,9 @@ export function buildRenderViewIdentity({
   sourcePolicy,
   mode,
   surfaceType,
+  surfaceId,
   overlaySurfaceType,
+  overlaySurfaceId,
   overlayEnabled,
 }) {
   return [
@@ -46,8 +48,26 @@ export function buildRenderViewIdentity({
     "policy:" + normalizeSourcePolicy(sourcePolicy),
     "mode:" + String(mode || "canopy"),
     "base:" + String(surfaceType || "none"),
+    "base-id:" + String(surfaceId || "none"),
     "overlay:" + (overlayEnabled === true ? String(overlaySurfaceType || "none") : "off"),
+    "overlay-id:" + (overlayEnabled === true ? String(overlaySurfaceId || "none") : "off"),
   ].join("|");
+}
+
+export function hasCompleteCommittedRenderIdentity({
+  publicationId,
+  snapshotId,
+  surfaceInventoryHash,
+  renderAuthorizationVersion,
+  surfaceId,
+}) {
+  return [
+    publicationId,
+    snapshotId,
+    surfaceInventoryHash,
+    renderAuthorizationVersion,
+    surfaceId,
+  ].every((value) => String(value || "").trim().length > 0);
 }
 
 export function shouldRetainLastKnownGood(previous, candidate, plotId) {
@@ -63,6 +83,50 @@ export function isLatestLayer10Request(activeSequence, candidateSequence, aborte
     && Number(activeSequence) === Number(candidateSequence);
 }
 
+const CANONICAL_INTEGRITY_FLAGS = Object.freeze([
+  "nodeValid",
+  "publicationValid",
+  "receiptValid",
+  "inventoryValid",
+  "bindingValid",
+  "lineageValid",
+]);
+
+const CANONICAL_CONTRACT_FLAGS = Object.freeze([
+  "schemaValid",
+  "contractValid",
+  "publicationStatusValid",
+]);
+
+export function classifyCanonicalHeadValidation(validation) {
+  const flags = validation && typeof validation === "object" ? validation : {};
+  if (!CANONICAL_INTEGRITY_FLAGS.every((key) => flags[key] === true)) {
+    return "corrupt";
+  }
+  if (!CANONICAL_CONTRACT_FLAGS.every((key) => flags[key] === true)) {
+    return "stale";
+  }
+  return "valid";
+}
+
+export function resolveCompoundRenderAttribution({
+  baseRendered,
+  overlayRendered,
+  baseSourceLabel,
+  baseAuthorityLabel,
+}) {
+  if (!baseRendered) {
+    return { sourceLabel: "NO COMMITTED RASTER", authorityLabel: "No committed raster" };
+  }
+  if (overlayRendered) {
+    return {
+      sourceLabel: `${baseSourceLabel} + EXPERIMENTAL`,
+      authorityLabel: `${baseAuthorityLabel} · experimental scouting overlay`,
+    };
+  }
+  return { sourceLabel: baseSourceLabel, authorityLabel: baseAuthorityLabel };
+}
+
 function materializationSignature(materialization) {
   const receipt = materialization?.receipt;
   return JSON.stringify({
@@ -76,12 +140,17 @@ function materializationSignature(materialization) {
     gridBounds: materialization?.gridBounds || null,
     gridWidth: materialization?.gridWidth ?? null,
     gridHeight: materialization?.gridHeight ?? null,
+    surfaceId: materialization?.surfaceId || null,
     receipt: receipt ? {
       publicationId: receipt.publicationId || null,
       sourceId: receipt.sourceId || null,
       layerId: receipt.layerId || null,
       renderKind: receipt.renderKind || null,
       mapInstanceId: receipt.mapInstanceId || null,
+      snapshotId: receipt.snapshotId || null,
+      surfaceInventoryHash: receipt.surfaceInventoryHash || null,
+      renderAuthorizationVersion: receipt.renderAuthorizationVersion || null,
+      surfaceId: receipt.surfaceId || null,
     } : null,
   });
 }
@@ -90,7 +159,13 @@ export function browserRenderReceiptSignature(receipt) {
   if (!receipt) return "none";
   return JSON.stringify({
     viewIdentity: receipt.viewIdentity || null,
+    publicationId: receipt.publicationId || null,
+    surfaceInventoryHash: receipt.surfaceInventoryHash || null,
+    renderAuthorizationVersion: receipt.renderAuthorizationVersion || null,
     base: materializationSignature(receipt.baseMaterialization),
     overlay: materializationSignature(receipt.overlayMaterialization),
+    hybridOverlays: Array.isArray(receipt.hybridOverlayMaterializations)
+      ? receipt.hybridOverlayMaterializations.map(materializationSignature)
+      : [],
   });
 }

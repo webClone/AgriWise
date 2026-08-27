@@ -63,6 +63,72 @@ def _stable_array_hash(bands: dict[str, np.ndarray]) -> str:
         digest.update(array.tobytes())
     return digest.hexdigest()
 
+
+def _has_complete_s1_orbit_metadata(metadata: dict) -> bool:
+    """Return whether cached provider metadata can support crop independence.
+
+    Older raster artifacts remain useful to ASMAE, but artifacts written
+    before orbit metadata was persisted cannot become independent crop
+    evidence.  This check is intentionally limited to refresh planning; the
+    canonical crop observation resolver remains the scientific authority.
+    """
+    records = []
+    pending = [metadata]
+    seen = set()
+    while pending:
+        current = pending.pop(0)
+        if isinstance(current, dict):
+            marker = id(current)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            records.append(current)
+            for key in (
+                "process_metadata", "process_api_metadata", "userData",
+                "userdata", "tiles", "catalog_metadata", "properties",
+                "stac_metadata", "official_product_identity",
+            ):
+                nested = current.get(key)
+                if isinstance(nested, (dict, list, tuple)):
+                    pending.append(nested)
+        elif isinstance(current, (list, tuple)):
+            pending.extend(current)
+
+    relative = None
+    direction = None
+    relative_aliases = (
+        "provider_relative_orbit", "process_relative_orbit",
+        "relative_orbit", "relative_orbit_number", "relativeOrbitNumber",
+        "sat:relative_orbit", "s1:relative_orbit",
+    )
+    direction_aliases = (
+        "provider_orbit_pass", "orbit_pass", "orbit_direction",
+        "orbitDirection", "orbitPass", "sat:orbit_state", "s1:orbit_state",
+    )
+    for record in records:
+        if relative is None:
+            for alias in relative_aliases:
+                raw = str(record.get(alias) or "").strip().upper()
+                if raw.startswith("R"):
+                    raw = raw[1:]
+                if raw.isdigit() and 1 <= int(raw) <= 175:
+                    relative = int(raw)
+                    break
+        if direction is None:
+            for alias in direction_aliases:
+                raw = str(record.get(alias) or "").strip().upper()
+                normalized = {
+                    "A": "ASCENDING", "ASC": "ASCENDING",
+                    "D": "DESCENDING", "DES": "DESCENDING",
+                    "DESC": "DESCENDING",
+                }.get(raw, raw)
+                if normalized in {"ASCENDING", "DESCENDING"}:
+                    direction = normalized
+                    break
+        if relative is not None and direction is not None:
+            return True
+    return False
+
 def fetch_asmae_s1_scene_stack(
     plot_id: str,
     run_id: str,
@@ -200,6 +266,7 @@ def fetch_asmae_s1_scene_stack(
     seen_content_hashes: dict[str, str] = {}
     local_scenes = []
     cached_by_provider_id = {}
+    orbit_complete_provider_ids = set()
     failed_closed = False
     fail_reason = None
     
@@ -338,6 +405,10 @@ def fetch_asmae_s1_scene_stack(
                 provider_tile_id=meta.get("provider_tile_id"),
                 provider_orbit_id=meta.get("provider_orbit_id"),
                 provider_orbit_pass=meta.get("provider_orbit_pass"),
+                provider_relative_orbit=meta.get("provider_relative_orbit"),
+                provider_absolute_orbit=meta.get("provider_absolute_orbit"),
+                process_metadata=dict(meta.get("process_metadata") or {}),
+                catalog_metadata=dict(meta.get("catalog_metadata") or {}),
                 content_hash=content_hash,
                 process_request_hash=meta.get("process_request_hash"),
                 provider_response_hash=meta.get("provider_response_hash"),
@@ -345,7 +416,9 @@ def fetch_asmae_s1_scene_stack(
                 binding_proof=dict(meta.get("binding_proof") or {}),
             )
             local_scenes.append(sp)
-            cached_by_provider_id[prov_prod_id] = sp
+            if _has_complete_s1_orbit_metadata(meta):
+                cached_by_provider_id[prov_prod_id] = sp
+                orbit_complete_provider_ids.add(prov_prod_id)
         except Exception:
             failed_closed = True
             fail_reason = "provider_error"
@@ -353,7 +426,7 @@ def fetch_asmae_s1_scene_stack(
             
     if failed_closed:
         return _unavailable("scene_validation", fail_reason or "provider_error", date_range)
-    if len(local_scenes) >= 2:
+    if len(local_scenes) >= 2 and len(orbit_complete_provider_ids) >= 2:
         return local_scenes
 
     # ── 3. SENTINEL HUB PROCESS API FALLBACK ──
@@ -404,6 +477,8 @@ def fetch_asmae_s1_scene_stack(
         try:
             transform = _build_affine_transform(bbox, W, H)
         except ValueError:
+            if local_scenes:
+                return local_scenes
             return _unavailable(
                 "request_build", "no_geometry", date_range,
                 accepted_count=len(local_scenes),
@@ -415,6 +490,8 @@ def fetch_asmae_s1_scene_stack(
     try:
         token = get_access_token()
     except Exception:
+        if local_scenes:
+            return local_scenes
         return _unavailable("authentication", "credentials_missing", date_range, accepted_count=len(local_scenes))
         
     stac_url = "https://sh.dataspace.copernicus.eu/catalog/v1/search"
@@ -435,10 +512,14 @@ def fetch_asmae_s1_scene_stack(
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         resp = requests.post(stac_url, json=stac_payload, headers=headers, timeout=25)
         if resp.status_code != 200:
+            if local_scenes:
+                return local_scenes
             reason = "rate_limited" if resp.status_code == 429 else "provider_error"
             return _unavailable("catalog_query", reason, date_range, accepted_count=len(local_scenes), http_status=resp.status_code, request_id=resp.headers.get("x-request-id", ""))
         features = resp.json().get("features", [])
     except Exception:
+        if local_scenes:
+            return local_scenes
         return _unavailable("catalog_query", "provider_error", date_range, accepted_count=len(local_scenes))
         
     if not features and not local_scenes:
@@ -654,6 +735,10 @@ def fetch_asmae_s1_scene_stack(
                 "provider_tile_id": binding.get("provider_tile_id"),
                 "provider_orbit_id": binding.get("provider_orbit_id"),
                 "provider_orbit_pass": binding.get("provider_orbit_pass"),
+                "provider_relative_orbit": binding.get("provider_relative_orbit"),
+                "provider_absolute_orbit": binding.get("provider_absolute_orbit"),
+                "process_metadata": binding.get("process_metadata") or {},
+                "catalog_metadata": dict(props),
                 "source_reality": "real_raster",
                 "production_usable": exact_binding,
                 "diagnostic_only": not exact_binding,
@@ -699,6 +784,10 @@ def fetch_asmae_s1_scene_stack(
                 provider_tile_id=binding.get("provider_tile_id"),
                 provider_orbit_id=binding.get("provider_orbit_id"),
                 provider_orbit_pass=binding.get("provider_orbit_pass"),
+                provider_relative_orbit=binding.get("provider_relative_orbit"),
+                provider_absolute_orbit=binding.get("provider_absolute_orbit"),
+                process_metadata=dict(binding.get("process_metadata") or {}),
+                catalog_metadata=dict(props),
                 content_hash=content_hash,
                 process_request_hash=process_request_hash,
                 provider_response_hash=metadata["provider_response_hash"],

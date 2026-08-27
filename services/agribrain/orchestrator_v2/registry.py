@@ -111,7 +111,7 @@ LAYER_REGISTRY: Dict[LayerId, LayerSpec] = {
         name="SeasonPlanning",
         version="7.0.0",
         runner=run_layer7_planning,
-        depends_on=[LayerId.L1],
+        depends_on=[LayerId.L1, LayerId.L2, LayerId.L3, LayerId.L4, LayerId.L5, LayerId.L6],
         required=False
     ),
     LayerId.L8: LayerSpec(

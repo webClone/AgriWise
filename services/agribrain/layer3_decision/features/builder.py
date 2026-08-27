@@ -36,8 +36,8 @@ class DecisionFeatures:
     # Crop State (from L2 phenology)
     current_stage: str = "UNKNOWN"
     days_in_stage: int = 0
-    stage_confidence: float = 0.5
-    growth_adequacy: float = 1.0
+    stage_confidence: float = 0.0
+    growth_adequacy: float = 0.5
     growth_velocity_7d: float = 0.0
 
     # Anomalies (from L2 vegetation intelligence)
@@ -135,7 +135,7 @@ def build_decision_features(
     sar_available = ops.get("sar_available", False)
     optical_available = ops.get("optical_available", False)
     rain_available = ops.get("rain_available", False)
-    temp_available = ops.get("temp_available", True)
+    temp_available = ops.get("temp_available", False)
     sar_obs_count = ops.get("sar_obs_count", 0)
     optical_obs_count = ops.get("optical_obs_count", 0)
 
@@ -151,8 +151,8 @@ def build_decision_features(
         missing.append(Driver.NDVI)
 
     # --- 3. Water context from L2 stress interpretation ---
-    # v2: Use REAL precipitation data when available from L1 timeseries.
-    # Falls back to severity-based proxy ONLY when real data is missing.
+    # Precipitation is a measurement, not a value that can be reconstructed
+    # from an inferred water-stress severity.  Missing rain remains missing.
     water_severity = ops.get("water_deficit_severity", 0.0)
     stress_summary = getattr(l3_context, "stress_summary", {}) or {}
 
@@ -162,24 +162,14 @@ def build_decision_features(
         rain_sum_14d = ops.get("real_rain_sum_14d", 0.0)
         days_since_rain = ops.get("real_days_since_rain", 0)
     else:
-        # Fallback: proxy from water deficit severity (legacy path)
-        # NOTE: This creates a circular evidence loop when water_deficit_severity
-        # was itself derived from proxy data. Prefer real rain data always.
-        if water_severity > 0.5:
-            rain_sum_7d = 2.0
-            rain_sum_14d = 3.0
-            days_since_rain = 14
-        elif water_severity > 0.2:
-            rain_sum_7d = 10.0
-            rain_sum_14d = 15.0
-            days_since_rain = 7
-        else:
-            rain_sum_7d = 25.0
-            rain_sum_14d = 40.0
-            days_since_rain = 2
+        rain_sum_7d = 0.0
+        rain_sum_14d = 0.0
+        days_since_rain = 0
 
-    # Soil moisture proxy from water stress
-    soil_moisture_proxy = max(0.0, min(1.0, 1.0 - water_severity))
+    # No physical soil-moisture observation is available on this legacy
+    # boundary.  Keep the neutral placeholder for schema compatibility; it is
+    # not used as scientific evidence.
+    soil_moisture_proxy = 0.5
 
     # --- 4. Thermal context from L2 stress evidence ---
     thermal_severity = ops.get("thermal_severity", 0.0)
@@ -208,6 +198,8 @@ def build_decision_features(
 
     # --- 5. Crop state from L2 phenology ---
     phenology_stage = getattr(l3_context, "phenology_stage", "unknown") or "unknown"
+    if not getattr(l3_context, "stage_specific_allowed", False):
+        phenology_stage = "unknown"
 
     # Map L2 stages to L3 canonical stages
     # BUG-9 FIX: Added emergence, harvested, grain_filling as separate keys
@@ -227,16 +219,18 @@ def build_decision_features(
     current_stage = stage_map.get(phenology_stage.lower(), "UNKNOWN")
 
     gdd_vigor = getattr(l3_context, "gdd_adjusted_vigor", None)
-    stage_confidence = 0.5
+    stage_confidence = max(
+        0.0,
+        min(1.0, float(getattr(l3_context, "phenology_confidence", 0.0) or 0.0)),
+    )
     veg_status = getattr(l3_context, "vegetation_status", {}) or {}
 
-    # Extract confidence from vegetation features
-    for vf_name, vf_data in veg_status.items():
-        if isinstance(vf_data, dict) and "confidence" in vf_data:
-            stage_confidence = max(stage_confidence, vf_data["confidence"])
+    # Vegetation feature confidence is not phenology confidence and therefore
+    # cannot raise this value.
 
-    # Growth adequacy from vigor
-    growth_adequacy = gdd_vigor if gdd_vigor is not None else 1.0
+    # Absence of a measured vigor feature is neutral/unknown, not perfect
+    # growth.  A value of 1.0 previously created false healthy evidence.
+    growth_adequacy = gdd_vigor if gdd_vigor is not None else 0.5
 
     # Growth velocity from operational signals
     growth_velocity = ops.get("growth_velocity", 0.0)
@@ -355,15 +349,20 @@ def _apply_energy_balance(
     ndvi = ops.get("ndvi_mean")
     wind_speed = ops.get("wind_speed_ms")
 
-    # Determine Kc from crop profile + phenological stage
-    crop_profile = get_crop_profile(context.crop_type)
-    kc = get_kc_for_stage(
-        crop_type=context.crop_type,
-        stage=features.current_stage,
-        kc_init=crop_profile.kc_init,
-        kc_mid=crop_profile.kc_mid,
-        kc_end=crop_profile.kc_end,
-    )
+    # A declaration/unknown crop must not enter the crop database: that lookup
+    # has a legacy wheat fallback.  Use a bounded generic coefficient until a
+    # canonical species receipt authorizes the species-specific profile.
+    if context.species_specific_allowed and context.crop_type != "unknown":
+        crop_profile = get_crop_profile(context.crop_type)
+        kc = get_kc_for_stage(
+            crop_type=context.crop_type,
+            stage=features.current_stage,
+            kc_init=crop_profile.kc_init,
+            kc_mid=crop_profile.kc_mid,
+            kc_end=crop_profile.kc_end,
+        )
+    else:
+        kc = 0.85
 
     # Compute water budget
     wb = compute_water_budget(
@@ -527,11 +526,7 @@ def _apply_atmospheric_drivers(
             e_sat = e_sat_max
         if rh is not None and isinstance(rh, (int, float)):
             vpd = e_sat * (1.0 - float(rh) / 100.0)
-        else:
-            # No RH data: estimate VPD from temp alone
-            # Arid regions (MENA default): RH ~ 30-40%
-            vpd = e_sat * 0.65  # ~35% RH assumption
-        features.vpd_kpa = round(max(0.0, vpd), 2)
+            features.vpd_kpa = round(max(0.0, vpd), 2)
 
     # --- Wind Speed ---
     wind = ops.get("wind_speed_ms", None)

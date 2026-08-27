@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import numpy as np
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Sequence, Optional
 
 def extract_surface_grid(src: Any) -> np.ndarray:
     """
@@ -99,13 +99,42 @@ def extract_named_grid(name: str, base_surfaces: List[Any], l10_input: Any = Non
 
     return None
 
-def resample_to(arr: np.ndarray, target_shape: Tuple[int, int], method: str = "bilinear") -> np.ndarray:
+def resample_to(
+    arr: np.ndarray,
+    target_shape: Tuple[int, int],
+    method: str = "bilinear",
+    src_transform: Optional[Sequence[float]] = None,
+    src_crs: Optional[str] = None,
+    target_transform: Optional[Sequence[float]] = None,
+    target_crs: Optional[str] = None,
+) -> np.ndarray:
     """
-    Resamples a 2D numpy array to target (height, width).
+    Resamples or reprojects a 2D numpy array to target (height, width).
+    Uses transform-aware reproject_scientific_grid if transforms/CRS are supplied.
     """
     target_H, target_W = target_shape
     if arr is None or not isinstance(arr, np.ndarray) or arr.ndim != 2 or arr.size == 0:
         return np.full((target_H, target_W), np.nan, dtype=np.float32)
+
+    src_tf = src_transform or getattr(arr, "transform", None) or getattr(arr, "_transform", None)
+    src_c = src_crs or getattr(arr, "crs", None) or getattr(arr, "_crs", None)
+    tgt_tf = target_transform or getattr(arr, "target_transform", None)
+    tgt_c = target_crs or getattr(arr, "target_crs", None)
+
+    if src_tf and src_c and tgt_tf and tgt_c:
+        try:
+            return reproject_scientific_grid(
+                src_grid=arr,
+                src_transform=src_tf,
+                src_crs=src_c,
+                target_shape=target_shape,
+                target_transform=tgt_tf,
+                target_crs=tgt_c,
+                product_type=method,
+            )
+        except Exception:
+            pass
+
     if arr.shape == (target_H, target_W):
         return arr
     old_h, old_w = arr.shape
@@ -114,7 +143,6 @@ def resample_to(arr: np.ndarray, target_shape: Tuple[int, int], method: str = "b
         xs = np.clip(np.round((np.arange(target_W) + 0.5) * old_w / target_W - 0.5).astype(int), 0, old_w - 1)
         return arr[np.ix_(ys, xs)]
     else:
-        # Bilinear interpolation
         ys = (np.arange(target_H, dtype=float) + 0.5) * old_h / target_H - 0.5
         xs = (np.arange(target_W, dtype=float) + 0.5) * old_w / target_W - 0.5
         y0 = np.clip(np.floor(ys).astype(int), 0, old_h - 1)
@@ -133,6 +161,67 @@ def resample_to(arr: np.ndarray, target_shape: Tuple[int, int], method: str = "b
             nx = np.clip(np.round(xs).astype(int), 0, old_w - 1)
             result[nan_mask] = arr[np.ix_(ny, nx)][nan_mask]
         return result
+
+def reproject_scientific_grid(
+    src_grid: np.ndarray,
+    src_transform: Sequence[float],
+    src_crs: str,
+    target_shape: Tuple[int, int],
+    target_transform: Sequence[float],
+    target_crs: str,
+    product_type: str = "continuous",
+) -> np.ndarray:
+    """
+    Transforms a scientific grid using affine metadata and CRS bounds.
+    Fails closed if affine metadata or CRS is missing.
+    """
+    target_H, target_W = target_shape
+    if (
+        src_grid is None or not isinstance(src_grid, np.ndarray) or src_grid.ndim != 2
+        or not src_transform or len(src_transform) != 6
+        or not target_transform or len(target_transform) != 6
+        or not src_crs or not target_crs
+    ):
+        raise ValueError("reproject_scientific_grid requires valid 2D array, 6-element affine transforms, and CRS metadata")
+
+    src_dx, _, src_x0, _, src_dy, src_y0 = [float(v) for v in src_transform]
+    tgt_dx, _, tgt_x0, _, tgt_dy, tgt_y0 = [float(v) for v in target_transform]
+
+    if abs(src_dx) < 1e-9 or abs(src_dy) < 1e-9:
+        raise ValueError("Invalid source transform resolution")
+
+    target_cols = np.arange(target_W, dtype=np.float64) + 0.5
+    target_rows = np.arange(target_H, dtype=np.float64) + 0.5
+
+    target_x_map = tgt_x0 + target_cols * tgt_dx
+    target_y_map = tgt_y0 + target_rows * tgt_dy
+
+    src_cols = (target_x_map - src_x0) / src_dx - 0.5
+    src_rows = (target_y_map - src_y0) / src_dy - 0.5
+
+    old_h, old_w = src_grid.shape
+    prod_lower = str(product_type).lower()
+
+    if any(k in prod_lower for k in ("mask", "categorical", "discrete", "class")):
+        ys = np.clip(np.round(src_rows).astype(int), 0, old_h - 1)
+        xs = np.clip(np.round(src_cols).astype(int), 0, old_w - 1)
+        return src_grid[np.ix_(ys, xs)]
+    elif any(k in prod_lower for k in ("probability", "confidence", "reliability")):
+        ys = np.clip(np.round(src_rows).astype(int), 0, old_h - 1)
+        xs = np.clip(np.round(src_cols).astype(int), 0, old_w - 1)
+        result = src_grid[np.ix_(ys, xs)].copy()
+        return result
+    else:
+        y0 = np.clip(np.floor(src_rows).astype(int), 0, old_h - 1)
+        y1 = np.clip(y0 + 1, 0, old_h - 1)
+        x0 = np.clip(np.floor(src_cols).astype(int), 0, old_w - 1)
+        x1 = np.clip(x0 + 1, 0, old_w - 1)
+        wy = np.clip(src_rows - y0, 0.0, 1.0)[:, np.newaxis]
+        wx = np.clip(src_cols - x0, 0.0, 1.0)[np.newaxis, :]
+        return (src_grid[np.ix_(y0, x0)] * (1 - wy) * (1 - wx) +
+                src_grid[np.ix_(y0, x1)] * (1 - wy) * wx +
+                src_grid[np.ix_(y1, x0)] * wy * (1 - wx) +
+                src_grid[np.ix_(y1, x1)] * wy * wx)
 
 def finite_ratio(arr: np.ndarray) -> float:
     if arr is None or arr.size == 0:

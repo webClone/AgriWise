@@ -18,6 +18,7 @@ def spatial_refresh_block_reason(job: Optional[Mapping[str, Any]]) -> str:
         "failed": "spatial_refresh_failed",
         "superseded": "spatial_refresh_superseded",
         "completed": "spatial_refresh_completed_without_compatible_snapshot",
+        "not_eligible": "NOT_ELIGIBLE_NO_EXECUTABLE_SPATIAL_SCENE",
     }.get(status, "spatial_refresh_unavailable")
 
 
@@ -89,6 +90,8 @@ def build_spatial_supersession_state(
         supersession_reason = "active_spatial_job_failed"
     elif job_status == "superseded":
         supersession_reason = "active_spatial_job_superseded"
+    elif job_status == "not_eligible":
+        supersession_reason = "NOT_ELIGIBLE_NO_EXECUTABLE_SPATIAL_SCENE"
     elif is_spatial_result and snapshot_accepted:
         supersession_reason = "spatial_snapshot_current"
     elif job_status in ACTIVE_JOB_STATUSES:

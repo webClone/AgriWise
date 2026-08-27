@@ -183,7 +183,7 @@ def generate_asmae_composite_surfaces(
     )
 
     # ── BC.10.13 P6: hard gate — no spatial signal → no surfaces ─────────────
-    if not bus.available:
+    if not bus.available or bus.vigor is None:
         return []
 
     state = bus.state
@@ -251,7 +251,7 @@ def generate_asmae_composite_surfaces(
         else:
             feat_w = _feat_weight(key)
 
-        if arr is not None and status != "unavailable" and feat_w != 0.0:
+        if arr is not None and status in ("real", "proxy_derived", "assimilated") and feat_w != 0.0:
             return WeightedFeature(values=arr, effective_weight=nominal_weight * feat_w, status=status, source_kind=source_kind)
         return WeightedFeature(values=np.zeros(shape, dtype=np.float32), effective_weight=0.0, status="unavailable", source_kind="unavailable")
 
@@ -317,9 +317,43 @@ def generate_asmae_composite_surfaces(
 
             physio_accum += contribution
 
+    contribution_mass = {
+        "direct_assimilated": 0.0,
+        "indirectly_constrained": 0.0,
+        "proxy_derived": 0.0,
+        "prior_constrained": 0.0,
+    }
+    for key, _, _ in _pv_spec:
+        feat = _pv_weighted_features[key]
+        mass = abs(float(feat.effective_weight))
+        entry = bus.feature_status.get(key) if isinstance(bus.feature_status, dict) else None
+        entry = entry if isinstance(entry, dict) else {}
+        if int(entry.get("direct_observation_count", 0) or 0) > 0:
+            bucket = "direct_assimilated"
+        elif int(entry.get("indirect_observation_count", 0) or 0) > 0:
+            bucket = "indirectly_constrained"
+        elif feat.status == "proxy_derived":
+            bucket = "proxy_derived"
+        else:
+            bucket = "prior_constrained"
+        contribution_mass[bucket] += mass
+
+    contribution_pct = {
+        key: round(100.0 * value / norm_factor, 3) if norm_factor > 0.0 else 0.0
+        for key, value in contribution_mass.items()
+    }
+    direct_contribution_pct = contribution_pct["direct_assimilated"]
+
     # MIN_CANOPY_WEIGHT gate: total active nominal weights * feat weights must be at least 0.30
     if norm_factor < MIN_CANOPY_WEIGHT:
         return []
+
+    advisory_eligible = direct_contribution_pct >= 35.0
+    epistemic_class = (
+        "assimilated_multi_sensor_advisory"
+        if advisory_eligible
+        else "model_prior_scouting_overlay"
+    )
 
     physio_vigor = np.clip(physio_accum / norm_factor, 0.0, 1.0)
 
@@ -612,14 +646,28 @@ def generate_asmae_composite_surfaces(
         provenance = {
             "source_reality":               source_reality,
             "real_asmae_evidence":          real_ev,
-            "asmae_advisory_evidence":      True,
+            "asmae_advisory_evidence":      advisory_eligible,
+            "epistemic_class":              epistemic_class,
+            "epistemic_contribution_pct":   contribution_pct,
+            "direct_assimilated_contribution_pct": direct_contribution_pct,
+            "authority_block_reason": (
+                None if advisory_eligible
+                else "insufficient_direct_assimilated_contribution"
+            ),
             "current_1m_approval_allowed":  False,
             "authority":                    authority,
             "state_update_allowed":         False,
             "prescription_driver_allowed":  False,
+            "support_class":                "composite_scouting",
+            "evidence_class":               "Composite scouting diagnostic",
+            "direct_observation":           False,
+            "management_zone_eligible":     False,
+            "zone_statistics_eligible":     False,
+            "diagnostic_only":              True,
             "creator":                      "L10_ASMAE_COMPOSITE",
             # BC.10.13 P6: status fields read from per-feature dict, not bare string compare
-            "bma_status":            "active" if _lstat("bma_disagreement") == "real" else "proxy",
+            "bma_status":            "active" if _lstat("bma_disagreement") == "real" else "unavailable",
+            "visual_fusion_status":  "active" if _lstat("bma_disagreement") == "real" else "unavailable",
             "archive_status":        "active" if _lstat("archive_support") == "real" else "unavailable",
             "ml_status":             "active" if _lstat("ml_support") == "real" else "unavailable",
             "retrovalidation_status":"active" if _lstat("retro_score") == "real" else "unavailable",

@@ -222,18 +222,24 @@ class DiagnosisEngine:
     # --- Specific Diagnosis Logics ---
 
     def _diagnose_water_stress(self, f: DecisionFeatures, context: PlotContext = None) -> Optional[Diagnosis]:
-        # Prior: Low (0.1)
-        lo = self._to_log_odds(0.1)
+        # GAP-22 FIX: Climate-adaptive prior probability.
+        # In arid zones (AI<0.3), water stress is far more likely than in humid zones.
+        # prior = 0.1 * max(0.5, min(3.0, 1.0 / AI))
+        # Arid (AI=0.2) → prior ≈ 0.50, Semi-arid (AI=0.5) → prior ≈ 0.20, Humid (AI=1.5) → prior ≈ 0.07
+        ai = getattr(context, 'climate_aridity_index', 1.0) if context else 1.0
+        ai = max(0.1, ai)  # Guard against zero/negative
+        water_stress_prior = min(0.60, 0.1 * max(0.5, min(3.0, 1.0 / ai)))
+        lo = self._to_log_odds(water_stress_prior)
         trace = []
         
         # Evidence: Rain deficit
-        if f.rain_sum_14d < 5.0:
+        if f.rain_available and f.rain_sum_14d < 5.0:
             lo += self._add_evidence("rain_sum_14d", "14d", f.rain_sum_14d, 1.0, 2.0, trace)
-        elif f.rain_sum_14d > 30.0:
+        elif f.rain_available and f.rain_sum_14d > 30.0:
             # Strong contraindication if rain is abundant (Expert Grade: lowered from 40 to 30)
             lo += self._add_evidence("rain_sum_14d", "14d", f.rain_sum_14d, -1.0, 4.0, trace)
             
-        if f.days_since_rain > 12: # increased from 10 to 12
+        if f.rain_available and f.days_since_rain > 12: # increased from 10 to 12
              lo += self._add_evidence("days_since_rain", "current", f.days_since_rain, 1.0, 1.5, trace)
 
         
@@ -338,14 +344,14 @@ class DiagnosisEngine:
         if f.saturation_days >= 2:
             lo += self._add_evidence("saturation_days", "7d", f.saturation_days, 1.0, 2.5, trace)
         
-        if f.rain_sum_7d > 50.0:
+        if f.rain_available and f.rain_sum_7d > 50.0:
             lo += self._add_evidence("rain_sum_7d", "7d", f.rain_sum_7d, 1.0, 1.5, trace)
             
         if f.has_anomaly and f.anomaly_type == "DROP":
             lo += self._add_evidence("ndvi_drop", "current", f.anomaly_severity, 0.5, 1.0, trace)
 
         # Contraindication: dry conditions
-        if f.rain_sum_7d < 5.0 and f.days_since_rain > 7:
+        if f.rain_available and f.rain_sum_7d < 5.0 and f.days_since_rain > 7:
             lo += self._add_evidence("dry_conditions", "7d", f.rain_sum_7d, -1.0, 2.0, trace)
             
         prob = self._to_prob(lo)
@@ -524,7 +530,7 @@ class DiagnosisEngine:
         trace = []
 
         # Primary: wet conditions (prolonged leaf wetness proxy)
-        if f.rain_sum_7d > 20.0:
+        if f.rain_available and f.rain_sum_7d > 20.0:
             score = min(1.0, (f.rain_sum_7d - 15.0) / 30.0)
             lo += self._add_evidence("wet_conditions", "7d", f.rain_sum_7d, score, 2.0, trace)
 
@@ -550,7 +556,7 @@ class DiagnosisEngine:
             lo += self._add_evidence("forecast_rain", "3d_forecast", f.forecast_rain_3d, 0.7, 1.5, trace)
 
         # Contraindication: dry
-        if f.rain_sum_7d < 5.0 and f.days_since_rain > 7:
+        if f.rain_available and f.rain_sum_7d < 5.0 and f.days_since_rain > 7:
             lo += self._add_evidence("dry_conditions", "7d", f.rain_sum_7d, -1.0, 3.0, trace)
 
         prob = self._to_prob(lo)
@@ -941,7 +947,7 @@ class DiagnosisEngine:
         trace = []
 
         # Heavy rain weakens stems
-        if f.rain_sum_7d > 30.0:
+        if f.rain_available and f.rain_sum_7d > 30.0:
             score = min(1.0, (f.rain_sum_7d - 25.0) / 40.0)
             lo += self._add_evidence("heavy_rain", "7d", f.rain_sum_7d, score, 1.5, trace)
 

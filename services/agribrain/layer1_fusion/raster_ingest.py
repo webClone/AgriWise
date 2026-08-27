@@ -507,7 +507,31 @@ def ingest_asmae_raster_refs(output: Dict[str, Any], plot_id: str) -> List[Raste
         # Pull trust score and diagnostics
         diag = output.get("diagnostics", {}) or {}
         prov = output.get("provenance") or {}
-        conf_val = float(diag.get("confidence", 1.0))
+
+        def finite_support_mean(group_name: str, preferred_key: str):
+            group = output.get(group_name) or {}
+            grid = group.get(preferred_key)
+            if not isinstance(grid, list):
+                return None
+            values = []
+            for row in grid:
+                if not isinstance(row, list):
+                    continue
+                for value in row:
+                    try:
+                        number = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(number):
+                        values.append(number)
+            return sum(values) / len(values) if values else None
+
+        post_conc_mean = finite_support_mean("confidence_maps", "ASMAE_POSTERIOR_CONCENTRATION")
+        if post_conc_mean is None:
+            post_conc_mean = finite_support_mean("confidence_maps", "ASMAE_CONFIDENCE")
+        uncertainty_mean = finite_support_mean("uncertainty_maps", "ASMAE_UNCERTAINTY")
+        post_conc_val = float(post_conc_mean) if post_conc_mean is not None else 0.0
+        unc_val = float(uncertainty_mean) if uncertainty_mean is not None else 1.0
 
         archive_used = prov.get("sentinel_archive_used") or diag.get("sentinel_archive_used") or False
         archive_count = prov.get("archive_scene_count") or diag.get("archive_scene_count") or 0
@@ -541,14 +565,8 @@ def ingest_asmae_raster_refs(output: Dict[str, Any], plot_id: str) -> List[Raste
             diagnostic_only=ref_diagnostic_only,
             asmae_channel=channel,
             source_basis="asmae",
-            confidence=conf_val,
-            uncertainty=0.0,
-            source_run_id=output.get("run_id"),
-            source_schema_version=output.get("schema_version"),
-            artifact_instance_hash=output.get("artifact_instance_hash"),
-            prescription_driver_allowed=ref_prescription_allowed,
-            authority_block_reason=block_reason if not ref_state_allowed else None,
-            sentinel_archive_used=archive_used,
+            confidence=None,
+            uncertainty=unc_val,
             archive_scene_count=archive_count,
             archive_date_range=archive_date_range,
             scene_stack_mode=scene_stack_mode,
@@ -571,15 +589,26 @@ def ingest_asmae_raster_refs(output: Dict[str, Any], plot_id: str) -> List[Raste
         if ref:
             raster_refs.append(ref)
 
-    # Ingest confidence maps
+    # Ingest confidence maps (deduplicated to single canonical asmae_posterior_concentration raster)
+    ingested_confidence_vars = set()
     for var, grid in output.get("confidence_maps", {}).items():
-        if var == "ASMAE_CONFIDENCE":
-            var_name = "asmae_confidence"
+        if var in ("ASMAE_CONFIDENCE", "CONFIDENCE_ASMAE", "ASMAE_POSTERIOR_CONCENTRATION"):
+            canonical_key = "asmae_posterior_concentration"
+            if canonical_key in ingested_confidence_vars:
+                continue
+            ingested_confidence_vars.add(canonical_key)
+            var_name = canonical_key
+            ref = build_ref(var_name, grid, "diagnostic", is_state=False)
+            if ref and isinstance(ref, dict):
+                ref.setdefault("metadata", {})["legacy_aliases"] = ["ASMAE_CONFIDENCE", "CONFIDENCE_ASMAE"]
+                ref["metadata"]["canonical_name"] = "ASMAE_POSTERIOR_CONCENTRATION"
+                raster_refs.append(ref)
         else:
             var_name = var if var.lower().startswith("asmae_") else f"asmae_{var}_confidence"
-        ref = build_ref(var_name, grid, "diagnostic", is_state=False)
-        if ref:
-            raster_refs.append(ref)
+            ref = build_ref(var_name, grid, "diagnostic", is_state=False)
+            if ref:
+                raster_refs.append(ref)
+
 
     # Ingest retrovalidation maps
     for var, grid in output.get("retrovalidation_maps", {}).items():

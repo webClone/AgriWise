@@ -3,6 +3,7 @@ Layer 3.3: Water Stress Detection Engine
 Distinguishes water stress using Soil Model (Ks) + Satellite (NDMI).
 """
 
+import warnings
 import numpy as np
 import pandas as pd
 from typing import Dict, Any
@@ -15,6 +16,12 @@ class WaterStressDetector:
         """
         Analyze recent soil state and spectral moisture for stress alerts.
         """
+        warnings.warn(
+            "WaterStressDetector is deprecated as of Layer 3.0. "
+            "Use layer3_water.limitation.WaterLimitationEngine for canonical physical limitation.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # 1. Soil Model Indicator (Ks)
         # last 3 days average Ks
         recent_ks = soil_df["stress_ks"].iloc[-3:].mean()

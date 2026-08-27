@@ -5,9 +5,10 @@ Predicts yield using Biomass Baseline and Stress Penalties (Water, Nutrient, Dis
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Mapping
+import math
 
-from crop_database import get_crop
+from crop_database import get_crop, CROP_REGISTRY
 
 class YieldForecastEngine:
     
@@ -133,11 +134,124 @@ class YieldForecastEngine:
             "reduction_factor": round(reduction_factor, 2),
             "attribution": attribution,
             "asmae_uncertainty_contribution": round(asmae_unc_contrib, 4),
+            "crop_stage_evidence_class": "declared_scenario_assumption",
+            "crop_posterior_hash": "",
+            "phenology_posterior_hash": "",
+            "identity_uncertainty_variance": 0.0,
+            "phenology_uncertainty_variance": 0.0,
+            "production_eligible": False,
             "meta": {
                 "model_version": "L6_HYBRID_V1.1",
                 "input_hash": input_hash,
                 "coverage": coverage_str
             }
+        }
+
+    def predict_yield_posterior(
+        self,
+        *,
+        semantic_context: Any,
+        final_biomass_kg_ha: float,
+        cumulative_stress: Dict[str, float],
+        confidence_scores: Dict[str, float] = None,
+        input_hash: str = "",
+        asmae_features: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
+        """Forecast across canonical crop/stage hypotheses.
+
+        Identity variance and phenology variance remain separate so callers
+        cannot mistake a narrow biomass interval for crop certainty.
+        """
+        def normalise(raw: Any) -> Dict[str, float]:
+            if not isinstance(raw, Mapping):
+                return {}
+            clean = {}
+            for key, value in raw.items():
+                try:
+                    probability = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(probability) and probability > 0.0:
+                    clean[str(key).lower()] = probability
+            total = sum(clean.values())
+            return ({key: value / total for key, value in clean.items()}
+                    if total > 0.0 else {})
+
+        crop_mix = normalise(getattr(semantic_context, "crop_mixture", {}))
+        species_allowed = bool(getattr(semantic_context, "species_specific_allowed", False))
+        resolution = str(getattr(semantic_context, "crop_resolution", "unknown"))
+        selected = str(getattr(semantic_context, "selected_crop", "") or "").lower()
+        if species_allowed and selected and not crop_mix:
+            crop_mix = {selected: 1.0}
+        elif not species_allowed and resolution == "group_only":
+            expanded = {}
+            for group, probability in crop_mix.items():
+                matches = [
+                    code for code, spec in CROP_REGISTRY.items()
+                    if str(spec.architecture).lower() == group
+                ]
+                for code in matches:
+                    expanded[code] = expanded.get(code, 0.0) + probability / max(1, len(matches))
+            crop_mix = normalise(expanded)
+        if not crop_mix:
+            representatives = {}
+            for code, spec in CROP_REGISTRY.items():
+                representatives.setdefault(str(spec.architecture).lower(), code)
+            crop_mix = normalise({code: 1.0 for code in representatives.values()})
+
+        branches = []
+        for crop_code, probability in crop_mix.items():
+            if crop_code not in CROP_REGISTRY:
+                continue
+            branch = self.predict_yield(
+                crop_type=crop_code,
+                final_biomass_kg_ha=final_biomass_kg_ha,
+                cumulative_stress=cumulative_stress,
+                confidence_scores=confidence_scores,
+                input_hash=input_hash or "posterior",
+                asmae_features=asmae_features,
+            )
+            branches.append((probability, branch))
+        if not branches:
+            raise ValueError("no compatible crop hypotheses for yield forecast")
+        total = sum(weight for weight, _ in branches) or 1.0
+        mean = sum(weight / total * branch["yield_mean_t_ha"] for weight, branch in branches)
+        identity_variance = sum(
+            weight / total * (branch["yield_mean_t_ha"] - mean) ** 2
+            for weight, branch in branches
+        )
+        within_variance = sum(
+            weight / total
+            * ((branch["yield_p90"] - branch["yield_p10"]) / (2 * 1.645)) ** 2
+            for weight, branch in branches
+        )
+
+        stage_mix = normalise(getattr(semantic_context, "stage_posterior", {}))
+        if stage_mix:
+            entropy = -sum(p * math.log(p) for p in stage_mix.values())
+            max_entropy = math.log(max(2, len(stage_mix)))
+            entropy_fraction = min(1.0, entropy / max_entropy) if max_entropy else 0.0
+        else:
+            entropy_fraction = 1.0
+        stage_allowed = bool(getattr(semantic_context, "stage_specific_allowed", False))
+        phenology_variance = (mean * (0.04 if stage_allowed else 0.15) * entropy_fraction) ** 2
+        total_std = math.sqrt(max(0.0, within_variance + identity_variance + phenology_variance))
+
+        return {
+            "yield_mean_t_ha": round(mean, 2),
+            "yield_p10": round(max(0.0, mean - 1.645 * total_std), 2),
+            "yield_p90": round(mean + 1.645 * total_std, 2),
+            "identity_uncertainty_variance": round(identity_variance, 6),
+            "phenology_uncertainty_variance": round(phenology_variance, 6),
+            "crop_stage_evidence_class": (
+                "canonical_species_stage_posterior"
+                if species_allowed and stage_allowed else "hypothesis_ensemble"
+            ),
+            "crop_posterior_hash": str(getattr(semantic_context, "crop_posterior_hash", "") or ""),
+            "phenology_posterior_hash": str(getattr(semantic_context, "phenology_posterior_hash", "") or ""),
+            "hypothesis_weights": crop_mix,
+            "production_eligible": species_allowed and stage_allowed,
+            "meta": {"model_version": "L6_HYBRID_POSTERIOR_V2", "input_hash": input_hash},
         }
 
 # Singleton
@@ -160,4 +274,8 @@ def predict_yield(
         input_hash=input_hash,
         asmae_features=asmae_features,
     )
+
+
+def predict_yield_posterior(**kwargs) -> Dict[str, Any]:
+    return yield_engine.predict_yield_posterior(**kwargs)
 

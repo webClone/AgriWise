@@ -22,24 +22,34 @@ Dependencies: layer2_veg_int.features.{phenology, red_edge, sar_temporal}
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from layer2_veg_int.features.phenology_features import (
+from services.agribrain.layer2_veg_int.features.phenology_features import (
     PhenologyFeatures,
     extract_phenology_features,
 )
-from layer2_veg_int.features.red_edge_features import (
+from services.agribrain.layer2_veg_int.features.red_edge_features import (
     RedEdgeFeatures,
     extract_red_edge_features,
 )
-from layer2_veg_int.features.sar_temporal_features import (
+from services.agribrain.layer2_veg_int.features.sar_temporal_features import (
     SARTemporalFeatures,
     extract_sar_temporal_features,
 )
 
 logger = logging.getLogger("agribrain.v6.crop_feature_vector")
+
+
+CROP_FEATURE_TRANSFORM_VERSION = "ledger-crop-feature-transform-v2-manifest"
+NO_NORMALIZATION_ARTIFACT_HASH = hashlib.sha256(
+    b"agribrain-crop-feature-normalization:none:v1"
+).hexdigest()
 
 
 # ============================================================================
@@ -69,6 +79,8 @@ _LEVEL_FEATURES = {
         "sos_doy", "pos_doy", "eos_doy", "los_days", "growth_rate",
         "senescence_rate", "asymmetry", "greenup_duration_days",
         "senescence_duration_days", "small_integral", "large_integral",
+        "sos_gdd", "pos_gdd", "eos_gdd", "growth_rate_per_gdd",
+        "senescence_rate_per_gdd",
         "velocity_p10", "velocity_p50", "velocity_p90",
         "ndre_peak", "ndre_mean", "ndre_at_peak_ndvi", "ndre_ndvi_ratio_mean",
         "cired_peak", "cired_mean", "mtci_peak", "mtci_at_senescence",
@@ -158,6 +170,11 @@ class CropFeatureVector:
             d["cv_ndvi"] = p.cv_ndvi
             d["greenup_duration_days"] = float(p.greenup_duration_days) if p.greenup_duration_days is not None else None
             d["senescence_duration_days"] = float(p.senescence_duration_days) if p.senescence_duration_days is not None else None
+            d["sos_gdd"] = p.sos_gdd
+            d["pos_gdd"] = p.pos_gdd
+            d["eos_gdd"] = p.eos_gdd
+            d["growth_rate_per_gdd"] = p.growth_rate_per_gdd
+            d["senescence_rate_per_gdd"] = p.senescence_rate_per_gdd
             d["n_seasons"] = float(p.n_seasons) if p.n_seasons is not None else None
             d["is_evergreen"] = 1.0 if p.is_evergreen else 0.0
 
@@ -180,6 +197,8 @@ class CropFeatureVector:
                 "base_ndvi", "amplitude", "growth_rate", "senescence_rate",
                 "small_integral", "large_integral", "asymmetry", "cv_ndvi",
                 "greenup_duration_days", "senescence_duration_days",
+                "sos_gdd", "pos_gdd", "eos_gdd", "growth_rate_per_gdd",
+                "senescence_rate_per_gdd",
                 "n_seasons", "is_evergreen",
                 "velocity_p10", "velocity_p25", "velocity_p50",
                 "velocity_p75", "velocity_p90",
@@ -294,16 +313,272 @@ class CropFeatureVector:
                 "plot_area_ha": self.plot_area_ha,
             },
         }
-
-        # Full diagnostic lists (NOT in to_flat_dict)
         if self.sar_temporal:
             result["sar_diagnostics"] = {
                 "change_point_doys": self.sar_temporal._change_point_doys,
                 "vv_rolling_median_30d": self.sar_temporal._vv_rolling_median_30d,
                 "vh_rolling_median_30d": self.sar_temporal._vh_rolling_median_30d,
             }
-
         return result
+
+
+def _feature_semantic(name: str) -> Dict[str, Any]:
+    """Return hash-bound scientific semantics for one legacy RF feature.
+
+    The previous compatibility hash covered column order only.  These fields
+    deliberately bind scientific meaning so a per-observation slope cannot be
+    silently replaced by a per-day slope under the same model schema.
+    """
+    source_bands: List[str] = []
+    support = "ledger-selected admitted physical acquisitions"
+    temporal = "calendar_day"
+    normalization = "none"
+    statistic = "derived"
+    unit = "dimensionless"
+    definition = name.replace("_", " ")
+
+    if name.startswith("ndre"):
+        source_bands = ["B05", "B8A"]
+    elif name.startswith("cired"):
+        source_bands = ["B05", "B8A"]
+    elif name.startswith("mtci"):
+        source_bands = ["B04", "B05", "B06"]
+    elif name.startswith("psri"):
+        source_bands = ["B02", "B04", "B06"]
+    elif name.startswith("reip"):
+        source_bands = ["B04", "B05", "B06", "B07"]
+        unit = "nm"
+    elif name.startswith(("vv_", "vh_", "sar_", "rvi", "flood_")):
+        source_bands = ["VV", "VH"]
+        support = (
+            "ledger-selected admitted S1 acquisitions from one explicit "
+            "orbit-direction/relative-orbit track"
+        )
+    elif name in {
+        "peak_ndvi", "base_ndvi", "amplitude", "growth_rate",
+        "senescence_rate", "small_integral", "large_integral", "cv_ndvi",
+        "velocity_p10", "velocity_p25", "velocity_p50", "velocity_p75",
+        "velocity_p90", "seasonal_pattern_shift",
+    }:
+        source_bands = ["B04", "B08"]
+
+    if name.endswith("_gdd") or name.endswith("_per_gdd"):
+        temporal = "cumulative_growing_degree_days"
+        unit = "gdd" if name.endswith("_gdd") else "value_per_gdd"
+        support = "ledger observation environmental context aligned to optical acquisition"
+
+    if name.endswith("_doy") or name in {"sos_doy", "pos_doy", "eos_doy"}:
+        unit = "day_of_year"
+        temporal = "acquisition_datetime_utc"
+    elif name.endswith("_days") or name == "los_days":
+        unit = "day"
+    elif name.endswith("_db") or "_db" in name:
+        unit = "dB"
+    elif name.endswith("_slope") or name.endswith("_trend") or name in {
+        "growth_rate", "senescence_rate",
+    }:
+        unit = "value_per_calendar_day"
+        statistic = "ordinary_least_squares_over_elapsed_days"
+    elif name.endswith("_mean"):
+        statistic = "arithmetic_mean"
+    elif name.endswith("_peak") or name.startswith("peak_"):
+        statistic = "maximum"
+    elif name.endswith("_std") or "_std_" in name:
+        statistic = "population_standard_deviation"
+    elif name.endswith("_count") or name.startswith("n_"):
+        statistic = "count"
+
+    if name in {"latitude", "longitude"}:
+        support = "authenticated plot context"
+        temporal = "static_context"
+        unit = "decimal_degree"
+    elif name == "plot_area_ha":
+        support = "authenticated canonical plot geometry"
+        temporal = "static_context"
+        unit = "hectare"
+    elif name == "aridity_index":
+        support = "versioned environmental context"
+        temporal = "context_valid_time"
+
+    return {
+        "name": name,
+        "scientific_definition": definition,
+        "unit": unit,
+        "source_bands": source_bands,
+        "statistic": statistic,
+        "support_definition": support,
+        "temporal_coordinate": temporal,
+        "normalization": normalization,
+        "missing_value_semantics": (
+            "null means unavailable; zero remains a measured or derived zero"
+        ),
+    }
+
+
+def crop_feature_schema_receipt():
+    """Build the complete semantic schema used by the engineered EO expert."""
+    from services.agribrain.scientific_contracts.crop_model_input import (
+        CropFeatureSchemaReceiptV1,
+        CropFeatureSemanticV1,
+    )
+
+    names = tuple(CropFeatureVector().to_flat_dict().keys())
+    features = tuple(
+        CropFeatureSemanticV1(**_feature_semantic(name)) for name in names
+    )
+    return CropFeatureSchemaReceiptV1(
+        schema_version="crop-feature-vector-6.0-ledger-semantics-v1",
+        features=features,
+        transform_version=CROP_FEATURE_TRANSFORM_VERSION,
+    )
+
+
+def _crop_transform_module_digests() -> Dict[str, str]:
+    here = Path(__file__).resolve()
+    paths = {
+        "crop_feature_vector": here,
+        "phenology_features": here.with_name("phenology_features.py"),
+        "red_edge_features": here.with_name("red_edge_features.py"),
+        "sar_temporal_features": here.with_name("sar_temporal_features.py"),
+        "ledger_crop_features": here.with_name("ledger_crop_features.py"),
+        "crop_ml": here.parent.parent / "crop_ml.py",
+        "crop_model_input_contract": (
+            here.parents[2] / "scientific_contracts" / "crop_model_input.py"
+        ),
+    }
+    return {
+        module_id: hashlib.sha256(path.read_bytes()).hexdigest()
+        for module_id, path in sorted(paths.items())
+    }
+
+
+def _transform_recipe_group(feature_name: str) -> str:
+    if feature_name in {"latitude", "longitude", "aridity_index", "plot_area_ha"}:
+        return "context"
+    if feature_name.startswith(("ndre_", "cired_", "mtci_", "psri_", "reip_")):
+        return "red_edge"
+    if (
+        feature_name.startswith(("vv_", "vh_", "rvi_", "sar_", "flood_"))
+        or feature_name in {
+            "n_change_points", "first_change_point_doy", "last_change_point_doy",
+        }
+    ):
+        return "sar"
+    return "phenology"
+
+
+def crop_feature_transform_manifest():
+    """Return the exact, module-bound scientific transform manifest."""
+    from services.agribrain.scientific_contracts.crop_model_input import (
+        CropFeatureTransformManifest,
+        CropFeatureTransformRecipe,
+    )
+
+    schema = crop_feature_schema_receipt()
+    digests = _crop_transform_module_digests()
+    recipes = []
+    for semantic in schema.features:
+        group = _transform_recipe_group(semantic.name)
+        if group == "phenology":
+            module_id = "phenology_features"
+            algorithm_id = (
+                "phenology_features.extract_phenology_features+"
+                "crop_ml.smooth_ndvi+crop_ml.extract_phenology:v1"
+            )
+            parameters: Tuple[Tuple[str, Any], ...] = (
+                ("savgol_window_observations", 7),
+                ("savgol_polynomial_order", 3),
+                ("upper_envelope_pass_count", 3),
+                ("cloud_dip_correction_threshold_ndvi", 0.05),
+                ("sos_eos_amplitude_fraction", 0.20),
+                ("interpolation", "none"),
+            )
+            window = "sample_index_savgol_window_7_adapted_to_odd_series_length"
+            thresholds: Tuple[Tuple[str, Any], ...] = (
+                ("sos_eos_amplitude_fraction", 0.20),
+                ("cloud_dip_correction_threshold_ndvi", 0.05),
+            )
+        elif group == "red_edge":
+            module_id = "red_edge_features"
+            algorithm_id = "red_edge_features.extract_red_edge_features:v1"
+            parameters = (
+                ("event_alignment", "calendar_date_key"),
+                ("interpolation", "none"),
+                ("resampling", "preserve_upstream_values"),
+                ("senescence_event_fraction_after_peak", 0.60),
+            )
+            window = "all_admitted_current_cycle_red_edge_observations"
+            thresholds = (
+                ("ndre_ndvi_ratio_minimum_ndvi", 0.05),
+                ("ndre_ndvi_ratio_minimum_pairs", 3),
+            )
+        elif group == "sar":
+            module_id = "sar_temporal_features"
+            algorithm_id = "sar_temporal_features.extract_sar_temporal_features:v1"
+            parameters = (
+                ("change_point_threshold_db", 2.5),
+                ("rolling_median_window_days", 30),
+                ("rolling_window_alignment", "centered_plus_minus_15_days_inclusive"),
+                ("track_policy", "single_orbit_direction_relative_orbit_track"),
+                ("interpolation", "none"),
+            )
+            window = "centered_30_calendar_day_window_inclusive"
+            thresholds = (("change_point_threshold_db", 2.5),)
+        else:
+            module_id = "crop_feature_vector"
+            algorithm_id = "crop_feature_vector.authenticated_context_passthrough:v1"
+            parameters = (("interpolation", "none"),)
+            window = "static_authenticated_plot_context"
+            thresholds = ()
+        recipes.append(CropFeatureTransformRecipe(
+            feature_name=semantic.name,
+            algorithm_id=algorithm_id,
+            formula_id=f"agribrain.crop.{group}.{semantic.name}:v1",
+            parameters=parameters,
+            window_definition=window,
+            thresholds=thresholds,
+            input_bands=semantic.source_bands,
+            mask_semantics=(
+                "ledger_v2_selected_independence_representative & qa_admitted & "
+                "feature_support_hash_bound & finite_feature_values"
+            ),
+            temporal_coordinate=semantic.temporal_coordinate,
+            normalization=semantic.normalization,
+            module_id=module_id,
+            module_digest=digests[module_id],
+        ))
+    return CropFeatureTransformManifest(
+        transform_version=CROP_FEATURE_TRANSFORM_VERSION,
+        schema_hash=schema.content_hash,
+        source_policy="crop_evidence_ledger_v2_selected_current_cycle_only",
+        mask_policy=(
+            "immutable observation support plus admitted QA and physical "
+            "independence selection"
+        ),
+        time_policy="UTC sensing time; rates use elapsed calendar days",
+        normalization_policy=(
+            f"none;artifact={NO_NORMALIZATION_ARTIFACT_HASH}"
+        ),
+        smoothing_policy=(
+            "three-pass upper-envelope Savitzky-Golay; sample window=7; "
+            "polynomial order=3; cloud-dip threshold=0.05"
+        ),
+        interpolation_policy="none; missing acquisition dates are not filled",
+        red_edge_policy=(
+            "no feature-stage resampling; preserve ledger values; align "
+            "phenology events by UTC calendar date"
+        ),
+        sos_threshold=0.20,
+        sar_change_point_threshold_db=2.5,
+        sar_rolling_window_days=30,
+        feature_recipes=tuple(recipes),
+        module_digests=tuple(digests.items()),
+    )
+
+
+def crop_feature_transform_hash() -> str:
+    """Content identity of the exact scientific transform manifest."""
+    return crop_feature_transform_manifest().content_hash
 
 
 # ============================================================================
@@ -325,6 +600,9 @@ def extract_crop_features(
     irrigation_type: Optional[str] = None,
     plot_area_ha: Optional[float] = None,
     irrigation_events: Optional[List[Dict]] = None,
+    data_sources: Optional[List[str]] = None,
+    require_ledger_provenance: bool = False,
+    gdd_series: Optional[List[float]] = None,
 ) -> CropFeatureVector:
     """Extract full CropFeatureVector from plot timeseries data.
 
@@ -348,33 +626,85 @@ def extract_crop_features(
         CropFeatureVector with all extractable features.
     """
     warnings: List[str] = []
-    sources: List[str] = []
+    sources: List[str] = sorted({
+        str(source).strip() for source in (data_sources or [])
+        if str(source).strip()
+    })
+    if require_ledger_provenance and not sources:
+        raise ValueError("ledger-derived crop features require explicit source lineage")
 
     # ── Extract dates and NDVI from timeseries if not provided ──
-    if dates is None or ndvi_series is None:
-        extracted_dates = []
-        extracted_ndvi = []
-        for entry in plot_timeseries:
+    aligned_rows = []
+    if dates is not None and ndvi_series is not None:
+        candidates = [
+            (
+                raw_date,
+                raw_ndvi,
+                gdd_series[index] if gdd_series is not None and index < len(gdd_series) else None,
+            )
+            for index, (raw_date, raw_ndvi) in enumerate(zip(dates, ndvi_series))
+        ]
+    else:
+        candidates = []
+        for index, entry in enumerate(plot_timeseries):
             if isinstance(entry, dict):
-                d = entry.get("date", entry.get("timestamp", ""))
-                n = entry.get("ndvi_mean", entry.get("ndvi"))
+                row_date = entry.get("date", entry.get("timestamp", ""))
+                row_ndvi = entry.get("ndvi_mean")
+                if row_ndvi is None:
+                    row_ndvi = entry.get("ndvi")
             else:
-                d = getattr(entry, "date", "")
-                n = getattr(entry, "ndvi_mean", None)
-            extracted_dates.append(str(d)[:10] if d else "")
-            if n is not None:
-                extracted_ndvi.append(float(n))
-        if dates is None:
-            dates = extracted_dates
-        if ndvi_series is None:
-            ndvi_series = extracted_ndvi
+                row_date = getattr(entry, "date", "")
+                row_ndvi = getattr(entry, "ndvi_mean", None)
+            candidate_date = (
+                dates[index] if dates is not None and index < len(dates)
+                else row_date
+            )
+            candidate_ndvi = (
+                ndvi_series[index]
+                if ndvi_series is not None and index < len(ndvi_series)
+                else row_ndvi
+            )
+            row_gdd = (
+                gdd_series[index] if gdd_series is not None and index < len(gdd_series)
+                else entry.get("gdd_accumulated") if isinstance(entry, dict)
+                else getattr(entry, "gdd_accumulated", None)
+            )
+            candidates.append((candidate_date, candidate_ndvi, row_gdd))
+    for raw_date, raw_ndvi, raw_gdd in candidates:
+        if raw_date in (None, "") or raw_ndvi is None:
+            continue
+        try:
+            parsed_ndvi = float(raw_ndvi)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(parsed_ndvi):
+            continue
+        parsed_gdd = None
+        if raw_gdd is not None:
+            try:
+                parsed_gdd = float(raw_gdd)
+                if not math.isfinite(parsed_gdd):
+                    parsed_gdd = None
+            except (TypeError, ValueError):
+                parsed_gdd = None
+        aligned_rows.append((str(raw_date)[:10], parsed_ndvi, parsed_gdd))
+    aligned_rows.sort(key=lambda row: row[0])
+    dates = [row[0] for row in aligned_rows]
+    ndvi_series = [row[1] for row in aligned_rows]
+    aligned_gdd = [row[2] for row in aligned_rows]
+    gdd_series = (
+        [float(value) for value in aligned_gdd if value is not None]
+        if aligned_gdd and all(value is not None for value in aligned_gdd)
+        else None
+    )
 
     # ── Phenology features ──
     phenology = None
     if ndvi_series and len(ndvi_series) >= 5:
         try:
-            phenology = extract_phenology_features(ndvi_series, dates)
-            sources.append("sentinel2")
+            phenology = extract_phenology_features(
+                ndvi_series, dates, gdd_series=gdd_series,
+            )
             warnings.extend(phenology.extraction_warnings)
         except Exception as e:
             logger.warning(f"Phenology extraction failed: {e}")
@@ -385,7 +715,7 @@ def extract_crop_features(
     ndvi_peak_idx = None
     senescence_idx = None
     if phenology and phenology.peak_ndvi is not None:
-        # Find NDVI peak index
+        # Find the peak on the aligned NDVI/time axis.
         if ndvi_series:
             peak_val = phenology.peak_ndvi
             for i, v in enumerate(ndvi_series):
@@ -397,9 +727,43 @@ def extract_crop_features(
             remaining = len(ndvi_series) - ndvi_peak_idx
             senescence_idx = ndvi_peak_idx + int(remaining * 0.6)
 
+    # The red-edge extractor operates on the original observation rows.  Map
+    # the aligned NDVI event back by date rather than reusing its positional
+    # index across a differently sparse series.
+    red_edge_rows = sorted(
+        list(plot_timeseries),
+        key=lambda row: str(
+            row.get("date", row.get("timestamp", ""))
+            if isinstance(row, dict) else getattr(row, "date", "")
+        ),
+    )
+    aligned_peak_date = (
+        dates[ndvi_peak_idx]
+        if ndvi_peak_idx is not None and ndvi_peak_idx < len(dates) else None
+    )
+    aligned_senescence_date = (
+        dates[senescence_idx]
+        if senescence_idx is not None and senescence_idx < len(dates) else None
+    )
+    if aligned_peak_date:
+        ndvi_peak_idx = next((
+            index for index, row in enumerate(red_edge_rows)
+            if str(
+                row.get("date", row.get("timestamp", ""))
+                if isinstance(row, dict) else getattr(row, "date", "")
+            )[:10] == aligned_peak_date
+        ), None)
+    if aligned_senescence_date:
+        senescence_idx = next((
+            index for index, row in enumerate(red_edge_rows)
+            if str(
+                row.get("date", row.get("timestamp", ""))
+                if isinstance(row, dict) else getattr(row, "date", "")
+            )[:10] == aligned_senescence_date
+        ), None)
     try:
         red_edge = extract_red_edge_features(
-            plot_timeseries,
+            red_edge_rows,
             ndvi_peak_idx=ndvi_peak_idx,
             senescence_start_idx=senescence_idx,
         )
@@ -417,16 +781,10 @@ def extract_crop_features(
             optical_obs_count=optical_count,
             irrigation_events=irrigation_events,
         )
-        if sar_temporal.n_observations > 0:
-            sources.append("sentinel1")
         warnings.extend(sar_temporal.extraction_warnings)
     except Exception as e:
         logger.warning(f"SAR extraction failed: {e}")
         warnings.append(f"sar_extraction_error: {str(e)[:80]}")
-
-    # Add weather source if we have dates
-    if dates and len(dates) > 0:
-        sources.append("open_meteo")
 
     # ── Build feature vector ──
     fv = CropFeatureVector(

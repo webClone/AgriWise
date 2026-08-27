@@ -25,6 +25,11 @@ import { resolveSourcePolicyDisplay } from "@/lib/agribrain/source-policy-displa
 import { getSession } from "@/lib/session";
 import * as crypto from "crypto";
 import { getPlotRepresentativePoint, isValidWgs84Point } from "@/lib/agribrain/plot-geometry";
+import {
+  buildCanonicalCropCycleContextV2,
+  canonicalScientificHash,
+} from "@/lib/agribrain/crop-cycle-context.mjs";
+import { activeCropCyclePrismaFilter } from "@/lib/agribrain/crop-cycle-status.mjs";
 
 export type RunOutcome =
   | {
@@ -143,6 +148,30 @@ interface RunRequest {
   sourcePolicy?: string;
 }
 
+function publicRunResponse(outcome: RunOutcome, mode: RunRequest["mode"]) {
+  if (mode !== "surfaces" || outcome.httpStatus !== 200) {
+    return outcome.payload;
+  }
+  const raw = outcome.payload?.data ?? outcome.payload ?? {};
+  const plotState = raw.source_policy_display_state?.asmaePlotState ?? {};
+  return {
+    success: true,
+    status: "publication_pending",
+    runId: outcome.runId,
+    scientificRequestId: outcome.scientificRequestId,
+    job: {
+      id: plotState.activeSpatialJobId ?? raw.job_id ?? null,
+      status: plotState.activeSpatialJobStatus ?? raw.status ?? "accepted",
+      stage: plotState.activeSpatialJobStage ?? null,
+      progressPct: plotState.activeSpatialJobProgressPct ?? null,
+    },
+    publication: {
+      required: true,
+      endpoint: "/api/agribrain/surfaces/latest",
+    },
+  };
+}
+
 function buildCanonicalExecutionKey(
   plotId: string,
   farmId: string,
@@ -193,9 +222,33 @@ async function executeRun(
       include: {
         farm: true,
         cropCycles: {
-          where: { status: { not: "HARVESTED" } },
-          orderBy: { plantDate: "desc" },
+          where: { status: activeCropCyclePrismaFilter() },
+          // Unknown planting dates are valid. Select the most recently
+          // maintained active cycle instead of letting nullable plant dates
+          // decide cycle identity.
+          orderBy: { updatedAt: "desc" },
           take: 1,
+          select: {
+            id: true,
+            cropCode: true,
+            variety: true,
+            plantDate: true,
+            plantDateStatus: true,
+            plantDateSource: true,
+            plantDateConfidence: true,
+            plantDateMin: true,
+            plantDateMax: true,
+            declaredCropAuthority: true,
+            declaredCropAt: true,
+            declaredCropSource: true,
+            expectedHarvest: true,
+            actualHarvest: true,
+            status: true,
+            updatedAt: true,
+            tasks: { select: { id: true } },
+            inputs: { select: { id: true } },
+            observations: { select: { id: true } },
+          },
         },
         soilAnalyses: {
           orderBy: { date: "desc" },
@@ -225,19 +278,130 @@ async function executeRun(
       };
     }
 
+    const geometryVersion = plot?.geoJson
+      ? `sha256:${canonicalScientificHash(plot.geoJson)}`
+      : "unavailable";
+    const irrigationType = String(
+      plot?.irrigation || plot?.farm?.irrigationType || "unknown",
+    ).toLowerCase();
     const context: Record<string, unknown> = {
-      plot_id: plotId,
+      tenant_id: requestUserId,
+      farm_id: authorizedPlot.farmId,
+      plot_id: authorizedPlot.id,
+      geometry_hash: geometryVersion,
       lat: center.lat,
       lng: center.lng,
       area: plot?.area,
-      farm_id: plot?.farmId || "UNKNOWN",
       polygon: plot?.geoJson || null,
       field_geometry: plot?.geoJson || null,
+      irrigation_type: irrigationType,
     };
 
     if (plot?.cropCycles?.length) {
-      context.crop = plot.cropCycles[0].cropCode;
-      context.stage = plot.cropCycles[0].status;
+      const activeCycle = plot.cropCycles[0];
+      const storedPlantDateStatus = String(
+        activeCycle.plantDateStatus || "unknown",
+      ).toLowerCase();
+      const plantDateStatus = (
+        ["confirmed", "estimated"].includes(storedPlantDateStatus)
+        && activeCycle.plantDate
+      ) || (
+        storedPlantDateStatus === "interval"
+        && activeCycle.plantDateMin
+        && activeCycle.plantDateMax
+      )
+        ? storedPlantDateStatus
+        : "unknown";
+      const plantDate = plantDateStatus === "unknown"
+        ? null
+        : activeCycle.plantDate?.toISOString() || null;
+      const plantDateMin = plantDateStatus === "unknown"
+        ? null
+        : activeCycle.plantDateMin?.toISOString() || plantDate;
+      const plantDateMax = plantDateStatus === "unknown"
+        ? null
+        : activeCycle.plantDateMax?.toISOString() || plantDate;
+      const rawPlantDateConfidence = Number(activeCycle.plantDateConfidence);
+      const plantDateConfidence = Number.isFinite(rawPlantDateConfidence)
+        && rawPlantDateConfidence >= 0
+        && rawPlantDateConfidence <= 1
+        ? rawPlantDateConfidence
+        : null;
+      const storedDeclaredCropAuthority = String(
+        activeCycle.declaredCropAuthority || "REGISTRY_DECLARED",
+      ).toUpperCase();
+      const declaredCropAuthority = [
+        "UNKNOWN",
+        "REGISTRY_DECLARED",
+        "USER_CONFIRMED",
+        "FARMER_CONFIRMED",
+        "OFFICIAL_PARCEL_LABEL",
+        "AGRONOMIST_CONFIRMED",
+      ].includes(storedDeclaredCropAuthority)
+        ? storedDeclaredCropAuthority
+        : "REGISTRY_DECLARED";
+      // A database update time is not evidence of when crop identity was
+      // declared. Legacy cycles keep this unknown until an authenticated
+      // declaration writes the dedicated field.
+      const declaredCropAt = activeCycle.declaredCropAt?.toISOString() || null;
+      const declaredCropSource = String(
+        activeCycle.declaredCropSource || "unknown",
+      ).trim() || "unknown";
+      const managementEventRefs = [
+        ...activeCycle.tasks.map((item) => `task:${item.id}`),
+        ...activeCycle.inputs.map((item) => `input:${item.id}`),
+        ...activeCycle.observations.map((item) => `observation:${item.id}`),
+      ];
+      const cropCycleContext = buildCanonicalCropCycleContextV2({
+        plot_namespace: {
+          tenant_id: requestUserId,
+          farm_id: authorizedPlot.farmId,
+          plot_id: authorizedPlot.id,
+        },
+        crop_cycle_id: activeCycle.id,
+        geometry_version: geometryVersion,
+        effective_at: activeCycle.updatedAt.toISOString(),
+        declared_crop_code: activeCycle.cropCode,
+        declared_crop_authority: declaredCropAuthority,
+        declared_crop_at: declaredCropAt,
+        declared_crop_source: declaredCropSource,
+        variety: activeCycle.variety,
+        irrigation_type: irrigationType,
+        plant_date: {
+          status: plantDateStatus,
+          source: plantDateStatus === "unknown"
+            ? "unknown"
+            : activeCycle.plantDateSource || "unknown",
+          confidence: plantDateConfidence,
+          nominal: plantDate,
+          range_start: plantDateMin,
+          range_end: plantDateMax,
+        },
+        harvest_dates: {
+          expected: activeCycle.expectedHarvest?.toISOString() || null,
+          actual: activeCycle.actualHarvest?.toISOString() || null,
+        },
+        administrative_status: activeCycle.status,
+        management_event_refs: managementEventRefs,
+      });
+      context.crop = activeCycle.cropCode;
+      context.crop_cycle_id = activeCycle.id;
+      context.crop_season_id = activeCycle.id;
+      context.plant_date = plantDate;
+      context.planting_date = plantDate;
+      context.plant_date_status = plantDateStatus;
+      context.plant_date_source = plantDateStatus === "unknown"
+        ? "unknown"
+        : activeCycle.plantDateSource || "unknown";
+      context.plant_date_confidence = plantDateConfidence;
+      context.plant_date_min = plantDateMin;
+      context.plant_date_max = plantDateMax;
+      context.crop_cycle_effective_at = activeCycle.updatedAt.toISOString();
+      context.declared_crop_authority = declaredCropAuthority;
+      context.declared_crop_at = declaredCropAt;
+      context.declared_crop_source = declaredCropSource;
+      context.administrative_status = activeCycle.status;
+      context.crop_cycle_context = cropCycleContext;
     }
 
     if (plot?.soilAnalyses?.length) {
@@ -310,11 +474,22 @@ async function executeRun(
       force_refresh: body.forceRefresh || false,
       experimental_1m: body.experimental1m || false,
       visual_intensity: body.visualIntensity ?? 0.40,
-      // Architecture A: the backend publishes one complete, immutable
-      // inventory. requestedSourcePolicy remains a local display concern.
       source_policy: "canonical",
       run_id: runId,
     };
+
+    const bodyText = JSON.stringify(payload);
+    const { buildSignedInternalHeaders } = await import("@/lib/agribrain/internal-service-auth");
+    const signedHeaders = buildSignedInternalHeaders(
+      "POST",
+      "/v2/run",
+      {
+        tenantId: requestUserId,
+        farmId: authorizedPlot.farmId,
+        plotId: authorizedPlot.id,
+      },
+      bodyText
+    );
 
     const apiUrl = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
     const timeoutMs = 360_000;
@@ -325,10 +500,14 @@ async function executeRun(
     try {
       response = await fetch(`${apiUrl}/v2/run`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        headers: {
+          ...signedHeaders,
+          "Content-Type": "application/json",
+        },
+        body: bodyText,
         signal: controller.signal,
       });
+
     } catch (fetchErr: any) {
       if (fetchErr.name === "AbortError") {
         return {
@@ -687,7 +866,7 @@ export async function POST(request: NextRequest) {
     if (existingPromise) {
       console.log(`[AgriBrain Singleflight] Reusing active run promise for key: ${lockKey}`);
       const outcome = await existingPromise;
-      return NextResponse.json(outcome.payload, { status: outcome.httpStatus });
+      return NextResponse.json(publicRunResponse(outcome, body.mode), { status: outcome.httpStatus });
     }
 
     const executionPromise = executeRun(body, authorizedPlot, requestUserId, lockKey);
@@ -695,7 +874,7 @@ export async function POST(request: NextRequest) {
 
     try {
       const outcome = await executionPromise;
-      return NextResponse.json(outcome.payload, { status: outcome.httpStatus });
+      return NextResponse.json(publicRunResponse(outcome, body.mode), { status: outcome.httpStatus });
     } finally {
       if (runInflight.get(lockKey) === executionPromise) {
         runInflight.delete(lockKey);

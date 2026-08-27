@@ -1,0 +1,176 @@
+"""
+Layer 3.0 Multi-Layer Soil Water Balance Engine
+Simulates infiltration, vertical percolation cascade, Feddes root water extraction U(z), and drainage.
+"""
+
+from typing import List, Tuple, Optional
+import math
+
+from layer3_water.contracts.water_state import (
+    InfiltrationState,
+    SoilEvaporationState,
+    SoilWaterState,
+    RootZoneWaterState,
+)
+from layer3_water.contracts.state_factory import WaterStateFactory
+
+
+class LayeredWaterBalanceEngine:
+    """Multi-layer vertical soil water balance propagator."""
+
+    @classmethod
+    def step_water_balance(
+        cls,
+        prev_soil: SoilWaterState,
+        root_zone: RootZoneWaterState,
+        precipitation_mm: float,
+        irrigation_mm: float,
+        actual_transpiration_mm: float,
+        actual_soil_evaporation_mm: float,
+        capillary_rise_mm: float = 0.0,
+        days_since_wetting: int = 0,
+    ) -> Tuple[SoilWaterState, float, float, float]:
+        """Propagate multi-layer soil water state through daily hydrological flux cycle.
+        
+        Returns:
+            (updated_soil_state, actual_infiltration_mm, surface_runoff_mm, deep_drainage_mm)
+        """
+        n_layers = len(prev_soil.layer_depths_cm)
+        layer_thickness_mm = []
+        prev_d = 0.0
+        for d in prev_soil.layer_depths_cm:
+            layer_thickness_mm.append((d - prev_d) * 10.0)
+            prev_d = d
+
+        # Current water storage per layer (mm)
+        layer_storage_mm = [
+            round(th * thickness, 2)
+            for th, thickness in zip(prev_soil.theta_profile, layer_thickness_mm)
+        ]
+        sat_storage_mm = [
+            round(th_s * thickness, 2)
+            for th_s, thickness in zip(prev_soil.saturation_profile, layer_thickness_mm)
+        ]
+        fc_storage_mm = [
+            round(th_fc * thickness, 2)
+            for th_fc, thickness in zip(prev_soil.field_capacity_profile, layer_thickness_mm)
+        ]
+        wp_storage_mm = [
+            round(th_wp * thickness, 2)
+            for th_wp, thickness in zip(prev_soil.wilting_point_profile, layer_thickness_mm)
+        ]
+        res_storage_mm = [
+            round(th_r * thickness, 2)
+            for th_r, thickness in zip(prev_soil.residual_profile, layer_thickness_mm)
+        ]
+
+        # 1. Surface Infiltration & Runoff Partitioning
+        total_surface_water = precipitation_mm + irrigation_mm
+        # Topsoil infiltration capacity: K_sat scaled by available pore space
+        top_avail_pore = max(0.0, sat_storage_mm[0] - layer_storage_mm[0])
+        # Daily infiltration capacity based on hydraulic conductivity (mm/day)
+        top_ks_mm_day = prev_soil.hydraulic_conductivity_profile[0] * 10.0
+        infil_capacity = min(top_avail_pore + top_ks_mm_day, top_ks_mm_day * 1.5)
+        
+        if total_surface_water <= infil_capacity:
+            actual_infil = total_surface_water
+            runoff = 0.0
+        else:
+            actual_infil = infil_capacity
+            runoff = round(total_surface_water - infil_capacity, 2)
+
+        infil_state = InfiltrationState(
+            precipitation_mm=precipitation_mm,
+            irrigation_mm=irrigation_mm,
+            total_surface_water_mm=total_surface_water,
+            infiltration_capacity_mm=round(infil_capacity, 2),
+            actual_infiltration_mm=round(actual_infil, 2),
+            surface_excess_runoff_mm=round(runoff, 2),
+        )
+
+        # 2. Add Infiltrated Water to Top Layer and Inflow Percolation Cascade
+        percolating_flux = actual_infil
+        new_storage = list(layer_storage_mm)
+        
+        for i in range(n_layers):
+            new_storage[i] += percolating_flux
+            percolating_flux = 0.0
+            
+            # Excess above Field Capacity drains downward (percolation)
+            if new_storage[i] > fc_storage_mm[i]:
+                excess = new_storage[i] - fc_storage_mm[i]
+                # Drainage rate governed by hydraulic conductivity
+                layer_ks_mm = prev_soil.hydraulic_conductivity_profile[i] * 10.0
+                drainage_step = min(excess, layer_ks_mm)
+                new_storage[i] -= drainage_step
+                percolating_flux = drainage_step
+
+        deep_drainage = round(percolating_flux, 2)
+
+        # 3. Topsoil Evaporation Extraction (Es_act from top layer bounded by residual water)
+        allowable_evap = max(0.0, new_storage[0] - res_storage_mm[0])
+        actual_top_evap = min(actual_soil_evaporation_mm, allowable_evap)
+        new_storage[0] = max(res_storage_mm[0], new_storage[0] - actual_top_evap)
+
+        # 4. Layer-by-Layer Root Water Extraction U(z) via Feddes weighting
+        # Plant roots cannot extract below permanent wilting point (WP)
+        uptake_fractions = root_zone.root_uptake_distribution_profile
+        for i in range(n_layers):
+            if i < len(uptake_fractions):
+                layer_uptake = round(uptake_fractions[i] * actual_transpiration_mm, 2)
+                allowable_plant_extract = max(0.0, new_storage[i] - wp_storage_mm[i])
+                actual_layer_uptake = min(layer_uptake, allowable_plant_extract)
+                new_storage[i] = max(wp_storage_mm[i], new_storage[i] - actual_layer_uptake)
+
+        # 5. Capillary Rise Addition to Bottom Layer
+        if capillary_rise_mm > 0.0:
+            new_storage[-1] = min(sat_storage_mm[-1], new_storage[-1] + capillary_rise_mm)
+
+        # 6. Recompute Volumetric Water Content Profile theta_i = S_i / thickness
+        new_theta = [
+            round(min(sat, max(th_r, s / thickness)), 4)
+            for s, thickness, sat, th_r in zip(
+                new_storage, layer_thickness_mm, prev_soil.saturation_profile, prev_soil.residual_profile
+            )
+        ]
+
+        # Mass balance closure error calculation (mm)
+        s_prev = sum(layer_storage_mm)
+        s_next = sum(new_storage)
+        delta_s = s_next - s_prev
+        inflows = actual_infil + capillary_rise_mm
+        total_plant_extracted = sum(
+            min(round(uptake_fractions[i] * actual_transpiration_mm, 2), max(0.0, layer_storage_mm[i] - wp_storage_mm[i]))
+            for i in range(min(n_layers, len(uptake_fractions)))
+        )
+        outflows = total_plant_extracted + actual_top_evap + deep_drainage
+        mass_balance_error = round(abs(delta_s - (inflows - outflows)), 4)
+
+        # Topsoil evaporation memory state
+        rew_mm = max(2.0, (prev_soil.field_capacity_profile[0] - prev_soil.wilting_point_profile[0]) * 100.0 * 0.5)
+        top_storage_avail = max(0.0, new_storage[0] - wp_storage_mm[0])
+        days_wet = 0 if total_surface_water > 5.0 else (days_since_wetting + 1)
+        
+        evap_state = SoilEvaporationState(
+            surface_storage_mm=round(min(rew_mm, top_storage_avail), 2),
+            max_surface_storage_mm=round(rew_mm, 2),
+            days_since_wetting=days_wet,
+            kr_reduction_factor=round(min(1.0, top_storage_avail / rew_mm) if rew_mm > 0 else 1.0, 3),
+            few_exposed_wetted_fraction=0.65,
+        )
+
+        updated_soil = WaterStateFactory.create_soil_water_state(
+            layer_depths_cm=prev_soil.layer_depths_cm,
+            theta_profile=new_theta,
+            field_capacity_profile=prev_soil.field_capacity_profile,
+            wilting_point_profile=prev_soil.wilting_point_profile,
+            saturation_profile=prev_soil.saturation_profile,
+            residual_profile=prev_soil.residual_profile,
+            hydraulic_conductivity_profile=prev_soil.hydraulic_conductivity_profile,
+            van_genuchten_alpha=prev_soil.van_genuchten_alpha,
+            van_genuchten_n=prev_soil.van_genuchten_n,
+            infiltration=infil_state,
+            evaporation_state=evap_state,
+        )
+
+        return updated_soil, round(actual_infil, 2), round(runoff, 2), deep_drainage, mass_balance_error

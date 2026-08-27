@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { activeCropCyclePrismaFilter } from "@/lib/agribrain/crop-cycle-status.mjs";
 import { prisma } from "@/lib/db";
 import { authorizePlot } from "@/lib/agribrain/authorize-plot";
 import { getAuthoritativePlotSpatialContext } from "@/lib/agribrain/plot-geometry";
@@ -47,8 +48,8 @@ export async function POST(request: NextRequest) {
       include: {
         farm: true,
         cropCycles: {
-          where: { status: { not: "HARVESTED" } },
-          orderBy: { plantDate: "desc" },
+          where: { status: activeCropCyclePrismaFilter() },
+          orderBy: { updatedAt: "desc" },
           take: 1,
         },
         soilAnalyses: {
@@ -97,8 +98,21 @@ export async function POST(request: NextRequest) {
     };
 
     if (plot.cropCycles?.length) {
-      context.crop = plot.cropCycles[0].cropCode;
-      context.stage = plot.cropCycles[0].status;
+      const cycle = plot.cropCycles[0];
+      context.crop = cycle.cropCode;
+      // CropCycle.status is an administrative workflow state, never a
+      // biological phenology observation.  The sandbox may consume it for
+      // workflow context, but must not expose it through the legacy `stage`
+      // key because downstream simulators historically interpreted that key
+      // as phenology evidence.
+      context.crop_cycle = {
+        id: cycle.id,
+        crop: cycle.cropCode,
+        variety: cycle.variety ?? null,
+        plant_date: cycle.plantDate?.toISOString() ?? null,
+        administrative_status: cycle.status,
+        administrative_status_role: "workflow_only_not_phenology_evidence",
+      };
     }
 
     if (plot.soilAnalyses?.length) {

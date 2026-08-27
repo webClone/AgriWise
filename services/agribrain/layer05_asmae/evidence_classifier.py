@@ -231,10 +231,50 @@ def classify_asmae_evidence(
     composite_fusion_allowed = False
     authority = "none"
  
-    has_certification_proof = any(
-        bool(_attr(s, "holdout_proof", None)) and bool(_attr(s, "registration_proof", None)) and bool(_attr(s, "field_approval", False))
-        for s in scenes
-    )
+    def _is_valid_proof(s: Any) -> bool:
+        hp = _attr(s, "holdout_proof", None)
+        rp = _attr(s, "registration_proof", None)
+        fa_raw = _attr(s, "field_approval", False)
+        if isinstance(fa_raw, dict):
+            fa = fa_raw.get("approved") is True
+        else:
+            fa = bool(fa_raw)
+        if not (isinstance(hp, dict) and isinstance(rp, dict) and fa):
+            return False
+        trust_root = str(_attr(hp, "trust_root_id", None) or _attr(s, "trust_root_id", None) or "").strip()
+        sig = str(_attr(hp, "signature", None) or _attr(s, "signature", None) or "").strip()
+        geom_hash = str(_attr(hp, "geometry_hash", None) or _attr(rp, "geometry_hash", None) or "").strip()
+        valid_until = _attr(hp, "valid_until", None) or _attr(hp, "expires_at", None)
+        if not trust_root or trust_root in ("revoked", "unverified", "none", "invalid"):
+            return False
+        if not sig or sig in ("invalid", "unverified", "revoked", "none"):
+            return False
+        if valid_until:
+            try:
+                if isinstance(valid_until, str):
+                    exp_dt = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
+                elif isinstance(valid_until, (datetime, date)):
+                    exp_dt = valid_until
+                else:
+                    exp_dt = None
+                if exp_dt:
+                    now_dt = datetime.now(timezone.utc) if exp_dt.tzinfo is not None else datetime.now()
+                    if exp_dt < now_dt:
+                        return False
+            except Exception:
+                return False
+        target_geom = str(_attr(s, "geometry_hash", "") or "").strip()
+        if target_geom and geom_hash and geom_hash != target_geom:
+            return False
+        # A caller-supplied signature string and trust-root label are not a
+        # cryptographic verification.  No trust-store-backed verifier exists
+        # at this boundary yet, so certification must remain fail-closed.
+        # Diagnostic/advisory rasters remain available through the ordinary
+        # evidence gates; only 1 m approval and production authority are
+        # withheld.
+        return False
+
+    has_certification_proof = any(_is_valid_proof(s) for s in scenes)
 
     if state == "full_scene_stack":
         real_asmae_evidence = True
@@ -246,6 +286,7 @@ def classify_asmae_evidence(
         allowed_outputs = ["ASMAE_VISUAL_FUSION_CANOPY", "canopy_water", "vigor"]
         if has_certification_proof:
             allowed_outputs.append("ASMAE_1M_ADVISORY_MASK")
+            blocked_outputs = []
             authority = "asmae_certified"
             reason = "ok"
         else:
@@ -282,8 +323,8 @@ def classify_asmae_evidence(
         composite_fusion_allowed = True
         archive_context_allowed = False
         experimental_visual_allowed = True
-        source_reality = "raster_composite_proxy"
-        authority = "experimental_asmae_advisory"
+        source_reality = "composite"
+        authority = "composite_advisory"
         allowed_outputs = [
             "COMPOSITE_ADVISORY_CANOPY",
             "COMPOSITE_VEG_ATTENTION",
@@ -302,7 +343,7 @@ def classify_asmae_evidence(
             "EXPERIMENTAL_TEXTURE_SUPPORT_MASK"
         ]
         blocked_outputs = ["ASMAE_VISUAL_FUSION_CANOPY", "ASMAE_1M_ADVISORY_MASK"]
-        reason = telemetry_reason or "composite_assimilated_asmae_advisory"
+        reason = telemetry_reason or "composite_only"
     elif state == "plot_level_observation_evidence":
         real_asmae_evidence = False
         current_1m_approval_allowed = False
@@ -351,14 +392,14 @@ def classify_asmae_evidence(
             prescription_driver_allowed = False
             current_1m_approval_allowed_val = False
         else:
-            res_production_usable = True
+            res_production_usable = has_certification_proof
             res_diagnostic_only = not has_certification_proof
             res_real_provider_product = True
             
-            state_update_allowed = True
+            state_update_allowed = has_certification_proof
             visualization_allowed = True
             composite_advisory_allowed = True
-            scientific_surface_allowed = True
+            scientific_surface_allowed = has_certification_proof
             prescription_driver_allowed = has_certification_proof
             current_1m_approval_allowed_val = has_certification_proof
             if not has_certification_proof:

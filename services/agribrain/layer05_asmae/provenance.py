@@ -20,6 +20,21 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
+def _clean_summary_item(item: Any) -> Any:
+    if isinstance(item, dict):
+        cleaned = {}
+        for k, v in item.items():
+            s_val = str(v)
+            if s_val.startswith("[[") or s_val.startswith("array("):
+                cleaned[k] = "<array_data_omitted>"
+            else:
+                cleaned[k] = _clean_summary_item(v)
+        return cleaned
+    if isinstance(item, list):
+        return [_clean_summary_item(x) for x in item]
+    return item
+
+
 @dataclass
 class ASMAEProvenance:
     """Full provenance record for an ASMAE run."""
@@ -90,6 +105,7 @@ class ASMAEProvenance:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dict for storage."""
+        cleaned_scenes = [_clean_summary_item(s) for s in self.scene_summary]
         return {
             "run_id": self.run_id,
             "plot_id": self.plot_id,
@@ -101,7 +117,7 @@ class ASMAEProvenance:
             "scenes_available": self.scenes_available,
             "scenes_used": self.scenes_used,
             "scenes_rejected": self.scenes_rejected,
-            "scene_summary": self.scene_summary,
+            "scene_summary": cleaned_scenes,
             "resolution_tested": self.resolution_tested,
             "resolution_selected_m": self.resolution_selected_m,
             "resolution_reason_codes": self.resolution_reason_codes,

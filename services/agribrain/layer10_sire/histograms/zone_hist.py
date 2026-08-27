@@ -18,6 +18,9 @@ def compute_zone_histograms(
     histograms = []
     prepared_surfaces = []
     for surface in surfaces:
+        prov = getattr(surface, "provenance", {}) or {}
+        if prov.get("zone_statistics_eligible") is False or getattr(surface, "zone_statistics_eligible", True) is False:
+            continue
         surface_type = (
             surface.semantic_type.value
             if hasattr(surface.semantic_type, "value")

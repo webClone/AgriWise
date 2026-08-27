@@ -28,7 +28,7 @@ function SystemStatusDashboard({
   cacheStatus,
   refreshing,
   lastCaptured,
-  cropPhenology,
+  phenology,
   sensorContext,
   userInputs,
   l10Quality,
@@ -43,7 +43,7 @@ function SystemStatusDashboard({
   cacheStatus: string | null;
   refreshing: boolean;
   lastCaptured: string | null;
-  cropPhenology: any;
+  phenology: any;
   sensorContext: any;
   userInputs: any;
   l10Quality: any;
@@ -139,9 +139,13 @@ function SystemStatusDashboard({
       {/* ── Row 3: Context Strip (Crop + Sensors + Area) ──────────── */}
       <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
         {/* Crop stage */}
-        {cropPhenology?.stage && (
-          <ContextPill icon="🌱" label={cropPhenology.stage} detail={cropPhenology.dap != null ? `DAP ${cropPhenology.dap}` : cropPhenology.basis} />
-        )}
+        <ContextPill
+          icon="🌱"
+          label={phenology?.stage || "Stage UNKNOWN"}
+          detail={phenology?.stage
+            ? `Layer 2 ${phenology.authority} · ${String(phenology.posteriorHash || "").slice(0, 12)}`
+            : phenology?.userLabel || "Canonical Layer 2 phenology receipt required"}
+        />
         {/* Sensor network */}
         {sensorContext && sensorContext.count > 0 && (
           <ContextPill icon="📶" label={`${sensorContext.active}/${sensorContext.count} sensors`} detail={sensorContext.types?.join(", ")} />
@@ -298,14 +302,17 @@ function SensorPill({ label, value }: { label: string; value: string }) {
 
 
 // ── Main Panel ──────────────────────────────────────────────────────────
-export default function EnginePipelinePanel() {
+export default function EnginePipelinePanel({
+  visualLens = "standard",
+}: {
+  visualLens?: "standard" | "thermal" | "chlorophyll" | "chroma";
+}) {
   const pi = usePlotIntelligence();
   const {
     engines, expandedEngine, setExpandedEngine,
     showEnginePanel, setShowEnginePanel,
     detailMode, loading: piLoading,
     assimilation, cacheStatus, refreshing, lastCaptured,
-    cropPhenology,
   } = pi;
   const l10 = useLayer10();
   const [statusExpanded, setStatusExpanded] = useState(false);
@@ -533,7 +540,7 @@ export default function EnginePipelinePanel() {
           cacheStatus={cacheStatus}
           refreshing={refreshing}
           lastCaptured={lastCaptured}
-          cropPhenology={cropPhenology}
+          phenology={l10.evidenceState.resolvedPhenology}
           sensorContext={sensorContext}
           userInputs={userInputs}
           l10Quality={l10.data?.quality || null}
@@ -571,10 +578,13 @@ export default function EnginePipelinePanel() {
         }} suppressHydrationWarning={true}>
           <SurfaceLegendBar
             activeMode={l10.activeMode}
+            surface={l10.committedSurface}
+            committed={l10.activeSurfaceMaterialized}
             detailMode={detailMode}
-            groundingClass={l10.activeSurface?.grounding_class ?? "UNIFORM"}
+            groundingClass={l10.committedSurface?.grounding_class ?? "UNIFORM"}
             evidenceLevel={l10.evidenceState?.evidenceLevel}
             coverageRatio={l10.data?.quality?.coverage_ratio ?? null}
+            visualLens={visualLens}
           />
         </div>
 

@@ -8,6 +8,10 @@ import {
   isZoneSpatiallyAuthorized,
   type RenderMaterializationResult,
 } from "./render-materialization";
+import {
+  normalizeCanonicalPhenologyPublication,
+  phenologyEvidenceReasonLabel,
+} from "./phenology-authority.mjs";
 
 export type MapMode =
   | "vegetation"
@@ -406,7 +410,7 @@ export const MODE_DISPLAY_LADDERS: Record<string, Array<{ level: DisplayLevel; s
     { level: "raster", surface: "DATA_RELIABILITY" },
     { level: "raster", surface: "DATA_CONFIDENCE" },
     { level: "raster", surface: "UNCERTAINTY_SIGMA" },
-    { level: "asmae_diagnostic", surface: "CONFIDENCE_ASMAE" },
+    { level: "asmae_diagnostic", surface: "ASMAE_POSTERIOR_CONCENTRATION" },
     { level: "proxy", surface: "COMPOSITE_CONFIDENCE" },
   ],
   resolution_coverage: [
@@ -418,7 +422,7 @@ export const MODE_DISPLAY_LADDERS: Record<string, Array<{ level: DisplayLevel; s
 
 export interface ResolvedPhenology {
   stage: string | null;
-  source: "user_crop_cycle" | "plot_intelligence" | "layer10" | "unknown" | "conflict";
+  source: "layer10" | "unknown";
   confidence: number;
   conflict: boolean;
   conflictSources: Array<{
@@ -426,6 +430,10 @@ export interface ResolvedPhenology {
     stage: string | null;
   }>;
   userLabel: string;
+  authority: "unavailable" | "diagnostic" | "calibrated";
+  posteriorHash: string;
+  receiptValid: boolean;
+  evidenceNeededReason: string;
 }
 
 export interface RiskWaterConflict {
@@ -470,6 +478,10 @@ export const DEFAULT_EVIDENCE_STATE: PlotMapEvidenceState = {
     conflict: false,
     conflictSources: [],
     userLabel: "Unknown",
+    authority: "unavailable",
+    posteriorHash: "",
+    receiptValid: false,
+    evidenceNeededReason: "canonical_layer2_phenology_receipt_required",
   },
   riskWaterConflict: {
     hasConflict: false,
@@ -724,96 +736,67 @@ export function resolveRiskNarrative(input: {
   };
 }
 
-/**
- * Resolve crop stage from multiple conflicting sources.
- */
-export function resolvePhenologyStage(input: {
-  dbCropCycleStage?: string | null;
-  plotIntelligenceStage?: string | null;
-  layer10PhenologyStage?: string | null;
+/** Resolve browser phenology exclusively from canonical Layer 10 authority. */
+export function resolveCanonicalPhenologyStage(input: {
+  resolvedCropStage?: string | null;
+  evidenceClass?: string | null;
+  confidence?: number | null;
+  posteriorHash?: string | null;
+  source?: string | null;
+  receiptValid?: boolean | null;
+  evidenceNeededReason?: string | null;
 }): ResolvedPhenology {
-  const db = input.dbCropCycleStage?.toUpperCase().replace(/_/g, " ").trim() || null;
-  const pi = input.plotIntelligenceStage?.toUpperCase().replace(/_/g, " ").trim() || null;
-  const l10 = input.layer10PhenologyStage?.toUpperCase().replace(/_/g, " ").trim() || null;
-
-  const rawSources = [
-    { name: "Crop record", val: db },
-    { name: "Plot intelligence", val: pi },
-    { name: "Satellite model", val: l10 },
-  ];
-
-  // We find active/known stages (excluding UNKNOWN, UNDEFINED, null)
-  const activeStages = rawSources.filter(
-    (s) => s.val && s.val !== "UNKNOWN" && s.val !== "UNDEFINED"
+  const normalized = normalizeCanonicalPhenologyPublication({
+    resolvedCropStage: input.resolvedCropStage,
+    phenologyContext: {
+      phenology_evidence_class: input.evidenceClass || undefined,
+      phenology_authority: input.evidenceClass || undefined,
+      phenology_confidence: input.confidence ?? undefined,
+      phenology_posterior_hash: input.posteriorHash || undefined,
+      phenology_source: input.source || undefined,
+      phenology_receipt_valid: input.receiptValid ?? undefined,
+      phenology_evidence_needed_reason: input.evidenceNeededReason || undefined,
+    },
+  });
+  const context = normalized.phenologyContext;
+  const stage = normalized.resolvedCropStage;
+  const authority = String(
+    context.phenology_authority || "unavailable",
+  ) as ResolvedPhenology["authority"];
+  const posteriorHash = String(context.phenology_posterior_hash || "");
+  const evidenceNeededReason = String(
+    context.phenology_evidence_needed_reason ||
+      "additional_independent_phenology_evidence_required",
   );
-
-  // We find explicit UNKNOWN or UNDEFINED stages
-  const unknownSources = rawSources.filter(
-    (s) => s.val === "UNKNOWN" || s.val === "UNDEFINED"
-  );
-
-  if (activeStages.length === 0) {
+  if (stage === "UNKNOWN") {
     return {
       stage: null,
       source: "unknown",
       confidence: 0,
       conflict: false,
       conflictSources: [],
-      userLabel: "Unknown",
+      userLabel: `Unknown — ${phenologyEvidenceReasonLabel(evidenceNeededReason)}`,
+      authority,
+      posteriorHash,
+      receiptValid: context.phenology_receipt_valid === true,
+      evidenceNeededReason,
     };
   }
-
-  const hasKnownVsUnknownConflict = activeStages.length > 0 && unknownSources.length > 0;
-  const uniqueActiveStages = Array.from(new Set(activeStages.map((s) => s.val!)));
-
-  const conflictSources = rawSources
-    .filter((s) => s.val !== null)
-    .map((s) => ({
-      source: s.name.toLowerCase().replace(/ /g, "_"),
-      stage: s.val,
-    }));
-
-  if (uniqueActiveStages.length === 1 && !hasKnownVsUnknownConflict) {
-    const finalStage = uniqueActiveStages[0];
-    const displayLabel = finalStage.charAt(0) + finalStage.slice(1).toLowerCase();
-    return {
-      stage: finalStage,
-      source: activeStages[0].name.toLowerCase().replace(/ /g, "_") as any,
-      confidence: 1.0,
-      conflict: false,
-      conflictSources: [],
-      userLabel: displayLabel,
-    };
-  }
-
-  if (uniqueActiveStages.length === 1 && hasKnownVsUnknownConflict) {
-    const finalStage = uniqueActiveStages[0];
-    const knownSource = activeStages[0].name;
-    const unknownSource = unknownSources[0].name;
-    const displayStage = finalStage.charAt(0) + finalStage.slice(1).toLowerCase();
-    const userLabel = `${knownSource} says ${displayStage}; ${unknownSource.toLowerCase()} has not confirmed growth stage.`;
-
-    return {
-      stage: finalStage,
-      source: "conflict",
-      confidence: 0.5,
-      conflict: true,
-      conflictSources,
-      userLabel,
-    };
-  }
-
-  const dbLabel = db ? db.charAt(0) + db.slice(1).toLowerCase() : "Unknown";
-  const l10Label = l10 ? l10.charAt(0) + l10.slice(1).toLowerCase() : "Unknown";
-  const userLabel = `Growth stage conflict — crop record says ${dbLabel}, satellite model says ${l10Label}.`;
-
+  const userLabel = stage
+    .split("_")
+    .map((part) => part.charAt(0) + part.slice(1).toLowerCase())
+    .join(" ");
   return {
-    stage: pi || l10 || db || null,
-    source: "conflict",
-    confidence: 0.3,
-    conflict: true,
-    conflictSources,
+    stage,
+    source: "layer10",
+    confidence: Math.max(0, Math.min(1, Number(context.phenology_confidence ?? 0))),
+    conflict: false,
+    conflictSources: [],
     userLabel,
+    authority,
+    posteriorHash,
+    receiptValid: true,
+    evidenceNeededReason: "",
   };
 }
 
@@ -1001,7 +984,15 @@ export function resolvePlotMapEvidenceState(input: {
   zones: ZoneData[];
   quality: any;
   explainPack: any;
-  cropStage?: string | null;
+  canonicalCropStage?: string | null;
+  phenologyContext?: {
+    phenology_evidence_class?: string;
+    phenology_confidence?: number;
+    phenology_posterior_hash?: string;
+    phenology_source?: string;
+    phenology_receipt_valid?: boolean;
+    phenology_evidence_needed_reason?: string;
+  };
   visualSource?: any;
   engines?: any[];
   waterStressSurfaceMean?: number | null;
@@ -1015,7 +1006,8 @@ export function resolvePlotMapEvidenceState(input: {
     zones,
     quality,
     explainPack,
-    cropStage,
+    canonicalCropStage,
+    phenologyContext,
     visualSource,
     engines,
     waterStressSurfaceMean,
@@ -1114,11 +1106,14 @@ export function resolvePlotMapEvidenceState(input: {
   const recalibrated = detectTrendRecalibration(null, null); // wait, will check from engines delta
 
   // 6. Phenology stage
-  const l2 = engines?.find((e) => e.id === "L2");
-  const resolvedPhenology = resolvePhenologyStage({
-    dbCropCycleStage: cropStage,
-    plotIntelligenceStage: l2?.data?.crop_stage || l2?.data?.phenology_stage || null,
-    layer10PhenologyStage: activeSurface?.provenance?.phenology_stage as string | null,
+  const resolvedPhenology = resolveCanonicalPhenologyStage({
+    resolvedCropStage: canonicalCropStage,
+    evidenceClass: phenologyContext?.phenology_evidence_class,
+    confidence: phenologyContext?.phenology_confidence,
+    posteriorHash: phenologyContext?.phenology_posterior_hash,
+    source: phenologyContext?.phenology_source,
+    receiptValid: phenologyContext?.phenology_receipt_valid,
+    evidenceNeededReason: phenologyContext?.phenology_evidence_needed_reason,
   });
 
   // 7. Risk/water conflict
@@ -1174,7 +1169,7 @@ export const ALL_KNOWN_SURFACE_TYPES = [
   "RESOLUTION_COVERAGE", "GAP_FILL_MASK",
   "CANOPY_ASMAE_VIGOR", "WATER_ASMAE_CANOPY_WATER", "WATER_ASMAE_ROOT_ZONE_WATER",
   "NUTRIENT_ASMAE_CHLOROPHYLL_PROXY", "SALINITY_ASMAE_STRESS", "RISK_ASMAE_DIAGNOSTIC",
-  "CONFIDENCE_ASMAE", "RESOLUTION_ASMAE_EFFECTIVE",
+  "ASMAE_POSTERIOR_CONCENTRATION", "RESOLUTION_ASMAE_EFFECTIVE",
   "VEG_ATTENTION_ASMAE_DIAGNOSTIC", "VEG_ATTENTION_ASMAE_CONFLICT", "VEG_ATTENTION_ASMAE_DISAGREEMENT"
 ] as const;
 

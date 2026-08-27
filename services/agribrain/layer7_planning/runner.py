@@ -152,13 +152,19 @@ def _compute_soil_health_trajectory(l1_out: Any) -> Dict[str, Any]:
 # Deterministic Run ID
 # ============================================================================
 
-def _generate_run_id(inputs: OrchestratorInput, target_crop: str) -> str:
+def _generate_run_id(inputs: OrchestratorInput, target_crop: str, semantics: Any = None) -> str:
     """Generate deterministic L7-{hash} from canonical inputs."""
     payload = json.dumps({
         "plot_id": inputs.plot_id,
         "crop": target_crop,
         "date_end": inputs.date_range.get("end", ""),
         "geometry_hash": inputs.geometry_hash,
+        "crop_posterior_hash": getattr(semantics, "crop_posterior_hash", ""),
+        "phenology_posterior_hash": getattr(semantics, "phenology_posterior_hash", ""),
+        "planning_assumption": (
+            "canonical_species" if getattr(semantics, "species_specific_allowed", False)
+            else "declared_scenario"
+        ),
     }, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
     return f"L7-{digest}"
@@ -353,8 +359,21 @@ def run(
     else:
         l5_res_unwrapped = l5_res
 
+    from services.agribrain.common.downstream_crop_context import resolve_downstream_crop_phenology
+
+    crop_semantics = resolve_downstream_crop_phenology(inputs=inputs)
     raw_crop = inputs.crop_config.get("crop")
-    target_crop = str(raw_crop or "").lower().strip()
+    declared_target = str(raw_crop or "").lower().strip()
+    target_crop = (
+        crop_semantics.selected_crop
+        if crop_semantics.species_specific_allowed and crop_semantics.selected_crop
+        else declared_target
+    )
+    planning_assumption = (
+        "canonical_species_posterior"
+        if crop_semantics.species_specific_allowed
+        else "declared_planning_scenario"
+    )
     if not target_crop or target_crop == "unknown":
         return LayerResult(
             layer_id="L7", status="DEGRADED", output=None,
@@ -409,7 +428,7 @@ def run(
             ]
 
     # Deterministic run ID
-    run_id = _generate_run_id(inputs, target_crop)
+    run_id = _generate_run_id(inputs, target_crop, crop_semantics)
 
     # ----------------------------------------------------------------
     # 1. Degradation Mode Detection
@@ -667,6 +686,13 @@ def run(
     }
 
     penalties = []
+    if not crop_semantics.species_specific_allowed:
+        missing_drivers.append("CROP_SPECIES_AUTHORITY")
+        penalties.append({
+            "type": "crop_identity_scenario_only",
+            "impact": "reliability_cap_0.45",
+            "source": "declared_planning_target_not_observed_identity",
+        })
     if soil_health["trajectory"] == "DEGRADING":
         penalties.append({
             "type": "soil_health_degradation",
@@ -675,7 +701,10 @@ def run(
         })
 
     quality = QualityMetricsL7(
-        decision_reliability=round(conf_floor * prob_floor, 4),
+        decision_reliability=round(min(
+            conf_floor * prob_floor,
+            1.0 if crop_semantics.species_specific_allowed else 0.45,
+        ), 4),
         data_completeness=data_completeness,
         upstream_confidence_floor=round(conf_floor, 4),
         missing_drivers=missing_drivers,
@@ -701,8 +730,25 @@ def run(
             "l1_timeseries_len": len(getattr(l1_out, "plot_timeseries", []) or []),
             "l5_available": l5_out is not None,
             "soil_health": soil_health,
+            "crop_posterior_hash": crop_semantics.crop_posterior_hash,
+            "phenology_posterior_hash": crop_semantics.phenology_posterior_hash,
+            "crop_resolution": crop_semantics.crop_resolution,
+            "crop_authority": crop_semantics.crop_authority,
+            "crop_mixture": dict(crop_semantics.crop_mixture),
+            "stage_posterior": dict(crop_semantics.stage_posterior),
+            "planning_assumption_class": planning_assumption,
+            "planning_assumptions_are_not_observed_evidence": True,
         },
     )
+
+    if planning_assumption == "declared_planning_scenario":
+        rec.preconditions.append(
+            "Crop is a user-declared planning scenario, not an observed identity."
+        )
+        rec.risk_if_wrong = (
+            "Suitability and economics change if the planning target changes; "
+            + rec.risk_if_wrong
+        )
 
     # ----------------------------------------------------------------
     # 9. Assemble Layer7Output

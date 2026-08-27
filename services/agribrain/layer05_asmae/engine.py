@@ -237,13 +237,13 @@ class ASMAEEngine:
             self._audit("state_estimation", "starting")
             state_result = self._run_state_estimation(
                 scenes, bundle, getattr(self, "_graph", graph_summary), priors,
-                resolution_decision, inp,
+                resolution_decision, inp, deadline_check=check_timeout,
             )
             advisory_scenes = getattr(self, "_advisory_scenes", [])
             if advisory_scenes and len(advisory_scenes) > len(scenes):
                 advisory_result = self._run_advisory_state_estimation(
                     advisory_scenes, getattr(self, "_graph", graph_summary), priors,
-                    resolution_decision, inp,
+                    resolution_decision, inp, deadline_check=check_timeout,
                 )
                 state_result["advisory_ensemble"] = advisory_result
                 state_result["production_ensemble_scene_ids"] = [
@@ -277,6 +277,7 @@ class ASMAEEngine:
             self._audit("retrovalidation", "starting")
             retro_result = self._run_retrovalidation(
                 state_result, scenes, bundle, inp, consistency_result,
+                deadline_check=check_timeout,
             )
             provenance.retro_score = retro_result.get("mean_retro_score")
             self._audit(
@@ -390,12 +391,20 @@ class ASMAEEngine:
             logger.error("ASMAE CHAIN INTEGRITY VIOLATION: %s", e)
             provenance.completed_at = datetime.now(timezone.utc)
             provenance.audit_log = self._audit_log
+            error_msg = str(e)
+            is_budget_overrun = "BUDGET OVERRUN" in error_msg
             self._spatial_block_reason = "chain_integrity_violation:{}".format(e)
-            fallback = self._no_scene_output(
-                inp, provenance, getattr(self, "_scene_stack_status", None)
-            )
+            if is_budget_overrun:
+                fallback = self._timeout_fallback_output(
+                    inp, provenance, getattr(self, "_scene_stack_status", None),
+                    error_msg,
+                )
+            else:
+                fallback = self._no_scene_output(
+                    inp, provenance, getattr(self, "_scene_stack_status", None)
+                )
             fallback.diagnostics["chain_integrity_error"] = True
-            fallback.diagnostics["chain_integrity_message"] = str(e)
+            fallback.diagnostics["chain_integrity_message"] = error_msg
             fallback.diagnostics["production_usable_reason"] = "chain_integrity_violation"
             return fallback
 
@@ -560,6 +569,117 @@ class ASMAEEngine:
         output.diagnostics['reason'] = fallback_reason
         output.asmae_evidence_state['authority_level'] = 'DIAGNOSTIC'
         output.asmae_evidence_state['reason'] = fallback_reason
+        output.asmae_proof['authority_level'] = 'DIAGNOSTIC'
+        output.asmae_proof['spatial_normalization'] = list(
+            getattr(self, '_spatial_proof', []) or []
+        )
+        return output
+
+    def _timeout_fallback_output(self, inp, provenance, scene_stack_status, error_message: str):
+        """Build fallback output for state-estimation timeout that preserves admitted scene evidence.
+
+        Unlike _no_scene_output, this method does NOT falsify scene counts.
+        Eight admitted scenes remain as evidence; only the spatial execution failed.
+        """
+        from .resilient_posterior import estimate_resilient_plot_posterior
+        from .plot_state import build_plot_state_artifact, canonical_availability
+
+        estimate = estimate_resilient_plot_posterior(inp)
+        state_availability = canonical_availability(estimate["state_availability"])
+        posterior_available = estimate["posterior_available"]
+        plot_level_posterior = estimate["plot_level_posterior"]
+        state_proof = estimate["state_support_ledger"]
+        normalized_uncertainty = estimate["normalized_uncertainty"]
+
+        actual_scenes_available = getattr(provenance, 'scenes_available', 0) or 0
+        actual_scenes_used = getattr(provenance, 'scenes_used', 0) or 0
+        actual_scenes_rejected = getattr(provenance, 'scenes_rejected', 0) or 0
+
+        fallback_reason = 'state_estimation_timeout'
+        plot_state_artifact = build_plot_state_artifact(
+            plot_id=inp.plot_id,
+            run_id=inp.run_id,
+            as_of=inp.end_date,
+            availability=state_availability,
+            authority='DIAGNOSTIC',
+            posterior=plot_level_posterior,
+            support_ledger=state_proof,
+            production_usable=False,
+            current_spatial_assimilation=False,
+            geometry_hash=inp.geometry_hash,
+            evidence_hash=str(getattr(inp, 'archive_metrics_hash', '') or ''),
+            reason=fallback_reason,
+        )
+        provenance.completed_at = datetime.now(timezone.utc)
+        provenance.audit_log = self._audit_log
+        provenance.compute_content_hash()
+
+        output = ASMAEOutput(
+            plot_id=inp.plot_id,
+            run_id=inp.run_id,
+            generated_at=datetime.now(timezone.utc),
+            resolution_decision=ResolutionDecision(
+                candidate_resolutions_tested_m=[DEFAULT_RESOLUTION_M],
+                selected_effective_resolution_m=DEFAULT_RESOLUTION_M,
+            ),
+            raster_maps={},
+            uncertainty_maps={},
+            weak_labels=[],
+            diagnostics={
+                "scene_stack_mode": "admitted_but_execution_timeout",
+                "scene_count": actual_scenes_available,
+                "scenes_available": actual_scenes_available,
+                "scenes_used": actual_scenes_used,
+                "scenes_rejected": actual_scenes_rejected,
+                "state_availability": state_availability,
+                "authority_level": "DIAGNOSTIC_ONLY",
+                "posterior_available": posterior_available,
+                "plot_level_posterior": plot_level_posterior,
+                "normalized_uncertainty": normalized_uncertainty,
+                "stage_status": {
+                    "current_scene_assimilation": "admitted_but_timeout",
+                    "plot_level_state": "degraded" if posterior_available else "unavailable",
+                    "retrovalidation": "unavailable",
+                    "bma": "unavailable",
+                    "ml": "unavailable",
+                    "certification": "unavailable",
+                },
+                "production_usable": False,
+                "production_usable_reason": "state_estimation_timeout",
+                "status_override": "failed_spatial_timeout",
+                "scientific_pass": False,
+                "layer1_export_allowed": False,
+                "state_update_allowed": False,
+                "visual_allowed": False,
+                "weak_label_export_allowed": False,
+                "diagnostic_only": True,
+                "reason": fallback_reason,
+                "failure_stage": "state_estimation",
+                "failure_code": "STATE_ESTIMATION_TIMEOUT",
+                "failure_message": error_message,
+            },
+            provenance=provenance.to_dict(),
+            asmae_evidence_state={
+                "state_availability": state_availability,
+                "authority_level": "DIAGNOSTIC",
+                "posterior_available": posterior_available,
+                "production_usable": False,
+                "current_spatial_assimilation": False,
+                "reason": fallback_reason,
+                "failure_stage": "state_estimation",
+                "failure_code": "STATE_ESTIMATION_TIMEOUT",
+            },
+            asmae_feature_pack={"state_proof": state_proof, "state_support_ledger": state_proof},
+            asmae_proof={
+                "state_availability": state_availability,
+                "authority_level": "DIAGNOSTIC",
+                "state_proof": state_proof,
+                "state_support_ledger": state_proof,
+            },
+        )
+        output.plot_state_artifact = plot_state_artifact
+        output.diagnostics['authority_level'] = 'DIAGNOSTIC'
+        output.asmae_evidence_state['authority_level'] = 'DIAGNOSTIC'
         output.asmae_proof['authority_level'] = 'DIAGNOSTIC'
         output.asmae_proof['spatial_normalization'] = list(
             getattr(self, '_spatial_proof', []) or []
@@ -1071,6 +1191,7 @@ class ASMAEEngine:
     def _run_state_estimation(
         self, scenes, bundle: SelectedOperatorBundle, graph, priors,
         rd: ResolutionDecision, inp: ASMAEInput,
+        deadline_check=None,
     ) -> dict:
         """V74 + V79A + V922: EnKF with Hₜ from selected bundle."""
         from .assimilation.filter import run_enkf
@@ -1115,6 +1236,7 @@ class ASMAEEngine:
             soil_context=getattr(inp, "soil_context", {}) or {},
             management_events=getattr(inp, "management_events", []) or [],
             initial_posterior=initial_posterior,
+            deadline_check=deadline_check,
         )
         result["initialization_proof"]["state_availability"] = initialization.get("state_availability")
         result["initialization_proof"]["archive_contract_valid"] = initialization.get("archive_contract_valid")
@@ -1127,6 +1249,7 @@ class ASMAEEngine:
 
     def _run_advisory_state_estimation(
         self, scenes, graph, priors, rd: ResolutionDecision, inp: ASMAEInput,
+        deadline_check=None,
     ) -> dict:
         """Run the proxy-inclusive ensemble without mutating production state."""
         from .assimilation.filter import run_enkf
@@ -1174,6 +1297,7 @@ class ASMAEEngine:
                 initialization.get("plot_level_posterior", {})
                 if initialization.get("posterior_available") else {}
             ),
+            deadline_check=deadline_check,
         )
         result["authority"] = "advisory_only"
         result["production_invariant"] = True
@@ -1203,7 +1327,7 @@ class ASMAEEngine:
 
     def _run_retrovalidation(
         self, state_result, scenes, bundle: SelectedOperatorBundle,
-        inp: ASMAEInput, consistency_result=None,
+        inp: ASMAEInput, consistency_result=None, deadline_check=None,
     ) -> dict:
         """V76 + V79A + V922: Retrovalidation with bundle operators."""
         from .retrovalidation.engine import run_retrovalidation
@@ -1239,6 +1363,7 @@ class ASMAEEngine:
                 "plot_id": inp.plot_id,
                 "geometry_hash": inp.geometry_hash,
             },
+            deadline_check=deadline_check,
         )
 
     def _run_causal_tracking(
@@ -1677,8 +1802,7 @@ class ASMAEEngine:
             # Compute and append overall_conf
             if "ASMAE_UNCERTAINTY" in uncertainty_maps:
                 overall_conf = [[max(0.0, min(1.0, 1.0 - float(val))) for val in row] for row in uncertainty_maps["ASMAE_UNCERTAINTY"]]
-                confidence_maps["ASMAE_CONFIDENCE"] = overall_conf
-                confidence_maps["ASMAE_CONFIDENCE"] = overall_conf
+                confidence_maps["ASMAE_POSTERIOR_CONCENTRATION"] = overall_conf
 
             # Compile retrovalidation score map
             retro_pm = retro_result.get("per_microzone", {})
@@ -1792,13 +1916,13 @@ class ASMAEEngine:
                 enkf_mode_val = state_result.get("enkf_mode")
                 enkf_active = (enkf_mode_val == "ht_per_pixel")
                 enkf_support_grid = [[0.0] * W_grid for _ in range(H_grid)]
-                _has_conf = ("ASMAE_CONFIDENCE" in confidence_maps
-                             and confidence_maps["ASMAE_CONFIDENCE"] is not None)
+                _has_conf = ("ASMAE_POSTERIOR_CONCENTRATION" in confidence_maps
+                             and confidence_maps["ASMAE_POSTERIOR_CONCENTRATION"] is not None)
                 _has_unc2 = ("ASMAE_UNCERTAINTY" in uncertainty_maps
                              and uncertainty_maps["ASMAE_UNCERTAINTY"] is not None)
                 for r in range(H_grid):
                     for c in range(W_grid):
-                        conf = (confidence_maps["ASMAE_CONFIDENCE"][r][c]
+                        conf = (confidence_maps["ASMAE_POSTERIOR_CONCENTRATION"][r][c]
                                 if _has_conf else None)
                         unc = (uncertainty_maps["ASMAE_UNCERTAINTY"][r][c]
                                if _has_unc2 else None)
@@ -2184,7 +2308,7 @@ class ASMAEEngine:
                     ("ASMAE_RADIOMETRIC_SUPPORT", retrovalidation_maps),
                     ("ASMAE_RETROVALIDATION_SCORE", retrovalidation_maps),
                     ("ASMAE_BMA_DISAGREEMENT", bma_maps),
-                    ("ASMAE_CONFIDENCE", confidence_maps),
+                    ("ASMAE_POSTERIOR_CONCENTRATION", confidence_maps),
                     ("ASMAE_UNCERTAINTY", uncertainty_maps),
                 ]:
                     grid_candidate = src_dict.get(map_key)
@@ -2489,6 +2613,51 @@ class ASMAEEngine:
         from .feature_export import build_state_support_ledger, export_asmae_feature_pack
         state_support_ledger = build_state_support_ledger(update_reports)
         diagnostics["state_support_ledger"] = state_support_ledger
+
+        # Capability is an execution result, not merely an input-package flag.
+        # Finalize S1 truth from accepted SAR observation updates so a working
+        # VV/VH/ratio path cannot remain labelled unavailable.
+        sar_observation_names = {
+            "sar_vv", "sar_vh", "sar_ratio", "vv", "vh", "vv_vh_ratio",
+            "sar_wetness_proxy",
+        }
+        accepted_s1_reports = [
+            report for report in update_reports
+            if isinstance(report, dict)
+            and report.get("update_applied") is True
+            and (
+                str(report.get("sensor", "")).upper() in ("S1", "SENTINEL1", "SENTINEL-1")
+                or str(report.get("obs_name", "")).lower() in sar_observation_names
+            )
+        ]
+        accepted_s1_features = sorted({
+            str(report.get("obs_name", "")).lower()
+            for report in accepted_s1_reports
+            if str(report.get("obs_name", "")).strip()
+        })
+        production_s1_scene_ids = sorted({
+            str(getattr(scene, "scene_id", getattr(scene, "id", "")) or "")
+            for scene in production_scenes
+            if str(getattr(scene, "sensor", "")).upper() in ("S1", "SENTINEL1", "SENTINEL-1")
+        } - {""})
+        if accepted_s1_reports:
+            diagnostics.update({
+                "s1_capability_status": "available",
+                "s1_capability_reason": "accepted_s1_scene_operator_updates",
+                "s1_scene_count": len(production_s1_scene_ids),
+                "s1_scene_ids": production_s1_scene_ids,
+                "s1_accepted_update_count": len(accepted_s1_reports),
+                "s1_accepted_features": accepted_s1_features,
+            })
+        elif production_s1_scene_ids:
+            diagnostics.update({
+                "s1_capability_status": "available_no_state_update",
+                "s1_capability_reason": "s1_scene_loaded_without_accepted_update",
+                "s1_scene_count": len(production_s1_scene_ids),
+                "s1_scene_ids": production_s1_scene_ids,
+                "s1_accepted_update_count": 0,
+                "s1_accepted_features": [],
+            })
         diagnostics["graph_regularization_report"] = state_result_dict.get(
             "graph_regularization_report", []
         )
@@ -2928,4 +3097,14 @@ class ASMAEEngine:
             details=details,
         )
         self._audit_log.append(entry.to_dict())
+        progress_callback = self.config.get("_worker_progress_callback")
+        if callable(progress_callback):
+            try:
+                progress_callback(step, status, details)
+            except Exception as exc:
+                # Lease loss is a commit-fence event and must stop obsolete
+                # work. Display-only callback failures must not alter science.
+                if getattr(exc, "worker_lease_lost", False):
+                    raise
+                logger.debug("ASMAE worker progress callback failed: %s", exc)
         logger.debug("ASMAE audit: %s — %s", step, status)

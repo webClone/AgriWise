@@ -307,19 +307,11 @@ def build_asmae_feature_bus(
         cp = getattr(ft, "_context_package", None) if ft else None
         ao = getattr(cp, "asmae_output", None) if cp else None
         if ao:
-            fpack = {"state": {}, "diagnostics": {}, "feature_status": {}}
-            archive_grid = getattr(ao, "archive_bma", None)
-            if archive_grid is not None:
-                fpack["diagnostics"]["archive_support"] = archive_grid
-                fpack["feature_status"]["archive_support"] = {"status": "real", "source": "mock_archive_bma", "weight": 0.9, "confidence": 0.9}
-            retro_grid = getattr(ao, "retrovalidation_residuals", None)
-            if retro_grid is not None:
-                fpack["diagnostics"]["retrovalidation_score"] = retro_grid
-                fpack["feature_status"]["retrovalidation_score"] = {"status": "real", "source": "mock_retro_residuals", "weight": 0.9, "confidence": 0.9}
-            ml_grid = getattr(ao, "ml_agreement", None)
-            if ml_grid is not None:
-                fpack["diagnostics"]["ml_support"] = ml_grid
-                fpack["feature_status"]["ml_support"] = {"status": "real", "source": "mock_ml_agreement", "weight": 0.9, "confidence": 0.9}
+            candidate_pack = getattr(ao, "asmae_feature_pack", None)
+            if isinstance(candidate_pack, dict):
+                fpack = candidate_pack
+
+    from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
 
     FPACK_KEYS = {
         "vigor": "vigor",
@@ -328,10 +320,10 @@ def build_asmae_feature_bus(
         "canopy_water": "canopy_water",
         "root_zone_water": "root_zone_water",
         "structure": "structure",
-        "bare_soil": "bare_soil_fraction",
-        "salinity": "salinity_stress",
-        "thermal": "thermal_stress",
-        "biotic_risk": "biotic_confounder_risk",
+        "bare_soil": canonical_state_key("bare_soil"),
+        "salinity": canonical_state_key("salinity"),
+        "thermal": canonical_state_key("thermal"),
+        "biotic_risk": canonical_state_key("biotic_risk"),
         "confidence": "confidence",
         "uncertainty": "uncertainty",
         "bma_disagreement": "bma_disagreement",
@@ -371,6 +363,7 @@ def build_asmae_feature_bus(
         None is acceptable and means "unavailable".
         """
         fpack_key = FPACK_KEYS.get(bus_key, bus_key)
+        explicit_status = None
 
         # Priority 1 & 2: Layer 05 feature pack
         if fpack:
@@ -380,6 +373,7 @@ def build_asmae_feature_bus(
                 fs = fstatus_entry.get("status", "unavailable")
             else:
                 fs = fstatus_entry  # legacy string
+            explicit_status = fs
             if fs in ("real", "proxy_derived"):
                 for category in ("state", "diagnostics", "resolution"):
                     grid = fpack.get(category, {}).get(fpack_key)
@@ -404,6 +398,28 @@ def build_asmae_feature_bus(
                         feature_manifest[bus_key] = feature_status[bus_key]
                         return arr
 
+            # An explicit Layer 05 upper-bound is authoritative. In particular,
+            # a prior-only state or an unexecuted archive/ML/BMA stage must not
+            # fall through and be relabelled as a real Layer 1 raster or proxy.
+            if fs in ("prior_constrained", "unavailable", "unsupported"):
+                if isinstance(fstatus_entry, dict):
+                    st = dict(fstatus_entry)
+                else:
+                    st = {
+                        "status": fs,
+                        "source": None,
+                        "confidence": 0.0,
+                        "weight": 0.0,
+                    }
+                st.update(
+                    weight=0.0,
+                    usable_for_advisory=False,
+                    authority_upper_bound=fs,
+                )
+                feature_status[bus_key] = st
+                feature_manifest[bus_key] = st
+                return None
+
         # Priority 3: Layer 1 ASMAE raster maps
         l1_key = f"asmae_{bus_key}"
         if l1_data:
@@ -418,7 +434,8 @@ def build_asmae_feature_bus(
                     if arr.shape != (H, W):
                         arr = resample_to(arr, (H, W), method="bilinear")
                     st = {"status": "real", "source": "layer1_asmae_raster",
-                          "weight": 0.85, "confidence": 0.85}
+                          "weight": 0.85, "confidence": 0.85,
+                          "authority_upper_bound": explicit_status or "legacy_unbounded"}
                     feature_status[bus_key] = st
                     feature_manifest[bus_key] = st
                     return arr

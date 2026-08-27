@@ -13,14 +13,10 @@ def get_var(bus: Any, key: str, default_val: float = 0.0) -> np.ndarray:
         if val is not None:
             return np.asarray(val, dtype=np.float32)
 
-    alias_map = {
-        "salinity": "salinity_stress",
-        "thermal": "thermal_stress",
-        "biotic_risk": "biotic_confounder_risk",
-        "bare_soil": "bare_soil_fraction",
-        "retro_score": "retrovalidation_score",
-    }
-    alt_key = alias_map.get(key)
+    from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+    diagnostic_aliases = {"retro_score": "retrovalidation_score"}
+    canonical_key = canonical_state_key(key)
+    alt_key = diagnostic_aliases.get(key) or (canonical_key if canonical_key != key else None)
     if alt_key and hasattr(bus, alt_key):
         val = getattr(bus, alt_key)
         if val is not None:
@@ -30,9 +26,10 @@ def get_var(bus: Any, key: str, default_val: float = 0.0) -> np.ndarray:
     fpack = getattr(bus, "asmae_feature_pack", None)
     if fpack:
         for cat in ("state", "diagnostics", "resolution"):
-            grid = fpack.get(cat, {}).get(key) or fpack.get(cat, {}).get(alt_key or "")
-            if grid is not None:
-                return np.asarray(grid, dtype=np.float32)
+            category = fpack.get(cat, {})
+            for candidate_key in (key, alt_key):
+                if candidate_key and category.get(candidate_key) is not None:
+                    return np.asarray(category[candidate_key], dtype=np.float32)
 
     # Retrieve shape from vigor or default to 10x10
     shape = (10, 10)

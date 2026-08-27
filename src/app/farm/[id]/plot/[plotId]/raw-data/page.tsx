@@ -6,6 +6,7 @@ import PlotPageClient from "@/components/farm/PlotPageClient";
 import RawSatelliteViewer from "@/components/farm/RawSatelliteViewer";
 import RawTelemetryHub from "@/components/farm/RawTelemetryHub";
 import { notFound } from "next/navigation";
+import { isActiveCropCycleStatus } from "@/lib/agribrain/crop-cycle-status.mjs";
 
 export default async function RawDataPage({ params }: { params: Promise<{ id: string; plotId: string }> }) {
   const { id: farmId, plotId } = await params;
@@ -14,7 +15,7 @@ export default async function RawDataPage({ params }: { params: Promise<{ id: st
   if (!routeContext) notFound();
 
   const { plot, farm, cropCycles } = routeContext;
-  const currentCrop = cropCycles.find(c => c.status !== 'HARVESTED');
+  const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
   
   // Fetch tasks for the current crop if exists
   let currentTasks: any[] = [];

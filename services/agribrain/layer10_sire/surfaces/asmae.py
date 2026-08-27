@@ -7,7 +7,9 @@ Enforces truthfulness-first UI gating, standard warning wordings, display trust 
 and blocks fake full-field broadcasts for state layers.
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
+import hashlib
+import json
 import numpy as np
 
 from services.agribrain.layer10_sire.schema import (
@@ -15,6 +17,348 @@ from services.agribrain.layer10_sire.schema import (
     ASMAE_STATE_SURFACES, ASMAE_DIAGNOSTIC_SURFACES,
 )
 from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
+from services.agribrain.scientific_contracts import index_state_support_ledger
+
+
+_ASMAE_NEAREST_RESAMPLE_TYPES = {
+    SurfaceType.ASMAE_EXPORT_ELIGIBILITY,
+    SurfaceType.ASMAE_1M_ADVISORY_MASK,
+    SurfaceType.ASMAE_2_5M_MODEL_ASSISTED_MASK,
+    SurfaceType.ASMAE_5M_GENERALIZED_MASK,
+}
+
+
+def _plain_grid_spec(value: Any) -> Optional[Dict[str, Any]]:
+    """Return a JSON-safe grid specification without guessing its convention."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        raw = dict(value)
+    elif callable(getattr(value, "to_dict", None)):
+        raw = dict(value.to_dict())
+    else:
+        raw = {
+            key: getattr(value, key, None)
+            for key in (
+                "crs", "transform", "bounds", "width", "height",
+                "resolution", "resolution_m", "nodata", "grid_hash",
+                "transform_convention",
+            )
+            if getattr(value, key, None) is not None
+        }
+    if not raw:
+        return None
+    for key in ("transform", "bounds"):
+        if raw.get(key) is not None:
+            raw[key] = [float(v) for v in raw[key]]
+    for key in ("width", "height"):
+        if raw.get(key) is not None:
+            raw[key] = int(raw[key])
+    if raw.get("crs") is not None:
+        raw["crs"] = str(raw["crs"])
+    return raw
+
+
+def _rectangular_grid(grid: Any) -> Tuple[List[List[Optional[float]]], int, int]:
+    """Normalize only the container type; never reshape or transpose values."""
+    if isinstance(grid, np.ndarray):
+        if grid.ndim != 2:
+            raise ValueError("ASMAE_GRID_NOT_2D")
+        rows = grid.tolist()
+    elif isinstance(grid, (list, tuple)):
+        rows = list(grid)
+    else:
+        raise ValueError("ASMAE_GRID_NOT_2D")
+    if not rows or not all(isinstance(row, (list, tuple)) for row in rows):
+        raise ValueError("ASMAE_GRID_NOT_2D")
+    width = len(rows[0])
+    if width <= 0 or any(len(row) != width for row in rows):
+        raise ValueError("ASMAE_GRID_RAGGED")
+    return [list(row) for row in rows], len(rows), width
+
+
+def _validated_north_up_gdal_spec(
+    value: Any,
+    *,
+    height: int,
+    width: int,
+    label: str,
+) -> Dict[str, Any]:
+    """Prove the Layer-1 GDAL affine convention against bounds and dimensions."""
+    spec = _plain_grid_spec(value)
+    if not spec:
+        raise ValueError(f"ASMAE_GRID_ALIGNMENT_UNPROVEN:{label}_grid_spec_missing")
+    try:
+        spec_h = int(spec["height"])
+        spec_w = int(spec["width"])
+        bounds = [float(v) for v in spec["bounds"]]
+        transform = [float(v) for v in spec["transform"]]
+        crs = str(spec["crs"] or "").strip()
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"ASMAE_GRID_ALIGNMENT_UNPROVEN:{label}_grid_spec_incomplete"
+        ) from exc
+    if spec_h != int(height) or spec_w != int(width):
+        raise ValueError(f"ASMAE_GRID_ALIGNMENT_UNPROVEN:{label}_dimension_mismatch")
+    if len(bounds) != 4 or len(transform) != 6:
+        raise ValueError(f"ASMAE_GRID_ALIGNMENT_UNPROVEN:{label}_geometry_invalid")
+    if not crs or not all(np.isfinite(v) for v in bounds + transform):
+        raise ValueError(f"ASMAE_GRID_ALIGNMENT_UNPROVEN:{label}_geometry_invalid")
+
+    min_x, min_y, max_x, max_y = bounds
+    x0, dx, rx, y0, ry, dy = transform
+    if max_x <= min_x or max_y <= min_y or dx <= 0.0 or dy >= 0.0:
+        raise ValueError(f"ASMAE_GRID_ALIGNMENT_UNPROVEN:{label}_not_north_up")
+    tolerance = max(max_x - min_x, max_y - min_y, 1.0) * 1e-8
+    if (
+        abs(rx) > tolerance
+        or abs(ry) > tolerance
+        or abs(x0 - min_x) > tolerance
+        or abs(y0 - max_y) > tolerance
+        or abs((x0 + dx * width) - max_x) > tolerance
+        or abs((y0 + dy * height) - min_y) > tolerance
+    ):
+        raise ValueError(
+            f"ASMAE_GRID_ALIGNMENT_UNPROVEN:{label}_gdal_bounds_mismatch"
+        )
+    spec["width"] = int(width)
+    spec["height"] = int(height)
+    spec["bounds"] = bounds
+    spec["transform"] = transform
+    spec["crs"] = crs
+    spec["transform_convention"] = "gdal"
+    return spec
+
+
+def _grid_identity(spec: Dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(spec, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _source_grid_spec_for_surface(
+    metadata: Dict[str, Any],
+    fallback: Any,
+) -> Any:
+    """Prefer the exact RasterRef grid bound to this numeric surface."""
+    explicit = metadata.get("source_grid_spec") or metadata.get("grid_spec")
+    if explicit is not None:
+        return explicit
+    geometry_keys = ("crs", "bounds", "transform", "width", "height")
+    if any(metadata.get(key) is not None for key in geometry_keys):
+        return {
+            key: metadata.get(key)
+            for key in (
+                *geometry_keys,
+                "resolution", "resolution_m", "nodata", "grid_hash",
+                "transform_convention",
+            )
+            if metadata.get(key) is not None
+        }
+    return fallback
+
+
+def _record_alignment_failure(
+    l1_data: L1SpatialData,
+    *,
+    surface_type: SurfaceType,
+    variable: str,
+    reason: str,
+) -> None:
+    """Expose a typed failure on the adapted Layer-1 boundary value."""
+    failure = {
+        "component": "ASMAE_SURFACE_ALIGNMENT",
+        "code": "ASMAE_GRID_ALIGNMENT_FAILED",
+        "surface_type": surface_type.value,
+        "variable": variable,
+        "reason": reason,
+    }
+    failures = getattr(l1_data, "asmae_alignment_failures", None)
+    if not isinstance(failures, list):
+        failures = []
+        l1_data.asmae_alignment_failures = failures
+    if failure not in failures:
+        failures.append(failure)
+
+    if not isinstance(getattr(l1_data, "asmae_feature_pack", None), dict):
+        l1_data.asmae_feature_pack = {}
+    feature_failures = l1_data.asmae_feature_pack.setdefault(
+        "surface_alignment_failures", []
+    )
+    if isinstance(feature_failures, list) and failure not in feature_failures:
+        feature_failures.append(dict(failure))
+
+
+def _align_asmae_grid_to_target(
+    grid: Any,
+    *,
+    source_grid_spec: Any,
+    target_grid_spec: Any,
+    target_height: int,
+    target_width: int,
+    method: str,
+) -> Tuple[List[List[Optional[float]]], Optional[Dict[str, Any]], Optional[Dict[str, Any]], Dict[str, Any]]:
+    """Align one ASMAE raster using proven CRS/affine geometry only."""
+    rows, source_height, source_width = _rectangular_grid(grid)
+    source_raw = _plain_grid_spec(source_grid_spec)
+    target_raw = _plain_grid_spec(target_grid_spec)
+    if method not in {"nearest", "bilinear"}:
+        raise ValueError(f"ASMAE_GRID_ALIGNMENT_UNPROVEN:unsupported_method:{method}")
+
+    # Shape equality is not geographic identity. Both contracts must be
+    # complete and affine-valid even when the arrays happen to have the same
+    # dimensions.
+    source = _validated_north_up_gdal_spec(
+        source_raw, height=source_height, width=source_width, label="source"
+    )
+    target = _validated_north_up_gdal_spec(
+        target_raw, height=target_height, width=target_width, label="target"
+    )
+    same_crs = source["crs"].upper() == target["crs"].upper()
+    if (
+        (source_height, source_width) == (target_height, target_width)
+        and same_crs
+        and np.allclose(source["transform"], target["transform"], rtol=0.0, atol=1e-12)
+    ):
+        return rows, source, target, {
+            "display_resampled": False,
+            "reprojection_applied": False,
+            "resampling_method": "identity_grid",
+            "source_grid_shape": [source_height, source_width],
+            "display_grid_shape": [target_height, target_width],
+            "source_grid_identity": _grid_identity(source),
+            "display_grid_identity": _grid_identity(target),
+            "source_crs": source["crs"],
+            "display_crs": target["crs"],
+        }
+
+    src = np.asarray(rows, dtype=np.float64)
+    nodata = source.get("nodata")
+    if nodata is not None:
+        try:
+            src[np.isclose(src, float(nodata), rtol=0.0, atol=0.0)] = np.nan
+        except (TypeError, ValueError, OverflowError):
+            pass
+
+    if not same_crs:
+        # Cross-CRS display alignment is a real reprojection. Rasterio/GDAL is
+        # a production dependency; if it or either CRS is unavailable, fail
+        # closed rather than falling back to row/column sampling.
+        try:
+            from rasterio.crs import CRS
+            from rasterio.enums import Resampling
+            from rasterio.transform import Affine
+            from rasterio.warp import reproject
+
+            src_crs = CRS.from_user_input(source["crs"])
+            dst_crs = CRS.from_user_input(target["crs"])
+            destination = np.full(
+                (target_height, target_width), np.nan, dtype=np.float64
+            )
+            reproject(
+                source=src,
+                destination=destination,
+                src_transform=Affine.from_gdal(*source["transform"]),
+                src_crs=src_crs,
+                src_nodata=np.nan,
+                dst_transform=Affine.from_gdal(*target["transform"]),
+                dst_crs=dst_crs,
+                dst_nodata=np.nan,
+                resampling=(
+                    Resampling.nearest
+                    if method == "nearest"
+                    else Resampling.bilinear
+                ),
+                init_dest_nodata=True,
+            )
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise ValueError(
+                "ASMAE_GRID_ALIGNMENT_UNPROVEN:reprojection_dependency_missing"
+            ) from exc
+        except Exception as exc:
+            raise ValueError(
+                "ASMAE_GRID_ALIGNMENT_UNPROVEN:reprojection_failed"
+            ) from exc
+
+        if not np.isfinite(destination).any():
+            raise ValueError(
+                "ASMAE_GRID_ALIGNMENT_UNPROVEN:reprojection_no_overlap_or_valid_pixels"
+            )
+        reprojected = [
+            [float(value) if np.isfinite(value) else None for value in row]
+            for row in destination
+        ]
+        return reprojected, source, target, {
+            "display_resampled": True,
+            "reprojection_applied": True,
+            "resampling_method": method,
+            "source_grid_shape": [source_height, source_width],
+            "display_grid_shape": [target_height, target_width],
+            "source_grid_identity": _grid_identity(source),
+            "display_grid_identity": _grid_identity(target),
+            "source_transform_convention": "gdal",
+            "display_transform_convention": "gdal",
+            "source_crs": source["crs"],
+            "display_crs": target["crs"],
+        }
+
+    result: List[List[Optional[float]]] = [
+        [None for _ in range(target_width)] for _ in range(target_height)
+    ]
+    src_min_x, src_min_y, src_max_x, src_max_y = source["bounds"]
+    src_x0, src_dx, _, src_y0, _, src_dy = source["transform"]
+    tgt_x0, tgt_dx, _, tgt_y0, _, tgt_dy = target["transform"]
+
+    for row in range(target_height):
+        y = tgt_y0 + (row + 0.5) * tgt_dy
+        if y < src_min_y or y > src_max_y:
+            continue
+        source_row = (src_y0 - y) / abs(src_dy) - 0.5
+        for col in range(target_width):
+            x = tgt_x0 + (col + 0.5) * tgt_dx
+            if x < src_min_x or x > src_max_x:
+                continue
+            source_col = (x - src_x0) / src_dx - 0.5
+            if method == "nearest":
+                sr = int(np.floor(source_row + 0.5))
+                sc = int(np.floor(source_col + 0.5))
+                if 0 <= sr < source_height and 0 <= sc < source_width:
+                    value = src[sr, sc]
+                    if np.isfinite(value):
+                        result[row][col] = float(value)
+                continue
+
+            r0 = int(np.floor(source_row))
+            c0 = int(np.floor(source_col))
+            dr = source_row - r0
+            dc = source_col - c0
+            weighted = 0.0
+            weight_sum = 0.0
+            for sr, rw in ((r0, 1.0 - dr), (r0 + 1, dr)):
+                for sc, cw in ((c0, 1.0 - dc), (c0 + 1, dc)):
+                    weight = rw * cw
+                    if weight <= 0.0 or not (0 <= sr < source_height and 0 <= sc < source_width):
+                        continue
+                    value = src[sr, sc]
+                    if np.isfinite(value):
+                        weighted += float(value) * weight
+                        weight_sum += weight
+            if weight_sum > 0.0:
+                result[row][col] = weighted / weight_sum
+
+    return result, source, target, {
+        "display_resampled": True,
+        "reprojection_applied": False,
+        "resampling_method": method,
+        "source_grid_shape": [source_height, source_width],
+        "display_grid_shape": [target_height, target_width],
+        "source_grid_identity": _grid_identity(source),
+        "display_grid_identity": _grid_identity(target),
+        "source_transform_convention": "gdal",
+        "display_transform_convention": "gdal",
+        "source_crs": source["crs"],
+        "display_crs": target["crs"],
+    }
 
 def get_standard_variable_name(stype: SurfaceType, meta_var: Optional[str] = None) -> str:
     v = (meta_var or "").lower()
@@ -98,6 +442,126 @@ def get_surface_display_policy(
     }
 
 
+def compute_asmae_support_classification(
+    *,
+    real_ev: bool,
+    source_reality: str,
+    meta: Dict[str, Any],
+    stype: SurfaceType,
+    state_support_ledger: Optional[Dict[str, Any]] = None,
+    feature_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    valid_classes = {
+        "directly_assimilated",
+        "proxy_assimilated",
+        "indirectly_constrained",
+        "prior_constrained",
+        "unsupported",
+        "derived_diagnostic",
+    }
+
+    derived_diagnostic_types = set(ASMAE_DIAGNOSTIC_SURFACES) | {
+        SurfaceType.ASMAE_CONFIDENCE,
+        getattr(SurfaceType, "CONFIDENCE_ASMAE", None),
+    }
+
+    # Diagnostics describe the inference process; a real upstream raster does
+    # not turn resolution, uncertainty, agreement, or support into an observed
+    # biophysical state.
+    if stype in derived_diagnostic_types:
+        return {
+            "support_class": "derived_diagnostic",
+            "evidence_class": "Derived diagnostic",
+            "direct_observation": False,
+            "scouting_zone_eligible": True,
+            "management_zone_eligible": False,
+            "zone_statistics_eligible": False,
+        }
+
+    support_class = None
+    if state_support_ledger and feature_name:
+        from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+        canon_feature = canonical_state_key(feature_name)
+        state_entry = (
+            state_support_ledger.get(canon_feature)
+            or state_support_ledger.get(feature_name)
+            or state_support_ledger.get(f"asmae_{canon_feature}")
+        )
+        if state_entry and isinstance(state_entry, dict):
+            if state_entry.get("support_status") in valid_classes:
+                support_class = state_entry["support_status"]
+            else:
+                try:
+                    from services.agribrain.scientific_contracts.state_support import resolve_state_evidence_class
+                    ev_class = resolve_state_evidence_class(state_entry)
+                    support_class = ev_class.value
+                except Exception:
+                    pass
+
+    if not support_class:
+        raw_class = meta.get("support_class") or meta.get("evidence_support_class")
+        if raw_class in valid_classes:
+            support_class = raw_class
+        elif real_ev and source_reality == "real_raster":
+            support_class = "directly_assimilated"
+        elif real_ev or source_reality in ("raster_composite_proxy", "proxy"):
+            support_class = "proxy_assimilated"
+        elif meta.get("used_archive") or meta.get("used_ml"):
+            support_class = "indirectly_constrained"
+        elif meta.get("has_enkf_proxy_fallback") or meta.get("degraded_mean_only"):
+            support_class = "prior_constrained"
+        else:
+            support_class = "unsupported"
+
+    if support_class == "directly_assimilated":
+        evidence_class = "Observed"
+        direct_observation = True
+        scouting = True
+        mgmt = True
+        stats = True
+    elif support_class == "proxy_assimilated":
+        evidence_class = "Proxy-Assimilated"
+        direct_observation = False
+        scouting = True
+        mgmt = False  # Proxy states support scouting, not management/prescription authority
+        stats = True
+    elif support_class == "indirectly_constrained":
+        evidence_class = "Indirectly-Constrained"
+        direct_observation = False
+        scouting = True
+        mgmt = False
+        stats = True
+    elif support_class == "prior_constrained":
+        evidence_class = "Prior-Constrained"
+        direct_observation = False
+        scouting = True
+        mgmt = False
+        stats = False
+    else:
+        evidence_class = "Unsupported"
+        direct_observation = False
+        scouting = False
+        mgmt = False
+        stats = False
+
+    is_alias = stype in (
+        SurfaceType.ASMAE_POSTERIOR_CONCENTRATION,
+        SurfaceType.ASMAE_CONFIDENCE,
+        getattr(SurfaceType, "CONFIDENCE_ASMAE", None),
+    )
+    if is_alias:
+        stats = False
+
+    return {
+        "support_class": support_class,
+        "evidence_class": evidence_class,
+        "direct_observation": direct_observation,
+        "scouting_zone_eligible": scouting,
+        "management_zone_eligible": mgmt,
+        "zone_statistics_eligible": stats,
+    }
+
+
 def generate_asmae_surfaces(
     inp: Layer10Input,
     H: int,
@@ -127,6 +591,22 @@ def generate_asmae_surfaces(
         return []
 
     surfaces = []
+    evidence_state = dict(getattr(l1_data, "asmae_evidence_state", {}) or {})
+    feature_pack = dict(getattr(l1_data, "asmae_feature_pack", {}) or {})
+    raw_support_ledger = (
+        feature_pack.get("state_support_ledger")
+        if "state_support_ledger" in feature_pack
+        else evidence_state.get("state_support_ledger")
+    )
+    state_support_ledger = (
+        index_state_support_ledger(raw_support_ledger)
+        if raw_support_ledger is not None
+        else {}
+    )
+    source_asmae_grid_spec = feature_pack.get("grid_spec")
+    target_grid_spec = getattr(l1_data, "grid_spec", None)
+    if target_grid_spec is None and getattr(inp, "field_tensor", None) is not None:
+        target_grid_spec = getattr(inp.field_tensor, "grid_spec", None)
 
     # Combine state and diagnostic surfaces to process
     all_asmae_types = list(ASMAE_STATE_SURFACES) + list(ASMAE_DIAGNOSTIC_SURFACES)
@@ -134,9 +614,11 @@ def generate_asmae_surfaces(
     # Palette mappings
     palettes = {
         SurfaceType.ASMAE_VIGOR: PaletteId.VIGOR_GREEN,
+        getattr(SurfaceType, "CANOPY_ASMAE_VIGOR", SurfaceType.ASMAE_VIGOR): PaletteId.VIGOR_GREEN,
         SurfaceType.ASMAE_LAI: PaletteId.VIGOR_GREEN,
         SurfaceType.ASMAE_CHLOROPHYLL: PaletteId.VIGOR_GREEN,
         SurfaceType.ASMAE_CANOPY_WATER: PaletteId.YIELD_BLUE,
+        getattr(SurfaceType, "WATER_ASMAE_CANOPY_WATER", SurfaceType.ASMAE_CANOPY_WATER): PaletteId.YIELD_BLUE,
         SurfaceType.ASMAE_ROOT_ZONE_WATER: PaletteId.YIELD_BLUE,
         SurfaceType.ASMAE_SURFACE_WETNESS_EVENT: PaletteId.YIELD_BLUE,
         SurfaceType.ASMAE_STRUCTURE: PaletteId.RAW_GRAYSCALE,
@@ -145,7 +627,7 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_THERMAL_STRESS: PaletteId.THERMAL_ORANGE,
         SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: PaletteId.STRESS_RED,
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: PaletteId.RAW_GRAYSCALE,
-        SurfaceType.ASMAE_CONFIDENCE: PaletteId.UNCERTAINTY_GRAY,
+        SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: PaletteId.UNCERTAINTY_GRAY,
         SurfaceType.ASMAE_UNCERTAINTY: PaletteId.UNCERTAINTY_GRAY,
         SurfaceType.ASMAE_RETROVALIDATION_SCORE: PaletteId.UNCERTAINTY_GRAY,
         SurfaceType.ASMAE_BMA_DISAGREEMENT: PaletteId.RISK_HEAT,
@@ -180,9 +662,11 @@ def generate_asmae_surfaces(
     # Unit mappings
     units = {
         SurfaceType.ASMAE_VIGOR: "fraction",
+        getattr(SurfaceType, "CANOPY_ASMAE_VIGOR", SurfaceType.ASMAE_VIGOR): "fraction",
         SurfaceType.ASMAE_LAI: "index",
-        SurfaceType.ASMAE_CHLOROPHYLL: "index",
+        SurfaceType.ASMAE_CHLOROPHYLL: "ug/cm2",
         SurfaceType.ASMAE_CANOPY_WATER: "fraction",
+        getattr(SurfaceType, "WATER_ASMAE_CANOPY_WATER", SurfaceType.ASMAE_CANOPY_WATER): "fraction",
         SurfaceType.ASMAE_ROOT_ZONE_WATER: "fraction",
         SurfaceType.ASMAE_SURFACE_WETNESS_EVENT: "fraction",
         SurfaceType.ASMAE_STRUCTURE: "fraction",
@@ -191,7 +675,7 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_THERMAL_STRESS: "fraction",
         SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: "fraction",
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: "meters",
-        SurfaceType.ASMAE_CONFIDENCE: "fraction",
+        SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: "fraction",
         SurfaceType.ASMAE_UNCERTAINTY: "fraction",
         SurfaceType.ASMAE_RETROVALIDATION_SCORE: "fraction",
         SurfaceType.ASMAE_BMA_DISAGREEMENT: "fraction",
@@ -225,6 +709,7 @@ def generate_asmae_surfaces(
 
     render_ranges = {
         SurfaceType.ASMAE_LAI: (0.0, 8.0),
+        SurfaceType.ASMAE_CHLOROPHYLL: (0.0, 80.0),
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: (0.03, 10.0),
     }
 
@@ -244,6 +729,10 @@ def generate_asmae_surfaces(
         
         # Map variables to their actual raster keys in L1 raster_maps
         l1_grid_keys = [var_name, var_name.upper(), var_name.lower(), stype.value]
+        if stype in (SurfaceType.ASMAE_VIGOR, getattr(SurfaceType, "CANOPY_ASMAE_VIGOR", None)):
+            l1_grid_keys.extend(["asmae_vigor", "canopy_asmae_vigor", "vigor"])
+        if stype in (SurfaceType.ASMAE_CANOPY_WATER, getattr(SurfaceType, "WATER_ASMAE_CANOPY_WATER", None)):
+            l1_grid_keys.extend(["asmae_canopy_water", "water_asmae_canopy_water", "canopy_water"])
         # Standardize state aliases
         if stype == SurfaceType.ASMAE_BARE_SOIL:
             l1_grid_keys.extend(["asmae_bare_soil_fraction", "asmae_bare_soil", "bare_soil_fraction"])
@@ -292,9 +781,13 @@ def generate_asmae_surfaces(
             state_update_allowed = meta.get("state_update_allowed", False)
             visual_only = False
 
-        # Extract parameters
-        confidence = float(meta.get("confidence", 0.5))
-        uncertainty = float(meta.get("uncertainty", 0.1))
+        # Extract parameters None-safely
+        confidence_available = bool(meta.get("calibrated_confidence_available", meta.get("posterior_confidence_available", False)))
+        uncertainty_available = bool(meta.get("posterior_uncertainty_available", meta.get("uncertainty") is not None))
+        raw_conf = meta.get("posterior_concentration", meta.get("confidence"))
+        confidence = float(raw_conf) if raw_conf is not None else 0.0
+        raw_unc = meta.get("uncertainty")
+        uncertainty = float(raw_unc) if raw_unc is not None else 1.0
         resolution_m = float(meta.get("resolution_m", 10.0))
         asmae_channel = meta.get("asmae_channel", "diagnostic")
         source_basis = meta.get("source_basis", "asmae")
@@ -449,7 +942,7 @@ def generate_asmae_surfaces(
             SurfaceType.ASMAE_THERMAL_STRESS: "ASMAE_ENKF",
             SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: "ASMAE_ENKF",
             SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: "ASMAE_ENKF",
-            SurfaceType.ASMAE_CONFIDENCE: "ASMAE_BMA",
+            SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: "ASMAE_BMA",
             SurfaceType.ASMAE_UNCERTAINTY: "ASMAE_BMA",
             SurfaceType.ASMAE_RETROVALIDATION_SCORE: "ASMAE_RETROVALIDATION",
             SurfaceType.ASMAE_BMA_DISAGREEMENT: "ASMAE_BMA",
@@ -479,7 +972,7 @@ def generate_asmae_surfaces(
             SurfaceType.ASMAE_THERMAL_STRESS: "asmae_thermal_stress",
             SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: "asmae_biotic_confounder_risk",
             SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: "asmae_effective_resolution",
-            SurfaceType.ASMAE_CONFIDENCE: "asmae_confidence",
+            SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: "asmae_posterior_concentration",
             SurfaceType.ASMAE_UNCERTAINTY: "asmae_uncertainty",
             SurfaceType.ASMAE_RETROVALIDATION_SCORE: "retrovalidation_score",
             SurfaceType.ASMAE_BMA_DISAGREEMENT: "bma_disagreement",
@@ -496,16 +989,34 @@ def generate_asmae_surfaces(
             SurfaceType.ASMAE_VISUAL_FUSION_CANOPY: "visual_fusion_canopy",
         }
 
+        support_meta = compute_asmae_support_classification(
+            real_ev=real_ev,
+            source_reality=src_real,
+            meta=meta,
+            stype=stype,
+            state_support_ledger=state_support_ledger,
+            feature_name=feature_mapping.get(stype, var_name),
+        )
+
         provenance = {
             "real_asmae_evidence": real_ev,
             "source_reality": src_real,
+            "support_class": support_meta["support_class"],
+            "evidence_class": support_meta["evidence_class"],
+            "direct_observation": support_meta["direct_observation"],
+            "scouting_zone_eligible": support_meta["scouting_zone_eligible"],
+            "management_zone_eligible": support_meta["management_zone_eligible"],
+            "zone_statistics_eligible": support_meta["zone_statistics_eligible"],
             "creator": creator_mapping.get(stype, "ASMAE_ENKF"),
             "asmae_feature": feature_mapping.get(stype, stype.value.lower()),
-            "used_bma": True,
-            "used_archive": True,
-            "used_retrovalidation": True,
+            "used_bma": bool(meta.get("used_bma", evidence_state.get("used_bma", False))),
+            "used_archive": bool(meta.get("used_archive", evidence_state.get("used_archive", False))),
+            "used_retrovalidation": bool(meta.get("used_retrovalidation", evidence_state.get("used_retrovalidation", False))),
+            "used_ml": bool(meta.get("used_ml", evidence_state.get("used_ml", False))),
             "has_spatial_grid": has_spatial_grid_flag,
-            "grid_inheritance_allowed": True,
+            # The surface receives an explicit, validated display grid below.
+            # Inheriting a later output grid would sever that proof.
+            "grid_inheritance_allowed": False,
             "surface_generated_from": generated_from,
             "surface_type": stype.value,
             "render_mode": f"RenderMode.{stype.value}",
@@ -517,6 +1028,8 @@ def generate_asmae_surfaces(
             "source_basis": source_basis,
             "confidence": confidence,
             "uncertainty": uncertainty,
+            "posterior_confidence_available": confidence_available,
+            "posterior_uncertainty_available": uncertainty_available,
             "retro_status": retro_status,
             "retrovalidation_score": retro_score,
             "bma_status": bma_status,
@@ -546,6 +1059,40 @@ def generate_asmae_surfaces(
             "requires_user_warning": policy["requires_user_warning"],
             "warning_wording": warning_wording,
         }
+
+        surface_source_grid_spec = None
+        surface_display_grid_spec = None
+        if has_real_grid:
+            resampling_method = (
+                "nearest" if stype in _ASMAE_NEAREST_RESAMPLE_TYPES else "bilinear"
+            )
+            try:
+                (
+                    grid,
+                    surface_source_grid_spec,
+                    surface_display_grid_spec,
+                    alignment_proof,
+                ) = _align_asmae_grid_to_target(
+                    grid,
+                    source_grid_spec=_source_grid_spec_for_surface(
+                        meta, source_asmae_grid_spec
+                    ),
+                    target_grid_spec=target_grid_spec,
+                    target_height=H,
+                    target_width=W,
+                    method=resampling_method,
+                )
+            except ValueError as exc:
+                # Omit only this unproven surface. Never transpose/reshape it,
+                # and do not erase independently valid ASMAE candidates.
+                _record_alignment_failure(
+                    l1_data,
+                    surface_type=stype,
+                    variable=var_name,
+                    reason=str(exc),
+                )
+                continue
+            provenance.update(alignment_proof)
 
         # The advisory mask is an inter-stage control artifact, not just a
         # renderable raster.  Bind it to the exact ASMAE snapshot, authority
@@ -654,6 +1201,9 @@ def generate_asmae_surfaces(
             source_layers=["L1"],
             provenance=provenance,
             grounding_class=grounding,
+            grid_spec=surface_display_grid_spec,
+            source_grid_spec=surface_source_grid_spec,
+            display_grid_spec=surface_display_grid_spec,
         ))
 
     return surfaces
@@ -846,8 +1396,19 @@ def generate_asmae_aliases(
     aliases = []
     
     # Helper to find a surface by semantic type
+    def has_exact_shape(surface: SurfaceArtifact) -> bool:
+        try:
+            _, height, width = _rectangular_grid(surface.values)
+        except ValueError:
+            return False
+        return height == H and width == W
+
     def find_surf(stype: SurfaceType) -> Optional[SurfaceArtifact]:
-        return next((s for s in surfaces if s.semantic_type == stype), None)
+        # Never trust an inherited grid_ref over the actual numeric array.
+        return next(
+            (s for s in surfaces if s.semantic_type == stype and has_exact_shape(s)),
+            None,
+        )
 
     # Alias mapping rules
     ASMAE_ALIAS_RULES = {
@@ -948,7 +1509,9 @@ def generate_asmae_aliases(
             "map_mode": rules["mode"],
             "source_class": "asmae_diagnostic",
             "diagnostic_only": True,
+            "direct_observation": False,
             "not_direct_observation": True,
+            "management_zone_eligible": False,
             "prescription_driver_allowed": False,
             "state_update_allowed": False,
             "visual_only": False,
@@ -986,6 +1549,8 @@ def generate_asmae_aliases(
             provenance=prov,
             grounding_class=src_surf.grounding_class,
             grid_spec=grid_spec_dict,
+            source_grid_spec=src_surf.source_grid_spec,
+            display_grid_spec=grid_spec_dict,
         ))
 
     # ── V92.4-BC.2: VEG_ATTENTION_ASMAE_DIAGNOSTIC composite ──────────
@@ -1091,7 +1656,7 @@ def generate_asmae_aliases(
         composite_grid = [[0.0] * W for _ in range(H)]
         has_val = False
         
-        conf_surf = find_surf(SurfaceType.ASMAE_CONFIDENCE)
+        conf_surf = find_surf(SurfaceType.ASMAE_POSTERIOR_CONCENTRATION)
         retro_surf = find_surf(SurfaceType.ASMAE_RETROVALIDATION_SCORE)
         
         for r in range(H):
@@ -1161,95 +1726,15 @@ def generate_asmae_aliases(
                 grid_spec=grid_spec_dict,
             ))
 
-    # ── CONFIDENCE_ASMAE ──────────────────────────────────────────────
-    # V92.4-BC.2: Uses pixel_visual eligibility (not authority) for confidence
-    conf_surf = find_surf(SurfaceType.ASMAE_CONFIDENCE)
-    conf_pixel_ok = False
+    # Compatibility names resolve to this canonical surface in metadata.  Do
+    # not publish a second numeric grid: duplicated arrays can diverge while
+    # appearing to describe the same scientific quantity.
+    conf_surf = find_surf(SurfaceType.ASMAE_POSTERIOR_CONCENTRATION)
     if conf_surf:
-        conf_pixel_ok, conf_pixel_reason = asmae_surface_pixel_visual_eligible(conf_surf, output_grid_spec=grid_spec_dict)
-        if not conf_pixel_ok:
-            # Check if visually eligible for plot-level card
-            conf_visual_ok, _ = asmae_surface_visual_eligible(conf_surf)
-            if not conf_visual_ok:
-                conf_surf = None
-    
-    if conf_surf and conf_pixel_ok:
-        conf_authority_ok, conf_authority_reason = asmae_surface_spatially_eligible(conf_surf)
-        aliases.append(SurfaceArtifact(
-            surface_id=f"CONFIDENCE_ASMAE_{inp.plot_id}",
-            semantic_type=SurfaceType.CONFIDENCE_ASMAE,
-            grid_ref=conf_surf.grid_ref,
-            values=conf_surf.values,
-            units=conf_surf.units,
-            native_resolution_m=conf_surf.native_resolution_m,
-            render_range=conf_surf.render_range,
-            palette_id=PaletteId.UNCERTAINTY_GRAY,
-            source_layers=conf_surf.source_layers,
-            provenance={
-                "alias_of": "ASMAE_CONFIDENCE",
-                "map_mode": "uncertainty",
-                "source_class": "asmae_diagnostic",
-                "diagnostic_only": True,
-                "not_direct_observation": True,
-                "prescription_driver_allowed": False,
-                "state_update_allowed": False,
-                "visual_only": False,
-                "has_spatial_grid": True,
-                "card_or_badge_eligible": True,
-                "overlay_eligible": True,
-                "authority_eligible": conf_authority_ok,
-                "authority_block_reason": conf_authority_reason if not conf_authority_ok else None,
-                "display_level": "asmae_diagnostic",
-                "authority_level": "scout",
-                "trust_badges": ["ASMAE diagnostic", "not direct observation"],
-                "warning_wording": "ASMAE diagnostic confidence.",
-            },
-            grounding_class=conf_surf.grounding_class,
-            grid_spec=grid_spec_dict,
-        ))
-    elif not conf_surf or not conf_pixel_ok:
-        # Fallback to inverted ASMAE_UNCERTAINTY
-        unc_surf = find_surf(SurfaceType.ASMAE_UNCERTAINTY)
-        if unc_surf:
-            unc_pixel_ok, unc_pixel_reason = asmae_surface_pixel_visual_eligible(unc_surf, output_grid_spec=grid_spec_dict)
-            if not unc_pixel_ok:
-                unc_surf = None
-        if unc_surf:
-            unc_authority_ok, unc_authority_reason = asmae_surface_spatially_eligible(unc_surf)
-            inverted_grid = [[None if v is None else round(1.0 - v, 4) for v in row] for row in unc_surf.values]
-            aliases.append(SurfaceArtifact(
-                surface_id=f"CONFIDENCE_ASMAE_{inp.plot_id}",
-                semantic_type=SurfaceType.CONFIDENCE_ASMAE,
-                grid_ref=unc_surf.grid_ref,
-                values=inverted_grid,
-                units="score",
-                native_resolution_m=unc_surf.native_resolution_m,
-                render_range=(0.0, 1.0),
-                palette_id=PaletteId.UNCERTAINTY_GRAY,
-                source_layers=unc_surf.source_layers,
-                provenance={
-                    "alias_of": "ASMAE_UNCERTAINTY",
-                    "map_mode": "uncertainty",
-                    "source_class": "asmae_diagnostic",
-                    "diagnostic_only": True,
-                    "not_direct_observation": True,
-                    "prescription_driver_allowed": False,
-                    "state_update_allowed": False,
-                    "visual_only": False,
-                    "has_spatial_grid": True,
-                    "inverted": True,
-                    "card_or_badge_eligible": True,
-                    "overlay_eligible": True,
-                    "authority_eligible": unc_authority_ok,
-                    "authority_block_reason": unc_authority_reason if not unc_authority_ok else None,
-                    "display_level": "asmae_diagnostic",
-                    "authority_level": "scout",
-                    "trust_badges": ["ASMAE diagnostic", "inverted uncertainty", "not direct observation"],
-                    "warning_wording": "ASMAE diagnostic confidence derived from uncertainty.",
-                },
-                grounding_class=unc_surf.grounding_class,
-                grid_spec=grid_spec_dict,
-            ))
+        conf_surf.provenance = {
+            **(conf_surf.provenance or {}),
+            "compatibility_aliases": ["ASMAE_CONFIDENCE", "CONFIDENCE_ASMAE"],
+        }
 
     return aliases
 

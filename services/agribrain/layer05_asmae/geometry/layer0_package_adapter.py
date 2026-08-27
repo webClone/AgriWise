@@ -1,4 +1,6 @@
 import datetime
+import hashlib
+import json
 import logging
 import math
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -61,8 +63,18 @@ def adapt_layer0_package_to_scene_candidate(
     
     # 1. Recover metadata either from direct attribute or provenance
     asmae_meta = prov.get("asmae_scene_metadata", {}) or {}
-    scene_id = _attr(meta, "scene_id", asmae_meta.get("scene_id"))
-    prov_pid = _attr(pkg, "provider_product_id", None) or asmae_meta.get("provider_product_id") or prov.get("provider_product_id")
+    incoming_scene_id = _attr(meta, "scene_id", asmae_meta.get("scene_id"))
+    prov_pid = (
+        _attr(pkg, "provider_product_id", None)
+        or asmae_meta.get("provider_product_id")
+        or prov.get("provider_product_id")
+        or _attr(pkg, "catalog_item_id", None)
+        or prov.get("catalog_item_id")
+        or _attr(pkg, "product_id", None)
+        or prov.get("product_id")
+        or _attr(pkg, "source_content_hash", None)
+        or prov.get("source_content_hash")
+    )
     
     acq_dt = _attr(meta, "acquisition_datetime", None) or _attr(meta, "acquisition_time", None)
     if isinstance(acq_dt, str):
@@ -76,16 +88,28 @@ def adapt_layer0_package_to_scene_candidate(
         except Exception:
             acq_dt = None
 
-    if not scene_id:
-        if prov_pid:
-            scene_id = f"{source}_{str(prov_pid)[:28]}"
-        elif acq_dt:
-            scene_id = f"{source}_{acq_dt.strftime('%Y%m%dT%H%M%S')}"
-
     crs = _attr(meta, "crs", asmae_meta.get("crs"))
     transform = _attr(meta, "transform", asmae_meta.get("transform"))
     width = _attr(meta, "width", asmae_meta.get("width"))
     height = _attr(meta, "height", asmae_meta.get("height"))
+    orbit_pass = _attr(meta, "orbit_pass", asmae_meta.get("orbit_pass")) or prov.get("orbit_pass") or "unknown"
+    polarization = _attr(meta, "polarization", asmae_meta.get("polarization")) or prov.get("polarization") or "unknown"
+
+    acq_iso = acq_dt.isoformat() if acq_dt else "unknown"
+    scene_identity_v2 = {
+        "version": "scene_identity_v2",
+        "source_sensor": source,
+        "provider_product_id": str(prov_pid or ""),
+        "acquisition_datetime_iso": acq_iso,
+        "orbit_pass": str(orbit_pass),
+        "polarization": str(polarization),
+        "crs": str(crs or ""),
+        "transform_digest": str(transform or ""),
+    }
+    canonical_scene_id = f"{source}_{hashlib.sha256(json.dumps(scene_identity_v2, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()}"
+    scene_id = canonical_scene_id
+    if incoming_scene_id and incoming_scene_id != canonical_scene_id:
+        prov["legacy_ordinal_scene_id"] = incoming_scene_id
     
     def normalize_band_key(key: str) -> str:
         k = key.lower().strip()
@@ -270,6 +294,7 @@ def adapt_layer0_package_to_scene_candidate(
 
     # Extract QA
     qa_metrics = {}
+    scalar_usable = True
     if packets:
         first = packets[0]
         if isinstance(first, dict):
@@ -280,7 +305,8 @@ def adapt_layer0_package_to_scene_candidate(
         if isinstance(data, dict):
             qa_metrics["cloud_cover"] = data.get("cloud_cover", _attr(pkg, "cloud_cover", None))
             qa_metrics["data_status"] = data.get("data_status", "observed")
-            qa_metrics["usable"] = data.get("usable", _attr(_attr(pkg, "qa", None), "usable", True))
+            scalar_usable = data.get("usable", True)
+            qa_metrics["scalar_summary_usable"] = scalar_usable
             qa_metrics["orbit_direction"] = data.get("orbit_direction")
 
     qa_obj = _attr(pkg, "qa", None)
@@ -288,10 +314,14 @@ def adapt_layer0_package_to_scene_candidate(
         qc = _attr(qa_obj, "quality_class", None)
         qa_metrics["quality_class"] = _attr(qc, "value", "good") if qc else "good"
         qa_metrics["valid_fraction"] = _attr(qa_obj, "valid_fraction", 1.0)
+        qa_metrics["usable"] = bool(_attr(qa_obj, "usable", True))
+        qa_metrics["raster_scene_usable"] = qa_metrics["usable"]
     else:
         quality = _attr(pkg, "quality", {}) or {}
         qa_metrics["quality_class"] = quality.get("quality_class", "good") if isinstance(quality, dict) else "good"
         qa_metrics["valid_fraction"] = quality.get("valid_fraction", 1.0) if isinstance(quality, dict) else 1.0
+        qa_metrics["usable"] = bool(quality.get("usable", True)) if isinstance(quality, dict) else True
+        qa_metrics["raster_scene_usable"] = qa_metrics["usable"]
 
     return ASMAESceneCandidate(
         source=source,

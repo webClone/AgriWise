@@ -1,0 +1,85 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "REG-MITIDJA",
+        "name": "Mitidja Plain Agricultural Region",
+        "cropType": "Durum Wheat & Citrus"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [2.60, 36.35],
+            [3.35, 36.35],
+            [3.35, 36.75],
+            [2.60, 36.75],
+            [2.60, 36.35]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "REG-BISKRA",
+        "name": "Biskra Oasis Agriculture Cluster",
+        "cropType": "Phoeniciculture & Early Crops"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [5.40, 34.60],
+            [6.10, 34.60],
+            [6.10, 35.20],
+            [5.40, 35.20],
+            [5.40, 34.60]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "REG-GUELMA",
+        "name": "Guelma Cereal Belt",
+        "cropType": "Durum Wheat & Tomato"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [7.10, 36.25],
+            [7.85, 36.25],
+            [7.85, 36.75],
+            [7.10, 36.75],
+            [7.10, 36.25]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": "REG-CHLEF",
+        "name": "Lower Chelif Plain",
+        "cropType": "Cereals & Forage"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [1.00, 36.00],
+            [1.70, 36.00],
+            [1.70, 36.45],
+            [1.00, 36.45],
+            [1.00, 36.00]
+          ]
+        ]
+      }
+    }
+  ]
+}

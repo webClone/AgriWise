@@ -182,8 +182,17 @@ def build_real_asmae_scene_stack(inp: ASMAEInput) -> SceneStack:
         ext_data = [ext_data]
     ext_scenes = load_external_scenes(ext_data)
 
-    # Merge all scenes
-    all_scenes = s2_scenes + s1_scenes + s5p_scenes + ext_scenes
+    # Merge all scenes and perform Stage 2 deduplication by canonical scene_id
+    raw_scenes = s2_scenes + s1_scenes + s5p_scenes + ext_scenes
+    seen_scene_ids = set()
+    all_scenes = []
+    for scene in raw_scenes:
+        sid = getattr(scene.get("runtime"), "scene_id", None) or scene.get("scene_id")
+        if sid:
+            if sid in seen_scene_ids:
+                continue
+            seen_scene_ids.add(sid)
+        all_scenes.append(scene)
 
     # Quality filter
     included = []

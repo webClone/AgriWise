@@ -1,0 +1,41 @@
+# Source-control and local tooling state
+.git/
+.codex/
+.agents/
+.pytest_cache/
+.test-tmp/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Dependencies and build products
+node_modules/
+.next/
+dist/
+build/
+*.zip
+
+# Local secrets and databases
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.db
+*.sqlite
+*.sqlite3
+
+# Development probes and generated scientific/runtime products
+scratch/
+artifacts/
+services/agribrain/layer0/.state/
+services/agribrain/data/cache/
+services/agribrain/data/chat_memory/
+services/agribrain/data/feedback_learning/
+
+# Logs, coverage, and transient worker metadata
+*.log
+coverage/
+.coverage
+tmp/
+temp/

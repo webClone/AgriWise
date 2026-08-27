@@ -36,6 +36,10 @@ class SceneProduct:
     provider_tile_id: Optional[str] = None
     provider_orbit_id: Optional[str] = None
     provider_orbit_pass: Optional[str] = None
+    provider_relative_orbit: Optional[str] = None
+    provider_absolute_orbit: Optional[str] = None
+    process_metadata: Dict[str, Any] = field(default_factory=dict)
+    catalog_metadata: Dict[str, Any] = field(default_factory=dict)
     content_hash: Optional[str] = None
     process_request_hash: Optional[str] = None
     provider_response_hash: Optional[str] = None
@@ -73,6 +77,10 @@ class SceneProduct:
             "provider_tile_id": self.provider_tile_id,
             "provider_orbit_id": self.provider_orbit_id,
             "provider_orbit_pass": self.provider_orbit_pass,
+            "provider_relative_orbit": self.provider_relative_orbit,
+            "provider_absolute_orbit": self.provider_absolute_orbit,
+            "process_metadata": self.process_metadata,
+            "catalog_metadata": self.catalog_metadata,
             "content_hash": self.content_hash,
             "process_request_hash": self.process_request_hash,
             "provider_response_hash": self.provider_response_hash,

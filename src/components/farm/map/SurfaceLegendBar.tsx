@@ -1,7 +1,11 @@
 "use client";
 
-import type { MapMode } from "@/hooks/useLayer10";
+import type { MapMode, SurfaceData } from "@/hooks/useLayer10";
 import type { EvidenceLevel } from "@/lib/agribrain/plot-map-evidence-state";
+import {
+  resolveCommittedSurfaceLegend,
+  resolveSurfaceDisplayScale,
+} from "@/lib/agribrain/surface-legend-meta.mjs";
 
 
 /**
@@ -203,28 +207,55 @@ function rampColor(meta: typeof MODE_META[MapMode], t: number): string {
 
 interface SurfaceLegendBarProps {
   activeMode: MapMode;
+  surface?: SurfaceData | null;
+  committed?: boolean;
   detailMode?: "farmer" | "expert";
   groundingClass?: string;
   evidenceLevel?: EvidenceLevel;
   coverageRatio?: number | null;
   minVal?: number | null;
   maxVal?: number | null;
+  visualLens?: "standard" | "thermal" | "chlorophyll" | "chroma";
 }
 
 export default function SurfaceLegendBar({
   activeMode,
+  surface = null,
+  committed = true,
   detailMode = "farmer",
   groundingClass = "UNIFORM",
   evidenceLevel,
   coverageRatio = null,
   minVal = null,
   maxVal = null,
+  visualLens = "standard",
 }: SurfaceLegendBarProps) {
-  const meta = MODE_META[activeMode];
-  const stretchLabel =
-    detailMode === "expert"
-      ? "P01–P99 per-field stretch"
-      : "P02–P98 per-field stretch";
+  const baseMeta = resolveCommittedSurfaceLegend(surface, MODE_META[activeMode], visualLens);
+  const displayScale = resolveSurfaceDisplayScale(surface, { activeMode, detailMode });
+  const meta = displayScale.labels
+    ? {
+        ...baseMeta,
+        lowLabel: displayScale.labels[0],
+        midLabel: displayScale.labels[1],
+        highLabel: displayScale.labels[2],
+        stopLabels: ["Lowest in field", "Lower", "Typical", "Higher", "Highest in field"],
+      }
+    : baseMeta;
+  if (!committed) {
+    return (
+      <div className="w-full rounded-lg px-3 py-3 border border-slate-700/30 bg-slate-950/20">
+        <div className="text-[11px] font-bold uppercase tracking-widest text-slate-400">
+          Basemap only
+        </div>
+        <div className="mt-1 text-[9px] text-slate-500">
+          No scientific raster has been committed to this map view.
+        </div>
+      </div>
+    );
+  }
+  const stretchLabel = displayScale.policy === "field_percentile"
+    ? `Relative field display: P${String(Math.round((displayScale.lowPercentile ?? 0) * 100)).padStart(2, "0")}–P${String(Math.round((displayScale.highPercentile ?? 1) * 100)).padStart(2, "0")}`
+    : "Fixed physical display scale";
 
   const gcLabel = evidenceLevel
     ? (EVIDENCE_LEVEL_LABEL[evidenceLevel] ?? "Unknown")
@@ -241,9 +272,11 @@ export default function SurfaceLegendBar({
   const gradient = `linear-gradient(to right, ${meta.lowColor}, ${meta.midColor}, ${meta.highColor})`;
 
   // Display range if available
+  const effectiveMin = minVal ?? displayScale.min ?? null;
+  const effectiveMax = maxVal ?? displayScale.max ?? null;
   const rangeText =
-    minVal !== null && maxVal !== null
-      ? `${minVal.toFixed(3)} – ${maxVal.toFixed(3)}`
+    effectiveMin !== null && effectiveMax !== null
+      ? `${effectiveMin.toFixed(3)} – ${effectiveMax.toFixed(3)}`
       : null;
 
   // Compute discrete stop colors dynamically based on stopLabels length
@@ -325,7 +358,14 @@ export default function SurfaceLegendBar({
         {/* Value range (if computed) */}
         {rangeText && (
           <div className="text-[9px] text-slate-500 text-center mb-0.5">
+            {displayScale.policy === "field_percentile" ? "Display stretch: " : "Display range: "}
             {rangeText} {meta.unit}
+          </div>
+        )}
+
+        {displayScale.policy === "field_percentile" && (
+          <div className="text-[8px] text-slate-600 text-center mb-0.5">
+            Physical contract: {displayScale.declaredMin.toFixed(3)} – {displayScale.declaredMax.toFixed(3)} {meta.unit}
           </div>
         )}
 
@@ -333,6 +373,12 @@ export default function SurfaceLegendBar({
         <div className="text-[8px] italic text-slate-600 text-center">
           {stretchLabel}
         </div>
+
+        {visualLens !== "standard" && (
+          <div className="text-[8px] text-indigo-300 text-center mt-0.5">
+            Color lens: {visualLens} (visualization only)
+          </div>
+        )}
 
         {/* Partial coverage warning */}
         {partial && (

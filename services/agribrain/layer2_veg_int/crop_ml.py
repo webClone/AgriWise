@@ -17,7 +17,8 @@ import math
 import json
 import os
 import logging
-from typing import Dict, List, Optional, Tuple
+import uuid
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from datetime import datetime, timezone
 
 import numpy as np
@@ -689,19 +690,28 @@ _FEEDBACK_DIR = os.path.join(
     ".cache", "crop_feedback"
 )
 
+_FEEDBACK_SCHEMA_VERSION = "crop_feedback_v2"
+_TRUSTED_TRAINING_LABEL_SOURCES = frozenset({
+    "agronomist_confirmed",
+    "official_parcel_label",
+    "field_survey",
+    "lab_ground_truth",
+    "admin_verified",
+})
+_MIN_PRIOR_SAMPLES = 30
+_MIN_PRIOR_PLOTS = 12
+_MIN_PRIOR_FARMS = 5
+_MIN_PRIOR_CYCLES = 12
+_MIN_PRIOR_CROPS = 3
+
 
 class CropFeedbackStore:
-    """Persists user-confirmed crop observations for Bayesian learning.
-    
-    When a user accepts or corrects a crop identification, we store:
-    - The NDVI timeseries and phenological features
-    - The engine's prediction vs. the user's confirmed crop
-    - Location context (lat, lng, climate zone)
-    
-    Over time, this accumulates a regional training dataset that:
-    1. Adjusts per-crop sigma values (uncertainty narrows with more data)
-    2. Updates regional priors (actual crop frequencies in the user's area)
-    3. Learns local NDVI signatures that differ from generic references
+    """Persist feedback as audit data with fail-closed learning eligibility.
+
+    A farmer click is useful product feedback, but is not ground truth.  Prior
+    or sigma learning requires an explicitly validated source and an explicit
+    tenant/region/sensor partition.  No unpartitioned/global learning query is
+    permitted, and repeated confirmations for one plot-cycle count once.
     """
     
     def __init__(self, store_dir: str = None):
@@ -719,12 +729,46 @@ class CropFeedbackStore:
         ndvi_series: List[float] = None,
         lat: float = None,
         lng: float = None,
+        *,
+        tenant_id: Optional[str] = None,
+        farm_id: Optional[str] = None,
+        crop_cycle_id: Optional[str] = None,
+        region_partition: Optional[str] = None,
+        season_partition: Optional[str] = None,
+        sensor_regime: Optional[str] = None,
+        label_source: str = "farmer_confirmation",
+        label_confidence: str = "UNVERIFIED",
+        authority_validated: bool = False,
     ) -> str:
-        """Store a labeled sample when user confirms or corrects a crop."""
+        """Store feedback; only validated authoritative labels may train."""
+        now = datetime.now(timezone.utc)
+        source = str(label_source or "farmer_confirmation").strip().lower()
+        confidence = str(label_confidence or "UNVERIFIED").strip().upper()
+        crop_code = str(confirmed_crop or "").strip().lower()
+        try:
+            from .crop_science_data import CROP_GROUP_MAP
+            valid_crop_code = crop_code in CROP_GROUP_MAP
+        except Exception:
+            valid_crop_code = False
+        partition_complete = all(
+            str(value or "").strip()
+            for value in (
+                tenant_id, farm_id, crop_cycle_id, region_partition,
+                season_partition, sensor_regime,
+            )
+        )
+        learning_eligible = bool(
+            authority_validated
+            and source in _TRUSTED_TRAINING_LABEL_SOURCES
+            and confidence == "HIGH"
+            and valid_crop_code
+            and partition_complete
+        )
         sample = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "schema_version": _FEEDBACK_SCHEMA_VERSION,
+            "timestamp": now.isoformat(),
             "plot_id": plot_id,
-            "confirmed_crop": confirmed_crop,
+            "confirmed_crop": crop_code,
             "engine_prediction": engine_prediction,
             "engine_confidence": engine_confidence,
             "was_correct": confirmed_crop == engine_prediction,
@@ -732,13 +776,27 @@ class CropFeedbackStore:
             "ndvi_series": ndvi_series,
             "lat": lat,
             "lng": lng,
+            "tenant_id": tenant_id,
+            "farm_id": farm_id,
+            "crop_cycle_id": crop_cycle_id,
+            "region_partition": region_partition,
+            "season_partition": season_partition,
+            "sensor_regime": sensor_regime,
+            "label_source": source,
+            "label_confidence": confidence,
+            "authority_validated": bool(authority_validated),
+            "learning_eligible": learning_eligible,
+            "learning_exclusion_reason": (
+                None if learning_eligible
+                else "requires_validated_authority_and_complete_partition"
+            ),
         }
-        
-        # FIX BUG-5: Include HMS to prevent same-day overwrites
-        fname = f"fb_{plot_id}_{confirmed_crop}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+        # User-controlled identifiers never become path components.
+        fname = f"fb_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid.uuid4().hex}.json"
         fpath = os.path.join(self.store_dir, fname)
-        
-        with open(fpath, "w") as f:
+
+        with open(fpath, "w", encoding="utf-8") as f:
             json.dump(sample, f, indent=2, default=str)
         
         self._samples = None  # Invalidate cache
@@ -765,23 +823,105 @@ class CropFeedbackStore:
         
         self._samples = samples
         return samples
-    
-    def compute_learned_priors(self) -> Dict[str, float]:
-        """Compute crop priors from accumulated feedback.
-        
-        Returns P(crop_k) based on observed frequency of confirmed crops.
-        Uses Laplace smoothing to avoid zero probabilities.
-        """
-        samples = self.load_all_samples()
-        if len(samples) < 3:
-            return {}  # Not enough data to learn from
-        
+
+    @staticmethod
+    def _complete_partition(partition: Optional[Mapping[str, Any]]) -> Optional[Dict[str, str]]:
+        raw = dict(partition or {})
+        result = {
+            "tenant_id": str(raw.get("tenant_id") or "").strip(),
+            "region_partition": str(raw.get("region_partition") or "").strip(),
+            "season_partition": str(raw.get("season_partition") or "").strip(),
+            "sensor_regime": str(raw.get("sensor_regime") or "").strip(),
+        }
+        return result if all(result.values()) else None
+
+    def _eligible_partition_samples(
+        self, partition: Optional[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        wanted = self._complete_partition(partition)
+        if wanted is None:
+            return []
+        grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        for raw in self.load_all_samples():
+            if not isinstance(raw, Mapping):
+                continue
+            sample = dict(raw)
+            if sample.get("schema_version") != _FEEDBACK_SCHEMA_VERSION:
+                continue
+            if sample.get("learning_eligible") is not True:
+                continue
+            if sample.get("label_source") not in _TRUSTED_TRAINING_LABEL_SOURCES:
+                continue
+            if sample.get("label_confidence") != "HIGH":
+                continue
+            if any(str(sample.get(key) or "") != value for key, value in wanted.items()):
+                continue
+            plot_id = str(sample.get("plot_id") or "").strip()
+            cycle_id = str(sample.get("crop_cycle_id") or "").strip()
+            farm_id = str(sample.get("farm_id") or "").strip()
+            crop = str(sample.get("confirmed_crop") or "").strip()
+            if not all((plot_id, cycle_id, farm_id, crop)):
+                continue
+            grouped.setdefault((plot_id, cycle_id), []).append(sample)
+
+        deduplicated: List[Dict[str, Any]] = []
+        for samples in grouped.values():
+            # Conflicting authoritative labels are quarantined rather than
+            # resolved by timestamp or majority vote.
+            if len({str(row.get("confirmed_crop")) for row in samples}) != 1:
+                continue
+            deduplicated.append(max(samples, key=lambda row: str(row.get("timestamp") or "")))
+        return deduplicated
+
+    def learning_support(
+        self, partition: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        samples = self._eligible_partition_samples(partition)
+        return {
+            "partition_complete": self._complete_partition(partition) is not None,
+            "eligible_samples": len(samples),
+            "independent_plots": len({str(s.get("plot_id")) for s in samples}),
+            "independent_farms": len({str(s.get("farm_id")) for s in samples}),
+            "independent_cycles": len({str(s.get("crop_cycle_id")) for s in samples}),
+            "crop_classes": len({str(s.get("confirmed_crop")) for s in samples}),
+            "farmer_feedback_is_training_label": False,
+        }
+
+    def compute_learned_priors(
+        self,
+        *,
+        partition: Optional[Mapping[str, Any]] = None,
+        min_samples: int = _MIN_PRIOR_SAMPLES,
+        min_plots: int = _MIN_PRIOR_PLOTS,
+        min_farms: int = _MIN_PRIOR_FARMS,
+        min_cycles: int = _MIN_PRIOR_CYCLES,
+        min_crops: int = _MIN_PRIOR_CROPS,
+        min_samples_per_crop: int = 3,
+    ) -> Dict[str, float]:
+        """Return a partition-local prior only after strong support gates."""
+        samples = self._eligible_partition_samples(partition)
+        support = self.learning_support(partition)
+        if (
+            len(samples) < min_samples
+            or support["independent_plots"] < min_plots
+            or support["independent_farms"] < min_farms
+            or support["independent_cycles"] < min_cycles
+            or support["crop_classes"] < min_crops
+        ):
+            return {}
+
         counts: Dict[str, int] = {}
         for s in samples:
             crop = s.get("confirmed_crop", "")
             if crop:
                 counts[crop] = counts.get(crop, 0) + 1
-        
+        counts = {
+            crop: count for crop, count in counts.items()
+            if count >= min_samples_per_crop
+        }
+        if len(counts) < min_crops:
+            return {}
+
         # Laplace smoothing (add-1)
         total = sum(counts.values()) + len(counts)
         priors = {k: (v + 1) / total for k, v in counts.items()}
@@ -790,14 +930,22 @@ class CropFeedbackStore:
                     f"{len(priors)} crops, top={max(priors, key=priors.get) if priors else '?'}")
         return priors
     
-    def compute_learned_sigmas(self, min_samples: int = 3) -> Dict[str, Dict[str, float]]:
+    def compute_learned_sigmas(
+        self,
+        min_samples: int = 20,
+        *,
+        partition: Optional[Mapping[str, Any]] = None,
+        min_plots: int = 10,
+        min_farms: int = _MIN_PRIOR_FARMS,
+        min_cycles: int = 12,
+    ) -> Dict[str, Dict[str, float]]:
         """Compute per-crop sigma (std deviation) from confirmed observations.
         
         For each crop with enough confirmed samples, compute the empirical
         standard deviation of each phenological metric. This narrows the
         Gaussian likelihood to reflect actual local variability.
         """
-        samples = self.load_all_samples()
+        samples = self._eligible_partition_samples(partition)
         
         # Group by confirmed crop
         by_crop: Dict[str, List[Dict]] = {}
@@ -810,6 +958,16 @@ class CropFeedbackStore:
         learned_sigmas = {}
         for crop, pheno_list in by_crop.items():
             if len(pheno_list) < min_samples:
+                continue
+            crop_samples = [
+                sample for sample in samples
+                if sample.get("confirmed_crop") == crop
+            ]
+            if len({s.get("plot_id") for s in crop_samples}) < min_plots:
+                continue
+            if len({s.get("farm_id") for s in crop_samples}) < min_farms:
+                continue
+            if len({s.get("crop_cycle_id") for s in crop_samples}) < min_cycles:
                 continue
             
             # Compute std dev for each metric
@@ -842,6 +1000,10 @@ class CropFeedbackStore:
             "total": total,
             "correct": correct,
             "accuracy": round(correct / total, 3) if total > 0 else 0,
+            "learning_eligible": sum(
+                1 for s in samples if s.get("learning_eligible") is True
+            ),
+            "farmer_feedback_is_training_label": False,
             "incorrect_crops": [
                 s.get("confirmed_crop") for s in samples if not s.get("was_correct")
             ],

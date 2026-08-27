@@ -13,6 +13,11 @@ from services.agribrain.layer5_bio.schema import BioThreatIntelligenceOutput
 from services.agribrain.layer6_exec.schema import Layer6Output, ExecutionState
 from services.agribrain.layer10_sire.schema import Layer10Output
 
+from services.agribrain.common.plot_namespace import PlotNamespace
+from services.agribrain.common.crop_cycle_context import (
+    CanonicalCropCycleContextV2,
+)
+
 # Enums
 
 class LayerStatus(str, Enum):
@@ -31,24 +36,61 @@ class GlobalDegradation(str, Enum):
 
 # Data Structures
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class OrchestratorInput:
     """
     Frozen input snapshot. EVERYTHING needed to reproduce the run.
     """
-    plot_id: str
-    geometry_hash: str # SHA256 of WKT/GeoJSON
-    date_range: Dict[str, str] # {start, end}
-    
-    # Context
-    crop_config: Dict[str, Any] # Crop type, variety, planting date
-    operational_context: Dict[str, Any] # Equipment, budget, workforce
-    policy_snapshot: Dict[str, Any] # Regulatory rules, quotas
+    plot_namespace: Optional[PlotNamespace] = None
+    geometry_hash: str = "UNKNOWN_GEO"
+    date_range: Dict[str, str] = field(default_factory=lambda: {"start": "", "end": ""})
+    crop_config: Dict[str, Any] = field(default_factory=dict)
+    operational_context: Dict[str, Any] = field(default_factory=dict)
+    policy_snapshot: Dict[str, Any] = field(default_factory=dict)
+    plot_id: str = ""
+    tenant_id: str = ""
+    farm_id: str = ""
     field_geometry: Optional[Dict[str, Any]] = None
     polygon_geojson: Optional[Dict[str, Any]] = None
     evidence_set_hash: Optional[str] = None
     worldline_head_hash: Optional[str] = None
     scene_manifest_hash: Optional[str] = None
+    crop_cycle_context: Optional[CanonicalCropCycleContextV2] = None
+
+    def __post_init__(self):
+        if not self.plot_namespace or not isinstance(self.plot_namespace, PlotNamespace):
+            t_id = str(self.tenant_id or "").strip()
+            f_id = str(self.farm_id or "").strip()
+            p_id = str(self.plot_id or "").strip()
+            if t_id and f_id and p_id:
+                object.__setattr__(self, "plot_namespace", PlotNamespace(
+                    tenant_id=t_id,
+                    farm_id=f_id,
+                    plot_id=p_id,
+                ))
+
+        if not self.plot_namespace or not isinstance(self.plot_namespace, PlotNamespace) or not self.plot_namespace.is_valid():
+            raise ValueError(f"OrchestratorInput requires valid non-empty PlotNamespace: {self.plot_namespace}")
+
+        object.__setattr__(self, "tenant_id", self.plot_namespace.tenant_id)
+        object.__setattr__(self, "farm_id", self.plot_namespace.farm_id)
+        object.__setattr__(self, "plot_id", self.plot_namespace.plot_id)
+
+        cycle_context = self.crop_cycle_context
+        if isinstance(cycle_context, dict):
+            cycle_context = CanonicalCropCycleContextV2.from_mapping(
+                cycle_context
+            )
+            object.__setattr__(self, "crop_cycle_context", cycle_context)
+        if cycle_context is not None:
+            if not isinstance(cycle_context, CanonicalCropCycleContextV2):
+                raise ValueError("crop_cycle_context must use the V2 contract")
+            if cycle_context.plot_namespace != self.plot_namespace:
+                raise ValueError(
+                    "crop_cycle_context namespace must match OrchestratorInput"
+                )
+
+
 
 @dataclass
 class LayerResult:

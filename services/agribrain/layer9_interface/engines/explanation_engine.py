@@ -110,7 +110,11 @@ class ExplanationEngine:
             moisture = sensors.get("soil_moisture", 0)
             rain_7d = sensors.get("rain_mm_last_7d", sensors.get("rain_7d", 0))
             et0 = sensors.get("et0_daily", 4.0)
-            stage = sensors.get("growth_stage", "tillering")
+            stage = (
+                sensors.get("growth_stage", "UNKNOWN")
+                if sensors.get("phenology_receipt_valid") is True
+                else "UNKNOWN"
+            )
 
             rec = get_irrigation_recommendation(crop, moisture, rain_7d, et0, stage)
         except Exception:
@@ -199,7 +203,11 @@ class ExplanationEngine:
             temp = sensors.get("ambient_temperature", sensors.get("temperature", 20))
             humidity = sensors.get("humidity", 60)
             rain_7d = sensors.get("rain_mm_last_7d", sensors.get("rain_7d", 0))
-            stage = sensors.get("growth_stage", "tillering")
+            stage = (
+                sensors.get("growth_stage", "UNKNOWN")
+                if sensors.get("phenology_receipt_valid") is True
+                else "UNKNOWN"
+            )
 
             risks = get_disease_risk(crop, temp, humidity, rain_7d, stage)
         except Exception:

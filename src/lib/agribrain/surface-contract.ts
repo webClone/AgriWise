@@ -1,5 +1,5 @@
-export const SURFACES_SCHEMA_VERSION = "v924_bc10_21r5_publication_authority_v1";
-export const RENDER_AUTHORIZATION_VERSION = "v924_bc10_18_render_auth_v1";
+export const SURFACES_SCHEMA_VERSION = "v925_bc10_24r5_phenology_authority_v2";
+export const RENDER_AUTHORIZATION_VERSION = "v924_bc10_22r5_render_identity_v1";
 
 export const PUBLICATION_STATUS = {
   VALID_NORMAL: "VALID_NORMAL",

@@ -23,7 +23,9 @@ Invariants:
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
+from services.agribrain.layer10_sire.surface_contract import RENDER_AUTHORIZATION_VERSION
 from enum import Enum
+from services.agribrain.common.plot_namespace import PlotNamespace
 
 
 # ============================================================================
@@ -155,6 +157,7 @@ class SurfaceType(str, Enum):
 
     # ASMAE Diagnostic Surfaces (V82)
     ASMAE_EFFECTIVE_RESOLUTION = "ASMAE_EFFECTIVE_RESOLUTION"
+    ASMAE_POSTERIOR_CONCENTRATION = "ASMAE_POSTERIOR_CONCENTRATION"
     ASMAE_CONFIDENCE = "ASMAE_CONFIDENCE"
     ASMAE_UNCERTAINTY = "ASMAE_UNCERTAINTY"
     ASMAE_RETROVALIDATION_SCORE = "ASMAE_RETROVALIDATION_SCORE"
@@ -223,7 +226,7 @@ ASMAE_STATE_SURFACES = {
 
 ASMAE_DIAGNOSTIC_SURFACES = {
     SurfaceType.ASMAE_EFFECTIVE_RESOLUTION,
-    SurfaceType.ASMAE_CONFIDENCE,
+    SurfaceType.ASMAE_POSTERIOR_CONCENTRATION,
     SurfaceType.ASMAE_UNCERTAINTY,
     SurfaceType.ASMAE_RETROVALIDATION_SCORE,
     SurfaceType.ASMAE_BMA_DISAGREEMENT,
@@ -350,6 +353,7 @@ class RenderMode(str, Enum):
     ASMAE_THERMAL_STRESS = "ASMAE_THERMAL_STRESS"
     ASMAE_BIOTIC_CONFOUNDER_RISK = "ASMAE_BIOTIC_CONFOUNDER_RISK"
     ASMAE_EFFECTIVE_RESOLUTION = "ASMAE_EFFECTIVE_RESOLUTION"
+    ASMAE_POSTERIOR_CONCENTRATION = "ASMAE_POSTERIOR_CONCENTRATION"
     ASMAE_CONFIDENCE = "ASMAE_CONFIDENCE"
     ASMAE_UNCERTAINTY = "ASMAE_UNCERTAINTY"
     ASMAE_RETROVALIDATION_SCORE = "ASMAE_RETROVALIDATION_SCORE"
@@ -419,6 +423,7 @@ class SIREDegradation(str, Enum):
     LOW_RESOLUTION = "LOW_RESOLUTION"   # Resolution too coarse for structural detail
     DATA_GAP = "DATA_GAP"               # Insufficient data for reliable surfaces
     DEGRADED = "DEGRADED"               # Post-invariant quality or materialization failure
+    ASMAE_SURFACE_MATERIALIZATION_FAILED = "ASMAE_SURFACE_MATERIALIZATION_FAILED"
 
 
 # ============================================================================
@@ -652,6 +657,16 @@ class RenderManifest:
     show_zone_boundaries: bool = True
 
 
+@dataclass
+class ComponentFailure:
+    code: str
+    component: str
+    stage: str
+    message: str
+    fallback_used: bool = False
+    affected_surface_types: List[str] = field(default_factory=list)
+
+
 # ============================================================================
 # QUALITY & PROVENANCE
 # ============================================================================
@@ -670,6 +685,8 @@ class QualityReport:
     zone_state_by_surface: Dict[str, str] = field(default_factory=dict)
     missing_upstream: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    component_failures: List[ComponentFailure] = field(default_factory=list)
+    degradation_codes: List[str] = field(default_factory=list)
 
 
 # ============================================================================
@@ -778,15 +795,18 @@ class ForecastContext:
 # I/O
 # ============================================================================
 
-@dataclass
+@dataclass(kw_only=True)
 class Layer10Input:
     """
     Unified input to SIRE from L1-L9.
 
-    Required: field_tensor (L1), veg_int (L2)
+    Required: plot_namespace (PlotNamespace), field_tensor (L1), veg_int (L2)
     Optional: everything else - L10 degrades gracefully
     """
-    # Required
+    plot_namespace: Optional[PlotNamespace] = None
+    plot_id: str = ""
+    tenant_id: str = ""
+    farm_id: str = ""
     field_tensor: Any = None                     # FieldTensor from L1
     veg_int: Any = None                          # VegIntOutput from L2
     decision: Optional[Any] = None               # L3 Layer3Output
@@ -797,6 +817,27 @@ class Layer10Input:
     planning: Any = None                         # L7 Layer7Output
     prescriptive: Any = None                     # L8 Layer8Output
     interface: Any = None                        # L9 InterfaceOutput
+
+    def __post_init__(self):
+
+        if not self.plot_namespace or not isinstance(self.plot_namespace, PlotNamespace):
+            t_id = str(self.tenant_id or "").strip()
+            f_id = str(self.farm_id or "").strip()
+            p_id = str(self.plot_id or "").strip()
+            if t_id and f_id and p_id:
+                object.__setattr__(self, "plot_namespace", PlotNamespace(
+                    tenant_id=t_id,
+                    farm_id=f_id,
+                    plot_id=p_id,
+                ))
+
+        if not self.plot_namespace or not isinstance(self.plot_namespace, PlotNamespace) or not self.plot_namespace.is_valid():
+            raise ValueError(f"Layer10Input requires valid non-empty PlotNamespace: {self.plot_namespace}")
+
+        object.__setattr__(self, "tenant_id", self.plot_namespace.tenant_id)
+        object.__setattr__(self, "farm_id", self.plot_namespace.farm_id)
+        object.__setattr__(self, "plot_id", self.plot_namespace.plot_id)
+
 
     # Explicit Geometry Context
     field_geometry: Optional[Dict[str, Any]] = None
@@ -816,7 +857,6 @@ class Layer10Input:
     resolution_m: float = 10.0
     visual_intensity: Optional[float] = 0.40
     user_mode: Optional[str] = "farmer"
-    plot_id: str = ""
     run_id: str = ""
     timestamp: str = ""
     ground_truth_context: Dict[str, Any] = field(default_factory=dict)
@@ -824,6 +864,7 @@ class Layer10Input:
     source_policy: Optional[str] = None
     asmae_proof: Dict[str, Any] = field(default_factory=dict)
     raster_composites: Optional[Dict[str, Any]] = None
+
 
 
 @dataclass
@@ -838,6 +879,7 @@ class Layer10Output:
     request_run_id: str = ""
     publication_id: str = ""
     publication_status: str = "INVALID_PUBLICATION"
+    surface_inventory_hash: str = ""
     surface_schema_version: str = ""
     timestamp: str = ""
     input_run_ids: Optional[Dict[str, Any]] = field(default_factory=dict)
@@ -876,6 +918,9 @@ class Layer10Output:
         detail_conservation_ok=True,
     ))
     provenance: Dict[str, Any] = field(default_factory=dict)
+    # Canonical authority; clients must not consume raw L2 stage_by_day values.
+    resolved_crop_stage: str = "UNKNOWN"
+    phenology_context: Dict[str, Any] = field(default_factory=dict)
 
     # Phase B OS Contracts
     explainability_pack: Dict[str, ExplainabilityPack] = field(default_factory=dict)
@@ -923,5 +968,5 @@ class Layer10Output:
     display_trace: Dict[str, Any] = field(default_factory=dict)
     asmae_proof: Dict[str, Any] = field(default_factory=dict)
     render_authorizations: Dict[str, Any] = field(default_factory=dict)
-    render_authorization_version: str = "v924_bc10_18_render_auth_v1"
+    render_authorization_version: str = RENDER_AUTHORIZATION_VERSION
 

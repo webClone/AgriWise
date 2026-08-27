@@ -69,11 +69,15 @@ export default async function FarmDetailsPage({ params }: { params: Promise<{ id
   const context = await getFarmContext(id);
   if (!context) {
     if (process.env.NODE_ENV === "development" && ObjectId.isValid(id)) {
-      const requestedFarm = await prisma.farm.findUnique({
-        where: { id },
-        select: { id: true },
-      });
-      if (requestedFarm) return <DevelopmentSessionBootstrap farmId={id} />;
+      try {
+        const requestedFarm = await prisma.farm.findUnique({
+          where: { id },
+          select: { id: true },
+        });
+        if (requestedFarm) return <DevelopmentSessionBootstrap farmId={id} />;
+      } catch (dbErr) {
+        console.error("Development bootstrap Prisma query error:", dbErr);
+      }
     }
     notFound();
   }

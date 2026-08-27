@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { useLayer10, type Layer10Result, type ExplainabilityPack, type HistogramData, type DeltaHistogramData, type ZoneData } from "@/hooks/useLayer10";
 import { sanitizeRecommendedAction } from "@/lib/agribrain/plot-map-evidence-state";
 import { getRenderAuthorization, normalizeMode } from "@/lib/agribrain/source-policy-display-resolver";
+import { RENDER_AUTHORIZATION_VERSION } from "@/lib/agribrain/surface-contract";
 
 interface Props {
   data: Layer10Result | null;
@@ -100,7 +101,7 @@ export default function WorkspaceIntelPanel({ data, activeMode, activeSurfaceTyp
   const renderAuth = data
     ? getRenderAuthorization(activeSurfaceType, sourcePolicy, normalizeMode(activeMode), "inspector", data.render_authorizations)
     : null;
-  const diagnosisAuthorized = data?.render_authorization_version === "v924_bc10_18_render_auth_v1" &&
+  const diagnosisAuthorized = data?.render_authorization_version === RENDER_AUTHORIZATION_VERSION &&
     !!renderAuth?.authorized &&
     renderAuth.inspectorAllowed === true;
   const authorizedPack = diagnosisAuthorized ? activePack : undefined;

@@ -86,11 +86,20 @@ def verify_exact_product_binding(
         "is_exact": exact,
         "product_binding": "exact_catalog_item" if exact else "binding_mismatch",
         "provider_tile_id": _first(records, ("tileId", "shId", "dataPath")),
+        "provider_relative_orbit": _first(
+            records, ("relativeOrbitNumber", "sat:relative_orbit"),
+        ),
+        "provider_absolute_orbit": _first(
+            records, ("orbitId", "orbitNumber", "sat:absolute_orbit"),
+        ),
         "provider_orbit_id": _first(
             records, ("orbitId", "relativeOrbitNumber", "orbitNumber"),
         ),
         "provider_orbit_pass": _first(
             records, ("orbitDirection", "orbitPass", "sat:orbit_state"),
+        ),
+        "process_metadata": (
+            dict(userdata) if isinstance(userdata, dict) else {}
         ),
         "proof": proof,
     }

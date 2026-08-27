@@ -37,6 +37,15 @@ def _selected_consensus_value(variables: Any, *names: str) -> Any:
     return None
 
 
+def _weather_record_value(daily: Any, variables: Any, *names: str) -> Any:
+    """Read flat replay records as well as native consensus structures."""
+    if isinstance(daily, dict):
+        for name in names:
+            if daily.get(name) is not None:
+                return daily[name]
+    return _selected_consensus_value(variables, *names)
+
+
 def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket]) -> List[Dict[str, Any]]:
     """Freeze weather consensus into an evidence-addressed transport contract."""
     packet_ids: Dict[tuple, str] = {}
@@ -82,13 +91,13 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
                 "authority": "process_forcing_only",
                 "state_update_allowed": False,
                 "overall_confidence": confidence,
-                "temp_min_c": _selected_consensus_value(variables, "temp_min", "tmin_c", "temperature_2m_min"),
-                "temp_max_c": _selected_consensus_value(variables, "temp_max", "tmax_c", "temperature_2m_max"),
-                "temp_mean_c": _selected_consensus_value(variables, "temp_mean", "tmean_c"),
-                "precipitation_mm": _selected_consensus_value(variables, "precipitation_sum", "precipitation_sum_mm", "precipitation"),
-                "et0_mm": _selected_consensus_value(variables, "et0_mm", "et0_sum_mm", "reference_et0_mm"),
-                "humidity_mean_pct": _selected_consensus_value(variables, "relative_humidity_mean", "relative_humidity_mean_pct", "humidity_mean_pct"),
-                "wind_speed_m_s": _selected_consensus_value(variables, "wind_speed_max", "wind_speed_mean_10m_ms", "wind_speed_10m_max"),
+                "temp_min_c": _weather_record_value(daily, variables, "temp_min", "temp_min_c", "tmin_c", "temperature_2m_min"),
+                "temp_max_c": _weather_record_value(daily, variables, "temp_max", "temp_max_c", "tmax_c", "temperature_2m_max"),
+                "temp_mean_c": _weather_record_value(daily, variables, "temp_mean", "temp_mean_c", "tmean_c"),
+                "precipitation_mm": _weather_record_value(daily, variables, "precipitation", "precipitation_mm", "precipitation_sum", "precipitation_sum_mm"),
+                "et0_mm": _weather_record_value(daily, variables, "et0", "et0_mm", "et0_sum_mm", "reference_et0_mm"),
+                "humidity_mean_pct": _weather_record_value(daily, variables, "humidity", "humidity_mean_pct", "relative_humidity_mean", "relative_humidity_mean_pct"),
+                "wind_speed_m_s": _weather_record_value(daily, variables, "wind_speed", "wind_speed_m_s", "wind_speed_max", "wind_speed_mean_10m_ms", "wind_speed_10m_max"),
             }
             if not record["evidence_id"]:
                 identity = json.dumps(record, sort_keys=True, default=str)
@@ -391,7 +400,12 @@ def wrap_sentinel1(
         for pkt in (s1_package.packets or [])
     ]
 
-    existing_prov = s1_package.provenance if isinstance(s1_package.provenance, dict) else {}
+    package_provenance = getattr(s1_package, "provenance", None)
+    if not isinstance(package_provenance, dict):
+        package_provenance = getattr(s1_package, "provenance_report", None)
+    existing_prov = (
+        package_provenance if isinstance(package_provenance, dict) else {}
+    )
     has_raster_data = bool(getattr(s1_package, "local_cache_refs", {}) or getattr(s1_package, "band_arrays", None))
     source_reality = getattr(s1_package, "source_reality", None)
     if not source_reality:

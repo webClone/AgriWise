@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { usePlotIntelligence } from "@/hooks/usePlotIntelligence";
+import { useLayer10 } from "@/hooks/useLayer10";
 
 interface RawTelemetryHubProps {
   plotId: string;
@@ -10,6 +11,7 @@ interface RawTelemetryHubProps {
 
 export default function RawTelemetryHub({ plotId, farmId }: RawTelemetryHubProps) {
   const pi = usePlotIntelligence();
+  const l10 = useLayer10();
   const data = pi?.data;
   
   useEffect(() => {
@@ -42,7 +44,7 @@ export default function RawTelemetryHub({ plotId, farmId }: RawTelemetryHubProps
   const soilRaw      = raw.soilgrids_raw || {};
   const waterRaw     = raw.water_balance_raw || {};
   const histWeather  = raw.historical_weather || {};
-  const cropPheno    = data.cropPhenology;
+  const canonicalPhenology = l10.evidenceState.resolvedPhenology;
 
   // Sources active badge
   const sourcesActive = [
@@ -66,7 +68,7 @@ export default function RawTelemetryHub({ plotId, farmId }: RawTelemetryHubProps
     { id: "soil",     label: "Soil (ISRIC/SoilGrids)",   icon: "🌱", count: Object.keys(soilRaw).length },
     { id: "eo",       label: "Earth Observation",        icon: "🛰️", count: Object.keys(s2Raw).length + Object.keys(s1Raw).length },
     { id: "water",    label: "Water Balance",            icon: "💧", count: Object.keys(waterRaw).length },
-    { id: "phenology",label: "Phenology & GDD",          icon: "🌾", count: cropPheno ? 1 : 0 },
+    { id: "phenology",label: "Phenology",                icon: "🌾", count: canonicalPhenology.receiptValid ? 1 : 0 },
     { id: "sensors",  label: "Field Sensors (IoT)",      icon: "📡", count: data.sensorContext?.count || 0 },
   ];
 
@@ -310,14 +312,14 @@ export default function RawTelemetryHub({ plotId, farmId }: RawTelemetryHubProps
             <div className="space-y-6 animate-fade-in">
               <SectionHeader title="Crop Growth Stage" badge="Phenology Engine" />
               <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-                <DataCard label="Stage" value={renderValue(cropPheno?.stage)} source="Calendar / NDVI" />
-                <DataCard label="Days After Planting" value={renderValue(cropPheno?.dap, " days")} source="Plant Date" />
-                <DataCard label="Plant Date" value={renderValue(cropPheno?.plant_date)} source="User Input" />
-                <DataCard label="Stage Basis" value={renderValue(cropPheno?.basis)} source="Determination Method" />
+                <DataCard label="Stage" value={renderValue(canonicalPhenology.stage || "UNKNOWN")} source="Layer 2 canonical receipt" />
+                <DataCard label="Authority" value={renderValue(canonicalPhenology.authority)} source="Layer 2" />
+                <DataCard label="Receipt Hash" value={renderValue(canonicalPhenology.posteriorHash ? canonicalPhenology.posteriorHash.slice(0, 16) : null)} source="Content-addressed publication" />
+                <DataCard label="Confidence" value={renderValue(canonicalPhenology.stage ? canonicalPhenology.confidence : null)} source="Canonical posterior" />
               </div>
-              {!cropPheno && (
+              {!canonicalPhenology.stage && (
                 <div className="bg-slate-800/40 border border-white/5 rounded-xl p-4 text-xs text-slate-500">
-                  No phenology data available. Set a plant date in Crop Cycle settings to enable DAP-based growth stage tracking.
+                  Growth stage is UNKNOWN. {canonicalPhenology.userLabel}
                 </div>
               )}
             </div>

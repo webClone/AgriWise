@@ -83,6 +83,30 @@ export default function RawDataSidebar() {
   const modeConfig = MODE_CONFIG[activeMode];
   // Use hook's resolved surface type (handles veg_attention → NDVI_DEVIATION | BASELINE_ANOMALY)
   const surfaceType = l10.activeSurfaceType;
+  const committedBase = l10.browserRenderReceipt?.viewIdentity === l10.renderPlan.viewIdentity
+    ? l10.browserRenderReceipt.baseMaterialization
+    : null;
+  const committedOverlay = l10.browserRenderReceipt?.viewIdentity === l10.renderPlan.viewIdentity
+    ? l10.browserRenderReceipt.overlayMaterialization
+    : null;
+  const activeBaseCommitted = committedBase?.status === "rendered"
+    && committedBase.surfaceType === surfaceType
+    && !!l10.data?.publication_id
+    && committedBase.receipt?.publicationId === l10.data.publication_id;
+  const activeOverlayCommitted = committedOverlay?.status === "rendered"
+    && !!l10.data?.publication_id
+    && committedOverlay.receipt?.publicationId === l10.data.publication_id;
+  const committedHybridOverlays = (
+    l10.browserRenderReceipt?.viewIdentity === l10.renderPlan.viewIdentity
+      ? (l10.browserRenderReceipt.hybridOverlayMaterializations || [])
+      : []
+  ).filter((item) => item.status === "rendered"
+    && !!l10.data?.publication_id
+    && item.receipt?.publicationId === l10.data.publication_id);
+  const committedHybridLabels = [
+    ...(activeOverlayCommitted ? ["experimental detail"] : []),
+    ...committedHybridOverlays.map((item) => item.surfaceType.replace(/_/g, " ").toLowerCase()),
+  ];
 
   const explainPack = l10.data?.explainability_pack?.[surfaceType];
   // ─────────────────────────────────────────────────────────────────────────
@@ -185,8 +209,20 @@ export default function RawDataSidebar() {
         {/* ASMAE plot state is a card-only product, independent of maps. */}
         {l10.data?.source_policy_display_state?.asmaePlotState?.available && (() => {
           const plotState = l10.data.source_policy_display_state.asmaePlotState;
-          const supported = Array.isArray(plotState.supportedStates)
-            ? plotState.supportedStates
+          const directlyAssimilated = Array.isArray(plotState.directlyAssimilatedStates)
+            ? plotState.directlyAssimilatedStates
+            : [];
+          const proxyAssimilated = Array.isArray(plotState.proxyAssimilatedStates)
+            ? plotState.proxyAssimilatedStates
+            : [];
+          const assimilated = Array.isArray(plotState.assimilatedStates)
+            ? plotState.assimilatedStates
+            : [];
+          const indirect = Array.isArray(plotState.indirectlyConstrainedStates)
+            ? plotState.indirectlyConstrainedStates
+            : [];
+          const priorOnly = Array.isArray(plotState.priorConstrainedStates)
+            ? plotState.priorConstrainedStates
             : [];
           return (
             <div style={{
@@ -222,13 +258,22 @@ export default function RawDataSidebar() {
                 </div>
               )}
               <div style={{ color: "#94a3b8", marginTop: "3px" }}>
-                {plotState.spatialAvailable
+                {plotState.spatialAvailable && activeBaseCommitted
                   ? (l10.activeSurfaceType && (l10.activeSurfaceType.startsWith("CANOPY_ASMAE") || l10.activeSurfaceType.includes("ASMAE") || l10.activeSurfaceType.startsWith("COMPOSITE_"))
                       ? "ASMAE diagnostic state active. Raster visualization active (10m diagnostic basis)."
                       : "ASMAE diagnostic state available. Raster visualization active.")
                   : "ASMAE diagnostic state available. Raster visualization unavailable (materialization pending)."}
-                {supported.length > 0
-                  ? " Supported: " + supported.slice(0, 5).join(", ") + "."
+                {directlyAssimilated.length > 0
+                  ? " Directly assimilated: " + directlyAssimilated.slice(0, 5).join(", ") + "."
+                  : (assimilated.length > 0 ? " Assimilated: " + assimilated.slice(0, 5).join(", ") + "." : "")}
+                {proxyAssimilated.length > 0
+                  ? " Proxy-assimilated: " + proxyAssimilated.slice(0, 5).join(", ") + (proxyAssimilated.length > 5 ? ` +${proxyAssimilated.length - 5}` : "") + "."
+                  : ""}
+                {indirect.length > 0
+                  ? " Indirect: " + indirect.slice(0, 5).join(", ") + "."
+                  : ""}
+                {priorOnly.length > 0
+                  ? " Prior only: " + priorOnly.slice(0, 5).join(", ") + (priorOnly.length > 5 ? ` +${priorOnly.length - 5}` : "") + "."
                   : ""}
               </div>
             </div>
@@ -269,7 +314,7 @@ export default function RawDataSidebar() {
           </div>
         )}
 
-        {l10.bannerState === "composite_advisory_active" && (
+        {l10.bannerState === "composite_advisory_active" && activeBaseCommitted && (
           <div style={{
             marginBottom: "12px",
             padding: "10px 12px",
@@ -288,7 +333,8 @@ export default function RawDataSidebar() {
           </div>
         )}
 
-        {(l10.bannerState === "hybrid_active" || l10.bannerState === "asmae_diagnostic_active") && (
+        {((l10.bannerState === "hybrid_active" && committedHybridLabels.length > 0)
+          || (l10.bannerState === "asmae_diagnostic_active" && activeBaseCommitted)) && (
           <div style={{
             marginBottom: "12px",
             padding: "10px 12px",
@@ -301,8 +347,11 @@ export default function RawDataSidebar() {
             boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
           }}>
             <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
-              <span>✅</span> {l10.bannerState === "hybrid_active" ? "Hybrid Mode Active" : "ASMAE Diagnostic Active"}
+              <span>✅</span> {l10.bannerState === "hybrid_active" ? "Hybrid Overlays Committed" : "ASMAE Diagnostic Active"}
             </div>
+            {l10.bannerState === "hybrid_active" && (
+              <div style={{ marginBottom: "4px" }}>{committedHybridLabels.join(", ")}</div>
+            )}
             {(() => {
               const oneMeterPct = l10.data?.source_policy_display_state?.one_meter_advisory_coverage_pct;
               if (typeof oneMeterPct === "number") {
@@ -403,12 +452,12 @@ export default function RawDataSidebar() {
           {l10.activeDisplay?.groundingDetail ? " " + l10.activeDisplay.groundingDetail : ""}
         </span>
         <span style={{
-          color: l10.activeSourceLabel === "ASMAE ADVISORY"
+          color: l10.activeSourceLabel.includes("EXPERIMENTAL")
+            ? "#f59e0b"
+            : l10.activeSourceLabel === "ASMAE ADVISORY"
             ? "#22c55e"
             : l10.activeSourceLabel === "ASMAE FUSION"
             ? "#10b981"
-            : l10.activeSourceLabel === "EXPERIMENTAL"
-            ? "#f59e0b"
             : "#3b82f6",
           fontWeight: 700,
         }}>

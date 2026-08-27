@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
@@ -57,6 +57,7 @@ STRESS_TYPES = (
     "PHOTOSYNTHETIC_SHUTDOWN",
     "MECHANICAL",
     "SALINITY",           # v3.2: Allbed & Kumar (2013)
+    "UNRESOLVED",         # v4.0: Epistemic background hypothesis for unexplained decline
     "UNKNOWN",
 )
 
@@ -88,9 +89,10 @@ class StressEvidence:
     # V91.2: Real upstream evidence the curve was fitted from (audit trail only)
     lineage_source_evidence_ids: List[str] = field(default_factory=list)
     explanation_basis: List[str] = field(default_factory=list)
-
-    # Inherited quality
     data_health_at_attribution: float = 0.0
+
+    # Diagnostic-only flag: when True, this stress was detected from an anomaly
+    # without independent corroborating evidence.
     diagnostic_only: bool = False
 
     # Temporal
@@ -104,7 +106,106 @@ class StressEvidence:
     compound_synergy_factor: float = 1.0  # 1.0 = no synergy, >1.0 = supra-additive
     compound_partner: str = ""            # Stress type that causes synergy
 
+    # v4.0: Explicit physical vs biological vs epistemic separation
+    stress_magnitude: float = 0.0                  # S_k: Physical stress deficit metric [0.0, 1.0] (frozen upon detection)
+    biological_impact: float = 0.0                 # Backwards compatibility alias for normalized_impact
+    raw_biological_impact: float = 0.0             # Raw unclipped impact score (I_raw = S_k * s_k * beta)
+    normalized_impact: float = 0.0                 # min(1.0, raw_impact) bounded [0.0, 1.0] index
+    damage_probability: float = 0.0                # Sigmoid-mapped damage probability P(damage) in [0.0, 1.0]
+    impact_uncertainty: Optional[float] = None     # Propagated biological uncertainty
+    impact_authority: str = "TRANSFERRED"          # CALIBRATED | TRANSFERRED | PRIOR_ONLY | UNAVAILABLE
+    hypothesis_posterior: Optional[float] = None  # P(H_k | E): Diagnostic support from evidence [0.0, 1.0]
+    posterior_status: str = "NOT_COMPUTED"         # "COMPUTED" | "NOT_COMPUTED"
+    magnitude_uncertainty: Optional[float] = None  # Propagated physical uncertainty
+    display_priority: float = 0.0                  # UI ranking & triage priority score [0.0, 1.0]
+    display_severity: float = 0.0                  # UI display severity (deprecated alias for biological_impact)
+
+    # Note on `severity`: Retained as a backwards-compatibility alias for `biological_impact`.
+    # Downstream consumers should migrate to `stress_magnitude` for physical deficit (e.g. irrigation)
+    # or `biological_impact` for yield/damage consequence.
+
     flags: List[str] = field(default_factory=list)
+
+
+class StressEvidenceFactory:
+    """Canonical factory for constructing mathematically verified StressEvidence instances.
+
+    Prevents bypassing uncertainty budgets, diagnostic posteriors, and authority gating.
+    """
+    @staticmethod
+    def create(
+        stress_id: str,
+        stress_type: str,
+        severity: float,
+        confidence: float,
+        uncertainty: float,
+        magnitude_uncertainty: Optional[float] = None,
+        spatial_scope: str = "plot",
+        scope_id: Optional[str] = None,
+        primary_driver: str = "",
+        contributing_evidence_ids: Optional[List[str]] = None,
+        derived_artifact_ids: Optional[List[str]] = None,
+        lineage_source_evidence_ids: Optional[List[str]] = None,
+        explanation_basis: Optional[List[str]] = None,
+        data_health_at_attribution: float = 0.0,
+        diagnostic_only: bool = False,
+        observed_at: Optional[datetime] = None,
+        persistence_class: str = "",
+        persistence_ewma: float = 0.0,
+        compound_synergy_factor: float = 1.0,
+        compound_partner: str = "",
+        stress_magnitude: Optional[float] = None,
+        raw_biological_impact: Optional[float] = None,
+        normalized_impact: Optional[float] = None,
+        biological_impact: Optional[float] = None,
+        damage_probability: float = 0.0,
+        impact_uncertainty: Optional[float] = None,
+        impact_authority: str = "TRANSFERRED",
+        hypothesis_posterior: Optional[float] = None,
+        posterior_status: str = "NOT_COMPUTED",
+        display_priority: float = 0.0,
+        display_severity: float = 0.0,
+        flags: Optional[List[str]] = None,
+    ) -> StressEvidence:
+        mag = stress_magnitude if stress_magnitude is not None else severity
+        raw_imp = raw_biological_impact if raw_biological_impact is not None else (biological_impact if biological_impact is not None else mag)
+        norm_imp = normalized_impact if normalized_impact is not None else (biological_impact if biological_impact is not None else min(1.0, raw_imp))
+        mag_unc = magnitude_uncertainty if magnitude_uncertainty is not None else uncertainty
+
+        return StressEvidence(
+            stress_id=stress_id,
+            stress_type=stress_type.upper(),
+            severity=round(norm_imp, 3),
+            confidence=round(confidence, 3),
+            uncertainty=round(uncertainty, 4),
+            spatial_scope=spatial_scope,
+            scope_id=scope_id,
+            primary_driver=primary_driver,
+            contributing_evidence_ids=contributing_evidence_ids or [],
+            derived_artifact_ids=derived_artifact_ids or [],
+            lineage_source_evidence_ids=lineage_source_evidence_ids or [],
+            explanation_basis=explanation_basis or [],
+            data_health_at_attribution=data_health_at_attribution,
+            diagnostic_only=diagnostic_only,
+            observed_at=observed_at,
+            persistence_class=persistence_class,
+            persistence_ewma=persistence_ewma,
+            compound_synergy_factor=compound_synergy_factor,
+            compound_partner=compound_partner,
+            stress_magnitude=round(mag, 3),
+            biological_impact=round(norm_imp, 3),
+            raw_biological_impact=round(raw_imp, 3),
+            normalized_impact=round(norm_imp, 3),
+            damage_probability=round(damage_probability, 3),
+            impact_uncertainty=round(impact_uncertainty, 4) if impact_uncertainty is not None else None,
+            impact_authority=impact_authority,
+            hypothesis_posterior=round(hypothesis_posterior, 3) if hypothesis_posterior is not None else None,
+            posterior_status=posterior_status,
+            magnitude_uncertainty=round(mag_unc, 4),
+            display_priority=round(display_priority or (norm_imp * max(0.2, confidence)), 3),
+            display_severity=round(display_severity or norm_imp, 3),
+            flags=flags or [],
+        )
 
 
 @dataclass
@@ -174,6 +275,9 @@ class Layer2Provenance:
     zone_count: int = 0
 
     invariant_violations: List[Dict[str, Any]] = field(default_factory=list)
+    crop_posterior_lineage: Optional[str] = None
+    crop_lineage_id: Optional[str] = None
+    phenology_posterior_hash: Optional[str] = None
     generated_at: Optional[datetime] = None
 
 
@@ -270,6 +374,8 @@ class Layer2Output:
 @dataclass
 class Layer2CompositeOutput(Layer2Output):
     veg_temporal: Optional[Any] = None
+    belief_id: str = ""
+    scientific_state_envelope: Optional[Any] = None
 
     # compatibility aliases
     curve: Any = None
@@ -289,6 +395,23 @@ class Layer2CompositeOutput(Layer2Output):
         kwargs = {}
         for f in fields(Layer2Output):
             kwargs[f.name] = getattr(canonical, f.name)
+
+        veg_provenance = getattr(veg_temporal, "provenance", None)
+        veg_provenance = (
+            veg_provenance if isinstance(veg_provenance, dict) else {}
+        )
+        canonical_provenance = kwargs.get("provenance")
+        if isinstance(canonical_provenance, Layer2Provenance):
+            kwargs["provenance"] = replace(
+                canonical_provenance,
+                crop_posterior_lineage=veg_provenance.get(
+                    "crop_posterior_lineage"
+                ),
+                crop_lineage_id=veg_provenance.get("crop_lineage_id"),
+                phenology_posterior_hash=veg_provenance.get(
+                    "phenology_posterior_hash"
+                ),
+            )
 
         # Pull alias values from veg_temporal if it exists
         curve = getattr(veg_temporal, "curve", None)

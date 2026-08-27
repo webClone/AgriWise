@@ -44,7 +44,9 @@ _PERSONA_PROMPTS = {
     ),
     ExpertiseLevel.AGRONOMIST: (
         "You are AgriBrain, a peer agronomist. "
-        "Use full scientific vocabulary, reference BBCH stages, absorption coefficients, "
+        "Use full scientific vocabulary and absorption coefficients. Reference a current "
+        "growth stage only when a validated Layer-2 phenology receipt is present; otherwise "
+        "say UNKNOWN and do not infer it from DAP, GDD, NDVI, or CropStatus. "
         "and confidence intervals. Provide evidence chains from the data layers."
     ),
     ExpertiseLevel.RESEARCHER: (
@@ -560,10 +562,19 @@ Please regenerate the output. Ensure it is a SINGLE, valid JSON object containin
             parts.append(f"Priority intervention: {atype} (score={priority:.2f}).")
 
         # Add cross-layer biophysical summaries
-        if l9_input.l2_vegetation_data and l9_input.l2_vegetation_data.get("stage"):
-            stage = l9_input.l2_vegetation_data.get("stage")
-            bbch = l9_input.l2_vegetation_data.get("bbch")
-            parts.append(f"Phenology: {stage} (BBCH {bbch}).")
+        if l9_input.l2_vegetation_data:
+            phenology = l9_input.l2_vegetation_data
+            if phenology.get("phenology_receipt_valid") is True and phenology.get("stage") != "UNKNOWN":
+                parts.append(
+                    f"Layer-2 canonical phenology: {phenology.get('stage')} "
+                    f"({phenology.get('phenology_authority')} authority; receipt "
+                    f"{str(phenology.get('phenology_posterior_hash') or '')[:12]})."
+                )
+            else:
+                parts.append(
+                    "Phenology: UNKNOWN — "
+                    f"{phenology.get('phenology_evidence_needed_reason', 'canonical Layer-2 receipt required')}."
+                )
 
         if l9_input.l6_execution_data:
             leach = l9_input.l6_execution_data.get("nitrogen_leaching_fraction", 0.0)

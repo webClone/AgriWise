@@ -30,6 +30,19 @@ from pathlib import Path
 # V922.2A: Hard-forbidden paths that MUST NEVER appear in any export
 _HARD_FORBIDDEN_PATHS = [
     "services/agribrain/services/agribrain/",
+    "services/agribrain/artifacts/",
+    "services/agribrain/layer0/.state/",
+    "services/agribrain/data/cache/",
+    "services/agribrain/data/chat_memory/",
+    "services/agribrain/data/feedback_learning/",
+]
+
+# Release evidence declared by package.json must be reproducible from every
+# review archive. Missing tests are a release-integrity failure, not an
+# optional packaging choice.
+_REQUIRED_RELEASE_PATHS = [
+    "package.json",
+    "tests/frontend/layer10-request-state.test.mjs",
 ]
 
 
@@ -99,13 +112,22 @@ def create_clean_archive(root: Path, output_path: Path, max_size_mb: float = 50.
 
     Returns summary dict with counts.
     """
+    missing_required = [path for path in _REQUIRED_RELEASE_PATHS if not (root / path).is_file()]
+    if missing_required:
+        raise FileNotFoundError(
+            "release archive inputs missing: " + ", ".join(missing_required)
+        )
+
     patterns = load_exportignore(root)
     if not patterns:
         print("WARNING: No .exportignore found, using defaults")
         patterns = [".env", ".env.*", "*.pem", "*.key",
                      "__pycache__/", "*.pyc", ".pytest_cache/",
                      "*.egg-info/", "node_modules/", ".next/", "*.zip",
-                     "artifacts/", ".git/"]
+                     "artifacts/", ".state/", ".test-tmp/", "scratch/",
+                     "services/agribrain/data/cache/",
+                     "services/agribrain/data/chat_memory/",
+                     "services/agribrain/data/feedback_learning/", ".git/"]
 
     included = []
     excluded = []
@@ -169,9 +191,13 @@ def verify_archive(archive_path: Path, patterns: list) -> list:
     """
     violations = []
     with zipfile.ZipFile(archive_path, "r") as zf:
-        for name in zf.namelist():
+        normalized_names = {name.replace("\\", "/").lstrip("./") for name in zf.namelist()}
+        for name in normalized_names:
             if should_exclude(name, patterns):
                 violations.append(name)
+        for required in _REQUIRED_RELEASE_PATHS:
+            if required not in normalized_names:
+                violations.append(f"MISSING_REQUIRED:{required}")
     return violations
 
 
@@ -187,6 +213,9 @@ def verify_directory(dir_path: Path, patterns: list) -> list:
             rel_path = os.path.relpath(full_path, dir_path)
             if should_exclude(rel_path, patterns):
                 violations.append(rel_path)
+    for required in _REQUIRED_RELEASE_PATHS:
+        if not (dir_path / required).is_file():
+            violations.append(f"MISSING_REQUIRED:{required}")
     return violations
 
 

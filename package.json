@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:frontend": "node --test tests/frontend/layer10-request-state.test.mjs",
+    "test:frontend": "node --test tests/frontend/layer10-request-state.test.mjs tests/frontend/crop-cycle-context.test.mjs tests/frontend/crop-runtime-declaration.test.mjs",
+    "validate:r2-world": "npx tsx src/components/experience/world/validation.ts",
     "api": "py -m uvicorn services.agribrain.app.main:app --port 8000 --reload"
   },
   "dependencies": {
@@ -57,6 +58,7 @@
     "eslint-config-next": "16.1.4",
     "prisma": "^6.19.2",
     "tailwindcss": "^4",
+    "tsx": "^4.19.3",
     "typescript": "^5"
   }
 }

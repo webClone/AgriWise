@@ -65,7 +65,13 @@ class SceneQualityResult:
         )
         self.overall = round(max(0.0, min(1.0, self.overall)), 4)
 
-        if self.overall < SCENE_QUALITY_THRESHOLD:
+        if self.clear_pixel_fraction < 0.05 or self.valid_polygon_coverage < 0.05:
+            self.included = False
+            self.exclusion_reason = (
+                f"Zero valid scientific support (clear_fraction={self.clear_pixel_fraction:.3f}, "
+                f"polygon_coverage={self.valid_polygon_coverage:.3f})"
+            )
+        elif self.overall < SCENE_QUALITY_THRESHOLD:
             self.included = False
             self.exclusion_reason = (
                 f"Quality {self.overall:.3f} below threshold "

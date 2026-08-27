@@ -127,7 +127,9 @@ class PhotosynthesisNUEEngine:
         total_n_available = n_applied_kg_ha + soil_n_supply_kg_ha
         # Plant N = total available × recovery efficiency (~0.6)
         plant_n_kg_ha = total_n_available * 0.60
-        actual_n_pct = (plant_n_kg_ha / max(0.1, biomass * 10)) * 100 if biomass > 0 else 0
+        # biomass is t/ha.  Converting to kg/ha and then to percent gives
+        # plant_N / (biomass * 1000) * 100 == plant_N / (biomass * 10).
+        actual_n_pct = plant_n_kg_ha / max(0.1, biomass * 10) if biomass > 0 else 0
 
         # 4. N Nutrition Index
         nni = actual_n_pct / max(0.1, critical_n)
@@ -157,7 +159,7 @@ class PhotosynthesisNUEEngine:
         # 9. Optimal N rate
         if nni < 1.0 and biomass > 0:
             n_deficit_pct = critical_n - actual_n_pct
-            n_needed_kg_ha = (n_deficit_pct / 100) * biomass * 10000 / 0.60
+            n_needed_kg_ha = n_deficit_pct * biomass * 10.0 / 0.60
             optimal_n = max(0, n_needed_kg_ha - n_applied_kg_ha)
         else:
             optimal_n = 0.0

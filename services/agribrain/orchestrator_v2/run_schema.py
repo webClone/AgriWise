@@ -10,6 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 from services.agribrain.orchestrator_v2.schema import RunArtifact, LayerStatus
+from services.agribrain.scientific_contracts.prescription_authorization import (
+    AuthorizedActionV1,
+    PrescriptionAuthorizationEnvelopeV1,
+    canonical_hash,
+    selected_entries_exist,
+)
+from services.agribrain.scientific_contracts.exceptions import ContractViolation
 from layer9_interface.fallback_actions import build_fallback_guidance_map
 
 
@@ -98,19 +105,37 @@ def artifact_to_run(artifact: RunArtifact,
         "confidence_ceiling": _extract_l1_confidence_ceiling(artifact),
     }
 
+    # ---- Authorized L8 boundary ----
+    # Validate once, then use the same exact envelope for both recommendations
+    # and execution-plan visibility.  L3--L5 action-shaped fields are shadow
+    # evidence and must never be reconstructed here.
+    authorization, authorization_error = _validated_authorization(artifact)
+    safe_layer10_detail = (
+        layer10_detail or {}
+        if authorization is not None
+        else _redact_unauthorized_action_content(layer10_detail or {})
+    )
+    safe_surfaces = (
+        surfaces or []
+        if authorization is not None
+        else _redact_unauthorized_action_content(surfaces or [])
+    )
+
     # ---- Unified Plan ----
     plan = {"tasks": []}
-    if artifact.final_execution_plan:
+    if authorization is not None and artifact.final_execution_plan:
         try:
             plan = _serialize_plan(artifact.final_execution_plan)
         except Exception:
             plan = {"tasks": [], "error": "plan_serialization_failed"}
 
-    # ---- Recommendations (from L6/L7) ----
-    recommendations = _extract_recommendations(artifact)
+    # ---- Recommendations (only from the verified L8 authorization envelope) ----
+    recommendations = _extract_recommendations(artifact, authorization)
 
     # ---- Explanations (from chat adapter or ARF) ----
     explanations = chat_payload or {}
+    if authorization is None:
+        explanations = _diagnostic_only_explanations(explanations)
 
     # ---- Provenance Summary ----
     provenance = _build_provenance(layer_summaries)
@@ -143,15 +168,25 @@ def artifact_to_run(artifact: RunArtifact,
         "pipeline_mode": _pipeline_mode,
         "fallback_used": _fb,
         "fallback_reason": _fb_reason,
+        "prescription_authorization": {
+            "status": "AUTHORIZED" if authorization is not None else "BLOCKED",
+            "envelope_hash": authorization.content_hash if authorization else None,
+            "reason": authorization_error,
+        },
     }
 
     # ---- Layer 9 Interface Output ----
     l9_output = {}
-    if artifact.layer_9 and artifact.layer_9.output:
+    if authorization is not None and artifact.layer_9 and artifact.layer_9.output:
         l9_output = _serialize_layer9_output(artifact.layer_9.output)
+    elif artifact.layer_9 and artifact.layer_9.output:
+        l9_output = {
+            "prescription_status": "BLOCKED",
+            "reason": authorization_error,
+        }
 
     # ---- Fallback Guidance ----
-    zone_states = layer10_detail.get("quality", {}).get("zone_state_by_surface", {}) if layer10_detail else {}
+    zone_states = safe_layer10_detail.get("quality", {}).get("zone_state_by_surface", {})
     # Fix B: has_plot_data should be True whenever ANY layer above L0 produced usable output.
     # Previously: only checked surfaces list length OR layer_1.status=="OK".
     # Bug: DEGRADED layers still produce plot-level fallback metrics (weather, L2 stats, soil),
@@ -179,20 +214,12 @@ def artifact_to_run(artifact: RunArtifact,
     # upgrade vegetation zone states from "no_data"/"low_confidence" to
     # "field_wide" — we have real satellite ground-truth even if raster zones
     # didn't form due to confidence thresholds.
-    try:
-        from layer0.perception.satellite_rgb.tile_runtime import get_cached_vision
-        vision = get_cached_vision(artifact.inputs.plot_id)
-        if vision and vision.get("confidence", 0) > 0.3:
-            veg_keys = ["NDVI_CLEAN", "NDVI_DEVIATION", "BASELINE_ANOMALY"]
-            for vkey in veg_keys:
-                if zone_states.get(vkey) in ("no_data", "low_confidence", "unknown"):
-                    zone_states[vkey] = "field_wide"
-    except Exception:
-        pass  # Vision cache is non-fatal enrichment
+    # Cached LLM interpretation is narrative-only.  It cannot create raster
+    # support or promote no_data/low_confidence states to field_wide.
 
     # Compute surface means for cross-referencing (avoids banner/sidebar contradictions)
     surface_means = {}
-    for surf in (surfaces or []):
+    for surf in safe_surfaces:
         stype = surf.get("type", "")
         vals_flat = []
         for row in surf.get("values", []):
@@ -214,8 +241,8 @@ def artifact_to_run(artifact: RunArtifact,
         "layer_results": layer_summaries,
         "global_quality": quality,
         "unified_plan": plan,
-        "surfaces": surfaces or [],
-        "layer10": layer10_detail or {},
+        "surfaces": safe_surfaces,
+        "layer10": safe_layer10_detail,
         "fallback_guidance": fallback_guidance,
         "explanations": explanations,
         "recommendations": recommendations,
@@ -228,29 +255,74 @@ def artifact_to_run(artifact: RunArtifact,
     }
 
     # Enrich canonical run with Layer 10 fields if available
-    if layer10_detail:
-        res["timestamp"] = layer10_detail.get("timestamp") or audit.get("timestamp_utc", "")
-        res["zones"] = layer10_detail.get("zones") or []
-        res["histograms"] = layer10_detail.get("histograms") or {
+    if safe_layer10_detail:
+        res["timestamp"] = safe_layer10_detail.get("timestamp") or audit.get("timestamp_utc", "")
+        res["zones"] = safe_layer10_detail.get("zones") or []
+        res["histograms"] = safe_layer10_detail.get("histograms") or {
             "field": [], "zone": [], "delta": [], "uncertainty": []
         }
-        res["quicklooks"] = layer10_detail.get("quicklooks") or {}
-        res["raster_pack"] = layer10_detail.get("raster_pack") or []
-        res["vector_pack"] = layer10_detail.get("vector_pack") or []
-        res["tile_manifest"] = layer10_detail.get("tile_manifest") or {}
-        res["quality"] = layer10_detail.get("quality") or {}
-        res["provenance"] = layer10_detail.get("provenance") or {}
-        res["grid"] = layer10_detail.get("grid") or {"height": 0, "width": 0}
-        res["explainability_pack"] = layer10_detail.get("explainability_pack") or {}
-        res["scenario_pack"] = layer10_detail.get("scenario_pack") or []
-        res["history_pack"] = layer10_detail.get("history_pack") or []
+        res["quicklooks"] = safe_layer10_detail.get("quicklooks") or {}
+        res["raster_pack"] = safe_layer10_detail.get("raster_pack") or []
+        res["vector_pack"] = safe_layer10_detail.get("vector_pack") or []
+        res["tile_manifest"] = safe_layer10_detail.get("tile_manifest") or {}
+        res["quality"] = safe_layer10_detail.get("quality") or {}
+        res["provenance"] = safe_layer10_detail.get("provenance") or {}
+        res["grid"] = safe_layer10_detail.get("grid") or {"height": 0, "width": 0}
+        res["explainability_pack"] = safe_layer10_detail.get("explainability_pack") or {}
+        res["scenario_pack"] = (
+            safe_layer10_detail.get("scenario_pack") or []
+            if authorization is not None else []
+        )
+        res["history_pack"] = (
+            safe_layer10_detail.get("history_pack") or []
+            if authorization is not None else []
+        )
         # V92.4: Thread mode_surface_plan and surface_inventory to frontend
-        res["mode_surface_plan"] = layer10_detail.get("mode_surface_plan") or {}
-        res["surface_inventory"] = layer10_detail.get("surface_inventory") or {}
+        res["mode_surface_plan"] = safe_layer10_detail.get("mode_surface_plan") or {}
+        res["surface_inventory"] = safe_layer10_detail.get("surface_inventory") or {}
         # V92.4-BC: Thread mode_display_state
-        res["mode_display_state"] = layer10_detail.get("mode_display_state") or {}
+        res["mode_display_state"] = safe_layer10_detail.get("mode_display_state") or {}
 
     return res
+
+
+def _diagnostic_only_explanations(value: Any) -> Dict[str, Any]:
+    """Keep non-prescriptive chat context when no action envelope exists."""
+
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "assistant_mode", "assistant_style", "global_quality", "summary",
+        "diagnoses", "citations", "questions_for_user", "memory", "ui_hints",
+        "visuals", "data_inventory",
+    }
+    result = {key: value[key] for key in allowed if key in value}
+    result["actions"] = []
+    result["plan"] = {"tasks": []}
+    result["prescription_status"] = "BLOCKED"
+    return result
+
+
+_ACTION_KEY_TOKENS = (
+    "action", "prescription", "recommendation", "schedule", "zone_plan",
+    "execution_plan", "task", "dosage", "dose", "rate_kg", "timing_window",
+)
+
+
+def _redact_unauthorized_action_content(value: Any) -> Any:
+    """Remove action-shaped L10 fields while retaining diagnostic surfaces."""
+
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            token = str(key).lower()
+            if any(blocked in token for blocked in _ACTION_KEY_TOKENS):
+                continue
+            result[key] = _redact_unauthorized_action_content(item)
+        return result
+    if isinstance(value, list):
+        return [_redact_unauthorized_action_content(item) for item in value]
+    return value
 
 
 def _serialize_plan(plan) -> Dict[str, Any]:
@@ -290,55 +362,110 @@ def _serialize_plan(plan) -> Dict[str, Any]:
     }
 
 
-def _extract_recommendations(artifact: RunArtifact) -> List[Dict[str, Any]]:
+def _extract_recommendations(
+    artifact: RunArtifact,
+    authorization: Optional[PrescriptionAuthorizationEnvelopeV1] = None,
+) -> List[Dict[str, Any]]:
     """
-    Extract ranked recommendations from L3/L6/L7.
-    Returns a list sorted by urgency.
+    Serialize exact actions from a previously verified L8 authorization.
+
+    This function intentionally never reads L3, L4, L5, L6, or L7 action
+    fields.  Those layers can contribute scientific evidence, but L8 alone
+    selects an action and the authorization envelope alone permits publication.
     """
-    recs = []
+    if authorization is None:
+        return []
 
-    # From L3 diagnoses
-    if artifact.layer_3 and artifact.layer_3.status == LayerStatus.OK and artifact.layer_3.output:
-        l3 = artifact.layer_3.output
-        for diag in getattr(l3, "diagnoses", []):
-            for act in getattr(diag, "recommended_actions", []):
-                recs.append({
-                    "action": getattr(act, "action", str(act)),
-                    "source": "L3_DECISION",
-                    "urgency": getattr(act, "urgency", "MEDIUM"),
-                    "confidence": getattr(diag, "confidence", 0.5),
-                    "rationale": getattr(diag, "explanation", ""),
-                })
-
-    # From L4 nutrient prescriptions
-    if artifact.layer_4 and artifact.layer_4.status == LayerStatus.OK and artifact.layer_4.output:
-        l4 = artifact.layer_4.output
-        for rx in getattr(l4, "prescriptions", []):
-            action_id = getattr(rx, "action_id", "")
-            action_str = action_id.value if hasattr(action_id, "value") else str(action_id)
-            risk = getattr(rx, "risk_if_wrong", "")
-            risk_str = risk.value if hasattr(risk, "value") else str(risk)
-            rate = getattr(rx, "rate_kg_ha", None)
-            timing = getattr(rx, "timing_window", None)
-            is_allowed = getattr(rx, "is_allowed", True)
-            recs.append({
-                "action": action_str,
-                "source": "L4_NUTRIENTS",
-                "urgency": "HIGH" if rate and rate > 50 else "MEDIUM",
-                "confidence": 0.7 if is_allowed else 0.3,
-                "rationale": f"{action_str} at {rate:.0f} kg/ha" if rate else action_str,
-                "rate_kg_ha": rate,
-                "timing": {"start": getattr(timing, "start_date", ""), "end": getattr(timing, "end_date", "")} if timing else None,
-                "risk_if_wrong": risk_str,
-                "is_allowed": is_allowed,
-                "blocked_reason": getattr(rx, "blocked_reason", []),
-            })
+    recs = [{
+        "action_id": action.action_id,
+        "action": action.action_type,
+        "source": "L8_AUTHORIZED_ACTION",
+        "priority": action.priority_score,
+        "urgency": action.urgency_score,
+        "confidence": action.confidence,
+        "rationale": action.rationale,
+        "rate": dict(action.rate),
+        "timing": dict(action.timing),
+        "zone_targets": list(action.zone_targets),
+        "requires_confirmation": action.requires_confirmation,
+        "machine_execution_allowed": action.machine_execution_allowed,
+        "authorization_envelope_hash": authorization.content_hash,
+        "prescription_manifest_hash": authorization.prescription_manifest_hash,
+    } for action in authorization.actions]
 
     # Sort by urgency: CRITICAL > HIGH > MEDIUM > LOW
     urgency_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
     recs.sort(key=lambda r: urgency_order.get(r.get("urgency", "LOW"), 4))
 
     return recs
+
+
+def _validated_authorization(
+    artifact: RunArtifact,
+) -> tuple[Optional[PrescriptionAuthorizationEnvelopeV1], Optional[str]]:
+    """Verify all lineage bindings required by the public action boundary."""
+
+    try:
+        if not artifact.layer_8 or artifact.layer_8.status != LayerStatus.OK:
+            raise ContractViolation("L8 output is unavailable or degraded")
+        l8_output = artifact.layer_8.output
+        if l8_output is None:
+            raise ContractViolation("L8 output is unavailable")
+        raw = getattr(l8_output, "authorization_envelope", None)
+        if raw is None:
+            raise ContractViolation("L8 authorization envelope is missing")
+        envelope = (
+            raw
+            if isinstance(raw, PrescriptionAuthorizationEnvelopeV1)
+            else PrescriptionAuthorizationEnvelopeV1.from_mapping(raw)
+        )
+
+        gate = (artifact.diagnostic_integration or {}).get("prescription_gate") or {}
+        manifest = gate.get("influence_manifest") or {}
+        tribunal = gate.get("tribunal_verdict") or {}
+        if gate.get("status") != "completed":
+            raise ContractViolation("Prescription gate did not complete cleanly")
+        if manifest.get("requested_use") != "PRESCRIPTION_DRIVER":
+            raise ContractViolation("Prescription manifest has the wrong requested use")
+        if envelope.input_belief_id != str(gate.get("input_belief_id") or ""):
+            raise ContractViolation("Authorization belief identity mismatch")
+        if envelope.tribunal_content_hash != str(tribunal.get("content_hash") or ""):
+            raise ContractViolation("Authorization tribunal hash mismatch")
+        if envelope.prescription_manifest_hash != str(manifest.get("content_hash") or ""):
+            raise ContractViolation("Authorization manifest hash mismatch")
+        if not selected_entries_exist(envelope, manifest.get("entries") or []):
+            raise ContractViolation("Authorization references unavailable manifest entries")
+        if envelope.policy_snapshot_hash != canonical_hash(artifact.inputs.policy_snapshot):
+            raise ContractViolation("Authorization policy snapshot hash mismatch")
+        if envelope.l8_run_id != str(getattr(l8_output, "run_id", "") or ""):
+            raise ContractViolation("Authorization L8 run identity mismatch")
+        l8_actions = {
+            str(getattr(action, "action_id", "") or ""): action
+            for action in (getattr(l8_output, "actions", None) or [])
+        }
+        for approved in envelope.actions:
+            source = l8_actions.get(approved.action_id)
+            if source is None:
+                raise ContractViolation("Authorization action is absent from L8 output")
+            expected = AuthorizedActionV1.from_l8_action(source)
+            if approved.to_dict() != expected.to_dict():
+                raise ContractViolation("Authorization action differs from exact L8 selection")
+
+        l8_content_hash = ""
+        audit = getattr(l8_output, "audit", None)
+        for check in getattr(audit, "policy_checks", []) if audit else []:
+            if isinstance(check, dict) and check.get("check") == "content_hash":
+                l8_content_hash = str(check.get("value") or "")
+        if envelope.l8_content_hash != l8_content_hash:
+            raise ContractViolation("Authorization L8 content hash mismatch")
+        if artifact.final_execution_plan is None:
+            raise ContractViolation("Final execution plan is missing")
+        plan_hash = canonical_hash(_serialize_plan(artifact.final_execution_plan))
+        if envelope.final_execution_plan_hash != plan_hash:
+            raise ContractViolation("Authorization final-plan hash mismatch")
+        return envelope, None
+    except (ContractViolation, TypeError, ValueError) as exc:
+        return None, str(exc)
 
 
 def _get_layer_sources(lid: str, output) -> List[str]:

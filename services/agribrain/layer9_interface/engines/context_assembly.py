@@ -10,6 +10,9 @@ from typing import Any, Optional, Dict, List
 from dataclasses import asdict
 
 from layer9_interface.schema import Layer9Input
+from services.agribrain.scientific_contracts.crop_phenology import (
+    consume_canonical_phenology_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +74,19 @@ class ContextAssemblyEngine:
 
         l2_data = {}
         if l2_output:
-            pheno = getattr(l2_output, "phenology", None)
-            if pheno:
-                l2_data["stage"] = getattr(pheno, "stage", "UNKNOWN")
-                l2_data["bbch"] = getattr(pheno, "bbch", None)
-                l2_data["gdd_accumulated"] = getattr(pheno, "gdd_accumulated", 0.0)
-            anomalies = getattr(l2_output, "anomalies", []) or []
+            phenology = consume_canonical_phenology_output(l2_output)
+            l2_data.update({
+                "stage": phenology["resolved_crop_stage"],
+                "phenology_authority": phenology["phenology_authority"],
+                "phenology_posterior_hash": phenology["phenology_posterior_hash"],
+                "phenology_receipt_valid": phenology["phenology_receipt_valid"],
+                "phenology_confidence": phenology["phenology_confidence"],
+                "phenology_evidence_needed_reason": phenology[
+                    "phenology_evidence_needed_reason"
+                ],
+            })
+            temporal = getattr(l2_output, "veg_temporal", l2_output)
+            anomalies = getattr(temporal, "anomalies", []) or []
             l2_data["anomalies_count"] = len(anomalies)
             l2_data["anomalies_severity"] = [getattr(a, "severity", 0.0) for a in anomalies]
 
@@ -155,12 +165,19 @@ class ContextAssemblyEngine:
                 "source_layer": "L1",
                 "confidence": 0.95
             })
-        if l2_data.get("stage"):
+        if l2_data.get("phenology_receipt_valid") and l2_data.get("stage") != "UNKNOWN":
             cross_explanations.append({
-                "statement": f"Crop phenology derived as {l2_data['stage']} (BBCH {l2_data.get('bbch')}) with {l2_data.get('gdd_accumulated', 0):.0f} accumulated GDD.",
-                "evidence_id": "L2_phenology",
+                "statement": f"Layer-2 canonical phenology: {l2_data['stage']} ({l2_data['phenology_authority']} authority; receipt {l2_data['phenology_posterior_hash'][:12]}).",
+                "evidence_id": l2_data["phenology_posterior_hash"],
                 "source_layer": "L2",
-                "confidence": 0.90
+                "confidence": l2_data["phenology_confidence"],
+            })
+        elif l2_data:
+            cross_explanations.append({
+                "statement": f"Growth stage is UNKNOWN: {l2_data.get('phenology_evidence_needed_reason', 'canonical Layer-2 phenology evidence required')}.",
+                "evidence_id": "L2_phenology_unavailable",
+                "source_layer": "L2",
+                "confidence": 0.0,
             })
         if l2_data.get("anomalies_count", 0) > 0:
             max_sev = max(l2_data["anomalies_severity"])

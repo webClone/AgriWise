@@ -121,22 +121,42 @@ def _fetch_nasa_power(lat: float, lng: float, **kw):
 
 def _fetch_raster_composite_ndvi(lat: float, lng: float, start_date: str = "", end_date: str = "", **kw):
     from eo.sentinel import fetch_ndvi_raster_composite
-    return fetch_ndvi_raster_composite(lat, lng, start_date, end_date, polygon_coords=kw.get("polygon_coords"))
+    return fetch_ndvi_raster_composite(
+        lat, lng, start_date, end_date,
+        polygon_coords=kw.get("polygon_coords"),
+        target_resolution_m=kw.get("target_resolution_m", 10.0),
+        raster_contract_version=kw.get("raster_contract_version", ""),
+    )
 
 
 def _fetch_raster_composite_ndmi(lat: float, lng: float, start_date: str = "", end_date: str = "", **kw):
     from eo.sentinel import fetch_ndmi_raster_composite
-    return fetch_ndmi_raster_composite(lat, lng, start_date, end_date, polygon_coords=kw.get("polygon_coords"))
+    return fetch_ndmi_raster_composite(
+        lat, lng, start_date, end_date,
+        polygon_coords=kw.get("polygon_coords"),
+        target_resolution_m=kw.get("target_resolution_m", 10.0),
+        raster_contract_version=kw.get("raster_contract_version", ""),
+    )
 
 
 def _fetch_raster_composite_sar(lat: float, lng: float, start_date: str = "", end_date: str = "", **kw):
     from eo.sentinel import fetch_sar_raster_composite
-    return fetch_sar_raster_composite(lat, lng, start_date, end_date, polygon_coords=kw.get("polygon_coords"))
+    return fetch_sar_raster_composite(
+        lat, lng, start_date, end_date,
+        polygon_coords=kw.get("polygon_coords"),
+        target_resolution_m=kw.get("target_resolution_m", 10.0),
+        raster_contract_version=kw.get("raster_contract_version", ""),
+    )
 
 
 def _fetch_raster_quality_mask(lat: float, lng: float, start_date: str = "", end_date: str = "", **kw):
     from eo.sentinel import fetch_quality_mask
-    return fetch_quality_mask(lat, lng, start_date, end_date, polygon_coords=kw.get("polygon_coords"))
+    return fetch_quality_mask(
+        lat, lng, start_date, end_date,
+        polygon_coords=kw.get("polygon_coords"),
+        target_resolution_m=kw.get("target_resolution_m", 10.0),
+        raster_contract_version=kw.get("raster_contract_version", ""),
+    )
 
 
 def _fetch_rainfall_climatology(lat: float, lng: float, **kw):

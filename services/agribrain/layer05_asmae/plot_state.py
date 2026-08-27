@@ -61,6 +61,9 @@ def aggregate_spatial_posterior(
     sigmas = state_result.get("uncertainty_maps", {}) or {}
     ledger_dict = support_ledger if isinstance(support_ledger, dict) else {}
     result: Dict[str, Dict[str, Any]] = {}
+    from services.agribrain.scientific_contracts.state_support import (
+        resolve_state_evidence_class, StateEvidenceClass,
+    )
     for index, state in enumerate(STATE_NAMES):
         values = []
         uncertainty = []
@@ -80,15 +83,16 @@ def aggregate_spatial_posterior(
         has_spatial = int(entry.get("spatial_update_count", 0) or 0) > 0 or (accepted_cnt > 0 and len(values) > 0)
         has_temporal = int(entry.get("temporal_update_count", 0) or 0) > 0 or (accepted_cnt > 0 and not has_spatial)
 
-        if has_spatial and values:
+        ev_class = resolve_state_evidence_class(entry)
+        if ev_class == StateEvidenceClass.DIRECTLY_ASSIMILATED:
             status = "spatially_conditioned"
-            rel = "direct" if accepted_cnt > 0 else "proxy"
-        elif has_temporal:
+            rel = "direct"
+        elif ev_class == StateEvidenceClass.PROXY_ASSIMILATED:
+            status = "spatially_conditioned" if has_spatial else "temporally_conditioned"
+            rel = "proxy"
+        elif ev_class == StateEvidenceClass.INDIRECTLY_CONSTRAINED:
             status = "temporally_conditioned"
             rel = "indirect"
-        elif values and state in ("vigor", "lai", "canopy_water"):
-            status = "model_propagated"
-            rel = "proxy"
         else:
             status = "prior_constrained" if values else "unsupported"
             rel = "none"
@@ -151,46 +155,37 @@ def build_plot_state_artifact(
         "evidence_hash": evidence_hash,
         "stale_age_days": stale_age_days,
         "reason": reason,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
-    scientific = {
-        key: value for key, value in payload.items()
-        if key not in {"run_id", "generated_at"}
-    }
-    payload["content_hash"] = hashlib.sha256(
-        json.dumps(scientific, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
+    encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+    payload["content_hash"] = hashlib.sha256(encoded).hexdigest()
     return payload
 
 
 def intersect_artifact_authority(
-    artifact: Mapping[str, Any],
+    artifact: Dict[str, Any],
     *,
-    production_allowed: bool,
-    scientific_production_usable: bool,
+    production_allowed: bool = True,
+    scientific_production_usable: bool = True,
 ) -> Dict[str, Any]:
-    """Ensure state authority can never exceed current run authority."""
-    result = dict(artifact or {})
-    requested = str(result.get("authority_level") or "NONE").upper()
-    if requested not in AUTHORITY_LEVELS:
-        requested = "NONE"
-    production_grade = requested in {
-        "PRODUCTION", "RETROVALIDATED", "CERTIFIED"
-    }
-    if not (
-        production_allowed
-        and scientific_production_usable
-        and production_grade
-    ):
-        if requested in {"PRODUCTION", "RETROVALIDATED", "CERTIFIED"}:
-            requested = "MODEL_ASSISTED" if result.get("posterior") else "DIAGNOSTIC"
-        result["production_usable"] = False
-    result["authority_level"] = requested
-    scientific = {
-        key: value for key, value in result.items()
-        if key not in {"run_id", "generated_at", "content_hash"}
-    }
-    result["content_hash"] = hashlib.sha256(
-        json.dumps(scientific, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
-    return result
+    """
+    Intersect plot-state artifact authority level with runtime gates.
+    Demotes authority level if production is disallowed or unusable.
+    """
+    res = dict(artifact or {})
+    current_auth = str(res.get("authority_level", "NONE")).upper()
+    has_posterior = bool(res.get("posterior"))
+    prod_usable = bool(res.get("production_usable", True)) and scientific_production_usable and production_allowed
+
+    if not has_posterior:
+        res["authority_level"] = "NONE"
+        res["production_usable"] = False
+        return res
+
+    if not prod_usable:
+        res["production_usable"] = False
+        if current_auth in ("PRODUCTION", "RETROVALIDATED", "CERTIFIED", "MODEL_ASSISTED", "SCOUTING"):
+            res["authority_level"] = "DIAGNOSTIC"
+        return res
+
+    res["production_usable"] = True
+    return res

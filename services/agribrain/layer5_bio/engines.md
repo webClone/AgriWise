@@ -23,7 +23,7 @@ Layer 5 coordinates exactly **11 specialized core engines** split across five pr
 6. **SprayDriftRandomForestRegressor** (`layer5_bio/engines/chemical_engine.py`): Evaluates off-target chemical loss. It simulates a 3-tree Random Forest regressor (modeling physical trajectories, droplet evaporative shrinkage, and turbulent transport) to predict drift distances and off-target deposition.
 
 ### Category D: Image Processing and Bayesian Inference
-7. **VisualDetectionEngine** (`layer5_bio/visual_detection.py`): Executes a 3-layer pure-NumPy CNN forward pass to diagnose leaf symptoms from base64 uploaded photographs, outputting classification probabilities and fusing visual ground-truth evidence into active threat states.
+7. **VisualDetectionEngine** (`layer5_bio/visual_detection.py`): Executes a 3-layer pure-NumPy CNN forward pass to identify candidate leaf symptoms from base64 uploaded photographs, outputting classification probabilities as diagnostic evidence with model and source uncertainty.
 8. **BioThreatInferenceEngine** (`layer5_bio/engines/inference.py`): Calculates the posterior probability of deficiency and infection. It executes a Bayesian log-odds update trace across all threats, incorporating dynamic base priors, remote sensing anomaly vectors, microclimatic pressures, and genetical/chemical evidence.
 
 ### Category E: Auxiliary Evidence, Risk, and Planning

@@ -103,8 +103,13 @@ def observation_packet_to_evidence(
 
         "temp_max": ("temp_max", "degC"),
         "temp_min": ("temp_min", "degC"),
+        "temp_mean": ("temp_mean", "degC"),
         "precipitation": ("precipitation", "mm"),
         "et0": ("et0", "mm"),
+        "humidity": ("humidity", "percent"),
+        "humidity_mean_pct": ("humidity", "percent"),
+        "wind_speed": ("wind_speed", "m_s"),
+        "wind_speed_m_s": ("wind_speed", "m_s"),
 
         "clay_pct": ("soil_clay_pct", "percent"),
         "sand_pct": ("soil_sand_pct", "percent"),

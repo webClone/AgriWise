@@ -1,0 +1,56 @@
+{
+  "contract_version": "v1",
+  "secret": "agribrain-internal-dev-secret-key-32bytes",
+  "vectors": [
+    {
+      "description": "Standard GET request without query or body",
+      "method": "GET",
+      "pathname": "/v2/progress/697dddb0d4195b809226a681",
+      "query_params": [],
+      "tenant_id": "tenant_123",
+      "farm_id": "farm_456",
+      "plot_id": "697dddb0d4195b809226a681",
+      "body_text": "",
+      "timestamp": "1700000000",
+      "nonce": "0123456789abcdef0123456789abcdef",
+      "key_version": "v1",
+      "expected_canonical_string": "GET\n/v2/progress/697dddb0d4195b809226a681\n\ntenant_123\nfarm_456\n697dddb0d4195b809226a681\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1700000000\n0123456789abcdef0123456789abcdef\nv1",
+      "expected_signature": "39cdbdd3bbb3b8f6acf80d44f35e0af7b285a72bb2e8d2ce3bb3f02e45cb4947"
+    },
+    {
+      "description": "GET request with query params including special characters, spaces, and duplicate keys",
+      "method": "GET",
+      "pathname": "/v2/progress/697dddb0d4195b809226a681",
+      "query_params": [
+        ["run_id", "run_abc_123"],
+        ["tag", "c#"],
+        ["tag", "a+b"],
+        ["search", "foo bar~tilde"]
+      ],
+      "tenant_id": "tenant_123",
+      "farm_id": "farm_456",
+      "plot_id": "697dddb0d4195b809226a681",
+      "body_text": "",
+      "timestamp": "1700000000",
+      "nonce": "0123456789abcdef0123456789abcdef",
+      "key_version": "v1",
+      "expected_canonical_string": "GET\n/v2/progress/697dddb0d4195b809226a681\nrun_id=run_abc_123&search=foo%20bar~tilde&tag=a%2Bb&tag=c%23\ntenant_123\nfarm_456\n697dddb0d4195b809226a681\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1700000000\n0123456789abcdef0123456789abcdef\nv1",
+      "expected_signature": "7d507aaa8247c1f2a370a1ee68e57bbe5753c1417dddcca37dc15c4252548cd3"
+    },
+    {
+      "description": "POST request with JSON body",
+      "method": "POST",
+      "pathname": "/v2/run",
+      "query_params": [],
+      "tenant_id": "tenant_123",
+      "farm_id": "farm_456",
+      "plot_id": "697dddb0d4195b809226a681",
+      "body_text": "{\"mode\":\"full\",\"plot_id\":\"697dddb0d4195b809226a681\"}",
+      "timestamp": "1700000000",
+      "nonce": "0123456789abcdef0123456789abcdef",
+      "key_version": "v1",
+      "expected_canonical_string": "POST\n/v2/run\n\ntenant_123\nfarm_456\n697dddb0d4195b809226a681\nc172dbac501264928fa5e7f02584648b4f764e501ff2d05e112272b457b8083e\n1700000000\n0123456789abcdef0123456789abcdef\nv1",
+      "expected_signature": "2327f4d208d07884eaf238be0ba58a99d25dba3325ea051e4f6c584e1837b1f4"
+    }
+  ]
+}

@@ -121,11 +121,30 @@ def validate_safe_path_segment(value: Any, name: str) -> None:
     if ".." in value or "/" in value or "\\" in value or ":" in value:
         raise ValueError(f"unsafe path segment detected in {name}: {value}")
 
+
+def _geometry_storage_segment(geometry_hash: str) -> str:
+    """Map a canonical geometry identifier to one collision-safe path segment.
+
+    Geometry identity is now transported as ``sha256:<digest>``.  The colon is
+    part of the scientific identifier but is not a valid Windows path
+    character.  Preserve the identifier inside the memory payload while using
+    an explicit, reversible-on-format storage representation.  Unknown colon
+    forms remain rejected rather than being broadly sanitized.
+    """
+    import re
+
+    value = str(geometry_hash or "").strip()
+    match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", value)
+    if match:
+        return f"sha256-{match.group(1).lower()}"
+    validate_safe_path_segment(value, "geometry_hash")
+    return value
+
 def get_memory_file_path(plot_id: str, geometry_hash: str, crop_season_id: str) -> Path:
     validate_safe_path_segment(plot_id, "plot_id")
-    validate_safe_path_segment(geometry_hash, "geometry_hash")
     validate_safe_path_segment(crop_season_id, "crop_season_id")
-    return PLOT_MEMORY_ROOT / plot_id / geometry_hash / crop_season_id / "memory.json"
+    geometry_segment = _geometry_storage_segment(geometry_hash)
+    return PLOT_MEMORY_ROOT / plot_id / geometry_segment / crop_season_id / "memory.json"
 
 def load_plot_memory(plot_id: str, geometry_hash: str, crop_season_id: str) -> Optional[PlotLearningMemory]:
     path = get_memory_file_path(plot_id, geometry_hash, crop_season_id)

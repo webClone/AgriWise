@@ -1,10 +1,14 @@
 import {
   getRenderAuthorization,
+  isRenderKindAllowedForRole,
+  normalizeMode,
   type RenderAuthorization,
   type RenderRole,
 } from "./source-policy-display-resolver";
 
-export const RENDER_AUTHORIZATION_VERSION = "v924_bc10_18_render_auth_v1";
+import { hasCompleteCommittedRenderIdentity } from "./layer10-request-state.mjs";
+
+export const RENDER_AUTHORIZATION_VERSION = "v924_bc10_22r5_render_identity_v1";
 
 export type RenderMaterializationStatus =
   | "rendered"
@@ -20,6 +24,10 @@ export interface RenderMaterializationReceipt {
   renderKind: string;
   timestamp: string;
   mapInstanceId: string;
+  snapshotId?: string;
+  surfaceInventoryHash?: string;
+  renderAuthorizationVersion?: string;
+  surfaceId: string;
 }
 
 export interface RenderMaterializationResult {
@@ -33,6 +41,7 @@ export interface RenderMaterializationResult {
   gridBounds: [number, number, number, number] | null;
   gridWidth: number | null;
   gridHeight: number | null;
+  surfaceId: string;
   receipt?: RenderMaterializationReceipt | null;
 }
 
@@ -44,10 +53,17 @@ export interface BrowserRenderReceipt {
   viewIdentity: string;
   baseMaterialization: RenderMaterializationResult;
   overlayMaterialization: RenderMaterializationResult;
+  /** ASMAE hybrid overlays that were independently committed to DeckGL. */
+  hybridOverlayMaterializations: RenderMaterializationResult[];
+  snapshotId?: string;
+  publicationId?: string;
+  surfaceInventoryHash?: string;
+  renderAuthorizationVersion?: string;
   committedAt: string;
 }
 
 export interface MaterializationSurface {
+  surface_id?: string;
   type?: string;
   semantic_type?: string;
   values?: unknown[][];
@@ -184,6 +200,7 @@ function blocked(
     gridBounds: grid?.bounds ?? null,
     gridWidth: grid?.width ?? null,
     gridHeight: grid?.height ?? null,
+    surfaceId: String(input.surface?.surface_id || ""),
     receipt: null,
   };
 }
@@ -205,19 +222,14 @@ export function resolveRenderMaterialization(input: MaterializationInput): Rende
     return blocked(input, surfaceType, "blocked_unauthorized", auth.reason || "missing_render_authorization");
   }
 
-  const allowedKind = input.role === "base"
-    ? auth.renderKind === "full_raster" || auth.renderKind === "diagnostic_overlay"
-    : input.role === "overlay"
-      ? auth.renderKind === "proxy_overlay" || auth.renderKind === "diagnostic_overlay"
-      : input.role === "candidate"
-        ? auth.renderKind === "proxy_overlay" || auth.renderKind === "diagnostic_overlay"
-        : false;
+  const allowedKind = isRenderKindAllowedForRole(auth.renderKind, input.role);
   if (!allowedKind) {
     return blocked(input, surfaceType, "blocked_unauthorized", `unauthorized_render_kind:${auth.renderKind}`);
   }
 
-  const modeState = input.modeDisplayState?.[input.mode]
-    ? (input.modeDisplayState[input.mode] as Record<string, unknown>)
+  const normalizedMode = normalizeMode(input.mode);
+  const modeState = input.modeDisplayState?.[normalizedMode]
+    ? (input.modeDisplayState[normalizedMode] as Record<string, unknown>)
     : input.modeDisplayState;
 
   const isAsmaeDiag = input.policy === "asmae_diagnostic" || auth.renderKind === "diagnostic_overlay";
@@ -269,31 +281,95 @@ export function resolveRenderMaterialization(input: MaterializationInput): Rende
   return blocked(input, surfaceType, "blocked_image_generation", "image_layer_not_created", grid);
 }
 
-export function finalizeRenderMaterialization(
+export function createCommittedRenderReceipt(
   preflight: RenderMaterializationResult,
-  layer: unknown,
   layerId: string,
+  committedLayerIds: Set<string> | string[],
   receiptDetails?: Partial<RenderMaterializationReceipt>
 ): RenderMaterializationResult {
-  if (preflight.reason !== "image_layer_not_created") return preflight;
-  const hasLayer = Array.isArray(layer) ? layer.length > 0 && layer.every(Boolean) : !!layer;
-  if (!hasLayer) return preflight;
+  if (
+    preflight.reason !== "image_layer_not_created"
+    && preflight.reason !== "layer_created_pending_commit"
+    && preflight.status !== "rendered"
+  ) {
+    return preflight;
+  }
+
+  const layerSet = committedLayerIds instanceof Set
+    ? committedLayerIds
+    : new Set(committedLayerIds);
+
+  if (!layerSet.has(layerId)) {
+    return {
+      ...preflight,
+      status: "blocked_image_generation",
+      reason: "layer_not_in_committed_deckgl_collection",
+      layerId: null,
+      receipt: null,
+    };
+  }
+
+  const publicationId = String(receiptDetails?.publicationId || "").trim();
+  const snapshotId = String(receiptDetails?.snapshotId || "").trim();
+  const surfaceInventoryHash = String(receiptDetails?.surfaceInventoryHash || "").trim();
+  const renderAuthorizationVersion = String(
+    receiptDetails?.renderAuthorizationVersion || "",
+  ).trim();
+  const surfaceId = String(preflight.surfaceId || "").trim();
+  if (!hasCompleteCommittedRenderIdentity({
+    publicationId,
+    snapshotId,
+    surfaceInventoryHash,
+    renderAuthorizationVersion,
+    surfaceId,
+  })) {
+    return {
+      ...preflight,
+      status: "blocked_image_generation",
+      reason: "committed_render_identity_incomplete",
+      layerId: null,
+      receipt: null,
+    };
+  }
 
   const receipt: RenderMaterializationReceipt = {
-    publicationId: receiptDetails?.publicationId || "pub_canonical",
+    publicationId,
     sourceId: receiptDetails?.sourceId || `src_${layerId}`,
     layerId,
     renderKind: receiptDetails?.renderKind || preflight.surfaceType || "unknown",
     timestamp: receiptDetails?.timestamp || new Date().toISOString(),
     mapInstanceId: receiptDetails?.mapInstanceId || "map_primary",
+    snapshotId,
+    surfaceInventoryHash,
+    renderAuthorizationVersion,
+    surfaceId,
   };
 
   return {
     ...preflight,
     status: "rendered",
-    reason: "layer_created",
+    reason: "layer_committed_and_rendered",
     layerId,
     receipt,
+  };
+}
+
+export function finalizeRenderMaterialization(
+  preflight: RenderMaterializationResult,
+  layer: unknown,
+  layerId: string,
+  _receiptDetails?: Partial<RenderMaterializationReceipt>
+): RenderMaterializationResult {
+  if (preflight.reason !== "image_layer_not_created") return preflight;
+  const hasLayer = Array.isArray(layer) ? layer.length > 0 && layer.every(Boolean) : !!layer;
+  if (!hasLayer) return preflight;
+
+  return {
+    ...preflight,
+    status: "blocked_image_generation",
+    reason: "layer_created_pending_commit",
+    layerId,
+    receipt: null,
   };
 }
 

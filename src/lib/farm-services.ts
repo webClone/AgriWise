@@ -3,6 +3,7 @@ import { ObjectId } from "bson";
 import { cache } from "react";
 import { getPlotRepresentativePoint, isValidWgs84Point } from "@/lib/agribrain/plot-geometry";
 import { getSession } from "@/lib/session";
+import { activeCropCyclePrismaFilter } from "@/lib/agribrain/crop-cycle-status.mjs";
 
 function ownerScope(userId: string) {
   return { farm: { userId } };
@@ -55,7 +56,6 @@ function mapCropCycle(cycle: any) {
     variety: cycle.variety,
     status: cycle.status,
     startDate: cycle.plantDate,
-    stage: cycle.status,
   };
 }
 
@@ -71,7 +71,10 @@ export const getAuthorizedPlotRouteContext = cache(
       where: { id: plotId, farmId, ...ownerScope(ownerId) },
       include: {
         farm: true,
-        cropCycles: { orderBy: { plantDate: "desc" } },
+        cropCycles: {
+          where: { status: activeCropCyclePrismaFilter() },
+          orderBy: { updatedAt: "desc" },
+        },
         photos: true,
         cameras: true,
         soilAnalyses: { orderBy: { date: "desc" } },

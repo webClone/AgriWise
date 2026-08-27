@@ -1,24 +1,24 @@
 {
   "version": "layer0-v2.0",
   "plot_id": "697dddb0d4195b809226a681",
-  "saved_at": "2026-06-26T14:51:17.292189",
+  "saved_at": "2026-08-17T10:29:49.375373",
   "crop_params_hash": "44136fa355b3",
   "dna_hash": null,
   "kalman_zones": {
     "plot": {
       "state_values": {
-        "day": "2026-06-26",
-        "lai_proxy": 0.2127,
-        "biomass_proxy": 0.5455,
-        "sm_0_10": 0.1666,
-        "sm_10_40": 0.8382,
-        "canopy_stress": 0.0138,
-        "phenology_gdd": 2500.0,
-        "phenology_stage": 4,
-        "stress_thermal": 0.2042,
-        "photosynthetic_efficiency": 0.6907
+        "day": "2026-08-17",
+        "lai_proxy": 0.4337,
+        "biomass_proxy": 0.5393,
+        "sm_0_10": 0,
+        "sm_10_40": 0.2713,
+        "canopy_stress": 0.3969,
+        "phenology_gdd": 385.9,
+        "phenology_stage": 1.3098,
+        "stress_thermal": 0.26,
+        "photosynthetic_efficiency": 0.9482
       },
-      "last_day": "2026-06-26"
+      "last_day": "2026-08-17"
     }
   },
   "validation": {},

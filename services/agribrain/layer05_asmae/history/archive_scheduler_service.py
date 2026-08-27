@@ -63,19 +63,25 @@ class ScheduledArchiveWorldlineService:
         heads: List[Dict[str, Any]] = []
         if not Path(WORLDLINE_ROOT).exists():
             return heads
-        for path in Path(WORLDLINE_ROOT).glob("*/head.json"):
+        for path in Path(WORLDLINE_ROOT).glob("*/*/*/head.json"):
             head = _read(path)
+            tenant_id = str(head.get("tenant_id") or "").strip()
+            namespace = str(head.get("namespace") or "").strip()
+            if not tenant_id or not namespace:
+                continue
             latest = head.get("latest_by_type") or {}
             current_id = latest.get("CURRENT_POSTERIOR_VALIDATED")
             if not current_id:
                 continue
             current = self.worldline.load_event(
-                str(head.get("plot_id", "")), str(current_id)
+                str(head.get("plot_id", "")), str(current_id),
+                tenant_id, namespace,
             )
             archive_id = latest.get("ARCHIVE_POSTERIOR_VALIDATED")
             archive = (
                 self.worldline.load_event(
-                    str(head.get("plot_id", "")), str(archive_id)
+                    str(head.get("plot_id", "")), str(archive_id),
+                    tenant_id, namespace,
                 )
                 if archive_id else {}
             )
@@ -115,7 +121,10 @@ class ScheduledArchiveWorldlineService:
             plot_id = str(head.get("plot_id", ""))
             geometry_hash = str(current.get("geometry_hash", "") or "")
             crop_payload = self.worldline.latest_payload(
-                plot_id, "CROP_POSTERIOR"
+                plot_id,
+                "CROP_POSTERIOR",
+                str(head.get("tenant_id") or "default_tenant"),
+                str(head.get("namespace") or "default"),
             )
             crop_posterior = crop_payload.get("crop_posterior") or {}
             crop_context = {
@@ -131,6 +140,10 @@ class ScheduledArchiveWorldlineService:
                 ),
                 "crop_context": crop_context,
                 "archive_trigger_event_id": current.get("event_id"),
+                "tenant_id": str(head.get("tenant_id") or "default_tenant"),
+                "worldline_namespace": str(
+                    head.get("namespace") or "default"
+                ),
             }
             stats["attempted"] += 1
             try:
@@ -138,6 +151,8 @@ class ScheduledArchiveWorldlineService:
                     plot_id=plot_id,
                     geometry_hash=geometry_hash,
                     context=context,
+                    tenant_id=context["tenant_id"],
+                    namespace=context["worldline_namespace"],
                 )
                 status = str(result.get("status", ""))
                 if status == "validated":

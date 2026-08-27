@@ -26,8 +26,8 @@ class EnvironmentAdapter:
     def extract_evidence(
         self, package: Any, context: Layer1InputBundle
     ) -> List[EvidenceItem]:
-        if getattr(package, "contract_version", None) == "layer0-source-package-v1":
-            from layer1_fusion.adapters.layer0_source_package import Layer0SourcePackageAdapter
+        from layer1_fusion.adapters.layer0_source_package import Layer0SourcePackageAdapter, is_layer0_source_package
+        if is_layer0_source_package(package):
             return Layer0SourcePackageAdapter().extract_evidence(package, context)
 
         items: List[EvidenceItem] = []
@@ -93,7 +93,10 @@ class EnvironmentAdapter:
             date = getattr(wc, "date", None) or (wc.get("date") if isinstance(wc, dict) else None)
             wc_dict = wc if isinstance(wc, dict) else {
                 k: getattr(wc, k, None) for k in
-                ["precipitation_mm", "temp_mean", "temp_min", "temp_max", "et0_mm", "vpd_kpa"]
+                [
+                    "precipitation_mm", "temp_mean", "temp_min", "temp_max",
+                    "et0_mm", "vpd_kpa", "humidity_mean_pct", "wind_speed_m_s",
+                ]
             }
             for var, val in wc_dict.items():
                 if val is not None and var != "date":
@@ -139,8 +142,8 @@ class EnvironmentAdapter:
         return items
 
     def source_health(self, package: Any) -> SourceEnvelope:
-        if getattr(package, "contract_version", None) == "layer0-source-package-v1":
-            from layer1_fusion.adapters.layer0_source_package import Layer0SourcePackageAdapter
+        from layer1_fusion.adapters.layer0_source_package import Layer0SourcePackageAdapter, is_layer0_source_package
+        if is_layer0_source_package(package):
             return Layer0SourcePackageAdapter().source_health(package)
 
         if package is None:

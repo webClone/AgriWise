@@ -181,45 +181,48 @@ def build_chat_payload(
     # 4. Actions & Plan
     actions = []
     tasks = []
-    
-    # Plan Generation
-    # Ensure Plan visibility is gated by L7 recommendation if applicable
-    l7_is_allowed = True
-    if artifact.layer_7 and artifact.layer_7.output:
-        l7_rec = getattr(artifact.layer_7.output, "chosen_plan", None)
-        if l7_rec:
-            l7_is_allowed = l7_rec.is_allowed
 
-    if artifact.final_execution_plan:
+    # The chat boundary uses the exact same fail-closed authorization check as
+    # the canonical JSON serializer.  It must not reconstruct actions from
+    # L3--L7, even for a blocked/advisory display.
+    from services.agribrain.orchestrator_v2.run_schema import (
+        _validated_authorization,
+    )
+    authorization, authorization_error = _validated_authorization(artifact)
+
+    if authorization is not None and artifact.final_execution_plan:
         for t in artifact.final_execution_plan.tasks:
-            task_status = "Pending" if l7_is_allowed else "BLOCKED (Review L7 Constraints)"
             tasks.append(ChatTask(
                 task=f"{t.type}: {t.instructions}",
-                when=task_status,
+                when="Pending",
                 depends_on=t.depends_on
             ))
-            
-    # Actions mostly come from L3 policy or L5 recommnedations
-    if artifact.layer_3 and artifact.layer_3.output:
-        l3_rec = getattr(artifact.layer_3.output, "recommendations", [])
-        for r in l3_rec:
+
+    if authorization is not None:
+        for approved in authorization.actions:
+            rate = dict(approved.rate)
+            rate_text = ""
+            if rate:
+                rate_text = (
+                    f" at {rate.get('recommended')} {rate.get('unit', '')}"
+                ).rstrip()
             actions.append(ChatAction(
-                title=f"{r.action_type}: {r.action_id}",
-                priority=f"P-Score {r.priority_score:.1f}",
-                is_allowed=r.is_allowed,
-                why=r.blocked_reason if not r.is_allowed else []
+                title=f"{approved.action_type}: {approved.action_id}{rate_text}",
+                priority=(
+                    f"P-Score {approved.priority_score:.2f} / "
+                    f"Urgency {approved.urgency_score:.2f}"
+                ),
+                is_allowed=True,
+                why=[
+                    f"authorization_envelope:{authorization.content_hash}",
+                    f"prescription_manifest:{authorization.prescription_manifest_hash}",
+                ],
             ))
-            
-    # L5 actions
-    if artifact.layer_5 and artifact.layer_5.output:
-         l5_rec = getattr(artifact.layer_5.output, "recommended_actions", [])
-         for r in l5_rec:
-             actions.append(ChatAction(
-                title=f"{r.action_type}: {r.action_id}",
-                priority=f"Impact {r.expected_impact:.1f}",
-                is_allowed=r.is_allowed,
-                why=r.blocked_reason if not r.is_allowed else []
-            ))
+    elif authorization_error:
+        summary["prescription_status"] = {
+            "status": "BLOCKED",
+            "reason": authorization_error,
+        }
             
     # L7 Actions (Season Planning)
     if artifact.layer_7 and artifact.layer_7.output:
@@ -233,13 +236,6 @@ def build_chat_payload(
                  if l7_rec.risk_if_wrong:
                      why_reasons.append(f"Risk if ignored: {l7_rec.risk_if_wrong}")
                      
-             actions.append(ChatAction(
-                title=f"{l7_rec.decision_id}: {l7_rec.crop}",
-                priority=f"Planning Decision",
-                is_allowed=l7_rec.is_allowed,
-                why=why_reasons
-             ))
-             
              # Extract cognitive planning metrics
              chosen_opt = next((o for o in l7_options if o.crop == l7_rec.crop), None)
              if chosen_opt:
@@ -595,6 +591,10 @@ def _generate_arf_v2(
     Calls OpenRouter to generate ARF-v2 strict JSON response.
     """
 
+    prescription_blocked = (
+        summary.get("prescription_status", {}).get("status") == "BLOCKED"
+    )
+
     api_key = os.getenv("OPENROUTER_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
     gemini_key = os.getenv("GEMINI_API_KEY")
@@ -771,6 +771,11 @@ def _generate_arf_v2(
     for a in actions:
         status = "ALLOWED" if a.is_allowed else f"BLOCKED: {a.why}"
         action_str.append(f"{a.title} Priority:{a.priority} Status:{status}")
+    if prescription_blocked:
+        action_str = [
+            "PRESCRIPTIONS BLOCKED: provide diagnostic findings and next measurements only; "
+            "do not infer an action, rate, timing, urgency, or execution instruction."
+        ]
 
     # Format Tasks
     task_str = []
@@ -856,10 +861,13 @@ def _generate_arf_v2(
 
             plot_id_val = artifact.inputs.plot_id if (artifact and artifact.inputs) else "field"
             l10_input = Layer10Input(
+                plot_namespace=getattr(artifact.inputs, "plot_namespace", None),
+                tenant_id=getattr(artifact.inputs, "tenant_id", "") or "tenant_chat",
+                farm_id=getattr(artifact.inputs, "farm_id", "") or "farm_chat",
+                plot_id=plot_id_val,
                 field_tensor=artifact.layer_1.output if artifact.layer_1 else None,
                 veg_int=artifact.layer_2.output if artifact.layer_2 else None,
                 decision=artifact.layer_3.output if artifact.layer_3 else None,
-                plot_id=plot_id_val,
                 field_geometry=geom_canon.get("canonical_geojson") or geom_context,
                 canonical_geometry_hash=geom_canon.get("canonical_geometry_hash"),
                 source_geometry_hash=geom_canon.get("source_geometry_hash"),

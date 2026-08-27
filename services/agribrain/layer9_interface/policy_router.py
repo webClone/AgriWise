@@ -310,10 +310,16 @@ class PolicyRouter:
                 source_layer="L1", reference_id="fused_static_soil",
                 description=f"L1 soil ph={l9_input.l1_fusion_data.get('soil_ph')}, clay={l9_input.l1_fusion_data.get('soil_clay')}%",
             ))
-        if l9_input.l2_vegetation_data and l9_input.l2_vegetation_data.get("stage"):
+        if (
+            l9_input.l2_vegetation_data
+            and l9_input.l2_vegetation_data.get("phenology_receipt_valid") is True
+            and l9_input.l2_vegetation_data.get("stage") != "UNKNOWN"
+        ):
+            phenology = l9_input.l2_vegetation_data
             citations.append(Citation(
-                source_layer="L2", reference_id="phenology_state",
-                description=f"L2 phenology stage: {l9_input.l2_vegetation_data.get('stage')} (BBCH {l9_input.l2_vegetation_data.get('bbch')})",
+                source_layer="L2", reference_id=phenology.get("phenology_posterior_hash"),
+                value=phenology.get("phenology_confidence"),
+                description=f"L2 canonical phenology: {phenology.get('stage')} ({phenology.get('phenology_authority')} authority)",
             ))
         if l9_input.l4_nutrient_data and l9_input.l4_nutrient_data.get("nutrient_deficiencies"):
             for nut, info in l9_input.l4_nutrient_data["nutrient_deficiencies"].items():

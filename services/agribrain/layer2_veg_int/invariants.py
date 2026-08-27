@@ -165,10 +165,10 @@ def enforce_layer2_invariants(output) -> List[InvariantViolation]:
                     f"lai_series[{i}]={lai:.2f} outside [0, 10]"))
                 break
 
-    # 12. CWSI range [0, 1]
+    # 12. CWSI range [0, 1] (or None if unobserved/missing)
     if curve.cwsi_series:
         for i, cwsi in enumerate(curve.cwsi_series):
-            if cwsi < 0.0 or cwsi > 1.0:
+            if cwsi is not None and (cwsi < 0.0 or cwsi > 1.0):
                 violations.append(InvariantViolation(
                     "cwsi_range", "warning",
                     f"cwsi_series[{i}]={cwsi:.3f} outside [0, 1]"))

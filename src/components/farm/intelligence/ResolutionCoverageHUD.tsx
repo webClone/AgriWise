@@ -7,7 +7,11 @@ import {
   isRenderedMaterialization,
   RENDER_AUTHORIZATION_VERSION,
 } from "@/lib/agribrain/render-materialization";
-import { normalizeMode } from "@/lib/agribrain/source-policy-display-resolver";
+import {
+  isAsmaeSurfaceType,
+  isCompositeAdvisorySurface,
+  normalizeMode,
+} from "@/lib/agribrain/source-policy-display-resolver";
 
 interface ResolutionCoverageHUDProps {
   summary: GroundTruthSummary;
@@ -120,11 +124,9 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
            (data?.quality?.reliability_score !== undefined && Number(data.quality.reliability_score) < 0.40);
   }, [data]);
 
-  const hasComposites = bannerState === "composite_advisory_active";
-
   // ── BC.10.19 P0.7 — Experimental Detail Authorization Gate ─────────────
   // The experimental visual detail toggle may only be activated when a valid
-  // v924_bc10_18_render_auth_v1 authority proof exists in the payload.
+  // The current render authority proof exists in the payload.
   // The frontend MUST NOT promote backend authority — it may only demote.
   const isExperimentalAuthorized = useMemo(() => {
     const authVersion = data?.render_authorization_version;
@@ -161,14 +163,29 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
     baseRenderMaterialization,
     renderedBaseType || undefined,
   );
-  const asmaeRasterMaterialized = baseRasterMaterialized && (
-    renderedBaseType === "CANOPY_ASMAE_VIGOR"
-    || renderedBaseType === "COMPOSITE_ADVISORY_CANOPY"
-    || renderedBaseType.startsWith("ASMAE_")
-  );
-  const asmaePlotStateAvailable =
-    l10.data?.asmae_evidence_state?.spatial_materialization_allowed === true
-    || l10.data?.source_policy_display_state?.asmaePlotState?.available === true;
+  const asmaeRasterMaterialized = baseRasterMaterialized
+    && isAsmaeSurfaceType(renderedBaseType);
+  const providerFallbackMaterialized = baseRasterMaterialized
+    && renderedBaseType === "NDVI_CLEAN";
+  const compositeRasterMaterialized = baseRasterMaterialized
+    && isCompositeAdvisorySurface(renderedBaseType);
+  const committedHybridOverlayCount = browserRenderReceipt?.viewIdentity === renderPlan.viewIdentity
+    ? (browserRenderReceipt.hybridOverlayMaterializations || []).filter(
+        (item) => item.status === "rendered"
+          && item.receipt?.publicationId === data?.publication_id,
+      ).length + (canClaimExperimentalCoverage ? 1 : 0)
+    : 0;
+  const compositeStatusLabel = committedHybridOverlayCount > 0
+    ? `Composite + ${committedHybridOverlayCount} committed hybrid overlay${committedHybridOverlayCount === 1 ? "" : "s"}`
+    : "Composite Advisory Active";
+  const spatialJobStatus = String(
+    l10.data?.source_policy_display_state?.asmaePlotState?.activeSpatialJobStatus
+      || l10.data?.asmae_evidence_state?.active_spatial_job_status
+      || ""
+  ).toLowerCase();
+  const spatialMaterializationPending = ["queued", "running"].includes(spatialJobStatus);
+  const spatialMaterializationNotEligible = spatialJobStatus === "not_eligible"
+    || l10.data?.asmae_evidence_state?.reason === "NOT_ELIGIBLE_NO_EXECUTABLE_SPATIAL_SCENE";
 
   useEffect(() => {
     if (showExperimental1m && isLowConfidence && showCandidateMask) {
@@ -415,7 +432,7 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                   opacity: 0.45,
                   cursor: "not-allowed",
                   userSelect: "none",
-                }} title="Experimental detail requires a valid authority proof (v924_bc10_18_render_auth_v1). Authority is calibrating.">
+                }} title={`Experimental detail requires a valid authority proof (${RENDER_AUTHORIZATION_VERSION}). Authority is calibrating.`}>
                   <input
                     type="checkbox"
                     id="experimental-1m-toggle-ready"
@@ -470,7 +487,7 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
               )}
             </>
           ) : (
-            hasComposites ? (
+            compositeRasterMaterialized ? (
               <div style={{
                 fontSize: 10,
                 fontWeight: 700,
@@ -480,7 +497,7 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                 gap: 4
               }}>
                 <span>⚙️</span>
-                <span>Composite Advisory Active</span>
+                <span>{compositeStatusLabel}</span>
               </div>
             ) : (
               <div style={{
@@ -494,10 +511,14 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                 <span>⚙️</span>
                 <span>
                   {asmaeRasterMaterialized
-                    ? "ASMAE diagnostic raster rendered (1m approval unavailable)"
-                    : asmaePlotStateAvailable
-                      ? "ASMAE plot state available — spatial raster not materialized"
-                      : "NDVI Provider Fallback Active"}
+                    ? "ASMAE 10m Diagnostic Active (1m approval unavailable)"
+                    : spatialMaterializationPending
+                      ? "ASMAE Requested — Spatial Raster Materialization Pending"
+                      : spatialMaterializationNotEligible
+                        ? "ASMAE Spatial Unavailable - No Executable Scene"
+                      : providerFallbackMaterialized
+                        ? "NDVI Provider Fallback Active"
+                        : "ASMAE Unavailable — No Fallback Layer Committed"}
                 </span>
               </div>
             )
@@ -550,11 +571,11 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
           }}>
             {isAsmaeOrHybrid ? (
               // ASMAE Approval Ladder OR ASMAE Diagnostic Unavailable
-              hasComposites ? (
+              compositeRasterMaterialized ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                   <div style={{ fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", gap: 3, color: "#34d399" }}>
                     <span>✓</span>
-                    <span>Composite Advisory Active</span>
+                    <span>{compositeStatusLabel}</span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
                     <span style={{ color: "#94a3b8" }}>Mode:</span>
@@ -596,7 +617,7 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                     <span style={{ fontWeight: "bold", color: "#34d399" }}>{String(prov.certification_status ?? "verified")}</span>
                   </div>
                 </div>
-              ) : (canopySource === "asmae_diagnostic" || bannerState === "asmae_diagnostic_active" || bannerState === "hybrid_active") ? (
+              ) : (asmaeRasterMaterialized && (bannerState === "asmae_diagnostic_active" || bannerState === "hybrid_active")) ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
                   <div style={{ fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", gap: 3, color: "#38bdf8" }}>
                     <span>🔬</span>
@@ -626,8 +647,14 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                     <span style={{ fontWeight: "bold", color: "#fca5a5" }}>{(asmaeApprovalLadder?.unavailableReason || asmae_evidence_state?.reason || "no full scene stack").replace(/_/g, " ")}</span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
-                    <span style={{ color: "#94a3b8" }}>Displayed:</span>
-                    <span style={{ fontWeight: "bold", color: "#fca5a5" }}>NDVI_CLEAN fallback</span>
+                    <span style={{ color: "#94a3b8" }}>Displayed raster:</span>
+                    <span style={{ fontWeight: "bold", color: providerFallbackMaterialized ? "#fca5a5" : "#94a3b8" }}>
+                      {providerFallbackMaterialized
+                        ? "NDVI_CLEAN provider fallback"
+                        : baseRasterMaterialized
+                          ? renderedBaseType
+                          : "none"}
+                    </span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
                     <span style={{ color: "#94a3b8" }}>ASMAE 1m approval:</span>
@@ -674,11 +701,19 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                   </>
                 )}
                 <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
-                  <span style={{ color: "#94a3b8" }}>ASMAE support:</span>
+                  <span style={{ color: "#94a3b8" }}>ASMAE 1m approval:</span>
                   <span style={{ color: "#fb7185", fontWeight: "bold" }}>
                     {asmaeApprovalLadder?.oneMeterAsmaeApprovalPct !== null
                       ? "available"
                       : `unavailable — ${(asmaeApprovalLadder?.unavailableReason || asmae_evidence_state?.reason || "no full scene stack").replace(/_/g, " ")}`}
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
+                  <span style={{ color: "#94a3b8" }}>10m diagnostic support:</span>
+                  <span style={{ color: data?.source_policy_display_state?.asmaePlotState?.spatialAvailable ? "#34d399" : "#fbbf24", fontWeight: "bold" }}>
+                    {data?.source_policy_display_state?.asmaePlotState?.spatialAvailable
+                      ? "available · scouting authority"
+                      : "not spatially available"}
                   </span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 3, marginTop: 2 }}>
@@ -719,7 +754,7 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                 fontWeight: 600,
                 lineHeight: "1.25em",
               }}>
-                ⚠️ Experimental unavailable for this mode. Showing certified base raster.
+                ⚠️ Experimental unavailable for this mode. Showing committed composite advisory raster.
               </div>
             )}
             
@@ -860,7 +895,7 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
           boxShadow: "0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
         }}
       >
-        {showExperimental1m && (
+        {canClaimExperimentalCoverage && (
           <div style={{
             background: "linear-gradient(135deg, rgba(168,85,247,0.2) 0%, rgba(124,58,237,0.2) 100%)",
             border: "1px solid rgba(168,85,247,0.4)",
@@ -898,7 +933,7 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
         boxShadow: "0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
       }}
     >
-      {showExperimental1m && (
+      {canClaimExperimentalCoverage && (
         <div style={{
           background: "linear-gradient(135deg, rgba(168,85,247,0.2) 0%, rgba(124,58,237,0.2) 100%)",
           border: "1px solid rgba(168,85,247,0.4)",

@@ -2,6 +2,7 @@
 // Isomorphic and pure. No React, DOM, or window.
 
 import type { RenderMaterializationResult } from "./render-materialization";
+import { resolvePixelInspectorCapabilities } from "./pixel-inspector-authority.mjs";
 
 export type RenderKind =
   | "full_raster"
@@ -59,6 +60,10 @@ export interface SourcePolicyDisplayResolverOutput {
     bannerState: "composite_advisory_active" | "hybrid_active" | "asmae_diagnostic_active" | null;
     canShowPixelDiagnosis: boolean;
     canShowPixelHint: boolean;
+    canSamplePixel: boolean;
+    canInterpretForScouting: boolean;
+    canInterpretDiagnostically: boolean;
+    canUseForPrescription: boolean;
     shouldShowPlotLevel: boolean;
     shouldShowNoData: boolean;
     canShowExperimentalDetail: boolean;
@@ -76,6 +81,10 @@ export interface SourcePolicyDisplayResolverOutput {
   bannerState: "composite_advisory_active" | "hybrid_active" | "asmae_diagnostic_active" | null;
   canShowPixelDiagnosis: boolean;
   canShowPixelHint: boolean;
+  canSamplePixel: boolean;
+  canInterpretForScouting: boolean;
+  canInterpretDiagnostically: boolean;
+  canUseForPrescription: boolean;
   canShowExperimentalDetail: boolean;
   shouldShowNoData: boolean;
   shouldShowPlotLevel: boolean;
@@ -95,7 +104,12 @@ export interface AuthorizedSurfaceResolution {
     | "unavailable_missing_proof";
 }
 
-export function isAsmaeSurfaceType(type?: string | null): boolean {
+export function isCompositeAdvisorySurface(type?: string | null): boolean {
+  const t = String(type || "").toUpperCase();
+  return t.startsWith("COMPOSITE_");
+}
+
+export function isCoreAsmaeDiagnosticSurface(type?: string | null): boolean {
   const t = String(type || "").toUpperCase();
   return (
     t.startsWith("ASMAE_") ||
@@ -108,16 +122,14 @@ export function isAsmaeSurfaceType(type?: string | null): boolean {
     t.startsWith("RISK_ASMAE") ||
     t.startsWith("CONFIDENCE_ASMAE") ||
     t.startsWith("RESOLUTION_ASMAE") ||
-    t.startsWith("VEG_ATTENTION_ASMAE") ||
-    t.startsWith("COMPOSITE_ADVISORY") ||
-    t.startsWith("COMPOSITE_VEG") ||
-    t.startsWith("COMPOSITE_WATER") ||
-    t.startsWith("COMPOSITE_NUTRIENT") ||
-    t.startsWith("COMPOSITE_SALINITY") ||
-    t.startsWith("COMPOSITE_RISK") ||
-    t.startsWith("COMPOSITE_CONFIDENCE") ||
-    t.startsWith("COMPOSITE_EFFECTIVE")
+    t.startsWith("VEG_ATTENTION_ASMAE")
   );
+}
+
+// Backward-compatible name, now intentionally limited to the core ASMAE
+// family. Composite scouting products have a distinct authority contract.
+export function isAsmaeSurfaceType(type?: string | null): boolean {
+  return isCoreAsmaeDiagnosticSurface(type);
 }
 
 export function isExperimentalSurfaceType(type?: string | null): boolean {
@@ -158,7 +170,8 @@ export function getRenderAuthorization(
   role: RenderRole,
   renderAuthorizations: any
 ): RenderAuthorization {
-  const auth = renderAuthorizations?.[policy]?.[mode]?.[role]?.[surfaceType];
+  const normalizedMode = normalizeMode(mode);
+  const auth = renderAuthorizations?.[policy]?.[normalizedMode]?.[role]?.[surfaceType];
   if (auth) {
     return auth;
   }
@@ -166,7 +179,7 @@ export function getRenderAuthorization(
   return {
     surfaceType,
     policy: policy as any,
-    mode,
+    mode: normalizedMode,
     role,
     authorized: false,
     renderKind: "none",
@@ -239,8 +252,7 @@ export function resolveAuthorizedSurfaceForMode(input: {
     );
     if (
       authorization.authorized
-      && authorization.renderKind !== "none"
-      && authorization.renderKind !== "card_only"
+      && isRenderKindAllowedForRole(authorization.renderKind, "base")
     ) {
       return {
         requestedSurfaceType,
@@ -397,7 +409,7 @@ export function getPriorityList(
   } else if (normalizedMode === "uncertainty") {
     if (isAsmaeOrHybrid) {
       if (realAsmae) {
-        list.push("CONFIDENCE_ASMAE");
+        list.push("ASMAE_POSTERIOR_CONCENTRATION");
       }
       list.push("COMPOSITE_CONFIDENCE");
     }
@@ -451,6 +463,24 @@ function hasAsmaeSupportForMode(
   return false;
 }
 
+/** Keep resolver selection and map materialization on one render-kind contract. */
+export function isRenderKindAllowedForRole(
+  renderKind: RenderKind | string | null | undefined,
+  role: RenderRole,
+): boolean {
+  if (role === "base") {
+    return renderKind === "full_raster"
+      || renderKind === "diagnostic_overlay"
+      || renderKind === "proxy_overlay";
+  }
+  if (role === "overlay" || role === "candidate") {
+    return renderKind === "proxy_overlay" || renderKind === "diagnostic_overlay";
+  }
+  return false;
+}
+
+
+
 export function resolveSourcePolicyDisplay(input: SourcePolicyDisplayResolverInput): SourcePolicyDisplayResolverOutput {
   const surfaces = Array.isArray(input.surfaces) ? input.surfaces : [];
   const requestedPolicy = input.requestedPolicy || "satellite";
@@ -489,29 +519,42 @@ export function resolveSourcePolicyDisplay(input: SourcePolicyDisplayResolverInp
   let activeSurfaceType = activeSurface ? (activeSurface.type || activeSurface.semantic_type || null) : null;
   let renderKind: RenderKind = "none";
   let displayLevel: "raster" | "asmae_diagnostic" | "proxy" | "plot_level" | "unavailable" = "unavailable";
-
+  let blockedCandidateSurfaceType: string | null = null;
   if (activeSurface) {
     renderKind = activeAuth?.renderKind || "none";
     const gc = activeSurface.grounding_class || "UNIFORM";
     const stype = String(activeSurfaceType || "").toUpperCase();
     if (gc === "RASTER_GROUNDED" || gc === "PARTIAL_RASTER_GROUNDED" || gc === "MODEL_ASSISTED_RASTER") {
-      displayLevel = isAsmaeSurfaceType(stype) ? "asmae_diagnostic" : "raster";
+      displayLevel = (isAsmaeSurfaceType(stype) || isCompositeAdvisorySurface(stype))
+        ? "asmae_diagnostic"
+        : "raster";
     } else if (gc === "PROXY_SPATIAL") {
       displayLevel = "proxy";
     } else {
       displayLevel = "plot_level";
     }
   } else if (blockedSurfaceType) {
-    activeSurfaceType = blockedSurfaceType;
+    blockedCandidateSurfaceType = blockedSurfaceType;
+    activeSurfaceType = null;
     renderKind = "card_only";
     displayLevel = "unavailable";
   }
 
-  const stype = String(activeSurfaceType || "").toUpperCase();
+  const stype = String(activeSurfaceType || blockedCandidateSurfaceType || "").toUpperCase();
+  const isCompositeSurface = isCompositeAdvisorySurface(stype);
+  const compositeEpistemicClass = String(
+    activeSurface?.provenance?.epistemic_class || ""
+  ).toLowerCase();
+  const isModelPriorScouting =
+    isCompositeSurface && compositeEpistemicClass === "model_prior_scouting_overlay";
 
   // derive footer labels
   let activeSourceLabel = "SATELLITE";
-  if (stype.startsWith("ASMAE_VISUAL_FUSION") || stype === "ASMAE_VISUAL_FUSION_CANOPY") {
+  if (isModelPriorScouting) {
+    activeSourceLabel = "MODEL-PRIOR SCOUTING";
+  } else if (isCompositeSurface) {
+    activeSourceLabel = "MULTI-SENSOR COMPOSITE";
+  } else if (stype.startsWith("ASMAE_VISUAL_FUSION") || stype === "ASMAE_VISUAL_FUSION_CANOPY") {
     activeSourceLabel = "ASMAE FUSION";
   } else if (isAsmaeSurfaceType(stype)) {
     activeSourceLabel = "ASMAE ADVISORY";
@@ -521,45 +564,44 @@ export function resolveSourcePolicyDisplay(input: SourcePolicyDisplayResolverInp
     activeSourceLabel = "SATELLITE";
   }
 
+  const gc = activeSurface?.grounding_class || "UNIFORM";
+
   // Derive authority label from grounding or type
   let activeAuthorityLabel = "observed provider data";
-  if (isExperimentalSurfaceType(stype)) {
-    activeAuthorityLabel = "experimental visual";
+  if (isModelPriorScouting) {
+    activeAuthorityLabel = "Model-prior scouting overlay";
+  } else if (isCompositeSurface) {
+    activeAuthorityLabel = "Composite scouting raster";
+  } else if (isExperimentalSurfaceType(stype)) {
+    activeAuthorityLabel = "Experimental fine-detail model";
   } else if (isAsmaeSurfaceType(stype)) {
-    activeAuthorityLabel = "ASMAE advisory raster";
-  } else if (activeSurface) {
-    const gc = activeSurface.grounding_class || "UNIFORM";
-    const sourceReality = String(
-      activeSurface.source_reality || activeSurface.provenance?.source_reality || "",
-    ).toLowerCase();
-    if (sourceReality === "provider_temporal_composite_raster") {
-      activeAuthorityLabel = "provider temporal composite";
-    } else if (gc === "UNIFORM" || gc === "BROADCAST") {
-      activeAuthorityLabel = "Plot-level estimate";
-    } else if (gc === "MODEL_ASSISTED_RASTER") {
-      activeAuthorityLabel = "Estimated local signal";
-    } else if (gc === "PROXY_SPATIAL") {
-      activeAuthorityLabel = "Scouting hint";
-    }
-  }
-
-  // derive banner state
-  let bannerState: "composite_advisory_active" | "hybrid_active" | "asmae_diagnostic_active" | null = null;
-  const isActiveCompositeAdvisory = activeSurfaceType?.startsWith("COMPOSITE_");
-  const isActiveRealAsmae = isAsmaeSurfaceType(activeSurfaceType);
-
-  if (isActiveCompositeAdvisory) {
-    bannerState = "composite_advisory_active";
-  } else if (isActiveRealAsmae) {
-    bannerState = requestedPolicy === "hybrid" ? "hybrid_active" : "asmae_diagnostic_active";
+    activeAuthorityLabel = "ASMAE state posterior";
   } else {
-    bannerState = null;
+    activeAuthorityLabel = "observed provider data";
   }
 
-  // derive permissions
-  const gc = activeSurface?.grounding_class || "UNIFORM";
-  const canShowPixelDiagnosis = ["RASTER_GROUNDED", "PARTIAL_RASTER_GROUNDED"].includes(gc);
-  const canShowPixelHint = ["RASTER_GROUNDED", "PARTIAL_RASTER_GROUNDED", "MODEL_ASSISTED_RASTER", "PROXY_SPATIAL"].includes(gc);
+  const inspectorAuthorization = activeSurfaceType
+    ? getRenderAuthorization(
+        activeSurfaceType,
+        requestedPolicy,
+        normalized,
+        "inspector",
+        input.renderAuthorizations,
+      )
+    : null;
+  const inspectorCapabilities = resolvePixelInspectorCapabilities({
+    surface: activeSurface,
+    inspectorAuthorization,
+  });
+  const {
+    canSamplePixel,
+    canInterpretForScouting,
+    canInterpretDiagnostically,
+    canUseForPrescription,
+  } = inspectorCapabilities;
+  // Compatibility aliases. Diagnosis is now strictly the backend-authorized
+  // interpretation capability; sampling/scouting no longer promotes it.
+  const canShowPixelHint = canSamplePixel;
 
   // Lock 4: policy-aware and materialization-aware experimental detail. A
   // backend ladder or a serialized surface is evidence, not a rendered layer.
@@ -590,8 +632,8 @@ export function resolveSourcePolicyDisplay(input: SourcePolicyDisplayResolverInp
     }
   } else if (shouldShowPlotLevel) {
     groundingDetail = "(Plot-Level)";
-  } else if (stype.startsWith("COMPOSITE_")) {
-    groundingDetail = "(Advisory Raster)";
+  } else if (isCompositeSurface) {
+    groundingDetail = "(Scouting Overlay)";
   } else if (activeSurface) {
     if (gc === "PROXY_SPATIAL") {
       groundingDetail = "(Scouting Hint)";
@@ -599,6 +641,19 @@ export function resolveSourcePolicyDisplay(input: SourcePolicyDisplayResolverInp
       groundingDetail = "(Estimated Local Signal)";
     }
   }
+
+  let bannerState: "composite_advisory_active" | "hybrid_active" | "asmae_diagnostic_active" | null = null;
+  if (!!activeSurface && isCompositeSurface) {
+    bannerState = requestedPolicy === "hybrid"
+      ? "hybrid_active"
+      : "composite_advisory_active";
+  } else if (!!activeSurface && isAsmaeSurfaceType(activeSurfaceType)) {
+    bannerState = "asmae_diagnostic_active";
+  } else if (!!activeSurface && requestedPolicy === "hybrid") {
+    bannerState = "hybrid_active";
+  }
+
+  const canShowPixelDiagnosis = canInterpretDiagnostically;
 
   const activeDisplay = {
     surface: activeSurface,
@@ -611,6 +666,10 @@ export function resolveSourcePolicyDisplay(input: SourcePolicyDisplayResolverInp
     bannerState,
     canShowPixelDiagnosis,
     canShowPixelHint,
+    canSamplePixel,
+    canInterpretForScouting,
+    canInterpretDiagnostically,
+    canUseForPrescription,
     shouldShowPlotLevel,
     shouldShowNoData,
     canShowExperimentalDetail,
@@ -652,7 +711,9 @@ export function resolveSourcePolicyDisplay(input: SourcePolicyDisplayResolverInp
         surfaceAvailabilityByMode[m] = {
           surfaceType: st,
           status: "available_raster",
-          levelLabel: isAsmaeSurfaceType(st) ? "ASMAE diagnostic available" : "raster"
+          levelLabel: isCompositeAdvisorySurface(st)
+            ? "composite scouting diagnostic available"
+            : isAsmaeSurfaceType(st) ? "ASMAE diagnostic available" : "raster"
         };
       } else if (
         authObj.authorized
@@ -756,6 +817,10 @@ export function resolveSourcePolicyDisplay(input: SourcePolicyDisplayResolverInp
     bannerState: activeDisplay.bannerState,
     canShowPixelDiagnosis: activeDisplay.canShowPixelDiagnosis,
     canShowPixelHint: activeDisplay.canShowPixelHint,
+    canSamplePixel: activeDisplay.canSamplePixel,
+    canInterpretForScouting: activeDisplay.canInterpretForScouting,
+    canInterpretDiagnostically: activeDisplay.canInterpretDiagnostically,
+    canUseForPrescription: activeDisplay.canUseForPrescription,
     canShowExperimentalDetail: activeDisplay.canShowExperimentalDetail,
     shouldShowNoData: activeDisplay.shouldShowNoData,
     shouldShowPlotLevel: activeDisplay.shouldShowPlotLevel

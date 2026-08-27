@@ -349,7 +349,17 @@ model CropCycle {
   variety    String?
 
   // Timeline
-  plantDate       DateTime
+  // Planting time is scientific evidence only when its provenance says so.
+  // Legacy and newly declared cycles may legitimately leave it unknown.
+  plantDate             DateTime?
+  plantDateStatus       String?   // confirmed | estimated | interval | unknown
+  plantDateSource       String?
+  plantDateConfidence   Float?
+  plantDateMin          DateTime?
+  plantDateMax          DateTime?
+  declaredCropAuthority String?   // authenticated crop-identity authority
+  declaredCropAt        DateTime? // identity declaration time, never planting time
+  declaredCropSource    String?   // authenticated source of the identity claim
   expectedHarvest DateTime?
   actualHarvest   DateTime?
   status          CropStatus @default(PLANNED)
@@ -906,10 +916,12 @@ model PlotDNA {
 }
 
 // ============================================
-// CONFIRMED CROP LABELS — ML Training Ground Truth
+// CROP LABEL AUDIT RECORDS — TRAINING CANDIDATES ONLY
 // ============================================
-// v6.0B: Every farmer/admin confirmation creates a reusable training sample.
-// MongoDB collection ConfirmedCropLabel is the source of truth.
+// Farmer/admin declarations are audit feedback, never automatic ground truth.
+// Dataset admission additionally requires independent backend authority,
+// exact CropModelInputReceipt lineage, and leakage-control partitions.
+// MongoDB collection ConfirmedCropLabel is the audit-record source of truth.
 // Python reads/writes the same collection via PyMongo and maps
 // documents into dataclasses.
 // Prisma defines the frontend/admin schema.
@@ -941,7 +953,22 @@ model ConfirmedCropLabel {
   // Feature vector link
   layer1RunId            String?   // L1 run that produced features
   featureVectorVersion   String    @default("6.0.0")
+  featureVectorRef       String?
   featureVectorSnapshot  Json?     // Flattened CropFeatureVector at label time
+  cropModelInputReceipt      Json?
+  cropModelInputReceiptHash  String?
+  runtimeDeclarationReceipt Json?
+
+  // Authenticated namespace and training-authority partitioning
+  tenantId                 String?
+  farmId                   String?   @db.ObjectId
+  cropCycleId              String?   @db.ObjectId
+  authorityValidated       Boolean   @default(false)
+  synthetic               Boolean   @default(false)
+  regionPartition          String?
+  seasonPartition          String?
+  sensorRegime             String?
+  supportedHierarchyLevels String[] @default([])
 
   // Schema versioning
   labelSchemaVersion     String    @default("6.0B")
@@ -963,6 +990,9 @@ model ConfirmedCropLabel {
   @@index([labelSource])
   @@index([qualityTier])
   @@index([plotId, plantingDate])
+  @@index([tenantId, farmId, plotId])
+  @@index([cropCycleId])
+  @@index([cropModelInputReceiptHash])
 }
 
 // ============================================
@@ -1117,4 +1147,26 @@ model PlotObservationAggregate {
   @@index([plotId, period, startDate])
   @@index([plotId, cropCode, period])
   @@index([period, startDate])
+}
+
+// ============================================
+// INSTITUTIONAL LEADS & DEMO REQUESTS
+// ============================================
+
+model InstitutionalLead {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  intent       String   // agronomist | enterprise | cooperative | bank | insurance | government | agribusiness | research | api
+  name         String
+  email        String
+  organization String
+  country      String   @default("Algeria")
+  orgType      String?  // Enterprise, Government Ministry, Commercial Bank, Insurer, Cooperative, Research Institute, etc.
+  message      String?
+  fieldCount   String?  // Number of fields/farms or portfolio size
+  status       String   @default("NEW") // NEW | CONTACTED | QUALIFIED | CLOSED
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([intent])
+  @@index([createdAt])
 }

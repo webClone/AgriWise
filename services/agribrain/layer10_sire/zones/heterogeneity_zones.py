@@ -232,10 +232,20 @@ def _connected_components(labels, H: int, W: int, target_label: int) -> List[Lis
 
 # ── Zone Builder ──────────────────────────────────────────────────────────────
 
-def _compute_zone_stats(cells: List[Tuple[int, int]], surfaces: List[SurfaceArtifact]) -> Dict[str, float]:
-    """Compute mean value for each surface within a zone's cells."""
+def _compute_zone_stats(cells: List[Tuple[int, int]], surfaces: List[SurfaceArtifact]) -> Tuple[Dict[str, float], Dict[str, Any]]:
+    """Compute mean value for each surface within a zone's cells.
+
+    Returns (operational_stats, model_prior_summary).
+    Operational stats excludes prior-constrained surfaces.
+    """
     stats = {}
+    prior_summary = {}
     for surf in surfaces:
+        prov = getattr(surf, "provenance", {}) or {}
+        is_eligible = (
+            prov.get("zone_statistics_eligible") is not False
+            and getattr(surf, "zone_statistics_eligible", True) is not False
+        )
         vals = []
         for r, c in cells:
             if r < len(surf.values) and c < len(surf.values[r]):
@@ -243,8 +253,19 @@ def _compute_zone_stats(cells: List[Tuple[int, int]], surfaces: List[SurfaceArti
                 if v is not None and not (isinstance(v, float) and math.isnan(v)):
                     vals.append(v)
         if vals:
-            stats[surf.semantic_type.value] = round(sum(vals) / len(vals), 4)
-    return stats
+            mean_val = round(sum(vals) / len(vals), 4)
+            stype_key = surf.semantic_type.value
+            if is_eligible:
+                stats[stype_key] = mean_val
+            else:
+                prior_summary[stype_key] = {
+                    "mean": mean_val,
+                    "prior_only": True,
+                    "eligible_for_zone_statistics": False,
+                    "eligible_for_alerts": False,
+                    "eligible_for_management": False,
+                }
+    return stats, prior_summary
 
 
 def _classify_zone_type(zone_stats: Dict[str, float], cluster_rank: int) -> ZoneType:
@@ -327,11 +348,8 @@ def extract_heterogeneity_zones(
     labels = _kmeans_cluster(features, H, W, k)
     
     # Management zones: each k-means cluster = one zone containing ALL its cells.
-    # Unlike alert zones, management zones don't require contiguity —
-    # they represent agronomic behavior classes across the whole field.
     zone_counter = 0
     for cluster_id in range(k):
-        # Collect ALL cells assigned to this cluster
         cells = []
         for r in range(H):
             for c in range(W):
@@ -361,16 +379,24 @@ def _build_zone_artifact(
 ) -> ZoneArtifact:
     """Build a single ZoneArtifact from a connected component."""
     area_pct = len(cells) / total_cells if total_cells > 0 else 0
-    zone_stats = _compute_zone_stats(cells, surfaces)
+    zone_stats, prior_summary = _compute_zone_stats(cells, surfaces)
     zone_type = _classify_zone_type(zone_stats, cluster_id)
     
     rows = [r for r, c in cells]
     cols = [c for r, c in cells]
-    bbox_r = (min(rows), max(rows))
-    bbox_c = (min(cols), max(cols))
     
     zone_id = f"MZ_{cluster_id}_{comp_idx}"
     
+    linked_findings = [
+        {"type": "clustering", "detail": f"k-means cluster {cluster_id}"},
+        {"type": "contiguity", "detail": f"component {comp_idx}"},
+    ]
+    if prior_summary:
+        linked_findings.append({"type": "model_prior_summary", "detail": prior_summary})
+
+    bbox_r = (min(rows), max(rows))
+    bbox_c = (min(cols), max(cols))
+
     return ZoneArtifact(
         zone_id=zone_id,
         zone_type=zone_type,
@@ -383,10 +409,7 @@ def _build_zone_artifact(
         top_drivers=[band_names[0]] if band_names else [],
         label=f"Management Zone {chr(65 + zone_counter)}",
         source_surface_type=SurfaceType.NDVI_CLEAN.value,
-        linked_findings=[
-            {"type": "clustering", "detail": f"k-means cluster {cluster_id}"},
-            {"type": "contiguity", "detail": f"component {comp_idx}"},
-        ],
+        linked_findings=linked_findings,
         confidence_reasons=[
             f"based on {len(band_names)} spectral bands",
             f"coverage {coverage:.0%}",

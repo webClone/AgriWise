@@ -26,15 +26,15 @@ logger = logging.getLogger(__name__)
 # These are broad but evidence-based ranges per crop group.
 # LAI: m²/m², Chlorophyll: relative units (0–1 normalised)
 _CROP_GROUP_BOUNDS: Dict[str, Dict[str, Tuple[float, float]]] = {
-    "cereal":      {"lai": (0.5, 8.0), "chlorophyll": (0.3, 0.9)},
-    "legume":      {"lai": (0.3, 6.0), "chlorophyll": (0.3, 0.85)},
-    "orchard":     {"lai": (1.0, 7.0), "chlorophyll": (0.35, 0.90)},
-    "vegetable":   {"lai": (0.3, 5.0), "chlorophyll": (0.25, 0.85)},
-    "tuber":       {"lai": (0.5, 6.5), "chlorophyll": (0.3, 0.85)},
-    "forage":      {"lai": (0.3, 7.5), "chlorophyll": (0.3, 0.85)},
-    "industrial":  {"lai": (0.5, 8.0), "chlorophyll": (0.30, 0.90)},
-    "fallow":      {"lai": (0.0, 1.5), "chlorophyll": (0.05, 0.40)},
-    "unknown":     {"lai": (0.0, 10.0),"chlorophyll": (0.0, 1.0)},
+    "cereal":      {"lai": (0.5, 8.0), "chlorophyll": (24.0, 72.0)},
+    "legume":      {"lai": (0.3, 6.0), "chlorophyll": (24.0, 68.0)},
+    "orchard":     {"lai": (1.0, 7.0), "chlorophyll": (28.0, 72.0)},
+    "vegetable":   {"lai": (0.3, 5.0), "chlorophyll": (20.0, 68.0)},
+    "tuber":       {"lai": (0.5, 6.5), "chlorophyll": (24.0, 68.0)},
+    "forage":      {"lai": (0.3, 7.5), "chlorophyll": (24.0, 68.0)},
+    "industrial":  {"lai": (0.5, 8.0), "chlorophyll": (24.0, 72.0)},
+    "fallow":      {"lai": (0.0, 1.5), "chlorophyll": (4.0, 32.0)},
+    "unknown":     {"lai": (0.0, 10.0),"chlorophyll": (0.0, 80.0)},
 }
 
 # Coarse crop-name → group mapping.
@@ -54,7 +54,7 @@ _CROP_TO_GROUP: Dict[str, str] = {
 # Broad fallback when crop group is unknown.
 _BROAD_DEFAULT = {
     "lai":         (0.0, 10.0),
-    "chlorophyll": (0.0,  1.0),
+    "chlorophyll": (0.0, 80.0),
 }
 _BROAD_DEFAULT_WEIGHT = 0.20  # low weight when group is unknown
 

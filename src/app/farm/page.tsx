@@ -9,6 +9,8 @@ import { getSession } from "@/lib/session";
 import DevelopmentSessionBootstrap from "@/components/auth/DevelopmentSessionBootstrap";
 import { ObjectId } from "bson";
 
+export const dynamic = "force-dynamic";
+
 async function getFarms() {
   try {
     const session = await getSession();

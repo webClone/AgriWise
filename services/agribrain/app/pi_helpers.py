@@ -414,25 +414,21 @@ def build_timeline(results: Dict, lat: float, days_past: int, days_future: int,
     return timeline, ndvi_records, hist_records, forecast_records
 
 
-def compute_phenology(plant_date: Optional[str], crop_stage_label: Optional[str], ndvi_val: float) -> Optional[Dict]:
-    """Compute crop phenology from plant_date + NDVI."""
-    now = datetime.now(timezone.utc)
-    if plant_date:
-        try:
-            plant_dt = datetime.strptime(plant_date[:10], "%Y-%m-%d")
-            dap = (now.replace(tzinfo=None) - plant_dt).days
-            if dap < 15: pheno_stage = "Establishment"
-            elif dap < 40: pheno_stage = "Vegetative"
-            elif dap < 75: pheno_stage = "Reproductive"
-            elif dap < 110: pheno_stage = "Grain Fill"
-            else: pheno_stage = "Maturation"
-            if ndvi_val > 0.6: pheno_stage = "Reproductive" if dap > 30 else "Vegetative"
-            elif ndvi_val < 0.25 and dap > 60: pheno_stage = "Maturation"
-            return {"stage": pheno_stage, "dap": dap, "plant_date": plant_date[:10], "basis": "fao_dap_ndvi"}
-        except Exception as e:
-            print(f"[PI] Phenology computation failed: {e}")
-            if crop_stage_label:
-                return {"stage": crop_stage_label, "dap": None, "basis": "db_label"}
-    elif crop_stage_label:
-        return {"stage": crop_stage_label, "dap": None, "basis": "db_label"}
-    return None
+def compute_phenology(plant_date: Optional[str], crop_administrative_status: Optional[str], ndvi_val: float) -> Optional[Dict]:
+    """Return administrative context without inventing biological phenology.
+
+    Layer 2 owns phenology inference.  This compatibility helper deliberately
+    ignores NDVI and never converts CropStatus or days-after-planting into a
+    replacement stage.
+    """
+    del ndvi_val
+    if not plant_date and not crop_administrative_status:
+        return None
+    return {
+        "stage": "UNKNOWN",
+        "dap": None,
+        "plant_date": plant_date[:10] if plant_date else None,
+        "administrative_status": crop_administrative_status,
+        "basis": "layer2_phenology_required",
+        "scientific_authority": False,
+    }

@@ -1,7 +1,7 @@
 """
 Crop Intelligence v6.0B — Training Dataset Builder.
 
-Builds ML-ready datasets from confirmed crop labels.
+Builds ML-ready datasets from authority-validated crop labels.
 Consumed by v6.0C hierarchical classifier.
 
 Outputs:
@@ -9,9 +9,9 @@ Outputs:
   - CSV export for offline analysis
   - Summary statistics for dataset quality reporting
 
-Adjustment #6: include_historical flag controls whether
-historical_record labels are included (default True, but
-GROWING cycle labels are excluded by default via backfill rules).
+Historical records and ordinary farmer confirmations are not production
+ground truth.  This builder fails closed unless every sample carries trusted
+source authority, immutable evidence lineage, and leakage-control partitions.
 """
 
 import csv
@@ -25,10 +25,14 @@ from .label_schema import (
     LabeledSample,
     LabelQualityScore,
     DatasetSummary,
+    TRAINING_ELIGIBLE_LABEL_SOURCES,
     get_hierarchy_targets,
 )
 from .label_store import LabelStoreBase
 from .label_quality import compute_label_quality
+from services.agribrain.app.crop_training_snapshot_authority import (
+    assess_crop_training_snapshot,
+)
 
 logger = logging.getLogger("agribrain.labels.dataset")
 
@@ -55,7 +59,7 @@ class TrainingDatasetBuilder:
         min_quality_tier: str = "C",
         target_level: str = "L2",
         crop_groups: Optional[List[str]] = None,
-        include_historical: bool = True,
+        include_historical: bool = False,
         balance_classes: bool = False,
         max_samples_per_class: Optional[int] = None,
         require_feature_vector: bool = True,
@@ -68,7 +72,9 @@ class TrainingDatasetBuilder:
             min_quality_tier: Minimum quality tier (A/B/C/D)
             target_level: Which hierarchy level to train (L0/L1/L2/L3)
             crop_groups: Filter to specific crop groups (optional)
-            include_historical: Include historical_record labels (default True)
+            include_historical: Inspect historical_record labels (default
+                False). Historical records remain ineligible for production
+                training even when inspected.
             balance_classes: Downsample to balance class distribution
             max_samples_per_class: Cap per class if balance_classes=True
             require_feature_vector: Exclude labels without feature vectors (default True)
@@ -80,16 +86,16 @@ class TrainingDatasetBuilder:
         """
         min_score = _TIER_THRESHOLD.get(min_quality_tier, 0.4)
         warnings = []
+        if target_level not in {"L0", "L1", "L2", "L3"}:
+            raise ValueError("target_level must be one of L0, L1, L2, L3")
 
-        # Fetch labels
-        source_filter = None
-        if not include_historical:
-            source_filter = ["farmer_confirmed", "admin_verified", "imported_dataset"]
-
+        # Fetch the scoped label inventory and apply authority rules here so
+        # exclusions are visible in the dataset receipt.  Store-side source
+        # filtering would make unsafe labels disappear without an audit count.
         all_labels = self.store.get_all_labels(
             active_only=True,
             crop_groups=crop_groups,
-            label_sources=source_filter,
+            label_sources=None,
         )
 
         if not include_synthetic:
@@ -106,7 +112,20 @@ class TrainingDatasetBuilder:
                 warnings=["no_labels_found"],
                 included_samples=0,
                 excluded_samples=0,
-                exclusion_reasons={"missing_feature_vector": 0, "low_feature_completeness": 0},
+                exclusion_reasons={
+                    "historical_record_excluded": 0,
+                    "untrusted_label_source": 0,
+                    "authority_not_validated": 0,
+                    "label_confidence_not_high": 0,
+                    "missing_geometry": 0,
+                    "missing_run_lineage": 0,
+                    "missing_partition_metadata": 0,
+                    "below_quality_threshold": 0,
+                    "missing_feature_vector": 0,
+                    "invalid_crop_model_input_receipt": 0,
+                    "low_feature_completeness": 0,
+                    "target_level_not_labeled": 0,
+                },
             )
 
         # Score and filter
@@ -117,20 +136,97 @@ class TrainingDatasetBuilder:
         included_samples = 0
         excluded_samples = 0
         exclusion_reasons = {
+            "historical_record_excluded": 0,
+            "untrusted_label_source": 0,
+            "authority_not_validated": 0,
+            "label_confidence_not_high": 0,
+            "missing_geometry": 0,
+            "missing_run_lineage": 0,
+            "missing_partition_metadata": 0,
+            "below_quality_threshold": 0,
             "missing_feature_vector": 0,
-            "low_feature_completeness": 0
+            "invalid_crop_model_input_receipt": 0,
+            "low_feature_completeness": 0,
+            "target_level_not_labeled": 0,
         }
 
         for label in all_labels:
+            if target_level not in set(label.supported_hierarchy_levels):
+                exclusion_reasons["target_level_not_labeled"] += 1
+                excluded_samples += 1
+                continue
+            if label.label_source == "historical_record" and not include_historical:
+                exclusion_reasons["historical_record_excluded"] += 1
+                excluded_samples += 1
+                continue
+
+            if label.label_source not in TRAINING_ELIGIBLE_LABEL_SOURCES:
+                exclusion_reasons["untrusted_label_source"] += 1
+                excluded_samples += 1
+                continue
+
+            if not getattr(label, "authority_validated", False):
+                exclusion_reasons["authority_not_validated"] += 1
+                excluded_samples += 1
+                continue
+
+            if label.label_confidence != "HIGH":
+                exclusion_reasons["label_confidence_not_high"] += 1
+                excluded_samples += 1
+                continue
+
+            if not label.geometry_hash or label.geometry_hash == "NO_GEOMETRY":
+                exclusion_reasons["missing_geometry"] += 1
+                excluded_samples += 1
+                continue
+
+            if not label.layer1_run_id:
+                exclusion_reasons["missing_run_lineage"] += 1
+                excluded_samples += 1
+                continue
+
+            partition_values = (
+                getattr(label, "tenant_id", None),
+                getattr(label, "farm_id", None),
+                getattr(label, "crop_cycle_id", None),
+                getattr(label, "region_partition", None),
+                getattr(label, "season_partition", None),
+                getattr(label, "sensor_regime", None),
+            )
+            if any(not value for value in partition_values):
+                exclusion_reasons["missing_partition_metadata"] += 1
+                excluded_samples += 1
+                continue
+
             quality = compute_label_quality(label)
             quality_dist[quality.quality_tier] = quality_dist.get(quality.quality_tier, 0) + 1
 
             if quality.overall_quality < min_score:
+                exclusion_reasons["below_quality_threshold"] += 1
+                excluded_samples += 1
                 continue
 
             snapshot = label.feature_vector_snapshot
             if require_feature_vector and not snapshot:
                 exclusion_reasons["missing_feature_vector"] += 1
+                excluded_samples += 1
+                continue
+
+            training_input = assess_crop_training_snapshot(
+                feature_vector_snapshot=snapshot,
+                crop_model_input_receipt=getattr(
+                    label, "crop_model_input_receipt", None
+                ),
+                tenant_id=getattr(label, "tenant_id", None),
+                farm_id=getattr(label, "farm_id", None),
+                plot_id=label.plot_id,
+                crop_cycle_id=getattr(label, "crop_cycle_id", None),
+                expected_receipt_hash=getattr(
+                    label, "crop_model_input_receipt_hash", None
+                ),
+            )
+            if not training_input.eligible:
+                exclusion_reasons["invalid_crop_model_input_receipt"] += 1
                 excluded_samples += 1
                 continue
 
@@ -153,7 +249,13 @@ class TrainingDatasetBuilder:
                 excluded_samples += 1
                 continue
 
-            hierarchy = get_hierarchy_targets(label.crop_code, label.crop_group)
+            full_hierarchy = get_hierarchy_targets(
+                label.crop_code, label.crop_group,
+            )
+            hierarchy = {
+                level: value for level, value in full_hierarchy.items()
+                if level in set(label.supported_hierarchy_levels)
+            }
 
             sample = LabeledSample(
                 label=label,
@@ -168,7 +270,7 @@ class TrainingDatasetBuilder:
         # Class distribution
         class_dist: Dict[str, int] = {}
         for s in samples:
-            target = s.hierarchy_targets.get(target_level, "unknown")
+            target = s.hierarchy_targets[target_level]
             class_dist[target] = class_dist.get(target, 0) + 1
 
         # Balance classes if requested
@@ -179,7 +281,7 @@ class TrainingDatasetBuilder:
             # Recompute after balancing
             class_dist = {}
             for s in samples:
-                target = s.hierarchy_targets.get(target_level, "unknown")
+                target = s.hierarchy_targets[target_level]
                 class_dist[target] = class_dist.get(target, 0) + 1
             included_samples = len(samples)
 
@@ -227,7 +329,7 @@ class TrainingDatasetBuilder:
         # Group by target class
         by_class: Dict[str, List[LabeledSample]] = {}
         for s in samples:
-            target = s.hierarchy_targets.get(target_level, "unknown")
+            target = s.hierarchy_targets[target_level]
             by_class.setdefault(target, []).append(s)
 
         # Determine target count

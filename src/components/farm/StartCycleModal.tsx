@@ -30,7 +30,7 @@ export default function StartCycleModal({ plotId, onClose, onSuccess }: StartCyc
   const [formData, setFormData] = useState({
     cropName: "",
     variety: "",
-    startDate: new Date().toISOString().split('T')[0],
+    startDate: "",
   });
 
   useEffect(() => {
@@ -162,14 +162,16 @@ export default function StartCycleModal({ plotId, onClose, onSuccess }: StartCyc
             </div>
 
             <div className="mb-6">
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">تاريخ الزراعة *</label>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">تاريخ الزراعة</label>
               <input
                 type="date"
-                required
                 className="w-full p-3 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all text-slate-800 dark:text-slate-200 scheme-light dark:scheme-dark"
                 value={formData.startDate}
                 onChange={(e) => setFormData(prev => ({ ...prev, startDate: e.target.value }))}
               />
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Leave blank when unknown. Confirming crop identity does not confirm a planting date.
+              </p>
             </div>
 
             <div className="flex gap-3 pt-2">

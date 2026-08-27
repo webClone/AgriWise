@@ -14,11 +14,16 @@ import json
 import logging
 from dataclasses import dataclass, field, is_dataclass, fields
 from enum import Enum
+from datetime import datetime, date, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-EVIDENCE_CAPABILITY_CONTRACT_VERSION = "evidence_capability_contract_v4_executable_mapping"
+EVIDENCE_CAPABILITY_CONTRACT_VERSION = "evidence_capability_contract_v12_semantic_quality_status"
+
+
+class CapabilityPlanIdentityError(ValueError):
+    """A persisted scientific plan no longer resolves to the same identity."""
 
 
 class EvidenceCapability(str, Enum):
@@ -44,6 +49,7 @@ _PROCESS_SIGNAL_KEYS = {
     "precipitation": ("precipitation", "precipitation_mm", "rainfall", "rainfall_mm"),
     "et0": ("et0", "et0_mm", "evapotranspiration"),
     "humidity": ("humidity", "humidity_mean_pct", "relative_humidity"),
+    "wind_speed": ("wind_speed", "wind_speed_m_s", "wind_speed_10m", "wind_speed_10m_mean"),
     "soil_moisture": ("soil_moisture", "soil_moisture_pct", "volumetric_water_content"),
     "soil_ec": ("ec", "soil_ec", "soil_ec_ds_m"),
 }
@@ -55,7 +61,23 @@ _CHILD_COLLECTION_KEYS = (
 
 
 def _enum_value(value: Any) -> Any:
-    return value.value if isinstance(value, Enum) else value
+    """Return the semantic scalar carried by enum-like boundary objects.
+
+    Job manifests deliberately reconstruct arbitrary domain objects as
+    ``SimpleNamespace`` instances. Several Layer 0 adapters use an enum-like
+    ``SimpleNamespace(value=...)`` for quality and provider fields. Reading
+    only real ``Enum`` instances made the same observation hash differently
+    before and after a manifest round trip because the reconstructed object's
+    bookkeeping field leaked through ``str(value)``.
+    """
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, Mapping) and "value" in value:
+        return _enum_value(value.get("value"))
+    nested = getattr(value, "value", None)
+    if nested is not None and nested is not value:
+        return _enum_value(nested)
+    return value
 
 
 def _public(obj: Any) -> Dict[str, Any]:
@@ -234,6 +256,8 @@ def classify_package(pkg: Any, source_family: str) -> Tuple[EvidenceCapability, 
         return EvidenceCapability.COMPOSITE_RASTER, [], signals
 
     if intended == EvidenceCapability.SPATIAL_PROVIDER_SCENE:
+        from .scene_admission import scene_quality_admission
+
         if not _has_raster_geometry(d):
             reasons.append("missing_raster_geometry")
         if not (d.get("scene_id") or d.get("content_hash") or d.get("packet_id")):
@@ -248,6 +272,9 @@ def classify_package(pkg: Any, source_family: str) -> Tuple[EvidenceCapability, 
             reasons.append("non_provider_spatial_reality")
         if d.get("diagnostic_only") or d.get("spatial_visualization_unavailable") or d.get("data_status") == "unusable":
             reasons.append("diagnostic_only_package_not_spatial_provider_scene")
+        quality_admitted, quality_reason, _ = scene_quality_admission(d)
+        if not quality_admitted and quality_reason:
+            reasons.append(quality_reason)
         if reasons:
             return EvidenceCapability.UNKNOWN_OR_INVALID, reasons, signals
         return EvidenceCapability.SPATIAL_PROVIDER_SCENE, [], signals
@@ -278,35 +305,163 @@ def _sensor_for(d: Mapping[str, Any], family: str) -> Optional[str]:
     return None
 
 
+def _normalize_iso_time(val: Any) -> str:
+    if not val:
+        return ""
+    if isinstance(val, (datetime, date)):
+        if isinstance(val, datetime):
+            if val.tzinfo is not None:
+                val = val.astimezone(timezone.utc)
+            return val.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return val.strftime("%Y-%m-%d")
+    s = str(val).strip()
+    if not s:
+        return ""
+    try:
+        cleaned = s.replace("Z", "+00:00").replace(" ", "T")
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return s
+
+
+def _hash_scientific_value(value: Any) -> str:
+    """Use the cache's exact, cross-import scientific value identity."""
+    from .cache import stable_value_hash
+
+    return stable_value_hash(value)
+
+
+def _first_present(d: Mapping[str, Any], names: Sequence[str]) -> Any:
+    for name in names:
+        if name in d and d.get(name) is not None:
+            return d.get(name)
+    return None
+
+
+def _admission_identity(d: Mapping[str, Any]) -> Dict[str, Any]:
+    """Authority fields affect admission but wrapper provenance does not."""
+    fields = (
+        "production_usable", "diagnostic_only", "data_status",
+        "admission_status", "validation_status", "quality_status",
+        "state_update_allowed", "scientific_surface_allowed",
+        "prescription_driver_allowed", "real_provider_product",
+    )
+    return {
+        name: _enum_value(d.get(name))
+        for name in fields
+        if d.get(name) is not None
+    }
+
+
+def _scientific_product_role(d: Mapping[str, Any], family: str) -> str:
+    explicit = _first_present(
+        d,
+        (
+            "product_type", "surface_type", "variable", "index_name",
+            "band_name", "measurement", "contract_type",
+        ),
+    )
+    if explicit:
+        return str(_enum_value(explicit)).upper()
+    if str(family).upper() in {
+        "NDVI", "NDVI_CLEAN", "NDMI", "QUALITY", "SAR", "VV", "VH",
+        "SCL", "DATAMASK",
+    }:
+        return str(family).upper()
+    signals = sorted(_extract_scalar_signals(d))
+    if signals:
+        return "TEMPORAL:" + ",".join(signals)
+    bands = sorted(
+        str(key).upper()
+        for key in _mapping(d.get("band_arrays") or d.get("bands") or d.get("band_refs")).keys()
+    )
+    if bands:
+        return "BANDS:" + ",".join(bands)
+    return (_obs_type(d) or _sensor_for(d, family) or "UNKNOWN").upper()
+
+
+def canonical_observation_identity_v3(d: Mapping[str, Any], family: str) -> Dict[str, Any]:
+    from .artifact_identity import canonicalize_artifact_references
+    from .scene_admission import scene_quality_identity
+    sensor = _sensor_for(d, family) or "UNKNOWN"
+    raw_acq = d.get("timestamp") or d.get("date") or d.get("acquisition_time") or d.get("time") or ""
+    acq_time = _normalize_iso_time(raw_acq)
+    signals = _extract_scalar_signals(d)
+    geometry = {
+        "crs": d.get("crs"),
+        "width": d.get("width"),
+        "height": d.get("height"),
+        "transform": d.get("transform"),
+        "bounds": d.get("bounds"),
+    } if _has_raster_geometry(d) else None
+    pixel_names = ("values", "data", "array", "band_arrays", "bands", "band_refs")
+    pixel_name = next((name for name in pixel_names if d.get(name) is not None), "")
+    pixels = d.get(pixel_name) if pixel_name else None
+    support_names = (
+        "valid_support", "valid_mask", "support_mask", "mask", "masks",
+        "mask_refs", "quality_mask", "datamask",
+    )
+    support_name = next((name for name in support_names if d.get(name) is not None), "")
+    support = d.get(support_name) if support_name else None
+    window = _first_present(
+        d,
+        ("source_window", "observation_window", "acquisition_window", "date_range"),
+    )
+    return {
+        "version": "canonical_observation_identity_v4_content_quality",
+        "sensor": sensor,
+        "acq_time_iso": acq_time,
+        "observation_window_hash": _hash_scientific_value(window),
+        "product_role": _scientific_product_role(d, family),
+        "signals": {k: float(v) for k, v in sorted(signals.items()) if v is not None},
+        "geometry_hash": _hash_scientific_value(geometry),
+        "pixel_content_hash": _hash_scientific_value(
+            canonicalize_artifact_references(
+                pixels,
+                "band_refs" if pixel_name == "band_refs" else "",
+            )
+        ),
+        "valid_support_hash": str(d.get("valid_support_hash") or "")
+            or _hash_scientific_value(
+                canonicalize_artifact_references(
+                    support,
+                    "mask_refs" if support_name == "mask_refs" else "",
+                )
+            ),
+        "provider_product_id": str(_first_present(
+            d,
+            ("provider_product_id", "composite_id", "product_id", "catalog_item_id"),
+        ) or ""),
+        "provider": str(_enum_value(_first_present(d, ("provider", "platform"))) or ""),
+        "quality_identity": scene_quality_identity(d)
+            if _intended_capability(d, family) == EvidenceCapability.SPATIAL_PROVIDER_SCENE
+            else None,
+    }
+
+
+# Compatibility export for callers that imported the old function name. Its
+# returned schema is deliberately the current identity contract.
+canonical_observation_identity_v2 = canonical_observation_identity_v3
+
+
+def wrapper_provenance_record(d: Mapping[str, Any], family: str, path: Sequence[str]) -> Dict[str, Any]:
+    return {
+        "wrapper_path": list(path),
+        "source_family": family,
+        "raw_packet_id": str(d.get("packet_id") or d.get("observation_id") or ""),
+        "wrapper_content_hash": str(d.get("content_hash") or ""),
+    }
+
+
 def _stable_node_hash(value: Any, family: str, path: Sequence[str], parent_id: Optional[str]) -> str:
     """Canonical path-independent scientific observation content hash."""
     d = _merged_public(value)
-    canon_id = (
-        d.get("packet_id")
-        or d.get("observation_id")
-        or d.get("provider_product_id")
-        or d.get("scene_id")
-        or d.get("content_hash")
-    )
-    acq_time = d.get("timestamp") or d.get("date") or d.get("acquisition_time") or d.get("time")
-    sensor = _sensor_for(d, family)
-    signals = _extract_scalar_signals(d)
-    
-    if canon_id or acq_time:
-        canon_obj = {
-            "canon_id": str(canon_id or ""),
-            "acq_time": str(acq_time or ""),
-            "sensor": str(sensor or ""),
-            "signals": {k: float(v) for k, v in sorted(signals.items()) if v is not None},
-        }
-        return hashlib.sha256(json.dumps(canon_obj, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-
-    try:
-        from .job_manifest import scientific_value_hash
-        return scientific_value_hash({"value": value})
-    except Exception:
-        payload = json.dumps(_merged_public(value), sort_keys=True, default=str, separators=(",", ":"))
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    identity = canonical_observation_identity_v3(d, family)
+    payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _looks_like_atomic_scene(value: Any) -> bool:
@@ -426,6 +581,8 @@ class CapabilityPlan:
         return {
             "contract_version": self.contract_version,
             "capability_plan_hash": self.plan_hash(),
+            "execution_plan_hash": self.execution_plan_hash(),
+            "quarantine_ledger_hash": self.quarantine_ledger_hash(),
             "spatial_scene_capability": {
                 "status": "available" if self.spatial_scenes else "unavailable",
                 "accepted_count": len(self.spatial_scenes),
@@ -445,17 +602,62 @@ class CapabilityPlan:
             "unknown_quarantined": len(self.rejected_nodes),
         }
 
-    def plan_hash(self) -> str:
-        records = sorted(
-            f"{node.evidence_node_id}:{node.content_hash}:{node.capability.value}"
-            for node in (
-                self.spatial_scenes + self.temporal_observations
-                + self.composite_rasters + self.rejected_nodes
-            )
+    @staticmethod
+    def _identity_records(nodes: Sequence[EvidenceNode]) -> List[Dict[str, Any]]:
+        return sorted(
+            (
+                {
+                    "capability": node.capability.value,
+                    "intended_capability": node.intended_capability.value,
+                    "content_hash": node.content_hash,
+                    "product_role": _scientific_product_role(
+                        _merged_public(node.raw_value), node.source_family
+                    ),
+                    "accepted": node.accepted,
+                    "admission": _admission_identity(_merged_public(node.raw_value)),
+                    "rejection_reasons": list(node.rejection_reasons),
+                }
+                for node in nodes
+            ),
+            key=lambda record: json.dumps(record, sort_keys=True, separators=(",", ":")),
         )
+
+    @staticmethod
+    def _records_hash(contract: str, kind: str, records: Sequence[Mapping[str, Any]]) -> str:
         encoded = json.dumps(
-            {"contract": self.contract_version, "nodes": records},
+            {"contract": contract, "kind": kind, "nodes": list(records)},
             sort_keys=True, separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(encoded).hexdigest()[:24]
+
+    def execution_plan_hash(self) -> str:
+        accepted = (
+            self.spatial_scenes + self.temporal_observations
+            + self.composite_rasters + self.archive_posteriors
+            + self.context_priors
+        )
+        return self._records_hash(
+            self.contract_version,
+            "accepted_execution_plan",
+            self._identity_records(accepted),
+        )
+
+    def quarantine_ledger_hash(self) -> str:
+        return self._records_hash(
+            self.contract_version,
+            "rejected_quarantine_ledger",
+            self._identity_records(self.rejected_nodes),
+        )
+
+    def plan_hash(self) -> str:
+        encoded = json.dumps(
+            {
+                "contract": self.contract_version,
+                "execution_plan_hash": self.execution_plan_hash(),
+                "quarantine_ledger_hash": self.quarantine_ledger_hash(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         ).encode()
         return hashlib.sha256(encoded).hexdigest()[:24]
 
@@ -478,14 +680,27 @@ class CapabilityPlan:
                 continue
             seen.add(node.content_hash)
             key = "asmae_sentinel1_real" if node.sensor == "S1" else "asmae_sentinel2_real"
-            packages[key].append(copy.deepcopy(node.raw_value))
+            scene = copy.deepcopy(node.raw_value)
+            if isinstance(scene, dict):
+                from .scene_admission import scene_quality_identity
+                scene["_asmae_frozen_quality_identity"] = scene_quality_identity(
+                    _merged_public(scene)
+                )
+            packages[key].append(scene)
         return packages
 
     def execution_plot_timeseries(self) -> List[Dict[str, Any]]:
+        """Project every admitted temporal node into the executable timeline.
+
+        Direct observations condition the analysis state; process forcings drive
+        forecast dynamics.  Both are scientific inputs and must survive manifest
+        persistence.  The explicit role prevents weather from being mistaken for
+        a crop-state observation downstream.
+        """
         rows: List[Dict[str, Any]] = []
         seen: set[str] = set()
         for node in self.temporal_observations:
-            if not node.direct_observation or node.content_hash in seen:
+            if node.content_hash in seen:
                 continue
             seen.add(node.content_hash)
             d = _merged_public(node.raw_value)
@@ -497,8 +712,13 @@ class CapabilityPlan:
                 "quality": d.get("quality") or d.get("qa_score") or d.get("valid_fraction"),
                 "uncertainty": d.get("uncertainty"),
                 "data_status": str(_enum_value(d.get("data_status") or "observed")),
+                "observation_role": (
+                    "direct_observation" if node.direct_observation
+                    else "process_forcing"
+                ),
+                "direct_observation": node.direct_observation,
             }
-            row.update(_direct_signals(node.signal_map))
+            row.update({key: float(value) for key, value in node.signal_map.items()})
             rows.append(row)
         rows.sort(key=lambda row: str(row.get("timestamp") or ""))
         return rows
@@ -520,11 +740,8 @@ def _make_node(
     capability, reasons, signals = classify_package(raw, family)
     intended = _intended_capability(d, family)
     content_hash = _stable_node_hash(raw, family, path, parent_id)
-    base_id = str(
-        d.get("scene_id") or d.get("packet_id") or d.get("content_hash")
-        or d.get("observation_id") or f"{family}:{'/'.join(path)}"
-    )
-    node_id = f"{base_id}:{content_hash[:8]}"
+    role = _scientific_product_role(d, family).lower().replace(" ", "_")
+    node_id = f"{capability.value}:{role}:{content_hash[:16]}"
     direct = bool(_direct_signals(signals)) and str(_enum_value(d.get("data_status") or "observed")).lower() == "observed"
     return EvidenceNode(
         evidence_node_id=node_id,
@@ -584,7 +801,7 @@ def build_capability_plan(
             continue
         content_hash = _stable_node_hash(composite, str(key), ("raster_composites", str(key)), None)
         composites.append(EvidenceNode(
-            evidence_node_id=f"composite:{key}:{content_hash[:8]}",
+            evidence_node_id=f"composite_raster:{str(key).lower()}:{content_hash[:16]}",
             capability=EvidenceCapability.COMPOSITE_RASTER,
             intended_capability=EvidenceCapability.COMPOSITE_RASTER,
             source_family=str(key),
@@ -601,11 +818,44 @@ def build_capability_plan(
             raw_value=composite,
         ))
 
-    # Atomic content identity, rather than wrapper position, performs dedupe.
+    # Atomic scientific identity, rather than wrapper position, performs
+    # dedupe. Distinct product roles are never collapsed merely because they
+    # share a grid.
     def unique(nodes: List[EvidenceNode]) -> Tuple[EvidenceNode, ...]:
-        by_hash: Dict[str, EvidenceNode] = {}
+        by_hash: Dict[Tuple[str, str, str], EvidenceNode] = {}
+
+        def representative_rank(node: EvidenceNode) -> Tuple[str, str, str, str]:
+            """Choose duplicate-wrapper representatives without traversal order.
+
+            The scientific key above deliberately collapses wrappers that carry
+            the same atomic observation.  Manifest JSON canonicalization can
+            reorder source-family mappings, so an admission-only tie breaker
+            still made the retained wrapper depend on which mapping happened to
+            be traversed first.  Wrapper provenance does not change execution,
+            but it does appear in the public ledger; make that choice stable too.
+            """
+            return (
+                json.dumps(
+                    _admission_identity(_merged_public(node.raw_value)),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                str(node.source_family),
+                json.dumps(list(node.node_path), separators=(",", ":")),
+                str(node.evidence_node_id),
+            )
+
         for node in nodes:
-            by_hash.setdefault(node.content_hash, node)
+            role = _scientific_product_role(_merged_public(node.raw_value), node.source_family)
+            key = (node.capability.value, role, node.content_hash)
+            current = by_hash.get(key)
+            # Duplicate wrappers can carry different amounts of copied
+            # authority metadata. Select the representative by its semantic
+            # admission envelope, never by traversal order or wrapper path.
+            node_rank = representative_rank(node)
+            current_rank = representative_rank(current) if current is not None else None
+            if current is None or node_rank < current_rank:
+                by_hash[key] = node
         return tuple(by_hash[key] for key in sorted(by_hash))
 
     plan = CapabilityPlan(
@@ -625,28 +875,82 @@ def build_capability_plan(
 def prepare_capability_execution_context(context: Mapping[str, Any]) -> Tuple[Dict[str, Any], CapabilityPlan]:
     """Freeze evidence first, then construct the exact executable ASMAE inputs."""
     base = dict(context or {})
-    if base.get("_capability_plan_prepared") is True:
-        # The manifest already binds the original atomic-node ledger and the
-        # normalized execution inputs in its context hash.  Reclassify the
-        # execution inputs for runtime validation, but do not replace the
-        # original plan hash with a second-generation normalized-plan hash.
-        plan = build_capability_plan(
-            dict(base.get("layer0_source_packages") or {}),
-            dict(base.get("raster_composites") or {}),
-            base.get("plot_timeseries") or [],
-        )
-        return base, plan
+    if base.get("_capability_plan_prepared") and base.get("evidence_capability_contract_version") == EVIDENCE_CAPABILITY_CONTRACT_VERSION:
+        raw_l0 = base.get("_raw_layer0_source_packages") or dict(base.get("layer0_source_packages") or {})
+        raw_comp = base.get("_raw_raster_composites") or dict(base.get("raster_composites") or {})
+        raw_ts = base.get("_raw_plot_timeseries") or base.get("plot_timeseries") or []
+        plan = build_capability_plan(raw_l0, raw_comp, raw_ts)
+        prepared = dict(base)
+        recomputed_hash = plan.plan_hash()
+        recomputed_execution_hash = plan.execution_plan_hash()
+        recomputed_quarantine_hash = plan.quarantine_ledger_hash()
+        frozen_hash = base.get("_frozen_plan_hash", "")
+        frozen_execution_hash = base.get("_frozen_execution_plan_hash", "")
+        frozen_quarantine_hash = base.get("_frozen_quarantine_ledger_hash", "")
+        drift_parts = []
+        if frozen_execution_hash and recomputed_execution_hash != frozen_execution_hash:
+            drift_parts.append(
+                "execution_plan "
+                f"frozen={frozen_execution_hash}, recomputed={recomputed_execution_hash}"
+            )
+        if frozen_quarantine_hash and recomputed_quarantine_hash != frozen_quarantine_hash:
+            drift_parts.append(
+                "quarantine_ledger "
+                f"frozen={frozen_quarantine_hash}, recomputed={recomputed_quarantine_hash}"
+            )
+        if frozen_hash and recomputed_hash != frozen_hash and not drift_parts:
+            drift_parts.append(
+                f"combined_plan frozen={frozen_hash}, recomputed={recomputed_hash}"
+            )
+        if drift_parts:
+            import os
+            allow_drift = os.environ.get("ASMAE_ALLOW_PLAN_HASH_DRIFT") == "true"
+            msg = (
+                "CAPABILITY_PLAN_IDENTITY_MISMATCH on re-prepare: "
+                + "; ".join(drift_parts)
+            )
+            if allow_drift:
+                logger.warning("Plan hash drift (migration mode): %s", msg)
+            else:
+                raise CapabilityPlanIdentityError(msg)
+        prepared["capability_plan_hash"] = recomputed_hash
+        prepared["execution_plan_hash"] = recomputed_execution_hash
+        prepared["quarantine_ledger_hash"] = recomputed_quarantine_hash
+        prepared["capability_plan_summary"] = plan.capability_summary
+        prepared["capability_plan_nodes"] = plan.public_records()
+        return prepared, plan
+
+    # An older prepared context may be re-enqueued after a contract upgrade.
+    # Rebuild from its frozen raw evidence, never from its filtered execution
+    # projection, so the successor job cannot silently lose evidence.
+    source_l0 = base.get("_raw_layer0_source_packages") or base.get("layer0_source_packages") or {}
+    source_comp = base.get("_raw_raster_composites") or base.get("raster_composites") or {}
+    source_ts = base.get("_raw_plot_timeseries") or base.get("plot_timeseries") or []
+    raw_l0 = copy.deepcopy(dict(source_l0))
+    raw_comp = copy.deepcopy(dict(source_comp))
+    raw_ts = copy.deepcopy(source_ts)
+
     plan = build_capability_plan(
-        dict(base.get("layer0_source_packages") or {}),
-        dict(base.get("raster_composites") or {}),
-        base.get("plot_timeseries") or [],
+        dict(source_l0),
+        dict(source_comp),
+        source_ts,
     )
     prepared = dict(base)
+    prepared["_raw_layer0_source_packages"] = raw_l0
+    prepared["_raw_raster_composites"] = raw_comp
+    prepared["_raw_plot_timeseries"] = raw_ts
     prepared["layer0_source_packages"] = plan.execution_layer0_packages()
     prepared["plot_timeseries"] = plan.execution_plot_timeseries()
     prepared["raster_composites"] = plan.execution_raster_composites()
+    for stale_key in ("asmae_evidence_state", "surface_inventory", "support_summaries", "capability_plan_nodes", "capability_plan_summary"):
+        prepared.pop(stale_key, None)
     prepared["evidence_capability_contract_version"] = plan.contract_version
     prepared["capability_plan_hash"] = plan.plan_hash()
+    prepared["_frozen_plan_hash"] = plan.plan_hash()
+    prepared["execution_plan_hash"] = plan.execution_plan_hash()
+    prepared["_frozen_execution_plan_hash"] = plan.execution_plan_hash()
+    prepared["quarantine_ledger_hash"] = plan.quarantine_ledger_hash()
+    prepared["_frozen_quarantine_ledger_hash"] = plan.quarantine_ledger_hash()
     prepared["capability_plan_summary"] = plan.capability_summary
     prepared["capability_plan_nodes"] = plan.public_records()
     prepared["_capability_plan_prepared"] = True

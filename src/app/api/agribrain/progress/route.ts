@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/session";
+import { buildSignedInternalHeaders } from "@/lib/agribrain/internal-service-auth";
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
@@ -16,13 +17,15 @@ export async function GET(request: NextRequest) {
   if (!userId) {
     return NextResponse.json({ error: "Authentication required" }, { status: 401 });
   }
+
   const authorized = await prisma.plot.findFirst({
     where: {
       id: plotId,
       farm: { userId },
     },
-    select: { id: true },
+    select: { id: true, farmId: true },
   });
+
   if (!authorized) {
     return NextResponse.json({ error: "Plot not found" }, { status: 404 });
   }
@@ -30,21 +33,39 @@ export async function GET(request: NextRequest) {
   const apiUrl = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
 
   try {
-    const progressUrl = new URL(`${apiUrl}/v2/progress/${plotId}`);
-    if (runId) progressUrl.searchParams.set("run_id", runId);
+    const pathname = `/v2/progress/${encodeURIComponent(plotId)}`;
+    const queryParams: Array<[string, string]> = runId ? [["run_id", runId]] : [];
+    const queryStr = queryParams.length > 0 ? `?run_id=${encodeURIComponent(runId!)}` : "";
+
+    const signedHeaders = buildSignedInternalHeaders(
+      "GET",
+      pathname,
+      {
+        tenantId: userId,
+        farmId: authorized.farmId,
+        plotId,
+      },
+      "",
+      queryParams
+    );
+
+    const progressUrl = `${apiUrl}${pathname}${queryStr}`;
     const response = await fetch(progressUrl, {
-      // Don't cache this!
-      headers: { "Cache-Control": "no-cache" },
-      next: { revalidate: 0 }
+      headers: {
+        ...signedHeaders,
+        "Cache-Control": "no-cache",
+      },
+      next: { revalidate: 0 },
     });
 
     if (!response.ok) {
-      return NextResponse.json({ error: "Backend error" }, { status: response.status });
+      const errText = await response.text().catch(() => "");
+      return NextResponse.json({ error: "Backend error", detail: errText }, { status: response.status });
     }
 
     const data = await response.json();
     return NextResponse.json(data);
-  } catch (error) {
-    return NextResponse.json({ error: "Failed to fetch progress" }, { status: 500 });
+  } catch (error: any) {
+    return NextResponse.json({ error: "Failed to fetch progress", detail: error?.message || String(error) }, { status: 500 });
   }
 }

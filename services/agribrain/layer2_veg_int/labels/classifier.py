@@ -26,8 +26,15 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.impute import SimpleImputer
 
-from .label_schema import LabeledSample
-from ..features.crop_feature_vector import CropFeatureVector
+from .label_schema import LabeledSample, _GROUP_TO_L0_L1
+from ..crop_science_data import get_crop_group
+from ..features.crop_feature_vector import (
+    CropFeatureVector,
+    crop_feature_schema_receipt,
+)
+from services.agribrain.scientific_contracts.crop_governance import (
+    CropModelReceiptV1,
+)
 
 logger = logging.getLogger("agribrain.labels.classifier")
 
@@ -40,6 +47,174 @@ MIN_TOTAL_SAMPLES = 30
 MODEL_VERSION = "6.0C"
 FEATURE_VECTOR_VERSION = "6.0.0"
 LABEL_SCHEMA_VERSION = "6.0B"
+PRODUCTION_VALIDATION_CONTRACT_VERSION = "crop-model-release-v1"
+
+_REQUIRED_RELEASE_METRICS = (
+    "macro_f1",
+    "balanced_accuracy",
+    "brier_score",
+    "expected_calibration_error",
+    "log_loss",
+    "open_set_unknown_recall",
+    "accepted_coverage",
+    "accepted_accuracy",
+)
+
+_REQUIRED_MODEL_RECEIPT_FIELDS = (
+    "artifact_sha256",
+    "class_hierarchy_version",
+    "training_dataset_manifest_hash",
+    "calibration_artifact_hash",
+    "validation_report_hash",
+    "region_domain_compatibility",
+    "inference_device",
+    "runtime_version",
+    "deterministic_preprocessing_version",
+)
+
+
+def _canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _artifact_bundle_sha256(paths: List[str]) -> str:
+    """Hash the exact executable artifact bytes, excluding mutable metadata.
+
+    The metadata file contains this digest, so including it would create a
+    recursive identity. File names and lengths are framed to prevent ambiguous
+    concatenations.
+    """
+    digest = hashlib.sha256(b"agribrain-crop-model-artifact-v1\0")
+    for path in sorted(paths, key=lambda item: os.path.basename(item)):
+        name = os.path.basename(path).encode("utf-8")
+        size = os.path.getsize(path)
+        digest.update(len(name).to_bytes(4, "big"))
+        digest.update(name)
+        digest.update(int(size).to_bytes(8, "big"))
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _release_validation_hash(release: Dict[str, Any]) -> str:
+    payload = dict(release)
+    payload.pop("validation_report_hash", None)
+    return _canonical_sha256(payload)
+
+
+def _production_validation_errors(
+    metadata: Dict[str, Any],
+    trained_levels: List[str],
+    *,
+    actual_artifact_sha256: Optional[str] = None,
+) -> List[str]:
+    """Validate the external release evidence required for production use.
+
+    Internal GroupKFold accuracy is useful during development, but it cannot
+    establish calibration, open-set behavior, or farm/year/region transfer.
+    Production eligibility is therefore default-deny until a separate release
+    evaluation writes this complete contract into the immutable model
+    metadata.
+    """
+    errors: List[str] = []
+    release = metadata.get("deployment_validation")
+    if not isinstance(release, dict):
+        return ["deployment_validation_missing"]
+    if release.get("contract_version") != PRODUCTION_VALIDATION_CONTRACT_VERSION:
+        errors.append("deployment_validation_version")
+    if release.get("release_gate_passed") is not True:
+        errors.append("release_gate_not_passed")
+
+    for field_name in _REQUIRED_MODEL_RECEIPT_FIELDS:
+        if not metadata.get(field_name):
+            errors.append(f"{field_name}_missing")
+    artifact_sha256 = str(metadata.get("artifact_sha256") or "").strip().lower()
+    if actual_artifact_sha256 is None:
+        errors.append("artifact_bytes_not_verified")
+    elif artifact_sha256 != str(actual_artifact_sha256).strip().lower():
+        errors.append("artifact_sha256_mismatch")
+
+    validation_report_hash = str(
+        metadata.get("validation_report_hash") or ""
+    ).strip().lower()
+    if validation_report_hash and validation_report_hash != _release_validation_hash(
+        release
+    ):
+        errors.append("validation_report_hash_mismatch")
+
+    splits = release.get("split_contract")
+    if not isinstance(splits, dict):
+        errors.append("split_contract_missing")
+    else:
+        if splits.get("farm_disjoint") is not True:
+            errors.append("farm_holdout_missing")
+        if not (
+            splits.get("year_disjoint") is True
+            or splits.get("season_disjoint") is True
+        ):
+            errors.append("season_year_holdout_missing")
+        if splits.get("region_transfer_evaluated") is not True:
+            errors.append("region_transfer_missing")
+        if splits.get("observation_leakage_checked") is not True:
+            errors.append("observation_leakage_check_missing")
+
+    reports = release.get("metrics_by_level")
+    if not isinstance(reports, dict):
+        return errors + ["release_metrics_missing"]
+    for level in trained_levels:
+        report = reports.get(level)
+        if not isinstance(report, dict):
+            errors.append(f"{level}:metrics_missing")
+            continue
+        for metric in _REQUIRED_RELEASE_METRICS:
+            value = report.get(metric)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                errors.append(f"{level}:{metric}_missing")
+                continue
+            numeric = float(value)
+            if metric in {
+                "macro_f1",
+                "balanced_accuracy",
+                "expected_calibration_error",
+                "open_set_unknown_recall",
+                "accepted_coverage",
+                "accepted_accuracy",
+            } and not 0.0 <= numeric <= 1.0:
+                errors.append(f"{level}:{metric}_out_of_range")
+            if metric in {"brier_score", "log_loss"} and numeric < 0.0:
+                errors.append(f"{level}:{metric}_out_of_range")
+        if not isinstance(report.get("per_class_precision_recall"), dict) or not report.get(
+            "per_class_precision_recall"
+        ):
+            errors.append(f"{level}:per_class_metrics_missing")
+        if not isinstance(report.get("confusion_matrix"), list) or not report.get(
+            "confusion_matrix"
+        ):
+            errors.append(f"{level}:confusion_matrix_missing")
+        if not isinstance(report.get("confidence_coverage_curve"), list) or not report.get(
+            "confidence_coverage_curve"
+        ):
+            errors.append(f"{level}:confidence_coverage_curve_missing")
+        if report.get("thresholds_passed") is not True:
+            errors.append(f"{level}:thresholds_not_passed")
+        if report.get("probability_calibrated") is not True:
+            errors.append(f"{level}:probability_not_calibrated")
+    return errors
 
 
 # ── Trivial Classifier Fallback ──────────────────────────────────────────────
@@ -324,6 +499,12 @@ class HierarchicalCropClassifier:
         arrays_path = os.path.join(self.model_dir, "model_arrays.npz")
         _atomic_write_npz(arrays_dict, arrays_path)
 
+        # Bind deployment metadata to the exact executable model bytes. The
+        # metadata itself is intentionally excluded to avoid a recursive hash.
+        self.metadata["artifact_sha256"] = _artifact_bundle_sha256(
+            [manifest_path, arrays_path]
+        )
+
         # 4. Save JSON metadata
         meta_path = os.path.join(self.model_dir, "model_metadata.json")
         _atomic_write(self.metadata, meta_path, is_json=True)
@@ -357,8 +538,12 @@ class HierarchicalCropClassifier:
                 
                 with open(meta_path, "r", encoding="utf-8") as f:
                     self.metadata = json.load(f)
-                
-                return self._post_load_eligibility()
+
+                return self._post_load_eligibility(
+                    actual_artifact_sha256=_artifact_bundle_sha256(
+                        [manifest_path, arrays_path]
+                    )
+                )
             except Exception as e:
                 logger.error(f"[Classifier] Failed to load JSON+NPZ model: {e}")
                 return ModelLoadStatus(False, {
@@ -385,7 +570,10 @@ class HierarchicalCropClassifier:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     self.metadata = json.load(f)
                     
-                return self._post_load_eligibility()
+                # Legacy pickle is never eligible for a v1 artifact receipt;
+                # its unsafe serialization cannot be confused with the JSON+
+                # NPZ bundle even when development loading is explicitly on.
+                return self._post_load_eligibility(actual_artifact_sha256=None)
             except Exception as e:
                 logger.error(f"[Classifier] Failed to load legacy pickle model: {e}")
                 return ModelLoadStatus(False, {
@@ -399,7 +587,11 @@ class HierarchicalCropClassifier:
                 "blocked_reason": "files_not_found"
             })
 
-    def _post_load_eligibility(self) -> ModelLoadStatus:
+    def _post_load_eligibility(
+        self,
+        *,
+        actual_artifact_sha256: Optional[str] = None,
+    ) -> ModelLoadStatus:
         # A model file alone is not a scientific deployment contract. Version,
         # schema identity, held-out validation, and explicit eligibility are
         # mandatory and default-deny.
@@ -409,6 +601,7 @@ class HierarchicalCropClassifier:
             "feature_vector_version",
             "label_schema_version",
             "feature_order_hash",
+            "feature_schema_hash",
         )
         missing = [key for key in required_text if not metadata.get(key)]
         validation_reports = metadata.get("validation_reports")
@@ -419,6 +612,9 @@ class HierarchicalCropClassifier:
         ).hexdigest()
         if metadata.get("feature_order_hash") != computed_schema_hash:
             missing.append("feature_order_hash_mismatch")
+        semantic_schema_hash = crop_feature_schema_receipt().content_hash
+        if metadata.get("feature_schema_hash") != semantic_schema_hash:
+            missing.append("feature_schema_hash_mismatch")
         trained_levels = [
             level for level, status in (
                 metadata.get("level_status") or {}
@@ -439,6 +635,54 @@ class HierarchicalCropClassifier:
         ]
         if not trained_levels or len(validated_levels) != len(trained_levels):
             missing.append("held_out_validation_incomplete")
+        requested_production = metadata.get("production_eligible") is True
+        if requested_production:
+            missing.extend(
+                _production_validation_errors(
+                    metadata,
+                    trained_levels,
+                    actual_artifact_sha256=actual_artifact_sha256,
+                )
+            )
+            if str(metadata.get("training_dataset_type") or "") != "real_world":
+                missing.append("production_training_dataset_not_real_world")
+            if "production_inference" not in (metadata.get("allowed_for") or []):
+                missing.append("production_inference_not_authorized")
+        crop_model_receipt = None
+        if requested_production and not missing:
+            try:
+                crop_model_receipt = CropModelReceiptV1(
+                    model_family="hierarchical-crop-classifier",
+                    semantic_version=str(metadata.get("model_version") or ""),
+                    artifact_sha256=str(metadata.get("artifact_sha256") or ""),
+                    feature_schema_version=str(
+                        metadata.get("feature_vector_version") or ""
+                    ),
+                    feature_schema_hash=semantic_schema_hash,
+                    class_hierarchy_version=str(
+                        metadata.get("class_hierarchy_version") or ""
+                    ),
+                    training_dataset_manifest_hash=str(
+                        metadata.get("training_dataset_manifest_hash") or ""
+                    ),
+                    calibration_artifact_hash=str(
+                        metadata.get("calibration_artifact_hash") or ""
+                    ),
+                    validation_report_hash=str(
+                        metadata.get("validation_report_hash") or ""
+                    ),
+                    region_domain_compatibility=metadata.get(
+                        "region_domain_compatibility"
+                    ) or {},
+                    production_eligible=True,
+                    inference_device=str(metadata.get("inference_device") or ""),
+                    runtime_version=str(metadata.get("runtime_version") or ""),
+                    deterministic_preprocessing_version=str(
+                        metadata.get("deterministic_preprocessing_version") or ""
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                missing.append(f"crop_model_receipt_invalid:{exc}")
         if missing:
             self.models = None
             self.imputer = None
@@ -449,7 +693,7 @@ class HierarchicalCropClassifier:
                 "missing_or_invalid": sorted(set(missing)),
             })
 
-        production_eligible = metadata.get("production_eligible") is True
+        production_eligible = requested_production
         training_dataset_type = str(
             metadata.get("training_dataset_type", "unknown")
         )
@@ -478,14 +722,22 @@ class HierarchicalCropClassifier:
                 metadata.get("allowed_for") or []
             )
         )
+        if self.production_eligible and crop_model_receipt is not None:
+            metadata["crop_model_receipt"] = crop_model_receipt.to_dict()
+            metadata["crop_model_receipt_hash"] = crop_model_receipt.content_hash
         logger.info(f"[Classifier] Loaded hierarchical models (trained at {self.metadata.get('trained_at')})")
         return ModelLoadStatus(True, {
             "model_loaded": True,
             "training_dataset_type": training_dataset_type,
             "production_eligible": self.production_eligible,
             "model_version": metadata.get("model_version"),
-            "feature_schema_hash": computed_schema_hash,
+            "feature_schema_hash": semantic_schema_hash,
             "validated_levels": validated_levels,
+            "crop_model_receipt": (
+                crop_model_receipt.to_dict()
+                if self.production_eligible and crop_model_receipt is not None
+                else None
+            ),
         })
 
     def train(
@@ -509,8 +761,13 @@ class HierarchicalCropClassifier:
         flat_keys = sorted(list(CropFeatureVector().to_flat_dict().keys()))
         self.feature_names = flat_keys
         
-        # Calculate feature order hash
+        # Bind scientific definitions, units, support and transforms, not just
+        # column names.  A same-named feature with changed mathematics is a
+        # different model schema.
+        from ..features.crop_feature_vector import crop_feature_schema_receipt
+        feature_schema_receipt = crop_feature_schema_receipt()
         feature_order_hash = hashlib.sha256(",".join(flat_keys).encode("utf-8")).hexdigest()
+        feature_schema_hash = feature_schema_receipt.content_hash
 
         # Extract features (X) and metadata
         X_raw = []
@@ -524,10 +781,13 @@ class HierarchicalCropClassifier:
             X_raw.append(row)
             plot_ids.append(s.label.plot_id)
             
-            targets["L0"].append(s.hierarchy_targets.get("L0", "non_crop"))
-            targets["L1"].append(s.hierarchy_targets.get("L1", "fallow"))
-            targets["L2"].append(s.hierarchy_targets.get("L2", "non_crop"))
-            targets["L3"].append(s.hierarchy_targets.get("L3", "unknown"))
+            # Partial labels are legitimate.  Missing lower levels do not
+            # become fabricated non-crop/fallow/species targets.
+            for level in ("L0", "L1", "L2", "L3"):
+                value = s.hierarchy_targets.get(level)
+                targets[level].append(
+                    str(value).strip() if value not in (None, "") else ""
+                )
 
         X_arr = np.array(X_raw, dtype=np.float64)
         groups = np.array(plot_ids)
@@ -546,7 +806,14 @@ class HierarchicalCropClassifier:
         # Train each level
         for level in ["L0", "L1", "L2", "L3"]:
             y_list = targets[level]
-            y_arr = np.array(y_list)
+            eligible_indices = np.array([
+                index for index, value in enumerate(y_list)
+                if value and str(value).lower() not in {"unavailable", "not_labeled"}
+            ], dtype=int)
+            y_arr = np.array([y_list[index] for index in eligible_indices])
+            X_level_raw = X_arr[eligible_indices]
+            groups_level = groups[eligible_indices]
+            level_unique_groups = len(np.unique(groups_level)) if len(groups_level) else 0
             
             # 1. Compute class distribution
             unique_classes, counts = np.unique(y_arr, return_counts=True)
@@ -583,8 +850,8 @@ class HierarchicalCropClassifier:
             val_acc = 0.0
             val_status = "not_enough_groups"
             
-            if n_unique_groups >= 2:
-                n_splits = min(3, n_unique_groups)
+            if level_unique_groups >= 2:
+                n_splits = min(3, level_unique_groups)
                 
                 # Check StratifiedGroupKFold availability
                 try:
@@ -596,20 +863,23 @@ class HierarchicalCropClassifier:
                 
                 fold_scores = []
                 try:
-                    for train_idx, val_idx in gkf.split(X_imputed, y_arr, groups=groups):
-                        X_tr, X_val = X_imputed[train_idx], X_imputed[val_idx]
+                    for train_idx, val_idx in gkf.split(
+                        X_level_raw, y_arr, groups=groups_level
+                    ):
+                        # Preprocessing is fitted inside each fold. Validation
+                        # values never influence training medians.
+                        fold_imputer = SimpleImputer(strategy="median")
+                        X_tr = fold_imputer.fit_transform(X_level_raw[train_idx])
+                        X_val = fold_imputer.transform(X_level_raw[val_idx])
                         y_tr, y_val = y_arr[train_idx], y_arr[val_idx]
                         
                         # Fold model calibration logic
                         tr_unique, tr_counts = np.unique(y_tr, return_counts=True)
                         tr_min_samples = np.min(tr_counts) if len(tr_counts) > 0 else 0
-                        tr_unique_groups = len(np.unique(groups[train_idx]))
+                        tr_unique_groups = len(np.unique(groups_level[train_idx]))
                         
                         if len(tr_unique) <= 1:
                             fold_model = TrivialClassifier(tr_unique[0])
-                        elif tr_min_samples >= 5 and tr_unique_groups >= 3:
-                            base_rf = RandomForestClassifier(n_estimators=50, random_state=42)
-                            fold_model = CalibratedClassifierCV(estimator=base_rf, cv=min(3, tr_unique_groups))
                         else:
                             fold_model = RandomForestClassifier(n_estimators=50, random_state=42)
                             
@@ -625,28 +895,20 @@ class HierarchicalCropClassifier:
             validation_reports[level] = {
                 "validation_status": val_status,
                 "internal_validation_accuracy": round(val_acc, 4),
-                "folds_used": min(3, n_unique_groups) if n_unique_groups >= 2 else 0,
+                "folds_used": min(3, level_unique_groups) if level_unique_groups >= 2 else 0,
+                "preprocessing_scope": "fit_inside_each_training_fold",
+                "calibration_scope": "not_performed_internal_external_partition_required",
             }
 
             # 4. Train final model on all data
-            # Check calibration viability
-            can_calibrate = (
-                min_samples >= 5 and
-                n_unique_groups >= 3
-            )
-
             if n_classes == 1:
                 model = TrivialClassifier(unique_classes[0])
                 calibration_modes[level] = "trivial"
-            elif can_calibrate:
-                base_rf = RandomForestClassifier(n_estimators=50, random_state=42)
-                model = CalibratedClassifierCV(estimator=base_rf, cv=3)
-                calibration_modes[level] = "calibrated"
             else:
                 model = RandomForestClassifier(n_estimators=50, random_state=42)
-                calibration_modes[level] = "uncalibrated"
+                calibration_modes[level] = "external_disjoint_calibration_required"
 
-            model.fit(X_imputed, y_arr)
+            model.fit(imputer.transform(X_level_raw), y_arr)
             trained_models[level] = model
             level_status[level] = "trained"
 
@@ -673,10 +935,12 @@ class HierarchicalCropClassifier:
             allowed_for = ["pipeline_validation", "internal_demo"]
         else:
             training_dataset_type = "real_world"
-            production_eligible = heldout_validated
+            # Internal plot-group validation is not a production release gate.
+            # A separate farm/year/region-disjoint evaluation must attach the
+            # versioned deployment_validation receipt and explicitly promote
+            # an immutable artifact after calibration/open-set checks pass.
+            production_eligible = False
             allowed_for = ["pipeline_validation", "internal_demo"]
-            if production_eligible:
-                allowed_for.insert(0, "production_inference")
 
         metadata = {
             "model_version": MODEL_VERSION,
@@ -690,9 +954,14 @@ class HierarchicalCropClassifier:
             "validation_reports": validation_reports,
             "features_used": flat_keys,
             "feature_order_hash": feature_order_hash,
+            "feature_schema_hash": feature_schema_hash,
+            "feature_schema_receipt": feature_schema_receipt.to_dict(),
             "imputer_strategy": "median",
-            "validation_method": "StratifiedGroupKFold_by_plot_id" if n_unique_groups >= 2 else "none",
+            "validation_method": "StratifiedGroupKFold_by_plot_id_fold_local_preprocessing" if n_unique_groups >= 2 else "none",
+            "calibration_partition_policy": "external_farm_cycle_year_region_disjoint_required",
             "heldout_validation_complete": heldout_validated,
+            "deployment_validation_status": "external_release_evaluation_required",
+            "deployment_validation_contract_version": PRODUCTION_VALIDATION_CONTRACT_VERSION,
             "training_dataset_type": training_dataset_type,
             "production_eligible": production_eligible,
             "allowed_for": allowed_for,
@@ -709,13 +978,14 @@ class HierarchicalCropClassifier:
     def predict(
         self,
         feature_vector: Any,
-        apply_constraints: bool = True,
+        apply_constraints: bool = False,
     ) -> Dict[str, Any]:
         """Perform hierarchical prediction on a CropFeatureVector or snapshot dict.
         
         Args:
             feature_vector: Structured CropFeatureVector from v6.0A or flat dict.
-            apply_constraints: Apply agronomic constraint filters to Level 3.
+            apply_constraints: Compatibility flag only. Agronomic context is
+                diagnostic and never deletes EO-supported candidates.
         """
         if not self.models or not self.imputer or not self.feature_names or not self.metadata:
             raise ValueError("Classifier has not been loaded or trained.")
@@ -732,6 +1002,7 @@ class HierarchicalCropClassifier:
             irrigation = feature_vector.get("irrigation_type") or flat.get("irrigation_type")
             lat = feature_vector.get("latitude") or flat.get("latitude")
             lng = feature_vector.get("longitude") or flat.get("longitude")
+            input_receipt = feature_vector.get("crop_model_input_receipt")
         else:
             flat = feature_vector.to_flat_dict()
             fv_version = feature_vector.feature_vector_version
@@ -741,10 +1012,43 @@ class HierarchicalCropClassifier:
             irrigation = feature_vector.irrigation_type
             lat = feature_vector.latitude
             lng = feature_vector.longitude
+            input_receipt = None
 
         # ── Gate 1: Check Feature Vector Schema ──
         if fv_version != FEATURE_VECTOR_VERSION:
             raise ValueError(f"Feature version mismatch: model expects {FEATURE_VECTOR_VERSION}, got {fv_version}")
+        current_schema_hash = crop_feature_schema_receipt().content_hash
+        if self.metadata.get("feature_schema_hash") != current_schema_hash:
+            raise ValueError("Semantic crop feature schema mismatch")
+
+        evidence_gate = {
+            "feature_completeness": round(float(data_completeness), 6),
+            "physical_evidence_sufficiency": "unverified",
+            "phase_coverage": "unverified",
+            "domain_compatibility": "unverified",
+            "calibration_validity": "unverified",
+            "model_execution_eligible": float(data_completeness) >= 0.4,
+            "publication_eligible": False,
+            "blockers": ["crop_model_input_receipt_missing"],
+        }
+        if isinstance(input_receipt, dict):
+            if str(input_receipt.get("feature_schema_hash") or "") != current_schema_hash:
+                raise ValueError("Crop model input receipt feature schema mismatch")
+            blockers = list(input_receipt.get("publication_blockers") or [])
+            evidence_gate.update({
+                "feature_completeness": float(input_receipt.get("feature_completeness") or 0.0),
+                "physical_evidence_sufficiency": input_receipt.get("physical_evidence_sufficiency") or "unavailable",
+                "phase_coverage": input_receipt.get("phase_coverage") or "unavailable",
+                "domain_compatibility": input_receipt.get("domain_compatibility") or "unavailable",
+                "calibration_validity": input_receipt.get("calibration_validity") or "unavailable",
+                "model_execution_eligible": input_receipt.get("model_execution_eligible") is True,
+                "publication_eligible": (
+                    input_receipt.get("publication_eligible") is True
+                    and self.production_eligible is True
+                    and not blockers
+                ),
+                "blockers": blockers,
+            })
 
         # Ensure features are aligned
         row = []
@@ -758,42 +1062,52 @@ class HierarchicalCropClassifier:
 
         output: Dict[str, Any] = {}
 
+        def conditional_level(level: str, allowed: Optional[set[str]]) -> Dict[str, Any]:
+            if self.metadata["level_status"].get(level) != "trained":
+                return {"prediction": None, "probability": 0.0, "reason": "not_trained", "distribution": {}}
+            model = self.models[level]
+            probabilities = model.predict_proba(X_imputed)[0]
+            raw = {str(k): float(v) for k, v in zip(model.classes_, probabilities)}
+            conditioned = dict(raw) if allowed is None else {
+                key: value for key, value in raw.items() if key in allowed
+            }
+            total = sum(conditioned.values())
+            if total <= 0.0:
+                return {
+                    "prediction": None,
+                    "probability": 0.0,
+                    "reason": "hierarchy_incompatible",
+                    "distribution": {},
+                    "raw_distribution": {k: round(v, 6) for k, v in raw.items()},
+                }
+            distribution = {key: value / total for key, value in conditioned.items()}
+            prediction = max(distribution, key=distribution.get)
+            return {
+                "prediction": prediction,
+                "probability": round(distribution[prediction], 6),
+                "reason": "conditioned_on_parent" if allowed is not None else "trained",
+                "distribution": {k: round(v, 6) for k, v in distribution.items()},
+                "raw_distribution": {k: round(v, 6) for k, v in raw.items()},
+            }
+
 
         # ── Predict L0 ──
-        if self.metadata["level_status"].get("L0") == "trained":
-            model_l0 = self.models["L0"]
-            prob = model_l0.predict_proba(X_imputed)[0]
-            classes = model_l0.classes_
-            
-            # Resolve active_crop probability
-            active_idx = np.where(classes == "active_crop")[0]
-            active_prob = float(prob[active_idx[0]]) if len(active_idx) > 0 else 0.0
-            pred = str(model_l0.predict(X_imputed)[0])
-            output["L0"] = {"prediction": pred, "probability": round(active_prob, 4)}
-        else:
-            output["L0"] = {"prediction": None, "probability": 0.0, "reason": "not_trained"}
+        output["L0"] = conditional_level("L0", None)
 
         # ── Predict L1 ──
-        if self.metadata["level_status"].get("L1") == "trained":
-            model_l1 = self.models["L1"]
-            prob = model_l1.predict_proba(X_imputed)[0]
-            classes = model_l1.classes_
-            dist = {str(k): round(float(v), 4) for k, v in zip(classes, prob)}
-            pred = str(model_l1.predict(X_imputed)[0])
-            output["L1"] = {"prediction": pred, "probability": dist.get(pred, 0.0), "distribution": dist}
-        else:
-            output["L1"] = {"prediction": None, "probability": 0.0, "reason": "not_trained"}
+        l0_prediction = output["L0"].get("prediction")
+        l1_allowed = {
+            l1 for l0, l1 in _GROUP_TO_L0_L1.values() if l0 == l0_prediction
+        } if l0_prediction else set()
+        output["L1"] = conditional_level("L1", l1_allowed)
 
         # ── Predict L2 ──
-        if self.metadata["level_status"].get("L2") == "trained":
-            model_l2 = self.models["L2"]
-            prob = model_l2.predict_proba(X_imputed)[0]
-            classes = model_l2.classes_
-            dist = {str(k): round(float(v), 4) for k, v in zip(classes, prob)}
-            pred = str(model_l2.predict(X_imputed)[0])
-            output["L2"] = {"prediction": pred, "probability": dist.get(pred, 0.0), "distribution": dist}
-        else:
-            output["L2"] = {"prediction": None, "probability": 0.0, "reason": "not_trained"}
+        l1_prediction = output["L1"].get("prediction")
+        l2_allowed = {
+            group for group, (l0, l1) in _GROUP_TO_L0_L1.items()
+            if l0 == l0_prediction and l1 == l1_prediction
+        } if l0_prediction and l1_prediction else set()
+        output["L2"] = conditional_level("L2", l2_allowed)
 
         # ── Predict L3 (with agronomic filtering) ──
         if self.metadata["level_status"].get("L3") == "trained":
@@ -801,34 +1115,41 @@ class HierarchicalCropClassifier:
             prob = model_l3.predict_proba(X_imputed)[0]
             classes = model_l3.classes_
             
-            raw_candidates = [{"code": str(k), "raw_prob": float(v)} for k, v in zip(classes, prob)]
+            l2_prediction = output["L2"].get("prediction")
+            raw_candidates = [
+                {"code": str(k), "raw_prob": float(v)}
+                for k, v in zip(classes, prob)
+                if l2_prediction and get_crop_group(str(k)) == l2_prediction
+            ]
             
             # Apply agronomic constraint filtering
             filtered_candidates = []
-            removed_candidates = []
-            fallback_triggered = False
+            context_prior_diagnostics = []
             
             for cand in raw_candidates:
                 code = cand["code"]
                 p = cand["raw_prob"]
                 
-                if apply_constraints and koppen:
+                if koppen:
                     # Score constraints
                     s_koppen = self._score_koppen(code, koppen)
                     s_aridity = self._score_aridity(code, mean_temp_c=None, irrigation_type=irrigation, annual_rainfall_mm=None, et0_mm=None)
                     s_region = self._check_region_compat(code, koppen)
                     
                     # Hard elimination: if Köppen <= 0.1 or aridity <= 0.2 or region incompatible
-                    if s_koppen <= 0.1 or s_aridity <= 0.2 or not s_region:
-                        removed_candidates.append(code)
-                        # Eliminate
-                        p = 0.0
+                    context_prior_diagnostics.append({
+                        "code": code,
+                        "koppen_affinity": round(float(s_koppen), 6),
+                        "aridity_affinity": round(float(s_aridity), 6),
+                        "region_compatible": bool(s_region),
+                    })
                 
                 filtered_candidates.append({"code": code, "prob": p})
             
             # Re-normalize if sum > 0
             total_prob = sum(c["prob"] for c in filtered_candidates)
             
+            hierarchy_incompatible = total_prob <= 0.0
             if total_prob > 0.0:
                 for c in filtered_candidates:
                     c["probability"] = round(c["prob"] / total_prob, 4)
@@ -836,8 +1157,7 @@ class HierarchicalCropClassifier:
             else:
                 # All candidates zeroed out by agronomic constraints!
                 # Trigger fallback
-                fallback_triggered = True
-                filtered_candidates = [{"code": c["code"], "probability": round(c["raw_prob"], 4)} for c in raw_candidates]
+                filtered_candidates = []
 
             # Sort candidates
             filtered_candidates.sort(key=lambda x: x["probability"], reverse=True)
@@ -856,21 +1176,28 @@ class HierarchicalCropClassifier:
 
             # Determine ambiguity reason
             ambiguity_reason = None
-            if data_completeness < 0.4:
+            if hierarchy_incompatible:
+                ambiguity_reason = "hierarchy_incompatible"
+            elif not evidence_gate["model_execution_eligible"]:
+                ambiguity_reason = "physical_evidence_or_feature_gate_failed"
+            elif data_completeness < 0.4:
                 ambiguity_reason = "insufficient_features_l3"
             elif norm_entropy > 0.7 or margin < 0.05:
                 ambiguity_reason = "high_entropy_l3"
 
             # Populate Level 3 prediction details
             output["L3"] = {
-                "prediction": top_cand["code"] if (top_cand and not fallback_triggered) else None,
-                "probability": top_cand["probability"] if (top_cand and not fallback_triggered) else 0.0,
-                "reason": "fallback_triggered" if fallback_triggered else (ambiguity_reason or "trained"),
+                "prediction": top_cand["code"] if (top_cand and ambiguity_reason is None) else None,
+                "probability": top_cand["probability"] if (top_cand and ambiguity_reason is None) else 0.0,
+                "reason": ambiguity_reason or "trained",
                 "top_candidates": filtered_candidates[:5],
                 "agronomic_filter": {
-                    "applied": apply_constraints,
-                    "removed_candidates": removed_candidates,
-                    "fallback_triggered": fallback_triggered,
+                    "applied": False,
+                    "requested_legacy_flag": bool(apply_constraints),
+                    "role": "context_prior_diagnostic_only",
+                    "removed_candidates": [],
+                    "fallback_triggered": False,
+                    "diagnostics": context_prior_diagnostics,
                 }
             }
         else:
@@ -880,9 +1207,12 @@ class HierarchicalCropClassifier:
                 "reason": "insufficient_l3_training_data",
                 "top_candidates": [],
                 "agronomic_filter": {
-                    "applied": apply_constraints,
+                    "applied": False,
+                    "requested_legacy_flag": bool(apply_constraints),
+                    "role": "context_prior_diagnostic_only",
                     "removed_candidates": [],
                     "fallback_triggered": False,
+                    "diagnostics": [],
                 }
             }
 
@@ -891,14 +1221,16 @@ class HierarchicalCropClassifier:
             "feature_vector_version": fv_version,
             "probability_calibration": self.metadata.get("calibration_modes", {}),
             "data_completeness": data_completeness,
+            "crop_model_input_gate": evidence_gate,
+            "publication_eligible": bool(evidence_gate["publication_eligible"]),
         }
 
     # ── Agronomic Constraints Implementation ──────────────────────────────────
 
     def _score_koppen(self, crop_code: str, koppen_zone: Optional[str]) -> float:
         """Score crop affinity for the detected Köppen climate zone."""
-        from layer2_veg_int.crop_science_data import KOPPEN_CROP_AFFINITY
-        from crop_database import CROP_REGISTRY
+        from services.agribrain.layer2_veg_int.crop_science_data import KOPPEN_CROP_AFFINITY
+        from services.agribrain.crop_database import CROP_REGISTRY
         if koppen_zone is None:
             return 0.5
 
@@ -929,8 +1261,8 @@ class HierarchicalCropClassifier:
         et0_mm: Optional[float] = None,
     ) -> float:
         """Score crop feasibility based on estimated aridity."""
-        from layer2_veg_int.crop_science_data import ARIDITY_CROP_THRESHOLDS
-        from crop_database import CROP_REGISTRY
+        from services.agribrain.layer2_veg_int.crop_science_data import ARIDITY_CROP_THRESHOLDS
+        from services.agribrain.crop_database import CROP_REGISTRY
         
         crop = CROP_REGISTRY.get(crop_code)
         if not crop:
@@ -977,7 +1309,7 @@ class HierarchicalCropClassifier:
 
     def _check_region_compat(self, crop_code: str, koppen_zone: Optional[str]) -> bool:
         """Check region compatibility maps."""
-        from crop_database import CROP_REGISTRY
+        from services.agribrain.crop_database import CROP_REGISTRY
         if not koppen_zone:
             return True
         crop = CROP_REGISTRY.get(crop_code)

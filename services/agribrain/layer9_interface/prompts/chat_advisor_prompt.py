@@ -131,7 +131,9 @@ TASK: Collaborative yes/no decision support.
 
         "NUTRIENT": """
 TASK: Fertilizer and nutrient optimization query.
-- Ground recommendations in the current BBCH phenology stage requirements.
+- Use a current growth stage only when the context includes a validated Layer-2
+  canonical phenology receipt/hash/authority. Otherwise state that phenology is
+  UNKNOWN and request evidence; never infer stage from DAP, GDD, NDVI, or CropStatus.
 - Calculate exact application rates (kg/ha) based on active soil deficit models.
 - Detail ideal placement, timing, and moisture requirements for application.
 - Warn against runoff and leaching risks (5-8 sentences).""",

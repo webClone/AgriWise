@@ -44,11 +44,15 @@ class CoachEngine:
 
         # L2 phenological stage coaching (v9.7 advanced wiring)
         l2_data = l9_input.l2_vegetation_data
-        if l2_data and l2_data.get("stage") == "REPRODUCTIVE":
+        if (
+            l2_data
+            and l2_data.get("phenology_receipt_valid") is True
+            and l2_data.get("stage") == "REPRODUCTIVE"
+        ):
             if exp == ExpertiseLevel.NOVICE:
                 tips.append("Your crop is in the reproductive stage! Keep soil moist and avoid high stress 🌸")
             else:
-                tips.append(f"Crop phenology is REPRODUCTIVE (BBCH {l2_data.get('bbch')}). Maintain optimal soil water tension.")
+                tips.append("Layer-2 canonical phenology is REPRODUCTIVE. Maintain optimal soil water tension.")
 
         # L6 leaching mitigation coaching (v9.7 advanced wiring)
         l6_data = l9_input.l6_execution_data

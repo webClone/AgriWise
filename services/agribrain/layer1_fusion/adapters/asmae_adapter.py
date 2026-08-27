@@ -321,16 +321,22 @@ class ASMAEAdapter:
             res_m = res_decision.get("selected_effective_resolution_m", 10)
             diag = package.get("diagnostics", {})
             
-            conf_val = float(_mean_of_grids(package.get("confidence_maps", {})) or 0.5)
-            unc_val = float(_mean_of_grids(package.get("uncertainty_maps", {})) or 0.1)
+            evidence_state = package.get("asmae_evidence_state") or {}
+            confidence_maps = package.get("confidence_maps", {}) or {}
+            uncertainty_maps = package.get("uncertainty_maps", {}) or {}
+            conf_val = float(_mean_of_grids(confidence_maps)) if confidence_maps else 0.0
+            unc_val = float(_mean_of_grids(uncertainty_maps)) if uncertainty_maps else 1.0
 
-            diag_vars = [
-                ("ASMAE_CONFIDENCE", conf_val, "fraction"),
-                ("ASMAE_UNCERTAINTY", unc_val, "fraction"),
-                ("ASMAE_RETROVALIDATION_SCORE", float(diag.get("retro_mean_score") or 0.0), "fraction"),
-                ("ASMAE_BMA_DISAGREEMENT", float(diag.get("bma_mean_disagreement") or 0.0), "fraction"),
-                ("ASMAE_EXPORT_ELIGIBILITY", package.get("layer1_export_allowed", False), "bool"),
-            ]
+            diag_vars = []
+            if confidence_maps:
+                diag_vars.append(("ASMAE_CONFIDENCE", conf_val, "fraction"))
+            if uncertainty_maps:
+                diag_vars.append(("ASMAE_UNCERTAINTY", unc_val, "fraction"))
+            if evidence_state.get("used_retrovalidation") is True and diag.get("retro_mean_score") is not None:
+                diag_vars.append(("ASMAE_RETROVALIDATION_SCORE", float(diag["retro_mean_score"]), "fraction"))
+            if evidence_state.get("used_bma") is True and diag.get("bma_mean_disagreement") is not None:
+                diag_vars.append(("ASMAE_BMA_DISAGREEMENT", float(diag["bma_mean_disagreement"]), "fraction"))
+            diag_vars.append(("ASMAE_EXPORT_ELIGIBILITY", package.get("layer1_export_allowed", False), "bool"))
             if package.get("raster_maps"):
                 diag_vars.insert(0, ("ASMAE_EFFECTIVE_RESOLUTION", float(res_m), "m"))
             for var, val, unit in diag_vars:
@@ -380,7 +386,7 @@ class ASMAEAdapter:
                     flat = [v for r in grid for v in r if v is not None and v == v]
                     if flat:
                         val = sum(flat) / len(flat)
-                        unit = "index" if var in ("ASMAE_LAI", "ASMAE_CHLOROPHYLL") else "fraction"
+                        unit = "ug/cm2" if var == "ASMAE_CHLOROPHYLL" else ("index" if var == "ASMAE_LAI" else "fraction")
                         
                         items.append(EvidenceItem(
                             evidence_id=f"asmae_{run_id}_{var.lower()}",

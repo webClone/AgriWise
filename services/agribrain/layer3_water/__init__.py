@@ -1,0 +1,120 @@
+"""
+Layer 3: Transitional Water Intelligence Engine
+Soil-plant-atmosphere water-state estimation, data assimilation, ET
+partitioning, stress memory, and shadow decision analysis. This package is
+not the Agricultural World Model and does not own canonical actions.
+"""
+
+from layer3_water.contracts import (
+    WaterPhysicsAuthority,
+    HydrologyMode,
+    SolverFidelity,
+    WaterUncertaintyBudget,
+    WaterPhysicsConfidence,
+    HumiditySourceType,
+    RadiationSourceType,
+    WindSourceType,
+    TemperatureSourceType,
+    AtmosphericInputQuality,
+    CanopyTemperatureState,
+    WaterSignalType,
+    SoilObservationVector,
+    Layer3ToLayer2Receipt,
+    Layer3HydrologicalConstraintReceipt,
+    Layer3ToLayer4BoundaryReceipt,
+    IrrigationMethod,
+    WaterDecisionAction,
+    WaterDecisionUrgency,
+    IrrigationEvent,
+    IrrigationConstraints,
+    IrrigationObjective,
+    WaterDecision,
+    InfiltrationState,
+    SoilEvaporationState,
+    SoilWaterState,
+    PotentialWaterFlux,
+    ActualWaterFlux,
+    WaterFluxState,
+    RootZoneWaterState,
+    WaterLimitationForecast,
+    HydraulicStressMemoryState,
+    AssimilationDiagnostic,
+    WaterState,
+    WaterStateFactory,
+    WaterProcessStage,
+    ProcessStepDependency,
+    Layer3WaterTransitionGraph,
+)
+from layer3_water.et import (
+    PenmanMonteithET0,
+    DualKcEngine,
+    ET0Result,
+)
+from layer3_water.soil import (
+    SoilProfileDatabase,
+    LayeredWaterBalanceEngine,
+)
+from layer3_water.root_zone import RootZoneAvailabilityEngine
+from layer3_water.limitation import WaterLimitationEngine, WaterLimitationState
+from layer3_water.forecast import WeatherScenario, WeatherScenarioEnsemble, EnsembleForecastEngine
+from layer3_water.decision import MPCPrescriptiveOptimizer
+from layer3_water.assimilation import WaterStateAssimilator
+from layer3_water.solver import SolverSelectionDecision, SolverSelector
+from layer3_water.runner import WaterIntelligenceEngine
+
+__all__ = [
+    "WaterPhysicsAuthority",
+    "HydrologyMode",
+    "SolverFidelity",
+    "WaterUncertaintyBudget",
+    "WaterPhysicsConfidence",
+    "HumiditySourceType",
+    "RadiationSourceType",
+    "WindSourceType",
+    "TemperatureSourceType",
+    "AtmosphericInputQuality",
+    "CanopyTemperatureState",
+    "WaterSignalType",
+    "SoilObservationVector",
+    "Layer3ToLayer2Receipt",
+    "Layer3HydrologicalConstraintReceipt",
+    "Layer3ToLayer4BoundaryReceipt",
+    "IrrigationMethod",
+    "WaterDecisionAction",
+    "WaterDecisionUrgency",
+    "IrrigationEvent",
+    "IrrigationConstraints",
+    "IrrigationObjective",
+    "WaterDecision",
+    "InfiltrationState",
+    "SoilEvaporationState",
+    "SoilWaterState",
+    "PotentialWaterFlux",
+    "ActualWaterFlux",
+    "WaterFluxState",
+    "RootZoneWaterState",
+    "WaterLimitationForecast",
+    "HydraulicStressMemoryState",
+    "AssimilationDiagnostic",
+    "WaterState",
+    "WaterStateFactory",
+    "WaterProcessStage",
+    "ProcessStepDependency",
+    "Layer3WaterTransitionGraph",
+    "PenmanMonteithET0",
+    "DualKcEngine",
+    "ET0Result",
+    "SoilProfileDatabase",
+    "LayeredWaterBalanceEngine",
+    "RootZoneAvailabilityEngine",
+    "WaterLimitationEngine",
+    "WaterLimitationState",
+    "WeatherScenario",
+    "WeatherScenarioEnsemble",
+    "EnsembleForecastEngine",
+    "MPCPrescriptiveOptimizer",
+    "WaterStateAssimilator",
+    "SolverSelectionDecision",
+    "SolverSelector",
+    "WaterIntelligenceEngine",
+]

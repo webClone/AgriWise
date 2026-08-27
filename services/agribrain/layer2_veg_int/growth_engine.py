@@ -77,6 +77,8 @@ class GrowthCurveEngine:
         dates: List[str],
         ndvi_values: List[float],
         uncertainties: List[float],
+        cloud_qa: Optional[List[float]] = None,
+        delta_days: Optional[List[float]] = None,
     ) -> Tuple[List[float], Dict[str, List[float]], List[float]]:
         """
         Fits a robust curve to the NDVI time series.
@@ -84,7 +86,7 @@ class GrowthCurveEngine:
         Returns:
             - modeled_curve: Smoothed NDVI per day
             - derivatives: {velocity, acceleration}
-            - uncertainty: Standard error of the fit per day
+            - uncertainty: Standard error of the fit per day (fit_support_score)
         """
         n = len(ndvi_values)
         if n < 5:
@@ -92,7 +94,9 @@ class GrowthCurveEngine:
 
         # --- Scientific Mode ---
         if HAS_SCIPY:
-            modeled, derivs, unc = self._fit_whittaker(ndvi_values, uncertainties)
+            modeled, derivs, unc = self._fit_whittaker(
+                ndvi_values, uncertainties, cloud_qa=cloud_qa, delta_days=delta_days
+            )
         else:
             # --- Pure Python Fallback ---
             modeled, derivs, unc = self._fit_moving_average_pure(dates, ndvi_values, uncertainties)
@@ -117,6 +121,8 @@ class GrowthCurveEngine:
         uncertainties: List[float],
         d: int = 2,
         n_envelope_passes: int = 3,
+        cloud_qa: Optional[List[float]] = None,
+        delta_days: Optional[List[float]] = None,
     ) -> Tuple[List[float], Dict[str, List[float]], List[float]]:
         """
         Whittaker smoother with GCV-adaptive lambda and upper-envelope
@@ -127,19 +133,22 @@ class GrowthCurveEngine:
             GCV(λ) = n × ||y - z||² / (n - tr(H))²
         where H is the hat matrix.
 
-        Upper-envelope correction (Chen et al. 2004): iteratively increases
-        weights for points above the fit (cloud-free) and decreases weights
-        for points below (cloud-contaminated).
+        P1 FIX:
+          - Inverse-variance weighting uses w = 1 / (σ² + σ_min²)
+          - Upper-envelope downweighting is gated by cloud QA mask when available
+            to prevent erasing real, sustained crop stress drops.
         """
         y = np.array(ndvi_values, dtype=np.float64)
         n = len(y)
 
-        # Weights from uncertainty (inverse variance)
-        w = 1.0 / (np.array(uncertainties, dtype=np.float64) + 0.01)
-        w = w / w.max()  # Normalize to [0, 1]
+        # P1 FIX: Inverse-variance weighting w = 1 / (σ² + σ_min²) with σ_min = 0.01
+        sigmas = np.array(uncertainties, dtype=np.float64)
+        sigma_min = 0.01
+        w = 1.0 / (sigmas ** 2 + sigma_min ** 2)
+        w = w / max(1e-6, float(w.max()))  # Normalize to [0, 1]
 
         # GCV-adaptive lambda selection
-        lam = self._select_lambda_gcv(y, w, d)
+        lam = self._select_lambda_approximate_gcv(y, w, d)
 
         try:
             z = self._whittaker_solve(y, w, lam, d)
@@ -148,12 +157,19 @@ class GrowthCurveEngine:
             w_new = w.copy()
             for _ in range(n_envelope_passes):
                 residuals = y - z
-                # Points above the fit are more likely cloud-free
                 below = residuals < 0
-                # Decrease weight of below-fit points (likely cloud-contaminated)
-                w_new[below] *= 0.5
-                # Increase weight of above-fit points (likely true signal)
-                w_new[~below] *= 1.2
+
+                if cloud_qa is not None and len(cloud_qa) == n:
+                    # Cloud QA is available: downweight below points proportionally to cloud probability
+                    qa_arr = np.clip(np.array(cloud_qa, dtype=np.float64), 0.0, 1.0)
+                    w_new[below] *= np.maximum(0.1, 1.0 - qa_arr[below])
+                    w_new[~below] *= (1.0 + 0.2 * (1.0 - qa_arr[~below]))
+                else:
+                    # Without explicit cloud mask, apply conservative downweighting (0.7x instead of 0.5x)
+                    # to avoid erasing genuine rapid senescence or acute stress
+                    w_new[below] *= 0.7
+                    w_new[~below] *= 1.1
+
                 w_new = np.clip(w_new, 0.01, 5.0)
                 z = self._whittaker_solve(y, w_new, lam, d)
 
@@ -163,7 +179,7 @@ class GrowthCurveEngine:
             # Savitzky-Golay derivatives (noise-robust, preserves peak timing)
             velocity, acceleration = self._savgol_derivatives(z)
 
-            # Uncertainty of fit
+            # Uncertainty of fit (fit support score)
             fit_unc = self._compute_fit_uncertainty(w_new, lam, n)
 
             return (
@@ -176,15 +192,16 @@ class GrowthCurveEngine:
             print(f"⚠️ [GrowthEngine] Whittaker failed: {e}. Falling back to spline.")
             return self._fit_spline_scipy([], ndvi_values, uncertainties)
 
-    def _select_lambda_gcv(
+    def _select_lambda_approximate_gcv(
         self, y: "np.ndarray", w: "np.ndarray", d: int,
         candidates: List[float] = None,
     ) -> float:
         """Select optimal Whittaker smoothing parameter via GCV.
 
         GCV(λ) = n × RSS / (n - df)²
-        where df ≈ trace of hat matrix (approximated for efficiency).
+        where df ≈ trace of hat matrix (approximated for O(n) computational efficiency).
 
+        Note: tr(H) is approximated via df ≈ Σ wᵢ / (wᵢ + 4λ) for d=2.
         Reference: Eilers (2003) Section 3.1
         """
         if candidates is None:
@@ -200,9 +217,7 @@ class GrowthCurveEngine:
                 # RSS (weighted)
                 rss = float(np.sum(w * (y - z) ** 2))
 
-                # Approximate degrees of freedom:
-                # df ≈ trace(H) ≈ Σ wᵢ / (wᵢ + λ * penalty_i)
-                # For simplicity, use uniform penalty approximation
+                # Approximate degrees of freedom
                 penalty_approx = lam * 4.0  # Typical for d=2
                 df = float(np.sum(w / (w + penalty_approx)))
                 df = max(1.0, min(n - 1, df))
@@ -218,6 +233,9 @@ class GrowthCurveEngine:
                 continue
 
         return best_lam
+
+    # Backward-compatible alias
+    _select_lambda_gcv = _select_lambda_approximate_gcv
 
     def _whittaker_solve(
         self, y: "np.ndarray", w: "np.ndarray", lam: float, d: int
@@ -261,16 +279,21 @@ class GrowthCurveEngine:
 
     def _savgol_derivatives(
         self, z: "np.ndarray", window: int = 7, polyorder: int = 3,
+        delta_days: Optional[List[float]] = None,
     ) -> Tuple["np.ndarray", "np.ndarray"]:
-        """Compute velocity and acceleration via Savitzky-Golay filter.
+        """Compute velocity and acceleration via Savitzky-Golay filter with physical Δt scaling.
 
         SG derivatives are superior to finite differences because they
         smooth noise while preserving the underlying signal shape, especially
         peak timing and amplitude (Schafer 2011).
-
-        Falls back to np.gradient if the series is too short for SG.
         """
         n = len(z)
+        # Average time spacing for derivative unit scaling (units/day)
+        mean_dt = 1.0
+        if delta_days and len(delta_days) > 0:
+            valid_dts = [float(d) for d in delta_days if float(d) > 0.0]
+            if valid_dts:
+                mean_dt = max(0.1, statistics.mean(valid_dts))
 
         # Adjust window for short series (must be odd and > polyorder)
         win = min(window, n)
@@ -278,18 +301,18 @@ class GrowthCurveEngine:
             win -= 1
         if win <= polyorder:
             # Fallback to simple gradient
-            velocity = np.gradient(z)
-            acceleration = np.gradient(velocity)
+            velocity = np.gradient(z) / mean_dt
+            acceleration = np.gradient(velocity) / mean_dt
             return velocity, acceleration
 
         try:
             from scipy.signal import savgol_filter
-            velocity = savgol_filter(z, window_length=win, polyorder=polyorder, deriv=1)
-            acceleration = savgol_filter(z, window_length=win, polyorder=polyorder, deriv=2)
+            velocity = (savgol_filter(z, window_length=win, polyorder=polyorder, deriv=1)) / mean_dt
+            acceleration = (savgol_filter(z, window_length=win, polyorder=polyorder, deriv=2)) / (mean_dt ** 2)
             return velocity, acceleration
         except Exception:
-            velocity = np.gradient(z)
-            acceleration = np.gradient(velocity)
+            velocity = np.gradient(z) / mean_dt
+            acceleration = np.gradient(velocity) / mean_dt
             return velocity, acceleration
 
     def _compute_fit_uncertainty(
@@ -313,12 +336,9 @@ class GrowthCurveEngine:
     # =====================================================================
 
     def fit_double_logistic(
-        self,
-        ndvi_values: List[float],
-        dates: Optional[List[str]] = None,
-    ) -> Optional[Dict[str, float]]:
-        """
-        Fit an asymmetric double logistic function to the NDVI time series.
+        self, ndvi_values: List[float], dates: Optional[List[str]] = None,
+    ) -> Optional[Dict]:
+        """Fit an asymmetric double logistic curve using physical elapsed time.
 
         NDVI(t) = base + amp * [ 1/(1+exp(-a1*(t-t1))) - 1/(1+exp(-a2*(t-t2))) ]
 
@@ -329,8 +349,23 @@ class GrowthCurveEngine:
             return None
 
         y = np.array(ndvi_values, dtype=np.float64)
-        x = np.arange(len(y), dtype=np.float64)
         n = len(y)
+
+        # Use elapsed physical days if parseable dates are available
+        x = None
+        if dates and len(dates) == n:
+            try:
+                from datetime import datetime
+                d0 = datetime.strptime(str(dates[0])[:10], "%Y-%m-%d")
+                x = np.array([
+                    float((datetime.strptime(str(d)[:10], "%Y-%m-%d") - d0).days)
+                    for d in dates
+                ], dtype=np.float64)
+            except Exception:
+                x = None
+
+        if x is None:
+            x = np.arange(len(y), dtype=np.float64)
 
         def double_logistic(t, base, amp, a1, t1, a2, t2):
             """Asymmetric double sigmoid."""
@@ -343,19 +378,21 @@ class GrowthCurveEngine:
         y_max = float(np.percentile(y, 90))
         amp_est = y_max - y_min
         peak_idx = int(np.argmax(y))
+        peak_x = float(x[peak_idx])
+        max_x = float(x[-1]) if len(x) > 0 else float(n)
 
         p0 = [
             y_min,           # base
             amp_est,         # amplitude
-            0.3,             # a1 (greenup steepness)
-            peak_idx * 0.4,  # t1 (greenup midpoint)
-            0.3,             # a2 (senescence steepness)
-            peak_idx * 1.5,  # t2 (senescence midpoint)
+            0.1,             # a1 (greenup steepness)
+            peak_x * 0.5,    # t1 (greenup midpoint)
+            0.1,             # a2 (senescence steepness)
+            peak_x * 1.3,    # t2 (senescence midpoint)
         ]
 
         bounds = (
-            [0.0, 0.01, 0.01, 0, 0.01, 0],
-            [0.5, 1.0,  2.0,  n, 2.0,  n * 1.5],
+            [0.0, 0.01, 0.001, 0, 0.001, 0],
+            [0.5, 1.0,  2.0,   max_x * 1.5 + 1.0, 2.0, max_x * 2.0 + 1.0],
         )
 
         try:
@@ -365,10 +402,17 @@ class GrowthCurveEngine:
             )
             base, amp, a1, t1, a2, t2 = popt
 
+            # True argmax of fitted curve on sampled points
+            fitted_vals = double_logistic(x, *popt)
+            pos_idx = float(np.argmax(fitted_vals))
+
             # Derived phenological parameters
-            sos_idx = t1 - np.log(4) / a1   # ~20% rise
-            eos_idx = t2 + np.log(4) / a2   # ~80% decline
-            pos_idx = (t1 + t2) / 2          # Peak of season
+            sos_x = t1 - np.log(4) / a1   # ~20% rise
+            eos_x = t2 + np.log(4) / a2   # ~80% decline
+
+            # Convert x back to closest sample indices
+            sos_idx = int(np.argmin(np.abs(x - sos_x)))
+            eos_idx = int(np.argmin(np.abs(x - eos_x)))
 
             return {
                 "base": float(base),
@@ -379,7 +423,7 @@ class GrowthCurveEngine:
                 "eos_idx": min(n - 1, float(eos_idx)),
                 "pos_idx": float(pos_idx),
                 "los": max(0, float(eos_idx - sos_idx)),
-                "fitted_curve": double_logistic(x, *popt).tolist(),
+                "fitted_curve": fitted_vals.tolist(),
             }
 
         except Exception:
@@ -512,21 +556,34 @@ class GrowthCurveEngine:
     # Integrals (Trapezoidal)
     # =====================================================================
 
-    def compute_integrals(self, curve: List[float]) -> Dict[str, float]:
-        """Computes AUC (trapezoidal), peak, and small integral."""
+    def compute_integrals(
+        self,
+        curve: List[float],
+        delta_days: Optional[List[float]] = None,
+    ) -> Dict[str, float]:
+        """Computes AUC (trapezoidal), peak, and small integral.
+
+        Args:
+            curve: Smoothed VI time series.
+            delta_days: Optional time increments Δt between points (defaults to Δt=1.0).
+        """
         if not curve:
             return {"auc_season": 0.0, "auc_small": 0.0, "peak_value": 0.0, "peak_day_index": 0}
 
         if HAS_SCIPY:
             arr = np.array(curve)
-            _trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
-            auc = float(_trapz(np.maximum(arr, 0)))
             peak_val = float(np.max(arr))
             peak_idx = int(np.argmax(arr))
-
-            # Small integral: area above base NDVI (10th percentile)
             base = float(np.percentile(arr, 10))
-            auc_small = float(_trapz(np.maximum(arr - base, 0)))
+
+            if delta_days is not None and len(delta_days) == len(arr) - 1:
+                dt = np.array(delta_days, dtype=np.float64)
+                auc = float(np.sum(0.5 * (np.maximum(arr[:-1], 0) + np.maximum(arr[1:], 0)) * dt))
+                auc_small = float(np.sum(0.5 * (np.maximum(arr[:-1] - base, 0) + np.maximum(arr[1:] - base, 0)) * dt))
+            else:
+                _trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
+                auc = float(_trapz(np.maximum(arr, 0)))
+                auc_small = float(_trapz(np.maximum(arr - base, 0)))
 
             return {
                 "auc_season": auc,
@@ -537,16 +594,21 @@ class GrowthCurveEngine:
         else:
             # Pure Python trapezoidal rule
             auc = 0.0
+            auc_small = 0.0
+            base = sorted(curve)[max(0, int(len(curve) * 0.10))]
+
             for i in range(1, len(curve)):
+                dt = delta_days[i-1] if (delta_days and i-1 < len(delta_days)) else 1.0
                 v0 = max(0.0, curve[i - 1])
                 v1 = max(0.0, curve[i])
-                auc += (v0 + v1) / 2.0
+                auc += 0.5 * (v0 + v1) * dt
+                auc_small += 0.5 * (max(0.0, v0 - base) + max(0.0, v1 - base)) * dt
 
             peak_val = max(curve)
             peak_idx = curve.index(peak_val)
             return {
                 "auc_season": auc,
-                "auc_small": auc * 0.8,  # Approximate
+                "auc_small": auc_small,
                 "peak_value": peak_val,
                 "peak_day_index": peak_idx,
             }
@@ -556,7 +618,11 @@ class GrowthCurveEngine:
     # =====================================================================
 
     @staticmethod
-    def estimate_lai(ndvi_series: List[float], k: float = 0.5) -> List[float]:
+    def estimate_lai(
+        ndvi_series: List[float],
+        k: float = 0.5,
+        lai_max: float = 6.0,
+    ) -> List[float]:
         """Estimate Leaf Area Index from NDVI using Beer-Lambert law.
 
         LAI = -ln(1 - fPAR) / k
@@ -566,20 +632,20 @@ class GrowthCurveEngine:
         Args:
             ndvi_series: Smoothed NDVI values.
             k: Extinction coefficient (0.4-0.6 typical).
+            lai_max: Peak healthy canopy LAI prior.
 
         Returns:
-            LAI estimates per timestep, clamped to [0, 8].
+            LAI estimates per timestep, clamped to [0, lai_max].
         """
         lai = []
+        k_safe = max(0.2, min(1.5, k))
         for ndvi in ndvi_series:
-            fpar = max(0.0, min(0.95, 1.25 * ndvi - 0.025))
+            fpar = max(0.01, min(0.95, 1.25 * ndvi - 0.025))
             if fpar >= 0.95:
-                lai_val = 6.0  # Saturated canopy
-            elif fpar <= 0.0:
-                lai_val = 0.0
+                lai_val = lai_max  # Saturated canopy
             else:
-                lai_val = -math.log(1.0 - fpar) / k
-            lai.append(min(8.0, max(0.0, lai_val)))
+                lai_val = -math.log(1.0 - fpar) / k_safe
+            lai.append(min(lai_max, max(0.0, round(lai_val, 2))))
         return lai
 
     # =====================================================================
@@ -601,32 +667,56 @@ class GrowthCurveEngine:
     @staticmethod
     def compute_fvc(
         ndvi_series: List[float],
-        ndvi_soil: float = 0.10,
-        ndvi_veg: float = 0.85,
+        ndvi_soil: Optional[float] = None,
+        ndvi_veg: Optional[float] = None,
     ) -> List[float]:
-        """Compute fractional vegetation cover.
+        """Compute fractional vegetation cover with dynamic endpoints.
 
         FVC = ((NDVI - NDVI_soil) / (NDVI_veg - NDVI_soil))²
 
         Reference: Carlson & Ripley (1997), Gutman & Ignatov (1998)
 
+        P1 FIX:
+          - Endpoints can be dynamically estimated from data distribution
+            (5th percentile for soil, 95th percentile for dense vegetation)
+            rather than static poorly-transferable constants.
+
         Args:
             ndvi_series: Smoothed NDVI values.
-            ndvi_soil: NDVI of bare soil (default 0.10).
-            ndvi_veg: NDVI of fully vegetated pixel (default 0.85).
+            ndvi_soil: NDVI of bare soil (default: dynamic 5th percentile, ~0.10).
+            ndvi_veg: NDVI of fully vegetated pixel (default: dynamic 95th percentile, ~0.85).
 
         Returns:
             FVC per timestep, clamped to [0, 1].
         """
+        if not ndvi_series:
+            return []
+
+        if ndvi_soil is None:
+            # Dynamic bare soil baseline from lower envelope
+            if HAS_SCIPY:
+                ndvi_soil = float(np.clip(np.percentile(ndvi_series, 5), 0.05, 0.20))
+            else:
+                sorted_vals = sorted(ndvi_series)
+                ndvi_soil = max(0.05, min(0.20, sorted_vals[max(0, int(len(sorted_vals) * 0.05))]))
+
+        if ndvi_veg is None:
+            # Dynamic full canopy asymptote from upper envelope
+            if HAS_SCIPY:
+                ndvi_veg = float(np.clip(np.percentile(ndvi_series, 95), 0.65, 0.92))
+            else:
+                sorted_vals = sorted(ndvi_series)
+                ndvi_veg = max(0.65, min(0.92, sorted_vals[min(len(sorted_vals) - 1, int(len(sorted_vals) * 0.95))]))
+
         rng = ndvi_veg - ndvi_soil
-        if rng < 0.01:
-            return [0.0] * len(ndvi_series)
+        if rng < 0.05:
+            rng = 0.05
 
         fvc = []
         for ndvi in ndvi_series:
             ratio = (ndvi - ndvi_soil) / rng
             ratio = max(0.0, min(1.0, ratio))
-            fvc.append(ratio ** 2)  # Squared per Carlson & Ripley
+            fvc.append(round(ratio ** 2, 4))  # Squared per Carlson & Ripley
         return fvc
 
     # =====================================================================
@@ -638,18 +728,21 @@ class GrowthCurveEngine:
         fpar_series: List[float],
         latitude: Optional[float] = None,
         start_doy: int = 1,
+        rs_observed_series: Optional[List[Optional[float]]] = None,
     ) -> List[float]:
         """Estimate Net Primary Productivity proxy.
 
         NPP ≈ fPAR × PAR × LUE
 
-        PAR is approximated from latitude and day of year using a
-        simplified solar radiation model.
+        P0 FIX: Replaced naive constant-irradiance assumption with FAO-56
+        astronomical extraterrestrial radiation (Ra) formulation:
+        Ra = (24*60/π) * Gsc * dr * [ωs*sin(φ)*sin(δ) + cos(φ)*cos(δ)*sin(ωs)]
 
         Args:
             fpar_series: fPAR values per timestep.
-            latitude: Field latitude in degrees (default 36° for Algeria).
+            latitude: Field latitude in degrees (e.g. 36.0 for Algeria).
             start_doy: Starting day-of-year for the time series.
+            rs_observed_series: Optional measured surface solar radiation (MJ/m²/day).
 
         Returns:
             NPP proxy in gC/m²/day per timestep.
@@ -657,73 +750,81 @@ class GrowthCurveEngine:
         if latitude is None:
             return []
         LUE = 1.5  # Light Use Efficiency (gC/MJ) — generic C3 crops
-        SOLAR_CONSTANT = 1361  # W/m² (top of atmosphere)
-
-        npp = []
+        GSC = 0.0820  # Solar constant (MJ/m²/min)
         lat_rad = math.radians(latitude)
+        npp = []
 
         for i, fpar in enumerate(fpar_series):
             doy = (start_doy + i - 1) % 365 + 1
 
-            # Solar declination (Spencer 1971)
-            decl = 0.4093 * math.sin(2 * math.pi * (284 + doy) / 365)
+            # Check if observed Rs is provided
+            if rs_observed_series and i < len(rs_observed_series) and rs_observed_series[i] is not None:
+                par = 0.48 * rs_observed_series[i]
+            else:
+                # FAO-56 Astronomical Solar Radiation Model
+                # Inverse relative distance Earth-Sun
+                dr = 1.0 + 0.033 * math.cos(2.0 * math.pi * doy / 365.0)
+                # Solar declination (radians)
+                decl = 0.409 * math.sin(2.0 * math.pi * doy / 365.0 - 1.39)
+                # Sunset hour angle (radians)
+                tan_prod = -math.tan(lat_rad) * math.tan(decl)
+                tan_prod = max(-1.0, min(1.0, tan_prod))
+                omega_s = math.acos(tan_prod)
 
-            # Day length (hours)
-            cos_ha = -math.tan(lat_rad) * math.tan(decl)
-            cos_ha = max(-1.0, min(1.0, cos_ha))
-            day_length = 24.0 * math.acos(cos_ha) / math.pi
-
-            # Daily extraterrestrial radiation (MJ/m²/day)
-            # Simplified: Rs ≈ 0.75 × Ra (clear sky transmissivity)
-            ra = SOLAR_CONSTANT * 3600 * day_length / 1e6  # Convert W to MJ
-            rs = 0.75 * ra * 0.48  # PAR = 48% of total solar
+                # Extraterrestrial radiation Ra (MJ/m²/day)
+                ra = (24.0 * 60.0 / math.pi) * GSC * dr * (
+                    omega_s * math.sin(lat_rad) * math.sin(decl) +
+                    math.cos(lat_rad) * math.cos(decl) * math.sin(omega_s)
+                )
+                ra = max(0.0, ra)
+                # Surface solar radiation under clear-sky (Rs ≈ 0.75 Ra), PAR ≈ 48% of Rs
+                par = 0.75 * ra * 0.48
 
             # NPP = fPAR × PAR × LUE
-            npp_val = fpar * rs * LUE
+            npp_val = fpar * par * LUE
             npp.append(max(0.0, round(npp_val, 3)))
 
         return npp
 
     # =====================================================================
-    # CWSI — Crop Water Stress Index (Jackson et al. 1981)
+    # SCWA — Spectral Canopy Water Anomaly / Proxy (Jackson / Gao 1996)
     # =====================================================================
 
     @staticmethod
-    def compute_cwsi(
+    def compute_spectral_canopy_water_anomaly(
         ndwi_series: Optional[List[Optional[float]]],
         ndvi_series: List[float],
-    ) -> List[float]:
-        """Compute Crop Water Stress Index from NDVI-NDWI relationship.
+    ) -> List[Optional[float]]:
+        """Compute Spectral Canopy Water Anomaly (SCWA) / Water Stress Proxy.
 
-        CWSI = 1 - (NDWI_normalized)
-        where NDWI_normalized = (NDWI - NDWI_min) / (NDWI_max - NDWI_min)
+        SCWA = 1 - (NDWI - NDWI_dry) / (NDWI_wet - NDWI_dry)
+        where NDWI_dry = -0.25 and NDWI_wet = 0.35.
 
-        When NDWI is unavailable, falls back to NDVI-only proxy:
-        CWSI ≈ 1 - (NDVI / NDVI_max)
+        Missingness Rule:
+          - When NDWI is None, returns None (UNKNOWN).
+          - Missing canopy water evidence is NEVER converted into 0.0 (water adequacy).
         """
         n = len(ndvi_series)
+        if not ndwi_series:
+            return [None] * n
 
-        # Try NDWI-based CWSI
-        if ndwi_series and any(v is not None for v in ndwi_series):
-            valid = [v for v in ndwi_series if v is not None]
-            ndwi_min = min(valid)
-            ndwi_max = max(valid)
-            ndwi_range = ndwi_max - ndwi_min if ndwi_max > ndwi_min else 0.1
+        NDWI_DRY_REF = -0.25
+        NDWI_WET_REF = 0.35
+        ndwi_range = NDWI_WET_REF - NDWI_DRY_REF
 
-            cwsi = []
-            for i in range(n):
-                ndwi_val = ndwi_series[i] if i < len(ndwi_series) else None
-                if ndwi_val is not None:
-                    normalized = (ndwi_val - ndwi_min) / ndwi_range
-                    cwsi.append(max(0.0, min(1.0, 1.0 - normalized)))
-                else:
-                    ndvi_max = max(ndvi_series) if ndvi_series else 1.0
-                    cwsi.append(max(0.0, min(1.0, 1.0 - ndvi_series[i] / max(0.1, ndvi_max))))
-            return cwsi
+        scwa = []
+        for i in range(n):
+            ndwi_val = ndwi_series[i] if i < len(ndwi_series) else None
+            if ndwi_val is not None and not math.isnan(ndwi_val):
+                normalized = (ndwi_val - NDWI_DRY_REF) / ndwi_range
+                normalized = max(0.0, min(1.0, normalized))
+                scwa.append(round(1.0 - normalized, 3))
+            else:
+                scwa.append(None)
+        return scwa
 
-        # NDVI-only fallback
-        ndvi_max = max(ndvi_series) if ndvi_series else 1.0
-        return [max(0.0, min(1.0, 1.0 - v / max(0.1, ndvi_max))) for v in ndvi_series]
+    # Backward compatibility alias
+    compute_cwsi = compute_spectral_canopy_water_anomaly
 
     # =====================================================================
     # FAO-56 ETc Water Balance
@@ -827,57 +928,61 @@ class GrowthCurveEngine:
     # v3.2: CASA NPP Model (Potter et al. 1993)
     # =====================================================================
 
-    @staticmethod
-    def compute_npp_casa(
+    @classmethod
+    def compute_npp_casa_detailed(
+        cls,
         fpar_series: List[float],
         latitude: Optional[float] = None,
         start_doy: int = 1,
         temperature_series: Optional[List[float]] = None,
-        cwsi_series: Optional[List[float]] = None,
+        cwsi_series: Optional[List[Optional[float]]] = None,
         t_opt: float = 25.0,
         t_min: float = 5.0,
         t_max: float = 45.0,
         epsilon_max: float = 0.604,
-    ) -> List[float]:
-        """CASA-model Net Primary Productivity with stress scalars.
+        rs_observed_series: Optional[List[Optional[float]]] = None,
+    ) -> Dict[str, Any]:
+        """CASA-model Net Primary Productivity with detailed light-temperature and water components.
 
-        NPP = fPAR × PAR × ε_max × T_scalar × W_scalar
-
-        T_scalar (temperature stress factor):
-            T_scalar = min( (T - T_min)/(T_opt - T_min),
-                            (T_max - T)/(T_max - T_opt) )
-            Bounded [0, 1]. Peaks at T_opt.
-
-        W_scalar (water stress factor):
-            W_scalar = 0.5 + 0.5 × (1 - CWSI)
-            CWSI=0 → W_scalar=1.0, CWSI=1 → W_scalar=0.5
-
-        Reference: Potter et al. (1993) "Terrestrial ecosystem production:
-        A process model based on global satellite and surface data",
-        Global Biogeochemical Cycles 7(4): 811-841.
-
-        Falls back to simple fPAR × PAR × ε when temperature/CWSI unavailable.
+        NPP*_LT = fPAR × PAR × ε_max × T_scalar
+        NPP_water_adjusted = NPP*_LT × W_scalar
         """
         if latitude is None:
-            return []
-        SOLAR_CONSTANT = 1361  # W/m²
+            return {
+                "npp_light_temperature": [],
+                "npp_spectral_water_adjusted": [],
+                "water_constraint_applied": False,
+                "water_constraint_source": "NONE",
+                "radiation_source": "NONE",
+            }
+        GSC = 0.0820  # Solar constant (MJ/m²/min)
         lat_rad = math.radians(latitude)
-        npp = []
+        npp_lt = []
+        npp_water = []
+        water_applied = False
+        rad_source = "MEASURED_SURFACE_SOLAR" if rs_observed_series and any(r is not None for r in rs_observed_series) else "FAO56_CLEAR_SKY_EXTRATERRESTRIAL"
 
         for i, fpar in enumerate(fpar_series):
             doy = (start_doy + i - 1) % 365 + 1
 
-            # Solar declination
-            decl = 0.4093 * math.sin(2 * math.pi * (284 + doy) / 365)
-            cos_ha = -math.tan(lat_rad) * math.tan(decl)
-            cos_ha = max(-1.0, min(1.0, cos_ha))
-            day_length = 24.0 * math.acos(cos_ha) / math.pi
+            if rs_observed_series and i < len(rs_observed_series) and rs_observed_series[i] is not None:
+                par = 0.48 * rs_observed_series[i]
+            else:
+                # FAO-56 Ra formulation
+                dr = 1.0 + 0.033 * math.cos(2.0 * math.pi * doy / 365.0)
+                decl = 0.409 * math.sin(2.0 * math.pi * doy / 365.0 - 1.39)
+                tan_prod = -math.tan(lat_rad) * math.tan(decl)
+                tan_prod = max(-1.0, min(1.0, tan_prod))
+                omega_s = math.acos(tan_prod)
 
-            # PAR (MJ/m²/day)
-            ra = SOLAR_CONSTANT * 3600 * day_length / 1e6
-            par = 0.75 * ra * 0.48  # Clear sky × PAR fraction
+                ra = (24.0 * 60.0 / math.pi) * GSC * dr * (
+                    omega_s * math.sin(lat_rad) * math.sin(decl) +
+                    math.cos(lat_rad) * math.cos(decl) * math.sin(omega_s)
+                )
+                ra = max(0.0, ra)
+                par = 0.75 * ra * 0.48
 
-            # T_scalar
+            # T_scalar (photosynthetic temperature acclimation)
             t_scalar = 1.0
             if temperature_series and i < len(temperature_series):
                 t = temperature_series[i]
@@ -889,16 +994,56 @@ class GrowthCurveEngine:
                         t_down = (t_max - t) / max(0.1, t_max - t_opt)
                         t_scalar = max(0.0, min(1.0, min(t_up, t_down)))
 
-            # W_scalar
+            # Light-temperature potential NPP*_LT
+            npp_lt_val = fpar * par * epsilon_max * t_scalar
+            npp_lt.append(max(0.0, round(npp_lt_val, 3)))
+
+            # W_scalar (when water proxy is missing, W_scalar = 1.0)
             w_scalar = 1.0
-            if cwsi_series and i < len(cwsi_series):
-                cwsi = cwsi_series[i]
+            if cwsi_series and i < len(cwsi_series) and cwsi_series[i] is not None:
+                cwsi = float(cwsi_series[i])
                 w_scalar = 0.5 + 0.5 * (1.0 - cwsi)
+                water_applied = True
 
-            npp_val = fpar * par * epsilon_max * t_scalar * w_scalar
-            npp.append(max(0.0, round(npp_val, 3)))
+            npp_water_val = npp_lt_val * w_scalar
+            npp_water.append(max(0.0, round(npp_water_val, 3)))
 
-        return npp
+        return {
+            "npp_light_temperature": npp_lt,
+            "npp_spectral_water_adjusted": npp_water,
+            "water_constraint_applied": water_applied,
+            "water_constraint_source": "SPECTRAL_PROXY" if water_applied else "NONE",
+            "radiation_source": rad_source,
+        }
+
+    @classmethod
+    def compute_npp_casa(
+        cls,
+        fpar_series: List[float],
+        latitude: Optional[float] = None,
+        start_doy: int = 1,
+        temperature_series: Optional[List[float]] = None,
+        cwsi_series: Optional[List[Optional[float]]] = None,
+        t_opt: float = 25.0,
+        t_min: float = 5.0,
+        t_max: float = 45.0,
+        epsilon_max: float = 0.604,
+        rs_observed_series: Optional[List[Optional[float]]] = None,
+    ) -> List[float]:
+        """Backward-compatible wrapper returning water-adjusted NPP series."""
+        res = cls.compute_npp_casa_detailed(
+            fpar_series=fpar_series,
+            latitude=latitude,
+            start_doy=start_doy,
+            temperature_series=temperature_series,
+            cwsi_series=cwsi_series,
+            t_opt=t_opt,
+            t_min=t_min,
+            t_max=t_max,
+            epsilon_max=epsilon_max,
+            rs_observed_series=rs_observed_series,
+        )
+        return res.get("npp_spectral_water_adjusted", [])
 
     # =====================================================================
     # v3.2: Water Use Efficiency (Steduto et al. 2009 — AquaCrop)
@@ -910,18 +1055,15 @@ class GrowthCurveEngine:
         et_actual_series: List[float],
         window: int = 14,
     ) -> Dict[str, float]:
-        """Compute Water Use Efficiency and Crop Water Productivity.
+        """Compute Water Use Efficiency and Carbon Water Productivity.
 
         WUE = ΔBiomass / ETa (gC/m²/mm)
-        CWP = Yield / ET_total (kg/m³)
+        CWP = Total Carbon Biomass / ET_total (kgC/m³)
 
         Uses trailing window to compute recent WUE.
-
-        Reference: Steduto et al. (2009) "AquaCrop — The FAO crop model
-        to simulate yield response to water", Agronomy Journal.
         """
         if not biomass_series or not et_actual_series:
-            return {"wue": 0.0, "crop_water_productivity": 0.0, "et_total": 0.0}
+            return {"wue": 0.0, "carbon_water_productivity": 0.0, "crop_water_productivity": 0.0, "et_total": 0.0}
 
         n = min(len(biomass_series), len(et_actual_series))
         w = min(window, n)
@@ -935,16 +1077,15 @@ class GrowthCurveEngine:
 
         wue = delta_biomass / max(0.01, et_sum) if et_sum > 0 else 0.0
 
-        # Total season ET and CWP
+        # Total season ET and Carbon Water Productivity (kgC/m3)
         et_total = sum(et_actual_series[:n])
         total_biomass = max(biomass_series) if biomass_series else 0.0
-
-        # CWP in kg/m³ (biomass in gC/m², ET in mm → multiply by 10 for kg/ha per mm)
-        cwp = (total_biomass / max(0.01, et_total)) * 10.0 if et_total > 0 else 0.0
+        cwp = (total_biomass / max(0.01, et_total)) if et_total > 0 else 0.0
 
         return {
             "wue": round(wue, 4),
-            "crop_water_productivity": round(cwp, 3),
+            "carbon_water_productivity": round(cwp, 3),
+            "crop_water_productivity": round(cwp, 3),  # Alias for backward compatibility
             "et_total": round(et_total, 2),
         }
 
@@ -956,21 +1097,23 @@ class GrowthCurveEngine:
         self,
         ndvi_values: List[float],
         uncertainties: List[float],
+        dates: Optional[List[str]] = None,
+        cloud_qa: Optional[List[float]] = None,
+        delta_days: Optional[List[float]] = None,
     ) -> Tuple[List[float], Dict[str, List[float]], List[float]]:
         """Blend Whittaker + Savitzky-Golay with data-quality-adaptive weights.
 
-        For each point, weights are inversely proportional to each smoother's
-        local residual against the raw observations.
-
-        ensemble[t] = Σ(w_i × smoother_i[t]) / Σ(w_i)
-
-        Falls back to Whittaker alone if blending fails.
+        Passes cloud_qa and delta_days to Whittaker and SG derivatives.
         """
         if not HAS_SCIPY or len(ndvi_values) < 10:
-            return self._fit_whittaker(ndvi_values, uncertainties)
+            return self._fit_whittaker(
+                ndvi_values, uncertainties, cloud_qa=cloud_qa, delta_days=delta_days
+            )
 
-        # Run Whittaker
-        whit_curve, whit_deriv, whit_unc = self._fit_whittaker(ndvi_values, uncertainties)
+        # Run Whittaker with QA gating & delta_days
+        whit_curve, whit_deriv, whit_unc = self._fit_whittaker(
+            ndvi_values, uncertainties, cloud_qa=cloud_qa, delta_days=delta_days
+        )
 
         # Run SG smoother
         try:
@@ -996,22 +1139,59 @@ class GrowthCurveEngine:
 
             ensemble[t] = (w_w * whit_curve[t] + w_s * sg_curve[t]) / total_w
 
-        # Recompute derivatives on ensemble
-        velocity, acceleration = self._savgol_derivatives(ensemble)
+        # Recompute derivatives on ensemble using delta_days
+        velocity, acceleration = self._savgol_derivatives(ensemble, delta_days=delta_days)
 
-        # Convert to dict format (V922.2A: fix tuple/dict inconsistency)
         deriv = {
             "velocity": list(velocity) if hasattr(velocity, "tolist") else list(velocity),
             "acceleration": list(acceleration) if hasattr(acceleration, "tolist") else list(acceleration),
         }
 
-        # Uncertainty: average of both
         ens_unc = [
             round((whit_unc[i] + abs(whit_curve[i] - sg_curve[i])) / 2, 4)
             for i in range(n)
         ]
 
-        # V922.2A: Enforce length alignment
-        ens_unc = _align_length(ens_unc, n)
-
         return ensemble, deriv, ens_unc
+
+
+# =========================================================================
+# Radiative Transfer Model (RTM / PROSAIL) Hybrid Inversion Interface
+# =========================================================================
+
+class RadiativeTransferModelStub:
+    """Architectural interface for Canopy Radiative Transfer Model (RTM).
+
+    Designed for lookup table (LUT) or neural network hybrid inversion of
+    PROSAIL (PROSPECT-D + 4SAIL) to estimate biophysical variables:
+      - LAI (Leaf Area Index, m²/m²)
+      - Cab (Leaf chlorophyll content, μg/cm²)
+      - Cw (Leaf water content / EWT, g/cm²)
+      - FCOVER / FVC (Fractional Vegetation Cover)
+
+    Reference: Jacquemoud et al. (2009), Verrelst et al. (2015).
+    """
+
+    @staticmethod
+    def invert_prosail_lut(
+        reflectance_bands: Dict[str, float],
+        view_angles: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, float]:
+        """Invert canopy surface reflectance to biophysical quantities.
+
+        Fallback proxy mode when neural network LUT weights are absent.
+        """
+        # Multi-spectral empirical inversion fallback
+        b8 = reflectance_bands.get("B08", reflectance_bands.get("nir", 0.40))
+        b4 = reflectance_bands.get("B04", reflectance_bands.get("red", 0.08))
+        ndvi = (b8 - b4) / max(1e-4, b8 + b4)
+        
+        lai_est = GrowthCurveEngine.estimate_lai([ndvi])[0]
+        fvc_est = GrowthCurveEngine.compute_fvc([ndvi])[0]
+        
+        return {
+            "lai": lai_est,
+            "fvc": fvc_est,
+            "cab_proxy": round(min(80.0, max(10.0, ndvi * 65.0)), 2),
+            "retrieval_method": "empirical_proxy_fallback",
+        }
