@@ -66,6 +66,7 @@ diagnose_*.py
 test_*.js
 test_*.py
 !services/agribrain/tests/test_*.py
+!services/agribrain/**/tests/test_*.py
 verify_*.py
 
 # artifacts, temp and scratch

@@ -150,7 +150,7 @@ class CacheIdentityTests(unittest.TestCase):
         self.assertNotEqual(stable_value_hash(first), stable_value_hash(second))
 
     def test_array_source_and_key_hashes_are_stable_under_both_import_styles(self):
-        workspace = Path(__file__).resolve().parents[3]
+        workspace = Path(__file__).resolve().parents[4]
         backend = workspace / "services" / "agribrain"
         script = (
             "import importlib,json,numpy as np,sys;from datetime import date,datetime,timezone;"
