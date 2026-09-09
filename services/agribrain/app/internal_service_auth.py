@@ -49,7 +49,7 @@ def canonicalize_query_params(query: Union[str, List[Tuple[str, str]], Dict[str,
 
 def _get_secret() -> str:
     secret = os.getenv("AGRIBRAIN_INTERNAL_SERVICE_SECRET", "").strip()
-    env = os.getenv("NODE_ENV", os.getenv("ENVIRONMENT", os.getenv("APP_ENV", "development"))).lower()
+    env = os.getenv("NODE_ENV", os.getenv("ENVIRONMENT", os.getenv("ENV", os.getenv("APP_ENV", "development")))).lower()
     if not secret:
         if env in ("production", "prod", "staging"):
             raise RuntimeError("AGRIBRAIN_INTERNAL_SERVICE_SECRET must be set in non-development environments")
@@ -164,15 +164,25 @@ async def require_internal_service_request(request: Request) -> PlotNamespace:
     nonce = request.headers.get("X-AgriBrain-Nonce")
     key_version = request.headers.get("X-AgriBrain-Key-Version", "v1")
 
-    tenant_id = request.headers.get("X-Tenant-Id")
-    farm_id = request.headers.get("X-Farm-Id")
+    tenant_id = request.headers.get("X-Tenant-Id") or request.path_params.get("tenant_id")
+    farm_id = request.headers.get("X-Farm-Id") or request.path_params.get("farm_id")
     plot_id = request.headers.get("X-Plot-Id") or request.path_params.get("plot_id") or request.query_params.get("plot_id")
 
-    env_name = os.getenv("NODE_ENV", os.getenv("ENVIRONMENT", os.getenv("APP_ENV", "development"))).lower()
+    env_name = os.getenv("NODE_ENV", os.getenv("ENVIRONMENT", os.getenv("ENV", os.getenv("APP_ENV", "development")))).lower()
     is_prod = env_name in ("production", "prod", "staging")
 
     allow_unauthenticated_dev = (os.getenv("ALLOW_UNAUTHENTICATED_DEV", "false").lower() == "true") and not is_prod
     if not sig and allow_unauthenticated_dev:
+        if not plot_id:
+            try:
+                body_bytes = await request.body()
+                if body_bytes:
+                    import json as _json
+                    b_json = _json.loads(body_bytes.decode("utf-8"))
+                    if isinstance(b_json, dict):
+                        plot_id = b_json.get("plot_id") or b_json.get("plotId")
+            except Exception:
+                pass
         t_id = tenant_id or "dev_tenant"
         f_id = farm_id or "dev_farm"
         p_id = plot_id or "dev_plot"
@@ -190,17 +200,18 @@ async def require_internal_service_request(request: Request) -> PlotNamespace:
             detail=f"Unsupported internal service key version: {key_version}"
         )
 
-    if not tenant_id or not farm_id or not plot_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing required tenant_id, farm_id, or plot_id headers/params"
-        )
-
     path_plot_id = request.path_params.get("plot_id")
-    if path_plot_id and path_plot_id.strip() != plot_id.strip():
+    if path_plot_id and plot_id and path_plot_id.strip() != plot_id.strip():
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Header X-Plot-Id does not match URL path parameter plot_id"
+        )
+
+    path_farm_id = request.path_params.get("farm_id")
+    if path_farm_id and farm_id and path_farm_id.strip() != farm_id.strip():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Header X-Farm-Id does not match URL path parameter farm_id"
         )
 
     # Check clock skew (5-minute window)
@@ -250,8 +261,22 @@ async def require_internal_service_request(request: Request) -> PlotNamespace:
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Client payload must not specify tenant_id, tenantId, farm_id, or farmId. Authority is derived exclusively from authenticated tokens.",
                     )
+                body_plot_id = body_json.get("plot_id") or body_json.get("plotId")
+                if body_plot_id and plot_id and str(body_plot_id).strip() != str(plot_id).strip():
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Payload plot_id does not match authenticated token namespace",
+                    )
+                if not plot_id and body_plot_id:
+                    plot_id = str(body_plot_id).strip()
         except (UnicodeDecodeError, _json.JSONDecodeError):
             pass
+
+    if not tenant_id or not farm_id or not plot_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required tenant_id, farm_id, or plot_id headers/params"
+        )
     expected_sig = compute_request_signature(
         method=request.method,
         path=request.url.path,

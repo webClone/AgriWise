@@ -97,8 +97,17 @@ if job.lease_expires_at and job.lease_expires_at > now:
 ---
 
 ## 6. Progress Tracking Checklist
-- [ ] Line 1271 NameError fixed (`resumed` $\to$ `superseded`).
-- [ ] `COMPLETED_REINTEGRATION_PENDING` added to candidate recovery query.
-- [ ] Dedicated reintegration recovery dispatcher implemented.
-- [ ] Worker lease expiration guard enforced.
-- [ ] Automated recovery tests written and passing.
+- [x] Line 1271 NameError fixed (`resumed` $\to$ `superseded`).
+- [x] `COMPLETED_REINTEGRATION_PENDING` added to candidate recovery query.
+- [x] Dedicated reintegration recovery dispatcher implemented.
+- [x] Worker lease expiration guard enforced.
+- [x] Automated recovery tests written and passing.
+
+---
+
+## 7. Resolution Summary
+Resolved in Work Package 11 (WP11):
+1. Line 1271 NameError resolved by returning `superseded or current` with `_supersede_and_requeue_job = _supersede_recovery_candidate` alias.
+2. `completed_reintegration_pending` added to recovery query in `recover_pending_jobs` and `_mark_stalled_if_expired`, safely resuming at `resume_phase='reintegration'`.
+3. Active unexpired leases are validated prior to any preemption or supersede action.
+4. Validated by automated tests in `services/agribrain/tests/test_wp11_operational_isolation.py`.

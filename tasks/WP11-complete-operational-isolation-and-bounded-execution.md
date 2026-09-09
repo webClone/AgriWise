@@ -104,3 +104,29 @@ Update `infra/docker-compose.yml`:
 - **Monograph Findings**: Finding #32 (Inconsistent route authentication), Finding #34 (Background job capacity control), Finding #35 (Docker compose MongoDB bootstrap cycle).
 - **Defect Tasks**: [A07-asmae-job-recovery-and-reintegration.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A07-asmae-job-recovery-and-reintegration.md).
 - **Phase Tasks**: [P01.3-make-asmae-job-recovery-resilient.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P01.3-make-asmae-job-recovery-resilient.md).
+
+---
+
+## 7. Implementation & Verification Summary
+
+### 7.1 Key Changes Made
+1. **Universal Route Authentication & Ownership Enforcement (Finding #32)**:
+   - Secured all unprotected plot-scoped endpoints in [`services/agribrain/app/main.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/app/main.py) and [`services/agribrain/app/cache_admin.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/app/cache_admin.py) with `namespace: PlotNamespace = Depends(require_internal_service_request)`.
+   - Covered endpoints: `/v2/plot-dna`, `/v2/satellite-tile-image/{plot_id}`, `/v2/satellite-tile-meta/{plot_id}`, `/v2/plot-intelligence`, `/v2/crop-feedback`, `/collector/register-plot`, `/collector/snapshot/{farm_id}/{plot_id}`, `/data/{farm_id}/{plot_id}/observations`, `/v2/gateway/freshness/{plot_id}`, `/v2/gateway/invalidate/{plot_id}`, `/v2/gateway/maturity/{plot_id}`, `/v2/gateway/evolution/{plot_id}`.
+   - Enforced cross-parameter alignment in [`services/agribrain/app/internal_service_auth.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/app/internal_service_auth.py) and endpoint bodies: path `plot_id`, header `X-Plot-Id`, and body `plot_id` must match authenticated token namespace (403 Forbidden on mismatch).
+   - Fixed `ENVIRONMENT=production` bypass in admin routes (`api_train_crop_model`, `api_evaluate_crop_model`, `api_crop_model_readiness`).
+2. **Bounded Background Worker Pool & Resilient Recovery (Finding #34, Defect A07 & P01.3)**:
+   - Implemented `BoundedJobExecutor` in [`services/agribrain/layer05_asmae/background_jobs.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer05_asmae/background_jobs.py) with `AGRIBRAIN_MAX_WORKERS` (default 4) and FIFO queuing.
+   - Implemented cross-platform `is_pid_alive` and process memory RSS tracking `_get_process_rss_mb`.
+   - Enforced memory quota (`AGRIBRAIN_MAX_WORKER_MEMORY_MB`, default 2048 MB) and execution deadline (`300s`) in `supervise_job`.
+   - Fixed `NameError: 'resumed'` in `_supersede_recovery_candidate` (aliased as `_supersede_and_requeue_job`).
+   - Expanded candidate recovery states to include `completed_reintegration_pending` and enforced active unexpired lease protection.
+   - Implemented single-leader advisory recovery lease `acquire_recovery_leader_lock` to avoid multi-replica recovery storms.
+3. **Database Bootstrap Deadlock Repair (Finding #35)**:
+   - In [`infra/docker-compose.yml`](file:///c:/Users/E-C/Desktop/agriwise/infra/docker-compose.yml), replaced circular `rs.status()` healthcheck with `db.adminCommand('ping')`.
+   - Configured `mongo-init` to advertise `host: "mongo:27017"` on the internal Docker network.
+
+### 7.2 Verification
+- Automated test suite [`services/agribrain/tests/test_wp11_operational_isolation.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/tests/test_wp11_operational_isolation.py): 10/10 tests passed.
+- ASMAE test suite: 67/67 passed.
+- Full subsystem regression suite: 100% pass rate.

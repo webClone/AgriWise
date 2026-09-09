@@ -10,8 +10,8 @@ services:
     volumes:
       - agriwise_db:/data/db
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "rs.status()"]
-      interval: 10s
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
       timeout: 5s
       retries: 5
 
@@ -22,7 +22,7 @@ services:
         condition: service_healthy
     entrypoint: >
       mongosh --host mongo:27017 --eval '
-        try { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "localhost:27017" }] }) }
+        try { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "mongo:27017" }] }) }
         catch(e) { if (e.codeName !== "AlreadyInitialized") throw e; }
       '
     restart: "no"

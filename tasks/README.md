@@ -51,10 +51,10 @@ This directory structures the complete engineering remediation into:
 | **29** | L4 Substitutes Synthetic NDVI Defaults | `HIGH` | `layer4_nutrients/runner.py:887-891` (`ndvi = 0.5`) | **WP08** | **RESOLVED** (Preserved missing satellite NDVI as `None`; reported `spectral = 0.0`, flagged `NDVI_SPECTRAL` in `missing_drivers`, and discounted state confidence) |
 | **30** | L5 Double-Counts Inherited Evidence & Invariants | `HIGH` | `layer5_bio/runner.py:540-551`, `inference.py` | **WP01, WP08** | **RESOLVED** (WP01 invariant gating complete; WP08 conditioned weed inference on shared spectral evidence with 0.35 dampening and lineage tracking) |
 | **31** | L7 Yield Distribution is Heuristic Multiplier | `HIGH` | `layer7_planning/engines/yve_yield_distribution.py:70` | **WP09** | **VERIFIED** (`mean=p50`, fixed penalty rules) |
-| **32** | Inconsistent Route Authentication & Prod Check | `CRITICAL` | `app/main.py:4988-4996`, `internal_service_auth.py:52`| **WP01, WP11** | **VERIFIED** (`ENVIRONMENT=production` bypass) |
+| **32** | Inconsistent Route Authentication & Prod Check | `CRITICAL` | `app/main.py:4988-4996`, `internal_service_auth.py:52`| **WP01, WP11** | **RESOLVED** (Universal `require_internal_service_request` on all plot-scoped routes, parameter mismatch checks, and `ENVIRONMENT=production` admin enforcement) |
 | **33** | Worldline Persistence Non-Transactional | `HIGH` | `world_model/canonical_worldline.py:128-155` | **WP03** | **RESOLVED** (`CorruptedWorldlineError` on invalid/empty JSON; path containment enforced) |
-| **34** | ASMAE Background Jobs Lack Capacity Bounds | `HIGH` | `layer05_asmae/background_jobs.py` | **WP11** | **VERIFIED** (Unbounded `subprocess.Popen`) |
-| **35** | Docker Compose MongoDB Bootstrap Deadlock | `HIGH` | `infra/docker-compose.yml:12-28` | **WP11** | **VERIFIED** (`rs.status()` deadlock on clean start) |
+| **34** | ASMAE Background Jobs Lack Capacity Bounds | `HIGH` | `layer05_asmae/background_jobs.py` | **WP11** | **RESOLVED** (`BoundedJobExecutor` enforcing `AGRIBRAIN_MAX_WORKERS=4` concurrency cap, FIFO queue, memory quotas, and single-leader recovery lock) |
+| **35** | Docker Compose MongoDB Bootstrap Deadlock | `HIGH` | `infra/docker-compose.yml:12-28` | **WP11** | **RESOLVED** (Replaced circular `rs.status()` with `db.adminCommand('ping')` and advertised `mongo:27017` on internal Docker network) |
 
 ---
 
@@ -87,7 +87,7 @@ WP01: Repair Deterministic Failures & Explicit Degradation
 | [**WP08**](WP08-consolidate-l2-l5-around-shared-evidence.md) | Consolidate L2–L5 Around Shared Evidence | `layer2_intelligence/`, `layer3_water/`, `layer4_nutrients/` | Publish L2 Bayesian inference posterior; connect authoritative `layer3_water` expert and fix $\sigma_{\text{post}}$ math; pass all L4 inputs; eliminate fake $0.5$ NDVI default. | `COMPLETED` |
 | [**WP09**](WP09-rebuild-diagnostic-promotion-and-action-flow.md) | Rebuild Diagnostic Promotion & Action Flow | `orchestrator_v2/runner.py`, `diagnostic_integration/` | Build `DiagnosticPromotionService` to break prescription deadlock; re-sequence decision flow: Feasibility (L6) $\to$ Planning (L7) $\to$ Prescription (L8). | `COMPLETED` |
 | [**WP10**](WP10-consolidate-l9-l10-publication.md) | Consolidate L9/L10 Publication | `layer9_interface/`, `layer10_sire/surfaces/` | Ground L9 natural language claims to authorized receipts; formalize display vs native resolution metadata; reclassify spatial modulations as visual proxies. | `COMPLETED` |
-| [**WP11**](WP11-complete-operational-isolation-and-bounded-execution.md) | Complete Operational Isolation & Bounded Execution | `app/main.py`, `background_jobs.py`, `docker-compose.yml` | Enforce route authentication dependencies; bounded background worker pool ($N \le 4$); repair MongoDB replica-set bootstrap deadlock in Docker Compose. | `PENDING` |
+| [**WP11**](WP11-complete-operational-isolation-and-bounded-execution.md) | Complete Operational Isolation & Bounded Execution | `app/main.py`, `background_jobs.py`, `docker-compose.yml` | Enforce route authentication dependencies; bounded background worker pool ($N \le 4$); repair MongoDB replica-set bootstrap deadlock in Docker Compose. | `COMPLETED` |
 | [**WP12**](WP12-make-system-ready-for-omega-and-world-model.md) | Make System Ready for Omega & World Model | `world_model/`, `mesia/omega/experiment_proposer.py` | Bitemporal historical window extraction without future leakage; immutable forecast archive; separate intervention events; isolate Omega research proposals. | `PENDING` |
 
 ---
@@ -115,7 +115,7 @@ Operational deployment is strictly governed by 7 incremental capability gates:
 | [A04](A04-l3-water-solver-mass-conservation.md) | L3 Layered Water Solver Mass Balance Violation (Water Created at WP) | `layer3_water/soil/layered_water_balance.py:122` | `P0` |
 | [A05](A05-l3-water-posterior-flux-and-sigma.md) | Water Posterior Fluxes & Sigma Propagation Disconnect | `layer3_water/runner.py:201, 248, 287` | `P1` |
 | [A06](A06-asmae-external-scene-loader-resolution.md) | ASMAE Silent Drop of External Scenes (`resolution_m` NameError) | `layer05_asmae/geometry/external_scene_loader.py:115` | `P0` |
-| [A07](A07-asmae-job-recovery-and-reintegration.md) | ASMAE Job Recovery Misses Reintegration & `resumed` NameError Crash | `layer05_asmae/background_jobs.py:1271, 2265` | `P1` |
+| [A07](A07-asmae-job-recovery-and-reintegration.md) | ASMAE Job Recovery Misses Reintegration & `resumed` NameError Crash | `layer05_asmae/background_jobs.py:1271, 2265` | `P1` (RESOLVED in WP11) |
 | [A08](A08-mesia-rf-snr-vwc-assimilation.md) | MESIA Likelihood Score Assigned Directly as VWC ($1.000\text{ m}^3/\text{m}^3$) | `mesia/assimilation/asmae_operator.py:67` | `P0` |
 | [A09](A09-mesia-qualification-and-evidence-verification.md) | MESIA Capability Qualification Evaluated at Manifest Time vs Use Time | `mesia/assimilation/capability_governance.py` | `P0` |
 | [A10](A10-mesia-asmae-adapter-and-payload-integration.md) | MESIA ASMAE Adapter Missing 2D Tensor Serialization | `layer05_asmae/adapters/mesia_adapter.py` | `P1` |

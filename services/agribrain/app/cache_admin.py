@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import logging
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from layer0.data_gateway.storage_manager import StorageManager
 from layer0.learning.pattern_maturity import PatternMaturityEngine
 from layer0.learning.dna_recalibration import DNARecalibrationScheduler
+from services.agribrain.app.internal_service_auth import require_internal_service_request
+from services.agribrain.common.plot_namespace import PlotNamespace
 
 logger = logging.getLogger("agribrain.app.cache_admin")
 
@@ -31,7 +33,10 @@ def get_gateway_stats() -> Dict[str, Any]:
 
 
 @router.get("/freshness/{plot_id}")
-def get_plot_freshness(plot_id: str) -> Dict[str, Any]:
+def get_plot_freshness(
+    plot_id: str,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+) -> Dict[str, Any]:
     """Get real-time TTL freshness and age status for every data source on a plot."""
     try:
         report = storage_manager.get_freshness_report(plot_id)
@@ -42,7 +47,11 @@ def get_plot_freshness(plot_id: str) -> Dict[str, Any]:
 
 
 @router.post("/invalidate/{plot_id}")
-def invalidate_plot_cache(plot_id: str, source: Optional[str] = None) -> Dict[str, Any]:
+def invalidate_plot_cache(
+    plot_id: str,
+    source: Optional[str] = None,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+) -> Dict[str, Any]:
     """Force-invalidate cache entries (MongoDB + filesystem) for a specific plot."""
     try:
         count = storage_manager.invalidate(plot_id, source)
@@ -58,7 +67,10 @@ def invalidate_plot_cache(plot_id: str, source: Optional[str] = None) -> Dict[st
 
 
 @router.get("/maturity/{plot_id}")
-def get_pattern_maturity(plot_id: str) -> Dict[str, Any]:
+def get_pattern_maturity(
+    plot_id: str,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+) -> Dict[str, Any]:
     """Get the 12 ML pattern maturity activation and weight-blending report for a plot."""
     try:
         return maturity_engine.get_plot_maturity_report(plot_id)
@@ -68,7 +80,10 @@ def get_pattern_maturity(plot_id: str) -> Dict[str, Any]:
 
 
 @router.get("/evolution/{plot_id}")
-def get_dna_evolution_history(plot_id: str) -> List[Dict[str, Any]]:
+def get_dna_evolution_history(
+    plot_id: str,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+) -> List[Dict[str, Any]]:
     """Get the historical timeline of versioned biophysical PlotDNA snapshots."""
     try:
         return dna_scheduler.get_dna_evolution(plot_id)

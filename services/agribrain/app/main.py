@@ -1578,11 +1578,19 @@ class PlotDNARequest(BaseModel):
     polygon: Optional[Any] = None
 
 @app.post("/v2/plot-dna")
-def api_plot_dna(req: PlotDNARequest):
+def api_plot_dna(
+    req: PlotDNARequest,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
     """
     Returns the Plot DNA Decadal Inversion data using REAL EO DATA.
     Includes the biophysical traits, fluid topologies, and exhaustion index.
     """
+    if req.plot_id and req.plot_id.strip() != namespace.plot_id.strip():
+        raise HTTPException(
+            status_code=403,
+            detail="Payload plot_id does not match authenticated token namespace",
+        )
     try:
         from layer0.calibration.generative_inversion import trigger_dna_sequencing
         from layer10_sire.surfaces.fluid_topology import generate_fluid_payload
@@ -1626,7 +1634,10 @@ def api_plot_dna(req: PlotDNARequest):
         raise HTTPException(status_code=500, detail={"error": str(e), "type": "PlotDNAError"})
 
 @app.get("/v2/satellite-tile-image/{plot_id}")
-def api_satellite_tile_image(plot_id: str):
+def api_satellite_tile_image(
+    plot_id: str,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
     """Serve the cached satellite tile as a PNG image."""
     from fastapi.responses import Response
     try:
@@ -1650,7 +1661,10 @@ def api_satellite_tile_image(plot_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/v2/satellite-tile-meta/{plot_id}")
-def api_satellite_tile_meta(plot_id: str):
+def api_satellite_tile_meta(
+    plot_id: str,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
     """Get metadata about a cached satellite tile."""
     try:
         from layer0.perception.satellite_rgb.tile_runtime import get_tile_metadata, _is_cache_valid
@@ -1698,11 +1712,21 @@ class PlotIntelligenceRequest(BaseModel):
 
 
 @app.post("/v2/plot-intelligence")
-def api_plot_intelligence(req: PlotIntelligenceRequest):
+def api_plot_intelligence(
+    req: PlotIntelligenceRequest,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
     """
     Unified Plot Intelligence Endpoint.
     Delegates data fetching & timeline to pi_helpers for testability.
     """
+    if req.plot_id and req.plot_id.strip() != namespace.plot_id.strip():
+        raise HTTPException(
+            status_code=403,
+            detail="Payload plot_id does not match authenticated token namespace",
+        )
+    if not req.plot_id:
+        req.plot_id = namespace.plot_id
     import traceback
     import time as _time
     from datetime import timezone
@@ -3637,8 +3661,20 @@ class CropFeedbackRequest(BaseModel):
 
 
 @app.post("/v2/crop-feedback")
-def api_v2_crop_feedback(req: CropFeedbackRequest):
+def api_v2_crop_feedback(
+    req: CropFeedbackRequest,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
     """Record crop feedback as an audit-only user assertion.
+    """
+    if req.plot_id and req.plot_id.strip() != namespace.plot_id.strip():
+        raise HTTPException(
+            status_code=403,
+            detail="Payload plot_id does not match authenticated token namespace",
+        )
+    if not req.plot_id:
+        req.plot_id = namespace.plot_id
+    """
 
     This path does not create ground truth, update a learned prior, or make a
     record eligible for model training. Promotion requires a separate trusted
@@ -4463,8 +4499,23 @@ class PlotRegistrationRequest(BaseModel):
     area: Optional[float] = 0
 
 @app.post("/collector/register-plot")
-def register_plot(req: PlotRegistrationRequest):
+def register_plot(
+    req: PlotRegistrationRequest,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
     """Register a new plot for automatic data collection.
+    """
+    if req.plot_id and req.plot_id.strip() != namespace.plot_id.strip():
+        raise HTTPException(
+            status_code=403,
+            detail="Payload plot_id does not match authenticated token namespace",
+        )
+    if req.farm_id and req.farm_id.strip() != namespace.farm_id.strip():
+        raise HTTPException(
+            status_code=403,
+            detail="Payload farm_id does not match authenticated token namespace",
+        )
+    """
 
     Now also triggers the BootstrapEngine to pre-fetch ALL data sources
     (weather, satellite, soil, etc.) so the first dashboard load is instant.
@@ -4512,7 +4563,12 @@ def register_plot(req: PlotRegistrationRequest):
     }
 
 @app.post("/collector/snapshot/{farm_id}/{plot_id}")
-def capture_snapshot(farm_id: str, plot_id: str, data_type: str = "weather"):
+def capture_snapshot(
+    farm_id: str,
+    plot_id: str,
+    data_type: str = "weather",
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
     """Manually trigger a data snapshot for a plot"""
     from core.data_collector import data_collector
     
@@ -4542,7 +4598,13 @@ def collector_status():
     return data_collector.get_status()
 
 @app.get("/data/{farm_id}/{plot_id}/observations")
-def get_plot_observations(farm_id: str, plot_id: str, start_date: str = None, end_date: str = None):
+def get_plot_observations(
+    farm_id: str,
+    plot_id: str,
+    start_date: str = None,
+    end_date: str = None,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
     """Get collected observations for a plot"""
     from core.data_collector import data_collector
     return data_collector.get_plot_data(farm_id, plot_id, start_date, end_date)
@@ -4814,7 +4876,7 @@ def api_crop_model_readiness(
     Restricted to admins using AGRIBRAIN_ADMIN_TOKEN.
     """
     admin_token = os.environ.get("AGRIBRAIN_ADMIN_TOKEN")
-    is_prod = os.environ.get("NODE_ENV") == "production" or os.environ.get("ENV") == "production" or os.environ.get("APP_ENV") == "production"
+    is_prod = (os.environ.get("NODE_ENV") == "production" or os.environ.get("ENVIRONMENT") == "production" or os.environ.get("ENV") == "production" or os.environ.get("APP_ENV") == "production")
     
     if is_prod and not admin_token:
         raise HTTPException(
@@ -4985,7 +5047,7 @@ def api_train_crop_model(
     Restricted to admin users using AGRIBRAIN_ADMIN_TOKEN.
     """
     admin_token = os.environ.get("AGRIBRAIN_ADMIN_TOKEN")
-    is_prod = os.environ.get("NODE_ENV") == "production" or os.environ.get("ENV") == "production" or os.environ.get("APP_ENV") == "production"
+    is_prod = (os.environ.get("NODE_ENV") == "production" or os.environ.get("ENVIRONMENT") == "production" or os.environ.get("ENV") == "production" or os.environ.get("APP_ENV") == "production")
     
     if is_prod and not admin_token:
         raise HTTPException(
@@ -5089,7 +5151,7 @@ def api_evaluate_crop_model(
     Restricted to admin users using AGRIBRAIN_ADMIN_TOKEN.
     """
     admin_token = os.environ.get("AGRIBRAIN_ADMIN_TOKEN")
-    is_prod = os.environ.get("NODE_ENV") == "production" or os.environ.get("ENV") == "production" or os.environ.get("APP_ENV") == "production"
+    is_prod = (os.environ.get("NODE_ENV") == "production" or os.environ.get("ENVIRONMENT") == "production" or os.environ.get("ENV") == "production" or os.environ.get("APP_ENV") == "production")
     
     if is_prod and not admin_token:
         raise HTTPException(

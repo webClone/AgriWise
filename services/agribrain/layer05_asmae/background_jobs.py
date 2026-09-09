@@ -49,8 +49,170 @@ LAUNCH_COOLDOWN_SECONDS = 15
 RESERVATION_STALE_SECONDS = 30
 MAX_EXECUTION_ATTEMPTS = 3
 PROCESS_HARD_TIMEOUT_SECONDS = float(
-    os.environ.get("ASMAE_PROCESS_HARD_TIMEOUT_SECONDS", "305")
+    os.environ.get("ASMAE_PROCESS_HARD_TIMEOUT_SECONDS", "300")
 )
+MAX_WORKER_MEMORY_MB = float(
+    os.environ.get("AGRIBRAIN_MAX_WORKER_MEMORY_MB", "2048")
+)
+
+
+def is_pid_alive(pid: int) -> bool:
+    """Check if process with given PID is currently alive."""
+    if pid <= 0:
+        return False
+    if os.name == 'nt':
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return False
+            exit_code = ctypes.c_ulong()
+            try:
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    STILL_ACTIVE = 259
+                    return exit_code.value == STILL_ACTIVE
+                return False
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+
+
+def _get_process_rss_mb(pid: int) -> float:
+    """Get resident memory in MB for the given process PID."""
+    if pid <= 0:
+        return 0.0
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        return float(proc.memory_info().rss) / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    if os.name == 'nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+                _fields_ = [
+                    ('cb', wintypes.DWORD),
+                    ('PageFaultCount', wintypes.DWORD),
+                    ('PeakWorkingSetSize', ctypes.c_size_t),
+                    ('WorkingSetSize', ctypes.c_size_t),
+                    ('QuotaPeakPagedPoolUsage', ctypes.c_size_t),
+                    ('QuotaPagedPoolUsage', ctypes.c_size_t),
+                    ('QuotaPeakNonPagedPoolUsage', ctypes.c_size_t),
+                    ('QuotaNonPagedPoolUsage', ctypes.c_size_t),
+                    ('PagefileUsage', ctypes.c_size_t),
+                    ('PeakPagefileUsage', ctypes.c_size_t),
+                ]
+            PROCESS_QUERY_INFORMATION = 0x0400
+            PROCESS_VM_READ = 0x0010
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, False, pid)
+            if handle:
+                try:
+                    counters = PROCESS_MEMORY_COUNTERS()
+                    counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+                    if ctypes.windll.psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                        return float(counters.WorkingSetSize) / (1024.0 * 1024.0)
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+    return 0.0
+
+
+class BoundedJobExecutor:
+    """Enforces global concurrency bounding, FIFO queuing, and single-leader recovery."""
+
+    def __init__(self, max_workers: Optional[int] = None):
+        self._configured_max = max_workers
+
+    @property
+    def max_workers(self) -> int:
+        if self._configured_max is not None:
+            return self._configured_max
+        try:
+            return max(1, int(os.environ.get("AGRIBRAIN_MAX_WORKERS", "4")))
+        except (ValueError, TypeError):
+            return 4
+
+    def get_active_worker_pids(self) -> List[int]:
+        """Scan active job records and return PIDs of running live supervisors/workers."""
+        if not JOBS_DIR.exists():
+            return []
+        active_pids = []
+        for job_path in JOBS_DIR.glob("*.job.json"):
+            try:
+                payload = _read_json(job_path)
+                if not payload:
+                    continue
+                status = payload.get("status")
+                if status in ("running", "reserving") and not _lease_expired(payload):
+                    pid = payload.get("supervisor_pid") or payload.get("worker_pid")
+                    if pid and is_pid_alive(int(pid)):
+                        active_pids.append(int(pid))
+            except Exception:
+                pass
+        return list(set(active_pids))
+
+    def get_active_worker_count(self) -> int:
+        return len(self.get_active_worker_pids())
+
+    def can_spawn(self) -> bool:
+        return self.get_active_worker_count() < self.max_workers
+
+    def get_queued_jobs(self) -> List[Path]:
+        """Return all queued jobs sorted in FIFO order by creation timestamp."""
+        if not JOBS_DIR.exists():
+            return []
+        queued = []
+        for job_path in JOBS_DIR.glob("*.job.json"):
+            try:
+                payload = _read_json(job_path)
+                if not payload:
+                    continue
+                if payload.get("status") == "queued" and not payload.get("superseded"):
+                    queued.append((_job_created_at(payload), job_path))
+            except Exception:
+                pass
+        queued.sort(key=lambda item: item[0])
+        return [item[1] for item in queued]
+
+    def process_next_queued_job(self) -> Optional[Path]:
+        """If worker slot available, dequeue and spawn oldest queued job."""
+        if not self.can_spawn():
+            return None
+        queued = self.get_queued_jobs()
+        for job_path in queued:
+            if spawn_worker(job_path):
+                return job_path
+        return None
+
+    def on_worker_completed(self, job_path: Optional[Path] = None) -> None:
+        """Called when a worker process terminates to drain the queue."""
+        self.process_next_queued_job()
+
+    def drain_queue(self) -> int:
+        """Spawn queued jobs up to available capacity."""
+        spawned = 0
+        while self.can_spawn():
+            job = self.process_next_queued_job()
+            if not job:
+                break
+            spawned += 1
+        return spawned
+
+
+bounded_executor = BoundedJobExecutor()
+
 PROCESS_TERMINATE_GRACE_SECONDS = float(
     os.environ.get("ASMAE_PROCESS_TERMINATE_GRACE_SECONDS", "5")
 )
@@ -1028,6 +1190,12 @@ def _reserve_launch(job_path: Path) -> Optional[str]:
 
 def spawn_worker(job_path: Path) -> bool:
     """Launch a detached worker once for the current durable launch token."""
+    if not bounded_executor.can_spawn():
+        logger.info(
+            "Worker pool concurrency cap reached (%d active); job queued: %s",
+            bounded_executor.get_active_worker_count(), job_path.name
+        )
+        return False
     launch_token = _reserve_launch(job_path)
     if launch_token is None:
         return False
@@ -1160,12 +1328,13 @@ def _mark_stalled_if_expired(
     job_path: Path, payload: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     candidate = payload or _read_json(job_path)
-    if candidate.get('status') != 'running' or not _lease_expired(candidate):
+    if candidate.get('status') not in ('running', 'completed_reintegration_pending') or not _lease_expired(candidate):
         return candidate
     changed = False
     with _record_lock(job_path):
         current = _read_json(job_path)
-        if current.get('status') == 'running' and _lease_expired(current):
+        if current.get('status') in ('running', 'completed_reintegration_pending') and _lease_expired(current):
+            was_reintegration = (current.get('status') == 'completed_reintegration_pending')
             generation = int(current.get('lease_generation', 0) or 0) + 1
             exhausted = _recovery_attempt_count(current) >= MAX_EXECUTION_ATTEMPTS
             current.update(
@@ -1188,6 +1357,7 @@ def _mark_stalled_if_expired(
                 ),
                 recoverable=not exhausted,
                 stale_lease_owner=current.get('lease_owner'),
+                resume_phase='reintegration' if was_reintegration else current.get('resume_phase', 'scientific'),
                 lease_owner=None,
                 lease_token=None,
                 lease_generation=generation,
@@ -1263,12 +1433,12 @@ def _supersede_recovery_candidate(
             break
         except (LeaseLostError, ValueError):
             current = _read_json(job_path)
-            _append_job_event(
-                winner_path,
-                'worker_recovery_launched',
-                worldline_event_id=lifecycle_event_id,
-            )
-    return resumed
+            pass
+    return superseded or current
+
+
+# Task A07/P01.3 compatibility alias
+_supersede_and_requeue_job = _supersede_recovery_candidate
 
 
 def _claim(job_path: Path) -> Optional[WorkerClaim]:
@@ -1671,8 +1841,38 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
         child.terminate()
         child.wait(timeout=max(1.0, PROCESS_TERMINATE_GRACE_SECONDS))
         raise
+    memory_exceeded = False
+    peak_rss_mb = 0.0
+
+    def _monitor_memory():
+        nonlocal memory_exceeded, peak_rss_mb
+        poll_int = 0.5
+        deadline = started + PROCESS_HARD_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if hasattr(child, "poll"):
+                try:
+                    if child.poll() is not None:
+                        break
+                except Exception:
+                    break
+            rss = _get_process_rss_mb(getattr(child, "pid", 0))
+            if rss > peak_rss_mb:
+                peak_rss_mb = rss
+            if rss > MAX_WORKER_MEMORY_MB:
+                memory_exceeded = True
+                try:
+                    child.terminate()
+                except Exception:
+                    pass
+                break
+            time.sleep(poll_int)
+
+    monitor_thread = threading.Thread(target=_monitor_memory, daemon=True)
+    monitor_thread.start()
+
     try:
         child.wait(timeout=PROCESS_HARD_TIMEOUT_SECONDS)
+        bounded_executor.on_worker_completed(job_path)
         return
     except subprocess.TimeoutExpired:
         child.terminate()
@@ -1681,6 +1881,7 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
     except subprocess.TimeoutExpired:
         child.kill()
         child.wait(timeout=max(1.0, PROCESS_TERMINATE_GRACE_SECONDS))
+
     lock_path = job_path.with_suffix(".lock")
     try:
         lock_value = _read_json(lock_path)
@@ -1688,9 +1889,29 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
             lock_path.unlink(missing_ok=True)
     except OSError:
         pass
-    _finalize_supervised_timeout(
-        job_path, launch_token, time.monotonic() - started
-    )
+
+    if memory_exceeded:
+        _update_job(
+            job_path,
+            expected_launch_token=launch_token,
+            status="failed",
+            stage="memory_quota_exceeded",
+            error=f"Worker process exceeded memory quota ({peak_rss_mb:.1f} MB > {MAX_WORKER_MEMORY_MB:.1f} MB)",
+            retry_classification="manual_review",
+            recoverable=False,
+        )
+        _append_job_event(
+            job_path,
+            "worker_memory_quota_exceeded",
+            status="failed",
+            peak_rss_mb=peak_rss_mb,
+            quota_mb=MAX_WORKER_MEMORY_MB,
+        )
+    else:
+        _finalize_supervised_timeout(
+            job_path, launch_token, time.monotonic() - started
+        )
+    bounded_executor.on_worker_completed(job_path)
 
 
 def _run_reintegration(
@@ -2262,6 +2483,62 @@ def latest_job_for_plot(
 
 
 
+def acquire_recovery_leader_lock(lease_seconds: int = 60) -> bool:
+    """
+    Acquire single-leader advisory lease across API replicas before running recovery scans.
+    Tries MongoDB collection 'job_recovery_leader_lock', with fallback to filesystem lock.
+    """
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(seconds=lease_seconds)
+    my_id = f"pid_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+
+    try:
+        from services.agribrain.app.mongo_client import get_db
+        from pymongo import ReturnDocument
+        db = get_db()
+        coll = db["job_recovery_leader_lock"]
+        doc = coll.find_one_and_update(
+            {
+                "_id": "recovery_leader",
+                "$or": [
+                    {"lease_expires_at": {"$lt": now}},
+                    {"lease_expires_at": None},
+                ]
+            },
+            {
+                "$set": {
+                    "leader_id": my_id,
+                    "lease_expires_at": expires,
+                    "acquired_at": now,
+                }
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        if doc and doc.get("leader_id") == my_id:
+            return True
+        return False
+    except Exception:
+        # Filesystem fallback
+        lock_file = JOBS_DIR / ".recovery_leader.lock"
+        try:
+            JOBS_DIR.mkdir(parents=True, exist_ok=True)
+            if lock_file.exists():
+                data = _read_json(lock_file)
+                if data:
+                    exp = _parse_timestamp(data.get("lease_expires_at"))
+                    if exp and exp > now:
+                        return False
+            _atomic_json(lock_file, {
+                "leader_id": my_id,
+                "lease_expires_at": expires.isoformat(),
+                "acquired_at": now.isoformat(),
+            })
+            return True
+        except Exception:
+            return True
+
+
 def recover_pending_jobs(
     namespace: Optional[PlotNamespace] = None,
     plot_id: Optional[str] = None,
@@ -2291,8 +2568,12 @@ def recover_pending_jobs(
             continue
 
         payload = _mark_stalled_if_expired(job_path, payload)
-        status = _canonical_status(payload.get("status"))
-        if status in ("queued", "stalled", "running"):
+        raw_status = str(payload.get("status", ""))
+        status = _canonical_status(raw_status)
+        if status in ("queued", "stalled", "running") or raw_status == "completed_reintegration_pending":
+            # Active lease protection: if running or completed_reintegration_pending and lease is unexpired, do not preempt
+            if raw_status in ("running", "completed_reintegration_pending") and not _lease_expired(payload):
+                continue
             matching_jobs.append((job_path, payload))
 
     if not matching_jobs:
@@ -2306,8 +2587,9 @@ def recover_pending_jobs(
     newest_job_path, newest_payload = matching_jobs[0]
 
     for old_path, old_payload in matching_jobs[1:]:
-        old_status = _canonical_status(old_payload.get("status"))
-        if old_status in ("queued", "stalled", "running"):
+        old_raw = str(old_payload.get("status", ""))
+        old_status = _canonical_status(old_raw)
+        if old_status in ("queued", "stalled", "running") or old_raw == "completed_reintegration_pending":
             _update_job(
                 old_path,
                 status="superseded",
@@ -2340,6 +2622,9 @@ def recover_all_pending_jobs(namespace: Optional[Union[PlotNamespace, str]] = No
     if namespace:
         return recover_pending_jobs(namespace=namespace)
     if not JOBS_DIR.exists():
+        return 0
+    if not acquire_recovery_leader_lock():
+        logger.info("Another replica holds recovery leader lock; skipping startup recovery scan.")
         return 0
     total = 0
     namespaces = set()
