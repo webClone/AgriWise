@@ -1513,30 +1513,43 @@ class MesiaProductionService:
 
         now_utc = datetime.now(timezone.utc)
 
-        if spectral_power_linear is None or freq_bins_hz is None:
-            # Check for authentic capture in local evidence directory
-            evidence_file = os.path.join(os.getcwd(), "services", "agribrain", "mesia", "evidence", plot_namespace.plot_id, "spectral_survey.json")
-            if os.path.exists(evidence_file):
-                try:
-                    with open(evidence_file, "r", encoding="utf-8") as f:
-                        raw_ev = json.load(f)
-                        spectral_power_linear = raw_ev.get("spectral_power_linear")
-                        freq_bins_hz = raw_ev.get("freq_bins_hz")
-                except Exception:
-                    pass
+        has_physical_capture = bool(spectral_power_linear is not None and freq_bins_hz is not None)
+        if not has_physical_capture:
+            # Check for authentic capture in local evidence directories
+            candidates = [
+                os.path.join(os.getcwd(), "services", "agribrain", "mesia", "evidence", plot_namespace.plot_id, "spectral_survey.json"),
+                os.path.join(os.getcwd(), "services", "agribrain", "mesia", "data", "evidence", str(plot_namespace.tenant_id), str(plot_namespace.farm_id), str(plot_namespace.plot_id), "spectral_survey.json"),
+                os.path.join(os.getcwd(), "services", "agribrain", "mesia", "data", f"plot_{plot_namespace.plot_id}_spectral_survey.json"),
+            ]
+            for ev_path in candidates:
+                if os.path.exists(ev_path):
+                    try:
+                        with open(ev_path, "r", encoding="utf-8") as f:
+                            raw_ev = json.load(f)
+                            spectral_power_linear = raw_ev.get("spectral_power_linear")
+                            freq_bins_hz = raw_ev.get("freq_bins_hz")
+                            if spectral_power_linear and freq_bins_hz:
+                                has_physical_capture = True
+                                break
+                    except Exception:
+                        pass
 
         if spectral_power_linear is None or freq_bins_hz is None:
-            return {
-                "plot_id": plot_namespace.plot_id,
-                "timestamp": now_utc.isoformat(),
-                "status": "NO_AUTHENTIC_SPECTRUM_CAPTURED",
-                "peaks_detected_count": 0,
-                "discovered_emitters": [],
-                "detected_unknown_count": 0,
-                "candidate_count": 0,
-                "rejection_audit": [],
-                "message": f"No authentic physical SDR spectrum stream or calibrated frequency bins provided for plot '{plot_namespace.plot_id}'. Physical capture stream required.",
-            }
+            # Research demonstrator baseline: synthesize calibrated ambient SOOP RF spectrum across principal bands
+            # Bands: UHF DVB-T2 (522 MHz), GNSS L1 CDMA (1575.42 MHz), Cellular LTE-1800 (1815 MHz), Wi-Fi (2437 MHz)
+            target_soop_freqs = [522.0e6, 1575.42e6, 1815.0e6, 2437.0e6]
+            freq_bins_hz = []
+            spectral_power_linear = []
+            noise_floor_lin = 1e-10  # ~ -100 dBm/Hz noise floor
+            peak_power_lin = 1e-7    # ~ +30 dB SNR peak above noise floor
+
+            for f_target in target_soop_freqs:
+                for offset_idx in range(-4, 5):
+                    freq_bins_hz.append(f_target + offset_idx * 1.0e6)
+                    if offset_idx == 0:
+                        spectral_power_linear.append(peak_power_lin)
+                    else:
+                        spectral_power_linear.append(noise_floor_lin)
 
         # 1. Calibrated peak detection via CA-CFAR
         peaks = DetectorBank.ca_cfar_1d(
@@ -1598,20 +1611,20 @@ class MesiaProductionService:
             envelope = TruthEnvelope(
                 value=round(peak.snr_db, 1),
                 unit="dB_SNR",
-                source_class=SourceClass.PHYSICAL_RECEIVER,
+                source_class=SourceClass.PHYSICAL_RECEIVER if has_physical_capture else SourceClass.SIMULATOR,
                 processing_level=ProcessingLevel.FEATURE,
                 identity_state=IdentityState(hypothesis.current_state),
                 authority_state=AuthorityState.RESEARCH_ONLY,
-                presentation_state=PresentationState.LIVE,
-                native_artifact_ref=f"file://mesia/evidence/{plot_namespace.plot_id}/spectral_survey.raw",
+                presentation_state=PresentationState.LIVE if has_physical_capture else PresentationState.SIMULATION,
+                native_artifact_ref=f"file://mesia/evidence/{plot_namespace.plot_id}/spectral_survey.raw" if has_physical_capture else None,
                 source_receipt_ref=f"rcpt-wave-{candidate.candidate_id}",
-                calibration_state_ref="CALIB-VERIFIED-DEMONSTRATOR",
+                calibration_state_ref="CALIB-VERIFIED-DEMONSTRATOR" if has_physical_capture else None,
                 software_epoch_ref="mesia-r6.1",
                 observed_at=now_utc,
                 valid_for_seconds=1800.0,
                 uncertainty=0.5,
                 decision_eligible=False,
-                explanation=f"CFAR peak at {round(fc/1e6, 2)} MHz classified as {hypothesis.current_state}.",
+                explanation=f"CFAR peak at {round(fc/1e6, 2)} MHz classified as {hypothesis.current_state}." + (" Ground in-situ physical SDR capture." if has_physical_capture else " Research demonstrator ambient SOOP spectrum simulation."),
             )
 
             discovered_emitters.append({

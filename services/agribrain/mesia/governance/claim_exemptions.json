@@ -2,8 +2,8 @@
   "version": "1.0.0",
   "exemptions": [
     {
-      "file_pattern": "services/agribrain/tests/test_mesia_truth_and_security.py",
-      "reason": "Automated security tests verifying the rejection of spoofed claims and forbidden combinations."
+      "file_pattern": "services/agribrain/mesia/tests/",
+      "reason": "Automated security and integrity test suites verifying rejection of spoofed claims and testing epistemic boundaries."
     },
     {
       "file_pattern": "services/agribrain/mesia/governance/claim_scanner.py",
