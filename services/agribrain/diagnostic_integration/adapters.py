@@ -579,6 +579,52 @@ def adapt_layer8(output: Any, context: AdapterContext) -> Tuple[DiagnosticContri
     )
 
 
+
+def adapt_diagnostic_result(
+    result: Any,
+    context: AdapterContext,
+) -> Tuple[DiagnosticContribution, ...]:
+    """Adapts a canonical DiagnosticResult into a DiagnosticContribution tuple for tribunal integration."""
+    from services.agribrain.scientific_contracts.contracts_v2 import DiagnosticResult
+
+    if not isinstance(result, DiagnosticResult):
+        raise ContractViolation(f"Expected DiagnosticResult, got {type(result).__name__}")
+
+    role = ContributionRole.PRIMARY if result.probability >= 0.5 else ContributionRole.SUPPORTING
+    identifiability = (
+        IdentifiabilityClass.CONFOUNDED
+        if result.unresolved_status
+        else (
+            IdentifiabilityClass.IDENTIFIED
+            if result.confidence >= 0.75
+            else IdentifiabilityClass.PARTIALLY_IDENTIFIED
+        )
+    )
+
+    contrib = _make(
+        layer_id=result.layer_id,
+        context=context,
+        output_run_id=result.diagnosis_id,
+        entity_key=result.target_hypothesis,
+        target_state=f"diagnostic.{_token(result.target_hypothesis, 'unknown')}",
+        confidence=result.confidence,
+        payload={
+            "diagnosis_id": result.diagnosis_id,
+            "target_hypothesis": result.target_hypothesis,
+            "severity": result.severity,
+            "probability": result.probability,
+            "confidence": result.confidence,
+            "evidence_strength_log_odds": result.evidence_strength_log_odds,
+            "confounders_evaluated": list(result.confounders_evaluated),
+            "unresolved_status": result.unresolved_status,
+        },
+        dependency_family=f"{result.layer_id.upper()}_DIAGNOSTIC",
+        role=role,
+        identifiability=identifiability,
+        confounders=result.confounders_evaluated,
+    )
+    return (contrib,)
+
 ADAPTERS: Dict[str, Callable[[Any, AdapterContext], Tuple[DiagnosticContribution, ...]]] = {
     "L2": adapt_layer2,
     "L3": adapt_layer3,

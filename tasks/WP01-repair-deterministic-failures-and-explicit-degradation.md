@@ -158,3 +158,20 @@ The orchestrator's `_structured_output_status()` relies on guessing top-level di
 - **Monograph Findings**: Finding #5 (Stage health and identity normalization), Finding #7 (L10 water surface caller and missing helpers), Finding #30 (L5 invariant enforcement), Finding #32 (Authentication inconsistency).
 - **Defect Tasks**: [A14-l10-water-surfaces-call-signature.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A14-l10-water-surfaces-call-signature.md), [A15-orchestrator-and-l10-undefined-variables.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A15-orchestrator-and-l10-undefined-variables.md), [A12-orchestrator-health-and-quality-metrics.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A12-orchestrator-health-and-quality-metrics.md).
 - **Phase Tasks**: [P01.1-normalize-layer-returns-and-health.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P01.1-normalize-layer-returns-and-health.md), [P01.2-repair-asmae-scene-and-sire-failures.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P01.2-repair-asmae-scene-and-sire-failures.md).
+
+---
+
+## 7. Execution Status & Verification Report
+- **Status**: `COMPLETED`
+- **Execution Commit**: `b917ac4`
+- **Scope Delivery**:
+  - `services/agribrain/scientific_contracts/stage_receipt.py`: `StageReceipt`, `ExecutionStatus`, and `ScientificUsability` authored and exported in `scientific_contracts`.
+  - `services/agribrain/layer10_sire/surfaces/water.py`: `_compute_water_stress_prob`, `_compute_drainage_deficit` implemented; `PaletteId.STRESS_WATER` and `SurfaceType.DRAINAGE_DEFICIT_MM` enums added; dual calling signatures handled.
+  - `services/agribrain/layer10_sire/runner.py`: Silent exception swallowing removed; structured logging with stack traces installed.
+  - `services/agribrain/layer5_bio/runner.py`: Invariant errors explicitly transition `run_meta.degradation_mode = DegradationMode.DATA_GAP`, apply decision reliability penalties, and record violation details.
+  - `services/agribrain/orchestrator_v2/runner.py`: `_structured_output_status` systematically inspects `run_meta`, `data_health`, `provenance`, `quality_metrics` (with `decision_reliability < 0.50` degradation check), and `stage_receipt`; `_safe_run` extracts `run_id_l3`.
+  - Authentication hardening deferred for non-production environments per user directive.
+- **Verification**:
+  - Automated tests added: `test_water_surfaces_pipeline.py`, `test_invariants_degradation.py`, `test_structured_output_status.py`.
+  - Full test suite: 728 passed, 0 failures across all 13 layers.
+
