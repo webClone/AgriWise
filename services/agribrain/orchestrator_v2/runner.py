@@ -3152,37 +3152,86 @@ def _structured_output_status(output) -> tuple[LayerStatus, list[str]]:
     if output is None:
         return LayerStatus.DEGRADED, ["structured_output_missing"]
 
-    provenance = getattr(output, "provenance", {}) or {}
-    if not isinstance(provenance, dict):
-        provenance = {}
     candidates = [
         getattr(output, "status", None),
         getattr(output, "degradation_mode", None),
-        provenance.get("status"),
-        provenance.get("degradation_mode"),
     ]
-    quality = getattr(output, "quality_report", None)
-    if quality is not None:
+
+    # 1. Inspect run_meta if present
+    run_meta = getattr(output, "run_meta", None)
+    if run_meta is not None:
         candidates.extend([
-            getattr(quality, "status", None),
-            getattr(quality, "degradation_mode", None),
+            getattr(run_meta, "status", None),
+            getattr(run_meta, "degradation_mode", None),
         ])
+
+    # 2. Inspect data_health if present
+    data_health = getattr(output, "data_health", None)
+    if data_health is not None:
+        candidates.extend([
+            getattr(data_health, "status", None),
+            getattr(data_health, "health_status", None),
+        ])
+
+    # 3. Inspect provenance (dict or object)
+    prov = getattr(output, "provenance", None)
+    provenance_dict = {}
+    if prov is not None:
+        if isinstance(prov, dict):
+            provenance_dict = prov
+            candidates.extend([prov.get("status"), prov.get("degradation_mode")])
+        else:
+            candidates.extend([getattr(prov, "status", None), getattr(prov, "degradation_mode", None)])
+
+    # 4. Inspect quality_report or quality_metrics
+    qm = getattr(output, "quality_metrics", None) or getattr(output, "quality_report", None)
+    if qm is not None:
+        candidates.extend([
+            getattr(qm, "status", None),
+            getattr(qm, "degradation_mode", None),
+        ])
+        reliability = getattr(qm, "decision_reliability", None)
+        if reliability is not None and isinstance(reliability, (int, float)) and reliability < 0.50:
+            return LayerStatus.DEGRADED, [f"low_decision_reliability_{reliability:.2f}"]
+
+    # 5. Inspect stage_receipt or receipt if present
+    receipt = getattr(output, "stage_receipt", None) or getattr(output, "receipt", None)
+    if receipt is not None:
+        candidates.extend([
+            getattr(receipt, "execution_status", None),
+            getattr(receipt, "scientific_usability", None),
+        ])
+
     normalized = {
         str(value.value if hasattr(value, "value") else value).strip().lower()
         for value in candidates
         if value is not None
     }
-    run_id = str(getattr(output, "run_id", "") or "").lower()
-    explicitly_degraded = (
-        provenance.get("degraded") is True
-        or run_id.endswith("_degraded")
-        or any(value in {"degraded", "data_gap", "partial_data", "unusable"} for value in normalized)
+    run_id = str(
+        getattr(output, "run_id", "")
+        or getattr(getattr(output, "run_meta", None), "run_id", "")
+        or getattr(output, "run_id_l3", "")
+        or ""
+    ).lower()
+
+    explicitly_failed = any(
+        value in {"failed", "error", "critical_failure", "unusable"}
+        for value in normalized
     )
-    explicitly_failed = any(value in {"failed", "error", "critical_failure"} for value in normalized)
     if explicitly_failed:
         return LayerStatus.FAILED, ["structured_output_failed"]
+
+    explicitly_degraded = (
+        provenance_dict.get("degraded") is True
+        or run_id.endswith("_degraded")
+        or any(
+            value in {"degraded", "data_gap", "partial_data", "degraded_usable"}
+            for value in normalized
+        )
+    )
     if explicitly_degraded:
         return LayerStatus.DEGRADED, ["structured_output_degraded"]
+
     return LayerStatus.OK, []
 
 
@@ -3213,7 +3262,7 @@ def _safe_run(lid: LayerId, *args, progress_cb=None) -> LayerResult:
             layer_id=lid.value,
             status=status,
             output=output,
-            run_id=getattr(output, "run_id", "") or getattr(getattr(output, "run_meta", None), "run_id", ""),
+            run_id=getattr(output, "run_id", "") or getattr(getattr(output, "run_meta", None), "run_id", "") or getattr(output, "run_id_l3", ""),
             errors=structured_errors,
         )
         

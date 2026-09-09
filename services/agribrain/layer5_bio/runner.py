@@ -544,6 +544,14 @@ def run_layer5(
     if errors:
         for v in errors:
             logger.error(f"[Layer 5] INVARIANT ERROR: {v.check_name} — {v.description}")
+        output.run_meta.degradation_mode = DegradationMode.DATA_GAP
+        output.quality_metrics.decision_reliability = max(0.0, output.quality_metrics.decision_reliability - 0.5)
+        for v in errors:
+            output.quality_metrics.penalties_applied.append({
+                "driver": "INVARIANT_VIOLATION",
+                "penalty": 0.5,
+                "reason": f"{v.check_name}: {v.description}",
+            })
     if warnings:
         for v in warnings:
             logger.warning(f"[Layer 5] INVARIANT WARN: {v.check_name} — {v.description}")

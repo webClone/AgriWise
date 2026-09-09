@@ -48,6 +48,7 @@ class SurfaceType(str, Enum):
     WATER_STRESS_PROB = "WATER_STRESS_PROB"
     SOIL_MOISTURE_PROXY = "SOIL_MOISTURE_PROXY"
     DROUGHT_ACCUMULATION = "DROUGHT_ACCUMULATION"
+    DRAINAGE_DEFICIT_MM = "DRAINAGE_DEFICIT_MM"
     VPD_STRESS = "VPD_STRESS"                       # Vapor Pressure Deficit stomatal stress
 
     # Nutrients
@@ -410,6 +411,7 @@ class PaletteId(str, Enum):
     CARBON_BROWN = "CARBON_BROWN"
     COMPACTION_PURPLE = "COMPACTION_PURPLE"
     THERMAL_ORANGE = "THERMAL_ORANGE"
+    STRESS_WATER = "STRESS_WATER"
     RESOLUTION_CATEGORICAL = "resolution_categorical"
     EXPERIMENTAL_FINE_DETAIL = "experimental_fine_detail"
 

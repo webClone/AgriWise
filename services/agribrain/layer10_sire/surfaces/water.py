@@ -56,24 +56,101 @@ class VPDStressResult:
     physiological_claim_allowed: bool
 
 
-def generate_water_surfaces(
+def _compute_water_stress_prob(
     inp: Layer10Input,
-    l1_data: L1SpatialData,
-    l3_data: L3DiagnosticData,
+    l1: L1SpatialData,
+    l3: L3DiagnosticData,
     H: int,
     W: int,
+) -> Tuple[Optional[List[List[float]]], str, str, Dict[str, Any]]:
+    """Compute WATER_STRESS_PROB surface and provenance metadata."""
+    grid, grounding, src = _compute_spatial_water_stress(inp, l1, l3, H, W)
+    basis = "composite_moisture" if "L1" in src else "l3_diagnostic_anchor"
+    prov = {
+        "grounding_class": grounding,
+        "source_layers": src,
+        "method": "MULTI_SOURCE_SPATIAL_WATER_STRESS",
+    }
+    return grid, grounding, basis, prov
+
+
+def _compute_drainage_deficit(
+    l1: L1SpatialData,
+    H: int,
+    W: int,
+) -> Optional[List[List[float]]]:
+    """Compute drainage deficit / waterlogging anoxia risk in mm."""
+    sm_raster, _ = _get_raster(l1, ["soil_moisture", "root_zone_water", "surface_water"], H, W)
+    if sm_raster is not None:
+        grid = []
+        for r in range(H):
+            row = []
+            for c in range(W):
+                v = sm_raster[r][c] if r < len(sm_raster) and c < len(sm_raster[r]) else None
+                if v is not None and v > 0.35:
+                    excess_mm = min(30.0, max(0.0, (v - 0.35) * 300.0))
+                else:
+                    excess_mm = 0.0
+                row.append(round(excess_mm, 2))
+            grid.append(row)
+        return grid
+
+    ndmi_raster, _ = _get_raster(l1, ["ndmi", "water_index"], H, W)
+    if ndmi_raster is not None:
+        grid = []
+        for r in range(H):
+            row = []
+            for c in range(W):
+                v = ndmi_raster[r][c] if r < len(ndmi_raster) and c < len(ndmi_raster[r]) else None
+                if v is not None and v > 0.2:
+                    excess_mm = min(30.0, max(0.0, (v - 0.2) * 50.0))
+                else:
+                    excess_mm = 0.0
+                row.append(round(excess_mm, 2))
+            grid.append(row)
+        return grid
+
+    return None
+
+
+def generate_water_surfaces(
+    inp: Layer10Input,
+    H: Any,
+    W: Any,
+    l1_data: Optional[L1SpatialData] = None,
+    l3_data: Optional[L3DiagnosticData] = None,
+    **kwargs: Any,
 ) -> List[SurfaceArtifact]:
     surfaces: List[SurfaceArtifact] = []
 
+    # Support both (inp, H, W, l1_data=..., l3_data=...) and (inp, l1_data, l3_data, H, W)
+    if isinstance(H, L1SpatialData):
+        actual_l1 = H
+        actual_l3 = W if isinstance(W, L3DiagnosticData) else None
+        actual_H = int(l1_data) if isinstance(l1_data, (int, float)) else int(kwargs.get("H", 10))
+        actual_W = int(l3_data) if isinstance(l3_data, (int, float)) else int(kwargs.get("W", 10))
+    else:
+        actual_H = int(H)
+        actual_W = int(W)
+        actual_l1 = l1_data
+        actual_l3 = l3_data
+
+    if actual_l1 is None:
+        from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
+        actual_l1 = adapt_l1(inp.field_tensor, actual_H, actual_W)
+    if actual_l3 is None:
+        from services.agribrain.layer10_sire.adapters.l3_adapter import adapt_l3
+        actual_l3 = adapt_l3(inp.decision)
+
     # --- 1. WATER_STRESS_PROB — Primary Water Stress Map ---
     prob_grid, grounding_class, basis, prov = _compute_water_stress_prob(
-        inp, l1_data, l3_data, H, W
+        inp, actual_l1, actual_l3, actual_H, actual_W
     )
     if prob_grid is not None:
         surfaces.append(SurfaceArtifact(
             surface_id=f"WATER_STRESS_PROB_{inp.plot_id}",
             semantic_type=SurfaceType.WATER_STRESS_PROB,
-            grid_ref=f"{H}x{W}",
+            grid_ref=f"{actual_H}x{actual_W}",
             values=prob_grid,
             units="probability",
             native_resolution_m=inp.resolution_m,
@@ -85,12 +162,12 @@ def generate_water_surfaces(
         ))
 
     # --- 2. DRAINAGE_DEFICIT_MM — Waterlogging / Anoxia Risk ---
-    drainage_grid = _compute_drainage_deficit(l1_data, H, W)
+    drainage_grid = _compute_drainage_deficit(actual_l1, actual_H, actual_W)
     if drainage_grid is not None:
         surfaces.append(SurfaceArtifact(
             surface_id=f"DRAINAGE_DEFICIT_MM_{inp.plot_id}",
             semantic_type=SurfaceType.DRAINAGE_DEFICIT_MM,
-            grid_ref=f"{H}x{W}",
+            grid_ref=f"{actual_H}x{actual_W}",
             values=drainage_grid,
             units="mm",
             native_resolution_m=inp.resolution_m,
@@ -100,15 +177,12 @@ def generate_water_surfaces(
         ))
 
     # --- 3. VPD_STRESS — Vapor Pressure Deficit stomatal stress ---
-    # VPD is the atmospheric drying power. At VPD > 3.0 kPa, most C3 crops
-    # close stomata regardless of soil water. This is the ONLY indicator that
-    # catches "well-irrigated but heat-stressed" scenarios.
-    vpd_res = _compute_vpd_stress(l1_data, inp, H, W)
+    vpd_res = _compute_vpd_stress(actual_l1, inp, actual_H, actual_W)
     if vpd_res.grid is not None:
         surfaces.append(SurfaceArtifact(
             surface_id=f"VPD_STRESS_{inp.plot_id}",
             semantic_type=SurfaceType.VPD_STRESS,
-            grid_ref=f"{H}x{W}",
+            grid_ref=f"{actual_H}x{actual_W}",
             values=vpd_res.grid,
             units="probability",
             native_resolution_m=inp.resolution_m,
@@ -135,7 +209,6 @@ def generate_water_surfaces(
         ))
 
     return surfaces
-
 
 # ============================================================================
 # RASTER EXTRACTION HELPERS
