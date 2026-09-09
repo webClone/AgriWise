@@ -138,3 +138,30 @@ def modulate_combined(
     return modulate_by_ndvi(
         field_value, ndvi_raster, H, W, invert, clamp_min, clamp_max
     )
+
+
+def build_modulation_masks(ndvi_raster, H: int, W: int) -> tuple:
+    """
+    Build explicit (observed_mask, inferred_mask) for modulated proxy surfaces.
+
+    Returns:
+        (observed_mask, inferred_mask) where:
+        - observed_mask[r][c] is False (since modulated surfaces are proxy-inferred, not directly measured)
+        - inferred_mask[r][c] is True where valid proxy data was used to infer the value
+    """
+    observed_mask = [[False] * W for _ in range(H)]
+    inferred_mask = [[False] * W for _ in range(H)]
+    if not ndvi_raster:
+        return observed_mask, inferred_mask
+
+    for r in range(min(H, len(ndvi_raster))):
+        row = ndvi_raster[r]
+        if not row:
+            continue
+        for c in range(min(W, len(row))):
+            v = row[c]
+            if v is not None and not (isinstance(v, float) and math.isnan(v)):
+                inferred_mask[r][c] = True
+
+    return observed_mask, inferred_mask
+

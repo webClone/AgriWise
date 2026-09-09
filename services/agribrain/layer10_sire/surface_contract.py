@@ -121,14 +121,35 @@ def serialize_surface_artifact(surface: Any) -> dict:
             }
             else "agronomic_surface"
         )
+    grounding_class_val = str(_enum_value(_field(surface, "grounding_class", None)) or "UNIFORM")
+    state_update_allowed = _surface_value(surface, provenance, "state_update_allowed", "stateUpdateAllowed")
+    prescription_driver_allowed = _surface_value(
+        surface, provenance, "prescription_driver_allowed", "prescriptionDriverAllowed"
+    )
+    authority_block_reason = _surface_value(
+        surface, provenance, "authority_block_reason", "authorityBlockReason"
+    )
+    if grounding_class_val == "INTERPOLATED_PROXY":
+        state_update_allowed = False
+        prescription_driver_allowed = False
+        if not authority_block_reason:
+            authority_block_reason = (
+                "INTERPOLATED_PROXY surfaces have an authority ceiling and cannot drive state updates or variable-rate prescriptions"
+            )
+
     return {
         "surface_id": surface_id,
         "type": semantic_type,
         "semantic_type": semantic_type,
         "values": _field(surface, "values", []) or [],
-        "grounding_class": _field(surface, "grounding_class", None) or "UNIFORM",
+        "grounding_class": grounding_class_val,
         "raster_basis": list(_field(surface, "raster_basis", []) or []),
         "observed_ratio": float(_field(surface, "observed_ratio", 0.0) or 0.0),
+        "native_resolution_m": float(_surface_value(surface, provenance, "native_resolution_m", "nativeResolutionM") or 10.0),
+        "display_resolution_m": float(_surface_value(surface, provenance, "display_resolution_m", "displayResolutionM") or 1.0),
+        "effective_resolution_m": float(_surface_value(surface, provenance, "effective_resolution_m", "effectiveResolutionM") or 10.0),
+        "observed_mask": _surface_value(surface, provenance, "observed_mask", "observedMask"),
+        "inferred_mask": _surface_value(surface, provenance, "inferred_mask", "inferredMask"),
         "units": _field(surface, "units", "") or "",
         "render_range": list(_field(surface, "render_range", [0, 1]) or [0, 1]),
         "palette_id": _enum_value(_field(surface, "palette_id", "viridis")),
@@ -145,15 +166,11 @@ def serialize_surface_artifact(surface: Any) -> dict:
         ),
         "source_reality": _surface_value(surface, provenance, "source_reality", "sourceReality"),
         "diagnostic_only": _surface_value(surface, provenance, "diagnostic_only", "diagnosticOnly"),
-        "state_update_allowed": _surface_value(surface, provenance, "state_update_allowed", "stateUpdateAllowed"),
-        "prescription_driver_allowed": _surface_value(
-            surface, provenance, "prescription_driver_allowed", "prescriptionDriverAllowed"
-        ),
+        "state_update_allowed": state_update_allowed,
+        "prescription_driver_allowed": prescription_driver_allowed,
         "confidence": _surface_value(surface, provenance, "confidence"),
         "uncertainty": _surface_value(surface, provenance, "uncertainty"),
-        "authority_block_reason": _surface_value(
-            surface, provenance, "authority_block_reason", "authorityBlockReason"
-        ),
+        "authority_block_reason": authority_block_reason,
         "surface_role": surface_role,
         "grid_ref": _field(surface, "grid_ref", None),
         "cog_ref": _field(surface, "cog_ref", None),

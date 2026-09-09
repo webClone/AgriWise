@@ -5302,6 +5302,24 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
 
         asmae_composite_surf = next((s for s in output.surface_pack if (s.semantic_type.value if hasattr(s.semantic_type, "value") else str(s.semantic_type)) == "COMPOSITE_ADVISORY_CANOPY"), None)
 
+        # Pre-initialize coverage metrics to fix Defect A24 NameError during experimental policy trace building
+        one_meter_visual_coverage_pct: Optional[float] = None
+        strict_one_meter_candidate_pct: Optional[float] = None
+        if experimental_visual_surf and hasattr(experimental_visual_surf, "provenance") and isinstance(experimental_visual_surf.provenance, dict):
+            one_meter_visual_coverage_pct = float(
+                experimental_visual_surf.provenance.get("one_meter_coverage_pct")
+                or experimental_visual_surf.provenance.get("visual_detail_mask_pct")
+                or 0.0
+            )
+            strict_one_meter_candidate_pct = float(
+                experimental_visual_surf.provenance.get("strict_candidate_pct")
+                or experimental_visual_surf.provenance.get("strict_one_meter_candidate_pct")
+                or 0.0
+            )
+        else:
+            one_meter_visual_coverage_pct = 0.0
+            strict_one_meter_candidate_pct = 0.0
+
         experimental_policy_active = (
             requested_policy in ("experimental", "hybrid")
             and "satellite" not in str(resolved_policy).lower()

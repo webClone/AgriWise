@@ -114,7 +114,9 @@ def _validate_numeric_claim(self, val: float, unit: str, domain: str, action_typ
 ---
 
 ## 6. Progress Tracking Checklist
-- [ ] Flat float set replaced with `GroundedFact` registry binding variable, unit, and domain.
-- [ ] Unit and context parsing implemented in `_check_numbers`.
-- [ ] Cross-dimensional matching vulnerability eliminated.
-- [ ] Automated hallucination detection tests written and passing.
+- [x] Flat float set replaced with `GroundedFact` registry binding variable, unit, and domain.
+- [x] Unit and context parsing implemented in `_check_numbers`.
+- [x] Cross-dimensional matching vulnerability eliminated.
+- [x] Automated hallucination detection tests written and passing (`services/agribrain/tests/test_wp10_l9_l10_publication.py`).
+- **Status:** **RESOLVED** via Work Package 10 (WP10).
+

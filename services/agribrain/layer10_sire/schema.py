@@ -264,11 +264,14 @@ ASMAE_VISUAL_ONLY_SURFACES = set()  # Dynamically resolved or default empty set
 
 class GroundingClass(str, Enum):
     """How a surface's spatial pattern was derived."""
+    MEASURED_NATIVE = "MEASURED_NATIVE"                     # Direct sensor measurement at native sensor resolution
     RASTER_GROUNDED = "RASTER_GROUNDED"                     # Direct from 4D tensor pixel data (observed_ratio >= 0.90)
     PARTIAL_RASTER_GROUNDED = "PARTIAL_RASTER_GROUNDED"     # Real raster but gap-filled/model-assisted (0.3 <= observed_ratio < 0.90)
     MODEL_ASSISTED_RASTER = "MODEL_ASSISTED_RASTER"         # Spatially driven by raster but with heavy model calibration/interpolation (observed_ratio < 0.3 but has raster_basis)
     ZONE_GROUNDED = "ZONE_GROUNDED"                         # Per-zone values rasterized to grid
+    INTERPOLATED_PROXY = "INTERPOLATED_PROXY"               # Modulated raster or proxy interpolation (state_update_allowed=False, prescription_driver_allowed=False)
     PROXY_SPATIAL = "PROXY_SPATIAL"                         # Field value × NDVI ratio or other proxy (no direct raster basis for this mode)
+    SYNTHETIC = "SYNTHETIC"                                 # Purely simulated or synthetic spatial pattern
     UNIFORM = "UNIFORM"                                     # Single value broadcast to all pixels
 
 class ZoneFamily(str, Enum):
@@ -471,6 +474,14 @@ class SurfaceArtifact:
     grounding_class: Optional[str] = None  # GroundingClass value or None
     raster_basis: List[str] = field(default_factory=list)
     observed_ratio: float = 0.0
+
+    # Resolution metadata & explicit observation masks (WP10)
+    display_resolution_m: float = 1.0       # Rendered display resolution in meters (e.g. 1.0m ASMAE grid)
+    effective_resolution_m: float = 10.0    # True information resolution in meters (e.g. 10.0m Sentinel-2, 30.0m Landsat)
+    observed_mask: Optional[List[List[bool]]] = None   # [H][W] True where real measurement was observed
+    inferred_mask: Optional[List[List[bool]]] = None   # [H][W] True where value is interpolated or proxy-inferred
+    state_update_allowed: bool = True       # Whether surface can update physical state
+    prescription_driver_allowed: bool = True # Whether surface can drive variable-rate prescriptions
 
     # V92.4 GIS specifications & STAC reference points
     grid_spec: Optional[Dict[str, Any]] = None

@@ -56,3 +56,11 @@ else:
    - Execute SIRE with `requested_policy="experimental"` on mock parcel.
    - Assert pipeline finishes with `status=LayerStatus.OK`.
    - Assert `output.display_trace["visual_detail_mask_pct"]` is a valid numeric float (e.g. 0.0).
+
+---
+
+## 5. Resolution & Verification Status
+- **Status:** **RESOLVED** via Work Package 10 (WP10).
+- **Implementation:** Pre-initialized `one_meter_visual_coverage_pct` and `strict_one_meter_candidate_pct` prior to `display_trace` building in `services/agribrain/layer10_sire/runner.py`.
+- **Verification:** Verified by `test_defect_a24_experimental_policy_no_name_error` in `services/agribrain/tests/test_wp10_l9_l10_publication.py`.
+

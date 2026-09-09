@@ -80,3 +80,19 @@ When generating a $1\text{m} \times 1\text{m}$ GeoTIFF surface of soil moisture:
 - **Monograph Findings**: Finding #7 (L10 surface path failure), Finding #10 (Surface publication), Finding #12 (Proxy visualization boundaries).
 - **Defect Tasks**: [A14-l10-water-surfaces-call-signature.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A14-l10-water-surfaces-call-signature.md), [A19-l9-hallucination-guard-semantic-verification.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A19-l9-hallucination-guard-semantic-verification.md), [A24-l10-sire-display-trace-metrics-initialization.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A24-l10-sire-display-trace-metrics-initialization.md).
 - **Phase Tasks**: [P04.2-ground-scientific-explanations-structurally.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P04.2-ground-scientific-explanations-structurally.md).
+
+---
+
+## 7. Execution & Verification Results (Completed)
+- **Defect A19 Resolution**: Implemented `GroundedFact` dataclass with domain and unit scoping (`domain`, `variable`, `value`, `unit`, `action_type`, `tolerance`). Context- and unit-blind matching eliminated in `HallucinationGuard._check_numbers()`; weather temperatures (e.g. 25°C) can no longer validate chemical application rates (e.g. 25 kg/ha).
+- **Conversational Certainty Prohibition**: `HallucinationGuard._check_unresolved_diagnoses()` actively detects certainty assertions on unresolved diagnostic hypotheses, flags them as ungrounded, and substitutes hedged advisory language emphasizing uncertainty and advising in-field scouting.
+- **Blocked Action Recommendation Prohibition**: `HallucinationGuard._check_blocked_actions()` flags any suggestions of restricted actions and replaces them with safe operational warnings.
+- **L10 Resolution Metadata & Masks**: Extended `GroundingClass` with `MEASURED_NATIVE`, `INTERPOLATED_PROXY`, and `SYNTHETIC`. Added `display_resolution_m`, `effective_resolution_m`, `observed_mask`, `inferred_mask`, `state_update_allowed`, and `prescription_driver_allowed` to `SurfaceArtifact` and `serialize_surface_artifact()`.
+- **Interpolated Proxy Authority Ceilings**: All surfaces marked `INTERPOLATED_PROXY` are clamped at serialization to `state_update_allowed=False` and `prescription_driver_allowed=False` with explicit `authority_block_reason`. Added `build_modulation_masks()` helper in `spatial_modulation.py`.
+- **Defect A24 Resolution**: Pre-initialized `one_meter_visual_coverage_pct` and `strict_one_meter_candidate_pct` prior to `display_trace` building in `layer10_sire/runner.py`, completely resolving the experimental policy `NameError`.
+- **Automated Verification**:
+  - Dedicated test suite: `services/agribrain/tests/test_wp10_l9_l10_publication.py` (8/8 passed).
+  - Layer 9 test suite: `services/agribrain/layer9_interface/tests` (9/9 passed).
+  - Layer 10 test suite: `services/agribrain/layer10_sire/tests` (20/20 passed).
+  - Full subsystem regression suite: 798 passed, 0 failed across all 13 subsystems.
+
