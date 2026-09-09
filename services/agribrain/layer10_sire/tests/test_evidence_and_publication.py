@@ -1,3 +1,8 @@
+"""
+Layer 10 Evidence and Publication Test Suite.
+Verifies ASMAE spatial publication, composite scouting grounding,
+fallback guidance, degradation codes, and publication reconciliation.
+"""
 from types import SimpleNamespace
 
 from services.agribrain.layer10_sire import runner as layer10_runner
