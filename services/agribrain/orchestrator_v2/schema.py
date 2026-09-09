@@ -55,6 +55,13 @@ class OrchestratorInput:
     evidence_set_hash: Optional[str] = None
     worldline_head_hash: Optional[str] = None
     scene_manifest_hash: Optional[str] = None
+    weather_set_hash: Optional[str] = None
+    management_event_hash: Optional[str] = None
+    crop_posterior_hash: Optional[str] = None
+    intent: Optional[Any] = None
+    authority_version: Optional[str] = None
+    calibration_version: Optional[str] = None
+    model_version: Optional[str] = None
     crop_cycle_context: Optional[CanonicalCropCycleContextV2] = None
 
     def __post_init__(self):

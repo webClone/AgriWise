@@ -1095,7 +1095,7 @@ def run_orchestrator(
     
     # 1. Generate Deterministic ID
     layer_versions = get_layer_versions()
-    run_id = generate_orchestrator_run_id(inputs, layer_versions, ORCHESTRATOR_VERSION)
+    run_id = generate_orchestrator_run_id(inputs, layer_versions, ORCHESTRATOR_VERSION, intent=intent)
     
     results: Dict[LayerId, LayerResult] = {}
     

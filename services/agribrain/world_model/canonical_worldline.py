@@ -27,6 +27,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from services.agribrain.scientific_contracts.exceptions import ContractViolation
+
+
+class SecurityViolation(ContractViolation):
+    """Raised when an operation violates filesystem containment or namespace boundaries."""
+    pass
+
+
+class CorruptedWorldlineError(ContractViolation):
+    """Raised when a worldline file exists but contains corrupted or invalid JSON."""
+    pass
+
+
 from .event_identity import (
     WORLDLINE_CONTRACT_VERSION,
     WORLDLINE_IDENTITY_V2,
@@ -112,11 +125,22 @@ class CanonicalWorldlineService:
     def _plot_dir(self, plot_id: str, tenant_id: str = "default_tenant", namespace: str = "default") -> Path:
         if not str(plot_id).strip():
             raise ValueError("plot_id is required")
-        if not str(tenant_id).strip():
+        t_clean = str(tenant_id).strip()
+        ns_clean = str(namespace).strip()
+        if not t_clean:
             raise ValueError("tenant_id is required")
-        if not str(namespace).strip():
+        if not ns_clean:
             raise ValueError("namespace is required")
-        return self.root / tenant_id.strip() / namespace.strip() / self._plot_key(plot_id)
+
+        for seg in (t_clean, ns_clean):
+            if ".." in seg or "/" in seg or "\\" in seg:
+                raise SecurityViolation(f"Path traversal detected in tenant or namespace: {seg}")
+
+        resolved_root = self.root.resolve()
+        target = (self.root / t_clean / ns_clean / self._plot_key(plot_id)).resolve()
+        if not target.is_relative_to(resolved_root):
+            raise SecurityViolation(f"Path traversal detected in worldline access: {target}")
+        return target
 
     def _head_path(self, plot_id: str, tenant_id: str = "default_tenant", namespace: str = "default") -> Path:
         return self._plot_dir(plot_id, tenant_id, namespace) / "head.json"
@@ -126,11 +150,20 @@ class CanonicalWorldlineService:
 
     @staticmethod
     def _read(path: Path) -> Dict[str, Any]:
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (OSError, json.JSONDecodeError, TypeError):
+        if not path.exists():
             return {}
+        try:
+            content = path.read_text(encoding="utf-8")
+            if not content.strip():
+                raise CorruptedWorldlineError(f"Empty worldline file at {path}")
+            value = json.loads(content)
+            if not isinstance(value, dict):
+                raise CorruptedWorldlineError(f"Worldline file at {path} did not contain a JSON object")
+            return value
+        except json.JSONDecodeError as exc:
+            raise CorruptedWorldlineError(f"Worldline storage corruption at {path}: {exc}") from exc
+        except OSError as exc:
+            raise CorruptedWorldlineError(f"Failed to read worldline file at {path}: {exc}") from exc
 
     @staticmethod
     def _atomic(path: Path, payload: Dict[str, Any]) -> None:

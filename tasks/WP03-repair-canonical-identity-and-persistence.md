@@ -121,3 +121,25 @@ Furthermore, publishing an event involves writing `events/{event_id}.json` follo
 - **Monograph Findings**: Finding #6 (Run ID input sensitivity), Finding #21 (Namespace isolation), Finding #22 (Canonical evidence immutability), Finding #33 (Worldline persistence transactions and corruption).
 - **Defect Tasks**: [A16-run-id-hashing-and-deterministic-replay.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A16-run-id-hashing-and-deterministic-replay.md), [A22-asmae-canonical-worldline-service-migration.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A22-asmae-canonical-worldline-service-migration.md).
 - **Phase Tasks**: [P01.4-establish-deterministic-replay-identity.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P01.4-establish-deterministic-replay-identity.md).
+
+---
+
+## 7. Execution Status & Verification Report
+- **Status**: COMPLETED
+- **Verification Date**: 2026-09-09
+- **Implemented Changes**:
+  1. **Strict Scientific Run ID Derivation (`hashing.py`)**:
+     - Bound `intent` explicitly into identity hashing (e.g. `DIAGNOSIS` vs `DECISION` vs `PLANNING` yield distinct run IDs).
+     - Removed unsafe request-attribute fallbacks for physical evidence (`weather_set_hash`, `evidence_set_hash`, `scene_manifest_hash`, etc.), substituting explicit sentinel markers (`"MISSING_WEATHER_EVIDENCE"`, etc.).
+     - Added physical evidence hash fields to `OrchestratorInput` in `orchestrator_v2/schema.py`.
+     - Exported canonical alias `generate_scientific_run_id = generate_orchestrator_run_id`.
+  2. **Canonical Worldline Persistence & Security (`canonical_worldline.py`)**:
+     - Added `CorruptedWorldlineError` and `SecurityViolation` inheriting from `ContractViolation`.
+     - Replaced silent JSON corruption swallowing in `_read` with explicit `CorruptedWorldlineError` raising on empty files, invalid JSON, or non-dictionary JSON payloads.
+     - Enforced strict path containment in `_plot_dir`: validates segment characters (`..`, `/`, `\`) and asserts `target.is_relative_to(resolved_root)` to prevent path traversal attacks.
+  3. **Evidence Ledger Immutability & Superseding Lineage (`schemas.py`, `evidence_ledger.py`)**:
+     - Added `supersedes_evidence_id: Optional[str] = None` to `EvidenceItem`.
+     - Added `update_item(new_item: EvidenceItem, supersedes_id: Optional[str] = None)` to `EvidenceLedger` to atomically replace superseded items in active queries (`by_variable`, `by_source`, `by_scope`, `all_items`) while preserving full audit history in `_superseded` and accessible via `superseded_items` and `get_by_id`.
+  4. **Automated Verification**:
+     - Authored `services/agribrain/tests/test_canonical_identity_and_persistence.py` covering determinism, sensitivity, missing evidence markers, path containment, corruption detection, roundtrip publication, and evidence superseding lineage (10/10 tests passing).
+     - Full regression suite across `services/agribrain`: **751 passed, 22 warnings, 3 subtests passed (100% pass rate)**.

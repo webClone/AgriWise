@@ -279,6 +279,9 @@ class EvidenceItem:
     missing_variables: List[str] = field(default_factory=list)
     forecast_confidence: Optional[float] = None
 
+    # Lineage / superseding pointer
+    supersedes_evidence_id: Optional[str] = None
+
 
 
 # ============================================================================

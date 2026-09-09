@@ -28,6 +28,7 @@ class EvidenceLedger:
         self._by_variable: Dict[str, List[EvidenceItem]] = {}
         self._by_source: Dict[str, List[EvidenceItem]] = {}
         self._by_scope: Dict[str, List[EvidenceItem]] = {}
+        self._superseded: Dict[str, EvidenceItem] = {}
 
     def add(self, item: EvidenceItem) -> List[str]:
         """Add evidence item. Returns list of integrity violations (empty = OK)."""
@@ -41,6 +42,68 @@ class EvidenceLedger:
         self._by_variable.setdefault(item.variable, []).append(item)
         self._by_source.setdefault(item.source_family, []).append(item)
         self._by_scope.setdefault(item.spatial_scope, []).append(item)
+
+        return []
+
+    def update_item(self, new_item: EvidenceItem, supersedes_id: Optional[str] = None) -> List[str]:
+        """Atomically replace a superseded item while maintaining index consistency and audit history.
+
+        Returns list of integrity violations (empty = OK).
+        """
+        target_id = supersedes_id or new_item.supersedes_evidence_id
+        if not target_id:
+            return ["update_item requires supersedes_evidence_id or explicit supersedes_id"]
+        if target_id not in self._ids:
+            return [f"superseded evidence_id not found: {target_id}"]
+
+        if new_item.evidence_id in self._ids and new_item.evidence_id != target_id:
+            return [f"duplicate evidence_id: {new_item.evidence_id}"]
+
+        # Validate item
+        violations = [
+            v for v in self._validate(new_item)
+            if not (v.startswith("duplicate evidence_id:") and new_item.evidence_id == target_id)
+        ]
+        if violations:
+            return violations
+
+        # Find and remove old item from active items
+        old_item = None
+        for i, it in enumerate(self._items):
+            if it.evidence_id == target_id:
+                old_item = self._items.pop(i)
+                break
+
+        if old_item is None:
+            return [f"superseded item {target_id} not found in active items"]
+
+        # Clean old item from query indexes
+        if old_item.variable in self._by_variable:
+            self._by_variable[old_item.variable] = [
+                x for x in self._by_variable[old_item.variable] if x.evidence_id != target_id
+            ]
+        if old_item.source_family in self._by_source:
+            self._by_source[old_item.source_family] = [
+                x for x in self._by_source[old_item.source_family] if x.evidence_id != target_id
+            ]
+        if old_item.spatial_scope in self._by_scope:
+            self._by_scope[old_item.spatial_scope] = [
+                x for x in self._by_scope[old_item.spatial_scope] if x.evidence_id != target_id
+            ]
+
+        # Record in superseded audit store
+        self._superseded[target_id] = old_item
+
+        # Bind pointer and register new item
+        if not new_item.supersedes_evidence_id:
+            new_item.supersedes_evidence_id = target_id
+
+        self._items.append(new_item)
+        self._ids.add(new_item.evidence_id)
+
+        self._by_variable.setdefault(new_item.variable, []).append(new_item)
+        self._by_source.setdefault(new_item.source_family, []).append(new_item)
+        self._by_scope.setdefault(new_item.spatial_scope, []).append(new_item)
 
         return []
 
@@ -84,6 +147,17 @@ class EvidenceLedger:
     @property
     def all_items(self) -> List[EvidenceItem]:
         return list(self._items)
+
+    @property
+    def superseded_items(self) -> List[EvidenceItem]:
+        return list(self._superseded.values())
+
+    def get_by_id(self, evidence_id: str) -> Optional[EvidenceItem]:
+        """Find item by ID in active items, falling back to superseded items."""
+        for it in self._items:
+            if it.evidence_id == evidence_id:
+                return it
+        return self._superseded.get(evidence_id)
 
     def by_variable(self, variable: str) -> List[EvidenceItem]:
         return list(self._by_variable.get(variable, []))
