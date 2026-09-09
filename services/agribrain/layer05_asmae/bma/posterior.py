@@ -228,7 +228,14 @@ def run_bma(
             and math.isfinite(float(holdout_value))
         )
         independence_key = str(spec.get("independence_key", ""))
-        active = bool(target_indices and independence_key) and delta >= 0.02 and has_holdout
+        active = bool(target_indices and independence_key and has_holdout)
+        inactive_reason = ""
+        if not active:
+            if not has_holdout:
+                inactive_reason = "no_independent_holdout_score"
+            elif not (target_indices and independence_key):
+                inactive_reason = "missing_target_indices_or_independence_key"
+
         candidate_proof[expert_name] = {
             "target_state_normalized_delta_from_base": round(delta, 6),
             "has_independent_holdout_score": has_holdout,
@@ -238,10 +245,7 @@ def run_bma(
             "input_evidence": spec.get("input_evidence", []),
             "independence_key": independence_key,
             "model_version": spec.get("model_version"),
-            "inactive_reason": "" if active else (
-                "no_independent_holdout_score" if not has_holdout
-                else "target_state_delta_below_threshold"
-            ),
+            "inactive_reason": inactive_reason,
         }
         if active:
             active_predictions[expert_name] = prediction

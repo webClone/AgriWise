@@ -97,7 +97,6 @@ def predict_held_out_scene(
             'errors': {},
             'mean_error': None,
             'n_observations': len(observations),
-            'prediction_mode': 'none',
         }
     return {
         'status': 'predicted',
@@ -105,6 +104,96 @@ def predict_held_out_scene(
         'mean_error': round(sum(errors.values()) / len(errors), 6),
         'n_observations': len(errors),
         'prediction_mode': 'ht_per_pixel_exact_support',
+    }
+
+
+persistence_baseline_held_out_scene = predict_held_out_scene
+
+
+def forecast_held_out_scene(
+    training_state: Dict[str, List[float]],
+    holdout_scene: Any,
+    operator: Optional[Any] = None,
+    weather_day: Optional[dict] = None,
+    crop_context: Optional[dict] = None,
+    soil_context: Optional[dict] = None,
+    delta_days: float = 1.0,
+    rng: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Propagate training state forward to holdout time and evaluate closure against H_holdout.
+
+    Computes both persistence_rmse (baseline) and prospective_forecast_rmse (dynamic model),
+    reporting the comparative forecast_skill_score = 1 - (forecast_rmse / persistence_rmse).
+    """
+    import random
+    from ..assimilation.filter import forecast_step
+
+    # 1. Baseline: Frozen persistence
+    persistence_result = predict_held_out_scene(
+        training_state=training_state,
+        holdout_scene=holdout_scene,
+        operator=operator,
+    )
+    persistence_rmse = persistence_result.get("mean_error")
+
+    # If persistence evaluation already failed (e.g. geometry mismatch or operator unavailable), return immediately
+    if persistence_result.get("status") != "predicted":
+        return persistence_result
+
+    # 2. Dynamic Forward Propagation via ASMAE transition equations
+    if delta_days > 0.0 and training_state:
+        ensemble_in = {
+            node: [list(state)]
+            for node, state in training_state.items()
+            if isinstance(state, (list, tuple))
+        }
+        if ensemble_in:
+            generator = rng or random.Random(42)
+            propagated_ens = forecast_step(
+                ensemble=ensemble_in,
+                priors={},
+                crop_context=crop_context or {},
+                rng=generator,
+                weather_day=weather_day or {},
+                soil_context=soil_context or {},
+                delta_days=delta_days,
+            )
+            propagated_state = {
+                node: propagated_ens[node][0]
+                for node in propagated_ens
+            }
+        else:
+            propagated_state = training_state
+    else:
+        propagated_state = training_state
+
+    # 3. Evaluate Holdout Operator on Propagated State
+    forecast_result = predict_held_out_scene(
+        training_state=propagated_state,
+        holdout_scene=holdout_scene,
+        operator=operator,
+    )
+    forecast_rmse = forecast_result.get("mean_error")
+
+    skill_score = None
+    if (
+        persistence_rmse is not None
+        and forecast_rmse is not None
+        and persistence_rmse > 0.0
+    ):
+        skill_score = round(1.0 - (forecast_rmse / persistence_rmse), 6)
+
+    return {
+        "status": forecast_result.get("status", "predicted"),
+        "errors": forecast_result.get("errors", {}),
+        "mean_error": forecast_rmse,
+        "prospective_forecast_rmse": forecast_rmse,
+        "persistence_rmse": persistence_rmse,
+        "forecast_skill_score": skill_score,
+        "forecast_state": propagated_state,
+        "n_observations": forecast_result.get("n_observations", 0),
+        "prediction_mode": "dynamic_forecast_propagation",
+        "delta_days": delta_days,
     }
 
 

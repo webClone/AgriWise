@@ -77,9 +77,11 @@ class IdentifiabilityClass(Enum):
 class AuthorityCeiling(Enum):
     """Maximum authority this variable can achieve with current evidence."""
     VISUALIZATION = "visualization"
+    MONITORING_ONLY = "monitoring_only"
     DIAGNOSTIC = "diagnostic"
     STATE_UPDATE = "state_update"
     TRAINING_EXPORT = "training_export"
+    PRESCRIPTION_ELIGIBLE = "prescription_eligible"
     PRESCRIPTION_DRIVER = "prescription_driver"
 
 
@@ -156,7 +158,7 @@ STATE_DESCRIPTORS: Tuple[StateDescriptor, ...] = (
         transition_policy=TransitionPolicy.PROCESS_MODEL,
         assimilation_policy=AssimilationPolicy.INDIRECT_CONSTRAINT,
         identifiability_class=IdentifiabilityClass.INDIRECTLY_CONSTRAINED,
-        authority_ceiling=AuthorityCeiling.DIAGNOSTIC,
+        authority_ceiling=AuthorityCeiling.PRESCRIPTION_ELIGIBLE,
         notes="Constrained by NDVI/EVI; confounded by canopy density and soil background.",
     ),
     StateDescriptor(
@@ -261,7 +263,7 @@ STATE_DESCRIPTORS: Tuple[StateDescriptor, ...] = (
         transition_policy=TransitionPolicy.SLOWLY_VARYING,
         assimilation_policy=AssimilationPolicy.PROXY_DERIVED,
         identifiability_class=IdentifiabilityClass.INDIRECTLY_CONSTRAINED,
-        authority_ceiling=AuthorityCeiling.DIAGNOSTIC,
+        authority_ceiling=AuthorityCeiling.PRESCRIPTION_ELIGIBLE,
         notes="BSI-driven; slowly varying environmental state.",
     ),
     StateDescriptor(
@@ -274,7 +276,7 @@ STATE_DESCRIPTORS: Tuple[StateDescriptor, ...] = (
         transition_policy=TransitionPolicy.EXTERNAL_FORCING,
         assimilation_policy=AssimilationPolicy.HYPOTHESIS_INFERENCE,
         identifiability_class=IdentifiabilityClass.HYPOTHESIS_ONLY,
-        authority_ceiling=AuthorityCeiling.DIAGNOSTIC,
+        authority_ceiling=AuthorityCeiling.MONITORING_ONLY,
         notes="Requires soil EC evidence or local validation; spectral signature alone is insufficient.",
     ),
     StateDescriptor(
@@ -300,7 +302,7 @@ STATE_DESCRIPTORS: Tuple[StateDescriptor, ...] = (
         transition_policy=TransitionPolicy.EXTERNAL_FORCING,
         assimilation_policy=AssimilationPolicy.HYPOTHESIS_INFERENCE,
         identifiability_class=IdentifiabilityClass.HYPOTHESIS_ONLY,
-        authority_ceiling=AuthorityCeiling.DIAGNOSTIC,
+        authority_ceiling=AuthorityCeiling.MONITORING_ONLY,
         notes="Cannot acquire direct-observation status without external confirmation.",
     ),
     StateDescriptor(

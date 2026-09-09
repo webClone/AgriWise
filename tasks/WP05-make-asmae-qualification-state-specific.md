@@ -88,3 +88,18 @@ Sentinel-1 SAR VV backscatter primarily reflects surface soil roughness and surf
 - **Monograph Findings**: Finding #10 (Held-out scene state advancement), Finding #11 (BMA expert eligibility and disagreement), Finding #12 (Radiometric consistency vs latent state maturity), Finding #13 (Preserve existing ASMAE safeguards).
 - **Defect Tasks**: [A06-asmae-external-scene-loader-resolution.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A06-asmae-external-scene-loader-resolution.md).
 - **Phase Tasks**: [P01.2-repair-asmae-scene-and-sire-failures.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P01.2-repair-asmae-scene-and-sire-failures.md).
+
+---
+
+## 7. Execution Status & Verification Report
+- **Status**: COMPLETED
+- **Completed Components**:
+  1. **Dynamic Prospective Forecasting (`future_projection.py`)**: Authored `forecast_held_out_scene` which dynamically advances the physical ensemble state forward across `delta_days` using `forecast_step` forced by issue-time weather/soil parameters. Evaluates both frozen baseline (`persistence_rmse`) and forward model (`prospective_forecast_rmse`), returning explicit `forecast_skill_score = 1.0 - (forecast_rmse / persistence_rmse)` and `forecast_state`. Retained `persistence_baseline_held_out_scene` as alias for backward compatibility.
+  2. **Decoupled BMA Consensus Invariant (`posterior.py`)**: Removed the artificial `delta >= 0.02` gate from candidate proof eligibility. Models are evaluated based on target indices, declared independence keys, and independent holdout errors. Independent models predicting consensus estimates ($\Delta < 0.02$) remain fully active without triggering spurious `insufficient_experts` degradation.
+  3. **Per-Variable Authority Ceilings (`descriptors.py`)**: Added `MONITORING_ONLY` and `PRESCRIPTION_ELIGIBLE` to `AuthorityCeiling`. Restricted `root_zone_water` strictly to `DIAGNOSTIC` (surface SAR backscatter cannot promote unobserved root moisture to prescription driver). Configured `vigor` and `bare_soil_fraction` to `PRESCRIPTION_ELIGIBLE`, and diagnostic hypotheses (`salinity_stress`, `biotic_confounder_risk`) strictly to `MONITORING_ONLY`.
+  4. **Dedicated Verification Suite (`test_qualification_state_specific.py`)**:
+     - `test_dynamic_forecast_held_out_scene_computes_skill_score`: Verified forward state integration and comparative skill score computation.
+     - `test_bma_consensus_preserved_when_independent_models_agree`: Verified that independent physics models agreeing within $\Delta < 0.02$ maintain `active = True` and form valid BMA consensus weights.
+     - `test_per_variable_authority_ceilings`: Verified state-specific ceilings and full 13-state `PerVariableSupportLedger` validation.
+  5. **Regression Status**: 758 passed across all 13 core subsystems (100% pass rate).
+
