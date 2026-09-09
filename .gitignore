@@ -72,5 +72,7 @@ verify_*.py
 .pytest_cache/
 .test-tmp/
 scratch/
+.cache/
+services/agribrain/.cache/
 extracted_monograph_toc.txt
 monograph_full_text.md

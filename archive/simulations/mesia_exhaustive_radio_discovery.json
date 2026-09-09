@@ -1,0 +1,306 @@
+[
+  {
+    "emitter_id": "SUBNET_RADIO_7e-58-4e-0b-74-f1",
+    "type": "LOCAL_SUBNET_RADIO_NODE",
+    "display_name": "Host (192.168.139.51)",
+    "band": "Local Radio Link",
+    "channel": 0,
+    "freq_hz": 2450000000.0,
+    "observations": 2,
+    "mean_rssi_dbm": -55.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.215556+00:00",
+    "last_seen": "2026-08-31T16:49:37.562927+00:00",
+    "metadata": {
+      "ip": "192.168.139.51",
+      "mac": "7e-58-4e-0b-74-f1",
+      "link_type": "dynamic"
+    }
+  },
+  {
+    "emitter_id": "BT_KB830WB-MS_BTHLE\\DEV_E5",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "KB830WB-MS",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -62.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090865+00:00",
+    "last_seen": "2026-08-31T16:49:45.857736+00:00",
+    "metadata": {
+      "pnp_id": "BTHLE\\DEV_E55690F72968\\9&306AB8F&0&E55690F72968",
+      "pnp_status": "Unknown"
+    }
+  },
+  {
+    "emitter_id": "BT_Samir_BTHENUM\\DEV_",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "Samir",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -62.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090896+00:00",
+    "last_seen": "2026-08-31T16:49:45.857765+00:00",
+    "metadata": {
+      "pnp_id": "BTHENUM\\DEV_D8CE3AB80C0C\\9&21DED510&0&BLUETOOTHDEVICE_D8CE3AB80C0C",
+      "pnp_status": "Unknown"
+    }
+  },
+  {
+    "emitter_id": "BT_Samir_BTHLE\\DEV_D8",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "Samir",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -62.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090910+00:00",
+    "last_seen": "2026-08-31T16:49:45.857781+00:00",
+    "metadata": {
+      "pnp_id": "BTHLE\\DEV_D8CE3AB80C0C\\9&306AB8F&0&D8CE3AB80C0C",
+      "pnp_status": "Unknown"
+    }
+  },
+  {
+    "emitter_id": "WIFI_62:3d:29:89:63:3c",
+    "type": "WIFI_AP_BEACON",
+    "display_name": "IdoomFibre_ATzYVXm3G",
+    "band": "2.4 GHz",
+    "channel": 9,
+    "freq_hz": 2452000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -66.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:16.714543+00:00",
+    "last_seen": "2026-08-31T16:49:43.023003+00:00",
+    "metadata": {
+      "bssid": "62:3d:29:89:63:3c",
+      "radio_type": "802.11ax",
+      "signal_pct": 68.0,
+      "connected_stations": 2,
+      "channel_utilization_pct": 8
+    }
+  },
+  {
+    "emitter_id": "BT_Bluetooth_LE",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "Bluetooth",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 14,
+    "mean_rssi_dbm": -68.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090887+00:00",
+    "last_seen": "2026-08-31T16:49:45.857804+00:00",
+    "metadata": {
+      "pnp_id": "LE",
+      "pnp_status": "Generic"
+    }
+  },
+  {
+    "emitter_id": "BT_HOCO_EQ1",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "HOCO",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -68.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090901+00:00",
+    "last_seen": "2026-08-31T16:49:45.857771+00:00",
+    "metadata": {
+      "pnp_id": "EQ1",
+      "pnp_status": "BTHENUM\\DEV_D2D868A8A4F3\\9&21DED510&0&BLUETOOTHDEVICE_D2D868A8A4F3"
+    }
+  },
+  {
+    "emitter_id": "BT_Generic_Attribute",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "Generic",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -68.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090905+00:00",
+    "last_seen": "2026-08-31T16:49:45.857776+00:00",
+    "metadata": {
+      "pnp_id": "Attribute",
+      "pnp_status": "Profile"
+    }
+  },
+  {
+    "emitter_id": "BT_Generic_Access",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "Generic",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 14,
+    "mean_rssi_dbm": -68.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090915+00:00",
+    "last_seen": "2026-08-31T16:49:45.857807+00:00",
+    "metadata": {
+      "pnp_id": "Access",
+      "pnp_status": "Profile"
+    }
+  },
+  {
+    "emitter_id": "BT_HOCO_DW02",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "HOCO",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -68.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090919+00:00",
+    "last_seen": "2026-08-31T16:49:45.857792+00:00",
+    "metadata": {
+      "pnp_id": "DW02",
+      "pnp_status": "BTHENUM\\DEV_6352CB3AAF8E\\9&21DED510&0&BLUETOOTHDEVICE_6352CB3AAF8E"
+    }
+  },
+  {
+    "emitter_id": "BT_Device_Information",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "Device",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -68.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090923+00:00",
+    "last_seen": "2026-08-31T16:49:45.857796+00:00",
+    "metadata": {
+      "pnp_id": "Information",
+      "pnp_status": "Service"
+    }
+  },
+  {
+    "emitter_id": "BT_HOCO_EW09",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "HOCO",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -68.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090928+00:00",
+    "last_seen": "2026-08-31T16:49:45.857800+00:00",
+    "metadata": {
+      "pnp_id": "EW09",
+      "pnp_status": "BTHENUM\\DEV_90E2840DBEA6\\9&21DED510&0&BLUETOOTHDEVICE_90E2840DBEA6"
+    }
+  },
+  {
+    "emitter_id": "BT_Microsoft_Bluetooth",
+    "type": "BLUETOOTH_BLE_RADIO",
+    "display_name": "Microsoft",
+    "band": "2.4 GHz ISM",
+    "channel": 37,
+    "freq_hz": 2402000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -68.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:20.090941+00:00",
+    "last_seen": "2026-08-31T16:49:45.857810+00:00",
+    "metadata": {
+      "pnp_id": "Bluetooth",
+      "pnp_status": "LE"
+    }
+  },
+  {
+    "emitter_id": "WIFI_62:3d:29:89:63:40",
+    "type": "WIFI_AP_BEACON",
+    "display_name": "IdoomFibre_ATzYVXm3G",
+    "band": "5 GHz",
+    "channel": 40,
+    "freq_hz": 5200000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -72.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:16.714566+00:00",
+    "last_seen": "2026-08-31T16:49:43.023021+00:00",
+    "metadata": {
+      "bssid": "62:3d:29:89:63:40",
+      "radio_type": "802.11ax",
+      "signal_pct": 56.0,
+      "connected_stations": 0,
+      "channel_utilization_pct": 3
+    }
+  },
+  {
+    "emitter_id": "WIFI_62:3d:29:89:f3:68",
+    "type": "WIFI_AP_BEACON",
+    "display_name": "IdoomFibre_ATfm3tWDf",
+    "band": "2.4 GHz",
+    "channel": 1,
+    "freq_hz": 2412000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -74.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:16.714581+00:00",
+    "last_seen": "2026-08-31T16:49:43.023031+00:00",
+    "metadata": {
+      "bssid": "62:3d:29:89:f3:68",
+      "radio_type": "802.11ax",
+      "signal_pct": 52.0,
+      "connected_stations": 2,
+      "channel_utilization_pct": 8
+    }
+  },
+  {
+    "emitter_id": "CELLULAR_LTE_DJEZZY_AS327931",
+    "type": "CELLULAR_LTE_5G_CARRIER",
+    "display_name": "Optimum Telecom Algeria (Djezzy) (LTE-A)",
+    "band": "LTE Band 3 / Band 20 Carrier Aggregation",
+    "channel": 3,
+    "freq_hz": 1805000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -81.4,
+    "rssi_variance_db2": 12.897,
+    "first_seen": "2026-08-31T16:49:20.171872+00:00",
+    "last_seen": "2026-08-31T16:49:45.955137+00:00",
+    "metadata": {
+      "public_ip": "129.45.69.15",
+      "asn": "AS327931",
+      "ran_latency_ms": 75.0,
+      "gateway_ip": "192.168.139.51"
+    }
+  },
+  {
+    "emitter_id": "WIFI_8e:83:e8:a6:03:20",
+    "type": "WIFI_AP_BEACON",
+    "display_name": "IdoomFibre_ATbxfFM8e",
+    "band": "2.4 GHz",
+    "channel": 4,
+    "freq_hz": 2427000000.0,
+    "observations": 7,
+    "mean_rssi_dbm": -84.0,
+    "rssi_variance_db2": 0.0,
+    "first_seen": "2026-08-31T16:49:16.714576+00:00",
+    "last_seen": "2026-08-31T16:49:43.023027+00:00",
+    "metadata": {
+      "bssid": "8e:83:e8:a6:03:20",
+      "radio_type": "802.11ax",
+      "signal_pct": 32.0,
+      "connected_stations": 4,
+      "channel_utilization_pct": 11
+    }
+  }
+]

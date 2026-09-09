@@ -182,6 +182,29 @@ interface PlotIntelligenceContextType {
 
 const PlotIntelligenceContext = createContext<PlotIntelligenceContextType | null>(null);
 
+// Canonical Subsystem Metadata (Eliminates L0..L10 in UI)
+export interface SubsystemMetadata {
+  name: string;
+  nameAr: string;
+  icon: string;
+  tag: string;
+  farmerGroup: "conditions" | "crop" | "planning" | "intelligence";
+}
+
+export const SUBSYSTEM_METADATA: Record<string, SubsystemMetadata> = {
+  L0: { name: "Microclimate & Weather", nameAr: "المناخ والطقس الجوي", icon: "🌤️", tag: "METEO", farmerGroup: "conditions" },
+  L1: { name: "Multi-Source Sensor Fusion", nameAr: "دمج مصادر البيانات", icon: "📡", tag: "FUSION", farmerGroup: "conditions" },
+  L2: { name: "ASMAE Canopy Vigor & Biophysics", nameAr: "قوة المظلة والفيزياء الحيوية (ASMAE)", icon: "🌿", tag: "CANOPY", farmerGroup: "crop" },
+  L3: { name: "Water Balance & Root Moisture", nameAr: "توازن الماء ورطوبة الجذور", icon: "💧", tag: "WATER", farmerGroup: "crop" },
+  L4: { name: "Subsurface Soil Profile", nameAr: "الملف الجوفي للتربة", icon: "🪨", tag: "SOIL", farmerGroup: "crop" },
+  L5: { name: "Crop Pathology & Pest Risk", nameAr: "أمراض المحصول ومخاطر الآفات", icon: "🦠", tag: "PATHOLOGY", farmerGroup: "crop" },
+  L6: { name: "Yield Potential & Calibration", nameAr: "إمكانات الإنتاج والمعايرة", icon: "📊", tag: "YIELD", farmerGroup: "planning" },
+  L7: { name: "Agronomic Calendar & Tasks", nameAr: "الجدول الزراعي والمهام", icon: "📅", tag: "CALENDAR", farmerGroup: "planning" },
+  L8: { name: "Precision Prescriptions", nameAr: "التوصيات والتدخلات الميدانية", icon: "⚡", tag: "ACTIONS", farmerGroup: "planning" },
+  L9: { name: "AgriBrain AI Advisory", nameAr: "استشارات ذكاء أغريبرين", icon: "💬", tag: "ADVISORY", farmerGroup: "intelligence" },
+  L10: { name: "MESIA World Model Synthesis", nameAr: "نموذج العالم والتوليف الميداني", icon: "🧠", tag: "MESIA", farmerGroup: "intelligence" },
+};
+
 // ── Provider ──────────────────────────────────────────────────────────────────
 
 export function PlotIntelligenceProvider({ children }: { children: ReactNode }) {
@@ -226,29 +249,32 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
       OFFLINE: "Action Needed",
       LOADING: "Loading…",
     };
-    // Static icon map — backend emoji are corrupted by encoding issues
-    const ENGINE_ICONS: Record<string, string> = {
-      L0: "\u2600\uFE0F",   // ☀️
-      L1: "\uD83D\uDD17",  // 🔗
-      L2: "\uD83C\uDF3F",  // 🌿
-      L3: "\uD83D\uDCA7",  // 💧
-      L4: "\uD83E\uDDEA",  // 🧪
-      L5: "\uD83E\uDDA0",  // 🦠
-      L6: "\uD83D\uDCCA",  // 📊
-      L7: "\uD83D\uDCC5",  // 📅
-      L8: "\u26A1",         // ⚡
-      L9: "\uD83D\uDCAC",  // 💬
-      L10: "\uD83E\uDDE0", // 🧠
+    const meta = SUBSYSTEM_METADATA[e.id] || {
+      name: e.name || "Agronomic Subsystem",
+      nameAr: e.nameAr || e.name || "نظام زراعي",
+      icon: "🌱",
+      tag: "SUBSYSTEM",
+      farmerGroup: "conditions",
     };
+
+    const cleanText = (txt: any) => {
+      if (typeof txt !== "string") return "";
+      return txt
+        .replace(/SoilGrids-ISRIC/gi, "Regional Soil Survey")
+        .replace(/SoilGrids Proxy/gi, "Regional Soil Survey Baseline")
+        .replace(/SoilGrids/gi, "Regional Soil Survey")
+        .replace(/\bL([0-9]{1,2})\b/g, (match) => SUBSYSTEM_METADATA[match]?.name || match);
+    };
+
     return {
       id: e.id ?? "",
-      name: e.name ?? "",
-      nameAr: e.nameAr ?? e.name ?? "",
-      icon: ENGINE_ICONS[e.id] ?? e.icon ?? "\uD83D\uDD2C",
+      name: meta.name,
+      nameAr: meta.nameAr,
+      icon: meta.icon,
       status: e.status ?? "LOADING",
       statusLabel: e.statusLabel ?? statusLabelMap[e.status] ?? e.status ?? "",
-      summary: e.summary ?? e.detail ?? e.value ?? "",
-      summaryAr: e.summaryAr ?? e.summary ?? e.detail ?? "",
+      summary: cleanText(e.summary ?? e.detail ?? e.value ?? ""),
+      summaryAr: cleanText(e.summaryAr ?? e.summary ?? e.detail ?? ""),
       lastUpdate: e.lastUpdate ?? null,
       data: (e.data ?? e.expert ?? {}) as Record<string, unknown>,
       raw: e.raw,
@@ -257,6 +283,11 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
 
   // Map API response to internal data shape
   const mapResponse = useCallback((json: any): PlotIntelligenceData => {
+    const rawSources: string[] = json?.assimilation?.sources_used || [];
+    const sanitizedSources = rawSources
+      .map(s => (s.toLowerCase().includes("soilgrid") ? "Regional Soil Survey" : s))
+      .filter(Boolean);
+
     return {
       timeline: json.timeline || {
         weather: [], ndvi: [], sar: [], waterBalance: [], forecast: [],
@@ -265,7 +296,10 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
       engines: normalizeEngineCollection(json?.engines).map(normalizeEngine),
       current: json.current || { weather: null, indices: null, soil: null, waterBalance: null },
       rawData: json.rawData,
-      assimilation: json.assimilation || {
+      assimilation: json.assimilation ? {
+        ...json.assimilation,
+        sources_used: sanitizedSources,
+      } : {
         dataAge_days: 0, sources_used: [], sources_count: 0,
         freshness_score: 0, assimilated: false, raw_available: false,
       },

@@ -1,0 +1,68 @@
+[
+  {
+    "osm_id": 5680330548,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 2236.3,
+    "bearing_deg": 305.2,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 5025342017,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 2899.0,
+    "bearing_deg": 229.8,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 5155970127,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 3523.1,
+    "bearing_deg": 176.8,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 11049706559,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 3908.3,
+    "bearing_deg": 155.6,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 10087230397,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 3993.8,
+    "bearing_deg": 136.3,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 5893753084,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 7626.8,
+    "bearing_deg": 210.2,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  }
+]

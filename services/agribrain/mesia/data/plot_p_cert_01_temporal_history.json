@@ -1,0 +1,227 @@
+[
+  {
+    "timestamp_iso": "2026-09-05T09:49:21.056343+00:00",
+    "timestamp_epoch": 1788601761.056343,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T09:49:52.510477+00:00",
+    "timestamp_epoch": 1788601792.510477,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T09:50:15.688839+00:00",
+    "timestamp_epoch": 1788601815.688839,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T09:53:58.215459+00:00",
+    "timestamp_epoch": 1788602038.215459,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:13:59.744281+00:00",
+    "timestamp_epoch": 1788603239.744281,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:14:37.242902+00:00",
+    "timestamp_epoch": 1788603277.242902,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:15:03.257604+00:00",
+    "timestamp_epoch": 1788603303.257604,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:15:25.722794+00:00",
+    "timestamp_epoch": 1788603325.722794,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:20:47.683451+00:00",
+    "timestamp_epoch": 1788603647.683451,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:21:04.767601+00:00",
+    "timestamp_epoch": 1788603664.767601,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:30:20.183154+00:00",
+    "timestamp_epoch": 1788604220.183154,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:31:19.613378+00:00",
+    "timestamp_epoch": 1788604279.613378,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:31:33.492875+00:00",
+    "timestamp_epoch": 1788604293.492875,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:32:10.185349+00:00",
+    "timestamp_epoch": 1788604330.185349,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:33:01.664568+00:00",
+    "timestamp_epoch": 1788604381.664568,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:33:14.204841+00:00",
+    "timestamp_epoch": 1788604394.204841,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:36:39.472735+00:00",
+    "timestamp_epoch": 1788604599.472735,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:41:11.152878+00:00",
+    "timestamp_epoch": 1788604871.152878,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:49:28.132816+00:00",
+    "timestamp_epoch": 1788605368.132816,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:50:54.933399+00:00",
+    "timestamp_epoch": 1788605454.933399,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T10:51:18.543157+00:00",
+    "timestamp_epoch": 1788605478.543157,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T14:23:49.121072+00:00",
+    "timestamp_epoch": 1788618229.121072,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T14:24:24.966258+00:00",
+    "timestamp_epoch": 1788618264.966258,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T14:31:08.156356+00:00",
+    "timestamp_epoch": 1788618668.156356,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T14:33:54.830464+00:00",
+    "timestamp_epoch": 1788618834.830464,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T14:58:02.047217+00:00",
+    "timestamp_epoch": 1788620282.047217,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:07:04.204760+00:00",
+    "timestamp_epoch": 1788620824.20476,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:07:59.081483+00:00",
+    "timestamp_epoch": 1788620879.081483,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:27:32.760308+00:00",
+    "timestamp_epoch": 1788622052.760308,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:48:45.529308+00:00",
+    "timestamp_epoch": 1788623325.529308,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:49:40.664475+00:00",
+    "timestamp_epoch": 1788623380.664475,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:54:32.618719+00:00",
+    "timestamp_epoch": 1788623672.618719,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T00:34:08.190707+00:00",
+    "timestamp_epoch": 1788654848.190707,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T00:58:57.814696+00:00",
+    "timestamp_epoch": 1788656337.814696,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T01:05:35.130395+00:00",
+    "timestamp_epoch": 1788656735.130395,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T01:05:59.201632+00:00",
+    "timestamp_epoch": 1788656759.201632,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T15:16:13.732184+00:00",
+    "timestamp_epoch": 1788707773.732184,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T15:23:02.615546+00:00",
+    "timestamp_epoch": 1788708182.615546,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:10:08.384149+00:00",
+    "timestamp_epoch": 1788714608.384149,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:38:34.885134+00:00",
+    "timestamp_epoch": 1788716314.885134,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:53:46.725820+00:00",
+    "timestamp_epoch": 1788717226.72582,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:58:41.646878+00:00",
+    "timestamp_epoch": 1788717521.646878,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-07T14:08:48.603039+00:00",
+    "timestamp_epoch": 1788790128.603039,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-07T14:10:10.488823+00:00",
+    "timestamp_epoch": 1788790210.488823,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-07T15:37:48.864017+00:00",
+    "timestamp_epoch": 1788795468.864017,
+    "root_zone_vwc_pct": 22.0
+  }
+]

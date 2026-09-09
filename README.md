@@ -324,6 +324,10 @@ $$\begin{bmatrix} \Delta \text{NDVI} \\ \Delta \text{NDRE} \\ \Delta \text{NDWI}
 ## 📡 Volume X — MESIA & Multi-Scale Agricultural World Model
 
 ### What is MESIA?
+
+> [!WARNING]
+> **Maturity Classification (TRL 1–2):** The MESIA software package is currently an unimplemented research scaffold and specification. It does **not** contain an operational radio observatory, RF tomography system, or soil-moisture sensor. Do not use its simulated outputs as ASMAE-qualified evidence. See `services/agribrain/mesia/CONTRACT.md` as the authoritative source for MESIA's technical maturity and phase plan.
+
 **MESIA** (*Micro-Environmental Sensing & In-situ Attenuation*) is the in-situ radio frequency tomography and environmental sensing sub-system developed for AgriBrain.
 
 ```

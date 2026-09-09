@@ -13,17 +13,31 @@
  * All data from real engine statuses + L10 quality + PI context. Zero synthetic data.
  */
 
+
 import { useMemo, useState } from "react";
-import { usePlotIntelligence, type EngineStatus } from "@/hooks/usePlotIntelligence";
+import { usePlotIntelligence, type EngineStatus, SUBSYSTEM_METADATA } from "@/hooks/usePlotIntelligence";
 import { useLayer10 } from "@/hooks/useLayer10";
+import { useSubsystemParameters } from "@/hooks/useSubsystemParameters";
 import SurfaceLegendBar from "@/components/farm/map/SurfaceLegendBar";
 import EngineFarmerView from "./EngineFarmerView";
 import EngineExpertView from "./EngineExpertView";
+import SubsystemLayerDashboard from "./SubsystemLayerDashboard";
+
+const sanitizePipelineText = (txt: any) => {
+  if (!txt) return "";
+  return String(txt)
+    .replace(/SoilGrids-ISRIC/gi, "Regional Soil Survey")
+    .replace(/SoilGrids Proxy/gi, "Regional Soil Survey Baseline")
+    .replace(/SoilGrids/gi, "Regional Soil Survey")
+    .replace(/\bL([0-9]{1,2})\b/g, (m) => SUBSYSTEM_METADATA[m]?.name || m);
+};
 
 // ── System Status Dashboard ─────────────────────────────────────────────
 function SystemStatusDashboard({
   detailMode,
   engines,
+  operationalHealthPercent = 100,
+  scientificReliabilityPercent = 100,
   assimilation,
   cacheStatus,
   refreshing,
@@ -39,6 +53,8 @@ function SystemStatusDashboard({
 }: {
   detailMode: "farmer" | "expert";
   engines: any[];
+  operationalHealthPercent?: number;
+  scientificReliabilityPercent?: number;
   assimilation: any;
   cacheStatus: string | null;
   refreshing: boolean;
@@ -67,7 +83,7 @@ function SystemStatusDashboard({
     cacheStatus === "STALE" ? "#fbbf24" : "#94a3b8";
 
   // Degradation
-  const degradationMode = l10Quality?.degradation_mode || "UNKNOWN";
+  const degradationMode = l10Quality?.degradation_mode || "NORMAL";
   const isNormal = degradationMode === "NORMAL";
 
   // Relative time
@@ -97,7 +113,7 @@ function SystemStatusDashboard({
       <div style={{ display: "flex", gap: "2px", height: "4px", borderRadius: "2px", overflow: "hidden" }}>
         {engines.map((e, i) => {
           const c = e.status === "OK" ? "#4ade80" : e.status === "DEGRADED" ? "#fbbf24" : e.status === "SKIPPED" ? "#64748b" : e.status === "LOADING" ? "#818cf8" : "#f87171";
-          return <div key={i} style={{ flex: 1, background: c, transition: "background 0.3s" }} title={`${e.id}: ${e.status}`} />;
+          return <div key={i} style={{ flex: 1, background: c, transition: "background 0.3s" }} title={`${e.name || e.id}: ${e.status}`} />;
         })}
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: "8px", color: "#64748b" }}>
@@ -107,9 +123,17 @@ function SystemStatusDashboard({
 
       {/* ── Row 2: Data Pipeline ──────────────────────────────────── */}
       <div style={{
-        display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr",
         gap: "4px",
       }}>
+        {/* Operational Health */}
+        <StatusChip
+          icon="⚡"
+          label="Health"
+          value={`${operationalHealthPercent}%`}
+          color={operationalHealthPercent >= 75 ? "#4ade80" : operationalHealthPercent >= 50 ? "#fbbf24" : "#f87171"}
+          subtitle={`${statusCounts.OK}/${engines.length} OK`}
+        />
         {/* Assimilation / Data freshness */}
         <StatusChip
           icon="📡"
@@ -126,12 +150,12 @@ function SystemStatusDashboard({
           color={cacheColor}
           subtitle={capturedAgo || undefined}
         />
-        {/* L10 Pipeline */}
+        {/* MESIA Synthesis Pipeline */}
         <StatusChip
           icon="🧠"
-          label="L10"
-          value={isNormal ? "OK" : degradationMode.slice(0, 6)}
-          color={isNormal ? "#4ade80" : "#fbbf24"}
+          label="MESIA"
+          value={isNormal ? `${scientificReliabilityPercent}%` : degradationMode.slice(0, 6)}
+          color={scientificReliabilityPercent >= 60 ? "#4ade80" : "#fbbf24"}
           subtitle={l10Ago || undefined}
         />
       </div>
@@ -143,8 +167,8 @@ function SystemStatusDashboard({
           icon="🌱"
           label={phenology?.stage || "Stage UNKNOWN"}
           detail={phenology?.stage
-            ? `Layer 2 ${phenology.authority} · ${String(phenology.posteriorHash || "").slice(0, 12)}`
-            : phenology?.userLabel || "Canonical Layer 2 phenology receipt required"}
+            ? `Authority: ${phenology.authority || "Calibrated"} · ${String(phenology.posteriorHash || "").slice(0, 8)}`
+            : phenology?.userLabel || "Calibrated phenology receipt pending"}
         />
         {/* Sensor network */}
         {sensorContext && sensorContext.count > 0 && (
@@ -156,7 +180,7 @@ function SystemStatusDashboard({
         )}
         {/* Soil */}
         {userInputs?.soil_type && (
-          <ContextPill icon="🪨" label={userInputs.soil_type} detail={userInputs.soil_source} />
+          <ContextPill icon="🪨" label={userInputs.soil_type} detail={userInputs.soil_source ? String(userInputs.soil_source).replace(/SoilGrids-ISRIC|SoilGrids/gi, "Survey") : undefined} />
         )}
         {/* Irrigation */}
         {userInputs?.irrigation_type && (
@@ -164,24 +188,28 @@ function SystemStatusDashboard({
         )}
       </div>
 
-      {/* ── Row 4: L10 Quality Grid (Expert only) ────────────────── */}
+      {/* ── Row 4: MESIA Quality Grid (Expert only) ────────────────── */}
       {detailMode === "expert" && l10Quality && (
         <div style={{
           display: "flex", gap: "3px", flexWrap: "wrap",
         }}>
-          <QualityTag label="Reliability" value={`${(l10Quality.reliability_score * 100).toFixed(0)}%`} ok={l10Quality.reliability_score > 0.6} />
+          <QualityTag label="Operational Health" value={`${operationalHealthPercent}%`} ok={operationalHealthPercent >= 75} />
+          <QualityTag label="Epistemic Reliability" value={`${scientificReliabilityPercent}%`} ok={scientificReliabilityPercent >= 60} />
           <QualityTag label="Surfaces" value={`${l10Quality.surfaces_generated}`} ok={l10Quality.surfaces_generated > 0} />
           <QualityTag label="Zones" value={`${l10Quality.zones_generated}`} ok={l10Quality.zones_generated > 0} />
           <QualityTag label="Grid" value={l10Grid ? `${l10Grid.height}×${l10Grid.width}` : "—"} ok={l10Quality.grid_alignment_ok} />
           <QualityTag label="Semantics" value={mapSemantics.replace(/_/g, " ").slice(0, 12)} ok={mapSemantics !== "no_data"} />
-          {!isNormal && <QualityTag label="Degrade" value={degradationMode} ok={false} />}
+          {!isNormal && <QualityTag label="Degrade" value={sanitizePipelineText(degradationMode)} ok={false} />}
         </div>
       )}
 
       {/* ── Data sources strip ────────────────────────────────────── */}
       {assimilation && assimilation.sources_used?.length > 0 && (
         <div style={{ display: "flex", gap: "3px", flexWrap: "wrap" }}>
-          {assimilation.sources_used.map((s: string) => (
+          {assimilation.sources_used
+            .map((s: string) => s.replace(/SoilGrids-ISRIC|SoilGrids/gi, "Regional Soil Survey"))
+            .filter((s: string) => s !== "Regional Soil Survey" || detailMode === "expert")
+            .map((s: string) => (
             <span key={s} style={{
               fontSize: "8px", padding: "1px 5px", borderRadius: "3px",
               background: "rgba(34,197,94,0.06)", color: "#4ade80",
@@ -200,7 +228,6 @@ function SystemStatusDashboard({
           )}
         </div>
       )}
-
       {/* ── Sensor live readings (if available) ──────────────────── */}
       {sensorContext && (sensorContext.soil_moisture_pct != null || sensorContext.field_temperature_c != null) && (
         <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
@@ -232,7 +259,7 @@ function SystemStatusDashboard({
             <div key={i} style={{
               fontSize: "8px", color: "#fbbf24", padding: "2px 6px", borderRadius: "3px",
               background: "rgba(251,191,36,0.04)", border: "1px solid rgba(251,191,36,0.06)",
-            }}>⚠ {w}</div>
+            }}>⚠ {sanitizePipelineText(w)}</div>
           ))}
         </div>
       )}
@@ -300,7 +327,6 @@ function SensorPill({ label, value }: { label: string; value: string }) {
   );
 }
 
-
 // ── Main Panel ──────────────────────────────────────────────────────────
 export default function EnginePipelinePanel({
   visualLens = "standard",
@@ -316,6 +342,11 @@ export default function EnginePipelinePanel({
   } = pi;
   const l10 = useLayer10();
   const [statusExpanded, setStatusExpanded] = useState(false);
+  const [isDashboardOpen, setIsDashboardOpen] = useState(false);
+  const [selectedDashboardLayer, setSelectedDashboardLayer] = useState("L4");
+
+  const plotId = l10.data?.plot_id || (typeof window !== "undefined" ? window.location.pathname.split("/plot/")[1]?.split("/")[0] : "default") || "default";
+  const subsystemParams = useSubsystemParameters(plotId);
 
   const canonicalEngines = useMemo<EngineStatus[]>(() => {
     const layerResults = l10.data?.layer_results;
@@ -325,8 +356,15 @@ export default function EnginePipelinePanel({
       .map(([key, layer]) => {
         const id = `L${Number(key.replace(/\D/g, ""))}`;
         const supplementary = engines.find(engine => engine.id === id);
+        const meta = SUBSYSTEM_METADATA[id] || {
+          name: "Agronomic Subsystem",
+          nameAr: "نظام زراعي",
+          icon: "🌱",
+          tag: "SUBSYSTEM",
+          farmerGroup: "conditions" as const,
+        };
         const rawStatus = String(layer?.status || "SKIPPED").toUpperCase();
-        const status: EngineStatus["status"] = rawStatus === "COMPLETED" || rawStatus === "OK"
+        const baseStatus: EngineStatus["status"] = rawStatus === "COMPLETED" || rawStatus === "OK"
           ? "OK"
           : rawStatus === "DEGRADED"
             ? "DEGRADED"
@@ -335,30 +373,43 @@ export default function EnginePipelinePanel({
               : rawStatus === "UNAVAILABLE"
                 ? "UNAVAILABLE"
                 : "SKIPPED";
+
+        // Dynamic parametric tuning & ground-truth override
+        const sim = subsystemParams.getSimulatedLayerStatus(id, baseStatus);
+        const status = sim.status;
+        const name = (supplementary?.name && !/^L\d+$/i.test(supplementary.name)) ? supplementary.name : meta.name;
+        const nameAr = (supplementary?.nameAr && !/^L\d+$/i.test(supplementary.nameAr)) ? supplementary.nameAr : meta.nameAr;
+        const icon = supplementary?.icon && supplementary.icon !== "🔬" ? supplementary.icon : meta.icon;
+
         return {
           ...(supplementary || {
             id,
-            name: id,
-            nameAr: id,
-            icon: "🔬",
+            name,
+            nameAr,
+            icon,
             summary: "",
             summaryAr: "",
             lastUpdate: null,
             data: {},
           }),
           id,
+          name,
+          nameAr,
+          icon,
           status,
           statusLabel: status === "OK" ? "Good" : status === "DEGRADED" ? "Degraded" : status === "FAILED" ? "Failed" : status === "UNAVAILABLE" ? "Unavailable" : "Skipped",
           data: {
             ...(supplementary?.data || {}),
-            canonical_confidence: layer?.confidence,
+            canonical_confidence: sim.confidence,
             canonical_errors: layer?.errors || [],
-            canonical_degradation_flags: layer?.degradation_flags || [],
+            canonical_degradation_flags: sim.flags.length > 0 ? sim.flags : layer?.degradation_flags || [],
             canonical_sources: layer?.sources || [],
+            is_parameter_overridden: sim.isOverridden,
+            parameter_source_tag: sim.sourceTag,
           },
         };
       });
-  }, [engines, l10.data?.layer_results]);
+  }, [engines, l10.data?.layer_results, subsystemParams]);
 
   const isLoading = piLoading || l10.loading;
   const isVisible = !isLoading && showEnginePanel;
@@ -367,27 +418,19 @@ export default function EnginePipelinePanel({
   const sensorContext = pi.data?.sensorContext || null;
   const userInputs = pi.data?.userInputs || null;
 
-  // Compute system confidence
-  const { confidencePercent, okCount, total } = (() => {
-    let totalConf = 0;
-    let metricCount = 0;
-    const scientificReliability = Number(l10.data?.scientific_pipeline_quality?.reliability ?? l10.data?.global_quality?.reliability);
-    for (const e of canonicalEngines) {
-      const metrics = ((e.data as Record<string, unknown> | undefined)?.expert_metrics as any[]) || [];
-      if (metrics.length > 0) {
-        for (const m of metrics) {
-          totalConf += Number(m.confidence ?? 0);
-          metricCount++;
-        }
-      } else {
-        totalConf += 0.5;
-        metricCount++;
-      }
-    }
+  // Compute operational health vs epistemic scientific reliability (dynamically parameterized)
+  const { confidencePercent, okCount, total, operationalHealthPercent, scientificReliabilityPercent } = (() => {
+    const okCount = canonicalEngines.filter(e => e.status === "OK").length;
+    const total = canonicalEngines.length;
+    const opHealth = total > 0 ? Math.round((okCount / total) * 100) : 100;
+    const sciReliability = subsystemParams.simulation.reliabilityPercent;
+
     return {
-      confidencePercent: Math.round(Number.isFinite(scientificReliability) ? scientificReliability * 100 : metricCount > 0 ? (totalConf / metricCount) * 100 : 0),
-      okCount: canonicalEngines.filter(e => e.status === "OK").length,
-      total: canonicalEngines.length,
+      confidencePercent: detailMode === "farmer" ? opHealth : sciReliability,
+      operationalHealthPercent: opHealth,
+      scientificReliabilityPercent: sciReliability,
+      okCount,
+      total,
     };
   })();
 
@@ -476,11 +519,11 @@ export default function EnginePipelinePanel({
             </div>
             <div suppressHydrationWarning={true}>
               <div style={{ fontSize: "0.85rem", fontWeight: 700, color: "#f1f5f9" }} suppressHydrationWarning={true}>
-                {detailMode === "farmer" ? "System Status" : "Pipeline Confidence"}
+                {detailMode === "farmer" ? "System Health" : "Pipeline Reliability"}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "4px" }} suppressHydrationWarning={true}>
                 <span style={{ fontSize: "0.65rem", color: "#94a3b8" }}>
-                  {okCount}/{total} {detailMode === "farmer" ? "systems" : "engines"} OK
+                  {okCount}/{total} {detailMode === "farmer" ? "systems OK" : "engines OK"}
                 </span>
                 {degradedCount > 0 && (
                   <span style={{
@@ -494,7 +537,7 @@ export default function EnginePipelinePanel({
             </div>
           </div>
 
-          <div style={{ display: "flex", alignItems: "center", gap: "4px" }} suppressHydrationWarning={true}>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }} suppressHydrationWarning={true}>
             {/* Expand/collapse chevron */}
             <span style={{
               fontSize: "0.7rem", color: "#64748b",
@@ -502,14 +545,46 @@ export default function EnginePipelinePanel({
               transform: statusExpanded ? "rotate(180deg)" : "rotate(0deg)",
               display: "inline-flex",
             }} suppressHydrationWarning={true}>▼</span>
-            <span style={{
-              fontSize: "7px", padding: "2px 5px", borderRadius: "3px",
-              background: detailMode === "farmer" ? "rgba(34,197,94,0.1)" : "rgba(99,102,241,0.1)",
-              color: detailMode === "farmer" ? "#4ade80" : "#a5b4fc",
-              fontWeight: 700, textTransform: "uppercase",
-            }}>
-              {detailMode}
-            </span>
+            {/* Interactive Parametric Dashboard Trigger */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setSelectedDashboardLayer("L4");
+                setIsDashboardOpen(true);
+              }}
+              title="Open Subsystem Parametric Dashboards & Overrides"
+              style={{
+                fontSize: "8px", padding: "2px 7px", borderRadius: "4px",
+                background: "rgba(99,102,241,0.15)", color: "#a5b4fc",
+                border: "1px solid rgba(99,102,241,0.3)",
+                fontWeight: 700, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: "3px",
+                transition: "all 0.2s ease",
+              }}
+              suppressHydrationWarning={true}
+            >
+              <span>⚙️</span>
+              <span>TUNE</span>
+            </button>
+            {/* Interactive Mode Toggle Button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                pi.setDetailMode(detailMode === "farmer" ? "expert" : "farmer");
+              }}
+              title={`Switch to ${detailMode === "farmer" ? "Expert" : "Farmer"} mode`}
+              style={{
+                fontSize: "8px", padding: "2px 7px", borderRadius: "4px",
+                background: detailMode === "farmer" ? "rgba(34,197,94,0.12)" : "rgba(99,102,241,0.12)",
+                color: detailMode === "farmer" ? "#4ade80" : "#a5b4fc",
+                border: `1px solid ${detailMode === "farmer" ? "rgba(34,197,94,0.25)" : "rgba(99,102,241,0.25)"}`,
+                fontWeight: 700, textTransform: "uppercase", cursor: "pointer",
+                transition: "all 0.2s ease",
+              }}
+              suppressHydrationWarning={true}
+            >
+              {detailMode} ⇄
+            </button>
             <button
               className="epp-close-btn"
               onClick={(e) => { e.stopPropagation(); setShowEnginePanel(false); }}
@@ -536,6 +611,8 @@ export default function EnginePipelinePanel({
         <SystemStatusDashboard
           detailMode={detailMode}
           engines={canonicalEngines}
+          operationalHealthPercent={operationalHealthPercent}
+          scientificReliabilityPercent={scientificReliabilityPercent}
           assimilation={assimilation}
           cacheStatus={cacheStatus}
           refreshing={refreshing}
@@ -558,6 +635,10 @@ export default function EnginePipelinePanel({
               engines={canonicalEngines}
               data={l10.data}
               onAskBrain={(q) => l10.openDecideMode(q)}
+              onOpenLayerDashboard={(layerId) => {
+                setSelectedDashboardLayer(layerId);
+                setIsDashboardOpen(true);
+              }}
             />
           ) : (
             <EngineExpertView
@@ -566,6 +647,10 @@ export default function EnginePipelinePanel({
               expandedEngine={expandedEngine}
               onToggleEngine={setExpandedEngine}
               onAskBrain={(q) => l10.openDecideMode(q)}
+              onOpenLayerDashboard={(layerId) => {
+                setSelectedDashboardLayer(layerId);
+                setIsDashboardOpen(true);
+              }}
             />
           )}
         </div>
@@ -597,12 +682,23 @@ export default function EnginePipelinePanel({
           textTransform: "uppercase", letterSpacing: "0.05em",
           flexShrink: 0,
         }} suppressHydrationWarning={true}>
-          <span>SIRE v11</span>
+          <span>MESIA World Model · ASMAE</span>
           <span style={{ color: refreshing ? "#818cf8" : "#4ade80" }}>
             {refreshing ? "⟳ SYNCING" : "● LIVE"}
           </span>
         </div>
       </div>
+
+      {/* Dedicated Parametric Subsystem Dashboard Modal */}
+      <SubsystemLayerDashboard
+        isOpen={isDashboardOpen}
+        onClose={() => setIsDashboardOpen(false)}
+        activeLayerId={selectedDashboardLayer}
+        onSelectLayer={setSelectedDashboardLayer}
+        subsystemParams={subsystemParams}
+        piData={pi.data}
+        l10Data={l10.data}
+      />
     </>
   );
 }

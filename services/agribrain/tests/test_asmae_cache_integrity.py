@@ -101,6 +101,28 @@ def _cache_json_path(inp: ASMAEInput, cache_dir: Path) -> Path:
 
 
 class CacheIdentityTests(unittest.TestCase):
+    def test_canonical_phenology_content_and_lineage_each_invalidate_cache(self):
+        original = _input()
+        original.phenology_posterior = {
+            "current_stage": "UNKNOWN", "stage_authority": "unavailable",
+        }
+        original.phenology_posterior_hash = "phenology-hash-a"
+        original.phenology_worldline_event_id = "phenology-event-a"
+        original_key = get_asmae_cache_key(original)
+        for field, value in (
+            ("phenology_posterior", {
+                "current_stage": "REPRODUCTIVE", "stage_authority": "diagnostic",
+                "season_progress": {"mean": 0.58},
+            }),
+            ("phenology_posterior_hash", "phenology-hash-b"),
+            ("phenology_worldline_event_id", "phenology-event-b"),
+        ):
+            with self.subTest(field=field):
+                changed = copy.deepcopy(original)
+                setattr(changed, field, value)
+                self.assertNotEqual(original_key, get_asmae_cache_key(changed))
+        self.assertEqual(original_key, get_asmae_cache_key(copy.deepcopy(original)))
+
     def test_scene_authority_change_changes_source_hash_and_full_key(self):
         diagnostic = _input()
         production_scene = copy.deepcopy(diagnostic.layer0_source_packages["sentinel2"])

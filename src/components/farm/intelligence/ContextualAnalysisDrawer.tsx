@@ -423,7 +423,7 @@ export default function ContextualAnalysisDrawer({
                     {data.resolved_crop_stage.replace(/_/g, " ")}
                   </span>
                 ) : (
-                  <Unavailable reason={data.phenology_context?.phenology_evidence_needed_reason || "canonical Layer 2 receipt required"} />
+                  <Unavailable reason={data.phenology_context?.phenology_evidence_needed_reason || "canonical canopy receipt required"} />
                 )
               }
               subtext="Phenological context"

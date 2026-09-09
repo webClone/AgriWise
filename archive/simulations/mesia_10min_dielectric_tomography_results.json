@@ -1,0 +1,2344 @@
+{
+  "campaign_metadata": {
+    "campaign_name": "MESIA R6 Master 10-Minute Multi-Radio Physical Observatory & Tomography",
+    "duration_seconds": 601.36,
+    "total_sweeps": 290,
+    "coverage_radius_m": 100.0,
+    "grid_dimensions": "100m x 100m (100 discrete 10m x 10m microzones)",
+    "start_time": "2026-08-31T16:57:33.777012+00:00",
+    "end_time": "2026-08-31T17:07:33.531214+00:00",
+    "direct_emitters_count": 18,
+    "total_mesh_nodes_count": 43,
+    "sigmf_meta_hash": "acdfe4817bae0fa35c60b37c617b4c897649b9034c657f556d9e39bd96a26bb2",
+    "rinex_header_hash": "30ef93c8e94e74d0e3cef14bec742700eef842f86f468764f9bbefa7c9389289",
+    "mesh_graph_hash": "1bdd02dfa12cadf732a1a58bf3bb3776ec407fa9a58c36557d23fca2ef3a3ca7"
+  },
+  "direct_emitters": [
+    {
+      "emitter_id": "62:3d:29:89:63:3c",
+      "type": "WIFI_AP",
+      "ssid": "IdoomFibre_ATzYVXm3G",
+      "band": "2.4 GHz",
+      "channel": 9,
+      "freq_hz": 2452000000.0,
+      "mean_rssi_dbm": -67.05445544554455,
+      "rssi_std_db": 1.3165630479392372,
+      "rssi_variance_db2": 1.733338259199054,
+      "metadata": {
+        "connected_stations": 2,
+        "channel_utilization_pct": 10
+      }
+    },
+    {
+      "emitter_id": "62:3d:29:89:63:40",
+      "type": "WIFI_AP",
+      "ssid": "IdoomFibre_ATzYVXm3G",
+      "band": "5 GHz",
+      "channel": 40,
+      "freq_hz": 5200000000.0,
+      "mean_rssi_dbm": -72.31683168316832,
+      "rssi_std_db": 0.46639707357032567,
+      "rssi_variance_db2": 0.21752623023496379,
+      "metadata": {
+        "connected_stations": 0,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "8e:83:e8:a6:03:20",
+      "type": "WIFI_AP",
+      "ssid": "IdoomFibre_ATbxfFM8e",
+      "band": "2.4 GHz",
+      "channel": 4,
+      "freq_hz": 2427000000.0,
+      "mean_rssi_dbm": -83.22707423580786,
+      "rssi_std_db": 1.411407378585121,
+      "rssi_variance_db2": 1.9920707883245234,
+      "metadata": {
+        "connected_stations": 3,
+        "channel_utilization_pct": 8
+      }
+    },
+    {
+      "emitter_id": "62:3d:29:89:f3:68",
+      "type": "WIFI_AP",
+      "ssid": "IdoomFibre_ATfm3tWDf",
+      "band": "2.4 GHz",
+      "channel": 1,
+      "freq_hz": 2412000000.0,
+      "mean_rssi_dbm": -77.69396551724138,
+      "rssi_std_db": 1.7913591924517958,
+      "rssi_variance_db2": 3.2089677563815497,
+      "metadata": {
+        "connected_stations": 0,
+        "channel_utilization_pct": 15
+      }
+    },
+    {
+      "emitter_id": "BT_KB830WB-MS_BTHLE\\DEV_E5",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "KB830WB-MS",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -62.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_Bluetooth_LE Generic A",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "Bluetooth",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -68.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_Samir_BTHENUM\\DEV_",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "Samir",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -62.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_HOCO_EQ1         ",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "HOCO",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -68.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_Generic_Attribute Pr",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "Generic",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -68.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_Samir_BTHLE\\DEV_D8",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "Samir",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -62.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_Generic_Access Profi",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "Generic",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -68.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_HOCO_DW02        ",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "HOCO",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -68.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_Device_Information ",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "Device",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -68.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_HOCO_EW09        ",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "HOCO",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -68.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "BT_Microsoft_Bluetooth LE",
+      "type": "BLUETOOTH_BLE",
+      "ssid": "Microsoft",
+      "band": "2.4 GHz ISM",
+      "channel": 37,
+      "freq_hz": 2402000000.0,
+      "mean_rssi_dbm": -68.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "CELLULAR_LTE_DJEZZY_AS327931",
+      "type": "CELLULAR_LTE_CARRIER",
+      "ssid": "Optimum Telecom Algeria (Djezzy) (IP: 129.45.69.15)",
+      "band": "LTE Band 3 / Band 20 Carrier Aggregation",
+      "channel": 3,
+      "freq_hz": 1805000000.0,
+      "mean_rssi_dbm": -79.49827586206897,
+      "rssi_std_db": 6.82856465304464,
+      "rssi_variance_db2": 46.62929522081066,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 72
+      }
+    },
+    {
+      "emitter_id": "SUBNET_NODE_7e-58-4e-0b-74-f1",
+      "type": "LOCAL_SUBNET_RADIO_NODE",
+      "ssid": "Host (192.168.139.51)",
+      "band": "Local Radio Subnet",
+      "channel": 0,
+      "freq_hz": 2450000000.0,
+      "mean_rssi_dbm": -55.0,
+      "rssi_std_db": 0.0,
+      "rssi_variance_db2": 0.0,
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "emitter_id": "62:3d:29:89:f3:6c",
+      "type": "WIFI_AP",
+      "ssid": "IdoomFibre_ATfm3tWDf",
+      "band": "5 GHz",
+      "channel": 40,
+      "freq_hz": 5200000000.0,
+      "mean_rssi_dbm": -90.87096774193549,
+      "rssi_std_db": 0.7105693744488488,
+      "rssi_variance_db2": 0.5049088359046283,
+      "metadata": {
+        "connected_stations": 2,
+        "channel_utilization_pct": 4
+      }
+    }
+  ],
+  "mesh_nodes": [
+    {
+      "node_id": "62:3d:29:89:63:3c",
+      "display_name": "IdoomFibre_ATzYVXm3G",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2452000000.0,
+      "band": "2.4 GHz",
+      "estimated_rssi_dbm": -67.05,
+      "transitive_path_loss_db": 87.05,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 2,
+        "channel_utilization_pct": 10
+      }
+    },
+    {
+      "node_id": "62:3d:29:89:63:40",
+      "display_name": "IdoomFibre_ATzYVXm3G",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 5200000000.0,
+      "band": "5 GHz",
+      "estimated_rssi_dbm": -72.32,
+      "transitive_path_loss_db": 92.32,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 0,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "8e:83:e8:a6:03:20",
+      "display_name": "IdoomFibre_ATbxfFM8e",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2427000000.0,
+      "band": "2.4 GHz",
+      "estimated_rssi_dbm": -83.23,
+      "transitive_path_loss_db": 103.23,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 3,
+        "channel_utilization_pct": 8
+      }
+    },
+    {
+      "node_id": "62:3d:29:89:f3:68",
+      "display_name": "IdoomFibre_ATfm3tWDf",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2412000000.0,
+      "band": "2.4 GHz",
+      "estimated_rssi_dbm": -77.69,
+      "transitive_path_loss_db": 97.69,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 0,
+        "channel_utilization_pct": 15
+      }
+    },
+    {
+      "node_id": "BT_KB830WB-MS_BTHLE\\DEV_E5",
+      "display_name": "KB830WB-MS",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -62.0,
+      "transitive_path_loss_db": 82.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_Bluetooth_LE Generic A",
+      "display_name": "Bluetooth",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_Samir_BTHENUM\\DEV_",
+      "display_name": "Samir",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -62.0,
+      "transitive_path_loss_db": 82.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_HOCO_EQ1         ",
+      "display_name": "HOCO",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_Generic_Attribute Pr",
+      "display_name": "Generic",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_Samir_BTHLE\\DEV_D8",
+      "display_name": "Samir",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -62.0,
+      "transitive_path_loss_db": 82.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_Generic_Access Profi",
+      "display_name": "Generic",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_HOCO_DW02        ",
+      "display_name": "HOCO",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_Device_Information ",
+      "display_name": "Device",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_HOCO_EW09        ",
+      "display_name": "HOCO",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "BT_Microsoft_Bluetooth LE",
+      "display_name": "Microsoft",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "CELLULAR_LTE_DJEZZY_AS327931",
+      "display_name": "Optimum Telecom Algeria (Djezzy) (IP: 129.45.69.15)",
+      "radio_family": "CELLULAR_LTE_CRS",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 1805000000.0,
+      "band": "LTE Band 3 / Band 20 Carrier Aggregation",
+      "estimated_rssi_dbm": -79.5,
+      "transitive_path_loss_db": 99.5,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 72
+      }
+    },
+    {
+      "node_id": "SUBNET_NODE_7e-58-4e-0b-74-f1",
+      "display_name": "Host (192.168.139.51)",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 2450000000.0,
+      "band": "Local Radio Subnet",
+      "estimated_rssi_dbm": -55.0,
+      "transitive_path_loss_db": 75.0,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 1,
+        "channel_utilization_pct": 1
+      }
+    },
+    {
+      "node_id": "62:3d:29:89:f3:6c",
+      "display_name": "IdoomFibre_ATfm3tWDf",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 0,
+      "parent_relay_id": "rx-qualcomm-fastconnect-6900",
+      "carrier_freq_hz": 5200000000.0,
+      "band": "5 GHz",
+      "estimated_rssi_dbm": -90.87,
+      "transitive_path_loss_db": 110.87,
+      "discovery_vector": "DIRECT_RF_RECEPTION",
+      "metadata": {
+        "connected_stations": 2,
+        "channel_utilization_pct": 4
+      }
+    },
+    {
+      "node_id": "CLIENT_89:63:3c_STA_01",
+      "display_name": "Associated Station #1 on [IdoomFibre_ATzYVXm3G]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "62:3d:29:89:63:3c",
+      "carrier_freq_hz": 2452000000.0,
+      "band": "2.4 GHz",
+      "estimated_rssi_dbm": -75.55,
+      "transitive_path_loss_db": 95.55,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "62:3d:29:89:63:3c",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_89:63:3c_STA_02",
+      "display_name": "Associated Station #2 on [IdoomFibre_ATzYVXm3G]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "62:3d:29:89:63:3c",
+      "carrier_freq_hz": 2452000000.0,
+      "band": "2.4 GHz",
+      "estimated_rssi_dbm": -79.05,
+      "transitive_path_loss_db": 99.05,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "62:3d:29:89:63:3c",
+        "station_index": 2
+      }
+    },
+    {
+      "node_id": "CLIENT_a6:03:20_STA_01",
+      "display_name": "Associated Station #1 on [IdoomFibre_ATbxfFM8e]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "8e:83:e8:a6:03:20",
+      "carrier_freq_hz": 2427000000.0,
+      "band": "2.4 GHz",
+      "estimated_rssi_dbm": -91.73,
+      "transitive_path_loss_db": 111.73,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "8e:83:e8:a6:03:20",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_a6:03:20_STA_02",
+      "display_name": "Associated Station #2 on [IdoomFibre_ATbxfFM8e]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "8e:83:e8:a6:03:20",
+      "carrier_freq_hz": 2427000000.0,
+      "band": "2.4 GHz",
+      "estimated_rssi_dbm": -95.23,
+      "transitive_path_loss_db": 115.23,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "8e:83:e8:a6:03:20",
+        "station_index": 2
+      }
+    },
+    {
+      "node_id": "CLIENT_a6:03:20_STA_03",
+      "display_name": "Associated Station #3 on [IdoomFibre_ATbxfFM8e]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "8e:83:e8:a6:03:20",
+      "carrier_freq_hz": 2427000000.0,
+      "band": "2.4 GHz",
+      "estimated_rssi_dbm": -98.73,
+      "transitive_path_loss_db": 118.73,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "8e:83:e8:a6:03:20",
+        "station_index": 3
+      }
+    },
+    {
+      "node_id": "CLIENT_E\\DEV_E5_STA_01",
+      "display_name": "Associated Station #1 on [KB830WB-MS]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_KB830WB-MS_BTHLE\\DEV_E5",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -70.5,
+      "transitive_path_loss_db": 90.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "BT_KB830WB-MS_BTHLE\\DEV_E5",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "PICONET_BT_KB830WB-MS__SYNC",
+      "display_name": "Piconet Sync Sub-node via [KB830WB-MS]",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_KB830WB-MS_BTHLE\\DEV_E5",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "BLE_PICONET_SCATTERNET_JUMP",
+      "metadata": {
+        "piconet_master": "BT_KB830WB-MS_BTHLE\\DEV_E5"
+      }
+    },
+    {
+      "node_id": "CLIENT_eneric A_STA_01",
+      "display_name": "Associated Station #1 on [Bluetooth]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_Bluetooth_LE Generic A",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -76.5,
+      "transitive_path_loss_db": 96.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "BT_Bluetooth_LE Generic A",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_NUM\\DEV__STA_01",
+      "display_name": "Associated Station #1 on [Samir]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_Samir_BTHENUM\\DEV_",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -70.5,
+      "transitive_path_loss_db": 90.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "BT_Samir_BTHENUM\\DEV_",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "PICONET_BT_Samir_BTHEN_SYNC",
+      "display_name": "Piconet Sync Sub-node via [Samir]",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_Samir_BTHENUM\\DEV_",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "BLE_PICONET_SCATTERNET_JUMP",
+      "metadata": {
+        "piconet_master": "BT_Samir_BTHENUM\\DEV_"
+      }
+    },
+    {
+      "node_id": "CLIENT_        _STA_01",
+      "display_name": "Associated Station #1 on [HOCO]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_HOCO_EQ1         ",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -76.5,
+      "transitive_path_loss_db": 96.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "BT_HOCO_EQ1         ",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_ibute Pr_STA_01",
+      "display_name": "Associated Station #1 on [Generic]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_Generic_Attribute Pr",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -76.5,
+      "transitive_path_loss_db": 96.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "BT_Generic_Attribute Pr",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_E\\DEV_D8_STA_01",
+      "display_name": "Associated Station #1 on [Samir]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_Samir_BTHLE\\DEV_D8",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -70.5,
+      "transitive_path_loss_db": 90.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "BT_Samir_BTHLE\\DEV_D8",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "PICONET_BT_Samir_BTHLE_SYNC",
+      "display_name": "Piconet Sync Sub-node via [Samir]",
+      "radio_family": "BLE_COEXISTENCE",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_Samir_BTHLE\\DEV_D8",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -68.0,
+      "transitive_path_loss_db": 88.0,
+      "discovery_vector": "BLE_PICONET_SCATTERNET_JUMP",
+      "metadata": {
+        "piconet_master": "BT_Samir_BTHLE\\DEV_D8"
+      }
+    },
+    {
+      "node_id": "CLIENT_ss Profi_STA_01",
+      "display_name": "Associated Station #1 on [Generic]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_Generic_Access Profi",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -76.5,
+      "transitive_path_loss_db": 96.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "BT_Generic_Access Profi",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_rmation _STA_01",
+      "display_name": "Associated Station #1 on [Device]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_Device_Information ",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -76.5,
+      "transitive_path_loss_db": 96.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "BT_Device_Information ",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_tooth LE_STA_01",
+      "display_name": "Associated Station #1 on [Microsoft]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "BT_Microsoft_Bluetooth LE",
+      "carrier_freq_hz": 2402000000.0,
+      "band": "2.4 GHz ISM",
+      "estimated_rssi_dbm": -76.5,
+      "transitive_path_loss_db": 96.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "BT_Microsoft_Bluetooth LE",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_AS327931_STA_01",
+      "display_name": "Associated Station #1 on [Optimum Telecom Algeria (Djezzy) (IP: 129.45.69.15)]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "CELLULAR_LTE_DJEZZY_AS327931",
+      "carrier_freq_hz": 1805000000.0,
+      "band": "LTE Band 3 / Band 20 Carrier Aggregation",
+      "estimated_rssi_dbm": -88.0,
+      "transitive_path_loss_db": 108.0,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "CELLULAR_LTE_DJEZZY_AS327931",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CELL_NCELL_PCI_104",
+      "display_name": "Djezzy NCell Macro Sector-B (PCI 104)",
+      "radio_family": "CELLULAR_LTE_CRS",
+      "hop_distance": 1,
+      "parent_relay_id": "CELLULAR_LTE_DJEZZY_AS327931",
+      "carrier_freq_hz": 806000000.0,
+      "band": "LTE B20 (800 MHz)",
+      "estimated_rssi_dbm": -88.0,
+      "transitive_path_loss_db": 108.0,
+      "discovery_vector": "CELLULAR_ANR_NCELL_RELATION_JUMP",
+      "metadata": {
+        "serving_cell": "CELLULAR_LTE_DJEZZY_AS327931",
+        "pci": 104
+      }
+    },
+    {
+      "node_id": "CELL_NCELL_PCI_105",
+      "display_name": "Djezzy NCell Macro Sector-C (PCI 105)",
+      "radio_family": "CELLULAR_LTE_CRS",
+      "hop_distance": 1,
+      "parent_relay_id": "CELLULAR_LTE_DJEZZY_AS327931",
+      "carrier_freq_hz": 2140000000.0,
+      "band": "LTE B1 (2100 MHz)",
+      "estimated_rssi_dbm": -88.0,
+      "transitive_path_loss_db": 108.0,
+      "discovery_vector": "CELLULAR_ANR_NCELL_RELATION_JUMP",
+      "metadata": {
+        "serving_cell": "CELLULAR_LTE_DJEZZY_AS327931",
+        "pci": 105
+      }
+    },
+    {
+      "node_id": "CLIENT_0b-74-f1_STA_01",
+      "display_name": "Associated Station #1 on [Host (192.168.139.51)]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "SUBNET_NODE_7e-58-4e-0b-74-f1",
+      "carrier_freq_hz": 2450000000.0,
+      "band": "Local Radio Subnet",
+      "estimated_rssi_dbm": -63.5,
+      "transitive_path_loss_db": 83.5,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "SUBNET_NODE_7e-58-4e-0b-74-f1",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_89:f3:6c_STA_01",
+      "display_name": "Associated Station #1 on [IdoomFibre_ATfm3tWDf]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "62:3d:29:89:f3:6c",
+      "carrier_freq_hz": 5200000000.0,
+      "band": "5 GHz",
+      "estimated_rssi_dbm": -99.37,
+      "transitive_path_loss_db": 119.37,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "62:3d:29:89:f3:6c",
+        "station_index": 1
+      }
+    },
+    {
+      "node_id": "CLIENT_89:f3:6c_STA_02",
+      "display_name": "Associated Station #2 on [IdoomFibre_ATfm3tWDf]",
+      "radio_family": "WIFI_CSI",
+      "hop_distance": 1,
+      "parent_relay_id": "62:3d:29:89:f3:6c",
+      "carrier_freq_hz": 5200000000.0,
+      "band": "5 GHz",
+      "estimated_rssi_dbm": -102.87,
+      "transitive_path_loss_db": 122.87,
+      "discovery_vector": "BSS_ASSOCIATED_STATION_JUMP",
+      "metadata": {
+        "associated_ap": "62:3d:29:89:f3:6c",
+        "station_index": 2
+      }
+    },
+    {
+      "node_id": "CORE_MME_SGW_CI_104",
+      "display_name": "Djezzy Regional eNodeB Core Hub & Backhaul",
+      "radio_family": "ORAN_OPERATOR",
+      "hop_distance": 2,
+      "parent_relay_id": "CELL_NCELL_PCI_104",
+      "carrier_freq_hz": 1800000000.0,
+      "band": "Microwave Backhaul",
+      "estimated_rssi_dbm": -100.0,
+      "transitive_path_loss_db": 123.0,
+      "discovery_vector": "EXTENDED_OPERATOR_BACKHAUL_JUMP",
+      "metadata": {
+        "relay_ncell": "CELL_NCELL_PCI_104"
+      }
+    },
+    {
+      "node_id": "CORE_MME_SGW_CI_105",
+      "display_name": "Djezzy Regional eNodeB Core Hub & Backhaul",
+      "radio_family": "ORAN_OPERATOR",
+      "hop_distance": 2,
+      "parent_relay_id": "CELL_NCELL_PCI_105",
+      "carrier_freq_hz": 1800000000.0,
+      "band": "Microwave Backhaul",
+      "estimated_rssi_dbm": -100.0,
+      "transitive_path_loss_db": 123.0,
+      "discovery_vector": "EXTENDED_OPERATOR_BACKHAUL_JUMP",
+      "metadata": {
+        "relay_ncell": "CELL_NCELL_PCI_105"
+      }
+    }
+  ],
+  "dielectric_grid_map": {
+    "PLOT_USER_100M_MZ_0_0": {
+      "grid_x": 0,
+      "grid_y": 0,
+      "centre_x_m": 5.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_0_1": {
+      "grid_x": 0,
+      "grid_y": 1,
+      "centre_x_m": 5.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_0_2": {
+      "grid_x": 0,
+      "grid_y": 2,
+      "centre_x_m": 5.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_0_3": {
+      "grid_x": 0,
+      "grid_y": 3,
+      "centre_x_m": 5.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_0_4": {
+      "grid_x": 0,
+      "grid_y": 4,
+      "centre_x_m": 5.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_0_5": {
+      "grid_x": 0,
+      "grid_y": 5,
+      "centre_x_m": 5.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_0_6": {
+      "grid_x": 0,
+      "grid_y": 6,
+      "centre_x_m": 5.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_0_7": {
+      "grid_x": 0,
+      "grid_y": 7,
+      "centre_x_m": 5.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_0_8": {
+      "grid_x": 0,
+      "grid_y": 8,
+      "centre_x_m": 5.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_0_9": {
+      "grid_x": 0,
+      "grid_y": 9,
+      "centre_x_m": 5.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_1_0": {
+      "grid_x": 1,
+      "grid_y": 0,
+      "centre_x_m": 15.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_1_1": {
+      "grid_x": 1,
+      "grid_y": 1,
+      "centre_x_m": 15.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_1_2": {
+      "grid_x": 1,
+      "grid_y": 2,
+      "centre_x_m": 15.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_1_3": {
+      "grid_x": 1,
+      "grid_y": 3,
+      "centre_x_m": 15.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_1_4": {
+      "grid_x": 1,
+      "grid_y": 4,
+      "centre_x_m": 15.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_1_5": {
+      "grid_x": 1,
+      "grid_y": 5,
+      "centre_x_m": 15.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_1_6": {
+      "grid_x": 1,
+      "grid_y": 6,
+      "centre_x_m": 15.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_1_7": {
+      "grid_x": 1,
+      "grid_y": 7,
+      "centre_x_m": 15.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 7.456,
+      "equivalent_vwc_pct": 13.59,
+      "doppler_variance_db2": 1.035,
+      "intersecting_links": 1,
+      "material_classification": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    "PLOT_USER_100M_MZ_1_8": {
+      "grid_x": 1,
+      "grid_y": 8,
+      "centre_x_m": 15.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_1_9": {
+      "grid_x": 1,
+      "grid_y": 9,
+      "centre_x_m": 15.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_2_0": {
+      "grid_x": 2,
+      "grid_y": 0,
+      "centre_x_m": 25.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_2_1": {
+      "grid_x": 2,
+      "grid_y": 1,
+      "centre_x_m": 25.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_2_2": {
+      "grid_x": 2,
+      "grid_y": 2,
+      "centre_x_m": 25.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_2_3": {
+      "grid_x": 2,
+      "grid_y": 3,
+      "centre_x_m": 25.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_2_4": {
+      "grid_x": 2,
+      "grid_y": 4,
+      "centre_x_m": 25.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_2_5": {
+      "grid_x": 2,
+      "grid_y": 5,
+      "centre_x_m": 25.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_2_6": {
+      "grid_x": 2,
+      "grid_y": 6,
+      "centre_x_m": 25.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 4.523,
+      "equivalent_vwc_pct": 6.82,
+      "doppler_variance_db2": 0.484,
+      "intersecting_links": 1,
+      "material_classification": "Class B: Dense Mineral / Structural Partition (Reinforced Concrete / Tile)"
+    },
+    "PLOT_USER_100M_MZ_2_7": {
+      "grid_x": 2,
+      "grid_y": 7,
+      "centre_x_m": 25.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_2_8": {
+      "grid_x": 2,
+      "grid_y": 8,
+      "centre_x_m": 25.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_2_9": {
+      "grid_x": 2,
+      "grid_y": 9,
+      "centre_x_m": 25.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_0": {
+      "grid_x": 3,
+      "grid_y": 0,
+      "centre_x_m": 35.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_1": {
+      "grid_x": 3,
+      "grid_y": 1,
+      "centre_x_m": 35.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_2": {
+      "grid_x": 3,
+      "grid_y": 2,
+      "centre_x_m": 35.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_3": {
+      "grid_x": 3,
+      "grid_y": 3,
+      "centre_x_m": 35.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_4": {
+      "grid_x": 3,
+      "grid_y": 4,
+      "centre_x_m": 35.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_5": {
+      "grid_x": 3,
+      "grid_y": 5,
+      "centre_x_m": 35.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_6": {
+      "grid_x": 3,
+      "grid_y": 6,
+      "centre_x_m": 35.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_7": {
+      "grid_x": 3,
+      "grid_y": 7,
+      "centre_x_m": 35.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_8": {
+      "grid_x": 3,
+      "grid_y": 8,
+      "centre_x_m": 35.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_3_9": {
+      "grid_x": 3,
+      "grid_y": 9,
+      "centre_x_m": 35.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_4_0": {
+      "grid_x": 4,
+      "grid_y": 0,
+      "centre_x_m": 45.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_4_1": {
+      "grid_x": 4,
+      "grid_y": 1,
+      "centre_x_m": 45.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_4_2": {
+      "grid_x": 4,
+      "grid_y": 2,
+      "centre_x_m": 45.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_4_3": {
+      "grid_x": 4,
+      "grid_y": 3,
+      "centre_x_m": 45.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_4_4": {
+      "grid_x": 4,
+      "grid_y": 4,
+      "centre_x_m": 45.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_4_5": {
+      "grid_x": 4,
+      "grid_y": 5,
+      "centre_x_m": 45.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 9.107,
+      "equivalent_vwc_pct": 17.06,
+      "doppler_variance_db2": 0.734,
+      "intersecting_links": 3,
+      "material_classification": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    "PLOT_USER_100M_MZ_4_6": {
+      "grid_x": 4,
+      "grid_y": 6,
+      "centre_x_m": 45.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_4_7": {
+      "grid_x": 4,
+      "grid_y": 7,
+      "centre_x_m": 45.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_4_8": {
+      "grid_x": 4,
+      "grid_y": 8,
+      "centre_x_m": 45.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_4_9": {
+      "grid_x": 4,
+      "grid_y": 9,
+      "centre_x_m": 45.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_5_0": {
+      "grid_x": 5,
+      "grid_y": 0,
+      "centre_x_m": 55.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_5_1": {
+      "grid_x": 5,
+      "grid_y": 1,
+      "centre_x_m": 55.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_5_2": {
+      "grid_x": 5,
+      "grid_y": 2,
+      "centre_x_m": 55.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_5_3": {
+      "grid_x": 5,
+      "grid_y": 3,
+      "centre_x_m": 55.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_5_4": {
+      "grid_x": 5,
+      "grid_y": 4,
+      "centre_x_m": 55.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 11.816,
+      "equivalent_vwc_pct": 22.23,
+      "doppler_variance_db2": 39.243,
+      "intersecting_links": 2,
+      "material_classification": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    "PLOT_USER_100M_MZ_5_5": {
+      "grid_x": 5,
+      "grid_y": 5,
+      "centre_x_m": 55.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 12.335,
+      "equivalent_vwc_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "intersecting_links": 1,
+      "material_classification": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    "PLOT_USER_100M_MZ_5_6": {
+      "grid_x": 5,
+      "grid_y": 6,
+      "centre_x_m": 55.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_5_7": {
+      "grid_x": 5,
+      "grid_y": 7,
+      "centre_x_m": 55.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_5_8": {
+      "grid_x": 5,
+      "grid_y": 8,
+      "centre_x_m": 55.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_5_9": {
+      "grid_x": 5,
+      "grid_y": 9,
+      "centre_x_m": 55.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_6_0": {
+      "grid_x": 6,
+      "grid_y": 0,
+      "centre_x_m": 65.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_6_1": {
+      "grid_x": 6,
+      "grid_y": 1,
+      "centre_x_m": 65.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_6_2": {
+      "grid_x": 6,
+      "grid_y": 2,
+      "centre_x_m": 65.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_6_3": {
+      "grid_x": 6,
+      "grid_y": 3,
+      "centre_x_m": 65.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 6.206,
+      "equivalent_vwc_pct": 10.81,
+      "doppler_variance_db2": 9.877,
+      "intersecting_links": 2,
+      "material_classification": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    "PLOT_USER_100M_MZ_6_4": {
+      "grid_x": 6,
+      "grid_y": 4,
+      "centre_x_m": 65.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_6_5": {
+      "grid_x": 6,
+      "grid_y": 5,
+      "centre_x_m": 65.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_6_6": {
+      "grid_x": 6,
+      "grid_y": 6,
+      "centre_x_m": 65.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 12.335,
+      "equivalent_vwc_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "intersecting_links": 1,
+      "material_classification": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    "PLOT_USER_100M_MZ_6_7": {
+      "grid_x": 6,
+      "grid_y": 7,
+      "centre_x_m": 65.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_6_8": {
+      "grid_x": 6,
+      "grid_y": 8,
+      "centre_x_m": 65.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_6_9": {
+      "grid_x": 6,
+      "grid_y": 9,
+      "centre_x_m": 65.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_7_0": {
+      "grid_x": 7,
+      "grid_y": 0,
+      "centre_x_m": 75.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_7_1": {
+      "grid_x": 7,
+      "grid_y": 1,
+      "centre_x_m": 75.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_7_2": {
+      "grid_x": 7,
+      "grid_y": 2,
+      "centre_x_m": 75.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 2.894,
+      "equivalent_vwc_pct": 2.7,
+      "doppler_variance_db2": 0.435,
+      "intersecting_links": 1,
+      "material_classification": "Class C: Solid Dry Material (Plasterboard, Wood Desk, Furniture, Glass)"
+    },
+    "PLOT_USER_100M_MZ_7_3": {
+      "grid_x": 7,
+      "grid_y": 3,
+      "centre_x_m": 75.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_7_4": {
+      "grid_x": 7,
+      "grid_y": 4,
+      "centre_x_m": 75.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_7_5": {
+      "grid_x": 7,
+      "grid_y": 5,
+      "centre_x_m": 75.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_7_6": {
+      "grid_x": 7,
+      "grid_y": 6,
+      "centre_x_m": 75.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 5.345,
+      "equivalent_vwc_pct": 8.8,
+      "doppler_variance_db2": 1.396,
+      "intersecting_links": 1,
+      "material_classification": "Class B: Dense Mineral / Structural Partition (Reinforced Concrete / Tile)"
+    },
+    "PLOT_USER_100M_MZ_7_7": {
+      "grid_x": 7,
+      "grid_y": 7,
+      "centre_x_m": 75.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 12.335,
+      "equivalent_vwc_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "intersecting_links": 1,
+      "material_classification": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    "PLOT_USER_100M_MZ_7_8": {
+      "grid_x": 7,
+      "grid_y": 8,
+      "centre_x_m": 75.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_7_9": {
+      "grid_x": 7,
+      "grid_y": 9,
+      "centre_x_m": 75.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_8_0": {
+      "grid_x": 8,
+      "grid_y": 0,
+      "centre_x_m": 85.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_8_1": {
+      "grid_x": 8,
+      "grid_y": 1,
+      "centre_x_m": 85.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_8_2": {
+      "grid_x": 8,
+      "grid_y": 2,
+      "centre_x_m": 85.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_8_3": {
+      "grid_x": 8,
+      "grid_y": 3,
+      "centre_x_m": 85.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_8_4": {
+      "grid_x": 8,
+      "grid_y": 4,
+      "centre_x_m": 85.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_8_5": {
+      "grid_x": 8,
+      "grid_y": 5,
+      "centre_x_m": 85.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_8_6": {
+      "grid_x": 8,
+      "grid_y": 6,
+      "centre_x_m": 85.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_8_7": {
+      "grid_x": 8,
+      "grid_y": 7,
+      "centre_x_m": 85.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_8_8": {
+      "grid_x": 8,
+      "grid_y": 8,
+      "centre_x_m": 85.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 12.335,
+      "equivalent_vwc_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "intersecting_links": 1,
+      "material_classification": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    "PLOT_USER_100M_MZ_8_9": {
+      "grid_x": 8,
+      "grid_y": 9,
+      "centre_x_m": 85.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_0": {
+      "grid_x": 9,
+      "grid_y": 0,
+      "centre_x_m": 95.0,
+      "centre_y_m": 5.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_1": {
+      "grid_x": 9,
+      "grid_y": 1,
+      "centre_x_m": 95.0,
+      "centre_y_m": 15.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_2": {
+      "grid_x": 9,
+      "grid_y": 2,
+      "centre_x_m": 95.0,
+      "centre_y_m": 25.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_3": {
+      "grid_x": 9,
+      "grid_y": 3,
+      "centre_x_m": 95.0,
+      "centre_y_m": 35.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_4": {
+      "grid_x": 9,
+      "grid_y": 4,
+      "centre_x_m": 95.0,
+      "centre_y_m": 45.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_5": {
+      "grid_x": 9,
+      "grid_y": 5,
+      "centre_x_m": 95.0,
+      "centre_y_m": 55.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_6": {
+      "grid_x": 9,
+      "grid_y": 6,
+      "centre_x_m": 95.0,
+      "centre_y_m": 65.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_7": {
+      "grid_x": 9,
+      "grid_y": 7,
+      "centre_x_m": 95.0,
+      "centre_y_m": 75.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_8": {
+      "grid_x": 9,
+      "grid_y": 8,
+      "centre_x_m": 95.0,
+      "centre_y_m": 85.0,
+      "inferred_eps_r": 1.95,
+      "equivalent_vwc_pct": 0.19,
+      "doppler_variance_db2": 0.0,
+      "intersecting_links": 0,
+      "material_classification": "Class D: Ambient Dry Air / Open Corridor"
+    },
+    "PLOT_USER_100M_MZ_9_9": {
+      "grid_x": 9,
+      "grid_y": 9,
+      "centre_x_m": 95.0,
+      "centre_y_m": 95.0,
+      "inferred_eps_r": 12.335,
+      "equivalent_vwc_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "intersecting_links": 1,
+      "material_classification": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    }
+  },
+  "discovered_dielectric_objects": [
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_1_7",
+      "grid_coord": "(1,7)",
+      "center_pos_m": "(15m, 75m)",
+      "permittivity_eps_r": 7.456,
+      "volumetric_water_pct": 13.59,
+      "doppler_variance_db2": 1.035,
+      "object_type": "Water-Rich Organic Body / Active Human Presence",
+      "material_class": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_2_6",
+      "grid_coord": "(2,6)",
+      "center_pos_m": "(25m, 65m)",
+      "permittivity_eps_r": 4.523,
+      "volumetric_water_pct": 6.82,
+      "doppler_variance_db2": 0.484,
+      "object_type": "Solid Structural Wall / Load-Bearing Boundary",
+      "material_class": "Class B: Dense Mineral / Structural Partition (Reinforced Concrete / Tile)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_4_5",
+      "grid_coord": "(4,5)",
+      "center_pos_m": "(45m, 55m)",
+      "permittivity_eps_r": 9.107,
+      "volumetric_water_pct": 17.06,
+      "doppler_variance_db2": 0.734,
+      "object_type": "Water-Rich Organic Body / Active Human Presence",
+      "material_class": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_5_4",
+      "grid_coord": "(5,4)",
+      "center_pos_m": "(55m, 45m)",
+      "permittivity_eps_r": 11.816,
+      "volumetric_water_pct": 22.23,
+      "doppler_variance_db2": 39.243,
+      "object_type": "Water-Rich Organic Body / Active Human Presence",
+      "material_class": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_5_5",
+      "grid_coord": "(5,5)",
+      "center_pos_m": "(55m, 55m)",
+      "permittivity_eps_r": 12.335,
+      "volumetric_water_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "object_type": "Water-Rich Organic Body / Active Human Presence",
+      "material_class": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_6_3",
+      "grid_coord": "(6,3)",
+      "center_pos_m": "(65m, 35m)",
+      "permittivity_eps_r": 6.206,
+      "volumetric_water_pct": 10.81,
+      "doppler_variance_db2": 9.877,
+      "object_type": "Water-Rich Organic Body / Active Human Presence",
+      "material_class": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_6_6",
+      "grid_coord": "(6,6)",
+      "center_pos_m": "(65m, 65m)",
+      "permittivity_eps_r": 12.335,
+      "volumetric_water_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "object_type": "Water-Rich Organic Body / Active Human Presence",
+      "material_class": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_7_2",
+      "grid_coord": "(7,2)",
+      "center_pos_m": "(75m, 25m)",
+      "permittivity_eps_r": 2.894,
+      "volumetric_water_pct": 2.7,
+      "doppler_variance_db2": 0.435,
+      "object_type": "Interior Partition / Dry Furniture",
+      "material_class": "Class C: Solid Dry Material (Plasterboard, Wood Desk, Furniture, Glass)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_7_6",
+      "grid_coord": "(7,6)",
+      "center_pos_m": "(75m, 65m)",
+      "permittivity_eps_r": 5.345,
+      "volumetric_water_pct": 8.8,
+      "doppler_variance_db2": 1.396,
+      "object_type": "Solid Structural Wall / Load-Bearing Boundary",
+      "material_class": "Class B: Dense Mineral / Structural Partition (Reinforced Concrete / Tile)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_7_7",
+      "grid_coord": "(7,7)",
+      "center_pos_m": "(75m, 75m)",
+      "permittivity_eps_r": 12.335,
+      "volumetric_water_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "object_type": "Water-Rich Organic Body / Active Human Presence",
+      "material_class": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_8_8",
+      "grid_coord": "(8,8)",
+      "center_pos_m": "(85m, 85m)",
+      "permittivity_eps_r": 12.335,
+      "volumetric_water_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "object_type": "Water-Rich Organic Body / Active Human Presence",
+      "material_class": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    },
+    {
+      "microzone_id": "PLOT_USER_100M_MZ_9_9",
+      "grid_coord": "(9,9)",
+      "center_pos_m": "(95m, 95m)",
+      "permittivity_eps_r": 12.335,
+      "volumetric_water_pct": 23.16,
+      "doppler_variance_db2": 0.505,
+      "object_type": "Water-Rich Organic Body / Active Human Presence",
+      "material_class": "Class A: High-Dielectric / Water-Rich Body (Human Body / Organic Mass)"
+    }
+  ],
+  "timeline": [
+    {
+      "pass": 1,
+      "timestamp": "2026-08-31T16:57:33.777012+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 11,
+      "timestamp": "2026-08-31T16:58:00.380945+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 21,
+      "timestamp": "2026-08-31T16:58:22.175984+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 31,
+      "timestamp": "2026-08-31T16:58:43.872258+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 41,
+      "timestamp": "2026-08-31T16:59:05.613802+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 51,
+      "timestamp": "2026-08-31T16:59:31.694362+00:00",
+      "detected_emissions": 0
+    },
+    {
+      "pass": 61,
+      "timestamp": "2026-08-31T16:59:53.781997+00:00",
+      "detected_emissions": 0
+    },
+    {
+      "pass": 71,
+      "timestamp": "2026-08-31T17:00:12.750482+00:00",
+      "detected_emissions": 0
+    },
+    {
+      "pass": 81,
+      "timestamp": "2026-08-31T17:00:32.045601+00:00",
+      "detected_emissions": 0
+    },
+    {
+      "pass": 91,
+      "timestamp": "2026-08-31T17:00:54.484765+00:00",
+      "detected_emissions": 0
+    },
+    {
+      "pass": 101,
+      "timestamp": "2026-08-31T17:01:13.503816+00:00",
+      "detected_emissions": 0
+    },
+    {
+      "pass": 111,
+      "timestamp": "2026-08-31T17:01:32.744657+00:00",
+      "detected_emissions": 2
+    },
+    {
+      "pass": 121,
+      "timestamp": "2026-08-31T17:01:52.188723+00:00",
+      "detected_emissions": 2
+    },
+    {
+      "pass": 131,
+      "timestamp": "2026-08-31T17:02:14.913303+00:00",
+      "detected_emissions": 2
+    },
+    {
+      "pass": 141,
+      "timestamp": "2026-08-31T17:02:34.535823+00:00",
+      "detected_emissions": 5
+    },
+    {
+      "pass": 151,
+      "timestamp": "2026-08-31T17:02:53.863311+00:00",
+      "detected_emissions": 5
+    },
+    {
+      "pass": 161,
+      "timestamp": "2026-08-31T17:03:13.340492+00:00",
+      "detected_emissions": 5
+    },
+    {
+      "pass": 171,
+      "timestamp": "2026-08-31T17:03:35.663444+00:00",
+      "detected_emissions": 5
+    },
+    {
+      "pass": 181,
+      "timestamp": "2026-08-31T17:03:54.871708+00:00",
+      "detected_emissions": 5
+    },
+    {
+      "pass": 191,
+      "timestamp": "2026-08-31T17:04:14.260460+00:00",
+      "detected_emissions": 5
+    },
+    {
+      "pass": 201,
+      "timestamp": "2026-08-31T17:04:33.448348+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 211,
+      "timestamp": "2026-08-31T17:04:56.428806+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 221,
+      "timestamp": "2026-08-31T17:05:15.775842+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 231,
+      "timestamp": "2026-08-31T17:05:35.051361+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 241,
+      "timestamp": "2026-08-31T17:05:54.285570+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 251,
+      "timestamp": "2026-08-31T17:06:16.390981+00:00",
+      "detected_emissions": 4
+    },
+    {
+      "pass": 261,
+      "timestamp": "2026-08-31T17:06:35.414608+00:00",
+      "detected_emissions": 5
+    },
+    {
+      "pass": 271,
+      "timestamp": "2026-08-31T17:06:54.379089+00:00",
+      "detected_emissions": 5
+    },
+    {
+      "pass": 281,
+      "timestamp": "2026-08-31T17:07:13.367172+00:00",
+      "detected_emissions": 5
+    }
+  ]
+}

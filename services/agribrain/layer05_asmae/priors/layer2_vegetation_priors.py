@@ -16,6 +16,7 @@ from typing import Any, Dict, Optional
 def extract_layer2_priors(
     coarse_outputs: dict,
     crop_context: dict,
+    phenology_posterior: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Extract vegetation priors from Layer 2 outputs.
 
@@ -24,9 +25,35 @@ def extract_layer2_priors(
     l2 = coarse_outputs.get("layer2_intelligence", {})
     available = bool(l2) and l2.get("status") in ("available", "partial")
 
-    # Extract phenology stage
-    phenology_stage = l2.get("phenology_stage", "unknown")
-    growth_position = l2.get("growth_position")
+    # Only the canonical Layer 2A posterior may condition biological stage.
+    # The coarse NDVI trajectory is retained as descriptive evidence but is
+    # never promoted to phenology authority.
+    canonical = (
+        dict(phenology_posterior)
+        if isinstance(phenology_posterior, dict) else {}
+    )
+    phenology_stage = str(
+        canonical.get("current_stage")
+        or canonical.get("most_likely_stage")
+        or "UNKNOWN"
+    ).upper()
+    authority = str(
+        canonical.get("stage_authority")
+        or canonical.get("authority")
+        or "unavailable"
+    ).lower()
+    season_progress = canonical.get("season_progress")
+    growth_position = (
+        season_progress.get("mean")
+        if isinstance(season_progress, dict) else None
+    )
+    canonical_usable = bool(
+        phenology_stage != "UNKNOWN"
+        and authority in {"diagnostic", "calibrated"}
+        and isinstance(growth_position, (int, float))
+        and not isinstance(growth_position, bool)
+        and 0.0 <= float(growth_position) <= 1.0
+    )
     crop_type = (
         crop_context.get("crop")
         or crop_context.get("crop_type")
@@ -45,7 +72,7 @@ def extract_layer2_priors(
     )
 
     # Stage-specific noise modifiers
-    stage_noise = _stage_noise_modifiers(phenology_stage)
+    stage_noise = _stage_noise_modifiers(phenology_stage.lower())
 
     prior = {
         "source_layer": "layer2_intelligence",
@@ -53,12 +80,20 @@ def extract_layer2_priors(
         "source_timestamp": l2.get("timestamp", ""),
         "valid_time_window": l2.get("valid_window", ""),
         "uses_future_holdout": False,
-        "status": "available" if available else "degraded",
+        "status": "available" if canonical_usable else "degraded",
         "confidence": crop_confidence,
-        "usable_as_prior": available,
-        "reason": "" if available else l2.get("reason", "missing_layer2_output"),
+        "usable_as_prior": canonical_usable,
+        "reason": (
+            "" if canonical_usable
+            else "canonical_phenology_unavailable_or_unpositioned"
+        ),
         "phenology_stage": phenology_stage,
         "growth_position": growth_position,
+        "phenology_authority": authority,
+        "phenology_posterior_hash": canonical.get("content_hash"),
+        "ndvi_trajectory_phase": l2.get("ndvi_trajectory_phase"),
+        "ndvi_trajectory_position": l2.get("ndvi_trajectory_position"),
+        "ndvi_trajectory_used_as_phenology": False,
         "crop_type": crop_type,
         "crop_group_posterior": crop_group_posterior,
         "crop_mixture_used": bool(crop_group_posterior),
@@ -68,9 +103,9 @@ def extract_layer2_priors(
     }
 
     if not available:
-        prior["status"] = "degraded"
-        prior["usable_as_prior"] = False
-        prior["reason"] = "missing_layer2_output"
+        prior["coarse_trajectory_status"] = "missing"
+    else:
+        prior["coarse_trajectory_status"] = "descriptive_only"
 
     return prior
 

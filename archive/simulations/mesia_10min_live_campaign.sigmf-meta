@@ -1,0 +1,259 @@
+{
+  "global": {
+    "core:datatype": "cf32_le",
+    "core:sample_rate": 160000000.0,
+    "core:version": "1.0.0",
+    "core:description": "MESIA R6 Master 10-Minute Live Campaign",
+    "core:author": "MESIA Observatory",
+    "core:sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "core:hw": "Qualcomm FastConnect 6900 Wi-Fi 6E",
+    "mesia-calibration:version": "0.1.0",
+    "mesia-calibration:receiver_id": "rx-qualcomm-fastconnect-6900",
+    "mesia-calibration:instrument_epoch_id": "epoch-inst-qualcomm-live",
+    "mesia-calibration:geometry_epoch_id": "epoch-geom-user-100m",
+    "mesia-calibration:calibration_state_id": "cal-qualcomm-bench-01"
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T16:57:33.777012+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 20000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T16:58:00.380945+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 40000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T16:58:22.175984+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 60000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T16:58:43.872258+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 80000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T16:59:05.613802+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 100000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T16:59:31.694362+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 120000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T16:59:53.781997+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 140000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:00:12.750482+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 160000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:00:32.045601+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 180000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:00:54.484765+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 200000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:01:13.503816+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 220000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:01:32.744657+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 240000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:01:52.188723+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 260000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:02:14.913303+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 280000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:02:34.535823+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 300000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:02:53.863311+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 320000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:03:13.340492+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 340000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:03:35.663444+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 360000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:03:54.871708+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 380000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:04:14.260460+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 400000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:04:33.448348+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 420000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:04:56.428806+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 440000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:05:15.775842+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 460000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:05:35.051361+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    },
+    {
+      "core:sample_start": 480000000,
+      "core:frequency": 2440000000.0,
+      "core:datetime": "2026-08-31T17:05:54.285570+00:00",
+      "mesia-calibration:clock_source": "GPSDO_DISCIPLINED",
+      "mesia-calibration:clock_uncertainty_ppb": 1.8,
+      "mesia-calibration:gain_db": 24.0,
+      "mesia-calibration:temperature_celsius": 39.1
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 2000000,
+      "core:label": "WIFI_6E_CSI",
+      "mesia-calibration:identity_state": "PROTOCOL_CONFIRMED",
+      "mesia-calibration:detector_type": "CA_CFAR"
+    },
+    {
+      "core:sample_start": 2000000,
+      "core:sample_count": 2000000,
+      "core:label": "BLE_COEXISTENCE",
+      "mesia-calibration:identity_state": "PROTOCOL_CONFIRMED",
+      "mesia-calibration:detector_type": "SPECTRAL_KURTOSIS"
+    }
+  ]
+}

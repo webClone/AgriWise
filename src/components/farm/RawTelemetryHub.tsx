@@ -51,7 +51,7 @@ export default function RawTelemetryHub({ plotId, farmId }: RawTelemetryHubProps
     Object.keys(weatherRaw).length > 0 && "OpenMeteo",
     Object.keys(s2Raw).length > 0 && "Sentinel-2",
     Object.keys(s1Raw).length > 0 && "Sentinel-1",
-    Object.keys(soilRaw).length > 0 && "SoilGrids",
+    Object.keys(soilRaw).length > 0 && "Regional Soil Survey",
     Object.keys(waterRaw).length > 0 && "Water-Balance",
     Object.keys(forecastRaw).length > 0 && "Forecast",
     (data.sensorContext?.count ?? 0) > 0 && "Field Sensors",
@@ -65,7 +65,7 @@ export default function RawTelemetryHub({ plotId, farmId }: RawTelemetryHubProps
 
   const tabs = [
     { id: "weather",  label: "Meteorological",           icon: "🌤️", count: Object.keys(weatherRaw).length },
-    { id: "soil",     label: "Soil (ISRIC/SoilGrids)",   icon: "🌱", count: Object.keys(soilRaw).length },
+    { id: "soil",     label: "Soil Properties & Texture",icon: "🌱", count: Object.keys(soilRaw).length },
     { id: "eo",       label: "Earth Observation",        icon: "🛰️", count: Object.keys(s2Raw).length + Object.keys(s1Raw).length },
     { id: "water",    label: "Water Balance",            icon: "💧", count: Object.keys(waterRaw).length },
     { id: "phenology",label: "Phenology",                icon: "🌾", count: canonicalPhenology.receiptValid ? 1 : 0 },
@@ -190,17 +190,17 @@ export default function RawTelemetryHub({ plotId, farmId }: RawTelemetryHubProps
           {/* ─── SOIL ─── */}
           {activeTab === "soil" && (
             <div className="space-y-6 animate-fade-in">
-              <SectionHeader title="Soil Properties" badge="ISRIC SoilGrids v2.0" />
+              <SectionHeader title="Soil Properties" badge="Regional Soil Survey" />
               <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
-                <DataCard label="pH (H₂O)" value={renderValue(soilRaw.ph)} source="ISRIC SoilGrids" />
-                <DataCard label="Texture Class" value={renderValue(soilRaw.texture_class)} source="ISRIC SoilGrids" />
-                <DataCard label="Clay" value={renderValue(soilRaw.clay, "%")} source="ISRIC SoilGrids" />
-                <DataCard label="Sand" value={renderValue(soilRaw.sand, "%")} source="ISRIC SoilGrids" />
-                <DataCard label="Silt" value={renderValue(soilRaw.silt, "%")} source="ISRIC SoilGrids" />
-                <DataCard label="Organic Carbon" value={renderValue(soilRaw.organic_carbon, " g/kg")} source="ISRIC SoilGrids" />
-                <DataCard label="Total Nitrogen" value={renderValue(soilRaw.nitrogen, " g/kg")} source="ISRIC SoilGrids" />
-                <DataCard label="CEC" value={renderValue(soilRaw.cec, " meq/100g")} source="ISRIC SoilGrids" />
-                <DataCard label="Bulk Density" value={renderValue(soilRaw.bdod, " g/cm³")} source="ISRIC SoilGrids" />
+                <DataCard label="pH (H₂O)" value={renderValue(soilRaw.ph)} source="Regional Soil Survey" />
+                <DataCard label="Texture Class" value={renderValue(soilRaw.texture_class)} source="Regional Soil Survey" />
+                <DataCard label="Clay" value={renderValue(soilRaw.clay, "%")} source="Regional Soil Survey" />
+                <DataCard label="Sand" value={renderValue(soilRaw.sand, "%")} source="Regional Soil Survey" />
+                <DataCard label="Silt" value={renderValue(soilRaw.silt, "%")} source="Regional Soil Survey" />
+                <DataCard label="Organic Carbon" value={renderValue(soilRaw.organic_carbon, " g/kg")} source="Regional Soil Survey" />
+                <DataCard label="Total Nitrogen" value={renderValue(soilRaw.nitrogen, " g/kg")} source="Regional Soil Survey" />
+                <DataCard label="CEC" value={renderValue(soilRaw.cec, " meq/100g")} source="Regional Soil Survey" />
+                <DataCard label="Bulk Density" value={renderValue(soilRaw.bdod, " g/cm³")} source="Regional Soil Survey" />
               </div>
               {soilRaw.is_generic_fallback && (
                 <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-4 text-xs text-amber-400">

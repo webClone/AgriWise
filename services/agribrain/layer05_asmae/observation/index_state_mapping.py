@@ -236,6 +236,127 @@ _register(IndexStateMapping(
 ))
 
 
+# ── MESIA In-Situ Terrestrial RF Features (Monograph §146 / P-08) ────────────
+
+_register(IndexStateMapping(
+    index_name="mesia_root_zone_water",
+    sensor="MESIA",
+    target_state_indices=(IDX_ROOT_ZONE_WATER,),
+    forbidden_state_indices=(
+        IDX_VIGOR, IDX_CHLOROPHYLL, IDX_LAI, IDX_PHENOLOGY, IDX_STRUCTURE,
+    ),
+    base_noise_sigma=0.03,
+    noise_floor=0.015,
+    confidence_contribution=0.85,
+    description="Sub-surface volumetric water content from MESIA in-situ RF tomography",
+))
+
+_register(IndexStateMapping(
+    index_name="mesia_canopy_water",
+    sensor="MESIA",
+    target_state_indices=(IDX_CANOPY_WATER,),
+    forbidden_state_indices=(
+        IDX_ROOT_ZONE_WATER, IDX_CHLOROPHYLL, IDX_PHENOLOGY,
+    ),
+    base_noise_sigma=0.04,
+    noise_floor=0.02,
+    confidence_contribution=0.80,
+    description="Canopy water content from MESIA terrestrial multi-frequency link attenuation",
+))
+
+_register(IndexStateMapping(
+    index_name="mesia_surface_wetness",
+    sensor="MESIA",
+    target_state_indices=(IDX_SURFACE_WETNESS,),
+    forbidden_state_indices=(
+        IDX_VIGOR, IDX_CHLOROPHYLL, IDX_LAI, IDX_PHENOLOGY,
+    ),
+    base_noise_sigma=0.04,
+    noise_floor=0.02,
+    confidence_contribution=0.75,
+    description="Surface wetness event detection from MESIA multipath ground-bounce",
+))
+
+_register(IndexStateMapping(
+    index_name="mesia_gnssr_in_situ_vwc",
+    sensor="MESIA",
+    target_state_indices=(IDX_ROOT_ZONE_WATER,),
+    forbidden_state_indices=(
+        IDX_VIGOR, IDX_CHLOROPHYLL, IDX_LAI, IDX_PHENOLOGY, IDX_STRUCTURE,
+    ),
+    base_noise_sigma=0.03,
+    noise_floor=0.015,
+    confidence_contribution=0.85,
+    description="Volumetric soil water content from in-situ GNSS-R multipath SNR interferometry",
+))
+
+_register(IndexStateMapping(
+    index_name="mesia_cellular_canopy_water",
+    sensor="MESIA",
+    target_state_indices=(IDX_CANOPY_WATER,),
+    forbidden_state_indices=(
+        IDX_ROOT_ZONE_WATER, IDX_CHLOROPHYLL, IDX_PHENOLOGY, IDX_VIGOR, IDX_LAI,
+    ),
+    base_noise_sigma=0.04,
+    noise_floor=0.02,
+    confidence_contribution=0.80,
+    description="Canopy water content from public 4G/5G base station forward-scatter radar",
+))
+
+_register(IndexStateMapping(
+    index_name="mesia_dvb_deep_soil_water",
+    sensor="MESIA",
+    target_state_indices=(IDX_ROOT_ZONE_WATER,),
+    forbidden_state_indices=(
+        IDX_VIGOR, IDX_CHLOROPHYLL, IDX_LAI, IDX_PHENOLOGY, IDX_STRUCTURE,
+    ),
+    base_noise_sigma=0.04,
+    noise_floor=0.02,
+    confidence_contribution=0.80,
+    description="Deep root-zone soil water content (30-100cm) from terrestrial DVB-T2 UHF broadcast",
+))
+
+_register(IndexStateMapping(
+    index_name="mesia_spaceborne_gnssr_vwc",
+    sensor="MESIA",
+    target_state_indices=(IDX_ROOT_ZONE_WATER,),
+    forbidden_state_indices=(
+        IDX_VIGOR, IDX_CHLOROPHYLL, IDX_LAI, IDX_PHENOLOGY, IDX_STRUCTURE,
+    ),
+    base_noise_sigma=0.04,
+    noise_floor=0.02,
+    confidence_contribution=0.75,
+    description="100% pure remote soil moisture from NASA CYGNSS / Spire spaceborne GNSS-R",
+))
+
+_register(IndexStateMapping(
+    index_name="mesia_cml_humidity",
+    sensor="MESIA",
+    target_state_indices=(IDX_SURFACE_WETNESS,),
+    forbidden_state_indices=(
+        IDX_VIGOR, IDX_CHLOROPHYLL, IDX_LAI, IDX_PHENOLOGY,
+    ),
+    base_noise_sigma=0.05,
+    noise_floor=0.025,
+    confidence_contribution=0.70,
+    description="Near-surface humidity & rain from Commercial Microwave Link (CML) telecom backhaul",
+))
+
+_register(IndexStateMapping(
+    index_name="mesia_wifi_csi_canopy_foliar",
+    sensor="MESIA",
+    target_state_indices=(IDX_CANOPY_WATER,),
+    forbidden_state_indices=(
+        IDX_ROOT_ZONE_WATER, IDX_CHLOROPHYLL, IDX_PHENOLOGY, IDX_VIGOR, IDX_LAI, IDX_STRUCTURE,
+    ),
+    base_noise_sigma=0.035,
+    noise_floor=0.018,
+    confidence_contribution=0.82,
+    description="Foliar canopy water & perimeter mass scattering from 802.11bf Wi-Fi CSI OFDM subcarriers",
+))
+
+
+
 # ── Accessors ───────────────────────────────────────────────────────────────
 
 def get_mapping(index_name: str) -> Optional[IndexStateMapping]:

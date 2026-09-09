@@ -16,6 +16,7 @@ import { validateSessionToken } from "@/lib/session";
 // Routes that do NOT require authentication
 const PUBLIC_API_PREFIXES = [
   "/api/auth/",       // OTP send/verify
+  "/api/map/",        // Public map tiles & boundary detection
 ];
 
 export async function proxy(request: NextRequest) {

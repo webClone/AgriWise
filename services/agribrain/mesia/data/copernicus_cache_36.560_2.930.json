@@ -1,0 +1,14 @@
+{
+  "time": "2026-09-03T19:45",
+  "interval": 900,
+  "temperature_2m": 26.9,
+  "relative_humidity_2m": 85,
+  "surface_pressure": 1012.3,
+  "wind_speed_10m": 8.4,
+  "soil_temperature_0cm": 26.9,
+  "soil_moisture_0_to_1cm": 0.17,
+  "soil_moisture_1_to_3cm": 0.191,
+  "soil_moisture_3_to_9cm": 0.216,
+  "soil_moisture_9_to_27cm": 0.235,
+  "cached_at_utc": "2026-09-03T19:53:26.197477+00:00"
+}

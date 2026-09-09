@@ -592,4 +592,10 @@ def rebuild_canonical_plot_snapshot(
         "worldline_event_id": event.get("event_id"),
         "orchestrator_run_id": artifact.meta.orchestrator_run_id,
         "layer_run_ids": dict(artifact.lineage_map or {}),
+        "crop_worldline_event_id": result.get(
+            "crop_worldline_event_id"
+        ),
+        "phenology_worldline_event_id": result.get(
+            "phenology_worldline_event_id"
+        ),
     }

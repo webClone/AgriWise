@@ -1,0 +1,127 @@
+[
+  {
+    "pass_number": 1,
+    "timestamp": "2026-08-31T12:09:34.093932+00:00",
+    "emission_count": 1,
+    "emissions": [
+      {
+        "ssid": "IdoomFibre_ATDtdR46Z",
+        "bssid": "62:53:75:79:f8:64",
+        "band": "5 GHz",
+        "channel": 40,
+        "frequency_mhz": 5200.0,
+        "radio_type": "802.11ax",
+        "signal_pct": 80.0,
+        "rssi_dbm": -60.0,
+        "snr_db": 35.0,
+        "family": "WIFI_CSI",
+        "identity_state": "PROTOCOL_CONFIRMED",
+        "evidence_role": "SENSING",
+        "packet_hash": "5a7d9ab94cba5ca3",
+        "p_soil": 0.835,
+        "p_instrument": 0.08,
+        "p_geometry": 0.009
+      }
+    ]
+  },
+  {
+    "pass_number": 2,
+    "timestamp": "2026-08-31T12:09:36.218387+00:00",
+    "emission_count": 1,
+    "emissions": [
+      {
+        "ssid": "IdoomFibre_ATDtdR46Z",
+        "bssid": "62:53:75:79:f8:64",
+        "band": "5 GHz",
+        "channel": 40,
+        "frequency_mhz": 5200.0,
+        "radio_type": "802.11ax",
+        "signal_pct": 84.0,
+        "rssi_dbm": -58.0,
+        "snr_db": 37.0,
+        "family": "WIFI_CSI",
+        "identity_state": "PROTOCOL_CONFIRMED",
+        "evidence_role": "SENSING",
+        "packet_hash": "20494ae519e68c7d",
+        "p_soil": 0.835,
+        "p_instrument": 0.08,
+        "p_geometry": 0.009
+      }
+    ]
+  },
+  {
+    "pass_number": 3,
+    "timestamp": "2026-08-31T12:09:38.322945+00:00",
+    "emission_count": 1,
+    "emissions": [
+      {
+        "ssid": "IdoomFibre_ATDtdR46Z",
+        "bssid": "62:53:75:79:f8:64",
+        "band": "5 GHz",
+        "channel": 40,
+        "frequency_mhz": 5200.0,
+        "radio_type": "802.11ax",
+        "signal_pct": 84.0,
+        "rssi_dbm": -58.0,
+        "snr_db": 37.0,
+        "family": "WIFI_CSI",
+        "identity_state": "PROTOCOL_CONFIRMED",
+        "evidence_role": "SENSING",
+        "packet_hash": "dac67a5749b4d3c4",
+        "p_soil": 0.835,
+        "p_instrument": 0.08,
+        "p_geometry": 0.009
+      }
+    ]
+  },
+  {
+    "pass_number": 4,
+    "timestamp": "2026-08-31T12:09:40.429450+00:00",
+    "emission_count": 1,
+    "emissions": [
+      {
+        "ssid": "IdoomFibre_ATDtdR46Z",
+        "bssid": "62:53:75:79:f8:64",
+        "band": "5 GHz",
+        "channel": 40,
+        "frequency_mhz": 5200.0,
+        "radio_type": "802.11ax",
+        "signal_pct": 80.0,
+        "rssi_dbm": -60.0,
+        "snr_db": 35.0,
+        "family": "WIFI_CSI",
+        "identity_state": "PROTOCOL_CONFIRMED",
+        "evidence_role": "SENSING",
+        "packet_hash": "7fe8dcd884159669",
+        "p_soil": 0.835,
+        "p_instrument": 0.08,
+        "p_geometry": 0.009
+      }
+    ]
+  },
+  {
+    "pass_number": 5,
+    "timestamp": "2026-08-31T12:09:42.534325+00:00",
+    "emission_count": 1,
+    "emissions": [
+      {
+        "ssid": "IdoomFibre_ATDtdR46Z",
+        "bssid": "62:53:75:79:f8:64",
+        "band": "5 GHz",
+        "channel": 40,
+        "frequency_mhz": 5200.0,
+        "radio_type": "802.11ax",
+        "signal_pct": 80.0,
+        "rssi_dbm": -60.0,
+        "snr_db": 35.0,
+        "family": "WIFI_CSI",
+        "identity_state": "PROTOCOL_CONFIRMED",
+        "evidence_role": "SENSING",
+        "packet_hash": "77f2efbf8a9502aa",
+        "p_soil": 0.835,
+        "p_instrument": 0.08,
+        "p_geometry": 0.009
+      }
+    ]
+  }
+]

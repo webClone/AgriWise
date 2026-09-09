@@ -264,9 +264,9 @@ export default function PlotLoadingSequence({
   const headline = showDurableView
     ? view!.headline
     : requestIsPending
-      ? "Canonical ASMAE publication pending"
+      ? "Canonical surface publication pending"
       : requestError
-      ? "ASMAE spatial refresh unavailable"
+      ? "AgriBrain surface publication failed"
       : "Checking ASMAE worker";
   const detail = awaitingReplacementJob
     ? "Waiting for the new durable worker record"

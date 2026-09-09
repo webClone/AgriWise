@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, asdict
 
 import pytest
 
@@ -10,6 +10,8 @@ from services.agribrain.common.crop_cycle_context import (
 )
 from services.agribrain.common.plot_namespace import PlotNamespace
 from services.agribrain.orchestrator_v2.run_entrypoint import _build_inputs
+from services.agribrain.orchestrator_v2.runner import _freeze_reintegration_input
+from services.agribrain.orchestrator_v2.schema import OrchestratorInput
 from services.agribrain.scientific_contracts import (
     CanonicalCropCycleContextV2 as ExportedCropCycleContextV2,
 )
@@ -91,6 +93,34 @@ def test_crop_cycle_context_mapping_verifies_hash_and_rejects_phenology():
         CanonicalCropCycleContextV2.from_mapping(
             phenology_coercion, verify_hash=False
         )
+
+
+def test_legacy_dataclass_manifest_shape_rehydrates_without_weakening_hash():
+    cycle = _context()
+    legacy_payload = asdict(cycle)
+
+    restored = CanonicalCropCycleContextV2.from_mapping(legacy_payload)
+    assert restored == cycle
+
+    tampered = {**legacy_payload, "expected_harvest_date": "2027-01-01T00:00:00Z"}
+    with pytest.raises(ValueError, match="content_hash"):
+        CanonicalCropCycleContextV2.from_mapping(tampered)
+
+
+def test_reintegration_freeze_uses_canonical_crop_cycle_payload():
+    cycle = _context()
+    inputs = OrchestratorInput(
+        plot_namespace=cycle.plot_namespace,
+        geometry_hash=cycle.geometry_version,
+        crop_cycle_context=cycle,
+    )
+
+    frozen = _freeze_reintegration_input(inputs)
+
+    assert frozen["crop_cycle_context"] == cycle.to_dict()
+    assert CanonicalCropCycleContextV2.from_mapping(
+        frozen["crop_cycle_context"]
+    ) == cycle
 
 
 @pytest.mark.parametrize(

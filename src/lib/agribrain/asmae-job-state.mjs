@@ -27,7 +27,11 @@ function humanizeStage(value) {
  * never inferred from a client-side animation or stage ordinal.
  */
 export function buildAsmaeWorkerProgressView(progress, plotId) {
-  const job = progress?.asmae_job || progress?.durable_job || {};
+  const job = progress?.asmae_job || progress?.durable_job;
+  // Request-local Layer 10 failures are not ASMAE worker failures.  ASMAE
+  // status is authority-bearing only when the namespace-validated durable
+  // record carries its immutable job identity.
+  if (!job || !String(job?.job_id || "").trim()) return null;
   const responsePlotId = String(progress?.plot_id || job?.plot_id || "");
   const expectedPlotId = String(plotId || "");
   if (expectedPlotId && responsePlotId && responsePlotId !== expectedPlotId) {
@@ -126,7 +130,8 @@ export function buildAsmaeRefreshFailedDetail(progress, plotId) {
   if (progress?.terminal !== true || !TERMINAL_FAILURE_STATUSES.has(String(progress?.status || "").toLowerCase())) {
     return null;
   }
-  const job = progress?.asmae_job || progress?.durable_job || {};
+  const job = progress?.asmae_job || progress?.durable_job;
+  if (!job || !String(job?.job_id || "").trim()) return null;
   return {
     plotId: String(plotId || progress?.request?.plot_id || job?.plot_id || ""),
     jobId: String(job?.job_id || ""),

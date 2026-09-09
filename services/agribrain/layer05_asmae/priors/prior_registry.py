@@ -11,7 +11,7 @@ Design rules:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ PRIOR_BUILDERS = {
 def ingest_all_priors(
     coarse_outputs: dict,
     crop_context: dict,
+    phenology_posterior: Optional[dict] = None,
     plot_id: Optional[str] = None,
     geometry_hash: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
@@ -57,7 +58,9 @@ def ingest_all_priors(
         try:
             if layer_name == "layer2":
                 # Layer 2 needs crop_context
-                prior = builder(coarse_outputs, crop_context)
+                prior = builder(
+                    coarse_outputs, crop_context, phenology_posterior
+                )
             elif layer_name == "layer8":
                 prior = builder(coarse_outputs)
             else:

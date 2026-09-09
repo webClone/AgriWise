@@ -642,7 +642,6 @@ def _prior_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, A
         "chlorophyll": ((coarse, ("chlorophyll_proxy", "chlorophyll")),),
         "salinity_stress": ((soil, ("salinity_stress", "salinity_risk", "salinity")), (coarse, ("salinity_risk", "salinity_stress"))),
         "biotic_confounder_risk": ((coarse, ("biotic_threat_risk", "outbreak_probability", "biotic_risk")),),
-        "phenology_progress": ((coarse, ("growth_position", "phenology_progress")),),
         "stress_memory": ((coarse, ("climate_shock_risk", "stress_memory")),),
     }
     for state, sources in mappings.items():
@@ -661,6 +660,39 @@ def _prior_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, A
                 "update_mode": "numeric_process_prior",
             }
             break
+
+    canonical_phenology = getattr(inp, "phenology_posterior", {}) or {}
+    stage = str(
+        canonical_phenology.get("current_stage")
+        or canonical_phenology.get("most_likely_stage")
+        or "UNKNOWN"
+    ).upper() if isinstance(canonical_phenology, dict) else "UNKNOWN"
+    authority = str(
+        canonical_phenology.get("stage_authority")
+        or canonical_phenology.get("authority")
+        or "unavailable"
+    ).lower() if isinstance(canonical_phenology, dict) else "unavailable"
+    progress = _lookup_numeric(
+        canonical_phenology.get("season_progress", {})
+        if isinstance(canonical_phenology, dict) else {},
+        ("mean",),
+    )
+    if (
+        stage != "UNKNOWN"
+        and authority in {"diagnostic", "calibrated"}
+        and progress is not None
+    ):
+        result["phenology_progress"] = {
+            "mean": _clip("phenology_progress", progress),
+            "variance": (
+                (STATE_BOUNDS["phenology_progress"][1]
+                 - STATE_BOUNDS["phenology_progress"][0]) * 0.30
+            ) ** 2,
+            "status": "prior_constrained",
+            "support": ["canonical_phenology_posterior"],
+            "observation_count": 0,
+            "update_mode": "canonical_phenology_prior",
+        }
 
     weather = _weather_records(inp, as_of)
     if weather:

@@ -1,0 +1,373 @@
+{
+  "execution_timestamp": "2026-08-31T19:15:15.450339+00:00",
+  "blueprint_version": "MESIA_R6_Full_Implementation_Blueprint_Non_MVP",
+  "exhaustive_radio_discovery": {
+    "direct_emitters_count": 20,
+    "direct_emitters": [
+      {
+        "emitter_id": "WIFI_62:3d:29:89:f3:68",
+        "type": "WIFI_AP",
+        "ssid": "IdoomFibre_ATfm3tWDf",
+        "band": "2.4 GHz",
+        "channel": 11,
+        "freq_hz": 2462000000.0,
+        "mean_rssi_dbm": -82.0,
+        "metadata": {
+          "connected_stations": 1,
+          "radio_type": "802.11ax"
+        }
+      },
+      {
+        "emitter_id": "WIFI_62:3d:29:89:f3:6c",
+        "type": "WIFI_AP",
+        "ssid": "IdoomFibre_ATfm3tWDf",
+        "band": "5 GHz",
+        "channel": 40,
+        "freq_hz": 5200000000.0,
+        "mean_rssi_dbm": -86.0,
+        "metadata": {
+          "connected_stations": 2,
+          "radio_type": "802.11ax"
+        }
+      },
+      {
+        "emitter_id": "WIFI_62:3d:29:89:63:3c",
+        "type": "WIFI_AP",
+        "ssid": "IdoomFibre_ATzYVXm3G",
+        "band": "2.4 GHz",
+        "channel": 6,
+        "freq_hz": 2437000000.0,
+        "mean_rssi_dbm": -63.0,
+        "metadata": {
+          "connected_stations": 5,
+          "radio_type": "802.11ax"
+        }
+      },
+      {
+        "emitter_id": "WIFI_62:3d:29:89:63:40",
+        "type": "WIFI_AP",
+        "ssid": "IdoomFibre_ATzYVXm3G",
+        "band": "5 GHz",
+        "channel": 40,
+        "freq_hz": 5200000000.0,
+        "mean_rssi_dbm": -72.0,
+        "metadata": {
+          "connected_stations": 1,
+          "radio_type": "802.11ax"
+        }
+      },
+      {
+        "emitter_id": "WIFI_8e:83:e8:a6:03:20",
+        "type": "WIFI_AP",
+        "ssid": "IdoomFibre_ATbxfFM8e",
+        "band": "2.4 GHz",
+        "channel": 1,
+        "freq_hz": 2412000000.0,
+        "mean_rssi_dbm": -85.0,
+        "metadata": {
+          "connected_stations": 3,
+          "radio_type": "802.11ax"
+        }
+      },
+      {
+        "emitter_id": "WIFI_32:49:9e:c9:76:d8",
+        "type": "WIFI_AP",
+        "ssid": "IdoomFibre_ATqnAN7PE",
+        "band": "2.4 GHz",
+        "channel": 1,
+        "freq_hz": 2412000000.0,
+        "mean_rssi_dbm": -92.0,
+        "metadata": {
+          "connected_stations": 0,
+          "radio_type": "802.11ax"
+        }
+      },
+      {
+        "emitter_id": "BT_KB830WB-MS_BTHLE\\DEV_E5",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "KB830WB-MS",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -62.0,
+        "metadata": {
+          "pnp_id": "BTHLE\\DEV_E55690F72968\\9&306AB8F&0&E55690F72968"
+        }
+      },
+      {
+        "emitter_id": "BT_Bluetooth_LE Generic A",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "Bluetooth",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "LE Generic Attribute Service BTHLEDEVICE\\{0000180F-0000-1000-8000-00805F9B34FB}_DEV_VID&0232C2_PID&0001_RE..."
+        }
+      },
+      {
+        "emitter_id": "BT_Samir_BTHENUM\\DEV_",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "Samir",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -62.0,
+        "metadata": {
+          "pnp_id": "BTHENUM\\DEV_D8CE3AB80C0C\\9&21DED510&0&BLUETOOTHDEVICE_D8CE3AB80C0C"
+        }
+      },
+      {
+        "emitter_id": "BT_HOCO_EQ1         ",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "HOCO",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "EQ1                               BTHENUM\\DEV_D2D868A8A4F3\\9&21DED510&0&BLUETOOTHDEVICE_D2D868A8A4F3"
+        }
+      },
+      {
+        "emitter_id": "BT_Generic_Attribute Pr",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "Generic",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "Attribute Profile              BTHLEDEVICE\\{00001801-0000-1000-8000-00805F9B34FB}_D8CE3AB80C0C\\A&2377ADC3&0&..."
+        }
+      },
+      {
+        "emitter_id": "BT_Samir_BTHLE\\DEV_D8",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "Samir",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -62.0,
+        "metadata": {
+          "pnp_id": "BTHLE\\DEV_D8CE3AB80C0C\\9&306AB8F&0&D8CE3AB80C0C"
+        }
+      },
+      {
+        "emitter_id": "BT_Generic_Access Profi",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "Generic",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "Access Profile                 BTHLEDEVICE\\{00001800-0000-1000-8000-00805F9B34FB}_D8CE3AB80C0C\\A&2377ADC3&0&..."
+        }
+      },
+      {
+        "emitter_id": "BT_HOCO_DW02        ",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "HOCO",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "DW02                              BTHENUM\\DEV_6352CB3AAF8E\\9&21DED510&0&BLUETOOTHDEVICE_6352CB3AAF8E"
+        }
+      },
+      {
+        "emitter_id": "BT_Device_Information ",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "Device",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "Information Service             BTHLEDEVICE\\{0000180A-0000-1000-8000-00805F9B34FB}_DEV_VID&0232C2_PID&0001_RE..."
+        }
+      },
+      {
+        "emitter_id": "BT_HOCO_EW09        ",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "HOCO",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "EW09                              BTHENUM\\DEV_90E2840DBEA6\\9&21DED510&0&BLUETOOTHDEVICE_90E2840DBEA6"
+        }
+      },
+      {
+        "emitter_id": "BT_Bluetooth_LE Generic A",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "Bluetooth",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "LE Generic Attribute Service BTHLEDEVICE\\{6E40FF01-B5A3-F393-E0A9-E50E24DCCA9E}_DEV_VID&0232C2_PID&0001_RE..."
+        }
+      },
+      {
+        "emitter_id": "BT_Generic_Access Profi",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "Generic",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "Access Profile                 BTHLEDEVICE\\{00001800-0000-1000-8000-00805F9B34FB}_DEV_VID&0232C2_PID&0001_RE..."
+        }
+      },
+      {
+        "emitter_id": "BT_Microsoft_Bluetooth LE",
+        "type": "BLUETOOTH_BLE",
+        "ssid": "Microsoft",
+        "band": "2.4 GHz ISM",
+        "channel": 37,
+        "freq_hz": 2402000000.0,
+        "mean_rssi_dbm": -68.0,
+        "metadata": {
+          "pnp_id": "Bluetooth LE Enumerator      BTH\\MS_BTHLE\\8&2C83570D&0&3"
+        }
+      },
+      {
+        "emitter_id": "CELLULAR_LTE_DJEZZY_AS327931",
+        "type": "CELLULAR_LTE_CARRIER",
+        "ssid": "Optimum Telecom Algeria (Djezzy LTE-A)",
+        "band": "LTE Band 3 / Band 20",
+        "channel": 3,
+        "freq_hz": 1805000000.0,
+        "mean_rssi_dbm": -81.4,
+        "metadata": {
+          "public_ip": "129.45.69.15",
+          "ran_latency_ms": 72.0
+        }
+      }
+    ]
+  },
+  "multi_hop_mesh_horizon": {
+    "total_connected_nodes": 37,
+    "hop_0_direct": 18,
+    "hop_1_jumped": 17,
+    "hop_2_extended": 2
+  },
+  "coexistence_epoch": {
+    "epoch_id": "epoch-coex-001",
+    "triggered_at": "2026-08-31T19:15:15.450339+00:00",
+    "trigger_reason": "Multi-occupant workspace environment with active RF peripherals",
+    "previous_epoch_id": null,
+    "epoch_type": "CoexistenceEpoch",
+    "description": "Multi-occupant room with multiple active human bodies and peripheral devices",
+    "neighbouring_networks": [
+      "IdoomFibre_ATzYVXm3G",
+      "DJEZZY_LTE_A_GATEWAY"
+    ],
+    "interference_sources": [
+      "BLUETOOTH_LE_AUDIO",
+      "HUMAN_BODY_FRESNEL_SCATTER"
+    ],
+    "machinery_present": false,
+    "people_present": true,
+    "weather_regime": "",
+    "motion_detected": true
+  },
+  "uncertainty_budget": {
+    "type_a_db": 0.1,
+    "type_b_db": 0.2021,
+    "combined_uncertainty_uc_db": 0.2255,
+    "expanded_uncertainty_u95_db": 0.4509
+  },
+  "human_dielectric_collisions_count_5m": 4,
+  "human_dielectric_collisions_count_100m": 7,
+  "human_dielectric_collision_entities": [
+    {
+      "id": "HUMAN_COLLISION_01",
+      "coords": "(51.29m, 48.61m)",
+      "dist_m": 1.89,
+      "peak_eps_r": 64.58,
+      "vwc_pct": 60.0,
+      "doppler_var": 3.496,
+      "location": "Seated at Primary Desk Setup"
+    },
+    {
+      "id": "HUMAN_COLLISION_02",
+      "coords": "(50.78m, 51.44m)",
+      "dist_m": 1.64,
+      "peak_eps_r": 36.21,
+      "vwc_pct": 48.7,
+      "doppler_var": 1.842,
+      "location": "Active Body in Front-Right Quadrant"
+    },
+    {
+      "id": "HUMAN_COLLISION_03",
+      "coords": "(48.00m, 51.09m)",
+      "dist_m": 2.28,
+      "peak_eps_r": 40.49,
+      "vwc_pct": 51.3,
+      "doppler_var": 2.115,
+      "location": "Active Body in West/Left Quadrant"
+    },
+    {
+      "id": "HUMAN_COLLISION_04",
+      "coords": "(52.38m, 52.28m)",
+      "dist_m": 3.29,
+      "peak_eps_r": 17.53,
+      "vwc_pct": 31.3,
+      "doppler_var": 0.892,
+      "location": "Active Body Near Doorway Zone"
+    },
+    {
+      "id": "HUMAN_COLLISION_05",
+      "coords": "(55.00m, 45.00m)",
+      "dist_m": 7.1,
+      "peak_eps_r": 11.82,
+      "vwc_pct": 22.2,
+      "doppler_var": 39.243,
+      "location": "High-Motion Body in Adjacent Room/Corridor"
+    },
+    {
+      "id": "HUMAN_COLLISION_06",
+      "coords": "(45.00m, 55.00m)",
+      "dist_m": 7.1,
+      "peak_eps_r": 9.11,
+      "vwc_pct": 17.1,
+      "doppler_var": 0.734,
+      "location": "Stationary Body in North-West Adjacent Area"
+    },
+    {
+      "id": "HUMAN_COLLISION_07",
+      "coords": "(65.00m, 65.00m)",
+      "dist_m": 21.2,
+      "peak_eps_r": 12.34,
+      "vwc_pct": 23.2,
+      "doppler_var": 0.505,
+      "location": "Distant Body in Neighboring Building Unit"
+    }
+  ],
+  "asmae_evidence_proposal": {
+    "likelihood_id": "PROP-MESIA-L0-1788203715",
+    "radio_family": "WIFI",
+    "contract_ref": "CONTRACT-WIFI-CSI-V2",
+    "target_variable": "root_zone_water",
+    "likelihood_value": 0.96,
+    "innovation": 0.08,
+    "support": 100.0,
+    "covariance": 0.04,
+    "authority_scope": "evidence_proposal",
+    "alternative_causes": [],
+    "epoch_refs": {},
+    "observability_ref": "",
+    "closure_ref": "",
+    "qualification_ref": "",
+    "created_at": null,
+    "native_observation_ref": ""
+  }
+}

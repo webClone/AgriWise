@@ -1,6 +1,7 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from services.agribrain.common.plot_namespace import PlotNamespace
@@ -11,6 +12,7 @@ from services.agribrain.layer10_sire.schema import (
     ASMAE_DIAGNOSTIC_SURFACES,
     ASMAE_STATE_SURFACES,
     Layer10Input,
+    SurfaceArtifact,
     SurfaceType,
 )
 from services.agribrain.layer10_sire.surfaces.asmae import (
@@ -41,6 +43,27 @@ def _north_up_spec(height: int, width: int) -> dict:
         "resolution_m": 10.0,
         "nodata": -9999.0,
     }
+
+
+def test_polygon_mask_projects_exact_47x28_grid_to_highres_surface_last():
+    """Regression for the leaked row index that crashed after a 188-row surface."""
+    polygon = [
+        (0.0, 0.0),
+        (28.0, 0.0),
+        (24.0, 47.0),
+        (4.0, 47.0),
+        (0.0, 0.0),
+    ]
+    base = layer10_runner._rasterize_polygon_mask(
+        47, 28, [0.0, 0.0, 28.0, 47.0], polygon,
+    )
+    highres = layer10_runner._resize_boolean_mask(base, 188, 112)
+
+    assert base.shape == (47, 28)
+    assert highres.shape == (188, 112)
+    assert np.array_equal(highres, np.repeat(np.repeat(base, 4, axis=0), 4, axis=1))
+    assert highres.any()
+    assert (~highres).any()
 
 
 def test_asmae_grid_shape_change_uses_proven_geography_without_transpose(monkeypatch):
@@ -256,18 +279,18 @@ def test_full_layer10_publication_preserves_native_source_grid_for_core_asmae_su
     monkeypatch.setattr(layer10_runner, "load_layer10_from_cache", lambda _key: None)
     monkeypatch.setattr(layer10_runner, "save_layer10_to_cache", lambda *_args: 0)
 
-    source_h, source_w = 4, 3
-    source_bounds = [491000.0, 4039000.0, 491030.0, 4039040.0]
+    source_h, source_w = 48, 30
+    source_bounds = [491000.0, 4039000.0, 491300.0, 4039480.0]
     source_spec = {
         "crs": "EPSG:32631",
         "bounds": source_bounds,
-        "transform": [491000.0, 10.0, 0.0, 4039040.0, 0.0, -10.0],
+        "transform": [491000.0, 10.0, 0.0, 4039480.0, 0.0, -10.0],
         "width": source_w,
         "height": source_h,
         "resolution_m": 10.0,
         "nodata": -9999.0,
     }
-    target_h, target_w = 3, 4
+    target_h, target_w = 47, 28
     target_bounds = list(
         transform_bounds(
             source_spec["crs"], "EPSG:4326", *source_bounds, densify_pts=21
@@ -356,11 +379,28 @@ def test_full_layer10_publication_preserves_native_source_grid_for_core_asmae_su
         "coordinates": [[
             [min_x, min_y],
             [max_x, min_y],
-            [max_x, max_y],
-            [min_x, max_y],
+            [min_x + 0.85 * (max_x - min_x), max_y],
+            [min_x + 0.15 * (max_x - min_x), max_y],
             [min_x, min_y],
         ]],
     }
+
+    # Reproduce the former production ordering: a 4x display surface is the
+    # final generated surface immediately before the shared polygon-mask pass.
+    highres_h, highres_w = target_h * 4, target_w * 4
+    highres = SurfaceArtifact(
+        surface_id="mixed-resolution-last",
+        semantic_type=SurfaceType.GROWTH_TREND_7D,
+        grid_ref=f"{highres_h}x{highres_w}",
+        values=[[0.5] * highres_w for _ in range(highres_h)],
+        units="index",
+        native_resolution_m=2.5,
+    )
+    monkeypatch.setattr(
+        layer10_runner,
+        "generate_temporal_surfaces",
+        lambda *_args, **_kwargs: [highres],
+    )
 
     result = layer10_runner.run_layer10_sire(
         Layer10Input(
@@ -373,6 +413,15 @@ def test_full_layer10_publication_preserves_native_source_grid_for_core_asmae_su
         )
     )
     serialized = serialize_output(result)
+    serialized_highres = next(
+        surface for surface in serialized["surfaces"]
+        if surface["surface_id"] == "mixed-resolution-last"
+    )
+    assert len(serialized_highres["values"]) == highres_h
+    assert all(len(row) == highres_w for row in serialized_highres["values"])
+    flat_highres = [value for row in serialized_highres["values"] for value in row]
+    assert any(value is None for value in flat_highres)
+    assert any(value == 0.5 for value in flat_highres)
     serialized_core = [
         surface
         for surface in serialized["surfaces"]

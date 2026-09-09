@@ -1,0 +1,92 @@
+[
+  {
+    "timestamp_iso": "2026-09-05T15:27:16.777562+00:00",
+    "timestamp_epoch": 1788622036.777562,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:27:33.473356+00:00",
+    "timestamp_epoch": 1788622053.473356,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:48:46.245812+00:00",
+    "timestamp_epoch": 1788623326.245812,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:49:41.346040+00:00",
+    "timestamp_epoch": 1788623381.34604,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-05T15:54:33.371798+00:00",
+    "timestamp_epoch": 1788623673.371798,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T00:34:08.712067+00:00",
+    "timestamp_epoch": 1788654848.712067,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T00:58:58.177544+00:00",
+    "timestamp_epoch": 1788656338.177544,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T01:05:35.473153+00:00",
+    "timestamp_epoch": 1788656735.473153,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T01:05:59.585152+00:00",
+    "timestamp_epoch": 1788656759.585152,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T15:16:25.796358+00:00",
+    "timestamp_epoch": 1788707785.796358,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T15:23:03.265483+00:00",
+    "timestamp_epoch": 1788708183.265483,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:10:08.993318+00:00",
+    "timestamp_epoch": 1788714608.993318,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:38:35.589053+00:00",
+    "timestamp_epoch": 1788716315.589053,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:53:47.628190+00:00",
+    "timestamp_epoch": 1788717227.62819,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:58:42.334343+00:00",
+    "timestamp_epoch": 1788717522.334343,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-07T14:08:49.308317+00:00",
+    "timestamp_epoch": 1788790129.308317,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-07T14:10:11.172253+00:00",
+    "timestamp_epoch": 1788790211.172253,
+    "root_zone_vwc_pct": 22.0
+  },
+  {
+    "timestamp_iso": "2026-09-07T15:37:51.462241+00:00",
+    "timestamp_epoch": 1788795471.462241,
+    "root_zone_vwc_pct": 22.0
+  }
+]

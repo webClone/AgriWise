@@ -393,6 +393,8 @@ def test_reintegration_retry_reuses_the_valid_job_bound_publication(monkeypatch)
         asmae_result={
             "snapshot_id": snapshot_id,
             "plot_id": namespace.plot_id,
+            "crop_worldline_event_id": "crop-event-a",
+            "phenology_worldline_event_id": "phenology-event-a",
             "plot_state_artifact": {
                 "as_of": "2026-08-21T00:00:00+00:00",
                 "authority_level": "DIAGNOSTIC_NO_STATE_UPDATE",
@@ -410,6 +412,8 @@ def test_reintegration_retry_reuses_the_valid_job_bound_publication(monkeypatch)
     assert response["worldline_event_id"] == "canonical-event-a"
     assert response["orchestrator_run_id"] == "orchestrator-a"
     assert response["layer_run_ids"] == {"L1": "l1-a", "L10": "l10-a"}
+    assert response["crop_worldline_event_id"] == "crop-event-a"
+    assert response["phenology_worldline_event_id"] == "phenology-event-a"
     assert committed[0]["parent_event_id"] == "evidence-event-a"
     assert committed[0]["worldline_namespace"] == "farm-a"
 
@@ -569,6 +573,46 @@ def test_durable_terminal_job_overrides_stale_request_progress(monkeypatch):
     assert response["publicationRelation"] == "failed"
     assert response["canonical_head_snapshot_id"] == "ASMAE-SNAPSHOT-last-known-good"
     assert response["asmae_job"]["job_id"] == "job-failed-current"
+
+
+def test_request_local_layer10_failure_retains_code_without_fabricating_asmae_job(
+    monkeypatch,
+):
+    from services.agribrain.app import main
+    from services.agribrain.layer05_asmae import background_jobs as jobs
+    from services.agribrain.layer05_asmae import plot_snapshot_store as snapshots
+
+    namespace = PlotNamespace("tenant-a", "farm-a", "plot-request-failure")
+    run_id = "request-run-layer10-failure"
+    monkeypatch.setitem(main._plot_run_map, namespace.to_tuple(), run_id)
+    monkeypatch.setitem(main._progress_store, run_id, {
+        "run_id": run_id,
+        "plot_id": namespace.plot_id,
+        "namespace": namespace,
+        "status": "running",
+        "active": True,
+        "terminal": False,
+        "stages": [],
+    })
+    monkeypatch.setattr(jobs, "recover_all_pending_jobs", lambda namespace: 0)
+    monkeypatch.setattr(jobs, "latest_job_for_plot", lambda namespace, run_id=None: None)
+    monkeypatch.setattr(snapshots, "load_latest_plot_snapshot", lambda namespace: None)
+
+    failure = main._request_failure_from_exception(
+        IndexError("index 187 is out of bounds for axis 0 with size 47")
+    )
+    main._terminalize_progress(
+        namespace, "failed", run_id=run_id, failure=failure,
+    )
+    response = main.api_v2_progress(
+        namespace.plot_id, run_id=run_id, namespace=namespace,
+    )
+
+    assert response["status"] == "failed"
+    assert response["request_failure"]["code"] == "INDEX_ERROR"
+    assert response["request_failure"]["stage"] == "layer10_surface_publication"
+    assert response["durable_job"] is None
+    assert response["asmae_job"] is None
 
 
 def test_durable_running_job_overrides_stale_terminal_request_progress(monkeypatch):

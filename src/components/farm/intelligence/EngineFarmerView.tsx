@@ -7,13 +7,14 @@
  * All data from real engine statuses. Zero synthetic data.
  */
 
-import type { EngineStatus } from "@/hooks/usePlotIntelligence";
+import { type EngineStatus, SUBSYSTEM_METADATA } from "@/hooks/usePlotIntelligence";
 import type { Layer10Result } from "@/hooks/useLayer10";
 
 interface FarmerViewProps {
   engines: EngineStatus[];
   data: Layer10Result | null;
   onAskBrain: (query: string) => void;
+  onOpenLayerDashboard?: (layerId: string) => void;
 }
 
 // ── Engine groupings by farmer concern ──────────────────────────────────
@@ -23,104 +24,111 @@ const GROUPS = [
     label: "Field Conditions",
     icon: "🌤️",
     engineIds: ["L0", "L1"],
-    description: "Weather, soil and data fusion",
+    description: "Microclimate, atmospheric forecast & sensor assimilation",
   },
   {
     key: "crop",
-    label: "Crop Health Systems",
+    label: "Canopy & Root Zone",
     icon: "🌿",
     engineIds: ["L2", "L3", "L4", "L5"],
-    description: "Vegetation, water, nutrients, disease pipelines",
+    description: "ASMAE biophysical vigor, root moisture, soil nutrients, pest pathology",
   },
   {
     key: "planning",
-    label: "Yield & Planning",
+    label: "Yield & Operations",
     icon: "📋",
     engineIds: ["L6", "L7", "L8"],
-    description: "Yield estimation, calendar, actions",
+    description: "Yield calibration, agronomic calendar, precision prescriptions",
   },
   {
     key: "intelligence",
-    label: "Intelligence",
+    label: "Field Intelligence",
     icon: "🧠",
     engineIds: ["L9", "L10"],
-    description: "Advisory and synthesis",
+    description: "MESIA World Model synthesis & AI advisory",
   },
 ] as const;
 
+// ── Status dot & color helpers ──────────────────────────────────────────
 const STATUS_DOT: Record<string, { color: string; label: string }> = {
-  OK: { color: "#4ade80", label: "OK" },
-  DEGRADED: { color: "#fbbf24", label: "Needs attention" },
-  SKIPPED: { color: "#64748b", label: "Skipped" },
-  UNAVAILABLE: { color: "#94a3b8", label: "Unavailable" },
-  FAILED: { color: "#f87171", label: "Failed" },
-  OFFLINE: { color: "#f87171", label: "Issue detected" },
-  LOADING: { color: "#818cf8", label: "Loading..." },
+  OK: { color: "#4ade80", label: "Good" },
+  DEGRADED: { color: "#fbbf24", label: "Warning" },
+  OFFLINE: { color: "#f87171", label: "Issue" },
+  LOADING: { color: "#818cf8", label: "Updating" },
 };
 
-// ── Farmer-friendly engine name translations ────────────────────────────
-const FARMER_NAMES: Record<string, string> = {
-  L0: "Weather & Environment",
-  L1: "Data Sources",
-  L2: "Crop Greenness",
-  L3: "Water & Irrigation",
-  L4: "Soil Nutrients",
-  L5: "Disease & Pests",
-  L6: "Expected Yield",
-  L7: "Farm Calendar",
-  L8: "Recommended Actions",
-  L9: "Expert Advice",
-  L10: "Overall Analysis",
+function getGroupStatus(engines: EngineStatus[]) {
+  if (engines.some(e => e.status === "OFFLINE")) return { color: "#f87171", label: "Needs Attention", dot: "🔴" };
+  if (engines.some(e => e.status === "DEGRADED")) return { color: "#fbbf24", label: "Warning", dot: "🟡" };
+  if (engines.every(e => e.status === "OK")) return { color: "#4ade80", label: "All Systems OK", dot: "🟢" };
+  return { color: "#94a3b8", label: "Active", dot: "⚪" };
+}
+
+// ── Helper to resolve canonical agronomic name ──────────────────────────
+const getSubsystemName = (e: EngineStatus) => {
+  if (SUBSYSTEM_METADATA[e.id]) {
+    return SUBSYSTEM_METADATA[e.id].name;
+  }
+  if (e.name && !/^L\d+$/i.test(e.name)) {
+    return e.name;
+  }
+  return "Agronomic Subsystem";
 };
 
-// ── Group Status Summary ────────────────────────────────────────────────
-function GroupCard({ group, engines, onAskBrain }: {
+// ── Sanitize text from SoilGrids & layer codes ───────────────────────────
+const sanitizeSummary = (txt: any) => {
+  if (!txt) return "";
+  return String(txt)
+    .replace(/SoilGrids-ISRIC/gi, "Regional Soil Survey")
+    .replace(/SoilGrids Proxy/gi, "Regional Soil Survey Baseline")
+    .replace(/SoilGrids/gi, "Regional Soil Survey")
+    .replace(/\bL([0-9]{1,2})\b/g, (m) => SUBSYSTEM_METADATA[m]?.name || m);
+};
+
+// ── Group Card ──────────────────────────────────────────────────────────
+function GroupCard({ group, engines, onAskBrain, onOpenLayerDashboard }: {
   group: typeof GROUPS[number];
   engines: EngineStatus[];
   onAskBrain: (q: string) => void;
+  onOpenLayerDashboard?: (layerId: string) => void;
 }) {
   const groupEngines = engines.filter(e => (group.engineIds as readonly string[]).includes(e.id));
   if (groupEngines.length === 0) return null;
 
-  const worstStatus = groupEngines.reduce((worst, e) => {
-    const priority = { FAILED: 5, OFFLINE: 5, UNAVAILABLE: 4, DEGRADED: 3, SKIPPED: 2, LOADING: 1, OK: 0 };
-    const ep = priority[e.status as keyof typeof priority] ?? 0;
-    const wp = priority[worst as keyof typeof priority] ?? 0;
-    return ep > wp ? e.status : worst;
-  }, "OK" as string);
+  const statusInfo = getGroupStatus(groupEngines);
+  const degradedEngines = groupEngines.filter(e => e.status === "DEGRADED" || e.status === "OFFLINE");
 
-  const statusInfo = STATUS_DOT[worstStatus] || STATUS_DOT.OK;
-  const okCount = groupEngines.filter(e => e.status === "OK").length;
-  const degradedEngines = groupEngines.filter(e => e.status !== "OK");
-
-  // Get first non-empty farmer summary from any engine in group
-  const primarySummary = groupEngines
-    .map(e => String(e.data?.farmer_summary || e.summary || ""))
-    .find(s => s.length > 10) || null;
+  // Primary summary: best available summary from the group
+  const primarySummary = groupEngines.find(e => e.data?.farmer_summary)?.data?.farmer_summary as string
+    || groupEngines.find(e => e.summary)?.summary
+    || "";
 
   return (
-    <div className="efv-group-card" style={{
-      background: "rgba(15,23,42,0.4)",
-      border: `1px solid ${statusInfo.color}15`,
-      borderRadius: "12px",
-      padding: "12px",
-      transition: "all 0.2s",
-    }}>
-      {/* Group header */}
-      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px" }}>
-        <span style={{ fontSize: "1.3rem" }}>{group.icon}</span>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: "14px", fontWeight: 700, color: "#f1f5f9" }}>{group.label}</div>
-          <div style={{ fontSize: "12px", color: "#64748b" }}>{group.description}</div>
-        </div>
+    <div
+      className="efv-group-card"
+      style={{
+        background: "rgba(0,0,0,0.3)",
+        border: `1px solid ${degradedEngines.length > 0 ? "rgba(251,191,36,0.2)" : "rgba(71,85,105,0.12)"}`,
+        borderRadius: "10px",
+        padding: "10px 12px",
+        transition: "border-color 0.2s",
+      }}
+    >
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-          <div style={{
-            width: "8px", height: "8px", borderRadius: "50%",
-            background: statusInfo.color,
-            boxShadow: `0 0 6px ${statusInfo.color}40`,
-          }} />
-          <span style={{ fontSize: "12px", color: statusInfo.color, fontWeight: 700 }}>{statusInfo.label}</span>
+          <span style={{ fontSize: "1rem" }}>{group.icon}</span>
+          <div>
+            <span style={{ fontSize: "13px", fontWeight: 700, color: "#f1f5f9" }}>{group.label}</span>
+            <div style={{ fontSize: "10px", color: "#64748b", lineHeight: 1.2 }}>{group.description}</div>
+          </div>
         </div>
+        <span style={{
+          fontSize: "10px", fontWeight: 700, color: statusInfo.color,
+          display: "flex", alignItems: "center", gap: "3px",
+        }}>
+          {statusInfo.dot} {statusInfo.label}
+        </span>
       </div>
 
       {/* Engine status chips */}
@@ -128,16 +136,26 @@ function GroupCard({ group, engines, onAskBrain }: {
         {groupEngines.map(e => {
           const eStatus = STATUS_DOT[e.status] || STATUS_DOT.OK;
           return (
-            <div key={e.id} style={{
-              display: "flex", alignItems: "center", gap: "4px",
-              padding: "3px 8px", borderRadius: "6px",
-              background: `${eStatus.color}08`,
-              border: `1px solid ${eStatus.color}15`,
-            }}>
+            <div
+              key={e.id}
+              onClick={() => onOpenLayerDashboard?.(e.id)}
+              title={`Click to open ${getSubsystemName(e)} dashboard & parameters`}
+              style={{
+                display: "flex", alignItems: "center", gap: "4px",
+                padding: "3px 8px", borderRadius: "6px",
+                background: `${eStatus.color}08`,
+                border: `1px solid ${eStatus.color}15`,
+                cursor: "pointer",
+                transition: "all 0.15s",
+              }}
+              onMouseOver={(ev) => (ev.currentTarget.style.borderColor = "#6366f1")}
+              onMouseOut={(ev) => (ev.currentTarget.style.borderColor = `${eStatus.color}15`)}
+            >
               <div style={{ width: "5px", height: "5px", borderRadius: "50%", background: eStatus.color }} />
               <span style={{ fontSize: "11px", color: "#cbd5e1", fontWeight: 600 }}>
-                {FARMER_NAMES[e.id] || e.name}
+                {getSubsystemName(e)}
               </span>
+              <span style={{ fontSize: "10px", opacity: 0.6 }}>⚙️</span>
             </div>
           );
         })}
@@ -151,7 +169,7 @@ function GroupCard({ group, engines, onAskBrain }: {
           background: "rgba(0,0,0,0.2)",
           marginBottom: "6px",
         }}>
-          {primarySummary}
+          {sanitizeSummary(primarySummary)}
         </div>
       )}
 
@@ -163,26 +181,39 @@ function GroupCard({ group, engines, onAskBrain }: {
           background: "rgba(0,0,0,0.15)", marginBottom: "4px",
           borderLeft: `2px solid ${statusInfo.color}40`,
         }}>
-          <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{FARMER_NAMES[e.id] || e.name}: </span>
-          {String(e.data.why_it_matters)}
+          <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{getSubsystemName(e)}: </span>
+          {sanitizeSummary(e.data.why_it_matters)}
         </div>
       ) : null)}
 
-      {/* Degraded alerts */}
+      {/* Degraded alerts with direct resolution action buttons */}
       {degradedEngines.length > 0 && (
         <div style={{ marginTop: "4px" }}>
           {degradedEngines.map(e => (
             <div key={e.id} style={{
-              display: "flex", alignItems: "center", gap: "6px",
-              padding: "5px 10px", borderRadius: "6px",
+              display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px",
+              padding: "6px 10px", borderRadius: "6px",
               background: e.status === "OFFLINE" ? "rgba(248,113,113,0.06)" : "rgba(251,191,36,0.06)",
-              border: `1px solid ${e.status === "OFFLINE" ? "rgba(248,113,113,0.1)" : "rgba(251,191,36,0.1)"}`,
+              border: `1px solid ${e.status === "OFFLINE" ? "rgba(248,113,113,0.15)" : "rgba(251,191,36,0.15)"}`,
               marginBottom: "4px", fontSize: "12px",
             }}>
-              <span style={{ color: STATUS_DOT[e.status]?.color || "#fbbf24" }}>⚠</span>
-              <span style={{ color: "#cbd5e1", flex: 1 }}>
-                {FARMER_NAMES[e.id] || e.name}: {String(e.data?.farmer_summary || e.summary || "Check needed")}
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", flex: 1 }}>
+                <span style={{ color: STATUS_DOT[e.status]?.color || "#fbbf24" }}>⚠</span>
+                <span style={{ color: "#cbd5e1" }}>
+                  {getSubsystemName(e)}: {sanitizeSummary(e.data?.farmer_summary || e.summary || "Check needed")}
+                </span>
+              </div>
+              <button
+                onClick={() => onOpenLayerDashboard?.(e.id)}
+                style={{
+                  padding: "2px 8px", borderRadius: "4px",
+                  background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)",
+                  color: "#a5b4fc", fontSize: "10px", fontWeight: 700, cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {e.id === "L4" ? "🧪 Soil Test" : e.id === "L6" ? "🎯 Calibrate" : "⚙️ Fix"}
+              </button>
             </div>
           ))}
         </div>
@@ -191,18 +222,33 @@ function GroupCard({ group, engines, onAskBrain }: {
       {/* Quick metrics from key engines */}
       <EngineQuickMetrics engines={groupEngines} />
 
-      {/* Ask button */}
-      <button
-        onClick={() => onAskBrain(`Tell me about my field's ${group.label.toLowerCase()}. What should I know and what should I do?`)}
-        style={{
-          marginTop: "8px", width: "100%", padding: "8px",
-          borderRadius: "6px", border: "none",
-          background: "rgba(99,102,241,0.08)", color: "#a5b4fc",
-          fontSize: "12px", fontWeight: 700, cursor: "pointer",
-        }}
-      >
-        🧠 Ask about {group.label.toLowerCase()}
-      </button>
+      {/* Action buttons */}
+      <div style={{ display: "flex", gap: "6px", marginTop: "8px" }}>
+        <button
+          onClick={() => onAskBrain(`Tell me about my field's ${group.label.toLowerCase()}. What should I know and what should I do?`)}
+          style={{
+            flex: 1, padding: "8px",
+            borderRadius: "6px", border: "none",
+            background: "rgba(99,102,241,0.08)", color: "#a5b4fc",
+            fontSize: "12px", fontWeight: 700, cursor: "pointer",
+          }}
+        >
+          💬 Ask about {group.label.toLowerCase()}
+        </button>
+        <button
+          onClick={() => onOpenLayerDashboard?.(group.engineIds[0])}
+          title="Open parameter tuning dashboard for this group"
+          style={{
+            padding: "8px 12px",
+            borderRadius: "6px", border: "1px solid rgba(71,85,105,0.25)",
+            background: "rgba(255,255,255,0.03)", color: "#cbd5e1",
+            fontSize: "12px", fontWeight: 700, cursor: "pointer",
+            display: "flex", alignItems: "center", gap: "4px",
+          }}
+        >
+          ⚙️ Tune
+        </button>
+      </div>
     </div>
   );
 }
@@ -219,12 +265,26 @@ function EngineQuickMetrics({ engines }: { engines: EngineStatus[] }) {
     }
     if (e.id === "L2" && e.data.ndvi_mean != null) {
       const ndvi = Number(e.data.ndvi_mean);
-      const support = e.data.ndvi_support_type === "point" ? "Point Sentinel index" : "Temporal NDVI estimate";
+      const support = e.data.ndvi_support_type === "point" ? "Point Vigor" : "Canopy Vigor";
       metrics.push({ label: support, value: ndvi.toFixed(2), color: ndvi > 0.5 ? "#4ade80" : ndvi > 0.3 ? "#fbbf24" : "#f87171" });
     }
     if (e.id === "L3" && e.data.deficit_mm != null) {
       const d = Math.abs(Number(e.data.deficit_mm));
       metrics.push({ label: "Water deficit", value: `${d.toFixed(1)}mm`, color: d < 5 ? "#4ade80" : d < 15 ? "#fbbf24" : "#f87171" });
+    }
+    if (e.id === "L4" && (e.data.texture || e.data.clay_pct != null || e.data.soil_type)) {
+      const texture = String(e.data.texture || e.data.soil_type || (e.data.clay_pct != null ? `${e.data.clay_pct}% clay` : "Loam"));
+      metrics.push({ label: "Soil Texture", value: texture.slice(0, 10), color: "#cbd5e1" });
+    }
+    if (e.id === "L5" && (e.data.threat_level || e.data.disease_risk || e.data.pest_risk)) {
+      const threat = String(e.data.dominant_threat || e.data.threat_level || e.data.disease_risk || "Low");
+      const isHigh = /high|critical|severe/i.test(threat);
+      const isMed = /moderate|medium|watch/i.test(threat);
+      metrics.push({ label: "Pest / Disease", value: threat.slice(0, 10), color: isHigh ? "#f87171" : isMed ? "#fbbf24" : "#4ade80" });
+    }
+    if (e.id === "L6" && (e.data.expected_yield_t_ha != null || e.data.yield_potential_pct != null)) {
+      const yVal = e.data.expected_yield_t_ha != null ? `${Number(e.data.expected_yield_t_ha).toFixed(1)} t/ha` : `${e.data.yield_potential_pct}%`;
+      metrics.push({ label: "Yield Target", value: yVal, color: "#60a5fa" });
     }
   }
 
@@ -239,7 +299,7 @@ function EngineQuickMetrics({ engines }: { engines: EngineStatus[] }) {
           textAlign: "center",
         }}>
           <div style={{ fontSize: "10px", color: "#64748b", textTransform: "uppercase" }}>{m.label}</div>
-          <div style={{ fontSize: "14px", color: m.color, fontFamily: "monospace", fontWeight: 700 }}>{m.value}</div>
+          <div style={{ fontSize: "13px", color: m.color, fontFamily: "monospace", fontWeight: 700 }}>{m.value}</div>
         </div>
       ))}
     </div>
@@ -247,7 +307,7 @@ function EngineQuickMetrics({ engines }: { engines: EngineStatus[] }) {
 }
 
 // ── Main Farmer View ────────────────────────────────────────────────────
-export default function EngineFarmerView({ engines, data, onAskBrain }: FarmerViewProps) {
+export default function EngineFarmerView({ engines, data, onAskBrain, onOpenLayerDashboard }: FarmerViewProps) {
   // Zone alerts summary for farmer
   const alertZones = data?.zones?.filter(z => z.severity > 0.4) || [];
 
@@ -255,7 +315,13 @@ export default function EngineFarmerView({ engines, data, onAskBrain }: FarmerVi
     <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
       {/* Engine groups */}
       {GROUPS.map(group => (
-        <GroupCard key={group.key} group={group} engines={engines} onAskBrain={onAskBrain} />
+        <GroupCard
+          key={group.key}
+          group={group}
+          engines={engines}
+          onAskBrain={onAskBrain}
+          onOpenLayerDashboard={onOpenLayerDashboard}
+        />
       ))}
 
       {/* Zone awareness */}

@@ -95,6 +95,9 @@ class ASMAEInput:
     crop_context: dict = field(default_factory=dict)
     crop_posterior: dict = field(default_factory=dict)
     crop_posterior_lineage: Optional[str] = None
+    phenology_posterior: dict = field(default_factory=dict)
+    phenology_posterior_hash: Optional[str] = None
+    phenology_worldline_event_id: Optional[str] = None
     crop_evidence_ledger: dict = field(default_factory=dict)
     crop_evidence_ledger_hash: Optional[str] = None
     crop_influence_manifest: dict = field(default_factory=dict)

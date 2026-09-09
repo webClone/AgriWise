@@ -62,6 +62,10 @@ const RawDataSidebar = dynamic(
   () => import("@/components/farm/intelligence/RawDataSidebar"),
   { ssr: false }
 );
+const MesiaObservatoryWorkspace = dynamic(
+  () => import("@/components/farm/intelligence/MesiaObservatoryWorkspace"),
+  { ssr: false }
+);
 
 const PlotMapShell = dynamic(() => import("@/components/farm/map/PlotMapShell"), {
   ssr: false,
@@ -104,6 +108,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
   const [methodologyMetric, setMethodologyMetric] = useState<string | null>(null);
   const [showDronePanel, setShowDronePanel] = useState(false);
   const [showSensorsPanel, setShowSensorsPanel] = useState(false);
+  const [showMesiaPanel, setShowMesiaPanel] = useState(false);
   const [showIrrigationPanel, setShowIrrigationPanel] = useState(false);
   const [isEvidenceModalOpen, setIsEvidenceModalOpen] = useState(false);
   const [isRefreshingVision, setIsRefreshingVision] = useState(false);
@@ -241,14 +246,16 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
   const asmaePublicationRelation = String(
     asmaeWorkerState?.publicationRelation || "",
   ).toLowerCase();
-  const asmaeWorkerRequestError = Boolean(
-    l10.error
-    && /asmae|canonical publication|spatial refresh|worker|reintegration/i.test(l10.error),
-  );
+  // A request-local Layer 10 failure is not necessarily an ASMAE worker
+  // failure, but it still has to remain visible when a last-known-good map is
+  // retained. PlotLoadingSequence distinguishes the two cases from the
+  // durable job receipt; this gate must not suppress generic publication
+  // errors such as a masking or serialization exception.
+  const surfacePublicationRequestError = Boolean(l10.error);
   const showAsmaeWorkerProgress = Boolean(
     !l10.data
     || l10.loading
-    || asmaeWorkerRequestError
+    || surfacePublicationRequestError
     || [
       "queued",
       "running",
@@ -533,6 +540,40 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
               </button>
             </motion.div>
 
+            {/* ── MESIA Ambient Radio Observatory Button ────────────── */}
+            <motion.div variants={popIn} style={{ pointerEvents: "auto" }}>
+              <button
+                onClick={() => setShowMesiaPanel(!showMesiaPanel)}
+                id="mesia-observatory-toggle"
+                style={{
+                  position: "absolute",
+                  bottom: "180px",
+                  left: "calc(50% + 440px)",
+                  zIndex: 35,
+                  width: "56px",
+                  height: "56px",
+                  borderRadius: "10px",
+                  border: showMesiaPanel ? "1px solid rgba(56,189,248,0.6)" : "1px solid rgba(71,85,105,0.25)",
+                  background: showMesiaPanel ? "rgba(56,189,248,0.15)" : "rgba(8,12,25,0.92)",
+                  backdropFilter: "blur(24px)",
+                  color: showMesiaPanel ? "#38bdf8" : "#cbd5e1",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  boxShadow: "0 -2px 20px rgba(0,0,0,0.35), 0 0 0 1px rgba(71,85,105,0.06) inset",
+                  transition: "all 0.15s ease",
+                }}
+                title="MESIA Radio Spectrum Observatory (Signals of Opportunity)"
+              >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M4 11a9 9 0 0 1 9 9" />
+                  <path d="M4 4a16 16 0 0 1 16 16" />
+                  <circle cx="5" cy="19" r="1" />
+                </svg>
+              </button>
+            </motion.div>
+
             {/* ── Drone Mission Button + Panel ──────────────────────── */}
             <motion.div variants={popIn} style={{ pointerEvents: "auto" }}>
               <button
@@ -580,7 +621,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
                 id="irrigation-panel-toggle"
                 style={{
                   position: "absolute",
-                  bottom: "180px",
+                  bottom: "244px",
                   left: "calc(50% + 440px)",
                   zIndex: 35,
                   width: "56px",
@@ -614,7 +655,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
                 id="satellite-vision-refresh"
                 style={{
                   position: "absolute",
-                  bottom: "244px",
+                  bottom: "308px",
                   left: "calc(50% + 440px)",
                   zIndex: 35,
                   width: "56px",
@@ -650,7 +691,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
               {visionRefreshStatus && (
                 <div style={{
                   position: "absolute",
-                  bottom: "256px",
+                  bottom: "320px",
                   left: "calc(50% + 360px)",
                   zIndex: 40,
                   background: "rgba(8,12,25,0.95)",
@@ -725,47 +766,19 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
         )}
       </AnimatePresence>
 
-      {/* ── FieldInsightBar ─────────────────────────── */}
-      <AnimatePresence>
-        {screenState === "observe" && l10.data && (
-          <motion.div
-            initial={{ y: -50, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            exit={{ y: -50, opacity: 0 }}
-            transition={{ type: "spring", stiffness: 300, damping: 30, delay: 0.6 }}
-            style={{
-              position: "absolute", top: "106px", left: "0", transform: "translateX(-50%)",
-              zIndex: 15, width: "100%", display: "flex", justifyContent: "center", pointerEvents: "none"
-            }}
-          >
-            <FieldInsightBar
-              data={l10.data}
-              activeMode={l10.activeMode}
-              loading={l10.loading}
-              onInspect={(zoneId) => l10.setSelectedZone(zoneId)}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Zone detail is now inline above the timeline — no separate diagnose screen */}
-
-      {/* ── DECIDE: AgriBrainWorkspace ─────────────────────────────── */}
-      <AgriBrainWorkspace
-        isOpen={l10.isDecideMode}
-        onClose={() => l10.setIsDecideMode(false)}
-        context={context}
-        activeMode={l10.activeMode}
-        data={l10.data}
-        plotName={plot?.name ? String(plot.name) : undefined}
-        initialQuery={l10.decideModeQuery}
-      />
-
       {/* ── SENSORS: SensorNetworkWorkspace ──────────────────────────── */}
       {showSensorsPanel && (
         <SensorNetworkWorkspace
           plotId={String(plot?.id || "")}
           onClose={() => setShowSensorsPanel(false)}
+        />
+      )}
+
+      {/* ── MESIA: MesiaObservatoryWorkspace ──────────────────────────── */}
+      {showMesiaPanel && (
+        <MesiaObservatoryWorkspace
+          plotId={String(plot?.id || "")}
+          onClose={() => setShowMesiaPanel(false)}
         />
       )}
 

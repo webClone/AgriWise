@@ -273,21 +273,27 @@ def _spatial(nodes: List[str], context: Mapping[str, Any]) -> Optional[Dict[str,
 
 def _phenology(nodes: List[str], context: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     timeseries = _records(context.get("plot_timeseries", []))
-    envelope = context.get("phenology_envelopes", {}) or {}
+    canonical = context.get("phenology_posterior", {}) or {}
+    if not isinstance(canonical, Mapping):
+        return None
+    stage = str(
+        canonical.get("current_stage")
+        or canonical.get("most_likely_stage")
+        or "UNKNOWN"
+    ).upper()
+    authority = str(
+        canonical.get("stage_authority")
+        or canonical.get("authority")
+        or "unavailable"
+    ).lower()
+    if stage == "UNKNOWN" or authority not in {"diagnostic", "calibrated"}:
+        return None
     ndvi = []
     for row in timeseries:
         value = _find_numeric(row, ("ndvi", "ndvi_clean", "ndvi_interpolated"))
         if value is not None:
             ndvi.append(value)
-    progress = _find_numeric(envelope, ("phenology_progress", "growth_position", "season_position"))
-    if progress is None and len(ndvi) >= 3:
-        peak_index = max(range(len(ndvi)), key=lambda index: ndvi[index])
-        if len(ndvi) == 1:
-            progress = 0.0
-        elif peak_index == len(ndvi) - 1:
-            progress = 0.5 * peak_index / (len(ndvi) - 1)
-        else:
-            progress = 0.5 + 0.5 * (len(ndvi) - 1 - peak_index) / max(len(ndvi) - 1, 1)
+    progress = _find_numeric(canonical.get("season_progress", {}), ("mean",))
     if progress is None:
         return None
     stress_memory = 0.0
@@ -301,9 +307,9 @@ def _phenology(nodes: List[str], context: Mapping[str, Any]) -> Optional[Dict[st
     return {
         "predictions": _prediction(nodes, values),
         "target_states": list(values),
-        "input_evidence": ["plot_timeseries" if ndvi else "archive_phenology_envelope"],
-        "independence_key": "temporal_phenology_memory",
-        "model_version": "phenology_memory_v1",
+        "input_evidence": ["canonical_phenology_posterior"] + (["plot_timeseries"] if ndvi else []),
+        "independence_key": "canonical_phenology_memory",
+        "model_version": "canonical_phenology_memory_v2",
     }
 
 

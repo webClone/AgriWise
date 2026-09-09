@@ -1,0 +1,46 @@
+{
+  "radius_m": 5.0,
+  "total_separated_humans_in_5m": 4,
+  "entities": [
+    {
+      "human_id": "HUMAN_5M_ENTITY_02",
+      "center_x_m": 50.78,
+      "center_y_m": 51.44,
+      "distance_from_receiver_m": 1.64,
+      "peak_permittivity_eps_r": 36.21,
+      "equivalent_tissue_water_pct": 48.7,
+      "voxel_count_10cm": 457,
+      "spatial_classification": "Separate Person (In Workspace / Near Doorway)"
+    },
+    {
+      "human_id": "HUMAN_5M_ENTITY_03",
+      "center_x_m": 51.29,
+      "center_y_m": 48.61,
+      "distance_from_receiver_m": 1.89,
+      "peak_permittivity_eps_r": 64.58,
+      "equivalent_tissue_water_pct": 60.0,
+      "voxel_count_10cm": 929,
+      "spatial_classification": "Separate Person (In Workspace / Near Doorway)"
+    },
+    {
+      "human_id": "HUMAN_5M_ENTITY_01",
+      "center_x_m": 48.0,
+      "center_y_m": 51.09,
+      "distance_from_receiver_m": 2.28,
+      "peak_permittivity_eps_r": 40.49,
+      "equivalent_tissue_water_pct": 51.3,
+      "voxel_count_10cm": 780,
+      "spatial_classification": "Separate Person (In Workspace / Near Doorway)"
+    },
+    {
+      "human_id": "HUMAN_5M_ENTITY_04",
+      "center_x_m": 52.38,
+      "center_y_m": 52.28,
+      "distance_from_receiver_m": 3.29,
+      "peak_permittivity_eps_r": 17.53,
+      "equivalent_tissue_water_pct": 31.3,
+      "voxel_count_10cm": 220,
+      "spatial_classification": "Separate Person (In Workspace / Near Doorway)"
+    }
+  ]
+}

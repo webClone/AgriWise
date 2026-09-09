@@ -283,6 +283,13 @@ class CanonicalCropCycleContextV2:
         canonical_plant_date = (
             None if isinstance(plant_date, Mapping) else plant_date
         )
+        # ``dataclasses.asdict(OrchestratorInput)`` was used by early durable
+        # ASMAE reintegration manifests.  It preserved the hash from the
+        # canonical public payload but serialized these internal field names.
+        # Accept those names only as explicit aliases; the reconstructed
+        # canonical object must still match the supplied content hash below.
+        if canonical_plant_date in (None, ""):
+            canonical_plant_date = raw.get("plant_date_nominal")
         planting_date_alias = raw.get("planting_date")
         if (
             canonical_plant_date not in (None, "")
@@ -333,14 +340,24 @@ class CanonicalCropCycleContextV2:
             ),
             plant_date_range_start=(
                 raw.get("plant_date_min")
+                or raw.get("plant_date_range_start")
                 or legacy_plant_date.get("range_start")
             ),
             plant_date_range_end=(
                 raw.get("plant_date_max")
+                or raw.get("plant_date_range_end")
                 or legacy_plant_date.get("range_end")
             ),
-            expected_harvest_date=harvest_dates.get("expected"),
-            actual_harvest_date=harvest_dates.get("actual"),
+            expected_harvest_date=(
+                harvest_dates.get("expected")
+                if "expected" in harvest_dates
+                else raw.get("expected_harvest_date")
+            ),
+            actual_harvest_date=(
+                harvest_dates.get("actual")
+                if "actual" in harvest_dates
+                else raw.get("actual_harvest_date")
+            ),
             administrative_status=str(raw.get("administrative_status") or "UNKNOWN"),
             management_event_refs=tuple(management_refs),
         )

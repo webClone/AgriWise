@@ -1,0 +1,46 @@
+{
+  "rinex_version": "3.05",
+  "file_type": "OBSERVATION",
+  "marker_name": "USER-POS-LIVE-100M",
+  "marker_number": "",
+  "observer": "MESIA",
+  "agency": "AgriWise/AgriBrain",
+  "receiver": {
+    "number": "",
+    "type": "Qualcomm FastConnect + Host Radio Stack",
+    "version": ""
+  },
+  "antenna": {
+    "number": "",
+    "type": "Integrated Patch MIMO",
+    "delta_hen_m": [
+      1.2,
+      0.0,
+      0.0
+    ],
+    "phase_centre_model": ""
+  },
+  "approx_position_xyz_m": [
+    5112940.296,
+    268011.536,
+    3790821.883
+  ],
+  "observation_types": {
+    "G": [
+      "C1C",
+      "L1C",
+      "S1C"
+    ],
+    "E": [
+      "C1C",
+      "L1C",
+      "S1C"
+    ]
+  },
+  "interval_s": 1.0,
+  "mesia_geometry_epoch_id": "epoch-geom-user-100m",
+  "mesia_instrument_epoch_id": "epoch-inst-qualcomm-live",
+  "mesia_calibration_state_id": "cal-qualcomm-bench-01",
+  "mesia_correlator_type": "standard",
+  "mesia_rtk_correction_source": ""
+}

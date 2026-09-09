@@ -1,0 +1,16 @@
+{
+  "time": "2026-09-05T09:45",
+  "interval": 900,
+  "temperature_2m": 29.7,
+  "relative_humidity_2m": 44,
+  "surface_pressure": 1015.5,
+  "wind_speed_10m": 7.1,
+  "soil_temperature_0cm": 36.8,
+  "soil_moisture_0_to_1cm": 0.159,
+  "soil_moisture_1_to_3cm": 0.184,
+  "soil_moisture_3_to_9cm": 0.212,
+  "soil_moisture_9_to_27cm": 0.236,
+  "cached_at_utc": "2026-09-05T09:45:04.102105+00:00",
+  "source_class": "NWP_MODEL",
+  "processing_level": "DERIVED"
+}

@@ -193,5 +193,50 @@
     "last_satellite_collection": null,
     "collection_count": 1,
     "active": true
+  },
+  "697ddd3bd4195b809226a680:6aa0082f01e5f3c405fd9734": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "6aa0082f01e5f3c405fd9734",
+    "coordinates": {
+      "lng": 7.120799588235294,
+      "lat": 33.57138276470588
+    },
+    "crop": "unknown",
+    "area": 1.16,
+    "registered_at": "2026-09-08T14:05:51.510977",
+    "last_weather_collection": "2026-09-08T14:05:52.788460",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "697ddd3bd4195b809226a680:6aa02f444a6fc12a0ae90737": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "6aa02f444a6fc12a0ae90737",
+    "coordinates": {
+      "lng": 7.075815125000001,
+      "lat": 33.484843375
+    },
+    "crop": "unknown",
+    "area": 0.93,
+    "registered_at": "2026-09-08T16:52:36.886697",
+    "last_weather_collection": "2026-09-08T16:52:38.728895",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
+  },
+  "697ddd3bd4195b809226a680:6aa047ed4a6fc12a0ae9073a": {
+    "farm_id": "697ddd3bd4195b809226a680",
+    "plot_id": "6aa047ed4a6fc12a0ae9073a",
+    "coordinates": {
+      "lng": 3.0674184285714285,
+      "lat": 36.55097657142857
+    },
+    "crop": "unknown",
+    "area": 1.78,
+    "registered_at": "2026-09-08T18:37:50.311412",
+    "last_weather_collection": "2026-09-08T18:37:54.820843",
+    "last_satellite_collection": null,
+    "collection_count": 1,
+    "active": true
   }
 }

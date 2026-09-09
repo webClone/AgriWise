@@ -114,6 +114,11 @@ class CoarseLayerPriorsContract:
     """
     layer_keys: Dict[str, List[str]] = field(default_factory=lambda: {
         "layer2_intelligence": [
+            # Descriptive NDVI evidence is valid coarse input. Biological
+            # stage authority still comes from the canonical phenology receipt.
+            "ndvi_trajectory_phase",
+            "ndvi_trajectory_position",
+            "vigor",
             "phenology_stage",
             "growth_curve",
             "crop_identity_probability",
@@ -160,6 +165,7 @@ class CoarseLayerPriorsContract:
 
     invariants: List[str] = field(default_factory=lambda: [
         "Layer 8 outputs are constraints only — NEVER ASMAE truth",
+        "NDVI trajectory descriptors do not confer canonical phenology authority",
         "All priors must be versioned with run_id",
         "No future holdout leakage allowed",
         "Low-confidence ASMAE must never trigger irreversible Layer 8 action",

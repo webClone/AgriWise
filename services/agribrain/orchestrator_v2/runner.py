@@ -10,7 +10,23 @@ import time
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
+from services.agribrain.orchestrator_v2.serialization import to_plain_data
+
 logger = logging.getLogger(__name__)
+
+
+def _freeze_reintegration_input(inputs: Any) -> Dict[str, Any]:
+    """Serialize an orchestrator input without changing hash-bound contracts."""
+    payload = to_plain_data(inputs)
+    crop_cycle_context = getattr(inputs, "crop_cycle_context", None)
+    if crop_cycle_context is not None:
+        to_dict = getattr(crop_cycle_context, "to_dict", None)
+        if not callable(to_dict):
+            raise ValueError(
+                "crop_cycle_context cannot be frozen for ASMAE reintegration"
+            )
+        payload["crop_cycle_context"] = to_dict()
+    return payload
 
 
 def _propagate_intelligence_snapshot_id(
@@ -2013,7 +2029,7 @@ def run_orchestrator(
                     ),
                     "orchestrator_reintegration": {
                         "contract_version": REINTEGRATION_CONTRACT_VERSION,
-                        "input": asdict(inputs),
+                        "input": _freeze_reintegration_input(inputs),
                         "intent": "UNKNOWN",
                     },
                 }
@@ -2138,7 +2154,7 @@ def run_orchestrator(
                     ),
                     "orchestrator_reintegration": {
                         "contract_version": REINTEGRATION_CONTRACT_VERSION,
-                        "input": asdict(inputs),
+                        "input": _freeze_reintegration_input(inputs),
                         "intent": "UNKNOWN",
                     },
                 }
@@ -4090,17 +4106,14 @@ def _finalize_artifact(
     
     # Calculate Artifact Hash (Pure Content)
     # We exclude meta.timestamp, meta.orchestrator_run_id (circular), meta.replay_uri
-    pure_dict = asdict(art)
-    # Be careful with circular refs or exclusions. 
-    # Hash everything except meta fields that change? 
-    # Just hashing inputs + global_quality + final_plan + result_hashes seems robust.
-    
     # Only hashing inputs + layers content
     content_payload = {
-        "inputs": asdict(inputs),
-        "layers": {k: asdict(v) for k, v in results.items() if v},
-        "plan": asdict(final_plan) if final_plan else None,
-        "diagnostic_integration": diagnostic_integration,
+        "inputs": _freeze_reintegration_input(inputs),
+        "layers": {
+            k: to_plain_data(v) for k, v in results.items() if v
+        },
+        "plan": to_plain_data(final_plan) if final_plan else None,
+        "diagnostic_integration": to_plain_data(diagnostic_integration),
     }
     art_hash = hashlib.sha256(_canonical_json(content_payload).encode("utf-8")).hexdigest()
     art.meta.artifact_hash = art_hash

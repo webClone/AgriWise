@@ -1,0 +1,62 @@
+{
+  "version": "1.0.0",
+  "exemptions": [
+    {
+      "file_pattern": "services/agribrain/tests/test_mesia_truth_and_security.py",
+      "reason": "Automated security tests verifying the rejection of spoofed claims and forbidden combinations."
+    },
+    {
+      "file_pattern": "services/agribrain/mesia/governance/claim_scanner.py",
+      "reason": "Claim scanner implementation containing pattern definitions."
+    },
+    {
+      "file_pattern": "services/agribrain/mesia/truth/",
+      "reason": "Legitimate benchmark and ground truth reference dataset infrastructure."
+    },
+    {
+      "file_pattern": "services/agribrain/mesia/learning/asmae_evaluator.py",
+      "reason": "Reference to external biological benchmark ground truth."
+    },
+    {
+      "file_pattern": "services/agribrain/mesia/learning/masked_link_trainer.py",
+      "reason": "Explicit note asserting training never touches biological ground truth."
+    },
+    {
+      "file_pattern": "services/agribrain/mesia/validation/teacher_comparison.py",
+      "reason": "Reference to validated benchmark teacher comparison."
+    },
+    {
+      "file_pattern": "src/components/farm/intelligence/ContextualAnalysisDrawer.tsx",
+      "reason": "Farmer field survey ground truth registry UI."
+    },
+    {
+      "file_pattern": "src/components/farm/intelligence/EngineExpertView.tsx",
+      "reason": "Layer 10 pipeline diagnostic view referring to engine status."
+    },
+    {
+      "file_pattern": "src/components/farm/intelligence/EngineFarmerView.tsx",
+      "reason": "Layer 10 pipeline status description."
+    },
+    {
+      "file_pattern": "src/components/farm/intelligence/EnginePipelinePanel.tsx",
+      "reason": "Layer 10 pipeline status description."
+    },
+    {
+      "file_pattern": "src/components/farm/intelligence/FieldSnapshotHUD.tsx",
+      "reason": "Farmer field survey categorical ground truth registry."
+    },
+    {
+      "file_pattern": "src/components/farm/intelligence/SensorNetworkWorkspace.tsx",
+      "reason": "Physical IoT ground truth telemetry hub."
+    },
+    {
+      "file_pattern": "src/components/farm/intelligence/SidebarExpertView.tsx",
+      "reason": "Layer 10 diagnostic pipeline."
+    },
+    {
+      "file_pattern": "src/components/farm/intelligence/SubsystemLayerDashboard.tsx",
+      "reason": "Physical laboratory test soil ground truth comparison dashboard."
+    }
+  ]
+}
+

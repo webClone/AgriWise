@@ -491,6 +491,74 @@ def _point_in_polygon(px: float, py: float, polygon) -> bool:
     return inside
 
 
+def _rasterize_polygon_mask(
+    height: int,
+    width: int,
+    bounds: Any,
+    polygon: Any,
+) -> np.ndarray:
+    """Rasterize a field ring on one grid without leaking loop state.
+
+    The mask owns its row/column indices locally. Callers never depend on
+    variables left behind by a preceding surface loop, which is important
+    when the final surface uses a higher-resolution display grid.
+    """
+    if height <= 0 or width <= 0:
+        raise ValueError("polygon mask dimensions must be positive")
+    if not bounds or len(bounds) != 4:
+        raise ValueError("polygon mask requires four finite bounds")
+    min_x, min_y, max_x, max_y = (float(value) for value in bounds)
+    if not all(np.isfinite((min_x, min_y, max_x, max_y))):
+        raise ValueError("polygon mask bounds must be finite")
+    if max_x - min_x <= 1e-9 or max_y - min_y <= 1e-9:
+        raise ValueError("polygon mask bounds are degenerate")
+    if not polygon or len(polygon) < 3:
+        raise ValueError("polygon mask requires a valid exterior ring")
+
+    y_step = (max_y - min_y) / height
+    x_step = (max_x - min_x) / width
+    mask = np.zeros((height, width), dtype=bool)
+    for row_index in range(height):
+        center_y = max_y - (row_index + 0.5) * y_step
+        for column_index in range(width):
+            center_x = min_x + (column_index + 0.5) * x_step
+            mask[row_index, column_index] = _point_in_polygon(
+                center_x, center_y, polygon,
+            )
+    return mask
+
+
+def _resize_boolean_mask(
+    base_mask: np.ndarray,
+    target_height: int,
+    target_width: int,
+) -> np.ndarray:
+    """Project a base-grid mask onto a surface grid by cell-center ownership."""
+    source_mask = np.asarray(base_mask, dtype=bool)
+    if source_mask.ndim != 2 or not source_mask.size:
+        raise ValueError("source mask must be a non-empty two-dimensional array")
+    if target_height <= 0 or target_width <= 0:
+        raise ValueError("target mask dimensions must be positive")
+    source_height, source_width = source_mask.shape
+    if (target_height, target_width) == (source_height, source_width):
+        return source_mask
+    rows = np.clip(
+        np.floor(
+            (np.arange(target_height) + 0.5) * source_height / target_height
+        ).astype(int),
+        0,
+        source_height - 1,
+    )
+    columns = np.clip(
+        np.floor(
+            (np.arange(target_width) + 0.5) * source_width / target_width
+        ).astype(int),
+        0,
+        source_width - 1,
+    )
+    return source_mask[np.ix_(rows, columns)]
+
+
 def _extract_valid_field_polygon(field_tensor, explicit_geometry=None):
     """Return a non-degenerate exterior ring from explicit field geometry.
 
@@ -570,7 +638,10 @@ def _compute_field_valid_cells(l10_input, H: int, W: int, surfaces) -> Optional[
         if gs is not None and poly_ring:
             if poly_ring and len(poly_ring) >= 3:
                 # Rasterize: for each grid cell centre, test if inside polygon
-                gs_dict = gs.to_dict() if hasattr(gs, 'to_dict') else {}
+                gs_dict = (
+                    gs.to_dict() if hasattr(gs, 'to_dict')
+                    else (dict(gs) if isinstance(gs, dict) else {})
+                )
                 b = gs_dict.get('bounds') or getattr(gs, 'bounds', None)
                 if b and len(b) == 4:
                     min_lng, min_lat, max_lng, max_lat = b
@@ -2930,7 +3001,10 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         gs = getattr(ft, 'grid_spec', None)
         if gs is not None:
             if poly_ring and len(poly_ring) >= 3:
-                gs_dict = gs.to_dict() if hasattr(gs, 'to_dict') else {}
+                gs_dict = (
+                    gs.to_dict() if hasattr(gs, 'to_dict')
+                    else (dict(gs) if isinstance(gs, dict) else {})
+                )
                 b = gs_dict.get('bounds') or getattr(gs, 'bounds', None)
                 if b and len(b) == 4:
                     min_lng, min_lat, max_lng, max_lat = b
@@ -2938,241 +3012,21 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                     # degenerate bounds — lat_step/lng_step would be 0,
                     # collapsing all cell centers to a single point.
                     if abs(max_lng - min_lng) > 1e-9 and abs(max_lat - min_lat) > 1e-9:
-                        lat_step = (max_lat - min_lat) / H
-                        lng_step = (max_lng - min_lng) / W
-                        _field_mask = [[False] * W for _ in range(H)]
-                        for r in range(H):
-                            cy = max_lat - (r + 0.5) * lat_step
-                            for c in range(W):
-                                cx = min_lng + (c + 0.5) * lng_step
-                                _field_mask[r][c] = _point_in_polygon(cx, cy, poly_ring)
+                        base_field_mask = _rasterize_polygon_mask(
+                            H, W, b, poly_ring,
+                        )
+                        _field_mask = base_field_mask.tolist()
                         # Apply the geographic field footprint at each surface's
                         # own shape.  High-resolution products must not receive
                         # only the top-left HxW portion of the base mask.
-                        base_field_mask = np.asarray(_field_mask, dtype=bool)
                         for s in surfaces:
                             s_h = len(s.values)
                             s_w = len(s.values[0]) if s_h else 0
                             if not s_h or not s_w:
                                 continue
-                            if (s_h, s_w) == (H, W):
-                                surface_field_mask = base_field_mask
-                            else:
-                                rows = np.clip(
-                                    np.floor((np.arange(s_h) + 0.5) * H / s_h).astype(int),
-                                    0,
-                                    H - 1,
-                                )
-                                cols = np.clip(
-                                    np.floor((np.arange(s_w) + 0.5) * W / s_w).astype(int),
-                                    0,
-                                    W - 1,
-                                )
-                                surface_field_mask = base_field_mask[np.ix_(rows, cols)]
-                            dependency_mask = is_render_dependency_surface(s)
-                            for r in range(s_h):
-                                for c in range(s_w):
-                                    if not surface_field_mask[r, c]:
-                                        s.values[r][c] = 0.0 if dependency_mask else None
-
-                        # VALID_DATA_MASK is geometry ∩ finite final NDVI, not
-                        # merely the finite IDW rectangle.
-                        ndvi_surface = next(
-                            (s for s in surfaces if s.semantic_type == SurfaceType.NDVI_CLEAN), None
-                        )
-                        valid_surface = next(
-                            (s for s in surfaces if s.semantic_type == SurfaceType.VALID_DATA_MASK_NDVI), None
-                        )
-                        if ndvi_surface is not None and valid_surface is not None:
-                            ndvi_values = np.asarray(ndvi_surface.values, dtype=float)
-                            prior_valid_values = (
-                                np.asarray(valid_surface.values, dtype=float) > 0.5
+                            surface_field_mask = _resize_boolean_mask(
+                                base_field_mask, s_h, s_w,
                             )
-                            valid_values = (
-                                prior_valid_values
-                                & base_field_mask
-                                & np.isfinite(ndvi_values)
-                            )
-                            valid_surface.values = valid_values.astype(float).tolist()
-                            valid_surface.provenance["definition"] = (
-                                "trusted_source_support_intersection_field_geometry_finite_final_value"
-                            )
-                            valid_surface.provenance["field_geometry_applied"] = True
-
-                            # Reconcile all three canonical masks after the
-                            # field footprint is applied.  Coverage ratios are
-                            # field-relative; using the rectangular grid as the
-                            # denominator made a fully observed non-rectangular
-                            # plot look only 50.9% observed.
-                            observed_surface = next(
-                                (s for s in surfaces if s.semantic_type == SurfaceType.OBSERVED_DATA_MASK_NDVI), None
-                            )
-                            gap_surface = next(
-                                (s for s in surfaces if s.semantic_type == SurfaceType.GAP_FILL_MASK_NDVI), None
-                            )
-                            if observed_surface is not None and gap_surface is not None:
-                                observed_values = (
-                                    np.asarray(observed_surface.values, dtype=float) > 0.5
-                                ) & valid_values
-                                gap_values = valid_values & ~observed_values
-                                valid_count = int(np.count_nonzero(valid_values))
-                                observed_count = int(np.count_nonzero(observed_values))
-                                gap_count = int(np.count_nonzero(gap_values))
-                                field_observed_ratio = (
-                                    observed_count / valid_count if valid_count else 0.0
-                                )
-
-                                observed_surface.values = observed_values.astype(float).tolist()
-                                gap_surface.values = gap_values.astype(float).tolist()
-                                for mask_surface, count in (
-                                    (observed_surface, observed_count),
-                                    (gap_surface, gap_count),
-                                    (valid_surface, valid_count),
-                                ):
-                                    mask_surface.observed_ratio = field_observed_ratio
-                                    mask_surface.provenance["field_valid_cell_count"] = valid_count
-                                    mask_surface.provenance["active_cell_count"] = count
-                                    mask_surface.provenance["coverage_denominator"] = "field_geometry_valid_cells"
-                                ndvi_surface.observed_ratio = field_observed_ratio
-
-                                ratios = getattr(l1_data, "observed_ratios", None)
-                                if isinstance(ratios, dict):
-                                    ratios["ndvi"] = field_observed_ratio
-
-                                    # Normalize the remaining provider-mask
-                                    # ratios to the same geographic footprint.
-                                    # Preserve a ratio when no aligned source
-                                    # mask exists rather than fabricating one.
-                                    provider_masks = getattr(l1_data, "observed_masks", {}) or {}
-                                    field_count = int(np.count_nonzero(base_field_mask))
-                                    aliases = {
-                                        "vv": "sar_backscatter",
-                                        "vh": "sar_backscatter",
-                                        "sar": "sar_backscatter",
-                                    }
-                                    for ratio_key in list(ratios):
-                                        key = str(ratio_key).lower()
-                                        mask_value = provider_masks.get(ratio_key)
-                                        if mask_value is None:
-                                            mask_value = provider_masks.get(key)
-                                        if mask_value is None and key in aliases:
-                                            mask_value = provider_masks.get(aliases[key])
-                                        if mask_value is None:
-                                            continue
-                                        provider_mask = np.asarray(mask_value, dtype=bool)
-                                        if (
-                                            provider_mask.ndim != 2
-                                            or provider_mask.shape[0] == 0
-                                            or provider_mask.shape[1] == 0
-                                        ):
-                                            continue
-                                        if provider_mask.shape != (H, W):
-                                            rows = np.clip(
-                                                np.floor((np.arange(H) + 0.5) * provider_mask.shape[0] / H).astype(int),
-                                                0,
-                                                provider_mask.shape[0] - 1,
-                                            )
-                                            cols = np.clip(
-                                                np.floor((np.arange(W) + 0.5) * provider_mask.shape[1] / W).astype(int),
-                                                0,
-                                                provider_mask.shape[1] - 1,
-                                            )
-                                            provider_mask = provider_mask[np.ix_(rows, cols)]
-                                        ratios[ratio_key] = (
-                                            float(np.count_nonzero(provider_mask & base_field_mask)) / field_count
-                                            if field_count else 0.0
-                                        )
-
-                                # Experimental candidate percentages are also
-                                # field-relative.  They were generated before
-                                # polygon masking, so their cached provenance
-                                # still used the bounding rectangle even though
-                                # the serialized mask no longer did.
-                                candidate_surface = next(
-                                    (
-                                        s for s in surfaces
-                                        if s.semantic_type == SurfaceType.EXPERIMENTAL_STRICT_FINE_DETAIL_CANDIDATE_MASK
-                                    ),
-                                    None,
-                                )
-                                if candidate_surface is not None:
-                                    candidate_values = np.asarray(candidate_surface.values, dtype=float)
-                                    candidate_denominator = int(np.count_nonzero(np.isfinite(candidate_values)))
-                                    candidate_count = int(np.count_nonzero(candidate_values > 0.5))
-                                    candidate_pct = (
-                                        100.0 * candidate_count / candidate_denominator
-                                        if candidate_denominator else 0.0
-                                    )
-                                    for experimental_surface in surfaces:
-                                        provenance = experimental_surface.provenance or {}
-                                        if "candidate_coverage_pct" not in provenance:
-                                            continue
-                                        provenance["candidate_coverage_pct"] = candidate_pct
-                                        provenance["candidate_cell_count"] = candidate_count
-                                        provenance["field_valid_cell_count"] = candidate_denominator
-                                        provenance["coverage_denominator"] = "field_geometry_valid_cells"
-                                        experimental_surface.provenance = provenance
-
-                                # Recompute the categorical resolution summary
-                                # from the polygon-clipped values.  Outside-plot
-                                # cells must not remain classified as a 10 m
-                                # fallback in the percentages or unique classes.
-                                resolution_surface = next(
-                                    (s for s in surfaces if s.semantic_type == SurfaceType.RESOLUTION_COVERAGE),
-                                    None,
-                                )
-                                if resolution_surface is not None:
-                                    resolution_values = np.asarray(resolution_surface.values, dtype=float)
-                                    finite_resolution = resolution_values[np.isfinite(resolution_values)]
-                                    if finite_resolution.size:
-                                        unique_resolution = sorted(
-                                            float(value) for value in np.unique(finite_resolution)
-                                        )
-                                        resolution_total = int(finite_resolution.size)
-                                        percentage_for = lambda value: round(
-                                            100.0 * float(np.count_nonzero(np.isclose(finite_resolution, value)))
-                                            / resolution_total,
-                                            2,
-                                        )
-                                        resolution_pct = {
-                                            "three_cm_external_ground_truth_pct": percentage_for(0.0),
-                                            "one_meter_advisory_pct": percentage_for(1.0),
-                                            "two_meter_production_pct": 0.0,
-                                            "three_meter_production_pct": 0.0,
-                                            "two_meter_model_assisted_pct": percentage_for(2.0),
-                                            "three_meter_model_assisted_pct": percentage_for(3.0),
-                                            "five_meter_production_pct": 0.0,
-                                            "ten_meter_fallback_pct": percentage_for(5.0),
-                                            "five_meter_model_assisted_pct": percentage_for(4.0),
-                                        }
-                                        provenance = resolution_surface.provenance or {}
-                                        provenance["unique_resolution_class_codes"] = unique_resolution
-                            for c in range(W):
-                                cx = min_lng + (c + 0.5) * lng_step
-                                _field_mask[r][c] = _point_in_polygon(cx, cy, poly_ring)
-                        # Apply the geographic field footprint at each surface's
-                        # own shape.  High-resolution products must not receive
-                        # only the top-left HxW portion of the base mask.
-                        base_field_mask = np.asarray(_field_mask, dtype=bool)
-                        for s in surfaces:
-                            s_h = len(s.values)
-                            s_w = len(s.values[0]) if s_h else 0
-                            if not s_h or not s_w:
-                                continue
-                            if (s_h, s_w) == (H, W):
-                                surface_field_mask = base_field_mask
-                            else:
-                                rows = np.clip(
-                                    np.floor((np.arange(s_h) + 0.5) * H / s_h).astype(int),
-                                    0,
-                                    H - 1,
-                                )
-                                cols = np.clip(
-                                    np.floor((np.arange(s_w) + 0.5) * W / s_w).astype(int),
-                                    0,
-                                    W - 1,
-                                )
-                                surface_field_mask = base_field_mask[np.ix_(rows, cols)]
                             dependency_mask = is_render_dependency_surface(s)
                             for r in range(s_h):
                                 for c in range(s_w):

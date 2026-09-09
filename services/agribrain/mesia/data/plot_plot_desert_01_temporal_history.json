@@ -1,0 +1,37 @@
+[
+  {
+    "timestamp_iso": "2026-09-06T17:35:58.995360+00:00",
+    "timestamp_epoch": 1788716158.99536,
+    "root_zone_vwc_pct": 5.6
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:37:33.377776+00:00",
+    "timestamp_epoch": 1788716253.377776,
+    "root_zone_vwc_pct": 5.6
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:38:05.060848+00:00",
+    "timestamp_epoch": 1788716285.060848,
+    "root_zone_vwc_pct": 5.6
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:38:41.469365+00:00",
+    "timestamp_epoch": 1788716321.469365,
+    "root_zone_vwc_pct": 5.6
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:58:19.256902+00:00",
+    "timestamp_epoch": 1788717499.256902,
+    "root_zone_vwc_pct": 5.6
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:58:53.482306+00:00",
+    "timestamp_epoch": 1788717533.482306,
+    "root_zone_vwc_pct": 5.6
+  },
+  {
+    "timestamp_iso": "2026-09-07T14:08:46.122788+00:00",
+    "timestamp_epoch": 1788790126.122788,
+    "root_zone_vwc_pct": 5.4
+  }
+]

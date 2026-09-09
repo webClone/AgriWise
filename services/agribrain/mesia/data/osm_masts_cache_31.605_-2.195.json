@@ -1,0 +1,90 @@
+[
+  {
+    "osm_id": 4272458564,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 2225.3,
+    "bearing_deg": 2.1,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 5830422299,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 3709.3,
+    "bearing_deg": 287.9,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 5830646088,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 3720.5,
+    "bearing_deg": 316.8,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 3647678246,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 3792.3,
+    "bearing_deg": 317.6,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 5830406278,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 4019.2,
+    "bearing_deg": 317.8,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 5111739658,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 4123.1,
+    "bearing_deg": 254.7,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 9933796067,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 6462.5,
+    "bearing_deg": 320.2,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  },
+  {
+    "osm_id": 5111727848,
+    "operator": "UNKNOWN",
+    "band": "UNKNOWN",
+    "freq_hz": 0.0,
+    "dist_m": 6738.9,
+    "bearing_deg": 216.5,
+    "tx_power_dbm": 0.0,
+    "source_class": "GIS_REGISTRY",
+    "identity_state": "UNKNOWN"
+  }
+]

@@ -120,6 +120,33 @@ test("R5.0 Frontend Auth & Surface Integrity Contracts", async (t) => {
     assert.deepEqual(patched.surfaces, previous.surfaces);
   });
 
+  await t.test("request-local Layer 10 failure is never presented as an ASMAE worker failure", async () => {
+    const {
+      buildAsmaeRefreshFailedDetail,
+      buildAsmaeWorkerProgressView,
+    } = await import("../../src/lib/agribrain/asmae-job-state.mjs");
+    const requestFailure = {
+      plot_id: "plot-a",
+      status: "failed",
+      terminal: true,
+      durable_job: null,
+      asmae_job: null,
+      request_failure: {
+        code: "L10_POLYGON_MASK_EXECUTION_ERROR",
+        stage: "layer10_surface_publication",
+      },
+    };
+
+    assert.equal(buildAsmaeWorkerProgressView(requestFailure, "plot-a"), null);
+    assert.equal(buildAsmaeRefreshFailedDetail(requestFailure, "plot-a"), null);
+
+    const progressSource = await readFile(
+      new URL("../../src/components/farm/intelligence/PlotLoadingSequence.tsx", import.meta.url),
+      "utf8",
+    );
+    assert.match(progressSource, /AgriBrain surface publication failed/);
+  });
+
   await t.test("worker progress view uses the durable percentage and retains the canonical map", async () => {
     const { buildAsmaeWorkerProgressView } = await import(
       "../../src/lib/agribrain/asmae-job-state.mjs"
@@ -361,7 +388,12 @@ test("R5.0 Frontend Auth & Surface Integrity Contracts", async (t) => {
     assert.match(progressSource, /dispatchedCompletionRef\.current !== completionIdentity/);
     assert.doesNotMatch(progressSource, /ALL_DYNAMIC_STAGES|progressFraction/);
     assert.match(dashboardSource, /showAsmaeWorkerProgress/);
-    assert.match(dashboardSource, /asmaeWorkerRequestError/);
+    assert.match(dashboardSource, /surfacePublicationRequestError = Boolean\(l10\.error\)/);
+    assert.doesNotMatch(
+      dashboardSource,
+      /asmae\|canonical publication\|spatial refresh\|worker\|reintegration/,
+      "generic publication failures must remain visible with last-known-good data",
+    );
     assert.match(dashboardSource, /completed_reintegration_pending/);
     assert.match(dashboardSource, /pointer-events-none/);
     assert.match(dashboardSource, /handleAsmaeWorkerRetry/);

@@ -1,0 +1,77 @@
+[
+  {
+    "timestamp_iso": "2026-09-06T01:04:09.997413+00:00",
+    "timestamp_epoch": 1788656649.997413,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T01:04:38.666554+00:00",
+    "timestamp_epoch": 1788656678.666554,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T01:04:59.357423+00:00",
+    "timestamp_epoch": 1788656699.357423,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T01:05:24.389997+00:00",
+    "timestamp_epoch": 1788656724.389997,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T01:05:35.524474+00:00",
+    "timestamp_epoch": 1788656735.524474,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T01:05:59.660612+00:00",
+    "timestamp_epoch": 1788656759.660612,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T15:16:26.493691+00:00",
+    "timestamp_epoch": 1788707786.493691,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T15:23:03.373089+00:00",
+    "timestamp_epoch": 1788708183.373089,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:10:09.170477+00:00",
+    "timestamp_epoch": 1788714609.170477,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:38:35.702105+00:00",
+    "timestamp_epoch": 1788716315.702105,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:53:47.787252+00:00",
+    "timestamp_epoch": 1788717227.787252,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-06T17:58:42.459767+00:00",
+    "timestamp_epoch": 1788717522.459767,
+    "root_zone_vwc_pct": 21.2
+  },
+  {
+    "timestamp_iso": "2026-09-07T14:08:49.826772+00:00",
+    "timestamp_epoch": 1788790129.826772,
+    "root_zone_vwc_pct": 21.3
+  },
+  {
+    "timestamp_iso": "2026-09-07T14:10:11.249495+00:00",
+    "timestamp_epoch": 1788790211.249495,
+    "root_zone_vwc_pct": 21.3
+  },
+  {
+    "timestamp_iso": "2026-09-07T15:37:51.550815+00:00",
+    "timestamp_epoch": 1788795471.550815,
+    "root_zone_vwc_pct": 21.3
+  }
+]

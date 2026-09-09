@@ -103,9 +103,12 @@ def init_mongo_nonce_indexes(db: Any) -> None:
         print(f"[AUTH] Could not initialize MongoDB nonce collection: {exc}")
 
 
+_in_memory_nonces: Dict[str, float] = {}
+
+
 def verify_and_store_nonce(key_version: str, nonce: str, max_age_seconds: int = 300) -> bool:
-    """Stores nonce in MongoDB or in-memory fallback. Returns False if duplicate or DB fails in production."""
-    global _mongo_nonces_collection
+    """Stores nonce in MongoDB or sliding-window TTL memory cache. Returns False if duplicate or DB fails in production."""
+    global _mongo_nonces_collection, _in_memory_nonces
     nonce_key = f"{key_version}::{nonce}"
     environment = os.getenv(
         "NODE_ENV", os.getenv("ENVIRONMENT", os.getenv("APP_ENV", "development"))
@@ -116,6 +119,13 @@ def verify_and_store_nonce(key_version: str, nonce: str, max_age_seconds: int = 
     # Production therefore requires the shared atomic nonce store to exist.
     if is_prod and _mongo_nonces_collection is None:
         return False
+
+    now_ts = time.time()
+
+    # Sliding-window eviction: evict nonces older than their expiration timestamp
+    expired_keys = [k for k, exp in _in_memory_nonces.items() if exp <= now_ts]
+    for k in expired_keys:
+        del _in_memory_nonces[k]
 
     if nonce_key in _in_memory_nonces:
         return False
@@ -140,10 +150,7 @@ def verify_and_store_nonce(key_version: str, nonce: str, max_age_seconds: int = 
                 # Production fails closed on DB error
                 return False
 
-    _in_memory_nonces.add(nonce_key)
-    if len(_in_memory_nonces) > 10000:
-        _in_memory_nonces.clear()
-
+    _in_memory_nonces[nonce_key] = now_ts + max_age_seconds
     return True
 
 
@@ -161,7 +168,10 @@ async def require_internal_service_request(request: Request) -> PlotNamespace:
     farm_id = request.headers.get("X-Farm-Id")
     plot_id = request.headers.get("X-Plot-Id") or request.path_params.get("plot_id") or request.query_params.get("plot_id")
 
-    allow_unauthenticated_dev = os.getenv("ALLOW_UNAUTHENTICATED_DEV", "false").lower() == "true"
+    env_name = os.getenv("NODE_ENV", os.getenv("ENVIRONMENT", os.getenv("APP_ENV", "development"))).lower()
+    is_prod = env_name in ("production", "prod", "staging")
+
+    allow_unauthenticated_dev = (os.getenv("ALLOW_UNAUTHENTICATED_DEV", "false").lower() == "true") and not is_prod
     if not sig and allow_unauthenticated_dev:
         t_id = tenant_id or "dev_tenant"
         f_id = farm_id or "dev_farm"
@@ -208,8 +218,40 @@ async def require_internal_service_request(request: Request) -> PlotNamespace:
             detail="Invalid request timestamp format"
         )
 
+    # Enforce 10 MB payload limit before and during reading body
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > 10 * 1024 * 1024:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="Request payload exceeds 10MB limit",
+                )
+        except ValueError:
+            pass
+
     # Read body for hash verification FIRST
     body_bytes = await request.body()
+    if len(body_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Request payload exceeds 10MB limit",
+        )
+
+    # Reject client spoofing of tenant/farm identity inside JSON body (both snake_case and camelCase)
+    if body_bytes:
+        try:
+            import json as _json
+            body_json = _json.loads(body_bytes.decode("utf-8"))
+            if isinstance(body_json, dict):
+                spoofed = {"tenant_id", "tenantId", "farm_id", "farmId"}.intersection(body_json.keys())
+                if spoofed:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Client payload must not specify tenant_id, tenantId, farm_id, or farmId. Authority is derived exclusively from authenticated tokens.",
+                    )
+        except (UnicodeDecodeError, _json.JSONDecodeError):
+            pass
     expected_sig = compute_request_signature(
         method=request.method,
         path=request.url.path,

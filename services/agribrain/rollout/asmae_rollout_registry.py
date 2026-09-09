@@ -9,6 +9,7 @@ import json
 import os
 import time
 import threading
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -107,6 +108,42 @@ REGISTRY_SCHEMA_VERSION = "v86_rollout_registry_v2"
 ROLLOUT_CONTRACT_VERSION = "bc10.20r3"
 _LOCAL_LOCK = threading.RLock()
 _local_initialized = False
+_ephemeral_test_registry: Optional[Dict[str, Any]] = None
+
+
+def _uses_ephemeral_test_registry() -> bool:
+    """Keep pytest rollout mutations out of the tracked operator registry."""
+    return bool(
+        is_test_context()
+        and Path(REGISTRY_FILE).resolve()
+        == (REGISTRY_DIR / "asmae_rollout_registry.json").resolve()
+    )
+
+
+def _load_ephemeral_test_registry() -> Dict[str, Any]:
+    global _ephemeral_test_registry
+    if _ephemeral_test_registry is None:
+        try:
+            with open(REGISTRY_FILE, "r", encoding="utf-8") as handle:
+                registry = json.load(handle)
+        except Exception:
+            registry = {"version": REGISTRY_SCHEMA_VERSION, "plots": {}}
+        plots = registry.setdefault("plots", {})
+        for plot_id, phase in _get_default_plots().items():
+            plots.setdefault(plot_id, {
+                "enabled": True,
+                "backend_enabled": True,
+                "l10_visuals_enabled": phase != "backend_observation",
+                "phase": phase,
+                "owner": "internal",
+                "crop": "generic",
+                "region": "internal_test",
+                "created_at": "pytest-ephemeral",
+                "notes": "Ephemeral test rollout fixture",
+            })
+        registry["version"] = REGISTRY_SCHEMA_VERSION
+        _ephemeral_test_registry = registry
+    return deepcopy(_ephemeral_test_registry)
 
 
 def _use_persistent_store() -> bool:
@@ -223,6 +260,8 @@ def _load_registry() -> Dict[str, Any]:
     if _use_persistent_store():
         raise RuntimeError("local rollout registry is disabled in production")
     with _LOCAL_LOCK:
+        if _uses_ephemeral_test_registry():
+            return _load_ephemeral_test_registry()
         if not _local_initialized:
             migrate_registry_to_v86()
             _local_initialized = True
@@ -233,9 +272,13 @@ def _load_registry() -> Dict[str, Any]:
             return {"version": REGISTRY_SCHEMA_VERSION, "plots": {}}
 
 def _save_registry(registry: Dict[str, Any]):
+    global _ephemeral_test_registry
     if _use_persistent_store():
         raise RuntimeError("local rollout registry is disabled in production")
     with _LOCAL_LOCK:
+        if _uses_ephemeral_test_registry():
+            _ephemeral_test_registry = deepcopy(registry)
+            return
         _atomic_json_write(REGISTRY_FILE, registry)
 
 
@@ -461,6 +504,7 @@ def record_rollout_decision(
         "rollback_available": rollback_available
     }
     
-    AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(AUDIT_LOG_FILE, "a") as f:
-        f.write(json.dumps(audit_entry) + "\n")
+    if not _uses_ephemeral_test_registry():
+        AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(AUDIT_LOG_FILE, "a") as f:
+            f.write(json.dumps(audit_entry) + "\n")

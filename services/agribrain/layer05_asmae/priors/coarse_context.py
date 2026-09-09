@@ -99,22 +99,27 @@ def build_coarse_layer_outputs(
         peak = max(ndvi)
         peak_index = ndvi.index(peak)
         if len(ndvi) < 3:
-            growth_position = None
-            stage = "unknown"
+            trajectory_position = None
+            trajectory_phase = "unknown"
         elif peak_index == len(ndvi) - 1:
-            growth_position = 0.5 * peak_index / max(len(ndvi) - 1, 1)
-            stage = "vegetative"
+            trajectory_position = 0.5 * peak_index / max(len(ndvi) - 1, 1)
+            trajectory_phase = "rising"
         else:
-            growth_position = 0.5 + 0.5 * (len(ndvi) - 1 - peak_index) / max(len(ndvi) - 1, 1)
-            stage = "senescence" if current < peak * 0.8 else "reproductive"
+            trajectory_position = 0.5 + 0.5 * (len(ndvi) - 1 - peak_index) / max(len(ndvi) - 1, 1)
+            trajectory_phase = "declining" if current < peak * 0.8 else "plateau"
         result["layer2_intelligence"] = {
             "status": "available",
             "confidence": min(0.9, 0.45 + 0.05 * len(ndvi)),
             "source_layer": "layer1_coarse_temporal",
             "source_timestamp": now,
             "evidence": ["NDVI"],
-            "phenology_stage": stage,
-            "growth_position": growth_position,
+            # This is a shape descriptor derived from the NDVI sequence, not
+            # a canonical biological-stage receipt.  Downstream code must not
+            # reinterpret it as phenology authority.
+            "ndvi_trajectory_phase": trajectory_phase,
+            "ndvi_trajectory_position": trajectory_position,
+            "trajectory_authority": "ndvi_shape_prior_only",
+            "canonical_phenology_allowed": False,
             "vigor": max(0.0, min(1.0, (current + 0.1) / 0.9)),
         }
 

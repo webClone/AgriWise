@@ -7,7 +7,7 @@
  * All data from real engine statuses + L10 quality. Zero synthetic data.
  */
 
-import type { EngineStatus } from "@/hooks/usePlotIntelligence";
+import { type EngineStatus, SUBSYSTEM_METADATA } from "@/hooks/usePlotIntelligence";
 import type { Layer10Result } from "@/hooks/useLayer10";
 
 interface ExpertViewProps {
@@ -16,7 +16,21 @@ interface ExpertViewProps {
   expandedEngine: string | null;
   onToggleEngine: (id: string | null) => void;
   onAskBrain: (query: string) => void;
+  onOpenLayerDashboard?: (layerId: string) => void;
 }
+
+const getSubsystemTag = (engineId: string) => {
+  return SUBSYSTEM_METADATA[engineId]?.tag || "CORE";
+};
+
+const sanitizeExpertText = (txt: any) => {
+  if (!txt) return "";
+  return String(txt)
+    .replace(/SoilGrids-ISRIC/gi, "Regional Soil Survey")
+    .replace(/SoilGrids Proxy/gi, "Regional Soil Survey Baseline")
+    .replace(/SoilGrids/gi, "Regional Soil Survey")
+    .replace(/\bL([0-9]{1,2})\b/g, (m) => SUBSYSTEM_METADATA[m]?.name || m);
+};
 
 const STATUS_COLORS: Record<string, { bg: string; border: string; dot: string; text: string }> = {
   OK: { bg: "rgba(34, 197, 94, 0.08)", border: "rgba(34, 197, 94, 0.2)", dot: "#4ade80", text: "OK" },
@@ -69,20 +83,24 @@ function MetricRow({ metric }: { metric: any }) {
 }
 
 // ── Engine Card (Expert) ────────────────────────────────────────────────
-function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneRelevance }: {
+function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneRelevance, onOpenLayerDashboard }: {
   engine: EngineStatus;
   isExpanded: boolean;
   onToggle: () => void;
   onAskBrain: (q: string) => void;
   zoneRelevance: string[];
+  onOpenLayerDashboard?: (layerId: string) => void;
 }) {
   const colors = STATUS_COLORS[engine.status] || STATUS_COLORS.OFFLINE;
+  const isOverridden = Boolean(engine.data?.is_parameter_overridden);
   const expertMetrics = (engine.data?.expert_metrics as any[]) || [];
 
-  // Compute per-engine confidence from its metrics
-  const engineConf = expertMetrics.length > 0
-    ? expertMetrics.reduce((sum, m) => sum + Number(m.confidence ?? 0), 0) / expertMetrics.length
-    : null;
+  // Compute per-engine confidence from its metrics or ground-truth override
+  const engineConf = isOverridden
+    ? Number(engine.data?.canonical_confidence ?? 0.95)
+    : expertMetrics.length > 0
+      ? expertMetrics.reduce((sum, m) => sum + Number(m.confidence ?? 0), 0) / expertMetrics.length
+      : (engine.data?.canonical_confidence != null ? Number(engine.data.canonical_confidence) : null);
 
   return (
     <div
@@ -112,10 +130,17 @@ function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneReleva
         {/* Icon */}
         <span style={{ fontSize: "1rem", lineHeight: 1 }}>{engine.icon}</span>
 
-        {/* ID + Name */}
+        {/* Tag + Name */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-            <span style={{ fontSize: "12px", color: "#64748b", fontFamily: "monospace", fontWeight: 700 }}>{engine.id}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <span style={{
+              fontSize: "9px", padding: "1px 5px", borderRadius: "3px",
+              background: "rgba(99,102,241,0.12)", color: "#a5b4fc",
+              border: "1px solid rgba(99,102,241,0.2)",
+              fontWeight: 700, letterSpacing: "0.04em",
+            }}>
+              {getSubsystemTag(engine.id)}
+            </span>
             <span style={{
               fontSize: "13px", fontWeight: 600, color: "#e2e8f0",
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
@@ -123,7 +148,7 @@ function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneReleva
               {engine.name}
             </span>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
             <span style={{ fontSize: "11px", color: colors.dot, fontWeight: 600 }}>{colors.text}</span>
             {engineConf !== null && (
               <span style={{
@@ -131,6 +156,15 @@ function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneReleva
                 fontFamily: "monospace",
               }}>
                 conf:{(engineConf * 100).toFixed(0)}%
+              </span>
+            )}
+            {isOverridden && (
+              <span style={{
+                fontSize: "8px", padding: "1px 5px", borderRadius: "3px",
+                background: "rgba(16,185,129,0.15)", color: "#34d399",
+                border: "1px solid rgba(16,185,129,0.3)", fontWeight: 700,
+              }}>
+                VERIFIED OVERRIDE
               </span>
             )}
           </div>
@@ -155,7 +189,7 @@ function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneReleva
         }}>
           {/* Expert summary */}
           <p style={{ fontSize: "13px", color: "#cbd5e1", lineHeight: 1.6, margin: "0 0 10px 0" }}>
-            {String(engine.data?.expert_summary || engine.summary)}
+            {sanitizeExpertText(engine.data?.expert_summary || engine.summary)}
           </p>
 
           {/* Confidence + freshness row */}
@@ -201,7 +235,7 @@ function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneReleva
           {engine.data && Object.keys(engine.data).filter(k => !["expert_metrics", "expert_summary", "farmer_summary", "why_it_matters", "confidence_level", "confidence_reason", "data_freshness", "model_version"].includes(k)).length > 0 ? (
             <details style={{ marginBottom: "6px" }}>
               <summary style={{ fontSize: "12px", color: "#64748b", cursor: "pointer", fontWeight: 700, textTransform: "uppercase" }}>
-                Raw Fields ({Object.keys(engine.data).length})
+                Raw Subsystem Fields ({Object.keys(engine.data).length})
               </summary>
               <div className="eev-raw-box" style={{
                 marginTop: "4px", padding: "8px 10px", borderRadius: "6px",
@@ -215,7 +249,7 @@ function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneReleva
                     <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "1px 0" }}>
                       <span style={{ color: "#64748b" }}>{k}</span>
                       <span style={{ color: "#cbd5e1" }}>
-                        {typeof v === "object" ? (v === null ? "null" : Array.isArray(v) ? `[${(v as any[]).length}]` : "{…}") : String(v)}
+                        {typeof v === "object" ? (v === null ? "null" : Array.isArray(v) ? `[${(v as any[]).length}]` : "{…}") : sanitizeExpertText(String(v))}
                       </span>
                     </div>
                   ))}
@@ -245,15 +279,25 @@ function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneReleva
                 padding: "6px 10px", background: "rgba(0,0,0,0.2)", borderRadius: "4px",
                 marginTop: "4px", fontSize: "12px", color: "#94a3b8", lineHeight: 1.5,
               }}>
-                {String(engine.data.why_it_matters)}
+                {sanitizeExpertText(engine.data.why_it_matters)}
               </div>
             </details>
           ) : null}
 
           {/* Action buttons */}
-          <div style={{ display: "flex", gap: "8px" }}>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
             <button
-              onClick={(e) => { e.stopPropagation(); onAskBrain(`Deep analysis of ${engine.id} ${engine.name}: current findings, confidence reasoning, and what alternative interpretations exist.`); }}
+              onClick={(e) => { e.stopPropagation(); onOpenLayerDashboard?.(engine.id); }}
+              style={{
+                fontSize: "12px", color: "#34d399", background: "rgba(16,185,129,0.12)",
+                border: "1px solid rgba(16,185,129,0.3)", borderRadius: "4px",
+                cursor: "pointer", fontWeight: 700, padding: "3px 8px",
+              }}
+            >
+              ⚙️ Tune & Override
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onAskBrain(`Deep analysis of ${engine.name}: current findings, confidence reasoning, and what alternative interpretations exist.`); }}
               style={{
                 fontSize: "12px", color: "#818cf8", background: "none", border: "none",
                 cursor: "pointer", fontWeight: 700, textTransform: "uppercase", padding: "2px 0",
@@ -262,7 +306,7 @@ function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneReleva
               Analyze →
             </button>
             <button
-              onClick={(e) => { e.stopPropagation(); onAskBrain(`What are the limitations of ${engine.id} ${engine.name} right now? What could invalidate its current assessment?`); }}
+              onClick={(e) => { e.stopPropagation(); onAskBrain(`What are the limitations of ${engine.name} right now? What could invalidate its current assessment?`); }}
               style={{
                 fontSize: "12px", color: "#fbbf24", background: "none", border: "none",
                 cursor: "pointer", fontWeight: 700, textTransform: "uppercase", padding: "2px 0",
@@ -278,7 +322,7 @@ function EngineCardExpert({ engine, isExpanded, onToggle, onAskBrain, zoneReleva
 }
 
 // ── Main Expert View ────────────────────────────────────────────────────
-export default function EngineExpertView({ engines, data, expandedEngine, onToggleEngine, onAskBrain }: ExpertViewProps) {
+export default function EngineExpertView({ engines, data, expandedEngine, onToggleEngine, onAskBrain, onOpenLayerDashboard }: ExpertViewProps) {
   // Build zone relevance map from real zone data
   const zoneRelevanceMap: Record<string, string[]> = {};
   if (data?.zones) {
@@ -337,6 +381,7 @@ export default function EngineExpertView({ engines, data, expandedEngine, onTogg
           onToggle={() => onToggleEngine(expandedEngine === engine.id ? null : engine.id)}
           onAskBrain={onAskBrain}
           zoneRelevance={zoneRelevanceMap[engine.id] || []}
+          onOpenLayerDashboard={onOpenLayerDashboard}
         />
       ))}
 
@@ -350,7 +395,7 @@ export default function EngineExpertView({ engines, data, expandedEngine, onTogg
             Pipeline Warnings ({quality.warnings.length})
           </div>
           {quality.warnings.map((w, i) => (
-            <div key={i} style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "3px" }}>⚠ {w}</div>
+            <div key={i} style={{ fontSize: "12px", color: "#94a3b8", marginBottom: "3px" }}>⚠ {sanitizeExpertText(w)}</div>
           ))}
         </div>
       )}

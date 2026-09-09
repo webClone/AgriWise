@@ -1,0 +1,17 @@
+[
+  {
+    "timestamp_iso": "2026-09-07T17:32:38.321817+00:00",
+    "timestamp_epoch": 1788802358.321817,
+    "root_zone_vwc_pct": 21.3
+  },
+  {
+    "timestamp_iso": "2026-09-07T17:33:02.729286+00:00",
+    "timestamp_epoch": 1788802382.729286,
+    "root_zone_vwc_pct": 21.3
+  },
+  {
+    "timestamp_iso": "2026-09-07T17:33:40.235839+00:00",
+    "timestamp_epoch": 1788802420.235839,
+    "root_zone_vwc_pct": 21.3
+  }
+]

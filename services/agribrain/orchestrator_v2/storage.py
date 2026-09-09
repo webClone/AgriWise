@@ -2,9 +2,9 @@
 import json
 import os
 from typing import Protocol, Any
-from dataclasses import asdict
 
 from services.agribrain.orchestrator_v2.schema import RunArtifact
+from services.agribrain.orchestrator_v2.serialization import to_plain_data
 
 class ArtifactStore(Protocol):
     def save(self, artifact: RunArtifact) -> str:
@@ -25,7 +25,7 @@ class LocalJsonStore:
         fpath = os.path.join(self.base_path, f"{rid}.json")
         
         # Serialize
-        data = asdict(artifact)
+        data = to_plain_data(artifact)
         with open(fpath, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, default=str)
             

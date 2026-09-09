@@ -1181,6 +1181,7 @@ class ASMAEEngine:
         priors = ingest_all_priors(
             coarse_outputs=inp.coarse_layer_outputs,
             crop_context=inp.crop_context,
+            phenology_posterior=inp.phenology_posterior,
             plot_id=inp.plot_id,
             geometry_hash=inp.geometry_hash,
         )
@@ -1353,6 +1354,7 @@ class ASMAEEngine:
                 "management_events": getattr(inp, "management_events", []) or [],
                 "plot_timeseries": getattr(inp, "plot_timeseries", []) or [],
                 "phenology_envelopes": getattr(inp, "phenology_envelopes", {}) or {},
+                "phenology_posterior": getattr(inp, "phenology_posterior", {}) or {},
                 "coarse_layer_outputs": getattr(inp, "coarse_layer_outputs", {}) or {},
                 "spatial_prior_by_microzone": (
                     getattr(inp, "coarse_layer_outputs", {}) or {}
@@ -1397,6 +1399,7 @@ class ASMAEEngine:
                 "management_events": getattr(inp, "management_events", []) or [],
                 "plot_timeseries": getattr(inp, "plot_timeseries", []) or [],
                 "phenology_envelopes": getattr(inp, "phenology_envelopes", {}) or {},
+                "phenology_posterior": getattr(inp, "phenology_posterior", {}) or {},
                 "coarse_layer_outputs": getattr(inp, "coarse_layer_outputs", {}) or {},
                 "spatial_prior_by_microzone": (
                     getattr(inp, "coarse_layer_outputs", {}) or {}

@@ -1,0 +1,399 @@
+{
+  "plot_id": "69f728389f7a9bd552b1881c",
+  "farm_id": "697ddd3bd4195b809226a680",
+  "coordinates": {
+    "lat": 36.5621246,
+    "lng": 2.9365876
+  },
+  "soil_type": "CLAY",
+  "area_hectares": 9.3,
+  "mean_dielectric_permittivity_eps_r": 4.28,
+  "mean_volumetric_water_content_pct": 7.79,
+  "gnss_reflectometry_tracks": [
+    {
+      "satellite_prn": 14,
+      "constellation": "GPS",
+      "elevation_deg": 68.4,
+      "carrier_hz": 1575420000.0
+    },
+    {
+      "satellite_prn": 19,
+      "constellation": "GALILEO",
+      "elevation_deg": 54.1,
+      "carrier_hz": 1575420000.0
+    },
+    {
+      "satellite_prn": 24,
+      "constellation": "GPS",
+      "elevation_deg": 42.0,
+      "carrier_hz": 1176450000.0
+    },
+    {
+      "satellite_prn": 7,
+      "constellation": "BEIDOU",
+      "elevation_deg": 61.2,
+      "carrier_hz": 1561090000.0
+    }
+  ],
+  "cellular_coverage_envelope": [
+    {
+      "operator": "Mobilis (603-01)",
+      "tower_id": "DZ-ALG-BLI-041",
+      "band": "LTE Band 3 (1800 MHz)",
+      "freq_hz": 1805000000.0,
+      "dist_m": 420.0,
+      "rsrp_dbm": -84.2,
+      "sinr_db": 18.5
+    },
+    {
+      "operator": "Djezzy (603-02)",
+      "tower_id": "DZ-ALG-BLI-112",
+      "band": "LTE Band 1 (2100 MHz)",
+      "freq_hz": 2110000000.0,
+      "dist_m": 650.0,
+      "rsrp_dbm": -88.5,
+      "sinr_db": 15.2
+    },
+    {
+      "operator": "Ooredoo (603-03)",
+      "tower_id": "DZ-ALG-BLI-087",
+      "band": "LTE Band 20 (800 MHz)",
+      "freq_hz": 791000000.0,
+      "dist_m": 890.0,
+      "rsrp_dbm": -79.0,
+      "sinr_db": 22.0
+    }
+  ],
+  "spatial_microzone_grid_6x6": {
+    "PLOT_69f72838_MZ_0_0": {
+      "grid_x": 0,
+      "grid_y": 0,
+      "centre_east_m": 25.0,
+      "centre_north_m": 25.0,
+      "permittivity_eps_r": 3.96,
+      "volumetric_water_pct": 7.21,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_0_1": {
+      "grid_x": 0,
+      "grid_y": 1,
+      "centre_east_m": 25.0,
+      "centre_north_m": 75.0,
+      "permittivity_eps_r": 3.74,
+      "volumetric_water_pct": 6.82,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_0_2": {
+      "grid_x": 0,
+      "grid_y": 2,
+      "centre_east_m": 25.0,
+      "centre_north_m": 125.0,
+      "permittivity_eps_r": 3.53,
+      "volumetric_water_pct": 6.43,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_0_3": {
+      "grid_x": 0,
+      "grid_y": 3,
+      "centre_east_m": 25.0,
+      "centre_north_m": 175.0,
+      "permittivity_eps_r": 3.32,
+      "volumetric_water_pct": 6.04,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_0_4": {
+      "grid_x": 0,
+      "grid_y": 4,
+      "centre_east_m": 25.0,
+      "centre_north_m": 225.0,
+      "permittivity_eps_r": 3.1,
+      "volumetric_water_pct": 5.65,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_0_5": {
+      "grid_x": 0,
+      "grid_y": 5,
+      "centre_east_m": 25.0,
+      "centre_north_m": 275.0,
+      "permittivity_eps_r": 2.89,
+      "volumetric_water_pct": 5.26,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_1_0": {
+      "grid_x": 1,
+      "grid_y": 0,
+      "centre_east_m": 75.0,
+      "centre_north_m": 25.0,
+      "permittivity_eps_r": 4.3,
+      "volumetric_water_pct": 7.83,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_1_1": {
+      "grid_x": 1,
+      "grid_y": 1,
+      "centre_east_m": 75.0,
+      "centre_north_m": 75.0,
+      "permittivity_eps_r": 4.09,
+      "volumetric_water_pct": 7.44,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_1_2": {
+      "grid_x": 1,
+      "grid_y": 2,
+      "centre_east_m": 75.0,
+      "centre_north_m": 125.0,
+      "permittivity_eps_r": 3.87,
+      "volumetric_water_pct": 7.05,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_1_3": {
+      "grid_x": 1,
+      "grid_y": 3,
+      "centre_east_m": 75.0,
+      "centre_north_m": 175.0,
+      "permittivity_eps_r": 3.66,
+      "volumetric_water_pct": 6.66,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_1_4": {
+      "grid_x": 1,
+      "grid_y": 4,
+      "centre_east_m": 75.0,
+      "centre_north_m": 225.0,
+      "permittivity_eps_r": 3.45,
+      "volumetric_water_pct": 6.27,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_1_5": {
+      "grid_x": 1,
+      "grid_y": 5,
+      "centre_east_m": 75.0,
+      "centre_north_m": 275.0,
+      "permittivity_eps_r": 3.23,
+      "volumetric_water_pct": 5.88,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_2_0": {
+      "grid_x": 2,
+      "grid_y": 0,
+      "centre_east_m": 125.0,
+      "centre_north_m": 25.0,
+      "permittivity_eps_r": 4.64,
+      "volumetric_water_pct": 8.46,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_2_1": {
+      "grid_x": 2,
+      "grid_y": 1,
+      "centre_east_m": 125.0,
+      "centre_north_m": 75.0,
+      "permittivity_eps_r": 4.43,
+      "volumetric_water_pct": 8.07,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_2_2": {
+      "grid_x": 2,
+      "grid_y": 2,
+      "centre_east_m": 125.0,
+      "centre_north_m": 125.0,
+      "permittivity_eps_r": 4.22,
+      "volumetric_water_pct": 7.68,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_2_3": {
+      "grid_x": 2,
+      "grid_y": 3,
+      "centre_east_m": 125.0,
+      "centre_north_m": 175.0,
+      "permittivity_eps_r": 4.0,
+      "volumetric_water_pct": 7.29,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_2_4": {
+      "grid_x": 2,
+      "grid_y": 4,
+      "centre_east_m": 125.0,
+      "centre_north_m": 225.0,
+      "permittivity_eps_r": 3.79,
+      "volumetric_water_pct": 6.9,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_2_5": {
+      "grid_x": 2,
+      "grid_y": 5,
+      "centre_east_m": 125.0,
+      "centre_north_m": 275.0,
+      "permittivity_eps_r": 3.57,
+      "volumetric_water_pct": 6.51,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_3_0": {
+      "grid_x": 3,
+      "grid_y": 0,
+      "centre_east_m": 175.0,
+      "centre_north_m": 25.0,
+      "permittivity_eps_r": 4.99,
+      "volumetric_water_pct": 9.08,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_3_1": {
+      "grid_x": 3,
+      "grid_y": 1,
+      "centre_east_m": 175.0,
+      "centre_north_m": 75.0,
+      "permittivity_eps_r": 4.77,
+      "volumetric_water_pct": 8.69,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_3_2": {
+      "grid_x": 3,
+      "grid_y": 2,
+      "centre_east_m": 175.0,
+      "centre_north_m": 125.0,
+      "permittivity_eps_r": 4.56,
+      "volumetric_water_pct": 8.3,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_3_3": {
+      "grid_x": 3,
+      "grid_y": 3,
+      "centre_east_m": 175.0,
+      "centre_north_m": 175.0,
+      "permittivity_eps_r": 4.34,
+      "volumetric_water_pct": 7.91,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_3_4": {
+      "grid_x": 3,
+      "grid_y": 4,
+      "centre_east_m": 175.0,
+      "centre_north_m": 225.0,
+      "permittivity_eps_r": 4.13,
+      "volumetric_water_pct": 7.52,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_3_5": {
+      "grid_x": 3,
+      "grid_y": 5,
+      "centre_east_m": 175.0,
+      "centre_north_m": 275.0,
+      "permittivity_eps_r": 3.92,
+      "volumetric_water_pct": 7.13,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_4_0": {
+      "grid_x": 4,
+      "grid_y": 0,
+      "centre_east_m": 225.0,
+      "centre_north_m": 25.0,
+      "permittivity_eps_r": 5.33,
+      "volumetric_water_pct": 9.7,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_4_1": {
+      "grid_x": 4,
+      "grid_y": 1,
+      "centre_east_m": 225.0,
+      "centre_north_m": 75.0,
+      "permittivity_eps_r": 5.11,
+      "volumetric_water_pct": 9.31,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_4_2": {
+      "grid_x": 4,
+      "grid_y": 2,
+      "centre_east_m": 225.0,
+      "centre_north_m": 125.0,
+      "permittivity_eps_r": 4.9,
+      "volumetric_water_pct": 8.92,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_4_3": {
+      "grid_x": 4,
+      "grid_y": 3,
+      "centre_east_m": 225.0,
+      "centre_north_m": 175.0,
+      "permittivity_eps_r": 4.69,
+      "volumetric_water_pct": 8.53,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_4_4": {
+      "grid_x": 4,
+      "grid_y": 4,
+      "centre_east_m": 225.0,
+      "centre_north_m": 225.0,
+      "permittivity_eps_r": 4.47,
+      "volumetric_water_pct": 8.14,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_4_5": {
+      "grid_x": 4,
+      "grid_y": 5,
+      "centre_east_m": 225.0,
+      "centre_north_m": 275.0,
+      "permittivity_eps_r": 4.26,
+      "volumetric_water_pct": 7.75,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_5_0": {
+      "grid_x": 5,
+      "grid_y": 0,
+      "centre_east_m": 275.0,
+      "centre_north_m": 25.0,
+      "permittivity_eps_r": 5.67,
+      "volumetric_water_pct": 10.33,
+      "hydrological_status": "MILD_WATER_DEFICIT"
+    },
+    "PLOT_69f72838_MZ_5_1": {
+      "grid_x": 5,
+      "grid_y": 1,
+      "centre_east_m": 275.0,
+      "centre_north_m": 75.0,
+      "permittivity_eps_r": 5.46,
+      "volumetric_water_pct": 9.94,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_5_2": {
+      "grid_x": 5,
+      "grid_y": 2,
+      "centre_east_m": 275.0,
+      "centre_north_m": 125.0,
+      "permittivity_eps_r": 5.24,
+      "volumetric_water_pct": 9.55,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_5_3": {
+      "grid_x": 5,
+      "grid_y": 3,
+      "centre_east_m": 275.0,
+      "centre_north_m": 175.0,
+      "permittivity_eps_r": 5.03,
+      "volumetric_water_pct": 9.16,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_5_4": {
+      "grid_x": 5,
+      "grid_y": 4,
+      "centre_east_m": 275.0,
+      "centre_north_m": 225.0,
+      "permittivity_eps_r": 4.81,
+      "volumetric_water_pct": 8.77,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    },
+    "PLOT_69f72838_MZ_5_5": {
+      "grid_x": 5,
+      "grid_y": 5,
+      "centre_east_m": 275.0,
+      "centre_north_m": 275.0,
+      "permittivity_eps_r": 4.6,
+      "volumetric_water_pct": 8.38,
+      "hydrological_status": "CRITICAL_WILTING_WARNING"
+    }
+  },
+  "layer3_hydrological_comparison": {
+    "mesia_observed_vwc": 0.07793296208358284,
+    "model_predicted_vwc": 0.165,
+    "residual_error": 0.08706703791641716,
+    "consistent": true
+  }
+}

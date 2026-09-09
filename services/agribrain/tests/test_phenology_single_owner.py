@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -10,9 +11,25 @@ from services.agribrain.orchestrator_v2.runner import (
     _derive_phenology_stage,
     _legacy_derive_phenology_stage_for_migration,
 )
+from services.agribrain.orchestrator_v2.serialization import to_plain_data
 from services.agribrain.scientific_contracts.crop_phenology import (
     CanonicalPhenologyPosteriorV2,
 )
+from services.agribrain.layer05_asmae.bma.physics_experts import (
+    compute_physics_experts,
+)
+from services.agribrain.layer05_asmae.priors.coarse_context import (
+    build_coarse_layer_outputs,
+)
+from services.agribrain.layer05_asmae.priors.layer2_vegetation_priors import (
+    extract_layer2_priors,
+)
+from services.agribrain.layer05_asmae.runner import ASMAERunner
+
+
+@dataclass
+class SimpleNamespaceReceipt:
+    phenology: CanonicalPhenologyPosteriorV2
 
 
 def _posterior() -> CanonicalPhenologyPosteriorV2:
@@ -81,6 +98,23 @@ def test_phenology_confidence_has_no_floor_and_nested_contract_is_immutable():
         posterior.planting_date_posterior["range"]["lower"] = "2026-05-02"
 
 
+def test_immutable_phenology_contract_serializes_without_pickle():
+    payload = _posterior().to_dict()
+    payload.pop("content_hash")
+    payload["planting_date_posterior"] = {
+        "status": "interval", "range": {"lower": "2026-05-01"}
+    }
+    posterior = CanonicalPhenologyPosteriorV2.from_dict(payload)
+
+    serialized = to_plain_data(
+        SimpleNamespaceReceipt(phenology=posterior)
+    )
+
+    assert serialized["phenology"]["planting_date_posterior"] == {
+        "status": "interval", "range": {"lower": "2026-05-01"}
+    }
+
+
 def test_orchestrator_consumes_canonical_layer2_stage_not_crop_status():
     phenology = SimpleNamespace(
         canonical_posterior=_posterior().to_dict(),
@@ -137,3 +171,116 @@ def test_plot_intelligence_never_converts_status_or_dap_to_stage():
     assert result["stage"] == "UNKNOWN"
     assert result["administrative_status"] == "FLOWERING"
     assert result["scientific_authority"] is False
+
+
+@pytest.mark.parametrize("ndvi", [[], [0.31], [0.25, 0.62, 0.31]])
+def test_generated_coarse_evidence_passes_worker_contract_without_phenology(ndvi):
+    coarse = build_coarse_layer_outputs(
+        SimpleNamespace(plot_timeseries=[{"ndvi": value} for value in ndvi], static={}),
+        crop_context={},
+        weather_records=[],
+        management_events=[],
+    )
+    runner = ASMAERunner(config={"disable_job_recovery": True})
+    fatal, _, _ = runner._validate_contracts({"coarse_layer_outputs": coarse})
+    assert fatal == []
+    prior = extract_layer2_priors(coarse, {}, {})
+    assert prior["usable_as_prior"] is False
+    assert prior["growth_position"] is None
+
+    # Available metadata alone must still be rejected. Accepting renamed
+    # evidence must not bypass the scientific-field or provenance checks.
+    coarse["layer2_intelligence"] = {
+        "status": "available",
+        "source_layer": "layer1_coarse_temporal",
+        "source_timestamp": "2026-09-04T00:00:00+00:00",
+        "evidence": ["NDVI"],
+        "trajectory_authority": "ndvi_shape_prior_only",
+        "canonical_phenology_allowed": False,
+    }
+    fatal, _, _ = runner._validate_contracts({"coarse_layer_outputs": coarse})
+    assert fatal == [
+        "coarse_layer_outputs: No declared scientific field present: layer2_intelligence"
+    ]
+    coarse["layer2_intelligence"]["vigor"] = 0.4
+    del coarse["layer2_intelligence"]["evidence"]
+    fatal, _, _ = runner._validate_contracts({"coarse_layer_outputs": coarse})
+    assert fatal == [
+        "coarse_layer_outputs: Missing coarse prior proof field: layer2_intelligence.evidence"
+    ]
+
+
+def test_ndvi_trajectory_is_not_published_or_consumed_as_phenology():
+    layer1 = SimpleNamespace(
+        plot_timeseries=[
+            {"ndvi": 0.25},
+            {"ndvi": 0.62},
+            {"ndvi": 0.31},
+        ],
+        static={},
+    )
+    coarse = build_coarse_layer_outputs(
+        layer1,
+        crop_context={},
+        weather_records=[],
+        management_events=[],
+    )
+    trajectory = coarse["layer2_intelligence"]
+    assert trajectory["ndvi_trajectory_phase"] == "declining"
+    assert trajectory["canonical_phenology_allowed"] is False
+    assert "phenology_stage" not in trajectory
+    assert "growth_position" not in trajectory
+
+    # Old cached aliases must also fail closed when canonical authority is
+    # absent; they cannot revive the former hidden senescence prior.
+    trajectory.update({
+        "phenology_stage": "senescence",
+        "growth_position": 0.9,
+    })
+    prior = extract_layer2_priors(
+        coarse,
+        {},
+        {
+            "current_stage": "UNKNOWN",
+            "stage_authority": "unavailable",
+            "season_progress": {"mean": None, "status": "unknown"},
+        },
+    )
+    assert prior["phenology_stage"] == "UNKNOWN"
+    assert prior["usable_as_prior"] is False
+    assert prior["growth_position"] is None
+    assert prior["ndvi_trajectory_used_as_phenology"] is False
+
+    experts = compute_physics_experts(
+        {"zone-a": [0.4] * 13},
+        {
+            "plot_timeseries": layer1.plot_timeseries,
+            "phenology_posterior": {
+                "current_stage": "UNKNOWN",
+                "stage_authority": "unavailable",
+            },
+        },
+    )
+    assert "phenology_memory" not in experts
+
+
+def test_canonical_phenology_can_authorize_position_prior():
+    prior = extract_layer2_priors(
+        {"layer2_intelligence": {
+            "status": "available",
+            "ndvi_trajectory_phase": "plateau",
+            "ndvi_trajectory_position": 0.7,
+        }},
+        {},
+        {
+            "current_stage": "REPRODUCTIVE",
+            "stage_authority": "diagnostic",
+            "stage_confidence": 0.7,
+            "season_progress": {"mean": 0.58, "status": "estimated"},
+            "content_hash": "phenology-hash-a",
+        },
+    )
+    assert prior["usable_as_prior"] is True
+    assert prior["growth_position"] == pytest.approx(0.58)
+    assert prior["phenology_authority"] == "diagnostic"
+    assert prior["ndvi_trajectory_used_as_phenology"] is False

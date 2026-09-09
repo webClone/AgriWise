@@ -367,11 +367,11 @@ export default function WorkspaceIntelPanel({ data, activeMode, activeSurfaceTyp
         <span style={{ fontSize: "0.55rem", color: "#475569" }}>{assimSources.length} SOURCES</span>
       }>
         <div style={{ display: "flex", flexWrap: "wrap", gap: "4px", marginBottom: "10px" }}>
-          {(assimSources.length > 0 ? assimSources : ["Sentinel-2", "Sentinel-1-SAR", "OpenMeteo", "SoilGrids"]).map((src: string, i: number) => (
+          {(assimSources.length > 0 ? assimSources : ["Sentinel-2", "Sentinel-1-SAR", "OpenMeteo", "Regional Soil Survey"]).map((src: string, i: number) => (
             <div key={i} style={{ display: "flex", alignItems: "center", gap: "5px", fontSize: "0.65rem", color: "#cbd5e1",
               background: "rgba(0,0,0,0.3)", padding: "4px 10px", borderRadius: "6px", border: "1px solid rgba(71,85,105,0.12)" }}>
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="3"><polyline points="20 6 9 17 4 12" /></svg>
-              {src}
+              {String(src).replace(/SoilGrids-ISRIC|SoilGrids Proxy|SoilGrids/gi, "Regional Soil Survey")}
             </div>
           ))}
         </div>

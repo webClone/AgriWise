@@ -122,9 +122,9 @@ export function normalizeCanonicalPhenologyPublication(input = {}) {
 export function phenologyEvidenceReasonLabel(reason) {
   const labels = {
     canonical_layer2_phenology_receipt_required:
-      "A canonical Layer 2 phenology receipt is required.",
+      "A canonical canopy phenology receipt is required.",
     canonical_layer2_phenology_receipt_invalid:
-      "The Layer 2 phenology receipt could not be validated.",
+      "The canopy phenology receipt could not be validated.",
     canonical_layer2_phenology_namespace_mismatch:
       "The phenology receipt belongs to a different plot.",
     additional_independent_phenology_evidence_required:

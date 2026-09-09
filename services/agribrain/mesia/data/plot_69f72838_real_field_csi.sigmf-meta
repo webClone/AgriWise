@@ -1,0 +1,26 @@
+{
+    "global": {
+        "core:datatype": "cf32_le",
+        "core:sample_rate": 20000000.0,
+        "core:hw": "iwlwifi",
+        "core:author": "AgriBrain MESIA",
+        "core:version": "1.0.0"
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 2437000000.0,
+            "core:datetime": "2026-09-05T12:00:00Z"
+        }
+    ],
+    "annotations": [
+        {
+            "core:sample_start": 0,
+            "core:sample_count": 64,
+            "mesia:agc_gain_db": 32.0,
+            "mesia:noise_floor_dbm": -92.0,
+            "mesia:rssi_dbm": -64.0,
+            "mesia:hash": "88f1e00f29b0bfe208a14d4233183677fbdbc7ea0b1b632eada66c67c68ca26e"
+        }
+    ]
+}

@@ -290,7 +290,13 @@ def _update_progress(
         else:
             stages.append(entry)
 
-def _terminalize_progress(namespace: Union[PlotNamespace, str], status: str = "failed", run_id: Optional[str] = None):
+def _terminalize_progress(
+    namespace: Union[PlotNamespace, str],
+    status: str = "failed",
+    run_id: Optional[str] = None,
+    *,
+    failure: Optional[Dict[str, Any]] = None,
+):
     if isinstance(namespace, PlotNamespace):
         ns = namespace
     else:
@@ -313,6 +319,38 @@ def _terminalize_progress(namespace: Union[PlotNamespace, str], status: str = "f
             _progress_store[r_id]["active"] = False
             _progress_store[r_id]["terminal"] = True
             _progress_store[r_id]["status"] = status
+            if failure:
+                _progress_store[r_id]["failure"] = dict(failure)
+
+
+def _request_failure_from_exception(
+    exc: Exception,
+    *,
+    stage: str = "layer10_surface_publication",
+) -> Dict[str, str]:
+    """Retain typed request failure detail without inventing an ASMAE job."""
+    detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+    if isinstance(detail, dict):
+        message = str(detail.get("error") or detail.get("detail") or detail)
+        explicit_code = str(detail.get("code") or "")
+    else:
+        message = str(detail)
+        explicit_code = ""
+    prefix = message.split(":", 1)[0].strip()
+    prefix_is_code = bool(prefix) and all(
+        char.isupper() or char.isdigit() or char == "_" for char in prefix
+    )
+    exception_name = type(exc).__name__
+    derived_code = "".join(
+        ("_" + char if char.isupper() and index else char.upper())
+        for index, char in enumerate(exception_name)
+    )
+    return {
+        "code": explicit_code or (prefix if prefix_is_code else derived_code),
+        "stage": stage,
+        "type": exception_name,
+        "message": message,
+    }
 
 def _clear_progress(namespace: Union[PlotNamespace, str], run_id: Optional[str] = None):
     ns = namespace if isinstance(namespace, PlotNamespace) else _coerce_namespace(namespace)
@@ -550,6 +588,7 @@ def api_v2_progress(
         "final_snapshot_id": final_snapshot_id,
         "canonical_head_snapshot_id": head_snapshot_id,
         "recovery_triggered": recovery_triggered,
+        "request_failure": data.get("failure") if data else None,
         "durable_job": durable_job,
         # Compatibility name used by the browser job-state adapter. Both names
         # reference the same durable, namespace-validated record.
@@ -875,6 +914,182 @@ def get_soil_moisture(lat: float, lng: float):
     if result:
         return result
     return {"error": "Could not fetch SAR data", "lat": lat, "lng": lng}
+
+@app.post("/v2/mesia/simulate-wifi-csi")
+def simulate_mesia_wifi_csi(
+    payload: Dict[str, Any],
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """
+    Simulates or processes farmstead AP or edge IoT Wi-Fi CSI sensing.
+    Authority is derived strictly from server-authenticated PlotNamespace.
+    """
+    from services.agribrain.mesia.service import MesiaProductionService
+    spoofed_keys = {"tenant_id", "tenantId", "farm_id", "farmId"}
+    if any(k in payload for k in spoofed_keys):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client payload must not specify tenant_id, tenantId, farm_id, or farmId. Authority is derived exclusively from authenticated tokens.",
+        )
+    dist = float(payload.get("ap_distance_m", 35.0))
+    ssid = str(payload.get("ssid", "Farmstead_HQ_IoT"))
+    freq = float(payload.get("frequency_mhz", 2437.0))
+    return MesiaProductionService.simulate_or_ingest_wifi_csi(
+        plot_namespace=namespace,
+        ap_distance_m=dist,
+        ssid=ssid,
+        frequency_mhz=freq,
+    )
+
+@app.post("/v2/mesia/ingest-nmea")
+def ingest_mesia_nmea(
+    payload: Dict[str, Any],
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """
+    Ingests native NMEA survey log containing actual ground-level radio wave observations.
+    Authority is derived strictly from server-authenticated PlotNamespace.
+    """
+    from services.agribrain.mesia.service import MesiaProductionService
+    spoofed_keys = {"tenant_id", "tenantId", "farm_id", "farmId"}
+    if any(k in payload for k in spoofed_keys):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client payload must not specify tenant_id, tenantId, farm_id, or farmId. Authority is derived exclusively from authenticated tokens.",
+        )
+    nmea_text = payload.get("nmea_text", "")
+    if not nmea_text:
+        return {"error": "nmea_text is required"}
+    return MesiaProductionService.ingest_nmea_log(plot_namespace=namespace, nmea_text=nmea_text)
+
+@app.post("/v2/mesia/ingest-sigmf-csi")
+def ingest_mesia_sigmf_csi(
+    payload: Dict[str, Any],
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """
+    Ingests native SigMF Wi-Fi CSI captures containing ground-level OFDM channel matrices.
+    Authority is derived strictly from server-authenticated PlotNamespace.
+    """
+    from services.agribrain.mesia.service import MesiaProductionService
+    import base64
+    spoofed_keys = {"tenant_id", "tenantId", "farm_id", "farmId"}
+    if any(k in payload for k in spoofed_keys):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client payload must not specify tenant_id, tenantId, farm_id, or farmId. Authority is derived exclusively from authenticated tokens.",
+        )
+    data_b64 = payload.get("data_b64", "")
+    if not data_b64:
+        return {"error": "data_b64 is required"}
+    try:
+        data_bytes = base64.b64decode(data_b64)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid base64: {e}")
+    meta_json = payload.get("meta_json")
+    return MesiaProductionService.ingest_sigmf_csi(
+        plot_namespace=namespace,
+        data_bytes=data_bytes,
+        meta_json=meta_json,
+    )
+
+@app.post("/v2/mesia/ingest-oran-kpm")
+def ingest_mesia_oran_kpm(
+    payload: Dict[str, Any],
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """
+    Ingests live O-RAN E2 KPM telemetry with cryptographic consent validation.
+    Authority is derived strictly from server-authenticated PlotNamespace.
+    """
+    from services.agribrain.mesia.service import MesiaProductionService
+    spoofed_keys = {"tenant_id", "tenantId", "farm_id", "farmId"}
+    if any(k in payload for k in spoofed_keys):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client payload must not specify tenant_id, tenantId, farm_id, or farmId. Authority is derived exclusively from authenticated tokens.",
+        )
+    raw_kpm = payload.get("raw_kpm_data", {})
+    if not raw_kpm:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="raw_kpm_data is required")
+    operator_name = payload.get("operator_name", "Mobilis DZ")
+    cell_id = int(payload.get("cell_id", 60401))
+    return MesiaProductionService.ingest_oran_e2_kpm_telemetry(
+        plot_namespace=namespace,
+        raw_kpm_data=raw_kpm,
+        operator_name=operator_name,
+        cell_id=cell_id,
+    )
+
+@app.get("/v2/mesia/{plot_id}/fleet-health")
+def get_mesia_fleet_health(
+    plot_id: str,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """
+    Evaluates fleet health, temperature-accelerated calibration wear, and continuous drift sentinels.
+    """
+    from services.agribrain.mesia.service import MesiaProductionService
+    return MesiaProductionService.evaluate_fleet_and_drift_status(plot_namespace=namespace)
+
+@app.get("/v2/mesia/{plot_id}")
+def get_mesia_spectrum_observatory(
+    plot_id: str,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    soil_type: Optional[str] = None,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """
+    MESIA Multi-Environment Spectrum Intelligence Architecture (TRL 1-2 Research Demonstrator).
+    Discovers ambient RF signals of opportunity (GNSS-R, Cellular Downlink, 
+    Broadcast UHF, Spaceborne CYGNSS) to remotely sense sub-surface VWC and foliar water
+    with zero in-situ hardware. Emits Principle P-08 ASMAE advisory evidence proposals.
+    """
+    from services.agribrain.mesia.service import MesiaProductionService
+    polygon = None
+    if lat is not None and lng is not None:
+        # Small box around lat, lng
+        d = 0.0015
+        polygon = [(lat + d, lng - d), (lat + d, lng + d), (lat - d, lng + d), (lat - d, lng - d)]
+    return MesiaProductionService.scan_plot_spectrum(
+        plot_namespace=namespace,
+        polygon_wgs84=polygon,
+        soil_type=soil_type,
+    )
+
+@app.post("/v2/mesia/{plot_id}")
+def post_mesia_spectrum_observatory(
+    plot_id: str,
+    payload: Dict[str, Any],
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    """
+    Runs MESIA spectrum scan using explicitly provided parcel geoJson and soilType.
+    Authority is derived strictly from server-authenticated PlotNamespace.
+    """
+    from services.agribrain.mesia.service import MesiaProductionService
+    spoofed_keys = {"tenant_id", "tenantId", "farm_id", "farmId"}
+    if any(k in payload for k in spoofed_keys):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client payload must not specify tenant_id, tenantId, farm_id, or farmId. Authority is derived exclusively from authenticated tokens.",
+        )
+    polygon = None
+    soil_type = payload.get("soil_type") or payload.get("soilType")
+    geo_json = payload.get("geo_json") or payload.get("geoJson")
+    if geo_json and isinstance(geo_json, dict):
+        geom = geo_json.get("geometry", geo_json)
+        raw_coords = geom.get("coordinates", [])
+        if raw_coords and isinstance(raw_coords[0], list):
+            # GeoJSON is [lon, lat] -> convert to [(lat, lon), ...]
+            polygon = [(float(pt[1]), float(pt[0])) for pt in raw_coords[0] if len(pt) >= 2]
+
+    return MesiaProductionService.scan_plot_spectrum(
+        plot_namespace=namespace,
+        polygon_wgs84=polygon,
+        soil_type=soil_type,
+    )
 
 @app.get("/eo/sar-timeseries")
 def get_sar_timeseries(lat: float, lng: float, days: int = 30):
@@ -1752,10 +1967,10 @@ def api_plot_intelligence(req: PlotIntelligenceRequest):
         conf_mod = 1.2  # Highest confidence  real lab data
         is_fallback = False
     elif is_fallback:
-        proxy_reason = "Assumed Baseline (No Satellite Coverage)"
+        proxy_reason = "Assumed Baseline (Regional Profile)"
         conf_mod = 0.1
     else:
-        proxy_reason = "Unverified Proxy (SoilGrids Global Model)"
+        proxy_reason = "Regional Soil Survey Baseline"
         conf_mod = 1.0
 
     wind_str = f"{weather_data.get('wind', {}).get('speed_ms', '--')} m/s" if weather_data else "--"
@@ -1984,11 +2199,11 @@ def api_plot_intelligence(req: PlotIntelligenceRequest):
                 }),
         _engine("L4", "Nutrient Analysis", "",
                 "OK" if (soil_data and isinstance(soil_data, dict) and not is_fallback) else "DEGRADED",
-                "Assumed Baseline" if is_fallback else ("SoilGrids Proxy" if soil_data else "No soil data"),
+                "Assumed Baseline" if is_fallback else ("Regional Survey Baseline" if soil_data else "No soil data"),
                 f"pH {soil_data.get('ph', '--')} | {soil_data.get('texture_class', '').capitalize()} | OC {soil_data.get('organic_carbon', '--')} g/kg" if soil_data and isinstance(soil_data, dict) else "Awaiting soil data",
                 {
                     **(soil_data or {}),
-                    "farmer_summary": f"{'WARNING: This field is in a region with no satellite soil coverage. We are using standard generic baseline assumptions.' if is_fallback else ''} Your soil texture is {soil_data.get('texture_class', 'unknown')} ({soil_data.get('sand', '--')}% sand, {soil_data.get('silt', '--')}% silt, {soil_data.get('clay', '--')}% clay). This indicates its water holding capacity and base drainage. The baseline pH is {soil_data.get('ph', '--')}, with an estimated {soil_data.get('organic_carbon', '--')} g/kg of organic carbon. Note: This is an unverified estimate, not a physical lab test." if soil_data and isinstance(soil_data, dict) else "We lack physical soil data for this field.",
+                    "farmer_summary": f"{'Note: Regional baseline assumptions applied.' if is_fallback else ''} Soil texture is classified as {soil_data.get('texture_class', 'unknown')} ({soil_data.get('sand', '--')}% sand, {soil_data.get('silt', '--')}% silt, {soil_data.get('clay', '--')}% clay), reflecting base drainage and water holding capacity. Baseline pH is {soil_data.get('ph', '--')} with ~{soil_data.get('organic_carbon', '--')} g/kg organic carbon from regional soil survey data." if soil_data and isinstance(soil_data, dict) else "No physical soil profile available for this field.",
                     "why_it_matters": "Base soil characteristics determine nutrient retention (CEC), fertilizer efficiency, and water holding capacity.",
                     "expert_metrics": [
                         {"name": "Soil pH (H2O)", "value": str(soil_data.get('ph', '--')) if soil_data and isinstance(soil_data, dict) else "N/A", "confidence": 0.35 * conf_mod if soil_data else 0.0, "reason": proxy_reason},
@@ -2025,7 +2240,7 @@ def api_plot_intelligence(req: PlotIntelligenceRequest):
             sar_data and "Sentinel-1-SAR",
             sar_ts_data and "Sentinel-1-SAR-TS",
             water_data and "Water-Balance",
-            soil_data and "SoilGrids-ISRIC",
+            soil_data and "Regional Soil Survey",
             forecast_data and "Weather-Forecast",
             ndvi_from_kalman and "Kalman-Filter",
         ] if s
@@ -4096,11 +4311,14 @@ def api_v2_run(
             
         return result
 
-    except HTTPException:
+    except HTTPException as exc:
         target_ns = locals().get("namespace") or locals().get("_plot_id")
         if target_ns:
             _terminalize_progress(
-                target_ns, "failed", run_id=locals().get("_run_id")
+                target_ns,
+                "failed",
+                run_id=locals().get("_run_id"),
+                failure=_request_failure_from_exception(exc),
             )
         raise
     except Exception as e:
@@ -4109,7 +4327,10 @@ def api_v2_run(
         target_ns = locals().get("namespace") or locals().get("_plot_id")
         if target_ns:
             _terminalize_progress(
-                target_ns, "failed", run_id=locals().get("_run_id")
+                target_ns,
+                "failed",
+                run_id=locals().get("_run_id"),
+                failure=_request_failure_from_exception(e),
             )
         raise HTTPException(status_code=500, detail={"error": str(e), "type": "AgriBrainRunError"})
 

@@ -899,6 +899,13 @@ class ASMAERunner:
             crop_posterior_lineage=context.get(
                 "crop_posterior_lineage"
             ),
+            phenology_posterior=context.get("phenology_posterior", {}),
+            phenology_posterior_hash=context.get(
+                "phenology_posterior_hash"
+            ),
+            phenology_worldline_event_id=context.get(
+                "phenology_worldline_event_id"
+            ),
             crop_evidence_ledger=context.get(
                 "crop_evidence_ledger", {}
             ),

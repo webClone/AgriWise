@@ -20,7 +20,14 @@ include = ["services", "services.*"]
 dependencies = { file = ["services/agribrain/requirements.txt"] }
 
 [tool.pytest.ini_options]
-testpaths = ["services/agribrain/tests"]
+testpaths = ["services/agribrain/tests", "services/agribrain/mesia/tests"]
 python_files = ["test_*.py"]
 pythonpath = ["services/agribrain", "."]
 addopts = ["--import-mode=importlib"]
+markers = [
+    "schema: Tests that validate contracts, schemas, and state machines without hardware.",
+    "hardware: Tests that require physical radio acquisition hardware.",
+    "replay: Tests that require recorded sigMF/IQ data.",
+    "scientific: Tests that validate Fisher information or physical models.",
+    "field_validation: Tests that require ground-truth soil or crop data."
+]

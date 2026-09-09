@@ -1,0 +1,140 @@
+{
+  "total_separated_humans_detected": 7,
+  "entities": [
+    {
+      "human_id": "HUMAN_BODY_ENTITY_01",
+      "center_x_m": 45.0,
+      "center_y_m": 55.0,
+      "distance_from_receiver_m": 7.1,
+      "peak_permittivity_eps_r": 9.11,
+      "equivalent_tissue_water_pct": 17.1,
+      "doppler_motion_variance_db2": 0.734,
+      "cluster_size_microzones": 1,
+      "spatial_classification": "Separate Individual (In Room / Adjacent Near-Field Corridor)"
+    },
+    {
+      "human_id": "HUMAN_BODY_ENTITY_02",
+      "center_x_m": 55.0,
+      "center_y_m": 45.0,
+      "distance_from_receiver_m": 7.1,
+      "peak_permittivity_eps_r": 11.82,
+      "equivalent_tissue_water_pct": 22.2,
+      "doppler_motion_variance_db2": 39.243,
+      "cluster_size_microzones": 1,
+      "spatial_classification": "Separate Individual (In Room / Adjacent Near-Field Corridor)"
+    },
+    {
+      "human_id": "HUMAN_BODY_ENTITY_03",
+      "center_x_m": 55.0,
+      "center_y_m": 55.0,
+      "distance_from_receiver_m": 7.1,
+      "peak_permittivity_eps_r": 12.34,
+      "equivalent_tissue_water_pct": 23.2,
+      "doppler_motion_variance_db2": 0.505,
+      "cluster_size_microzones": 1,
+      "spatial_classification": "Separate Individual (In Room / Adjacent Near-Field Corridor)"
+    },
+    {
+      "human_id": "HUMAN_BODY_ENTITY_04",
+      "center_x_m": 65.0,
+      "center_y_m": 65.0,
+      "distance_from_receiver_m": 21.2,
+      "peak_permittivity_eps_r": 12.34,
+      "equivalent_tissue_water_pct": 23.2,
+      "doppler_motion_variance_db2": 0.505,
+      "cluster_size_microzones": 1,
+      "spatial_classification": "Separate Individual (In Neighboring Unit / Perimeter Path)"
+    },
+    {
+      "human_id": "HUMAN_BODY_ENTITY_05",
+      "center_x_m": 75.0,
+      "center_y_m": 75.0,
+      "distance_from_receiver_m": 35.4,
+      "peak_permittivity_eps_r": 12.34,
+      "equivalent_tissue_water_pct": 23.2,
+      "doppler_motion_variance_db2": 0.505,
+      "cluster_size_microzones": 1,
+      "spatial_classification": "Separate Individual (In Neighboring Unit / Perimeter Path)"
+    },
+    {
+      "human_id": "HUMAN_BODY_ENTITY_06",
+      "center_x_m": 85.0,
+      "center_y_m": 85.0,
+      "distance_from_receiver_m": 49.5,
+      "peak_permittivity_eps_r": 12.34,
+      "equivalent_tissue_water_pct": 23.2,
+      "doppler_motion_variance_db2": 0.505,
+      "cluster_size_microzones": 1,
+      "spatial_classification": "Separate Individual (In Neighboring Unit / Perimeter Path)"
+    },
+    {
+      "human_id": "HUMAN_BODY_ENTITY_07",
+      "center_x_m": 95.0,
+      "center_y_m": 95.0,
+      "distance_from_receiver_m": 63.6,
+      "peak_permittivity_eps_r": 12.34,
+      "equivalent_tissue_water_pct": 23.2,
+      "doppler_motion_variance_db2": 0.505,
+      "cluster_size_microzones": 1,
+      "spatial_classification": "Separate Individual (In Neighboring Unit / Perimeter Path)"
+    }
+  ],
+  "raw_collision_points": [
+    {
+      "id": "PLOT_USER_100M_MZ_4_5",
+      "x": 45.0,
+      "y": 55.0,
+      "eps_r": 9.107,
+      "vwc_pct": 17.06,
+      "var_db2": 0.734
+    },
+    {
+      "id": "PLOT_USER_100M_MZ_5_4",
+      "x": 55.0,
+      "y": 45.0,
+      "eps_r": 11.816,
+      "vwc_pct": 22.23,
+      "var_db2": 39.243
+    },
+    {
+      "id": "PLOT_USER_100M_MZ_5_5",
+      "x": 55.0,
+      "y": 55.0,
+      "eps_r": 12.335,
+      "vwc_pct": 23.16,
+      "var_db2": 0.505
+    },
+    {
+      "id": "PLOT_USER_100M_MZ_6_6",
+      "x": 65.0,
+      "y": 65.0,
+      "eps_r": 12.335,
+      "vwc_pct": 23.16,
+      "var_db2": 0.505
+    },
+    {
+      "id": "PLOT_USER_100M_MZ_7_7",
+      "x": 75.0,
+      "y": 75.0,
+      "eps_r": 12.335,
+      "vwc_pct": 23.16,
+      "var_db2": 0.505
+    },
+    {
+      "id": "PLOT_USER_100M_MZ_8_8",
+      "x": 85.0,
+      "y": 85.0,
+      "eps_r": 12.335,
+      "vwc_pct": 23.16,
+      "var_db2": 0.505
+    },
+    {
+      "id": "PLOT_USER_100M_MZ_9_9",
+      "x": 95.0,
+      "y": 95.0,
+      "eps_r": 12.335,
+      "vwc_pct": 23.16,
+      "var_db2": 0.505
+    }
+  ]
+}
