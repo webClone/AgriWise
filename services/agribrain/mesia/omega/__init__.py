@@ -12,6 +12,7 @@ from .surprise_detector import (
 from .experiment_proposer import (
     ProposedScientificExperiment,
     OmegaExperimentProposer,
+    verify_omega_proposal_authority,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "OmegaSurpriseDetector",
     "ProposedScientificExperiment",
     "OmegaExperimentProposer",
+    "verify_omega_proposal_authority",
 ]

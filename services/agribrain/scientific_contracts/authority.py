@@ -52,6 +52,14 @@ class OperationalStatus(str, Enum):
     REJECTED = "REJECTED"
 
 
+class AuthorityScope(str, Enum):
+    """Authority governance scopes differentiating research, shadow, and operational decision rights."""
+    RESEARCH_ONLY = "RESEARCH_ONLY"
+    OPERATIONAL_SHADOW = "OPERATIONAL_SHADOW"
+    OPERATIONAL_DECISION = "OPERATIONAL_DECISION"
+    SAFETY_COURT_VERIFIED = "SAFETY_COURT_VERIFIED"
+
+
 @dataclass(frozen=True)
 class AuthorityVector:
     """Pure permission gates object. Monotone non-increasing across transformations."""

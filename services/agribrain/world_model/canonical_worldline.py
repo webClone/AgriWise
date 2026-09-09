@@ -227,6 +227,30 @@ class CanonicalWorldlineService:
         """Load specific event by ID for a tenant plot."""
         return self._read(self._event_path(plot_id, event_id, tenant_id, namespace))
 
+    def load_all_events(
+        self, plot_id: str, tenant_id: str = "default_tenant", namespace: str = "default"
+    ) -> List[Dict[str, Any]]:
+        """Load all persisted events for a tenant plot, ordered by sequence."""
+        events_dir = self._plot_dir(plot_id, tenant_id, namespace) / "events"
+        if not events_dir.exists() or not events_dir.is_dir():
+            return []
+        events = []
+        for file in events_dir.glob("*.json"):
+            try:
+                rec = self._read(file)
+                if rec and isinstance(rec, dict) and "event_id" in rec:
+                    events.append(rec)
+            except Exception as exc:
+                logger.warning("Could not read worldline event file %s: %s", file, exc)
+        events.sort(
+            key=lambda e: (
+                int(e.get("sequence") or 0),
+                str(e.get("committed_at") or ""),
+                str(e.get("effective_at") or ""),
+            )
+        )
+        return events
+
     def validate_proposal(
         self, proposal: "WorldlineEventProposal", plot_id: str, tenant_id: str = "default_tenant", namespace: str = "default"
     ) -> List[str]:

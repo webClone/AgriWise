@@ -86,3 +86,29 @@ Create `services/agribrain/world_model/forecast_archive.py`:
 ## 6. Monograph & Defect Task Traceability
 - **Monograph Findings**: Finding #22 (Canonical evidence graph), Finding #24 (World state binding), Finding #33 (Worldline persistence), Finding #34 (Background jobs), Monograph Section "Omega helpers and World-model package".
 - **Phase Tasks**: [P05.1-omega-readonly-surprise-and-experiment-proposals.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P05.1-omega-readonly-surprise-and-experiment-proposals.md), [P05.2-omega-offline-evaluation-and-model-registry.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P05.2-omega-offline-evaluation-and-model-registry.md), [P06.1-world-model-state-observation-action-contracts.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P06.1-world-model-state-observation-action-contracts.md), [P06.2-world-model-calibrated-forecasts-evaluation.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P06.2-world-model-calibrated-forecasts-evaluation.md).
+
+---
+
+## 7. Implementation & Verification Summary (RESOLVED)
+
+### 7.1 Implemented Components
+1. **Bitemporal Worldline Extractor** ([`services/agribrain/world_model/historical_extractor.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/world_model/historical_extractor.py)):
+   - Implemented `BitemporalWorldlineExtractor` and immutable `TrainingTrajectoryWindow`.
+   - Strictly enforces **Zero Future Knowledge Leakage**: observations committed after `as_of_knowledge_time` are completely masked, even if their physical occurrence was in the past.
+   - Automatically restores the active historical version of evidence that was subsequently superseded after the knowledge cutoff date.
+2. **Immutable Forecast Archive & Calibration Engine** ([`services/agribrain/world_model/forecast_archive.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/world_model/forecast_archive.py)):
+   - Created `ForecastRecord`, `ForecastEvaluationRecord`, and `ImmutableForecastArchive`.
+   - Added mathematically verified Continuous Ranked Probability Score (`CRPS`) implementations for both quantile pinball loss and Gaussian distributions, alongside prediction interval sharpness and empirical coverage.
+   - Enforced the **Shadow Forecast Invariant**: shadow forecasts carry `AuthorityScope.OPERATIONAL_SHADOW` and evaluate against realized ground truth without mutating the original forecast or operational belief state.
+3. **Omega Research Proposal Operational Containment** ([`services/agribrain/mesia/omega/experiment_proposer.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/mesia/omega/experiment_proposer.py)):
+   - Removed hardcoded `regulatory_safety_approved = True`; defaulted to `regulatory_safety_approved = False`.
+   - Bound proposals to `AuthorityScope.RESEARCH_ONLY` with mandatory `requires_human_signoff = True`.
+   - Added `verify_omega_proposal_authority()` enforcing the **Omega Boundary Invariant**: fails closed with `ContractViolation` if a research proposal attempts to claim `prescription_driver_allowed` or `machine_execution_allowed`.
+4. **Agronomical World Model Contracts & Conservation Laws** ([`services/agribrain/world_model/contracts.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/world_model/contracts.py)):
+   - Formulated `AgronomicalStateVector` encompassing 5-stratum soil hydrology (0–10, 10–20, 20–40, 40–60, 60–100 cm), soil temperature, crop phenology, LAI, dry biomass, and mineral nitrogen.
+   - Codified `verify_water_balance_conservation` enforcing physical mass balance ($\Delta S = \text{Inflow} - \text{Outflow}$).
+   - Introduced `ActionVector` and `InterventionLifecycleState` (`PROPOSED`, `SCHEDULED`, `COMPLETED`, `EXPOSED`) ensuring strict distinction between planned management scenarios and realized physical field exposures.
+
+### 7.2 Verification Suite
+- Created dedicated test suite [`services/agribrain/tests/test_wp12_world_model_and_omega.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/tests/test_wp12_world_model_and_omega.py) (14/14 passed in 0.90s).
+- Full 13-subsystem regression suite: 822 passed, 0 failures, 3 subtests passed in 109.74s.

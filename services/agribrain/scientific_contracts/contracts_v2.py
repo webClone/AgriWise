@@ -55,6 +55,14 @@ class ForcingExecutionStatus(str, Enum):
     OBSERVED_CONFIRMED = "OBSERVED_CONFIRMED"
 
 
+class InterventionLifecycleState(str, Enum):
+    """4-phase lifecycle for farm interventions distinguishing plans from physical exposures (P06.1)."""
+    PROPOSED = "PROPOSED"
+    SCHEDULED = "SCHEDULED"
+    COMPLETED = "COMPLETED"
+    EXPOSED = "EXPOSED"
+
+
 # ============================================================================
 # SERIALIZATION & HASHING HELPERS
 # ============================================================================
@@ -420,7 +428,7 @@ class ForcingEvent:
     """
     event_id: str
     forcing_type: str
-    execution_status: Union[ForcingExecutionStatus, ExecutionStatus]
+    execution_status: Union[ForcingExecutionStatus, ExecutionStatus, InterventionLifecycleState]
     quantity: float
     units: str
     effective_start: datetime
