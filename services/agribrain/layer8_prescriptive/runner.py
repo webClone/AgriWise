@@ -260,7 +260,7 @@ def run_layer8(l8_input, forecast=None, start_date=None):
         Layer8Output with ranked actions, schedule, zone plan, audit
     """
     if forecast is None:
-        forecast = []
+        forecast = getattr(l8_input, "weather_forecast", None) or []
     if start_date is None:
         start_date = datetime.now()
 
