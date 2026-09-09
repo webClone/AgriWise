@@ -104,7 +104,7 @@ def run_layer4_standalone(
     # Spectral/environmental data
     daily_weather: Optional[List[Dict]] = None,
     stages: Optional[List[str]] = None,
-    ndvi: float = 0.5,  # Conservative default (was 0.7 synthetic "healthy")
+    ndvi: Optional[float] = None,  # No synthetic default — None preserves true observational missingness
     ndre: Optional[float] = None,
     growth_velocity: float = 0.01,
     spatial_heterogeneity: bool = False,
@@ -558,6 +558,11 @@ def run_layer4_standalone(
                 if reason and reason not in prescription.blocked_reason:
                     prescription.blocked_reason.append(reason)
 
+    # If real NDVI is missing, penalize confidence to reflect widened epistemic uncertainty (Finding #29)
+    if ndvi is None or ndvi <= 0.0:
+        for s in states.values():
+            s.confidence = round(max(0.1, float(s.confidence) * 0.75), 3)
+
     # 10. Quality metrics
     user_soil_available = any(k in soil_props for k in ("nitrogen_ppm", "phosphorus_ppm", "potassium_ppm"))
     quality = QualityMetricsL4(
@@ -569,7 +574,8 @@ def run_layer4_standalone(
             reason for reason, missing in (
                 ("CROP_SPECIES_AUTHORITY", not species_allowed),
                 ("PHENOLOGY_POSTERIOR", not stage_allowed),
-            ) if semantic_gate_active and missing
+                ("NDVI_SPECTRAL", ndvi is None or ndvi <= 0.0),
+            ) if (missing and (semantic_gate_active or reason == "NDVI_SPECTRAL"))
         ]),
         data_completeness={
             "soil_analysis": 1.0 if user_soil_available else 0.0,
@@ -772,6 +778,7 @@ def run_layer4_nutrients(
     daily_weather = []
     stages_from_l1 = []
     ndvi = None  # NO synthetic fallback — None means "genuinely unknown"
+    latest_ts_ndvi = None
     ndvi_from_kalman = False  # Track data provenance
     ndre = None
     sar_vv_pre = None
@@ -850,16 +857,15 @@ def run_layer4_nutrients(
                             w["t_max"] = None
                         daily_weather.append(w)
 
-                    # NDVI from raw timeseries (only if Kalman didn't provide)
+                    # NDVI from raw timeseries (collect latest valid real observation)
                     if ndvi is None:
                         ndvi_val = entry.get("ndvi")
                         if ndvi_val is not None:
                             try:
                                 candidate = float(ndvi_val)
-                                # Only accept if it's a real observation, not interpolated
                                 is_observed = entry.get("is_observed", True)
-                                if is_observed:
-                                    ndvi = candidate
+                                if is_observed and candidate > 0.0:
+                                    latest_ts_ndvi = candidate
                             except (TypeError, ValueError):
                                 pass
 
@@ -880,14 +886,18 @@ def run_layer4_nutrients(
                             sar_vh_pre = float(vh)
                         sar_vh_post = float(vh)
 
+        # Adopt latest valid timeseries NDVI if Kalman did not provide one
+        if ndvi is None and latest_ts_ndvi is not None:
+            ndvi = latest_ts_ndvi
+
         # =============================================================
-        # NDVI: If still None after both paths, use a conservative
-        # estimate but FLAG IT clearly — no silent synthetic data
+        # Finding #29: Forbid synthetic NDVI default substitution.
+        # When no real NDVI is available, keep ndvi as None so that
+        # true observational missingness is reported to downstream checks.
         # =============================================================
         if ndvi is None:
-            ndvi = 0.5  # Conservative mid-range (NOT 0.7 "healthy")
-            print("[L4] WARNING: No real NDVI data available from Kalman or timeseries. "
-                  "Using conservative estimate 0.5 — confidence will be penalized.")
+            print("[L4] INFO: No real NDVI data available from Kalman or timeseries. "
+                  "Preserving ndvi as None — true observational missingness reported.")
 
         # Soil from FieldTensor static properties
         static = getattr(l1_output, "static", {})
@@ -1053,6 +1063,12 @@ def run_layer4_nutrients(
         stages = stages[:min_len] if len(stages) > min_len else stages + [stages[-1]] * (min_len - len(stages))
         daily_weather = daily_weather[:min_len]
 
+    # Extract supported crop management and field history inputs (Finding #28)
+    previous_crop = op_ctx.get("previous_crop", crop_cfg.get("previous_crop", ""))
+    cover_crop = op_ctx.get("cover_crop", crop_cfg.get("cover_crop", ""))
+    tissue_data = op_ctx.get("tissue_data", None)
+    initial_soil_moisture_mm = op_ctx.get("initial_soil_moisture_mm", None)
+
     return run_layer4_standalone(
         plot_id=plot_id,
         crop_type=crop_type,
@@ -1074,6 +1090,10 @@ def run_layer4_nutrients(
         sar_coherence_drop=sar_coherence_drop,
         l3_decision=l3_output,
         l3_run_id=getattr(l3_output, "run_id_l3", "") if l3_output else "",
+        initial_soil_moisture_mm=initial_soil_moisture_mm,
+        previous_crop=previous_crop,
+        cover_crop=cover_crop,
+        tissue_data=tissue_data,
         # v4.0: L2 biophysical features
         l2_biophysical=l2_biophysical if l2_biophysical else None,
         # v8.1: ASMAE features

@@ -414,13 +414,23 @@ class BioThreatInferenceEngine:
             drivers.add(ev.driver)
 
         # L3 weed corroboration: if L3 already detected weeds, amplify
+        # Finding #30 fix: Avoid double-counting when Driver.NDVI was already incorporated in ev_list.
+        # Both L5 remote signatures and L3 decision share the underlying Sentinel-2 spectral observations.
         l3_weed = self._get_l3_prob(l3, "WEED_PRESSURE")
         if l3_weed > 0.3:
-            delta = min(1.5, l3_weed * 2.0)
+            raw_delta = min(1.5, l3_weed * 2.0)
+            has_spectral_evidence = Driver.NDVI in drivers
+            if has_spectral_evidence:
+                # Condition on shared evidence to avoid artificial certainty inflation
+                delta = round(raw_delta * 0.35, 3)
+                desc = f"L3 weed corroboration conditioned on shared spectral evidence (p={l3_weed:.2f})"
+            else:
+                delta = round(raw_delta, 3)
+                desc = f"L3 weed corroboration (p={l3_weed:.2f})"
             logit += delta
             trace.append(EvidenceLogit(
-                Driver.NDVI, f"L3 weed corroboration (p={l3_weed:.2f})",
-                delta, 1.0, {"l3_weed_prob": l3_weed}
+                Driver.NDVI, desc,
+                delta, 1.0, {"l3_weed_prob": l3_weed, "shared_spectral_lineage": has_spectral_evidence}
             ))
 
         prob = _sigmoid(logit)

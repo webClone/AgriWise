@@ -199,8 +199,8 @@ class NutrientObservationProxyEngine:
 
     def extract_features(
         self,
-        ndvi: float,
-        stage: str,
+        ndvi: Optional[float] = None,
+        stage: str = "vegetative",
         crop_type: str = "corn",
         ndre: Optional[float] = None,
         growth_velocity: float = 0.0,
@@ -220,10 +220,13 @@ class NutrientObservationProxyEngine:
         stage_lower = stage.lower()
 
         # 1. NDVI Z-Score (deviation from healthy baseline)
-        spec = get_crop(crop_lower)
-        ndvi_baselines = spec.ndvi_baselines
-        ndvi_mean, ndvi_std = ndvi_baselines.get(stage_lower, (0.5, 0.15))
-        ndvi_z = (ndvi - ndvi_mean) / max(ndvi_std, 0.01)
+        if ndvi is not None:
+            spec = get_crop(crop_lower)
+            ndvi_baselines = spec.ndvi_baselines
+            ndvi_mean, ndvi_std = ndvi_baselines.get(stage_lower, (0.5, 0.15))
+            ndvi_z = (ndvi - ndvi_mean) / max(ndvi_std, 0.01)
+        else:
+            ndvi_z = 0.0
 
         # 2. NDRE Z-Score (chlorophyll proxy, more sensitive in dense canopies)
         ndre_z = 0.0

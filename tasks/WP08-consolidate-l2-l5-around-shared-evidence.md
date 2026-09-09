@@ -98,3 +98,52 @@ In `layer4_nutrients/runner.py`:
 - **Monograph Findings**: Finding #23 (L2 hypothesis distribution), Finding #24 (L2 shared world state), Finding #25 (Evidence dependency tracking), Finding #26 (Conflation of probability/confidence/identifiability), Finding #27 (Authoritative water engine connection and uncertainty), Finding #28 (L4 dropped inputs), Finding #29 (L4 fake completeness), Finding #30 (L5 double-counting).
 - **Defect Tasks**: [A01-authoritative-water-path.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A01-authoritative-water-path.md), [A02-l4-hydrology-rainfall-and-leaching-units.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A02-l4-hydrology-rainfall-and-leaching-units.md), [A03-l4-missing-weather-handling.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A03-l4-missing-weather-handling.md), [A05-l3-water-posterior-flux-and-sigma.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A05-l3-water-posterior-flux-and-sigma.md).
 - **Phase Tasks**: [P02.3-install-single-authoritative-water-owner.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P02.3-install-single-authoritative-water-owner.md), [P02.5-qualify-remaining-agronomical-outputs.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P02.5-qualify-remaining-agronomical-outputs.md).
+
+---
+
+## 7. Execution Status & Verification Report
+
+### 7.1 Implemented Components & Architectural Repairs
+1. **L2 Simplex & Evidence Decoupling (Finding #23)**:
+   - File: [`services/agribrain/layer2_intelligence/composite_runner.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer2_intelligence/composite_runner.py#L90-L125)
+   - Replaced severity summation with Bayesian posterior probability $P(H_k | E)$ extraction from `stress.hypothesis_posterior` (falling back to `damage_probability` and `confidence`).
+   - Implemented independent hypothesis residual non-occurrence calculation: $P(\text{UNRESOLVED}) = \prod_{k} (1 - P(H_k))$.
+   - Normalized hypothesis distribution strictly to $1.0$ while ensuring high-posterior mild stress is never dominated by low-posterior severe stress.
+
+2. **L3 Exact Water Mass Balance & Wilting Point Conservation (Finding #27 / Defect A04)**:
+   - File: [`services/agribrain/layer3_water/soil/layered_water_balance.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/soil/layered_water_balance.py#L110-L150)
+   - Eradicated artificial water creation at permanent wilting point via strict delta subtraction: `allowable_plant_extract = max(0.0, new_storage[i] - wp_storage_mm[i])`, `actual_layer_uptake = min(layer_uptake, allowable_plant_extract)`, and `new_storage[i] = round(new_storage[i] - actual_layer_uptake, 6)`.
+   - Bounded capillary rise by available unsaturated pore space in the bottom layer: `allowable_rise = max(0.0, sat_storage_mm[-1] - new_storage[-1])`.
+   - Closed daily mass balance equation: $\Delta S = \text{inflows} - \text{outflows}$ within $10^{-6}$ mm.
+
+3. **L3 Uncertainty Propagation & Variance Reduction Scaling (Finding #27 / Defect A05)**:
+   - File: [`services/agribrain/layer3_water/runner.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer3_water/runner.py#L200-L260)
+   - Corrected standard deviation scaling under Kalman assimilation variance reduction: $\sigma_{\text{post}} = \sigma_{\text{prior}} \times \sqrt{1 - \text{variance\_reduction\_fraction}}$.
+   - Passed `_posterior_soil_sigma` to `EnsembleForecastEngine.simulate_depletion_forecast(soil_sigma=_posterior_soil_sigma)` and into `WaterStateFactory.create_water_state(uncertainty=posterior_uncertainty)`.
+
+4. **L4 Observational Missingness & Operational Context Propagation (Findings #28, #29)**:
+   - Files: [`services/agribrain/layer4_nutrients/proxies/engine.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer4_nutrients/proxies/engine.py#L82), [`services/agribrain/layer4_nutrients/runner.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer4_nutrients/runner.py#L107, #L562-L582, #L780-L895, #L1065-L1095)
+   - Eradicated synthetic `0.5` NDVI substitution; when Sentinel-2 or Kalman NDVI is missing, preserved `ndvi = None`.
+   - Reported `data_completeness["spectral"] = 0.0` and flagged `"NDVI_SPECTRAL"` in `missing_drivers`, discounting nutrient state confidence by $25\%$ to reflect genuine epistemic uncertainty.
+   - Propagated operational history and field management parameters (`previous_crop`, `cover_crop`, `tissue_data`, `initial_soil_moisture_mm`) from `operational_context` / `crop_config` into `run_layer4_standalone`.
+
+5. **L5 Shared Evidence Debiasing & Lineage Conditioning (Finding #30)**:
+   - File: [`services/agribrain/layer5_bio/engines/inference.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer5_bio/engines/inference.py#L416-L435)
+   - Conditioned weed pressure inference on shared evidence when `Driver.NDVI` is present in `ev_list`, dampening L3 weed corroboration by a factor of $0.35$ and tagging trace with `"shared_spectral_lineage": True` to prevent double-counting.
+
+### 7.2 Verification Results
+- **Dedicated WP08 Test Suite**: `services/agribrain/tests/test_wp08_shared_evidence_and_coherence.py` (7/7 tests passed):
+  - `test_layer2_simplex_and_evidence_conditioning`: Verified simplex closure ($\sum P = 1.0$) and posterior dominance over severity.
+  - `test_layer3_water_conservation_at_wilting_point`: Verified zero water creation and mass balance error $\le 10^{-4}$ mm.
+  - `test_layer3_capillary_rise_bounded_by_pore_space`: Verified bottom layer saturation bounds.
+  - `test_layer3_uncertainty_variance_reduction_scaling`: Verified $\sqrt{1 - f}$ standard deviation scaling.
+  - `test_layer4_missing_ndvi_penalizes_confidence_and_reports_driver`: Verified missingness preservation and confidence penalty.
+  - `test_layer4_operational_context_propagation`: Verified field history and tissue test propagation into data completeness.
+  - `test_layer5_shared_evidence_debiasing`: Verified 0.35 dampening factor and shared spectral lineage tagging.
+- **Subsystem Test Suites**:
+  - `layer3_water/tests`: 31/31 passed.
+  - `layer4_nutrients/tests`: 14/14 passed.
+  - `layer5_bio/tests`: 17/17 passed.
+  - `layer2_veg_int/tests`: 212/212 passed.
+  - `agribrain/tests`: 186/186 passed.
+

@@ -3,6 +3,7 @@ Layer 3.0 Unified Water Intelligence Engine Runner
 Integrates multi-layer soil hydrology, data assimilation, dual Kc evaporative partitioning, stress memory, and MPC optimization.
 """
 
+import math
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple, List
 
@@ -27,6 +28,7 @@ from layer3_water.contracts import (
     AssimilationDiagnostic,
     WaterState,
     WaterStateFactory,
+    WaterUncertaintyBudget,
 )
 from layer3_water.et import (
     PenmanMonteithET0,
@@ -197,9 +199,10 @@ class WaterIntelligenceEngine:
         # This replaces the hardcoded 0.04 with the actual posterior uncertainty.
         _posterior_soil_sigma = et0_res.uncertainty.soil_sigma  # fallback
         if assim_diag and assim_diag.observations_assimilated_count > 0:
-            # Use posterior variance reduction to derive calibrated sigma
-            _posterior_soil_sigma = max(0.01, round(
-                et0_res.uncertainty.soil_sigma * (1.0 - assim_diag.variance_reduction_fraction),
+            # Defect A05 / Finding #27 fix: sqrt(1 - f) variance reduction scaling on standard deviation
+            var_reduction = max(0.0, min(0.99, float(getattr(assim_diag, "variance_reduction_fraction", 0.0) or 0.0)))
+            _posterior_soil_sigma = max(0.005, round(
+                et0_res.uncertainty.soil_sigma * math.sqrt(1.0 - var_reduction),
                 4,
             ))
 
@@ -239,13 +242,13 @@ class WaterIntelligenceEngine:
             current_vpd_kpa=vpd_val,
         )
 
-        # 11. Weather Ensemble Limitation Forecast with coupled soil uncertainty
+        # 11. Weather Ensemble Limitation Forecast with coupled calibrated posterior soil uncertainty
         lim_forecast = EnsembleForecastEngine.simulate_depletion_forecast(
             current_root_zone=final_root_zone,
             kcb=kcb,
             ke=ke,
             weather_ensemble=weather_ensemble,
-            soil_uncertainty_sigma=et0_res.uncertainty.soil_sigma,
+            soil_uncertainty_sigma=_posterior_soil_sigma,
         )
 
         # 12. MPC Prescriptive Irrigation Optimization
@@ -266,7 +269,14 @@ class WaterIntelligenceEngine:
         else:
             authority = WaterPhysicsAuthority.MODELLED
 
-        # 13. Canonical WaterState Construction
+        # 13. Canonical WaterState Construction with calibrated posterior uncertainty
+        posterior_uncertainty = WaterUncertaintyBudget(
+            sensor_sigma=et0_res.uncertainty.sensor_sigma,
+            soil_sigma=_posterior_soil_sigma,
+            weather_sigma=et0_res.uncertainty.weather_sigma,
+            model_sigma=et0_res.uncertainty.model_sigma,
+        )
+
         water_state = WaterStateFactory.create_water_state(
             plot_id=plot_id,
             timestamp=timestamp,
@@ -284,7 +294,7 @@ class WaterIntelligenceEngine:
             hydrology_mode=solver_decision.hydrology_mode,
             solver_fidelity=solver_decision.solver_fidelity,
             mass_balance_error_mm=mass_balance_err,
-            uncertainty=et0_res.uncertainty,
+            uncertainty=posterior_uncertainty,
         )
 
         # 14. Hydrological Feedback Receipt to Layer 2

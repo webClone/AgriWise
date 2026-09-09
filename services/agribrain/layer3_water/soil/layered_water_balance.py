@@ -110,21 +110,27 @@ class LayeredWaterBalanceEngine:
         # 3. Topsoil Evaporation Extraction (Es_act from top layer bounded by residual water)
         allowable_evap = max(0.0, new_storage[0] - res_storage_mm[0])
         actual_top_evap = min(actual_soil_evaporation_mm, allowable_evap)
-        new_storage[0] = max(res_storage_mm[0], new_storage[0] - actual_top_evap)
+        new_storage[0] = round(new_storage[0] - actual_top_evap, 6)
 
         # 4. Layer-by-Layer Root Water Extraction U(z) via Feddes weighting
         # Plant roots cannot extract below permanent wilting point (WP)
+        # Defect A04 fix: strict delta subtraction without water creation at wilting point
         uptake_fractions = root_zone.root_uptake_distribution_profile
+        total_plant_extracted = 0.0
         for i in range(n_layers):
             if i < len(uptake_fractions):
                 layer_uptake = round(uptake_fractions[i] * actual_transpiration_mm, 2)
                 allowable_plant_extract = max(0.0, new_storage[i] - wp_storage_mm[i])
                 actual_layer_uptake = min(layer_uptake, allowable_plant_extract)
-                new_storage[i] = max(wp_storage_mm[i], new_storage[i] - actual_layer_uptake)
+                new_storage[i] = round(new_storage[i] - actual_layer_uptake, 6)
+                total_plant_extracted += actual_layer_uptake
 
-        # 5. Capillary Rise Addition to Bottom Layer
+        # 5. Capillary Rise Addition to Bottom Layer (bounded by available pore space)
+        actual_capillary_rise = 0.0
         if capillary_rise_mm > 0.0:
-            new_storage[-1] = min(sat_storage_mm[-1], new_storage[-1] + capillary_rise_mm)
+            allowable_rise = max(0.0, sat_storage_mm[-1] - new_storage[-1])
+            actual_capillary_rise = min(capillary_rise_mm, allowable_rise)
+            new_storage[-1] = round(new_storage[-1] + actual_capillary_rise, 6)
 
         # 6. Recompute Volumetric Water Content Profile theta_i = S_i / thickness
         new_theta = [
@@ -138,11 +144,7 @@ class LayeredWaterBalanceEngine:
         s_prev = sum(layer_storage_mm)
         s_next = sum(new_storage)
         delta_s = s_next - s_prev
-        inflows = actual_infil + capillary_rise_mm
-        total_plant_extracted = sum(
-            min(round(uptake_fractions[i] * actual_transpiration_mm, 2), max(0.0, layer_storage_mm[i] - wp_storage_mm[i]))
-            for i in range(min(n_layers, len(uptake_fractions)))
-        )
+        inflows = actual_infil + actual_capillary_rise
         outflows = total_plant_extracted + actual_top_evap + deep_drainage
         mass_balance_error = round(abs(delta_s - (inflows - outflows)), 4)
 

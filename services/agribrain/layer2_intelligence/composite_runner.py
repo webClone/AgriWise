@@ -86,19 +86,40 @@ def _build_scientific_state_envelope(inputs: Any, tensor: Any, output: Any):
         json.dumps(identity_payload, sort_keys=True).encode("utf-8")
     ).hexdigest()
 
+    # Derive hypothesis weights from Bayesian posterior probabilities P(H_k | E),
+    # strictly separating diagnostic probability from physical/biological severity (Finding #23).
     by_type = {}
     for stress in output.stress_context:
         raw_type = getattr(stress, "stress_type", "UNRESOLVED") or "UNRESOLVED"
         key = str(getattr(raw_type, "value", raw_type)).upper()
-        by_type[key] = by_type.get(key, 0.0) + max(
-            0.0, float(getattr(stress, "severity", 0.0) or 0.0)
-        )
-    unresolved_weight = 1.0 + by_type.pop("UNRESOLVED", 0.0)
-    total = sum(by_type.values()) + unresolved_weight
+        post_p = getattr(stress, "hypothesis_posterior", None)
+        if post_p is None:
+            post_p = getattr(stress, "damage_probability", None)
+        if post_p is None:
+            post_p = getattr(stress, "confidence", 0.0) or 0.0
+        p_val = max(0.0, min(1.0, float(post_p)))
+        # For multiple evidence items of the same stress type, retain maximum posterior probability
+        by_type[key] = max(by_type.get(key, 0.0), p_val)
+
+    # UNRESOLVED probability reflects joint residual non-occurrence under independent hypotheses:
+    # P(UNRESOLVED) = prod(1 - P(H_k))
+    explicit_unresolved = by_type.pop("UNRESOLVED", None)
+    if explicit_unresolved is not None and explicit_unresolved > 0:
+        residual_unresolved = explicit_unresolved
+    else:
+        residual_unresolved = 1.0
+        for p in by_type.values():
+            residual_unresolved *= (1.0 - min(0.95, p))
+        residual_unresolved = max(0.05, min(1.0, residual_unresolved))
+
+    # Normalize to strict probability distribution summing to 1.0
+    total_mass = sum(by_type.values()) + residual_unresolved
     hypotheses = {
-        key: value / total for key, value in sorted(by_type.items())
+        key: round(value / total_mass, 6) for key, value in sorted(by_type.items())
     }
-    hypotheses["UNRESOLVED"] = unresolved_weight / total
+    # Ensure exact sum to 1.0 for contract validator
+    assigned_sum = sum(hypotheses.values())
+    hypotheses["UNRESOLVED"] = round(1.0 - assigned_sum, 6)
 
     generated_at = getattr(output, "generated_at", None)
     evidence_cutoff = (
