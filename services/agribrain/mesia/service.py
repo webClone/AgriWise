@@ -627,9 +627,7 @@ class MesiaProductionService:
             candidate_paths.extend(sorted(evidence_dir.glob("*.nmea"), key=lambda p: p.stat().st_mtime, reverse=True))
         candidate_paths.extend([
             data_dir / f"plot_{plot_id}_real_field_gnss.nmea",
-            data_dir / f"plot_{plot_id[:8]}_real_field_gnss.nmea",
             data_dir / f"plot_{plot_id}_field.nmea",
-            data_dir / f"plot_{plot_id[:8]}_field.nmea",
         ])
 
         log_file = None
@@ -811,15 +809,11 @@ class MesiaProductionService:
         if wifi_insitu_dir.exists():
             candidate_paths.extend([
                 wifi_insitu_dir / f"plot_{plot_id}_real_field_csi.sigmf-data",
-                wifi_insitu_dir / f"plot_{plot_id[:8]}_real_field_csi.sigmf-data",
                 wifi_insitu_dir / f"plot_{plot_id}_field_csi.sigmf-data",
-                wifi_insitu_dir / f"plot_{plot_id[:8]}_field_csi.sigmf-data",
             ])
         candidate_paths.extend([
             data_dir / f"plot_{plot_id}_real_field_csi.sigmf-data",
-            data_dir / f"plot_{plot_id[:8]}_real_field_csi.sigmf-data",
             data_dir / f"plot_{plot_id}_field_csi.sigmf-data",
-            data_dir / f"plot_{plot_id[:8]}_field_csi.sigmf-data",
         ])
 
         log_file = None
@@ -2389,6 +2383,9 @@ class MesiaProductionService:
                 "decision_eligible": False,
                 "evidence_class": "MEASURED_NATIVE" if has_real_gnss else "SIMULATED",
                 "truth_classification": "MEASURED_NATIVE" if has_real_gnss else "SIMULATED",
+                "truth_tier": "BIOLOGICAL_INFERENCE" if has_real_gnss else "ASMAE_INNOVATION_PROPOSAL",
+                "truth_class": "DERIVED_MODEL_INFERRED" if has_real_gnss else "SIMULATED",
+                "is_derived_model_inference": True,
                 "physical_waves_measured": has_real_gnss,
             },
             {
@@ -2478,6 +2475,9 @@ class MesiaProductionService:
                 "decision_eligible": False,
                 "evidence_class": "MEASURED_NATIVE",
                 "truth_classification": "MEASURED_NATIVE",
+                "truth_tier": "BIOLOGICAL_INFERENCE",
+                "truth_class": "DERIVED_MODEL_INFERRED",
+                "is_derived_model_inference": True,
                 "physical_waves_measured": True,
                 "target_classification": real_in_situ_wifi.get("target_classification", "BACKGROUND"),
             })

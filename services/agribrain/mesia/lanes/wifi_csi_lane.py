@@ -62,14 +62,20 @@ class WifiCsiLaneAdapter:
     @classmethod
     def from_sigmf_dict(cls, sigmf_dict: Dict[str, Any], frame_id: str = "frame-01") -> WifiCsiFrame:
         """Constructs a WifiCsiFrame from a parsed SigMF dict."""
+        from ..contracts.capture_manifest import QuarantinedCaptureException
+
         ts = sigmf_dict.get("timestamp")
+        if not ts:
+            raise QuarantinedCaptureException("Missing capture timestamp in SigMF dict: temporal provenance required")
         if isinstance(ts, str):
             try:
                 ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            except Exception:
-                ts = datetime.now(timezone.utc)
+            except Exception as e:
+                raise QuarantinedCaptureException(f"Unparseable capture timestamp {ts!r}: {e}") from e
         elif not isinstance(ts, datetime):
-            ts = datetime.now(timezone.utc)
+            raise QuarantinedCaptureException(f"Invalid timestamp type {type(ts).__name__} in SigMF dict")
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
 
         return WifiCsiFrame(
             frame_id=frame_id,

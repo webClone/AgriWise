@@ -101,18 +101,29 @@ class NativeWifiCsiExtractor:
         if not os.path.exists(data_path):
             raise FileNotFoundError(f"SigMF binary data not found: {data_path}")
 
+        if not os.path.exists(meta_path):
+            from services.agribrain.mesia.contracts.capture_manifest import QuarantinedCaptureException
+            raise QuarantinedCaptureException(
+                f"SigMF metadata missing: {meta_path}. Captures lacking metadata must be quarantined to prevent synthetic timestamping."
+            )
+
         with open(data_path, "rb") as f:
             raw_bytes = f.read()
 
         file_hash = hashlib.sha256(raw_bytes).hexdigest()
 
-        meta = {}
-        if os.path.exists(meta_path):
+        try:
             with open(meta_path, "r", encoding="utf-8") as f:
-                try:
-                    meta = json.load(f)
-                except Exception:
-                    meta = {}
+                meta = json.load(f)
+        except Exception as e:
+            from services.agribrain.mesia.contracts.capture_manifest import QuarantinedCaptureException
+            raise QuarantinedCaptureException(f"Corrupted SigMF metadata {meta_path}: {e}") from e
+
+        annot = (meta.get("annotations") or [{}])[0]
+        capture = (meta.get("captures") or [{}])[0]
+        glob = meta.get("global") or {}
+
+        capture_dt = capture.get("core:datetime")
 
         # Unpack interleaved complex float32 (<ff)
         num_floats = len(raw_bytes) // 4
@@ -128,10 +139,6 @@ class NativeWifiCsiExtractor:
             amplitudes_linear.append(round(amp, 6))
             phases_rad.append(round(phase, 4))
 
-        annot = (meta.get("annotations") or [{}])[0]
-        capture = (meta.get("captures") or [{}])[0]
-        glob = meta.get("global") or {}
-
         return {
             "amplitudes_linear": amplitudes_linear,
             "phases_rad": phases_rad,
@@ -142,7 +149,7 @@ class NativeWifiCsiExtractor:
             "noise_floor_dbm": annot.get("mesia:noise_floor_dbm", -92.0),
             "rssi_dbm": annot.get("mesia:rssi_dbm", -65.0),
             "center_frequency_hz": capture.get("core:frequency", 2.437e9),
-            "timestamp": capture.get("core:datetime", datetime.now(timezone.utc).isoformat()),
+            "timestamp": str(capture_dt) if capture_dt is not None else None,
             "bandwidth_hz": glob.get("core:sample_rate", 20.0e6),
             "driver": glob.get("core:hw", "iwlwifi"),
             "meta": meta,

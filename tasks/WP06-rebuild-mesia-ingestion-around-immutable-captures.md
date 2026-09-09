@@ -95,3 +95,20 @@ This manufactures spatial heterogeneity out of coordinate numbers, deceiving dow
 - **Monograph Findings**: Finding #16 (Native vs derived evidence mislabeling), Finding #17 (SigMF ingestion metadata disconnection), Finding #18 (Qualification checks), Finding #19 (Canonical spatial lattice vs synthetic gradients), Finding #21 (Namespace isolation).
 - **Defect Tasks**: [A08-mesia-rf-snr-vwc-assimilation.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A08-mesia-rf-snr-vwc-assimilation.md), [A09-mesia-qualification-and-evidence-verification.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A09-mesia-qualification-and-evidence-verification.md).
 - **Phase Tasks**: [P03.1-specify-native-rf-measurements-and-models.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P03.1-specify-native-rf-measurements-and-models.md), [P03.2-enforce-cryptographic-qualification-at-use-time.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P03.2-enforce-cryptographic-qualification-at-use-time.md).
+
+---
+
+## 7. Execution Status & Verification Report
+- **Status**: COMPLETED
+- **Completed Components**:
+  1. **Atomic Capture Manifest Contracts (`capture_manifest.py`)**: Authored `RadioProfile` and `SigMFCaptureManifest` binding raw `.sigmf-data` and `.sigmf-meta` under a single content-addressed `capture_id` (SHA-256). Defined `QuarantinedCaptureException` for missing metadata, absent timestamps, or corrupted signatures.
+  2. **Truth Hierarchy & Epistemic Typing (`truth_hierarchy.py`)**: Implemented four-tier evidence typing (`TruthTier.NATIVE_RF_CAPTURE`, `CALIBRATED_RF_FEATURE`, `BIOLOGICAL_INFERENCE`, `ASMAE_INNOVATION_PROPOSAL`) and `TruthClass` mappings. Biological proposals are strictly categorized as `BIOLOGICAL_INFERENCE` and `DERIVED_MODEL_INFERRED` with `is_derived_model_inference=True`, preventing inverted model outputs from posing as native physical antenna measurements.
+  3. **Atomic SigMF Ingestion Pipeline (`sigmf_ingest.py`)**: Created atomic ingestion with content-addressed file writing (`<capture_id>.sigmf-data` and `<capture_id>.sigmf-meta`), integrity verification (`verify_capture_integrity`), strict UTC timestamp parsing (`parse_capture_timestamp`), and path traversal sanitization.
+  4. **Strict Provenance & Zero Synthetic Timestamps (`csi_extractor.py`, `wifi_csi_lane.py`)**: Eliminated `datetime.now()` fallback in SigMF readers; missing companion metadata files or unauthenticated timestamps fail closed with `QuarantinedCaptureException`.
+  5. **Cryptographic Qualification Hardening (`capability_governance.py`)**: Hardened `issue_qualification_record` to reject empty, whitespace, or superficial validation signatures (requiring genuine signatures $\ge 16$ characters).
+  6. **Tenant & Plot Namespace Isolation (`service.py`)**: Eliminated truncated `plot_id[:8]` filesystem fallbacks across GNSS and Wi-Fi CSI paths, strictly confining evidence queries to validated tenant/farm/plot scopes.
+  7. **Dedicated Verification Suite (`test_immutable_captures_and_truth_governance.py`)**: 7/7 tests passed verifying atomic manifests, tamper detection, timestamp quarantine, signature validation, path traversal blocking, and truth classification.
+  8. **Subsystem & Full Regression Status**:
+     - MESIA test suite: 108/108 passed (100%).
+     - AgriBrain full regression: 765 passed across all 13 core subsystems (100%).
+

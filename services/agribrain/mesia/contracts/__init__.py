@@ -27,6 +27,16 @@ from .receipts import (
     RegistryQueryReceipt,
     ModelContextReceipt,
 )
+from .capture_manifest import (
+    RadioProfile,
+    SigMFCaptureManifest,
+    QuarantinedCaptureException,
+)
+from .truth_hierarchy import (
+    TruthTier,
+    TruthClass,
+    classify_proposal_truth,
+)
 
 __all__ = [
     # Epochs
@@ -70,4 +80,12 @@ __all__ = [
     "RadarFrameReceipt",
     "RegistryQueryReceipt",
     "ModelContextReceipt",
+    # Capture Manifest & Provenance
+    "RadioProfile",
+    "SigMFCaptureManifest",
+    "QuarantinedCaptureException",
+    # Truth Hierarchy
+    "TruthTier",
+    "TruthClass",
+    "classify_proposal_truth",
 ]

@@ -52,8 +52,9 @@ class CapabilityGovernanceAuthority:
             gate_governance_passed,
         ])
         
-        # Phase 2: Require independent validation signature
-        is_qualified = all_passed and validation_signature is not None
+        # Finding #18: Require genuine, non-empty validation signature (minimum 16 chars)
+        has_valid_sig = bool(validation_signature and len(str(validation_signature).strip()) >= 16)
+        is_qualified = all_passed and has_valid_sig
 
         return CapabilityAuthorityRecord(
             capability_id=capability_id,
