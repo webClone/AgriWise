@@ -126,3 +126,27 @@ Update `services/agribrain/layer05_asmae/state/descriptors.py` and `assimilation
 - **Monograph Findings**: Finding #8 (Root-zone moisture unit discrepancy), Finding #9 (Management forcing typing and execution confirmation), Finding #13 (Preserve ASMAE safeguards).
 - **Defect Tasks**: [A04-l3-water-solver-mass-conservation.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A04-l3-water-solver-mass-conservation.md), [A05-l3-water-posterior-flux-and-sigma.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A05-l3-water-posterior-flux-and-sigma.md), [A02-l4-hydrology-rainfall-and-leaching-units.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A02-l4-hydrology-rainfall-and-leaching-units.md).
 - **Phase Tasks**: [P02.1-repair-l4-hydrology-and-leaching.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P02.1-repair-l4-hydrology-and-leaching.md), [P02.2-repair-l3-water-solver-and-uncertainty.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P02.2-repair-l3-water-solver-and-uncertainty.md).
+
+---
+
+## 7. Execution Status & Verification Report
+- **Status**: COMPLETED
+- **Verification Date**: 2026-09-09
+- **Implemented Changes**:
+  1. **Dimensional Unit Conservation in ASMAE (`filter.py`)**:
+     - Eliminated the $4.35\times$ unit inflation error where mm flux was divided by plant available water ($\text{storage\_mm}$).
+     - Implemented true volumetric water conservation: $\Delta \theta_v = \Delta W / (Z_r \times 1000)$.
+     - Implemented FAO-56 moisture stress reduction factor ($K_s$) for actual transpiration extraction.
+     - Confirmed: $10\text{ mm}$ water added to a $0.4\text{ m}$ root depth increases $\theta_v$ by exactly $0.0250 \pm 10^{-4}$.
+  2. **Soil-Specific Gravity Drainage Boundaries**:
+     - Removed artificial $0.8$ fixed threshold.
+     - Gravity drainage now strictly commences when volumetric moisture exceeds the soil's physical Field Capacity ($\theta_{FC}$), and ceases when $\theta_v \le \theta_{FC}$.
+     - Clamped moisture states to physical soil boundaries $[\theta_{WP} \times 0.5, \theta_{\text{sat}}]$.
+  3. **Strongly-Typed Management Forcing (`ForcingEvent`)**:
+     - Supported typed `ForcingEvent` objects with `forcing_type`, `execution_status`, `quantity`, `units`, and `effective_start`.
+     - Strictly filtered out unconfirmed planned actions (`PLANNED`), preventing unexecuted interventions from artificially altering physical historical transitions.
+     - Added automatic unit conversion: $100\text{ m}^3/\text{ha} \to 10\text{ mm}$, liters to mm via plot area.
+  4. **Automated Verification**:
+     - Authored `services/agribrain/layer05_asmae/tests/test_physical_state_transition.py` covering volumetric water conservation, field capacity drainage boundaries, typed forcing event parsing, and unconfirmed plan filtering (4/4 tests passing).
+     - Full ASMAE test suite: **64 passed, 2 warnings, 3 subtests passed**.
+     - Full regression suite across `services/agribrain`: **755 passed, 22 warnings, 3 subtests passed (100% pass rate)**.

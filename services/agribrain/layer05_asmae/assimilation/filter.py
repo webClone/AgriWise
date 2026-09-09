@@ -61,18 +61,24 @@ def _weather_for_day(weather_daily_series: Optional[dict], day: str) -> dict:
 
 
 def _management_events_for_segment(
-    management_events: List[dict],
+    management_events: List[Any],
     segment_start: datetime,
     segment_end: datetime,
     process_day: str,
-) -> List[dict]:
+) -> List[Any]:
     """Select each management event for at most one elapsed-time segment."""
-    selected: List[dict] = []
+    selected: List[Any] = []
     completed_day = segment_end.date() > segment_start.date()
     for event in management_events or []:
-        if not isinstance(event, dict):
+        if isinstance(event, dict):
+            raw = str(event.get("timestamp") or event.get("date") or "")
+        elif hasattr(event, "effective_start"):
+            start_val = getattr(event, "effective_start")
+            raw = start_val.isoformat() if hasattr(start_val, "isoformat") else str(start_val or "")
+        elif hasattr(event, "timestamp") or hasattr(event, "time"):
+            raw = str(getattr(event, "timestamp", None) or getattr(event, "time", None) or "")
+        else:
             continue
-        raw = str(event.get("timestamp") or event.get("date") or "")
         if not raw:
             continue
         if len(raw) <= 10:
@@ -761,17 +767,58 @@ def forecast_step(
     radiation = number(weather_day, ("solar_radiation_mj_m2", "solar_radiation", "radiation"))
     irrigation = 0.0
     fertilization = 0.0
-    for event in management_events:
-        if not isinstance(event, dict):
-            continue
-        event_day = str(event.get("date") or event.get("timestamp") or "")[:10]
-        if process_day and event_day and event_day != process_day:
-            continue
-        event_type = str(event.get("type") or event.get("event_type") or "").lower()
-        if "irrig" in event_type:
-            irrigation += number(event, ("amount_mm", "water_mm", "irrigation_mm", "amount")) or 0.0
-        if "fert" in event_type or "nutrient" in event_type:
-            fertilization += number(event, ("amount_kg_ha", "nitrogen_kg_ha", "amount")) or 0.0
+    for event in management_events or []:
+        if hasattr(event, "forcing_type") or (hasattr(event, "event_type") and hasattr(event, "quantity")):
+            status = getattr(event, "execution_status", getattr(event, "status", None))
+            if status is not None:
+                status_str = str(getattr(status, "value", status)).upper()
+                if "CONFIRMED" not in status_str and "OBSERVED" not in status_str:
+                    continue  # Ignore unconfirmed planned actions during physical transition
+            start_dt = getattr(event, "effective_start", getattr(event, "timestamp", None))
+            event_day = str(start_dt.isoformat() if hasattr(start_dt, "isoformat") else (start_dt or ""))[:10]
+            if process_day and event_day and event_day != process_day:
+                continue
+            etype = str(getattr(event, "forcing_type", getattr(event, "event_type", ""))).lower()
+            qty = float(event.quantity or 0.0)
+            unit = str(getattr(event, "units", getattr(event, "unit", "mm")) or "mm").lower()
+            if unit in ("m3_ha", "m3/ha"):
+                qty_mm = qty * 0.1
+            elif unit in ("l", "liters", "litre", "litres"):
+                area_m2 = number(soil_context, ("area_m2", "plot_area_m2")) or 10000.0
+                qty_mm = qty / area_m2
+            else:
+                qty_mm = qty
+
+            if "irrig" in etype or "water" in etype:
+                irrigation += qty_mm
+            elif "fert" in etype or "nutrient" in etype:
+                fertilization += qty
+
+        elif isinstance(event, dict):
+            status = event.get("status")
+            if status:
+                status_str = str(getattr(status, "value", status)).upper()
+                if (
+                    "CONFIRMED" not in status_str
+                    and "OBSERVED" not in status_str
+                    and status_str not in ("OK", "APPLIED", "EXECUTED")
+                ):
+                    continue  # Ignore unconfirmed planned actions
+            event_day = str(event.get("date") or event.get("timestamp") or "")[:10]
+            if process_day and event_day and event_day != process_day:
+                continue
+            event_type = str(event.get("type") or event.get("event_type") or "").lower()
+            if "irrig" in event_type:
+                unit = str(event.get("unit") or "mm").lower()
+                amt = number(event, ("amount_mm", "water_mm", "irrigation_mm", "amount", "quantity")) or 0.0
+                if unit in ("m3_ha", "m3/ha"):
+                    amt *= 0.1
+                elif unit in ("l", "liters", "litre", "litres"):
+                    area_m2 = number(soil_context, ("area_m2", "plot_area_m2")) or 10000.0
+                    amt /= area_m2
+                irrigation += amt
+            if "fert" in event_type or "nutrient" in event_type:
+                fertilization += number(event, ("amount_kg_ha", "nitrogen_kg_ha", "amount", "quantity")) or 0.0
 
     field_capacity = number(soil_context, ("field_capacity", "theta_fc"))
     wilting_point = number(soil_context, ("wilting_point", "theta_wp"))
@@ -787,16 +834,32 @@ def forecast_step(
     has_water_drivers = isinstance(rain, (int, float)) and isinstance(et0, (int, float))
     effective_rain = float(rain or 0.0) * (1.0 - max(0.0, min(1.0, runoff_fraction or 0.0)))
     atmospheric_demand = crop_coefficient * float(et0 or 0.0)
+
+    # Physical soil hydrology parameters: Delta theta_v = flux_mm / root_depth_mm
+    root_depth_mm = max(100.0, (rooting_depth or 0.4) * 1000.0)
+    theta_fc_val = field_capacity or 0.35
+    theta_wp_val = wilting_point or 0.12
+    theta_sat_val = number(soil_context, ("saturation", "theta_sat")) or (theta_fc_val + 0.10)
+    theta_sat_val = min(1.0, max(theta_fc_val + 0.02, theta_sat_val))
+
+    # Volumetric water content increments
+    delta_theta_rain = (effective_rain * delta_days) / root_depth_mm
+    delta_theta_irrig = irrigation / root_depth_mm
+
+    # FAO-56 Transpiration reduction (Ks factor)
+    p_depletion = 0.5
+    theta_p = theta_fc_val - p_depletion * (theta_fc_val - theta_wp_val)
+    paw_range = max(1e-4, theta_p - theta_wp_val)
+
+    # Relative available water balance metrics for salinity and stress memory
     daily_water_balance = (
         effective_rain - atmospheric_demand
         if (rain is not None or et0 is not None) else 0.0
     )
-    storage_mm = max(
-        25.0,
-        (rooting_depth or 0.4) * 1000.0 * max((field_capacity or 0.35) - (wilting_point or 0.12), 0.05),
-    )
+    paw_capacity_mm = root_depth_mm * max(theta_fc_val - theta_wp_val, 0.05)
+    storage_mm = max(25.0, paw_capacity_mm)
     normalized_daily_water_delta = daily_water_balance / storage_mm
-    irrigation_impulse = irrigation / storage_mm
+
     missing_driver_scale = 1.0 if has_water_drivers else 1.8
     import numpy as np
 
@@ -814,18 +877,34 @@ def forecast_step(
                 0.0, 0.05 * missing_driver_scale * sqrt_delta_days, member_shape,
             )
         elif name == "root_zone_water":
-            drainage = np.maximum(0.0, current - 0.8) * max(
-                0.0, min(1.0, drainage_fraction or 0.0),
-            )
+            # Actual ET based on FAO-56 moisture stress factor Ks
+            ks_factor = np.clip((current - theta_wp_val) / paw_range, 0.0, 1.0)
+            actual_et_mm = atmospheric_demand * ks_factor * delta_days
+            delta_theta_et = actual_et_mm / root_depth_mm
+
+            # Gravity drainage strictly occurs above Field Capacity theta_FC
+            excess_water = np.maximum(0.0, current - theta_fc_val)
+            drainage_coeff = max(0.0, min(1.0, drainage_fraction if drainage_fraction is not None else 0.5))
+            drainage_rate = excess_water * drainage_coeff * delta_days
+
             updated = (
-                current + normalized_daily_water_delta * delta_days
-                + irrigation_impulse - drainage * delta_days
-                + generator.normal(0.0, 0.02 * missing_driver_scale * sqrt_delta_days, member_shape)
+                current
+                + delta_theta_rain
+                + delta_theta_irrig
+                - delta_theta_et
+                - drainage_rate
+                + generator.normal(0.0, 0.01 * missing_driver_scale * sqrt_delta_days, member_shape)
             )
+            # Clip to physical soil bounds [theta_wp * 0.5, theta_sat]
+            updated = np.clip(updated, max(0.01, theta_wp_val * 0.5), theta_sat_val)
         elif name == "canopy_water":
+            ks_factor = np.clip((current - theta_wp_val) / paw_range, 0.0, 1.0)
+            actual_et_mm = atmospheric_demand * ks_factor * delta_days
+            delta_theta_et = actual_et_mm / root_depth_mm
+            water_impulse = delta_theta_rain + delta_theta_irrig - delta_theta_et
             updated = (
                 current * (0.97 ** delta_days)
-                + 0.6 * (normalized_daily_water_delta * delta_days + irrigation_impulse)
+                + 0.6 * water_impulse
                 + generator.normal(0.0, 0.02 * missing_driver_scale * sqrt_delta_days, member_shape)
             )
         elif name == "thermal_stress":
