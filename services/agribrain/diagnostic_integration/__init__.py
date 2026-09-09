@@ -29,6 +29,10 @@ from .registry import (
     DiagnosticRegistry,
     build_default_registry,
 )
+from .promotion_service import (
+    DiagnosticPromotionService,
+    PromotionResult,
+)
 from .runtime import (
     DiagnosticIntegrationResult,
     DiagnosticIntegrationRuntime,
@@ -142,6 +146,8 @@ __all__ = [
     "build_default_registry",
     "build_default_runtime",
     "validate_dependency_map",
+    "DiagnosticPromotionService",
+    "PromotionResult",
     "pre_decision_tribunal",
     "post_execution_audit",
 ]

@@ -2552,54 +2552,31 @@ def run_orchestrator(
         l5_res = _safe_run(LayerId.L5, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, progress_cb=progress_cb)
         results[LayerId.L5] = l5_res
         
+        # Diagnostic Tribunal adjudicates belief state without authorizing machine prescriptions
+        try:
+            from services.agribrain.diagnostic_integration import InfluenceUse
+            _build_diagnostic_integration(
+                results, run_id, ts_now, InfluenceUse.DIAGNOSIS,
+                policy_snapshot=inputs.policy_snapshot,
+            )
+        except Exception as diag_exc:
+            logger.warning("Diagnostic integration in DIAGNOSIS intent warning: %s", diag_exc)
+        
         # L3-L5 are diagnostic/state contributors on the canonical path.
-        # Their legacy action-shaped fields are ignored; L8 is the sole action
-        # owner after a full contribution tribunal.
+        # Execution plan is explicitly omitted for diagnostic-only runs.
         unified_plan = merge_execution_plans(None, None, None)
         prov_gq = evaluate_global_quality(results)
         unified_plan = filter_unsafe_actions(unified_plan, prov_gq)
         
-        return _finalize_artifact(run_id, ts_now, inputs, results, store, unified_plan, primary_acquisition=primary_acquisition, fallback_used=fallback_used, fallback_reason=fallback_reason)
+        return _finalize_artifact(
+            run_id, ts_now, inputs, results, store, unified_plan,
+            primary_acquisition=primary_acquisition, fallback_used=fallback_used,
+            fallback_reason=fallback_reason, intent_scope="diagnostic_only",
+        )
 
     # --- Layer 3 ---
     l3_res = _safe_run(LayerId.L3, inputs, l1_res.output, l2_res.output, progress_cb=progress_cb)
     results[LayerId.L3] = l3_res
-    
-    # --- Intent Gating (DECISION) ---
-    if intent == Intent.DECISION:
-        # User requested Decision (Irrigation/General).
-        # L1 -> L2 -> L3 -> L4 -> L5 -> L6. Skip L7/L8.
-        l4_res = _safe_run(LayerId.L4, inputs, l1_res.output, l2_res.output, l3_res.output, progress_cb=progress_cb)
-        results[LayerId.L4] = l4_res
-        
-        l5_res = _safe_run(LayerId.L5, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, progress_cb=progress_cb)
-        results[LayerId.L5] = l5_res
-        
-        unified_plan = merge_execution_plans(None, None, None)
-        prov_gq = evaluate_global_quality(results)
-        unified_plan = filter_unsafe_actions(unified_plan, prov_gq)
-        try:
-            from services.agribrain.diagnostic_integration import InfluenceUse
-            decision_manifest = _build_diagnostic_integration(
-                results, run_id, ts_now, InfluenceUse.PRESCRIPTION_DRIVER,
-            )
-            decision_entries = (
-                decision_manifest.get("influence_manifest", {}).get("entries", [])
-            )
-        except Exception:
-            decision_entries = []
-        if decision_entries:
-            l6_res = _safe_run(LayerId.L6, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, l5_res.output, progress_cb=progress_cb)
-        else:
-            l6_res = LayerResult(
-                layer_id="L6", status=LayerStatus.DEGRADED, output=None,
-                errors=["execution_blocked:prescription_influence_manifest_unavailable"],
-            )
-        results[LayerId.L6] = l6_res
-        
-        if l3_res.output: l3_res.output.execution_plan = unified_plan
-        
-        return _finalize_artifact(run_id, ts_now, inputs, results, store, unified_plan, primary_acquisition=primary_acquisition, fallback_used=fallback_used, fallback_reason=fallback_reason)
 
     # --- Layer 4 (Nutrients) ---
     l4_res = _safe_run(LayerId.L4, inputs, l1_res.output, l2_res.output, l3_res.output, progress_cb=progress_cb)
@@ -2612,45 +2589,45 @@ def run_orchestrator(
         prov_gq = evaluate_global_quality(results)
         unified_plan = filter_unsafe_actions(unified_plan, prov_gq)
         
-        return _finalize_artifact(run_id, ts_now, inputs, results, store, unified_plan, primary_acquisition=primary_acquisition, fallback_used=fallback_used, fallback_reason=fallback_reason)
+        return _finalize_artifact(
+            run_id, ts_now, inputs, results, store, unified_plan,
+            primary_acquisition=primary_acquisition, fallback_used=fallback_used,
+            fallback_reason=fallback_reason, intent_scope="nutrient_only",
+        )
     
     # --- Intent Gating (PLANNING) ---
     if intent == Intent.PLANNING:
         # User requested season planning / crop suitability
-        # Run L1 -> L7. Run L5 ONLY if explicitly asked about disease/risk.
-        l5_res = None
-        if user_query and any(k in user_query.lower() for k in ["disease", "risk", "fungal", "pest"]):
-            l5_res = _safe_run(LayerId.L5, inputs, l1_res.output, None, None, None, progress_cb=progress_cb)
-            results[LayerId.L5] = l5_res
+        # Canonical sequence: L1-L5 -> Tribunal -> L6 Feasibility -> L7 Planning. Skip L8.
+        l5_res = _safe_run(LayerId.L5, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, progress_cb=progress_cb)
+        results[LayerId.L5] = l5_res
         
         # Load chat memory if needed by L7
         from services.agribrain.orchestrator_v2.chat_memory import load_memory
         mem = load_memory(inputs.plot_id)
         
-        try:
-            from services.agribrain.diagnostic_integration import InfluenceUse
-            planning_manifest = _build_diagnostic_integration(
-                results, run_id, ts_now, InfluenceUse.PRESCRIPTION_DRIVER,
-            )
-            planning_entries = (
-                planning_manifest.get("influence_manifest", {}).get("entries", [])
-            )
-        except Exception:
-            planning_entries = []
-        if planning_entries:
-            l7_res = _safe_run(LayerId.L7, inputs, l1_res.output, l5_res.output if l5_res else None, mem, progress_cb=progress_cb)
-        else:
-            l7_res = LayerResult(
-                layer_id="L7", status=LayerStatus.DEGRADED, output=None,
-                errors=["planning_blocked:prescription_influence_manifest_unavailable"],
-            )
+        # Step C: Feasibility assessment via L6
+        l6_res = _safe_run(LayerId.L6, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, l5_res.output, progress_cb=progress_cb)
+        results[LayerId.L6] = l6_res
+        
+        # Step D: Season planning conditioned on L6 feasibility
+        l7_res = _safe_run(
+            LayerId.L7, inputs, l1_res,
+            l5_res.output if l5_res else None, mem,
+            l3_res.output if l3_res else None,
+            l6_res.output if l6_res else None, progress_cb=progress_cb
+        )
         results[LayerId.L7] = l7_res
 
         unified_plan = merge_execution_plans(None, None, None)
         prov_gq = evaluate_global_quality(results)
         unified_plan = filter_unsafe_actions(unified_plan, prov_gq)
         
-        return _finalize_artifact(run_id, ts_now, inputs, results, store, unified_plan, primary_acquisition=primary_acquisition, fallback_used=fallback_used, fallback_reason=fallback_reason)
+        return _finalize_artifact(
+            run_id, ts_now, inputs, results, store, unified_plan,
+            primary_acquisition=primary_acquisition, fallback_used=fallback_used,
+            fallback_reason=fallback_reason, intent_scope="planning_only",
+        )
 
     # --- Layer 5 ---
     l5_res = _safe_run(LayerId.L5, inputs, l1_res.output, l2_res.output, l3_res.output, l4_res.output, progress_cb=progress_cb)
@@ -2661,6 +2638,7 @@ def run_orchestrator(
         from services.agribrain.diagnostic_integration import InfluenceUse
         pre_action_diagnostic = _build_diagnostic_integration(
             results, run_id, ts_now, InfluenceUse.PRESCRIPTION_DRIVER,
+            policy_snapshot=inputs.policy_snapshot,
         )
         pre_action_manifest = pre_action_diagnostic.get("influence_manifest", {})
         pre_action_entries = pre_action_manifest.get("entries", [])
@@ -2844,6 +2822,31 @@ def run_orchestrator(
         policy_snapshot_hash=hashlib.sha256(
             _canonical_json(inputs.policy_snapshot).encode("utf-8")
         ).hexdigest(),
+        candidate_scenarios=(
+            list(getattr(l7_res.output, "options", []))
+            if l7_res and l7_res.output
+            else []
+        ),
+        feasibility_constraints=(
+            {
+                "feasibility_score": getattr(
+                    getattr(l6_res.output, "quality_metrics", None),
+                    "intervention_feasibility_score",
+                    0.0,
+                ),
+                "nitrogen_leaching_fraction": getattr(
+                    l6_res.output, "nitrogen_leaching_fraction", 0.0
+                ),
+                "runoff_risk_index": getattr(
+                    l6_res.output, "runoff_risk_index", 0.0
+                ),
+                "vapor_pressure_deficit_kpa": getattr(
+                    l6_res.output, "vapor_pressure_deficit_kpa", 0.0
+                ),
+            }
+            if l6_res and l6_res.output
+            else {}
+        ),
         soil_static=real_soil_static,
     )
     # GAP 17 NOTE: L8 uses non-standard call convention:
@@ -3694,13 +3697,17 @@ def _build_diagnostic_integration(
     orchestrator_run_id: str,
     timestamp: str,
     requested_use: Any = None,
+    policy_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Adapt every completed L2-L8 result into one immutable belief ledger."""
     from services.agribrain.diagnostic_integration import (
         AdapterContext,
         InfluenceUse,
         build_default_runtime,
+        DiagnosticPromotionService,
     )
+    from services.agribrain.diagnostic_integration.contracts import canonical_hash
+    from services.agribrain.diagnostic_integration.runtime import DiagnosticIntegrationResult
     from services.agribrain.scientific_contracts.authority import AuthorityVector
 
     requested_use = requested_use or InfluenceUse.DIAGNOSIS
@@ -3734,12 +3741,17 @@ def _build_diagnostic_integration(
         l1_provenance.get("data_health_status")
         if isinstance(l1_provenance, dict) else None
     )
+    evidence_count_valid = isinstance(evidence_count, (int, float)) and evidence_count > 0
+    health_status_valid = (
+        health_status is not None
+        and str(health_status).strip().lower() not in ("unusable", "unknown", "none", "")
+    )
     l1_usable = bool(
         l1_result
         and l1_result.status in (LayerStatus.OK, LayerStatus.DEGRADED)
         and l1_output is not None
-        and evidence_count != 0
-        and health_status != "unusable"
+        and evidence_count_valid
+        and health_status_valid
     )
     authority = AuthorityVector(
         visualization_allowed=bool(l1_output),
@@ -3825,7 +3837,40 @@ def _build_diagnostic_integration(
             }],
             "diagnosis_allowed": False,
         }
-    result = runtime.finalize(belief_id, requested_use)
+
+    promotion_audit: Optional[Dict[str, Any]] = None
+    if requested_use == InfluenceUse.PRESCRIPTION_DRIVER:
+        runtime.ledger.verify()
+        runtime.graph.validate()
+        contributions = runtime.ledger.contributions(belief_id)
+        verdict = runtime.tribunal.adjudicate(contributions, runtime.graph)
+
+        accepted_contribs = [
+            c for c in contributions if c.contribution_id in verdict.accepted_contribution_ids
+        ]
+        promo_service = DiagnosticPromotionService()
+        promo_result = promo_service.promote_to_prescription_eligibility(
+            accepted_contribs, policy_snapshot=policy_snapshot
+        )
+        promotion_audit = promo_result.to_dict()
+
+        promoted_map = {c.contribution_id: c for c in promo_result.promoted_contributions}
+        effective_contributions = tuple(
+            promoted_map.get(c.contribution_id, c) for c in contributions
+        )
+        manifest = runtime.manifest_builder.build(
+            verdict, effective_contributions, runtime.graph, requested_use
+        )
+        result = DiagnosticIntegrationResult(
+            input_belief_id=belief_id,
+            tribunal_verdict=verdict,
+            influence_manifest=manifest,
+            ledger_head_hash=runtime.ledger.head_hash,
+            dependency_graph_hash=canonical_hash(runtime.graph.to_dict()),
+        )
+    else:
+        result = runtime.finalize(belief_id, requested_use)
+
     payload = result.to_dict()
     payload.update({
         "status": (
@@ -3839,6 +3884,8 @@ def _build_diagnostic_integration(
         "diagnosis_allowed": l1_usable,
         "state_mutation_performed": False,
     })
+    if promotion_audit is not None:
+        payload["promotion_audit"] = promotion_audit
     return payload
 
 def _finalize_artifact(
@@ -3850,7 +3897,8 @@ def _finalize_artifact(
     final_plan: Optional[Any] = None,
     primary_acquisition: str = "layer0",
     fallback_used: bool = False,
-    fallback_reason: Optional[str] = None
+    fallback_reason: Optional[str] = None,
+    intent_scope: Optional[str] = None,
 ) -> RunArtifact:
     # Ensure Layer 10 (SIRE) is run if we have L1 and L2 but L10 is missing.
     # This ensures early exits (DIAGNOSIS, DECISION, NUTRIENT, PLANNING) 
@@ -4101,11 +4149,11 @@ def _finalize_artifact(
     gq = evaluate_global_quality(results)
     try:
         diagnostic_integration = _build_diagnostic_integration(
-            results, run_id, ts,
+            results, run_id, ts, policy_snapshot=inputs.policy_snapshot,
         )
         from services.agribrain.diagnostic_integration import InfluenceUse
         diagnostic_integration["prescription_gate"] = _build_diagnostic_integration(
-            results, run_id, ts, InfluenceUse.PRESCRIPTION_DRIVER,
+            results, run_id, ts, InfluenceUse.PRESCRIPTION_DRIVER, policy_snapshot=inputs.policy_snapshot,
         )
     except Exception as exc:
         diagnostic_integration = {
@@ -4130,7 +4178,8 @@ def _finalize_artifact(
         replay_uri="",
         primary_acquisition=primary_acquisition,
         fallback_used=fallback_used,
-        fallback_reason=fallback_reason
+        fallback_reason=fallback_reason,
+        intent_scope=intent_scope,
     )
     
     art = RunArtifact(
@@ -4150,6 +4199,7 @@ def _finalize_artifact(
         final_execution_plan=final_plan,
         top_findings=_extract_top_findings(results, gq),
         diagnostic_integration=diagnostic_integration,
+        intent_scope=intent_scope,
         lineage_map=parents_map,
     )
     

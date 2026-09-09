@@ -148,3 +148,49 @@ class DiagnosticPromotionService:
 - **Monograph Findings**: Finding #1 (Prescription authority deadlock), Finding #2 (Diagnosis permission from receipts), Finding #3 (Intent branch consistency), Finding #4 (Decision sequence inversion), Finding #31 (L7 scenario estimation).
 - **Defect Tasks**: [A11-l7-planning-result-envelope-normalization.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A11-l7-planning-result-envelope-normalization.md), [A13-l8-prescriptive-weather-constraints.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A13-l8-prescriptive-weather-constraints.md).
 - **Phase Tasks**: [P04.1-enforce-per-action-weather-constraints.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P04.1-enforce-per-action-weather-constraints.md), [P04.3-demonstrate-operational-readiness.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P04.3-demonstrate-operational-readiness.md).
+
+---
+
+## 7. Execution Status & Verification Report
+
+### 7.1 Implemented Changes
+1. **Diagnostic Promotion Service (Finding #1)**:
+   - File: [`services/agribrain/diagnostic_integration/promotion_service.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/diagnostic_integration/promotion_service.py)
+   - Created `DiagnosticPromotionService` and `PromotionResult` to act as the explicit, policy-governed bridge between diagnostic tribunal acceptance and prescriptive execution.
+   - Enforces 4 promotion gates: minimum epistemic confidence ($\ge 0.70$ or policy-defined), identifiability class (`IDENTIFIED` or `PARTIALLY_IDENTIFIED`), clean lineage without blocking reasons, and policy scope compliance.
+   - For eligible contributions, derives elevated copies with `AuthorityVector(visualization_allowed=True, diagnosis_allowed=True, prescription_driver_allowed=True)`.
+   - Exported in [`services/agribrain/diagnostic_integration/__init__.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/diagnostic_integration/__init__.py).
+
+2. **Permission Reconstruction from Output Presence Fixed (Finding #2)**:
+   - File: [`services/agribrain/orchestrator_v2/runner.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/orchestrator_v2/runner.py#L3744-L3755)
+   - Replaced loose truthiness check with explicit type-checked validation: `evidence_count` requires `isinstance(evidence_count, (int, float)) and evidence_count > 0`, and `health_status` requires string presence not in `("unusable", "unknown", "none", "")`.
+   - Missing, `None`, or ungrounded metadata strictly evaluates to `l1_usable = False` (fail-closed).
+
+3. **Intent Branch Contradictions Aligned (Finding #3)**:
+   - File: [`services/agribrain/orchestrator_v2/runner.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/orchestrator_v2/runner.py#L2542-L2630)
+   - `Intent.DIAGNOSIS`: runs L1 through L5 + Diagnostic Tribunal with `InfluenceUse.DIAGNOSIS`; skips L6, L7, and L8; returns structured artifact with `intent_scope="diagnostic_only"`.
+   - `Intent.PLANNING`: runs L1 through L5 + L6 Feasibility + L7 Planning conditioned on L6 feasibility; skips L8; returns structured artifact with `intent_scope="planning_only"`.
+   - `Intent.DECISION` (and default): runs the complete canonical pipeline through L8 prescriptive authorization.
+   - Schema updated in [`services/agribrain/orchestrator_v2/schema.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/orchestrator_v2/schema.py) with `intent_scope` on `RunMeta` and `RunArtifact`.
+
+4. **Canonical Decision Sequence & Scenario Propagation (Finding #4)**:
+   - Files: [`services/agribrain/layer8_prescriptive/schema.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/layer8_prescriptive/schema.py#L391-L392), [`services/agribrain/orchestrator_v2/runner.py`](file:///c:/Users/E-C/Desktop/agriwise/services/agribrain/orchestrator_v2/runner.py#L2670-L2835)
+   - Re-sequenced main pipeline: (1) L1–L5 Diagnostic Tribunal $\to$ (2) Diagnostic Promotion Service $\to$ (3) L6 Feasibility Assessment $\to$ (4) L7 Season Planning (conditioned on L6) $\to$ (5) L8 Prescriptive Intelligence.
+   - Added `candidate_scenarios: List[Any]` and `feasibility_constraints: Dict[str, Any]` to `Layer8Input`.
+   - In `runner.py`, candidate scenarios from `l7_res.output.options` and operational feasibility constraints from `l6_res.output` are explicitly extracted and passed into `Layer8Input`.
+
+### 7.2 Verification Results
+- **Dedicated WP09 Test Suite**: `services/agribrain/tests/test_wp09_diagnostic_promotion_and_action_flow.py` (6/6 tests passed):
+  - `test_deadlock_resolution_via_promotion`: Verified that `DiagnosticPromotionService` promotes eligible diagnoses, producing non-empty manifest entries for `InfluenceUse.PRESCRIPTION_DRIVER` and unblocking action planning.
+  - `test_build_diagnostic_integration_end_to_end_promotion`: Verified end-to-end promotion pipeline inside `_build_diagnostic_integration()` with audit generation.
+  - `test_fail_closed_low_confidence_or_uncalibrated`: Verified fail-closed rejection and explicit exclusion reasons for low confidence, heuristic identifiability, confounded variables, and active block reasons.
+  - `test_permission_reconstruction_from_none_metadata`: Verified that `None`, 0, negative, or unusable metadata does not grant diagnosis permission.
+  - `test_decision_sequence_and_scenario_propagation`: Verified `Layer8Input` acceptance of L7 candidate scenarios and L6 feasibility constraints.
+  - `test_intent_routing_capabilities`: Verified intent scopes (`diagnostic_only`, `planning_only`) on `RunMeta` and `RunArtifact`.
+- **Subsystem Test Suites**:
+  - `layer6_exec/tests`: 10/10 passed.
+  - `layer7_planning/tests`: 16/16 passed.
+  - `layer8_prescriptive/tests`: 13/13 passed.
+  - `agribrain/tests`: 192/192 passed.
+  - **Full Regression Suite**: 790/790 passed, 0 failures across all 13 subsystems.
+

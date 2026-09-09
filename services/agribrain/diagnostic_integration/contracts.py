@@ -264,3 +264,10 @@ class DiagnosticContribution:
         data = canonical_data(self.identity_payload())
         data.update({"generated_at": self.generated_at, "content_hash": self.content_hash})
         return data
+
+    def with_authority(self, new_authority: AuthorityVector) -> DiagnosticContribution:
+        """Derive an elevated copy with updated authority while maintaining immutability and content-addressing."""
+        if not isinstance(new_authority, AuthorityVector):
+            raise ContractViolation("with_authority requires an explicit AuthorityVector")
+        return dataclasses.replace(self, authority=new_authority, content_hash="")
+

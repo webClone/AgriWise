@@ -137,6 +137,7 @@ class RunMeta:
     primary_acquisition: str = "layer0"
     fallback_used: bool = False
     fallback_reason: Optional[str] = None
+    intent_scope: Optional[str] = None
 
 @dataclass
 class RunArtifact:
@@ -163,6 +164,7 @@ class RunArtifact:
     final_execution_plan: Optional[ExecutionPlan] = None
     top_findings: List[str] = field(default_factory=list)
     diagnostic_integration: Optional[Dict[str, Any]] = None
+    intent_scope: Optional[str] = None
     
     # Audit
     lineage_map: Dict[str, str] = field(default_factory=dict) # {L1: id, L2: id...}
@@ -177,6 +179,7 @@ class RunArtifact:
             "reliability": self.global_quality.reliability_score,
             "plan_tasks": len(self.final_execution_plan.tasks) if self.final_execution_plan else 0,
             "findings": self.top_findings,
+            "intent_scope": self.intent_scope or self.meta.intent_scope,
             "artifact_ref": self.meta.replay_uri,
             "diagnostic_integration_status": (
                 (self.diagnostic_integration or {}).get("status", "unavailable")

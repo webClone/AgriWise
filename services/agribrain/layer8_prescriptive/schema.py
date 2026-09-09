@@ -388,6 +388,8 @@ class Layer8Input:
     # Optional reviewed contract for group-safe actions.  It may authorize
     # only the listed action types, never a species- or stage-specific rate.
     group_recommendation_contract: Dict[str, Any] = field(default_factory=dict)
+    candidate_scenarios: List[Any] = field(default_factory=list)
+    feasibility_constraints: Dict[str, Any] = field(default_factory=dict)
     soil_static: Dict[str, float] = field(default_factory=lambda: {
         "soil_clay": 22.0, "soil_ph": 6.5, "soil_org_carbon": 1.8,
     })
