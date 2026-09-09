@@ -232,3 +232,7 @@ class Layer7Output:
         }
         raw = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()
+
+    @property
+    def run_id(self) -> str:
+        return self.run_meta.run_id
