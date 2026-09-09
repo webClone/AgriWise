@@ -108,3 +108,30 @@ class ASMAEObservationPayload:
 - **Monograph Findings**: Finding #14 (Discarded MESIA ASMAE event), Finding #15 (Likelihood treated as measured VWC), Finding #19 (Lattice consumption), Finding #20 (Observability containment).
 - **Defect Tasks**: [A08-mesia-rf-snr-vwc-assimilation.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A08-mesia-rf-snr-vwc-assimilation.md), [A10-mesia-asmae-adapter-and-payload-integration.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/A10-mesia-asmae-adapter-and-payload-integration.md).
 - **Phase Tasks**: [P03.3-connect-complete-asmae-numerical-tensors.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P03.3-connect-complete-asmae-numerical-tensors.md), [P03.4-mesia-shadow-operation-before-authority.md](file:///c:/Users/E-C/Desktop/agriwise/tasks/P03.4-mesia-shadow-operation-before-authority.md).
+
+---
+
+## 7. Execution Status & Verification Report (COMPLETED)
+
+### 7.1 Architecture & Implementation Summary
+1. **Physical Units & Inversion Integrity (Finding #15)**:
+   - Created `services/agribrain/scientific_contracts/observation.py` defining canonical `ASMAEObservationPayload`. Enforces strict physical units (`volumetric fraction [0,1]` for soil moisture), realistic porosity bounds $[0.0, 0.65]$, strictly positive measurement variance, and qualification certificate lineage.
+   - Refactored `services/agribrain/mesia/assimilation/asmae_operator.py` to eradicate `measured_vwc = likelihood.likelihood_value`.
+   - Added `from_calibrated_inversion` implementing physical forward/inverse mappings with boundary enforcement.
+   - Added `from_ensemble_likelihood` implementing Gaussian particle reweighting directly in measurement space without state corruption.
+
+2. **Observation Dispatching & Durable Abstention (Finding #14)**:
+   - Implemented `services/agribrain/layer05_asmae/observation/dispatcher.py` with `ASMAEObservationDispatcher` and `ObservationAbstentionReceipt`.
+   - Updated `services/agribrain/mesia/service.py` to capture `l0_rec, asmae_event` from `bridge.process_and_admit_observation(...)` and route every proposal to the dispatcher.
+   - Gated admission: qualified observations enter the EnKF queue; uncalibrated or fail-closed observations generate an immutable `ObservationAbstentionReceipt` embedded in `p["dispatch_receipt"]`.
+
+3. **Algebraic Observability Analysis (Finding #20)**:
+   - Updated `services/agribrain/mesia/assimilation/observability_analyzer.py` to compute algebraic observability using the Fisher Information Matrix ($A^T A$) rank and condition number:
+     $$\text{is\_observable} = (\text{effective\_rank} == N_{\text{zones}}) \land (\kappa < 10^6) \land (N_{\text{zones}} > 0)$$
+   - Generates structured `abstention_reasons` when geometry is rank-deficient or ill-conditioned.
+
+### 7.2 Test Verification
+- **Dedicated Suite**: `services/agribrain/mesia/tests/test_mesia_asmae_observation_boundary.py` (12/12 PASSED in 5.36s).
+- **Subsystem Regression**: `services/agribrain/mesia/tests/` (120/120 PASSED in 36.33s).
+- **Full AgriBrain Regression**: `services/agribrain/` (777/777 PASSED, 22 warnings, 3 subtests passed in 99.72s).
+

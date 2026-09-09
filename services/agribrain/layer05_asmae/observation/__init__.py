@@ -15,6 +15,7 @@ from .index_state_mapping import (
 from .s2_forward_model import predict_observation, compute_jacobian
 from .s1_sar_model import predict_sar_observation, compute_sar_jacobian
 from .observation_noise import compute_observation_noise
+from .dispatcher import ASMAEObservationDispatcher, ObservationAbstentionReceipt
 
 __all__ = [
     "INDEX_STATE_REGISTRY",
@@ -27,4 +28,6 @@ __all__ = [
     "predict_sar_observation",
     "compute_sar_jacobian",
     "compute_observation_noise",
+    "ASMAEObservationDispatcher",
+    "ObservationAbstentionReceipt",
 ]

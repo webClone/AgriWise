@@ -59,13 +59,20 @@ class ASMAEObservationOperator:
         microzone_id: str,
         depth_stratum: str = "ROOT_ZONE_5_30CM",
     ) -> ASMAEInnovationProposal:
-        """Construct calibrated innovation proposal."""
+        """Construct calibrated innovation proposal.
+
+        Monograph Finding #15: Never treats dimensionless likelihood scores as volumetric water content.
+        """
         # Principle P-08 check: MESIA never claims state authority
         if likelihood.authority_scope != "evidence_proposal":
             raise ValueError(f"Principle P-08 violation: MESIA authority_scope must be 'evidence_proposal', got {likelihood.authority_scope}")
 
-        measured_vwc = likelihood.likelihood_value if likelihood.likelihood_value is not None else prior_state_vwc
-        innovation = measured_vwc - prior_state_vwc
+        if likelihood.innovation is not None:
+            innovation = float(likelihood.innovation)
+        else:
+            # Finding #15: Dimensionless likelihood score cannot be directly subtracted from physical state moisture.
+            innovation = 0.0
+
         variance = likelihood.covariance if likelihood.covariance is not None else 0.25
         support = likelihood.support if likelihood.support is not None else 0.80
 
@@ -84,3 +91,63 @@ class ASMAEObservationOperator:
             likelihood_ref=likelihood.likelihood_id,
             created_at=now,
         )
+
+    @staticmethod
+    def from_calibrated_inversion(
+        inverted_vwc: float,
+        prior_state_vwc: float,
+        variance: float,
+        support: float,
+        microzone_id: str,
+        depth_stratum: str = "ROOT_ZONE_5_30CM",
+        native_lineage_hash: str = "",
+        proposal_id: Optional[str] = None,
+        target_state_variable: str = "root_zone_water",
+    ) -> ASMAEInnovationProposal:
+        """Construct innovation proposal from calibrated physical inversion (e.g. Topp dielectric model).
+
+        Ensures physical units match target variable and obeys realistic moisture bounds.
+        """
+        if target_state_variable == "root_zone_water" and not (0.0 <= inverted_vwc <= 0.65):
+            raise ValueError(
+                f"Physical boundary violation: inverted VWC {inverted_vwc} outside realistic soil range [0.0, 0.65]"
+            )
+        if variance <= 0.0:
+            raise ValueError(f"observation_variance must be strictly positive, got {variance}")
+
+        now = datetime.now(timezone.utc)
+        pid = proposal_id or f"innov-inv-{now.strftime('%Y%m%d%H%M%S')}"
+        return ASMAEInnovationProposal(
+            proposal_id=pid,
+            target_state_variable=target_state_variable,
+            microzone_id=microzone_id,
+            depth_stratum=depth_stratum,
+            innovation_value=round(inverted_vwc - prior_state_vwc, 6),
+            observation_variance=variance,
+            confidence_support=support,
+            authority_scope="evidence_proposal",
+            native_lineage_hash=native_lineage_hash,
+            likelihood_ref="calibrated_physical_inversion",
+            created_at=now,
+        )
+
+    @staticmethod
+    def from_ensemble_likelihood(
+        observed_feature: float,
+        ensemble_states: List[float],
+        forward_operator_fn: Any,
+        observation_variance: float = 0.01,
+    ) -> List[float]:
+        """Evaluate observation likelihood across ensemble members to update particle weights.
+
+        Guarantees likelihood space integration without subtracting probabilities from moisture.
+        """
+        import math
+        weights = []
+        for state in ensemble_states:
+            predicted_obs = forward_operator_fn(state)
+            error = observed_feature - predicted_obs
+            w = math.exp(-0.5 * (error ** 2) / max(1e-6, observation_variance))
+            weights.append(w)
+        total = sum(weights) or 1.0
+        return [round(w / total, 6) for w in weights]

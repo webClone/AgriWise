@@ -48,6 +48,7 @@ from .stage_receipt import (
     ExecutionStatus,
     ScientificUsability,
 )
+from .observation import ASMAEObservationPayload
 from .crop_evidence import (
     CROP_EVIDENCE_LEDGER_CONTRACT_VERSION,
     CROP_OBSERVATION_CONTRACT_VERSION,
@@ -265,4 +266,5 @@ __all__ = [
     "ActionAuthorization",
     "canonical_data",
     "canonical_hash",
+    "ASMAEObservationPayload",
 ]

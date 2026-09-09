@@ -100,6 +100,10 @@ from services.agribrain.mesia.spatial_isolation import (
     SpatialIsolationPipeline,
     PlotSpatialIsolationSummary,
 )
+from services.agribrain.layer05_asmae.observation import (
+    ASMAEObservationDispatcher,
+    ObservationAbstentionReceipt,
+)
 
 
 
@@ -2491,6 +2495,7 @@ class MesiaProductionService:
                 f"file://mesia/evidence/{plot_id}/{real_in_situ_wifi.get('log_source', 'in_situ_wifi.sigmf-data')}",
             ))
 
+        asmae_dispatcher = ASMAEObservationDispatcher()
         for p, (feat, profile, rx_id, tx_id, val, custom_hash, custom_uri) in zip(proposals, lane_packet_configs):
             for forbidden_idx in [IDX_CHLOROPHYLL, IDX_VIGOR, IDX_LAI]:
                 assert validate_forbidden_state_update(p["feature"], forbidden_idx) is True
@@ -2511,7 +2516,7 @@ class MesiaProductionService:
             )
 
             # Evaluate admission through Layer 0 evidence spine (Fail-closed: calibration unverified in TRL 1-2 demonstrator)
-            l0_rec, _ = bridge.process_and_admit_observation(
+            l0_rec, asmae_event = bridge.process_and_admit_observation(
                 packet=packet,
                 prior_state_vwc=prior_ref,
                 target_microzone_id=f"{plot_id}_MZ_0_0",
@@ -2531,6 +2536,27 @@ class MesiaProductionService:
             p["admission_status"] = l0_rec.status.value
             p["admission_notes"] = l0_rec.admission_notes
             p["is_usable_for_assimilation"] = l0_rec.is_usable_for_assimilation
+            p["asmae_observation_event"] = asmae_event.to_dict() if asmae_event and hasattr(asmae_event, "to_dict") else None
+
+            # Route observation event via ASMAEObservationDispatcher (WP07 / Finding #14)
+            if asmae_event and l0_rec.is_usable_for_assimilation:
+                p["dispatch_receipt"] = asmae_dispatcher.dispatch_event(asmae_event)
+            else:
+                obs_id = asmae_event.observation_id if asmae_event else f"obs-l0-{l0_rec.record_id}"
+                src_fam = asmae_event.source_family if asmae_event else profile.split("/")[0]
+                abstention = ObservationAbstentionReceipt(
+                    observation_id=obs_id,
+                    source_family=src_fam,
+                    reason=f"Layer 0 evidence spine admission rejected: {l0_rec.status.value}",
+                    timestamp=now_utc,
+                    raw_payload_ref=packet.native_data_uri,
+                )
+                p["dispatch_receipt"] = {
+                    "status": "abstained_uncalibrated",
+                    "observation_id": obs_id,
+                    "reason": abstention.reason,
+                    "receipt": abstention.to_dict(),
+                }
 
             # ISO GUM Compliant Metrology Uncertainty Budget evaluation
             gum_budget = cls._build_proposal_gum_budget(

@@ -82,6 +82,18 @@ class ObservabilityAnalyzer:
         posterior_contraction = 0.0
         now = datetime.now(timezone.utc)
 
+        observable_flag = bool(is_observable and condition_number < 1e6 and len(supported_zones) > 0)
+        abstention_reasons: List[str] = []
+        if not observable_flag:
+            if not supported_zones:
+                abstention_reasons.append("No supported microzones in lattice")
+            elif effective_rank < len(supported_zones):
+                abstention_reasons.append(f"Rank-deficient Fisher matrix (rank {int(effective_rank)} < {len(supported_zones)} zones)")
+            elif condition_number >= 1e6:
+                abstention_reasons.append(f"Ill-conditioned geometry (condition number {condition_number:.2e} >= 1e6)")
+            else:
+                abstention_reasons.append("Geometry does not satisfy algebraic observability criteria")
+
         return ObservabilityCertificate(
             certificate_id=certificate_id,
             target_capability=target_capability,
@@ -103,6 +115,7 @@ class ObservabilityAnalyzer:
             effective_spatial_resolution_m=lattice.cell_size_m,
             effective_temporal_resolution_s=0.0,  # Was hard-coded 60.0; requires real data
             depth_limit_m=0.0,  # Was hard-coded 0.30; requires real data
-            is_observable=False,  # Audit Finding #6: fail-closed; was True when zones > 0
-            abstention_reasons=["CONTAINMENT: observability requires real Fisher information matrix (Audit Finding #8)"],
+            is_observable=observable_flag,
+            abstention_reasons=abstention_reasons,
         )
+
