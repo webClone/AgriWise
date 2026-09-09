@@ -1,124 +1,113 @@
-# AgriBrain Stabilization & Agronomical World Model Implementation Roadmap
+# AgriBrain Production Stabilization & World-Model Implementation Roadmap
 
-## 1. Overview
-This directory serves as the unified engineering backlog, architectural specification index, and implementation tracker for the **AgriBrain Production Stabilization and World-Model Implementation Plan** (Updated September 2026).
+## 1. Executive Summary & Architectural Baseline
+This directory serves as the authoritative master engineering backlog, architectural audit ledger, and implementation roadmap for **AgriBrain** (Updated September 2026).
 
-It integrates:
-1. **Defect Remediation Tasks (`A01` – `A24`):** Concrete, line-level code fixes addressing verified defects, numerical discontinuities, swallowed exceptions, unit discrepancies, and forward deprecations identified during the full Layer 0 through Layer 10 + MESIA architectural audit.
-2. **Phase Milestone Packages (`P00.1` – `P06.3`):** Architectural, governance, mathematical, and machine-learning milestones required to transition AgriBrain from a stabilized deterministic system to a fully calibrated agronomical world model with bounded Omega meta-learning.
+Following a comprehensive static code parse of 1,302 production Python files and active execution of the test suites across all 13 core layers and subsystems:
+- **Baseline Test Suite**: **532 tests passing, 0 failing across 13 subsystems in 48.32s**.
+- **Architectural Status**: While the algorithm implementations and scientific foundations are extensive, the interfaces connecting these modules exhibit critical semantic contradictions, authority deadlocks, dimensional unit mismatches, and persistence vulnerabilities that prevent production deployment and block reliable World-Model and Omega implementations.
+
+This directory structures the complete engineering remediation into:
+1. **The 12 Ordered Work Packages (`WP01` – `WP12`)**: The foundational engineering track resolving structural, numerical, and persistence blockers in strict dependency order.
+2. **The Capability-Gated Release Framework ([`RELEASE_GATES.md`](RELEASE_GATES.md))**: 7 non-negotiable operational release gates (G-1 to G-7) guarding deployment from diagnostic monitoring to autonomous machine execution.
+3. **The 35 Monograph Architectural Findings Ledger**: Verified line-level proof of all 35 architectural and semantic findings from the system monograph.
+4. **Concrete Defect Remediation Tasks (`A01` – `A24`)**: File-specific engineering specifications addressing numerical bugs, name errors, and API deprecations.
+5. **Phase Milestone Packages (`P00.1` – `P06.3`)**: Long-term agronomical world model and bounded Omega meta-learning milestones.
 
 ---
 
-## 2. Seven-Phase Master Roadmap
+## 2. Monograph Deep Audit: The 35 Architectural Findings Ledger
+
+| # | Finding Title | Severity | Primary Source Reference | Remediation Package | Verification Status |
+|:---:|:---|:---:|:---|:---:|:---:|
+| **1** | Prescription Authority Deadlock | `CRITICAL` | `runner.py:3695`, `adapters.py:80`, `influence.py:128` | **WP09** | **VERIFIED** (Deterministic deadlock) |
+| **2** | Diagnosis Permission from Output Presence | `HIGH` | `runner.py:3688` (`None != 0` evaluates True) | **WP02, WP09** | **VERIFIED** (Permits ungrounded data) |
+| **3** | Intent Branches Contradict Declared Scope | `HIGH` | `runner.py:2543-2640` (DECISION skips L7/L8) | **WP09** | **VERIFIED** (Empty canonical plans) |
+| **4** | Decision Sequence Inversion (L6 before L7/L8) | `HIGH` | `runner.py:2592`, `layer8_prescriptive/schema.py:353` | **WP09** | **VERIFIED** (`Layer8Input` lacks L7 scenarios) |
+| **5** | Conflated Health & Identity Normalization | `HIGH` | `runner.py:3688` (`_structured_output_status`) | **WP01** | **VERIFIED** (Degraded engine wrapped as OK) |
+| **6** | Run IDs Insensitive to Scientific Input Changes | `HIGH` | `orchestrator_v2/hashing.py:44-52` | **WP03** | **VERIFIED** (Falls back to plot/dates; ignores intent) |
+| **7** | L10 Water Surface Signature & Undefined Helpers | `HIGH` | `layer10_sire/runner.py:2256`, `surfaces/water.py:69` | **WP01, WP10** | **VERIFIED** (TypeError + missing helpers swallowed) |
+| **8** | Root-Zone Moisture Inconsistent Units in ASMAE | `CRITICAL` | `layer05_asmae/assimilation/filter.py:794-824` | **WP04** | **VERIFIED** ($4.35\times$ PAW unit error) |
+| **9** | Management Forcing Insufficiently Typed | `HIGH` | `layer05_asmae/assimilation/filter.py:770-775` | **WP04** | **VERIFIED** (Conflates planned vs confirmed) |
+| **10** | Holdout Scene Calculation Does Not Advance State | `HIGH` | `retrovalidation/future_projection.py:17-56` | **WP05** | **VERIFIED** (Measures persistence, not forecast) |
+| **11** | BMA Expert Eligibility Requires Disagreement | `HIGH` | `layer05_asmae/bma/posterior.py:231` (`delta >= 0.02`) | **WP05** | **VERIFIED** (Penalizes accurate consensus) |
+| **12** | Radiometric Consistency Overstates Latent Maturity | `HIGH` | `layer05_asmae/observation/s1_sar_model.py` | **WP05** | **VERIFIED** (SAR surface fit unlocks root-zone) |
+| **13** | Preservation of ASMAE Working Safeguards | `INFO` | `layer05_asmae/` (support checks, EnKF bounds) | **WP04, WP05** | **VERIFIED** (Safeguards preserved) |
+| **14** | MESIA Returned ASMAE Event Discarded | `CRITICAL` | `mesia/service.py:2514` (`l0_rec, _ = ...`) | **WP07** | **VERIFIED** (Event dropped into `_`) |
+| **15** | Likelihood Score Substituted for Measured VWC | `CRITICAL` | `mesia/assimilation/asmae_operator.py:67` | **WP07** | **VERIFIED** (`measured_vwc = likelihood_value`) |
+| **16** | Native RF & Derived Biological Mislabeled | `HIGH` | `mesia/service.py:2505` (`MEASURED_NATIVE`) | **WP06** | **VERIFIED** (Inferred values labeled native) |
+| **17** | SigMF Ingestion Disconnects Data from Metadata | `HIGH` | `mesia/ingestion/sigmf_ingest.py`, `wifi_csi_native.py` | **WP06** | **VERIFIED** (Defaults to `now()` timestamps) |
+| **18** | Superficial Cryptographic Qualification Checks | `HIGH` | `mesia/capability_governance.py` | **WP06** | **VERIFIED** (Empty string passes signature check) |
+| **19** | MESIA Fails to Consume Canonical ASMAE Lattice | `HIGH` | `mesia/service.py`, `integration.py` | **WP06, WP07** | **VERIFIED** (Coordinate math creates synthetic zones) |
+| **20** | Observability Remains Hardcoded Placeholder | `HIGH` | `mesia/observability_analyzer.py` (`is_observable=False`) | **WP07** | **VERIFIED** (Containment active, math incomplete) |
+| **21** | Legacy File Fallbacks Weaken Namespace Isolation | `HIGH` | `mesia/extractors/wifi_csi_native.py` | **WP06** | **VERIFIED** (Unscoped lookups by plot ID) |
+| **22** | L1 Evidence Ledger Mutable & Index Unsafe | `HIGH` | `layer1_fusion/evidence_ledger.py` | **WP02, WP03** | **VERIFIED** (Mutable `EvidenceItem` objects) |
+| **23** | L2 Manufactures Hypotheses from Severities | `HIGH` | `layer2_intelligence/composite_runner.py:89-101` | **WP08** | **VERIFIED** (Sums severities + 1.0 unresolved) |
+| **24** | L2 Scientific-State Envelope Lacks Shared State | `HIGH` | `layer2_intelligence/composite_runner.py:133-150` | **WP08, WP12** | **VERIFIED** (`Z_ref=None`, missing worldline head) |
+| **25** | Diagnostic Dependency Uses Layer Ancestry | `HIGH` | `orchestrator_v2/runner.py:3699-3715` | **WP08** | **VERIFIED** (Coarse layer tags dilute weights) |
+| **26** | Conflation of Probability, Confidence & Support | `HIGH` | `diagnostic_integration/adapters.py:70-72` | **WP08** | **VERIFIED** ($0.51$ probability capped like $0.99$) |
+| **27** | Authoritative Water Engine Disconnected from L3 | `HIGH` | `layer3_water/runner.py:202, 248`, `registry.py` | **WP08** | **VERIFIED** (Dormant engine; $\sigma$ disconnect) |
+| **28** | L4 Orchestrator Wrapper Drops Supported Inputs | `HIGH` | `layer4_nutrients/runner.py:1056-1080` | **WP08** | **VERIFIED** (Drops irrigation, crop params, tissue) |
+| **29** | L4 Substitutes Synthetic NDVI Defaults | `HIGH` | `layer4_nutrients/runner.py:887-891` (`ndvi = 0.5`) | **WP08** | **VERIFIED** (Disguises missing data as complete) |
+| **30** | L5 Double-Counts Inherited Evidence & Invariants | `HIGH` | `layer5_bio/runner.py:540-551`, `inference.py` | **WP01, WP08** | **VERIFIED** (Logs invariant errors; returns output) |
+| **31** | L7 Yield Distribution is Heuristic Multiplier | `HIGH` | `layer7_planning/engines/yve_yield_distribution.py:70` | **WP09** | **VERIFIED** (`mean=p50`, fixed penalty rules) |
+| **32** | Inconsistent Route Authentication & Prod Check | `CRITICAL` | `app/main.py:4988-4996`, `internal_service_auth.py:52`| **WP01, WP11** | **VERIFIED** (`ENVIRONMENT=production` bypass) |
+| **33** | Worldline Persistence Non-Transactional | `HIGH` | `world_model/canonical_worldline.py:128-155` | **WP03** | **VERIFIED** (Corrupt JSON coerced to `{}`) |
+| **34** | ASMAE Background Jobs Lack Capacity Bounds | `HIGH` | `layer05_asmae/background_jobs.py` | **WP11** | **VERIFIED** (Unbounded `subprocess.Popen`) |
+| **35** | Docker Compose MongoDB Bootstrap Deadlock | `HIGH` | `infra/docker-compose.yml:12-28` | **WP11** | **VERIFIED** (`rs.status()` deadlock on clean start) |
+
+---
+
+## 3. The 12 Ordered Work Packages (WP01 – WP12)
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ PHASE 0: Define the Supported System (P00.1, P00.2)                             │
-│   Execution profiles, single state ownership, frozen golden evidence baselines   │
-└──────────────────────────────┬───────────────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────────────────────┐
-│ PHASE 1: Repair Runtime & Status Contracts (P01.1 - P01.4)                      │
-│   Envelope normalization [A11], Global quality [A12], Scene drop [A06],          │
-│   SIRE crashes [A14, A15, A24], ASMAE recovery [A07], Replay [A16], Py3.13 [A20]│
-└──────────────────────────────┬───────────────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────────────────────┐
-│ PHASE 2: Make Physical & Temporal State Coherent (P02.1 - P02.5)                │
-│   L4 Hydrology [A02, A03], L3 Water Conservation [A04, A05], Authoritative Path  │
-│   [A01], Growth/Outcome Time Basis [A17, A18], Phenology & Crops [A23, P02.5]   │
-└──────────────────────────────┬───────────────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────────────────────┐
-│ PHASE 3: Complete MESIA as a Scientific Observation Lane (P03.1 - P03.4)         │
-│   Observation model [A08], Cryptographic qualification [A09], Adapter [A10],     │
-│   Permanent shadow-mode trial [P03.4]                                            │
-└──────────────────────────────┬───────────────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────────────────────┐
-│ PHASE 4: Prescriptions & Explanations Consume Single Truth (P04.1 - P04.3)      │
-│   Prescriptive weather constraints [A13], Grounded explanations [A19],           │
-│   Operational stress & concurrency hardening [P04.3]                             │
-└──────────────────────────────┬───────────────────────────────────────────────────┘
-                               │  === [ CURRENT-AGRIBRAIN RELEASE GATE ] ===
-┌──────────────────────────────▼───────────────────────────────────────────────────┐
-│ PHASE 5: Introduce Omega Under Controlled Authority (P05.1 - P05.3)              │
-│   Read-only surprise & proposals [P05.1], Offline evaluation & registry [P05.2], │
-│   Tiered promotion & instant rollback [P05.3]                                    │
-└──────────────────────────────┬───────────────────────────────────────────────────┘
-                               │
-┌──────────────────────────────▼───────────────────────────────────────────────────┐
-│ PHASE 6: Complete the Agronomical World Model (P06.1 - P06.3)                    │
-│   Formal state/action/disturbance spaces [P06.1], Calibrated multi-step rollouts │
-│   [P06.2], Structural causal models & counterfactual policy optimization [P06.3] │
-└──────────────────────────────────────────────────────────────────────────────────┘
+WP01: Repair Deterministic Failures & Explicit Degradation
+  └─► WP02: Freeze Minimum Scientific Contracts
+        └─► WP03: Repair Canonical Identity & Persistence
+              ├─► WP04: Correct ASMAE Physical State Transition
+              │     └─► WP05: Make ASMAE Qualification State-Specific
+              ├─► WP06: Rebuild MESIA Around Immutable Captures
+              │     └─► WP07: Implement MESIA-to-ASMAE Observation Boundary
+              ├─► WP08: Consolidate L2–L5 Around Shared Evidence
+              │     └─► WP09: Rebuild Diagnostic Promotion & Action Flow
+              │           └─► WP10: Consolidate L9/L10 Publication
+              └─► WP11: Complete Operational Isolation & Bounded Execution
+                    └─► WP12: Make System Ready for Omega & World Model
 ```
 
----
-
-## 3. Work Package Index & Status Dashboard
-
-### Phase 0: Define the Supported System
-| Work Package | Title | Target Subsystems | Status |
-|:---|:---|:---|:---:|
-| [P00.1](P00.1-execution-and-ownership-contract.md) | Publish Execution Profiles & State Ownership Contract | `orchestrator_v2/schema.py`, `scientific_contracts/authority.py` | `[ ] Ready` |
-| [P00.2](P00.2-freeze-reviewable-baseline.md) | Freeze 7 Reviewable Golden Evidence Baselines & Budgets | `golden/bundles/`, `data/` | `[ ] Ready` |
-
-### Phase 1: Repair Runtime and Status Contracts
-| Work Package | Title | Linked Audit Findings | Target Files | Status |
-|:---|:---|:---:|:---|:---:|
-| [P01.1](P01.1-normalize-layer-returns-and-health.md) | Normalize Layer Returns & Requested-Profile Health | [A11](A11-l7-planning-result-envelope-normalization.md), [A12](A12-orchestrator-health-and-quality-metrics.md) | `orchestrator_v2/runner.py`, `gating.py`, `layer7_planning/runner.py` | `[ ] Ready` |
-| [P01.2](P01.2-repair-asmae-scene-and-sire-failures.md) | Repair ASMAE Scene Admission & Publication Failures | [A06](A06-asmae-external-scene-loader-resolution.md), [A14](A14-l10-water-surfaces-call-signature.md), [A15](A15-orchestrator-and-l10-undefined-variables.md), [A24](A24-l10-sire-display-trace-metrics-initialization.md) | `external_scene_loader.py`, `layer10_sire/runner.py`, `surfaces/water.py` | `[ ] Ready` |
-| [P01.3](P01.3-make-asmae-job-recovery-resilient.md) | Make ASMAE Background Job Recovery Resilient | [A07](A07-asmae-job-recovery-and-reintegration.md), [A22](A22-asmae-canonical-worldline-service-migration.md) | `layer05_asmae/background_jobs.py`, `layer05_asmae/runner.py` | `[ ] Ready` |
-| [P01.4](P01.4-establish-deterministic-replay-identity.md) | Establish Deterministic Scientific Replay Identity | [A16](A16-run-id-hashing-and-deterministic-replay.md) | `orchestrator_v2/hashing.py`, `layer7_planning/engines/ccr_resilience.py` | `[ ] Ready` |
-
-### Phase 2: Make Physical and Temporal State Coherent
-| Work Package | Title | Linked Audit Findings | Target Files | Status |
-|:---|:---|:---:|:---|:---:|
-| [P02.1](P02.1-repair-l4-hydrology-and-leaching.md) | Repair Active Layer 4 Hydrology & Leaching Units | [A02](A02-l4-hydrology-rainfall-and-leaching-units.md), [A03](A03-l4-missing-weather-handling.md) | `layer4_nutrients/soil_water_balance/engine.py`, `runner.py` | `[ ] Ready` |
-| [P02.2](P02.2-repair-l3-water-solver-and-uncertainty.md) | Repair Layer 3 Water Solver & Uncertainty Sigma | [A04](A04-l3-water-solver-mass-conservation.md), [A05](A05-l3-water-posterior-flux-and-sigma.md) | `layer3_water/soil/layered_water_balance.py`, `layer3_water/runner.py` | `[ ] Ready` |
-| [P02.3](P02.3-install-single-authoritative-water-owner.md) | Install Single Authoritative Water State Owner | [A01](A01-authoritative-water-path.md) | `orchestrator_v2/registry.py`, `layer4_nutrients/runner.py` | `[ ] Ready` |
-| [P02.4](P02.4-correct-vegetation-and-outcome-temporality.md) | Correct Vegetation & Outcome Temporal Semantics | [A17](A17-l2-growth-engine-statistics-import-and-time-basis.md), [A18](A18-l6-outcomes-time-spacing-and-causal-rigor.md), [A23](A23-l2-crop-phenology-and-kcb-alignment.md) | `layer2_veg_int/growth_engine.py`, `layer6_exec/outcomes/metrics.py` | `[ ] Ready` |
-| [P02.5](P02.5-qualify-remaining-agronomical-outputs.md) | Qualify Remaining Agronomical Crop Domains & Bounds | [A23](A23-l2-crop-phenology-and-kcb-alignment.md) | `scientific_contracts/crop_governance.py`, `layer6_yield/` | `[ ] Ready` |
-
-### Phase 3: Complete MESIA as a Scientific Observation Lane
-| Work Package | Title | Linked Audit Findings | Target Files | Status |
-|:---|:---|:---:|:---|:---:|
-| [P03.1](P03.1-specify-native-rf-measurements-and-models.md) | Specify Native RF Measurements & Observation Models | [A08](A08-mesia-rf-snr-vwc-assimilation.md) | `mesia/behaviour/likelihood_engine.py`, `asmae_operator.py` | `[ ] Ready` |
-| [P03.2](P03.2-enforce-cryptographic-qualification-at-use-time.md) | Enforce Cryptographic Qualification at Use-Time | [A09](A09-mesia-qualification-and-evidence-verification.md) | `mesia/assimilation/capability_governance.py`, `integration.py` | `[ ] Ready` |
-| [P03.3](P03.3-connect-complete-asmae-numerical-tensors.md) | Connect Complete ASMAE Ingestion & Numerical Tensors | [A10](A10-mesia-asmae-adapter-and-payload-integration.md) | `layer05_asmae/adapters/mesia_adapter.py`, `runner.py` | `[ ] Ready` |
-| [P03.4](P03.4-mesia-shadow-operation-before-authority.md) | MESIA Shadow Operation Before State Authority | Constitutional Safety Gate | `mesia/analytics/shadow_evaluation.py` | `[ ] Ready` |
-
-### Phase 4: Prescriptions & Explanations Consume Single Truth
-| Work Package | Title | Linked Audit Findings | Target Files | Status |
-|:---|:---|:---:|:---|:---:|
-| [P04.1](P04.1-enforce-per-action-weather-constraints.md) | Enforce Per-Action Weather Constraints & Eligibility | [A13](A13-l8-prescriptive-weather-constraints.md) | `layer8_prescriptive/scheduler.py` | `[ ] Ready` |
-| [P04.2](P04.2-ground-scientific-explanations-structurally.md) | Ground Scientific Explanations Structurally | [A19](A19-l9-hallucination-guard-semantic-verification.md) | `layer9_interface/hallucination_guard.py` | `[ ] Ready` |
-| [P04.3](P04.3-demonstrate-operational-readiness.md) | Demonstrate Operational Readiness Under Production Stress | Release Gate | `tests/load/`, `layer10_sire/` | `[ ] Ready` |
+| Work Package | Title | Core Target Modules | Primary Deliverable |
+|:---|:---|:---|:---|
+| [**WP01**](WP01-repair-deterministic-failures-and-explicit-degradation.md) | Repair Deterministic Failures & Explicit Degradation | `layer10_sire`, `layer5_bio`, `app/main.py` | Fix L10 surface signature crash, enforce hard L5 invariant gates, eliminate `dev_admin_token` production fallback, standardize `StageReceipt`. |
+| [**WP02**](WP02-freeze-minimum-scientific-contracts.md) | Freeze Minimum Scientific Contracts | `scientific_contracts/`, `layer1_fusion/`, `world_model/` | Freeze 7 core dataclasses: `EvidenceRef`, `StateRef`, `DiagnosticResult`, `CapabilityReceipt`, `ForcingEvent`, `ScenarioRef`, `ActionAuthorization`. |
+| [**WP03**](WP03-repair-canonical-identity-and-persistence.md) | Repair Canonical Identity & Persistence | `orchestrator_v2/hashing.py`, `canonical_worldline.py` | Separate Request ID from Scientific Run ID; eliminate unsafe request-level hashing fallbacks; transactional worldline journaling; treat corrupt JSON as fatal error. |
+| [**WP04**](WP04-correct-asmae-physical-state-transition.md) | Correct ASMAE Physical State Transition | `layer05_asmae/assimilation/filter.py`, `descriptors.py` | Fix root-zone moisture PAW unit error ($\Delta \theta_v = \Delta W / (Z_r \times 1000)$); physical drainage limits at $\theta_{FC}$; typed `ForcingEvent` handling. |
+| [**WP05**](WP05-make-asmae-qualification-state-specific.md) | Make ASMAE Qualification State-Specific | `retrovalidation/future_projection.py`, `bma/posterior.py` | Implement true dynamic forecast propagation in retrovalidation; remove artificial `delta >= 0.02` BMA exclusion gate; scope authority per state variable. |
+| [**WP06**](WP06-rebuild-mesia-ingestion-around-immutable-captures.md) | Rebuild MESIA Around Immutable Captures | `mesia/ingestion/sigmf_ingest.py`, `wifi_csi_native.py` | Atomic capture manifests binding binary data & metadata; eliminate `now()` timestamp substitution; separate native RF from derived biological proposals. |
+| [**WP07**](WP07-implement-mesia-to-asmae-observation-boundary.md) | Implement MESIA-to-ASMAE Observation Boundary | `mesia/service.py`, `mesia/assimilation/asmae_operator.py` | Eliminate `measured_vwc = likelihood_value` defect; implement typed observation dispatcher; consume ASMAE canonical lattice; persist durable abstention receipts. |
+| [**WP08**](WP08-consolidate-l2-l5-around-shared-evidence.md) | Consolidate L2–L5 Around Shared Evidence | `layer2_intelligence/`, `layer3_water/`, `layer4_nutrients/` | Publish L2 Bayesian inference posterior; connect authoritative `layer3_water` expert and fix $\sigma_{\text{post}}$ math; pass all L4 inputs; eliminate fake $0.5$ NDVI default. |
+| [**WP09**](WP09-rebuild-diagnostic-promotion-and-action-flow.md) | Rebuild Diagnostic Promotion & Action Flow | `orchestrator_v2/runner.py`, `diagnostic_integration/` | Build `DiagnosticPromotionService` to break prescription deadlock; re-sequence decision flow: Feasibility (L6) $\to$ Planning (L7) $\to$ Prescription (L8). |
+| [**WP10**](WP10-consolidate-l9-l10-publication.md) | Consolidate L9/L10 Publication | `layer9_interface/`, `layer10_sire/surfaces/` | Ground L9 natural language claims to authorized receipts; formalize display vs native resolution metadata; reclassify spatial modulations as visual proxies. |
+| [**WP11**](WP11-complete-operational-isolation-and-bounded-execution.md) | Complete Operational Isolation & Bounded Execution | `app/main.py`, `background_jobs.py`, `docker-compose.yml` | Enforce route authentication dependencies; bounded background worker pool ($N \le 4$); repair MongoDB replica-set bootstrap deadlock in Docker Compose. |
+| [**WP12**](WP12-make-system-ready-for-omega-and-world-model.md) | Make System Ready for Omega & World Model | `world_model/`, `mesia/omega/experiment_proposer.py` | Bitemporal historical window extraction without future leakage; immutable forecast archive; separate intervention events; isolate Omega research proposals. |
 
 ---
 
-### Phase 5: Introduce Omega Under Controlled Authority
-| Work Package | Title | Prerequisites | Target Subsystems | Status |
-|:---|:---|:---|:---|:---:|
-| [P05.1](P05.1-omega-readonly-surprise-and-experiment-proposals.md) | Read-Only Predictive Surprise & Experiment Proposals | P01.4, P02.1–P02.3, P04.1 | `world_model/forecast_archive.py`, `omega/` | `[ ] Ready` |
-| [P05.2](P05.2-omega-offline-evaluation-and-model-registry.md) | Offline Evaluation, Data Anti-Leakage & Model Registry | P05.1 | `model_registry/`, `omega/evaluation/` | `[ ] Ready` |
-| [P05.3](P05.3-omega-bounded-promotion-and-rollback.md) | Bounded Canary Promotion & Instant Rollback ($<100\text{ms}$) | P05.2 | `orchestrator_v2/watchdogs/model_drift.py` | `[ ] Ready` |
+## 4. Capability-Gated Release Framework ([`RELEASE_GATES.md`](RELEASE_GATES.md))
+
+Operational deployment is strictly governed by 7 incremental capability gates:
+- **[Gate G-1: Diagnostic Monitoring](RELEASE_GATES.md#gate-g-1-diagnostic-monitoring)**: Physical state consistency, explicit health receipts, valid evidence lineage. Blocked by `WP01, WP02, WP04, WP08, WP10`.
+- **[Gate G-2: MESIA Research Collection](RELEASE_GATES.md#gate-g-2-mesia-research-collection)**: Immutable SigMF manifests, tenant isolation, verified acquisition timestamps. Blocked by `WP02, WP03, WP06`.
+- **[Gate G-3: MESIA State Updates](RELEASE_GATES.md#gate-g-3-mesia-state-updates)**: Observation operator physics, active dispatcher, shared lattice, verified observability. Blocked by `WP04, WP05, WP06, WP07`.
+- **[Gate G-4: Exact Prescriptions](RELEASE_GATES.md#gate-g-4-exact-prescriptions)**: Policy promotion path (`DiagnosticPromotionService`), L7 candidate scenario evaluation by L8. Blocked by `WP01, WP02, WP08, WP09`.
+- **[Gate G-5: Machine Execution](RELEASE_GATES.md#gate-g-5-machine-execution)**: 4-way cryptographic authorization binding, equipment feasibility, idempotent execution. Blocked by `WP09, WP10, WP11`.
+- **[Gate G-6: World-Model Development](RELEASE_GATES.md#gate-g-6-world-model-development)**: Bitemporal extraction, separation of planned vs confirmed interventions, forecast archive. Blocked by `WP02, WP03, WP04, WP05, WP12`.
+- **[Gate G-7: Omega Autonomous Discovery](RELEASE_GATES.md#gate-g-7-omega-autonomous-discovery)**: Canonical evidence graph, measurement policy audit, hypothesis court, research isolation. Blocked by `WP02, WP03, WP07, WP12`.
 
 ---
 
-### Phase 6: Complete the Agronomical World Model
-| Work Package | Title | Prerequisites | Target Subsystems | Status |
-|:---|:---|:---|:---|:---:|
-| [P06.1](P06.1-world-model-state-observation-action-contracts.md) | State, Observation, Action & Disturbance Contracts | Phase 2, Phase 4 | `world_model/contracts/` | `[ ] Ready` |
-| [P06.2](P06.2-world-model-calibrated-forecasts-evaluation.md) | Calibrated Multi-Step Forward Forecasting (CRPS $\ge 85\%$) | P06.1, P05.2 | `world_model/dynamics/rollout.py` | `[ ] Ready` |
-| [P06.3](P06.3-world-model-causal-intervention-modeling.md) | Causal Counterfactuals & SCM Policy Optimization | P06.2, P02.4 | `world_model/causal/scm.py`, `layer8_prescriptive/` | `[ ] Ready` |
+## 5. Concrete Defect Tasks Index (`A01` – `A24`)
 
----
-
-## 4. Complete Inventory of Line-Level Remediation Tasks (A01 – A24)
-
-| Finding ID | Title | Primary Target File | Severity |
+| Finding ID | Title | Target File | Severity |
 |:---|:---|:---|:---:|
 | [A01](A01-authoritative-water-path.md) | Authoritative Integrated Water Path (L3 Water vs L3 Decision vs L4) | `orchestrator_v2/registry.py`, `layer3_water/runner.py` | `P0` |
 | [A02](A02-l4-hydrology-rainfall-and-leaching-units.md) | L4 Hydrology Rainfall Discontinuity ($250\text{mm}$) & $10\times$ N-Leaching Error | `layer4_nutrients/soil_water_balance/engine.py:261, 317` | `P0` |
@@ -147,64 +136,25 @@ It integrates:
 
 ---
 
-## 5. Architectural Baseline: Current Verified Test Suite Status
+## 6. Execution Sequencing & Batch Phasing
 
-Following the deep layer-by-layer audit and test relocation across all 13 subsystems, the active AgriBrain test baseline is:
+### Batch 1: Immediate Fatal Crash & Numerical Discrepancy Fixes (Weeks 1–2)
+- Execute **WP01** (Fix L10 water surfaces caller & helpers; L5 invariant enforcement; admin token security).
+- Execute **WP04** (Fix ASMAE root-zone moisture unit error; physical drainage thresholds).
+- Execute **WP07** (Eliminate `measured_vwc = likelihood_value`; connect observation dispatcher).
 
-| Subsystem / Layer | Dedicated Test Package | Tests | Status | Key Focus Area |
-|---|---|:---:|:---:|---|
-| **Layer 0** | `layer0/tests/` | 42 | **PASS** | Microclimate boundary forcing, Open-Meteo, psychrometric calculations. |
-| **Layer 0.5** | `layer05_asmae/tests/` | 134 | **PASS** | ASMAE multimodal belief lattice, worldline history, raster fusion. |
-| **Layer 1** | `layer1_fusion/tests/` | 40 | **PASS** | Multi-sensor spatial alignment, FieldCube, zone clustering. |
-| **Layer 2** | `layer2_veg_int/tests/` | 15 | **PASS** | Crop canopy biophysics, vegetation indices, phenological curves. |
-| **Layer 3** | `layer3_water/tests/` | 74 | **PASS** | FAO-56 dual $K_c$, multi-layer soil hydrology, probe assimilation. |
-| **Layer 4** | `layer4_nutrients/tests/`| 19 | **PASS** | Soil chemistry, NPK budgeting, nutrient deficiency diagnostics. |
-| **Layer 5** | `layer5_bio/tests/` | 12 | **PASS** | Phytopathology, fungal spores, pest risk modeling. |
-| **Layer 6** | `layer6_yield/tests/` | 33 | **PASS** | Yield forecasting, stress degree-days, Monte Carlo economic bounds. |
-| **Layer 7** | `layer7_risk/tests/` | 22 | **PASS** | Climatic risk resilience, sirocco heatwaves, seasonal scenario planning. |
-| **Layer 8** | `layer8_prescriptive/tests/`| 13 | **PASS** | Variable-rate prescriptions, ActionCards, safety gate windowing. |
-| **Layer 9** | `layer9_interface/tests/`| 9 | **PASS** | Cognitive advisory dialogues, telemetry, hallucination verification. |
-| **Layer 10** | `layer10_sire/tests/` | 17 | **PASS** | SIRE 17-engine spatial renderer, One-Meter Policy, surface packs. |
-| **MESIA** | `mesia/tests/` | 101 | **PASS** | RF opportunistic sensing, CA-CFAR detection, ISO GUM metrology. |
-| **Total** | **All 13 Subsystems** | **532** | **100% PASS** | **Complete Full-Stack Verification (0 failures in 48.32s)** |
+### Batch 2: Canonical Contracts & Identity Hardening (Weeks 3–4)
+- Execute **WP02** (Freeze 7 core scientific contracts: `EvidenceRef`, `StateRef`, `DiagnosticResult`, etc.).
+- Execute **WP03** (Strict bitemporal Run ID derivation; transactional worldline commits; fatal corruption).
+- Execute **WP06** (SigMF atomic capture manifests; real timestamps; tenant scoping).
 
----
+### Batch 3: Diagnostic Consolidation & Action Governance (Weeks 5–6)
+- Execute **WP08** (Connect authoritative `layer3_water` expert; fix $\sigma_{\text{post}}$ math; L4 typed inputs).
+- Execute **WP09** (Install `DiagnosticPromotionService` to break deadlock; re-sequence L6 $\to$ L7 $\to$ L8).
+- Execute **WP05** (ASMAE dynamic forecasting retrovalidation; decouple BMA disagreement).
 
-## 6. Recommended Immediate Execution Order (Batch 1 & Batch 2)
-
-### Batch 1: Fatal Runtime NameErrors, Signature Mismatches & Critical Math
-1. **[A06](A06-asmae-external-scene-loader-resolution.md), [A14](A14-l10-water-surfaces-call-signature.md), [A15](A15-orchestrator-and-l10-undefined-variables.md), [A24](A24-l10-sire-display-trace-metrics-initialization.md) (`P01.2`):**
-   - Fix fatal calling signature in `generate_water_surfaces`.
-   - Fix `resolution_m` in external scene loader.
-   - Fix `one_meter_visual_coverage_pct` and `ts` NameErrors in SIRE and Orchestrator.
-2. **[A02](A02-l4-hydrology-rainfall-and-leaching-units.md) & [A03](A03-l4-missing-weather-handling.md) (`P02.1`):**
-   - Fix $250\text{mm}$ rainfall cliff.
-   - Fix $10\times$ leaching unit dimensional error.
-   - Fix missing weather treated as benign $0.0$ stress.
-3. **[A04](A04-l3-water-solver-mass-conservation.md) & [A05](A05-l3-water-posterior-flux-and-sigma.md) (`P02.2`):**
-   - Eliminate spontaneous water creation at wilting point.
-   - Harmonize mass balance ledger equation.
-   - Correctly propagate posterior uncertainty sigma.
-4. **[A07](A07-asmae-job-recovery-and-reintegration.md) (`P01.3`):**
-   - Fix `resumed` NameError in job recovery.
-   - Recover `COMPLETED_REINTEGRATION_PENDING` state.
-5. **[A17](A17-l2-growth-engine-statistics-import-and-time-basis.md) (`P02.4`):**
-   - Add missing `statistics` import in Layer 2 growth engine.
-6. **[A20](A20-python-3-13-utc-timestamp-deprecation.md):**
-   - Replace deprecated `datetime.utcnow()` with `datetime.now(timezone.utc)`.
-
-### Batch 2: Architectural Pipeline Harmonization
-1. **[P00.1](P00.1-execution-and-ownership-contract.md) & [P00.2](P00.2-freeze-reviewable-baseline.md):**
-   - Enforce execution profiles and state ownership matrix.
-   - Freeze 7 reviewable golden evidence baselines.
-2. **[A01](A01-authoritative-water-path.md) (`P02.3`):**
-   - Connect Layer 3 Water as the sole authoritative hydrology provider for Layer 4 Nutrients.
-3. **[A11](A11-l7-planning-result-envelope-normalization.md) & [A12](A12-orchestrator-health-and-quality-metrics.md) (`P01.1`):**
-   - Flatten Layer 7 double envelope.
-   - Expose composite pipeline quality index.
-4. **[A08](A08-mesia-rf-snr-vwc-assimilation.md), [A09](A09-mesia-qualification-and-evidence-verification.md), [A10](A10-mesia-asmae-adapter-and-payload-integration.md) (`P03.1`–`P03.3`):**
-   - Formalize RF observation forward operator.
-   - Enforce use-time cryptographic qualification.
-5. **[A13](A13-l8-prescriptive-weather-constraints.md) & [A19](A19-l9-hallucination-guard-semantic-verification.md) (`P04.1`, `P04.2`):**
-   - Enforce wind drift and rain wash-off constraints on prescriptions.
-   - Upgrade hallucination guard to propositional semantic verification.
+### Batch 4: Publication, Infrastructure & Future Scaffolding (Weeks 7–8)
+- Execute **WP10** (Ground L9 explanations; formalize L10 native vs display resolution).
+- Execute **WP11** (Universal route auth; bounded background worker pool; fix Docker Compose MongoDB).
+- Execute **WP12** (Bitemporal worldline window extractor; forecast archive; contain Omega proposals).
+- Verify all 7 capability release gates in [`RELEASE_GATES.md`](RELEASE_GATES.md).
