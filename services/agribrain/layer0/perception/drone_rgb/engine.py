@@ -58,9 +58,14 @@ class DroneRGBEngine:
         
         for idx, frame_data in enumerate(frames):
             # Preserve Drone Provenance
+            ref = (
+                frame_data.get("url")
+                if isinstance(frame_data, dict) and "url" in frame_data
+                else f"drone_frame_{inp.mission_id}_{idx}"
+            )
             fp_inp = FarmerPhotoEngineInput(
                 plot_id=inp.plot_id,
-                image_ref=f"mock_drone_cmd_{inp.mission_id}_{idx}",
+                image_ref=ref,
                 user_label="drone_close_up",
                 synthetic_pixels=frame_data if isinstance(frame_data, dict) and "red" in frame_data else None,
                 # Here we pass the provenance via metadata or kwargs if supported, 

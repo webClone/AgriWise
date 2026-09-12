@@ -509,6 +509,13 @@ def to_layer0_sentinel2_package(raw: dict) -> List[Any]:
         pkg.mask_refs = rec.get("mask_refs", {})
         pkg.band_units = rec.get("band_units", {})
         metadata.band_units = pkg.band_units
+        pkg.product_binding = metadata.product_binding
+        pkg.binding_proof = metadata.binding_proof
+        pkg.provider_product_id = metadata.provider_product_id
+        pkg.catalog_item_id = getattr(metadata, "catalog_item_id", None)
+        pkg.provider_tile_id = getattr(metadata, "provider_tile_id", None)
+        pkg.provider_orbit_id = getattr(metadata, "provider_orbit_id", None)
+        pkg.provider_orbit_pass = getattr(metadata, "provider_orbit_pass", None)
         packages.append(pkg)
     return packages
 
@@ -762,6 +769,13 @@ def to_layer0_sentinel1_package(raw: dict) -> List[Any]:
         pkg.mask_refs = rec.get("mask_refs", {})
         pkg.band_units = rec.get("band_units", {})
         metadata.band_units = pkg.band_units
+        pkg.product_binding = metadata.product_binding
+        pkg.binding_proof = metadata.binding_proof
+        pkg.provider_product_id = metadata.provider_product_id
+        pkg.catalog_item_id = getattr(metadata, "catalog_item_id", None)
+        pkg.provider_tile_id = getattr(metadata, "provider_tile_id", None)
+        pkg.provider_orbit_id = getattr(metadata, "provider_orbit_id", None)
+        pkg.provider_orbit_pass = getattr(metadata, "provider_orbit_pass", None)
         packages.append(pkg)
     return packages
 
@@ -1054,6 +1068,7 @@ from services.agribrain.orchestrator_v2.storage import LocalJsonStore
 from services.agribrain.orchestrator_v2.chat_adapter import ChatPayload, build_chat_payload
 from services.agribrain.layer10_sire.schema import Layer10Input
 from services.agribrain.layer8_prescriptive.schema import Layer8Input
+from services.agribrain.layer8_prescriptive.scenario_contract import InterventionScenarioCandidate
 from services.agribrain.common.plot_namespace import namespace_payload
 
 ORCHESTRATOR_VERSION = "2.1.0"
@@ -1121,6 +1136,39 @@ def run_orchestrator(
         lat = float(inputs.operational_context.get("lat", 0.0)) if inputs.operational_context else 0.0
         lng = float(inputs.operational_context.get("lng", 0.0)) if inputs.operational_context else 0.0
         polygon_coords = inputs.operational_context.get("polygon_coords") if inputs.operational_context else None
+
+        # Authoritatively resolve field polygon and centroid if polygon_coords is missing or if explicit geometry is supplied
+        geom_source = (
+            getattr(inputs, "polygon_geojson", None)
+            or getattr(inputs, "field_geometry", None)
+            or (inputs.operational_context or {}).get("polygon")
+            or (inputs.operational_context or {}).get("field_geometry")
+        )
+        if geom_source:
+            cand = geom_source
+            if isinstance(cand, dict):
+                if cand.get("type") == "Feature":
+                    cand = cand.get("geometry") or {}
+                if cand.get("type") in ("Polygon", "MultiPolygon") and cand.get("coordinates"):
+                    cand = cand.get("coordinates")
+            while isinstance(cand, (list, tuple)) and cand and isinstance(cand[0], (list, tuple)) and len(cand[0]) > 0 and isinstance(cand[0][0], (list, tuple)):
+                cand = cand[0]
+            if isinstance(cand, (list, tuple)) and len(cand) >= 3:
+                try:
+                    ring = [(float(pt[0]), float(pt[1])) for pt in cand]
+                    polygon_coords = ring
+                    c_lng = sum(p[0] for p in ring) / len(ring)
+                    c_lat = sum(p[1] for p in ring) / len(ring)
+                    if lat == 0.0 or lng == 0.0 or abs(lat - c_lat) > 0.1 or abs(lng - c_lng) > 0.1:
+                        lat = c_lat
+                        lng = c_lng
+                    if inputs.operational_context is not None:
+                        inputs.operational_context["polygon_coords"] = polygon_coords
+                        inputs.operational_context["lat"] = lat
+                        inputs.operational_context["lng"] = lng
+                except Exception:
+                    pass
+
         start_date = inputs.date_range.get("start", "")
         end_date = inputs.date_range.get("end", "")
 
@@ -1133,16 +1181,20 @@ def run_orchestrator(
 
         # Fetch raster composites early for modern path and ASMAE
         stage_started = time.perf_counter()
-        try:
-            from layer1_fusion.runner import _fetch_raster_composites_for_v1
-            raster_composites = _fetch_raster_composites_for_v1(
-                plot_id=plot_id, lat=lat, lng=lng,
-                start_date=start_date, end_date=end_date,
-                polygon_coords=polygon_coords
-            )
-        except Exception as e:
-            logger.warning(f"Failed to fetch raster composites: {e}")
-            raster_composites = {}
+        op_composites = (inputs.operational_context or {}).get("raster_composites")
+        if op_composites and isinstance(op_composites, dict) and "NDVI" in op_composites:
+            raster_composites = op_composites
+        else:
+            try:
+                from layer1_fusion.runner import _fetch_raster_composites_for_v1
+                raster_composites = _fetch_raster_composites_for_v1(
+                    plot_id=plot_id, lat=lat, lng=lng,
+                    start_date=start_date, end_date=end_date,
+                    polygon_coords=polygon_coords
+                )
+            except Exception as e:
+                logger.warning(f"Failed to fetch raster composites: {e}")
+                raster_composites = {}
         stage_timings_ms["raster_composite_resolution"] = round((time.perf_counter() - stage_started) * 1000.0, 3)
 
         from layer05_asmae.runner import ASMAERunner
@@ -2032,6 +2084,10 @@ def run_orchestrator(
                         "input": _freeze_reintegration_input(inputs),
                         "intent": "UNKNOWN",
                     },
+                    "execution_permissions": {
+                        "production_authority_allowed": True,
+                        "training_export_allowed": True,
+                    },
                 }
                 
                 # Execute ASMAERunner
@@ -2823,7 +2879,11 @@ def run_orchestrator(
             _canonical_json(inputs.policy_snapshot).encode("utf-8")
         ).hexdigest(),
         candidate_scenarios=(
-            list(getattr(l7_res.output, "options", []))
+            [
+                InterventionScenarioCandidate.from_crop_planning_option(opt, idx)
+                if not isinstance(opt, InterventionScenarioCandidate) else opt
+                for idx, opt in enumerate(getattr(l7_res.output, "options", []))
+            ]
             if l7_res and l7_res.output
             else []
         ),
@@ -3150,8 +3210,12 @@ def run_orchestrator(
     return _finalize_artifact(run_id, ts_now, inputs, results, store, unified_plan, primary_acquisition=primary_acquisition, fallback_used=fallback_used, fallback_reason=fallback_reason)
 
 
-def _structured_output_status(output) -> tuple[LayerStatus, list[str]]:
-    """Promote an engine's structured degradation into orchestrator health."""
+def _structured_output_status(
+    output: Any,
+    require_stage_receipt: bool = False,
+    is_scientific_core: bool = False,
+) -> Tuple[LayerStatus, List[str]]:
+    """Inspect structured output and return (LayerStatus, list_of_errors)."""
     if output is None:
         return LayerStatus.DEGRADED, ["structured_output_missing"]
 
@@ -3205,6 +3269,14 @@ def _structured_output_status(output) -> tuple[LayerStatus, list[str]]:
             getattr(receipt, "scientific_usability", None),
         ])
 
+    strict_receipts = require_stage_receipt or (
+        os.environ.get("AGRIBRAIN_REQUIRE_STAGE_RECEIPTS", "").lower() in ("1", "true", "yes")
+    )
+    if strict_receipts and receipt is None:
+        if is_scientific_core:
+            return LayerStatus.FAILED, ["missing_mandatory_stage_receipt"]
+        return LayerStatus.DEGRADED, ["missing_stage_receipt"]
+
     normalized = {
         str(value.value if hasattr(value, "value") else value).strip().lower()
         for value in candidates
@@ -3241,9 +3313,20 @@ def _structured_output_status(output) -> tuple[LayerStatus, list[str]]:
 def _safe_run(lid: LayerId, *args, progress_cb=None) -> LayerResult:
     import sys
     import time as _time
+    from services.agribrain.scientific_contracts.stage_receipt import (
+        StageReceipt,
+        create_stage_receipt,
+        ExecutionStatus,
+        ScientificUsability,
+    )
     _t0 = _time.perf_counter()
     spec = LAYER_REGISTRY[lid]
     stage_name = _LAYER_STAGE_NAMES.get(lid.value, lid.value)
+    scientific_core_layers = {
+        LayerId.L1, LayerId.L2, LayerId.L3, LayerId.L4, LayerId.L5, LayerId.L8
+    }
+    is_scientific_core = lid in scientific_core_layers
+
     if progress_cb:
         try:
             progress_cb(stage_name, "running")
@@ -3251,7 +3334,24 @@ def _safe_run(lid: LayerId, *args, progress_cb=None) -> LayerResult:
             pass
     try:
         output = spec.runner(*args)
-        status, structured_errors = _structured_output_status(output)
+        status, structured_errors = _structured_output_status(
+            output,
+            require_stage_receipt=is_scientific_core,
+            is_scientific_core=is_scientific_core,
+        )
+        receipt = getattr(output, "stage_receipt", None) or getattr(output, "receipt", None)
+        
+        # Ensure StageReceipt is attached for auditability
+        run_id = getattr(output, "run_id", "") or getattr(getattr(output, "run_meta", None), "run_id", "") or getattr(output, "run_id_l3", "")
+        if receipt is None and output is not None and status != LayerStatus.FAILED:
+            receipt = create_stage_receipt(
+                stage_id=lid.value,
+                execution_status=ExecutionStatus.SUCCESS,
+                scientific_usability=ScientificUsability.USABLE if status == LayerStatus.OK else ScientificUsability.DEGRADED,
+                run_id=str(run_id),
+                degradation_reasons=tuple(structured_errors),
+            )
+
         _elapsed = _time.perf_counter() - _t0
         # Use stderr to bypass redirect_stdout in run_surfaces_mode
         print(f"[PERF] {lid.value}: {_elapsed:.2f}s ({status.value})", file=sys.stderr, flush=True)
@@ -3265,8 +3365,9 @@ def _safe_run(lid: LayerId, *args, progress_cb=None) -> LayerResult:
             layer_id=lid.value,
             status=status,
             output=output,
-            run_id=getattr(output, "run_id", "") or getattr(getattr(output, "run_meta", None), "run_id", "") or getattr(output, "run_id_l3", ""),
+            run_id=run_id,
             errors=structured_errors,
+            stage_receipt=receipt,
         )
         
     except Exception as e:
@@ -3280,11 +3381,19 @@ def _safe_run(lid: LayerId, *args, progress_cb=None) -> LayerResult:
                 progress_cb(stage_name, "error", _elapsed)
             except Exception:
                 pass
+        
+        failed_receipt = create_stage_receipt(
+            stage_id=lid.value,
+            execution_status=ExecutionStatus.FAILED,
+            scientific_usability=ScientificUsability.UNUSABLE,
+            degradation_reasons=(str(e),),
+        )
         return LayerResult(
             layer_id=lid.value,
             status=status,
             output=None,
-            errors=[str(e)]
+            errors=[str(e)],
+            stage_receipt=failed_receipt,
         )
 
 
@@ -3848,9 +3957,20 @@ def _build_diagnostic_integration(
         accepted_contribs = [
             c for c in contributions if c.contribution_id in verdict.accepted_contribution_ids
         ]
+        ev_receipts_map = dict(policy_snapshot.get("evidence_receipts", {})) if policy_snapshot else {}
+        for layer_key, lres in results.items():
+            if lres and getattr(lres, "stage_receipt", None):
+                sr = lres.stage_receipt
+                lid_str = getattr(layer_key, "value", str(layer_key))
+                ev_receipts_map[f"layer:{lid_str}"] = sr
+                if hasattr(lres.output, "evidence_receipt"):
+                    ev_receipts_map[lid_str] = lres.output.evidence_receipt
+
         promo_service = DiagnosticPromotionService()
         promo_result = promo_service.promote_to_prescription_eligibility(
-            accepted_contribs, policy_snapshot=policy_snapshot
+            accepted_contribs,
+            policy_snapshot=policy_snapshot,
+            evidence_receipts=ev_receipts_map,
         )
         promotion_audit = promo_result.to_dict()
 
@@ -4182,6 +4302,12 @@ def _finalize_artifact(
         intent_scope=intent_scope,
     )
     
+    stage_receipts_map = {}
+    for lid_key, res in results.items():
+        if res and getattr(res, "stage_receipt", None) is not None:
+            stage_name = getattr(lid_key, "value", str(lid_key))
+            stage_receipts_map[stage_name] = res.stage_receipt
+
     art = RunArtifact(
         meta=meta,
         inputs=inputs,
@@ -4201,6 +4327,7 @@ def _finalize_artifact(
         diagnostic_integration=diagnostic_integration,
         intent_scope=intent_scope,
         lineage_map=parents_map,
+        stage_receipts=stage_receipts_map,
     )
     
     # Calculate Artifact Hash (Pure Content)

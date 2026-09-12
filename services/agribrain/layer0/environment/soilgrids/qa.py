@@ -109,6 +109,10 @@ def evaluate_soilgrids_qa(
     if not texture_consistent:
         quality_class = SoilGridsQualityClass.UNUSABLE
         reason_parts.append("Impossible texture values")
+    elif total_props == 0 or depth_completeness == 0.0:
+        quality_class = SoilGridsQualityClass.UNUSABLE
+        flags.append("EMPTY_PROFILE")
+        reason_parts.append("No properties present in depth layers")
     elif not water_available or not uncertainty_ok:
         quality_class = SoilGridsQualityClass.DEGRADED
         if not water_available:

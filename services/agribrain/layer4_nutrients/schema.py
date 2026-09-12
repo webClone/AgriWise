@@ -276,6 +276,12 @@ class SoilWaterBalanceOutput:
     irrigation_applied_mm: float = 0.0
     effective_precipitation_mm: float = 0.0
 
+    # Quality & degradation tracking
+    status: str = "OK"
+    is_degraded: bool = False
+    missing_weather_days: int = 0
+    uncertainty_multiplier: float = 1.0
+
 
 # ============================================================================
 # Crop Demand

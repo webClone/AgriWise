@@ -111,6 +111,7 @@ CROP_NDVI_SIGNATURES: Dict[str, dict] = {
     # Aliases for backward compat
     "citrus_orange":  {"shape": "evergreen", "peak_ndvi": 0.62, "trough_ndvi": 0.45, "peak_frac": 0.40, "greenup_rate": 0.001, "amplitude": 0.17, "season_integral": 2.00, "n_peaks": 0},
     "citrus_lemon":   {"shape": "evergreen", "peak_ndvi": 0.60, "trough_ndvi": 0.42, "peak_frac": 0.40, "greenup_rate": 0.001, "amplitude": 0.18, "season_integral": 1.95, "n_peaks": 0},
+    "citrus_group":   {"shape": "evergreen", "peak_ndvi": 0.61, "trough_ndvi": 0.44, "peak_frac": 0.40, "greenup_rate": 0.001, "amplitude": 0.17, "season_integral": 1.97, "n_peaks": 0},
 
     # ── TROPICAL TREES ──
     "date_palm":     {"shape": "stable",    "peak_ndvi": 0.72, "trough_ndvi": 0.58, "peak_frac": 0.40, "greenup_rate": 0.001, "amplitude": 0.14, "season_integral": 2.40, "n_peaks": 0},

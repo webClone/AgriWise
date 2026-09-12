@@ -72,7 +72,7 @@ class CompactionEngine:
         }
 
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             raw_cutoff = now - timedelta(days=RAW_RETENTION_DAYS)
             daily_cutoff = now - timedelta(days=DAILY_RETENTION_DAYS)
 
@@ -236,7 +236,7 @@ class CompactionEngine:
     def _group_by_day_and_type(self, obs_list: List[Dict]) -> Dict:
         groups = defaultdict(list)
         for obs in obs_list:
-            dt = obs.get("obsDate", datetime.utcnow())
+            dt = obs.get("obsDate") or datetime.now(timezone.utc)
             day_str = dt.strftime("%Y-%m-%d") if hasattr(dt, "strftime") else str(dt)[:10]
             obs_type = obs.get("obsType", "unknown")
             groups[(day_str, obs_type)].append(obs)
@@ -245,7 +245,7 @@ class CompactionEngine:
     def _group_by_week_and_type(self, obs_list: List[Dict]) -> Dict:
         groups = defaultdict(list)
         for obs in obs_list:
-            dt = obs.get("obsDate", datetime.utcnow())
+            dt = obs.get("obsDate") or datetime.now(timezone.utc)
             # ISO week key
             if hasattr(dt, "isocalendar"):
                 yr, wk, _ = dt.isocalendar()
@@ -270,7 +270,7 @@ class CompactionEngine:
             "obsType": obs_type,
             "compaction_level": "daily",
             "sample_count": len(obs_list),
-            "compacted_at": datetime.utcnow(),
+            "compacted_at": datetime.now(timezone.utc),
         }
 
         for field, values in numeric_fields.items():
@@ -308,7 +308,7 @@ class CompactionEngine:
             "compaction_level": "weekly",
             "sample_count": total_samples,
             "daily_count": len(obs_list),
-            "compacted_at": datetime.utcnow(),
+            "compacted_at": datetime.now(timezone.utc),
         }
 
         for field, values in numeric_fields.items():

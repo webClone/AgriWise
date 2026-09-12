@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Any, Tuple
 from enum import Enum
 
+from .scenario_contract import InterventionScenarioCandidate, ScenarioType
+
 
 # ============================================================================
 # Enums

@@ -199,7 +199,7 @@ def trigger_dna_sequencing(plot_id: str, lat: float, lng: float, polygon_coords:
     
     # We fetch 5 years of data (1800 days) to prevent API timeout but provide
     # a highly robust decadal-scale biological trait inversion.
-    end_date = datetime.datetime.now() - datetime.timedelta(days=1)
+    end_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
     start_date = end_date - datetime.timedelta(days=1800)
     
     start_str = start_date.strftime("%Y-%m-%d")

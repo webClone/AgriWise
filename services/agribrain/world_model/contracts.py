@@ -234,6 +234,14 @@ class ActionVector:
     exposure_verified_at: Optional[datetime] = None
     spatial_extent: SpatialSupport = SpatialSupport.PLOT
     schema_version: str = ACTION_VECTOR_SCHEMA_VERSION
+    actual_execution_timestamp: Optional[datetime] = None
+    applied_rate: Optional[float] = None
+    applied_units: Optional[str] = None
+    as_applied_evidence_ids: Tuple[str, ...] = ()
+    executor_device_id: Optional[str] = None
+    spatial_footprint: Optional[Dict[str, Any]] = None
+    exposure_confidence: float = 0.0
+    application_status: str = "PLANNED"
 
     def __post_init__(self) -> None:
         self.validate()
@@ -264,6 +272,14 @@ class ActionVector:
             "exposure_verified_at": self.exposure_verified_at.isoformat() if self.exposure_verified_at else None,
             "spatial_extent": self.spatial_extent.value,
             "is_physically_realized": self.is_physically_realized(),
+            "actual_execution_timestamp": self.actual_execution_timestamp.isoformat() if self.actual_execution_timestamp else None,
+            "applied_rate": self.applied_rate,
+            "applied_units": self.applied_units,
+            "as_applied_evidence_ids": list(self.as_applied_evidence_ids),
+            "executor_device_id": self.executor_device_id,
+            "spatial_footprint": self.spatial_footprint,
+            "exposure_confidence": self.exposure_confidence,
+            "application_status": self.application_status,
             "schema_version": self.schema_version,
         }
 

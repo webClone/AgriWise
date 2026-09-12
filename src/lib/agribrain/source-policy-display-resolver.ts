@@ -471,7 +471,8 @@ export function isRenderKindAllowedForRole(
   if (role === "base") {
     return renderKind === "full_raster"
       || renderKind === "diagnostic_overlay"
-      || renderKind === "proxy_overlay";
+      || renderKind === "proxy_overlay"
+      || renderKind === "uniform_tint";
   }
   if (role === "overlay" || role === "candidate") {
     return renderKind === "proxy_overlay" || renderKind === "diagnostic_overlay";

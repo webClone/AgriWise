@@ -11,7 +11,7 @@ Currently in-memory with TTL-based expiry.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import hashlib
 
@@ -20,12 +20,15 @@ import hashlib
 class CacheEntry:
     """A single cache entry with TTL."""
     data: Any
-    created_at: datetime = field(default_factory=datetime.now)
+    plot_id: Optional[str] = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     ttl_seconds: int = 3600  # 1 hour default
 
     @property
     def is_expired(self) -> bool:
-        return (datetime.now() - self.created_at).total_seconds() > self.ttl_seconds
+        now = datetime.now(timezone.utc)
+        created = self.created_at if self.created_at.tzinfo else self.created_at.replace(tzinfo=timezone.utc)
+        return (now - created).total_seconds() > self.ttl_seconds
 
 
 class PerceptionCache:
@@ -47,12 +50,15 @@ class PerceptionCache:
         cache.set(key, result)
     """
 
+    _key_to_plot: Dict[str, str] = {}
+
     def __init__(self, default_ttl_seconds: int = 3600):
         self._store: Dict[str, CacheEntry] = {}
         self._default_ttl = default_ttl_seconds
 
-    @staticmethod
+    @classmethod
     def make_key(
+        cls,
         engine_family: str,
         plot_id: str,
         image_content_hash: str,
@@ -65,7 +71,9 @@ class PerceptionCache:
         collision problems seen in the legacy path.
         """
         raw = f"{engine_family}:{plot_id}:{image_content_hash}:{model_version}"
-        return hashlib.sha256(raw.encode()).hexdigest()[:24]
+        key = hashlib.sha256(raw.encode()).hexdigest()[:24]
+        cls._key_to_plot[key] = plot_id
+        return key
 
     @staticmethod
     def compute_content_hash(image_data: bytes) -> str:
@@ -81,14 +89,22 @@ class PerceptionCache:
         if entry is None:
             return None
         if entry.is_expired:
-            del self._store[key]
+            self.invalidate(key)
             return None
         return entry.data
 
-    def set(self, key: str, data: Any, ttl_seconds: Optional[int] = None) -> None:
+    def set(
+        self,
+        key: str,
+        data: Any,
+        ttl_seconds: Optional[int] = None,
+        plot_id: Optional[str] = None,
+    ) -> None:
         """Store a result in the cache."""
+        resolved_plot = plot_id or self._key_to_plot.get(key)
         self._store[key] = CacheEntry(
             data=data,
+            plot_id=resolved_plot,
             ttl_seconds=ttl_seconds or self._default_ttl,
         )
 
@@ -96,14 +112,18 @@ class PerceptionCache:
         """Remove a specific entry. Returns True if it existed."""
         if key in self._store:
             del self._store[key]
+            self._key_to_plot.pop(key, None)
             return True
         return False
 
     def invalidate_plot(self, plot_id: str) -> int:
         """Remove all entries for a specific plot. Returns count removed."""
-        to_remove = [k for k, v in self._store.items() if plot_id in k]
+        to_remove = [
+            k for k, v in self._store.items()
+            if v.plot_id == plot_id or self._key_to_plot.get(k) == plot_id or plot_id in k
+        ]
         for k in to_remove:
-            del self._store[k]
+            self.invalidate(k)
         return len(to_remove)
 
     def clear(self) -> None:

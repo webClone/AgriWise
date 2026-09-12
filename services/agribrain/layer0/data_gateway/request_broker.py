@@ -237,6 +237,7 @@ class DataRequestBroker:
             return None
 
         # Build a fetch wrapper that handles consolidation
+        call_kwargs = {"plot_id": plot_id, **kwargs}
         if self._consolidator.should_consolidate(source) and not force_refresh:
             consolidated_fn = self._make_consolidated_fetch(
                 source, fetch_fn, lat, lng, plot_id, **kwargs
@@ -244,7 +245,7 @@ class DataRequestBroker:
         else:
             # Direct fetch (fine-resolution or force refresh)
             def consolidated_fn(lat_arg, lng_arg, **kw):
-                return fetch_fn(lat_arg, lng_arg, **{**kwargs, **kw})
+                return fetch_fn(lat_arg, lng_arg, **{**call_kwargs, **kw})
 
         # Compute a deterministic param_hash from extra kwargs to differentiate cache keys
         param_hash = ""

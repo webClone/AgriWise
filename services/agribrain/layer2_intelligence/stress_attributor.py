@@ -738,7 +738,6 @@ def _assess_thermal_stress(
         asmae_thermal = _get_usable_asmae_feature(context, "ASMAE_THERMAL_STRESS")
         if asmae_thermal is None:
             return None
-        temp_max = 0.0 # dummy value so execution continues
 
     # Check for independent thermal support
     has_independent = (

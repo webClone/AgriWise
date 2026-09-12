@@ -960,12 +960,15 @@ def run_surfaces_mode(ctx: dict, query: str = "", progress_cb=None, authenticate
     run["version"] = canonical_l10_payload.get("version", SURFACES_SCHEMA_VERSION)
     # The published envelope belongs to the immutable orchestrator science
     # run. Layer 10's component run remains available in provenance.
+    # The published envelope belongs to the immutable orchestrator science
+    # run. Layer 10's component run remains available in provenance.
     run["publication_run_id"] = run["run_id"]
     run["request_run_id"] = canonical_l10_payload.get("request_run_id", "")
     run["publication_id"] = canonical_l10_payload.get("publication_id", "")
     run["publication_status"] = canonical_l10_payload.get("publication_status", "INVALID_PUBLICATION")
     
-    # Phase B & C Mock Payload Enrichment
+    # Phase B & C Payload Enrichment
+
     run["explainability_pack"] = canonical_l10_payload.get("explainability_pack", {})
     run["scenario_pack"] = canonical_l10_payload.get("scenario_pack", [])
     run["history_pack"] = canonical_l10_payload.get("history_pack", [])

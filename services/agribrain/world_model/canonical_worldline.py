@@ -446,6 +446,211 @@ class CanonicalWorldlineService:
         )
         return event_record
 
+    def latest_payload(
+        self,
+        plot_id: str,
+        event_type: str,
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+    ) -> Dict[str, Any]:
+        """Retrieve latest payload for a specific event_type."""
+        head = self.load_head(plot_id, tenant_id, namespace)
+        event_id = (head.get("latest_by_type") or {}).get(event_type)
+        event = (
+            self.load_event(plot_id, str(event_id), tenant_id, namespace)
+            if event_id else {}
+        )
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            return {}
+        result = dict(payload)
+        result["_worldline_event_id"] = event.get("event_id")
+        return result
+
+    def commit_event(
+        self,
+        *,
+        plot_id: str,
+        event_type: str,
+        payload: Mapping[str, Any],
+        geometry_hash: str = "",
+        effective_at: Optional[Any] = None,
+        observation_or_valid_time: Optional[Any] = None,
+        parent_event_ids: Optional[Iterable[Any]] = None,
+        authority: str = "",
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+    ) -> Dict[str, Any]:
+        """Convenience method to propose and commit an event in one canonical step."""
+        if not str(authority or "").strip():
+            raise ValueError("authority is required for worldline writes")
+        if not str(geometry_hash or "").strip():
+            raise ValueError("geometry_hash is required for worldline writes")
+
+        payload_dict = dict(payload or {})
+        if effective_at is None or not str(effective_at).strip():
+            raise ValueError("effective_at is required for worldline writes")
+        if observation_or_valid_time is None or not str(observation_or_valid_time).strip():
+            raise ValueError("observation_or_valid_time is required for worldline writes")
+        valid_time = observation_or_valid_time
+        if hasattr(valid_time, "isoformat"):
+            valid_time = valid_time.isoformat()
+
+        parents = tuple(parent_event_ids or ())
+
+        proposal = WorldlineEventProposal(
+            event_type=str(event_type),
+            payload=payload_dict,
+            parent_event_ids=parents,
+            geometry_version=str(geometry_hash),
+            evidence_set_hash=_stable(payload or {}),
+            model_version="asmae_v0.5.0",
+            calibration_version="",
+            authority_contract_version="authority_v1",
+            authority_ref=str(authority),
+            state_schema_version=STATE_SCHEMA_VERSION,
+            observation_or_valid_time=str(valid_time),
+        )
+
+        return self.commit_proposal(
+            plot_id=plot_id,
+            proposal=proposal,
+            effective_at=effective_at,
+            tenant_id=tenant_id,
+            namespace=namespace,
+        )
+
+    def hydrate_context(
+        self,
+        plot_id: str,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Hydrate missing live inputs from one geometry-compatible worldline."""
+        geometry_hash = str(context.get("geometry_hash", "") or "")
+        tenant_id = str(context.get("tenant_id") or "default_tenant")
+        namespace = str(context.get("worldline_namespace") or "default")
+        archive_event = self.latest_payload(
+            plot_id, "ARCHIVE_POSTERIOR_VALIDATED", tenant_id, namespace
+        )
+        archive = archive_event.get("archive_posterior")
+        if (
+            not context.get("archive_posterior")
+            and isinstance(archive, dict)
+            and archive.get("geometry_hash") == geometry_hash
+        ):
+            context["archive_posterior"] = archive
+            context["archive_metrics"] = archive_event.get(
+                "historical_metrics", {}
+            )
+            context["archive_baselines"] = archive_event.get("baseline", {})
+            context["archive_bma"] = archive_event.get("archive_bma", {})
+            context["retrovalidation_residuals"] = archive_event.get(
+                "retrovalidation", {}
+            )
+            context["archive_metrics_hash"] = archive_event.get(
+                "archive_metrics_hash"
+            ) or _stable(archive_event)
+            context["archive_metrics_status"] = "available"
+            context["worldline_archive_event_id"] = archive_event.get(
+                "_worldline_event_id"
+            )
+
+        crop_payload = self.latest_payload(
+            plot_id, "CROP_POSTERIOR", tenant_id, namespace
+        )
+        if crop_payload and not context.get("crop_posterior"):
+            crop_posterior = crop_payload.get("crop_posterior", {})
+            context["crop_posterior"] = crop_posterior
+            context["crop_posterior_lineage"] = crop_payload.get(
+                "content_hash"
+            ) or crop_posterior.get(
+                "content_hash"
+            ) or _stable(crop_payload)
+            context["crop_lineage_id"] = crop_posterior.get(
+                "lineage_id"
+            )
+        context["plot_worldline_head"] = self.load_head(
+            plot_id, tenant_id, namespace
+        )
+        return context
+
+    def commit_asmae_result(
+        self,
+        result: Mapping[str, Any],
+        *,
+        geometry_hash: str,
+        snapshot_ref: str = "",
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+    ) -> Dict[str, Any]:
+        """Commit an ASMAE execution result to canonical worldline history."""
+        artifact = dict(result.get("plot_state_artifact") or {})
+        if not artifact:
+            return {}
+        event_type = (
+            "CURRENT_POSTERIOR_VALIDATED"
+            if bool(
+                (result.get("diagnostics") or {}).get(
+                    "scientific_production_usable", False
+                )
+            )
+            else "CURRENT_POSTERIOR_DIAGNOSTIC"
+        )
+        artifact_time = str(artifact.get("as_of") or "").strip()
+        artifact_authority = str(
+            artifact.get("authority_level") or ""
+        ).strip()
+        if not artifact_time:
+            raise ValueError("plot-state artifact as_of is required")
+        if not artifact_authority:
+            raise ValueError("plot-state artifact authority_level is required")
+        event = self.commit_event(
+            plot_id=str(result.get("plot_id", "")),
+            event_type=event_type,
+            geometry_hash=geometry_hash,
+            effective_at=artifact_time,
+            observation_or_valid_time=artifact_time,
+            authority=artifact_authority,
+            tenant_id=tenant_id,
+            namespace=namespace,
+            payload={
+                "plot_state_artifact": artifact,
+                "output_content_hash": result.get("content_hash"),
+                "snapshot_ref": snapshot_ref,
+                "archive_update_candidate": event_type
+                == "CURRENT_POSTERIOR_VALIDATED",
+            },
+        )
+        return event
+
+    def commit_acquisition_plan(
+        self,
+        *,
+        plot_id: str,
+        geometry_hash: str,
+        reason: str,
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+    ) -> Dict[str, Any]:
+        """Commit an archive observation acquisition requirement."""
+        event_time = datetime.now(timezone.utc)
+        return self.commit_event(
+            plot_id=plot_id,
+            event_type="ARCHIVE_ACQUISITION_PLAN",
+            geometry_hash=geometry_hash,
+            authority="DIAGNOSTIC",
+            effective_at=event_time,
+            observation_or_valid_time=event_time,
+            tenant_id=tenant_id,
+            namespace=namespace,
+            payload={
+                "status": "needs_observations",
+                "reason": reason,
+                "requested_sources": ["sentinel2", "sentinel1", "weather"],
+                "synthetic_observations_allowed": False,
+            },
+        )
+
 
 # ── WorldlineEventProposal ───────────────────────────────────────────────────
 

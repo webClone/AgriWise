@@ -26,10 +26,17 @@ def _mean(vals: List[float]) -> float:
     return sum(vals) / max(len(vals), 1) if vals else 0.0
 
 
-def _slope(vals: List[float]) -> float:
-    """Linear slope estimate: (last - first) / (n-1)."""
+def _slope(vals: List[float], dates: List[datetime] = None) -> float:
+    """Rate of change estimate: Delta v / Delta t in units/day."""
     if len(vals) < 2:
         return 0.0
+    if dates is not None and len(dates) == len(vals):
+        try:
+            dt_days = (dates[-1] - dates[0]).total_seconds() / 86400.0
+            if dt_days > 1e-5:
+                return (vals[-1] - vals[0]) / dt_days
+        except Exception:
+            pass
     return (vals[-1] - vals[0]) / (len(vals) - 1)
 
 
@@ -54,12 +61,35 @@ def compute_outcomes(
     now = datetime.now(timezone.utc)
 
     for intervention in completed_interventions:
-        # Use timing window end as proxy for execution date
-        tw = intervention.timing_window or {}
-        try:
-            exec_date = datetime.fromisoformat(tw.get("start", now.isoformat()))
-        except (ValueError, TypeError):
-            exec_date = now
+        # Exposure verification check:
+        # Requires application_status == "COMPLETED_VERIFIED" and valid actual_execution_timestamp
+        actual_ts = getattr(intervention, "actual_execution_timestamp", None)
+        app_status = getattr(intervention, "application_status", "")
+
+        exposure_verified = (
+            app_status == "COMPLETED_VERIFIED" and actual_ts is not None
+        )
+        causal_classification = (
+            "CAUSAL_ATTRIBUTED" if exposure_verified else "OBSERVATIONAL_ASSOCIATION_ONLY"
+        )
+
+        # Resolve execution date: use actual timestamp when available, else timing window start
+        if actual_ts is not None:
+            if isinstance(actual_ts, datetime):
+                exec_date = actual_ts
+            elif isinstance(actual_ts, str):
+                try:
+                    exec_date = datetime.fromisoformat(actual_ts)
+                except (ValueError, TypeError):
+                    exec_date = now
+            else:
+                exec_date = now
+        else:
+            tw = intervention.timing_window or {}
+            try:
+                exec_date = datetime.fromisoformat(tw.get("start", now.isoformat()))
+            except (ValueError, TypeError):
+                exec_date = now
 
         # Define analysis windows
         pre_start = (exec_date - timedelta(days=14)).date().isoformat()
@@ -69,6 +99,7 @@ def compute_outcomes(
 
         # Extract NDVI series
         pre_ndvi, post_ndvi = [], []
+        pre_dates, post_dates = [], []
         pre_rain, post_rain = [], []
 
         for rec in timeseries:
@@ -79,12 +110,22 @@ def compute_outcomes(
             rain = rec.get("rain") or rec.get("precipitation") or 0
 
             if ndvi is not None:
+                d_obj = None
+                try:
+                    d_obj = datetime.fromisoformat(d)
+                except Exception:
+                    pass
+
                 if pre_start <= d <= pre_end:
                     pre_ndvi.append(float(ndvi))
                     pre_rain.append(float(rain or 0))
+                    if d_obj:
+                        pre_dates.append(d_obj)
                 elif post_start <= d <= post_end:
                     post_ndvi.append(float(ndvi))
                     post_rain.append(float(rain or 0))
+                    if d_obj:
+                        post_dates.append(d_obj)
 
         if not pre_ndvi or not post_ndvi:
             continue
@@ -119,8 +160,16 @@ def compute_outcomes(
         elif len(local_confounders) > 0:
             base_confidence = 0.35
 
+        # Downweight confidence when unverified
+        if not exposure_verified:
+            base_confidence *= 0.6
+
         base_w = {"start": pre_start, "end": pre_end}
         eval_w = {"start": post_start, "end": post_end}
+
+        status_suffix = ""
+        if not exposure_verified:
+            status_suffix = " [OBSERVATIONAL_ASSOCIATION_ONLY: execution not verified with as-applied evidence or timestamp]"
 
         # ── Metric 1: NDVI Recovery ──────────────────────────────────────
         delta_ndvi = _mean(post_ndvi) - _mean(pre_ndvi)
@@ -131,12 +180,14 @@ def compute_outcomes(
             method=method,
             baseline_window=base_w, eval_window=eval_w,
             confounders_present=local_confounders,
-            notes=f"Pre mean={_mean(pre_ndvi):.3f}, Post mean={_mean(post_ndvi):.3f}",
+            notes=f"Pre mean={_mean(pre_ndvi):.3f}, Post mean={_mean(post_ndvi):.3f}{status_suffix}",
+            causal_classification=causal_classification,
+            exposure_verified=exposure_verified,
         ))
 
         # ── Metric 2: Growth Velocity Recovery ───────────────────────────
-        pre_slope = _slope(pre_ndvi)
-        post_slope = _slope(post_ndvi)
+        pre_slope = _slope(pre_ndvi, pre_dates if len(pre_dates) == len(pre_ndvi) else None)
+        post_slope = _slope(post_ndvi, post_dates if len(post_dates) == len(post_ndvi) else None)
         velocity_delta = post_slope - pre_slope
         outcomes.append(OutcomeMetric(
             metric_id=OutcomeMetricId.GROWTH_VELOCITY_RECOVERY,
@@ -145,7 +196,9 @@ def compute_outcomes(
             method=method,
             baseline_window=base_w, eval_window=eval_w,
             confounders_present=local_confounders,
-            notes=f"Pre velocity={pre_slope:.4f}/day, Post velocity={post_slope:.4f}/day",
+            notes=f"Pre velocity={pre_slope:.4f}/day, Post velocity={post_slope:.4f}/day{status_suffix}",
+            causal_classification=causal_classification,
+            exposure_verified=exposure_verified,
         ))
 
         # ── Metric 3: Yield Proxy Delta (cumulative NDVI integral) ───────
@@ -159,7 +212,9 @@ def compute_outcomes(
             method=method,
             baseline_window=base_w, eval_window=eval_w,
             confounders_present=local_confounders,
-            notes=f"Pre integral={pre_integral:.3f}, Post integral={post_integral:.3f}",
+            notes=f"Pre integral={pre_integral:.3f}, Post integral={post_integral:.3f}{status_suffix}",
+            causal_classification=causal_classification,
+            exposure_verified=exposure_verified,
         ))
 
     return outcomes

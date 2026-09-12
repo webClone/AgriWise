@@ -7,7 +7,7 @@ consistent processing chain records.
 
 from __future__ import annotations
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from services.agribrain.layer0.observation_packet import Provenance
 
@@ -49,6 +49,6 @@ def build_provenance(
         processing_chain=chain,
         software_version=sw_version,
         source_url=source_url,
-        download_timestamp=datetime.now(),
+        download_timestamp=datetime.now(timezone.utc),
         cache_hit=cache_hit,
     )

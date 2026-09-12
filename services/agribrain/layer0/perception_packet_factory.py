@@ -25,7 +25,7 @@ from __future__ import annotations
 
 __legacy__ = True  # This module is deprecated — use engine-specific pipelines
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 
 from services.agribrain.layer0.image_qa import ImageQAEngine, ImageQAResult
@@ -139,11 +139,13 @@ class PerceptionPacketFactory:
         source = source_map.get(meta.get("source_type", ""), ObservationSource.USER_OBSERVATION)
         
         # Timestamp
-        ts = meta.get("timestamp", datetime.now().isoformat())
+        ts = meta.get("timestamp", datetime.now(timezone.utc).isoformat())
         try:
             timestamp = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (ValueError, TypeError):
-            timestamp = datetime.now()
+            timestamp = datetime.now(timezone.utc)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
         
         # Build QA metadata — use QAFlag enum values and scene_score
         qa_flags = []

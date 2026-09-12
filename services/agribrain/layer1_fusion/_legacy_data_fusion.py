@@ -1019,30 +1019,28 @@ class DataFusionEngine:
             if d in wx_map:
                 w = wx_map[d] or {}
                 rain = w.get("precipitation", 0.0)
-                tmean = w.get("temperature_mean", 20.0)
+                tmean = w.get("temperature_mean")
                 row["rain"] = float(rain) if rain is not None else 0.0
-                row["tmean"] = float(tmean) if tmean is not None else 20.0
+                row["tmean"] = float(tmean) if tmean is not None else None
                 # Pure Python GDD (base 10C default; crop-specific base can be added later)
-                row["gdd"] = max(0.0, row["tmean"] - 10.0)
+                row["gdd"] = max(0.0, row["tmean"] - 10.0) if row["tmean"] is not None else 0.0
             else:
                 # Ensure keys exist for downstream consumers
                 row.setdefault("rain", 0.0)
-                row.setdefault("tmean", 20.0)
-                row.setdefault("gdd", max(0.0, row["tmean"] - 10.0))
+                row.setdefault("tmean", None)
+                row.setdefault("gdd", 0.0)
 
     def _merge_static(self, tensor: "FieldTensor", evidence: List["EvidenceItem"]):
         """Step 7: Static Layers (Robust against missing data)"""
         soil_items = [e for e in evidence if e.source_type == EvidenceSourceType.SOIL]
         
-        # Start with safe defaults
-        clay = 20.0
-        sand = 40.0
-        silt = 40.0
-        ph = 6.5
-        org_c = 10.0
+        clay = None
+        sand = None
+        silt = None
+        ph = None
+        org_c = None
         texture_class = "unknown"
-
-        data_source = "defaults_no_data"
+        data_source = "no_data"
 
         if soil_items:
             best = soil_items[0]
@@ -1058,7 +1056,10 @@ class DataFusionEngine:
                 if raw_sand is not None:
                     sand = float(raw_sand)
                     
-                silt = round(100.0 - clay - sand, 1)
+                if clay is not None and sand is not None:
+                    silt = round(100.0 - clay - sand, 1)
+                elif raw.get("silt") is not None:
+                    silt = float(raw.get("silt"))
                 
                 raw_ph = raw.get("ph")
                 if raw_ph is not None:
@@ -1073,7 +1074,10 @@ class DataFusionEngine:
                 print(f"⚠️ [Spatial] Error parsing static soil data: {e}")
                 data_source = "defaults_parse_error"
 
-        tensor.static = {
+        if not hasattr(tensor, "static") or tensor.static is None:
+            tensor.static = {}
+
+        tensor.static.update({
             "soil_clay_mean": clay,
             "soil_sand_mean": sand,
             "soil_silt_mean": silt,
@@ -1081,7 +1085,7 @@ class DataFusionEngine:
             "soil_org_c_mean": org_c,
             "texture_class": texture_class,
             "data_source": data_source
-        }
+        })
 
     def _merge_forecast_7d(self, tensor: "FieldTensor", evidence: List["EvidenceItem"]):
         """Step 8: Weather forecast mapping"""
@@ -1119,15 +1123,18 @@ class DataFusionEngine:
             d = rec.get("date")
             if not d:
                 continue
-            tmean = rec.get("tmean", 20.0)
+            tmean = rec.get("tmean")
             rain = rec.get("rain", 0.0)
-            et0 = rec.get("et0", 3.0)
-            daily_weather[d] = {
-                "temp_max": tmean + 5.0,   # Approximate from mean
-                "temp_min": tmean - 5.0,
-                "precipitation": rain,
-                "et0": float(et0) if et0 is not None else 3.0,
-            }
+            et0 = rec.get("et0")
+            tmax = rec.get("temp_max")
+            tmin = rec.get("temp_min")
+            if any(v is not None for v in (tmean, tmax, tmin, et0)):
+                daily_weather[d] = {
+                    "temp_max": float(tmax) if tmax is not None else tmean,
+                    "temp_min": float(tmin) if tmin is not None else tmean,
+                    "precipitation": float(rain) if rain is not None else 0.0,
+                    "et0": float(et0) if et0 is not None else 0.0,
+                }
         
         # If weather evidence has explicit temp_max/min, use them
         for e in evidence:

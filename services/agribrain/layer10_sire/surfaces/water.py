@@ -78,8 +78,22 @@ def _compute_drainage_deficit(
     l1: L1SpatialData,
     H: int,
     W: int,
-) -> Optional[List[List[float]]]:
-    """Compute drainage deficit / waterlogging anoxia risk in mm."""
+    root_zone_depth_m: float = 0.40,
+    field_capacity_vwc: float = 0.35,
+    l3: Optional[L3DiagnosticData] = None,
+) -> Optional[Tuple[List[List[float]], str, GroundingClass, Dict[str, Any]]]:
+    """Compute drainage deficit / waterlogging anoxia risk.
+
+    Returns:
+        (grid, units, grounding_class, provenance) or None if no moisture source available.
+        - Physical mm: computed from volumetric water content (VWC) above field capacity across root depth.
+        - Proxy index: computed from spectral NDMI; labeled as proxy_index (NOT mm).
+    """
+    c_water = getattr(l3, "canonical_water_state", None) if l3 else None
+    if c_water is not None:
+        if hasattr(c_water, "soil_water") and hasattr(c_water.soil_water, "theta_fc"):
+            field_capacity_vwc = float(c_water.soil_water.theta_fc)
+
     sm_raster, _ = _get_raster(l1, ["soil_moisture", "root_zone_water", "surface_water"], H, W)
     if sm_raster is not None:
         grid = []
@@ -87,13 +101,24 @@ def _compute_drainage_deficit(
             row = []
             for c in range(W):
                 v = sm_raster[r][c] if r < len(sm_raster) and c < len(sm_raster[r]) else None
-                if v is not None and v > 0.35:
-                    excess_mm = min(30.0, max(0.0, (v - 0.35) * 300.0))
+                if v is not None and v > field_capacity_vwc:
+                    # Physical water depth in mm: excess_vwc * root_zone_depth_m * 1000 mm/m
+                    excess_mm = min(50.0, max(0.0, (v - field_capacity_vwc) * root_zone_depth_m * 1000.0))
                 else:
                     excess_mm = 0.0
                 row.append(round(excess_mm, 2))
             grid.append(row)
-        return grid
+        prov = {
+            "source_type": "volumetric_water_content",
+            "root_zone_depth_m": root_zone_depth_m,
+            "field_capacity_vwc": field_capacity_vwc,
+            "calibrated_physical_units": True,
+            "formula": "max(0, (VWC - FC) * Zr * 1000)",
+        }
+        if c_water is not None:
+            prov["canonical_water_authority"] = "L3_WATER_INTELLIGENCE"
+            prov["canonical_deep_drainage_mm"] = float(getattr(getattr(c_water, "fluxes", None), "actual", None).deep_drainage_mm) if hasattr(getattr(c_water, "fluxes", None), "actual") else 0.0
+        return grid, "mm", GroundingClass.RASTER_GROUNDED, prov
 
     ndmi_raster, _ = _get_raster(l1, ["ndmi", "water_index"], H, W)
     if ndmi_raster is not None:
@@ -103,14 +128,61 @@ def _compute_drainage_deficit(
             for c in range(W):
                 v = ndmi_raster[r][c] if r < len(ndmi_raster) and c < len(ndmi_raster[r]) else None
                 if v is not None and v > 0.2:
-                    excess_mm = min(30.0, max(0.0, (v - 0.2) * 50.0))
+                    # NDMI is a dimensionless optical proxy [0..1], NOT physical millimetres
+                    proxy_val = min(1.0, max(0.0, (v - 0.2) / 0.8))
                 else:
-                    excess_mm = 0.0
-                row.append(round(excess_mm, 2))
+                    proxy_val = 0.0
+                row.append(round(proxy_val, 3))
             grid.append(row)
-        return grid
+        prov = {
+            "source_type": "spectral_ndmi",
+            "calibrated_physical_units": False,
+            "note": "dimensionless_canopy_water_proxy_not_physical_mm",
+            "formula": "normalized_ndmi_above_threshold",
+        }
+        return grid, "proxy_index", GroundingClass.PROXY_SPATIAL, prov
 
     return None
+
+
+def legacy_generate_water_surfaces_adapter(*args: Any, **kwargs: Any) -> List[SurfaceArtifact]:
+    """Legacy positional adapter for generate_water_surfaces.
+
+    Supports legacy positional signatures such as:
+      generate_water_surfaces(inp, l1_data, l3_data, H, W)
+    Deprecated: Call generate_water_surfaces(inp, H, W, l1_data=..., l3_data=...) directly.
+    """
+    import warnings
+    warnings.warn(
+        "Positional legacy signature for generate_water_surfaces is deprecated. "
+        "Use generate_water_surfaces(inp, H, W, l1_data=..., l3_data=...).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    inp = args[0]
+    H_arg = args[1] if len(args) > 1 else kwargs.get("H", 10)
+    W_arg = args[2] if len(args) > 2 else kwargs.get("W", 10)
+    l1_arg = args[3] if len(args) > 3 else kwargs.get("l1_data")
+    l3_arg = args[4] if len(args) > 4 else kwargs.get("l3_data")
+
+    if isinstance(H_arg, L1SpatialData):
+        actual_l1 = H_arg
+        actual_l3 = W_arg if isinstance(W_arg, L3DiagnosticData) else None
+        actual_H = int(l1_arg) if isinstance(l1_arg, (int, float)) else int(kwargs.get("H", 10))
+        actual_W = int(l3_arg) if isinstance(l3_arg, (int, float)) else int(kwargs.get("W", 10))
+    else:
+        actual_H = int(H_arg)
+        actual_W = int(W_arg)
+        actual_l1 = l1_arg
+        actual_l3 = l3_arg
+
+    return _generate_water_surfaces_impl(
+        inp=inp,
+        H=actual_H,
+        W=actual_W,
+        l1_data=actual_l1,
+        l3_data=actual_l3,
+    )
 
 
 def generate_water_surfaces(
@@ -121,19 +193,40 @@ def generate_water_surfaces(
     l3_data: Optional[L3DiagnosticData] = None,
     **kwargs: Any,
 ) -> List[SurfaceArtifact]:
-    surfaces: List[SurfaceArtifact] = []
+    """Primary typed water surface generation contract.
 
-    # Support both (inp, H, W, l1_data=..., l3_data=...) and (inp, l1_data, l3_data, H, W)
+    Args:
+        inp: Layer10Input configuration and tensor metadata.
+        H: Target grid height in pixels.
+        W: Target grid width in pixels.
+        l1_data: Optional pre-adapted L1 spatial data.
+        l3_data: Optional pre-adapted L3 diagnostic data.
+    """
     if isinstance(H, L1SpatialData):
-        actual_l1 = H
-        actual_l3 = W if isinstance(W, L3DiagnosticData) else None
-        actual_H = int(l1_data) if isinstance(l1_data, (int, float)) else int(kwargs.get("H", 10))
-        actual_W = int(l3_data) if isinstance(l3_data, (int, float)) else int(kwargs.get("W", 10))
-    else:
-        actual_H = int(H)
-        actual_W = int(W)
-        actual_l1 = l1_data
-        actual_l3 = l3_data
+        # Delegate legacy positional reinterpretation to dedicated adapter
+        return legacy_generate_water_surfaces_adapter(inp, H, W, l1_data, l3_data, **kwargs)
+
+    return _generate_water_surfaces_impl(
+        inp=inp,
+        H=int(H),
+        W=int(W),
+        l1_data=l1_data,
+        l3_data=l3_data,
+    )
+
+
+def _generate_water_surfaces_impl(
+    inp: Layer10Input,
+    H: int,
+    W: int,
+    l1_data: Optional[L1SpatialData] = None,
+    l3_data: Optional[L3DiagnosticData] = None,
+) -> List[SurfaceArtifact]:
+    surfaces: List[SurfaceArtifact] = []
+    actual_H = H
+    actual_W = W
+    actual_l1 = l1_data
+    actual_l3 = l3_data
 
     if actual_l1 is None:
         from services.agribrain.layer10_sire.adapters.l1_adapter import adapt_l1
@@ -161,19 +254,34 @@ def generate_water_surfaces(
             provenance=prov,
         ))
 
-    # --- 2. DRAINAGE_DEFICIT_MM — Waterlogging / Anoxia Risk ---
-    drainage_grid = _compute_drainage_deficit(actual_l1, actual_H, actual_W)
-    if drainage_grid is not None:
+    # --- 2. DRAINAGE_DEFICIT_MM or WATERLOGGING_PROXY_INDEX — Waterlogging / Anoxia Risk ---
+    drainage_result = _compute_drainage_deficit(actual_l1, actual_H, actual_W, l3=actual_l3)
+    if drainage_result is not None:
+        drainage_grid, units, drainage_grounding, d_prov = drainage_result
+        if units == "mm":
+            sem_type = SurfaceType.DRAINAGE_DEFICIT_MM
+            surf_id = f"DRAINAGE_DEFICIT_MM_{inp.plot_id}"
+            render_max = 50.0
+        else:
+            sem_type = SurfaceType.WATERLOGGING_PROXY_INDEX
+            surf_id = f"WATERLOGGING_PROXY_INDEX_{inp.plot_id}"
+            render_max = 1.0
+            d_prov = dict(d_prov)
+            d_prov["prescription_driver_allowed"] = False
+            d_prov["is_physical_measurement"] = False
+
         surfaces.append(SurfaceArtifact(
-            surface_id=f"DRAINAGE_DEFICIT_MM_{inp.plot_id}",
-            semantic_type=SurfaceType.DRAINAGE_DEFICIT_MM,
+            surface_id=surf_id,
+            semantic_type=sem_type,
             grid_ref=f"{actual_H}x{actual_W}",
             values=drainage_grid,
-            units="mm",
+            units=units,
             native_resolution_m=inp.resolution_m,
-            render_range=(0.0, 30.0),
+            render_range=(0.0, render_max),
             palette_id=PaletteId.STRESS_RED,
             source_layers=["L1"],
+            grounding_class=drainage_grounding,
+            provenance=d_prov,
         ))
 
     # --- 3. VPD_STRESS — Vapor Pressure Deficit stomatal stress ---

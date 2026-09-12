@@ -110,6 +110,7 @@ class LayerResult:
     errors: List[str] = field(default_factory=list)
     degradation_flags: List[str] = field(default_factory=list)
     run_id: str = "" # The specific Lx-{hash}
+    stage_receipt: Optional[Any] = None
 
 @dataclass
 class GlobalQuality:
@@ -169,6 +170,7 @@ class RunArtifact:
     # Audit
     lineage_map: Dict[str, str] = field(default_factory=dict) # {L1: id, L2: id...}
     layer_lineage: List[Dict[str, str]] = field(default_factory=list) # Detailed audit {layer, inputs_ref, code_ref}
+    stage_receipts: Dict[str, Any] = field(default_factory=dict) # Layer stage receipts
 
     def to_summary_json(self) -> Dict[str, Any]:
         """Lightweight summary for API responses."""

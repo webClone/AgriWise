@@ -73,7 +73,7 @@ class TemporalAnomalyEngine:
         if evi_series:
             evi_modeled = self._simple_smooth(evi_series)
             evi_z = self._compute_z_scores(
-                [v if v is not None else 0.0 for v in evi_series],
+                evi_series,
                 evi_modeled,
                 [0.05] * n,
             )
@@ -83,7 +83,7 @@ class TemporalAnomalyEngine:
         if ndwi_series:
             ndwi_modeled = self._simple_smooth(ndwi_series)
             ndwi_z = self._compute_z_scores(
-                [v if v is not None else 0.0 for v in ndwi_series],
+                ndwi_series,
                 ndwi_modeled,
                 [0.05] * n,
             )
@@ -144,6 +144,7 @@ class TemporalAnomalyEngine:
                 ndwi_series, ndmi_series,
                 crop_temp_max, crop_temp_min, temp_min_series,
                 is_positive=False,
+                evi_series=evi_series,
             )
             anomalies.append(anomaly)
 
@@ -155,6 +156,7 @@ class TemporalAnomalyEngine:
                 ndwi_series, ndmi_series,
                 crop_temp_max, crop_temp_min, temp_min_series,
                 is_positive=True,
+                evi_series=evi_series,
             )
             anomalies.append(anomaly)
 
@@ -447,6 +449,7 @@ class TemporalAnomalyEngine:
         ndwi_series, ndmi_series,
         crop_temp_max, crop_temp_min, temp_min_series,
         is_positive,
+        evi_series: Optional[List[Optional[float]]] = None,
     ) -> VegetationAnomaly:
         """Create an anomaly object with full attribution evidence."""
 
@@ -536,7 +539,11 @@ class TemporalAnomalyEngine:
 
         # 6. Canopy/Chlorophyll anomaly: EVI drops faster than NDVI
         if evi_z:
-            mean_evi_z = statistics.mean(evi_z[start:end]) if evi_z[start:end] else 0.0
+            valid_evi_z = [
+                evi_z[i] for i in range(start, end)
+                if i < len(evi_z) and evi_series and i < len(evi_series) and evi_series[i] is not None
+            ]
+            mean_evi_z = statistics.mean(valid_evi_z) if valid_evi_z else 0.0
             if abs(mean_evi_z) > abs(mean_z) * 1.3 and mean_evi_z < -1.5:
                 attr.nutrient_deficiency = min(1.0, abs(mean_evi_z - mean_z) * 0.5)
 

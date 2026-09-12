@@ -84,8 +84,9 @@ class TrainingTrajectoryWindow:
     events: Tuple[Dict[str, Any], ...]
     active_events: Tuple[Dict[str, Any], ...]
     superseded_events: Tuple[Dict[str, Any], ...]
-    extracted_at: datetime
-    window_hash: str
+    quarantined_events: Tuple[Dict[str, Any], ...] = ()
+    extracted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    window_hash: str = ""
 
     def has_future_leakage(self, knowledge_cutoff: Optional[datetime] = None) -> bool:
         """Verify that no event in this window was committed after the knowledge cutoff."""
@@ -123,6 +124,7 @@ class TrainingTrajectoryWindow:
             "event_count": len(self.events),
             "active_event_count": len(self.active_events),
             "superseded_event_count": len(self.superseded_events),
+            "quarantined_event_count": len(self.quarantined_events),
             "extracted_at": self.extracted_at.isoformat(),
             "window_hash": self.window_hash,
         }
@@ -174,31 +176,42 @@ class BitemporalWorldlineExtractor:
         # 1. Load all persisted events for plot
         all_events = self.worldline_service.load_all_events(plot_id, tenant_id=tenant_id, namespace=namespace)
 
-        # 2. Filter 1: Strictly mask future knowledge
-        # Any event committed AFTER as_of_knowledge_time did not exist in the system's
-        # knowledge at that time.
+        # 2. Filter & Quarantine: Validate knowledge time, causality, status, and future leakage
+        quarantined_events: List[Dict[str, Any]] = []
         knowledge_known_events: List[Dict[str, Any]] = []
+
         for event in all_events:
+            quarantine_reason = None
             kt = _extract_knowledge_time(event)
-            if kt is not None and kt > knowledge_dt:
-                # FUTURE LEAKAGE: Skip completely
-                continue
-            knowledge_known_events.append(event)
+            et = _extract_event_time(event)
+            status = str(event.get("status") or (event.get("payload") or {}).get("status") or "").upper()
+
+            if kt is None:
+                quarantine_reason = "missing_knowledge_time"
+            elif et is None:
+                quarantine_reason = "missing_event_time"
+            elif kt < et:
+                quarantine_reason = "causality_violation_knowledge_precedes_event"
+            elif kt > knowledge_dt:
+                quarantine_reason = "future_knowledge_leakage"
+            elif status in ("PROVISIONAL", "UNCOMMITTED", "ABORTED", "QUARANTINED", "FAILED"):
+                quarantine_reason = f"uncommitted_or_aborted_status_{status.lower()}"
+
+            if quarantine_reason:
+                rec = dict(event)
+                rec["quarantine_reason"] = quarantine_reason
+                quarantined_events.append(rec)
+            else:
+                knowledge_known_events.append(event)
 
         # 3. Filter 2: Event time window [start_event_time, end_event_time]
         window_events: List[Dict[str, Any]] = []
         for event in knowledge_known_events:
             et = _extract_event_time(event)
-            if et is None:
-                # If event has no valid time, fallback to committed time
-                et = _extract_knowledge_time(event)
             if et is not None and start_dt <= et <= end_dt:
                 window_events.append(event)
 
         # 4. Resolve superseding relationships within knowledge-known events
-        # If an event B was committed <= knowledge_dt and supersedes event A,
-        # then A is superseded. If event B was committed > knowledge_dt,
-        # B was filtered out in step 2, so A remains active!
         superseded_ids: Set[str] = set()
         for event in knowledge_known_events:
             payload = event.get("payload") or {}
@@ -236,6 +249,7 @@ class BitemporalWorldlineExtractor:
             events=tuple(window_events),
             active_events=tuple(active_events),
             superseded_events=tuple(superseded_events),
+            quarantined_events=tuple(quarantined_events),
             extracted_at=extracted_at,
             window_hash=window_hash,
         )

@@ -8,7 +8,14 @@ from typing import Any, Dict, List, Optional
 
 from layer0.archive.scene_manifest import HistoricalSceneRecord
 
-from .worldline_service import PlotWorldlineService, WORLDLINE_ROOT
+from services.agribrain.world_model.canonical_worldline import (
+    CanonicalWorldlineService,
+    CANONICAL_WORLDLINE_ROOT,
+)
+
+# Backwards-compatibility aliases
+PlotWorldlineService = CanonicalWorldlineService
+WORLDLINE_ROOT = CANONICAL_WORLDLINE_ROOT
 
 
 ARCHIVE_MANIFEST_ROOT = (
@@ -55,13 +62,13 @@ class ScheduledArchiveWorldlineService:
 
     def __init__(
         self,
-        worldline: Optional[PlotWorldlineService] = None,
+        worldline: Optional[Any] = None,
     ) -> None:
-        self.worldline = worldline or PlotWorldlineService()
+        self.worldline = worldline or CanonicalWorldlineService()
 
     def _due_plot_heads(self) -> List[Dict[str, Any]]:
         heads: List[Dict[str, Any]] = []
-        if not Path(WORLDLINE_ROOT).exists():
+        if not Path(CANONICAL_WORLDLINE_ROOT).exists():
             return heads
         for path in Path(WORLDLINE_ROOT).glob("*/*/*/head.json"):
             head = _read(path)

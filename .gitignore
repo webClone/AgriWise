@@ -77,3 +77,9 @@ scratch/
 services/agribrain/.cache/
 extracted_monograph_toc.txt
 monograph_full_text.md
+services/agribrain/mesia/data/copernicus_cache_*.json
+services/agribrain/mesia/data/osm_masts_cache_*.json
+services/agribrain/mesia/data/plot_*_temporal_history.json
+services/data/conversation_memory/
+services/agribrain/data/feedback_learning/
+services/agribrain/layer9_interface/config/telemetry/

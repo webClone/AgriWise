@@ -264,7 +264,7 @@ export default function RawDataSidebar() {
                       : "ASMAE diagnostic state available. Raster visualization active.")
                   : "ASMAE diagnostic state available. Raster visualization unavailable (materialization pending)."}
                 {directlyAssimilated.length > 0
-                  ? " Directly assimilated: " + directlyAssimilated.slice(0, 5).join(", ") + "."
+                  ? ` Directly assimilated (${directlyAssimilated.length}): ` + directlyAssimilated.join(", ") + "."
                   : (assimilated.length > 0 ? " Assimilated: " + assimilated.slice(0, 5).join(", ") + "." : "")}
                 {proxyAssimilated.length > 0
                   ? " Proxy-assimilated: " + proxyAssimilated.slice(0, 5).join(", ") + (proxyAssimilated.length > 5 ? ` +${proxyAssimilated.length - 5}` : "") + "."

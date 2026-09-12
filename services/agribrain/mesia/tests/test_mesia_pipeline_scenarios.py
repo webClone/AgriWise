@@ -473,7 +473,9 @@ class TestScenarioCInSituGnssEdgeCasesAndFailClosed:
     def test_insufficient_satellite_arc_strictly_fails_closed(self):
         """Arc with only 3 points (< 8 required) strictly returns INSUFFICIENT_SATELLITE_ARCS without 20.0% fallback."""
         ns = PlotNamespace(tenant_id="default_tenant", farm_id="default_farm", plot_id="test_insufficient_edge")
-        data_dir = Path("services/agribrain/mesia/data")
+        from services.agribrain.mesia.service import WORKSPACE_ROOT
+        data_dir = WORKSPACE_ROOT / "services" / "agribrain" / "mesia" / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
         log_file = data_dir / f"plot_{ns.plot_id}_field.nmea"
 
         # Only 3 points for PRN 05

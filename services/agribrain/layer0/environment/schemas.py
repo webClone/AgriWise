@@ -68,8 +68,8 @@ class ProcessForcing:
     water_balance_mm: float = 0.0
 
     # Confidence
-    rainfall_confidence: float = 0.5
-    weather_confidence: float = 0.5
+    rainfall_confidence: float = 0.0
+    weather_confidence: float = 0.0
 
     # ET₀ source
     et0_source: Literal["open_meteo", "penman_monteith", "penman_monteith_reduced", "hargreaves", "unknown"] = "unknown"

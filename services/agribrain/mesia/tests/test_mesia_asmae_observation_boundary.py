@@ -18,7 +18,10 @@ from services.agribrain.mesia.assimilation.asmae_operator import ASMAEObservatio
 from services.agribrain.layer05_asmae.observation.dispatcher import (
     ASMAEObservationDispatcher,
     ObservationAbstentionReceipt,
+    AssimilationReceipt,
+    compute_idempotency_key,
 )
+from services.agribrain.scientific_contracts.exceptions import ContractViolation
 from services.agribrain.layer05_asmae.observation.contracts import ObservationEvent
 from services.agribrain.layer05_asmae.state.authority import AuthorityVector
 from services.agribrain.mesia.assimilation.observability_analyzer import ObservabilityAnalyzer
@@ -290,3 +293,136 @@ class TestEndToEndMesiaProposalReceipts:
             assert receipt["status"] in ("admitted_for_assimilation", "abstained_uncalibrated")
             assert "observation_id" in receipt
             assert "receipt" in receipt
+
+
+class TestAsmaeDurableQueueAndTwoPhaseCommit:
+    """WP07 & Blocking Amendment 5: Durable queue FIFO ordering, lease semantics, and 2-phase EnKF commit."""
+
+    def test_durable_queue_fifo_and_atomic_lease(self, tmp_path):
+        dispatcher = ASMAEObservationDispatcher(queue_root=tmp_path / "queue")
+        now = datetime.now(timezone.utc)
+
+        # Enqueue 3 events in sequence
+        for i in range(3):
+            ev = ObservationEvent(
+                observation_id=f"obs-queue-{i}",
+                source_family="MESIA_GNSSR",
+                sensor_id="RX_F9P",
+                acquisition_time=now,
+                valid_time=now,
+                spatial_support_ref="mz:TEST_PLOT_01",
+                quality_ref=f"var:0.00{i+1}",
+                observation_operator_ref="gnss_ref_v1",
+                uncertainty_model_ref="gum_budget",
+                authority=AuthorityVector(visualization_allowed=True, state_update_allowed=True, diagnosis_allowed=True),
+            )
+            res = dispatcher.dispatch_event(ev, plot_id="PLOT_QUEUE_01", capture_manifest_id=f"manifest-{i}")
+            assert res["status"] == "admitted_for_assimilation"
+
+        # Leased in strict FIFO order
+        leased_0 = dispatcher.lease_next_observation("PLOT_QUEUE_01", lease_duration_seconds=30.0, worker_id="worker-a")
+        assert leased_0 is not None
+        assert leased_0["observation_id"] == "obs-queue-0"
+        assert leased_0["status"] == "LEASED"
+
+        leased_1 = dispatcher.lease_next_observation("PLOT_QUEUE_01", lease_duration_seconds=30.0, worker_id="worker-a")
+        assert leased_1 is not None
+        assert leased_1["observation_id"] == "obs-queue-1"
+
+        leased_2 = dispatcher.lease_next_observation("PLOT_QUEUE_01", lease_duration_seconds=30.0, worker_id="worker-a")
+        assert leased_2 is not None
+        assert leased_2["observation_id"] == "obs-queue-2"
+
+        # No more queued items
+        leased_none = dispatcher.lease_next_observation("PLOT_QUEUE_01")
+        assert leased_none is None
+
+        # Release lease_1 back to QUEUED
+        rel = dispatcher.release_lease("PLOT_QUEUE_01", leased_1["idempotency_key"], leased_1["lease_id"])
+        assert rel is True
+
+        re_leased = dispatcher.lease_next_observation("PLOT_QUEUE_01")
+        assert re_leased is not None
+        assert re_leased["observation_id"] == "obs-queue-1"
+
+    def test_idempotent_deduplication(self, tmp_path):
+        dispatcher = ASMAEObservationDispatcher(queue_root=tmp_path / "queue")
+        now = datetime.now(timezone.utc)
+        ev = ObservationEvent(
+            observation_id="obs-idempotent-01",
+            source_family="MESIA_GNSSR",
+            sensor_id="RX_F9P",
+            acquisition_time=now,
+            valid_time=now,
+            spatial_support_ref="mz:TEST_PLOT_IDEM",
+            quality_ref="var:0.001",
+            observation_operator_ref="gnss_ref_v1",
+            uncertainty_model_ref="gum_budget",
+            authority=AuthorityVector(visualization_allowed=True, state_update_allowed=True, diagnosis_allowed=True),
+        )
+
+        res1 = dispatcher.dispatch_event(ev, plot_id="PLOT_IDEM_01", capture_manifest_id="manifest-idem")
+        assert res1["status"] == "admitted_for_assimilation"
+        assert "idempotent" not in res1
+
+        res2 = dispatcher.dispatch_event(ev, plot_id="PLOT_IDEM_01", capture_manifest_id="manifest-idem")
+        assert res2["status"] == "admitted_for_assimilation"
+        assert res2.get("idempotent") is True
+
+    def test_two_phase_commit_with_valid_signed_innovation(self):
+        dispatcher = ASMAEObservationDispatcher()
+        now = datetime.now(timezone.utc)
+
+        receipt = AssimilationReceipt(
+            receipt_id="rec-assim-01",
+            plot_id="plot_assim_01",
+            observation_id="obs-inversion-01",
+            candidate_node_id="node-candidate-sha256-abc",
+            innovation_vector=(-0.032, 0.015),  # signed innovation residual y - H(x^-)
+            covariance_min_eigenvalue=0.00045,
+            assimilated_at=now,
+            status="COMMITTED",
+        )
+
+        # Covariance matrix is positive semi-definite
+        cov = [
+            [0.002, 0.0001],
+            [0.0001, 0.0015],
+        ]
+
+        result = dispatcher.commit_assimilation(
+            plot_id="plot_assim_01",
+            candidate_node_id="node-candidate-sha256-abc",
+            assimilation_receipt=receipt,
+            geometry_hash="geom_assim_hash",
+            error_covariance=cov,
+        )
+
+        assert result["status"] == "committed"
+        assert result["worldline_event_id"] is not None
+        assert result["candidate_node_id"] == "node-candidate-sha256-abc"
+
+    def test_two_phase_commit_rejects_negative_covariance_eigenvalue(self):
+        dispatcher = ASMAEObservationDispatcher()
+        now = datetime.now(timezone.utc)
+
+        receipt = AssimilationReceipt(
+            receipt_id="rec-assim-bad-cov",
+            plot_id="plot_assim_02",
+            observation_id="obs-inversion-02",
+            candidate_node_id="node-candidate-bad",
+            innovation_vector=(0.045,),
+            covariance_min_eigenvalue=-0.05,  # Violates PSD
+            assimilated_at=now,
+            status="COMMITTED",
+        )
+
+        with pytest.raises(ContractViolation, match="Covariance.*violated"):
+            dispatcher.commit_assimilation(
+                plot_id="plot_assim_02",
+                candidate_node_id="node-candidate-bad",
+                assimilation_receipt=receipt,
+                geometry_hash="geom_assim_hash",
+                error_covariance=[[-0.05]],
+            )
+

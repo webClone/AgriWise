@@ -18,7 +18,7 @@ Rules:
 
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 
 from services.agribrain.layer0.perception.common.contracts import (
@@ -132,7 +132,9 @@ def to_observation_packets(
     )
 
     # Timestamp
-    timestamp = output.timestamp or datetime.now()
+    timestamp = output.timestamp or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
 
     # Build provenance
     provenance = Provenance(

@@ -142,6 +142,7 @@ export interface FAOIntelligenceProfile {
 
 import { prisma } from "@/lib/db";
 import { calculateDeltaT, calculateDewPoint, calculateSoilTension } from "./physics-engine";
+import { buildSignedInternalHeaders } from "./internal-service-auth";
 
 // ============================================================================
 // LEGACY MOCK DATA REMOVED (v5.1)
@@ -179,6 +180,8 @@ export async function getFAOLandIntelligence(
   let snapshot: any = null;
   try {
     let resolvedPlotId = plotId;
+    let resolvedFarmId = "";
+    let resolvedTenantId = "";
     if (!resolvedPlotId) {
       // Look for a plot nearby within ~1.1km
       const plot = await prisma.plot.findFirst({
@@ -188,10 +191,21 @@ export async function getFAOLandIntelligence(
             longitude: { gte: longitude - 0.01, lte: longitude + 0.01 }
           }
         },
-        select: { id: true }
+        select: { id: true, farmId: true, farm: { select: { userId: true } } }
       });
       if (plot) {
         resolvedPlotId = plot.id;
+        resolvedFarmId = plot.farmId;
+        resolvedTenantId = plot.farm?.userId || "";
+      }
+    } else {
+      const plot = await prisma.plot.findUnique({
+        where: { id: resolvedPlotId },
+        select: { id: true, farmId: true, farm: { select: { userId: true } } }
+      });
+      if (plot) {
+        resolvedFarmId = plot.farmId;
+        resolvedTenantId = plot.farm?.userId || "";
       }
     }
 
@@ -218,17 +232,33 @@ export async function getFAOLandIntelligence(
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 20000);
       
+      const payload = {
+        lat: latitude,
+        lng: longitude,
+        crop: cropCode,
+        days_past: 7,
+        days_future: 7,
+        plot_id: plotId || "system"
+      };
+      const bodyText = JSON.stringify(payload);
+      const signedHeaders = buildSignedInternalHeaders(
+        "POST",
+        "/v2/plot-intelligence",
+        {
+          tenantId: "system",
+          farmId: "system",
+          plotId: (plotId || "system").trim(),
+        },
+        bodyText
+      );
+
       const response = await fetch(`${AGRIBRAIN_URL}/v2/plot-intelligence`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          lat: latitude,
-          lng: longitude,
-          crop: cropCode,
-          days_past: 7,
-          days_future: 7,
-          plot_id: plotId || null
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          ...signedHeaders,
+        },
+        body: bodyText,
         signal: controller.signal
       });
       clearTimeout(timer);

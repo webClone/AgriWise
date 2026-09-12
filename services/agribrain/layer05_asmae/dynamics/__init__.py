@@ -1,5 +1,27 @@
-"""ASMAE Dynamics — R5.0 Contract Freeze.
+"""ASMAE Dynamics — Biophysical Transition Models.
 
-This package will hold the temporal transition runtime in R5.1.
-For R5.0, it contains only the forcing contract.
+Provides degree-day plant growth curves and hydraulic soil drying dynamics.
 """
+
+from .plant_growth import (
+    CropGrowthParameters,
+    calculate_daily_gdd,
+    step_plant_growth,
+    temperature_inhibition_factor,
+)
+from .soil_drying import (
+    SoilHydraulicParameters,
+    compute_transpiration_reduction_ks,
+    step_soil_drying,
+)
+
+__all__ = [
+    "CropGrowthParameters",
+    "calculate_daily_gdd",
+    "step_plant_growth",
+    "temperature_inhibition_factor",
+    "SoilHydraulicParameters",
+    "compute_transpiration_reduction_ks",
+    "step_soil_drying",
+]
+

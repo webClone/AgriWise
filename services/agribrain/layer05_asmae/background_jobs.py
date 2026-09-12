@@ -390,7 +390,10 @@ def _manifest_for_job(job_path: Path, payload: Dict[str, Any]) -> Path:
     expected_job, expected_manifest = _paths(job_id)
     if job_path.resolve() != expected_job.resolve():
         raise ManifestError("job record path does not match its identity")
-    supplied = Path(str(payload.get("manifest_ref", "")))
+    raw_manifest_ref = payload.get("manifest_ref")
+    if not raw_manifest_ref or str(raw_manifest_ref).strip() in ("", "None"):
+        return expected_manifest
+    supplied = Path(str(raw_manifest_ref))
     if not supplied.is_absolute():
         supplied = JOBS_DIR / supplied
     if supplied.resolve() != expected_manifest.resolve():
@@ -731,6 +734,7 @@ def _enqueue_standard_job_locked(
             "created_at": _now().isoformat(),
             "updated_at": _now().isoformat(),
             "scientific_identity": identity,
+            "manifest_ref": manifest_path.name,
             "revision": 0,
         }
         try:
@@ -1297,10 +1301,12 @@ def _commit_job_lifecycle_event(
         )
         if not geometry_hash:
             return None
-        from .history.worldline_service import PlotWorldlineService
+        from services.agribrain.world_model.canonical_worldline import (
+            CanonicalWorldlineService,
+        )
 
         event_time = _now().isoformat()
-        event = PlotWorldlineService().commit_event(
+        event = CanonicalWorldlineService().commit_event(
             plot_id=str(payload.get('plot_id') or ''),
             event_type=event_type,
             geometry_hash=geometry_hash,
@@ -1641,7 +1647,9 @@ def _commit_job_evidence(
 ) -> Optional[str]:
     if not result.get("snapshot_id"):
         return None
-    from .history.worldline_service import PlotWorldlineService
+    from services.agribrain.world_model.canonical_worldline import (
+        CanonicalWorldlineService,
+    )
 
     context = dict(saved.get("context") or {})
     valid_time = _required_scientific_valid_time(result, context, payload)
@@ -1651,7 +1659,7 @@ def _commit_job_evidence(
         else "DIAGNOSTIC_NO_STATE_UPDATE"
     )
     event_type = _completed_result_event_type(result)
-    event = PlotWorldlineService().commit_event(
+    event = CanonicalWorldlineService().commit_event(
         plot_id=str(payload.get("plot_id", "")),
         event_type=event_type,
         geometry_hash=str(payload.get("geometry_hash", "") or ""),
@@ -1713,7 +1721,9 @@ def _commit_job_failure_event(
     result: Dict[str, Any], payload: Dict[str, Any], saved: Dict[str, Any]
 ) -> Tuple[str, Optional[str]]:
     try:
-        from .history.worldline_service import PlotWorldlineService
+        from services.agribrain.world_model.canonical_worldline import (
+            CanonicalWorldlineService,
+        )
         context = dict(saved.get("context") or {})
         valid_time = datetime.now(timezone.utc).isoformat()
         job_id = str(payload.get("job_id", ""))
@@ -1723,7 +1733,7 @@ def _commit_job_failure_event(
             f"{job_id}:{run_id}:"
             f"{hashlib.sha256(reason.encode('utf-8')).hexdigest()[:16]}"
         )
-        event = PlotWorldlineService().commit_event(
+        event = CanonicalWorldlineService().commit_event(
             plot_id=str(payload.get("plot_id", "")),
             event_type="ASMAE_SPATIAL_REFRESH_FAILED",
             geometry_hash=str(payload.get("geometry_hash", "") or context.get("geometry_hash") or "f750290c"),
@@ -1809,6 +1819,12 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
     """Own a monotonic deadline and kill a non-cooperative scientific child."""
     environment = dict(os.environ)
     environment["ASMAE_SUPERVISED_CHILD"] = "1"
+    current_pythonpath = environment.get("PYTHONPATH", "")
+    new_paths = [str(REPO_ROOT), str(AGRIBRAIN_ROOT)]
+    if current_pythonpath:
+        new_paths.append(current_pythonpath)
+    environment["PYTHONPATH"] = os.pathsep.join(new_paths)
+    environment["ASMAE_JOBS_DIR"] = str(JOBS_DIR)
     started = time.monotonic()
     child = subprocess.Popen(
         [
@@ -2295,52 +2311,6 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
             error_type=type(exc).__name__,
         )
         logger.error("ASMAE job contract rejected: %s", exc)
-        _append_job_event(
-            job_path,
-            'worker_finished',
-            status=terminal,
-            result_status=result_status,
-        )
-        logger.info(
-            "Standard ASMAE job %s finished with %s",
-            payload.get("job_id"),
-            terminal,
-        )
-    except LeaseLostError as exc:
-        stop_heartbeat.set()
-        if heartbeat_thread:
-            heartbeat_thread.join(timeout=2.0)
-        _append_job_event(
-            job_path,
-            'stale_worker_commit_rejected',
-            error=str(exc),
-            lease_generation=lease.generation if lease else None,
-        )
-        logger.warning('Stale ASMAE worker commit rejected: %s', exc)
-    except ManifestError as exc:
-        stop_heartbeat.set()
-        if heartbeat_thread:
-            heartbeat_thread.join(timeout=2.0)
-        if lease is not None:
-            _fenced_update_job(
-                job_path,
-                lease,
-                status='failed',
-                stage='contract_validation_failed',
-                error=str(exc),
-                retry_classification='permanent_contract',
-                lease_expires_at=None,
-                lease_token=None,
-                lease_owner=None,
-                recoverable=False,
-            )
-        _append_job_event(
-            job_path,
-            'worker_contract_rejected',
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        logger.error("ASMAE job contract rejected: %s", exc)
     except Exception as exc:
         stop_heartbeat.set()
         if heartbeat_thread:
@@ -2468,8 +2438,26 @@ def latest_job_for_plot(
     if not matches:
         return None
     if run_id is None:
+        running_jobs = [
+            v for v in matches
+            if v.get("status") in {"queued", "running", "stalled", "claimed"}
+        ]
+        if running_jobs:
+            return max(running_jobs, key=lambda v: (_job_created_at(v), str(v.get("job_id", ""))))
+
+        try:
+            from services.agribrain.layer05_asmae.plot_snapshot_store import load_latest_plot_snapshot
+            head = load_latest_plot_snapshot(plot_id)
+            if head and head.get("publication_job_id"):
+                pub_job_id = str(head["publication_job_id"])
+                for v in matches:
+                    if str(v.get("job_id", "")) == pub_job_id:
+                        return v
+        except Exception:
+            pass
+
         unsuperseded = [
-            value for value in matches if not value.get("superseded")
+            value for value in matches if not value.get("superseded") and value.get("status") != "superseded"
         ]
         if unsuperseded:
             matches = unsuperseded
@@ -2491,6 +2479,15 @@ def acquire_recovery_leader_lock(lease_seconds: int = 60) -> bool:
     now = datetime.now(timezone.utc)
     expires = now + timedelta(seconds=lease_seconds)
     my_id = f"pid_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+
+    lock_file = JOBS_DIR / ".recovery_leader.lock"
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    if lock_file.exists():
+        data = _read_json(lock_file)
+        if data:
+            exp = _parse_timestamp(data.get("lease_expires_at"))
+            if exp and exp > now and data.get("leader_id") != my_id:
+                return False
 
     try:
         from services.agribrain.app.mongo_client import get_db
@@ -2516,19 +2513,19 @@ def acquire_recovery_leader_lock(lease_seconds: int = 60) -> bool:
             return_document=ReturnDocument.AFTER,
         )
         if doc and doc.get("leader_id") == my_id:
+            try:
+                _atomic_json(lock_file, {
+                    "leader_id": my_id,
+                    "lease_expires_at": expires.isoformat(),
+                    "acquired_at": now.isoformat(),
+                })
+            except Exception:
+                pass
             return True
         return False
     except Exception:
         # Filesystem fallback
-        lock_file = JOBS_DIR / ".recovery_leader.lock"
         try:
-            JOBS_DIR.mkdir(parents=True, exist_ok=True)
-            if lock_file.exists():
-                data = _read_json(lock_file)
-                if data:
-                    exp = _parse_timestamp(data.get("lease_expires_at"))
-                    if exp and exp > now:
-                        return False
             _atomic_json(lock_file, {
                 "leader_id": my_id,
                 "lease_expires_at": expires.isoformat(),
@@ -2536,7 +2533,8 @@ def acquire_recovery_leader_lock(lease_seconds: int = 60) -> bool:
             })
             return True
         except Exception:
-            return True
+            # Fail closed: never allow concurrent leader recovery on lock acquisition errors
+            return False
 
 
 def recover_pending_jobs(

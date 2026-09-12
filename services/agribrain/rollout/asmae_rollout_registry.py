@@ -24,6 +24,7 @@ PRODUCTION_ROLLOUT_REGISTRY = {
     "timimoun_plot": "backend_observation",
     "boufarik_plot": "backend_observation",
     "v50b_oued_souf_10ha": "backend_observation",
+    "6a09d9e91dd0c7ed6fce7d50": "backend_observation",
 }
 
 ARCHIVE_PILOT_REGISTRY = {
@@ -33,6 +34,7 @@ ARCHIVE_PILOT_REGISTRY = {
     "boufarik_plot": "pilot_internal",
     "oued_souf_plot": "pilot_internal",
     "sparse_plot": "pilot_fixture",
+    "6a09d9e91dd0c7ed6fce7d50": "pilot_internal",
 }
 
 

@@ -16,7 +16,7 @@ Key behaviors:
 """
 
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from services.agribrain.layer0.perception.common.cache import PerceptionCache
@@ -127,7 +127,11 @@ class FarmerPhotoEngine:
         # Compute recentness from timestamp
         recentness_days = None
         if engine_input.timestamp:
-            delta = datetime.now() - engine_input.timestamp
+            ts = engine_input.timestamp
+            now = datetime.now(timezone.utc)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            delta = now - ts
             recentness_days = max(0, delta.days)
 
         qa_result = self.qa.assess(

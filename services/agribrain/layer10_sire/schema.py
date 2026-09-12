@@ -49,6 +49,7 @@ class SurfaceType(str, Enum):
     SOIL_MOISTURE_PROXY = "SOIL_MOISTURE_PROXY"
     DROUGHT_ACCUMULATION = "DROUGHT_ACCUMULATION"
     DRAINAGE_DEFICIT_MM = "DRAINAGE_DEFICIT_MM"
+    WATERLOGGING_PROXY_INDEX = "WATERLOGGING_PROXY_INDEX"
     VPD_STRESS = "VPD_STRESS"                       # Vapor Pressure Deficit stomatal stress
 
     # Nutrients

@@ -134,7 +134,7 @@ class DronePacketizer:
         packet = ObservationPacket(
             source=ObservationSource.DRONE,
             obs_type=ObservationType.RASTER,
-            timestamp=datetime.datetime.now(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc),
             payload=payload,
             qa=qa_meta,
             uncertainty=UncertaintyModel(sigmas=sigmas),

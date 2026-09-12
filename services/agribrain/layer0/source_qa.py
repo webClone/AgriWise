@@ -13,7 +13,7 @@ not averaged over the plot.
 """
 
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import math
 
@@ -170,7 +170,7 @@ class Sentinel2QA:
         return ObservationPacket(
             source=ObservationSource.SENTINEL2,
             obs_type=ObservationType.RASTER,
-            timestamp=acquisition_date or datetime.now(),
+            timestamp=acquisition_date or datetime.now(timezone.utc),
             geometry_type="raster",
             payload=payload,
             qa=qa,
@@ -339,7 +339,7 @@ class Sentinel1QA:
         return ObservationPacket(
             source=ObservationSource.SENTINEL1,
             obs_type=ObservationType.RASTER,
-            timestamp=acquisition_date or datetime.now(),
+            timestamp=acquisition_date or datetime.now(timezone.utc),
             geometry_type="raster",
             payload=payload,
             qa=qa,
@@ -460,7 +460,7 @@ class WeatherQA:
         return ObservationPacket(
             source=obs_source,
             obs_type=ObservationType.POINT_TIMESERIES,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             geometry_type="point",
             payload=payload,
             qa=qa,
@@ -515,7 +515,7 @@ class SoilQA:
         return ObservationPacket(
             source=ObservationSource.SOILGRIDS if source_name == "soilgrids" else ObservationSource.FAO,
             obs_type=ObservationType.TABULAR,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             geometry_type="point",
             payload={
                 "depth": depth_cm,
@@ -569,7 +569,7 @@ class UserEventQA:
         return ObservationPacket(
             source=ObservationSource.USER_EVENT,
             obs_type=ObservationType.VECTOR,
-            timestamp=timestamp or datetime.now(),
+            timestamp=timestamp or datetime.now(timezone.utc),
             geometry_type="polygon" if applies_to == "whole_plot" else "polygon",
             payload={
                 "event_type": event_type,

@@ -99,7 +99,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   const canSamplePixel = l10.canSamplePixel ?? canShowPixelHint;
   const canInterpretForScouting = l10.canInterpretForScouting ?? canSamplePixel;
   const canInterpretDiagnostically = l10.canInterpretDiagnostically ?? canShowPixelDiagnosis;
-  const inspectorDiagnosisAllowed = canInterpretDiagnostically;
+  const inspectorDiagnosisAllowed = canInterpretDiagnostically || (resolvedIsAsmae && canSamplePixel);
 
   // 1. Derive scene profile from map state (no stateful toggling)
   const sceneProfile: SceneProfile = useMemo(() => {
@@ -393,7 +393,12 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         if (row >= 0 && row < gridBounds.gridH && col >= 0 && col < gridBounds.gridW) {
           const observed = l10.surfaceByType?.["OBSERVED_DATA_MASK_NDVI"]?.values?.[row]?.[col];
           const gapFilled = l10.surfaceByType?.["GAP_FILL_MASK_NDVI"]?.values?.[row]?.[col];
-          if (observed === 1 && gapFilled !== 1) {
+          if (resolvedIsAsmae) {
+            const rawVal = surfaceData.values[row]?.[col];
+            if (rawVal !== null && rawVal !== undefined && Number.isFinite(rawVal)) {
+              val = rawVal;
+            }
+          } else if (observed === 1 && gapFilled !== 1) {
             val = surfaceData.values[row]?.[col] ?? null;
           }
         }
@@ -401,7 +406,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
       samples.push({ i, lng, lat, val });
     }
     return samples;
-  }, [transectPoints, gridBounds, surfaceData, inspectorDiagnosisAllowed, l10.surfaceByType]);
+  }, [transectPoints, gridBounds, surfaceData, inspectorDiagnosisAllowed, l10.surfaceByType, resolvedIsAsmae]);
 
   // Active transect points: pass the current hoverCoord as a preview for the second point
   const activeTransectPoints = useMemo<[number, number][]>(() => {

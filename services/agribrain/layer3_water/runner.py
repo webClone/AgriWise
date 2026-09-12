@@ -98,14 +98,14 @@ class WaterIntelligenceEngine:
 
         mode = requested_hydrology_mode or hydrology_mode
         weather = weather_observations or {}
-        t_max = weather.get("t_max_c", 28.0)
-        t_min = weather.get("t_min_c", 16.0)
-        precip = weather.get("precipitation_mm", 0.0)
-        wind = weather.get("wind_speed_2m_m_s", 2.0)
-        rh_min = weather.get("rh_min_pct", 40.0)
-        rh_max = weather.get("rh_max_pct", 85.0)
+        t_max = weather["t_max_c"]
+        t_min = weather["t_min_c"]
+        precip = weather["precipitation_mm"]
+        wind = weather["wind_speed_2m_m_s"]
+        rh_min = weather["rh_min_pct"]
+        rh_max = weather["rh_max_pct"]
         dew_point = weather.get("dew_point_c")
-        rn = weather.get("net_radiation_mj_m2", 18.5)
+        rn = weather["net_radiation_mj_m2"]
         
         # 1. Adaptive Numerical Solver Selection Policy
         crop_priority = irrigation_objective.crop_economic_priority_factor if irrigation_objective else 1.0
@@ -132,9 +132,10 @@ class WaterIntelligenceEngine:
             fvc = vegetation_state.fvc
             root_depth_m = vegetation_state.root_depth_proxy_m or 1.0
         else:
-            lai = 2.5
-            fvc = 0.70
-            root_depth_m = 1.0
+            # Unmeasured vegetation: bare-soil baseline without fabricated lush canopy
+            lai = 0.0
+            fvc = 0.0
+            root_depth_m = 0.3
 
         # 4. Dual Kc Canopy Demand & Soil Evaporation
         kcb = DualKcEngine.estimate_kcb_from_canopy(

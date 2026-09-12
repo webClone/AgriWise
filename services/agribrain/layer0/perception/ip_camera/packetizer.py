@@ -1,5 +1,5 @@
 from typing import List, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from services.agribrain.layer0.perception.common.contracts import PerceptionEngineFamily, PerceptionVariable
 from services.agribrain.layer0.perception.ip_camera.schemas import IPCameraEngineInput, IPCameraEngineOutput, IPCameraSceneContext, IPCameraQAResult
@@ -79,7 +79,7 @@ class IPCameraPacketizer:
         return ObservationPacket(
             source=ObservationSource.IP_CAMERA,
             obs_type=ObservationType.POINT_TIMESERIES, # IP Camera is a fixed point timeseries
-            timestamp=engine_output.timestamp or datetime.now(),
+            timestamp=engine_output.timestamp or datetime.now(timezone.utc),
             payload=payload,
             qa=qa,
             uncertainty=uncertainty,

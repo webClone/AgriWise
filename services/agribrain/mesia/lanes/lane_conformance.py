@@ -42,9 +42,25 @@ class LaneConformanceValidator:
 
         # 2. Native data completeness check (P-04)
         has_uri = bool(packet.native_data_uri and len(packet.native_data_uri) > 0)
-        has_hash = bool(packet.native_data_hash and len(packet.native_data_hash) == 64)
+        has_hash = bool(
+            packet.native_data_hash
+            and len(packet.native_data_hash) == 64
+            and all(c in "0123456789abcdefABCDEF" for c in packet.native_data_hash)
+        )
         if not has_uri or not has_hash:
             violations.append("Native data URI or 64-character SHA-256 hash is missing or invalid.")
+        else:
+            # If filesystem artifact exists, verify actual capture integrity
+            from services.agribrain.mesia.ingestion.sigmf_ingest import verify_capture_integrity
+            from pathlib import Path
+            clean_path = packet.native_data_uri.replace("file://", "")
+            p = Path(clean_path)
+            if p.exists() or (p.parent / f"{p.name}.sigmf-data").exists() or p.with_suffix(".sigmf-data").exists():
+                try:
+                    if not verify_capture_integrity(p):
+                        violations.append("Native SigMF capture manifest or data integrity verification failed.")
+                except Exception as exc:
+                    violations.append(f"Capture integrity check error: {exc}")
 
         # 3. Epoch completeness check
         epochs_present = bool(

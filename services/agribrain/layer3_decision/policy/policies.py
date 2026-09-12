@@ -204,7 +204,11 @@ class PolicyEngine:
             # Compute TAW from the profile (FC - WP) across root zone
             taw_mm = 0.0
             prev_d = 0.0
-            root_depth_cm = 100.0  # 1m default root zone
+            if context.crop_type and context.species_specific_allowed and context.crop_type != "unknown":
+                from layer3_decision.knowledge.crops import get_crop_profile
+                root_depth_cm = get_crop_profile(context.crop_type).max_root_depth_cm or 100.0
+            else:
+                root_depth_cm = 100.0
             for i, d in enumerate(soil_profile.layer_depths_cm):
                 if prev_d >= root_depth_cm:
                     break

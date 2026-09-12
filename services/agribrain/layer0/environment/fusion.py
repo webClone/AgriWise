@@ -57,18 +57,19 @@ def _params_from_soilgrids(
         # AWC over 0-60cm → mm per meter equivalent
         whc = hydraulics.root_zone_awc_mm_0_60 / 0.6
 
-    # Field capacity from wv003 (topsoil average)
-    fc = None
-    wp = None
-    if hydraulics.awc_volumetric_proxy_by_depth:
-        # Use first available depth layer values
+    # Field capacity and wilting point directly from authentic SoilGrids wv003 & wv1500
+    fc = hydraulics.field_capacity_vol_pct
+    wp = hydraulics.wilting_point_vol_pct
+
+    # If wv003/wv1500 were not directly provided but volumetric AWC was computed:
+    if (fc is None or wp is None) and hydraulics.awc_volumetric_proxy_by_depth:
         first_depth = next(iter(hydraulics.awc_volumetric_proxy_by_depth.keys()), None)
         if first_depth:
             awc_vol = hydraulics.awc_volumetric_proxy_by_depth[first_depth]
-            # Approximate FC and WP from AWC
-            # Typical: FC ≈ WP + AWC. Use typical WP range.
-            wp = 10.0  # Approximate wilting point vol%
-            fc = wp + awc_vol
+            if fc is None and wp is not None:
+                fc = wp + awc_vol
+            elif wp is None and fc is not None:
+                wp = max(0.0, fc - awc_vol)
 
     return ProcessParameters(
         field_capacity_vol_pct=round(fc, 2) if fc is not None else None,

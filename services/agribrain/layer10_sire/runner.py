@@ -5845,53 +5845,57 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                         **common_grid_authority,
                         "requiresObservedMask": is_experimental_type(stype) or bool(non_asmae_extra.get("requiresObservedMask", False)),
                         "requiresGapFillMask": is_experimental_type(stype) or bool(non_asmae_extra.get("requiresGapFillMask", False)),
-                        "observedMaskType": "OBSERVED_DATA_MASK_NDVI",
-                        "gapFillMaskType": "GAP_FILL_MASK_NDVI",
-                        "validMaskType": "VALID_DATA_MASK_NDVI",
-                        "maskAlignmentPolicy": (
-                            "nearest_shared_bounds" if is_experimental_type(stype) else "exact_grid"
-                        ),
-                        "trustAlphaScale": 0.45 if is_experimental_type(stype) else float(non_asmae_extra.get("trustAlphaScale", 1.0))
-                    }
-                    
-                    # 3. Candidate Role
-                    cand_auth = is_experimental_type(stype) and (p in ["experimental", "hybrid"])
-                    cand_auth, cand_kind, cand_reason = _apply_grid_gate(
-                        cand_auth,
-                        "proxy_overlay" if cand_auth else "none",
-                        "candidate_visual_detail" if cand_auth else "candidate_denied",
-                        surface_grid_ok,
-                        surface_grid_status,
-                    )
-                    render_authorizations[p][m]["candidate"][stype] = {
-                        "surfaceType": stype, "policy": p, "mode": m, "role": "candidate",
-                        "authorized": cand_auth, "renderKind": cand_kind,
-                        "reason": cand_reason,
-                        "surfaceRole": "agronomic_surface",
-                        **common_grid_authority,
-                    }
-                    
-                    # 4. Inspector Role
-                    inspect_allowed = False
-                    if not is_asmae_type(stype) and not is_experimental_type(stype):
-                        inspect_allowed = _inspector_allowed(s, stype_upper)
-                    inspect_allowed, inspect_kind, inspect_reason = _apply_grid_gate(
-                        inspect_allowed,
-                        "full_raster" if inspect_allowed else "none",
-                        "inspector_allowed" if inspect_allowed else "proxy_or_advisory_inspector_blocked",
-                        surface_grid_ok,
-                        surface_grid_status,
-                    )
-                    render_authorizations[p][m]["inspector"][stype] = {
-                        "surfaceType": stype, "policy": p, "mode": m, "role": "inspector",
-                        "authorized": inspect_allowed, "renderKind": inspect_kind,
-                        "reason": inspect_reason,
-                        "inspectorAllowed": inspect_allowed,
-                        "surfaceRole": "agronomic_surface",
-                        **common_grid_authority,
-                    }
-
-        output.render_authorizations = render_authorizations
+                        "observedMaskType": "OBSERVED_DATA_MASK_NDVI",
+                        "gapFillMaskType": "GAP_FILL_MASK_NDVI",
+                        "validMaskType": "VALID_DATA_MASK_NDVI",
+                        "maskAlignmentPolicy": (
+                            "nearest_shared_bounds" if is_experimental_type(stype) else "exact_grid"
+                        ),
+                        "trustAlphaScale": 0.45 if is_experimental_type(stype) else float(non_asmae_extra.get("trustAlphaScale", 1.0))
+                    }
+                    
+                    # 3. Candidate Role
+                    cand_auth = is_experimental_type(stype) and (p in ["experimental", "hybrid"])
+                    cand_auth, cand_kind, cand_reason = _apply_grid_gate(
+                        cand_auth,
+                        "proxy_overlay" if cand_auth else "none",
+                        "candidate_visual_detail" if cand_auth else "candidate_denied",
+                        surface_grid_ok,
+                        surface_grid_status,
+                    )
+                    render_authorizations[p][m]["candidate"][stype] = {
+                        "surfaceType": stype, "policy": p, "mode": m, "role": "candidate",
+                        "authorized": cand_auth, "renderKind": cand_kind,
+                        "reason": cand_reason,
+                        "surfaceRole": "agronomic_surface",
+                        **common_grid_authority,
+                    }
+                    
+                    # 4. Inspector Role
+                    inspect_allowed = False
+                    if not is_asmae_type(stype) and not is_experimental_type(stype):
+                        inspect_allowed = _inspector_allowed(s, stype_upper)
+                    elif is_asmae_type(stype):
+                        fam_ok, fam_reason = asmae_surface_gate(s, stype_upper)
+                        if fam_ok and (asmae_authorized or asmae_production_usable or p in ["asmae_diagnostic", "hybrid", "satellite"]):
+                            inspect_allowed = True
+                    inspect_allowed, inspect_kind, inspect_reason = _apply_grid_gate(
+                        inspect_allowed,
+                        "full_raster" if inspect_allowed else "none",
+                        "inspector_allowed" if inspect_allowed else "proxy_or_advisory_inspector_blocked",
+                        surface_grid_ok,
+                        surface_grid_status,
+                    )
+                    render_authorizations[p][m]["inspector"][stype] = {
+                        "surfaceType": stype, "policy": p, "mode": m, "role": "inspector",
+                        "authorized": inspect_allowed, "renderKind": inspect_kind,
+                        "reason": inspect_reason,
+                        "inspectorAllowed": inspect_allowed,
+                        "surfaceRole": "agronomic_surface",
+                        **common_grid_authority,
+                    }
+
+        output.render_authorizations = render_authorizations
         output.render_authorization_version = RENDER_AUTHORIZATION_VERSION
 
         # Reconcile the summary mode cards with the same exact policy/role

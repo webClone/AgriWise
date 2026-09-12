@@ -273,6 +273,8 @@ class AdaptiveTTLEngine:
         # Calculate time since anomaly
         now = datetime.now(timezone.utc)
         if isinstance(detected_at, datetime):
+            if detected_at.tzinfo is None:
+                detected_at = detected_at.replace(tzinfo=timezone.utc)
             elapsed = (now - detected_at).total_seconds()
         else:
             return 1.0

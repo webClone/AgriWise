@@ -91,15 +91,54 @@ def test_generate_water_surfaces_legacy_signature():
     assert SurfaceType.WATER_STRESS_PROB in types
 
 
-def test_compute_drainage_deficit_helper():
-    """Verify _compute_drainage_deficit correctly calculates excess water above field capacity."""
-    l1 = _make_dummy_l1(4, 4)
-    grid = _compute_drainage_deficit(l1, 4, 4)
+from services.agribrain.layer10_sire.schema import GroundingClass
+from services.agribrain.layer10_sire.surfaces.water import legacy_generate_water_surfaces_adapter
 
-    assert grid is not None
+
+def test_compute_drainage_deficit_helper_physical():
+    """Verify _compute_drainage_deficit correctly calculates physical mm excess from volumetric moisture."""
+    l1 = _make_dummy_l1(4, 4)
+    res = _compute_drainage_deficit(l1, 4, 4)
+
+    assert res is not None
+    grid, units, grounding, prov = res
+    assert units == "mm"
+    assert grounding == GroundingClass.RASTER_GROUNDED
+    assert prov["calibrated_physical_units"] is True
     assert len(grid) == 4
     assert len(grid[0]) == 4
-    # Cells with moisture 0.38 should show (0.38 - 0.35) * 300 = 9.0 mm
-    assert grid[0][0] == 9.0
+    # Cells with moisture 0.38: (0.38 - 0.35) * 0.40 * 1000 = 12.0 mm
+    assert grid[0][0] == 12.0
     # Cells with moisture 0.22 should show 0.0 mm
     assert grid[0][1] == 0.0
+
+
+def test_compute_drainage_deficit_ndmi_proxy():
+    """Verify _compute_drainage_deficit labels NDMI source as proxy_index rather than mm."""
+    l1_proxy = L1SpatialData(
+        height=4,
+        width=4,
+        resolution_m=10.0,
+        raster_maps={
+            "ndmi": [[0.60, 0.10], [0.10, 0.10]],
+        },
+        zone_masks={},
+    )
+    res = _compute_drainage_deficit(l1_proxy, 2, 2)
+    assert res is not None
+    grid, units, grounding, prov = res
+    assert units == "proxy_index"
+    assert grounding == GroundingClass.PROXY_SPATIAL
+    assert prov["calibrated_physical_units"] is False
+    assert grid[0][0] == round((0.60 - 0.2) / 0.8, 3)
+    assert grid[0][1] == 0.0
+
+
+def test_legacy_adapter_direct_call():
+    """Verify legacy_generate_water_surfaces_adapter executes properly."""
+    inp = _make_dummy_input()
+    l1 = _make_dummy_l1(4, 4)
+    l3 = _make_dummy_l3()
+    surfaces = legacy_generate_water_surfaces_adapter(inp, l1, l3, 4, 4)
+    assert isinstance(surfaces, list)
+    assert len(surfaces) >= 1

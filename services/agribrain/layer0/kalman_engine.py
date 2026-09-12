@@ -319,7 +319,7 @@ class ZoneKalmanFilter:
         
         return source_weights
     
-    def step(self, day: str, weather: Dict[str, float],
+    def step(self, day: str, weather: Optional[Dict[str, float]],
              observations: Optional[List[KalmanObservation]] = None,
              events: Optional[List[Dict]] = None) -> Dict[str, Any]:
         """
@@ -327,8 +327,11 @@ class ZoneKalmanFilter:
         
         Returns provenance record for this day.
         """
-        # Predict
-        self.predict(day, weather, events)
+        # Predict: if weather missing, use high-uncertainty unforced evolution
+        if not weather:
+            self.predict_missing_weather(day)
+        else:
+            self.predict(day, weather, events)
         
         # Update (if observations exist)
         source_weights = {}
@@ -351,6 +354,7 @@ class ZoneKalmanFilter:
             "days_since_obs": self.days_since_obs,
             "conflicts": conflicts,
             "uncertainty_mean": sum(self.state.variance) / N_STATES,
+            "weather_update_mode": "missing_weather_high_uncertainty" if not weather else "measured",
         }
         self.provenance_history.append(provenance)
         
@@ -455,10 +459,7 @@ class DailyAssimilationEngine:
         while current <= end:
             day = current.strftime("%Y-%m-%d")
             
-            weather = daily_weather.get(day, {
-                "temp_max": 20.0, "temp_min": 10.0,
-                "precipitation": 0.0, "et0": 3.0
-            })
+            weather = daily_weather.get(day)
             
             obs = all_observations.get(day, {})
             events = events_by_day.get(day, [])

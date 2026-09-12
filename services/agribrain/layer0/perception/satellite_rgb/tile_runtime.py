@@ -20,7 +20,7 @@ import logging
 import hashlib
 import requests
 from typing import Optional, Dict, Any, Tuple, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +219,8 @@ def _get_synthetic_tile() -> bytes:
 
 def _return_fallback(plot_id: str, status: str) -> Optional[bytes]:
     """Emits fallback warnings, cache provenance, and returns cached or synthetic tile."""
+    if not plot_id:
+        return None
     cached_bytes = get_cached_tile(plot_id)
     meta_path = _get_meta_path(plot_id)
     
@@ -233,6 +235,8 @@ def _return_fallback(plot_id: str, status: str) -> Optional[bytes]:
         except Exception:
             pass
     else:
+        if os.getenv("ALLOW_SYNTHETIC_VISUAL_PREVIEW", "").lower() not in ("true", "1", "yes"):
+            return None
         prov = "synthetic_fallback"
         img_bytes = _get_synthetic_tile()
         dim = [8, 8]
@@ -247,7 +251,7 @@ def _return_fallback(plot_id: str, status: str) -> Optional[bytes]:
             json.dump({
                 "plot_id": plot_id,
                 "fetched_at": time.time(),
-                "fetched_date": datetime.utcnow().isoformat(),
+                "fetched_date": datetime.now(timezone.utc).isoformat(),
                 "tile_size_bytes": len(img_bytes),
                 "dimensions": dim,
                 "source": "synthetic" if prov == "synthetic_fallback" else "sentinel-2-l2a",
@@ -359,7 +363,7 @@ def fetch_rgb_tile(
     }
     """
 
-    end_date = datetime.utcnow()
+    end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=30)  # Last 30 days for best cloud-free mosaic
 
     payload = {
@@ -413,7 +417,7 @@ def fetch_rgb_tile(
             json.dump({
                 "plot_id": plot_id,
                 "fetched_at": time.time(),
-                "fetched_date": datetime.utcnow().isoformat(),
+                "fetched_date": datetime.now(timezone.utc).isoformat(),
                 "tile_size_bytes": len(image_bytes),
                 "dimensions": [w, h],
                 "source": "sentinel-2-l2a",

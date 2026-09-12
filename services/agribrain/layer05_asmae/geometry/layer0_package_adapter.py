@@ -49,6 +49,9 @@ class ASMAESceneCandidate:
     provider_orbit_pass: Optional[str] = None
     product_binding: str = "unknown"
     binding_proof: Optional[Dict[str, Any]] = None
+    holdout_proof: Optional[Dict[str, Any]] = None
+    registration_proof: Optional[Dict[str, Any]] = None
+    field_approval: Optional[Any] = None
 
 def adapt_layer0_package_to_scene_candidate(
     pkg: Any,
@@ -352,4 +355,7 @@ def adapt_layer0_package_to_scene_candidate(
         provider_orbit_pass=_attr(pkg, "provider_orbit_pass", None),
         product_binding=_attr(pkg, "product_binding", "unknown"),
         binding_proof=dict(_attr(pkg, "binding_proof", {}) or {}),
+        holdout_proof=_attr(pkg, "holdout_proof", None) or _attr(_attr(pkg, "metadata", {}), "holdout_proof", None),
+        registration_proof=_attr(pkg, "registration_proof", None) or _attr(_attr(pkg, "metadata", {}), "registration_proof", None),
+        field_approval=_attr(pkg, "field_approval", None) or _attr(_attr(pkg, "metadata", {}), "field_approval", None),
     )

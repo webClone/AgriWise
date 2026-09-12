@@ -313,7 +313,7 @@ class StorageManager:
 
         try:
             key = self._make_key(source, lat, lng, plot_id, param_hash)
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
             doc = db.eo_cache.find_one({
                 "cache_key": key,
@@ -322,6 +322,8 @@ class StorageManager:
 
             if doc and doc.get("data") is not None:
                 fetched = doc.get("fetched_at", now)
+                if isinstance(fetched, datetime) and fetched.tzinfo is None:
+                    fetched = fetched.replace(tzinfo=timezone.utc)
                 age_min = (now - fetched).total_seconds() / 60
                 logger.debug("[STORAGE] HOT HIT: %s (%.0fmin old)", source, age_min)
                 return doc["data"]
@@ -350,7 +352,7 @@ class StorageManager:
 
         try:
             key = self._make_key(source, lat, lng, plot_id, param_hash)
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             expires = now + timedelta(seconds=ttl)
 
             doc = {
@@ -401,7 +403,7 @@ class StorageManager:
         report = {}
 
         db = _get_db()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         for source in check_sources:
             entry = FreshnessEntry(source=source)
@@ -424,10 +426,12 @@ class StorageManager:
                         entry.ttl_total_seconds = doc.get("ttl_seconds", 0)
 
                         if entry.fetched_at:
-                            entry.age_seconds = (now - entry.fetched_at).total_seconds()
+                            f_at = entry.fetched_at if entry.fetched_at.tzinfo else entry.fetched_at.replace(tzinfo=timezone.utc)
+                            entry.age_seconds = (now - f_at).total_seconds()
 
                         if entry.expires_at:
-                            remaining = (entry.expires_at - now).total_seconds()
+                            exp_at = entry.expires_at if entry.expires_at.tzinfo else entry.expires_at.replace(tzinfo=timezone.utc)
+                            remaining = (exp_at - now).total_seconds()
                             entry.ttl_remaining_seconds = max(0, remaining)
                             entry.is_fresh = remaining > 0
 

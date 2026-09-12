@@ -349,6 +349,9 @@ def _process_s1_package(
     runtime.provider_orbit_pass = getattr(candidate, "provider_orbit_pass", None)
     runtime.product_binding = getattr(candidate, "product_binding", "unknown")
     runtime.binding_proof = dict(getattr(candidate, "binding_proof", {}) or {})
+    runtime.holdout_proof = getattr(candidate, "holdout_proof", None) or runtime.binding_proof.get("holdout_proof")
+    runtime.registration_proof = getattr(candidate, "registration_proof", None) or runtime.binding_proof.get("registration_proof")
+    runtime.field_approval = getattr(candidate, "field_approval", None) or runtime.binding_proof.get("field_approval")
     if runtime.production_usable and runtime.product_binding != "exact_catalog_item":
         runtime.production_usable = False
         runtime.real_provider_product = False
@@ -361,6 +364,8 @@ def _process_s1_package(
     if loaded_bands and not units_contract_valid:
         runtime.production_usable = False
         runtime.diagnostic_only = True
+    elif runtime.production_usable and runtime.source_reality in ("real_raster", "real_provider_raster", "provider_observation"):
+        runtime.authority = "real"
     runtime.sar_units = {
         'VV': ('db' if vv_is_db is True else 'linear_sigma0' if vv_is_db is False else 'unknown'),
         'VH': ('db' if vh_is_db is True else 'linear_sigma0' if vh_is_db is False else 'unknown'),

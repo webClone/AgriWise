@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from services.agribrain.layer0.source_package import Layer0SourcePackage, Layer0StatePackage
@@ -296,7 +296,7 @@ class Layer0Runner:
 
         provenance = {
             "runner": "Layer0Runner",
-            "run_timestamp": (run_timestamp or datetime.utcnow()).isoformat(),
+            "run_timestamp": (run_timestamp or datetime.now(timezone.utc)).isoformat(),
             "sources_run": list(source_packages.keys()),
         }
 

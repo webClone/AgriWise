@@ -30,12 +30,13 @@ ALLOWED_TRANSITIONS = {
     ("approved_shadow_expert", "revoked"),
 }
 
-def validate_model_path(model_id: str, artifact_path: str) -> None:
+def validate_model_id(model_id: str) -> None:
     if not model_id or not isinstance(model_id, str) or model_id.strip() == "":
         raise ValueError("empty_model_id")
     if "/" in model_id or "\\" in model_id or ".." in model_id or ":" in model_id:
         raise ValueError("unsafe_model_id_path_traversal")
-        
+
+def validate_artifact_path(artifact_path: str) -> None:
     if not artifact_path or not isinstance(artifact_path, str) or artifact_path.strip() == "":
         raise ValueError("empty_artifact_path")
         
@@ -54,13 +55,20 @@ def validate_model_path(model_id: str, artifact_path: str) -> None:
     if ext not in (".json", ".npz"):
         raise ValueError(f"unexpected_file_extension: {ext}")
 
+def validate_model_path(model_id: str, artifact_path: str) -> None:
+    validate_model_id(model_id)
+    validate_artifact_path(artifact_path)
+
 class ModelRegistry:
     @staticmethod
     def save_manifest(model_id: str, manifest: Dict[str, Any]) -> None:
-        validate_model_path(model_id, manifest.get("parameters_ref", "models/dummy.json"))
+        validate_model_id(model_id)
+        ref = manifest.get("parameters_ref", "")
+        if not ref:
+            raise ValueError("empty_artifact_path")
+        validate_artifact_path(ref)
         
         # Guard against pickle
-        ref = manifest.get("parameters_ref", "")
         if ".pkl" in ref or ".pickle" in ref:
             raise ValueError("pickle_artifacts_forbidden")
             
@@ -104,7 +112,7 @@ class ModelRegistry:
 
     @staticmethod
     def load_manifest(model_id: str) -> Dict[str, Any]:
-        validate_model_path(model_id, "dummy.json")
+        validate_model_id(model_id)
         manifest_path = MODELS_ROOT / model_id / "manifest.json"
         if not manifest_path.exists():
             raise FileNotFoundError(f"Model manifest not found: {model_id}")
@@ -114,7 +122,7 @@ class ModelRegistry:
             
         ref = manifest.get("parameters_ref", "")
         # Re-run safety path validation on stored parameters_ref
-        validate_model_path(model_id, ref)
+        validate_artifact_path(ref)
         
         status = manifest.get("status", "candidate")
         param_path = MODELS_ROOT.parent / ref

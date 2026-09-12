@@ -124,6 +124,9 @@ class SatelliteRGBEngine:
             synthetic_pixels=engine_input.synthetic_pixels,
             rgb_image_ref=engine_input.rgb_image_ref,
         )
+        if ctx.load_error:
+            print(f"[FAIL] [SatelliteRGBEngine] Ingress error: {ctx.load_error}")
+            return None
         processing_steps.append("preprocess_crop_mask")
 
         # --- Step 3: QA ---

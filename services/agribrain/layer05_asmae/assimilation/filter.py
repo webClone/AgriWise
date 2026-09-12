@@ -456,11 +456,19 @@ def run_enkf(
 
 def has_observation_in_stack(scenes: List[Any], state_name: str) -> bool:
     state_to_obs = {
+        "vigor": ["ndvi", "evi", "savi", "nbr", "vigor"],
+        "lai": ["ndvi", "evi", "lai"],
+        "chlorophyll": ["ndre", "reip", "chlorophyll"],
         "canopy_water": ["ndmi", "canopy_water"],
-        "salinity_stress": ["salinity_stress"],
         "root_zone_water": ["ndwi", "sar_vv", "sar_vh", "root_zone_water"],
-        "vigor": ["ndvi", "evi", "reip", "vigor"],
-        "phenology_progress": ["crop_stage", "phenology_progress"],
+        "surface_wetness_event": ["ndwi", "sar_vv", "sar_ratio", "surface_wetness_event"],
+        "structure": ["sar_vh", "sar_ratio", "structure"],
+        "bare_soil_fraction": ["savi", "bsi", "nbr", "bare_soil_fraction"],
+        "salinity_stress": ["ndsi", "salinity_stress"],
+        "thermal_stress": ["cwsi", "thermal_stress"],
+        "biotic_confounder_risk": ["biotic_anomaly", "biotic_confounder_risk"],
+        "phenology_progress": ["phenology_index", "crop_stage", "phenology_progress"],
+        "stress_memory": ["stress_memory_index", "stress_memory"],
     }
     obs_types = state_to_obs.get(state_name, [state_name])
     from ..observation.pixel_extraction import extract_pixel_observations
@@ -1402,10 +1410,11 @@ def _predict_observation_array(
         bare_soil = values[..., indices["bare_soil_fraction"]]
         if name == "sar_vv":
             prediction = (
-                0.4 * surface_wetness
-                + 0.3 * root_zone_water
-                + 0.15 * bare_soil
-                + 0.1
+                0.35 * structure
+                + 0.25 * surface_wetness
+                + 0.2 * root_zone_water
+                + 0.1 * bare_soil
+                + 0.05
             )
         elif name == "sar_vh":
             prediction = 0.6 * structure + 0.2 * surface_wetness + 0.1
@@ -1441,9 +1450,27 @@ def _predict_observation_array(
     elif name == "ndmi":
         prediction = 0.6 * canopy_water + 0.2 * np.minimum(lai / 5.0, 1.0) + 0.05
     elif name == "ndwi":
-        prediction = 0.7 * surface_wetness + 0.1 * bare_soil - 0.2
+        prediction = (
+            -0.65 * vigor - 0.20 * bare_soil + 0.6 * surface_wetness - 0.05
+        )
     elif name == "bsi":
         prediction = 0.6 * bare_soil - 0.3 * vigor + 0.2
+    elif name == "ndsi":
+        salinity = values[..., indices["salinity_stress"]]
+        prediction = 0.55 * salinity + 0.35 * bare_soil - 0.20 * vigor
+    elif name == "cwsi":
+        thermal = values[..., indices["thermal_stress"]]
+        prediction = 0.70 * thermal - 0.30 * canopy_water
+    elif name == "phenology_index":
+        phenology = values[..., indices["phenology_progress"]]
+        prediction = 0.60 * phenology + 0.30 * vigor + 0.10 * np.minimum(lai / 4.0, 1.0)
+    elif name == "stress_memory_index":
+        memory = values[..., indices["stress_memory"]]
+        salinity = values[..., indices["salinity_stress"]]
+        prediction = 0.65 * memory + 0.35 * salinity
+    elif name == "biotic_anomaly":
+        biotic = values[..., indices["biotic_confounder_risk"]]
+        prediction = 0.75 * biotic - 0.25 * vigor
     else:
         return None
     return np.clip(prediction, -1.0, 1.0)

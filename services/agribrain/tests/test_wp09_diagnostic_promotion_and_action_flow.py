@@ -434,3 +434,144 @@ def test_intent_routing_capabilities():
     assert Intent.DIAGNOSIS.value == "DIAGNOSIS"
     assert Intent.PLANNING.value == "PLANNING"
     assert Intent.DECISION.value == "DECISION"
+
+
+def test_evidence_receipts_and_identifiability_promotion_tiers():
+    """Verify evidence receipt validation and strict identifiability tiering in promotion service."""
+    from services.agribrain.diagnostic_integration.promotion_service import (
+        DiagnosticPromotionService,
+        PromotionTier,
+    )
+
+    promo_service = DiagnosticPromotionService(default_min_confidence=0.70)
+
+    # 1. PARTIALLY_IDENTIFIED contribution without policy override is rejected from exact prescription
+    c_partial = make_diagnostic_contribution(
+        "c_partial",
+        target="soil.moisture",
+        confidence=0.85,
+        identifiability=IdentifiabilityClass.PARTIALLY_IDENTIFIED,
+    )
+    res_partial = promo_service.promote_to_prescription_eligibility([c_partial])
+    assert res_partial.promoted_count == 0
+    assert "c_partial" in res_partial.exclusions
+    assert "PROMOTION_DENIED_PARTIALLY_IDENTIFIED" in res_partial.exclusions["c_partial"][0]
+    assert res_partial.promotion_tiers.get("c_partial") == PromotionTier.SCOUTING_RECOMMENDATION.value
+
+    # 2. PARTIALLY_IDENTIFIED with explicit policy override is permitted
+    policy_override = {"allow_partial_identifiability_for_prescriptions": True}
+    res_partial_override = promo_service.promote_to_prescription_eligibility([c_partial], policy_snapshot=policy_override)
+    assert res_partial_override.promoted_count == 1
+    assert res_partial_override.promoted_ids == ("c_partial",)
+    assert res_partial_override.promotion_tiers.get("c_partial") == PromotionTier.EXACT_PRESCRIPTION.value
+
+    # 3. Evidence receipts: uncalibrated evidence is rejected
+    c_identified = make_diagnostic_contribution(
+        "c_identified",
+        target="soil.moisture",
+        confidence=0.90,
+        identifiability=IdentifiabilityClass.IDENTIFIED,
+    )
+    uncalibrated_receipts = {
+        "c_identified": {"is_calibrated": False, "is_expired": False},
+    }
+    res_uncalibrated = promo_service.promote_to_prescription_eligibility(
+        [c_identified], evidence_receipts=uncalibrated_receipts
+    )
+    assert res_uncalibrated.promoted_count == 0
+    assert "PROMOTION_DENIED_UNCALIBRATED_EVIDENCE" in res_uncalibrated.exclusions["c_identified"][0]
+
+    # 4. Evidence receipts: valid calibrated evidence promotes cleanly
+    calibrated_receipts = {
+        "c_identified": {"is_calibrated": True, "is_expired": False, "spatial_support_valid": True},
+    }
+    res_calibrated = promo_service.promote_to_prescription_eligibility(
+        [c_identified], evidence_receipts=calibrated_receipts
+    )
+    assert res_calibrated.promoted_count == 1
+    assert res_calibrated.promoted_ids == ("c_identified",)
+    assert res_calibrated.promotion_tiers.get("c_identified") == PromotionTier.EXACT_PRESCRIPTION.value
+
+
+def test_canonical_evidence_receipt_contract_promotion():
+    """Verify promotion behavior using canonical EvidenceReceipt dataclass contract."""
+    from datetime import datetime, timedelta, timezone
+    from services.agribrain.diagnostic_integration.promotion_service import (
+        DiagnosticPromotionService,
+        PromotionTier,
+    )
+    from services.agribrain.scientific_contracts.evidence_receipt import create_evidence_receipt
+
+    promo_service = DiagnosticPromotionService(default_min_confidence=0.70)
+    now = datetime.now(timezone.utc)
+
+    c_water = make_diagnostic_contribution(
+        "c_water_prescription",
+        target="soil.moisture",
+        confidence=0.92,
+        identifiability=IdentifiabilityClass.IDENTIFIED,
+    )
+
+    # 1. Valid calibrated EvidenceReceipt qualifies for EXACT_PRESCRIPTION
+    valid_receipt = create_evidence_receipt(
+        contribution_id="c_water_prescription",
+        evidence_ids=("ev_satellite_01", "ev_tdr_02"),
+        content_hashes=("hash_a", "hash_b"),
+        capture_manifest_id="sigmf_manifest_001",
+        calibration_certificate_id="cert_calib_2026_09",
+        spatial_support={"polygon": [[0.0, 0.0], [1.0, 1.0]], "srid": 4326},
+        observation_timestamp=now - timedelta(hours=1),
+        freshness_expiry=now + timedelta(hours=6),
+        action_classes_allowed=("EXACT_PRESCRIPTION", "IRRIGATION_VRA"),
+    )
+
+    res_valid = promo_service.promote_to_prescription_eligibility(
+        [c_water], evidence_receipts={"c_water_prescription": valid_receipt}
+    )
+    assert res_valid.promoted_count == 1
+    assert res_valid.promoted_ids == ("c_water_prescription",)
+    assert res_valid.promotion_tiers["c_water_prescription"] == PromotionTier.EXACT_PRESCRIPTION.value
+
+    # 2. Expired EvidenceReceipt is rejected
+    expired_receipt = create_evidence_receipt(
+        contribution_id="c_water_prescription",
+        evidence_ids=("ev_satellite_01",),
+        calibration_certificate_id="cert_calib_2026_09",
+        spatial_support={"polygon": [[0.0, 0.0], [1.0, 1.0]]},
+        observation_timestamp=now - timedelta(days=2),
+        freshness_expiry=now - timedelta(hours=1),
+    )
+    res_expired = promo_service.promote_to_prescription_eligibility(
+        [c_water], evidence_receipts={"c_water_prescription": expired_receipt}
+    )
+    assert res_expired.promoted_count == 0
+    assert "c_water_prescription" in res_expired.exclusions
+    assert "PROMOTION_DENIED_EVIDENCE_EXPIRED" in res_expired.exclusions["c_water_prescription"][0]
+    assert res_expired.promotion_tiers["c_water_prescription"] == PromotionTier.SCOUTING_RECOMMENDATION.value
+
+    # 3. Action class restricted EvidenceReceipt rejects unauthorized action
+    restricted_receipt = create_evidence_receipt(
+        contribution_id="c_water_prescription",
+        evidence_ids=("ev_scout_01",),
+        calibration_certificate_id="cert_scout_01",
+        spatial_support={"polygon": [[0.0, 0.0], [1.0, 1.0]]},
+        freshness_expiry=now + timedelta(hours=12),
+        action_classes_allowed=("SCOUTING_ONLY",),
+    )
+    res_restricted = promo_service.promote_to_prescription_eligibility(
+        [c_water],
+        policy_snapshot={"action_class": "EXACT_PRESCRIPTION"},
+        evidence_receipts={"c_water_prescription": restricted_receipt},
+    )
+    assert res_restricted.promoted_count == 0
+    assert "PROMOTION_DENIED_ACTION_CLASS_NOT_ALLOWED" in res_restricted.exclusions["c_water_prescription"][0]
+
+    # 4. Mandatory receipt requirement: missing receipt fails closed
+    res_missing = promo_service.promote_to_prescription_eligibility(
+        [c_water],
+        policy_snapshot={"require_evidence_receipts": True},
+        evidence_receipts={},
+    )
+    assert res_missing.promoted_count == 0
+    assert "PROMOTION_DENIED_MISSING_EVIDENCE_RECEIPT" in res_missing.exclusions["c_water_prescription"][0]
+

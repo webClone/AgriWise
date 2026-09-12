@@ -20,7 +20,7 @@ Output: IPCameraQAResult -> determines reliability weight and sigma inflation.
 
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 try:
     import numpy as np
@@ -265,7 +265,10 @@ class IPCameraQA:
         ts = input_data.timestamp
         if ts is None:
             return 0.7
-        age_hours = (datetime.now() - ts).total_seconds() / 3600
+        now = datetime.now(timezone.utc)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_hours = (now - ts).total_seconds() / 3600
         if age_hours < 2:
             return 1.0
         if age_hours < 6:
@@ -305,8 +308,12 @@ class IPCameraQA:
         prev_ts = self._previous_timestamps.get(camera_id)
 
         # Update state
+        now_utc = datetime.now(timezone.utc)
+        cur_ts = input_data.timestamp or now_utc
+        if cur_ts.tzinfo is None:
+            cur_ts = cur_ts.replace(tzinfo=timezone.utc)
         self._previous_thumbnails[camera_id] = current_thumb.copy()
-        self._previous_timestamps[camera_id] = input_data.timestamp or datetime.now()
+        self._previous_timestamps[camera_id] = cur_ts
 
         if prev_thumb is None:
             return 1.0  # First frame, nothing to compare
@@ -315,9 +322,10 @@ class IPCameraQA:
         ssim = self._compute_ssim(current_thumb, prev_thumb)
 
         # Check time gap
-        current_ts = input_data.timestamp or datetime.now()
         if prev_ts:
-            gap_minutes = (current_ts - prev_ts).total_seconds() / 60
+            if prev_ts.tzinfo is None:
+                prev_ts = prev_ts.replace(tzinfo=timezone.utc)
+            gap_minutes = (cur_ts - prev_ts).total_seconds() / 60
         else:
             gap_minutes = 0
 

@@ -121,14 +121,21 @@ def _commit_canonical_snapshot_event(
     run_lineage: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Commit the final worldline edge from immutable publication metadata."""
-    from .history.worldline_service import PlotWorldlineService
+    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
 
     plot_state = _mapping(result.get("plot_state_artifact"))
+    evidence_state = _mapping(result.get("asmae_evidence_state"))
     worldline_time = str(
-        plot_state.get("as_of") or result.get("as_of") or ""
+        plot_state.get("as_of")
+        or result.get("as_of")
+        or result.get("observation_or_valid_time")
+        or evidence_state.get("as_of")
+        or result.get("published_at")
+        or ""
     ).strip()
     authority_ref = str(
         plot_state.get("authority_level")
+        or evidence_state.get("authority_level")
         or result.get("authority_level")
         or ""
     ).strip()
@@ -143,7 +150,7 @@ def _commit_canonical_snapshot_event(
     parent = str(
         parent_event_id or result.get("worldline_event_id") or ""
     ).strip()
-    return PlotWorldlineService().commit_event(
+    return CanonicalWorldlineService().commit_event(
         plot_id=str(getattr(plot_namespace, "plot_id", "") or ""),
         event_type="CANONICAL_PLOT_SNAPSHOT",
         geometry_hash=str(geometry_hash or ""),
@@ -199,7 +206,7 @@ def _is_reusable_publication(
     ):
         return False
     validation = _mapping(head.get("validation"))
-    return all(
+    if not all(
         validation.get(key) is True
         for key in (
             "nodeValid",
@@ -212,7 +219,14 @@ def _is_reusable_publication(
             "contractValid",
             "publicationStatusValid",
         )
-    )
+    ):
+        return False
+    fe = _mapping(head.get("frontend_payload"))
+    mode_state = _mapping(fe.get("mode_display_state"))
+    canopy = _mapping(mode_state.get("canopy"))
+    if canopy.get("displayLevel") == "unavailable" or canopy.get("grid_spec_status") == "grid_does_not_intersect_plot":
+        return False
+    return True
 
 
 def rebuild_canonical_plot_snapshot(
@@ -222,6 +236,7 @@ def rebuild_canonical_plot_snapshot(
     job_id: str,
     manifest_hash: str,
     parent_event_id: str = "",
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Re-run downstream layers around one completed ASMAE snapshot.
 
@@ -305,7 +320,7 @@ def rebuild_canonical_plot_snapshot(
     existing_head = load_latest_plot_snapshot(
         plot_namespace, str(raw_input.get("geometry_hash") or "")
     )
-    if existing_head and _is_reusable_publication(
+    if not force and existing_head and _is_reusable_publication(
         existing_head,
         snapshot_id=snapshot_id,
         job_id=job_id,
@@ -433,8 +448,32 @@ def rebuild_canonical_plot_snapshot(
         operational["asmae_replay_capability_plan_hash"] = str(
             context.get("capability_plan_hash") or ""
         )
-    field_geometry = _mapping(raw_input.get("field_geometry"))
-    polygon_geojson = _mapping(raw_input.get("polygon_geojson"))
+    field_geometry = _mapping(
+        raw_input.get("field_geometry") or context.get("field_geometry")
+    )
+    polygon_geojson = _mapping(
+        raw_input.get("polygon_geojson") or context.get("polygon_geojson")
+    )
+    geom_target = polygon_geojson or field_geometry
+    if geom_target:
+        cand = geom_target
+        if isinstance(cand, dict):
+            if cand.get("type") == "Feature":
+                cand = cand.get("geometry") or {}
+            if cand.get("type") in ("Polygon", "MultiPolygon") and cand.get("coordinates"):
+                cand = cand.get("coordinates")
+        while isinstance(cand, (list, tuple)) and cand and isinstance(cand[0], (list, tuple)) and len(cand[0]) > 0 and isinstance(cand[0][0], (list, tuple)):
+            cand = cand[0]
+        if isinstance(cand, (list, tuple)) and len(cand) >= 3:
+            try:
+                ring = [(float(pt[0]), float(pt[1])) for pt in cand]
+                operational["polygon_coords"] = ring
+                operational["lng"] = sum(p[0] for p in ring) / len(ring)
+                operational["lat"] = sum(p[1] for p in ring) / len(ring)
+            except Exception:
+                pass
+    if context.get("raster_composites"):
+        operational["raster_composites"] = context["raster_composites"]
     if (
         result.get("visual_allowed") is True
         and bool(result.get("raster_maps"))
@@ -539,6 +578,16 @@ def rebuild_canonical_plot_snapshot(
         ),
         "replay_mode": "exact_frozen_worldline_events",
     }
+    if isinstance(frontend.get("surfaces"), list):
+        seen_sids = set()
+        deduped_surfs = []
+        for s in frontend["surfaces"]:
+            sid = str(s.get("surface_id") or "").strip() if isinstance(s, dict) else str(getattr(s, "surface_id", "") or "").strip()
+            if sid and sid not in seen_sids:
+                deduped_surfs.append(s)
+                seen_sids.add(sid)
+        frontend["surfaces"] = deduped_surfs
+
     _mark_completed_publication(frontend, job_id)
 
     from .job_manifest import JOB_RUNNER_CONTRACT_VERSION
@@ -562,6 +611,7 @@ def rebuild_canonical_plot_snapshot(
             ),
             "capability_plan_hash": str(context.get("capability_plan_hash") or ""),
         },
+        allow_overwrite=True,
     )
     run_lineage = {
         "orchestrator_run_id": artifact.meta.orchestrator_run_id,

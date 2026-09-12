@@ -206,6 +206,11 @@ def build_real_asmae_scene_stack(inp: ASMAEInput) -> SceneStack:
     included.sort(key=lambda s: s["runtime"].acquisition_time)
     excluded.sort(key=lambda s: s["runtime"].acquisition_time)
 
+    for scene in included:
+        rt = scene.get("runtime")
+        if getattr(rt, "production_usable", False):
+            rt.authority = "real"
+
     stack.scenes = included
     stack.excluded_scenes = excluded
 
@@ -506,10 +511,7 @@ def _extract_packages(
 ) -> List[Any]:
     """Extract source packages for a sensor type from Layer 0 dict.
 
-    Handles multiple naming conventions:
-      - l0["sentinel2"] — list of packages
-      - l0["s2_packages"] — list of packages
-      - l0[sensor_key] — single package or list
+    Handles multiple naming conventions without duplicating packages.
     """
     keys_to_try = [
         f"asmae_{sensor_key}_real",
@@ -521,15 +523,30 @@ def _extract_packages(
     ]
 
     all_pkgs = []
+    seen_ids = set()
     for key in keys_to_try:
         if key is None:
             continue
         data = l0.get(key)
         if data is not None:
-            if isinstance(data, list):
-                all_pkgs.extend(data)
-            else:
-                all_pkgs.append(data)
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                item_id = id(item)
+                meta = getattr(item, "metadata", None) or (item.get("metadata") if isinstance(item, dict) else {})
+                sid = (
+                    getattr(meta, "provider_product_id", None)
+                    or getattr(meta, "scene_id", None)
+                    or (meta.get("provider_product_id") if isinstance(meta, dict) else None)
+                    or (meta.get("scene_id") if isinstance(meta, dict) else None)
+                    or getattr(item, "provider_product_id", None)
+                    or getattr(item, "scene_id", None)
+                    or (item.get("provider_product_id") if isinstance(item, dict) else None)
+                    or (item.get("scene_id") if isinstance(item, dict) else None)
+                )
+                unique_key = sid if sid else item_id
+                if unique_key not in seen_ids:
+                    seen_ids.add(unique_key)
+                    all_pkgs.append(item)
     return all_pkgs
 
 

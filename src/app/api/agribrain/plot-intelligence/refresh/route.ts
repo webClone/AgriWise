@@ -12,6 +12,7 @@ export const runtime = "nodejs"; // Required for zlib in intelligence-store
 import { writeSnapshot } from "@/lib/intelligence-store";
 import { authorizePlot } from "@/lib/agribrain/authorize-plot";
 import { loadPlotIntelligenceContext } from "@/lib/agribrain/plot-intelligence-context";
+import { buildSignedInternalHeaders } from "@/lib/agribrain/internal-service-auth";
 
 const AGRIBRAIN_URL = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
 
@@ -61,22 +62,49 @@ export async function POST(request: NextRequest) {
       sensor_readings,
     } = loaded.context;
 
-    // Call AgriBrain LIVE
+    // Call AgriBrain LIVE with signed HMAC headers
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 60000);
 
+    const payload = {
+      lat,
+      lng,
+      crop,
+      polygon,
+      plant_date,
+      crop_administrative_status,
+      irrigation_type,
+      soil_type,
+      soil_analysis,
+      physical_constraints,
+      area_ha,
+      sensor_readings,
+      expert_mode: true,
+      force_refresh_weather: true,
+      days_past: 7,
+      days_future: 7,
+      plot_id: plotId,
+    };
+    const bodyText = JSON.stringify(payload);
+
+    const signedHeaders = buildSignedInternalHeaders(
+      "POST",
+      "/v2/plot-intelligence",
+      {
+        tenantId: (access.userId || "system").trim(),
+        farmId: farmId.trim(),
+        plotId: plotId.trim(),
+      },
+      bodyText
+    );
+
     const response = await fetch(`${AGRIBRAIN_URL}/v2/plot-intelligence`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        lat, lng, crop, polygon, plant_date, crop_administrative_status,
-        irrigation_type, soil_type, soil_analysis, physical_constraints,
-        area_ha, sensor_readings,
-        expert_mode: true,
-        force_refresh_weather: true,
-        days_past: 7, days_future: 7,
-        plot_id: plotId,
-      }),
+      headers: {
+        "Content-Type": "application/json",
+        ...signedHeaders,
+      },
+      body: bodyText,
       signal: controller.signal,
     });
     clearTimeout(timer);
@@ -84,7 +112,7 @@ export async function POST(request: NextRequest) {
     if (!response.ok) {
       const errText = await response.text();
       return NextResponse.json(
-        { success: false, error: `AgriBrain returned ${response.status}` },
+        { success: false, error: `AgriBrain returned ${response.status}: ${errText}` },
         { status: 502 }
       );
     }
@@ -95,10 +123,12 @@ export async function POST(request: NextRequest) {
 
     // Write new snapshot
     const snapshotId = await writeSnapshot({
-      plotId, farmId,
+      plotId,
+      farmId,
       response: data,
       // Note: L10 surface data comes via /api/agribrain/run, not here
-      lat, lng,
+      lat,
+      lng,
       cropCode: crop,
       areaHa: area_ha ?? undefined,
     });

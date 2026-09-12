@@ -61,8 +61,8 @@ class FAOSoilContext:
     dataset_version: str = "v2.0"
     label: Literal["soil_context"] = "soil_context"
     access_method: Literal[
-        "mocked_fixture", "local_database", "api"
-    ] = "mocked_fixture"
+        "api", "local_database", "mocked_fixture"
+    ] = "api"
 
 
 @dataclass

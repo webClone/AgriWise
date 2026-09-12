@@ -25,7 +25,7 @@ def build_provenance(
     longitude: float,
     coordinate_crs: str = "EPSG:4326",
     soilgrids_version: str = "",
-    soilgrids_access_method: str = "mocked_fixture",
+    soilgrids_access_method: str = "rest_api",
     fao_dataset_name: str = "HWSD",
     fao_dataset_version: str = "v2.0",
     fao_resolution_m: float = 1000.0,

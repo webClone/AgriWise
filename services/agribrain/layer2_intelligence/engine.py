@@ -122,6 +122,7 @@ class Layer2IntelligenceEngine:
         crop_cycle: Optional[CropCycleContext] = None,
         run_id: str = "",
         run_timestamp: Optional[datetime] = None,
+        prior_stress_memory: Optional[Dict[str, float]] = None,
     ) -> Layer2Output:
         """Run the 18-step intelligence pipeline."""
         ts = run_timestamp or datetime.now(timezone.utc)
@@ -294,7 +295,9 @@ class Layer2IntelligenceEngine:
         _stamp_data_health(vegetation_features, data_health)
 
         # 14b. Stress persistence classification (v3.2 EWMA)
-        self._classify_stress_persistence(all_stress, context.plot_id)
+        updated_memory = self._classify_stress_persistence(
+            all_stress, context.plot_id, prior_stress_memory=prior_stress_memory
+        )
 
         audit.append({
             "step": "attribution",
@@ -342,6 +345,7 @@ class Layer2IntelligenceEngine:
             provenance=provenance,
             diagnostics=diagnostics,
             asmae_features=getattr(context, "asmae_features", {}) or {},
+            stress_memory=updated_memory,
         )
 
         pkg._input_water_ctx = water_ctx
@@ -550,10 +554,11 @@ class Layer2IntelligenceEngine:
         self,
         stress_items: List[StressEvidence],
         plot_id: str,
+        prior_stress_memory: Optional[Dict[str, float]] = None,
         ewma_lambda: float = 0.3,
         chronic_threshold: float = 0.4,
         acute_spike_threshold: float = 0.6,
-    ) -> None:
+    ) -> Dict[str, float]:
         """Classify each stress as ACUTE, CHRONIC, or TRANSIENT using EWMA.
 
         EWMA(t) = λ × severity(t) + (1 - λ) × EWMA(t-1)
@@ -562,15 +567,17 @@ class Layer2IntelligenceEngine:
         - ACUTE:   severity ≥ acute_spike_threshold but EWMA < chronic_threshold
         - TRANSIENT: everything else (low severity, low memory)
 
-        The EWMA state persists across calls for the same (plot_id, stress_type).
+        Consumes prior_stress_memory if provided, returns updated stress memory.
 
         Reference: Roberts (1959) "Control chart tests based on geometric
         moving averages", Technometrics.
         """
-        if plot_id not in self._stress_memory:
-            self._stress_memory[plot_id] = {}
-
-        memory = self._stress_memory[plot_id]
+        if prior_stress_memory is not None:
+            memory = dict(prior_stress_memory)
+        elif plot_id in self._stress_memory:
+            memory = dict(self._stress_memory[plot_id])
+        else:
+            memory = {}
 
         # Track which stress types are active this run
         active_types: set = set()
@@ -606,6 +613,9 @@ class Layer2IntelligenceEngine:
                 memory[stype] = round(memory[stype] * (1 - ewma_lambda), 4)
                 if memory[stype] < 0.01:
                     del memory[stype]
+
+        self._stress_memory[plot_id] = memory
+        return memory
 
 
 def _filter_zone_features(features: Dict[str, Any], zone_id: str) -> Dict[str, Any]:

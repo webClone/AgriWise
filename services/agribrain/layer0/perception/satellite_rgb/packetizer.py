@@ -17,7 +17,7 @@ Responsibilities:
 
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 from services.agribrain.layer0.perception.satellite_rgb.inference import SatelliteRGBInferenceResult
 from services.agribrain.layer0.perception.satellite_rgb.qa import SatelliteRGBQAResult
@@ -162,7 +162,7 @@ def packetize(
     output = PerceptionEngineOutput(
         engine_family=PerceptionEngineFamily.SATELLITE_RGB,
         plot_id=engine_input.plot_id,
-        timestamp=engine_input.timestamp or datetime.now(),
+        timestamp=engine_input.timestamp or datetime.now(timezone.utc),
         geometry_scope=engine_input.geometry_scope,
         qa_score=qa_result.qa_score,
         reliability_weight=qa_result.reliability_weight,
@@ -203,7 +203,7 @@ def build_engine_output(
     result = SatelliteRGBEngineOutput(
         engine_family=PerceptionEngineFamily.SATELLITE_RGB,
         plot_id=engine_input.plot_id,
-        timestamp=engine_input.timestamp or datetime.now(),
+        timestamp=engine_input.timestamp or datetime.now(timezone.utc),
         geometry_scope=engine_input.geometry_scope,
         qa_score=qa_result.qa_score,
         reliability_weight=qa_result.reliability_weight,

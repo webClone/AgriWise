@@ -112,7 +112,7 @@ class IPCameraPreprocessor:
             "crop_mask_applied": False,
             "roi_applied": False,
             "segmentation_applied": False,
-            "source": "mock",
+            "source": "none",
         }
 
         # --- Path 1: Try real image loading ---
@@ -132,12 +132,12 @@ class IPCameraPreprocessor:
                 if roi_poly:
                     context["roi_applied"] = True
 
-        # --- Path 2: Mock fallback (tests / no cv2) ---
+        # --- Path 2: Stats override fallback (tests / no cv2) ---
         if not result.real_image_loaded:
-            mock_stats = input_data.metadata.get("mock_frame_stats", {})
+            mock_stats = input_data.metadata.get("mock_frame_stats") or input_data.metadata.get("override_frame_stats", {})
             if mock_stats:
                 self._from_mock_stats(result, mock_stats)
-                context["source"] = "mock"
+                context["source"] = "mock_stats"
                 context["lighting_normalized"] = True
                 context["crop_mask_applied"] = True
 

@@ -30,6 +30,7 @@ class SceneStackClassification:
     n_proxy: int = 0
     n_diagnostic: int = 0
     reasons: List[str] = field(default_factory=list)
+    current_1m_approval_allowed: bool = False
 
     # Derived gates
     @property
@@ -144,6 +145,9 @@ def classify_scene_stack(scenes: list) -> SceneStackClassification:
     else:
         mode = "no_scenes"
 
+    from ..evidence_classifier import _is_valid_proof
+    current_1m_approval_allowed = any(_is_valid_proof(s) for s in scenes)
+
     return SceneStackClassification(
         mode=mode,
         n_total=n_total,
@@ -154,6 +158,7 @@ def classify_scene_stack(scenes: list) -> SceneStackClassification:
         n_proxy=n_proxy,
         n_diagnostic=n_diagnostic,
         reasons=reasons,
+        current_1m_approval_allowed=current_1m_approval_allowed,
     )
 
 

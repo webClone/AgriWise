@@ -420,10 +420,15 @@ def _process_s2_package(
     runtime.provider_orbit_pass = getattr(candidate, "provider_orbit_pass", None)
     runtime.product_binding = getattr(candidate, "product_binding", "unknown")
     runtime.binding_proof = dict(getattr(candidate, "binding_proof", {}) or {})
+    runtime.holdout_proof = getattr(candidate, "holdout_proof", None) or runtime.binding_proof.get("holdout_proof")
+    runtime.registration_proof = getattr(candidate, "registration_proof", None) or runtime.binding_proof.get("registration_proof")
+    runtime.field_approval = getattr(candidate, "field_approval", None) or runtime.binding_proof.get("field_approval")
     if (runtime.production_usable and runtime.product_binding != "exact_catalog_item") or (valid_fraction is not None and valid_fraction <= 0.0) or (cloud_cover is not None and cloud_cover >= 1.0):
         runtime.production_usable = False
         runtime.real_provider_product = False
         runtime.diagnostic_only = True
+    elif runtime.production_usable and runtime.source_reality in ("real_raster", "real_provider_raster", "provider_observation"):
+        runtime.authority = "real"
 
     # ── Compute Quality ──────────────────────────────────────────────
     quality = SceneQualityResult(scene_id=scene_id, sensor="S2")

@@ -24,6 +24,7 @@ import {
   writeSnapshot,
   type CacheStatus,
 } from "@/lib/intelligence-store";
+import { buildSignedInternalHeaders } from "@/lib/agribrain/internal-service-auth";
 
 const AGRIBRAIN_URL = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
 const AUTO_REFRESH_HOURS = 2;
@@ -90,6 +91,7 @@ export async function POST(request: NextRequest) {
     const { data: freshData, plotMeta } = await fetchFromAgriBrain(
       plotId,
       farmId,
+      access.userId || "system",
       expertMode,
       forceRefreshWeather
     );
@@ -154,6 +156,7 @@ function buildResponse(
 async function fetchFromAgriBrain(
   plotId: string,
   farmId: string,
+  tenantId: string,
   expertMode: boolean,
   forceRefreshWeather: boolean
 ): Promise<{ data: any; plotMeta: any }> {
@@ -181,32 +184,49 @@ async function fetchFromAgriBrain(
     sensor_readings,
   } = loaded.context;
 
-  // Call AgriBrain
+  // Call AgriBrain with signed HMAC headers
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60000);
 
+  const payload = {
+    lat,
+    lng,
+    crop,
+    polygon,
+    plant_date,
+    crop_administrative_status,
+    irrigation_type,
+    soil_type,
+    soil_analysis,
+    physical_constraints,
+    area_ha,
+    sensor_readings,
+    expert_mode: expertMode,
+    force_refresh_weather: forceRefreshWeather,
+    days_past: 7,
+    days_future: 7,
+    plot_id: plotId,
+  };
+  const bodyText = JSON.stringify(payload);
+
+  const signedHeaders = buildSignedInternalHeaders(
+    "POST",
+    "/v2/plot-intelligence",
+    {
+      tenantId: tenantId.trim(),
+      farmId: farmId.trim(),
+      plotId: plotId.trim(),
+    },
+    bodyText
+  );
+
   const response = await fetch(`${AGRIBRAIN_URL}/v2/plot-intelligence`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      lat,
-      lng,
-      crop,
-      polygon,
-      plant_date,
-      crop_administrative_status,
-      irrigation_type,
-      soil_type,
-      soil_analysis,
-      physical_constraints,
-      area_ha,
-      sensor_readings,
-      expert_mode: expertMode,
-      force_refresh_weather: forceRefreshWeather,
-      days_past: 7,
-      days_future: 7,
-      plot_id: plotId,
-    }),
+    headers: {
+      "Content-Type": "application/json",
+      ...signedHeaders,
+    },
+    body: bodyText,
     signal: controller.signal,
   });
   clearTimeout(timer);

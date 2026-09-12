@@ -3,19 +3,26 @@ Layer 7.4: Drift & Trust Monitor.
 Evaluates data quality and model confidence.
 """
 
-from typing import Dict, Any, List
-from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta, timezone
 
 class TrustMonitor:
     
     def evaluate_trust(self, 
                        last_satellite_date: datetime, 
                        sensor_active: bool,
-                       forecast_available: bool) -> Dict[str, Any]:
+                       forecast_available: bool,
+                       current_time: Optional[datetime] = None) -> Dict[str, Any]:
         """
         Compute Trust Score based on data freshness and availability.
+        Accepts optional current_time for deterministic replay (Task A16).
         """
-        now = datetime.now() # Mock current time in simulation usually
+        if current_time is not None:
+            now = current_time
+        elif last_satellite_date.tzinfo is not None:
+            now = datetime.now(timezone.utc)
+        else:
+            now = datetime.now()
         days_since_sat = (now - last_satellite_date).days
         
         score = 100

@@ -14,7 +14,7 @@ manually building Kalman observations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
@@ -101,7 +101,7 @@ class Layer0StateEngine:
                 provenance={"error": "Kalman engine not available"},
             )
 
-        now = run_timestamp or datetime.utcnow()
+        now = run_timestamp or datetime.now(timezone.utc)
 
         # Initialize assimilation engine
         engine = self._DailyAssimilationEngine()

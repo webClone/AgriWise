@@ -459,7 +459,7 @@ class SpatialAnalysisEngine:
 
         for zid, ts in zone_means.items():
             if not ts:
-                zone_scores[zid] = 0.5
+                zone_scores[zid] = 0.0
                 zone_trends[zid] = "STABLE"
                 continue
 

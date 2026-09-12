@@ -108,9 +108,36 @@ def extract_pixel_observations(scene: Any) -> Dict[str, 'PixelObservation']:
     swir = _first_grid(bands, ('B11',))
     narrow_nir = _first_grid(bands, ('B8A', 'B08', 'B8'))
 
+    swir2 = _first_grid(bands, ('B12',))
+
     emit('ndvi', _ratio_index(nir, red))
     emit('ndre', _ratio_index(ndre_nir, red_edge))
     emit('ndmi', _ratio_index(narrow_nir, swir))
+    if swir is not None and swir2 is not None:
+        emit('ndsi', _ratio_index(swir, swir2))
+    if ndre_nir is not None and red_edge is not None:
+        emit('phenology_index', _ratio_index(ndre_nir, red_edge))
+
+    if 'ndvi' in result and 'ndmi' in result:
+        ndvi_arr = np.asarray(result['ndvi'].values, dtype=float)
+        ndmi_arr = np.asarray(result['ndmi'].values, dtype=float)
+        cwsi_arr = np.clip(1.0 - (ndmi_arr + 0.2) / np.maximum(ndvi_arr, 0.05), 0.0, 1.0)
+        if result['ndvi'].is_per_pixel and width > 0 and height > 0:
+            emit('cwsi', cwsi_arr.reshape(height, width))
+        else:
+            emit('cwsi', cwsi_arr)
+
+    if 'ndvi' in result and result['ndvi'].is_per_pixel and width > 2 and height > 2:
+        try:
+            from scipy.ndimage import uniform_filter
+            ndvi_2d = np.asarray(result['ndvi'].values, dtype=float).reshape(height, width)
+            local_mean = uniform_filter(ndvi_2d, size=3, mode='reflect')
+            local_sq_mean = uniform_filter(ndvi_2d**2, size=3, mode='reflect')
+            local_std = np.sqrt(np.maximum(0.0, local_sq_mean - local_mean**2))
+            biotic_risk = np.clip(local_std * 3.0, 0.0, 1.0)
+            emit('biotic_anomaly', biotic_risk)
+        except Exception:
+            pass
 
     precomputed = {
         'ndvi': ('NDVI', 'ndvi'),
@@ -120,6 +147,11 @@ def extract_pixel_observations(scene: Any) -> Dict[str, 'PixelObservation']:
         'ndwi': ('NDWI', 'ndwi'),
         'bsi': ('BSI', 'bsi'),
         'nbr': ('NBR', 'nbr'),
+        'ndsi': ('NDSI', 'ndsi', 'salinity_index'),
+        'cwsi': ('CWSI', 'cwsi', 'thermal_stress_proxy'),
+        'phenology_index': ('PHENOLOGY_INDEX', 'phenology_index', 'crop_stage_proxy'),
+        'stress_memory_index': ('STRESS_MEMORY', 'stress_memory_index', 'stress_memory'),
+        'biotic_anomaly': ('BIOTIC_ANOMALY', 'biotic_anomaly', 'biotic_risk'),
         # Assimilation forward models operate on the loader's bounded
         # normalized features. Raw calibrated provider bands remain available
         # under uppercase names for explicitly unit-aware physics experts.
@@ -134,6 +166,25 @@ def extract_pixel_observations(scene: Any) -> Dict[str, 'PixelObservation']:
     for name, candidates in precomputed.items():
         if name not in result:
             emit(name, _first_grid(bands, candidates))
+
+    if 'sar_vh' in result and 'ndvi' in result and 'stress_memory_index' not in result:
+        vh_arr = np.asarray(result['sar_vh'].values, dtype=float)
+        ndvi_arr = np.asarray(result['ndvi'].values, dtype=float)
+        if vh_arr.shape == ndvi_arr.shape:
+            divergence = np.clip(np.maximum(0.0, vh_arr - ndvi_arr), 0.0, 1.0)
+            if result['ndvi'].is_per_pixel and width > 0 and height > 0:
+                emit('stress_memory_index', divergence.reshape(height, width))
+            else:
+                emit('stress_memory_index', divergence)
+    elif 'stress_memory_index' not in result and 'ndvi' in result and 'cwsi' in result:
+        ndvi_arr = np.asarray(result['ndvi'].values, dtype=float)
+        cwsi_arr = np.asarray(result['cwsi'].values, dtype=float)
+        mem = np.clip(cwsi_arr * np.clip(1.0 - ndvi_arr, 0.1, 0.95), 0.0, 1.0)
+        if result['ndvi'].is_per_pixel and width > 0 and height > 0:
+            emit('stress_memory_index', mem.reshape(height, width))
+        else:
+            emit('stress_memory_index', mem)
+
     return result
 
 

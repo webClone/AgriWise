@@ -154,12 +154,14 @@ def apply_policies(
             ))
 
         # Gate 3: Sensor Nyquist limit
+        from ..evidence_classifier import _is_valid_proof
+        has_certified_trust_root = any(_is_valid_proof(s) for s in scenes)
         finest_nyquist = min(
             SENSOR_NYQUIST.get(s, 10) for s in sensors
         ) if sensors else 10
         if res_m < finest_nyquist:
-            # Only reject if no external data can fill the gap
-            if "EXTERNAL" not in sensors:
+            # Only reject if no external data or certified trust root can fill the gap
+            if "EXTERNAL" not in sensors and not has_certified_trust_root:
                 ev.rejected = True
                 ev.rejection_reason = f"{res_m}m exceeds Nyquist limit {finest_nyquist}m"
                 result.demoted_candidates.append({

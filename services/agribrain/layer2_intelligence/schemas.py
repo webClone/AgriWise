@@ -332,6 +332,7 @@ class Layer2Output:
     stress_context: List[StressEvidence] = field(default_factory=list)
     phenology_adjusted_indices: List[PhenologyFeature] = field(default_factory=list)
     asmae_features: Dict[str, Any] = field(default_factory=dict)
+    stress_memory: Dict[str, float] = field(default_factory=dict)
 
     # Spatial
     spatial_index_ref: Optional[SpatialIndex] = None

@@ -238,7 +238,7 @@ class PatternMaturityEngine:
         logger.info("[MATURITY] Set crop override for crop=%s, pattern=%s: %s", crop_type, pattern_name, overrides)
 
     def get_plot_stats(self, plot_id: str) -> Dict[str, Any]:
-        """Fetch real observation/metadata statistics for a plot from MongoDB or mock defaults."""
+        """Fetch real observation/metadata statistics for a plot from MongoDB or zero-initialized baseline."""
         stats = {
             "observations": 0,
             "days": 0,
@@ -304,9 +304,16 @@ class PatternMaturityEngine:
 
         return stats
 
-    def get_maturity_score(self, pattern_name: str, plot_id: str, mock_stats: Optional[Dict[str, Any]] = None) -> float:
+    def get_maturity_score(
+        self,
+        pattern_name: str,
+        plot_id: str,
+        override_stats: Optional[Dict[str, Any]] = None,
+        mock_stats: Optional[Dict[str, Any]] = None,
+    ) -> float:
         """Compute maturity score [0.0 - 1.0] for a pattern on a specific plot."""
-        stats = mock_stats if mock_stats is not None else self.get_plot_stats(plot_id)
+        effective_stats = override_stats if override_stats is not None else mock_stats
+        stats = effective_stats if effective_stats is not None else self.get_plot_stats(plot_id)
         profile = self.get_profile(pattern_name, plot_id, stats.get("crop_type", ""))
 
         # Check deactivation
@@ -378,17 +385,31 @@ class PatternMaturityEngine:
             return False
         return True
 
-    def get_blend_weight(self, pattern_name: str, plot_id: str, mock_stats: Optional[Dict[str, Any]] = None) -> Tuple[float, float]:
+    def get_blend_weight(
+        self,
+        pattern_name: str,
+        plot_id: str,
+        override_stats: Optional[Dict[str, Any]] = None,
+        mock_stats: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[float, float]:
         """Return (pattern_weight, fallback_weight) for blending prediction/priors.
         
         pattern_weight + fallback_weight = 1.0
         """
-        maturity_score = self.get_maturity_score(pattern_name, plot_id, mock_stats)
+        effective_stats = override_stats if override_stats is not None else mock_stats
+        maturity_score = self.get_maturity_score(pattern_name, plot_id, override_stats=effective_stats)
         return (maturity_score, 1.0 - maturity_score)
 
-    def should_activate(self, pattern_name: str, plot_id: str, mock_stats: Optional[Dict[str, Any]] = None) -> bool:
+    def should_activate(
+        self,
+        pattern_name: str,
+        plot_id: str,
+        override_stats: Optional[Dict[str, Any]] = None,
+        mock_stats: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Strategic activation: is the pattern ready to be used?"""
-        score = self.get_maturity_score(pattern_name, plot_id, mock_stats)
+        effective_stats = override_stats if override_stats is not None else mock_stats
+        score = self.get_maturity_score(pattern_name, plot_id, override_stats=effective_stats)
         return score > 0.0
 
     def should_deactivate(self, pattern_name: str, plot_id: str, 
@@ -406,11 +427,17 @@ class PatternMaturityEngine:
         
         return False
 
-    def get_plot_maturity_report(self, plot_id: str, mock_stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def get_plot_maturity_report(
+        self,
+        plot_id: str,
+        override_stats: Optional[Dict[str, Any]] = None,
+        mock_stats: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Generate a complete maturity status dashboard for a plot."""
-        stats = mock_stats if mock_stats is not None else self.get_plot_stats(plot_id)
+        effective_stats = override_stats if override_stats is not None else mock_stats
+        stats = effective_stats if effective_stats is not None else self.get_plot_stats(plot_id)
         
-        # In mock tests or small databases, let's inject active_patterns count dynamically
+        # When evaluating small databases, compute active_patterns count dynamically
         active_patterns_count = 0
         pattern_reports = {}
         

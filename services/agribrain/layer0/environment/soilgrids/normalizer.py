@@ -42,7 +42,7 @@ def normalize_soilgrids_response(
     latitude: float,
     longitude: float,
     soilgrids_version: str = "2.0",
-    access_method: str = "mocked_fixture",
+    access_method: str = "rest_api",
 ) -> SoilGridsProfile:
     """
     Convert a raw SoilGrids response dict to a SoilGridsProfile.
@@ -81,15 +81,26 @@ def normalize_soilgrids_response(
                 continue  # Skip unknown or optional properties in V1
 
             conv = SOILGRIDS_UNIT_CONVERSIONS.get(prop_id, {})
-            raw_mean = prop_data.get("mean")
+            if isinstance(prop_data, dict):
+                raw_mean = prop_data.get("mean")
+                q005 = prop_data.get("Q0.05")
+                q050 = prop_data.get("Q0.5")
+                q095 = prop_data.get("Q0.95")
+            elif isinstance(prop_data, (int, float)):
+                raw_mean = float(prop_data)
+                q005 = None
+                q050 = raw_mean
+                q095 = None
+            else:
+                continue
 
             properties[prop_id] = SoilGridsPropertyValue(
                 property_id=prop_id,
                 depth_label=depth_label,
                 mean=_convert_value(prop_id, raw_mean),
-                q005=_convert_value(prop_id, prop_data.get("Q0.05")),
-                q050=_convert_value(prop_id, prop_data.get("Q0.5")),
-                q095=_convert_value(prop_id, prop_data.get("Q0.95")),
+                q005=_convert_value(prop_id, q005),
+                q050=_convert_value(prop_id, q050),
+                q095=_convert_value(prop_id, q095),
                 unit=conv.get("output_unit", ""),
                 raw_value=raw_mean,
                 conversion_factor=conv.get("factor", 1.0),

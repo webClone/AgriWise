@@ -258,3 +258,36 @@ def test_evidence_ledger_rejects_invalid_supersede():
     violations = ledger.update_item(item_orphan)
     assert any("not found" in v for v in violations)
     assert ledger.count == 0
+
+
+def test_derive_structured_run_identity_incomplete():
+    from services.agribrain.orchestrator_v2.hashing import derive_structured_run_identity
+    inp = _make_sample_input()  # Missing management_event_hash and crop_posterior_hash
+    layer_versions = {"L1": "1.0"}
+    ident = derive_structured_run_identity(inp, layer_versions, "2.0")
+
+    assert ident.run_id.startswith("AGB2-INC-")
+    assert ident.is_scientifically_complete is False
+    assert ident.identity_tier == "INCOMPLETE_MONITORING_ONLY"
+    assert ident.reproducibility_allowed is False
+    assert ident.prescription_allowed is False
+    assert "management_event_hash" in ident.missing_evidence_keys
+    assert "crop_posterior_hash" in ident.missing_evidence_keys
+
+
+def test_derive_structured_run_identity_complete():
+    from services.agribrain.orchestrator_v2.hashing import derive_structured_run_identity
+    inp = _make_sample_input(
+        management_event_hash="mgmt_hash_1",
+        crop_posterior_hash="crop_post_hash_1",
+    )
+    layer_versions = {"L1": "1.0"}
+    ident = derive_structured_run_identity(inp, layer_versions, "2.0")
+
+    assert ident.run_id.startswith("AGB2-")
+    assert not ident.run_id.startswith("AGB2-INC-")
+    assert ident.is_scientifically_complete is True
+    assert ident.identity_tier == "SCIENTIFIC_FROZEN"
+    assert ident.reproducibility_allowed is True
+    assert ident.prescription_allowed is True
+    assert ident.missing_evidence_keys == ()

@@ -850,13 +850,17 @@ class GrowthCurveEngine:
             (et_actual, et_deficit) lists per timestep.
         """
         n = len(et0_series)
-        et_actual = []
-        et_deficit = []
+        et_actual: List[Optional[float]] = []
+        et_deficit: List[Optional[float]] = []
 
         for i in range(n):
-            et0 = et0_series[i] if et0_series[i] is not None else 3.0  # Default 3mm/day
-            kc = kc_series[i] if i < len(kc_series) else 1.0
-            rain = rainfall_series[i] if i < len(rainfall_series) else 0.0
+            if et0_series[i] is None:
+                et_actual.append(None)
+                et_deficit.append(None)
+                continue
+            et0 = et0_series[i]
+            kc = kc_series[i] if i < len(kc_series) and kc_series[i] is not None else 1.0
+            rain = rainfall_series[i] if i < len(rainfall_series) and rainfall_series[i] is not None else 0.0
 
             etc = kc * et0  # Crop water demand
             # Simple water balance: deficit = demand - supply
@@ -1070,7 +1074,7 @@ class GrowthCurveEngine:
 
         # Recent biomass change
         recent_bio = biomass_series[-w:]
-        recent_et = et_actual_series[-w:]
+        recent_et = [e for e in et_actual_series[-w:] if e is not None]
 
         delta_biomass = max(0.0, recent_bio[-1] - recent_bio[0]) if len(recent_bio) >= 2 else 0.0
         et_sum = sum(recent_et)
@@ -1078,7 +1082,8 @@ class GrowthCurveEngine:
         wue = delta_biomass / max(0.01, et_sum) if et_sum > 0 else 0.0
 
         # Total season ET and Carbon Water Productivity (kgC/m3)
-        et_total = sum(et_actual_series[:n])
+        valid_season_et = [e for e in et_actual_series[:n] if e is not None]
+        et_total = sum(valid_season_et)
         total_biomass = max(biomass_series) if biomass_series else 0.0
         cwp = (total_biomass / max(0.01, et_total)) if et_total > 0 else 0.0
 

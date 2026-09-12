@@ -47,8 +47,13 @@ from .contracts_v2 import (
 )
 from .stage_receipt import (
     StageReceipt,
+    create_stage_receipt,
     ExecutionStatus,
     ScientificUsability,
+)
+from .evidence_receipt import (
+    EvidenceReceipt,
+    create_evidence_receipt,
 )
 from .observation import ASMAEObservationPayload
 from .crop_evidence import (
@@ -251,6 +256,9 @@ __all__ = [
     "PrescriptionAuthorizationEnvelopeV1",
     "MechanismExpertContributionV3",
     "StageReceipt",
+    "create_stage_receipt",
+    "EvidenceReceipt",
+    "create_evidence_receipt",
     "ExecutionStatus",
     "ScientificUsability",
     "EvidenceRole",

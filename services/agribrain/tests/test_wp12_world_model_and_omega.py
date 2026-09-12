@@ -219,6 +219,80 @@ def test_bitemporal_window_date_validation():
         )
 
 
+def test_bitemporal_extractor_quarantines_causality_and_status_violations(tmp_path: Path):
+    """Verify that causality violations (t_k < t_e) and aborted statuses are quarantined."""
+    import json
+    worldline_svc = CanonicalWorldlineService(root=tmp_path)
+    extractor = BitemporalWorldlineExtractor(worldline_service=worldline_svc)
+    plot_id = "plot_quarantine_01"
+
+    # Event 1: Valid event
+    p1 = WorldlineEventProposal(
+        event_type="OBSERVATION",
+        payload={"soil_vwc": 0.25},
+        geometry_version="geo_v1",
+        evidence_set_hash="ev_1",
+        model_version="mod_1",
+        authority_ref="MEASURED",
+        observation_or_valid_time="2026-05-20T10:00:00Z",
+    )
+    e1 = worldline_svc.commit_proposal(plot_id=plot_id, proposal=p1, effective_at="2026-05-20T10:00:00Z")
+    f1 = tmp_path / "default_tenant" / "default" / worldline_svc._plot_key(plot_id) / "events" / f"{e1['event_id']}.json"
+    d1 = json.loads(f1.read_text(encoding="utf-8"))
+    d1["committed_at"] = "2026-05-20T12:00:00Z"
+    f1.write_text(json.dumps(d1), encoding="utf-8")
+
+    # Event 2: Causality paradox (t_k < t_e: committed before observation happened)
+    p2 = WorldlineEventProposal(
+        event_type="OBSERVATION",
+        payload={"soil_vwc": 0.28},
+        geometry_version="geo_v1",
+        evidence_set_hash="ev_2",
+        model_version="mod_1",
+        authority_ref="MEASURED",
+        observation_or_valid_time="2026-05-25T10:00:00Z",
+    )
+    e2 = worldline_svc.commit_proposal(plot_id=plot_id, proposal=p2, effective_at="2026-05-25T10:00:00Z")
+    f2 = tmp_path / "default_tenant" / "default" / worldline_svc._plot_key(plot_id) / "events" / f"{e2['event_id']}.json"
+    d2 = json.loads(f2.read_text(encoding="utf-8"))
+    d2["committed_at"] = "2026-05-20T10:00:00Z"  # 5 days before event time!
+    f2.write_text(json.dumps(d2), encoding="utf-8")
+
+    # Event 3: Aborted status
+    p3 = WorldlineEventProposal(
+        event_type="OBSERVATION",
+        payload={"soil_vwc": 0.20, "status": "ABORTED"},
+        geometry_version="geo_v1",
+        evidence_set_hash="ev_3",
+        model_version="mod_1",
+        authority_ref="MEASURED",
+        observation_or_valid_time="2026-05-22T10:00:00Z",
+    )
+    e3 = worldline_svc.commit_proposal(plot_id=plot_id, proposal=p3, effective_at="2026-05-22T10:00:00Z")
+    f3 = tmp_path / "default_tenant" / "default" / worldline_svc._plot_key(plot_id) / "events" / f"{e3['event_id']}.json"
+    d3 = json.loads(f3.read_text(encoding="utf-8"))
+    d3["committed_at"] = "2026-05-22T12:00:00Z"
+    f3.write_text(json.dumps(d3), encoding="utf-8")
+
+    window = extractor.extract_training_window(
+        plot_id=plot_id,
+        start_event_time="2026-05-01T00:00:00Z",
+        end_event_time="2026-05-31T23:59:59Z",
+        as_of_knowledge_time="2026-06-01T00:00:00Z",
+    )
+
+    # Only e1 is active in window
+    assert len(window.events) == 1
+    assert window.events[0]["event_id"] == e1["event_id"]
+
+    # e2 and e3 are quarantined
+    assert len(window.quarantined_events) == 2
+    reasons = {q["event_id"]: q["quarantine_reason"] for q in window.quarantined_events}
+    assert reasons[e2["event_id"]] == "causality_violation_knowledge_precedes_event"
+    assert "uncommitted_or_aborted_status" in reasons[e3["event_id"]]
+
+
+
 # ============================================================================
 # 2. Immutable Forecast Archive & Scoring Tests
 # ============================================================================
@@ -560,3 +634,62 @@ def test_intervention_lifecycle_separation():
         exposure_verified_at=now,
     )
     assert action_exposed.is_physically_realized() is True
+
+
+def test_forecast_evaluation_fails_without_distribution(tmp_path: Path):
+    """Verify ContractViolation is raised when evaluating forecast without predictive distribution."""
+    archive = ImmutableForecastArchive(root=tmp_path)
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=3)
+
+    # Forecast with neither quantiles nor mean/std
+    fc = ForecastRecord(
+        forecast_id="fc-nodist-01",
+        plot_id="plot_nodist",
+        target_variable="soil_vwc",
+        issued_at_knowledge_time=now,
+        target_epoch=future,
+        horizon_days=3.0,
+        predicted_quantiles={},
+        predicted_mean=None,
+        predicted_std=None,
+    )
+    archive.store_forecast(fc)
+
+    with pytest.raises(ContractViolation, match="neither predictive quantiles nor valid mean/std"):
+        archive.evaluate_forecast(
+            forecast_id="fc-nodist-01",
+            observed_value=0.25,
+            verifying_evidence_ids=["ev_obs_1"],
+        )
+
+
+def test_forecast_archive_file_conflict_detection(tmp_path: Path):
+    """Verify ContractViolation is raised if an on-disk file has conflicting content for the same ID."""
+    archive = ImmutableForecastArchive(root=tmp_path)
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=3)
+
+    fc1 = ForecastRecord(
+        forecast_id="fc-conflict-01",
+        plot_id="plot_conflict",
+        target_variable="soil_vwc",
+        issued_at_knowledge_time=now,
+        target_epoch=future,
+        horizon_days=3.0,
+        predicted_quantiles={"p50": 0.22},
+    )
+    archive.store_forecast(fc1)
+
+    # Corrupt or alter the on-disk file
+    fc_file = tmp_path / "forecasts" / "fc-conflict-01.json"
+    import json
+    data = json.loads(fc_file.read_text(encoding="utf-8"))
+    data["horizon_days"] = 7.0
+    fc_file.write_text(json.dumps(data), encoding="utf-8")
+
+    # Create new archive instance reading from same root
+    archive2 = ImmutableForecastArchive(root=tmp_path)
+    with pytest.raises(ContractViolation, match="Forecast immutability violation"):
+        archive2.store_forecast(fc1)
+

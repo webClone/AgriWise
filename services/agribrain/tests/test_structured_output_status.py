@@ -66,3 +66,10 @@ def test_structured_output_status_stage_receipt_degraded():
     status, errors = _structured_output_status(out)
     assert status == LayerStatus.DEGRADED
     assert "structured_output_degraded" in errors
+
+
+def test_structured_output_status_missing_stage_receipt_strict():
+    out = SimpleNamespace(status="OK", run_id="RUN-123")
+    status, errors = _structured_output_status(out, require_stage_receipt=True)
+    assert status == LayerStatus.DEGRADED
+    assert "missing_stage_receipt" in errors

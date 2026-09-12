@@ -925,6 +925,9 @@ function canonicalPublicationToRunData(cacheJson: any, plotId: string) {
     asmae_proof: cacheJson.asmae_proof || {},
     surface_behavior_proof: cacheJson.surface_behavior_proof || {},
     display_trace: cacheJson.display_trace || {},
+    resolved_crop_stage: cacheJson.resolved_crop_stage || cacheJson.crop_phenology?.resolved_crop_stage || cacheJson.phenology_context?.resolved_crop_stage || null,
+    phenology_context: cacheJson.phenology_context || cacheJson.crop_phenology || null,
+    crop_phenology: cacheJson.crop_phenology || null,
   };
 }
 

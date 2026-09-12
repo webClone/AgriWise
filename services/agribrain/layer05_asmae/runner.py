@@ -162,15 +162,19 @@ class ASMAERunner:
         # Rollout permission is resolved before reading, adapting, generating,
         # or persisting any real/proxy scene products.
         permissions = self.execution_permissions(plot_id)
+        if isinstance(context.get("_asmae_execution_permissions"), dict):
+            permissions.update(context["_asmae_execution_permissions"])
+        elif isinstance(context.get("execution_permissions"), dict):
+            permissions.update(context["execution_permissions"])
         context["_asmae_execution_permissions"] = permissions
         if not permissions["compute_allowed"]:
             logger.info("ASMAE disabled for plot %s by rollout policy", plot_id)
             return self._disabled_response(plot_id, run_id)
 
         try:
-            from .history.worldline_service import PlotWorldlineService
+            from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
 
-            PlotWorldlineService().hydrate_context(plot_id, context)
+            CanonicalWorldlineService().hydrate_context(plot_id, context)
         except Exception as exc:
             # Worldline read failure cannot erase current evidence, but is
             # retained as an explicit diagnostic.
@@ -424,10 +428,10 @@ class ASMAERunner:
                     )
                     cached_result["snapshot_status"] = "published"
                     try:
-                        from .history.worldline_service import (
-                            PlotWorldlineService,
+                        from services.agribrain.world_model.canonical_worldline import (
+                            CanonicalWorldlineService,
                         )
-                        event = PlotWorldlineService().commit_asmae_result(
+                        event = CanonicalWorldlineService().commit_asmae_result(
                             cached_result,
                             geometry_hash=inp.geometry_hash,
                             snapshot_ref=cached_result["snapshot_ref"],
@@ -621,9 +625,9 @@ class ASMAERunner:
                         geometry_hash=inp.geometry_hash,
                     )
                     serialized["snapshot_status"] = "published"
-                    from .history.worldline_service import PlotWorldlineService
+                    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
 
-                    worldline = PlotWorldlineService()
+                    worldline = CanonicalWorldlineService()
                     event = worldline.commit_asmae_result(
                         serialized,
                         geometry_hash=inp.geometry_hash,
@@ -644,20 +648,22 @@ class ASMAERunner:
                     and serialized.get("snapshot_ref")
                 ):
                     try:
-                        from .history.worldline_service import (
-                            PlotWorldlineService,
+                        from services.agribrain.world_model.canonical_worldline import (
+                            CanonicalWorldlineService,
                         )
 
-                        worldline = PlotWorldlineService()
+                        worldline = CanonicalWorldlineService()
                         archive_head = worldline.latest_payload(
                             inp.plot_id,
                             "ARCHIVE_POSTERIOR_VALIDATED",
                             str(context.get("tenant_id") or "default_tenant"),
                             str(context.get("worldline_namespace") or "default"),
                         )
-                        if not archive_head:
-                            serialized["archive_refresh"] = (
-                                worldline.refresh_archive_from_context(
+                        from .history.worldline_service import PlotWorldlineService
+
+                        archive_worldline = PlotWorldlineService()
+                        serialized["archive_refresh"] = (
+                            archive_worldline.refresh_archive_from_context(
                                     plot_id=inp.plot_id,
                                     geometry_hash=inp.geometry_hash,
                                     context=context,
@@ -1647,7 +1653,22 @@ class ASMAERunner:
         )
 
         refresh = None
-        candidate_snapshot = load_latest_snapshot(inp.plot_id)
+        expected_snapshot_id = str(
+            context.get("expected_asmae_snapshot_id", "") or ""
+        )
+        candidate_snapshot = None
+        if expected_snapshot_id and inp.plot_id and inp.geometry_hash:
+            from .snapshot_store import load_snapshot_exact
+            try:
+                candidate_snapshot = load_snapshot_exact(
+                    plot_id=inp.plot_id,
+                    geometry_hash=inp.geometry_hash,
+                    snapshot_id=expected_snapshot_id,
+                )
+            except Exception:
+                candidate_snapshot = None
+        if candidate_snapshot is None:
+            candidate_snapshot = load_latest_snapshot(inp.plot_id)
         snapshot = candidate_snapshot
         if (
             snapshot
@@ -1660,9 +1681,6 @@ class ASMAERunner:
             geometry_hash=inp.geometry_hash,
             capability_plan_hash=str(context.get("capability_plan_hash", "")),
             worker_contract_version=JOB_RUNNER_CONTRACT_VERSION,
-        )
-        expected_snapshot_id = str(
-            context.get("expected_asmae_snapshot_id", "") or ""
         )
         reintegration_snapshot = bool(
             context.get("asmae_worker_reintegration") is True

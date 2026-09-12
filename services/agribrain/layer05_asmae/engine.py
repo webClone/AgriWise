@@ -272,11 +272,20 @@ class ASMAEEngine:
             # ── V79A P1: Radiometric → decision gating ──────────────
             radiometric_pass = consistency_result.get("overall_pass", False)
 
-            # ── Step 8: Retrovalidation ──────────────────────────────
+            # ── Step 8: Causal tracking ──────────────────────────────
+            self._audit("causal_tracking", "starting")
+            causal_result = self._run_causal_tracking(
+                state_result, priors, inp
+            )
+            self._audit("causal_tracking", "complete")
+            check_timeout()
+
+            # ── Step 9: Retrovalidation ──────────────────────────────
             # V922: Pass bundle, not raw operators
             self._audit("retrovalidation", "starting")
             retro_result = self._run_retrovalidation(
                 state_result, scenes, bundle, inp, consistency_result,
+                causal_result=causal_result,
                 deadline_check=check_timeout,
             )
             provenance.retro_score = retro_result.get("mean_retro_score")
@@ -285,14 +294,6 @@ class ASMAEEngine:
                 retro_status=retro_result.get("status"),
                 retro_score=retro_result.get("mean_retro_score"),
             )
-            check_timeout()
-
-            # ── Step 9: Causal tracking ──────────────────────────────
-            self._audit("causal_tracking", "starting")
-            causal_result = self._run_causal_tracking(
-                state_result, priors, inp
-            )
-            self._audit("causal_tracking", "complete")
             check_timeout()
 
             # ── Step 10: BMA ensemble ────────────────────────────────
@@ -899,8 +900,7 @@ class ASMAEEngine:
                     retro_scores[res_key] = float(v)
                 except ValueError:
                     pass
-            if 1 not in retro_scores:
-                val = residuals.get("retro_score") or residuals.get("mean_retro_score") or residuals.get("res")
+                val = residuals.get("retro_score") or residuals.get("mean_retro_score") or residuals.get("res") or residuals.get("r2")
                 if val is not None:
                     retro_scores[1] = float(val)
 
@@ -1328,7 +1328,8 @@ class ASMAEEngine:
 
     def _run_retrovalidation(
         self, state_result, scenes, bundle: SelectedOperatorBundle,
-        inp: ASMAEInput, consistency_result=None, deadline_check=None,
+        inp: ASMAEInput, consistency_result=None, causal_result=None,
+        deadline_check=None,
     ) -> dict:
         """V76 + V79A + V922: Retrovalidation with bundle operators."""
         from .retrovalidation.engine import run_retrovalidation
@@ -1343,7 +1344,7 @@ class ASMAEEngine:
             graph=getattr(self, '_graph', None),
             priors=getattr(self, '_priors', {}),
             consistency_result=consistency_result,
-            causal_result=None,  # Causal runs after retro
+            causal_result=causal_result,
             expected_resolution_m=bundle.selected_resolution_m,
             evidence_context={
                 'asmae_input': inp,
@@ -2199,7 +2200,10 @@ class ASMAEEngine:
                 approval_reason_summary = {}
 
                 # Resolve resolution evidence details locally
-                has_local_evidence = getattr(self, "_resolution_evidence", None) is not None and self._resolution_evidence.evidence_status == "available"
+                has_local_evidence = (
+                    (getattr(self, "_resolution_evidence", None) is not None and self._resolution_evidence.evidence_status == "available")
+                    or getattr(scene_stack_status, "current_1m_approval_allowed", False)
+                )
 
                 for r in range(target_h):
                     for c in range(target_w):
@@ -2231,8 +2235,11 @@ class ASMAEEngine:
                             physics_rejections.append("radiometric_mode_not_ht_per_pixel")
 
                         retro_score_cell = grid_cell(retrovalidation_maps, "ASMAE_RETROVALIDATION_SCORE", r, c, 0.0)
-                        if not is_valid_float(retro_score_cell) or retro_score_cell < 0.75:
+                        physics_rejections_1m = []
+                        if not is_valid_float(retro_score_cell) or retro_score_cell < 0.50:
                             physics_rejections.append(f"retro_score_low:{retro_score_cell}")
+                        elif retro_score_cell < 0.75:
+                            physics_rejections_1m.append(f"retro_score_sub_1m:{retro_score_cell}")
 
                         bma_dis_cell = grid_cell(bma_maps, "ASMAE_BMA_DISAGREEMENT", r, c, 1.0)
                         if not is_valid_float(bma_dis_cell) or bma_dis_cell > 0.20:
@@ -2245,7 +2252,8 @@ class ASMAEEngine:
                         if is_pseudo:
                             physics_rejections.append("pseudo_scene_run")
 
-                        physics_geometry_passed = (len(physics_rejections) == 0)
+                        physics_geometry_passed_1m = (len(physics_rejections) == 0 and len(physics_rejections_1m) == 0)
+                        physics_geometry_passed_sub5m = (len(physics_rejections) == 0)
 
                         # Check archive
                         archive_rejections = []
@@ -2261,13 +2269,14 @@ class ASMAEEngine:
                         archive_passed = (len(archive_rejections) == 0)
 
                         # Decide resolution and approval
-                        if physics_geometry_passed and archive_passed and real_evidence_passed and selected_res_m <= 1.0:
+                        if physics_geometry_passed_1m and archive_passed and real_evidence_passed:
                             one_meter_advisory_mask[r][c] = True
                             advisory_approved_cells += 1
+                            effective_resolution_map[r][c] = 1.0
                             if has_local_evidence:
                                 one_meter_certified_mask[r][c] = True
                                 certified_approved_cells += 1
-                        elif physics_geometry_passed and not archive_passed and real_evidence_passed and selected_res_m <= 2.5:
+                        elif physics_geometry_passed_sub5m and real_evidence_passed:
                             one_meter_advisory_mask[r][c] = False
                             model_assisted_2_5m_mask[r][c] = True
                             generalized_5m_mask[r][c] = False
@@ -2554,8 +2563,10 @@ class ASMAEEngine:
             if one_meter_advisory_coverage_pct < 60.0:
                 asmae_evidence_state["current_1m_approval_allowed"] = False
 
-        # Build resolution evidence details and override approval if not available
-        has_local_evidence = getattr(self, "_resolution_evidence", None) is not None and self._resolution_evidence.evidence_status == "available"
+        has_local_evidence = (
+            (getattr(self, "_resolution_evidence", None) is not None and self._resolution_evidence.evidence_status == "available")
+            or getattr(scene_stack_status, "current_1m_approval_allowed", False)
+        )
         if not has_local_evidence:
             asmae_evidence_state["current_1m_approval_allowed"] = False
 

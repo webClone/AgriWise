@@ -41,9 +41,18 @@ def run_nitrogen_leaching(
         if fc:
             precip_forecast = sum(float(x.get("precip", 0.0)) if isinstance(x, dict) else 0.0 for x in fc) / max(len(fc), 1)
             
-    # Infiltration flux (m/day)
-    P_daily = (precip_history + precip_forecast) / 2.0  # mm/day
-    infiltration_flux = P_daily / 1000.0  # m/day
+    # Infiltration flux: consume canonical L3/L4 percolation if available, avoiding ad-hoc averaging
+    canonical_perc_mm = None
+    if inputs.nutrient_l4 and hasattr(inputs.nutrient_l4, "swb_output"):
+        canonical_perc_mm = getattr(inputs.nutrient_l4.swb_output, "deep_percolation_mm", None)
+
+    if canonical_perc_mm is not None and canonical_perc_mm > 0.0:
+        P_daily = float(canonical_perc_mm)
+        infiltration_flux = P_daily / 1000.0  # m/day from canonical water balance
+    else:
+        # Fallback time-integrated infiltration from weather history/forecast
+        P_daily = (precip_history + precip_forecast) / 2.0  # mm/day
+        infiltration_flux = P_daily / 1000.0  # m/day
 
     # 2. Resolve L2 Crop Transpiration Demand
     ndvi = 0.5
@@ -132,6 +141,7 @@ def run_nitrogen_leaching(
     c_coeff = [0.0] * num_layers
     d_coeff = [0.0] * num_layers
     
+    sinks = [0.0] * num_layers
     for i in range(num_layers):
         # Local dispersion coefficient
         D = D0 + alpha * abs(v[i])
@@ -143,6 +153,7 @@ def run_nitrogen_leaching(
         # Plant uptake sink (sink represents crop N extraction, limited by availability)
         sink = actual_transpiration * root_fractions[i] * C[i] * 5.0  # simplified crop uptake kinetics
         sink = min(sink, C[i] * 0.8)  # cannot take more than 80% per step
+        sinks[i] = sink
         
         if i == 0:
             # Boundary at surface (no inflow of solute, or zero flux gradient)
@@ -183,10 +194,11 @@ def run_nitrogen_leaching(
     # Ensure non-negativity
     C_next = [max(0.0, val) for val in C_next]
     
-    # Mass balance and leaching calculation
+    # Mass balance and leaching calculation (deduct crop uptake sink so uptake is not counted as leaching loss)
     initial_solute = sum(C)
     final_solute = sum(C_next)
-    solute_loss = max(0.0, initial_solute - final_solute)
+    total_uptake = sum(sinks)
+    solute_loss = max(0.0, initial_solute - final_solute - total_uptake)
     leaching_fraction = solute_loss / max(initial_solute, 1.0)
     
     # Runoff risk calculation based on infiltration capacity vs precipitation

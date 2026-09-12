@@ -40,17 +40,19 @@ def linear_to_db(linear_val: float) -> float:
 def forward_model_sar_vv(state: List[float]) -> float:
     """Predict SAR VV backscatter from state vector.
 
-    VV is dominated by surface roughness and soil moisture.
-    σ°_VV ≈ f(surface_wetness, root_zone_water, bare_soil)
+    VV is influenced by surface roughness, soil moisture, and in woody /
+    orchard canopies by structural double-bounce scattering.
+    σ°_VV ≈ f(structure, surface_wetness, root_zone_water, bare_soil)
 
     Returns normalized backscatter in [0, 1] range.
     """
     sw = state[IDX_SURFACE_WETNESS]
     rzw = state[IDX_ROOT_ZONE_WATER]
     bare = state[IDX_BARE_SOIL]
+    struct = state[IDX_STRUCTURE]
 
-    # VV increases with moisture and bare soil exposure
-    vv = 0.4 * sw + 0.3 * rzw + 0.15 * bare + 0.1
+    # VV increases with structure (double-bounce), moisture, and bare soil exposure
+    vv = 0.35 * struct + 0.25 * sw + 0.2 * rzw + 0.1 * bare + 0.05
     return max(0.0, min(1.0, vv))
 
 
@@ -103,7 +105,7 @@ SAR_FORWARD_MODELS = {
 }
 
 SAR_FORWARD_MODEL_STATE_REQUIREMENTS = {
-    "sar_vv": (IDX_SURFACE_WETNESS, IDX_ROOT_ZONE_WATER, IDX_BARE_SOIL),
+    "sar_vv": (IDX_STRUCTURE, IDX_SURFACE_WETNESS, IDX_ROOT_ZONE_WATER, IDX_BARE_SOIL),
     "sar_vh": (IDX_STRUCTURE, IDX_SURFACE_WETNESS),
     "sar_ratio": (IDX_STRUCTURE, IDX_SURFACE_WETNESS),
     "delta_sar": (IDX_SURFACE_WETNESS, IDX_BARE_SOIL),
@@ -133,9 +135,10 @@ def predict_sar_observation(
 
 def compute_jacobian_sar_vv(state: List[float]) -> List[float]:
     jac = [0.0] * N_STATES
-    jac[IDX_SURFACE_WETNESS] = 0.4
-    jac[IDX_ROOT_ZONE_WATER] = 0.3
-    jac[IDX_BARE_SOIL] = 0.15
+    jac[IDX_STRUCTURE] = 0.35
+    jac[IDX_SURFACE_WETNESS] = 0.25
+    jac[IDX_ROOT_ZONE_WATER] = 0.2
+    jac[IDX_BARE_SOIL] = 0.1
     return jac
 
 

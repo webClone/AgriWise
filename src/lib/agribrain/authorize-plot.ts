@@ -26,6 +26,6 @@ export async function authorizePlot(plotId: string, farmId?: string | null) {
   });
 
   return plot
-    ? { status: 200 as const, plot }
-    : { status: 404 as const, plot: null };
+    ? { status: 200 as const, plot, userId }
+    : { status: 404 as const, plot: null, userId: null };
 }

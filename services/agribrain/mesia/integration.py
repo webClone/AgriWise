@@ -70,12 +70,29 @@ class MesiaAgriBrainBridge:
         - Capability match requires radio_family and target_variable alignment.
         - ASMAE state_update and diagnosis authority are BLOCKED pending Phase 1 acquisition.
         """
-        # 0. Verify native evidence exists (Audit Finding #4)
+        # 0. Verify native evidence exists and check capture integrity (Audit Finding #4 & Phase 3)
         native_uri = getattr(packet, "native_data_uri", None) or ""
         native_hash = getattr(packet, "native_data_hash", None) or ""
         
-        # Phase 3: Strict hash verification logic
-        is_hash_valid = len(native_hash) == 64
+        # Verify 64-character hex SHA-256 hash formatting
+        is_hash_valid = (
+            bool(native_hash)
+            and len(native_hash) == 64
+            and all(c in "0123456789abcdefABCDEF" for c in native_hash)
+        )
+        
+        # If on-disk SigMF capture artifact is referenced, verify actual file integrity
+        if is_hash_valid and native_uri:
+            from .ingestion.sigmf_ingest import verify_capture_integrity
+            from pathlib import Path
+            clean_path = native_uri.replace("file://", "")
+            p = Path(clean_path)
+            if p.exists() or (p.parent / f"{p.name}.sigmf-data").exists() or p.with_suffix(".sigmf-data").exists():
+                try:
+                    if not verify_capture_integrity(p):
+                        is_hash_valid = False
+                except Exception:
+                    is_hash_valid = False
         
         if not native_uri.strip() or not is_hash_valid:
             l0_record = Layer0EvidenceSpine.evaluate_admission(

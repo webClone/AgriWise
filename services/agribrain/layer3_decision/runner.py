@@ -733,12 +733,16 @@ def run_layer3_decision(
         # Extract weather forecast from L1 output
         forecast = _extract_weather_forecast(l1_output)
 
-        return run_layer3(
+        decision_output = run_layer3(
             l3_context=l3_ctx,
             plot_context=plot_ctx,
             weather_forecast=forecast,
             run_timestamp=run_timestamp,
         )
+        c_water, w_receipt = _execute_canonical_water_engine(inputs, l1_output, l2_output, run_timestamp)
+        decision_output.canonical_water_state = c_water
+        decision_output.water_receipt = w_receipt
+        return decision_output
 
     # Case 2: l2_output is legacy VegIntOutput or None
     import logging
@@ -750,12 +754,86 @@ def run_layer3_decision(
     plot_ctx = _extract_plot_context(inputs, l1_output, l2_output)
     forecast = _extract_weather_forecast(l1_output)
 
-    return run_layer3(
+    decision_output = run_layer3(
         l3_context=l3_ctx,
         plot_context=plot_ctx,
         weather_forecast=forecast,
         run_timestamp=run_timestamp,
     )
+    c_water, w_receipt = _execute_canonical_water_engine(inputs, l1_output, l2_output, run_timestamp)
+    decision_output.canonical_water_state = c_water
+    decision_output.water_receipt = w_receipt
+    return decision_output
+
+
+def _execute_canonical_water_engine(
+    inputs: Any,
+    l1_output: Any,
+    l2_output: Any,
+    run_timestamp: Optional[datetime.datetime] = None,
+) -> tuple[Any, Any]:
+    """Execute authoritative Layer 3 Hydrological Water Balance Engine."""
+    try:
+        from layer3_water.runner import WaterIntelligenceEngine
+        from layer3_water.contracts import HydrologyMode
+        from layer2_contracts.state_contracts import VegetationState
+
+        plot_id = getattr(inputs, "plot_id", "P1") if inputs else "P1"
+        ts = run_timestamp or datetime.datetime.now(timezone.utc)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+
+        # Build weather observations from L1
+        timeseries = getattr(l1_output, "plot_timeseries", []) or []
+        rec = timeseries[-1] if (timeseries and isinstance(timeseries[-1], dict)) else {}
+
+        t_max = rec.get("temp_max") or rec.get("temp") or rec.get("temperature") or 25.0
+        t_min = rec.get("temp_min") or rec.get("temp") or rec.get("temperature") or 15.0
+        precip = rec.get("precipitation") or rec.get("rain") or rec.get("precip") or 0.0
+        wind = rec.get("wind_speed") or rec.get("wind") or 2.0
+        hum = rec.get("humidity") or rec.get("rh") or 60.0
+        rh_min = rec.get("rh_min") or max(10.0, float(hum) - 15.0)
+        rh_max = rec.get("rh_max") or min(100.0, float(hum) + 15.0)
+        rn = rec.get("net_radiation_mj_m2") or 15.0
+
+        weather_obs = {
+            "t_max_c": float(t_max),
+            "t_min_c": float(t_min),
+            "precipitation_mm": float(precip),
+            "wind_speed_2m_m_s": float(wind),
+            "rh_min_pct": float(rh_min),
+            "rh_max_pct": float(rh_max),
+            "net_radiation_mj_m2": float(rn),
+        }
+
+        # Extract vegetation coordinates from L2
+        veg_state = None
+        if l2_output and hasattr(l2_output, "lai_mean"):
+            lai = float(getattr(l2_output, "lai_mean", 1.5) or 1.5)
+            fvc = float(getattr(l2_output, "canopy_cover_pct", 50.0) or 50.0) / 100.0
+            veg_state = VegetationState(
+                plot_id=plot_id,
+                timestamp=ts,
+                lai=lai,
+                fvc=fvc,
+                root_depth_proxy_m=1.0,
+            )
+
+        soil_type = getattr(inputs, "soil_type", "loam") or "loam"
+
+        water_state, feedback = WaterIntelligenceEngine.execute_pipeline(
+            plot_id=plot_id,
+            timestamp=ts,
+            vegetation_state=veg_state,
+            weather_observations=weather_obs,
+            soil_type=soil_type,
+            hydrology_mode=HydrologyMode.FAO56_LAYERED_BUCKET,
+        )
+        return water_state, feedback
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[L3] Canonical water engine execution note: {e}")
+        return None, None
 
 
 def _extract_plot_context(

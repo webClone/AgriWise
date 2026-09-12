@@ -183,6 +183,61 @@ _register(IndexStateMapping(
     description="Disturbance/harvest residue from NBR",
 ))
 
+_register(IndexStateMapping(
+    index_name="ndsi",
+    sensor="S2",
+    target_state_indices=(IDX_SALINITY, IDX_BARE_SOIL),
+    forbidden_state_indices=(IDX_CHLOROPHYLL, IDX_CANOPY_WATER, IDX_PHENOLOGY),
+    base_noise_sigma=0.06,
+    noise_floor=0.03,
+    confidence_contribution=0.55,
+    description="Salinity-induced osmotic stress from Normalized Difference Salinity Index (SWIR1/SWIR2)",
+))
+
+_register(IndexStateMapping(
+    index_name="cwsi",
+    sensor="S2",
+    target_state_indices=(IDX_THERMAL,),
+    forbidden_state_indices=(IDX_ROOT_ZONE_WATER, IDX_STRUCTURE, IDX_PHENOLOGY),
+    base_noise_sigma=0.06,
+    noise_floor=0.03,
+    confidence_contribution=0.55,
+    description="Canopy thermal stress from Crop Water Stress Index proxy (SWIR water absorption relative to vigor)",
+))
+
+_register(IndexStateMapping(
+    index_name="phenology_index",
+    sensor="S2",
+    target_state_indices=(IDX_PHENOLOGY,),
+    forbidden_state_indices=(IDX_ROOT_ZONE_WATER, IDX_SURFACE_WETNESS, IDX_SALINITY),
+    base_noise_sigma=0.05,
+    noise_floor=0.02,
+    confidence_contribution=0.60,
+    description="Phenological progress from red-edge/chlorophyll seasonal progression",
+))
+
+_register(IndexStateMapping(
+    index_name="stress_memory_index",
+    sensor="S2",
+    target_state_indices=(IDX_STRESS_MEMORY,),
+    forbidden_state_indices=(IDX_CHLOROPHYLL, IDX_SURFACE_WETNESS),
+    base_noise_sigma=0.07,
+    noise_floor=0.03,
+    confidence_contribution=0.50,
+    description="Cumulative stress memory from canopy structure-vigor divergence",
+))
+
+_register(IndexStateMapping(
+    index_name="biotic_anomaly",
+    sensor="S2",
+    target_state_indices=(IDX_BIOTIC,),
+    forbidden_state_indices=(IDX_ROOT_ZONE_WATER, IDX_PHENOLOGY),
+    base_noise_sigma=0.06,
+    noise_floor=0.03,
+    confidence_contribution=0.50,
+    description="Biotic confounder risk from localized high-frequency spatial texture anomalies",
+))
+
 # ── SAR indices (Sentinel-1) ───────────────────────────────────────────────
 
 _register(IndexStateMapping(

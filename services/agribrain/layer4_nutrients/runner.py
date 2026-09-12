@@ -186,8 +186,61 @@ def run_layer4_standalone(
         tillage=tillage, clay_pct=clay_pct, temperature_c=avg_temp,
     )
 
-    # 3. SWB (CONTRACT-1 FIX: pass L1 Kalman soil moisture)
-    if daily_weather:
+    # 3. SWB — Canonical Layer 3 Water Balance Authority (Requirement 1)
+    canonical_water = getattr(l3_decision, "canonical_water_state", None) if l3_decision else None
+
+    if canonical_water is not None and hasattr(canonical_water, "root_zone") and hasattr(canonical_water, "soil_water"):
+        rz = canonical_water.root_zone
+        sw = canonical_water.soil_water
+        fx = canonical_water.fluxes.actual if hasattr(canonical_water, "fluxes") and hasattr(canonical_water.fluxes, "actual") else None
+        ks = getattr(rz, "stress_factor_ks", 1.0)
+        drainage_mm = getattr(fx, "deep_drainage_mm", 0.0) if fx else 0.0
+        taw_val = getattr(rz, "total_available_water_mm", 150.0)
+        raw_val = getattr(rz, "readily_available_water_mm", 75.0)
+
+        # Transition comparison audit: compute legacy SWB for comparison only; cannot drive decisions
+        legacy_swb_comparison = None
+        if daily_weather:
+            try:
+                swb_engine = SoilWaterBalanceEngine()
+                legacy_swb = swb_engine.run(
+                    daily_weather=daily_weather,
+                    crop_type=crop_type,
+                    stages=stages,
+                    soil_props=soil_props,
+                    irrigation_events=irrigation_events,
+                    initial_soil_moisture_mm=initial_soil_moisture_mm,
+                )
+                legacy_swb_comparison = {
+                    "legacy_stress_index": legacy_swb.water_stress_index,
+                    "legacy_drainage_mm": legacy_swb.drainage_accum_mm,
+                    "canonical_stress_index": round(1.0 - ks, 4),
+                    "canonical_drainage_mm": drainage_mm,
+                }
+            except Exception:
+                pass
+
+        swb = SoilWaterBalanceOutput(
+            theta_fc=float(getattr(sw, "theta_fc", 0.30)),
+            theta_wp=float(getattr(sw, "theta_wp", 0.15)),
+            theta_sat=float(getattr(sw, "theta_sat", 0.45)),
+            taw_mm=float(taw_val),
+            raw_mm=float(raw_val),
+            water_stress_index=round(max(0.0, min(1.0, 1.0 - ks)), 4),
+            leaching_risk_index=round(min(1.0, drainage_mm / 25.0), 4),
+            drainage_accum_mm=float(drainage_mm),
+            soil_moisture_mm=float(getattr(sw, "root_zone_storage_mm", taw_val * 0.7)),
+            is_water_limiting=(ks < 0.90),
+            deep_percolation_mm=float(drainage_mm),
+            n_leaching_kg_ha=0.0,
+            irrigation_applied_mm=float(getattr(fx, "irrigation_mm", 0.0)) if fx else 0.0,
+            effective_precipitation_mm=float(getattr(fx, "precipitation_mm", 0.0)) if fx else 0.0,
+            status="OK",
+            is_degraded=False,
+            missing_weather_days=0,
+            uncertainty_multiplier=1.0,
+        )
+    elif daily_weather:
         swb_engine = SoilWaterBalanceEngine()
         swb = swb_engine.run(
             daily_weather=daily_weather,

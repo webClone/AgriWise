@@ -312,5 +312,5 @@ class ArchiveFetcher:
                         f.write(chunk)
                 cache_refs[asset] = path
             except Exception as e:
-                # Fallback: log warning and raise or write mock
+                # Fail closed on download failure
                 raise RuntimeError(f"Failed to download asset {asset}: {str(e)}")

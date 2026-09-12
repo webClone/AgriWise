@@ -233,7 +233,7 @@ class DataRefreshWorker:
                 return
 
             # Find distinct plot_ids with recent cache entries
-            cutoff = datetime.utcnow()
+            cutoff = datetime.now(timezone.utc)
             pipeline = [
                 {"$match": {"plot_id": {"$ne": ""}, "fetched_at": {"$exists": True}}},
                 {"$group": {"_id": "$plot_id"}},

@@ -111,8 +111,8 @@ class SoilGridsProfile:
 
     soilgrids_version: str = ""
     access_method: Literal[
-        "mocked_fixture", "wcs_tile", "rest_api", "webdav"
-    ] = "mocked_fixture"
+        "rest_api", "wcs_tile", "webdav", "mocked_fixture"
+    ] = "rest_api"
 
 
 @dataclass
@@ -124,6 +124,10 @@ class SoilGridsDerivedHydraulics:
     # AWC in mm per layer (with coarse-fragment correction)
     awc_mm_by_layer: Dict[str, float] = field(default_factory=dict)
     coarse_fragment_correction_applied: bool = False
+
+    # Authentic Field Capacity & Wilting Point from SoilGrids wv003 / wv1500
+    field_capacity_vol_pct: Optional[float] = None
+    wilting_point_vol_pct: Optional[float] = None
 
     # Root-zone aggregated AWC (mm)
     root_zone_awc_mm_0_30: Optional[float] = None

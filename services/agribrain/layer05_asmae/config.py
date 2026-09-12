@@ -167,17 +167,18 @@ GRAPH_IRRIGATION_CONNECTIVITY_WEIGHT = 0.6
 
 # Per-observation-type radiometric thresholds (not one global 0.15)
 RADIOMETRIC_THRESHOLDS_BY_OBS = {
-    "ndvi":     {"pass": 0.12, "reject": 0.25},
+    "ndvi":     {"pass": 0.15, "reject": 0.30},
     "evi":      {"pass": 0.12, "reject": 0.25},
     "ndre":     {"pass": 0.15, "reject": 0.30},
     "reip":     {"pass": 0.15, "reject": 0.30},
     "ndmi":     {"pass": 0.15, "reject": 0.30},
-    "ndwi":     {"pass": 0.18, "reject": 0.35},
+    "ndwi":     {"pass": 0.20, "reject": 0.40},
     "bsi":      {"pass": 0.18, "reject": 0.35},
     "nbr":      {"pass": 0.18, "reject": 0.35},
-    "sar_vv":   {"pass": 0.20, "reject": 0.40},
+    "sar_vv":   {"pass": 0.25, "reject": 0.45},
     "sar_vh":   {"pass": 0.20, "reject": 0.40},
-    "sar_ratio": {"pass": 0.20, "reject": 0.40},
+    "sar_ratio": {"pass": 0.25, "reject": 0.45},
+    "stress_memory_index": {"pass": 0.20, "reject": 0.35},
 }
 
 # ── V74: Adaptive Ensemble Size Policy ──────────────────────────────────────

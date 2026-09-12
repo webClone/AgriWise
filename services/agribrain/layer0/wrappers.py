@@ -549,14 +549,14 @@ def wrap_sensors(
         data_status=aggregate_data_status(packets, has_data),
         is_available=has_data,
         packets=packets,
-        kalman_observations=sensor_package.kalman_observations or [],
-        process_forcing=sensor_package.process_forcing_events or [],
-        diagnostics=sensor_package.diagnostics if isinstance(sensor_package.diagnostics, dict) else {},
-        provenance=sensor_package.provenance if isinstance(sensor_package.provenance, dict) else {},
+        kalman_observations=getattr(sensor_package, "kalman_observations", None) or [],
+        process_forcing=getattr(sensor_package, "process_forcing_events", None) or [],
+        diagnostics=sensor_package.diagnostics if isinstance(getattr(sensor_package, "diagnostics", None), dict) else {},
+        provenance=sensor_package.provenance if isinstance(getattr(sensor_package, "provenance", None), dict) else {},
         health={
-            "device_count": len(sensor_package.devices),
-            "reading_count": len(sensor_package.readings),
-            "aggregate_count": len(sensor_package.aggregates),
+            "device_count": len(getattr(sensor_package, "devices", []) or []),
+            "reading_count": len(getattr(sensor_package, "readings", []) or []),
+            "aggregate_count": len(getattr(sensor_package, "aggregates", []) or []),
         },
     )
 

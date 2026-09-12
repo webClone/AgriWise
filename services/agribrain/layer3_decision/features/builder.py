@@ -251,15 +251,21 @@ def build_decision_features(
 
     # --- 8. Spatial stability from zone intelligence ---
     zone_status = getattr(l3_context, "zone_status", {}) or {}
-    spatial_stability = "STABLE"
-    spatial_confidence = 0.5
     if len(zone_status) > 1:
         severities = [z.get("severity", 0.0) for z in zone_status.values()]
         if max(severities) - min(severities) > 0.3:
             spatial_stability = "HETEROGENEOUS"
+        else:
+            spatial_stability = "STABLE"
         spatial_confidence = min(
             z.get("confidence", 0.5) for z in zone_status.values()
         )
+    elif len(zone_status) == 1:
+        spatial_stability = "STABLE"
+        spatial_confidence = list(zone_status.values())[0].get("confidence", 0.5)
+    else:
+        spatial_stability = "UNKNOWN"
+        spatial_confidence = 0.0
 
     # --- 9. Data health integration ---
     data_health = getattr(l3_context, "data_health", None)
@@ -455,20 +461,24 @@ def _apply_forecast_features(
             continue
 
         rain = float(day.get("rain", 0.0) or 0.0)
-        t_min = float(day.get("temp_min", 15.0) or 15.0)
-        t_max = float(day.get("temp_max", 30.0) or 30.0)
+        t_min_val = day.get("temp_min")
+        t_max_val = day.get("temp_max")
 
         rain_7d += rain
         if i < 3:
             rain_3d += rain
 
-        if t_min < 2.0:
-            cold_days += 1
-        if t_max > 38.0:
-            heat_days += 1
+        if t_min_val is not None:
+            t_min = float(t_min_val)
+            if t_min < 2.0:
+                cold_days += 1
+            min_temp = min(min_temp, t_min)
 
-        min_temp = min(min_temp, t_min)
-        max_temp = max(max_temp, t_max)
+        if t_max_val is not None:
+            t_max = float(t_max_val)
+            if t_max > 38.0:
+                heat_days += 1
+            max_temp = max(max_temp, t_max)
 
     features.forecast_rain_3d = round(rain_3d, 1)
     features.forecast_rain_7d = round(rain_7d, 1)

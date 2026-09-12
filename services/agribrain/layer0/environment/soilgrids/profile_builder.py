@@ -71,6 +71,8 @@ def build_derived_hydraulics(profile: SoilGridsProfile) -> SoilGridsDerivedHydra
     topsoil_phh2o: Optional[float] = None
     topsoil_cec: Optional[float] = None
     topsoil_soc: Optional[float] = None
+    topsoil_wv003: Optional[float] = None
+    topsoil_wv1500: Optional[float] = None
 
     for depth_label in SOILGRIDS_DEPTH_LABELS:
         layer = profile.depth_layers.get(depth_label)
@@ -114,6 +116,10 @@ def build_derived_hydraulics(profile: SoilGridsProfile) -> SoilGridsDerivedHydra
             topsoil_phh2o = layer.get("phh2o")
             topsoil_cec = layer.get("cec")
             topsoil_soc = layer.get("soc")
+        if topsoil_wv003 is None and wv003 is not None:
+            topsoil_wv003 = wv003
+        if topsoil_wv1500 is None and wv1500 is not None:
+            topsoil_wv1500 = wv1500
 
     # Texture class
     texture_class = ""
@@ -132,6 +138,8 @@ def build_derived_hydraulics(profile: SoilGridsProfile) -> SoilGridsDerivedHydra
         awc_volumetric_proxy_by_depth=awc_volumetric,
         awc_mm_by_layer=awc_mm,
         coarse_fragment_correction_applied=coarse_corrected,
+        field_capacity_vol_pct=round(topsoil_wv003, 2) if topsoil_wv003 is not None else None,
+        wilting_point_vol_pct=round(topsoil_wv1500, 2) if topsoil_wv1500 is not None else None,
         root_zone_awc_mm_0_30=round(rz_awc_30, 2) if awc_mm else None,
         root_zone_awc_mm_0_60=round(rz_awc_60, 2) if awc_mm else None,
         root_zone_awc_mm_0_100=round(rz_awc_100, 2) if awc_mm else None,

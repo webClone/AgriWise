@@ -212,19 +212,21 @@ def generate_historical_surfaces(
         provenance=provenance
     ))
 
-    # 3. ASMAE_BMA_DISAGREEMENT
-    surfaces.append(SurfaceArtifact(
-        surface_id=f"ASMAE_BMA_DISAGREEMENT_{inp.plot_id}",
-        semantic_type=SurfaceType.ASMAE_BMA_DISAGREEMENT,
-        grid_ref=f"{H}x{W}",
-        values=bma_grid,
-        units="disagreement",
-        native_resolution_m=inp.resolution_m,
-        render_range=(0.0, 1.0),
-        palette_id=PaletteId.STRESS_RED,
-        source_layers=["L10_HISTORICAL"],
-        confidence=confidence_grid,
-        provenance=provenance
-    ))
+    # 3. ASMAE_BMA_DISAGREEMENT (only if not already provided by real ASMAE rasters)
+    has_real_bma = bool(l1_data and ("ASMAE_BMA_DISAGREEMENT" in getattr(l1_data, "raster_maps", {})))
+    if not has_real_bma:
+        surfaces.append(SurfaceArtifact(
+            surface_id=f"ASMAE_BMA_DISAGREEMENT_{inp.plot_id}",
+            semantic_type=SurfaceType.ASMAE_BMA_DISAGREEMENT,
+            grid_ref=f"{H}x{W}",
+            values=bma_grid,
+            units="disagreement",
+            native_resolution_m=inp.resolution_m,
+            render_range=(0.0, 1.0),
+            palette_id=PaletteId.STRESS_RED,
+            source_layers=["L10_HISTORICAL"],
+            confidence=confidence_grid,
+            provenance=provenance
+        ))
 
     return surfaces

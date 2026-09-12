@@ -29,6 +29,8 @@ class L3DiagnosticData:
     confidence_trajectory: Dict[str, str] = field(default_factory=dict)
 
     run_id: str = ""
+    # Canonical Layer 3 Water State (Authoritative Hydrological Water Balance)
+    canonical_water_state: Any = None
 
 
 def _classify_trend(values: List[float]) -> str:
@@ -54,7 +56,10 @@ def adapt_l3(decision: Any) -> L3DiagnosticData:
     if decision is None:
         return L3DiagnosticData()
 
-    result = L3DiagnosticData(run_id=getattr(decision, 'run_id_l3', ''))
+    result = L3DiagnosticData(
+        run_id=getattr(decision, 'run_id_l3', ''),
+        canonical_water_state=getattr(decision, 'canonical_water_state', None),
+    )
 
     # Diagnoses with spatial fields
     for dx in getattr(decision, 'diagnoses', []):

@@ -115,6 +115,40 @@ def get_kcb(crop_type: str, stage: str) -> float:
 
 
 # ============================================================================
+# C^1 Continuous Effective Precipitation Spline
+# ============================================================================
+
+def calculate_effective_precipitation(rain_mm: float) -> float:
+    """Continuously differentiable (C^1) agricultural effective precipitation.
+
+    Guarantees value and slope continuity across all rainfall regimes:
+    - P <= 0: 0.0 mm
+    - 0 < P <= 200 mm: P * (125.0 - 0.2 * P) / 125.0 (quadratic retention)
+      At P = 200: P_eff = 136.0 mm, dP_eff/dP = 0.36
+    - 200 < P < 300 mm: Monotone Hermite cubic spline S(P)
+      matching value and first derivative at P=200 and P=300
+    - P >= 300 mm: 135.0 + 0.1 * P (linear runoff asymptotic branch)
+      At P = 300: P_eff = 165.0 mm, dP_eff/dP = 0.10
+    """
+    if rain_mm <= 0.0:
+        return 0.0
+    if rain_mm <= 200.0:
+        return rain_mm * (125.0 - 0.2 * rain_mm) / 125.0
+    if rain_mm < 300.0:
+        u = (rain_mm - 200.0) / 100.0
+        h00 = 2.0 * u**3 - 3.0 * u**2 + 1.0
+        h10 = u**3 - 2.0 * u**2 + u
+        h01 = -2.0 * u**3 + 3.0 * u**2
+        h11 = u**3 - u**2
+        y0 = 136.0
+        m0 = 36.0  # S'(200) * 100
+        y1 = 165.0
+        m1 = 10.0  # S'(300) * 100
+        return h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1
+    return 135.0 + 0.1 * rain_mm
+
+
+# ============================================================================
 # SWB Engine
 # ============================================================================
 
@@ -143,19 +177,7 @@ class SoilWaterBalanceEngine:
         root_depth_mm: float = 1000.0,
         initial_soil_moisture_mm: Optional[float] = None,
     ) -> SoilWaterBalanceOutput:
-        """Run the FAO-56 daily water balance.
-
-        Args:
-            daily_weather: List of {et0, rain_mm, t_max} per day
-            crop_type: Crop name for Kc lookup
-            stages: Phenology stage per day
-            soil_props: {clay_pct, sand_pct, organic_matter_pct} from user
-            irrigation_events: List of {day, amount_mm} from user
-            root_depth_mm: Effective root zone depth
-            initial_soil_moisture_mm: Initial soil moisture from L1 Kalman
-                state. If None, defaults to 70% of FC.
-                LOGIC-1 FIX: accepts L1 Kalman soil moisture.
-        """
+        """Run the FAO-56 daily water balance."""
         # 1. Derive hydraulic properties
         clay = (soil_props or {}).get("clay_pct", self.default_clay)
         sand = (soil_props or {}).get("sand_pct", self.default_sand)
@@ -186,35 +208,30 @@ class SoilWaterBalanceEngine:
         # 2. Daily simulation
         n_days = len(daily_weather)
 
-        # LOGIC-1 FIX: Use L1 Kalman soil moisture if available
         if initial_soil_moisture_mm is not None:
-            # Clamp to [WP, FC] — Kalman state may be in VWC fraction
             theta_curr_mm = max(wp_mm, min(fc_mm, initial_soil_moisture_mm))
         else:
             theta_curr_mm = fc_mm * 0.7 + wp_mm * 0.3  # Default: 70% FC
 
-        # LOGIC-2 FIX: Soil evaporation depletion tracking (FAO-56 Eq. 71-73)
-        # Stage 1: energy-limited evaporation (soil wet)
-        # Stage 2: falling-rate evaporation (soil drying)
-        # TEW = total evaporable water = 1000 * (θ_FC - 0.5*θ_WP) * Ze
-        ze_mm = 100.0  # Evaporation layer depth (100mm typical)
-        tew = (theta_fc - 0.5 * theta_wp) * ze_mm  # Total evaporable water
-        rew = min(tew * 0.4, 8.0)  # Readily evaporable water (mm)
-        de_curr = rew * 0.5  # Initial evaporation depletion (mm)
+        ze_mm = 100.0
+        tew = (theta_fc - 0.5 * theta_wp) * ze_mm
+        rew = min(tew * 0.4, 8.0)
+        de_curr = rew * 0.5
 
         daily_stress = []
         daily_leaching = []
         total_drainage = 0.0
         total_deep_perc = 0.0
         total_eff_precip = 0.0
+        missing_weather_days = 0
 
         for day_idx, wx in enumerate(daily_weather):
             et0 = wx.get("et0")
             rain = wx.get("rain_mm")
             irr = irr_schedule.get(day_idx, 0.0)
 
-            # If weather row is partial, mark SWB unavailable/partial for this day and avoid type errors
             if et0 is None or rain is None:
+                missing_weather_days += 1
                 theta_next = theta_curr_mm + irr
                 if theta_next > fc_mm:
                     theta_next = fc_mm
@@ -223,47 +240,31 @@ class SoilWaterBalanceEngine:
                 theta_curr_mm = max(wp_mm, theta_next)
                 continue
 
-            # Stage-aware Kc
             stage = "vegetative"
             if stages and day_idx < len(stages):
                 stage = stages[day_idx]
             kcb = get_kcb(crop_type, stage)
 
-            # LOGIC-2 FIX: 3-stage Ke model (FAO-56 Eq. 71-73)
-            # Instead of binary ke = 0.10 / 0.05, track soil evaporation
-            # depletion (De) through wetting and drying cycles.
-            # Ke = Kr * (Kcb_max - Kcb), where Kr = (TEW - De) / (TEW - REW)
             wetting = rain + irr
-            de_curr = max(0, de_curr - wetting)  # Wetting reduces depletion
+            de_curr = max(0, de_curr - wetting)
             if de_curr < rew:
-                # Stage 1: energy-limited, Kr = 1.0
                 kr = 1.0
             elif de_curr < tew:
-                # Stage 2: falling rate
                 kr = (tew - de_curr) / max(0.01, tew - rew)
             else:
-                # Stage 3: dry, negligible evaporation
                 kr = 0.0
-            kcb_max = max(kcb + 0.05, 1.20)  # FAO-56 Eq. 72
+            kcb_max = max(kcb + 0.05, 1.20)
             ke = kr * max(0, kcb_max - kcb)
-            ke = min(ke, 0.30)  # Physical cap
+            ke = min(ke, 0.30)
 
             kc = kcb + ke
             etc = et0 * kc
 
-            # Update soil evaporation depletion
-            e_soil = et0 * ke  # Actual soil evaporation
-            de_curr = min(tew, de_curr + e_soil)  # Drying increases depletion
+            e_soil = et0 * ke
+            de_curr = min(tew, de_curr + e_soil)
 
-            # NUM-4 FIX: Continuous effective precipitation (FAO formula)
-            # Replaces the step function which had a downward discontinuity
-            # at rain=25mm. This formula is continuous over the full range.
-            if rain <= 0:
-                p_eff = 0.0
-            elif rain < 250:
-                p_eff = rain * (125.0 - 0.2 * rain) / 125.0
-            else:
-                p_eff = rain * 0.1 + 25.0  # Very heavy rain: mostly runoff
+            # Continuous C^1 effective precipitation
+            p_eff = calculate_effective_precipitation(rain)
             total_eff_precip += p_eff
 
             # Water balance
@@ -271,26 +272,21 @@ class SoilWaterBalanceEngine:
             outflow = etc
             theta_next = theta_curr_mm + inflow - outflow
 
-            # Drainage (excess above FC)
             drainage = 0.0
             if theta_next > fc_mm:
                 drainage = theta_next - fc_mm
                 theta_next = fc_mm
             total_drainage += drainage
 
-            # NUM-2 FIX: Texture-dependent deep percolation fraction
-            # Sandy soils drain 85-95% deep, clays only 30-50%
             f_deep = 0.30 + 0.60 * (sand / 100.0)
             deep_perc = drainage * f_deep
             total_deep_perc += deep_perc
 
-            # Leaching risk
             l_risk = 0.0
             if drainage > 5.0:
                 l_risk = min(1.0, 0.3 + drainage / 30.0)
             daily_leaching.append(l_risk)
 
-            # Water stress factor (Ks)
             paw = max(0, theta_next - wp_mm)
             ks = 1.0
             threshold = taw_mm * 0.5
@@ -299,22 +295,19 @@ class SoilWaterBalanceEngine:
             wsi = 1.0 - ks
             daily_stress.append(wsi)
 
-            # Floor at wilting point
             theta_next = max(wp_mm, theta_next)
             theta_curr_mm = theta_next
 
-        # 3. Aggregate
         window = min(n_days, 14) if n_days > 0 else 1
         recent_stress = sum(daily_stress[-window:]) / window if daily_stress else 0.0
         recent_leaching = max(daily_leaching[-window:]) if daily_leaching else 0.0
 
-        # NUM-3 FIX: N leaching with texture-adjusted concentration
-        # Addiscott & Whitmore (1991): NO3-N concentration depends on
-        # soil type and N application. Sandy soils have higher concentrations
-        # due to lower denitrification capacity.
-        # Base: 10 mg/L, increased by sand fraction (sandy = higher conc)
-        no3_conc_mg_l = 10.0 + 15.0 * (sand / 100.0)  # 10-25 mg/L range
-        n_leaching = total_deep_perc * no3_conc_mg_l / 1000.0  # mm * mg/L → kg/ha
+        no3_conc_mg_l = 10.0 + 15.0 * (sand / 100.0)
+        n_leaching = total_deep_perc * no3_conc_mg_l / 1000.0
+
+        is_degraded = missing_weather_days > 0
+        status = "DEGRADED" if is_degraded else "OK"
+        uncertainty_mult = 1.0 + (missing_weather_days / max(1, n_days)) * 0.5
 
         return SoilWaterBalanceOutput(
             theta_fc=round(theta_fc, 4),
@@ -331,4 +324,8 @@ class SoilWaterBalanceEngine:
             n_leaching_kg_ha=round(n_leaching, 2),
             irrigation_applied_mm=round(total_irrigation, 1),
             effective_precipitation_mm=round(total_eff_precip, 1),
+            status=status,
+            is_degraded=is_degraded,
+            missing_weather_days=missing_weather_days,
+            uncertainty_multiplier=round(uncertainty_mult, 3),
         )

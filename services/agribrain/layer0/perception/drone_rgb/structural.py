@@ -244,9 +244,9 @@ class DroneStructuralAnalyzer:
         grid_h = len(canopy_map)
         grid_w = len(canopy_map[0]) if grid_h > 0 else 0
         
-        # Use the synthetic image's row params for spacing
-        row_spacing_px = 40  # default from benchmark cases
-        row_width_px = 10
+        meta = inp.orthomosaic_metadata or {}
+        row_spacing_px = meta.get("row_spacing_px", 40)
+        row_width_px = meta.get("row_width_px", 10)
         
         # Row continuity
         scores, row_count = row_analysis.compute_row_profiles(

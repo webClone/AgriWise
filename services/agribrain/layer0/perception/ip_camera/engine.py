@@ -13,7 +13,7 @@ Pipeline:
 """
 
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from services.agribrain.layer0.perception.ip_camera.schemas import IPCameraEngineInput, IPCameraEngineOutput, IPCameraQAResult
@@ -76,7 +76,7 @@ class IPCameraEngine:
         qa_result = self.qa.assess_quality(input_data, preprocess)
 
         # 4. Scene Stability (histogram + edge + scalar comparison)
-        current_time = input_data.timestamp or datetime.now()
+        current_time = input_data.timestamp or datetime.now(timezone.utc)
         scene_ctx = self.stability_analyzer.analyze(
             input_data.camera_id, preprocess, current_time
         )

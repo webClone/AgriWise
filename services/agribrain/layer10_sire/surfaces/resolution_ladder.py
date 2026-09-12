@@ -166,13 +166,17 @@ def select_resolution_per_pixel(
     if l1_data is not None:
         raster_maps = getattr(l1_data, 'raster_maps', {}) or {}
 
+    asmae_res = _extract_raster(raster_maps, ['ASMAE_EFFECTIVE_RESOLUTION_MAP', 'asmae_effective_resolution_map'], H, W)
+    if asmae_res is not None:
+        uses_best_val_res_map = True
+
     ndvi = _extract_raster(raster_maps, ['ndvi', 'NDVI'], H, W)
-    uncertainty = _extract_raster(raster_maps, ['ndvi_uncertainty', 'uncertainty', 'microzone_uncertainty'], H, W)
-    sar_vh = _extract_raster(raster_maps, ['vh', 'VH', 'sar_vh'], H, W)
+    uncertainty = _extract_raster(raster_maps, ['ndvi_uncertainty', 'uncertainty', 'microzone_uncertainty', 'ASMAE_UNCERTAINTY', 'asmae_uncertainty'], H, W)
+    sar_vh = _extract_raster(raster_maps, ['vh', 'VH', 'sar_vh', 'sar_backscatter'], H, W)
     fallback_mask = _extract_raster(raster_maps, ['microzone_fallback_mask', 'fallback_mask'], H, W)
-    zone_policy = _extract_raster(raster_maps, ['microzone_zone_policy', 'zone_policy_map'], H, W)
-    retro_score = _extract_raster(raster_maps, ['microzone_retrovalidation_score', 'retrovalidation_score'], H, W)
-    obs_count = _extract_raster(raster_maps, ['observation_count', 'obs_density'], H, W)
+    zone_policy = _extract_raster(raster_maps, ['microzone_zone_policy', 'zone_policy_map', 'ASMAE_1M_ADVISORY_MASK', 'asmae_1m_advisory_mask', 'ASMAE_ENKF_SUPPORT', 'asmae_enkf_support'], H, W)
+    retro_score = _extract_raster(raster_maps, ['microzone_retrovalidation_score', 'retrovalidation_score', 'ASMAE_RETROVALIDATION_SCORE', 'asmae_retrovalidation_score'], H, W)
+    obs_count = _extract_raster(raster_maps, ['observation_count', 'obs_density', 'ASMAE_ARCHIVE_SUPPORT', 'asmae_archive_support'], H, W)
 
     # ── Build validity masks ──────────────────────────────────────────────
     has_ndvi = ndvi is not None
@@ -277,6 +281,8 @@ def select_resolution_per_pixel(
             gate_1m = gate_1m & ~block
 
     res_map[gate_1m] = 1.0
+    if asmae_res is not None:
+        res_map = np.copy(asmae_res)
 
     # ── Gate 3cm: external ground truth mask (highest priority) ──────────
     # 3cm overwrites ALL satellite-derived classes

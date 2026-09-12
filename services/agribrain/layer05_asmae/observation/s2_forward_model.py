@@ -20,10 +20,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..config import (
     IDX_BARE_SOIL,
+    IDX_BIOTIC,
     IDX_CANOPY_WATER,
     IDX_CHLOROPHYLL,
     IDX_LAI,
+    IDX_PHENOLOGY,
+    IDX_ROOT_ZONE_WATER,
+    IDX_SALINITY,
+    IDX_STRESS_MEMORY,
+    IDX_STRUCTURE,
     IDX_SURFACE_WETNESS,
+    IDX_THERMAL,
     IDX_VIGOR,
     N_STATES,
     STATE_NAMES,
@@ -88,14 +95,19 @@ def forward_model_ndmi(state: List[float]) -> float:
 
 
 def forward_model_ndwi(state: List[float]) -> float:
-    """Predict NDWI from state vector.
+    """Predict McFeeters NDWI from state vector.
 
-    NDWI responds to surface wetness events.
+    McFeeters NDWI = (Green - NIR) / (Green + NIR).
+    Green vegetation canopy has high NIR reflectance and low Green reflectance,
+    driving NDWI to negative values (-0.6 to -0.8) proportional to vigor.
+    Bare soil has lower NIR contrast (~ -0.2 to -0.3).
+    Standing surface wetness increases Green relative to NIR.
     """
     sw = state[IDX_SURFACE_WETNESS]
+    vigor = state[IDX_VIGOR]
     bare = state[IDX_BARE_SOIL]
 
-    ndwi = 0.7 * sw + 0.1 * bare - 0.2
+    ndwi = -0.65 * vigor - 0.20 * bare + 0.6 * sw - 0.05
     return max(-1.0, min(1.0, ndwi))
 
 
@@ -111,6 +123,48 @@ def forward_model_bsi(state: List[float]) -> float:
     return max(-1.0, min(1.0, bsi))
 
 
+def forward_model_ndsi(state: List[float]) -> float:
+    """Predict NDSI from state vector."""
+    salinity = state[IDX_SALINITY]
+    bare = state[IDX_BARE_SOIL]
+    vigor = state[IDX_VIGOR]
+    ndsi = 0.55 * salinity + 0.35 * bare - 0.20 * vigor
+    return max(-1.0, min(1.0, ndsi))
+
+
+def forward_model_cwsi(state: List[float]) -> float:
+    """Predict CWSI thermal stress proxy from state vector."""
+    thermal = state[IDX_THERMAL]
+    cw = state[IDX_CANOPY_WATER]
+    cwsi = 0.70 * thermal - 0.30 * cw
+    return max(0.0, min(1.0, cwsi))
+
+
+def forward_model_phenology(state: List[float]) -> float:
+    """Predict phenology index from state vector."""
+    pheno = state[IDX_PHENOLOGY]
+    vigor = state[IDX_VIGOR]
+    lai = state[IDX_LAI]
+    p_idx = 0.60 * pheno + 0.30 * vigor + 0.10 * min(lai / 4.0, 1.0)
+    return max(0.0, min(1.0, p_idx))
+
+
+def forward_model_stress_memory(state: List[float]) -> float:
+    """Predict stress memory from state vector."""
+    mem = state[IDX_STRESS_MEMORY]
+    sal = state[IDX_SALINITY]
+    res = 0.65 * mem + 0.35 * sal
+    return max(0.0, min(1.0, res))
+
+
+def forward_model_biotic_anomaly(state: List[float]) -> float:
+    """Predict biotic risk anomaly from state vector."""
+    bio = state[IDX_BIOTIC]
+    vigor = state[IDX_VIGOR]
+    anomaly = 0.75 * bio - 0.25 * vigor
+    return max(0.0, min(1.0, anomaly))
+
+
 # ── Forward Model Dispatch ──────────────────────────────────────────────────
 
 FORWARD_MODELS = {
@@ -120,6 +174,11 @@ FORWARD_MODELS = {
     "ndmi": forward_model_ndmi,
     "ndwi": forward_model_ndwi,
     "bsi": forward_model_bsi,
+    "ndsi": forward_model_ndsi,
+    "cwsi": forward_model_cwsi,
+    "phenology_index": forward_model_phenology,
+    "stress_memory_index": forward_model_stress_memory,
+    "biotic_anomaly": forward_model_biotic_anomaly,
 }
 
 FORWARD_MODEL_STATE_REQUIREMENTS = {
@@ -127,7 +186,7 @@ FORWARD_MODEL_STATE_REQUIREMENTS = {
     "evi": (IDX_VIGOR, IDX_LAI, IDX_BARE_SOIL),
     "ndre": (IDX_CHLOROPHYLL, IDX_LAI),
     "ndmi": (IDX_CANOPY_WATER, IDX_LAI),
-    "ndwi": (IDX_SURFACE_WETNESS, IDX_BARE_SOIL),
+    "ndwi": (IDX_SURFACE_WETNESS, IDX_VIGOR, IDX_BARE_SOIL),
     "bsi": (IDX_BARE_SOIL, IDX_VIGOR),
 }
 
@@ -193,8 +252,9 @@ def compute_jacobian_ndmi(state: List[float]) -> List[float]:
 
 def compute_jacobian_ndwi(state: List[float]) -> List[float]:
     jac = [0.0] * N_STATES
-    jac[IDX_SURFACE_WETNESS] = 0.7
-    jac[IDX_BARE_SOIL] = 0.1
+    jac[IDX_VIGOR] = -0.65
+    jac[IDX_BARE_SOIL] = -0.20
+    jac[IDX_SURFACE_WETNESS] = 0.6
     return jac
 
 
@@ -205,6 +265,43 @@ def compute_jacobian_bsi(state: List[float]) -> List[float]:
     return jac
 
 
+def compute_jacobian_ndsi(state: List[float]) -> List[float]:
+    jac = [0.0] * N_STATES
+    jac[IDX_SALINITY] = 0.55
+    jac[IDX_BARE_SOIL] = 0.35
+    jac[IDX_VIGOR] = -0.20
+    return jac
+
+
+def compute_jacobian_cwsi(state: List[float]) -> List[float]:
+    jac = [0.0] * N_STATES
+    jac[IDX_THERMAL] = 0.70
+    jac[IDX_CANOPY_WATER] = -0.30
+    return jac
+
+
+def compute_jacobian_phenology(state: List[float]) -> List[float]:
+    jac = [0.0] * N_STATES
+    jac[IDX_PHENOLOGY] = 0.60
+    jac[IDX_VIGOR] = 0.30
+    jac[IDX_LAI] = 0.10 / 4.0
+    return jac
+
+
+def compute_jacobian_stress_memory(state: List[float]) -> List[float]:
+    jac = [0.0] * N_STATES
+    jac[IDX_STRESS_MEMORY] = 0.65
+    jac[IDX_SALINITY] = 0.35
+    return jac
+
+
+def compute_jacobian_biotic(state: List[float]) -> List[float]:
+    jac = [0.0] * N_STATES
+    jac[IDX_BIOTIC] = 0.75
+    jac[IDX_VIGOR] = -0.25
+    return jac
+
+
 JACOBIANS = {
     "ndvi": compute_jacobian_ndvi,
     "evi": compute_jacobian_evi,
@@ -212,6 +309,11 @@ JACOBIANS = {
     "ndmi": compute_jacobian_ndmi,
     "ndwi": compute_jacobian_ndwi,
     "bsi": compute_jacobian_bsi,
+    "ndsi": compute_jacobian_ndsi,
+    "cwsi": compute_jacobian_cwsi,
+    "phenology_index": compute_jacobian_phenology,
+    "stress_memory_index": compute_jacobian_stress_memory,
+    "biotic_anomaly": compute_jacobian_biotic,
 }
 
 

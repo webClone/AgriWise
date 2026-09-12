@@ -15,7 +15,7 @@ from services.agribrain.layer0.environment.fao.schemas import FAOSoilContext
 def normalize_fao_response(
     raw_data: Dict[str, Any],
     dataset_version: str = "v2.0",
-    access_method: str = "mocked_fixture",
+    access_method: str = "api",
 ) -> FAOSoilContext:
     """Convert raw HWSD/FAO response dict to FAOSoilContext."""
     return FAOSoilContext(

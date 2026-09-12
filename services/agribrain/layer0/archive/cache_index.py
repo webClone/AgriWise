@@ -5,6 +5,7 @@ Maintains a persistent index mapping plot IDs and geometries to local scene cach
 import os
 import json
 import tempfile
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
 class CacheIndex:
@@ -57,7 +58,7 @@ class CacheIndex:
             "source": source,
             "acquisition_time": acquisition_time,
             "size_mb": size_mb,
-            "last_accessed": datetime.now().isoformat() if "datetime" in globals() else "2026-06-16T13:25:00Z"
+            "last_accessed": datetime.now(timezone.utc).isoformat()
         }
         self._save(idx)
 
@@ -80,6 +81,3 @@ class CacheIndex:
             return idx["plots"][plot_id][geom_hash].get("scenes", {})
         except KeyError:
             return {}
-            
-# Make datetime import available
-from datetime import datetime

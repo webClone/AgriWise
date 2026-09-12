@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 import os
+import uuid
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,6 +23,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from services.agribrain.scientific_contracts.authority import AuthorityScope
 from services.agribrain.scientific_contracts.exceptions import ContractViolation
+
+
+def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, path)
 
 
 FORECAST_SCHEMA_VERSION = "forecast_artifact_v1"
@@ -379,7 +390,20 @@ class ImmutableForecastArchive:
             fc_dir = self.root / "forecasts"
             fc_dir.mkdir(parents=True, exist_ok=True)
             path = fc_dir / f"{fid}.json"
-            path.write_text(json.dumps(forecast.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+            new_payload = forecast.to_dict()
+            if path.exists():
+                try:
+                    existing_payload = json.loads(path.read_text(encoding="utf-8"))
+                    new_hash = hashlib.sha256(json.dumps(new_payload, sort_keys=True).encode("utf-8")).hexdigest()
+                    existing_hash = hashlib.sha256(json.dumps(existing_payload, sort_keys=True).encode("utf-8")).hexdigest()
+                    if new_hash != existing_hash:
+                        raise ContractViolation(
+                            f"Forecast immutability violation: file {path} exists with conflicting content"
+                        )
+                except json.JSONDecodeError:
+                    raise ContractViolation(f"Corrupted forecast file at {path}")
+            else:
+                _atomic_write_json(path, new_payload)
 
         return forecast
 
@@ -467,10 +491,9 @@ class ImmutableForecastArchive:
             coverage_hit = p10 <= obs <= p90
             rmse = abs(obs - forecast.predicted_mean)
         else:
-            rmse = abs(obs - (forecast.predicted_mean or obs))
-            crps = rmse
-            sharpness = 0.0
-            coverage_hit = (rmse < 1e-6)
+            raise ContractViolation(
+                f"Forecast {forecast_id} has neither predictive quantiles nor valid mean/std distribution"
+            )
 
         eval_id = f"eval-{forecast_id[:16]}-{int(eval_time.timestamp())}"
         record = ForecastEvaluationRecord(
@@ -492,7 +515,7 @@ class ImmutableForecastArchive:
             eval_dir = self.root / "evaluations"
             eval_dir.mkdir(parents=True, exist_ok=True)
             path = eval_dir / f"{eval_id}.json"
-            path.write_text(json.dumps(record.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+            _atomic_write_json(path, record.to_dict())
 
         return record
 

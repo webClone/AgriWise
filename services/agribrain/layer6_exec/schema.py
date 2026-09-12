@@ -303,6 +303,16 @@ class InterventionCandidate:
     # Dependencies
     depends_on: List[str] = field(default_factory=list)  # Other intervention_ids
 
+    # Verified execution evidence (Requirement 7)
+    actual_execution_timestamp: Optional[datetime] = None
+    applied_rate: Optional[float] = None
+    applied_units: Optional[str] = None
+    as_applied_evidence_ids: List[str] = field(default_factory=list)
+    executor_device_id: Optional[str] = None
+    spatial_footprint: Optional[Dict[str, Any]] = None
+    exposure_confidence: float = 0.0
+    application_status: str = "PLANNED"  # PLANNED, IN_PROGRESS, COMPLETED_VERIFIED, PARTIAL, CANCELLED
+
 
 # ============================================================================
 # Conflict Resolution
@@ -346,6 +356,8 @@ class OutcomeMetric:
     eval_window: Dict[str, str] = field(default_factory=dict)
     confounders_present: List[str] = field(default_factory=list)
     notes: str = ""
+    causal_classification: str = "CAUSAL_ATTRIBUTED"  # "CAUSAL_ATTRIBUTED" | "OBSERVATIONAL_ASSOCIATION_ONLY"
+    exposure_verified: bool = False
 
 
 @dataclass

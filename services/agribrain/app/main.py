@@ -20,6 +20,13 @@ if env_path.exists():
     load_dotenv(env_path)
     print(f"[OK] Loaded environment from: {env_path}")
 
+import sys
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+agribrain_root = project_root / "services" / "agribrain"
+if str(agribrain_root) not in sys.path:
+    sys.path.insert(0, str(agribrain_root))
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request, Header, Query, Path as FastAPIPath, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -93,9 +100,10 @@ async def lifespan(app: FastAPI):
 
     # Initialize shared Mongo nonce indexes if storage is connected
     try:
-        from layer0.data_gateway.storage_engine import _storage_engine
-        if _storage_engine and getattr(_storage_engine, "db", None) is not None:
-            init_mongo_nonce_indexes(_storage_engine.db)
+        from app.mongo_client import get_db
+        _db = get_db()
+        if _db is not None:
+            init_mongo_nonce_indexes(_db)
             logger.info("[STARTUP] Initialized Mongo nonce collection indexes.")
     except Exception as _nonce_err:
         logger.warning(f"[STARTUP] Mongo nonce index initialization deferred: {_nonce_err}")

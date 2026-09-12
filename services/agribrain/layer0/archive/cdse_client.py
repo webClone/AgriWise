@@ -24,7 +24,7 @@ class CDSEClient:
     def get_access_token(self) -> str:
         """Fetches and caches the OAuth2 token in memory."""
         if self.offline or not self.client_id or not self.client_secret:
-            return "offline-mock-token"
+            return "offline-token"
 
         now = time.time()
         # Refresh token 30 seconds before it expires
@@ -55,7 +55,7 @@ class CDSEClient:
     def get_auth_header(self) -> Dict[str, str]:
         """Returns the authorization header dict."""
         token = self.get_access_token()
-        if token == "offline-mock-token":
+        if token in ("offline-token", "offline-mock-token", ""):
             return {}
         return {"Authorization": f"Bearer {token}"}
 

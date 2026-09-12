@@ -127,10 +127,10 @@ class FarmerPhotoPreprocessor:
                 except Exception as e:
                     import logging
                     logging.getLogger(__name__).warning(f"_from_synthetic failed: {e}")
-                    self._apply_generic_fallback(result)
+                    result.load_error = f"Synthetic pixel extraction error: {e}"
                     
-            if is_mock:
-                # Clear artificial load errors caused by missing mock files
+            if is_mock and (pixel_stats or synthetic_pixels):
+                # Clear artificial load errors caused by missing test files when explicit stats/pixels were provided
                 result.load_error = None
 
         # Derive color features

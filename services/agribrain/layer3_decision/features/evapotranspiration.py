@@ -165,12 +165,17 @@ def compute_water_budget(
 
     # --- 5. Fractional cover correction ---
     # Bare soil contributes to LST but not transpiration
-    fc = _fractional_cover(ndvi) if ndvi is not None else 0.8
-    if fc < 0.3:
-        # Low canopy cover: LST is dominated by soil, reduce weight
-        lst_weight = max(0.2, fc)
+    if ndvi is not None:
+        fc = _fractional_cover(ndvi)
+        if fc < 0.3:
+            # Low canopy cover: LST is dominated by soil, reduce weight
+            lst_weight = max(0.2, fc)
+        else:
+            lst_weight = min(0.85, 0.5 + fc * 0.5)
     else:
-        lst_weight = min(0.85, 0.5 + fc * 0.5)
+        # Without measured NDVI, fractional cover cannot be inferred;
+        # use neutral 50/50 balance between FAO-56 demand and satellite thermal signal
+        lst_weight = 0.5
 
     # --- 6. Fusion: weighted average of FAO-56 and LST estimates ---
     fao_weight = 1.0 - lst_weight

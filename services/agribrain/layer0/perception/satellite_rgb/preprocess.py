@@ -78,6 +78,9 @@ class PlotImageContext:
     # Masks
     masks: PlotMasks = field(default_factory=PlotMasks)
 
+    # Ingress status
+    load_error: Optional[str] = None
+
     # Computed statistics
     height: int = 0
     width: int = 0
@@ -164,19 +167,13 @@ class SatelliteRGBPreprocessor:
                         ctx.green = img_float[:,:,1].tolist()
                         ctx.blue = img_float[:,:,2].tolist()
                     else:
-                        raise ValueError("Failed to decode image")
+                        raise ValueError(f"Failed to decode image: {rgb_image_ref}")
                 else:
                     raise FileNotFoundError(f"Image not found: {rgb_image_ref}")
             except Exception as e:
-                # Fallback to placeholder if real loading fails (e.g. mock test without real file)
-                ctx.red = [[0.3] * image_width for _ in range(image_height)]
-                ctx.green = [[0.4] * image_width for _ in range(image_height)]
-                ctx.blue = [[0.2] * image_width for _ in range(image_height)]
+                ctx.load_error = str(e)
         else:
-            # Fallback to uniform placeholder
-            ctx.red = [[0.3] * image_width for _ in range(image_height)]
-            ctx.green = [[0.4] * image_width for _ in range(image_height)]
-            ctx.blue = [[0.2] * image_width for _ in range(image_height)]
+            ctx.load_error = "No image reference or synthetic pixels provided"
 
         # --- Step 2: Generate masks ---
         ctx.masks = self._generate_masks(
@@ -231,7 +228,7 @@ class SatelliteRGBPreprocessor:
 
     def _compute_statistics(self, ctx: PlotImageContext) -> None:
         """Compute per-channel statistics for inside-plot pixels."""
-        if not ctx.red or not ctx.inside_pixels:
+        if ctx.load_error or not ctx.red or not ctx.inside_pixels:
             return
 
         r_sum, g_sum, b_sum = 0.0, 0.0, 0.0

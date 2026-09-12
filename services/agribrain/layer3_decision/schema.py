@@ -404,6 +404,10 @@ class DecisionOutput:
     provenance: Layer3Provenance = field(default_factory=Layer3Provenance)
     diagnostics: Layer3Diagnostics = field(default_factory=Layer3Diagnostics)
 
+    # Canonical L3 Water State (Authoritative Hydrological Water Balance)
+    canonical_water_state: Optional[Any] = None
+    water_receipt: Optional[Any] = None
+
     def content_hash(self) -> str:
         """Deterministic hash for reproducibility verification.
 

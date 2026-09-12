@@ -2389,6 +2389,10 @@ class MesiaProductionService:
                 "truth_classification": "MEASURED_NATIVE" if has_real_gnss else "SIMULATED",
                 "truth_tier": "BIOLOGICAL_INFERENCE" if has_real_gnss else "ASMAE_INNOVATION_PROPOSAL",
                 "truth_class": "DERIVED_MODEL_INFERRED" if has_real_gnss else "SIMULATED",
+                "native_observation_truth_class": "MEASURED_NATIVE" if has_real_gnss else "SIMULATED",
+                "derived_output_truth_class": "DERIVED_MODEL_INFERRED" if has_real_gnss else "SIMULATED",
+                "native_capture_present": bool(has_real_gnss and real_in_situ_gnss.get("sha256")),
+                "direct_measurement_of_target": False,  # Reflectometry inversion is indirect, not direct TDR probe
                 "is_derived_model_inference": True,
                 "physical_waves_measured": has_real_gnss,
             },
@@ -2407,6 +2411,10 @@ class MesiaProductionService:
                 "authority_state": "RESEARCH_ONLY",
                 "presentation_state": "SIMULATION" if real_masts else "UNOBSERVED",
                 "decision_eligible": False,
+                "native_observation_truth_class": "SIMULATED",
+                "derived_output_truth_class": "SIMULATED",
+                "native_capture_present": False,
+                "direct_measurement_of_target": False,
                 "cellular_towers_in_range": len(real_masts),
             },
             {
@@ -2424,6 +2432,10 @@ class MesiaProductionService:
                 "authority_state": "RESEARCH_ONLY",
                 "presentation_state": "SIMULATION",
                 "decision_eligible": False,
+                "native_observation_truth_class": "SIMULATED",
+                "derived_output_truth_class": "SIMULATED",
+                "native_capture_present": False,
+                "direct_measurement_of_target": False,
             },
             {
                 "proposal_id": f"innov-cygnss-{plot_id}-{now_utc.strftime('%H%M')}",
@@ -2440,6 +2452,10 @@ class MesiaProductionService:
                 "authority_state": "RESEARCH_ONLY",
                 "presentation_state": "SIMULATION",
                 "decision_eligible": False,
+                "native_observation_truth_class": "SIMULATED",
+                "derived_output_truth_class": "SIMULATED",
+                "native_capture_present": False,
+                "direct_measurement_of_target": False,
             },
         ]
 
@@ -2481,6 +2497,10 @@ class MesiaProductionService:
                 "truth_classification": "MEASURED_NATIVE",
                 "truth_tier": "BIOLOGICAL_INFERENCE",
                 "truth_class": "DERIVED_MODEL_INFERRED",
+                "native_observation_truth_class": "MEASURED_NATIVE",
+                "derived_output_truth_class": "DERIVED_MODEL_INFERRED",
+                "native_capture_present": bool(real_in_situ_wifi.get("sha256")),
+                "direct_measurement_of_target": False,  # Foliar attenuation is biological inference
                 "is_derived_model_inference": True,
                 "physical_waves_measured": True,
                 "target_classification": real_in_situ_wifi.get("target_classification", "BACKGROUND"),

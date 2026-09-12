@@ -5,7 +5,7 @@ Predicts yield using Biomass Baseline and Stress Penalties (Water, Nutrient, Dis
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Mapping
+from typing import Dict, Any, List, Mapping, Optional
 import math
 
 from crop_database import get_crop, CROP_REGISTRY
@@ -22,16 +22,17 @@ class YieldForecastEngine:
                       final_biomass_kg_ha: float,
                       cumulative_stress: Dict[str, float],
                       confidence_scores: Dict[str, float] = None,
-                      input_hash: str = "mock_hash",
+                      input_hash: Optional[str] = None,
                       asmae_features: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Hybrid Prediction with Uncertainty Propagation & Versioning.
         Y_final = (Biomass * HI) * (1 - Loss_Water) * (1 - Loss_Nutri) * (1 - Loss_Dis)
         """
-        if input_hash == "mock_hash" or not input_hash:
+        if not input_hash or input_hash == "mock_hash":
             import hashlib
             hash_src = f"{crop_type}-{final_biomass_kg_ha:.2f}-{sorted(cumulative_stress.items())}"
             input_hash = hashlib.sha256(hash_src.encode("utf-8")).hexdigest()[:16]
+
         if confidence_scores is None:
             confidence_scores = {"biomass": 0.8, "stress": 0.7}
             
@@ -263,7 +264,7 @@ def predict_yield(
     final_biomass_kg_ha: float,
     cumulative_stress: Dict[str, float],
     confidence_scores: Dict[str, float] = None,
-    input_hash: str = "mock_hash",
+    input_hash: Optional[str] = None,
     asmae_features: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     return yield_engine.predict_yield(
@@ -278,4 +279,3 @@ def predict_yield(
 
 def predict_yield_posterior(**kwargs) -> Dict[str, Any]:
     return yield_engine.predict_yield_posterior(**kwargs)
-

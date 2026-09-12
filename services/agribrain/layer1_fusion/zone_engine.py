@@ -6,6 +6,8 @@ This is the heart of AgriBrain's Polygon-Aware Spatial Intelligence.
 
 from typing import Dict, List, Any, Tuple
 
+import warnings
+
 try:
     import numpy as np
     HAS_NUMPY = True
@@ -50,7 +52,8 @@ def generate_management_zones(
     
     # 2. Compute Temporal Medians across the stack (ignore nans)
     # Using nanmedian to ignore cloudy days
-    with np.errstate(all='ignore'):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
         ndvi_median_map = np.nanmedian(ndvi_np, axis=0)
     
     # If the entire map is NaN (clouds for 60 days straight), fallback
@@ -96,10 +99,11 @@ def generate_management_zones(
         signature = {"ndvi_median": float(z_ndvi_median)}
         
         if sar_np is not None:
-             with np.errstate(all='ignore'):
+             with warnings.catch_warnings():
+                 warnings.simplefilter("ignore", category=RuntimeWarning)
                  sar_median_map = np.nanmedian(sar_np, axis=0)
-                 z_sar_median = np.nanmedian(sar_median_map[mask == 1]) if cell_count > 0 else 0.0
-                 signature["sar_vv_median"] = float(z_sar_median)
+             z_sar_median = np.nanmedian(sar_median_map[mask == 1]) if cell_count > 0 else 0.0
+             signature["sar_vv_median"] = float(z_sar_median)
                  
         # Centroid Approximation (Grid Index)
         y_idx, x_idx = np.where(mask == 1)
@@ -223,7 +227,7 @@ def _fallback_single_zone(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]
             "area_pct": round((count_a / max(total, 1)) * 100, 1),
             "mask": mask_a,
             "centroid": [height / 6.0, width / 2.0],
-            "signature": {"ndvi_median": 0.05},
+            "signature": {"ndvi_median": None},
             "spatial_label": "north"
         },
         "Zone B": {
@@ -231,7 +235,7 @@ def _fallback_single_zone(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]
             "area_pct": round((count_b / max(total, 1)) * 100, 1),
             "mask": mask_b,
             "centroid": [height / 2.0, width / 2.0],
-            "signature": {"ndvi_median": 0.0},
+            "signature": {"ndvi_median": None},
             "spatial_label": "central"
         },
         "Zone C": {
@@ -239,7 +243,7 @@ def _fallback_single_zone(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]
             "area_pct": round((count_c / max(total, 1)) * 100, 1),
             "mask": mask_c,
             "centroid": [5 * height / 6.0, width / 2.0],
-            "signature": {"ndvi_median": -0.05},
+            "signature": {"ndvi_median": None},
             "spatial_label": "south"
         }
     }
@@ -467,15 +471,14 @@ def compute_zone_stats_pure_python(
         stats["sar_vv"][z_id] = []
         
         if len(ndvi_stack) == 0:
-            # Fallback when no real spatial stack exists: fill with signature values
+            # Fallback when no real spatial stack exists: preserve observational missingness
             for t in range(T):
                 date_str = time_index[t]
-                base_val = z_data.get("signature", {}).get("ndvi_median", 0.0)
                 stats["ndvi"][z_id].append({
-                    "date": date_str, "mean": base_val, "std": 0.01, "min": base_val - 0.01, "max": base_val + 0.01
+                    "date": date_str, "mean": None, "std": None, "min": None, "max": None
                 })
                 stats["sar_vv"][z_id].append({
-                    "date": date_str, "mean": 0.0, "std": 0.0
+                    "date": date_str, "mean": None, "std": None
                 })
         else:
             for t in range(min(T, len(ndvi_stack))):
@@ -563,7 +566,7 @@ def _fallback_single_zone_pp(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, A
             "area_pct": round((count_a / max(total, 1)) * 100, 1),
             "mask": mask_a,
             "centroid": [height / 6.0, width / 2.0],
-            "signature": {"ndvi_median": 0.05},
+            "signature": {"ndvi_median": None},
             "spatial_label": "north"
         },
         "Zone B": {
@@ -571,7 +574,7 @@ def _fallback_single_zone_pp(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, A
             "area_pct": round((count_b / max(total, 1)) * 100, 1),
             "mask": mask_b,
             "centroid": [height / 2.0, width / 2.0],
-            "signature": {"ndvi_median": 0.0},
+            "signature": {"ndvi_median": None},
             "spatial_label": "central"
         },
         "Zone C": {
@@ -579,7 +582,7 @@ def _fallback_single_zone_pp(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, A
             "area_pct": round((count_c / max(total, 1)) * 100, 1),
             "mask": mask_c,
             "centroid": [5 * height / 6.0, width / 2.0],
-            "signature": {"ndvi_median": -0.05},
+            "signature": {"ndvi_median": None},
             "spatial_label": "south"
         }
     }

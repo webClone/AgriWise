@@ -34,7 +34,7 @@ from services.agribrain.layer05_asmae.constraints.radiometric import (
 from services.agribrain.layer05_asmae.evidence_capability import prepare_capability_execution_context
 from services.agribrain.layer05_asmae.geometry.layer0_package_adapter import adapt_layer0_package_to_scene_candidate
 from services.agribrain.layer05_asmae.geometry.support_contract import build_scene_valid_support
-from services.agribrain.layer05_asmae.history.worldline_service import PlotWorldlineService
+from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
 from services.agribrain.layer05_asmae.history.resolution_evidence_builder import build_resolution_evidence
 from services.agribrain.layer05_asmae.history.historical_scene_adapter import HistoricalSceneAdapter
 from services.agribrain.layer05_asmae.graph.microzone_graph import (
@@ -702,7 +702,7 @@ class AuthorityAndResourceTests(unittest.TestCase):
 class WorldlineTests(unittest.TestCase):
     def test_repeated_commit_repairs_missing_head(self):
         with tempfile.TemporaryDirectory() as root:
-            service = PlotWorldlineService(Path(root))
+            service = CanonicalWorldlineService(Path(root))
             event = service.commit_event(
                 plot_id="plot-a", event_type="TEST", payload={"value": 1},
                 geometry_hash="geometry-a",

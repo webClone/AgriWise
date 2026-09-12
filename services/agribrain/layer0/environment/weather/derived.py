@@ -83,12 +83,12 @@ def compute_daily_forcing(
     frost_flag = temp_min is not None and temp_min < 0
     thermal_stress_flag = temp_max is not None and temp_max > 35
 
-    # Rainfall confidence from consensus
+    # Rainfall confidence from consensus (fail closed to 0.0 if missing)
     rain_consensus = consensus.variable_consensus.get("precipitation_sum")
-    rainfall_confidence = rain_consensus.confidence if rain_consensus else 0.5
+    rainfall_confidence = rain_consensus.confidence if rain_consensus else 0.0
 
-    # Overall weather confidence
-    weather_confidence = consensus.overall_confidence
+    # Overall weather confidence (fail closed to 0.0 if missing)
+    weather_confidence = consensus.overall_confidence if consensus.overall_confidence is not None else 0.0
 
     return ProcessForcing(
         date=consensus.date,

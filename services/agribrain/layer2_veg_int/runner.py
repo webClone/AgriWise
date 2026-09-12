@@ -233,7 +233,9 @@ class VegetationIntelligenceEngine:
             )
             replay_crop_hash = (
                 replay_crop_config.get("crop_posterior_hash")
+                or replay_crop_config.get("crop_posterior_lineage")
                 or replay_crop_posterior.get("content_hash")
+                or (getattr(orch_inputs, "operational_context", {}) or {}).get("asmae_replay_crop_posterior_lineage")
             )
             logger.warning(
                 f"[Layer 2] FieldTensor has degraded input ({reason}) — "
@@ -282,10 +284,23 @@ class VegetationIntelligenceEngine:
         inputs: List[VegIntInput] = []
         for r in tensor.plot_timeseries:
             val_ndvi = r.get("ndvi_mean") if r.get("ndvi_mean") is not None else r.get("ndvi")
+            unc_val = r.get("uncertainty")
+            if isinstance(unc_val, (int, float)):
+                unc_float = float(unc_val)
+            elif hasattr(unc_val, "sigmas") and isinstance(getattr(unc_val, "sigmas"), dict):
+                unc_float = float(unc_val.sigmas.get("ndvi", unc_val.sigmas.get("NDVI", 0.1)))
+            elif isinstance(unc_val, dict):
+                unc_float = float(unc_val.get("ndvi", unc_val.get("NDVI", 0.1)))
+            else:
+                try:
+                    unc_float = float(unc_val)
+                except (TypeError, ValueError):
+                    unc_float = 0.1
+            row_date = str(r.get("date") or r.get("timestamp") or r.get("sensing_time") or "")[:10]
             inputs.append(VegIntInput(
-                date=r.get("date", ""),
+                date=row_date,
                 ndvi_obs=val_ndvi if r.get("is_observed", True) else None,
-                ndvi_unc_obs=r.get("uncertainty", 0.1),
+                ndvi_unc_obs=unc_float,
                 is_observed=r.get("is_observed", True) if val_ndvi is not None else False,
                 rain=r.get("rain"),
                 tmean=r.get("tmean"),
@@ -391,6 +406,18 @@ class VegetationIntelligenceEngine:
                         season_initial_gdd = max(0.0, candidate_initial_gdd)
                 except (TypeError, ValueError):
                     season_initial_gdd = 0.0
+
+                if season_initial_gdd == 0.0 and is_perennial and inputs:
+                    try:
+                        raw_d = inputs[0].date
+                        first_doy = datetime.strptime(str(raw_d)[:10], "%Y-%m-%d").timetuple().tm_yday if raw_d else 245
+                        if first_doy > 150:
+                            days_since_spring = max(0, first_doy - 60)
+                            season_initial_gdd = round(days_since_spring * 7.5, 1)
+                        else:
+                            season_initial_gdd = 1400.0
+                    except Exception:
+                        season_initial_gdd = 1400.0
 
             lat = operational.get('lat', operational.get('latitude'))
             if lat is not None:
@@ -598,9 +625,11 @@ class VegetationIntelligenceEngine:
         )
 
         pheno_engine = photoperiod_engine
+        initial_stage = "REPRODUCTIVE" if is_perennial and season_initial_gdd >= 600 else None
         stages, stage_confs = pheno_engine.infer_daily_stages(
             modeled_ndvi, derivatives["velocity"], dates, cumulative_gdd,
             uncertainty=fit_unc, ndwi_series=ndwi_series,
+            initial_stage=initial_stage,
             initial_gdd=season_initial_gdd,
             vernalization_series=vern_daily_series,
         )
@@ -868,21 +897,53 @@ class VegetationIntelligenceEngine:
             for record in tensor.plot_timeseries or []:
                 if not isinstance(record, dict):
                     continue
-                key = record.get("physical_acquisition_key")
+                key = (
+                    record.get("physical_acquisition_key")
+                    or record.get("evidence_node_id")
+                    or record.get("scene_id")
+                    or record.get("observation_id")
+                    or record.get("content_hash")
+                    or record.get("raster_id")
+                )
                 if key:
                     physical_keys.add(str(key))
-                obs_id = record.get("observation_id") or record.get("scene_id")
+                obs_id = record.get("observation_id") or record.get("scene_id") or record.get("evidence_node_id") or record.get("content_hash")
                 if obs_id:
                     evidence_ids.append(str(obs_id))
 
+            ledger = (
+                cfg.get("crop_evidence_ledger")
+                or operational.get("asmae_replay_crop_evidence_ledger")
+                or (getattr(orch_inputs, "crop_config", {}) or {}).get("crop_evidence_ledger")
+            )
+            if isinstance(ledger, dict):
+                for obs in ledger.get("observations") or []:
+                    if isinstance(obs, dict):
+                        pkey = obs.get("physical_acquisition_key") or obs.get("observation_id") or obs.get("scene_id")
+                        if pkey:
+                            physical_keys.add(str(pkey))
+                        oid = obs.get("observation_id") or obs.get("scene_id") or obs.get("observation_hash")
+                        if oid:
+                            evidence_ids.append(str(oid))
+
+            ctx_pkg = getattr(tensor, "_context_package", None)
+            if ctx_pkg and getattr(ctx_pkg, "evidence_items", None):
+                for ev in ctx_pkg.evidence_items:
+                    ev_id = getattr(ev, "evidence_id", None) or getattr(ev, "id", None)
+                    if ev_id:
+                        evidence_ids.append(str(ev_id))
+                        physical_keys.add(str(ev_id))
+
             # Confidence has no artificial floor.  The Viterbi margin is
             # reduced by direct, independent season evidence coverage.
+            unique_evidence_ids = tuple(sorted(set(evidence_ids)))
+
             evidence_strength = min(1.0, len(physical_keys) / 6.0)
             published_confidence = candidate_confidence * evidence_strength
             if (
                 season_anchor_sufficient
                 and candidate_stage != "UNKNOWN"
-                and published_confidence > 0.0
+                and published_confidence >= 0.50
             ):
                 current_stage = candidate_stage
                 posterior = (
@@ -987,8 +1048,8 @@ class VegetationIntelligenceEngine:
                 plant_date_status=plant_date_status,
                 plant_date_min=str(plant_date_min) if plant_date_min else None,
                 plant_date_max=str(plant_date_max) if plant_date_max else None,
-                independent_evidence_count=len(physical_keys),
-                evidence_observation_ids=tuple(sorted(set(evidence_ids))),
+                independent_evidence_count=len(unique_evidence_ids),
+                evidence_observation_ids=unique_evidence_ids,
                 degradation_reasons=degradation_reasons,
             ).to_dict()
 
@@ -1042,6 +1103,7 @@ class VegetationIntelligenceEngine:
                 z_stages, z_stage_confs = z_pheno_engine.infer_daily_stages(
                     z_modeled, z_deriv["velocity"], dates, cumulative_gdd,
                     uncertainty=z_unc,
+                    initial_stage=initial_stage,
                     initial_gdd=season_initial_gdd,
                 )
                 z_transitions = z_pheno_engine.extract_transitions(dates, z_stages)
@@ -1089,9 +1151,10 @@ class VegetationIntelligenceEngine:
                     "casa_npp_used": latitude is not None,
                 },
                 "crop_posterior_lineage": (
-                    (getattr(orch_inputs, 'crop_config', {}) or {}).get(
-                        'crop_posterior_hash'
-                    ) if orch_inputs is not None else None
+                    (getattr(orch_inputs, 'crop_config', {}) or {}).get('crop_posterior_hash')
+                    or (getattr(orch_inputs, 'crop_config', {}) or {}).get('crop_posterior_lineage')
+                    or (getattr(orch_inputs, 'operational_context', {}) or {}).get('asmae_replay_crop_posterior_lineage')
+                    if orch_inputs is not None else None
                 ),
                 "crop_lineage_id": (
                     (getattr(orch_inputs, 'crop_config', {}) or {}).get(
@@ -1304,7 +1367,7 @@ class VegetationIntelligenceEngine:
         if total_weight > 0:
             overall = sum(w * score for _, w, score in components) / total_weight
         else:
-            overall = 0.5
+            overall = 0.0
         overall = max(0.0, min(1.0, overall))
 
         health_coverage = round(total_weight, 2)
@@ -1483,7 +1546,24 @@ def _resolve_ndvi_signature(crop_name: str) -> dict:
         return None
     try:
         from layer2_veg_int.crop_science_data import CROP_NDVI_SIGNATURES
-        return CROP_NDVI_SIGNATURES.get(crop_name)
+        sig = CROP_NDVI_SIGNATURES.get(crop_name)
+        if sig:
+            return sig
+        # Normalize common suffixes like _group, _orchard, _grove
+        cleaned = str(crop_name).lower().replace("_group", "").replace("_orchard", "").replace("_grove", "").strip()
+        sig = CROP_NDVI_SIGNATURES.get(cleaned)
+        if sig:
+            return sig
+        # Fallback to crop architecture if species is unknown
+        from crop_database import get_architecture_class
+        arch = get_architecture_class(crop_name)
+        if arch in ("perennial", "tropical_tree"):
+            return CROP_NDVI_SIGNATURES.get("citrus")
+        elif arch == "cereal":
+            return CROP_NDVI_SIGNATURES.get("wheat")
+        elif arch == "legume":
+            return CROP_NDVI_SIGNATURES.get("soybean")
+        return None
     except Exception:
         return None
 

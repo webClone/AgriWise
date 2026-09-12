@@ -15,7 +15,7 @@ Production note: swap to binary (msgpack/protobuf) if size matters.
 
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -61,15 +61,21 @@ def save_engine_state(
     # DNA 4.0: Capture current DNA hash for trait-change invalidation
     dna_hash = None
     try:
-        from layer0.calibration.dna_cache import get_dna_hash
+        from services.agribrain.layer0.calibration.dna_cache import get_dna_hash
         dna_hash = get_dna_hash(plot_id)
+    except ImportError:
+        try:
+            from layer0.calibration.dna_cache import get_dna_hash
+            dna_hash = get_dna_hash(plot_id)
+        except Exception:
+            pass
     except Exception:
         pass  # DNA cache not available — non-critical
     
     state = {
         "version": VERSION,
         "plot_id": plot_id,
-        "saved_at": datetime.now().isoformat(),
+        "saved_at": datetime.now(timezone.utc).isoformat(),
         "crop_params_hash": _hash_params(crop_params or {}),
         "dna_hash": dna_hash,
         "kalman_zones": kalman_zones,
@@ -130,7 +136,10 @@ def load_engine_state(
     saved_dna_hash = state.get("dna_hash")
     if saved_dna_hash is not None:
         try:
-            from layer0.calibration.dna_cache import get_dna_hash
+            try:
+                from services.agribrain.layer0.calibration.dna_cache import get_dna_hash
+            except ImportError:
+                from layer0.calibration.dna_cache import get_dna_hash
             current_dna_hash = get_dna_hash(state.get("plot_id", ""))
             if current_dna_hash and current_dna_hash != saved_dna_hash:
                 print(f" DNA traits changed ({saved_dna_hash} → {current_dna_hash}), cold start")

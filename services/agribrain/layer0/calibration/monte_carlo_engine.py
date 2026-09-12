@@ -8,7 +8,7 @@ Includes Terraforming ROI logic for modifying DNA traits.
 
 import numpy as np
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from services.agribrain.layer0.state_vector import ProcessModel, DEFAULT_CROP_PARAMS
 
 logger = logging.getLogger("agribrain.monte_carlo")
@@ -24,11 +24,13 @@ class MonteCarloMultiverse:
         self.traits = plot_dna["traits"]
         self.base_carbon = plot_dna.get("decadal_insights", {}).get("carbon_memory_proxy", 10.0)
         
-    def simulate_multiverse(self, num_universes: int = 2000) -> Dict:
+    def simulate_multiverse(self, num_universes: int = 2000, seed: Optional[int] = None) -> Dict:
         """
         Runs stochastic weather variations to build a yield probability cloud.
         (Reduced to 2000 for standard API response time, though conceptualized as 10k)
+        Accepts optional seed for deterministic replay (Task A16 / WP03).
         """
+        rng = np.random.default_rng(seed)
         theta = self.traits["theta_retention"]
         beta = self.traits["beta_resilience"]
         alpha = self.traits["alpha_vigor"]
@@ -44,8 +46,8 @@ class MonteCarloMultiverse:
         
         for i in range(num_universes):
             # 2030 Climate Shift Randomizers
-            temp_anomaly = np.random.normal(loc=1.5, scale=1.0) # +1.5C average shift
-            rain_anomaly = np.random.normal(loc=-0.1, scale=0.3) # 10% less rain avg, high variance
+            temp_anomaly = float(rng.normal(loc=1.5, scale=1.0)) # +1.5C average shift
+            rain_anomaly = float(rng.normal(loc=-0.1, scale=0.3)) # 10% less rain avg, high variance
             
             # Base yield potential
             potential = 100.0 * alpha
@@ -57,7 +59,7 @@ class MonteCarloMultiverse:
             final_yield = max(0, potential - water_stress - thermal_stress)
             
             # Add some irreducible systemic noise
-            final_yield += np.random.normal(0, 5)
+            final_yield += float(rng.normal(0, 5))
             final_yield = max(0, final_yield)
             
             all_yields.append(final_yield)
