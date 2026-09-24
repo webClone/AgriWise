@@ -43,6 +43,38 @@ class ArchiveExpertScoring:
             "provenance": "computed_from_historical_retrovalidation"
         }
 
+    def compute_biophysical_cluster_bma_weights(
+        self,
+        base_model_rmses: Dict[str, float],
+        cluster_id: str,
+        temperature: float = 0.1
+    ) -> Dict[str, Any]:
+        """
+        Conditions BMA physics expert weights on the microzone's biophysical cluster.
+        Adjusts effective RMSE to favor appropriate physics priors:
+          - bio_rapid_drainage_sand: favors high-hydraulic-conductivity drainage models
+          - bio_retentive_fertile: favors high-biomass radiative transfer models
+          - bio_saline_stressed: favors osmotic/stress-memory models
+        """
+        adjusted_rmses = dict(base_model_rmses)
+        c_lower = str(cluster_id).lower()
+        if "sand" in c_lower or "drainage" in c_lower:
+            for m in adjusted_rmses:
+                if "drain" in m.lower() or "hydro" in m.lower():
+                    adjusted_rmses[m] *= 0.80  # Lower RMSE -> higher BMA weight
+        elif "fertile" in c_lower or "retentive" in c_lower:
+            for m in adjusted_rmses:
+                if "prosail" in m.lower() or "canopy" in m.lower() or "growth" in m.lower():
+                    adjusted_rmses[m] *= 0.80
+        elif "saline" in c_lower or "stress" in c_lower:
+            for m in adjusted_rmses:
+                if "salin" in m.lower() or "stress" in m.lower() or "osmotic" in m.lower():
+                    adjusted_rmses[m] *= 0.75
+
+        res = self.compute_bma_weights(adjusted_rmses, temperature=temperature)
+        res["biophysical_cluster"] = cluster_id
+        return res
+
     def merge_into_production_bma(
         self,
         production_bma_config: Dict[str, Any],

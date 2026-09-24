@@ -55,29 +55,31 @@ def forward_model_ndvi(state: List[float]) -> float:
 def forward_model_evi(state: List[float]) -> float:
     """Predict EVI from state vector.
 
-    EVI ≈ vigor * f(LAI), better in dense canopy.
+    EVI ≈ 0.35 * vigor + 0.15 * lai_norm - 0.20 * bare_soil + 0.05
     """
     vigor = state[IDX_VIGOR]
     lai = state[IDX_LAI]
     bare = state[IDX_BARE_SOIL]
 
     lai_norm = min(lai / 6.0, 1.0)
-    evi = 0.6 * vigor + 0.3 * lai_norm - 0.2 * bare + 0.05
+    evi = 0.35 * vigor + 0.15 * lai_norm - 0.20 * bare + 0.05
     return max(-1.0, min(1.0, evi))
 
 
 def forward_model_ndre(state: List[float]) -> float:
     """Predict NDRE from state vector.
 
-    NDRE is sensitive to chlorophyll content.
-    NDRE ≈ f(chlorophyll, LAI)
+    NDRE is sensitive to chlorophyll content and canopy cover.
+    Linearized for citrus orchard canopy:
+    NDRE ≈ 0.30 * chl_norm + 0.15 * lai_norm - 0.15 * bare_soil + 0.05
     """
     chl = state[IDX_CHLOROPHYLL]
     lai = state[IDX_LAI]
+    bare = state[IDX_BARE_SOIL]
 
     chl_norm = min(chl / 60.0, 1.0)
     lai_norm = min(lai / 5.0, 1.0)
-    ndre = 0.5 * chl_norm + 0.3 * lai_norm + 0.05
+    ndre = 0.30 * chl_norm + 0.15 * lai_norm - 0.15 * bare + 0.05
     return max(-1.0, min(1.0, ndre))
 
 
@@ -119,7 +121,7 @@ def forward_model_bsi(state: List[float]) -> float:
     bare = state[IDX_BARE_SOIL]
     vigor = state[IDX_VIGOR]
 
-    bsi = 0.6 * bare - 0.3 * vigor + 0.2
+    bsi = 0.6 * bare - 0.3 * vigor
     return max(-1.0, min(1.0, bsi))
 
 
@@ -133,20 +135,24 @@ def forward_model_ndsi(state: List[float]) -> float:
 
 
 def forward_model_cwsi(state: List[float]) -> float:
-    """Predict CWSI thermal stress proxy from state vector."""
-    thermal = state[IDX_THERMAL]
-    cw = state[IDX_CANOPY_WATER]
-    cwsi = 0.70 * thermal - 0.30 * cw
+    """Predict CWSI thermal stress proxy from state vector.
+
+    Matches satellite empirical CWSI extraction: 1.0 - (NDMI + 0.2) / max(NDVI, 0.05).
+    """
+    ndvi = forward_model_ndvi(state)
+    ndmi = forward_model_ndmi(state)
+    denom = max(ndvi, 0.05)
+    cwsi = 1.0 - (ndmi + 0.2) / denom
     return max(0.0, min(1.0, cwsi))
 
 
 def forward_model_phenology(state: List[float]) -> float:
-    """Predict phenology index from state vector."""
-    pheno = state[IDX_PHENOLOGY]
-    vigor = state[IDX_VIGOR]
-    lai = state[IDX_LAI]
-    p_idx = 0.60 * pheno + 0.30 * vigor + 0.10 * min(lai / 4.0, 1.0)
-    return max(0.0, min(1.0, p_idx))
+    """Predict phenology index from state vector.
+
+    Observation extraction uses red-edge ratio (B06 - B05)/(B06 + B05),
+    matching the NDRE spectral response.
+    """
+    return forward_model_ndre(state)
 
 
 def forward_model_stress_memory(state: List[float]) -> float:
@@ -184,10 +190,12 @@ FORWARD_MODELS = {
 FORWARD_MODEL_STATE_REQUIREMENTS = {
     "ndvi": (IDX_VIGOR, IDX_LAI, IDX_BARE_SOIL),
     "evi": (IDX_VIGOR, IDX_LAI, IDX_BARE_SOIL),
-    "ndre": (IDX_CHLOROPHYLL, IDX_LAI),
+    "ndre": (IDX_CHLOROPHYLL, IDX_LAI, IDX_BARE_SOIL),
     "ndmi": (IDX_CANOPY_WATER, IDX_LAI),
     "ndwi": (IDX_SURFACE_WETNESS, IDX_VIGOR, IDX_BARE_SOIL),
     "bsi": (IDX_BARE_SOIL, IDX_VIGOR),
+    "cwsi": (IDX_VIGOR, IDX_LAI, IDX_BARE_SOIL, IDX_CANOPY_WATER),
+    "phenology_index": (IDX_CHLOROPHYLL, IDX_LAI, IDX_BARE_SOIL),
 }
 
 
@@ -230,16 +238,17 @@ def compute_jacobian_ndvi(state: List[float]) -> List[float]:
 
 def compute_jacobian_evi(state: List[float]) -> List[float]:
     jac = [0.0] * N_STATES
-    jac[IDX_VIGOR] = 0.6
-    jac[IDX_LAI] = 0.3 / 6.0
-    jac[IDX_BARE_SOIL] = -0.2
+    jac[IDX_VIGOR] = 0.35
+    jac[IDX_LAI] = 0.15 / 6.0
+    jac[IDX_BARE_SOIL] = -0.20
     return jac
 
 
 def compute_jacobian_ndre(state: List[float]) -> List[float]:
     jac = [0.0] * N_STATES
-    jac[IDX_CHLOROPHYLL] = 0.5 / 60.0
-    jac[IDX_LAI] = 0.3 / 5.0
+    jac[IDX_CHLOROPHYLL] = 0.30 / 60.0
+    jac[IDX_LAI] = 0.15 / 5.0
+    jac[IDX_BARE_SOIL] = -0.15
     return jac
 
 
@@ -274,18 +283,19 @@ def compute_jacobian_ndsi(state: List[float]) -> List[float]:
 
 
 def compute_jacobian_cwsi(state: List[float]) -> List[float]:
+    ndvi = max(forward_model_ndvi(state), 0.05)
+    ndmi = forward_model_ndmi(state)
+    j_ndvi = compute_jacobian_ndvi(state)
+    j_ndmi = compute_jacobian_ndmi(state)
     jac = [0.0] * N_STATES
-    jac[IDX_THERMAL] = 0.70
-    jac[IDX_CANOPY_WATER] = -0.30
+    factor = (ndmi + 0.2) / (ndvi * ndvi)
+    for i in range(N_STATES):
+        jac[i] = -(1.0 / ndvi) * j_ndmi[i] + factor * j_ndvi[i]
     return jac
 
 
 def compute_jacobian_phenology(state: List[float]) -> List[float]:
-    jac = [0.0] * N_STATES
-    jac[IDX_PHENOLOGY] = 0.60
-    jac[IDX_VIGOR] = 0.30
-    jac[IDX_LAI] = 0.10 / 4.0
-    return jac
+    return compute_jacobian_ndre(state)
 
 
 def compute_jacobian_stress_memory(state: List[float]) -> List[float]:

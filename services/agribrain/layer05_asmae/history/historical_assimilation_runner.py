@@ -15,6 +15,8 @@ from .smoother import RTSSmoother
 from .history_diagnostics import HistoryDiagnostics
 from .history_no_effect_guard import HistoryNoEffectGuard
 from .history_observation_rules import HistoryObservationRules
+from .crop_season_segmenter import CropSeasonSegmenter
+from .event_detector import IntraSeasonalEventDetector
 from ..geometry.scene_stack_builder import SceneStack
 
 class HistoricalAssimilationRunner:
@@ -24,6 +26,8 @@ class HistoricalAssimilationRunner:
         self.diagnostics = HistoryDiagnostics()
         self.no_effect_guard = HistoryNoEffectGuard(self.workspace_root)
         self.observation_rules = HistoryObservationRules()
+        self.segmenter = CropSeasonSegmenter()
+        self.event_detector = IntraSeasonalEventDetector()
 
     def run_assimilation(
         self,
@@ -182,6 +186,39 @@ class HistoricalAssimilationRunner:
 
         # 4. Compute diagnostics
         diag = self.diagnostics.compute_run_diagnostics(output)
+
+        # 4b. Seasonal Segmentation & Intra-Seasonal Event Detection
+        try:
+            segments = self.segmenter.segment_scenes(included_scenes, daily_weather=daily_weather)
+            diag["seasonal_segments"] = []
+            all_events = []
+            scenes_map = {s["runtime"].scene_id: s for s in included_scenes if isinstance(s, dict) and "runtime" in s}
+
+            for seg in segments:
+                seg_scenes = [scenes_map[m.scene_id] for m in seg.scenes if m.scene_id in scenes_map]
+                events = self.event_detector.detect_events(
+                    season_id=seg.season_id,
+                    start_date=seg.start_date,
+                    end_date=seg.end_date,
+                    scenes=seg_scenes,
+                    daily_weather=daily_weather,
+                )
+                seg_dict = {
+                    "season_id": seg.season_id,
+                    "start_date": seg.start_date.isoformat(),
+                    "end_date": seg.end_date.isoformat(),
+                    "is_active_crop": seg.is_active_crop,
+                    "peak_date": seg.peak_date.isoformat() if seg.peak_date else None,
+                    "peak_ndvi": seg.peak_ndvi,
+                    "gdd_accumulated": seg.gdd_accumulated,
+                    "events": [e.to_dict() for e in events]
+                }
+                diag["seasonal_segments"].append(seg_dict)
+                all_events.extend([e.to_dict() for e in events])
+            diag["detected_events"] = all_events
+        except Exception as exc:
+            diag["seasonal_segmentation_error"] = str(exc)
+
         output.diagnostics = diag
 
         # 5. Assert No-Effect Guard: verify production files remained unchanged

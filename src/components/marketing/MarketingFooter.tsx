@@ -1,85 +1,102 @@
+"use client";
+
+import React from "react";
 import Link from "next/link";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
 
 /* ═══ MarketingFooter ══════════════════════════════════════════
-   Redesigned footer for the marketing homepage.
-   No fake product links. Real links only.
+   Localized footer for the marketing homepage.
+   Real links only, powered by useLanguage().
    ═══════════════════════════════════════════════════════════════ */
 
-const FOOTER_SECTIONS = [
-  {
-    title: "Platform",
-    links: [
-      { label: "Field Monitoring", href: "/farm" },
-      { label: "Crop Intelligence", href: "/farm" },
-      { label: "AgriBrain", href: "/agribrain" },
-    ],
-  },
-  {
-    title: "Solutions",
-    links: [
-      { label: "Farmers", href: "#solutions" },
-      { label: "Agronomists", href: "#solutions" },
-      { label: "Farm Enterprise", href: "#solutions" },
-      { label: "Banks & Insurance", href: "#solutions" },
-      { label: "Government", href: "#solutions" },
-    ],
-  },
-  {
-    title: "Company",
-    links: [
-      { label: "About", href: "#" },
-      { label: "Contact", href: "#" },
-      { label: "Privacy", href: "#" },
-      { label: "Terms", href: "#" },
-    ],
-  },
-] as const;
-
 export default function MarketingFooter() {
+  const { t } = useLanguage();
+
+  const sections = [
+    {
+      title: t.footer.platform,
+      links: [
+        { label: t.footer.fieldMonitoring, href: "/farm" },
+        { label: t.footer.cropIntelligence, href: "/farm" },
+        { label: t.footer.agribrain, href: "/agribrain" },
+      ],
+    },
+    {
+      title: t.footer.solutions,
+      links: [
+        { label: t.footer.farmers, href: "#solutions" },
+        { label: t.footer.agronomists, href: "#solutions" },
+        { label: t.footer.farmEnterprise, href: "#solutions" },
+        { label: t.footer.banksInsurance, href: "#solutions" },
+        { label: t.footer.government, href: "#solutions" },
+      ],
+    },
+    {
+      title: t.footer.company,
+      links: [
+        { label: t.footer.about, href: "#" },
+        { label: t.footer.contact, href: "#" },
+        { label: t.footer.privacy, href: "#" },
+        { label: t.footer.terms, href: "#" },
+      ],
+    },
+  ];
+
   return (
-    <footer style={{
-      borderTop: "1px solid var(--border-subtle)",
-      padding: "56px 0 32px",
-    }}>
+    <footer
+      style={{
+        borderTop: "1px solid var(--border-subtle)",
+        padding: "56px 0 32px",
+      }}
+    >
       <div className="marketing-container">
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: "2fr 1fr 1fr 1fr",
-          gap: "40px",
-          marginBottom: "40px",
-        }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "2fr 1fr 1fr 1fr",
+            gap: "40px",
+            marginBottom: "40px",
+          }}
+        >
           {/* Brand */}
           <div>
-            <div style={{
-              fontSize: "18px",
-              fontWeight: 800,
-              color: "var(--text-primary)",
-              marginBottom: "12px",
-            }}>
+            <div
+              style={{
+                fontSize: "18px",
+                fontWeight: 800,
+                color: "var(--text-primary)",
+                marginBottom: "12px",
+              }}
+            >
               Agri<span style={{ color: "var(--field-green)" }}>Wise</span>
             </div>
-            <p style={{
-              fontSize: "13px",
-              color: "var(--text-dim)",
-              lineHeight: 1.6,
-              maxWidth: "300px",
-            }}>
-              Agricultural intelligence infrastructure.
-              Powered by AgriBrain. Built in Algeria.
+            <p
+              style={{
+                fontSize: "13px",
+                color: "var(--text-dim)",
+                lineHeight: 1.6,
+                maxWidth: "320px",
+              }}
+            >
+              {t.footer.slogan}
+              <br />
+              {t.footer.tagline}
             </p>
           </div>
 
           {/* Link columns */}
-          {FOOTER_SECTIONS.map((section) => (
+          {sections.map((section) => (
             <div key={section.title}>
-              <h4 style={{
-                fontSize: "11px",
-                fontWeight: 700,
-                color: "var(--text-secondary)",
-                textTransform: "uppercase",
-                letterSpacing: "0.1em",
-                marginBottom: "14px",
-              }}>
+              <h4
+                style={{
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  color: "var(--text-secondary)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.1em",
+                  marginBottom: "14px",
+                }}
+              >
                 {section.title}
               </h4>
               {section.links.map((link) => (
@@ -103,17 +120,19 @@ export default function MarketingFooter() {
         </div>
 
         {/* Bottom bar */}
-        <div style={{
-          borderTop: "1px solid var(--border-subtle)",
-          paddingTop: "20px",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: "12px",
-        }}>
+        <div
+          style={{
+            borderTop: "1px solid var(--border-subtle)",
+            paddingTop: "20px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "12px",
+          }}
+        >
           <span style={{ fontSize: "11px", color: "var(--text-faint)" }}>
-            🇩🇿 Built in Algeria · © {new Date().getFullYear()} AgriWise
+            🇩🇿 Built in Algeria · © {new Date().getFullYear()} AgriWise · {t.footer.rightsReserved}
           </span>
           <span style={{ fontSize: "11px", color: "var(--text-faint)" }}>
             Powered by AgriBrain · Copernicus Programme

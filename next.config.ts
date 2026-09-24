@@ -22,7 +22,7 @@ const nextConfig: NextConfig = {
 
   // Strict mode disabled due to deck.gl v9 WebGL context double-render bugs
   reactStrictMode: false,
-  // Cache invalidation trigger: 1
+  serverExternalPackages: ["@prisma/client", "prisma", "bson"],
 };
 
 export default nextConfig;

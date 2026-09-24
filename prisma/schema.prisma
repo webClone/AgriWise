@@ -20,6 +20,7 @@ model User {
   name       String
   nameAr     String?
   email      String?
+  password   String?  // Hashed password for credentials auth
   role       UserRole @default(SMALL_FARMER)
   wilaya     String
   wilayaCode String

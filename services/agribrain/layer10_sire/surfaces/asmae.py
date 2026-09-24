@@ -608,6 +608,44 @@ def generate_asmae_surfaces(
     if target_grid_spec is None and getattr(inp, "field_tensor", None) is not None:
         target_grid_spec = getattr(inp.field_tensor, "grid_spec", None)
 
+    # Construct authoritative WGS84 geographic display grid from metric ASMAE grid spec
+    # to avoid downsampling or clipping high-resolution (e.g. 2m) full-extent ASMAE surfaces.
+    asmae_display_grid_spec = None
+    if source_asmae_grid_spec and isinstance(source_asmae_grid_spec, dict):
+        try:
+            from rasterio.crs import CRS
+            from rasterio.warp import transform_bounds
+            s_crs_raw = source_asmae_grid_spec.get("crs")
+            s_bounds = source_asmae_grid_spec.get("bounds")
+            s_w = int(source_asmae_grid_spec.get("width", 0) or 0)
+            s_h = int(source_asmae_grid_spec.get("height", 0) or 0)
+            s_res = float(source_asmae_grid_spec.get("native_resolution_m", source_asmae_grid_spec.get("resolution_m", 2.0)) or 2.0)
+            if s_crs_raw and s_bounds and s_w > 0 and s_h > 0:
+                s_crs = CRS.from_user_input(s_crs_raw)
+                if not s_crs.is_geographic:
+                    dst_crs = CRS.from_user_input("EPSG:4326")
+                    geo_bounds = list(transform_bounds(s_crs, dst_crs, *s_bounds))
+                    dx = (geo_bounds[2] - geo_bounds[0]) / float(s_w)
+                    dy = (geo_bounds[3] - geo_bounds[1]) / float(s_h)
+                    asmae_display_grid_spec = {
+                        "crs": "EPSG:4326",
+                        "bounds": geo_bounds,
+                        "transform": [geo_bounds[0], dx, 0.0, geo_bounds[3], 0.0, -dy],
+                        "width": s_w,
+                        "height": s_h,
+                        "resolution_m": s_res,
+                        "resolution": s_res,
+                    }
+                else:
+                    asmae_display_grid_spec = dict(source_asmae_grid_spec)
+        except Exception:
+            asmae_display_grid_spec = None
+
+    if target_grid_spec is None and asmae_display_grid_spec:
+        target_grid_spec = asmae_display_grid_spec
+        H = asmae_display_grid_spec["height"]
+        W = asmae_display_grid_spec["width"]
+
     # Combine state and diagnostic surfaces to process
     all_asmae_types = list(ASMAE_STATE_SURFACES) + list(ASMAE_DIAGNOSTIC_SURFACES)
 
@@ -635,6 +673,13 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_EXPORT_ELIGIBILITY: PaletteId.RAW_GRAYSCALE,
         SurfaceType.ASMAE_1M_ADVISORY_MASK: PaletteId.RAW_GRAYSCALE,
         SurfaceType.ASMAE_2_5M_MODEL_ASSISTED_MASK: PaletteId.RAW_GRAYSCALE,
+        SurfaceType.ASMAE_UNCERTAINTY: PaletteId.UNCERTAINTY_GRAY,
+        SurfaceType.ASMAE_RETROVALIDATION_SCORE: PaletteId.UNCERTAINTY_GRAY,
+        SurfaceType.ASMAE_BMA_DISAGREEMENT: PaletteId.RISK_HEAT,
+        SurfaceType.ASMAE_CROSS_LAYER_CONFLICT: PaletteId.RISK_HEAT,
+        SurfaceType.ASMAE_EXPORT_ELIGIBILITY: PaletteId.RAW_GRAYSCALE,
+        SurfaceType.ASMAE_1M_ADVISORY_MASK: PaletteId.RAW_GRAYSCALE,
+        SurfaceType.ASMAE_2_5M_MODEL_ASSISTED_MASK: PaletteId.RAW_GRAYSCALE,
         SurfaceType.ASMAE_5M_GENERALIZED_MASK: PaletteId.RAW_GRAYSCALE,
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION_MAP: PaletteId.RAW_GRAYSCALE,
         SurfaceType.ASMAE_ML_AGREEMENT: PaletteId.UNCERTAINTY_GRAY,
@@ -642,6 +687,11 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_ENKF_SUPPORT: PaletteId.UNCERTAINTY_GRAY,
         SurfaceType.ASMAE_RADIOMETRIC_SUPPORT: PaletteId.UNCERTAINTY_GRAY,
         SurfaceType.ASMAE_VISUAL_FUSION_CANOPY: PaletteId.VIGOR_GREEN,
+        SurfaceType.ASMAE_BIOPHYSICAL_CLUSTERS: PaletteId.DECISION_CATEGORICAL,
+        SurfaceType.ASMAE_WATER_RETENTION: PaletteId.YIELD_BLUE,
+        SurfaceType.ASMAE_NUTRIENT_RESPONSE: PaletteId.VIGOR_GREEN,
+        SurfaceType.ASMAE_SALINITY_PERSISTENCE: PaletteId.SALINITY_TEAL,
+        SurfaceType.ASMAE_THERMAL_SENSITIVITY: PaletteId.THERMAL_ORANGE,
         SurfaceType.COMPOSITE_ADVISORY_CANOPY: PaletteId.VIGOR_GREEN,
         SurfaceType.COMPOSITE_VEG_ATTENTION: PaletteId.VIGOR_GREEN,
         SurfaceType.COMPOSITE_WATER_SUPPORT: PaletteId.YIELD_BLUE,
@@ -688,6 +738,11 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_ML_AGREEMENT: "fraction",
         SurfaceType.ASMAE_ARCHIVE_SUPPORT: "fraction",
         SurfaceType.ASMAE_ENKF_SUPPORT: "fraction",
+        SurfaceType.ASMAE_BIOPHYSICAL_CLUSTERS: "cluster_id",
+        SurfaceType.ASMAE_WATER_RETENTION: "fraction",
+        SurfaceType.ASMAE_NUTRIENT_RESPONSE: "fraction",
+        SurfaceType.ASMAE_SALINITY_PERSISTENCE: "fraction",
+        SurfaceType.ASMAE_THERMAL_SENSITIVITY: "fraction",
         SurfaceType.ASMAE_RADIOMETRIC_SUPPORT: "fraction",
         SurfaceType.ASMAE_VISUAL_FUSION_CANOPY: "fraction",
         SurfaceType.COMPOSITE_ADVISORY_CANOPY: "fraction",
@@ -957,6 +1012,11 @@ def generate_asmae_surfaces(
             SurfaceType.ASMAE_ENKF_SUPPORT: "ASMAE_ENKF",
             SurfaceType.ASMAE_RADIOMETRIC_SUPPORT: "ASMAE_RADIOMETRIC",
             SurfaceType.ASMAE_VISUAL_FUSION_CANOPY: "ASMAE_VISUAL_FUSION",
+            SurfaceType.ASMAE_BIOPHYSICAL_CLUSTERS: "ASMAE_MICROZONE",
+            SurfaceType.ASMAE_WATER_RETENTION: "ASMAE_MICROZONE",
+            SurfaceType.ASMAE_NUTRIENT_RESPONSE: "ASMAE_MICROZONE",
+            SurfaceType.ASMAE_SALINITY_PERSISTENCE: "ASMAE_MICROZONE",
+            SurfaceType.ASMAE_THERMAL_SENSITIVITY: "ASMAE_MICROZONE",
         }
 
         feature_mapping = {
@@ -987,6 +1047,11 @@ def generate_asmae_surfaces(
             SurfaceType.ASMAE_ENKF_SUPPORT: "enkf_support",
             SurfaceType.ASMAE_RADIOMETRIC_SUPPORT: "radiometric_support",
             SurfaceType.ASMAE_VISUAL_FUSION_CANOPY: "visual_fusion_canopy",
+            SurfaceType.ASMAE_BIOPHYSICAL_CLUSTERS: "biophysical_clusters",
+            SurfaceType.ASMAE_WATER_RETENTION: "water_retention",
+            SurfaceType.ASMAE_NUTRIENT_RESPONSE: "nutrient_response",
+            SurfaceType.ASMAE_SALINITY_PERSISTENCE: "salinity_persistence",
+            SurfaceType.ASMAE_THERMAL_SENSITIVITY: "thermal_sensitivity",
         }
 
         support_meta = compute_asmae_support_classification(

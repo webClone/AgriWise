@@ -83,3 +83,9 @@ services/agribrain/mesia/data/plot_*_temporal_history.json
 services/data/conversation_memory/
 services/agribrain/data/feedback_learning/
 services/agribrain/layer9_interface/config/telemetry/
+
+# Local SQLite database
+prisma/dev.db
+
+# Large video assets
+public/videos/

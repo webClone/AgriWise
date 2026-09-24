@@ -66,3 +66,46 @@ def compute_calibration_score(
     score = max(0.0, 1.0 - deviation / ideal)
 
     return round(score, 4)
+
+
+def compute_biophysical_calibration_report(
+    holdout_errors: List[Dict[str, float]],
+    sigmas: Dict[str, List[float]],
+    soil_clusters: Optional[Dict[str, str]] = None,
+    events: Optional[List[Any]] = None,
+    alpha: float = 2.0,
+) -> Dict[str, Any]:
+    """Compute calibration report broken down by biophysical cluster and event type.
+
+    Ensures that uncertainty estimates are well-calibrated not just field-wide,
+    but within distinct soil/hydraulic management units (e.g. sandy drainage vs retentive loam).
+    """
+    global_score = compute_calibration_score(holdout_errors, sigmas, alpha=alpha)
+    clusters = soil_clusters or {}
+
+    cluster_scores: Dict[str, float] = {}
+    if clusters:
+        # Group sigmas by cluster
+        cluster_sigmas: Dict[str, Dict[str, List[float]]] = {}
+        for mz_id, s_vec in sigmas.items():
+            c_id = clusters.get(mz_id, "unknown")
+            cluster_sigmas.setdefault(c_id, {})[mz_id] = s_vec
+
+        for c_id, c_sigmas in cluster_sigmas.items():
+            c_score = compute_calibration_score(holdout_errors, c_sigmas, alpha=alpha)
+            cluster_scores[c_id] = c_score
+
+    # Event breakdown
+    event_counts: Dict[str, int] = {}
+    for ev in events or []:
+        etype = getattr(ev, "event_type", "unknown")
+        event_counts[etype] = event_counts.get(etype, 0) + 1
+
+    return {
+        "global_calibration_score": global_score,
+        "cluster_calibration_scores": cluster_scores,
+        "event_counts": event_counts,
+        "alpha": alpha,
+        "is_calibrated": bool(global_score >= 0.70),
+    }
+

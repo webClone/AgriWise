@@ -303,7 +303,7 @@ def generate_resolution_surfaces(
     best_map = None
     if l1_data is not None:
         raster_maps = getattr(l1_data, 'raster_maps', {}) or {}
-        for key in ['microzone_best_validated_resolution_m', 'best_val_res_map']:
+        for key in ['microzone_best_validated_resolution_m', 'best_val_res_map', 'ASMAE_EFFECTIVE_RESOLUTION_MAP', 'effective_resolution_map']:
             if key in raster_maps:
                 candidate = raster_maps[key]
                 if hasattr(candidate, 'shape') or isinstance(candidate, list):

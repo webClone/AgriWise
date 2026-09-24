@@ -170,7 +170,18 @@ def _enforce_ht_per_pixel(
     from ..chain_integrity import assert_scene_operator_binding
     assert_scene_operator_binding(scenes, operators, stage_name="radiometric")
 
-    for scene, op in zip(scenes, operators):
+    # Map operators by scene_id for safe, non-positional binding
+    op_by_scene_id = {
+        str(getattr(op, "scene_id", "")): op
+        for op in operators
+        if getattr(op, "scene_id", None)
+    }
+
+    for scene in scenes:
+        scene_id = str(getattr(scene, "scene_id", ""))
+        op = op_by_scene_id.get(scene_id)
+        if op is None:
+            continue
         h_matrix = getattr(op, "H_matrix", None)
         if h_matrix is None:
             continue

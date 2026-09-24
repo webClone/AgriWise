@@ -55,6 +55,9 @@ _ASMAE_FROZEN_LINEAGE_FIELDS = (
     "crop_influence_manifest_hash",
 )
 
+_CANONICAL_SNAPSHOT_CACHE: Dict[Tuple[str, int, str, str], Dict[str, Any]] = {}
+_SNAPSHOT_CACHE_LOCK = threading.Lock()
+
 
 def _plot_key(namespace: PlotNamespace) -> str:
     return hashlib.sha256(namespace.stable_key().encode("utf-8")).hexdigest()[:32]
@@ -506,6 +509,10 @@ def publish_canonical_plot_snapshot(
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     _atomic(_head_path(ns), head)
+    with _SNAPSHOT_CACHE_LOCK:
+        keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
+        for k in keys_to_evict:
+            _CANONICAL_SNAPSHOT_CACHE.pop(k, None)
     return head
 
 
@@ -540,6 +547,18 @@ def publish_canonical_layer10_snapshot(
         raise ValueError("ASMAE frontend payload has no matching canonical head")
     if not snapshot_id.startswith("L10-"):
         raise ValueError("terminal Layer 10 payload has no canonical snapshot identity")
+
+    existing_head = _read(_head_path(ns))
+    if existing_head.get("snapshot_kind") == "asmae" or str(existing_head.get("snapshot_id", "")).startswith("ASMAE-SNAPSHOT-"):
+        # A validated canonical ASMAE snapshot head already exists.
+        # An L10 terminal publication must never overwrite an authoritative ASMAE head.
+        return {
+            "snapshot_id": existing_head.get("snapshot_id"),
+            "node_hash": existing_head.get("node_hash"),
+            "frontend_publication_hash": existing_head.get("frontend_publication_hash"),
+            "publication_receipt_hash": existing_head.get("publication_receipt_hash"),
+            "surface_inventory_hash": existing_head.get("surface_inventory_hash"),
+        }
 
     surfaces = payload.get("surfaces") or payload.get("surface_pack") or []
     if not isinstance(surfaces, list):
@@ -625,7 +644,15 @@ def load_latest_plot_snapshot(
     farm_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     ns = _coerce_namespace(namespace, tenant_id=tenant_id, farm_id=farm_id)
-    head = _read(_head_path(ns))
+    head_file = _head_path(ns)
+    if not head_file.exists():
+        return None
+    try:
+        head_mtime = head_file.stat().st_mtime_ns
+    except OSError:
+        head_mtime = 0
+
+    head = _read(head_file)
     if head.get("contract_version") != PLOT_SNAPSHOT_CONTRACT_VERSION:
         return None
     if geometry_hash and head.get("geometry_hash") != geometry_hash:
@@ -634,6 +661,17 @@ def load_latest_plot_snapshot(
     snapshot_id = head.get("snapshot_id")
     if not snapshot_id:
         return None
+
+    cache_key = (
+        ns.stable_key(),
+        head_mtime,
+        str(snapshot_id),
+        str(head.get("frontend_publication_hash") or ""),
+    )
+    with _SNAPSHOT_CACHE_LOCK:
+        cached = _CANONICAL_SNAPSHOT_CACHE.get(cache_key)
+        if cached is not None:
+            return copy.copy(cached)
 
     directory = _plot_dir(ns)
     node_path = directory / "nodes" / f"{snapshot_id}.json"
@@ -800,6 +838,11 @@ def load_latest_plot_snapshot(
     # mutation of the node.
     if publication_frontend:
         node["frontend_payload"] = publication_frontend
+
+    with _SNAPSHOT_CACHE_LOCK:
+        if len(_CANONICAL_SNAPSHOT_CACHE) > 20:
+            _CANONICAL_SNAPSHOT_CACHE.clear()
+        _CANONICAL_SNAPSHOT_CACHE[cache_key] = copy.copy(node)
 
     return node
 

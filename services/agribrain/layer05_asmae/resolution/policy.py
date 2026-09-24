@@ -156,12 +156,13 @@ def apply_policies(
         # Gate 3: Sensor Nyquist limit
         from ..evidence_classifier import _is_valid_proof
         has_certified_trust_root = any(_is_valid_proof(s) for s in scenes)
+        has_retro_cert = retro_scores.get(res_m, 0.0) >= RETRO_SCORE_1M_THRESHOLD
         finest_nyquist = min(
             SENSOR_NYQUIST.get(s, 10) for s in sensors
         ) if sensors else 10
         if res_m < finest_nyquist:
-            # Only reject if no external data or certified trust root can fill the gap
-            if "EXTERNAL" not in sensors and not has_certified_trust_root:
+            # Only reject if no external data, certified trust root, or certified retrovalidation can fill the gap
+            if "EXTERNAL" not in sensors and not has_certified_trust_root and not has_retro_cert:
                 ev.rejected = True
                 ev.rejection_reason = f"{res_m}m exceeds Nyquist limit {finest_nyquist}m"
                 result.demoted_candidates.append({
@@ -219,7 +220,8 @@ def apply_policies(
             result.policy_reasons[res_m] = reasons
 
     # ── Pass 2: Select Effective Resolution ─────────────────────────
-    # Pick the finest non-rejected resolution with highest composite score
+    # Pick the finest certified resolution meeting confidence threshold,
+    # or the finest non-rejected resolution with highest composite score.
     eligible = [
         (res_m, ev)
         for res_m, ev in sorted(evaluation_results.items())
@@ -227,16 +229,25 @@ def apply_policies(
     ]
 
     if eligible:
-        # Sort by score descending, then by resolution ascending (prefer finer)
-        eligible.sort(key=lambda x: (-x[1].composite_score, x[0]))
-        best_res, best_ev = eligible[0]
-
-        # Only pick finer-than-10m if score exceeds confidence threshold
-        if best_res < DEFAULT_RESOLUTION_M and best_ev.composite_score < COMPOSITE_CONFIDENCE:
-            # Fall back to 10m
-            result.effective_resolution_m = DEFAULT_RESOLUTION_M
-        else:
+        fine_eligible = [
+            (res_m, ev) for res_m, ev in eligible
+            if res_m < DEFAULT_RESOLUTION_M
+            and ev.composite_score >= COMPOSITE_CONFIDENCE
+            and (retro_scores.get(res_m, 0.0) >= RETRO_SCORE_1M_THRESHOLD or res_m >= finest_nyquist)
+        ]
+        if fine_eligible:
+            fine_eligible.sort(key=lambda x: (x[0], -x[1].composite_score))
+            best_res, best_ev = fine_eligible[0]
             result.effective_resolution_m = best_res
+            if best_res == 1:
+                result.safe_for_1m_claim = True
+        else:
+            eligible.sort(key=lambda x: (-x[1].composite_score, x[0]))
+            best_res, best_ev = eligible[0]
+            if best_res < DEFAULT_RESOLUTION_M and best_ev.composite_score < COMPOSITE_CONFIDENCE:
+                result.effective_resolution_m = DEFAULT_RESOLUTION_M
+            else:
+                result.effective_resolution_m = best_res
     else:
         result.effective_resolution_m = DEFAULT_RESOLUTION_M
 

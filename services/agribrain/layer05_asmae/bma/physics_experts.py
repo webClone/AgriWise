@@ -41,8 +41,6 @@ def _real_scenes(context: Mapping[str, Any]) -> List[Any]:
         binding = str(getattr(scene, "product_binding", "") or "")
         if (
             getattr(scene, "real_provider_product", False) is True
-            and getattr(scene, "production_usable", False) is True
-            and getattr(scene, "diagnostic_only", True) is False
             and reality in {
                 "real_raster",
                 "real_provider_raster",

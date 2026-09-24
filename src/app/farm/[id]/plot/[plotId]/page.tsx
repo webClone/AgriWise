@@ -6,12 +6,12 @@ import DevelopmentSessionBootstrap from "@/components/auth/DevelopmentSessionBoo
 import { isActiveCropCycleStatus } from "@/lib/agribrain/crop-cycle-status.mjs";
 
 export default async function PlotDetailsPage({ params }: { params: Promise<{ id: string; plotId: string }> }) {
-  const { id: farmId, plotId } = await params;
+  const { id: farmIdRaw, plotId: plotIdRaw } = await params;
+  const farmId = farmIdRaw.replace(/\/+$/, "");
+  const plotId = plotIdRaw.replace(/\/+$/, "");
   const session = await getSession();
-  if (!session?.userId) {
-    if (process.env.NODE_ENV === "development") {
-      return <DevelopmentSessionBootstrap plotId={plotId} farmId={farmId} />;
-    }
+
+  if (!session?.userId && process.env.NODE_ENV !== "development") {
     notFound();
   }
   
@@ -41,4 +41,3 @@ export default async function PlotDetailsPage({ params }: { params: Promise<{ id
     </div>
   );
 }
-

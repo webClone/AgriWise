@@ -44,15 +44,15 @@ logger = logging.getLogger(__name__)
 AGRIBRAIN_ROOT = Path(__file__).resolve().parents[1]
 JOBS_DIR = AGRIBRAIN_ROOT / "artifacts" / "asmae_jobs"
 JOBS_DIR = Path(os.environ.get('ASMAE_JOBS_DIR', str(JOBS_DIR))).resolve()
-LEASE_SECONDS = 180
+LEASE_SECONDS = int(os.environ.get("ASMAE_LEASE_SECONDS", "600"))
 LAUNCH_COOLDOWN_SECONDS = 15
 RESERVATION_STALE_SECONDS = 30
 MAX_EXECUTION_ATTEMPTS = 3
 PROCESS_HARD_TIMEOUT_SECONDS = float(
-    os.environ.get("ASMAE_PROCESS_HARD_TIMEOUT_SECONDS", "300")
+    os.environ.get("ASMAE_PROCESS_HARD_TIMEOUT_SECONDS", "1800")
 )
 MAX_WORKER_MEMORY_MB = float(
-    os.environ.get("AGRIBRAIN_MAX_WORKER_MEMORY_MB", "2048")
+    os.environ.get("AGRIBRAIN_MAX_WORKER_MEMORY_MB", "6144")
 )
 
 
@@ -179,7 +179,7 @@ class BoundedJobExecutor:
                 payload = _read_json(job_path)
                 if not payload:
                     continue
-                if payload.get("status") == "queued" and not payload.get("superseded"):
+                if payload.get("status") == "queued" and not payload.get("superseded") and payload.get("manifest_hash"):
                     queued.append((_job_created_at(payload), job_path))
             except Exception:
                 pass
@@ -225,7 +225,7 @@ QUEUED_STATUSES: FrozenSet[str] = frozenset(
 TERMINAL_STATUSES: FrozenSet[str] = frozenset(
     {'failed', 'completed', 'superseded'}
 )
-_JOB_ID = re.compile(r"^[0-9a-f]{24}$")
+_JOB_ID = re.compile(r"^(?:[0-9a-f]{24}|job_[a-zA-Z0-9_-]{8,32})$")
 
 
 class LeaseLostError(RuntimeError):
@@ -960,41 +960,29 @@ def _enqueue_standard_job_locked(
             identity=identity,
         )
         attempts = int(existing.get("attempts", 0) or 0)
-        _atomic_json(
+        _update_job(
             job_path,
-            {
-                "job_id": job_id,
-                "plot_namespace": namespace_payload(namespace),
-                "tenant_id": namespace.tenant_id,
-                "farm_id": namespace.farm_id,
-                "plot_id": plot_id,
-                "run_id": execution_run_id,
-                "request_lineage_id": request_lineage_id,
-                "mode": "standard",
-                "status": "queued",
-                "stage": "manifest_persisted",
-                "progress_pct": 5,
-                "attempts": attempts,
-                "manifest_ref": manifest_path.name,
-                "manifest_hash": manifest.get("manifest_hash"),
-                "manifest_contract_version": JOB_MANIFEST_CONTRACT_VERSION,
-                "worker_contract_version": JOB_RUNNER_CONTRACT_VERSION,
-                "scientific_identity": identity,
-                "context_hash": identity.get("context_hash"),
-                "geometry_hash": identity.get("geometry_hash"),
-                "crop_posterior_lineage": identity.get(
-                    "crop_posterior_lineage"
-                ),
-                "crop_lineage_id": identity.get("crop_lineage_id"),
-                "reintegration_required": _requires_reintegration(context),
-                "created_at": existing.get("created_at") or _now().isoformat(),
-                "updated_at": _now().isoformat(),
-                "restart_recoverable": True,
-                "compatibility": "current",
-                "evidence_capability_contract_version": EVIDENCE_CAPABILITY_CONTRACT_VERSION,
-                "capability_plan_hash": identity.get("capability_plan_hash"),
-                "revision": int(existing.get("revision", 0) or 0) + 1,
-            },
+            mode="standard",
+            status="queued",
+            stage="manifest_persisted",
+            progress_pct=5,
+            attempts=attempts,
+            manifest_ref=manifest_path.name,
+            manifest_hash=manifest.get("manifest_hash"),
+            manifest_contract_version=JOB_MANIFEST_CONTRACT_VERSION,
+            worker_contract_version=JOB_RUNNER_CONTRACT_VERSION,
+            scientific_identity=identity,
+            context_hash=identity.get("context_hash"),
+            geometry_hash=identity.get("geometry_hash"),
+            crop_posterior_lineage=identity.get(
+                "crop_posterior_lineage"
+            ),
+            crop_lineage_id=identity.get("crop_lineage_id"),
+            reintegration_required=_requires_reintegration(context),
+            restart_recoverable=True,
+            compatibility="current",
+            evidence_capability_contract_version=EVIDENCE_CAPABILITY_CONTRACT_VERSION,
+            capability_plan_hash=identity.get("capability_plan_hash"),
         )
     except Exception as exc:
         _update_job(
@@ -1039,7 +1027,6 @@ def _parse_timestamp(raw: Any) -> Optional[datetime]:
 def _canonical_status(status: Any) -> str:
     raw = str(status or 'queued')
     return {
-        'reserving': 'queued',
         'completed_reintegration_pending': 'queued',
         'failed_to_launch': 'failed',
         'degraded': 'failed',
@@ -1050,7 +1037,8 @@ def _canonical_status(status: Any) -> str:
 
 def _public_job_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     public = dict(payload)
-    public['status'] = _canonical_status(public.get('status'))
+    raw_st = str(public.get('status') or 'queued')
+    public['status'] = 'queued' if raw_st == 'reserving' else _canonical_status(raw_st)
     public['recoverable'] = bool(
         public.get('recoverable')
         or public['status'] in {'queued', 'stalled'}
@@ -1089,7 +1077,10 @@ def _reserve_launch(job_path: Path) -> Optional[str]:
         payload = _read_json(job_path)
         if not payload:
             return None
-        status = _canonical_status(payload.get('status'))
+        raw_status = str(payload.get('status') or '')
+        if raw_status == 'reserving' or not payload.get('manifest_hash'):
+            return None
+        status = _canonical_status(raw_status)
         if status in TERMINAL_STATUSES:
             return None
         if status == 'running':
@@ -1211,6 +1202,9 @@ def spawn_worker(job_path: Path) -> bool:
     environment["PYTHONPATH"] = os.pathsep.join(new_paths)
     environment['ASMAE_JOBS_DIR'] = str(JOBS_DIR)
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if os.name == "nt":
+        creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
     stdout_path, _ = _job_log_paths(job_path)
     _append_job_event(job_path, 'worker_launch_reserved')
     try:
@@ -1266,7 +1260,14 @@ def spawn_worker(job_path: Path) -> bool:
 
 def _lease_expired(payload: Dict[str, Any]) -> bool:
     expires_at = _parse_timestamp(payload.get('lease_expires_at'))
-    return expires_at is None or expires_at <= _now()
+    if expires_at is None:
+        return True
+    if expires_at <= _now():
+        worker_pid = payload.get('worker_pid')
+        if worker_pid and is_pid_alive(int(worker_pid)):
+            return False
+        return True
+    return False
 
 
 def _recovery_attempt_count(payload: Dict[str, Any]) -> int:
@@ -1974,9 +1975,17 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
         )
         manifest_path = _manifest_for_job(job_path, payload)
         saved = load_job_manifest(manifest_path)
-        if str(saved.get('manifest_hash', '')) != str(
-            payload.get('manifest_hash', '')
-        ):
+        manifest_hash = str(saved.get('manifest_hash', ''))
+        job_manifest_hash = str(payload.get('manifest_hash') or '')
+        if not job_manifest_hash and manifest_hash:
+            logger.info('Reconciling missing manifest_hash from verified manifest: %s', manifest_hash)
+            payload['manifest_hash'] = manifest_hash
+            job_manifest_hash = manifest_hash
+            try:
+                _update_job(job_path, manifest_hash=manifest_hash)
+            except Exception:
+                pass
+        if manifest_hash != job_manifest_hash:
             raise ManifestError('job record and manifest hash do not match')
         try:
             job_namespace = _coerce_namespace(payload.get("plot_namespace"))
@@ -1992,7 +2001,7 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
         resume_reintegration = payload.get('resume_phase') == 'reintegration'
 
         def heartbeat() -> None:
-            while not stop_heartbeat.wait(LEASE_SECONDS / 3):
+            while not stop_heartbeat.wait(min(60.0, LEASE_SECONDS / 3)):
                 try:
                     _renew_lease(job_path, lease)
                 except LeaseLostError:
@@ -2004,6 +2013,8 @@ def run_job(job_path: Path, launch_token: Optional[str] = None) -> None:
                         lease_generation=lease.generation,
                     )
                     return
+                except Exception as exc:
+                    logger.warning("Heartbeat renewal encountered transient error: %s", exc)
 
         heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
         heartbeat_thread.start()
@@ -2445,22 +2456,41 @@ def latest_job_for_plot(
         if running_jobs:
             return max(running_jobs, key=lambda v: (_job_created_at(v), str(v.get("job_id", ""))))
 
+        unsuperseded = [
+            value for value in matches if not value.get("superseded") and value.get("status") != "superseded"
+        ]
+        valid_unsuperseded = []
+        for v in unsuperseded:
+            if v.get("status") == "completed":
+                ref = v.get("final_snapshot_ref")
+                if ref and not Path(ref).exists():
+                    continue
+            valid_unsuperseded.append(v)
+        candidate_matches = valid_unsuperseded if valid_unsuperseded else unsuperseded
+        latest_match = max(
+            candidate_matches,
+            key=lambda value: (
+                _job_created_at(value),
+                str(value.get("job_id", "")),
+            ),
+        ) if candidate_matches else None
+
         try:
             from services.agribrain.layer05_asmae.plot_snapshot_store import load_latest_plot_snapshot
             head = load_latest_plot_snapshot(plot_id)
             if head and head.get("publication_job_id"):
                 pub_job_id = str(head["publication_job_id"])
-                for v in matches:
-                    if str(v.get("job_id", "")) == pub_job_id:
-                        return v
+                pub_match = next((v for v in matches if str(v.get("job_id", "")) == pub_job_id), None)
+                if pub_match:
+                    # Do not latch onto a stale historical snapshot job if a newer valid candidate exists
+                    if latest_match and _job_created_at(latest_match) > _job_created_at(pub_match):
+                        return latest_match
+                    return pub_match
         except Exception:
             pass
 
-        unsuperseded = [
-            value for value in matches if not value.get("superseded") and value.get("status") != "superseded"
-        ]
-        if unsuperseded:
-            matches = unsuperseded
+        if latest_match:
+            return latest_match
     return max(
         matches,
         key=lambda value: (
@@ -2567,6 +2597,8 @@ def recover_pending_jobs(
 
         payload = _mark_stalled_if_expired(job_path, payload)
         raw_status = str(payload.get("status", ""))
+        if raw_status == "reserving" or not payload.get("manifest_hash"):
+            continue
         status = _canonical_status(raw_status)
         if status in ("queued", "stalled", "running") or raw_status == "completed_reintegration_pending":
             # Active lease protection: if running or completed_reintegration_pending and lease is unexpired, do not preempt

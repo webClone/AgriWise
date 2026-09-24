@@ -177,6 +177,7 @@ app.add_middleware(
 _progress_lock = _threading.Lock()
 _progress_store: Dict[str, Dict[str, Any]] = {}  # run_id -> progress state
 _plot_run_map: Dict[Tuple[str, str, str], str] = {}  # (tenant_id, farm_id, plot_id) -> latest run_id
+_last_recovery_scan_time: Dict[str, float] = {}
 _RUN_RESULTS_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "run_results"
 
 
@@ -380,7 +381,19 @@ def api_v2_exact_snapshot(
     snapshot = load_plot_snapshot_by_id(snapshot_id, namespace=namespace)
     if snapshot is None:
         raise HTTPException(status_code=404, detail=f"Exact snapshot {snapshot_id} not found for namespace")
-    return snapshot
+    response = dict(snapshot)
+    response.pop("asmae", None)
+    response.pop("scientific_result", None)
+    response["available"] = True
+    return Response(
+        content=json.dumps(response).encode("utf-8"),
+        media_type="application/json",
+        headers={"Cache-Control": "no-cache"}
+    )
+
+
+_SNAPSHOT_RESPONSE_CACHE: Dict[Tuple[str, str, str], bytes] = {}
+_SNAPSHOT_RESPONSE_CACHE_LOCK = _threading.Lock()
 
 
 @app.get("/v2/plots/{plot_id}/snapshot")
@@ -458,8 +471,37 @@ def api_v2_canonical_plot_snapshot(
             "validation": validation,
             "contract_validation": snapshot.get("contract_validation") or {},
         }
-    snapshot["available"] = True
-    return snapshot
+
+    cache_key = (
+        namespace.stable_key(),
+        str(snapshot.get("snapshot_id")),
+        str(snapshot.get("frontend_publication_hash") or ""),
+    )
+    with _SNAPSHOT_RESPONSE_CACHE_LOCK:
+        cached_bytes = _SNAPSHOT_RESPONSE_CACHE.get(cache_key)
+    if cached_bytes is not None:
+        return Response(
+            content=cached_bytes,
+            media_type="application/json",
+            headers={"Cache-Control": "no-cache"}
+        )
+
+    response = dict(snapshot)
+    response.pop("asmae", None)
+    response.pop("scientific_result", None)
+    response["available"] = True
+
+    raw_bytes = json.dumps(response).encode("utf-8")
+    with _SNAPSHOT_RESPONSE_CACHE_LOCK:
+        if len(_SNAPSHOT_RESPONSE_CACHE) > 20:
+            _SNAPSHOT_RESPONSE_CACHE.clear()
+        _SNAPSHOT_RESPONSE_CACHE[cache_key] = raw_bytes
+
+    return Response(
+        content=raw_bytes,
+        media_type="application/json",
+        headers={"Cache-Control": "no-cache"}
+    )
 
 
 @app.get("/v2/progress/{plot_id}")
@@ -476,11 +518,15 @@ def api_v2_progress(
         )
 
     recovery_triggered = 0
-    try:
-        from services.agribrain.layer05_asmae.background_jobs import recover_all_pending_jobs
-        recovery_triggered = recover_all_pending_jobs(namespace=namespace)
-    except Exception as recovery_exc:
-        logger.warning('Durable ASMAE recovery failed during progress poll: %s', recovery_exc)
+    now_ts = _progress_time.time()
+    ns_key = namespace.stable_key()
+    if now_ts - _last_recovery_scan_time.get(ns_key, 0.0) >= 15.0:
+        _last_recovery_scan_time[ns_key] = now_ts
+        try:
+            from services.agribrain.layer05_asmae.background_jobs import recover_all_pending_jobs
+            recovery_triggered = recover_all_pending_jobs(namespace=namespace)
+        except Exception as recovery_exc:
+            logger.warning('Durable ASMAE recovery failed during progress poll: %s', recovery_exc)
 
     with _progress_lock:
         target_run_id = run_id or _plot_run_map.get(namespace.to_tuple())
@@ -566,7 +612,16 @@ def api_v2_progress(
     if status_val == "completed" and final_snapshot_id and head_snapshot_id == final_snapshot_id:
         publication_relation = "published"
     elif status_val == "completed":
-        publication_relation = "completed_unpublished"
+        completed_at_str = (durable_job or {}).get("completed_at") or (durable_job or {}).get("updated_at")
+        try:
+            completed_dt = _parse_timestamp(completed_at_str)
+            age_s = (_progress_time.time() - completed_dt.timestamp()) if completed_dt else 999999
+        except Exception:
+            age_s = 999999
+        if age_s > 60:
+            publication_relation = "published" if head_snapshot_id else "stale_completed"
+        else:
+            publication_relation = "completed_unpublished"
     elif durable_error or status_val in ("failed", "error"):
         publication_relation = "failed"
     else:
@@ -4012,9 +4067,31 @@ def api_v2_run(
                         authority_ok, _ = _validate_surface_authority(
                             candidate
                         )
+                        from services.agribrain.eo.sentinel import _extract_ring_coordinates
+                        poly_ring = _extract_ring_coordinates(ctx.get("field_geometry") or ctx.get("polygon"))
+                        bounds_enclosed = True
+                        if poly_ring and len(poly_ring) >= 3:
+                            p_xs = [pt[0] for pt in poly_ring]
+                            p_ys = [pt[1] for pt in poly_ring]
+                            poly_min_x, poly_max_x = min(p_xs), max(p_xs)
+                            poly_min_y, poly_max_y = min(p_ys), max(p_ys)
+                            candidate_surfs = candidate.get("surfaces") or []
+                            if candidate_surfs and isinstance(candidate_surfs, list):
+                                s0 = candidate_surfs[0]
+                                g_spec = s0.get("display_grid_spec") or s0.get("grid_spec") or candidate.get("grid_spec") or {}
+                                g_bounds = g_spec.get("bounds") if isinstance(g_spec, dict) else None
+                                if g_bounds and len(g_bounds) == 4:
+                                    g_min_x, g_min_y, g_max_x, g_max_y = g_bounds
+                                    if (g_min_x > poly_min_x + 1e-5 or g_max_x < poly_max_x - 1e-5 or
+                                        g_min_y > poly_min_y + 1e-5 or g_max_y < poly_max_y - 1e-5):
+                                        bounds_enclosed = False
+                                        logger.info(
+                                            f"Rejecting snapshot cache: grid bounds {g_bounds} do not enclose plot polygon [{poly_min_x}, {poly_min_y}, {poly_max_x}, {poly_max_y}]"
+                                        )
                         if (
                             candidate
                             and authority_ok
+                            and bounds_enclosed
                             and isinstance(age_seconds, (int, float))
                             and age_seconds < CACHE_MAX_AGE
                             and abs(candidate_intensity - clamped_intensity)
@@ -4084,6 +4161,26 @@ def api_v2_run(
                                             cached_result.get("source_policy") != "canonical"
                                         ):
                                             cache_valid = False
+
+                                    if cache_valid:
+                                        from services.agribrain.eo.sentinel import _extract_ring_coordinates
+                                        poly_ring = _extract_ring_coordinates(ctx.get("field_geometry") or ctx.get("polygon"))
+                                        if poly_ring and len(poly_ring) >= 3:
+                                            p_xs = [pt[0] for pt in poly_ring]
+                                            p_ys = [pt[1] for pt in poly_ring]
+                                            poly_min_x, poly_max_x = min(p_xs), max(p_xs)
+                                            poly_min_y, poly_max_y = min(p_ys), max(p_ys)
+                                            s0 = surfs[0] if surfs else {}
+                                            g_spec = s0.get("display_grid_spec") or s0.get("grid_spec") or cached_result.get("grid_spec") or {}
+                                            g_bounds = g_spec.get("bounds") if isinstance(g_spec, dict) else None
+                                            if g_bounds and len(g_bounds) == 4:
+                                                g_min_x, g_min_y, g_max_x, g_max_y = g_bounds
+                                                if (g_min_x > poly_min_x + 1e-5 or g_max_x < poly_max_x - 1e-5 or
+                                                    g_min_y > poly_min_y + 1e-5 or g_max_y < poly_max_y - 1e-5):
+                                                    cache_valid = False
+                                                    logger.info(
+                                                        f"Rejecting file cache: grid bounds {g_bounds} do not enclose plot polygon [{poly_min_x}, {poly_min_y}, {poly_max_x}, {poly_max_y}]"
+                                                    )
 
                                     # BC.10.18: Reject payloads missing render authorization fields
                                     if cache_valid:

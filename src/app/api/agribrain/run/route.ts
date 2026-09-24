@@ -23,6 +23,7 @@ import {
 } from "@/lib/agribrain/surface-contract";
 import { resolveSourcePolicyDisplay } from "@/lib/agribrain/source-policy-display-resolver";
 import { getSession } from "@/lib/session";
+import { authorizePlot } from "@/lib/agribrain/authorize-plot";
 import * as crypto from "crypto";
 import { getPlotRepresentativePoint, isValidWgs84Point } from "@/lib/agribrain/plot-geometry";
 import {
@@ -837,28 +838,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const session = await getSession();
-    const requestUserId = session?.userId || null;
-    if (!requestUserId) {
+    const access = await authorizePlot(plotId);
+    if (access.status !== 200 || !access.plot) {
       return NextResponse.json(
-        { success: false, error: "Authentication required" },
-        { status: 401 }
+        { success: false, error: access.status === 401 ? "Authentication required" : "Plot not found" },
+        { status: access.status }
       );
     }
-
-    const authorizedPlot = await prisma.plot.findFirst({
-      where: {
-        id: plotId,
-        farm: { userId: requestUserId },
-      },
-      select: { id: true, farmId: true },
-    });
-    if (!authorizedPlot) {
-      return NextResponse.json(
-        { success: false, error: "Plot not found" },
-        { status: 404 }
-      );
-    }
+    const authorizedPlot = access.plot;
+    const requestUserId = authorizedPlot.farm?.userId || access.userId!;
 
     const lockKey = buildCanonicalExecutionKey(plotId, authorizedPlot.farmId, body);
 

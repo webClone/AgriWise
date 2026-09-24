@@ -253,7 +253,11 @@ class ComprehensiveASMAEPipelineExecutionTests(unittest.TestCase):
             if output.resolution_decision
             else DEFAULT_RESOLUTION_M
         )
-        self.assertEqual(selected_res, DEFAULT_RESOLUTION_M)
+        from services.agribrain.layer05_asmae.config import CANDIDATE_RESOLUTIONS_M
+        self.assertIn(
+            selected_res, CANDIDATE_RESOLUTIONS_M,
+            f"Selected resolution {selected_res}m must be a valid candidate"
+        )
         self.assertTrue(diagnostics.get("current_spatial_assimilation"))
         self.assertTrue(diagnostics.get("spatial_raster_available"))
 

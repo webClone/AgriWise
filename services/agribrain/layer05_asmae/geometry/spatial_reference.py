@@ -103,6 +103,11 @@ def _flatten_coordinate_pairs(value: Any) -> List[Tuple[float, float]]:
         else:
             for child in value:
                 result.extend(_flatten_coordinate_pairs(child))
+    elif isinstance(value, dict):
+        if "items" in value and isinstance(value["items"], (list, tuple)):
+            result.extend(_flatten_coordinate_pairs(value["items"]))
+        elif "coordinates" in value:
+            result.extend(_flatten_coordinate_pairs(value["coordinates"]))
     return result
 
 
@@ -316,8 +321,13 @@ class TargetMicrozoneGrid:
         ]
 
 
-def target_grid_from_reference(scene: Any, resolution_m: int) -> TargetMicrozoneGrid:
-    """Build the fixed microzone grid from the reference scene's bounds."""
+def target_grid_from_reference(
+    scene: Any,
+    resolution_m: int,
+    polygon_points: Optional[List[Tuple[float, float]]] = None,
+) -> TargetMicrozoneGrid:
+    """Build the fixed microzone grid from the reference scene's bounds,
+    expanding bounds if polygon_points are provided and extend beyond scene."""
     from rasterio.transform import array_bounds
 
     if not crs_is_projected_metre(getattr(scene, "crs", None)):
@@ -328,6 +338,24 @@ def target_grid_from_reference(scene: Any, resolution_m: int) -> TargetMicrozone
         raise SpatialReferenceError("reference_scene_dimensions_missing")
     affine = affine_from_gdal(getattr(scene, "transform", []))
     west, south, east, north = array_bounds(height, width, affine)
+
+    px_size = pixel_size_m(scene)
+    step_m = max(float(px_size), float(resolution_m))
+
+    if polygon_points and len(polygon_points) >= 3:
+        p_xs = [float(p[0]) for p in polygon_points]
+        p_ys = [float(p[1]) for p in polygon_points]
+        p_min_x, p_max_x = min(p_xs), max(p_xs)
+        p_min_y, p_max_y = min(p_ys), max(p_ys)
+        if p_min_x < west:
+            west -= math.ceil((west - p_min_x) / step_m) * step_m
+        if p_max_x > east:
+            east += math.ceil((p_max_x - east) / step_m) * step_m
+        if p_min_y < south:
+            south -= math.ceil((south - p_min_y) / step_m) * step_m
+        if p_max_y > north:
+            north += math.ceil((p_max_y - north) / step_m) * step_m
+
     width_m = max(0.0, float(east - west))
     height_m = max(0.0, float(north - south))
     if width_m <= 0.0 or height_m <= 0.0:

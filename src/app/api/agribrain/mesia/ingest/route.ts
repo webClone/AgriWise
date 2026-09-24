@@ -1,17 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/session";
+import { authorizePlot } from "@/lib/agribrain/authorize-plot";
 import { buildSignedInternalHeaders } from "@/lib/agribrain/internal-service-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
-  const session = await getSession();
-  const userId = session?.userId || null;
-  if (!userId) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  }
-
   try {
     const body = await request.json();
     const { plotId, nmeaText } = body;
@@ -20,17 +15,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "plotId and nmeaText are required" }, { status: 400 });
     }
 
-    const authorized = await prisma.plot.findFirst({
-      where: {
-        id: plotId,
-        farm: { userId },
-      },
-      select: { id: true, farmId: true },
-    });
-
-    if (!authorized) {
-      return NextResponse.json({ error: "Plot not found or access denied" }, { status: 404 });
+    const access = await authorizePlot(plotId);
+    if (access.status !== 200 || !access.plot) {
+      return NextResponse.json(
+        { error: access.status === 401 ? "Authentication required" : "Plot not found or access denied" },
+        { status: access.status },
+      );
     }
+
+    const authorized = access.plot;
+    const tenantId = authorized.farm.userId || access.userId!;
 
     const apiUrl = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
     const pathname = "/v2/mesia/ingest-nmea";
@@ -40,7 +34,7 @@ export async function POST(request: NextRequest) {
       "POST",
       pathname,
       {
-        tenantId: userId,
+        tenantId,
         farmId: authorized.farmId,
         plotId,
       },

@@ -278,6 +278,8 @@ def fetch_asmae_s1_scene_stack(
         
     start_dt = datetime.combine(start_date, datetime.min.time(), timezone.utc)
     end_dt = datetime.combine(end_date, datetime.max.time(), timezone.utc)
+    from .geometry_utils import extract_polygon_ring, _build_affine_transform
+    field_ring = extract_polygon_ring(polygon_coords)
 
     for mf in metadata_files:
         try:
@@ -378,6 +380,35 @@ def fetch_asmae_s1_scene_stack(
                 )
             )
             
+            # Verify scene spatial extent covers the plot envelope
+            if field_ring and len(field_ring) >= 3:
+                p_xs = [float(p[0]) for p in field_ring]
+                p_ys = [float(p[1]) for p in field_ring]
+                plot_min_x, plot_max_x = min(p_xs), max(p_xs)
+                plot_min_y, plot_max_y = min(p_ys), max(p_ys)
+
+                t = meta.get("transform")
+                w, h = meta.get("width", 0), meta.get("height", 0)
+                if meta.get("bounds"):
+                    s_min_x, s_min_y, s_max_x, s_max_y = meta["bounds"]
+                elif t and len(t) == 6 and w > 0 and h > 0:
+                    s_min_x = min(t[0], t[0] + w * t[1])
+                    s_max_x = max(t[0], t[0] + w * t[1])
+                    s_min_y = min(t[3], t[3] + h * t[5])
+                    s_max_y = max(t[3], t[3] + h * t[5])
+                else:
+                    s_min_x = s_max_x = s_min_y = s_max_y = None
+
+                if s_min_x is not None:
+                    # If cached scene does not cover plot envelope (with 1e-4 tolerance), skip it
+                    if (s_min_x > plot_min_x + 1e-4 or s_max_x < plot_max_x - 1e-4 or
+                        s_min_y > plot_min_y + 1e-4 or s_max_y < plot_max_y - 1e-4):
+                        logger.warning(
+                            "Skipping cached S1 scene %s: extent does not cover plot envelope (scene=[%.6f, %.6f, %.6f, %.6f] vs plot=[%.6f, %.6f, %.6f, %.6f])",
+                            scene_id, s_min_x, s_min_y, s_max_x, s_max_y, plot_min_x, plot_min_y, plot_max_x, plot_max_y,
+                        )
+                        continue
+
             seen_ids.add(prov_prod_id)
             sp = SceneProduct(
                 scene_id=scene_id,
@@ -438,13 +469,24 @@ def fetch_asmae_s1_scene_stack(
         return _unavailable("authentication", "credentials_missing", date_range, accepted_count=len(local_scenes))
 
     # Construct bbox/geometry in WGS84 for STAC search
-    from .geometry_utils import extract_polygon_ring, _build_affine_transform
-    ring = extract_polygon_ring(polygon_coords)
-    if ring:
+    sar_data = raster_composites.get("SAR") or {}
+    ndvi_data = raster_composites.get("NDVI") or raster_composites.get("NDVI_CLEAN") or {}
+    grid_spec = sar_data.get("grid_spec") or ndvi_data.get("grid_spec") or {}
+    if not grid_spec and "NDVI_CLEAN" in raster_composites:
+        grid_spec = raster_composites["NDVI_CLEAN"].get("grid_spec") or {}
+
+    grid_bounds = grid_spec.get("bounds") or grid_spec.get("bbox")
+    ring = field_ring
+
+    if grid_bounds and len(grid_bounds) >= 4:
+        bbox = [float(v) for v in grid_bounds]
+    elif ring:
         try:
             xs = [float(p[0]) for p in ring]
             ys = [float(p[1]) for p in ring]
-            bbox = [min(xs), min(ys), max(xs), max(ys)]
+            pad_x = max((max(xs) - min(xs)) * 0.05, 0.0002)
+            pad_y = max((max(ys) - min(ys)) * 0.05, 0.0002)
+            bbox = [min(xs) - pad_x, min(ys) - pad_y, max(xs) + pad_x, max(ys) + pad_y]
         except Exception:
             if local_scenes:
                 return local_scenes
@@ -457,16 +499,16 @@ def fetch_asmae_s1_scene_stack(
             return local_scenes
         return _unavailable("request_build", "no_geometry", date_range, accepted_count=len(local_scenes))
         
-    # Get spatial metadata from raster_composites or derived values
-    sar_data = raster_composites.get("SAR") or {}
-    ndvi_data = raster_composites.get("NDVI") or raster_composites.get("NDVI_CLEAN") or {}
-    crs = "EPSG:4326"
-    transform = None
+    crs = grid_spec.get("crs", "EPSG:4326")
+    transform = grid_spec.get("transform")
     
     pixel_array = sar_data.get("values") or sar_data.get("pixel_array") or ndvi_data.get("values") or ndvi_data.get("pixel_array")
     if pixel_array and len(pixel_array) > 0 and len(pixel_array[0]) > 0:
         H = len(pixel_array)
         W = len(pixel_array[0])
+    elif "width" in grid_spec and "height" in grid_spec:
+        W = int(grid_spec["width"])
+        H = int(grid_spec["height"])
     else:
         lon_span = bbox[2] - bbox[0]
         lat_span = bbox[3] - bbox[1]

@@ -1,7 +1,21 @@
-// Authentication utilities for AgriWise
-// Using free OTP simulation for development, can switch to real SMS provider for production
-
 import { prisma } from "./db";
+import crypto from "crypto";
+
+// ── Password Hashing & Verification ──────────────────────────
+export function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const derivedKey = crypto.scryptSync(password, salt, 64);
+  return `${salt}:${derivedKey.toString("hex")}`;
+}
+
+export function verifyPassword(password: string, storedHash: string): boolean {
+  if (!storedHash || !storedHash.includes(":")) return false;
+  const [salt, key] = storedHash.split(":");
+  if (!salt || !key) return false;
+  const keyBuffer = Buffer.from(key, "hex");
+  const derivedKey = crypto.scryptSync(password, salt, 64);
+  return crypto.timingSafeEqual(keyBuffer, derivedKey);
+}
 
 // Generate 6-digit OTP code
 export function generateOTP(): string {
@@ -74,7 +88,7 @@ export async function verifyOTP(phone: string, code: string): Promise<boolean> {
 }
 
 // Send OTP via SMS (mock for development, replace with real provider for production)
-export async function sendOTP(phone: string): Promise<{ success: boolean; message: string }> {
+export async function sendOTP(phone: string): Promise<{ success: boolean; message: string; code?: string }> {
   if (!validatePhoneNumber(phone)) {
     return { success: false, message: "رقم الهاتف غير صالح" };
   }
@@ -82,11 +96,12 @@ export async function sendOTP(phone: string): Promise<{ success: boolean; messag
   const code = await createOTP(phone);
   
   if (process.env.NODE_ENV === "development" || process.env.SMS_PROVIDER === "mock") {
-    // In development, only log to server console — NEVER return in response
+    // In development, log and provide code for seamless local testing
     console.log(`[DEV] OTP for ${phone}: ${code}`);
     return { 
       success: true, 
       message: "تم إرسال رمز التحقق (وضع التطوير)",
+      code,
     };
   }
   
@@ -170,5 +185,30 @@ export async function getOrCreateUser(phone: string, data?: { name?: string; wil
     });
   }
   
+  return user;
+}
+
+// Authenticate user via phone/email and password credentials
+export async function authenticateWithCredentials(identifier: string, password: string) {
+  if (!identifier || !password) return null;
+  const cleanedPhone = identifier.replace(/[\s-]/g, "");
+  const trimmed = identifier.trim();
+
+  // Find user by phone, cleaned phone, or email
+  const user = await prisma.user.findFirst({
+    where: {
+      OR: [
+        { phone: cleanedPhone },
+        { phone: trimmed },
+        { email: trimmed.toLowerCase() },
+      ],
+    },
+  });
+
+  if (!user || !user.password) return null;
+
+  const isValid = verifyPassword(password, user.password);
+  if (!isValid) return null;
+
   return user;
 }

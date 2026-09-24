@@ -176,12 +176,21 @@ def resolve_mode_surface_plan(
                 "trust_badges": trust_badges_for_surface(s_clean, ["Direct observation"])
             }
     elif prefer_asmae:
-        if s_alias and is_spatial(s_alias):
+        if s_fusion and is_spatial(s_fusion):
+            canopy_plan = {
+                "selected_surface_type": "ASMAE_VISUAL_FUSION_CANOPY",
+                "source_class": "asmae",
+                "spatial": True,
+                "fallback_rank": 1.0,
+                "reason": "Using ASMAE Visual Fusion Canopy per policy",
+                "trust_badges": ["Visual Fusion", "ASMAE diagnostic"],
+            }
+        elif s_alias and is_spatial(s_alias):
             canopy_plan = {
                 "selected_surface_type": "CANOPY_ASMAE_VIGOR",
                 "source_class": "asmae",
                 "spatial": True,
-                "fallback_rank": 1.0,
+                "fallback_rank": 1.05,
                 "reason": "Using ASMAE Vigor diagnostic raster per policy",
                 "trust_badges": ["ASMAE diagnostic", "not direct observation", "not prescription driver"],
                 "candidate_metadata": {
@@ -189,15 +198,6 @@ def resolve_mode_surface_plan(
                     "accepted_updates": getattr(s_alias, "provenance", {}).get("accepted_update_count", 1) if isinstance(getattr(s_alias, "provenance", None), dict) else 1,
                     "uncertainty_valid": True,
                 }
-            }
-        elif s_fusion and is_spatial(s_fusion):
-            canopy_plan = {
-                "selected_surface_type": "ASMAE_VISUAL_FUSION_CANOPY",
-                "source_class": "asmae",
-                "spatial": True,
-                "fallback_rank": 1.05,
-                "reason": "Using ASMAE Visual Fusion Canopy per policy",
-                "trust_badges": ["Visual Fusion"]
             }
         elif s_comp and is_spatial(s_comp):
             canopy_plan = {

@@ -22,6 +22,11 @@ class CropSeasonSegment:
     end_date: datetime
     is_active_crop: bool
     scenes: List[HistoricalSceneMetadata] = field(default_factory=list)
+    peak_date: Optional[datetime] = None
+    peak_ndvi: float = 0.0
+    gdd_accumulated: float = 0.0
+    detected_events: List[Dict[str, Any]] = field(default_factory=list)
+    retrovalidation_summary: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class HistoricalSmootherOutput:

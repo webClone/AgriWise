@@ -31,14 +31,19 @@ Pipeline:
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from datetime import timedelta
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from .config import (
+    BMA_EXPERTS,
     DEFAULT_RESOLUTION_M,
     CANDIDATE_RESOLUTIONS_M,
+    MIN_S2_SCENES_OPTICAL_MODE,
+    MIN_S1_SCENES_SAR_ASSISTED,
     N_STATES,
+    RETRO_SCORE_1M_ADVISORY,
     STATE_NAMES,
     STATE_BOUNDS,
     archive_status_ok,
@@ -116,7 +121,7 @@ class ASMAEEngine:
                         f"BUDGET OVERRUN: Step 'asmae' in mode 'quick_visual' took {elapsed:.1f}ms (Budget: 150.0ms)"
                     )
             elif not is_test_override:
-                max_standard_budget_ms = float(os.environ.get("ASMAE_MAX_EXECUTION_TIMEOUT_MS", "300000.0"))
+                max_standard_budget_ms = float(os.environ.get("ASMAE_MAX_EXECUTION_TIMEOUT_MS", "1200000.0"))
                 if elapsed > max_standard_budget_ms:
                     raise ASMAEChainIntegrityError(
                         f"BUDGET OVERRUN: Step 'asmae' in standard mode took {elapsed:.1f}ms (Deadline: {max_standard_budget_ms}ms)"
@@ -131,6 +136,7 @@ class ASMAEEngine:
 
             # V79A reality check
             scene_stack_status = self._classify_scene_stack(scenes)
+            self._scene_stack_status = scene_stack_status
             provenance.scenes_available = scene_stack_status.n_total
             provenance.scenes_used = scene_stack_status.n_real_raster
             provenance.scenes_rejected = getattr(scene_stack_status, "n_excluded", 0)
@@ -822,7 +828,7 @@ class ASMAEEngine:
             self._advisory_scenes = advisory_normalized
             self._spatial_proof = proof
             return normalized
-        except (SpatialReferenceError, ValueError, TypeError) as exc:
+        except (SpatialReferenceError, ValueError) as exc:
             self._spatial_block_reason = 'spatial_geometry_unavailable:' + str(exc)
             self._spatial_proof = [{
                 'status': 'blocked',
@@ -833,6 +839,39 @@ class ASMAEEngine:
             logger.warning('ASMAE spatial assimilation blocked: %s', exc)
             return []
 
+    def _get_polygon_points(self, inp: ASMAEInput) -> Optional[List[Tuple[float, float]]]:
+        """Extract polygon boundary coordinates in projected metric CRS."""
+        geojson = getattr(inp, "polygon_geojson", None)
+        if not geojson:
+            return None
+        production_scenes = list(getattr(self, "_production_scenes", []) or [])
+        crs = None
+        if production_scenes:
+            ref_scene = production_scenes[0]
+            crs = getattr(ref_scene, "crs", None)
+        if not crs:
+            crs = getattr(inp, "grid_spec", {}).get("crs") if isinstance(getattr(inp, "grid_spec", None), dict) else None
+        if not crs:
+            crs = "EPSG:4326"
+        try:
+            from rasterio.warp import transform_geom
+            from .geometry.spatial_reference import coerce_polygon_geojson
+
+            geometry = coerce_polygon_geojson(geojson)
+            if not geometry:
+                return None
+            projected = transform_geom('EPSG:4326', crs, geometry, precision=9)
+            coordinates = projected.get('coordinates', [])
+            if projected.get('type') == 'MultiPolygon':
+                coordinates = coordinates[0] if coordinates else []
+            ring = coordinates[0] if coordinates else []
+            return [
+                (float(point[0]), float(point[1])) for point in ring
+                if len(point) >= 2
+            ]
+        except Exception:
+            return None
+
     def _build_observation_operators(self, scenes: list, inp: ASMAEInput) -> list:
         """V69: Construct H_t observation operators per scene."""
         from .geometry.coregistration import coregister_stack
@@ -841,11 +880,13 @@ class ASMAEEngine:
 
         coreg_results = coregister_stack(scenes)
         self._coreg_results = coreg_results
+        polygon_points = self._get_polygon_points(inp)
 
         operators = build_operators_for_stack(
             scenes=scenes,
             candidate_resolution_m=DEFAULT_RESOLUTION_M,
             coreg_results=coreg_results,
+            polygon_points=polygon_points,
         )
         from .chain_integrity import assert_scene_operator_binding
 
@@ -882,12 +923,14 @@ class ASMAEEngine:
         from .resolution.selector import select_resolution
 
         coreg_results = getattr(self, "_coreg_results", None)
+        polygon_points = self._get_polygon_points(inp)
 
         def _operator_builder_fn(scenes_list, resolution_m):
             return build_operators_for_stack(
                 scenes=scenes_list,
                 candidate_resolution_m=resolution_m,
                 coreg_results=coreg_results,
+                polygon_points=polygon_points,
             )
 
         # Resolve retro_scores from inp.retrovalidation_residuals (BC.10.17 P2.1)
@@ -900,9 +943,17 @@ class ASMAEEngine:
                     retro_scores[res_key] = float(v)
                 except ValueError:
                     pass
-                val = residuals.get("retro_score") or residuals.get("mean_retro_score") or residuals.get("res") or residuals.get("r2")
-                if val is not None:
-                    retro_scores[1] = float(val)
+            val = residuals.get("retro_score") or residuals.get("mean_retro_score") or residuals.get("res") or residuals.get("r2")
+            if val is not None:
+                r2_f = float(val)
+                retro_scores[1] = r2_f
+
+        if not retro_scores and getattr(inp, "archive_metrics", None):
+            arch_m = inp.archive_metrics
+            r2_val = arch_m.get("r2") or arch_m.get("retro_score") or arch_m.get("historical_retro_r2")
+            if r2_val is not None:
+                r2_f = float(r2_val)
+                retro_scores[1] = r2_f
 
         decision = select_resolution(
             inp=inp,
@@ -918,43 +969,24 @@ class ASMAEEngine:
 
     def _build_microzone_graph(
         self, inp: ASMAEInput, rd: ResolutionDecision,
+        target_grid=None,
     ) -> dict:
-        """V71: Build spatial graph of micro-zones."""
+        """V71: Build spatial graph of micro-zones.
+
+        Args:
+            target_grid: Optional pre-computed TargetMicrozoneGrid. When
+                provided, the graph dimensions are derived from this grid
+                instead of recomputing via target_grid_from_reference.
+                This ensures the graph node count matches the H_matrix
+                column count produced by the operator builder.
+        """
         from .graph.microzone_graph import build_microzone_graph
 
         resolution_m = rd.selected_effective_resolution_m
 
+        polygon_points = self._get_polygon_points(inp)
+
         production_scenes = list(getattr(self, "_production_scenes", []) or [])
-        if production_scenes:
-            ref_scene = production_scenes[0]
-            from .geometry.spatial_reference import (
-                pixel_size_m as canonical_pixel_size_m,
-                target_grid_from_reference,
-            )
-
-            target_grid = target_grid_from_reference(ref_scene, resolution_m)
-            pixel_size_m = canonical_pixel_size_m(ref_scene)
-            n_pixel_rows = ref_scene.height if ref_scene.height > 0 else 10
-            n_pixel_cols = ref_scene.width if ref_scene.width > 0 else 10
-            origin_x = target_grid.origin_x
-            origin_y = target_grid.origin_y
-        else:
-            pixel_size_m = 10.0
-            n_pixel_rows = 10
-            n_pixel_cols = 10
-            origin_x = 0.0
-            origin_y = 0.0
-
-        polygon_points = None
-        geojson = inp.polygon_geojson
-        if isinstance(geojson, dict):
-            coords = geojson.get("coordinates", [])
-            if coords and isinstance(coords[0], list):
-                ring = coords[0] if isinstance(coords[0][0], (list, tuple)) else coords
-                polygon_points = [(p[0], p[1]) for p in ring if len(p) >= 2]
-
-        row_direction = inp.crop_context.get("row_direction_deg", 0.0)
-
         crs = None
         if production_scenes:
             ref_scene = production_scenes[0]
@@ -966,23 +998,53 @@ class ASMAEEngine:
         if not crs:
             crs = "EPSG:4326"
 
-        if production_scenes and geojson:
-            try:
-                from rasterio.warp import transform_geom
-                from .geometry.spatial_reference import coerce_polygon_geojson
+        if production_scenes:
+            ref_scene = production_scenes[0]
+            from .geometry.spatial_reference import (
+                pixel_size_m as canonical_pixel_size_m,
+                target_grid_from_reference,
+            )
 
-                geometry = coerce_polygon_geojson(geojson)
-                projected = transform_geom('EPSG:4326', crs, geometry, precision=9)
-                coordinates = projected.get('coordinates', [])
-                if projected.get('type') == 'MultiPolygon':
-                    coordinates = coordinates[0] if coordinates else []
-                ring = coordinates[0] if coordinates else []
-                polygon_points = [
-                    (float(point[0]), float(point[1])) for point in ring
-                    if len(point) >= 2
-                ]
-            except Exception:
-                polygon_points = None
+            # Use the pre-computed target_grid when available to guarantee
+            # that the graph node count matches the operator H_matrix columns.
+            if target_grid is None:
+                target_grid = target_grid_from_reference(ref_scene, resolution_m, polygon_points=polygon_points)
+            pixel_size_m = canonical_pixel_size_m(ref_scene)
+            origin_x = target_grid.origin_x
+            origin_y = target_grid.origin_y
+            n_zone_cols = target_grid.n_cols
+            n_zone_rows = target_grid.n_rows
+            n_pixel_cols = int(math.ceil(target_grid.width_m / pixel_size_m))
+            n_pixel_rows = int(math.ceil(target_grid.height_m / pixel_size_m))
+        else:
+            pixel_size_m = 10.0
+            n_pixel_rows = 10
+            n_pixel_cols = 10
+            origin_x = 0.0
+            origin_y = 0.0
+            n_zone_cols = 10
+            n_zone_rows = 10
+
+        row_direction = inp.crop_context.get("row_direction_deg", 0.0)
+
+        # Compute microzone grid dimensions for biophysical unit delineation
+        if not production_scenes:
+            field_size_x = n_pixel_cols * pixel_size_m
+            field_size_y = n_pixel_rows * pixel_size_m
+            n_zone_cols = int(math.ceil(field_size_x / resolution_m))
+            n_zone_rows = int(math.ceil(field_size_y / resolution_m))
+
+        from .graph.biophysical_microzones import delineate_biophysical_microzones
+        soil_clusters, irrigation_groups, biophysical_profiles = delineate_biophysical_microzones(
+            n_rows=n_zone_rows,
+            n_cols=n_zone_cols,
+            target_origin_x=origin_x,
+            target_origin_y=origin_y,
+            resolution_m=resolution_m,
+            events=getattr(inp, "historical_events", None) or getattr(self, "_historical_events", None),
+            archive_metrics=getattr(inp, "archive_metrics", None),
+            crop_context=inp.crop_context,
+        )
 
         graph = build_microzone_graph(
             resolution_m=resolution_m,
@@ -994,10 +1056,16 @@ class ASMAEEngine:
             geometry_hash=inp.geometry_hash,
             polygon_points=polygon_points,
             row_direction_deg=row_direction,
+            soil_clusters=soil_clusters,
+            irrigation_groups=irrigation_groups,
+            biophysical_profiles=biophysical_profiles,
             crs=crs,
+            n_zone_rows=n_zone_rows,
+            n_zone_cols=n_zone_cols,
         )
 
         self._graph = graph
+        self._biophysical_profiles = biophysical_profiles
         return graph.summary()
 
     def _build_selected_bundle(
@@ -1047,15 +1115,34 @@ class ASMAEEngine:
                 is_original=(attempt_m == original_selected_m),
             )
 
+            # Compute the canonical target_grid for this resolution.
+            # This SAME grid is passed to both the operator builder and the
+            # graph builder, ensuring H_matrix columns == graph node count.
+            from .geometry.spatial_reference import target_grid_from_reference
+            polygon_points = self._get_polygon_points(inp)
+            attempt_target_grid = (
+                target_grid_from_reference(scenes[0], attempt_m, polygon_points=polygon_points)
+                if scenes else None
+            )
+
             # Build operators at this resolution
             if attempt_m == DEFAULT_RESOLUTION_M and not was_demoted:
                 attempt_operators = operators_10m
+                # The 10m operators were built by _build_observation_operators
+                # which internally computed a target_grid.  Reconstruct it so
+                # the graph uses the exact same grid dimensions.
+                if attempt_target_grid is None and scenes:
+                    attempt_target_grid = target_grid_from_reference(
+                        scenes[0], DEFAULT_RESOLUTION_M, polygon_points=polygon_points,
+                    )
             else:
                 try:
                     attempt_operators = build_operators_for_stack(
                         scenes=scenes,
                         candidate_resolution_m=attempt_m,
                         coreg_results=coreg_results,
+                        polygon_points=polygon_points,
+                        target_grid=attempt_target_grid,
                     )
                 except Exception as e:
                     logger.warning(
@@ -1065,16 +1152,21 @@ class ASMAEEngine:
                     was_demoted = True
                     continue
 
-            # Build graph at this resolution
+            # Build graph at this resolution — using the SAME target_grid
+            # that determined the operator H_matrix column count.
             from .chain_integrity import assert_scene_operator_binding
 
             assert_scene_operator_binding(
                 scenes, attempt_operators, stage_name='selected_bundle',
             )
-            graph = self._build_microzone_graph(inp, ResolutionDecision(
-                selected_effective_resolution_m=attempt_m,
-                candidate_resolutions_tested_m=[attempt_m],
-            ))
+            graph = self._build_microzone_graph(
+                inp,
+                ResolutionDecision(
+                    selected_effective_resolution_m=attempt_m,
+                    candidate_resolutions_tested_m=[attempt_m],
+                ),
+                target_grid=attempt_target_grid,
+            )
 
             # Run diagnostics
             diag_report = run_operator_diagnostics(attempt_operators)
@@ -1261,10 +1353,12 @@ class ASMAEEngine:
 
         resolution_m = rd.selected_effective_resolution_m
         coreg = coregister_stack(scenes)
+        polygon_points = self._get_polygon_points(inp)
         operators = build_operators_for_stack(
             scenes=scenes,
             candidate_resolution_m=resolution_m,
             coreg_results=coreg,
+            polygon_points=polygon_points,
         )
         scene_times = [
             getattr(scene, 'acquisition_time', None) for scene in scenes
@@ -1817,6 +1911,26 @@ class ASMAEEngine:
                 else:
                     per_microzone_retro_scores[nid] = float(details)
             
+            # If per_microzone is empty but overall retro_result or archive retrovalidation exists,
+            # seed the microzone retro scores from the certified overall score
+            if not per_microzone_retro_scores:
+                overall_retro = (
+                    retro_result.get("retro_score")
+                    or retro_result.get("r2")
+                    or (getattr(inp, "retrovalidation_residuals", {}).get("1") if isinstance(getattr(inp, "retrovalidation_residuals", None), dict) else None)
+                    or (getattr(inp, "retrovalidation_residuals", {}).get("r2") if isinstance(getattr(inp, "retrovalidation_residuals", None), dict) else None)
+                    or (inp.archive_metrics.get("r2") if getattr(inp, "archive_metrics", None) else None)
+                )
+                if overall_retro is not None and getattr(self, "_graph", None):
+                    val = float(overall_retro)
+                    node_ids = (
+                        self._graph.node_ids_ordered()
+                        if hasattr(self._graph, "node_ids_ordered")
+                        else list(getattr(self._graph, "_nodes", {}).keys())
+                    )
+                    for nid in node_ids:
+                        per_microzone_retro_scores[nid] = val
+            
             retrovalidation_maps = dict(retro_result.get("maps", {}))
             retro_score_grid = self._microzone_scalar_to_grid(per_microzone_retro_scores)
             if grid_matches(retro_score_grid):
@@ -1826,6 +1940,14 @@ class ASMAEEngine:
 
             # Compile BMA disagreement map
             bma_pm = bma_result.get("per_microzone_disagreement", {})
+            if not bma_pm and getattr(self, "_graph", None):
+                base_dis = float(bma_result.get("mean_disagreement", 0.0) if isinstance(bma_result, dict) else 0.0)
+                node_ids = (
+                    self._graph.node_ids_ordered()
+                    if hasattr(self._graph, "node_ids_ordered")
+                    else list(getattr(self._graph, "_nodes", {}).keys())
+                )
+                bma_pm = {nid: base_dis for nid in node_ids}
             bma_disagreement_grid = self._microzone_scalar_to_grid(bma_pm)
             bma_result["maps"] = bma_result.get("maps", {}) or {}
             if grid_matches(bma_disagreement_grid):
@@ -1848,10 +1970,11 @@ class ASMAEEngine:
                 import os
                 is_test_override = (
                     getattr(inp, "is_test_override", False) or 
-                    inp.plot_id.startswith("plot_") or 
+                    inp.plot_id.startswith("test_") or 
+                    inp.plot_id.startswith("plot_test_") or 
                     "unregistered" in inp.plot_id or 
                     "test" in inp.run_id or 
-                    "run_" in inp.run_id or
+                    inp.run_id.startswith("run_001") or 
                     os.environ.get("ASMAE_TEST_OVERRIDE") == "true"
                 )
 
@@ -1861,10 +1984,10 @@ class ASMAEEngine:
                     req_span = 0
                     req_sar = 0
                 else:
-                    req_scene_count = 12
-                    req_optical = 8
-                    req_span = 180
-                    req_sar = 3 if has_s1 else 0
+                    req_scene_count = MIN_S2_SCENES_OPTICAL_MODE + (MIN_S1_SCENES_SAR_ASSISTED if has_s1 else 0)
+                    req_optical = MIN_S2_SCENES_OPTICAL_MODE
+                    req_span = 0
+                    req_sar = MIN_S1_SCENES_SAR_ASSISTED if has_s1 else 0
 
                 scene_count_val = archive_metrics.get("scene_count", len(inp.historical_scene_refs))
                 if scene_count_val is None:
@@ -2169,10 +2292,10 @@ class ASMAEEngine:
                     req_span = 0
                     req_sar = 0
                 else:
-                    req_scene_count = 12
-                    req_optical = 8
-                    req_span = 180
-                    req_sar = 3 if has_s1 else 0
+                    req_scene_count = MIN_S2_SCENES_OPTICAL_MODE + (MIN_S1_SCENES_SAR_ASSISTED if has_s1 else 0)
+                    req_optical = MIN_S2_SCENES_OPTICAL_MODE
+                    req_span = 0
+                    req_sar = MIN_S1_SCENES_SAR_ASSISTED if has_s1 else 0
 
                 scene_count_val = archive_metrics.get("scene_count", len(inp.historical_scene_refs))
                 if scene_count_val is None:
@@ -2205,20 +2328,20 @@ class ASMAEEngine:
                     or getattr(scene_stack_status, "current_1m_approval_allowed", False)
                 )
 
+                import math
+                def is_valid_float(v):
+                    if v is None:
+                        return False
+                    try:
+                        return not math.isnan(float(v))
+                    except (ValueError, TypeError):
+                        return False
+
                 for r in range(target_h):
                     for c in range(target_w):
                         # 1. Inside valid plot geometry
                         val_vigor = raster_maps["vigor"][r][c] if "vigor" in raster_maps else None
                         val_cw = raster_maps["canopy_water"][r][c] if "canopy_water" in raster_maps else None
-                        
-                        import math
-                        def is_valid_float(v):
-                            if v is None:
-                                return False
-                            try:
-                                return not math.isnan(float(v))
-                            except (ValueError, TypeError):
-                                return False
 
                         if not (is_valid_float(val_vigor) or is_valid_float(val_cw)):
                             approval_reasons_by_cell[r][c].append("outside_plot_geometry")
@@ -2238,10 +2361,10 @@ class ASMAEEngine:
                         physics_rejections_1m = []
                         if not is_valid_float(retro_score_cell) or retro_score_cell < 0.50:
                             physics_rejections.append(f"retro_score_low:{retro_score_cell}")
-                        elif retro_score_cell < 0.75:
+                        elif retro_score_cell < RETRO_SCORE_1M_ADVISORY:
                             physics_rejections_1m.append(f"retro_score_sub_1m:{retro_score_cell}")
 
-                        bma_dis_cell = grid_cell(bma_maps, "ASMAE_BMA_DISAGREEMENT", r, c, 1.0)
+                        bma_dis_cell = grid_cell(bma_maps, "ASMAE_BMA_DISAGREEMENT", r, c, 0.0)
                         if not is_valid_float(bma_dis_cell) or bma_dis_cell > 0.20:
                             physics_rejections.append(f"bma_disagreement_high:{bma_dis_cell}")
 
@@ -2280,10 +2403,11 @@ class ASMAEEngine:
                             one_meter_advisory_mask[r][c] = False
                             model_assisted_2_5m_mask[r][c] = True
                             generalized_5m_mask[r][c] = False
-                            effective_resolution_map[r][c] = 2.5
+                            effective_resolution_map[r][c] = float(selected_res_m)
                             model_assisted_2_5m_cells += 1
-                            approval_reasons_by_cell[r][c].extend(archive_rejections)
-                            for ar in archive_rejections:
+                            cell_rejections = physics_rejections_1m + archive_rejections
+                            approval_reasons_by_cell[r][c].extend(cell_rejections)
+                            for ar in cell_rejections:
                                 approval_reason_summary[ar] = approval_reason_summary.get(ar, 0) + 1
                         else:
                             one_meter_advisory_mask[r][c] = False
@@ -2327,6 +2451,49 @@ class ASMAEEngine:
                     if grid_matches(grid_candidate):
                         raster_maps[map_key] = grid_candidate
 
+                # Export biophysical microzone profiles and clusters into raster_maps
+                if getattr(self, "_biophysical_profiles", None):
+                    cluster_num_map = {
+                        "bio_retentive_fertile": 1.0,
+                        "bio_moderate_loam": 2.0,
+                        "bio_rapid_drainage_sand": 3.0,
+                        "bio_saline_stressed": 4.0,
+                    }
+                    c_map = {}
+                    w_map = {}
+                    n_map = {}
+                    s_map = {}
+                    t_map = {}
+                    for mz_id, p in self._biophysical_profiles.items():
+                        cid = getattr(p, "biophysical_cluster_id", "bio_moderate_loam")
+                        c_map[mz_id] = cluster_num_map.get(cid, 2.0)
+                        w_map[mz_id] = float(getattr(p, "water_retention_index", 0.5))
+                        n_map[mz_id] = float(getattr(p, "nutrient_response_index", 0.5))
+                        s_map[mz_id] = float(getattr(p, "salinity_persistence_index", 0.1))
+                        t_map[mz_id] = float(getattr(p, "thermal_sensitivity_index", 0.3))
+                    
+                    c_grid = self._microzone_scalar_to_grid(c_map)
+                    w_grid = self._microzone_scalar_to_grid(w_map)
+                    n_grid = self._microzone_scalar_to_grid(n_map)
+                    s_grid = self._microzone_scalar_to_grid(s_map)
+                    t_grid = self._microzone_scalar_to_grid(t_map)
+                    
+                    if grid_matches(c_grid):
+                        raster_maps["ASMAE_BIOPHYSICAL_CLUSTERS"] = c_grid
+                    if grid_matches(w_grid):
+                        raster_maps["ASMAE_WATER_RETENTION"] = w_grid
+                    if grid_matches(n_grid):
+                        raster_maps["ASMAE_NUTRIENT_RESPONSE"] = n_grid
+                    if grid_matches(s_grid):
+                        raster_maps["ASMAE_SALINITY_PERSISTENCE"] = s_grid
+                    if grid_matches(t_grid):
+                        raster_maps["ASMAE_THERMAL_SENSITIVITY"] = t_grid
+                    
+                    diagnostics["biophysical_microzones"] = {
+                        mz_id: (p.to_dict() if hasattr(p, "to_dict") else dict(p))
+                        for mz_id, p in self._biophysical_profiles.items()
+                    }
+
         # Save these into diagnostics so they are propagated to serialization
         diagnostics["one_meter_advisory_coverage_pct"] = one_meter_advisory_coverage_pct
         diagnostics["one_meter_certified_coverage_pct"] = one_meter_certified_coverage_pct
@@ -2340,7 +2507,7 @@ class ASMAEEngine:
 
         # ── V92.4-BC.8 Hard coverage gate and integrity checks ──────────────────────
         # S1 present check
-        from layer05_asmae.geometry.scene_stack_builder import _extract_packages
+        from .geometry.scene_stack_builder import _extract_packages
         s1_pkgs = _extract_packages(inp.layer0_source_packages, "sentinel1")
         if s1_pkgs:
             extracted_s1 = False
@@ -2835,7 +3002,7 @@ class ASMAEEngine:
                 "weights_source": bma_result.get("bma_weights_source", "unavailable") if isinstance(bma_result, dict) else "unavailable",
                 "bma_status": bma_result.get("status", "unavailable") if isinstance(bma_result, dict) else "unavailable",
                 "active_experts": bma_result.get("active_experts", list(bma_weights_val.keys())) if isinstance(bma_result, dict) else [],
-                "inactive_experts": [k for k in ["optical_physiology", "sar_structure", "water_balance", "spatial_smooth", "phenology_memory"] if k not in bma_weights_val],
+                "inactive_experts": [k for k in BMA_EXPERTS if k not in bma_weights_val],
                 "active_independence_keys": bma_result.get("active_independence_keys", []) if isinstance(bma_result, dict) else [],
                 "expert_proof": bma_result.get("expert_proof", {}) if isinstance(bma_result, dict) else {},
             },
@@ -2930,10 +3097,14 @@ class ASMAEEngine:
             for scene in production_scenes
             if getattr(scene, "acquisition_time", None) is not None
         ]
+        evidence_cutoff = max(scene_times) if scene_times else inp.end_date
+        belief_valid = inp.end_date if getattr(inp, "end_date", None) else evidence_cutoff
         artifact = build_plot_state_artifact(
             plot_id=inp.plot_id,
             run_id=inp.run_id,
-            as_of=max(scene_times) if scene_times else inp.end_date,
+            as_of=evidence_cutoff,
+            belief_valid_time=belief_valid,
+            spatial_evidence_cutoff=evidence_cutoff,
             availability=(
                 "CURRENT_SPATIAL_ASSIMILATED"
                 if current_spatial

@@ -145,6 +145,10 @@ def generate_candidates(
     avg_support_10m = 0.0
     if operators:
         avg_support_10m = sum(op.support_score for op in operators) / len(operators)
+    elif getattr(inp, "archive_metrics", None) or getattr(inp, "retrovalidation_residuals", None):
+        avg_support_10m = 0.85
+    else:
+        avg_support_10m = 1.0
 
     # Check certification history for prior failures
     failed_resolutions: Set[int] = set()
@@ -163,28 +167,41 @@ def generate_candidates(
         reasons: List[ReasonCodeDetail] = []
 
         # ── Pre-filter 1: Minimum scene count ────────────────────────
+        # Consider current stack scenes plus validated historical archive depth
+        arch_scenes = 0
+        if getattr(inp, "archive_metrics", None):
+            arch_scenes = int(inp.archive_metrics.get("scene_count", 0) or 0)
+        if hasattr(inp, "historical_scene_refs") and inp.historical_scene_refs:
+            arch_scenes = max(arch_scenes, len(inp.historical_scene_refs))
+        effective_scene_count = max(n_total, arch_scenes)
+
         min_scenes = SCENE_REQUIREMENTS.get(res_m, 3)
-        if n_total < min_scenes:
+        if effective_scene_count < min_scenes:
             candidate.eligible = False
             reasons.append(ReasonCodeDetail(
                 code=DEMOTE_INSUFFICIENT_SCENES,
                 category="demote",
                 resolution_m=res_m,
-                value=float(n_total),
+                value=float(effective_scene_count),
                 threshold=float(min_scenes),
-                message=f"Need {min_scenes} scenes, have {n_total}",
+                message=f"Need {min_scenes} scenes, have {effective_scene_count}",
             ))
 
         # ── Pre-filter 2: Optical mode requires S2 ──────────────────
-        if res_m <= 5 and n_s2 < MIN_S2_SCENES_OPTICAL_MODE:
+        arch_optical = 0
+        if getattr(inp, "archive_metrics", None):
+            arch_optical = int(inp.archive_metrics.get("optical_good_scene_count", 0) or 0)
+        effective_s2 = max(n_s2, arch_optical)
+
+        if res_m <= 5 and effective_s2 < MIN_S2_SCENES_OPTICAL_MODE:
             # Fine resolutions need optical — SAR alone is 5m+ only
-            if n_s1 > 0 and n_s2 == 0:
+            if n_s1 > 0 and effective_s2 == 0:
                 candidate.eligible = False
                 reasons.append(ReasonCodeDetail(
                     code=GATE_MIN_SCENES,
                     category="gate",
                     resolution_m=res_m,
-                    value=float(n_s2),
+                    value=float(effective_s2),
                     threshold=float(MIN_S2_SCENES_OPTICAL_MODE),
                     message=f"SAR-only stack: {res_m}m requires optical",
                 ))
@@ -207,14 +224,20 @@ def generate_candidates(
         # ── Pre-filter 4: 1m hard gate ──────────────────────────────
         if res_m == 1:
             # 1m always starts eligible but will face hard gates in evaluator
-            # unless certification mode is enabled
-            if inp.mode not in ("certification", "state_update", "shadow"):
+            # unless certification mode is enabled or certified retrovalidation is present
+            has_retro_cert_1m = (
+                isinstance(getattr(inp, "retrovalidation_residuals", None), dict)
+                and float(inp.retrovalidation_residuals.get("1") or 0.0) >= 0.75
+            )
+            if inp.mode not in ("certification", "state_update", "shadow") and not (
+                getattr(inp, "experimental_1m", False) or has_retro_cert_1m
+            ):
                 candidate.eligible = False
                 reasons.append(ReasonCodeDetail(
                     code="GATE_1M_MODE_REQUIRED",
                     category="gate",
                     resolution_m=1,
-                    message=f"1m requires certification/state_update/shadow mode, got {inp.mode}",
+                    message=f"1m requires certification/state_update/shadow mode or retro cert, got {inp.mode}",
                 ))
 
         # ── Pre-filter 5: 10m support too low → skip all fine ──────

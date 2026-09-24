@@ -126,11 +126,23 @@ def build_plot_state_artifact(
     evidence_hash: str = "",
     stale_age_days: Optional[float] = None,
     reason: str = "",
+    belief_valid_time: Optional[Any] = None,
+    spatial_evidence_cutoff: Optional[Any] = None,
 ) -> Dict[str, Any]:
     availability = canonical_availability(availability, spatial=current_spatial_assimilation)
     as_of_text = as_of.isoformat() if hasattr(as_of, "isoformat") else str(as_of or "")
     if not as_of_text.strip():
         raise ValueError("plot-state artifact requires as_of")
+    belief_valid_text = (
+        belief_valid_time.isoformat()
+        if hasattr(belief_valid_time, "isoformat")
+        else str(belief_valid_time or as_of_text)
+    )
+    cutoff_text = (
+        spatial_evidence_cutoff.isoformat()
+        if hasattr(spatial_evidence_cutoff, "isoformat")
+        else str(spatial_evidence_cutoff or as_of_text)
+    )
     authority = str(authority or "").upper()
     if authority not in AUTHORITY_LEVELS:
         raise ValueError("plot-state artifact requires explicit valid authority")
@@ -144,6 +156,8 @@ def build_plot_state_artifact(
         "plot_id": plot_id,
         "run_id": run_id,
         "as_of": as_of_text,
+        "belief_valid_time": belief_valid_text,
+        "spatial_evidence_cutoff": cutoff_text,
         "state_availability": availability,
         "authority_level": authority,
         "posterior": dict(posterior or {}),

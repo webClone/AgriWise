@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/session";
+import { authorizePlot } from "@/lib/agribrain/authorize-plot";
 import { buildSignedInternalHeaders } from "@/lib/agribrain/internal-service-auth";
 import { classifyCanonicalHeadValidation } from "@/lib/agribrain/layer10-request-state.mjs";
 
@@ -31,23 +32,16 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
     return NextResponse.json({ success: false, error: "plotId is required" }, { status: 400 });
   }
 
-  const session = await getSession();
-  const userId = session?.userId || null;
-  if (!userId) {
-    return NextResponse.json({ success: false, error: "Authentication required" }, { status: 401 });
+  const access = await authorizePlot(plotId);
+  if (access.status !== 200 || !access.plot) {
+    return NextResponse.json(
+      { success: false, error: access.status === 401 ? "Authentication required" : "Plot not found" },
+      { status: access.status }
+    );
   }
 
-  const authorizedPlot = await prisma.plot.findFirst({
-    where: {
-      id: plotId,
-      farm: { userId },
-    },
-    select: { id: true, farmId: true },
-  });
-
-  if (!authorizedPlot) {
-    return NextResponse.json({ success: false, error: "Plot not found" }, { status: 404 });
-  }
+  const authorizedPlot = access.plot;
+  const tenantId = authorizedPlot.farm.userId || access.userId!;
 
   const apiUrl = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
 
@@ -58,7 +52,7 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
       "GET",
       pathname,
       {
-        tenantId: userId,
+        tenantId,
         farmId: authorizedPlot.farmId,
         plotId,
       }
@@ -137,7 +131,7 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
       "GET",
       progressPathname,
       {
-        tenantId: userId,
+        tenantId,
         farmId: authorizedPlot.farmId,
         plotId,
       }

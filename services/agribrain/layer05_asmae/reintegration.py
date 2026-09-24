@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Any, Dict, Mapping, Optional
+
+_AGRIBRAIN_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _AGRIBRAIN_ROOT not in sys.path:
+    sys.path.insert(0, _AGRIBRAIN_ROOT)
 
 
 REINTEGRATION_CONTRACT_VERSION = "asmae_orchestrator_reintegration_v2_terminal_publication"
@@ -246,6 +252,13 @@ def rebuild_canonical_plot_snapshot(
     share one identity rather than waiting for the next user request.
     """
     result = dict(asmae_result or {})
+    if "result" in result and isinstance(result["result"], dict):
+        inner = dict(result["result"])
+        for k, v in result.items():
+            if k != "result" and k not in inner:
+                inner[k] = v
+        result = inner
+
     # Scientific completion is bound to the crop/phenology evidence heads that
     # were frozen into the durable job.  Carry those identities through every
     # publication artifact; downstream reintegration must never silently swap
@@ -363,9 +376,14 @@ def rebuild_canonical_plot_snapshot(
             ),
         }
 
-    from orchestrator_v2.intents import Intent
-    from orchestrator_v2.runner import run_orchestrator
-    from orchestrator_v2.schema import OrchestratorInput
+    try:
+        from orchestrator_v2.intents import Intent
+        from orchestrator_v2.runner import run_orchestrator
+        from orchestrator_v2.schema import OrchestratorInput
+    except ModuleNotFoundError:
+        from services.agribrain.orchestrator_v2.intents import Intent
+        from services.agribrain.orchestrator_v2.runner import run_orchestrator
+        from services.agribrain.orchestrator_v2.schema import OrchestratorInput
 
     operational = _mapping(raw_input.get("operational_context"))
     operational.update(
@@ -426,12 +444,14 @@ def rebuild_canonical_plot_snapshot(
                 if context.get(key) is not None
             },
             # Rebuild the policy the user actually queued with the scientific
-            # job.  The captured orchestrator input may predate the source
+            # job. The captured orchestrator input may predate the source
             # policy switch (for example, an initial satellite fallback).
-            "source_policy": str(
-                context.get("source_policy")
-                or operational.get("source_policy")
-                or "satellite"
+            # When ASMAE completes, publication promotes to asmae_diagnostic
+            # unless the user explicitly requested hybrid.
+            "source_policy": (
+                "hybrid"
+                if str(context.get("source_policy") or operational.get("source_policy") or "").lower() == "hybrid"
+                else "asmae_diagnostic"
             ),
         }
     )
@@ -451,9 +471,27 @@ def rebuild_canonical_plot_snapshot(
     field_geometry = _mapping(
         raw_input.get("field_geometry") or context.get("field_geometry")
     )
-    polygon_geojson = _mapping(
-        raw_input.get("polygon_geojson") or context.get("polygon_geojson")
-    )
+    raw_poly = raw_input.get("polygon_geojson") or context.get("polygon_geojson")
+    if isinstance(raw_poly, dict):
+        polygon_geojson = dict(raw_poly)
+    elif isinstance(raw_poly, (list, tuple)):
+        polygon_geojson = list(raw_poly)
+    else:
+        polygon_geojson = None
+
+    if not polygon_geojson and not field_geometry:
+        try:
+            from app.mongo_client import get_db
+            from bson import ObjectId
+            db = get_db()
+            pid = str(raw_input.get("plot_id") or result.get("plot_id") or "")
+            if pid:
+                plot_rec = db["Plot"].find_one({"_id": ObjectId(pid)})
+                if plot_rec and plot_rec.get("geoJson"):
+                    polygon_geojson = dict(plot_rec["geoJson"])
+                    field_geometry = polygon_geojson
+        except Exception:
+            pass
     geom_target = polygon_geojson or field_geometry
     if geom_target:
         cand = geom_target
@@ -523,8 +561,17 @@ def rebuild_canonical_plot_snapshot(
         getattr(layer2_output, "provenance", None)
     )
     expected_crop_lineage = str(
-        result.get("crop_posterior_lineage") or ""
+        result.get("crop_posterior_lineage")
+        or context.get("crop_posterior_lineage")
+        or ""
     )
+    if not result.get("crop_posterior_lineage") and expected_crop_lineage:
+        result["crop_posterior_lineage"] = expected_crop_lineage
+    if not result.get("crop_worldline_event_id") and context.get("crop_worldline_event_id"):
+        result["crop_worldline_event_id"] = context.get("crop_worldline_event_id")
+    if not result.get("phenology_worldline_event_id") and context.get("phenology_worldline_event_id"):
+        result["phenology_worldline_event_id"] = context.get("phenology_worldline_event_id")
+
     if (
         not expected_crop_lineage
         or str(layer2_provenance.get("crop_posterior_lineage") or "")

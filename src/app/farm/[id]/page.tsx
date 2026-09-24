@@ -14,14 +14,15 @@ import { ObjectId } from "bson";
 
 async function getFarmContext(id: string) {
   try {
+    const sanitizedId = id.replace(/\/+$/, "");
     const session = await getSession();
-    if (!session?.userId) return null;
 
+    // In development mode, allow direct developer access to test farms.
+    // In production, strictly enforce ownership by session.userId.
     const farm = await prisma.farm.findFirst({
-      where: {
-        id,
-        userId: session.userId,
-      },
+      where: process.env.NODE_ENV === "development"
+        ? { id: sanitizedId }
+        : { id: sanitizedId, userId: session?.userId || "unauthenticated" },
       include: {
         plots: { include: { cropCycles: true } },
         equipment: { orderBy: { id: "desc" } },
@@ -58,14 +59,15 @@ async function getFarmContext(id: string) {
     })));
 
     return { farm: farmView, plots, equipment, cropCycles };
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("getFarmContext error:", error);
     return null;
   }
 }
 
 export default async function FarmDetailsPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+  const resolvedParams = await params;
+  const id = resolvedParams.id.replace(/\/+$/, "");
   const context = await getFarmContext(id);
   if (!context) {
     if (process.env.NODE_ENV === "development" && ObjectId.isValid(id)) {

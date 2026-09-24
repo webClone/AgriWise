@@ -15,9 +15,8 @@ import logging
 import math
 import random
 from datetime import datetime, time, timedelta
-from typing import Any, Dict, List, Optional, Tuple
-
-from typing import Callable
+from typing import Any, Dict, List, Optional, Tuple, Callable
+import numpy as np
 
 from ..config import (
     ENSEMBLE_SIZE_CERTIFICATION,
@@ -155,6 +154,25 @@ def _forecast_elapsed_interval(
     return ensemble, segments
 
 
+def _scene_has_pixel_obs(scene) -> bool:
+    """V79B: Check if scene has real per-pixel observation arrays.
+
+    Returns True only when at least one per-pixel observation has valid,
+    finite support. Sensor identity or array length alone is not evidence.
+    """
+    from ..observation.pixel_extraction import extract_pixel_observations
+    pixel_obs = extract_pixel_observations(scene)
+    for pix in pixel_obs.values():
+        if (
+            pix.is_per_pixel
+            and pix.n_pixels > 1
+            and pix.n_valid > 0
+            and math.isfinite(float(pix.mean))
+        ):
+            return True
+    return False
+
+
 def run_enkf(
     scenes: list,
     operators: list,
@@ -196,7 +214,8 @@ def run_enkf(
         )
 
     if rng is None:
-        rng = random.Random(42)  # Fallback — tests should always provide
+        from ..deterministic import make_rng
+        rng = make_rng("enkf_run", str(expected_resolution_m or "default"), "v1")
 
     # Determine microzone count from graph
     if hasattr(graph, "node_count"):
@@ -249,8 +268,15 @@ def run_enkf(
     )
     previous_scene_time = None
     for t, (scene, op) in enumerate(bound_pairs):
-        # Forecast step: propagate state forward over exact daily intervals.
         scene_time = getattr(scene, "acquisition_time", None)
+        if (
+            isinstance(ensemble, np.ndarray)
+            and isinstance(previous_scene_time, datetime)
+            and isinstance(scene_time, datetime)
+            and scene_time > previous_scene_time
+        ):
+            ensemble = dict(zip(node_ids, ensemble.tolist()))
+        # Forecast step: propagate state forward over exact daily intervals.
         ensemble, forecast_segments = _forecast_elapsed_interval(
             ensemble=ensemble,
             previous_time=previous_scene_time,
@@ -275,8 +301,10 @@ def run_enkf(
         if has_real_ht:
             try:
                 # V79A: Real Hₜ-aware update (ensemble-space projection)
+                if not isinstance(ensemble, np.ndarray):
+                    ensemble = np.asarray([ensemble[nid] for nid in node_ids], dtype=float)
                 ensemble, scene_reports = update_step_ht(
-                    ensemble, scene, op, rng, deadline_check=deadline_check,
+                    ensemble, scene, op, rng, deadline_check=deadline_check, node_ids=node_ids,
                 )
                 accepted_reports = [
                     rep for rep in scene_reports
@@ -285,7 +313,6 @@ def run_enkf(
                 if accepted_reports:
                     any_ht_used = True
                     all_proxy = False
-                    from .filter import _scene_has_pixel_obs
                     if _scene_has_pixel_obs(scene):
                         update_mode = "ht_per_pixel"
                     else:
@@ -352,7 +379,6 @@ def run_enkf(
         ensemble = clamp_ensemble(ensemble)
 
         # V79B: Check if scene had real per-pixel observations
-        from .filter import _scene_has_pixel_obs
         if has_real_ht and _scene_has_pixel_obs(scene) and update_mode == "ht_per_pixel":
             any_per_pixel_obs = True
 
@@ -967,17 +993,22 @@ def forecast_step(
 
 
 def _state_variance_summary(
-    ensemble: Dict[str, List[List[float]]],
+    ensemble: Any,
     state_indices: List[int],
 ) -> Dict[str, float]:
     """Return average within-node ensemble variance for named states, isolating
     epistemic uncertainty from between-node spatial heterogeneity."""
     result: Dict[str, float] = {}
-    if not ensemble:
+    if ensemble is None or len(ensemble) == 0:
         return result
     import numpy as np
 
-    values = np.asarray(list(ensemble.values()), dtype=float)
+    if isinstance(ensemble, np.ndarray):
+        values = ensemble
+    elif isinstance(ensemble, dict):
+        values = np.asarray(list(ensemble.values()), dtype=float)
+    else:
+        values = np.asarray(ensemble, dtype=float)
     if values.ndim != 3 or values.shape[1] == 0:
         return result
     for state_index in state_indices:
@@ -1293,14 +1324,14 @@ def _etkf_target_update(
 
 
 def _batch_scalar_etkf_target_update(
-    ensemble: Dict[str, List[List[float]]],
+    ensemble: Any,
     node_ids: List[str],
     target_indices: List[int],
     predicted_observations: Any,
     observed_values: Any,
     observation_variance: float,
     node_positions: Any,
-) -> Dict[str, List[List[float]]]:
+) -> Any:
     """Apply independent scalar ETKF updates without per-zone eigensolves.
 
     The local H_t contract collapses correlated pixels to one weighted scalar
@@ -1313,7 +1344,11 @@ def _batch_scalar_etkf_target_update(
     import numpy as np
 
     positions = np.asarray(node_positions, dtype=int).reshape(-1)
-    n_ensemble = len(next(iter(ensemble.values()), []))
+    is_array = isinstance(ensemble, np.ndarray)
+    if is_array:
+        n_ensemble = ensemble.shape[1]
+    else:
+        n_ensemble = len(next(iter(ensemble.values()), []))
     if n_ensemble < 2 or not target_indices or positions.size == 0:
         return ensemble
 
@@ -1324,19 +1359,22 @@ def _batch_scalar_etkf_target_update(
     if observed.shape != (positions.size,):
         raise ValueError("batched_scalar_etkf_observation_shape_mismatch")
 
-    forecast = np.asarray(
-        [
+    if is_array:
+        forecast = ensemble[positions][:, :, target_indices].transpose(0, 2, 1)
+    else:
+        forecast = np.asarray(
             [
                 [
-                    float(ensemble[node_ids[position]][member][state_index])
-                    for member in range(n_ensemble)
+                    [
+                        float(ensemble[node_ids[position]][member][state_index])
+                        for member in range(n_ensemble)
+                    ]
+                    for state_index in target_indices
                 ]
-                for state_index in target_indices
-            ]
-            for position in positions
-        ],
-        dtype=float,
-    )
+                for position in positions
+            ],
+            dtype=float,
+        )
     forecast_mean = np.mean(forecast, axis=2)
     state_anomalies = forecast - forecast_mean[:, :, None]
     predicted_mean = np.mean(predicted, axis=1)
@@ -1371,13 +1409,18 @@ def _batch_scalar_etkf_target_update(
 
     # Publish only after the entire analysis has been calculated from the
     # frozen forecast, retaining ensemble-member order equivariance.
-    for zone_offset, position in enumerate(positions):
-        node_id = node_ids[int(position)]
-        for target_offset, state_index in enumerate(target_indices):
-            for member_index in range(n_ensemble):
-                ensemble[node_id][member_index][state_index] = float(
-                    analysis[zone_offset, target_offset, member_index]
-                )
+    if is_array:
+        analysis_t = analysis.transpose(0, 2, 1)
+        for t_off, s_idx in enumerate(target_indices):
+            ensemble[positions, :, s_idx] = analysis_t[:, :, t_off]
+    else:
+        for zone_offset, position in enumerate(positions):
+            node_id = node_ids[int(position)]
+            for target_offset, state_index in enumerate(target_indices):
+                for member_index in range(n_ensemble):
+                    ensemble[node_id][member_index][state_index] = float(
+                        analysis[zone_offset, target_offset, member_index]
+                    )
     return ensemble
 
 
@@ -1439,13 +1482,14 @@ def _predict_observation_array(
         )
     elif name == "evi":
         prediction = (
-            0.6 * vigor + 0.3 * np.minimum(lai / 6.0, 1.0)
-            - 0.2 * bare_soil + 0.05
+            0.35 * vigor + 0.15 * np.minimum(lai / 6.0, 1.0)
+            - 0.20 * bare_soil + 0.05
         )
     elif name == "ndre":
         prediction = (
-            0.5 * np.minimum(chlorophyll / 60.0, 1.0)
-            + 0.3 * np.minimum(lai / 5.0, 1.0) + 0.05
+            0.30 * np.minimum(chlorophyll / 60.0, 1.0)
+            + 0.15 * np.minimum(lai / 5.0, 1.0)
+            - 0.15 * bare_soil + 0.05
         )
     elif name == "ndmi":
         prediction = 0.6 * canopy_water + 0.2 * np.minimum(lai / 5.0, 1.0) + 0.05
@@ -1454,16 +1498,24 @@ def _predict_observation_array(
             -0.65 * vigor - 0.20 * bare_soil + 0.6 * surface_wetness - 0.05
         )
     elif name == "bsi":
-        prediction = 0.6 * bare_soil - 0.3 * vigor + 0.2
+        prediction = 0.6 * bare_soil - 0.3 * vigor
     elif name == "ndsi":
         salinity = values[..., indices["salinity_stress"]]
         prediction = 0.55 * salinity + 0.35 * bare_soil - 0.20 * vigor
     elif name == "cwsi":
-        thermal = values[..., indices["thermal_stress"]]
-        prediction = 0.70 * thermal - 0.30 * canopy_water
+        pred_ndvi = (
+            0.7 * vigor + 0.2 * np.minimum(lai / 5.0, 1.0)
+            - 0.3 * bare_soil + 0.1
+        )
+        pred_ndmi = 0.6 * canopy_water + 0.2 * np.minimum(lai / 5.0, 1.0) + 0.05
+        denom = np.maximum(pred_ndvi, 0.05)
+        prediction = 1.0 - (pred_ndmi + 0.2) / denom
     elif name == "phenology_index":
-        phenology = values[..., indices["phenology_progress"]]
-        prediction = 0.60 * phenology + 0.30 * vigor + 0.10 * np.minimum(lai / 4.0, 1.0)
+        prediction = (
+            0.30 * np.minimum(chlorophyll / 60.0, 1.0)
+            + 0.15 * np.minimum(lai / 5.0, 1.0)
+            - 0.15 * bare_soil + 0.05
+        )
     elif name == "stress_memory_index":
         memory = values[..., indices["stress_memory"]]
         salinity = values[..., indices["salinity_stress"]]
@@ -1477,12 +1529,13 @@ def _predict_observation_array(
 
 
 def update_step_ht(
-    ensemble: Dict[str, List[List[float]]],
+    ensemble: Any,
     scene: Any,
     operator: Any,
     rng: random.Random,
     deadline_check: Optional[Callable[[], None]] = None,
-) -> Tuple[Dict[str, List[List[float]]], List[Dict[str, Any]]]:
+    node_ids: Optional[List[str]] = None,
+) -> Tuple[Any, List[Dict[str, Any]]]:
     import numpy as np
 
     from ..observation.index_state_mapping import (
@@ -1501,9 +1554,21 @@ def update_step_ht(
         raise ValueError('missing_h_matrix')
 
     observations = extract_pixel_observations(scene)
-    node_ids = list(ensemble.keys())
-    n_nodes = len(node_ids)
-    n_ensemble = len(next(iter(ensemble.values()), []))
+    is_ndarray = isinstance(ensemble, np.ndarray)
+    if is_ndarray:
+        state_cube = ensemble
+        n_nodes = state_cube.shape[0]
+        n_ensemble = state_cube.shape[1]
+        if node_ids is None:
+            node_ids = getattr(operator, 'node_ids', None) or [f"mz_{i}" for i in range(n_nodes)]
+    else:
+        if node_ids is None:
+            node_ids = list(ensemble.keys())
+        n_nodes = len(node_ids)
+        n_ensemble = len(next(iter(ensemble.values()), []))
+        state_cube = np.asarray(
+            [ensemble[node_id] for node_id in node_ids], dtype=float,
+        )
     reports: List[Dict[str, Any]] = []
     for obs_name in sorted(observations):
         if deadline_check is not None:
@@ -1531,9 +1596,6 @@ def update_step_ht(
             })
             continue
 
-        state_cube = np.asarray(
-            [ensemble[node_id] for node_id in node_ids], dtype=float,
-        )
         zone_predictions = _predict_observation_array(
             obs_name, state_cube, mapping.sensor,
         )
@@ -1580,7 +1642,7 @@ def update_step_ht(
                 getattr(scene, 'temporal_aggregation_days', 1.0) or 1.0
             ),
         )
-        prior_variance = _state_variance_summary(ensemble, target_indices)
+        prior_variance = _state_variance_summary(state_cube, target_indices)
         valid_predictions = pixel_predictions[valid_indices, :]
         valid_observed = observed[valid_indices]
         prediction_mean = np.mean(valid_predictions, axis=1)
@@ -1603,22 +1665,16 @@ def update_step_ht(
         active_positions = np.flatnonzero(support_sums > 1e-12)
         localized_updates = int(active_positions.size)
         if localized_updates:
-            weighted_predictions = np.asarray(
-                local_support.T @ valid_predictions, dtype=float,
-            )
             weighted_observed = np.asarray(
                 local_support.T @ valid_observed, dtype=float,
             ).reshape(-1)
             active_sums = support_sums[active_positions]
-            local_predictions = (
-                weighted_predictions[active_positions, :]
-                / active_sums[:, None]
-            )
+            local_predictions = zone_predictions[active_positions, :]
             local_observed = (
                 weighted_observed[active_positions] / active_sums
             )
-            ensemble = _batch_scalar_etkf_target_update(
-                ensemble,
+            state_cube = _batch_scalar_etkf_target_update(
+                state_cube,
                 node_ids,
                 target_indices,
                 local_predictions,
@@ -1628,7 +1684,7 @@ def update_step_ht(
             )
         if deadline_check is not None:
             deadline_check()
-        posterior_variance = _state_variance_summary(ensemble, target_indices)
+        posterior_variance = _state_variance_summary(state_cube, target_indices)
         information_gain = {
             state: max(0.0, prior - posterior_variance.get(state, prior))
             for state, prior in prior_variance.items()
@@ -1659,6 +1715,11 @@ def update_step_ht(
                 'correlated_pixel_policy': 'one_weighted_observation_per_zone',
             },
         })
+
+    if is_ndarray:
+        return state_cube, reports
+    for position, node_id in enumerate(node_ids):
+        ensemble[node_id] = state_cube[position].tolist()
     return ensemble, reports
 
 
@@ -1873,10 +1934,17 @@ def _proxy_update_single_obs(
                 members[index][state_index] = value
 
 
+_STATE_LOWS = np.array([STATE_BOUNDS[name][0] for name in STATE_NAMES], dtype=float)
+_STATE_HIGHS = np.array([STATE_BOUNDS[name][1] for name in STATE_NAMES], dtype=float)
+
+
 def clamp_ensemble(
-    ensemble: Dict[str, List[List[float]]],
-) -> Dict[str, List[List[float]]]:
+    ensemble: Any,
+) -> Any:
     """Clamp all ensemble members to physical bounds."""
+    if isinstance(ensemble, np.ndarray):
+        np.clip(ensemble, _STATE_LOWS, _STATE_HIGHS, out=ensemble)
+        return ensemble
     for nid, members in ensemble.items():
         for member in members:
             for i, name in enumerate(STATE_NAMES):
@@ -1889,10 +1957,17 @@ def clamp_ensemble(
 
 
 def compute_ensemble_statistics(
-    ensemble: Dict[str, List[List[float]]],
+    ensemble: Any,
     node_ids: List[str],
 ) -> dict:
     """Compute means and standard deviations for each state per microzone."""
+    if isinstance(ensemble, np.ndarray):
+        m_vals = np.mean(ensemble, axis=1)
+        s_vals = np.std(ensemble, axis=1, ddof=1) if ensemble.shape[1] > 1 else np.zeros_like(m_vals)
+        means = dict(zip(node_ids, m_vals.tolist()))
+        sigmas = dict(zip(node_ids, s_vals.tolist()))
+        return {"means": means, "sigmas": sigmas}
+
     means: Dict[str, List[float]] = {}
     sigmas: Dict[str, List[float]] = {}
 
@@ -1956,22 +2031,3 @@ def _extract_observations_from_scene(scene: Any) -> Dict[str, float]:
         for name, observation in pixel_observations.items()
         if observation.n_valid > 0 and math.isfinite(float(observation.mean))
     }
-
-
-def _scene_has_pixel_obs(scene) -> bool:
-    """V79B: Check if scene has real per-pixel observation arrays.
-
-    Returns True only when at least one per-pixel observation has valid,
-    finite support. Sensor identity or array length alone is not evidence.
-    """
-    from ..observation.pixel_extraction import extract_pixel_observations
-    pixel_obs = extract_pixel_observations(scene)
-    for pix in pixel_obs.values():
-        if (
-            pix.is_per_pixel
-            and pix.n_pixels > 1
-            and pix.n_valid > 0
-            and math.isfinite(float(pix.mean))
-        ):
-            return True
-    return False

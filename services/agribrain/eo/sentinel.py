@@ -160,36 +160,83 @@ def get_access_token():
 # Returns real pixel grids for zone engines. Stats API = plot summaries only.
 # ============================================================================
 
-def _build_process_bounds(polygon_coords: Optional[Any], lat: float, lng: float, buffer: float = 0.003):
-    """Build bounds dict for the Process API — polygon preferred, bbox fallback."""
+def _extract_ring_coordinates(polygon_coords: Optional[Any]) -> Optional[List[List[float]]]:
+    """Extract [[lng, lat], ...] from arbitrary polygon/GeoJSON representation.
+    Handles GeoJSON Feature/Polygon/MultiPolygon, lists of tuples, and serialized structures.
+    """
+    if not polygon_coords:
+        return None
     coords = None
     if isinstance(polygon_coords, dict):
         geom = polygon_coords.get("geometry", polygon_coords) if polygon_coords.get("type") == "Feature" else polygon_coords
-        if "coordinates" in geom:
-            if geom.get("type") == "Polygon":
-                coords = geom["coordinates"][0]  # Take outer ring
-            elif geom.get("type") == "MultiPolygon":
-                coords = geom["coordinates"][0][0]
-    elif isinstance(polygon_coords, list):
-        if len(polygon_coords) > 0 and isinstance(polygon_coords[0], list):
-            # Nested list [[lng, lat], ...]
-            coords = polygon_coords[0] if isinstance(polygon_coords[0][0], list) else polygon_coords
-            
+        if isinstance(geom, dict) and "coordinates" in geom:
+            c = geom["coordinates"]
+            if geom.get("type") == "Polygon" and c and len(c) > 0:
+                coords = c[0]
+            elif geom.get("type") == "MultiPolygon" and c and len(c) > 0 and len(c[0]) > 0:
+                coords = c[0][0]
+            else:
+                coords = c
+    elif isinstance(polygon_coords, (list, tuple)):
+        if len(polygon_coords) > 0:
+            first = polygon_coords[0]
+            if isinstance(first, dict):
+                if "items" in first:
+                    coords = [pt["items"] for pt in polygon_coords if isinstance(pt, dict) and "items" in pt]
+                elif "lng" in first and "lat" in first:
+                    coords = [[float(pt["lng"]), float(pt["lat"])] for pt in polygon_coords if isinstance(pt, dict)]
+            elif isinstance(first, (list, tuple)) and len(first) > 0 and isinstance(first[0], (list, tuple)):
+                coords = first
+            elif isinstance(first, (list, tuple)) and len(first) >= 2 and isinstance(first[0], (int, float)):
+                coords = polygon_coords
+            else:
+                coords = polygon_coords
+
+    if not coords or len(coords) < 3:
+        return None
+
+    cleaned: List[List[float]] = []
+    for pt in coords:
+        if isinstance(pt, dict) and "items" in pt:
+            pt = pt["items"]
+        if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+            try:
+                cleaned.append([float(pt[0]), float(pt[1])])
+            except (ValueError, TypeError):
+                continue
+    return cleaned if len(cleaned) >= 3 else None
+
+
+def _build_process_bounds(polygon_coords: Optional[Any], lat: float, lng: float, buffer: float = 0.003):
+    """Build bounds dict for the Process API — polygon preferred, bbox fallback."""
+    coords = _extract_ring_coordinates(polygon_coords)
     if coords and len(coords) >= 3:
         xs = [c[0] for c in coords]
         ys = [c[1] for c in coords]
-        
-        # Ensure the polygon ring is closed for GeoJSON validity
-        if coords[0] != coords[-1]:
-            coords = list(coords)
-            coords.append(coords[0])
-            
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        center_lat = (min_y + max_y) / 2.0
+        deg_lat_10m = 10.0 / 111320.0
+        deg_lng_10m = 10.0 / (111320.0 * math.cos(math.radians(center_lat)))
+        pad_x = deg_lng_10m * 0.5
+        pad_y = deg_lat_10m * 0.5
+
+        min_x_pad = min_x - pad_x
+        max_x_pad = max_x + pad_x
+        min_y_pad = min_y - pad_y
+        max_y_pad = max_y + pad_y
+
+        closed_coords = list(coords)
+        if closed_coords[0] != closed_coords[-1]:
+            closed_coords.append(closed_coords[0])
+
         return {
-            "bbox": [min(xs), min(ys), max(xs), max(ys)],
-            "geometry": {"type": "Polygon", "coordinates": [coords]},
+            "bbox": [min_x_pad, min_y_pad, max_x_pad, max_y_pad],
+            "geometry": {"type": "Polygon", "coordinates": [closed_coords]},
             "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
         }
-        
+
     return {
         "bbox": [lng - buffer, lat - buffer, lng + buffer, lat + buffer],
         "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
@@ -200,30 +247,30 @@ def _compute_raster_dimensions(polygon_coords: Optional[Any], lat: float, lng: f
                                 target_resolution_m: float = 10.0, max_dim: int = 512) -> tuple:
     """Compute pixel width/height for a polygon bbox at a target GSD."""
     import math
-    coords = None
-    if isinstance(polygon_coords, dict):
-        geom = polygon_coords.get("geometry", polygon_coords) if polygon_coords.get("type") == "Feature" else polygon_coords
-        if "coordinates" in geom:
-            if geom.get("type") == "Polygon":
-                coords = geom["coordinates"][0]
-            elif geom.get("type") == "MultiPolygon":
-                coords = geom["coordinates"][0][0]
-    elif isinstance(polygon_coords, list):
-        if len(polygon_coords) > 0 and isinstance(polygon_coords[0], list):
-            coords = polygon_coords[0] if isinstance(polygon_coords[0][0], list) else polygon_coords
-            
+    coords = _extract_ring_coordinates(polygon_coords)
     if coords and len(coords) >= 3:
         xs = [c[0] for c in coords]
         ys = [c[1] for c in coords]
-        d_lng = max(xs) - min(xs)
-        d_lat = max(ys) - min(ys)
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        center_lat = (min_y + max_y) / 2.0
+        deg_lat_10m = 10.0 / 111320.0
+        deg_lng_10m = 10.0 / (111320.0 * math.cos(math.radians(center_lat)))
+        pad_x = deg_lng_10m * 0.5
+        pad_y = deg_lat_10m * 0.5
+
+        d_lng = (max_x + pad_x) - (min_x - pad_x)
+        d_lat = (max_y + pad_y) - (min_y - pad_y)
+        ref_lat = center_lat
     else:
         d_lng = 0.006
         d_lat = 0.006
+        ref_lat = lat
     m_per_deg_lat = 111320
-    m_per_deg_lng = 111320 * math.cos(math.radians(lat))
-    w = max(4, min(max_dim, int((d_lng * m_per_deg_lng) / target_resolution_m)))
-    h = max(4, min(max_dim, int((d_lat * m_per_deg_lat) / target_resolution_m)))
+    m_per_deg_lng = 111320 * math.cos(math.radians(ref_lat))
+    w = max(4, min(max_dim, int(math.ceil((d_lng * m_per_deg_lng) / target_resolution_m))))
+    h = max(4, min(max_dim, int(math.ceil((d_lat * m_per_deg_lat) / target_resolution_m))))
     return w, h
 
 

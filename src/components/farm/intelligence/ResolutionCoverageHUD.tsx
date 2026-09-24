@@ -511,7 +511,11 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                 <span>⚙️</span>
                 <span>
                   {asmaeRasterMaterialized
-                    ? "ASMAE 10m Diagnostic Active (1m approval unavailable)"
+                    ? (asmaeApprovalLadder?.oneMeterAsmaeApprovalPct && asmaeApprovalLadder.oneMeterAsmaeApprovalPct > 0)
+                      ? `ASMAE 1m Advisory Active (${Math.round(asmaeApprovalLadder.oneMeterAsmaeApprovalPct * 10) / 10}% approved)`
+                      : (asmaeApprovalLadder?.modelAssisted2_5mPct && asmaeApprovalLadder.modelAssisted2_5mPct > 0)
+                      ? `ASMAE 2.5m Model-Assisted Active (${Math.round(asmaeApprovalLadder.modelAssisted2_5mPct * 10) / 10}%)`
+                      : "ASMAE 10m Diagnostic Active (1m approval unavailable)"
                     : spatialMaterializationPending
                       ? "ASMAE Requested — Spatial Raster Materialization Pending"
                       : spatialMaterializationNotEligible
@@ -587,7 +591,13 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
                     <span style={{ color: "#94a3b8" }}>Detail ladder:</span>
-                    <span style={{ fontWeight: "bold", color: "#f1f5f9" }}>10m Advisory (No 1m Approval)</span>
+                    <span style={{ fontWeight: "bold", color: "#f1f5f9" }}>
+                      {(asmaeApprovalLadder?.oneMeterAsmaeApprovalPct && asmaeApprovalLadder.oneMeterAsmaeApprovalPct > 0)
+                        ? `1m Advisory (${Math.round(asmaeApprovalLadder.oneMeterAsmaeApprovalPct * 10) / 10}% approved)`
+                        : (asmaeApprovalLadder?.modelAssisted2_5mPct && asmaeApprovalLadder.modelAssisted2_5mPct > 0)
+                        ? `2.5m Model-Assisted (${Math.round(asmaeApprovalLadder.modelAssisted2_5mPct * 10) / 10}%)`
+                        : "10m Advisory (No 1m Approval)"}
+                    </span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 3, marginTop: 2 }}>
                     <span style={{ color: "#34d399" }}>Authority:</span>
@@ -602,19 +612,35 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
                     <span style={{ color: "#94a3b8" }}>ASMAE 1m approval:</span>
-                    <span style={{ fontWeight: "bold", color: "#f1f5f9" }}>{asmaeApprovalLadder?.oneMeterAsmaeApprovalPct}%</span>
+                    <span style={{ fontWeight: "bold", color: "#f1f5f9" }}>
+                      {typeof asmaeApprovalLadder?.oneMeterAsmaeApprovalPct === "number"
+                        ? `${Math.round(asmaeApprovalLadder.oneMeterAsmaeApprovalPct * 10) / 10}%`
+                        : `${asmaeApprovalLadder?.oneMeterAsmaeApprovalPct}%`}
+                    </span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
                     <span style={{ color: "#94a3b8" }}>2.5m model-assisted:</span>
-                    <span style={{ fontWeight: "bold", color: "#f1f5f9" }}>{asmaeApprovalLadder?.modelAssisted2_5mPct}%</span>
+                    <span style={{ fontWeight: "bold", color: "#f1f5f9" }}>
+                      {typeof asmaeApprovalLadder?.modelAssisted2_5mPct === "number"
+                        ? `${Math.round(asmaeApprovalLadder.modelAssisted2_5mPct * 10) / 10}%`
+                        : `${asmaeApprovalLadder?.modelAssisted2_5mPct}%`}
+                    </span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6 }}>
                     <span style={{ color: "#94a3b8" }}>5m generalized:</span>
-                    <span style={{ fontWeight: "bold", color: "#f1f5f9" }}>{asmaeApprovalLadder?.generalized5mPct}%</span>
+                    <span style={{ fontWeight: "bold", color: "#f1f5f9" }}>
+                      {typeof asmaeApprovalLadder?.generalized5mPct === "number"
+                        ? `${Math.round(asmaeApprovalLadder.generalized5mPct * 10) / 10}%`
+                        : `${asmaeApprovalLadder?.generalized5mPct}%`}
+                    </span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", paddingLeft: 6, borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 3, marginTop: 2 }}>
                     <span style={{ color: "#34d399" }}>Authority:</span>
-                    <span style={{ fontWeight: "bold", color: "#34d399" }}>{String(prov.certification_status ?? "verified")}</span>
+                    <span style={{ fontWeight: "bold", color: "#34d399" }}>
+                      {(asmaeApprovalLadder?.oneMeterAsmaeApprovalPct && asmaeApprovalLadder.oneMeterAsmaeApprovalPct > 0)
+                        ? "advisory_certified"
+                        : "advisory (diagnostic basis)"}
+                    </span>
                   </div>
                 </div>
               ) : (asmaeRasterMaterialized && (bannerState === "asmae_diagnostic_active" || bannerState === "hybrid_active")) ? (
@@ -758,7 +784,9 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
               </div>
             )}
             
-            {certificationStatus === "experimental_learning_unvalidated" ? (
+            {!isAsmaeOrHybrid && (
+              <>
+                {certificationStatus === "experimental_learning_unvalidated" ? (
               <div style={{
                 background: "rgba(245,158,11,0.08)",
                 border: "1px solid rgba(245,158,11,0.2)",
@@ -874,6 +902,8 @@ export default function ResolutionCoverageHUD({ summary }: ResolutionCoverageHUD
                   />
                 </div>
               </div>
+            )}
+              </>
             )}
           </div>
         )}

@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from dataclasses import dataclass
 
@@ -80,14 +81,23 @@ def adapt_layer0_package_to_scene_candidate(
     )
     
     acq_dt = _attr(meta, "acquisition_datetime", None) or _attr(meta, "acquisition_time", None)
-    if isinstance(acq_dt, str):
+    if isinstance(acq_dt, dict):
+        acq_str = acq_dt.get("value") or acq_dt.get("iso") or acq_dt.get("datetime") or acq_dt.get("$date")
+        if isinstance(acq_str, str):
+            try:
+                acq_dt = datetime.datetime.fromisoformat(acq_str.replace('Z', '+00:00'))
+            except Exception:
+                acq_dt = None
+        else:
+            acq_dt = None
+    elif isinstance(acq_dt, str):
         try:
             acq_dt = datetime.datetime.fromisoformat(acq_dt.replace('Z', '+00:00'))
         except Exception:
             acq_dt = None
     if not acq_dt and asmae_meta.get("acquisition_datetime"):
         try:
-            acq_dt = datetime.datetime.fromisoformat(asmae_meta["acquisition_datetime"].replace('Z', '+00:00'))
+            acq_dt = datetime.datetime.fromisoformat(str(asmae_meta["acquisition_datetime"]).replace('Z', '+00:00'))
         except Exception:
             acq_dt = None
 
@@ -98,7 +108,7 @@ def adapt_layer0_package_to_scene_candidate(
     orbit_pass = _attr(meta, "orbit_pass", asmae_meta.get("orbit_pass")) or prov.get("orbit_pass") or "unknown"
     polarization = _attr(meta, "polarization", asmae_meta.get("polarization")) or prov.get("polarization") or "unknown"
 
-    acq_iso = acq_dt.isoformat() if acq_dt else "unknown"
+    acq_iso = acq_dt.isoformat() if hasattr(acq_dt, "isoformat") else "unknown"
     scene_identity_v2 = {
         "version": "scene_identity_v2",
         "source_sensor": source,
@@ -154,10 +164,26 @@ def adapt_layer0_package_to_scene_candidate(
     # BC.10.13 P2d: normalize band_arrays keys the same way band_refs keys are normalized.
     band_arrays = {normalize_band_key(k): v for k, v in raw_band_arrays.items()}
 
+    def _resolve_ref_path(v: Any) -> Any:
+        if isinstance(v, Mapping):
+            rel = v.get("relative_path") or v.get("path") or v.get("portable_uri")
+            if rel and isinstance(rel, str):
+                if os.path.exists(rel):
+                    return rel
+                job_p = os.path.join("services", "agribrain", "artifacts", "asmae_jobs", rel)
+                if os.path.exists(job_p):
+                    return job_p
+                norm_rel = rel.replace("\\", "/")
+                for candidate_base in ("services/agribrain/artifacts/asmae_jobs", "artifacts/asmae_jobs"):
+                    cand = os.path.join(candidate_base, norm_rel)
+                    if os.path.exists(cand):
+                        return cand
+        return v
+
     pkg_band_refs = _attr(pkg, "local_cache_refs", {}) or _attr(pkg, "band_refs", {}) or {}
     if isinstance(pkg_band_refs, dict):
         for k, v in pkg_band_refs.items():
-            band_refs[normalize_band_key(k)] = v
+            band_refs[normalize_band_key(k)] = _resolve_ref_path(v)
 
     raw_band_units = (
         _attr(pkg, "band_units", {})
@@ -245,7 +271,6 @@ def adapt_layer0_package_to_scene_candidate(
                     is_synthetic_proxy = True
                     break
 
-    import os
     if os.environ.get("ASMAE_TEST_OVERRIDE") == "true" and pkg_source_reality != "raster_composite_proxy":
         is_synthetic_proxy = False
 
@@ -339,7 +364,7 @@ def adapt_layer0_package_to_scene_candidate(
         band_arrays=band_arrays,
         # BC.10.13 P2d: preserve mask_refs from SceneProduct (SCL/cloud masks) instead of
         # always emitting an empty dict, which was silently discarding cloud/data masks.
-        mask_refs={normalize_band_key(k): v for k, v in (_attr(pkg, "mask_refs", {}) or {}).items()},
+        mask_refs={normalize_band_key(k): _resolve_ref_path(v) for k, v in (_attr(pkg, "mask_refs", {}) or {}).items()},
         band_units=band_units,
         scalar_observations=scalar_obs,
         qa_metrics=qa_metrics,

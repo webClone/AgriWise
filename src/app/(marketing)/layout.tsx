@@ -18,7 +18,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "AgriWise — Agricultural Intelligence Infrastructure",
     description:
-      "Intelligence for every agricultural decision. From one field to an entire food system.",
+      "Where nature's wisdom meets data's precision. Intelligence for every agricultural decision.",
     type: "website",
     siteName: "AgriWise",
   },
@@ -30,7 +30,7 @@ export default function MarketingLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div lang="en" dir="ltr" className="marketing-root">
+    <div className="marketing-root">
       {children}
     </div>
   );

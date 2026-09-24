@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/session";
+import { authorizePlot } from "@/lib/agribrain/authorize-plot";
 import { buildSignedInternalHeaders } from "@/lib/agribrain/internal-service-auth";
 
 export const dynamic = "force-dynamic";
@@ -13,29 +14,16 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "plotId is required" }, { status: 400 });
   }
 
-  const session = await getSession();
-  const userId = session?.userId || null;
-  if (!userId) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
+  const access = await authorizePlot(plotId);
+  if (access.status !== 200 || !access.plot) {
+    return NextResponse.json(
+      { error: access.status === 401 ? "Authentication required" : "Plot not found or access denied" },
+      { status: access.status },
+    );
   }
 
-  const authorized = await prisma.plot.findFirst({
-    where: {
-      id: plotId,
-      farm: { userId },
-    },
-    select: {
-      id: true,
-      farmId: true,
-      geoJson: true,
-      soilType: true,
-      area: true,
-    },
-  });
-
-  if (!authorized) {
-    return NextResponse.json({ error: "Plot not found or access denied" }, { status: 404 });
-  }
+  const authorized = access.plot;
+  const tenantId = authorized.farm.userId || access.userId!;
 
   const apiUrl = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
 
@@ -44,6 +32,7 @@ export async function GET(request: NextRequest) {
     const bodyObj = {
       geoJson: authorized.geoJson,
       soilType: authorized.soilType,
+      area: authorized.area,
     };
     const bodyText = JSON.stringify(bodyObj);
 
@@ -51,7 +40,7 @@ export async function GET(request: NextRequest) {
       "POST",
       pathname,
       {
-        tenantId: userId,
+        tenantId,
         farmId: authorized.farmId,
         plotId,
       },
@@ -109,20 +98,16 @@ export async function POST(request: NextRequest) {
     delete (payload as any).farm_id;
     delete (payload as any).farmId;
 
-    const authorized = await prisma.plot.findFirst({
-      where: {
-        id: plotId,
-        farm: { userId },
-      },
-      select: {
-        id: true,
-        farmId: true,
-      },
-    });
-
-    if (!authorized) {
-      return NextResponse.json({ error: "Plot not found or access denied" }, { status: 404 });
+    const access = await authorizePlot(plotId);
+    if (access.status !== 200 || !access.plot) {
+      return NextResponse.json(
+        { error: access.status === 401 ? "Authentication required" : "Plot not found or access denied" },
+        { status: access.status },
+      );
     }
+
+    const authorized = access.plot;
+    const tenantId = authorized.farm.userId || access.userId!;
 
     const apiUrl = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
 
@@ -139,7 +124,7 @@ export async function POST(request: NextRequest) {
         "POST",
         pathname,
         {
-          tenantId: userId,
+          tenantId,
           farmId: authorized.farmId,
           plotId,
         },
@@ -178,7 +163,7 @@ export async function POST(request: NextRequest) {
         "POST",
         pathname,
         {
-          tenantId: userId,
+          tenantId,
           farmId: authorized.farmId,
           plotId,
         },
@@ -218,7 +203,7 @@ export async function POST(request: NextRequest) {
         "POST",
         pathname,
         {
-          tenantId: userId,
+          tenantId,
           farmId: authorized.farmId,
           plotId,
         },
@@ -259,7 +244,7 @@ export async function POST(request: NextRequest) {
         "POST",
         pathname,
         {
-          tenantId: userId,
+          tenantId,
           farmId: authorized.farmId,
           plotId,
         },
@@ -293,7 +278,7 @@ export async function POST(request: NextRequest) {
         "GET",
         pathname,
         {
-          tenantId: userId,
+          tenantId,
           farmId: authorized.farmId,
           plotId,
         }

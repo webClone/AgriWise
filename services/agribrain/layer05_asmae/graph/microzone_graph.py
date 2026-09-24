@@ -72,9 +72,10 @@ class MicrozoneNode:
     row_direction_deg: float = 0.0
     soil_cluster_id: str = "unknown"
     irrigation_connectivity_group: str = "unknown"
+    biophysical_profile: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "microzone_id": self.microzone_id,
             "row": self.row,
             "col": self.col,
@@ -87,6 +88,9 @@ class MicrozoneNode:
             "soil_cluster_id": self.soil_cluster_id,
             "irrigation_connectivity_group": self.irrigation_connectivity_group,
         }
+        if self.biophysical_profile:
+            d["biophysical_profile"] = self.biophysical_profile
+        return d
 
 
 # ── Edge ────────────────────────────────────────────────────────────────────
@@ -329,7 +333,10 @@ def build_microzone_graph(
     row_direction_deg: float = 0.0,
     soil_clusters: Optional[Dict[str, str]] = None,
     irrigation_groups: Optional[Dict[str, str]] = None,
+    biophysical_profiles: Optional[Dict[str, Any]] = None,
     crs: str = "EPSG:4326",
+    n_zone_rows: Optional[int] = None,
+    n_zone_cols: Optional[int] = None,
 ) -> MicrozoneGraph:
     """Build a MicrozoneGraph for a plot at a given resolution.
 
@@ -345,7 +352,10 @@ def build_microzone_graph(
         row_direction_deg: Estimated crop row direction.
         soil_clusters: {microzone_id: cluster_id} mapping.
         irrigation_groups: {microzone_id: group_id} mapping.
+        biophysical_profiles: {microzone_id: profile} mapping.
         crs: Coordinate reference system.
+        n_zone_rows: Optional fixed microzone row count from TargetMicrozoneGrid.
+        n_zone_cols: Optional fixed microzone column count from TargetMicrozoneGrid.
 
     Returns:
         MicrozoneGraph with nodes and weighted edges.
@@ -357,10 +367,14 @@ def build_microzone_graph(
     from .edge_preservation import compute_edge_penalties
 
     # Compute microzone grid dimensions
-    field_size_x = n_pixel_cols * pixel_size_m
-    field_size_y = n_pixel_rows * pixel_size_m
-    n_zone_cols = int(math.ceil(field_size_x / resolution_m))
-    n_zone_rows = int(math.ceil(field_size_y / resolution_m))
+    if n_zone_cols is None or n_zone_rows is None:
+        field_size_x = n_pixel_cols * pixel_size_m
+        field_size_y = n_pixel_rows * pixel_size_m
+        n_zone_cols = int(math.ceil(field_size_x / resolution_m))
+        n_zone_rows = int(math.ceil(field_size_y / resolution_m))
+    else:
+        n_zone_cols = int(n_zone_cols)
+        n_zone_rows = int(n_zone_rows)
 
     transform = (
         float(target_origin_x), float(resolution_m), 0.0,
@@ -398,6 +412,8 @@ def build_microzone_graph(
             # Soil and irrigation lookups
             soil_id = (soil_clusters or {}).get(mz_id, "unknown")
             irr_group = (irrigation_groups or {}).get(mz_id, "unknown")
+            bio_prof = (biophysical_profiles or {}).get(mz_id)
+            bio_dict = bio_prof.to_dict() if hasattr(bio_prof, "to_dict") else bio_prof
 
             node = MicrozoneNode(
                 microzone_id=mz_id,
@@ -410,6 +426,7 @@ def build_microzone_graph(
                 row_direction_deg=row_direction_deg,
                 soil_cluster_id=soil_id,
                 irrigation_connectivity_group=irr_group,
+                biophysical_profile=bio_dict,
             )
             graph.add_node(node)
 

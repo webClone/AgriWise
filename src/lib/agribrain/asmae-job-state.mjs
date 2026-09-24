@@ -45,9 +45,13 @@ export function buildAsmaeWorkerProgressView(progress, plotId) {
   const terminal = progress?.terminal === true;
   const failed = ["failed", "error", "cancelled"].includes(status)
     || (status === "stalled" && terminal);
-  const awaitingPublication = status === "completed" && publicationRelation !== "published";
-  const reintegrating = /reintegration|publication|canonical/i.test(stageCode)
-    || rawStatus === "completed_reintegration_pending"
+  const completedAt = job?.completed_at || job?.updated_at || progress?.updated_at;
+  const completedAgeSeconds = completedAt ? (Date.now() - new Date(completedAt).getTime()) / 1000 : 0;
+  const awaitingPublication = status === "completed"
+    && publicationRelation === "completed_unpublished"
+    && completedAgeSeconds <= 120;
+  const reintegrating = ((/reintegration|publication|canonical/i.test(stageCode)
+    || rawStatus === "completed_reintegration_pending") && status !== "completed")
     || awaitingPublication;
   const active = ACTIVE_WORKER_STATUSES.has(rawStatus) || awaitingPublication;
   const hasCanonicalFallback = Boolean(progress?.canonical_head_snapshot_id);

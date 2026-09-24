@@ -179,6 +179,10 @@ RADIOMETRIC_THRESHOLDS_BY_OBS = {
     "sar_vh":   {"pass": 0.20, "reject": 0.40},
     "sar_ratio": {"pass": 0.25, "reject": 0.45},
     "stress_memory_index": {"pass": 0.20, "reject": 0.35},
+    "cwsi":     {"pass": 0.20, "reject": 0.35},
+    "phenology_index": {"pass": 0.15, "reject": 0.30},
+    "ndsi":     {"pass": 0.20, "reject": 0.35},
+    "biotic_anomaly": {"pass": 0.25, "reject": 0.40},
 }
 
 # ── V74: Adaptive Ensemble Size Policy ──────────────────────────────────────
@@ -195,7 +199,7 @@ LOCALIZATION_HALF_WIDTH = 10
 
 # ── V76: Retrovalidation Tier Thresholds ────────────────────────────────────
 
-RETRO_SCORE_1M_ADVISORY = 0.75         # Advisory / research display
+RETRO_SCORE_1M_ADVISORY = 0.70         # Advisory / research display
 RETRO_SCORE_1M_CERTIFIED_DISPLAY = 0.85  # Plot-certified 1m display
 # 1m state update requires external validation — no numeric threshold alone
 

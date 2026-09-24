@@ -1,4 +1,3 @@
-
 import { prisma } from "@/lib/prisma";
 import SeedDemoButton from "@/components/farm/SeedDemoButton";
 import { FarmHeroClient, FarmStatsClient, FarmCardClient } from "@/components/farm/FarmPageClient";
@@ -15,7 +14,7 @@ async function getFarms() {
   try {
     const session = await getSession();
     const sessionUserId = session?.userId;
-    const farms = sessionUserId && ObjectId.isValid(sessionUserId)
+    let farms = sessionUserId && ObjectId.isValid(sessionUserId)
       ? await prisma.farm.findMany({
           where: { userId: sessionUserId },
           include: { plots: { include: { cropCycles: true } } },
@@ -23,27 +22,30 @@ async function getFarms() {
         })
       : [];
 
-    if (farms.length > 0 || process.env.NODE_ENV !== "development") {
+    if (farms.length > 0) {
       return { farms, bootstrapFarmId: null as string | null };
     }
 
-    // Signed local cookies can outlive a reseeded user. Repair only an absent
-    // identity; a real owner with zero farms keeps the genuine empty state.
-    const sessionUserExists = sessionUserId && ObjectId.isValid(sessionUserId)
-      ? await prisma.user.findUnique({
-          where: { id: sessionUserId },
-          select: { id: true },
-        })
-      : null;
-    if (sessionUserExists) {
-      return { farms, bootstrapFarmId: null as string | null };
+    // In development mode, if user has no farms or no session, show all test farms in database
+    if (process.env.NODE_ENV === "development") {
+      const allFarms = await prisma.farm.findMany({
+        include: { plots: { include: { cropCycles: true } } },
+        orderBy: { createdAt: "desc" },
+      });
+      if (allFarms.length > 0) {
+        return { farms: allFarms, bootstrapFarmId: null as string | null };
+      }
+    }
+
+    if (process.env.NODE_ENV !== "development") {
+      return { farms: [], bootstrapFarmId: null as string | null };
     }
 
     const existingFarm = await prisma.farm.findFirst({
       orderBy: { createdAt: "desc" },
       select: { id: true },
     });
-    return { farms, bootstrapFarmId: existingFarm?.id || null };
+    return { farms: [], bootstrapFarmId: existingFarm?.id || null };
   } catch (error) {
     console.error("Error fetching farms:", error);
     return { farms: [], bootstrapFarmId: null as string | null };

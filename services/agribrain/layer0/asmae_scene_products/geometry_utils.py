@@ -5,7 +5,7 @@ def extract_polygon_ring(polygon_like):
       - GeoJSON Polygon
       - GeoJSON MultiPolygon
       - raw coordinates [[[lng, lat], ...]]]
-      - raw ring [[lng, lat], ...]
+      - raw ring [[lng, lat], ...] or [(lng, lat), ...]
     Returns:
       list[[lng, lat], ...]
     """
@@ -25,20 +25,26 @@ def extract_polygon_ring(polygon_like):
                 return extract_polygon_ring(features[0])
 
             if gtype == "Polygon":
-                return coords[0] if coords else None
+                coords = coords[0] if coords else None
+            elif gtype == "MultiPolygon":
+                coords = coords[0][0] if coords else None
 
-            if gtype == "MultiPolygon":
-                return coords[0][0] if coords else None
+            if coords and isinstance(coords, (list, tuple)):
+                return [[float(pt[0]), float(pt[1])] for pt in coords if len(pt) >= 2]
 
-        if isinstance(polygon_like, list):
-            # raw ring: [[lng,lat], [lng,lat]]
-            if polygon_like and isinstance(polygon_like[0], list):
-                if len(polygon_like[0]) >= 2 and isinstance(polygon_like[0][0], (int, float)):
-                    return polygon_like
-
-                # polygon coords: [[[lng,lat], ...]]
-                if isinstance(polygon_like[0][0], list):
-                    return polygon_like[0]
+        if isinstance(polygon_like, (list, tuple)):
+            if not polygon_like:
+                return None
+            first = polygon_like[0]
+            # Case 1: polygon coords [[[lng, lat], ...]] or [([(lng, lat), ...])]
+            if isinstance(first, (list, tuple)) and len(first) > 0 and isinstance(first[0], (list, tuple)):
+                if len(first[0]) >= 2 and isinstance(first[0][0], (int, float)):
+                    return [[float(pt[0]), float(pt[1])] for pt in first if len(pt) >= 2]
+                if isinstance(first[0][0], (list, tuple)):
+                    return [[float(pt[0]), float(pt[1])] for pt in first[0] if len(pt) >= 2]
+            # Case 2: raw ring [[lng, lat], ...] or [(lng, lat), ...]
+            if isinstance(first, (list, tuple)) and len(first) >= 2 and isinstance(first[0], (int, float)):
+                return [[float(pt[0]), float(pt[1])] for pt in polygon_like if len(pt) >= 2]
 
         return None
     except Exception:

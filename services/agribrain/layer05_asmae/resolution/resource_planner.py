@@ -10,7 +10,7 @@ from ..config import N_STATES
 from ..geometry.spatial_reference import target_grid_from_reference
 
 
-DEFAULT_MEMORY_LIMIT_MB = 768.0
+DEFAULT_MEMORY_LIMIT_MB = 1024.0
 
 
 def memory_limit_bytes(inp: Any = None) -> int:

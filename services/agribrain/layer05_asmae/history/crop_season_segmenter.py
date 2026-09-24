@@ -4,7 +4,7 @@ Partitions chronological scene list into active crop and fallow periods.
 Uses NDVI/RVI thresholds to detect vegetation status transitions.
 """
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 from .history_schema import HistoricalSceneMetadata, CropSeasonSegment
 
 class CropSeasonSegmenter:
@@ -30,13 +30,20 @@ class CropSeasonSegmenter:
             return float(val or 0.0)
         return 0.0
 
-    def segment_scenes(self, scenes: List[Dict[str, Any]]) -> List[CropSeasonSegment]:
+    def segment_scenes(
+        self,
+        scenes: List[Dict[str, Any]],
+        daily_weather: Optional[Dict[str, Dict[str, float]]] = None
+    ) -> List[CropSeasonSegment]:
         """
         Segments a list of chronologically sorted scenes into active crop
         and fallow periods.
         """
         if not scenes:
             return []
+
+        # Map scenes by id for quick attribute extraction
+        scenes_map = {s["runtime"].scene_id: s for s in scenes if isinstance(s, dict) and "runtime" in s}
 
         # Sort chronologically by acquisition_time
         sorted_scenes = sorted(scenes, key=lambda s: s["runtime"].acquisition_time)
@@ -84,12 +91,17 @@ class CropSeasonSegmenter:
                 if transition_allowed:
                     # Close current segment
                     seg_id = f"season_{season_counter:03d}_{'active' if is_current_active else 'fallow'}"
+                    p_val, p_dt = self._calculate_peak(current_scenes, scenes_map)
+                    gdd = self._calculate_gdd(segment_start_dt, current_scenes[-1].acquisition_time, daily_weather)
                     segments.append(CropSeasonSegment(
                         season_id=seg_id,
                         start_date=segment_start_dt,
                         end_date=current_scenes[-1].acquisition_time,
                         is_active_crop=is_current_active,
-                        scenes=list(current_scenes)
+                        scenes=list(current_scenes),
+                        peak_date=p_dt,
+                        peak_ndvi=p_val,
+                        gdd_accumulated=gdd,
                     ))
                     
                     # Start new segment
@@ -105,12 +117,43 @@ class CropSeasonSegmenter:
         # Close final segment
         if current_scenes:
             seg_id = f"season_{season_counter:03d}_{'active' if is_current_active else 'fallow'}"
+            p_val, p_dt = self._calculate_peak(current_scenes, scenes_map)
+            gdd = self._calculate_gdd(segment_start_dt, current_scenes[-1].acquisition_time, daily_weather)
             segments.append(CropSeasonSegment(
                 season_id=seg_id,
                 start_date=segment_start_dt,
                 end_date=current_scenes[-1].acquisition_time,
                 is_active_crop=is_current_active,
-                scenes=list(current_scenes)
+                scenes=list(current_scenes),
+                peak_date=p_dt,
+                peak_ndvi=p_val,
+                gdd_accumulated=gdd,
             ))
             
         return segments
+
+    def _calculate_peak(self, current_scenes: List[HistoricalSceneMetadata], scenes_map: Dict[str, Any]) -> tuple:
+        max_val = 0.0
+        max_dt = None
+        for m in current_scenes:
+            sc = scenes_map.get(m.scene_id)
+            if sc:
+                v = self._get_scene_veg_index(sc)
+                if v >= max_val:
+                    max_val = v
+                    max_dt = m.acquisition_time
+        return float(max_val), max_dt
+
+    def _calculate_gdd(self, start_dt: datetime, end_dt: datetime, daily_weather: Optional[Dict[str, Dict[str, float]]]) -> float:
+        if not daily_weather:
+            return 0.0
+        gdd = 0.0
+        curr = start_dt
+        while curr.date() <= end_dt.date():
+            d_str = curr.strftime("%Y-%m-%d")
+            w = daily_weather.get(d_str)
+            if w:
+                t_mean = (w.get("temp_max", 20.0) + w.get("temp_min", 10.0)) / 2.0
+                gdd += max(0.0, t_mean - 5.0)
+            curr += timedelta(days=1)
+        return float(round(gdd, 1))

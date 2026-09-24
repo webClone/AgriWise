@@ -1,17 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/session";
+import { authorizePlot } from "@/lib/agribrain/authorize-plot";
 
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ runId: string }> },
 ) {
-  const session = await getSession();
-  const userId = session?.userId || null;
-  if (!userId) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  }
-
   const { runId } = await params;
   const apiUrl = process.env.AGRIBRAIN_API_URL || "http://127.0.0.1:8000";
   const upstream = await fetch(
@@ -27,14 +22,8 @@ export async function GET(
 
   const envelope = await upstream.json();
   const plotId = String(envelope?.plot_id || "");
-  const authorized = await prisma.plot.findFirst({
-    where: {
-      id: plotId,
-      farm: { userId },
-    },
-    select: { id: true },
-  });
-  if (!authorized) {
+  const access = await authorizePlot(plotId);
+  if (access.status !== 200 || !access.plot) {
     return NextResponse.json({ error: "Run result not found" }, { status: 404 });
   }
   return NextResponse.json(envelope, {

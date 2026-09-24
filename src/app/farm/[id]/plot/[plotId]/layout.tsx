@@ -17,28 +17,23 @@ export default async function PlotLayout({
   children: React.ReactNode;
   params: Promise<{ id: string; plotId: string }>;
 }) {
-  const { id: farmId, plotId } = await params;
+  const { id: farmIdRaw, plotId: plotIdRaw } = await params;
+  const farmId = farmIdRaw.replace(/\/+$/, "");
+  const plotId = plotIdRaw.replace(/\/+$/, "");
 
   const session = await getSession();
-  if (!session?.userId) {
-    // The page owns the tightly-scoped localhost development bootstrap.  Do
-    // not resolve plot data in the layout before that bootstrap can render.
-    if (process.env.NODE_ENV === "development") return <>{children}</>;
+  if (!session?.userId && process.env.NODE_ENV !== "development") {
     notFound();
   }
   
   const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
   if (!routeContext) {
-    // Let the child replace a stale local-development session for this exact
-    // route. Production ownership still fails closed.
     if (process.env.NODE_ENV === "development") return <>{children}</>;
     notFound();
   }
 
   const { plot, farm, cropCycles } = routeContext;
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
-  
-  // Tasks not needed in layout usually, but kept in page.tsx if specific there.
   
   // Coordinate Calculation for Context
   const center = getPlotCenter(plot, farm);

@@ -2,6 +2,8 @@
 import Link from "next/link";
 import { ThemeProvider, ThemeToggle, useTheme } from "@/components/landing/ThemeProvider";
 import { ThemeLogo } from "@/components/landing/ThemeLogo";
+import LanguageSwitcher from "@/components/common/LanguageSwitcher";
+import UserMenu from "@/components/auth/UserMenu";
 import "@/components/landing/agribrain-theme.css";
 
 export function NavbarContent({ activePage = "farm" }: { activePage?: string }) {
@@ -26,13 +28,14 @@ export function NavbarContent({ activePage = "farm" }: { activePage?: string }) 
         <Link href="/" style={{ textDecoration: "none", display: "flex", alignItems: "center" }}>
           <ThemeLogo height={50} />
         </Link>
-        <div style={{ display: "flex", alignItems: "center", gap: "20px" }} suppressHydrationWarning={true}>
+        <div style={{ display: "flex", alignItems: "center", gap: "14px" }} suppressHydrationWarning={true}>
           <Link href="/" style={linkStyle("home")}>Home</Link>
           <Link href="/farm" style={linkStyle("farm")}>My Farms</Link>
-          <Link href="/agribrain" style={{ fontSize: "13px", color: "#818cf8", textDecoration: "none", fontWeight: 600, transition: "color 0.15s" }}>🧠 AgriBrain</Link>
+          <LanguageSwitcher variant="capsule" />
           <ThemeToggle />
+          <UserMenu />
           <Link href="/farm/new" className="hp-cta-nav" style={{
-            padding: "8px 20px", borderRadius: "10px",
+            padding: "8px 18px", borderRadius: "10px",
             background: "linear-gradient(135deg,#22c55e,#16a34a)", color: "#fff",
             fontSize: "13px", fontWeight: 700, textDecoration: "none",
             boxShadow: "0 2px 12px rgba(34,197,94,0.2)",

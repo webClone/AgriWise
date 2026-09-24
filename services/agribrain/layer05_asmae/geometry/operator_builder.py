@@ -469,6 +469,8 @@ def build_operators_for_stack(
     candidate_resolution_m: int,
     coreg_results: Optional[List[CoregistrationResult]] = None,
     cloud_masks: Optional[Dict[str, List[List[bool]]]] = None,
+    polygon_points: Optional[List[Tuple[float, float]]] = None,
+    target_grid: Optional[TargetMicrozoneGrid] = None,
 ) -> List[ObservationOperatorRuntime]:
     """Build H_t operators for an entire scene stack at a given resolution.
 
@@ -480,17 +482,18 @@ def build_operators_for_stack(
         candidate_resolution_m: Target resolution.
         coreg_results: Optional coregistration results (one per scene).
         cloud_masks: Optional cloud masks keyed by scene_id.
+        polygon_points: Optional polygon boundary points in projected metric CRS.
+        target_grid: Optional precomputed target grid.
 
     Returns:
         List of ObservationOperatorRuntime (one per scene).
     """
     operators = []
 
-    target_grid = (
-        target_grid_from_reference(scenes[0], candidate_resolution_m)
-        if scenes
-        else None
-    )
+    if target_grid is None and scenes:
+        target_grid = target_grid_from_reference(
+            scenes[0], candidate_resolution_m, polygon_points=polygon_points
+        )
 
     for i, scene in enumerate(scenes):
         coreg = None

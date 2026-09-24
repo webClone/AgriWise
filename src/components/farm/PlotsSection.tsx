@@ -3,7 +3,8 @@
 import { useState } from "react";
 import Link from "next/link";
 import AddPlotForm from "./AddPlotForm";
-
+import { useLanguage } from "@/lib/i18n/LanguageContext";
+import { ChevronRight, ChevronLeft, Plus, Sprout, Layers } from "lucide-react";
 
 interface Plot {
   id: string;
@@ -30,14 +31,21 @@ interface PlotsSectionProps {
   farmCoordinates?: { lat: number; lng: number };
 }
 
-const SOIL_LABELS: Record<string, string> = {
-  CLAY: "طينية", SANDY: "رملية", LOAM: "طميية",
-  SILT: "غرينية", PEAT: "خثية", CHALKY: "كلسية",
+const SOIL_LABELS: Record<string, { ar: string; en: string; fr: string }> = {
+  CLAY: { ar: "طينية", en: "Clay", fr: "Argileux" },
+  SANDY: { ar: "رملية", en: "Sandy", fr: "Sableux" },
+  LOAM: { ar: "طميية", en: "Loam", fr: "Limoneux" },
+  SILT: { ar: "غرينية", en: "Silt", fr: "Silt" },
+  PEAT: { ar: "خثية", en: "Peat", fr: "Tourbeux" },
+  CHALKY: { ar: "كلسية", en: "Chalky", fr: "Calcaire" },
 };
 
-const IRRIGATION_LABELS: Record<string, string> = {
-  DRIP: "تقطير", SPRINKLER: "رش", PIVOT: "محوري",
-  FLOOD: "غمر", RAINFED: "بعلي",
+const IRRIGATION_LABELS: Record<string, { ar: string; en: string; fr: string }> = {
+  DRIP: { ar: "تقطير", en: "Drip", fr: "Goutte-à-goutte" },
+  SPRINKLER: { ar: "رش", en: "Sprinkler", fr: "Aspersion" },
+  PIVOT: { ar: "محوري", en: "Center Pivot", fr: "Pivot" },
+  FLOOD: { ar: "غمر", en: "Surface / Flood", fr: "Gravitaire" },
+  RAINFED: { ar: "بعلي", en: "Rainfed", fr: "Pluvial" },
 };
 
 const IRRIGATION_ICONS: Record<string, string> = {
@@ -45,39 +53,66 @@ const IRRIGATION_ICONS: Record<string, string> = {
   FLOOD: "🌊", RAINFED: "🌧️", "": "🌧️",
 };
 
-const STATUS_STYLES: Record<string, { bg: string; color: string; label: string }> = {
-  GROWING: { bg: "rgba(34, 197, 94, 0.12)", color: "#4ade80", label: "نمو" },
-  FLOWERING: { bg: "rgba(236, 72, 153, 0.12)", color: "#f472b6", label: "إزهار" },
-  PLANTED: { bg: "rgba(59, 130, 246, 0.12)", color: "#93c5fd", label: "مزروع" },
-  FRUITING: { bg: "rgba(251, 146, 60, 0.12)", color: "#fb923c", label: "إثمار" },
-  READY_TO_HARVEST: { bg: "rgba(234, 179, 8, 0.12)", color: "#facc15", label: "جاهز للحصاد" },
-  HARVESTED: { bg: "rgba(148, 163, 184, 0.12)", color: "#94a3b8", label: "محصود" },
-  PLANNED: { bg: "rgba(99, 102, 241, 0.12)", color: "#a5b4fc", label: "مخطط" },
-  FAILED: { bg: "rgba(239, 68, 68, 0.12)", color: "#f87171", label: "فشل" },
+const STATUS_STYLES: Record<string, { bg: string; color: string; labelAr: string; labelEn: string; labelFr: string }> = {
+  GROWING: { bg: "rgba(34, 197, 94, 0.12)", color: "#4ade80", labelAr: "نمو", labelEn: "Vegetative", labelFr: "Végétation" },
+  FLOWERING: { bg: "rgba(236, 72, 153, 0.12)", color: "#f472b6", labelAr: "إزهار", labelEn: "Flowering", labelFr: "Floraison" },
+  PLANTED: { bg: "rgba(59, 130, 246, 0.12)", color: "#93c5fd", labelAr: "مزروع", labelEn: "Planted", labelFr: "Semé" },
+  FRUITING: { bg: "rgba(251, 146, 60, 0.12)", color: "#fb923c", labelAr: "إثمار", labelEn: "Fruiting", labelFr: "Fructification" },
+  READY_TO_HARVEST: { bg: "rgba(234, 179, 8, 0.12)", color: "#facc15", labelAr: "جاهز للحصاد", labelEn: "Ready to Harvest", labelFr: "Prêt à récolter" },
+  HARVESTED: { bg: "rgba(148, 163, 184, 0.12)", color: "#94a3b8", labelAr: "محصود", labelEn: "Harvested", labelFr: "Récolté" },
+  PLANNED: { bg: "rgba(99, 102, 241, 0.12)", color: "#a5b4fc", labelAr: "مخطط", labelEn: "Planned", labelFr: "Planifié" },
+  FAILED: { bg: "rgba(239, 68, 68, 0.12)", color: "#f87171", labelAr: "فشل", labelEn: "Failed", labelFr: "Échoué" },
 };
 
 export default function PlotsSection({ farmId, plots, cropCycles, farmCoordinates }: PlotsSectionProps) {
   const [showAddForm, setShowAddForm] = useState(false);
+  const { locale, isRtl } = useLanguage();
+
+  const title = locale === "ar" ? "قطع الأرض" : locale === "fr" ? "Parcelles cadastrales" : "Farm Plots";
+  const addPlotLabel = locale === "ar" ? "+ إضافة قطعة" : locale === "fr" ? "+ Ajouter une parcelle" : "+ Add Plot";
+  const areaUnit = locale === "ar" ? "هكتار" : "ha";
+  const emptyTitle = locale === "ar" ? "لا توجد قطع مسجلة لهذه المزرعة" : locale === "fr" ? "Aucune parcelle enregistrée" : "No plots mapped for this farm yet";
+  const emptySub = locale === "ar" ? "ابدأ بتحديد قطع أرضك ورسم حدودها على الخريطة" : locale === "fr" ? "Délimitez vos parcelles et tracez leurs polygones sur la carte satellite" : "Start by registering your parcels and drawing polygon boundaries on satellite imagery";
+  const emptyBtn = locale === "ar" ? "إضافة أول قطعة" : locale === "fr" ? "Ajouter la première parcelle" : "Add First Plot";
 
   return (
     <>
-      <div className="card fade-in" style={{ marginBottom: "1.5rem", padding: "20px" }} suppressHydrationWarning={true}>
+      <div 
+        style={{
+          marginBottom: "1.5rem",
+          padding: "24px",
+          background: "rgba(15, 23, 42, 0.5)",
+          backdropFilter: "blur(16px)",
+          borderRadius: "18px",
+          border: "1px solid rgba(71, 85, 105, 0.15)",
+          boxShadow: "0 10px 40px rgba(0,0,0,0.25)",
+        }} 
+        suppressHydrationWarning={true}
+      >
         {/* Header */}
         <div style={{
           display: "flex", justifyContent: "space-between", alignItems: "center",
-          marginBottom: plots.length > 0 ? "16px" : "0",
+          marginBottom: plots.length > 0 ? "20px" : "0",
         }} suppressHydrationWarning={true}>
           <div style={{ display: "flex", alignItems: "center", gap: "10px" }} suppressHydrationWarning={true}>
-            <span style={{ fontSize: "1.25rem" }}>🌱</span>
-            <h3 style={{ margin: 0, fontWeight: 700, fontSize: "1rem" }}>
-              قطع الأرض
+            <div style={{
+              width: "32px", height: "32px", borderRadius: "8px",
+              background: "rgba(34, 197, 94, 0.1)",
+              border: "1px solid rgba(34, 197, 94, 0.2)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              color: "#4ade80",
+            }}>
+              <Layers size={16} />
+            </div>
+            <h3 style={{ margin: 0, fontWeight: 700, fontSize: "1.1rem", color: "#f8fafc" }}>
+              {title}
             </h3>
             {plots.length > 0 && (
               <span style={{
-                fontSize: "0.7rem", fontWeight: 700,
+                fontSize: "0.75rem", fontWeight: 700,
                 background: "rgba(34, 197, 94, 0.12)", color: "#4ade80",
                 padding: "2px 10px", borderRadius: "9999px",
-                border: "1px solid rgba(34, 197, 94, 0.2)",
+                border: "1px solid rgba(34, 197, 94, 0.25)",
               }}>
                 {plots.length}
               </span>
@@ -86,61 +121,79 @@ export default function PlotsSection({ farmId, plots, cropCycles, farmCoordinate
           <button
             onClick={() => setShowAddForm(true)}
             style={{
-              padding: "6px 14px", borderRadius: "8px",
-              fontSize: "0.8rem", fontWeight: 600, cursor: "pointer",
-              background: "rgba(34, 197, 94, 0.1)",
-              border: "1px solid rgba(34, 197, 94, 0.2)",
+              padding: "8px 16px", borderRadius: "10px",
+              fontSize: "0.82rem", fontWeight: 600, cursor: "pointer",
+              background: "rgba(34, 197, 94, 0.12)",
+              border: "1px solid rgba(34, 197, 94, 0.3)",
               color: "#4ade80",
-              transition: "all 0.2s ease",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+              transition: "all 0.2s cubic-bezier(0.16, 1, 0.3, 1)",
             }}
-            onMouseOver={e => e.currentTarget.style.background = "rgba(34, 197, 94, 0.18)"}
-            onMouseOut={e => e.currentTarget.style.background = "rgba(34, 197, 94, 0.1)"}
+            onMouseOver={e => {
+              e.currentTarget.style.background = "rgba(34, 197, 94, 0.22)";
+              e.currentTarget.style.transform = "translateY(-1px)";
+            }}
+            onMouseOut={e => {
+              e.currentTarget.style.background = "rgba(34, 197, 94, 0.12)";
+              e.currentTarget.style.transform = "translateY(0)";
+            }}
           >
-            + إضافة قطعة
+            <Plus size={14} />
+            <span>{addPlotLabel}</span>
           </button>
         </div>
         
         {plots.length === 0 ? (
           /* Empty State */
           <div style={{
-            textAlign: "center", padding: "3rem 2rem",
-            border: "2px dashed rgba(71, 85, 105, 0.2)",
+            textAlign: "center", padding: "3.5rem 2rem",
+            border: "1px dashed rgba(71, 85, 105, 0.25)",
             borderRadius: "16px",
-            background: "linear-gradient(135deg, rgba(15, 23, 42, 0.3), rgba(15, 23, 42, 0.1))",
+            background: "linear-gradient(135deg, rgba(15, 23, 42, 0.4), rgba(15, 23, 42, 0.15))",
           }}>
             <div style={{
-              width: "64px", height: "64px", borderRadius: "16px",
-              background: "rgba(34, 197, 94, 0.08)",
+              width: "64px", height: "64px", borderRadius: "18px",
+              background: "rgba(34, 197, 94, 0.1)",
+              border: "1px solid rgba(34, 197, 94, 0.2)",
               display: "flex", alignItems: "center", justifyContent: "center",
-              margin: "0 auto 1rem", fontSize: "1.75rem",
+              margin: "0 auto 1.25rem", fontSize: "1.75rem",
             }}>
               🗺️
             </div>
-            <p style={{ fontWeight: 600, fontSize: "0.95rem", color: "#e8ecf4", margin: "0 0 0.5rem 0" }}>
-              لا توجد قطع مسجلة لهذه المزرعة
+            <p style={{ fontWeight: 700, fontSize: "1.05rem", color: "#f1f5f9", margin: "0 0 0.5rem 0" }}>
+              {emptyTitle}
             </p>
-            <p style={{ fontSize: "0.8rem", color: "#64748b", margin: "0 0 1.25rem 0" }}>
-              ابدأ بتحديد قطع أرضك ورسم حدودها على الخريطة
+            <p style={{ fontSize: "0.85rem", color: "#94a3b8", margin: "0 0 1.5rem 0", maxWidth: "420px", marginLeft: "auto", marginRight: "auto", lineHeight: 1.5 }}>
+              {emptySub}
             </p>
             <button
               onClick={() => setShowAddForm(true)}
               style={{
-                padding: "10px 24px", borderRadius: "10px",
-                fontWeight: 700, fontSize: "0.85rem", cursor: "pointer",
+                padding: "10px 24px", borderRadius: "12px",
+                fontWeight: 700, fontSize: "0.88rem", cursor: "pointer",
                 background: "linear-gradient(135deg, #22c55e, #16a34a)",
                 border: "none", color: "#fff",
-                boxShadow: "0 4px 16px rgba(34, 197, 94, 0.3)",
+                boxShadow: "0 4px 20px rgba(34, 197, 94, 0.35)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "8px",
                 transition: "all 0.2s ease",
               }}
             >
-              🌱 إضافة أول قطعة
+              <Sprout size={16} />
+              <span>{emptyBtn}</span>
             </button>
           </div>
         ) : (
           /* Plot Cards */
-          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }} suppressHydrationWarning={true}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "14px" }} suppressHydrationWarning={true}>
             {plots.map((plot) => {
               const plotCrops = cropCycles.filter(c => c.plotId === plot.id);
+              const soilLabel = plot.soilType ? (SOIL_LABELS[plot.soilType]?.[locale] || plot.soilType) : null;
+              const irrigationLabel = plot.irrigation ? (IRRIGATION_LABELS[plot.irrigation]?.[locale] || plot.irrigation) : null;
+
               return (
                 <Link 
                   href={`/farm/${farmId}/plot/${plot.id}`}
@@ -149,72 +202,89 @@ export default function PlotsSection({ farmId, plots, cropCycles, farmCoordinate
                 >
                   <div
                     style={{ 
-                      padding: "14px 16px",
-                      background: "rgba(15, 23, 42, 0.4)",
-                      borderRadius: "12px",
-                      border: "1px solid rgba(71, 85, 105, 0.15)",
+                      padding: "16px 18px",
+                      background: "rgba(15, 23, 42, 0.6)",
+                      borderRadius: "14px",
+                      border: "1px solid rgba(71, 85, 105, 0.18)",
                       transition: "all 0.25s cubic-bezier(0.16, 1, 0.3, 1)",
                       cursor: "pointer",
+                      position: "relative",
+                      overflow: "hidden",
                     }}
                     onMouseOver={e => {
-                      e.currentTarget.style.background = "rgba(15, 23, 42, 0.6)";
-                      e.currentTarget.style.borderColor = "rgba(34, 197, 94, 0.2)";
-                      e.currentTarget.style.transform = "translateX(-2px)";
+                      e.currentTarget.style.background = "rgba(15, 23, 42, 0.85)";
+                      e.currentTarget.style.borderColor = "rgba(34, 197, 94, 0.35)";
+                      e.currentTarget.style.transform = "translateY(-3px)";
+                      e.currentTarget.style.boxShadow = "0 12px 30px rgba(0,0,0,0.3), 0 0 20px rgba(34,197,94,0.06)";
                     }}
                     onMouseOut={e => {
-                      e.currentTarget.style.background = "rgba(15, 23, 42, 0.4)";
-                      e.currentTarget.style.borderColor = "rgba(71, 85, 105, 0.15)";
-                      e.currentTarget.style.transform = "translateX(0)";
+                      e.currentTarget.style.background = "rgba(15, 23, 42, 0.6)";
+                      e.currentTarget.style.borderColor = "rgba(71, 85, 105, 0.18)";
+                      e.currentTarget.style.transform = "translateY(0)";
+                      e.currentTarget.style.boxShadow = "none";
                     }}
                     suppressHydrationWarning={true}
                   >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }} suppressHydrationWarning={true}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }} suppressHydrationWarning={true}>
                       <div style={{ flex: 1 }} suppressHydrationWarning={true}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }} suppressHydrationWarning={true}>
-                          <h4 style={{ margin: 0, fontWeight: 600, fontSize: "0.95rem", color: "#e8ecf4" }}>
-                            {plot.name}
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" }} suppressHydrationWarning={true}>
+                          <h4 style={{ margin: 0, fontWeight: 700, fontSize: "1rem", color: "#f8fafc" }}>
+                            {locale === "ar" && plot.nameAr ? plot.nameAr : plot.name}
                           </h4>
                           <span style={{
-                            fontSize: "0.7rem", color: "#64748b",
-                            background: "rgba(51, 65, 85, 0.4)",
-                            padding: "2px 8px", borderRadius: "4px",
+                            fontSize: "0.72rem", color: "#4ade80",
+                            background: "rgba(34, 197, 94, 0.1)",
+                            border: "1px solid rgba(34, 197, 94, 0.2)",
+                            padding: "2px 8px", borderRadius: "6px", fontWeight: 700,
                           }}>
-                            {plot.area} هكتار
+                            {plot.area} {areaUnit}
                           </span>
                         </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: "12px", fontSize: "0.75rem", color: "#64748b" }} suppressHydrationWarning={true}>
-                          {plot.soilType && (
-                            <span>{SOIL_LABELS[plot.soilType] || plot.soilType}</span>
+
+                        <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "0.78rem", color: "#94a3b8", flexWrap: "wrap" }} suppressHydrationWarning={true}>
+                          {soilLabel && (
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                              🪨 {soilLabel}
+                            </span>
                           )}
-                          <span style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
                             {IRRIGATION_ICONS[plot.irrigation || ""] || "🌧️"}
-                            {IRRIGATION_LABELS[plot.irrigation || ""] || "بعلي"}
+                            {irrigationLabel || (locale === "ar" ? "بعلي" : "Rainfed")}
                           </span>
                         </div>
                       </div>
 
-                      {/* Arrow */}
-                      <div style={{ color: "#475569", fontSize: "0.9rem", marginTop: "4px" }} suppressHydrationWarning={true}>←</div>
+                      {/* Directional arrow */}
+                      <div style={{ color: "#4ade80", opacity: 0.8, marginTop: "2px" }} suppressHydrationWarning={true}>
+                        {isRtl ? <ChevronLeft size={18} /> : <ChevronRight size={18} />}
+                      </div>
                     </div>
 
                     {/* Active crops */}
                     {plotCrops.length > 0 && (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "10px" }} suppressHydrationWarning={true}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "12px", borderTop: "1px solid rgba(71,85,105,0.12)", paddingTop: "10px" }} suppressHydrationWarning={true}>
                         {plotCrops.map((crop) => {
                           const style = STATUS_STYLES[crop.status] || STATUS_STYLES.PLANNED;
+                          const cropName = locale === "ar" && crop.cropNameAr ? crop.cropNameAr : crop.cropCode;
+                          const statusLabel = locale === "ar" ? style.labelAr : locale === "fr" ? style.labelFr : style.labelEn;
+
                           return (
-                            <span 
+                            <div 
                               key={crop.id} 
                               style={{ 
-                                fontSize: "0.7rem", fontWeight: 600,
+                                fontSize: "0.72rem", fontWeight: 600,
                                 padding: "3px 10px", borderRadius: "9999px",
                                 background: style.bg, color: style.color,
-                                border: `1px solid ${style.color}20`,
+                                border: `1px solid ${style.color}25`,
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "6px",
                               }}
                             >
-                              {crop.cropNameAr || crop.cropCode}
-                              {crop.variety ? ` — ${crop.variety}` : ""}
-                            </span>
+                              <span>{cropName}</span>
+                              {crop.variety && <span style={{ opacity: 0.7 }}>({crop.variety})</span>}
+                              <span style={{ fontSize: "0.65rem", padding: "1px 6px", borderRadius: "4px", background: "rgba(0,0,0,0.25)" }}>{statusLabel}</span>
+                            </div>
                           );
                         })}
                       </div>

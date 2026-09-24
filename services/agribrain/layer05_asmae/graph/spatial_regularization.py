@@ -20,11 +20,11 @@ from ..config import GRAPH_BASE_LAPLACIAN_STRENGTH
 
 
 def apply_ensemble_graph_regularization(
-    ensemble: Dict[str, List[List[float]]],
+    ensemble: Any,
     graph: Any,
     state_names: List[str],
     deadline_check: Optional[Callable[[], None]] = None,
-) -> tuple[Dict[str, List[List[float]]], Dict[str, Any]]:
+) -> tuple[Any, Dict[str, Any]]:
     """Apply weak, state-specific graph smoothing to actual ensemble members.
 
     Only states updated by an accepted observation are regularized. The
@@ -35,7 +35,17 @@ def apply_ensemble_graph_regularization(
 
     from ..config import STATE_BOUNDS, STATE_NAMES
 
-    node_ids = list(ensemble)
+    is_ndarray = isinstance(ensemble, np.ndarray)
+    if is_ndarray:
+        values = ensemble
+        if hasattr(graph, "node_ids_ordered"):
+            node_ids = graph.node_ids_ordered()
+        elif hasattr(graph, "nodes"):
+            node_ids = [n.microzone_id for n in graph.nodes()]
+        else:
+            node_ids = [f"mz_{i}" for i in range(values.shape[0])]
+    else:
+        node_ids = list(ensemble)
     if not node_ids or graph is None or not hasattr(graph, "neighbors"):
         return ensemble, {"applied": False, "reason": "graph_unavailable"}
     target_indices = list(dict.fromkeys(
@@ -54,35 +64,48 @@ def apply_ensemble_graph_regularization(
         "structure": 0.04,
         "bare_soil_fraction": 0.035,
     }
-    ensemble_size = min((len(ensemble[node]) for node in node_ids), default=0)
+    if is_ndarray:
+        ensemble_size = values.shape[1]
+    else:
+        ensemble_size = min((len(ensemble[node]) for node in node_ids), default=0)
     if ensemble_size == 0:
         return ensemble, {"applied": False, "reason": "empty_ensemble"}
 
     if deadline_check is not None:
         deadline_check()
 
-    values = np.asarray([ensemble[node] for node in node_ids], dtype=float)
+    if not is_ndarray:
+        values = np.asarray([ensemble[node] for node in node_ids], dtype=float)
     if values.shape != (len(node_ids), ensemble_size, len(STATE_NAMES)):
         return ensemble, {"applied": False, "reason": "ensemble_shape_mismatch"}
-    node_positions = {node: position for position, node in enumerate(node_ids)}
-    sources: List[int] = []
-    targets: List[int] = []
-    weights: List[float] = []
-    for edge in graph.edges():
-        source = node_positions.get(str(getattr(edge, "source", "")))
-        target = node_positions.get(str(getattr(edge, "target", "")))
-        weight = max(0.0, float(getattr(edge, "combined_weight", 0.0) or 0.0))
-        if source is None or target is None or weight <= 1e-12:
-            continue
-        sources.append(source)
-        targets.append(target)
-        weights.append(weight)
-    if not weights:
-        return ensemble, {"applied": False, "reason": "graph_has_no_weighted_edges"}
 
-    source_array = np.asarray(sources, dtype=int)
-    target_array = np.asarray(targets, dtype=int)
-    weight_array = np.asarray(weights, dtype=float)
+    cached_edges = getattr(graph, "_cached_edge_arrays", None)
+    if cached_edges is not None and len(cached_edges) == 3 and cached_edges[0].size > 0:
+        source_array, target_array, weight_array = cached_edges
+    else:
+        node_positions = {node: position for position, node in enumerate(node_ids)}
+        sources: List[int] = []
+        targets: List[int] = []
+        weights: List[float] = []
+        for edge in graph.edges():
+            source = node_positions.get(str(getattr(edge, "source", "")))
+            target = node_positions.get(str(getattr(edge, "target", "")))
+            weight = max(0.0, float(getattr(edge, "combined_weight", 0.0) or 0.0))
+            if source is None or target is None or weight <= 1e-12:
+                continue
+            sources.append(source)
+            targets.append(target)
+            weights.append(weight)
+        if not weights:
+            return ensemble, {"applied": False, "reason": "graph_has_no_weighted_edges"}
+
+        source_array = np.asarray(sources, dtype=int)
+        target_array = np.asarray(targets, dtype=int)
+        weight_array = np.asarray(weights, dtype=float)
+        try:
+            graph._cached_edge_arrays = (source_array, target_array, weight_array)
+        except Exception:
+            pass
     selected = values[:, :, target_indices]
 
     # Compute weighted neighbour means for every member and selected state in
@@ -90,9 +113,15 @@ def apply_ensemble_graph_regularization(
     # ``edges()``; accumulate both directions to match ``neighbors()``.
     weighted_sum = np.zeros_like(selected)
     weighted_degree = np.zeros(len(node_ids), dtype=float)
-    edge_weights = weight_array[:, None, None]
-    np.add.at(weighted_sum, source_array, edge_weights * selected[target_array])
-    np.add.at(weighted_sum, target_array, edge_weights * selected[source_array])
+    chunk_size = 50000
+    n_edges = source_array.shape[0]
+    for start_idx in range(0, n_edges, chunk_size):
+        end_idx = min(start_idx + chunk_size, n_edges)
+        s_chunk = source_array[start_idx:end_idx]
+        t_chunk = target_array[start_idx:end_idx]
+        w_chunk = weight_array[start_idx:end_idx, None, None]
+        np.add.at(weighted_sum, s_chunk, w_chunk * selected[t_chunk])
+        np.add.at(weighted_sum, t_chunk, w_chunk * selected[s_chunk])
     np.add.at(weighted_degree, source_array, weight_array)
     np.add.at(weighted_degree, target_array, weight_array)
 
@@ -123,16 +152,24 @@ def apply_ensemble_graph_regularization(
     )[None, None, :]
     proposed = np.clip(proposed, lows, highs)
 
-    before_edge_delta = np.abs(selected[source_array] - selected[target_array])
-    after_edge_delta = np.abs(proposed[source_array] - proposed[target_array])
-    before_totals = np.sum(edge_weights * before_edge_delta, axis=(0, 1))
-    after_totals = np.sum(edge_weights * after_edge_delta, axis=(0, 1))
+    before_totals = np.zeros(len(target_indices), dtype=float)
+    after_totals = np.zeros(len(target_indices), dtype=float)
+    for start_idx in range(0, n_edges, chunk_size):
+        end_idx = min(start_idx + chunk_size, n_edges)
+        s_chunk = source_array[start_idx:end_idx]
+        t_chunk = target_array[start_idx:end_idx]
+        w_chunk = weight_array[start_idx:end_idx, None, None]
+        before_totals += np.sum(w_chunk * np.abs(selected[s_chunk] - selected[t_chunk]), axis=(0, 1))
+        after_totals += np.sum(w_chunk * np.abs(proposed[s_chunk] - proposed[t_chunk]), axis=(0, 1))
 
     values[:, :, target_indices] = proposed
-    updated = {
-        node: values[position].tolist()
-        for position, node in enumerate(node_ids)
-    }
+    if is_ndarray:
+        updated = values
+    else:
+        updated = {
+            node: values[position].tolist()
+            for position, node in enumerate(node_ids)
+        }
     if deadline_check is not None:
         deadline_check()
 

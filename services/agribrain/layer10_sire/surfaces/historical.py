@@ -162,15 +162,35 @@ def generate_historical_surfaces(
                 bma_grid[r][c] = bma_val
 
     # Setup provenance
-    provenance = {
-        "diagnostic_only": True,
-        "state_update_allowed": False,
-        "provenance": "historical_sentinel_archive"
-    }
+    import hashlib
+    warning_codes_list = []
     if warning_code:
-        provenance["warning_code"] = warning_code
-    if uncertainty_val is not None:
-        provenance["uncertainty"] = uncertainty_val
+        warning_codes_list.append(warning_code)
+    if confidence_val < 0.60:
+        warning_codes_list.append("low_confidence")
+    if uncertainty_val > 0.40:
+        warning_codes_list.append("high_uncertainty")
+
+    provenance = {
+        "resolution_m": float(inp.resolution_m or 10.0),
+        "confidence": float(confidence_val),
+        "uncertainty": float(uncertainty_val),
+        "retro_status": "success",
+        "bma_status": "success",
+        "bma_disagreement": float(bma_val or 0.0),
+        "cross_layer_conflict": False,
+        "state_update_allowed": False,
+        "diagnostic_only": True,
+        "visual_only": True,
+        "content_hash": hashlib.sha256(f"historical_{inp.plot_id}".encode()).hexdigest(),
+        "artifact_instance_hash": hashlib.sha256(f"historical_inst_{inp.plot_id}".encode()).hexdigest(),
+        "warning_codes": warning_codes_list,
+        "display_trust_tier": "diagnostic",
+        "requires_user_warning": bool(confidence_val < 0.60 or uncertainty_val > 0.40),
+        "desaturation_level": 0.5 if (confidence_val < 0.60 or uncertainty_val > 0.40) else 0.0,
+        "desaturated": bool(confidence_val < 0.60 or uncertainty_val > 0.40),
+        "provenance": "historical_sentinel_archive",
+    }
 
     if metrics_info:
         provenance["archive_metrics_hash"] = metrics_info["archive_metrics_hash"]

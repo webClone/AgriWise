@@ -65,10 +65,15 @@ export const getAuthorizedPlotRouteContext = cache(
     if (!ObjectId.isValid(plotId) || !ObjectId.isValid(farmId)) return null;
 
     const ownerId = await currentOwnerId();
-    if (!ownerId) return null;
+    const isDev = process.env.NODE_ENV === "development";
+    if (!ownerId && !isDev) return null;
 
     const plot = await prisma.plot.findFirst({
-      where: { id: plotId, farmId, ...ownerScope(ownerId) },
+      where: {
+        id: plotId,
+        farmId,
+        ...(ownerId && !isDev ? ownerScope(ownerId) : {}),
+      },
       include: {
         farm: true,
         cropCycles: {

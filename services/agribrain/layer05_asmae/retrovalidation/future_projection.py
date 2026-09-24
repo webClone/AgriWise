@@ -56,6 +56,7 @@ def predict_held_out_scene(
 
     observations = extract_pixel_observations(holdout_scene)
     errors: Dict[str, float] = {}
+    node_errors_by_obs: Dict[str, np.ndarray] = {}
     for obs_name in sorted(observations):
         pixel_observation = observations[obs_name]
         mapping = INDEX_STATE_REGISTRY.get(obs_name)
@@ -89,7 +90,18 @@ def predict_held_out_scene(
         valid &= np.isfinite(observed) & np.isfinite(predicted)
         if not np.any(valid):
             continue
-        errors[obs_name] = float(np.sqrt(np.mean((predicted[valid] - observed[valid]) ** 2)))
+        diff_sq = np.zeros_like(observed)
+        diff_sq[valid] = (predicted[valid] - observed[valid]) ** 2
+        errors[obs_name] = float(np.sqrt(np.mean(diff_sq[valid])))
+        try:
+            h_trans = h_matrix.T if hasattr(h_matrix, "T") else h_matrix.transpose()
+            valid_float = valid.astype(float)
+            node_weight = np.asarray(h_trans @ valid_float).reshape(-1)
+            node_diff_sum = np.asarray(h_trans @ diff_sq).reshape(-1)
+            node_mse = np.where(node_weight > 1e-9, node_diff_sum / np.maximum(node_weight, 1e-9), errors[obs_name] ** 2)
+            node_errors_by_obs[obs_name] = np.sqrt(np.maximum(0.0, node_mse))
+        except Exception as exc:
+            logger.debug("Node error back-projection failed for %s: %s", obs_name, exc)
 
     if not errors:
         return {
@@ -98,10 +110,24 @@ def predict_held_out_scene(
             'mean_error': None,
             'n_observations': len(observations),
         }
+
+    per_microzone_error: Dict[str, float] = {}
+    if node_errors_by_obs:
+        try:
+            all_obs_node_err = np.mean(list(node_errors_by_obs.values()), axis=0)
+            per_microzone_error = {
+                node_id: round(float(err), 6)
+                for node_id, err in zip(node_ids, all_obs_node_err)
+            }
+        except Exception as exc:
+            logger.debug("Per-microzone error aggregation failed: %s", exc)
+            per_microzone_error = {}
+
     return {
         'status': 'predicted',
         'errors': errors,
         'mean_error': round(sum(errors.values()) / len(errors), 6),
+        'per_microzone_error': per_microzone_error,
         'n_observations': len(errors),
         'prediction_mode': 'ht_per_pixel_exact_support',
     }
@@ -148,7 +174,12 @@ def forecast_held_out_scene(
             if isinstance(state, (list, tuple))
         }
         if ensemble_in:
-            generator = rng or random.Random(42)
+            from ..deterministic import make_rng
+            generator = rng or make_rng(
+                "retrovalidation_forecast",
+                str(getattr(holdout_scene, "scene_id", "holdout_scene")),
+                str(int(delta_days * 100)),
+            )
             propagated_ens = forecast_step(
                 ensemble=ensemble_in,
                 priors={},
@@ -187,6 +218,7 @@ def forecast_held_out_scene(
         "status": forecast_result.get("status", "predicted"),
         "errors": forecast_result.get("errors", {}),
         "mean_error": forecast_rmse,
+        "per_microzone_error": forecast_result.get("per_microzone_error") or persistence_result.get("per_microzone_error") or {},
         "prospective_forecast_rmse": forecast_rmse,
         "persistence_rmse": persistence_rmse,
         "forecast_skill_score": skill_score,
@@ -196,122 +228,3 @@ def forecast_held_out_scene(
         "delta_days": delta_days,
     }
 
-
-def _legacy_predict_held_out_scene(
-    training_state: Dict[str, List[float]],
-    holdout_scene: Any,
-    operator: Optional[Any] = None,
-) -> Dict[str, Any]:
-    """V79B: Compute prediction error on held-out scene via Hₜ.
-
-    Uses per-pixel observation extraction and Hₜ projection:
-      y_pred = H_holdout @ h(x̂_training)
-      y_obs  = real pixel obs from held-out scene
-      error  = RMSE(y_pred, y_obs) over valid pixels
-
-    Falls back to mean-level when no Hₜ or no per-pixel obs.
-    """
-    from ..observation.pixel_extraction import extract_pixel_observations
-    from ..observation.s2_forward_model import predict_observation
-    from ..observation.s1_sar_model import predict_sar_observation
-    from ..observation.index_state_mapping import INDEX_STATE_REGISTRY
-
-    # V79B: Per-pixel observation extraction
-    pixel_obs = extract_pixel_observations(holdout_scene)
-    if not pixel_obs:
-        return {
-            "status": "no_observations_in_holdout",
-            "errors": {},
-            "mean_error": 1.0,
-            "prediction_mode": "none",
-        }
-
-    h_matrix = getattr(operator, "H_matrix", None) if operator else None
-    node_ids = sorted(training_state.keys())
-
-    errors: Dict[str, float] = {}
-    has_per_pixel = False
-
-    for obs_name, pix_obs in pixel_obs.items():
-        mapping = INDEX_STATE_REGISTRY.get(obs_name)
-        if mapping is None:
-            continue
-
-        # Predict observation from training state per microzone
-        h_vector = []
-        for nid in node_ids:
-            state = training_state.get(nid)
-            if not isinstance(state, list):
-                h_vector = []
-                break
-            try:
-                if mapping.sensor == "S1":
-                    pred = predict_sar_observation(obs_name, state)
-                else:
-                    pred = predict_observation(obs_name, state)
-            except (TypeError, ValueError, IndexError):
-                pred = None
-            if pred is None:
-                h_vector = []
-                break
-            h_vector.append(pred)
-
-        if not h_vector:
-            continue
-
-        # V79B: Try Hₜ projection for per-pixel error
-        if h_matrix is not None and pix_obs.is_per_pixel:
-            try:
-                import numpy as np
-                h_vec = np.array(h_vector)
-
-                if hasattr(h_matrix, "shape") and h_matrix.shape[1] == len(h_vector):
-                    # y_pred = H_holdout @ h(x̂_training)
-                    y_pred = h_matrix @ h_vec
-                    n_pixels = len(y_pred)
-
-                    # y_obs = real per-pixel observation
-                    if pix_obs.n_pixels == n_pixels:
-                        y_obs = np.array(pix_obs.values[:n_pixels])
-                        valid = np.array(pix_obs.valid_mask[:n_pixels])
-                    elif pix_obs.n_pixels > 1:
-                        stride = max(1, pix_obs.n_pixels // n_pixels)
-                        y_obs = np.array(pix_obs.values[::stride][:n_pixels])
-                        valid = np.array(pix_obs.valid_mask[::stride][:n_pixels])
-                        if len(y_obs) < n_pixels:
-                            pad = n_pixels - len(y_obs)
-                            y_obs = np.concatenate([y_obs, np.full(pad, pix_obs.mean)])
-                            valid = np.concatenate([valid, np.zeros(pad, dtype=bool)])
-                    else:
-                        y_obs = np.full(n_pixels, pix_obs.mean)
-                        valid = np.ones(n_pixels, dtype=bool)
-
-                    valid_idx = np.where(valid)[0]
-                    if len(valid_idx) > 0:
-                        rmse = float(np.sqrt(np.mean(
-                            (y_pred[valid_idx] - y_obs[valid_idx]) ** 2
-                        )))
-                        errors[obs_name] = rmse
-                        has_per_pixel = True
-                        continue
-            except (ImportError, Exception) as e:
-                logger.debug("Hₜ projection failed in retro for %s: %s", obs_name, e)
-
-        # Fallback: mean-level prediction error
-        pred_mean = sum(h_vector) / max(len(h_vector), 1)
-        errors[obs_name] = abs(pred_mean - pix_obs.mean)
-
-    if errors:
-        mean_error = sum(errors.values()) / len(errors)
-    else:
-        mean_error = 1.0
-
-    prediction_mode = "ht_per_pixel" if has_per_pixel else "mean_level"
-
-    return {
-        "status": "predicted",
-        "errors": errors,
-        "mean_error": round(mean_error, 6),
-        "n_observations": len(pixel_obs),
-        "prediction_mode": prediction_mode,
-    }

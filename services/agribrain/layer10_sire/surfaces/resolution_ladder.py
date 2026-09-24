@@ -390,16 +390,20 @@ def _extract_raster(
 
 def _compute_percentages(res_map: np.ndarray, total_pixels: int) -> Dict[str, float]:
     """Compute the six-bucket resolution percentage breakdown."""
+    finite_mask = np.isfinite(res_map)
+    finite_count = int(np.sum(finite_mask))
+    if finite_count > 0:
+        total_pixels = finite_count
     if total_pixels == 0:
         return {field: 0.0 for field in PERCENTAGE_FIELDS}
 
     counts = {
-        0.03: int(np.sum(np.isclose(res_map, 0.03))),
-        1.0:  int(np.sum(np.isclose(res_map, 1.0))),
-        2.0:  int(np.sum(np.isclose(res_map, 2.0))),
-        3.0:  int(np.sum(np.isclose(res_map, 3.0))),
-        5.0:  int(np.sum(np.isclose(res_map, 5.0))),
-        10.0: int(np.sum(np.isclose(res_map, 10.0))),
+        0.03: int(np.sum(np.isclose(res_map[finite_mask], 0.03))),
+        1.0:  int(np.sum(np.isclose(res_map[finite_mask], 1.0))),
+        2.0:  int(np.sum(np.isclose(res_map[finite_mask], 2.0))),
+        3.0:  int(np.sum(np.isclose(res_map[finite_mask], 3.0))),
+        5.0:  int(np.sum(np.isclose(res_map[finite_mask], 5.0))),
+        10.0: int(np.sum(np.isclose(res_map[finite_mask], 10.0))),
     }
 
     pcts = {

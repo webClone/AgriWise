@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import Any, Dict, List, Optional
 
 from ..config import (
@@ -105,6 +106,8 @@ def _rebuild_fold_geometry(
         polygon_points=polygon_points,
         row_direction_deg=float(row_direction_deg or 0.0),
         crs=target_grid.crs,
+        n_zone_rows=target_grid.n_rows,
+        n_zone_cols=target_grid.n_cols,
     )
     if graph.node_count != training_operators[0].H_matrix.shape[1]:
         raise ValueError('retro_graph_operator_node_mismatch')
@@ -180,6 +183,13 @@ def run_retrovalidation(
             "degraded_mean_only_holdout",
             "no causal production-authority raster fold qualifies for holdout",
         )
+
+    try:
+        max_retro_folds = int(os.environ.get("ASMAE_MAX_RETRO_FOLDS", "2"))
+    except (ValueError, TypeError):
+        max_retro_folds = 2
+    if max_retro_folds > 0 and len(folds) > max_retro_folds:
+        folds = folds[-max_retro_folds:]
 
     # ── Component 1: true leave-one-date-out refitting ──────────────
     holdout_errors: List[Dict[str, float]] = []
@@ -294,6 +304,7 @@ def run_retrovalidation(
         fold_proof["status"] = pred_result.get("status", "unknown")
         fold_proof["prediction_mode"] = pred_result.get("prediction_mode", "none")
         fold_proof["mean_error"] = pred_result.get("mean_error")
+        fold_proof["per_microzone_error"] = pred_result.get("per_microzone_error", {})
         fold_proof["training_state"] = training_state
         fold_proof['training_sigmas'] = fold_state.get('uncertainty_maps', {})
         fold_proof['training_timeline'] = fold_state.get('state_timeline', [])
@@ -400,10 +411,31 @@ def run_retrovalidation(
 
     # ── Per-microzone retro scores ─────────────────────────────────
     per_microzone: Dict[str, Dict[str, Any]] = {}
+    node_holdout_errors: Dict[str, List[float]] = {}
+    for fold in successful_refits:
+        pm_err = fold.get("per_microzone_error") or {}
+        for nid, err in pm_err.items():
+            if isinstance(err, (int, float)) and math.isfinite(float(err)):
+                node_holdout_errors.setdefault(nid, []).append(float(err))
+
     for nid in means:
+        if nid in node_holdout_errors and node_holdout_errors[nid]:
+            mz_avg_err = sum(node_holdout_errors[nid]) / len(node_holdout_errors[nid])
+            mz_future = max(0.0, min(1.0, 1.0 - mz_avg_err))
+        else:
+            mz_future = future_score
+
+        mz_retro = (
+            w["future"] * mz_future +
+            w["radiometric"] * radiometric_score +
+            w["temporal"] * temporal_score +
+            w["spatial"] * spatial_score +
+            w["causal"] * causal_score +
+            w["calibration"] * calibration_score
+        )
         per_microzone[nid] = {
-            "retro_score": retro_score,  # Uniform for now (holdout is scene-level)
-            "future": round(future_score, 4),
+            "retro_score": round(mz_retro, 4),
+            "future": round(mz_future, 4),
             "radiometric": round(radiometric_score, 4),
             "temporal": round(temporal_score, 4),
             "spatial": round(spatial_score, 4),

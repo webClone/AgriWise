@@ -134,12 +134,19 @@ class HistoricalSceneAdapter:
         packets = [packet]
 
         # 4. Setup qa
+        valid_f = float(record.valid_pixel_fraction if record.valid_pixel_fraction is not None else 1.0)
+        cloud_f = float(record.cloud_score if record.cloud_score is not None else 0.0)
+        if record.quality_status == "accepted":
+            rel_weight = round(max(0.40, min(0.98, 0.98 * valid_f * (1.0 - 0.5 * cloud_f))), 3)
+        else:
+            rel_weight = round(max(0.05, min(0.30, 0.20 * valid_f)), 3)
+
         qa = SimpleNamespace(
             usable=bool(record.quality_status == "accepted" and has_arrays),
             valid_fraction=record.valid_pixel_fraction,
             quality_class=SimpleNamespace(value="excellent" if record.quality_status == "accepted" else "poor"),
             sigma_multiplier=1.0,
-            reliability_weight=0.95 if record.quality_status == "accepted" else 0.1
+            reliability_weight=rel_weight,
         )
 
         # 5. Build full adapted package namespace

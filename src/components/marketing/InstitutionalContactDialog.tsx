@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { AUDIENCES, type AudienceId, type ContactIntent } from "./data/audiences";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
 
 interface Props {
   isOpen: boolean;
@@ -17,6 +18,7 @@ export default function InstitutionalContactDialog({
   intent,
   customTitle,
 }: Props) {
+  const { t, isRTL } = useLanguage();
   const audience = AUDIENCES[intent] || AUDIENCES.enterprise;
   const prefersReduced = useReducedMotion();
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -58,7 +60,7 @@ export default function InstitutionalContactDialog({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.name || !formData.email || !formData.organization) {
-      setErrorMessage("Please complete all required fields.");
+      setErrorMessage(t.contactDialog.errors.required);
       setStatus("error");
       return;
     }
@@ -77,12 +79,12 @@ export default function InstitutionalContactDialog({
       });
 
       if (!res.ok) {
-        throw new Error("Server error, please try again.");
+        throw new Error(t.contactDialog.errors.server);
       }
 
       setStatus("success");
     } catch (err: any) {
-      setErrorMessage(err.message || "Failed to submit request.");
+      setErrorMessage(err.message || t.contactDialog.errors.server);
       setStatus("error");
     }
   };
@@ -191,10 +193,10 @@ export default function InstitutionalContactDialog({
                   color: "var(--text-primary)",
                 }}
               >
-                {customTitle || `Discuss AgriWise for ${audience.label}s`}
+                {customTitle || t.contactDialog.title}
               </h2>
               <p style={{ fontSize: "13px", color: "var(--text-muted)", margin: 0, lineHeight: 1.5 }}>
-                Connect with our technical & agricultural intelligence team to evaluate deployment or API integration.
+                {t.contactDialog.subtitle}
               </p>
             </div>
 
@@ -210,13 +212,13 @@ export default function InstitutionalContactDialog({
               >
                 <div style={{ fontSize: "2.5rem", marginBottom: "12px" }}>✅</div>
                 <h3 style={{ fontSize: "18px", fontWeight: 700, color: "var(--field-green)", margin: "0 0 8px" }}>
-                  Request Received
+                  {t.contactDialog.buttons.successTitle}
                 </h3>
                 <p style={{ fontSize: "14px", color: "var(--text-body)", margin: "0 0 20px" }}>
-                  Thank you for reaching out. An AgriWise technical specialist will review your request and contact you within 24 hours.
+                  {t.contactDialog.buttons.successDesc}
                 </p>
                 <button onClick={onClose} className="marketing-cta-primary" style={{ padding: "10px 24px", fontSize: "14px" }}>
-                  Close
+                  {t.contactDialog.buttons.close}
                 </button>
               </div>
             ) : (
@@ -239,7 +241,7 @@ export default function InstitutionalContactDialog({
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
                   <div>
                     <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "4px" }}>
-                      Full Name *
+                      {t.contactDialog.labels.name} *
                     </label>
                     <input
                       ref={firstInputRef}
@@ -247,7 +249,7 @@ export default function InstitutionalContactDialog({
                       required
                       value={formData.name}
                       onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                      placeholder="e.g. Dr. Ahmed Benali"
+                      placeholder={t.contactDialog.placeholders.name}
                       style={{
                         width: "100%",
                         padding: "10px 12px",
@@ -262,14 +264,14 @@ export default function InstitutionalContactDialog({
 
                   <div>
                     <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "4px" }}>
-                      Work Email *
+                      {t.contactDialog.labels.email} *
                     </label>
                     <input
                       type="email"
                       required
                       value={formData.email}
                       onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                      placeholder="name@organization.com"
+                      placeholder={t.contactDialog.placeholders.email}
                       style={{
                         width: "100%",
                         padding: "10px 12px",
@@ -286,14 +288,14 @@ export default function InstitutionalContactDialog({
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
                   <div>
                     <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "4px" }}>
-                      Organization Name *
+                      {t.contactDialog.labels.organization} *
                     </label>
                     <input
                       type="text"
                       required
                       value={formData.organization}
                       onChange={(e) => setFormData({ ...formData, organization: e.target.value })}
-                      placeholder="e.g. National Agribank / AgroEnterprise"
+                      placeholder={t.contactDialog.placeholders.organization}
                       style={{
                         width: "100%",
                         padding: "10px 12px",
@@ -308,7 +310,7 @@ export default function InstitutionalContactDialog({
 
                   <div>
                     <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "4px" }}>
-                      Country
+                      {t.contactDialog.labels.country}
                     </label>
                     <input
                       type="text"
@@ -331,7 +333,7 @@ export default function InstitutionalContactDialog({
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
                   <div>
                     <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "4px" }}>
-                      Organization Type
+                      {t.contactDialog.labels.orgType}
                     </label>
                     <select
                       value={formData.orgType}
@@ -347,26 +349,24 @@ export default function InstitutionalContactDialog({
                       }}
                     >
                       <option value="">Select Type...</option>
-                      <option value="Commercial Farm">Commercial Farm</option>
-                      <option value="Government Ministry / Agency">Government Ministry / Agency</option>
-                      <option value="Bank / Financial Institution">Bank / Financial Institution</option>
-                      <option value="Insurance Provider">Insurance Provider</option>
-                      <option value="Agricultural Cooperative">Agricultural Cooperative</option>
-                      <option value="Agribusiness / Supply Chain">Agribusiness / Supply Chain</option>
-                      <option value="Research Institution">Research Institution</option>
-                      <option value="Technology Partner / Developer">Technology Partner / Developer</option>
+                      <option value="Enterprise">{t.contactDialog.orgTypes.enterprise}</option>
+                      <option value="Cooperative">{t.contactDialog.orgTypes.cooperative}</option>
+                      <option value="Government">{t.contactDialog.orgTypes.government}</option>
+                      <option value="Bank">{t.contactDialog.orgTypes.bank}</option>
+                      <option value="Research">{t.contactDialog.orgTypes.research}</option>
+                      <option value="Other">{t.contactDialog.orgTypes.other}</option>
                     </select>
                   </div>
 
                   <div>
                     <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "4px" }}>
-                      Scope / Scale
+                      {t.contactDialog.labels.fieldCount}
                     </label>
                     <input
                       type="text"
                       value={formData.fieldCount}
                       onChange={(e) => setFormData({ ...formData, fieldCount: e.target.value })}
-                      placeholder="e.g. 5,000 ha / 120 credit lines"
+                      placeholder={t.contactDialog.placeholders.fieldCount}
                       style={{
                         width: "100%",
                         padding: "10px 12px",
@@ -382,13 +382,13 @@ export default function InstitutionalContactDialog({
 
                 <div>
                   <label style={{ display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "4px" }}>
-                    Evaluation Goals / Message
+                    {t.contactDialog.labels.message}
                   </label>
                   <textarea
                     rows={3}
                     value={formData.message}
                     onChange={(e) => setFormData({ ...formData, message: e.target.value })}
-                    placeholder="Describe your operational or evaluation needs..."
+                    placeholder={t.contactDialog.placeholders.message}
                     style={{
                       width: "100%",
                       padding: "10px 12px",
@@ -409,7 +409,7 @@ export default function InstitutionalContactDialog({
                     className="marketing-cta-ghost"
                     style={{ fontSize: "13px" }}
                   >
-                    Cancel
+                    {t.contactDialog.buttons.close}
                   </button>
                   <button
                     type="submit"
@@ -417,7 +417,7 @@ export default function InstitutionalContactDialog({
                     className="marketing-cta-primary"
                     style={{ padding: "10px 24px", fontSize: "14px" }}
                   >
-                    {status === "submitting" ? "Submitting..." : "Submit Evaluation Request →"}
+                    {status === "submitting" ? t.contactDialog.buttons.submitting : t.contactDialog.buttons.submit}
                   </button>
                 </div>
               </form>

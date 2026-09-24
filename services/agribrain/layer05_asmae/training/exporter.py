@@ -45,6 +45,7 @@ def export_weak_labels(
     n_scenes_processed: int = 0,
     certification_level: str = "provisional",
     mode: str = "training_export",
+    biophysical_profiles: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Export weak labels with 10-gate safety system.
 
@@ -157,7 +158,7 @@ def export_weak_labels(
                 training_weight = min(confidence, WEAK_LABEL_MAX_WEIGHT)
                 training_weight = round(training_weight, 4)
 
-            labels.append({
+            label_entry = {
                 "microzone_id": nid,
                 "state_name": s_name,
                 "state_index": s_idx,
@@ -173,7 +174,15 @@ def export_weak_labels(
                 "plot_id": plot_id,
                 "run_id": run_id,
                 "zero_weight_reasons": reasons,  # All reasons, not just first
-            })
+            }
+            if biophysical_profiles and nid in biophysical_profiles:
+                bp = biophysical_profiles[nid]
+                bp_d = bp.to_dict() if hasattr(bp, "to_dict") else bp
+                label_entry["biophysical_cluster"] = bp_d.get("biophysical_cluster_id", "unknown")
+                label_entry["water_retention_index"] = bp_d.get("water_retention_index", 0.5)
+                label_entry["nutrient_response_index"] = bp_d.get("nutrient_response_index", 0.5)
+
+            labels.append(label_entry)
 
     n_positive = sum(1 for l in labels if l["training_weight"] > 0)
     logger.info(

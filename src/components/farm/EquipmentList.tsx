@@ -3,6 +3,8 @@
 import { useState } from "react";
 import { deleteEquipment } from "@/actions/equipment";
 import AddEquipmentForm from "./AddEquipmentForm";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
+import { Wrench, Plus, Trash2, Pencil } from "lucide-react";
 
 type Equipment = {
   id: string;
@@ -10,6 +12,26 @@ type Equipment = {
   type: string;
   condition: string | null;
   quantity: number;
+};
+
+const EQUIPMENT_TYPE_LABELS: Record<string, { ar: string; en: string; fr: string; icon: string }> = {
+  TRACTOR: { ar: "جرار", en: "Tractor", fr: "Tracteur", icon: "🚜" },
+  HARVESTER: { ar: "حصادة", en: "Harvester", fr: "Moissonneuse", icon: "🌾" },
+  PUMP: { ar: "مضخة", en: "Water Pump", fr: "Pompe", icon: "💧" },
+  IRRIGATION_SYSTEM: { ar: "نظام ري", en: "Irrigation System", fr: "Système d'irrigation", icon: "🚿" },
+  PLOW: { ar: "محراث", en: "Plow", fr: "Charrue", icon: "⚒️" },
+  SPRAYER: { ar: "مرشة", en: "Sprayer", fr: "Pulvérisateur", icon: "🧴" },
+  TRUCK: { ar: "شاحنة", en: "Truck", fr: "Camion", icon: "🚚" },
+  STORAGE: { ar: "مخزن", en: "Storage / Silo", fr: "Stockage / Silo", icon: "🏭" },
+  OTHER: { ar: "أخرى", en: "Other", fr: "Autre", icon: "📦" },
+};
+
+const CONDITION_LABELS: Record<string, { ar: string; en: string; fr: string; color: string; bg: string }> = {
+  new: { ar: "جديد", en: "New", fr: "Neuf", color: "#4ade80", bg: "rgba(34, 197, 94, 0.12)" },
+  good: { ar: "جيد", en: "Good", fr: "Bon état", color: "#60a5fa", bg: "rgba(59, 130, 246, 0.12)" },
+  fair: { ar: "متوسط", en: "Fair", fr: "Passable", color: "#facc15", bg: "rgba(234, 179, 8, 0.12)" },
+  poor: { ar: "سيء", en: "Poor", fr: "Mauvais", color: "#fb923c", bg: "rgba(251, 146, 60, 0.12)" },
+  broken: { ar: "معطل", en: "Broken", fr: "En panne", color: "#f87171", bg: "rgba(239, 68, 68, 0.12)" },
 };
 
 export default function EquipmentList({ 
@@ -21,118 +43,211 @@ export default function EquipmentList({
 }) {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<Equipment | null>(null);
+  const { locale, isRtl } = useLanguage();
+
+  const title = locale === "ar" ? "المعدات والآلات" : locale === "fr" ? "Matériel & Machinisme" : "Equipment & Machinery";
+  const addBtn = locale === "ar" ? "+ إضافة معدات" : locale === "fr" ? "+ Ajouter du matériel" : "+ Add Equipment";
+  const emptyTitle = locale === "ar" ? "لا توجد معدات مسجلة لهذه المزرعة" : locale === "fr" ? "Aucun matériel enregistré" : "No machinery registered for this farm";
+  const emptyBtn = locale === "ar" ? "إضافة أول معدات" : locale === "fr" ? "Ajouter le premier équipement" : "Register First Equipment";
+  const confirmDelete = locale === "ar" ? "هل أنت متأكد من حذف هذه المعدات؟" : locale === "fr" ? "Voulez-vous vraiment supprimer cet équipement ?" : "Are you sure you want to remove this equipment?";
+
+  const colName = locale === "ar" ? "الاسم" : locale === "fr" ? "Nom" : "Name";
+  const colType = locale === "ar" ? "النوع" : locale === "fr" ? "Type" : "Type";
+  const colQty = locale === "ar" ? "العدد" : locale === "fr" ? "Qté" : "Qty";
+  const colStatus = locale === "ar" ? "الحالة" : locale === "fr" ? "État" : "Condition";
+  const colActions = locale === "ar" ? "إجراءات" : locale === "fr" ? "Actions" : "Actions";
 
   const handleDelete = async (id: string) => {
-    if (confirm("هل أنت متأكد من حذف هذه المعدات؟")) {
+    if (confirm(confirmDelete)) {
       await deleteEquipment(id, farmId);
     }
   };
 
   return (
-    <div className="card mt-6" suppressHydrationWarning={true}>
-      <div className="flex justify-between items-center mb-4" suppressHydrationWarning={true}>
-        <h3 className="text-xl font-bold">المعدات والآلات</h3>
+    <div 
+      style={{
+        padding: "24px",
+        background: "rgba(15, 23, 42, 0.5)",
+        backdropFilter: "blur(16px)",
+        borderRadius: "18px",
+        border: "1px solid rgba(71, 85, 105, 0.15)",
+        boxShadow: "0 10px 40px rgba(0,0,0,0.25)",
+      }} 
+      suppressHydrationWarning={true}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }} suppressHydrationWarning={true}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={{
+            width: "32px", height: "32px", borderRadius: "8px",
+            background: "rgba(168, 85, 247, 0.1)",
+            border: "1px solid rgba(168, 85, 247, 0.2)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#c084fc",
+          }}>
+            <Wrench size={16} />
+          </div>
+          <h3 style={{ margin: 0, fontWeight: 700, fontSize: "1.1rem", color: "#f8fafc" }}>{title}</h3>
+          {equipment.length > 0 && (
+            <span style={{
+              fontSize: "0.75rem", fontWeight: 700,
+              background: "rgba(168, 85, 247, 0.12)", color: "#c084fc",
+              padding: "2px 10px", borderRadius: "9999px",
+              border: "1px solid rgba(168, 85, 247, 0.25)",
+            }}>
+              {equipment.length}
+            </span>
+          )}
+        </div>
+
         <button 
           onClick={() => setIsAddModalOpen(true)}
-          className="btn btn-primary"
-          style={{ fontSize: "0.875rem", padding: "0.5rem 1rem" }}
+          style={{
+            padding: "8px 16px", borderRadius: "10px",
+            fontSize: "0.82rem", fontWeight: 600, cursor: "pointer",
+            background: "rgba(168, 85, 247, 0.12)",
+            border: "1px solid rgba(168, 85, 247, 0.3)",
+            color: "#c084fc",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "6px",
+            transition: "all 0.2s ease",
+          }}
+          onMouseOver={e => {
+            e.currentTarget.style.background = "rgba(168, 85, 247, 0.22)";
+            e.currentTarget.style.transform = "translateY(-1px)";
+          }}
+          onMouseOut={e => {
+            e.currentTarget.style.background = "rgba(168, 85, 247, 0.12)";
+            e.currentTarget.style.transform = "translateY(0)";
+          }}
         >
-          + إضافة معدات
+          <Plus size={14} />
+          <span>{addBtn}</span>
         </button>
       </div>
 
       {equipment.length === 0 ? (
         <div style={{ 
           textAlign: "center", 
-          padding: "3rem", 
-          background: "var(--background-secondary)", 
-          borderRadius: "12px", 
-          border: "1px dashed var(--background-tertiary)",
-          color: "var(--foreground-muted)"
+          padding: "3.5rem 2rem", 
+          background: "linear-gradient(135deg, rgba(15, 23, 42, 0.4), rgba(15, 23, 42, 0.15))", 
+          borderRadius: "16px", 
+          border: "1px dashed rgba(71, 85, 105, 0.25)",
         }} suppressHydrationWarning={true}>
           <div style={{ fontSize: "3rem", marginBottom: "1rem" }} suppressHydrationWarning={true}>🚜</div>
-          <p style={{ fontSize: "1.1rem", marginBottom: "1rem" }}>لا توجد معدات مسجلة لهذه المزرعة</p>
+          <p style={{ fontWeight: 700, fontSize: "1rem", color: "#f1f5f9", margin: "0 0 1.25rem 0" }}>{emptyTitle}</p>
           <button 
             onClick={() => setIsAddModalOpen(true)}
-            className="btn btn-outline"
-            style={{ fontSize: "0.9rem" }}
+            style={{
+              padding: "10px 22px", borderRadius: "10px",
+              fontWeight: 700, fontSize: "0.85rem", cursor: "pointer",
+              background: "linear-gradient(135deg, #a855f7, #7e22ce)",
+              border: "none", color: "#fff",
+              boxShadow: "0 4px 20px rgba(168, 85, 247, 0.3)",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "6px",
+            }}
           >
-            إضافة أول معدات
+            <Plus size={14} />
+            <span>{emptyBtn}</span>
           </button>
         </div>
       ) : (
-        <div className="overflow-x-auto" suppressHydrationWarning={true}>
-          <table className="w-full text-right" style={{ borderCollapse: "separate", borderSpacing: "0 0.5rem" }}>
+        <div style={{ overflowX: "auto" }} suppressHydrationWarning={true}>
+          <table style={{ width: "100%", borderCollapse: "separate", borderSpacing: "0 8px", textAlign: isRtl ? "right" : "left" }}>
             <thead>
-              <tr style={{ color: "var(--foreground-muted)", fontSize: "0.875rem" }}>
-                <th className="pb-2 px-4">الاسم</th>
-                <th className="pb-2 px-4">النوع</th>
-                <th className="pb-2 px-4">العدد</th>
-                <th className="pb-2 px-4">الحالة</th>
-                <th className="pb-2 px-4 text-left">إجراءات</th>
+              <tr style={{ color: "#94a3b8", fontSize: "0.78rem", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                <th style={{ padding: "8px 16px" }}>{colName}</th>
+                <th style={{ padding: "8px 16px" }}>{colType}</th>
+                <th style={{ padding: "8px 16px", textAlign: "center" }}>{colQty}</th>
+                <th style={{ padding: "8px 16px" }}>{colStatus}</th>
+                <th style={{ padding: "8px 16px", textAlign: isRtl ? "left" : "right" }}>{colActions}</th>
               </tr>
             </thead>
             <tbody>
-              {equipment.map((item) => (
-                <tr key={item.id} style={{ background: "var(--background-secondary)", borderRadius: "8px" }}>
-                  <td className="py-3 px-4 font-medium" style={{ borderRadius: "0 8px 8px 0" }}>{item.name}</td>
-                  <td className="py-3 px-4 text-gray-400">
-                    {item.type === 'TRACTOR' ? '🚜 جرار' : 
-                     item.type === 'HARVESTER' ? '🌾 حصادة' :
-                     item.type === 'PUMP' ? '💧 مضخة' : 
-                     item.type === 'IRRIGATION_SYSTEM' ? '🚿 نظام ري' :
-                     item.type === 'PLOW' ? '⚒️ محراث' : 
-                     item.type === 'SPRAYER' ? '🧴 مرشة' : 
-                     item.type === 'TRUCK' ? '🚚 شاحنة' : 
-                     item.type === 'STORAGE' ? '🏭 مخزن' : '📦 أخرى'}
-                  </td>
-                  <td className="py-3 px-4 text-center font-bold" style={{ color: "var(--color-primary-500)" }}>{item.quantity}</td>
-                  <td className="py-3 px-4">
-                    <span style={{
-                      padding: "0.25rem 0.75rem",
-                      borderRadius: "99px",
-                      fontSize: "0.75rem",
-                      background: 
-                        item.condition === 'new' ? 'rgba(34, 197, 94, 0.1)' :
-                        item.condition === 'good' ? 'rgba(59, 130, 246, 0.1)' :
-                        item.condition === 'fair' ? 'rgba(234, 179, 8, 0.1)' :
-                        'rgba(239, 68, 68, 0.1)',
-                      color:
-                        item.condition === 'new' ? '#22c55e' :
-                        item.condition === 'good' ? '#3b82f6' :
-                        item.condition === 'fair' ? '#eab308' :
-                        '#ef4444',
-                      display: "inline-block"
-                    }}>
-                      {item.condition === 'new' ? '✨ جديد' : 
-                       item.condition === 'good' ? '👍 جيد' : 
-                       item.condition === 'fair' ? '😐 متوسط' : 
-                       item.condition === 'poor' ? '👎 سيء' : 
-                       item.condition === 'broken' ? '🛠️ معطل' : '-'}
-                    </span>
-                  </td>
-                  <td className="py-3 px-4 text-left" style={{ borderRadius: "8px 0 0 8px" }}>
-                    <div style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }} suppressHydrationWarning={true}>
-                      <button 
-                        onClick={() => setEditingItem(item)}
-                        className="btn-icon"
-                        title="تعديل"
-                        style={{ color: "var(--color-primary-500)", background: "rgba(34, 197, 94, 0.1)", width: "32px", height: "32px", padding: 0, display: "flex", alignItems: "center", justifyContent: "center" }}
-                      >
-                        ✏️
-                      </button>
-                      <button 
-                        onClick={() => handleDelete(item.id)}
-                        className="btn-icon"
-                        title="حذف"
-                        style={{ color: "#ef4444", background: "rgba(239, 68, 68, 0.1)", width: "32px", height: "32px", padding: 0, display: "flex", alignItems: "center", justifyContent: "center" }}
-                      >
-                        🗑️
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {equipment.map((item) => {
+                const typeInfo = EQUIPMENT_TYPE_LABELS[item.type] || EQUIPMENT_TYPE_LABELS.OTHER;
+                const typeLabel = typeInfo[locale] || typeInfo.en;
+                const condInfo = CONDITION_LABELS[item.condition || "good"] || CONDITION_LABELS.good;
+                const condLabel = condInfo[locale] || condInfo.en;
+
+                return (
+                  <tr 
+                    key={item.id} 
+                    style={{ 
+                      background: "rgba(15, 23, 42, 0.6)", 
+                      borderRadius: "10px",
+                      transition: "background 0.2s ease",
+                    }}
+                    onMouseOver={e => e.currentTarget.style.background = "rgba(15, 23, 42, 0.85)"}
+                    onMouseOut={e => e.currentTarget.style.background = "rgba(15, 23, 42, 0.6)"}
+                  >
+                    <td style={{ padding: "14px 16px", fontWeight: 600, color: "#f8fafc", borderRadius: isRtl ? "0 10px 10px 0" : "10px 0 0 10px" }}>
+                      {item.name}
+                    </td>
+                    <td style={{ padding: "14px 16px", color: "#94a3b8", fontSize: "0.85rem" }}>
+                      <span style={{ marginRight: "6px" }}>{typeInfo.icon}</span>
+                      <span>{typeLabel}</span>
+                    </td>
+                    <td style={{ padding: "14px 16px", textAlign: "center", fontWeight: 700, color: "#4ade80", fontSize: "0.95rem" }}>
+                      {item.quantity}
+                    </td>
+                    <td style={{ padding: "14px 16px" }}>
+                      <span style={{
+                        padding: "3px 10px",
+                        borderRadius: "99px",
+                        fontSize: "0.72rem",
+                        fontWeight: 600,
+                        background: condInfo.bg,
+                        color: condInfo.color,
+                        border: `1px solid ${condInfo.color}25`,
+                        display: "inline-block",
+                      }}>
+                        {condLabel}
+                      </span>
+                    </td>
+                    <td style={{ padding: "14px 16px", textAlign: isRtl ? "left" : "right", borderRadius: isRtl ? "10px 0 0 10px" : "0 10px 10px 0" }}>
+                      <div style={{ display: "inline-flex", gap: "6px" }} suppressHydrationWarning={true}>
+                        <button 
+                          onClick={() => setEditingItem(item)}
+                          title="Edit"
+                          style={{
+                            color: "#4ade80",
+                            background: "rgba(34, 197, 94, 0.1)",
+                            border: "1px solid rgba(34, 197, 94, 0.2)",
+                            width: "32px", height: "32px", borderRadius: "8px",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            cursor: "pointer",
+                            transition: "all 0.15s ease",
+                          }}
+                          onMouseOver={e => e.currentTarget.style.background = "rgba(34, 197, 94, 0.25)"}
+                          onMouseOut={e => e.currentTarget.style.background = "rgba(34, 197, 94, 0.1)"}
+                        >
+                          <Pencil size={13} />
+                        </button>
+                        <button 
+                          onClick={() => handleDelete(item.id)}
+                          title="Delete"
+                          style={{
+                            color: "#f87171",
+                            background: "rgba(239, 68, 68, 0.1)",
+                            border: "1px solid rgba(239, 68, 68, 0.2)",
+                            width: "32px", height: "32px", borderRadius: "8px",
+                            display: "flex", alignItems: "center", justifyContent: "center",
+                            cursor: "pointer",
+                            transition: "all 0.15s ease",
+                          }}
+                          onMouseOver={e => e.currentTarget.style.background = "rgba(239, 68, 68, 0.25)"}
+                          onMouseOut={e => e.currentTarget.style.background = "rgba(239, 68, 68, 0.1)"}
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

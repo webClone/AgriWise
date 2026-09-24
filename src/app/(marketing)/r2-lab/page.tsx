@@ -3,7 +3,7 @@
 import React from "react";
 import SpatialEngine from "@/components/experience/SpatialStage/SpatialEngine";
 import HomeHero from "@/components/marketing/home/HomeHero";
-import ScaleChapter from "@/components/marketing/home/ScaleChapter";
+import ScaleSovereignCarousel from "@/components/marketing/home/ScaleSovereignCarousel";
 import "@/components/marketing/marketing.css";
 
 /* ═══ AgriWise R2 — Vertical Slice Prototype (/r2-lab) ═════════
@@ -16,7 +16,7 @@ export default function R2LabPage() {
       <SpatialEngine />
       <main style={{ position: "relative", zIndex: 10 }}>
         <HomeHero />
-        <ScaleChapter />
+        <ScaleSovereignCarousel />
       </main>
     </div>
   );
