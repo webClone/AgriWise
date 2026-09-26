@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..config import (
@@ -189,7 +190,30 @@ def run_retrovalidation(
     except (ValueError, TypeError):
         max_retro_folds = 2
     if max_retro_folds > 0 and len(folds) > max_retro_folds:
-        folds = folds[-max_retro_folds:]
+        # Multi-sensor stratified selection: ensure each sensor family (e.g. S2, S1)
+        # represented in the stack has at least one holdout fold so that domain-specific
+        # physical experts (optical_physiology, sar_structure) can receive holdout scores.
+        sensor_to_folds: Dict[str, List[int]] = {}
+        for idx, (trn, hld) in enumerate(folds):
+            sens = str(getattr(hld, "sensor", "unknown"))
+            sensor_to_folds.setdefault(sens, []).append(idx)
+
+        selected_indices = set()
+        # First pass: pick the latest fold for each distinct sensor
+        for sens, f_indices in sensor_to_folds.items():
+            selected_indices.add(f_indices[-1])
+
+        # If we selected more than max_retro_folds (e.g. >2 sensors), truncate to latest
+        if len(selected_indices) > max_retro_folds:
+            selected_indices = set(sorted(selected_indices)[-max_retro_folds:])
+        else:
+            # Fill remaining budget with latest available folds
+            remaining = [i for i in range(len(folds)) if i not in selected_indices]
+            needed = max_retro_folds - len(selected_indices)
+            if needed > 0 and remaining:
+                selected_indices.update(remaining[-needed:])
+
+        folds = [folds[i] for i in sorted(selected_indices)]
 
     # ── Component 1: true leave-one-date-out refitting ──────────────
     holdout_errors: List[Dict[str, float]] = []
@@ -314,17 +338,70 @@ def run_retrovalidation(
                 except Exception:
                     pass
 
-        # Weather available at forecast issuance
+        # Weather forcing available at forecast issuance
         holdout_time = getattr(holdout_scene, "acquisition_time", None)
         holdout_date_str = holdout_time.strftime("%Y-%m-%d") if hasattr(holdout_time, "strftime") else (str(holdout_time)[:10] if holdout_time else "")
-        weather_day = None
+
+        t_train_dt = getattr(training_scenes[-1], "acquisition_time", None) if training_scenes else None
+        t_holdout_dt = holdout_time if isinstance(holdout_time, datetime) else None
+
+        raw_weather_daily = (evidence_context or {}).get("weather_daily_series", {})
+        archived_forecast = (evidence_context or {}).get("weather_forecast", {})
+        raw_mgmt_events = (evidence_context or {}).get("management_events", [])
+
         training_weather_series = _training_weather(
-            (evidence_context or {}).get("weather_daily_series", {}),
+            raw_weather_daily,
             training_scenes,
             holdout_scene,
         )
-        if training_weather_series:
-            weather_day = training_weather_series.get(holdout_date_str) or next(iter(reversed(list(training_weather_series.values()))), {})
+
+        # Distinguish archived issuance-time forecast vs declared weather persistence
+        interval_weather_series = {}
+        forecast_forcing_source = "declared_weather_persistence"
+
+        if archived_forecast and isinstance(archived_forecast, dict):
+            interval_weather_series = dict(archived_forecast)
+            forecast_forcing_source = "archived_issuance_forecast"
+        elif raw_weather_daily and t_train_dt and t_holdout_dt:
+            # Check if interval between training end and holdout is present in daily series
+            d_curr = t_train_dt.date() + timedelta(days=1)
+            all_present = True
+            while d_curr <= t_holdout_dt.date():
+                ds = d_curr.strftime("%Y-%m-%d")
+                if ds in raw_weather_daily:
+                    interval_weather_series[ds] = raw_weather_daily[ds]
+                else:
+                    all_present = False
+                d_curr += timedelta(days=1)
+            if all_present and interval_weather_series:
+                forecast_forcing_source = "retrieved_historical_forcing"
+
+        # Explicit declared weather-persistence fallback if no forecast was archived
+        if not interval_weather_series:
+            forecast_forcing_source = "declared_weather_persistence"
+            last_known_weather = next(iter(reversed(list(training_weather_series.values()))), {}) if training_weather_series else {}
+            if t_train_dt and t_holdout_dt:
+                d_curr = t_train_dt.date() + timedelta(days=1)
+                while d_curr <= t_holdout_dt.date():
+                    interval_weather_series[d_curr.strftime("%Y-%m-%d")] = last_known_weather
+                    d_curr += timedelta(days=1)
+            else:
+                interval_weather_series[holdout_date_str] = last_known_weather
+
+        weather_day = interval_weather_series.get(holdout_date_str) or next(iter(reversed(list(interval_weather_series.values()))), {})
+
+        # Interval management events
+        interval_mgmt_events = []
+        for ev in raw_mgmt_events or []:
+            if isinstance(ev, dict):
+                raw_d = str(ev.get("timestamp") or ev.get("date") or "")[:10]
+                if t_train_dt and t_holdout_dt:
+                    train_str = t_train_dt.strftime("%Y-%m-%d")
+                    holdout_str = t_holdout_dt.strftime("%Y-%m-%d")
+                    if train_str < raw_d <= holdout_str:
+                        interval_mgmt_events.append(ev)
+                elif raw_d == holdout_date_str:
+                    interval_mgmt_events.append(ev)
 
         forecast_rng = make_rng(
             run_id=f"{identity.get('run_id', 'retro')}:forecast:{holdout_id}",
@@ -341,7 +418,12 @@ def run_retrovalidation(
             soil_context=(evidence_context or {}).get("soil_context", {}),
             delta_days=delta_days,
             rng=forecast_rng,
+            previous_time=t_train_dt,
+            current_time=t_holdout_dt,
+            weather_daily_series=interval_weather_series,
+            management_events=interval_mgmt_events,
         )
+        fold_proof["forecast_forcing_source"] = forecast_forcing_source
         fold_proof["status"] = pred_result.get("status", "unknown")
         fold_proof["prediction_mode"] = pred_result.get("prediction_mode", "none")
         fold_proof["mean_error"] = pred_result.get("mean_error")

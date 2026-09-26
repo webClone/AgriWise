@@ -393,30 +393,68 @@ class Layer2CompositeOutput(Layer2Output):
     @property
     def lai_mean(self) -> float:
         """Leaf Area Index mean from health_index, growth_metrics, curve, or features."""
+        import math
         if self.health_index is not None:
             val = getattr(self.health_index, "lai_estimate", None)
-            if val is not None and float(val) > 0.0:
-                return float(val)
+            if val is not None:
+                try:
+                    f = float(val)
+                    if math.isfinite(f) and f >= 0.0:
+                        return f
+                except (ValueError, TypeError):
+                    pass
         if self.growth_metrics is not None:
             val = getattr(self.growth_metrics, "lai_estimate", None)
-            if val is not None and float(val) > 0.0:
-                return float(val)
+            if val is not None:
+                try:
+                    f = float(val)
+                    if math.isfinite(f) and f >= 0.0:
+                        return f
+                except (ValueError, TypeError):
+                    pass
         if self.curve is not None:
             series = getattr(self.curve, "lai_series", [])
             if series:
-                return float(series[-1])
+                try:
+                    f = float(series[-1])
+                    if math.isfinite(f) and f >= 0.0:
+                        return f
+                except (ValueError, TypeError):
+                    pass
         for feat in getattr(self, "vegetation_intelligence", []):
             if getattr(feat, "feature_name", "") == "lai":
-                return float(getattr(feat, "value", 1.5))
+                val = getattr(feat, "value", None)
+                if val is not None:
+                    try:
+                        f = float(val)
+                        if math.isfinite(f) and f >= 0.0:
+                            return f
+                    except (ValueError, TypeError):
+                        pass
         return 1.5
 
     @property
     def canopy_cover_pct(self) -> float:
         """Canopy cover percentage (FVC * 100)."""
+        import math
         if self.health_index is not None:
             val = getattr(self.health_index, "vegetation_fraction", None)
-            if val is not None and float(val) > 0.0:
-                return float(val) * 100.0
+            if val is not None:
+                try:
+                    f = float(val)
+                    if math.isfinite(f) and f >= 0.0:
+                        return f * 100.0 if f <= 1.0 else min(100.0, f)
+                except (ValueError, TypeError):
+                    pass
+        if self.growth_metrics is not None:
+            val = getattr(self.growth_metrics, "canopy_cover_pct", None) or getattr(self.growth_metrics, "vegetation_fraction", None)
+            if val is not None:
+                try:
+                    f = float(val)
+                    if math.isfinite(f) and f >= 0.0:
+                        return f * 100.0 if f <= 1.0 else min(100.0, f)
+                except (ValueError, TypeError):
+                    pass
         return 50.0
 
     @property

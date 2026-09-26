@@ -83,6 +83,7 @@ def enforce_radiometric_consistency(
     has_shape_fallback = False
     has_scalar_fallback = False
     has_resampled = False
+    has_missing_snapshot = False
 
     # A given observation type can occur in several scenes.  Derive authority
     # from the complete check ledger; ``per_index`` is only the worst-case
@@ -102,12 +103,16 @@ def enforce_radiometric_consistency(
             has_scalar_fallback = True
         if method == "ht_resampled_observation":
             has_resampled = True
+        if method in ("ht_missing_state_snapshot", "ht_missing_node_state"):
+            has_missing_snapshot = True
 
     # Top-level mode: ht_per_pixel ONLY if all observations used it
     if len(mode_counts) == 0:
         top_mode = "proxy_average"
     elif len(mode_counts) == 1 and "ht_per_pixel" in mode_counts:
         top_mode = "ht_per_pixel"
+    elif has_missing_snapshot:
+        top_mode = "degraded_missing_snapshot"
     else:
         top_mode = "mixed_ht_modes"
 
@@ -118,12 +123,14 @@ def enforce_radiometric_consistency(
         and not has_shape_fallback
         and not has_scalar_fallback
         and not has_resampled
+        and not has_missing_snapshot
     )
 
     result["radiometric_mode"] = top_mode
     result["has_shape_fallback"] = has_shape_fallback
     result["has_scalar_observation_fallback"] = has_scalar_fallback
     result["has_resampled_observation"] = has_resampled
+    result["has_missing_snapshot"] = has_missing_snapshot
     result["has_alignment_rejection"] = any(
         method != "ht_per_pixel" for method in mode_counts
     )
@@ -144,6 +151,16 @@ def _check_operators_have_ht(operators: Optional[list]) -> bool:
     return False
 
 
+
+# Primary physical satellite observation channels whose rejection vetoes
+# overall_pass.  Derived diagnostic proxies (cwsi, stress_memory_index,
+# biotic_anomaly, phenology_index, evi, bsi, nbr, ndsi, sar_ratio) are
+# auxiliary indices: their status and actions are recorded, but a rejection
+# on an auxiliary index does not block certification of the primary sensor
+# chain.
+PRIMARY_OBSERVATIONS = {"ndvi", "ndre", "ndmi", "ndwi", "sar_vv", "sar_vh"}
+
+
 def _enforce_ht_per_pixel(
     state_estimates: Dict[str, List[float]],
     operators: list,
@@ -162,6 +179,9 @@ def _enforce_ht_per_pixel(
       2. Project: y_pred = H_t @ h_vector
       3. Extract y_obs = real per-pixel observation vector from scene
       4. Compute RMSE over valid pixels: RMSE(y_pred[valid], y_obs[valid])
+
+    overall_pass reflects primary sensor certification only.  Auxiliary proxy
+    indices are recorded with full status but cannot veto the primary chain.
     """
     from ..observation.pixel_extraction import extract_pixel_observations
 
@@ -196,7 +216,15 @@ def _enforce_ht_per_pixel(
         if h_matrix is None:
             continue
 
-        scene_state_estimates = timeline_by_scene_id.get(scene_id, state_estimates)
+        snapshot_missing = False
+        if state_timeline is not None:
+            if scene_id in timeline_by_scene_id:
+                scene_state_estimates = timeline_by_scene_id[scene_id]
+            else:
+                snapshot_missing = True
+                scene_state_estimates = None
+        else:
+            scene_state_estimates = state_estimates
 
         # V79B: Per-pixel observation extraction
         pixel_obs = extract_pixel_observations(scene)
@@ -210,68 +238,83 @@ def _enforce_ht_per_pixel(
                 obs_name, {"pass": 0.15, "reject": 0.30}
             )
 
-            # Compute h(x̂_t) per microzone using estimated state at time t
-            h_vector = []
-            for nid in node_ids:
-                # ``node_ids`` is built from the state-estimate mapping, so a
-                # missing value here is a corrupt proof path.  Never invent a
-                # midpoint state to make radiometry executable.
-                state = scene_state_estimates.get(nid, state_estimates[nid])
-                h_vector.append(forward_fn(state))
-
             actual_method = "ht_per_pixel"
             observation_source = "per_pixel"
             rejection_reason: Optional[str] = None
             rmse: Optional[float] = None
             n_valid_pixels = 0
 
-            try:
-                import numpy as np
-                h_vec = np.asarray(h_vector, dtype=float)
+            if snapshot_missing or scene_state_estimates is None:
+                actual_method = "ht_missing_state_snapshot"
+                observation_source = "none"
+                rejection_reason = f"timeline_snapshot_missing_for_scene_{scene_id}"
+            else:
+                # Compute h(x̂_t) per microzone using estimated state at time t
+                h_vector = []
+                node_missing = False
+                for nid in node_ids:
+                    if nid not in scene_state_estimates:
+                        node_missing = True
+                        break
+                    h_vector.append(forward_fn(scene_state_estimates[nid]))
 
-                if h_matrix.shape[1] != len(h_vector):
-                    actual_method = "ht_shape_mismatch"
+                if node_missing:
+                    actual_method = "ht_missing_node_state"
                     observation_source = "none"
-                    rejection_reason = "operator_columns_do_not_match_state_graph"
-                elif not pix_obs.is_per_pixel:
-                    actual_method = "ht_scalar_observation_unsupported"
-                    observation_source = "scalar_mean"
-                    rejection_reason = "pixel_level_observation_required"
+                    rejection_reason = f"snapshot_missing_microzone_state_in_scene_{scene_id}"
                 else:
-                    y_pred = np.asarray(h_matrix @ h_vec, dtype=float).reshape(-1)
-                    n_pixels = int(y_pred.size)
-                    if pix_obs.n_pixels != n_pixels:
-                        actual_method = "ht_support_mismatch"
-                        observation_source = "misaligned_per_pixel"
-                        rejection_reason = (
-                            f"observation_pixels={pix_obs.n_pixels},"
-                            f"operator_rows={n_pixels}"
-                        )
-                    else:
-                        y_obs = np.asarray(pix_obs.values, dtype=float).reshape(-1)
-                        valid_mask = np.asarray(
-                            pix_obs.valid_mask, dtype=bool,
-                        ).reshape(-1)
-                        valid_mask &= np.isfinite(y_obs) & np.isfinite(y_pred)
-                        n_valid_pixels = int(np.count_nonzero(valid_mask))
-                        if n_valid_pixels == 0:
-                            actual_method = "ht_no_valid_support"
-                            rejection_reason = "no_finite_shared_pixel_support"
+                    try:
+                        import numpy as np
+                        h_vec = np.asarray(h_vector, dtype=float)
+
+                        if h_matrix.shape[1] != len(h_vector):
+                            actual_method = "ht_shape_mismatch"
+                            observation_source = "none"
+                            rejection_reason = "operator_columns_do_not_match_state_graph"
+                        elif not pix_obs.is_per_pixel:
+                            actual_method = "ht_scalar_observation_unsupported"
+                            observation_source = "scalar_mean"
+                            rejection_reason = "pixel_level_observation_required"
                         else:
-                            residual = y_pred[valid_mask] - y_obs[valid_mask]
-                            rmse = float(np.sqrt(np.mean(residual ** 2)))
-            except ImportError:
-                actual_method = "ht_runtime_unavailable"
-                observation_source = "none"
-                rejection_reason = "numpy_unavailable"
-            except Exception as exc:
-                actual_method = "ht_projection_failed"
-                observation_source = "none"
-                rejection_reason = f"{type(exc).__name__}:{exc}"
+                            y_pred = np.asarray(h_matrix @ h_vec, dtype=float).reshape(-1)
+                            n_pixels = int(y_pred.size)
+                            if pix_obs.n_pixels != n_pixels:
+                                actual_method = "ht_support_mismatch"
+                                observation_source = "misaligned_per_pixel"
+                                rejection_reason = (
+                                    f"observation_pixels={pix_obs.n_pixels},"
+                                    f"operator_rows={n_pixels}"
+                                )
+                            else:
+                                y_obs = np.asarray(pix_obs.values, dtype=float).reshape(-1)
+                                valid_mask = np.asarray(
+                                    pix_obs.valid_mask, dtype=bool,
+                                ).reshape(-1)
+                                valid_mask &= np.isfinite(y_obs) & np.isfinite(y_pred)
+                                n_valid_pixels = int(np.count_nonzero(valid_mask))
+                                if n_valid_pixels == 0:
+                                    actual_method = "ht_no_valid_support"
+                                    rejection_reason = "no_finite_shared_pixel_support"
+                                else:
+                                    residual = y_pred[valid_mask] - y_obs[valid_mask]
+                                    rmse = float(np.sqrt(np.mean(residual ** 2)))
+                    except ImportError:
+                        actual_method = "ht_runtime_unavailable"
+                        observation_source = "none"
+                        rejection_reason = "numpy_unavailable"
+                    except Exception as exc:
+                        actual_method = "ht_projection_failed"
+                        observation_source = "none"
+                        rejection_reason = f"{type(exc).__name__}:{exc}"
+
+            # Determine per-observation status
+            is_primary = obs_name in PRIMARY_OBSERVATIONS
 
             if rmse is None:
                 status = "reject"
-                overall_pass = False
+                # Only primary observation rejections veto overall_pass
+                if is_primary:
+                    overall_pass = False
                 actions.append(f"demote_resolution:{obs_name}")
                 actions.append(f"block_state_update:{obs_name}")
             elif rmse <= thresholds["pass"]:
@@ -281,7 +324,9 @@ def _enforce_ht_per_pixel(
                 actions.append(f"increase_uncertainty:{obs_name}")
             else:
                 status = "reject"
-                overall_pass = False
+                # Only primary observation rejections veto overall_pass
+                if is_primary:
+                    overall_pass = False
                 actions.append(f"demote_resolution:{obs_name}")
                 actions.append(f"block_state_update:{obs_name}")
 
@@ -297,6 +342,7 @@ def _enforce_ht_per_pixel(
                 "threshold_pass": thresholds["pass"],
                 "threshold_reject": thresholds["reject"],
                 "status": status,
+                "is_primary": is_primary,
             }
             check_ledger.append(record)
 

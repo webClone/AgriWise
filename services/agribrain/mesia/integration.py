@@ -36,17 +36,49 @@ class MesiaAgriBrainBridge:
         target_grid: Optional[Any] = None,
         grid_dim: Optional[Tuple[int, int]] = None,
         cell_size_m: float = 10.0,
+        origin_x: float = 0.0,
+        origin_y: float = 0.0,
+        crs: Optional[str] = None,
+        boundary_mask: Optional[Any] = None,
     ) -> None:
         self.plot_id = plot_id
         if target_grid is not None:
             n_rows = getattr(target_grid, "n_rows", 5)
             n_cols = getattr(target_grid, "n_cols", 5)
             res_m = float(getattr(target_grid, "resolution_m", cell_size_m) or cell_size_m)
-            self.lattice = SharedBeliefLattice(plot_id=plot_id, cell_size_m=res_m, grid_dim=(n_rows, n_cols))
+            ox = float(getattr(target_grid, "origin_x", origin_x) or origin_x)
+            oy = float(getattr(target_grid, "origin_y", origin_y) or origin_y)
+            c = getattr(target_grid, "crs", crs)
+            self.lattice = SharedBeliefLattice(
+                plot_id=plot_id,
+                cell_size_m=res_m,
+                grid_dim=(n_rows, n_cols),
+                origin_east_m=ox,
+                origin_north_m=oy,
+                crs=str(c) if c else None,
+                boundary_mask=boundary_mask,
+                target_grid=target_grid,
+            )
         elif grid_dim is not None:
-            self.lattice = SharedBeliefLattice(plot_id=plot_id, cell_size_m=cell_size_m, grid_dim=grid_dim)
+            self.lattice = SharedBeliefLattice(
+                plot_id=plot_id,
+                cell_size_m=cell_size_m,
+                grid_dim=grid_dim,
+                origin_east_m=origin_x,
+                origin_north_m=origin_y,
+                crs=crs,
+                boundary_mask=boundary_mask,
+            )
         else:
-            self.lattice = SharedBeliefLattice(plot_id=plot_id, cell_size_m=cell_size_m, grid_dim=(5, 5))
+            self.lattice = SharedBeliefLattice(
+                plot_id=plot_id,
+                cell_size_m=cell_size_m,
+                grid_dim=(5, 5),
+                origin_east_m=origin_x,
+                origin_north_m=origin_y,
+                crs=crs,
+                boundary_mask=boundary_mask,
+            )
         self._active_capabilities: Dict[str, CapabilityAuthorityRecord] = {}
         self._revocation_history: List[RevocationEvent] = []
 
@@ -109,11 +141,17 @@ class MesiaAgriBrainBridge:
                     is_hash_valid = False
         
         if not native_uri.strip() or not is_hash_valid:
+            if target_microzone_id:
+                cell = self.lattice.get_cell(target_microzone_id)
+                fallback_mz = cell.microzone_id if cell else target_microzone_id
+            else:
+                cells = self.lattice.list_all_cells()
+                fallback_mz = cells[0].microzone_id if cells else f"{self.plot_id}_MZ_1_1"
             l0_record = Layer0EvidenceSpine.evaluate_admission(
                 proposal=ASMAEObservationOperator.create_innovation(
                     likelihood=BehaviourLikelihoodEngine.generate_likelihood(packet),
                     prior_state_vwc=prior_state_vwc,
-                    microzone_id=target_microzone_id or f"{self.plot_id}_MZ_1_1",
+                    microzone_id=fallback_mz,
                     depth_stratum="ROOT_ZONE_5_30CM",
                 ),
                 is_calibration_valid=False,
@@ -138,7 +176,12 @@ class MesiaAgriBrainBridge:
         likelihood = BehaviourLikelihoodEngine.generate_likelihood(packet, nuisance)
 
         # 3. Microzone target selection
-        mz_id = target_microzone_id or f"{self.plot_id}_MZ_1_1"
+        if target_microzone_id:
+            cell = self.lattice.get_cell(target_microzone_id)
+            mz_id = cell.microzone_id if cell else target_microzone_id
+        else:
+            cells = self.lattice.list_all_cells()
+            mz_id = cells[0].microzone_id if cells else f"{self.plot_id}_MZ_1_1"
 
         # 4. ASMAE Observation Operator
         innovation = ASMAEObservationOperator.create_innovation(

@@ -35,7 +35,8 @@ class HistoricalAssimilationRunner:
         geometry_hash: str,
         stack: SceneStack,
         daily_weather: Dict[str, Dict[str, float]],
-        crop_params: Optional[Dict[str, Any]] = None
+        crop_params: Optional[Dict[str, Any]] = None,
+        management_events: Optional[List[Any]] = None,
     ) -> HistoricalSmootherOutput:
         """
         Runs the complete forward Kalman filter and backward RTS smoother.
@@ -202,6 +203,7 @@ class HistoricalAssimilationRunner:
                     end_date=seg.end_date,
                     scenes=seg_scenes,
                     daily_weather=daily_weather,
+                    management_events=management_events,
                 )
                 seg_dict = {
                     "season_id": seg.season_id,

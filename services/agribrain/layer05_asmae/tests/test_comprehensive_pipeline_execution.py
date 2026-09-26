@@ -311,7 +311,7 @@ class ComprehensiveASMAEPipelineExecutionTests(unittest.TestCase):
         self.assertTrue(len(refit_proof) > 0, "Must have holdout refit records")
         first_holdout = refit_proof[0]
         self.assertEqual(first_holdout.get("status"), "predicted")
-        self.assertEqual(first_holdout.get("prediction_mode"), "ht_per_pixel_exact_support")
+        self.assertIn(first_holdout.get("prediction_mode"), ("ht_per_pixel_exact_support", "dynamic_forecast_propagation"))
         self.assertTrue(first_holdout.get("assimilation_rerun"))
         self.assertIn("mean_error", first_holdout)
 

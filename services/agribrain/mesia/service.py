@@ -37,6 +37,7 @@ if str(WORKSPACE_ROOT) not in sys.path:
 
 from services.agribrain.common.plot_namespace import PlotNamespace
 from services.agribrain.layer05_asmae.background_jobs import latest_job_for_plot, _read_json
+from services.agribrain.layer05_asmae.geometry.spatial_reference import TargetMicrozoneGrid
 from services.agribrain.mesia.opportunistic import (
     SensingModality,
     CellularDownlinkCorrelator,
@@ -111,6 +112,12 @@ from services.agribrain.layer05_asmae.observation import (
 
 class MesiaProductionService:
     """Production service for MESIA Signals of Opportunity & Spectrum Intelligence."""
+
+    _last_bridge: Optional[Any] = None
+
+    @classmethod
+    def get_last_bridge(cls) -> Optional[Any]:
+        return cls._last_bridge
 
     # Official TDA (Télédiffusion d'Algérie) High-Power DVB-T2 / Broadcast Stations
     ALGERIAN_TDA_TRANSMITTERS = [
@@ -514,9 +521,34 @@ class MesiaProductionService:
             if mean_ndvi is None:
                 mean_ndvi = snap.get("mean_ndvi") or snap.get("optical_indices", {}).get("mean_ndvi")
 
-            return {"root_zone": rz_grid, "canopy": cw_grid, "uncertainty": unc_grid, "mean_ndvi": mean_ndvi}
+            target_grid = None
+            grid_dict = snap.get("asmae", {}).get("target_grid") or snap.get("target_grid")
+            if isinstance(grid_dict, dict):
+                try:
+                    target_grid = TargetMicrozoneGrid(
+                        crs=str(grid_dict.get("crs", "EPSG:32631")),
+                        origin_x=float(grid_dict.get("origin_x", 0.0)),
+                        origin_y=float(grid_dict.get("origin_y", 0.0)),
+                        width_m=float(grid_dict.get("width_m", 100.0)),
+                        height_m=float(grid_dict.get("height_m", 100.0)),
+                        n_rows=int(grid_dict.get("n_rows", grid_dict.get("rows", 6))),
+                        n_cols=int(grid_dict.get("n_cols", grid_dict.get("cols", 6))),
+                        resolution_m=int(grid_dict.get("resolution_m", 10)),
+                    )
+                except Exception:
+                    pass
+            elif hasattr(grid_dict, "origin_x"):
+                target_grid = grid_dict
+
+            return {
+                "root_zone": rz_grid,
+                "canopy": cw_grid,
+                "uncertainty": unc_grid,
+                "mean_ndvi": mean_ndvi,
+                "target_grid": target_grid,
+            }
         except Exception:
-            return {"root_zone": None, "canopy": None, "uncertainty": None}
+            return {"root_zone": None, "canopy": None, "uncertainty": None, "target_grid": None}
 
     @classmethod
     def _compute_dubois_sentinel1_backscatter(
@@ -2279,6 +2311,22 @@ class MesiaProductionService:
 
         # 10. Compute aggregated 36 macro-zones for zone-constrained agronomic decisions
         grid_dim = 6
+        target_grid = raster_bundle.get("target_grid")
+        if target_grid is None:
+            utm_zone = int((centre_lon + 180) / 6) + 1
+            crs_str = f"EPSG:326{utm_zone:02d}" if centre_lat >= 0 else f"EPSG:327{utm_zone:02d}"
+            parcel_dim_m = 100.0
+            res_m = max(1, int(round(parcel_dim_m / float(grid_dim))))
+            target_grid = TargetMicrozoneGrid(
+                crs=crs_str,
+                origin_x=0.0,
+                origin_y=0.0,
+                width_m=float(res_m * grid_dim),
+                height_m=float(res_m * grid_dim),
+                n_rows=grid_dim,
+                n_cols=grid_dim,
+                resolution_m=res_m,
+            )
         spatial_microzones = []
 
         if real_grid is not None and real_grid.size > 0:
@@ -2460,7 +2508,12 @@ class MesiaProductionService:
         ]
 
         # Verify optical immunity (Principle P-08), ingest into Layer 0 bridge, and embed TruthEnvelope
-        bridge = MesiaAgriBrainBridge(plot_id=plot_id)
+        bridge = MesiaAgriBrainBridge(
+            plot_id=plot_id,
+            target_grid=target_grid,
+            grid_dim=(grid_dim, grid_dim),
+        )
+        cls._last_bridge = bridge
         lane_packet_configs = [
             (
                 "mesia_gnssr_in_situ_vwc",
@@ -2916,6 +2969,15 @@ class MesiaProductionService:
                     {"stratum": "DEEP_SUBSOIL_30_100CM", "physical_observable": "Deep Ground Penetration & Water Table", "band": "Broadcast UHF (470–700 MHz)"},
                 ],
                 "microzone_count": len(spatial_microzones),
+                "bridge_lattice": {
+                    "dimensions": {"rows": bridge.lattice.grid_dim[0], "cols": bridge.lattice.grid_dim[1]},
+                    "cell_count": len(bridge.lattice.list_all_cells()),
+                    "cell_ids": [c.microzone_id for c in bridge.lattice.list_all_cells()],
+                    "target_crs": bridge.lattice.crs,
+                    "cell_size_m": bridge.lattice.cell_size_m,
+                    "origin_east_m": bridge.lattice.origin_east_m,
+                    "origin_north_m": bridge.lattice.origin_north_m,
+                },
             },
             "data_lineage": {
                 "source_orbital_ephemeris": "Celestrak NORAD Broadcast TLEs via SGP4 (Orbital Geometry)",

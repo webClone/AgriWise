@@ -1036,18 +1036,68 @@ class ASMAEEngine:
 
         base_raster_vigor = getattr(inp, "base_raster_vigor", None)
         base_raster_water = getattr(inp, "base_raster_water", None)
-        if (base_raster_vigor is None or base_raster_water is None) and getattr(self, "_scene_stack", None):
-            import numpy as np
-            for sc in self._scene_stack:
-                runtime_sc = getattr(sc, "runtime", sc)
-                bands = getattr(runtime_sc, "bands", {}) or {}
-                if base_raster_vigor is None and "ndvi" in bands and isinstance(bands["ndvi"], np.ndarray):
-                    base_raster_vigor = bands["ndvi"]
-                if base_raster_water is None:
-                    for wb in ("ndmi", "ndwi", "canopy_water"):
-                        if wb in bands and isinstance(bands[wb], np.ndarray):
-                            base_raster_water = bands[wb]
-                            break
+        
+        # Geographically align raster helper
+        def _align_band(arr: Any, src_tr: Any, s_crs: str) -> Optional[Any]:
+            if arr is None or not isinstance(arr, np.ndarray) or arr.ndim != 2:
+                return None
+            try:
+                from rasterio.warp import reproject, Resampling
+                from .geometry.spatial_reference import affine_from_gdal
+                from rasterio.transform import Affine
+
+                dst_aff = Affine(
+                    float(resolution_m), 0.0, float(origin_x),
+                    0.0, -float(resolution_m), float(origin_y),
+                )
+                src_aff = affine_from_gdal(src_tr) if src_tr else dst_aff
+                dst_arr = np.full((n_zone_rows, n_zone_cols), np.nan, dtype=np.float32)
+                reproject(
+                    source=np.asarray(arr, dtype=np.float32),
+                    destination=dst_arr,
+                    src_transform=src_aff,
+                    src_crs=s_crs or crs,
+                    dst_transform=dst_aff,
+                    dst_crs=crs,
+                    resampling=Resampling.bilinear,
+                    dst_nodata=np.nan,
+                )
+                valid = np.isfinite(dst_arr)
+                if np.any(valid):
+                    dst_arr[~valid] = float(np.mean(dst_arr[valid]))
+                    return dst_arr
+            except Exception:
+                pass
+            return arr
+
+        import numpy as np
+        candidate_scenes = []
+        if production_scenes:
+            candidate_scenes.extend(production_scenes)
+        elif getattr(self, "_production_scenes", None):
+            candidate_scenes.extend(self._production_scenes)
+        elif getattr(self, "_scene_stack", None):
+            stk = self._scene_stack
+            rts = getattr(stk, "runtimes", None)
+            if not rts and hasattr(stk, "scenes"):
+                rts = [item.get("runtime", item) if isinstance(item, dict) else getattr(item, "runtime", item) for item in stk.scenes]
+            if rts:
+                candidate_scenes.extend(rts)
+
+        for sc in candidate_scenes:
+            runtime_sc = sc.get("runtime", sc) if isinstance(sc, dict) else getattr(sc, "runtime", sc)
+            bands = getattr(runtime_sc, "bands", {}) or {}
+            sc_transform = getattr(runtime_sc, "transform", None)
+            sc_crs = getattr(runtime_sc, "crs", crs)
+            if base_raster_vigor is None and "ndvi" in bands and isinstance(bands["ndvi"], np.ndarray):
+                base_raster_vigor = _align_band(bands["ndvi"], sc_transform, sc_crs)
+            if base_raster_water is None:
+                for wb in ("ndmi", "ndwi", "canopy_water"):
+                    if wb in bands and isinstance(bands[wb], np.ndarray):
+                        base_raster_water = _align_band(bands[wb], sc_transform, sc_crs)
+                        break
+            if base_raster_vigor is not None and base_raster_water is not None:
+                break
 
         from .graph.biophysical_microzones import delineate_biophysical_microzones
         soil_clusters, irrigation_groups, biophysical_profiles = delineate_biophysical_microzones(

@@ -404,6 +404,7 @@ class PlotWorldlineService:
             stack,
             daily_weather,
             crop_params=dict(context.get("crop_context") or {}),
+            management_events=context.get("management_events"),
         )
         backtest = YearlyBacktest(runner).run_backtest(
             plot_id, geometry_hash, stack.scenes, daily_weather

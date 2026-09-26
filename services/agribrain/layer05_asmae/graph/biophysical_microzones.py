@@ -157,7 +157,7 @@ def delineate_biophysical_microzones(
             # When real spatial evidence is present, vary retention according to observed water/soil patterns.
             # When no spatial evidence is supplied, do NOT fabricate artificial center-to-edge gradients!
             if has_spatial_evidence:
-                retention_base = 0.5 + 0.3 * (local_water - 0.45)
+                retention_base = 0.5 + 0.3 * (local_water - 0.45) - 0.15 * (norm_radius - 0.5)
             else:
                 retention_base = 0.50
             if drought_events:

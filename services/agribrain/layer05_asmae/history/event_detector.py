@@ -107,7 +107,7 @@ class IntraSeasonalEventDetector:
             w = daily_weather.get(day_str)
 
             # Preserve missing-weather status: absent weather must NOT be assumed to have zero precip and 3.5mm ET0
-            if not w or not isinstance(w, dict) or (w.get("precipitation") is None and w.get("et0") is None and w.get("temperature") is None and w.get("temp") is None):
+            if not w or not isinstance(w, dict):
                 # Close any completed observed drought window prior to the missing interval
                 if consecutive_deficit_days >= self.drought_min_days and cum_deficit >= self.drought_deficit_threshold_mm and drought_start_dt:
                     events.append(SeasonalEventRecord(
@@ -133,17 +133,16 @@ class IntraSeasonalEventDetector:
                 drought_start_dt = None
                 continue
 
-            precip = float(w.get("precipitation", 0.0) or 0.0)
-            et0 = float(w.get("et0", 0.0) or 0.0)
-            if et0 <= 0.0:
-                t_mean = float(w.get("temperature", w.get("temp", 20.0)) or 20.0)
-                et0 = max(0.5, min(7.0, 0.15 * t_mean)) if (w.get("temperature") is not None or w.get("temp") is not None) else 3.5
+            raw_precip = w.get("precipitation") if w.get("precipitation") is not None else w.get("rain")
+            precip = float(raw_precip) if raw_precip is not None else None
+
+            raw_et0 = w.get("et0")
+            et0 = float(raw_et0) if raw_et0 is not None else None
 
             applied_irr = irrigation_by_day.get(day_str, 0.0)
-            total_water_inflow = precip + applied_irr
 
-            # Rain detection
-            if precip >= self.rain_threshold_mm:
+            # Rain detection (only if precipitation is explicitly observed)
+            if precip is not None and precip >= self.rain_threshold_mm:
                 events.append(SeasonalEventRecord(
                     event_id=f"{season_id}_rain_{event_idx}",
                     event_type="rain",
@@ -152,7 +151,7 @@ class IntraSeasonalEventDetector:
                     peak_date=day_dt,
                     severity=min(1.0, precip / 50.0),
                     confidence=0.95,
-                    sensor_evidence={"precipitation_mm": precip, "et0_mm": et0},
+                    sensor_evidence={"precipitation_mm": precip, "et0_mm": et0 if et0 is not None else 0.0},
                     symptom_progression=["surface_saturation", "transpiration_recovery"]
                 ))
                 event_idx += 1
@@ -168,7 +167,36 @@ class IntraSeasonalEventDetector:
                 cum_deficit = 0.0
                 drought_start_dt = None
 
-            # Drought accumulation accounting for precipitation and irrigation
+            # If either precipitation or ET0 is missing, atmospheric water balance cannot be asserted.
+            # Preserve missing status and do not fabricate a drought deficit from unmeasured variables.
+            if precip is None or et0 is None:
+                if consecutive_deficit_days >= self.drought_min_days and cum_deficit >= self.drought_deficit_threshold_mm and drought_start_dt:
+                    events.append(SeasonalEventRecord(
+                        event_id=f"{season_id}_drought_{event_idx}",
+                        event_type="drought",
+                        start_date=drought_start_dt,
+                        end_date=day_dt - timedelta(days=1),
+                        peak_date=drought_start_dt + timedelta(days=consecutive_deficit_days // 2),
+                        severity=min(1.0, cum_deficit / 80.0),
+                        confidence=0.75,
+                        sensor_evidence={
+                            "duration_days": consecutive_deficit_days,
+                            "cumulative_deficit_mm": round(cum_deficit, 1)
+                        },
+                        symptom_progression=[
+                            "soil_moisture_depletion",
+                            "stomatal_closure",
+                        ]
+                    ))
+                    event_idx += 1
+                consecutive_deficit_days = 0
+                cum_deficit = 0.0
+                drought_start_dt = None
+                continue
+
+            total_water_inflow = precip + applied_irr
+
+            # Drought accumulation accounting for precipitation, irrigation, and valid zero ET0
             net_deficit = max(0.0, et0 - total_water_inflow)
             if net_deficit > 1.5:
                 if consecutive_deficit_days == 0:

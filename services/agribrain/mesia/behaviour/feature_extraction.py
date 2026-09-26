@@ -16,6 +16,20 @@ from typing import Any, Dict, List, Optional
 from ..contracts.observation import RadioObservationPacket
 
 
+CALIBRATED_BASELINES: Dict[str, Dict[str, float]] = {
+    "GNSS": {"expected_baseline_snr_db": 18.5, "calibration_uncertainty_db": 0.5},
+    "WIFI": {"expected_baseline_snr_db": 22.0, "calibration_uncertainty_db": 0.8},
+    "CELLULAR": {"expected_baseline_snr_db": 15.0, "calibration_uncertainty_db": 1.2},
+    "UHF": {"expected_baseline_snr_db": 12.0, "calibration_uncertainty_db": 1.5},
+    "BROADCAST_UHF": {"expected_baseline_snr_db": 12.0, "calibration_uncertainty_db": 1.5},
+    "LORA": {"expected_baseline_snr_db": 14.0, "calibration_uncertainty_db": 1.0},
+    "RADAR": {"expected_baseline_snr_db": 20.0, "calibration_uncertainty_db": 1.0},
+    "GPR": {"expected_baseline_snr_db": 25.0, "calibration_uncertainty_db": 0.5},
+    "UWB": {"expected_baseline_snr_db": 25.0, "calibration_uncertainty_db": 0.5},
+    "RFID": {"expected_baseline_snr_db": 16.0, "calibration_uncertainty_db": 1.0},
+}
+
+
 @dataclass(frozen=True)
 class ExtractedBehaviourFeatures:
     """Features extracted from a native RadioObservationPacket."""
@@ -23,8 +37,9 @@ class ExtractedBehaviourFeatures:
     packet_id: str
     radio_family: str
     extracted_at: datetime
-    features: Dict[str, float]
+    features: Dict[str, Any]
     lineage_hash: str
+    calibration_state_id: Optional[str] = None
 
     def content_hash(self) -> str:
         d = {
@@ -33,6 +48,7 @@ class ExtractedBehaviourFeatures:
             "extracted_at": self.extracted_at.isoformat(),
             "features": self.features,
             "lineage_hash": self.lineage_hash,
+            "calibration_state_id": self.calibration_state_id,
         }
         raw = json.dumps(d, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -44,7 +60,7 @@ class NativeFeatureExtractor:
     @staticmethod
     def extract_features(packet: RadioObservationPacket) -> ExtractedBehaviourFeatures:
         """Extract family-specific features preserving exact lineage."""
-        features: Dict[str, float] = {}
+        features: Dict[str, Any] = {}
 
         # 1. Common signal properties
         if packet.snr_db is not None:
@@ -56,7 +72,24 @@ class NativeFeatureExtractor:
         if packet.bandwidth_hz is not None:
             features["bandwidth_hz"] = float(packet.bandwidth_hz)
 
-        # 2. Family-specific feature derivation
+        # 2. Calibration baseline lookup
+        profile_upper = (packet.source_profile or "").upper()
+        cal_id_upper = (packet.calibration_state_id or "").upper()
+        matched_baseline = None
+        for fam_key, baseline_info in CALIBRATED_BASELINES.items():
+            if fam_key in profile_upper or fam_key in cal_id_upper:
+                matched_baseline = baseline_info
+                break
+
+        if matched_baseline is None:
+            matched_baseline = {"expected_baseline_snr_db": 20.0, "calibration_uncertainty_db": 2.0}
+
+        features["expected_baseline_snr_db"] = float(matched_baseline["expected_baseline_snr_db"])
+        features["calibration_uncertainty_db"] = float(matched_baseline["calibration_uncertainty_db"])
+        if packet.calibration_state_id:
+            features["calibration_state_id"] = packet.calibration_state_id
+
+        # 3. Family-specific feature derivation
         profile = packet.source_profile.split("/")[0] if packet.source_profile else ""
 
         if "WIFI" in profile:
@@ -86,4 +119,5 @@ class NativeFeatureExtractor:
             extracted_at=now,
             features=features,
             lineage_hash=packet.native_data_hash or packet.content_hash(),
+            calibration_state_id=packet.calibration_state_id or None,
         )

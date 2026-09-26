@@ -33,7 +33,11 @@ class ObservabilityAnalyzer:
 
         for p in link_profiles:
             for mz_id, w in p.weights_by_microzone.items():
-                if mz_id in cell_coverage:
+                cell = lattice.get_cell(mz_id)
+                target_id = cell.microzone_id if cell else mz_id
+                if target_id in cell_coverage:
+                    cell_coverage[target_id] += w
+                elif mz_id in cell_coverage:
                     cell_coverage[mz_id] += w
 
         supported_zones: List[str] = []
@@ -60,7 +64,11 @@ class ObservabilityAnalyzer:
             A = np.zeros((len(link_profiles), len(supported_zones)))
             for i, p in enumerate(link_profiles):
                 for mz_id, w in p.weights_by_microzone.items():
-                    if mz_id in zone_idx:
+                    cell = lattice.get_cell(mz_id)
+                    target_id = cell.microzone_id if cell else mz_id
+                    if target_id in zone_idx:
+                        A[i, zone_idx[target_id]] = w
+                    elif mz_id in zone_idx:
                         A[i, zone_idx[mz_id]] = w
             
             # Fisher Information Matrix = A^T * A

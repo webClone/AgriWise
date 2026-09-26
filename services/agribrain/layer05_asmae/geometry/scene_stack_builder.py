@@ -77,6 +77,12 @@ class SceneStack:
     def quality_scores(self) -> List[SceneQualityResult]:
         return [s["quality"] for s in self.scenes]
 
+    def __iter__(self):
+        return iter(self.scenes)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self.scenes[idx]
+
     def total_included(self) -> int:
         return len(self.scenes)
 

@@ -145,14 +145,20 @@ def forecast_held_out_scene(
     soil_context: Optional[dict] = None,
     delta_days: float = 1.0,
     rng: Optional[Any] = None,
+    previous_time: Optional[Any] = None,
+    current_time: Optional[Any] = None,
+    weather_daily_series: Optional[dict] = None,
+    management_events: Optional[List[dict]] = None,
 ) -> Dict[str, Any]:
     """Propagate training state forward to holdout time and evaluate closure against H_holdout.
 
     Computes both persistence_rmse (baseline) and prospective_forecast_rmse (dynamic model),
     reporting the comparative forecast_skill_score = 1 - (forecast_rmse / persistence_rmse).
+    Shares the exact same day-by-day temporal integration as normal assimilation.
     """
     import random
-    from ..assimilation.filter import forecast_step
+    from datetime import datetime, timedelta
+    from ..assimilation.filter import forecast_step, _forecast_elapsed_interval
 
     # 1. Baseline: Frozen persistence
     persistence_result = predict_held_out_scene(
@@ -166,7 +172,7 @@ def forecast_held_out_scene(
     if persistence_result.get("status") != "predicted":
         return persistence_result
 
-    # 2. Dynamic Forward Propagation via ASMAE transition equations
+    # 2. Dynamic Forward Propagation via ASMAE transition equations (shared daily temporal integration)
     if delta_days > 0.0 and training_state:
         ensemble_in = {
             node: [list(state)]
@@ -180,15 +186,40 @@ def forecast_held_out_scene(
                 str(getattr(holdout_scene, "scene_id", "holdout_scene")),
                 str(int(delta_days * 100)),
             )
-            propagated_ens = forecast_step(
-                ensemble=ensemble_in,
-                priors={},
-                crop_context=crop_context or {},
-                rng=generator,
-                weather_day=weather_day or {},
-                soil_context=soil_context or {},
-                delta_days=delta_days,
-            )
+
+            t_holdout = current_time or getattr(holdout_scene, "acquisition_time", None)
+            if previous_time and t_holdout and isinstance(previous_time, datetime) and isinstance(t_holdout, datetime) and previous_time < t_holdout:
+                propagated_ens, _ = _forecast_elapsed_interval(
+                    ensemble=ensemble_in,
+                    previous_time=previous_time,
+                    current_time=t_holdout,
+                    priors={},
+                    crop_context=crop_context or {},
+                    rng=generator,
+                    scenes=[holdout_scene],
+                    weather_daily_series=weather_daily_series or ({t_holdout.strftime("%Y-%m-%d"): weather_day} if weather_day else {}),
+                    soil_context=soil_context or {},
+                    management_events=management_events or [],
+                )
+            else:
+                # When exact timestamps are not provided, advance in daily steps (<= 1.0 day each)
+                # to preserve nonlinear water dynamics identical to normal assimilation
+                curr_ens = ensemble_in
+                remaining = float(delta_days)
+                while remaining > 0.0:
+                    step = min(1.0, remaining)
+                    curr_ens = forecast_step(
+                        ensemble=curr_ens,
+                        priors={},
+                        crop_context=crop_context or {},
+                        rng=generator,
+                        weather_day=weather_day or {},
+                        soil_context=soil_context or {},
+                        delta_days=step,
+                    )
+                    remaining -= step
+                propagated_ens = curr_ens
+
             propagated_state = {
                 node: propagated_ens[node][0]
                 for node in propagated_ens

@@ -970,6 +970,8 @@ def forecast_step(
             radiation_factor = max(0.0, min(1.0, radiation / 25.0))
             updated = current + delta_days * (
                 0.01 * radiation_factor - 0.01 * max(0.0, -normalized_daily_water_delta)
+            ) + generator.normal(
+                0.0, 0.035 * missing_driver_scale * sqrt_delta_days, member_shape,
             )
         elif name == "stress_memory":
             heat_signal = max(0.0, min(1.0, (float(temp_max) - optimal_temperature) / (maximum_temperature - optimal_temperature))) if temp_max is not None else 0.0
