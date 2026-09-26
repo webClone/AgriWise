@@ -2705,14 +2705,21 @@ def run_orchestrator(
     results[LayerId.L5] = l5_res
     
     # --- Full diagnostic ledger and tribunal, before any action consumer ---
+    pre_action_diagnostic = {
+        "status": "failed_closed",
+        "errors": [],
+    }
+    pre_action_manifest = {}
+    pre_action_entries = []
+    action_manifest_allowed = False
     try:
         from services.agribrain.diagnostic_integration import InfluenceUse
         pre_action_diagnostic = _build_diagnostic_integration(
             results, run_id, ts_now, InfluenceUse.PRESCRIPTION_DRIVER,
             policy_snapshot=inputs.policy_snapshot,
         )
-        pre_action_manifest = pre_action_diagnostic.get("influence_manifest", {})
-        pre_action_entries = pre_action_manifest.get("entries", [])
+        pre_action_manifest = pre_action_diagnostic.get("influence_manifest", {}) or {}
+        pre_action_entries = pre_action_manifest.get("entries", []) or []
         action_manifest_allowed = bool(
             pre_action_diagnostic.get("status") == "completed"
             and pre_action_manifest.get("requested_use") == "PRESCRIPTION_DRIVER"
@@ -2724,6 +2731,8 @@ def run_orchestrator(
             "status": "failed_closed",
             "errors": [{"layer_id": "L2-L5", "error": str(diagnostic_exc)}],
         }
+        pre_action_manifest = {}
+        pre_action_entries = []
         action_manifest_allowed = False
 
     # Legacy L3/L4/L5 plans are never canonical action inputs.  Keep an empty

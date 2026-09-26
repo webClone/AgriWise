@@ -30,9 +30,23 @@ from .assimilation.capability_governance import CapabilityGovernanceAuthority
 class MesiaAgriBrainBridge:
     """Full-system integration bridge between MESIA, Layer 0, and ASMAE."""
 
-    def __init__(self, plot_id: str = "PLOT_DEFAULT") -> None:
+    def __init__(
+        self,
+        plot_id: str = "PLOT_DEFAULT",
+        target_grid: Optional[Any] = None,
+        grid_dim: Optional[Tuple[int, int]] = None,
+        cell_size_m: float = 10.0,
+    ) -> None:
         self.plot_id = plot_id
-        self.lattice = SharedBeliefLattice(plot_id=plot_id, cell_size_m=10.0, grid_dim=(5, 5))
+        if target_grid is not None:
+            n_rows = getattr(target_grid, "n_rows", 5)
+            n_cols = getattr(target_grid, "n_cols", 5)
+            res_m = float(getattr(target_grid, "resolution_m", cell_size_m) or cell_size_m)
+            self.lattice = SharedBeliefLattice(plot_id=plot_id, cell_size_m=res_m, grid_dim=(n_rows, n_cols))
+        elif grid_dim is not None:
+            self.lattice = SharedBeliefLattice(plot_id=plot_id, cell_size_m=cell_size_m, grid_dim=grid_dim)
+        else:
+            self.lattice = SharedBeliefLattice(plot_id=plot_id, cell_size_m=cell_size_m, grid_dim=(5, 5))
         self._active_capabilities: Dict[str, CapabilityAuthorityRecord] = {}
         self._revocation_history: List[RevocationEvent] = []
 

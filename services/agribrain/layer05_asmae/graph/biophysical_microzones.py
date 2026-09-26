@@ -98,15 +98,35 @@ def delineate_biophysical_microzones(
     fertilization_events = [e for e in events_list if getattr(e, "event_type", "") == "fertilization"]
     deficiency_events = [e for e in events_list if getattr(e, "event_type", "") == "nutrient_deficiency"]
 
-    # Calculate global event intensities from archive
-    mean_irr_delta = np.mean([getattr(e, "sar_delta_db", 2.0) for e in irrigation_events]) if irrigation_events else 2.0
-    mean_drought_severity = np.mean([getattr(e, "cumulative_deficit_mm", 40.0) for e in drought_events]) if drought_events else 35.0
-    mean_fert_acceleration = np.mean([getattr(e, "ndvi_acceleration", 0.15) for e in fertilization_events]) if fertilization_events else 0.15
+    # Calculate global event intensities from archive (checking both top-level and sensor_evidence payloads)
+    def _get_metric(event_obj: Any, key: str, default: float) -> float:
+        val = getattr(event_obj, key, None)
+        if val is not None:
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                pass
+        evidence = getattr(event_obj, "sensor_evidence", None)
+        if isinstance(evidence, dict) and key in evidence and evidence[key] is not None:
+            try:
+                return float(evidence[key])
+            except (ValueError, TypeError):
+                pass
+        return default
+
+    mean_irr_delta = np.mean([_get_metric(e, "sar_delta_db", 2.0) for e in irrigation_events]) if irrigation_events else 2.0
+    mean_drought_severity = np.mean([_get_metric(e, "cumulative_deficit_mm", 40.0) for e in drought_events]) if drought_events else 35.0
+    mean_fert_acceleration = np.mean([_get_metric(e, "ndvi_acceleration", 0.15) for e in fertilization_events]) if fertilization_events else 0.15
 
     # Center coordinates for radial/pivot sector delineation
     center_r = (n_rows - 1) / 2.0
     center_c = (n_cols - 1) / 2.0
     max_radius = max(math.hypot(center_r, center_c), 1.0)
+
+    has_spatial_evidence = (
+        (base_raster_vigor is not None and isinstance(base_raster_vigor, np.ndarray)) or
+        (base_raster_water is not None and isinstance(base_raster_water, np.ndarray))
+    )
 
     # Base raster sampling helper
     def _sample_raster(grid: Optional[np.ndarray], r: int, c: int, default: float) -> float:
@@ -134,16 +154,22 @@ def delineate_biophysical_microzones(
             local_water = _sample_raster(base_raster_water, r, c, 0.45)
 
             # 1. Hydrological retention index:
-            # Low spots / center retain more moisture; peripheral sandy edges dry out faster
-            # Calibrated by historical drought severity and irrigation events
-            retention_base = 0.5 + 0.3 * (local_water - 0.45) - 0.15 * (norm_radius - 0.5)
+            # When real spatial evidence is present, vary retention according to observed water/soil patterns.
+            # When no spatial evidence is supplied, do NOT fabricate artificial center-to-edge gradients!
+            if has_spatial_evidence:
+                retention_base = 0.5 + 0.3 * (local_water - 0.45)
+            else:
+                retention_base = 0.50
             if drought_events:
                 retention_base += 0.05 * min(1.0, mean_drought_severity / 50.0)
             retention_idx = float(np.clip(retention_base, 0.05, 0.95))
 
             # 2. Nutrient responsiveness index:
             # High responsiveness where vigor accelerates after fertilization
-            fert_base = 0.5 + 0.4 * (local_vigor - 0.50)
+            if has_spatial_evidence:
+                fert_base = 0.5 + 0.4 * (local_vigor - 0.50)
+            else:
+                fert_base = 0.50
             if fertilization_events:
                 fert_base += 0.1 * min(1.0, mean_fert_acceleration / 0.20)
             if deficiency_events:
@@ -153,15 +179,19 @@ def delineate_biophysical_microzones(
             # 3. Salinity persistence index:
             # Identified by low vigor combined with high water (waterlogged saline crust)
             salinity_score = 0.1
-            if local_vigor < 0.35 and local_water > 0.40:
-                salinity_score = 0.65 + 0.25 * (0.35 - local_vigor)
-            elif local_vigor < 0.25:
-                salinity_score = 0.45
+            if has_spatial_evidence:
+                if local_vigor < 0.35 and local_water > 0.40:
+                    salinity_score = 0.65 + 0.25 * (0.35 - local_vigor)
+                elif local_vigor < 0.25:
+                    salinity_score = 0.45
             salinity_idx = float(np.clip(salinity_score, 0.02, 0.98))
 
             # 4. Thermal sensitivity:
-            # Higher in low retention, low vigor dry edges
-            thermal_score = 0.3 + 0.3 * (1.0 - retention_idx) + 0.2 * (1.0 - local_vigor)
+            # Reflects retention and vigor when spatial evidence exists, uniform prior otherwise
+            if has_spatial_evidence:
+                thermal_score = 0.3 + 0.3 * (1.0 - retention_idx) + 0.2 * (1.0 - local_vigor)
+            else:
+                thermal_score = 0.50
             thermal_idx = float(np.clip(thermal_score, 0.05, 0.95))
 
             # Biophysical classification
@@ -184,11 +214,17 @@ def delineate_biophysical_microzones(
                 block_r = int(min(3, r // max(1, n_rows // 4)))
                 block_c = int(min(1, c // max(1, n_cols // 2)))
                 irr_group = f"linear_block_r{block_r}_c{block_c}"
-            else:
-                # Pivot sectoring: 4 radial quadrants x 2 concentric rings (inner / outer span)
+            elif any(k in irr_type for k in ("pivot", "center_pivot")):
+                # Center pivot: explicit sectors
                 span = "inner" if norm_radius < 0.55 else "outer"
                 sector_quadrant = int(((angle + math.pi) / (math.pi / 2.0))) % 4
                 irr_group = f"pivot_span_{span}_sec_{sector_quadrant}"
+            elif irr_type in ("rainfed", "dryland", "none"):
+                irr_group = "rainfed_uniform"
+            else:
+                # Unknown irrigation system: default to single uniform management block
+                # rather than assuming center pivot without evidence
+                irr_group = "unspecified_uniform"
 
             profile = MicrozoneBiophysicalProfile(
                 microzone_id=mz_id,

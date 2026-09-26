@@ -296,15 +296,60 @@ def run_retrovalidation(
             1 for report in fold_state.get("update_report", [])
             if isinstance(report, dict) and report.get("update_applied") is True
         )
-        pred_result = predict_held_out_scene(
+        from .future_projection import forecast_held_out_scene, predict_held_out_scene
+
+        # Compute forecast horizon delta_days between last training scene and holdout scene
+        delta_days = 1.0
+        if training_scenes:
+            t_train = getattr(training_scenes[-1], "acquisition_time", None)
+            t_holdout = getattr(holdout_scene, "acquisition_time", None)
+            if hasattr(t_train, "timestamp") and hasattr(t_holdout, "timestamp"):
+                delta_days = max(0.0, (t_holdout.timestamp() - t_train.timestamp()) / 86400.0)
+            elif isinstance(t_train, str) and isinstance(t_holdout, str):
+                try:
+                    from datetime import datetime as dt_cls
+                    dt_train = dt_cls.fromisoformat(t_train.replace("Z", "+00:00"))
+                    dt_holdout = dt_cls.fromisoformat(t_holdout.replace("Z", "+00:00"))
+                    delta_days = max(0.0, (dt_holdout.timestamp() - dt_train.timestamp()) / 86400.0)
+                except Exception:
+                    pass
+
+        # Weather available at forecast issuance
+        holdout_time = getattr(holdout_scene, "acquisition_time", None)
+        holdout_date_str = holdout_time.strftime("%Y-%m-%d") if hasattr(holdout_time, "strftime") else (str(holdout_time)[:10] if holdout_time else "")
+        weather_day = None
+        training_weather_series = _training_weather(
+            (evidence_context or {}).get("weather_daily_series", {}),
+            training_scenes,
+            holdout_scene,
+        )
+        if training_weather_series:
+            weather_day = training_weather_series.get(holdout_date_str) or next(iter(reversed(list(training_weather_series.values()))), {})
+
+        forecast_rng = make_rng(
+            run_id=f"{identity.get('run_id', 'retro')}:forecast:{holdout_id}",
+            plot_id=identity.get("plot_id", "retro"),
+            geometry_hash=identity.get("geometry_hash", "retro"),
+        )
+
+        pred_result = forecast_held_out_scene(
             training_state=training_state,
             holdout_scene=holdout_scene,
             operator=holdout_op,
+            weather_day=weather_day,
+            crop_context=(evidence_context or {}).get("crop_context", {}),
+            soil_context=(evidence_context or {}).get("soil_context", {}),
+            delta_days=delta_days,
+            rng=forecast_rng,
         )
         fold_proof["status"] = pred_result.get("status", "unknown")
         fold_proof["prediction_mode"] = pred_result.get("prediction_mode", "none")
         fold_proof["mean_error"] = pred_result.get("mean_error")
+        fold_proof["prospective_forecast_rmse"] = pred_result.get("prospective_forecast_rmse")
+        fold_proof["persistence_rmse"] = pred_result.get("persistence_rmse")
+        fold_proof["forecast_skill_score"] = pred_result.get("forecast_skill_score")
         fold_proof["per_microzone_error"] = pred_result.get("per_microzone_error", {})
+        fold_proof["forecast_state"] = pred_result.get("forecast_state")
         fold_proof["training_state"] = training_state
         fold_proof['training_sigmas'] = fold_state.get('uncertainty_maps', {})
         fold_proof['training_timeline'] = fold_state.get('state_timeline', [])

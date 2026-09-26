@@ -1669,7 +1669,14 @@ def update_step_ht(
                 local_support.T @ valid_observed, dtype=float,
             ).reshape(-1)
             active_sums = support_sums[active_positions]
-            local_predictions = zone_predictions[active_positions, :]
+            # Construct predictions in consistent observation space (H-weighted support matching local_observed)
+            # to guarantee that zero innovation produces zero mean adjustment.
+            weighted_predictions = np.asarray(
+                local_support.T @ valid_predictions, dtype=float,
+            )
+            local_predictions = (
+                weighted_predictions[active_positions, :] / active_sums[:, None]
+            )
             local_observed = (
                 weighted_observed[active_positions] / active_sums
             )

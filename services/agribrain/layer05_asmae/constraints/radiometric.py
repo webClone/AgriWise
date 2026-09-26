@@ -35,6 +35,7 @@ def enforce_radiometric_consistency(
     operators: Optional[list] = None,
     scenes: Optional[list] = None,
     expected_resolution_m: Optional[int] = None,
+    state_timeline: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Enforce H_t · h(x̂_t) ≈ y_t for all available observations.
 
@@ -42,6 +43,7 @@ def enforce_radiometric_consistency(
     Falls back to proxy_average otherwise (marked as non-scientific).
     V922: Asserts operators match expected resolution if provided.
     V922.2A: Truthful per-observation mode labeling (5 modes).
+    Compares observation at time t with estimated state at time t using state_timeline.
     """
     # V922: Chain integrity assertion — operators must match resolution
     if expected_resolution_m is not None and operators:
@@ -62,6 +64,7 @@ def enforce_radiometric_consistency(
     if has_real_ht and operators and scenes:
         result = _enforce_ht_per_pixel(
             state_estimates, operators, scenes, all_forward,
+            state_timeline=state_timeline,
         )
     else:
         result = _enforce_proxy_average(
@@ -146,6 +149,7 @@ def _enforce_ht_per_pixel(
     operators: list,
     scenes: list,
     all_forward: dict,
+    state_timeline: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """V79B: Real Hₜ-aware radiometric check with per-pixel y_obs.
 
@@ -154,7 +158,7 @@ def _enforce_ht_per_pixel(
     resampling, padding, scalar broadcasting, or mean fallback is permitted.
 
     For each scene/operator pair and each observation type:
-      1. Compute h(x̂) per microzone → h_vector
+      1. Compute h(x̂_t) per microzone from state estimated at time t → h_vector
       2. Project: y_pred = H_t @ h_vector
       3. Extract y_obs = real per-pixel observation vector from scene
       4. Compute RMSE over valid pixels: RMSE(y_pred[valid], y_obs[valid])
@@ -177,6 +181,12 @@ def _enforce_ht_per_pixel(
         if getattr(op, "scene_id", None)
     }
 
+    timeline_by_scene_id: Dict[str, Dict[str, List[float]]] = {}
+    if state_timeline:
+        for snap in state_timeline:
+            if isinstance(snap, dict) and snap.get("scene_id") and snap.get("means"):
+                timeline_by_scene_id[str(snap["scene_id"])] = snap["means"]
+
     for scene in scenes:
         scene_id = str(getattr(scene, "scene_id", ""))
         op = op_by_scene_id.get(scene_id)
@@ -185,6 +195,8 @@ def _enforce_ht_per_pixel(
         h_matrix = getattr(op, "H_matrix", None)
         if h_matrix is None:
             continue
+
+        scene_state_estimates = timeline_by_scene_id.get(scene_id, state_estimates)
 
         # V79B: Per-pixel observation extraction
         pixel_obs = extract_pixel_observations(scene)
@@ -198,13 +210,13 @@ def _enforce_ht_per_pixel(
                 obs_name, {"pass": 0.15, "reject": 0.30}
             )
 
-            # Compute h(x̂) per microzone
+            # Compute h(x̂_t) per microzone using estimated state at time t
             h_vector = []
             for nid in node_ids:
                 # ``node_ids`` is built from the state-estimate mapping, so a
                 # missing value here is a corrupt proof path.  Never invent a
                 # midpoint state to make radiometry executable.
-                state = state_estimates[nid]
+                state = scene_state_estimates.get(nid, state_estimates[nid])
                 h_vector.append(forward_fn(state))
 
             actual_method = "ht_per_pixel"

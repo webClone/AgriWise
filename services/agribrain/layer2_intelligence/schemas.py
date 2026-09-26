@@ -390,6 +390,40 @@ class Layer2CompositeOutput(Layer2Output):
     # Composite diagnostics block
     composite_diagnostics: dict = field(default_factory=dict)
 
+    @property
+    def lai_mean(self) -> float:
+        """Leaf Area Index mean from health_index, growth_metrics, curve, or features."""
+        if self.health_index is not None:
+            val = getattr(self.health_index, "lai_estimate", None)
+            if val is not None and float(val) > 0.0:
+                return float(val)
+        if self.growth_metrics is not None:
+            val = getattr(self.growth_metrics, "lai_estimate", None)
+            if val is not None and float(val) > 0.0:
+                return float(val)
+        if self.curve is not None:
+            series = getattr(self.curve, "lai_series", [])
+            if series:
+                return float(series[-1])
+        for feat in getattr(self, "vegetation_intelligence", []):
+            if getattr(feat, "feature_name", "") == "lai":
+                return float(getattr(feat, "value", 1.5))
+        return 1.5
+
+    @property
+    def canopy_cover_pct(self) -> float:
+        """Canopy cover percentage (FVC * 100)."""
+        if self.health_index is not None:
+            val = getattr(self.health_index, "vegetation_fraction", None)
+            if val is not None and float(val) > 0.0:
+                return float(val) * 100.0
+        return 50.0
+
+    @property
+    def fvc(self) -> float:
+        """Fractional vegetation cover [0, 1]."""
+        return self.canopy_cover_pct / 100.0
+
     @classmethod
     def from_parts(cls, canonical: Layer2Output, veg_temporal: Any) -> Layer2CompositeOutput:
         from dataclasses import fields

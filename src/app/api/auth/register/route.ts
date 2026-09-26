@@ -64,8 +64,22 @@ export async function POST(request: NextRequest) {
     // Hash password if provided
     const hashedPassword = password && password.length >= 6 ? hashPassword(password) : null;
 
-    // Determine role safely
-    const assignedRole = Object.values(UserRole).includes(role as UserRole)
+    // Whitelist roles eligible for public self-registration.
+    // Privileged administrative and governmental roles (ADMIN, NATIONAL_GOV, LOCAL_GOV)
+    // require controlled internal provisioning and cannot be self-assigned.
+    const PUBLIC_REGISTRATION_ROLES: UserRole[] = [
+      UserRole.SMALL_FARMER,
+      UserRole.MEDIUM_FARMER,
+      UserRole.LARGE_FARMER,
+      UserRole.COOPERATIVE_MANAGER,
+      UserRole.AGRONOMIST,
+      UserRole.INPUT_SUPPLIER,
+      UserRole.TRANSPORTER,
+      UserRole.STORAGE_OPERATOR,
+      UserRole.RESEARCHER,
+    ];
+
+    const assignedRole = PUBLIC_REGISTRATION_ROLES.includes(role as UserRole)
       ? (role as UserRole)
       : UserRole.SMALL_FARMER;
 

@@ -175,7 +175,12 @@ class ASMAEObservationDispatcher:
         resolved_plot_id = plot_id or "default_plot"
         if not plot_id and event.spatial_support_ref:
             for part in event.spatial_support_ref.split(":"):
-                if "plot" in part.lower() or part.startswith("MZ_"):
+                if "_MZ_" in part:
+                    candidate = part.split("_MZ_")[0]
+                    if candidate:
+                        resolved_plot_id = candidate
+                        break
+                elif "plot" in part.lower() or part.startswith("MZ_"):
                     resolved_plot_id = part.split("_MZ_")[0]
                     break
 

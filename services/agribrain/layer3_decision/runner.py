@@ -22,6 +22,7 @@ Layer 3 never re-reads raw L1 data — reasons over L2's interpretation.
 from __future__ import annotations
 
 import datetime
+import math
 from datetime import timezone
 from typing import Any, Dict, List, Optional
 
@@ -766,6 +767,10 @@ def run_layer3_decision(
     return decision_output
 
 
+# Plot hydraulic state memory cache across time steps: plot_id -> (SoilWaterState, HydraulicStressMemoryState)
+_PLOT_WATER_STATE_MEMORY: dict = {}
+
+
 def _execute_canonical_water_engine(
     inputs: Any,
     l1_output: Any,
@@ -783,18 +788,59 @@ def _execute_canonical_water_engine(
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
 
-        # Build weather observations from L1
+        # 1. Weather observations from L1 or inputs
         timeseries = getattr(l1_output, "plot_timeseries", []) or []
-        rec = timeseries[-1] if (timeseries and isinstance(timeseries[-1], dict)) else {}
+        rec = timeseries[-1] if (timeseries and isinstance(timeseries[-1], dict)) else None
+        if not rec and inputs:
+            # Fallback to weather provided directly in inputs
+            weather_daily = getattr(inputs, "weather_daily_series", None) or getattr(inputs, "weather", None)
+            if isinstance(weather_daily, dict):
+                # Pick record matching current date or latest available
+                day_key = ts.strftime("%Y-%m-%d")
+                rec = weather_daily.get(day_key) or next(iter(weather_daily.values()), None)
 
-        t_max = rec.get("temp_max") or rec.get("temp") or rec.get("temperature") or 25.0
-        t_min = rec.get("temp_min") or rec.get("temp") or rec.get("temperature") or 15.0
-        precip = rec.get("precipitation") or rec.get("rain") or rec.get("precip") or 0.0
-        wind = rec.get("wind_speed") or rec.get("wind") or 2.0
-        hum = rec.get("humidity") or rec.get("rh") or 60.0
-        rh_min = rec.get("rh_min") or max(10.0, float(hum) - 15.0)
-        rh_max = rec.get("rh_max") or min(100.0, float(hum) + 15.0)
-        rn = rec.get("net_radiation_mj_m2") or 15.0
+        if not rec or not isinstance(rec, dict):
+            # Missing weather: preserve missing status, fail closed rather than fabricating clear sunny day
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[L3] Canonical water engine: missing weather observations for plot {plot_id}. "
+                "Preserving missingness rather than substituting synthetic atmospheric state."
+            )
+            return None, None
+
+        def _get_val(keys: list, default: Optional[float] = None) -> Optional[float]:
+            for k in keys:
+                v = rec.get(k)
+                if v is not None:
+                    try:
+                        f = float(v)
+                        if math.isfinite(f):
+                            return f
+                    except (ValueError, TypeError):
+                        pass
+            return default
+
+        t_max = _get_val(["temp_max", "temperature_max", "temp", "temperature"])
+        t_min = _get_val(["temp_min", "temperature_min"])
+        if t_max is None:
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[L3] Canonical water engine: temperature missing in weather record for {plot_id}."
+            )
+            return None, None
+        if t_min is None:
+            t_min = t_max - 10.0
+
+        precip = _get_val(["precipitation", "rain", "precip", "precipitation_mm"], default=0.0)
+        wind = _get_val(["wind_speed", "wind", "wind_speed_2m_m_s"], default=2.0)
+        hum = _get_val(["humidity", "rh", "relative_humidity"])
+        rh_min = _get_val(["rh_min"])
+        rh_max = _get_val(["rh_max"])
+        if rh_min is None:
+            rh_min = max(10.0, float(hum) - 15.0) if hum is not None else 45.0
+        if rh_max is None:
+            rh_max = min(100.0, float(hum) + 15.0) if hum is not None else 75.0
+        rn = _get_val(["net_radiation_mj_m2", "net_radiation", "radiation"], default=15.0)
 
         weather_obs = {
             "t_max_c": float(t_max),
@@ -806,19 +852,83 @@ def _execute_canonical_water_engine(
             "net_radiation_mj_m2": float(rn),
         }
 
-        # Extract vegetation coordinates from L2
+        # 2. Extract vegetation coordinates from L2 contracts
         veg_state = None
-        if l2_output and hasattr(l2_output, "lai_mean"):
-            lai = float(getattr(l2_output, "lai_mean", 1.5) or 1.5)
-            fvc = float(getattr(l2_output, "canopy_cover_pct", 50.0) or 50.0) / 100.0
+        if l2_output:
+            lai = None
+            fvc = None
+            root_depth = 1.0
+
+            # Direct attributes/properties on l2_output
+            if hasattr(l2_output, "lai_mean"):
+                lai = float(getattr(l2_output, "lai_mean") or 1.5)
+            if hasattr(l2_output, "canopy_cover_pct"):
+                fvc = float(getattr(l2_output, "canopy_cover_pct") or 50.0) / 100.0
+            elif hasattr(l2_output, "fvc"):
+                fvc = float(getattr(l2_output, "fvc") or 0.5)
+
+            # Health index inspection
+            h_idx = getattr(l2_output, "health_index", None)
+            if h_idx:
+                if lai is None:
+                    lai = float(getattr(h_idx, "lai_estimate", 1.5) or 1.5)
+                if fvc is None:
+                    fvc = float(getattr(h_idx, "vegetation_fraction", 0.5) or 0.5)
+
+            # Growth metrics inspection
+            g_met = getattr(l2_output, "growth_metrics", None)
+            if g_met and lai is None:
+                lai = float(getattr(g_met, "lai_estimate", 1.5) or 1.5)
+
+            # Check crop context for calibrated root depth
+            crop_ctx = getattr(inputs, "crop_context", None)
+            if isinstance(crop_ctx, dict):
+                rd = crop_ctx.get("root_depth_m") or crop_ctx.get("max_root_depth_m")
+                if rd is not None:
+                    try:
+                        root_depth = max(0.2, min(3.0, float(rd)))
+                    except (ValueError, TypeError):
+                        pass
+
+            if lai is None:
+                lai = 1.5
+            if fvc is None:
+                fvc = 0.5
+
             veg_state = VegetationState(
                 plot_id=plot_id,
                 timestamp=ts,
                 lai=lai,
                 fvc=fvc,
-                root_depth_proxy_m=1.0,
+                root_depth_proxy_m=root_depth,
             )
 
+        # 3. Retrieve or restore previous soil-water profile & hydraulic memory
+        soil_profile_state = getattr(inputs, "soil_profile_state", None)
+        hydraulic_memory = getattr(inputs, "previous_hydraulic_memory", None)
+        if (soil_profile_state is None or hydraulic_memory is None) and plot_id in _PLOT_WATER_STATE_MEMORY:
+            cached_soil, cached_mem = _PLOT_WATER_STATE_MEMORY[plot_id]
+            if soil_profile_state is None:
+                soil_profile_state = cached_soil
+            if hydraulic_memory is None:
+                hydraulic_memory = cached_mem
+
+        # 4. Extract applied irrigation from management events
+        applied_irrigation_mm = 0.0
+        for ev in (getattr(inputs, "management_events", []) or []):
+            if isinstance(ev, dict) and str(ev.get("type", "")).lower() == "irrigation":
+                applied_irrigation_mm += float(ev.get("amount_mm") or ev.get("volume_mm") or ev.get("depth_mm") or 0.0)
+            elif hasattr(ev, "event_type") and str(getattr(ev, "event_type", "")).lower() == "irrigation":
+                applied_irrigation_mm += float(
+                    getattr(ev, "amount_mm", 0.0)
+                    or getattr(ev, "volume_mm", 0.0)
+                    or (getattr(ev, "sensor_evidence", {}) or {}).get("irrigation_mm", 0.0)
+                    or 0.0
+                )
+
+        # 5. Extract soil observations & weather ensemble
+        soil_obs = getattr(inputs, "soil_observations", None)
+        weather_ensemble = getattr(inputs, "weather_ensemble", None)
         soil_type = getattr(inputs, "soil_type", "loam") or "loam"
 
         water_state, feedback = WaterIntelligenceEngine.execute_pipeline(
@@ -826,9 +936,22 @@ def _execute_canonical_water_engine(
             timestamp=ts,
             vegetation_state=veg_state,
             weather_observations=weather_obs,
+            soil_profile_state=soil_profile_state,
+            soil_observations=soil_obs,
+            previous_hydraulic_memory=hydraulic_memory,
             soil_type=soil_type,
+            irrigation_applied_mm=applied_irrigation_mm,
+            weather_ensemble=weather_ensemble,
             hydrology_mode=HydrologyMode.FAO56_LAYERED_BUCKET,
         )
+
+        # 6. Persist hydraulic memory and soil-water profile for next time step
+        if water_state is not None:
+            _PLOT_WATER_STATE_MEMORY[plot_id] = (
+                getattr(water_state, "soil_water", None),
+                getattr(water_state, "hydraulic_memory", None),
+            )
+
         return water_state, feedback
     except Exception as e:
         import logging

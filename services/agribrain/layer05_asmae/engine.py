@@ -1034,6 +1034,21 @@ class ASMAEEngine:
             n_zone_cols = int(math.ceil(field_size_x / resolution_m))
             n_zone_rows = int(math.ceil(field_size_y / resolution_m))
 
+        base_raster_vigor = getattr(inp, "base_raster_vigor", None)
+        base_raster_water = getattr(inp, "base_raster_water", None)
+        if (base_raster_vigor is None or base_raster_water is None) and getattr(self, "_scene_stack", None):
+            import numpy as np
+            for sc in self._scene_stack:
+                runtime_sc = getattr(sc, "runtime", sc)
+                bands = getattr(runtime_sc, "bands", {}) or {}
+                if base_raster_vigor is None and "ndvi" in bands and isinstance(bands["ndvi"], np.ndarray):
+                    base_raster_vigor = bands["ndvi"]
+                if base_raster_water is None:
+                    for wb in ("ndmi", "ndwi", "canopy_water"):
+                        if wb in bands and isinstance(bands[wb], np.ndarray):
+                            base_raster_water = bands[wb]
+                            break
+
         from .graph.biophysical_microzones import delineate_biophysical_microzones
         soil_clusters, irrigation_groups, biophysical_profiles = delineate_biophysical_microzones(
             n_rows=n_zone_rows,
@@ -1044,6 +1059,8 @@ class ASMAEEngine:
             events=getattr(inp, "historical_events", None) or getattr(self, "_historical_events", None),
             archive_metrics=getattr(inp, "archive_metrics", None),
             crop_context=inp.crop_context,
+            base_raster_vigor=base_raster_vigor,
+            base_raster_water=base_raster_water,
         )
 
         graph = build_microzone_graph(
@@ -1408,6 +1425,7 @@ class ASMAEEngine:
         assert_bundle_integrity(bundle, stage_name="radiometric")
 
         means = state_result.get("raster_maps", {})
+        state_timeline = state_result.get("state_timeline", [])
 
         result = enforce_radiometric_consistency(
             state_estimates=means,
@@ -1416,6 +1434,7 @@ class ASMAEEngine:
             operators=list(bundle.operators),
             scenes=scenes,
             expected_resolution_m=bundle.selected_resolution_m,
+            state_timeline=state_timeline,
         )
         self._consistency_result = result
         return result

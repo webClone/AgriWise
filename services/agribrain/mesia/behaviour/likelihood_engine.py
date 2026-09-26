@@ -43,9 +43,10 @@ class BehaviourLikelihoodEngine:
         contract_ref = contract.contract_id if contract else f"contract-{family.lower()}-default"
 
         # 3. Calculate target variable & likelihood
-        # Innovation proxy: difference from nominal baseline
-        snr = feat.features.get("snr_db", 20.0)
-        innovation = float(snr - 20.0)
+        # Observation innovation: evaluated against expected calibrated baseline rather than fixed scalar
+        snr = float(feat.features.get("snr_db", 20.0))
+        expected_baseline = float(feat.features.get("expected_baseline_snr_db", 20.0))
+        innovation = float(snr - expected_baseline)
         # Likelihood value based on nuisance safety
         likelihood_val = math.exp(-0.5 * (innovation / 3.0) ** 2) if nuisance.is_safe_for_soil_assimilation else 0.01
 

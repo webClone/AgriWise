@@ -2560,7 +2560,7 @@ class MesiaProductionService:
 
             # Route observation event via ASMAEObservationDispatcher (WP07 / Finding #14)
             if asmae_event and l0_rec.is_usable_for_assimilation:
-                p["dispatch_receipt"] = asmae_dispatcher.dispatch_event(asmae_event)
+                p["dispatch_receipt"] = asmae_dispatcher.dispatch_event(asmae_event, plot_id=plot_id)
             else:
                 obs_id = asmae_event.observation_id if asmae_event else f"obs-l0-{l0_rec.record_id}"
                 src_fam = asmae_event.source_family if asmae_event else profile.split("/")[0]
