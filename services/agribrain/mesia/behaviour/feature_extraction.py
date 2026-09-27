@@ -154,15 +154,14 @@ def resolve_profile_to_family(source_profile: Optional[str]) -> Optional[str]:
     """Map registered source profile to canonical calibration radio family.
     
     Unknown profiles return None (unknown families must remain unknown).
+    Loose substring matching is prohibited to prevent unregistered experimental
+    profiles from resolving to known families.
     """
     if not source_profile:
         return None
     raw = source_profile.split("/")[0].strip().upper()
     if raw in PROFILE_TO_CALIBRATION_FAMILY:
         return PROFILE_TO_CALIBRATION_FAMILY[raw]
-    for k, fam in PROFILE_TO_CALIBRATION_FAMILY.items():
-        if raw.startswith(k) or k in raw:
-            return fam
     return None
 
 
@@ -186,21 +185,27 @@ def resolve_calibration(
     allowed_fams = [f.upper() for f in rec.get("radio_families", [])]
     if allowed_fams and not any(f == fam_upper or f in fam_upper or fam_upper in f for f in allowed_fams):
         return None
-    if obs_time:
-        def _to_utc(dt: Any) -> Optional[datetime]:
-            if not dt:
-                return None
-            if isinstance(dt, datetime):
-                return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+    def _to_utc(dt: Any) -> Optional[datetime]:
+        if not dt:
+            return None
+        if isinstance(dt, datetime):
+            return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+        return None
+
+    vf = _to_utc(rec.get("valid_from"))
+    vt = _to_utc(rec.get("valid_to"))
+    if vf or vt:
+        # Time-bounded calibration strictly requires a usable acquisition timestamp
+        if not obs_time:
             return None
         obs_utc = _to_utc(obs_time)
-        vf = _to_utc(rec.get("valid_from"))
-        vt = _to_utc(rec.get("valid_to"))
-        if obs_utc:
-            if vf and obs_utc < vf:
-                return None
-            if vt and obs_utc > vt:
-                return None
+        if not obs_utc:
+            return None
+        if vf and obs_utc < vf:
+            return None
+        if vt and obs_utc > vt:
+            return None
     return rec
 
 

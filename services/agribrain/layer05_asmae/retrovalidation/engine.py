@@ -466,17 +466,60 @@ def run_retrovalidation(
         weather_day = interval_weather_series.get(holdout_date_str) or next(iter(reversed(list(interval_weather_series.values()))), {})
 
         # Interval management events
+        # Interventions known at issuance vs subsequently observed interventions (R2 §§54 and 86.2)
+        train_utc = _to_utc_datetime(t_train_dt)
+        condition_on_interventions = bool(
+            (evidence_context or {}).get("condition_on_observed_interventions")
+            or (evidence_context or {}).get("condition_on_interventions")
+        )
         interval_mgmt_events = []
+        consumed_post_issuance_interventions = False
+
         for ev in raw_mgmt_events or []:
             if isinstance(ev, dict):
-                raw_d = str(ev.get("timestamp") or ev.get("date") or "")[:10]
+                raw_d = str(ev.get("effective_start") or ev.get("timestamp") or ev.get("date") or "")[:10]
+                in_interval = False
                 if t_train_dt and t_holdout_dt:
                     train_str = t_train_dt.strftime("%Y-%m-%d")
                     holdout_str = t_holdout_dt.strftime("%Y-%m-%d")
                     if train_str <= raw_d <= holdout_str:
-                        interval_mgmt_events.append(ev)
+                        in_interval = True
                 elif raw_d == holdout_date_str:
+                    in_interval = True
+
+                if not in_interval:
+                    continue
+
+                raw_rec = (
+                    ev.get("recorded_at")
+                    or ev.get("created_at")
+                    or ev.get("logged_at")
+                    or ev.get("issued_at")
+                    or ev.get("known_at")
+                    or ev.get("record_time")
+                    or (ev.get("metadata", {}) if isinstance(ev.get("metadata"), dict) else {}).get("recorded_at")
+                    or (ev.get("metadata", {}) if isinstance(ev.get("metadata"), dict) else {}).get("created_at")
+                )
+                rec_dt = _to_utc_datetime(raw_rec)
+
+                # Check when this event became known relative to forecast origin (train_utc)
+                if rec_dt is not None and train_utc is not None and rec_dt > train_utc:
+                    # Learned after issuance!
+                    if condition_on_interventions:
+                        # Deliberately conditioned on subsequently observed interventions
+                        interval_mgmt_events.append(ev)
+                        consumed_post_issuance_interventions = True
+                    else:
+                        # Prospective issuance forecast: exclude interventions learned after issuance
+                        continue
+                else:
+                    # Known on or before issuance (or no post-issuance recording timestamp)
                     interval_mgmt_events.append(ev)
+
+        if consumed_post_issuance_interventions:
+            forecast_forcing_source = "retrieved_historical_forcing"
+            is_issuance_forecast = False
+            forcing_provenance = "intervention_conditioned_reconstruction"
 
         forecast_rng = make_rng(
             run_id=f"{identity.get('run_id', 'retro')}:forecast:{holdout_id}",
