@@ -983,6 +983,8 @@ def _execute_canonical_water_engine(
         )
 
         explicit_event_dates = set()
+        retained_irrigation_map: Dict[str, float] = {}
+
         for ev in raw_events:
             ev_id = None
             ev_type = ""
@@ -997,7 +999,7 @@ def _execute_canonical_water_engine(
                 ev_type = str(ev.get("type") or ev.get("event_type") or "").lower()
                 ev_status = str(ev.get("status") or "applied").lower()
                 ev_amount = float(ev.get("amount_mm") or ev.get("volume_mm") or ev.get("depth_mm") or 0.0)
-                ev_ver = ev.get("version", 1)
+                ev_ver = int(ev.get("version", 1) or 1)
                 is_deletion = (ev_status in {"cancelled", "canceled", "deleted", "revoked"}) or bool(ev.get("deleted")) or (ev.get("action") == "delete")
                 raw_d = ev.get("date") or ev.get("timestamp") or ev.get("time") or ev.get("effective_start")
                 if raw_d:
@@ -1015,7 +1017,7 @@ def _execute_canonical_water_engine(
                     or (getattr(ev, "sensor_evidence", {}) or {}).get("irrigation_mm", 0.0)
                     or 0.0
                 )
-                ev_ver = getattr(ev, "version", 1)
+                ev_ver = int(getattr(ev, "version", 1) or 1)
                 is_deletion = (ev_status in {"cancelled", "canceled", "deleted", "revoked"}) or bool(getattr(ev, "deleted", False))
                 raw_d = getattr(ev, "effective_start", None) or getattr(ev, "timestamp", None) or getattr(ev, "date", None)
                 if raw_d:
@@ -1025,9 +1027,33 @@ def _execute_canonical_water_engine(
                         pass
 
             target_d = ev_d or ts.date()
-            explicit_event_dates.add(target_d)
             if not ev_id:
                 ev_id = f"{target_d.isoformat()}_{ev_type}_{round(ev_amount, 2)}"
+
+            # Event versioning, cancellation protection, and date-shift invalidation
+            prev_d = None
+            if ev_id in plot_events:
+                existing_ev = plot_events[ev_id]
+                existing_ver = int(existing_ev.get("version", 1) or 1)
+                existing_is_cancelled = existing_ev.get("is_deletion") or (
+                    existing_ev.get("status") in {"cancelled", "canceled", "deleted", "revoked"}
+                )
+
+                # Reject stale version: reject if ev_ver < existing_ver
+                if ev_ver < existing_ver:
+                    continue
+                # Reject stale update received after cancellation: reject if ev_ver <= existing_ver
+                if existing_is_cancelled and ev_ver <= existing_ver:
+                    continue
+
+                prev_d = existing_ev.get("date")
+                if prev_d and prev_d != target_d:
+                    explicit_event_dates.add(prev_d)
+                    retained_irrigation_map.pop(prev_d.strftime("%Y-%m-%d"), None)
+
+            explicit_event_dates.add(target_d)
+            if is_deletion:
+                retained_irrigation_map.pop(target_d.strftime("%Y-%m-%d"), None)
 
             plot_events[ev_id] = {
                 "id": ev_id,
@@ -1037,9 +1063,8 @@ def _execute_canonical_water_engine(
                 "amount_mm": 0.0 if is_deletion else ev_amount,
                 "version": ev_ver,
                 "is_deletion": is_deletion,
+                "previous_date": prev_d,
             }
-
-        retained_irrigation_map: Dict[str, float] = {}
 
         def _get_irrigation_for_date(d_val: datetime.date) -> float:
             d_str = d_val.strftime("%Y-%m-%d")
@@ -1075,6 +1100,7 @@ def _execute_canonical_water_engine(
         soil_type = op_ctx.get("soil_type") or getattr(inputs, "soil_type", "loam") or "loam"
 
         # Ingest dated vegetation inputs into persistent plot history
+        supplied_veg_dates = set()
         veg_daily_input = (
             op_ctx.get("vegetation_daily")
             or getattr(inputs, "vegetation_daily", None)
@@ -1087,6 +1113,7 @@ def _execute_canonical_water_engine(
                     try:
                         vd = datetime.date.fromisoformat(vk[:10])
                         plot_veg_hist[vd.strftime("%Y-%m-%d")] = vv
+                        supplied_veg_dates.add(vd)
                     except Exception:
                         pass
         elif isinstance(veg_daily_input, list):
@@ -1101,12 +1128,15 @@ def _execute_canonical_water_engine(
                     try:
                         vd = datetime.date.fromisoformat(vd_str[:10])
                         plot_veg_hist[vd.strftime("%Y-%m-%d")] = v_item
+                        supplied_veg_dates.add(vd)
                     except Exception:
                         pass
         if veg_state is not None:
             plot_veg_hist[ts.date().strftime("%Y-%m-%d")] = veg_state
+            supplied_veg_dates.add(ts.date())
 
         # Ingest dated soil observations into persistent plot history
+        supplied_soil_obs_dates = set()
         soil_obs = op_ctx.get("soil_observations") or getattr(inputs, "soil_observations", None)
         soil_obs_daily_input = (
             op_ctx.get("soil_observations_daily")
@@ -1120,6 +1150,7 @@ def _execute_canonical_water_engine(
                     try:
                         sd = datetime.date.fromisoformat(sk[:10])
                         plot_so_hist[sd.strftime("%Y-%m-%d")] = sv
+                        supplied_soil_obs_dates.add(sd)
                     except Exception:
                         pass
         elif isinstance(soil_obs_daily_input, list):
@@ -1134,18 +1165,22 @@ def _execute_canonical_water_engine(
                     try:
                         sd = datetime.date.fromisoformat(sd_str[:10])
                         plot_so_hist[sd.strftime("%Y-%m-%d")] = s_item
+                        supplied_soil_obs_dates.add(sd)
                     except Exception:
                         pass
+
+        soil_obs_date = None
         if soil_obs is not None:
             so_ts = getattr(soil_obs, "timestamp", None) or getattr(soil_obs, "date", None)
             if so_ts:
                 try:
-                    s_d = so_ts.date() if hasattr(so_ts, "date") else datetime.date.fromisoformat(str(so_ts)[:10])
-                    plot_so_hist[s_d.strftime("%Y-%m-%d")] = soil_obs
+                    soil_obs_date = so_ts.date() if hasattr(so_ts, "date") else datetime.date.fromisoformat(str(so_ts)[:10])
                 except Exception:
-                    plot_so_hist[ts.date().strftime("%Y-%m-%d")] = soil_obs
+                    soil_obs_date = ts.date()
             else:
-                plot_so_hist[ts.date().strftime("%Y-%m-%d")] = soil_obs
+                soil_obs_date = ts.date()
+            plot_so_hist[soil_obs_date.strftime("%Y-%m-%d")] = soil_obs
+            supplied_soil_obs_dates.add(soil_obs_date)
 
         # Collect explicitly supplied dates from current request
         supplied_weather_dates = set()
@@ -1264,13 +1299,25 @@ def _execute_canonical_water_engine(
             imputed["weather_sigma_override"] = 0.08
             return imputed
 
+        def _state_digest(s_obj: Any) -> str:
+            if s_obj is None:
+                return "none"
+            vwc = getattr(s_obj, "volumetric_water_content", None) or getattr(s_obj, "layers_vwc", None) or getattr(s_obj, "theta_profile", None)
+            if vwc is not None:
+                return repr(vwc)
+            if hasattr(s_obj, "__dict__"):
+                return str(type(s_obj)) + repr(sorted((k, str(v)) for k, v in s_obj.__dict__.items()))
+            return str(type(s_obj)) + repr(s_obj)
+
         def _extract_veg_for_date(d_val: datetime.date, step_ts: datetime.datetime) -> Optional[VegetationState]:
             d_str = d_val.strftime("%Y-%m-%d")
-            if d_val == ts.date() and veg_state is not None:
-                return veg_state
-
             cand = None
-            if d_str in retained_veg_map:
+            # Explicitly supplied dated records in current request take top precedence
+            if d_val in supplied_veg_dates and d_str in plot_veg_hist:
+                cand = plot_veg_hist[d_str]
+            elif d_val == ts.date() and veg_state is not None:
+                return veg_state
+            elif d_str in retained_veg_map:
                 cand = retained_veg_map[d_str]
             elif d_str in plot_hist and isinstance(plot_hist[d_str], dict) and plot_hist[d_str].get("vegetation_state") is not None:
                 cand = plot_hist[d_str]["vegetation_state"]
@@ -1343,7 +1390,10 @@ def _execute_canonical_water_engine(
 
         def _extract_soil_obs_for_date(d_val: datetime.date) -> Optional[Any]:
             d_str = d_val.strftime("%Y-%m-%d")
-            if d_val == ts.date() and soil_obs is not None:
+            # Explicitly supplied dated records in current request take top precedence
+            if d_val in supplied_soil_obs_dates and d_str in plot_so_hist and plot_so_hist[d_str] is not None:
+                return plot_so_hist[d_str]
+            if soil_obs_date is not None and d_val == soil_obs_date and soil_obs is not None:
                 return soil_obs
             if d_str in retained_soil_obs_map and retained_soil_obs_map[d_str] is not None:
                 return retained_soil_obs_map[d_str]
@@ -1353,13 +1403,35 @@ def _execute_canonical_water_engine(
                 return plot_so_hist[d_str]
             return None
 
-        def _compute_step_forcing_hash(w: dict, irr: float) -> str:
-            w_items = tuple(sorted((k, str(v)) for k, v in w.items()))
-            return hashlib.sha256(repr((w_items, round(irr, 4))).encode("utf-8")).hexdigest()[:16]
+        def _compute_step_forcing_hash(
+            w: dict,
+            irr: float,
+            veg: Optional[VegetationState] = None,
+            so: Optional[Any] = None,
+        ) -> str:
+            w_items = tuple(sorted((k, str(v)) for k, v in (w or {}).items()))
+            v_items = (
+                (
+                    round(getattr(veg, "lai", 0.0), 4),
+                    round(getattr(veg, "fvc", 0.0), 4),
+                    round(getattr(veg, "root_depth_proxy_m", 0.0), 4),
+                )
+                if veg is not None
+                else "none"
+            )
+            so_item = _state_digest(so)
+            payload = (w_items, round(irr, 4), v_items, so_item)
+            return hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()[:16]
 
         # Invalidate any cached history whose input forcing or predecessor changed in current inputs:
         # Distinguish "not supplied in this request" (rolling daily inputs) from "historical evidence was corrected"
         earliest_invalid_day = None
+        supplied_dates = (
+            supplied_weather_dates
+            | explicit_event_dates
+            | supplied_veg_dates
+            | supplied_soil_obs_dates
+        )
         for hist_k in sorted(plot_hist.keys()):
             if hist_k > day_key:
                 continue
@@ -1369,12 +1441,19 @@ def _execute_canonical_water_engine(
                 continue
             hist_entry = plot_hist[hist_k]
 
-            if hist_d not in supplied_weather_dates and hist_d not in explicit_event_dates:
+            if hist_d not in supplied_dates:
                 continue
 
             curr_w = _extract_weather_for_date(hist_d)
             curr_irr = _get_irrigation_for_date(hist_d)
-            curr_f_hash = _compute_step_forcing_hash(curr_w, curr_irr)
+            step_ts_hist = (
+                ts
+                if (hist_d == ts.date())
+                else datetime.datetime.combine(hist_d, datetime.time(12, 0, tzinfo=timezone.utc))
+            )
+            curr_veg = _extract_veg_for_date(hist_d, step_ts_hist)
+            curr_so = _extract_soil_obs_for_date(hist_d)
+            curr_f_hash = _compute_step_forcing_hash(curr_w, curr_irr, curr_veg, curr_so)
             if hist_entry.get("step_forcing_hash") and hist_entry["step_forcing_hash"] != curr_f_hash:
                 earliest_invalid_day = hist_k
                 break
@@ -1382,17 +1461,22 @@ def _execute_canonical_water_engine(
         if earliest_invalid_day is not None:
             for k, v in plot_hist.items():
                 if isinstance(v, dict):
-                    if "weather" in v:
+                    k_d = None
+                    try:
+                        k_d = datetime.date.fromisoformat(k)
+                    except Exception:
+                        pass
+                    if "weather" in v and (k_d not in supplied_weather_dates):
                         retained_weather_map[k] = v["weather"]
-                    if "vegetation_state" in v or "lai" in v:
+                    if ("vegetation_state" in v or "lai" in v) and (k_d not in supplied_veg_dates):
                         retained_veg_map[k] = v.get("vegetation_state") or {
                             "lai": v.get("lai"),
                             "fvc": v.get("fvc"),
                             "root_depth": v.get("root_depth"),
                         }
-                    if "irrigation" in v:
+                    if "irrigation" in v and (k_d not in explicit_event_dates):
                         retained_irrigation_map[k] = v["irrigation"]
-                    if "soil_observations" in v:
+                    if "soil_observations" in v and (k_d not in supplied_soil_obs_dates):
                         retained_soil_obs_map[k] = v["soil_observations"]
                     if "initial_soil_water" in v:
                         retained_init_soil_map[k] = v["initial_soil_water"]
@@ -1431,7 +1515,7 @@ def _execute_canonical_water_engine(
                     d_start = ts.date()
             else:
                 # No predecessor in cache: start from earliest date in supplied inputs or target date
-                earliest_supplied_d = min(supplied_weather_dates) if supplied_weather_dates else ts.date()
+                earliest_supplied_d = min(supplied_dates) if supplied_dates else ts.date()
                 d_start = min(earliest_supplied_d, ts.date())
         d_end = ts.date()
 
@@ -1461,16 +1545,6 @@ def _execute_canonical_water_engine(
 
         weather_ensemble = op_ctx.get("weather_ensemble") or getattr(inputs, "weather_ensemble", None)
         soil_type = op_ctx.get("soil_type") or getattr(inputs, "soil_type", "loam") or "loam"
-
-        def _state_digest(s_obj: Any) -> str:
-            if s_obj is None:
-                return "none"
-            vwc = getattr(s_obj, "volumetric_water_content", None) or getattr(s_obj, "layers_vwc", None) or getattr(s_obj, "theta_profile", None)
-            if vwc is not None:
-                return repr(vwc)
-            if hasattr(s_obj, "__dict__"):
-                return str(type(s_obj)) + repr(sorted((k, str(v)) for k, v in s_obj.__dict__.items()))
-            return str(type(s_obj)) + repr(s_obj)
 
         # Build comprehensive interval forcing and dependency digest
         interval_forcing_entries = []
@@ -1581,7 +1655,7 @@ def _execute_canonical_water_engine(
                     "initial_hydraulic_memory": step_init_mem,
                     "evidence_hash": step_ev_hash,
                     "interval_hash": interval_hash if is_target_day else step_ev_hash,
-                    "step_forcing_hash": _compute_step_forcing_hash(step_weather, step_irrigation),
+                    "step_forcing_hash": _compute_step_forcing_hash(step_weather, step_irrigation, step_veg, step_soil_obs),
                 }
                 if step_veg:
                     plot_veg_hist[step_key] = step_veg

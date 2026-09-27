@@ -1816,6 +1816,63 @@ def _finalize_supervised_timeout(
     _commit_job_failure_event(result, terminal, saved)
 
 
+def _finalize_supervised_process_exit(
+    job_path: Path,
+    launch_token: str,
+    *,
+    exit_code: int,
+    elapsed_seconds: float,
+) -> None:
+    """Publish typed failure truth when the supervised worker exits unexpectedly."""
+    primary_reason = "UNEXPECTED_PROCESS_EXIT"
+    current = _read_json(job_path)
+    if not current or str(current.get("status")) in TERMINAL_STATUSES:
+        return
+    diagnostics = {
+        "failure_code": primary_reason,
+        "exit_code": exit_code,
+        "elapsed_ms": round(elapsed_seconds * 1000.0, 3),
+        "supervision_contract": "asmae_process_watchdog_v1",
+        "cooperative_cancellation": False,
+        "terminate_attempted": False,
+    }
+    try:
+        terminal = _update_job(
+            job_path,
+            expected_launch_token=launch_token,
+            expected_statuses=frozenset({"queued", "stalled", "running"}),
+            status="failed",
+            stage="worker_process_crashed",
+            progress_pct=100,
+            result_status="failed_process_exit",
+            reason=primary_reason,
+            error=f"Worker process exited unexpectedly with code {exit_code}",
+            error_type="UnexpectedProcessExit",
+            failure_diagnostics=diagnostics,
+            retry_classification="manual_review",
+            recoverable=False,
+            lease_expires_at=None,
+            lease_token=None,
+            lease_owner=None,
+        )
+    except LeaseLostError:
+        return
+    _append_job_event(
+        job_path, "worker_process_crashed", status="failed", **diagnostics
+    )
+    result = {
+        "status": "failed_process_exit",
+        "reason": primary_reason,
+        "failure_diagnostics": diagnostics,
+    }
+    try:
+        saved = load_job_manifest(_manifest_for_job(job_path, terminal))
+    except Exception as exc:
+        logger.warning("Could not load manifest for process crash lineage: %s", exc)
+        saved = {}
+    _commit_job_failure_event(result, terminal, saved)
+
+
 def supervise_job(job_path: Path, launch_token: str) -> None:
     """Own a monotonic deadline and kill a non-cooperative scientific child."""
     environment = dict(os.environ)
@@ -1887,12 +1944,14 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
     monitor_thread = threading.Thread(target=_monitor_memory, daemon=True)
     monitor_thread.start()
 
+    timed_out = False
     try:
         child.wait(timeout=PROCESS_HARD_TIMEOUT_SECONDS)
         if not memory_exceeded and getattr(child, "returncode", 0) == 0:
             bounded_executor.on_worker_completed(job_path)
             return
     except subprocess.TimeoutExpired:
+        timed_out = True
         child.terminate()
     try:
         child.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
@@ -1908,7 +1967,23 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
     except OSError:
         pass
 
+    exit_code = getattr(child, "returncode", None)
+    if exit_code is None:
+        try:
+            exit_code = child.poll()
+        except Exception:
+            exit_code = -1
+
+    elapsed = time.monotonic() - started
+
     if memory_exceeded:
+        diagnostics = {
+            "failure_code": "MEMORY_QUOTA_EXCEEDED",
+            "peak_rss_mb": peak_rss_mb,
+            "quota_mb": MAX_WORKER_MEMORY_MB,
+            "exit_code": exit_code,
+            "elapsed_ms": round(elapsed * 1000.0, 3),
+        }
         _update_job(
             job_path,
             expected_launch_token=launch_token,
@@ -1917,6 +1992,7 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
             error=f"Worker process exceeded memory quota ({peak_rss_mb:.1f} MB > {MAX_WORKER_MEMORY_MB:.1f} MB)",
             retry_classification="manual_review",
             recoverable=False,
+            failure_diagnostics=diagnostics,
         )
         _append_job_event(
             job_path,
@@ -1924,10 +2000,16 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
             status="failed",
             peak_rss_mb=peak_rss_mb,
             quota_mb=MAX_WORKER_MEMORY_MB,
+            exit_code=exit_code,
         )
+    elif timed_out:
+        _finalize_supervised_timeout(job_path, launch_token, elapsed)
     else:
-        _finalize_supervised_timeout(
-            job_path, launch_token, time.monotonic() - started
+        _finalize_supervised_process_exit(
+            job_path,
+            launch_token,
+            exit_code=exit_code if exit_code is not None else -1,
+            elapsed_seconds=elapsed,
         )
     bounded_executor.on_worker_completed(job_path)
 

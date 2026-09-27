@@ -503,19 +503,25 @@ def run_retrovalidation(
                 )
                 rec_dt = _to_utc_datetime(raw_rec)
 
-                # Check when this event became known relative to forecast origin (train_utc)
-                if rec_dt is not None and train_utc is not None and rec_dt > train_utc:
-                    # Learned after issuance!
+                # Demonstration of pre-issuance availability (R2 §§54 and 86.2)
+                # Prospective scoring requires demonstrable pre-issuance availability.
+                # Missing or invalid provenance does not prove the intervention was known at issuance.
+                is_demonstrably_pre_issuance = (
+                    rec_dt is not None and train_utc is not None and rec_dt <= train_utc
+                )
+
+                if is_demonstrably_pre_issuance:
+                    # Demonstrably known on or before issuance
+                    interval_mgmt_events.append(ev)
+                else:
+                    # Missing, invalid, or recorded after issuance
                     if condition_on_interventions:
-                        # Deliberately conditioned on subsequently observed interventions
+                        # Deliberately conditioned on interventions: include and mark reconstruction
                         interval_mgmt_events.append(ev)
                         consumed_post_issuance_interventions = True
                     else:
-                        # Prospective issuance forecast: exclude interventions learned after issuance
+                        # Prospective issuance forecast: exclude interventions lacking demonstrable pre-issuance availability
                         continue
-                else:
-                    # Known on or before issuance (or no post-issuance recording timestamp)
-                    interval_mgmt_events.append(ev)
 
         if consumed_post_issuance_interventions:
             forecast_forcing_source = "retrieved_historical_forcing"
