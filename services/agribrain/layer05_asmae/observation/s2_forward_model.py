@@ -89,9 +89,12 @@ def forward_model_ndmi(state: List[float]) -> float:
     NDMI responds to canopy water content.
     """
     cw = state[IDX_CANOPY_WATER]
+    if cw is None:
+        cw = state[IDX_ROOT_ZONE_WATER]
+    if cw is None or not math.isfinite(cw):
+        raise ValueError("NDMI requires canopy_water or root_zone_water")
     lai = state[IDX_LAI]
-
-    lai_norm = min(lai / 5.0, 1.0)
+    lai_norm = min(lai / 5.0, 1.0) if (lai is not None and math.isfinite(lai)) else 0.5
     ndmi = 0.6 * cw + 0.2 * lai_norm + 0.05
     return max(-1.0, min(1.0, ndmi))
 
@@ -152,14 +155,27 @@ def forward_model_phenology(state: List[float]) -> float:
     Observation extraction uses red-edge ratio (B06 - B05)/(B06 + B05),
     matching the NDRE spectral response.
     """
+    pheno = state[IDX_PHENOLOGY]
+    chl = state[IDX_CHLOROPHYLL]
+    lai = state[IDX_LAI]
+    bare = state[IDX_BARE_SOIL]
+    if pheno is not None and math.isfinite(pheno):
+        chl_norm = min(chl / 60.0, 1.0) if (chl is not None and math.isfinite(chl)) else min(1.0, 1.2 * math.sin(math.pi * min(1.0, max(0.0, pheno))))
+        lai_norm = min(lai / 5.0, 1.0) if (lai is not None and math.isfinite(lai)) else min(1.0, math.sin(math.pi * min(1.0, max(0.0, pheno))))
+        bare_norm = bare if (bare is not None and math.isfinite(bare)) else max(0.0, 1.0 - lai_norm)
+        ndre = 0.30 * chl_norm + 0.15 * lai_norm - 0.15 * bare_norm + 0.05
+        return max(-1.0, min(1.0, ndre))
     return forward_model_ndre(state)
 
 
 def forward_model_stress_memory(state: List[float]) -> float:
     """Predict stress memory from state vector."""
     mem = state[IDX_STRESS_MEMORY]
+    if mem is None or not math.isfinite(mem):
+        raise ValueError("stress_memory_index requires stress_memory")
     sal = state[IDX_SALINITY]
-    res = 0.65 * mem + 0.35 * sal
+    sal_val = sal if (sal is not None and math.isfinite(sal)) else 0.0
+    res = 0.65 * mem + 0.35 * sal_val
     return max(0.0, min(1.0, res))
 
 
@@ -188,19 +204,21 @@ FORWARD_MODELS = {
 }
 
 FORWARD_MODEL_STATE_REQUIREMENTS = {
-    "ndvi": (IDX_VIGOR, IDX_LAI, IDX_BARE_SOIL),
-    "evi": (IDX_VIGOR, IDX_LAI, IDX_BARE_SOIL),
-    "ndre": (IDX_CHLOROPHYLL, IDX_LAI, IDX_BARE_SOIL),
-    "ndmi": (IDX_CANOPY_WATER, IDX_LAI),
-    "ndwi": (IDX_SURFACE_WETNESS, IDX_VIGOR, IDX_BARE_SOIL),
-    "bsi": (IDX_BARE_SOIL, IDX_VIGOR),
-    "cwsi": (IDX_VIGOR, IDX_LAI, IDX_BARE_SOIL, IDX_CANOPY_WATER),
-    "phenology_index": (IDX_CHLOROPHYLL, IDX_LAI, IDX_BARE_SOIL),
+    "ndvi": (IDX_VIGOR,),
+    "evi": (IDX_VIGOR,),
+    "ndre": (IDX_CHLOROPHYLL,),
+    "ndmi": (IDX_CANOPY_WATER,),
+    "ndwi": (IDX_SURFACE_WETNESS,),
+    "bsi": (IDX_BARE_SOIL,),
+    "cwsi": (IDX_CANOPY_WATER,),
+    "phenology_index": (IDX_PHENOLOGY,),
+    "stress_memory_index": (IDX_STRESS_MEMORY,),
+    "biotic_anomaly": (IDX_BIOTIC,),
 }
 
 
 def predict_observation(
-    index_name: str, state: List[float],
+    index_name: str, state: List[float], nuisance_state: Optional[List[float]] = None,
 ) -> Optional[float]:
     """Predict observation-equivalent value from state vector.
 
@@ -209,13 +227,24 @@ def predict_observation(
     model = FORWARD_MODELS.get(index_name)
     if model is None:
         return None
+    if nuisance_state:
+        state = [
+            state[i] if (i < len(state) and state[i] is not None)
+            else (nuisance_state[i] if i < len(nuisance_state) else None)
+            for i in range(max(len(state), len(nuisance_state)))
+        ]
     requirements = FORWARD_MODEL_STATE_REQUIREMENTS.get(index_name, ())
     try:
+        # Check that the primary state target is available
         if any(
-            index >= len(state) or not math.isfinite(float(state[index]))
+            index >= len(state) or state[index] is None or not math.isfinite(float(state[index]))
             for index in requirements
         ):
-            return None
+            # Special case for NDMI: root_zone_water can serve as canopy water proxy
+            if index_name == "ndmi" and len(state) > IDX_ROOT_ZONE_WATER and state[IDX_ROOT_ZONE_WATER] is not None and math.isfinite(float(state[IDX_ROOT_ZONE_WATER])):
+                pass
+            else:
+                return None
     except (TypeError, ValueError):
         return None
     return model(state)

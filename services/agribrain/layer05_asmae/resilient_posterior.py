@@ -633,10 +633,29 @@ def _lookup_numeric(context: Any, aliases: Iterable[str]) -> Optional[float]:
 
 def _prior_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, Any]]:
     coarse = getattr(inp, "coarse_layer_outputs", {}) or {}
-    soil = getattr(inp, "soil_context", {}) or {}
+    soil = dict(getattr(inp, "soil_context", {}) or {})
     result: Dict[str, Dict[str, Any]] = {}
-    if as_of is not None:
+    cutoff = _parse_datetime(as_of) if as_of is not None else None
+    if cutoff is not None:
         coarse = {}
+        # Separate static soil properties from dated dynamic measurements
+        raw_soil_ts = (
+            soil.get("source_timestamp")
+            or soil.get("timestamp")
+            or soil.get("date")
+            or soil.get("recorded_at")
+            or soil.get("acquired_at")
+            or soil.get("as_of")
+            or soil.get("valid_time")
+        )
+        if raw_soil_ts:
+            soil_ts = _parse_datetime(raw_soil_ts)
+            if soil_ts is not None and soil_ts > cutoff:
+                dynamic_soil_keys = {
+                    "root_zone_water", "soil_moisture", "sm_10_40", "water_content",
+                    "salinity_stress", "salinity_risk", "salinity"
+                }
+                soil = {k: v for k, v in soil.items() if k not in dynamic_soil_keys}
     mappings = {
         "root_zone_water": ((soil, ("root_zone_water", "soil_moisture", "sm_10_40", "water_content")), (coarse, ("root_zone_water", "water_balance", "soil_moisture"))),
         "chlorophyll": ((coarse, ("chlorophyll_proxy", "chlorophyll")),),
@@ -662,6 +681,18 @@ def _prior_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, A
             break
 
     canonical_phenology = getattr(inp, "phenology_posterior", {}) or {}
+    if cutoff is not None and isinstance(canonical_phenology, dict):
+        raw_pheno_ts = (
+            canonical_phenology.get("generated_at")
+            or canonical_phenology.get("timestamp")
+            or canonical_phenology.get("source_timestamp")
+            or canonical_phenology.get("date")
+            or canonical_phenology.get("as_of")
+        )
+        if raw_pheno_ts:
+            pheno_ts = _parse_datetime(raw_pheno_ts)
+            if pheno_ts is not None and pheno_ts > cutoff:
+                canonical_phenology = {}
     stage = str(
         canonical_phenology.get("current_stage")
         or canonical_phenology.get("most_likely_stage")

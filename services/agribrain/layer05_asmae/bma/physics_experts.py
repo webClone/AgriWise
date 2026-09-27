@@ -207,9 +207,12 @@ def _water_balance(nodes: List[str], context: Mapping[str, Any]) -> Optional[Dic
     if root_initial is None:
         root_initial = (field_capacity + wilting) / 2.0
     rooting_depth = _find_numeric(soil, ("rooting_depth", "root_depth_m")) or 0.4
-    storage_mm = max(25.0, rooting_depth * 1000.0 * max(field_capacity - wilting, 0.05))
-    root = root_initial + (rainfall - et0) / storage_mm
-    canopy = root + (rainfall - et0) / max(storage_mm * 0.6, 1.0)
+    soil_depth_mm = max(50.0, rooting_depth * 1000.0)
+    delta_theta = (rainfall - et0) / soil_depth_mm
+    root = _clip("root_zone_water", root_initial + delta_theta)
+    awc = max(0.01, field_capacity - wilting)
+    relative_available_fraction = min(1.0, max(0.0, (root - wilting) / awc))
+    canopy = _clip("canopy_water", relative_available_fraction * 0.8 + 0.1)
     values: Dict[str, float] = {
         "root_zone_water": root,
         "canopy_water": canopy,

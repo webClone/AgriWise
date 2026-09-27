@@ -51,8 +51,15 @@ def forward_model_sar_vv(state: List[float]) -> float:
     bare = state[IDX_BARE_SOIL]
     struct = state[IDX_STRUCTURE]
 
+    if sw is None and rzw is None and struct is None:
+        raise ValueError("SAR VV requires moisture or structure")
+    struct_val = struct if (struct is not None and math.isfinite(struct)) else 0.4
+    sw_val = sw if (sw is not None and math.isfinite(sw)) else 0.1
+    rzw_val = rzw if (rzw is not None and math.isfinite(rzw)) else 0.2
+    bare_val = bare if (bare is not None and math.isfinite(bare)) else 0.3
+
     # VV increases with structure (double-bounce), moisture, and bare soil exposure
-    vv = 0.35 * struct + 0.25 * sw + 0.2 * rzw + 0.1 * bare + 0.05
+    vv = 0.35 * struct_val + 0.25 * sw_val + 0.2 * rzw_val + 0.1 * bare_val + 0.05
     return max(0.0, min(1.0, vv))
 
 
@@ -105,27 +112,37 @@ SAR_FORWARD_MODELS = {
 }
 
 SAR_FORWARD_MODEL_STATE_REQUIREMENTS = {
-    "sar_vv": (IDX_STRUCTURE, IDX_SURFACE_WETNESS, IDX_ROOT_ZONE_WATER, IDX_BARE_SOIL),
-    "sar_vh": (IDX_STRUCTURE, IDX_SURFACE_WETNESS),
-    "sar_ratio": (IDX_STRUCTURE, IDX_SURFACE_WETNESS),
-    "delta_sar": (IDX_SURFACE_WETNESS, IDX_BARE_SOIL),
+    "sar_vv": (IDX_SURFACE_WETNESS,),
+    "sar_vh": (IDX_STRUCTURE,),
+    "sar_ratio": (IDX_STRUCTURE,),
+    "delta_sar": (IDX_SURFACE_WETNESS,),
 }
 
 
 def predict_sar_observation(
-    index_name: str, state: List[float],
+    index_name: str, state: List[float], nuisance_state: Optional[List[float]] = None,
 ) -> Optional[float]:
     """Predict SAR observation-equivalent from state vector."""
     model = SAR_FORWARD_MODELS.get(index_name)
     if model is None:
         return None
+    if nuisance_state:
+        state = [
+            state[i] if (i < len(state) and state[i] is not None)
+            else (nuisance_state[i] if i < len(nuisance_state) else None)
+            for i in range(max(len(state), len(nuisance_state)))
+        ]
     requirements = SAR_FORWARD_MODEL_STATE_REQUIREMENTS.get(index_name, ())
     try:
         if any(
-            index >= len(state) or not math.isfinite(float(state[index]))
+            index >= len(state) or state[index] is None or not math.isfinite(float(state[index]))
             for index in requirements
         ):
-            return None
+            # Special case for SAR VV: root_zone_water or structure can fulfill primary requirement
+            if index_name == "sar_vv" and len(state) > IDX_ROOT_ZONE_WATER and state[IDX_ROOT_ZONE_WATER] is not None and math.isfinite(float(state[IDX_ROOT_ZONE_WATER])):
+                pass
+            else:
+                return None
     except (TypeError, ValueError):
         return None
     return model(state)

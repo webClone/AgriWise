@@ -776,6 +776,23 @@ _PLOT_MANAGEMENT_EVENTS: dict = {}
 _PLOT_VEGETATION_HISTORY: dict = {}
 _PLOT_SOIL_OBS_HISTORY: dict = {}
 _PLOT_INITIAL_STATE_HISTORY: dict = {}
+_PLOT_WITHDRAWN_SOIL_OBS: dict = {}
+_PLOT_WITHDRAWN_VEG: dict = {}
+
+
+def _is_soil_obs_withdrawn(val: Any) -> bool:
+    if val is None:
+        return True
+    if getattr(val, "deleted", False) is True or getattr(val, "is_deletion", False) is True:
+        return True
+    if str(getattr(val, "status", "")).lower() in {"cancelled", "deleted", "withdrawn"}:
+        return True
+    if isinstance(val, dict):
+        if val.get("deleted") is True or val.get("is_deletion") is True:
+            return True
+        if str(val.get("status", "")).lower() in {"cancelled", "deleted", "withdrawn"}:
+            return True
+    return False
 
 
 def _execute_canonical_water_engine(
@@ -975,6 +992,8 @@ def _execute_canonical_water_engine(
         plot_veg_hist = _PLOT_VEGETATION_HISTORY.setdefault(plot_id, {})
         plot_so_hist = _PLOT_SOIL_OBS_HISTORY.setdefault(plot_id, {})
         plot_init_hist = _PLOT_INITIAL_STATE_HISTORY.setdefault(plot_id, {})
+        plot_withdrawn_so = _PLOT_WITHDRAWN_SOIL_OBS.setdefault(plot_id, set())
+        plot_withdrawn_veg = _PLOT_WITHDRAWN_VEG.setdefault(plot_id, set())
 
         raw_events = (
             op_ctx.get("management_events")
@@ -1149,7 +1168,14 @@ def _execute_canonical_water_engine(
                 if len(sk) >= 10:
                     try:
                         sd = datetime.date.fromisoformat(sk[:10])
-                        plot_so_hist[sd.strftime("%Y-%m-%d")] = sv
+                        sd_str = sd.strftime("%Y-%m-%d")
+                        if _is_soil_obs_withdrawn(sv):
+                            plot_withdrawn_so.add(sd_str)
+                            plot_so_hist.pop(sd_str, None)
+                            retained_soil_obs_map.pop(sd_str, None)
+                        else:
+                            plot_withdrawn_so.discard(sd_str)
+                            plot_so_hist[sd_str] = sv
                         supplied_soil_obs_dates.add(sd)
                     except Exception:
                         pass
@@ -1164,7 +1190,14 @@ def _execute_canonical_water_engine(
                 if sd_str and len(sd_str) >= 10:
                     try:
                         sd = datetime.date.fromisoformat(sd_str[:10])
-                        plot_so_hist[sd.strftime("%Y-%m-%d")] = s_item
+                        sd_str = sd.strftime("%Y-%m-%d")
+                        if _is_soil_obs_withdrawn(s_item):
+                            plot_withdrawn_so.add(sd_str)
+                            plot_so_hist.pop(sd_str, None)
+                            retained_soil_obs_map.pop(sd_str, None)
+                        else:
+                            plot_withdrawn_so.discard(sd_str)
+                            plot_so_hist[sd_str] = s_item
                         supplied_soil_obs_dates.add(sd)
                     except Exception:
                         pass
@@ -1179,7 +1212,15 @@ def _execute_canonical_water_engine(
                     soil_obs_date = ts.date()
             else:
                 soil_obs_date = ts.date()
-            plot_so_hist[soil_obs_date.strftime("%Y-%m-%d")] = soil_obs
+
+            soil_obs_date_str = soil_obs_date.strftime("%Y-%m-%d")
+            if _is_soil_obs_withdrawn(soil_obs):
+                plot_withdrawn_so.add(soil_obs_date_str)
+                plot_so_hist.pop(soil_obs_date_str, None)
+                retained_soil_obs_map.pop(soil_obs_date_str, None)
+            else:
+                plot_withdrawn_so.discard(soil_obs_date_str)
+                plot_so_hist[soil_obs_date_str] = soil_obs
             supplied_soil_obs_dates.add(soil_obs_date)
 
         # Collect explicitly supplied dates from current request
@@ -1390,21 +1431,28 @@ def _execute_canonical_water_engine(
 
         def _extract_soil_obs_for_date(d_val: datetime.date) -> Optional[Any]:
             d_str = d_val.strftime("%Y-%m-%d")
-            # Explicitly supplied dated records in current request take top precedence
+            # Enforce persistent withdrawal semantics on every retrieval path
+            if d_str in plot_withdrawn_so:
+                return None
             if d_val in supplied_soil_obs_dates:
                 val = plot_so_hist.get(d_str)
-                # Check for explicit withdrawal / deletion
-                if val is None or getattr(val, "deleted", False) or getattr(val, "status", "") in {"cancelled", "deleted", "withdrawn"}:
+                if _is_soil_obs_withdrawn(val):
                     return None
                 return val
-            if soil_obs_date is not None and d_val == soil_obs_date and soil_obs is not None:
+            if soil_obs_date is not None and d_val == soil_obs_date and not _is_soil_obs_withdrawn(soil_obs):
                 return soil_obs
-            if d_str in retained_soil_obs_map and retained_soil_obs_map[d_str] is not None:
-                return retained_soil_obs_map[d_str]
-            if d_str in plot_hist and isinstance(plot_hist[d_str], dict) and plot_hist[d_str].get("soil_observations") is not None:
-                return plot_hist[d_str]["soil_observations"]
-            if d_str in plot_so_hist and plot_so_hist[d_str] is not None:
-                return plot_so_hist[d_str]
+            if d_str in retained_soil_obs_map:
+                val = retained_soil_obs_map[d_str]
+                if not _is_soil_obs_withdrawn(val):
+                    return val
+            if d_str in plot_hist and isinstance(plot_hist[d_str], dict):
+                cached = plot_hist[d_str].get("soil_observations")
+                if not _is_soil_obs_withdrawn(cached):
+                    return cached
+            if d_str in plot_so_hist:
+                val = plot_so_hist[d_str]
+                if not _is_soil_obs_withdrawn(val):
+                    return val
             return None
 
         def _compute_step_forcing_hash(

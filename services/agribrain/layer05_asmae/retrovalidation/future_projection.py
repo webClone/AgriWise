@@ -18,6 +18,7 @@ def predict_held_out_scene(
     training_state: Dict[str, List[float]],
     holdout_scene: Any,
     operator: Optional[Any] = None,
+    nuisance_state: Optional[Dict[str, List[float]]] = None,
 ) -> Dict[str, Any]:
     import math
     import numpy as np
@@ -70,6 +71,13 @@ def predict_held_out_scene(
             if not isinstance(state, list):
                 zone_prediction = []
                 break
+            if nuisance_state and node_id in nuisance_state:
+                base = nuisance_state[node_id]
+                state = [
+                    state[i] if (i < len(state) and state[i] is not None)
+                    else (base[i] if i < len(base) else None)
+                    for i in range(max(len(state), len(base)))
+                ]
             try:
                 prediction = (
                     predict_sar_observation(obs_name, state)

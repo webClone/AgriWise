@@ -576,14 +576,53 @@ def run_retrovalidation(
         )
 
         # Compute physics expert holdout errors on this fold immediately
-        from ..bma.physics_experts import compute_physics_experts
+        from ..bma.physics_experts import compute_physics_experts, _records
         if (
             training_state
             and holdout_scene is not None
             and pred_result.get("status") == "predicted"
         ):
+            training_times = [
+                getattr(s, "acquisition_time", None) for s in training_scenes
+                if getattr(s, "acquisition_time", None) is not None
+            ]
+            cutoff_date_str = max(training_times).date().isoformat() if training_times else None
+
             f_ctx = dict(evidence_context or {})
             f_ctx["scenes"] = training_scenes
+            f_ctx["weather_daily_series"] = _training_weather(
+                (evidence_context or {}).get("weather_daily_series", {}),
+                training_scenes,
+                holdout_scene,
+            )
+            if cutoff_date_str and "plot_timeseries" in f_ctx:
+                f_ctx["plot_timeseries"] = [
+                    row for row in _records(f_ctx["plot_timeseries"])
+                    if str(row.get("date") or row.get("timestamp") or "")[:10] <= cutoff_date_str
+                ]
+            if cutoff_date_str and isinstance(f_ctx.get("phenology_posterior"), dict):
+                pheno_raw = (
+                    f_ctx["phenology_posterior"].get("generated_at")
+                    or f_ctx["phenology_posterior"].get("timestamp")
+                    or f_ctx["phenology_posterior"].get("date")
+                )
+                if pheno_raw and str(pheno_raw)[:10] > cutoff_date_str:
+                    f_ctx["phenology_posterior"] = {}
+            if cutoff_date_str and isinstance(f_ctx.get("soil_context"), dict):
+                soil_raw = (
+                    f_ctx["soil_context"].get("source_timestamp")
+                    or f_ctx["soil_context"].get("timestamp")
+                    or f_ctx["soil_context"].get("date")
+                )
+                if soil_raw and str(soil_raw)[:10] > cutoff_date_str:
+                    static_keys = {
+                        "soil_type", "texture", "field_capacity", "wilting_point",
+                        "saturation", "bulk_density", "hydrologic_group", "depth_m",
+                        "ksat_mm_h", "organic_matter_pct", "rooting_depth", "root_depth_m",
+                    }
+                    f_ctx["soil_context"] = {k: v for k, v in f_ctx["soil_context"].items() if k in static_keys}
+            f_ctx["management_events"] = training_events
+
             exp_specs = compute_physics_experts(training_state, f_ctx)
             for exp_name, spec in exp_specs.items():
                 prediction = spec.get("predictions", {})
@@ -591,6 +630,7 @@ def run_retrovalidation(
                     training_state=prediction,
                     holdout_scene=holdout_scene,
                     operator=holdout_op,
+                    nuisance_state=training_state,
                 )
                 if e_pred_res.get("status") == "predicted" and isinstance(e_pred_res.get("mean_error"), (int, float)):
                     fold_expert_errors.setdefault(exp_name, []).append(float(e_pred_res["mean_error"]))
@@ -1093,6 +1133,7 @@ def _compute_expert_holdout_errors(
     if not refit_folds:
         return {}
 
+    from ..bma.physics_experts import _records
     expert_errors: Dict[str, List[float]] = {}
     for fold in refit_folds:
         training_state = fold.get("training_state", {})
@@ -1100,8 +1141,46 @@ def _compute_expert_holdout_errors(
         holdout_scene = fold.get("holdout_scene")
         if not training_state or holdout_scene is None:
             continue
+        training_times = [
+            getattr(s, "acquisition_time", None) for s in training_scenes
+            if getattr(s, "acquisition_time", None) is not None
+        ]
+        cutoff_date_str = max(training_times).date().isoformat() if training_times else None
+
         context = dict(evidence_context)
         context["scenes"] = training_scenes
+        context["weather_daily_series"] = _training_weather(
+            (evidence_context or {}).get("weather_daily_series", {}),
+            training_scenes,
+            holdout_scene,
+        )
+        if cutoff_date_str and "plot_timeseries" in context:
+            context["plot_timeseries"] = [
+                row for row in _records(context["plot_timeseries"])
+                if str(row.get("date") or row.get("timestamp") or "")[:10] <= cutoff_date_str
+            ]
+        if cutoff_date_str and isinstance(context.get("phenology_posterior"), dict):
+            pheno_raw = (
+                context["phenology_posterior"].get("generated_at")
+                or context["phenology_posterior"].get("timestamp")
+                or context["phenology_posterior"].get("date")
+            )
+            if pheno_raw and str(pheno_raw)[:10] > cutoff_date_str:
+                context["phenology_posterior"] = {}
+        if cutoff_date_str and isinstance(context.get("soil_context"), dict):
+            soil_raw = (
+                context["soil_context"].get("source_timestamp")
+                or context["soil_context"].get("timestamp")
+                or context["soil_context"].get("date")
+            )
+            if soil_raw and str(soil_raw)[:10] > cutoff_date_str:
+                static_keys = {
+                    "soil_type", "texture", "field_capacity", "wilting_point",
+                    "saturation", "bulk_density", "hydrologic_group", "depth_m",
+                    "ksat_mm_h", "organic_matter_pct", "rooting_depth", "root_depth_m",
+                }
+                context["soil_context"] = {k: v for k, v in context["soil_context"].items() if k in static_keys}
+
         expert_specs = compute_physics_experts(training_state, context)
         for expert_name, spec in expert_specs.items():
             prediction = spec.get("predictions", {})
@@ -1109,6 +1188,7 @@ def _compute_expert_holdout_errors(
                 training_state=prediction,
                 holdout_scene=holdout_scene,
                 operator=fold.get("holdout_operator"),
+                nuisance_state=training_state,
             )
             if pred_result.get("status") == "predicted" and isinstance(pred_result.get("mean_error"), (int, float)):
                 expert_errors.setdefault(expert_name, []).append(float(pred_result["mean_error"]))
