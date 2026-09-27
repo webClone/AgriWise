@@ -34,6 +34,38 @@ from ..config import (
 logger = logging.getLogger(__name__)
 
 
+def _to_utc_datetime(val: Any) -> Optional[datetime]:
+    """Parse any datetime representation into a timezone-aware UTC datetime."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        if val.tzinfo is None:
+            return val.replace(tzinfo=timezone.utc)
+        return val.astimezone(timezone.utc)
+    if isinstance(val, date):
+        return datetime.combine(val, datetime.min.time(), tzinfo=timezone.utc)
+    if isinstance(val, str):
+        val_str = val.strip()
+        if not val_str:
+            return None
+        try:
+            dt = datetime.fromisoformat(val_str.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S%z", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(val_str, fmt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+            except Exception:
+                pass
+    return None
+
+
 def _rebuild_fold_geometry(
     training_scenes: List[Any],
     holdout_scene: Any,
@@ -376,32 +408,19 @@ def run_retrovalidation(
                 or archived_forecast.get("forecast_issued_at")
                 or (archived_forecast.get("metadata", {}) if isinstance(archived_forecast.get("metadata"), dict) else {}).get("issued_at")
             )
-            issued_cutoff_ok = True
-            if raw_issued and t_train_dt:
-                try:
-                    if isinstance(raw_issued, datetime):
-                        issued_dt = raw_issued
-                    elif isinstance(raw_issued, date):
-                        issued_dt = datetime.combine(raw_issued, datetime.min.time(), tzinfo=timezone.utc)
-                    else:
-                        issued_dt = datetime.fromisoformat(str(raw_issued)[:19])
-
-                    issued_d = issued_dt.date() if hasattr(issued_dt, "date") else issued_dt
-                    train_d = t_train_dt.date() if hasattr(t_train_dt, "date") else t_train_dt
-                    if issued_d > train_d:
-                        issued_cutoff_ok = False
-                except Exception:
-                    pass
+            issued_dt = _to_utc_datetime(raw_issued)
+            train_utc = _to_utc_datetime(t_train_dt)
 
             interval_weather_series = dict(archived_forecast)
-            if issued_cutoff_ok:
+            # Require valid issuance provenance and compare complete timezone-aware timestamps
+            if issued_dt is not None and train_utc is not None and issued_dt <= train_utc:
                 forecast_forcing_source = "archived_issuance_forecast"
                 is_issuance_forecast = True
                 forcing_provenance = "archived_issuance_forecast"
             else:
                 forecast_forcing_source = "retrieved_historical_forcing"
                 is_issuance_forecast = False
-                forcing_provenance = "post_cutoff_forecast_reanalysis"
+                forcing_provenance = "post_cutoff_or_unverified_forecast_reanalysis"
 
         elif raw_weather_daily and t_train_dt and t_holdout_dt:
             # Check if interval from training day through holdout day consumes observed weather
@@ -610,22 +629,41 @@ def run_retrovalidation(
 
     # ── Per-microzone retro scores ─────────────────────────────────
     per_microzone: Dict[str, Dict[str, Any]] = {}
-    node_holdout_errors: Dict[str, List[float]] = {}
+    node_prospective_errors: Dict[str, List[float]] = {}
+    node_retrospective_errors: Dict[str, List[float]] = {}
     for fold in successful_refits:
+        is_prospective_fold = bool(fold.get("is_issuance_forecast", False))
         pm_err = fold.get("per_microzone_error") or {}
         for nid, err in pm_err.items():
             if isinstance(err, (int, float)) and math.isfinite(float(err)):
-                node_holdout_errors.setdefault(nid, []).append(float(err))
+                if is_prospective_fold:
+                    node_prospective_errors.setdefault(nid, []).append(float(err))
+                else:
+                    node_retrospective_errors.setdefault(nid, []).append(float(err))
 
     for nid in means:
-        if nid in node_holdout_errors and node_holdout_errors[nid]:
-            mz_avg_err = sum(node_holdout_errors[nid]) / len(node_holdout_errors[nid])
-            mz_future = max(0.0, min(1.0, 1.0 - mz_avg_err))
+        if prospective_mean_errors:
+            if nid in node_prospective_errors and node_prospective_errors[nid]:
+                mz_avg_err = sum(node_prospective_errors[nid]) / len(node_prospective_errors[nid])
+                mz_future = max(0.0, min(1.0, 1.0 - mz_avg_err))
+            else:
+                mz_future = future_score
         else:
-            mz_future = future_score
+            mz_future = 0.0
+
+        if retrospective_mean_errors:
+            if nid in node_retrospective_errors and node_retrospective_errors[nid]:
+                mz_retro_err = sum(node_retrospective_errors[nid]) / len(node_retrospective_errors[nid])
+                mz_reconstruction = max(0.0, min(1.0, 1.0 - mz_retro_err))
+            else:
+                mz_reconstruction = reconstruction_score
+        else:
+            mz_reconstruction = 0.0
+
+        target_mz_future_component = mz_future if prospective_mean_errors else (mz_reconstruction if retrospective_mean_errors else 0.0)
 
         mz_retro = (
-            w["future"] * mz_future +
+            w["future"] * target_mz_future_component +
             w["radiometric"] * radiometric_score +
             w["temporal"] * temporal_score +
             w["spatial"] * spatial_score +
@@ -635,6 +673,7 @@ def run_retrovalidation(
         per_microzone[nid] = {
             "retro_score": round(mz_retro, 4),
             "future": round(mz_future, 4),
+            "reconstruction": round(mz_reconstruction, 4),
             "radiometric": round(radiometric_score, 4),
             "temporal": round(temporal_score, 4),
             "spatial": round(spatial_score, 4),

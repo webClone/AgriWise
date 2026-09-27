@@ -843,13 +843,13 @@ def _execute_canonical_water_engine(
                             pass
                 return default
 
-            t_max_v = _get_val(["temp_max", "temperature_max", "temp", "temperature"])
-            t_min_v = _get_val(["temp_min", "temperature_min"])
-            precip_v = _get_val(["precipitation", "rain", "precip", "precipitation_mm"])
-            wind_v = _get_val(["wind_speed", "wind", "wind_speed_2m_m_s"])
+            t_max_v = _get_val(["t_max_c", "temp_max", "temperature_max", "temp", "temperature", "t_max"])
+            t_min_v = _get_val(["t_min_c", "temp_min", "temperature_min", "t_min"])
+            precip_v = _get_val(["precipitation_mm", "precipitation", "rain", "precip"])
+            wind_v = _get_val(["wind_speed_2m_m_s", "wind_speed", "wind", "wind_speed_2m"])
             hum_v = _get_val(["humidity", "rh", "relative_humidity"])
-            rh_min_v = _get_val(["rh_min"])
-            rh_max_v = _get_val(["rh_max"])
+            rh_min_v = _get_val(["rh_min_pct", "rh_min"])
+            rh_max_v = _get_val(["rh_max_pct", "rh_max"])
             rn_v = _get_val(["net_radiation_mj_m2", "net_radiation", "radiation"])
 
             if isinstance(weather_prior, dict):
@@ -1018,6 +1018,41 @@ def _execute_canonical_water_engine(
         soil_type = op_ctx.get("soil_type") or getattr(inputs, "soil_type", "loam") or "loam"
         plot_hist = _PLOT_WATER_STATE_HISTORY.setdefault(plot_id, {})
 
+        # Collect explicitly supplied dates from current request
+        supplied_weather_dates = set()
+        if isinstance(weather_daily, dict):
+            for k in weather_daily.keys():
+                if len(k) >= 10:
+                    try:
+                        supplied_weather_dates.add(datetime.date.fromisoformat(k[:10]))
+                    except Exception:
+                        pass
+        if timeseries:
+            for t_entry in timeseries:
+                if isinstance(t_entry, dict):
+                    t_d = t_entry.get("date") or str(t_entry.get("timestamp", ""))[:10]
+                    if t_d and len(t_d) >= 10:
+                        try:
+                            supplied_weather_dates.add(datetime.date.fromisoformat(t_d[:10]))
+                        except Exception:
+                            pass
+        supplied_weather_dates.add(ts.date())
+
+        supplied_event_dates = set()
+        for ev in raw_events:
+            raw_d = None
+            if isinstance(ev, dict):
+                raw_d = ev.get("date") or ev.get("timestamp") or ev.get("time") or ev.get("effective_start")
+            elif hasattr(ev, "date") or hasattr(ev, "timestamp") or hasattr(ev, "effective_start"):
+                raw_d = getattr(ev, "effective_start", None) or getattr(ev, "timestamp", None) or getattr(ev, "date", None)
+            if raw_d:
+                try:
+                    supplied_event_dates.add(datetime.date.fromisoformat(str(raw_d)[:10]))
+                except Exception:
+                    pass
+
+        retained_weather_map: Dict[str, dict] = {}
+
         def _extract_weather_for_date(d_val: datetime.date) -> dict:
             d_str = d_val.strftime("%Y-%m-%d")
             if d_val == ts.date():
@@ -1036,25 +1071,76 @@ def _execute_canonical_water_engine(
                 p = _parse_weather(r_entry)
                 if p:
                     return p
+
+            # If this date was previously integrated and stored in plot_hist, retain its observation
+            if d_str in plot_hist and isinstance(plot_hist[d_str], dict) and "weather" in plot_hist[d_str]:
+                cached_w = plot_hist[d_str]["weather"]
+                if cached_w and isinstance(cached_w, dict):
+                    return cached_w
+
+            # Also check retained_weather_map if replaying an invalidated trajectory
+            if d_str in retained_weather_map and isinstance(retained_weather_map[d_str], dict):
+                return retained_weather_map[d_str]
+
             # Missing intermediate day: NEVER leak future endpoint observations into earlier dates!
-            # Explicitly declared unobserved intermediate day with zero precipitation and preserved uncertainty
-            if weather_obs and isinstance(weather_obs, dict):
-                imputed = dict(weather_obs)
+            # Impute from evidence available BEFORE the missing interval (persistence forward with 0 rain),
+            # or climatological prior if no prior observation exists.
+            prior_obs = None
+            d_prior_walk = d_val - datetime.timedelta(days=1)
+            while (d_val - d_prior_walk).days <= 365:
+                dp_str = d_prior_walk.strftime("%Y-%m-%d")
+                if isinstance(weather_daily, dict) and dp_str in weather_daily:
+                    p_w = _parse_weather(weather_daily[dp_str])
+                    if p_w:
+                        prior_obs = p_w
+                        break
+                if timeseries:
+                    for t_entry in timeseries:
+                        if isinstance(t_entry, dict):
+                            t_d = t_entry.get("date") or str(t_entry.get("timestamp", ""))[:10]
+                            if t_d == dp_str:
+                                p_w = _parse_weather(t_entry)
+                                if p_w:
+                                    prior_obs = p_w
+                                    break
+                    if prior_obs:
+                        break
+                if dp_str in plot_hist and isinstance(plot_hist[dp_str], dict) and "weather" in plot_hist[dp_str]:
+                    prior_obs = plot_hist[dp_str]["weather"]
+                    break
+                if dp_str in retained_weather_map:
+                    prior_obs = retained_weather_map[dp_str]
+                    break
+                d_prior_walk -= datetime.timedelta(days=1)
+
+            if prior_obs and isinstance(prior_obs, dict):
+                imputed = dict(prior_obs)
+                imputation_method = "prior_weather_persistence_zero_rain"
             else:
+                base_tmax = float(weather_prior["temp_max"]) if isinstance(weather_prior, dict) and "temp_max" in weather_prior else 20.0
+                base_tmin = float(weather_prior["temp_min"]) if isinstance(weather_prior, dict) and "temp_min" in weather_prior else 10.0
+                base_wind = float(weather_prior["wind_speed"]) if isinstance(weather_prior, dict) and "wind_speed" in weather_prior else 2.0
+                base_rhmin = float(weather_prior["rh_min"]) if isinstance(weather_prior, dict) and "rh_min" in weather_prior else 40.0
+                base_rhmax = float(weather_prior["rh_max"]) if isinstance(weather_prior, dict) and "rh_max" in weather_prior else 80.0
+                base_rn = float(weather_prior["net_radiation"]) if isinstance(weather_prior, dict) and "net_radiation" in weather_prior else 15.0
                 imputed = {
-                    "t_max_c": 20.0,
-                    "t_min_c": 10.0,
-                    "wind_speed_2m_m_s": 2.0,
-                    "rh_min_pct": 40.0,
-                    "rh_max_pct": 80.0,
-                    "net_radiation_mj_m2": 15.0,
+                    "t_max_c": base_tmax,
+                    "t_min_c": base_tmin,
+                    "wind_speed_2m_m_s": base_wind,
+                    "rh_min_pct": base_rhmin,
+                    "rh_max_pct": base_rhmax,
+                    "net_radiation_mj_m2": base_rn,
                 }
+                imputation_method = "climatological_prior_zero_rain"
+
             imputed["date"] = d_str
             imputed["precipitation_mm"] = 0.0
             imputed["precipitation"] = 0.0
             imputed["rain"] = 0.0
-            imputed["imputation_method"] = "missing_intermediate_zero_rain"
+            imputed["imputation_method"] = imputation_method
             imputed["imputation_uncertainty_flag"] = True
+            imputed["weather_sigma"] = 0.08
+            imputed["weather_sigma_override"] = 0.08
             return imputed
 
         def _compute_step_forcing_hash(w: dict, irr: float) -> str:
@@ -1062,16 +1148,20 @@ def _execute_canonical_water_engine(
             return hashlib.sha256(repr((w_items, round(irr, 4))).encode("utf-8")).hexdigest()[:16]
 
         # Invalidate any cached history whose input forcing or predecessor changed in current inputs:
-        # A correction anywhere in the consumed interval must invalidate the affected result and its successors.
+        # Distinguish "not supplied in this request" (rolling daily inputs) from "historical evidence was corrected"
         earliest_invalid_day = None
         for hist_k in sorted(plot_hist.keys()):
             if hist_k > day_key:
                 continue
-            hist_entry = plot_hist[hist_k]
             try:
                 hist_d = datetime.date.fromisoformat(hist_k)
             except Exception:
                 continue
+            hist_entry = plot_hist[hist_k]
+
+            if hist_d not in supplied_weather_dates and hist_d not in supplied_event_dates:
+                continue
+
             curr_w = _extract_weather_for_date(hist_d)
             curr_irr = _get_irrigation_for_date(hist_d)
             curr_f_hash = _compute_step_forcing_hash(curr_w, curr_irr)
@@ -1080,6 +1170,9 @@ def _execute_canonical_water_engine(
                 break
 
         if earliest_invalid_day is not None:
+            for k, v in plot_hist.items():
+                if isinstance(v, dict) and "weather" in v:
+                    retained_weather_map[k] = v["weather"]
             to_delete = [k for k in list(plot_hist.keys()) if k >= earliest_invalid_day]
             for k in to_delete:
                 plot_hist.pop(k, None)
@@ -1087,16 +1180,38 @@ def _execute_canonical_water_engine(
         explicit_soil = op_ctx.get("soil_profile_state") or getattr(inputs, "soil_profile_state", None)
         explicit_mem = op_ctx.get("previous_hydraulic_memory") or getattr(inputs, "previous_hydraulic_memory", None)
 
-        if explicit_soil is not None:
+        if explicit_soil is not None or explicit_mem is not None:
             to_delete = [k for k in list(plot_hist.keys()) if k >= day_key]
             for k in to_delete:
                 plot_hist.pop(k, None)
 
-        # Retrieve or restore explicit predecessor state strictly prior to current timestamp
+        # Multi-day interval integration bounds:
+        # Determine the earliest date where integration must begin
+        if explicit_soil is not None:
+            d_start = ts.date()
+        elif earliest_invalid_day is not None:
+            # Rebuild from the earliest affected transition!
+            d_start = datetime.date.fromisoformat(earliest_invalid_day)
+        else:
+            # Check predecessor in cache: must be strictly PRECEDING target day (date < ts.date())
+            prior_dates = [r["timestamp"].date() for r in plot_hist.values() if r["timestamp"].date() < ts.date()]
+            if prior_dates:
+                latest_pred_d = max(prior_dates)
+                if (ts.date() - latest_pred_d).days > 1:
+                    d_start = latest_pred_d + datetime.timedelta(days=1)
+                else:
+                    d_start = ts.date()
+            else:
+                # No predecessor in cache: start from earliest date in supplied inputs or target date
+                earliest_supplied_d = min(supplied_weather_dates) if supplied_weather_dates else ts.date()
+                d_start = min(earliest_supplied_d, ts.date())
+        d_end = ts.date()
+
+        # Retrieve predecessor state strictly prior to d_start (date < d_start)
         predecessor_time = None
         cached_soil = None
         cached_mem = None
-        prior_records = [r for r in plot_hist.values() if r["timestamp"] < ts]
+        prior_records = [r for r in plot_hist.values() if r["timestamp"].date() < d_start]
         if prior_records:
             prior_records.sort(key=lambda r: r["timestamp"])
             latest_pred = prior_records[-1]
@@ -1110,16 +1225,6 @@ def _execute_canonical_water_engine(
         soil_obs = op_ctx.get("soil_observations") or getattr(inputs, "soil_observations", None)
         weather_ensemble = op_ctx.get("weather_ensemble") or getattr(inputs, "weather_ensemble", None)
         soil_type = op_ctx.get("soil_type") or getattr(inputs, "soil_type", "loam") or "loam"
-
-        # Multi-day interval integration bounds: if sparse execution (e.g. Jan 1 then Jan 11),
-        # integrate each intervening day with its corresponding forcing
-        if explicit_soil is not None:
-            d_start = ts.date()
-        elif predecessor_time is not None and (ts.date() - predecessor_time.date()).days > 1:
-            d_start = predecessor_time.date() + datetime.timedelta(days=1)
-        else:
-            d_start = ts.date()
-        d_end = ts.date()
 
         # Build comprehensive interval forcing and dependency digest
         interval_forcing_entries = []
@@ -1140,13 +1245,17 @@ def _execute_canonical_water_engine(
             vwc = getattr(s_obj, "volumetric_water_content", None) or getattr(s_obj, "layers_vwc", None) or getattr(s_obj, "theta_profile", None)
             if vwc is not None:
                 return repr(vwc)
-            return str(type(s_obj)) + repr(getattr(s_obj, "__dict__", str(s_obj)))
+            if hasattr(s_obj, "__dict__"):
+                return str(type(s_obj)) + repr(sorted((k, str(v)) for k, v in s_obj.__dict__.items()))
+            return str(type(s_obj)) + repr(s_obj)
 
         interval_components = (
             ts.isoformat(),
             tuple(interval_forcing_entries),
             _state_digest(explicit_soil),
             _state_digest(cached_soil),
+            _state_digest(explicit_mem),
+            _state_digest(cached_mem),
             predecessor_time.isoformat() if predecessor_time else "none",
             _state_digest(soil_obs),
             _state_digest(weather_ensemble),
@@ -1164,6 +1273,7 @@ def _execute_canonical_water_engine(
                 cached_entry.get("interval_hash") == interval_hash
                 and cached_entry.get("timestamp") == ts
                 and explicit_soil is None
+                and explicit_mem is None
             ):
                 return cached_entry["water_state"], cached_entry["feedback"]
             else:
@@ -1224,6 +1334,8 @@ def _execute_canonical_water_engine(
                     "hydraulic_memory": current_mem,
                     "water_state": w_state,
                     "feedback": fb,
+                    "weather": step_weather,
+                    "irrigation": step_irrigation,
                     "evidence_hash": step_ev_hash,
                     "interval_hash": interval_hash if is_target_day else step_ev_hash,
                     "step_forcing_hash": _compute_step_forcing_hash(step_weather, step_irrigation),

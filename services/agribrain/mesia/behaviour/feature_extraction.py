@@ -111,13 +111,70 @@ def register_calibration(
     }
 
 
+PROFILE_TO_CALIBRATION_FAMILY: Dict[str, str] = {
+    # Wi-Fi profiles
+    "WIFI_CSI": "WIFI",
+    "WIFI_80211BF_SUB7": "WIFI",
+    "WIFI_80211BF_MMWAVE": "WIFI",
+    "WIFI_HALOW": "WIFI",
+    "WIFI": "WIFI",
+    # Cellular profiles
+    "LTE_PUBLIC_SDR": "CELLULAR",
+    "NR_PUBLIC_UE": "CELLULAR",
+    "NR_PASSIVE_SDR": "CELLULAR",
+    "PRIVATE_5G": "CELLULAR",
+    "ORAN_OPERATOR": "CELLULAR",
+    "NBIOT_NTN": "CELLULAR",
+    "CELLULAR": "CELLULAR",
+    # LoRa
+    "LORA_CONTROLLED": "LORA",
+    "LORA": "LORA",
+    # GNSS
+    "GNSS_REFLECTOMETRY": "GNSS",
+    "GNSS_BURIED_DIFF": "GNSS",
+    "GNSS_RTK_GEOMETRY": "GNSS",
+    "GNSS": "GNSS",
+    # RFID / Ambient IoT
+    "RFID_BACKSCATTER": "RFID",
+    "AMBIENT_IOT": "RFID",
+    "RFID": "RFID",
+    # UWB / GPR / Radar
+    "UWB_IMPULSE_FMCW": "UWB",
+    "UWB": "UWB",
+    "GPR": "GPR",
+    "MMWAVE_RADAR": "RADAR",
+    "RADAR": "RADAR",
+    # UHF
+    "UHF": "UHF",
+    "BROADCAST_UHF": "BROADCAST_UHF",
+}
+
+
+def resolve_profile_to_family(source_profile: Optional[str]) -> Optional[str]:
+    """Map registered source profile to canonical calibration radio family.
+    
+    Unknown profiles return None (unknown families must remain unknown).
+    """
+    if not source_profile:
+        return None
+    raw = source_profile.split("/")[0].strip().upper()
+    if raw in PROFILE_TO_CALIBRATION_FAMILY:
+        return PROFILE_TO_CALIBRATION_FAMILY[raw]
+    for k, fam in PROFILE_TO_CALIBRATION_FAMILY.items():
+        if raw.startswith(k) or k in raw:
+            return fam
+    return None
+
+
 def resolve_calibration(
     calibration_state_id: Optional[str],
-    target_family: str,
+    target_family: Optional[str],
     obs_time: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
     """Resolve and validate calibration record by ID, applicability, and validity period."""
     if not calibration_state_id or not str(calibration_state_id).strip():
+        return None
+    if not target_family or target_family.upper() == "UNKNOWN":
         return None
     cid = str(calibration_state_id).strip()
     rec = REGISTERED_CALIBRATIONS.get(cid)
@@ -125,17 +182,25 @@ def resolve_calibration(
         return None
     if rec.get("status") != "VALID":
         return None
-    fam_upper = (target_family or "").upper()
+    fam_upper = target_family.upper()
     allowed_fams = [f.upper() for f in rec.get("radio_families", [])]
-    if allowed_fams and not any(f in fam_upper or fam_upper in f for f in allowed_fams):
+    if allowed_fams and not any(f == fam_upper or f in fam_upper or fam_upper in f for f in allowed_fams):
         return None
     if obs_time:
-        vf = rec.get("valid_from")
-        vt = rec.get("valid_to")
-        if vf and obs_time < vf:
+        def _to_utc(dt: Any) -> Optional[datetime]:
+            if not dt:
+                return None
+            if isinstance(dt, datetime):
+                return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
             return None
-        if vt and obs_time > vt:
-            return None
+        obs_utc = _to_utc(obs_time)
+        vf = _to_utc(rec.get("valid_from"))
+        vt = _to_utc(rec.get("valid_to"))
+        if obs_utc:
+            if vf and obs_utc < vf:
+                return None
+            if vt and obs_utc > vt:
+                return None
     return rec
 
 
@@ -177,24 +242,29 @@ class NativeFeatureExtractor:
         features["carrier_frequency_hz"] = float(packet.carrier_frequency_hz) if packet.carrier_frequency_hz is not None else None
         features["bandwidth_hz"] = float(packet.bandwidth_hz) if packet.bandwidth_hz is not None else None
 
-        # Determine radio family from profile
-        profile = packet.source_profile.split("/")[0] if packet.source_profile else ""
-        profile_upper = profile.upper()
-        detected_family = "WIFI"
-        for fam in ("GNSS", "WIFI", "CELLULAR", "UHF", "BROADCAST_UHF", "LORA", "RADAR", "GPR", "UWB", "RFID"):
-            if fam in profile_upper:
-                detected_family = fam
-                break
+        # Determine radio family from registered profile mapping (unknown remains unknown)
+        detected_family = resolve_profile_to_family(packet.source_profile)
+
+        # Canonical acquisition timestamp from packet
+        obs_time = (
+            getattr(packet, "utc_time", None)
+            or getattr(packet, "observed_at", None)
+            or getattr(packet, "device_time", None)
+        )
 
         # 2. Calibration baseline lookup: distinguish demonstrated calibration from assumed family prior
         # R6 §7.3: Resolve and validate referenced calibration (applicability, validity period, uncertainty)
         resolved_cal = resolve_calibration(
             packet.calibration_state_id,
             target_family=detected_family,
-            obs_time=packet.observed_at if hasattr(packet, "observed_at") else None,
+            obs_time=obs_time,
         )
 
-        family_prior = CALIBRATED_BASELINES.get(detected_family, {"expected_baseline_snr_db": 20.0, "calibration_uncertainty_db": 2.5})
+        family_prior = (
+            CALIBRATED_BASELINES.get(detected_family)
+            if detected_family
+            else {"expected_baseline_snr_db": 20.0, "calibration_uncertainty_db": 2.5}
+        ) or {"expected_baseline_snr_db": 20.0, "calibration_uncertainty_db": 2.5}
 
         if resolved_cal is not None:
             baseline_provenance = "demonstrated_calibration"

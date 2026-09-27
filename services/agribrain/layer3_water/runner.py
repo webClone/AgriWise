@@ -116,6 +116,14 @@ class WaterIntelligenceEngine:
         )
 
         # 2. Atmospheric Reference ET0 with input provenance
+        weather_sigma_override = None
+        if "weather_sigma_override" in weather and weather["weather_sigma_override"] is not None:
+            weather_sigma_override = float(weather["weather_sigma_override"])
+        elif "weather_sigma" in weather and weather["weather_sigma"] is not None:
+            weather_sigma_override = float(weather["weather_sigma"])
+        elif weather.get("imputation_uncertainty_flag") or weather.get("imputation_method"):
+            weather_sigma_override = 0.08
+
         et0_res = PenmanMonteithET0.calculate_et0(
             t_max_c=t_max,
             t_min_c=t_min,
@@ -124,6 +132,7 @@ class WaterIntelligenceEngine:
             dew_point_c=dew_point,
             rh_max_pct=rh_max,
             rh_min_pct=rh_min,
+            weather_sigma_override=weather_sigma_override,
         )
 
         # 3. Extract vegetation coordinates from Layer 2 latent state

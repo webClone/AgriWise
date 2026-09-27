@@ -599,6 +599,7 @@ class TestScenarioEAgriBrainLayer0Bridge:
             native_data_uri="sigmf://data/wifi_csi_01.sigmf-data",
             native_data_hash="a" * 64,
             native_data_type="cf32_le",
+            snr_db=22.0,
         )
 
         # 1. Uncalibrated attempt -> INVALIDATED
@@ -618,6 +619,25 @@ class TestScenarioEAgriBrainLayer0Bridge:
         )
         assert l0_adm.status == EvidenceAdmissionStatus.ADMITTED
         assert l0_adm.is_usable_for_assimilation is True
+
+        # 3. Missing observation / absent innovation -> ABSENT
+        packet_absent = RadioObservationPacket(
+            packet_id="pkt-test-absent",
+            source_profile="WIFI_CSI/v2",
+            receiver_id="RECV_TEST_01",
+            utc_time=datetime.now(timezone.utc),
+            native_data_uri="sigmf://data/wifi_csi_01.sigmf-data",
+            native_data_hash="a" * 64,
+            native_data_type="cf32_le",
+            snr_db=None,
+        )
+        l0_abs, _ = bridge.process_and_admit_observation(
+            packet=packet_absent,
+            is_calibration_valid=True,
+            is_epoch_active=True,
+        )
+        assert l0_abs.status == EvidenceAdmissionStatus.ABSENT
+        assert l0_abs.is_usable_for_assimilation is False
 
     def test_bridge_missing_native_hash_rejected(self):
         """Bridge must strictly reject packets without valid 64-character SHA-256 native data hash."""

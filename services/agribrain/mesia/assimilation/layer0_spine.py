@@ -67,6 +67,16 @@ class Layer0EvidenceSpine:
                 is_usable_for_assimilation=False,
             )
 
+        # Absence gate: missing innovation or nonpositive confidence support is ABSENT and not usable for assimilation
+        if proposal.innovation_value is None or proposal.confidence_support <= 0.0:
+            return Layer0EvidenceRecord(
+                record_id=f"l0-rec-{proposal.proposal_id}",
+                status=EvidenceAdmissionStatus.ABSENT,
+                proposal=proposal,
+                admission_notes="Observation missing or confidence support is non-positive",
+                is_usable_for_assimilation=False,
+            )
+
         return Layer0EvidenceRecord(
             record_id=f"l0-rec-{proposal.proposal_id}",
             status=EvidenceAdmissionStatus.ADMITTED,
