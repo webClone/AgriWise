@@ -223,7 +223,7 @@ QUEUED_STATUSES: FrozenSet[str] = frozenset(
     {'queued', 'stalled', 'completed_reintegration_pending'}
 )
 TERMINAL_STATUSES: FrozenSet[str] = frozenset(
-    {'failed', 'completed', 'superseded'}
+    {'failed', 'completed', 'superseded', 'cancelled'}
 )
 _JOB_ID = re.compile(r"^(?:[0-9a-f]{24}|job_[a-zA-Z0-9_-]{8,32})$")
 
@@ -1032,6 +1032,7 @@ def _canonical_status(status: Any) -> str:
         'degraded': 'failed',
         'error': 'failed',
         'obsolete': 'superseded',
+        'canceled': 'cancelled',
     }.get(raw, raw)
 
 
@@ -1238,23 +1239,35 @@ def spawn_worker(job_path: Path) -> bool:
         )
         _append_job_event(job_path, 'worker_process_started', pid=process.pid)
         return True
-    except OSError as exc:
-        _update_job(
-            job_path,
-            expected_launch_token=launch_token,
-            status='failed',
-            stage='launch_failed',
-            error=str(exc),
-            retry_classification='retryable_launch',
-            recoverable=True,
-            launch_state='failed',
-        )
+    except Exception as exc:
+        try:
+            _update_job(
+                job_path,
+                expected_launch_token=launch_token,
+                status='failed',
+                stage='launch_failed',
+                error=str(exc),
+                retry_classification='retryable_launch',
+                recoverable=True,
+                launch_state='failed',
+                lease_expires_at=None,
+                lease_token=None,
+                lease_owner=None,
+            )
+        except Exception:
+            pass
         _append_job_event(
             job_path,
             'worker_launch_failed',
             error=str(exc),
             error_type=type(exc).__name__,
         )
+        lock_path = job_path.with_suffix(".lock")
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        bounded_executor.on_worker_completed(job_path)
         return False
 
 
@@ -1913,7 +1926,16 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
         )
     except Exception:
         child.terminate()
-        child.wait(timeout=max(1.0, PROCESS_TERMINATE_GRACE_SECONDS))
+        try:
+            child.wait(timeout=max(1.0, PROCESS_TERMINATE_GRACE_SECONDS))
+        except Exception:
+            child.kill()
+        lock_path = job_path.with_suffix(".lock")
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        bounded_executor.on_worker_completed(job_path)
         raise
     memory_exceeded = False
     peak_rss_mb = 0.0
@@ -1946,72 +1968,73 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
 
     timed_out = False
     try:
-        child.wait(timeout=PROCESS_HARD_TIMEOUT_SECONDS)
-        if not memory_exceeded and getattr(child, "returncode", 0) == 0:
-            bounded_executor.on_worker_completed(job_path)
-            return
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        child.terminate()
-    try:
-        child.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        child.kill()
-        child.wait(timeout=max(1.0, PROCESS_TERMINATE_GRACE_SECONDS))
-
-    lock_path = job_path.with_suffix(".lock")
-    try:
-        lock_value = _read_json(lock_path)
-        if int(lock_value.get("pid") or -1) == child.pid:
-            lock_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-
-    exit_code = getattr(child, "returncode", None)
-    if exit_code is None:
         try:
-            exit_code = child.poll()
-        except Exception:
-            exit_code = -1
+            child.wait(timeout=PROCESS_HARD_TIMEOUT_SECONDS)
+            if not memory_exceeded and getattr(child, "returncode", 0) == 0:
+                return
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            child.terminate()
+        try:
+            child.wait(timeout=PROCESS_TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=max(1.0, PROCESS_TERMINATE_GRACE_SECONDS))
 
-    elapsed = time.monotonic() - started
+        lock_path = job_path.with_suffix(".lock")
+        try:
+            lock_value = _read_json(lock_path)
+            if int(lock_value.get("pid") or -1) == child.pid:
+                lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
-    if memory_exceeded:
-        diagnostics = {
-            "failure_code": "MEMORY_QUOTA_EXCEEDED",
-            "peak_rss_mb": peak_rss_mb,
-            "quota_mb": MAX_WORKER_MEMORY_MB,
-            "exit_code": exit_code,
-            "elapsed_ms": round(elapsed * 1000.0, 3),
-        }
-        _update_job(
-            job_path,
-            expected_launch_token=launch_token,
-            status="failed",
-            stage="memory_quota_exceeded",
-            error=f"Worker process exceeded memory quota ({peak_rss_mb:.1f} MB > {MAX_WORKER_MEMORY_MB:.1f} MB)",
-            retry_classification="manual_review",
-            recoverable=False,
-            failure_diagnostics=diagnostics,
-        )
-        _append_job_event(
-            job_path,
-            "worker_memory_quota_exceeded",
-            status="failed",
-            peak_rss_mb=peak_rss_mb,
-            quota_mb=MAX_WORKER_MEMORY_MB,
-            exit_code=exit_code,
-        )
-    elif timed_out:
-        _finalize_supervised_timeout(job_path, launch_token, elapsed)
-    else:
-        _finalize_supervised_process_exit(
-            job_path,
-            launch_token,
-            exit_code=exit_code if exit_code is not None else -1,
-            elapsed_seconds=elapsed,
-        )
-    bounded_executor.on_worker_completed(job_path)
+        exit_code = getattr(child, "returncode", None)
+        if exit_code is None:
+            try:
+                exit_code = child.poll()
+            except Exception:
+                exit_code = -1
+
+        elapsed = time.monotonic() - started
+
+        if memory_exceeded:
+            diagnostics = {
+                "failure_code": "MEMORY_QUOTA_EXCEEDED",
+                "peak_rss_mb": peak_rss_mb,
+                "quota_mb": MAX_WORKER_MEMORY_MB,
+                "exit_code": exit_code,
+                "elapsed_ms": round(elapsed * 1000.0, 3),
+            }
+            _update_job(
+                job_path,
+                expected_launch_token=launch_token,
+                status="failed",
+                stage="memory_quota_exceeded",
+                error=f"Worker process exceeded memory quota ({peak_rss_mb:.1f} MB > {MAX_WORKER_MEMORY_MB:.1f} MB)",
+                retry_classification="manual_review",
+                recoverable=False,
+                failure_diagnostics=diagnostics,
+            )
+            _append_job_event(
+                job_path,
+                "worker_memory_quota_exceeded",
+                status="failed",
+                peak_rss_mb=peak_rss_mb,
+                quota_mb=MAX_WORKER_MEMORY_MB,
+                exit_code=exit_code,
+            )
+        elif timed_out:
+            _finalize_supervised_timeout(job_path, launch_token, elapsed)
+        else:
+            _finalize_supervised_process_exit(
+                job_path,
+                launch_token,
+                exit_code=exit_code if exit_code is not None else -1,
+                elapsed_seconds=elapsed,
+            )
+    finally:
+        bounded_executor.on_worker_completed(job_path)
 
 
 def _run_reintegration(

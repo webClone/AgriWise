@@ -106,6 +106,102 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
+_TIMESTAMP_KEYS = frozenset({
+    "source_timestamp", "timestamp", "date", "recorded_at",
+    "acquired_at", "as_of", "valid_time", "generated_at",
+    "created_at", "logged_at", "available_at", "issued_at", "known_at",
+})
+
+_DYNAMIC_SOIL_KEYS = frozenset({
+    "root_zone_water", "soil_moisture", "sm_10_40", "water_content",
+    "vwc", "theta", "volumetric_water_content",
+    "salinity_stress", "salinity_risk", "salinity", "ec", "electrical_conductivity",
+})
+
+
+def _is_proven_before_cutoff(data: Mapping[str, Any], cutoff: datetime) -> bool:
+    """Check if dynamic evidence is demonstrably available at or before *cutoff*.
+
+    To prevent future information leakage into prospective initialization,
+    dynamic evidence MUST carry verifiable timestamps proving both:
+      1. It was acquired/observed at or before *cutoff*.
+      2. It was recorded/available in the system at or before *cutoff*.
+
+    If timestamps are missing, unparseable, or any timestamp exceeds *cutoff*,
+    the evidence cannot be proven available before cutoff and returns False.
+    """
+    if not isinstance(data, Mapping) or not data:
+        return False
+
+    avail_raw = (
+        data.get("recorded_at")
+        or data.get("created_at")
+        or data.get("logged_at")
+        or data.get("available_at")
+        or data.get("issued_at")
+        or data.get("known_at")
+    )
+    obs_raw = (
+        data.get("source_timestamp")
+        or data.get("acquired_at")
+        or data.get("timestamp")
+        or data.get("date")
+        or data.get("as_of")
+        or data.get("valid_time")
+        or data.get("generated_at")
+    )
+
+    if not avail_raw and not obs_raw:
+        return False
+
+    timestamps_checked = 0
+    for raw in (avail_raw, obs_raw):
+        if raw is not None:
+            parsed = _parse_datetime(raw)
+            if parsed is None or parsed > cutoff:
+                return False
+            timestamps_checked += 1
+
+    return timestamps_checked > 0
+
+
+def _strip_dynamic_recursive(
+    data: Dict[str, Any],
+    cutoff: datetime,
+    *,
+    is_proven: bool = False,
+    _depth: int = 0,
+) -> Dict[str, Any]:
+    """Recursively filter soil context for prospective initialization.
+
+    If *is_proven* is False, all dynamic measurement keys are stripped at all
+    levels (including inside containers like 'measurements'). Time-invariant
+    static soil properties (texture, depth, field_capacity, etc.) are preserved.
+
+    If *is_proven* is True, any nested sub-dict is individually validated; if
+    the sub-dict carries a timestamp exceeding *cutoff* or is an unproven
+    dynamic measurement container, it is stripped.
+    """
+    if _depth > 8 or not isinstance(data, dict):
+        return data
+    result = {}
+    for key, value in data.items():
+        key_lower = str(key).lower()
+        if not is_proven and key_lower in _DYNAMIC_SOIL_KEYS:
+            continue
+        if isinstance(value, dict):
+            child_has_ts = any(value.get(tk) is not None for tk in _TIMESTAMP_KEYS)
+            child_proven = _is_proven_before_cutoff(value, cutoff) if child_has_ts else is_proven
+            filtered_child = _strip_dynamic_recursive(
+                value, cutoff, is_proven=child_proven, _depth=_depth + 1
+            )
+            if filtered_child:
+                result[key] = filtered_child
+        else:
+            result[key] = value
+    return result
+
+
 def _crop_identity(value: Any) -> str:
     data = _as_dict(value)
     return str(data.get("crop") or data.get("crop_type") or data.get("name") or "").strip().lower()
@@ -246,8 +342,17 @@ def _records_as_of(records: List[Dict[str, Any]], as_of: Any) -> List[Dict[str, 
             or row.get('timestamp') or row.get('date')
         )
         stamp = _parse_datetime(raw_date)
-        if stamp is not None and stamp <= cutoff:
-            frozen.append(row)
+        if stamp is None or stamp > cutoff:
+            continue
+        rec_raw = (
+            row.get('recorded_at') or row.get('created_at')
+            or row.get('logged_at') or row.get('available_at')
+        )
+        if rec_raw is not None:
+            rec_stamp = _parse_datetime(rec_raw)
+            if rec_stamp is None or rec_stamp > cutoff:
+                continue
+        frozen.append(row)
     return frozen
 
 
@@ -638,24 +743,11 @@ def _prior_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, A
     cutoff = _parse_datetime(as_of) if as_of is not None else None
     if cutoff is not None:
         coarse = {}
-        # Separate static soil properties from dated dynamic measurements
-        raw_soil_ts = (
-            soil.get("source_timestamp")
-            or soil.get("timestamp")
-            or soil.get("date")
-            or soil.get("recorded_at")
-            or soil.get("acquired_at")
-            or soil.get("as_of")
-            or soil.get("valid_time")
-        )
-        if raw_soil_ts:
-            soil_ts = _parse_datetime(raw_soil_ts)
-            if soil_ts is not None and soil_ts > cutoff:
-                dynamic_soil_keys = {
-                    "root_zone_water", "soil_moisture", "sm_10_40", "water_content",
-                    "salinity_stress", "salinity_risk", "salinity"
-                }
-                soil = {k: v for k, v in soil.items() if k not in dynamic_soil_keys}
+        # Dynamic soil evidence requires verifiable proof of pre-cutoff availability.
+        # If unprovable (missing/invalid timestamps, or recorded/acquired past cutoff),
+        # all dynamic soil variables are stripped recursively while preserving static properties.
+        soil_proven = _is_proven_before_cutoff(soil, cutoff)
+        soil = _strip_dynamic_recursive(soil, cutoff, is_proven=soil_proven)
     mappings = {
         "root_zone_water": ((soil, ("root_zone_water", "soil_moisture", "sm_10_40", "water_content")), (coarse, ("root_zone_water", "water_balance", "soil_moisture"))),
         "chlorophyll": ((coarse, ("chlorophyll_proxy", "chlorophyll")),),
@@ -682,17 +774,8 @@ def _prior_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, A
 
     canonical_phenology = getattr(inp, "phenology_posterior", {}) or {}
     if cutoff is not None and isinstance(canonical_phenology, dict):
-        raw_pheno_ts = (
-            canonical_phenology.get("generated_at")
-            or canonical_phenology.get("timestamp")
-            or canonical_phenology.get("source_timestamp")
-            or canonical_phenology.get("date")
-            or canonical_phenology.get("as_of")
-        )
-        if raw_pheno_ts:
-            pheno_ts = _parse_datetime(raw_pheno_ts)
-            if pheno_ts is not None and pheno_ts > cutoff:
-                canonical_phenology = {}
+        if not _is_proven_before_cutoff(canonical_phenology, cutoff):
+            canonical_phenology = {}
     stage = str(
         canonical_phenology.get("current_stage")
         or canonical_phenology.get("most_likely_stage")

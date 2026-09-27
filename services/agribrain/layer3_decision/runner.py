@@ -1003,6 +1003,13 @@ def _execute_canonical_water_engine(
 
         explicit_event_dates = set()
         retained_irrigation_map: Dict[str, float] = {}
+        retained_weather_map: Dict[str, dict] = {}
+        retained_veg_map: Dict[str, Any] = {}
+        retained_soil_obs_map: Dict[str, Any] = {}
+        retained_init_soil_map: Dict[str, Any] = {}
+        retained_init_mem_map: Dict[str, Any] = {}
+        retained_events_map: Dict[str, Any] = {}
+        withdrawn_soil_dates: Set[datetime.date] = set()
 
         for ev in raw_events:
             ev_id = None
@@ -1173,11 +1180,12 @@ def _execute_canonical_water_engine(
                             plot_withdrawn_so.add(sd_str)
                             plot_so_hist.pop(sd_str, None)
                             retained_soil_obs_map.pop(sd_str, None)
+                            withdrawn_soil_dates.add(sd)
                         else:
                             plot_withdrawn_so.discard(sd_str)
                             plot_so_hist[sd_str] = sv
                         supplied_soil_obs_dates.add(sd)
-                    except Exception:
+                    except (ValueError, TypeError, AttributeError):
                         pass
         elif isinstance(soil_obs_daily_input, list):
             for s_item in soil_obs_daily_input:
@@ -1195,11 +1203,12 @@ def _execute_canonical_water_engine(
                             plot_withdrawn_so.add(sd_str)
                             plot_so_hist.pop(sd_str, None)
                             retained_soil_obs_map.pop(sd_str, None)
+                            withdrawn_soil_dates.add(sd)
                         else:
                             plot_withdrawn_so.discard(sd_str)
                             plot_so_hist[sd_str] = s_item
                         supplied_soil_obs_dates.add(sd)
-                    except Exception:
+                    except (ValueError, TypeError, AttributeError):
                         pass
 
         soil_obs_date = None
@@ -1208,7 +1217,7 @@ def _execute_canonical_water_engine(
             if so_ts:
                 try:
                     soil_obs_date = so_ts.date() if hasattr(so_ts, "date") else datetime.date.fromisoformat(str(so_ts)[:10])
-                except Exception:
+                except (ValueError, TypeError, AttributeError):
                     soil_obs_date = ts.date()
             else:
                 soil_obs_date = ts.date()
@@ -1218,6 +1227,7 @@ def _execute_canonical_water_engine(
                 plot_withdrawn_so.add(soil_obs_date_str)
                 plot_so_hist.pop(soil_obs_date_str, None)
                 retained_soil_obs_map.pop(soil_obs_date_str, None)
+                withdrawn_soil_dates.add(soil_obs_date)
             else:
                 plot_withdrawn_so.discard(soil_obs_date_str)
                 plot_so_hist[soil_obs_date_str] = soil_obs
@@ -1230,7 +1240,7 @@ def _execute_canonical_water_engine(
                 if len(k) >= 10:
                     try:
                         supplied_weather_dates.add(datetime.date.fromisoformat(k[:10]))
-                    except Exception:
+                    except (ValueError, TypeError, AttributeError):
                         pass
         if timeseries:
             for t_entry in timeseries:
@@ -1239,16 +1249,9 @@ def _execute_canonical_water_engine(
                     if t_d and len(t_d) >= 10:
                         try:
                             supplied_weather_dates.add(datetime.date.fromisoformat(t_d[:10]))
-                        except Exception:
+                        except (ValueError, TypeError, AttributeError):
                             pass
         supplied_weather_dates.add(ts.date())
-
-        retained_weather_map: Dict[str, dict] = {}
-        retained_veg_map: Dict[str, Any] = {}
-        retained_soil_obs_map: Dict[str, Any] = {}
-        retained_init_soil_map: Dict[str, Any] = {}
-        retained_init_mem_map: Dict[str, Any] = {}
-        retained_events_map: Dict[str, Any] = {}
 
         def _extract_weather_for_date(d_val: datetime.date) -> dict:
             d_str = d_val.strftime("%Y-%m-%d")
@@ -1524,6 +1527,12 @@ def _execute_canonical_water_engine(
                     earliest_invalid_day = hist_k
                 break
 
+        # Coherent withdrawal invalidation: any withdrawn soil date directly invalidates the trajectory from that day onward
+        if withdrawn_soil_dates:
+            earliest_withdrawn = min(withdrawn_soil_dates).strftime("%Y-%m-%d")
+            if earliest_invalid_day is None or earliest_withdrawn < earliest_invalid_day:
+                earliest_invalid_day = earliest_withdrawn
+
         if earliest_invalid_day is not None:
             for k, v in plot_hist.items():
                 if isinstance(v, dict):
@@ -1542,7 +1551,7 @@ def _execute_canonical_water_engine(
                         }
                     if "irrigation" in v and (k_d not in explicit_event_dates):
                         retained_irrigation_map[k] = v["irrigation"]
-                    if "soil_observations" in v and (k_d not in supplied_soil_obs_dates):
+                    if "soil_observations" in v and (k_d not in supplied_soil_obs_dates) and (k not in plot_withdrawn_so):
                         retained_soil_obs_map[k] = v["soil_observations"]
                     if "initial_soil_water" in v:
                         retained_init_soil_map[k] = v["initial_soil_water"]

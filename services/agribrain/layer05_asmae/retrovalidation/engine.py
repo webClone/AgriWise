@@ -23,12 +23,13 @@ import logging
 import math
 import os
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from ..config import (
     RETRO_SCORE_1M_ADVISORY,
     RETRO_SCORE_1M_CERTIFIED,
     RETRO_WEIGHTS,
+    STATE_NAMES,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,20 @@ def _to_utc_datetime(val: Any) -> Optional[datetime]:
             except Exception:
                 pass
     return None
+
+
+def _ts_at_or_before(raw_ts: Any, cutoff: datetime) -> bool:
+    """Return True if *raw_ts* parses to a datetime at or before *cutoff*.
+
+    If the value cannot be parsed at all it is treated as undated and
+    conservatively included (returns True).
+    """
+    if raw_ts is None:
+        return True
+    parsed = _to_utc_datetime(raw_ts)
+    if parsed is None:
+        return True
+    return parsed <= cutoff
 
 
 def _rebuild_fold_geometry(
@@ -586,7 +601,7 @@ def run_retrovalidation(
                 getattr(s, "acquisition_time", None) for s in training_scenes
                 if getattr(s, "acquisition_time", None) is not None
             ]
-            cutoff_date_str = max(training_times).date().isoformat() if training_times else None
+            cutoff_dt = _to_utc_datetime(max(training_times)) if training_times else train_utc
 
             f_ctx = dict(evidence_context or {})
             f_ctx["scenes"] = training_scenes
@@ -595,42 +610,51 @@ def run_retrovalidation(
                 training_scenes,
                 holdout_scene,
             )
-            if cutoff_date_str and "plot_timeseries" in f_ctx:
-                f_ctx["plot_timeseries"] = [
-                    row for row in _records(f_ctx["plot_timeseries"])
-                    if str(row.get("date") or row.get("timestamp") or "")[:10] <= cutoff_date_str
-                ]
-            if cutoff_date_str and isinstance(f_ctx.get("phenology_posterior"), dict):
-                pheno_raw = (
-                    f_ctx["phenology_posterior"].get("generated_at")
-                    or f_ctx["phenology_posterior"].get("timestamp")
-                    or f_ctx["phenology_posterior"].get("date")
-                )
-                if pheno_raw and str(pheno_raw)[:10] > cutoff_date_str:
+            if cutoff_dt and "plot_timeseries" in f_ctx:
+                filtered_ts = []
+                for row in _records(f_ctx["plot_timeseries"]):
+                    row_raw = row.get("timestamp") or row.get("date") or row.get("acquired_at")
+                    row_dt = _to_utc_datetime(row_raw) if row_raw else None
+                    if row_dt is None or row_dt > cutoff_dt:
+                        continue
+                    rec_raw = row.get("recorded_at") or row.get("created_at")
+                    rec_dt = _to_utc_datetime(rec_raw) if rec_raw else None
+                    if rec_dt is not None and rec_dt > cutoff_dt:
+                        continue
+                    filtered_ts.append(row)
+                f_ctx["plot_timeseries"] = filtered_ts
+
+            if cutoff_dt and isinstance(f_ctx.get("phenology_posterior"), dict):
+                from ..resilient_posterior import _is_proven_before_cutoff
+                if not _is_proven_before_cutoff(f_ctx["phenology_posterior"], cutoff_dt):
                     f_ctx["phenology_posterior"] = {}
-            if cutoff_date_str and isinstance(f_ctx.get("soil_context"), dict):
-                soil_raw = (
-                    f_ctx["soil_context"].get("source_timestamp")
-                    or f_ctx["soil_context"].get("timestamp")
-                    or f_ctx["soil_context"].get("date")
+
+            if cutoff_dt and isinstance(f_ctx.get("soil_context"), dict):
+                from ..resilient_posterior import _is_proven_before_cutoff, _strip_dynamic_recursive
+                soil_proven = _is_proven_before_cutoff(f_ctx["soil_context"], cutoff_dt)
+                f_ctx["soil_context"] = _strip_dynamic_recursive(
+                    dict(f_ctx["soil_context"]), cutoff_dt, is_proven=soil_proven
                 )
-                if soil_raw and str(soil_raw)[:10] > cutoff_date_str:
-                    static_keys = {
-                        "soil_type", "texture", "field_capacity", "wilting_point",
-                        "saturation", "bulk_density", "hydrologic_group", "depth_m",
-                        "ksat_mm_h", "organic_matter_pct", "rooting_depth", "root_depth_m",
-                    }
-                    f_ctx["soil_context"] = {k: v for k, v in f_ctx["soil_context"].items() if k in static_keys}
+
             f_ctx["management_events"] = training_events
 
             exp_specs = compute_physics_experts(training_state, f_ctx)
             for exp_name, spec in exp_specs.items():
                 prediction = spec.get("predictions", {})
+                target_names = spec.get("target_states", [])
+                exp_indices: Set[int] = set()
+                if target_names:
+                    for tname in target_names:
+                        try:
+                            exp_indices.add(STATE_NAMES.index(tname))
+                        except ValueError:
+                            pass
                 e_pred_res = predict_held_out_scene(
                     training_state=prediction,
                     holdout_scene=holdout_scene,
                     operator=holdout_op,
                     nuisance_state=training_state,
+                    expert_state_indices=exp_indices,
                 )
                 if e_pred_res.get("status") == "predicted" and isinstance(e_pred_res.get("mean_error"), (int, float)):
                     fold_expert_errors.setdefault(exp_name, []).append(float(e_pred_res["mean_error"]))
@@ -1145,7 +1169,7 @@ def _compute_expert_holdout_errors(
             getattr(s, "acquisition_time", None) for s in training_scenes
             if getattr(s, "acquisition_time", None) is not None
         ]
-        cutoff_date_str = max(training_times).date().isoformat() if training_times else None
+        cutoff_dt = _to_utc_datetime(max(training_times)) if training_times else None
 
         context = dict(evidence_context)
         context["scenes"] = training_scenes
@@ -1154,41 +1178,49 @@ def _compute_expert_holdout_errors(
             training_scenes,
             holdout_scene,
         )
-        if cutoff_date_str and "plot_timeseries" in context:
-            context["plot_timeseries"] = [
-                row for row in _records(context["plot_timeseries"])
-                if str(row.get("date") or row.get("timestamp") or "")[:10] <= cutoff_date_str
-            ]
-        if cutoff_date_str and isinstance(context.get("phenology_posterior"), dict):
-            pheno_raw = (
-                context["phenology_posterior"].get("generated_at")
-                or context["phenology_posterior"].get("timestamp")
-                or context["phenology_posterior"].get("date")
-            )
-            if pheno_raw and str(pheno_raw)[:10] > cutoff_date_str:
+        if cutoff_dt and "plot_timeseries" in context:
+            filtered_ts = []
+            for row in _records(context["plot_timeseries"]):
+                row_raw = row.get("timestamp") or row.get("date") or row.get("acquired_at")
+                row_dt = _to_utc_datetime(row_raw) if row_raw else None
+                if row_dt is None or row_dt > cutoff_dt:
+                    continue
+                rec_raw = row.get("recorded_at") or row.get("created_at")
+                rec_dt = _to_utc_datetime(rec_raw) if rec_raw else None
+                if rec_dt is not None and rec_dt > cutoff_dt:
+                    continue
+                filtered_ts.append(row)
+            context["plot_timeseries"] = filtered_ts
+
+        if cutoff_dt and isinstance(context.get("phenology_posterior"), dict):
+            from ..resilient_posterior import _is_proven_before_cutoff
+            if not _is_proven_before_cutoff(context["phenology_posterior"], cutoff_dt):
                 context["phenology_posterior"] = {}
-        if cutoff_date_str and isinstance(context.get("soil_context"), dict):
-            soil_raw = (
-                context["soil_context"].get("source_timestamp")
-                or context["soil_context"].get("timestamp")
-                or context["soil_context"].get("date")
+
+        if cutoff_dt and isinstance(context.get("soil_context"), dict):
+            from ..resilient_posterior import _is_proven_before_cutoff, _strip_dynamic_recursive
+            soil_proven = _is_proven_before_cutoff(context["soil_context"], cutoff_dt)
+            context["soil_context"] = _strip_dynamic_recursive(
+                dict(context["soil_context"]), cutoff_dt, is_proven=soil_proven
             )
-            if soil_raw and str(soil_raw)[:10] > cutoff_date_str:
-                static_keys = {
-                    "soil_type", "texture", "field_capacity", "wilting_point",
-                    "saturation", "bulk_density", "hydrologic_group", "depth_m",
-                    "ksat_mm_h", "organic_matter_pct", "rooting_depth", "root_depth_m",
-                }
-                context["soil_context"] = {k: v for k, v in context["soil_context"].items() if k in static_keys}
 
         expert_specs = compute_physics_experts(training_state, context)
         for expert_name, spec in expert_specs.items():
             prediction = spec.get("predictions", {})
+            target_names = spec.get("target_states", [])
+            exp_indices: Set[int] = set()
+            if target_names:
+                for tname in target_names:
+                    try:
+                        exp_indices.add(STATE_NAMES.index(tname))
+                    except ValueError:
+                        pass
             pred_result = predict_held_out_scene(
                 training_state=prediction,
                 holdout_scene=holdout_scene,
                 operator=fold.get("holdout_operator"),
                 nuisance_state=training_state,
+                expert_state_indices=exp_indices,
             )
             if pred_result.get("status") == "predicted" and isinstance(pred_result.get("mean_error"), (int, float)):
                 expert_errors.setdefault(expert_name, []).append(float(pred_result["mean_error"]))

@@ -9,7 +9,7 @@ Replaces mean-level holdout scoring with:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,7 @@ def predict_held_out_scene(
     holdout_scene: Any,
     operator: Optional[Any] = None,
     nuisance_state: Optional[Dict[str, List[float]]] = None,
+    expert_state_indices: Optional[Set[int]] = None,
 ) -> Dict[str, Any]:
     import math
     import numpy as np
@@ -65,6 +66,15 @@ def predict_held_out_scene(
             continue
         if pixel_observation.n_pixels != h_matrix.shape[0]:
             continue
+        # When scoring an expert, only evaluate observations whose target
+        # states overlap with the states the expert actually predicted.
+        # Without this gate the expert receives free validation credit from
+        # observation channels that depend entirely on the nuisance
+        # (background) state it never modified.
+        if expert_state_indices is not None:
+            obs_state_set = set(mapping.target_state_indices)
+            if not obs_state_set.intersection(expert_state_indices):
+                continue
         zone_prediction = []
         for node_id in node_ids:
             state = training_state.get(node_id)
