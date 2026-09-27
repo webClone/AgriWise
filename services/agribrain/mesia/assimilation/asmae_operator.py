@@ -23,7 +23,7 @@ class ASMAEInnovationProposal:
     target_state_variable: str
     microzone_id: str
     depth_stratum: str
-    innovation_value: float  # y - h(x_prior)
+    innovation_value: Optional[float]  # y - h(x_prior), None if absent
     observation_variance: float  # R covariance
     confidence_support: float
     authority_scope: str  # Must be "evidence_proposal" (Principle P-08)
@@ -62,6 +62,7 @@ class ASMAEObservationOperator:
         """Construct calibrated innovation proposal.
 
         Monograph Finding #15: Never treats dimensionless likelihood scores as volumetric water content.
+        Preserves missingness: does not fabricate a 0.0 innovation when observation is absent.
         """
         # Principle P-08 check: MESIA never claims state authority
         if likelihood.authority_scope != "evidence_proposal":
@@ -70,11 +71,11 @@ class ASMAEObservationOperator:
         if likelihood.innovation is not None:
             innovation = float(likelihood.innovation)
         else:
-            # Finding #15: Dimensionless likelihood score cannot be directly subtracted from physical state moisture.
-            innovation = 0.0
+            # Missingness preservation: absent observation has None innovation
+            innovation = None
 
         variance = likelihood.covariance if likelihood.covariance is not None else 0.25
-        support = likelihood.support if likelihood.support is not None else 0.80
+        support = float(likelihood.support) if likelihood.support is not None else 0.0
 
         now = datetime.now(timezone.utc)
 

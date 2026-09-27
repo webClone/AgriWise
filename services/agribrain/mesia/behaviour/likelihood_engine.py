@@ -99,7 +99,7 @@ class BehaviourLikelihoodEngine:
             target_variable=target_var,
             likelihood_value=likelihood_val,
             innovation=innovation,
-            support=1.0,
+            support=support,
             covariance=cov,
             authority_scope="evidence_proposal",  # Invariant: Principle P-08
             alternative_causes=alternatives,

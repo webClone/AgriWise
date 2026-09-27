@@ -104,6 +104,22 @@ class SharedBeliefLattice:
             self.crs = crs
         self.boundary_mask = boundary_mask
         self.target_grid = target_grid
+        if self.boundary_mask is not None:
+            n_rows, n_cols = self.grid_dim
+            if hasattr(self.boundary_mask, "shape"):
+                m_shape = tuple(self.boundary_mask.shape)
+                if m_shape != (n_rows, n_cols):
+                    raise ValueError(
+                        f"Incompatible boundary_mask shape {m_shape}; expected {(n_rows, n_cols)} for grid_dim"
+                    )
+            elif isinstance(self.boundary_mask, (list, tuple)):
+                if len(self.boundary_mask) != n_rows or any(
+                    len(row) != n_cols for row in self.boundary_mask if hasattr(row, "__len__")
+                ):
+                    raise ValueError(
+                        f"Incompatible boundary_mask dimensions; expected {(n_rows, n_cols)} for grid_dim"
+                    )
+
         self._cells: Dict[str, MicrozoneCell] = {}
         self._unique_cells: List[MicrozoneCell] = []
         self._initialize_grid()
@@ -113,16 +129,13 @@ class SharedBeliefLattice:
         for r in range(n_rows):
             for c in range(n_cols):
                 if self.boundary_mask is not None:
-                    try:
-                        if hasattr(self.boundary_mask, "__getitem__"):
-                            val = self.boundary_mask[r][c] if isinstance(self.boundary_mask, list) else self.boundary_mask[r, c]
-                            if not bool(val):
-                                continue
-                        elif callable(self.boundary_mask):
-                            if not self.boundary_mask(r, c):
-                                continue
-                    except Exception:
-                        pass
+                    if hasattr(self.boundary_mask, "__getitem__"):
+                        val = self.boundary_mask[r][c] if isinstance(self.boundary_mask, list) else self.boundary_mask[r, c]
+                        if not bool(val):
+                            continue
+                    elif callable(self.boundary_mask):
+                        if not self.boundary_mask(r, c):
+                            continue
 
                 primary_id = f"mz_{r:03d}_{c:03d}"
                 aliases = (

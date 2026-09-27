@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ..config import (
@@ -218,6 +218,8 @@ def run_retrovalidation(
     # ── Component 1: true leave-one-date-out refitting ──────────────
     holdout_errors: List[Dict[str, float]] = []
     holdout_mean_errors: List[float] = []
+    prospective_mean_errors: List[float] = []
+    retrospective_mean_errors: List[float] = []
     refit_folds: List[Dict[str, Any]] = []
 
     from ..assimilation.filter import run_enkf
@@ -267,7 +269,6 @@ def run_retrovalidation(
         asmae_input = (evidence_context or {}).get('asmae_input')
         if asmae_input is not None:
             try:
-                from datetime import timedelta
                 from ..resilient_posterior import estimate_resilient_plot_posterior
 
                 training_times = [
@@ -367,26 +368,67 @@ def run_retrovalidation(
         forcing_provenance = "issuance_weather_persistence"
 
         if archived_forecast and isinstance(archived_forecast, dict):
+            # Verify issuance cutoff: forecast must have been issued on or before t_train_dt
+            raw_issued = (
+                archived_forecast.get("issued_at")
+                or archived_forecast.get("issuance_time")
+                or archived_forecast.get("issue_date")
+                or archived_forecast.get("forecast_issued_at")
+                or (archived_forecast.get("metadata", {}) if isinstance(archived_forecast.get("metadata"), dict) else {}).get("issued_at")
+            )
+            issued_cutoff_ok = True
+            if raw_issued and t_train_dt:
+                try:
+                    if isinstance(raw_issued, datetime):
+                        issued_dt = raw_issued
+                    elif isinstance(raw_issued, date):
+                        issued_dt = datetime.combine(raw_issued, datetime.min.time(), tzinfo=timezone.utc)
+                    else:
+                        issued_dt = datetime.fromisoformat(str(raw_issued)[:19])
+
+                    issued_d = issued_dt.date() if hasattr(issued_dt, "date") else issued_dt
+                    train_d = t_train_dt.date() if hasattr(t_train_dt, "date") else t_train_dt
+                    if issued_d > train_d:
+                        issued_cutoff_ok = False
+                except Exception:
+                    pass
+
             interval_weather_series = dict(archived_forecast)
-            forecast_forcing_source = "archived_issuance_forecast"
-            is_issuance_forecast = True
-            forcing_provenance = "archived_issuance_forecast"
+            if issued_cutoff_ok:
+                forecast_forcing_source = "archived_issuance_forecast"
+                is_issuance_forecast = True
+                forcing_provenance = "archived_issuance_forecast"
+            else:
+                forecast_forcing_source = "retrieved_historical_forcing"
+                is_issuance_forecast = False
+                forcing_provenance = "post_cutoff_forecast_reanalysis"
+
         elif raw_weather_daily and t_train_dt and t_holdout_dt:
-            # Check if interval from training day through holdout day is present in daily series
+            # Check if interval from training day through holdout day consumes observed weather
             d_curr = t_train_dt.date()
-            all_present = True
+            consumed_post_train_obs = False
+            last_known_weather = next(iter(reversed(list(training_weather_series.values()))), {}) if training_weather_series else {}
+
             while d_curr <= t_holdout_dt.date():
                 ds = d_curr.strftime("%Y-%m-%d")
                 if ds in raw_weather_daily:
                     interval_weather_series[ds] = raw_weather_daily[ds]
+                    if d_curr > t_train_dt.date():
+                        consumed_post_train_obs = True
                 else:
-                    all_present = False
+                    # Impute missing day using persistence from training series, NOT future endpoint
+                    interval_weather_series[ds] = last_known_weather
                 d_curr += timedelta(days=1)
-            if all_present and interval_weather_series:
-                # Consuming post-training observed weather is a retrospective hindcast reanalysis
+
+            if consumed_post_train_obs:
+                # Consuming ANY post-training observed weather makes this a retrospective hindcast
                 forecast_forcing_source = "retrieved_historical_forcing"
                 is_issuance_forecast = False
                 forcing_provenance = "hindcast_reanalysis_observed_forcing"
+            else:
+                forecast_forcing_source = "declared_weather_persistence"
+                is_issuance_forecast = True
+                forcing_provenance = "issuance_weather_persistence"
 
         # Explicit declared weather-persistence fallback if no forecast was archived
         if not interval_weather_series:
@@ -463,7 +505,12 @@ def run_retrovalidation(
             and pred_result.get('errors')
         ):
             holdout_errors.append(dict(pred_result['errors']))
-            holdout_mean_errors.append(float(pred_result['mean_error']))
+            err_val = float(pred_result['mean_error'])
+            holdout_mean_errors.append(err_val)
+            if is_issuance_forecast:
+                prospective_mean_errors.append(err_val)
+            else:
+                retrospective_mean_errors.append(err_val)
 
     successful_refits = [
         fold for fold in refit_folds
@@ -478,11 +525,18 @@ def run_retrovalidation(
         result["refit_proof"] = [_public_refit_proof(fold) for fold in refit_folds]
         return result
 
-    if holdout_mean_errors:
-        avg_holdout_error = sum(holdout_mean_errors) / len(holdout_mean_errors)
-        future_score = max(0.0, min(1.0, 1.0 - avg_holdout_error))
+    if prospective_mean_errors:
+        avg_prospective_error = sum(prospective_mean_errors) / len(prospective_mean_errors)
+        future_score = max(0.0, min(1.0, 1.0 - avg_prospective_error))
     else:
+        # Zero prospective folds evaluated: future forecast skill is strictly 0.0
         future_score = 0.0
+
+    if retrospective_mean_errors:
+        avg_reconstruction_error = sum(retrospective_mean_errors) / len(retrospective_mean_errors)
+        reconstruction_score = max(0.0, min(1.0, 1.0 - avg_reconstruction_error))
+    else:
+        reconstruction_score = 0.0
 
     # ── Component 2: Radiometric (from V75 result, not internal) ────
     # V922.2A: full credit only when all observations used true Hₜ per-pixel
@@ -543,8 +597,9 @@ def run_retrovalidation(
 
     # ── Weighted aggregate ─────────────────────────────────────────
     w = RETRO_WEIGHTS
+    target_future_component = future_score if prospective_mean_errors else (reconstruction_score if retrospective_mean_errors else 0.0)
     retro_score = (
-        w["future"] * future_score +
+        w["future"] * target_future_component +
         w["radiometric"] * radiometric_score +
         w["temporal"] * temporal_score +
         w["spatial"] * spatial_score +
@@ -612,12 +667,17 @@ def run_retrovalidation(
             "mean_retro_score": retro_score,
             "components": {
                 "future_prediction": round(future_score, 4),
+                "retrospective_reconstruction": round(reconstruction_score, 4) if retrospective_mean_errors else None,
                 "radiometric": round(radiometric_score, 4),
                 "temporal_plausibility": round(temporal_score, 4),
                 "spatial_agreement": round(spatial_score, 4),
                 "causal_support": round(causal_score, 4),
                 "calibration": round(calibration_score, 4),
             },
+            "prospective_forecast_score": round(future_score, 4) if prospective_mean_errors else None,
+            "retrospective_reconstruction_score": round(reconstruction_score, 4) if retrospective_mean_errors else None,
+            "n_prospective_folds": len(prospective_mean_errors),
+            "n_retrospective_folds": len(retrospective_mean_errors),
             "weights": w,
         },
         "per_microzone": per_microzone,

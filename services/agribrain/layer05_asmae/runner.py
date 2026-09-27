@@ -955,6 +955,8 @@ class ASMAERunner:
             weather_archive_status=weather["weather_archive_status"],
             weather_source_reality=weather["weather_source_reality"],
             weather_daily_series=weather["weather_daily_series"],
+            weather_forecast=context.get("weather_forecast") or context.get("weather_forecast_series") or {},
+            weather_forecast_series=context.get("weather_forecast_series") or context.get("weather_forecast") or {},
             weather_archive_hash=weather["weather_archive_hash"],
             missing_variables=weather["missing_variables"],
             variable_completeness=weather["variable_completeness"],

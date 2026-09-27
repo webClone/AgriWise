@@ -1016,60 +1016,7 @@ def _execute_canonical_water_engine(
 
         target_applied_irrigation_mm = _get_irrigation_for_date(ts.date())
         soil_type = op_ctx.get("soil_type") or getattr(inputs, "soil_type", "loam") or "loam"
-
-        # Evidence / version identity hash
-        evidence_components = (
-            ts.isoformat(),
-            tuple(sorted(weather_obs.items())),
-            round(target_applied_irrigation_mm, 4),
-            round(lai, 4),
-            round(fvc, 4),
-            round(root_depth, 4),
-            soil_type,
-        )
-        evidence_hash = hashlib.sha256(repr(evidence_components).encode("utf-8")).hexdigest()[:16]
-
         plot_hist = _PLOT_WATER_STATE_HISTORY.setdefault(plot_id, {})
-
-        # Check idempotent replay with identical evidence and timestamp
-        if day_key in plot_hist:
-            cached_entry = plot_hist[day_key]
-            if cached_entry.get("evidence_hash") == evidence_hash and cached_entry.get("timestamp") == ts:
-                return cached_entry["water_state"], cached_entry["feedback"]
-            else:
-                # Inputs or timestamp changed: invalidate this entry and any successor entries
-                to_delete = [
-                    k for k, v in list(plot_hist.items())
-                    if v.get("timestamp", ts) >= cached_entry.get("timestamp", ts) or k >= day_key
-                ]
-                for k in to_delete:
-                    plot_hist.pop(k, None)
-
-        # Retrieve or restore explicit predecessor state strictly prior to current timestamp
-        predecessor_time = None
-        cached_soil = None
-        cached_mem = None
-        prior_records = [r for r in plot_hist.values() if r["timestamp"] < ts]
-        if prior_records:
-            prior_records.sort(key=lambda r: r["timestamp"])
-            latest_pred = prior_records[-1]
-            predecessor_time = latest_pred["timestamp"]
-            cached_soil = latest_pred["soil_water"]
-            cached_mem = latest_pred["hydraulic_memory"]
-
-        soil_profile_state = (
-            op_ctx.get("soil_profile_state")
-            or getattr(inputs, "soil_profile_state", None)
-            or cached_soil
-        )
-        hydraulic_memory = (
-            op_ctx.get("previous_hydraulic_memory")
-            or getattr(inputs, "previous_hydraulic_memory", None)
-            or cached_mem
-        )
-
-        soil_obs = op_ctx.get("soil_observations") or getattr(inputs, "soil_observations", None)
-        weather_ensemble = op_ctx.get("weather_ensemble") or getattr(inputs, "weather_ensemble", None)
 
         def _extract_weather_for_date(d_val: datetime.date) -> dict:
             d_str = d_val.strftime("%Y-%m-%d")
@@ -1089,15 +1036,143 @@ def _execute_canonical_water_engine(
                 p = _parse_weather(r_entry)
                 if p:
                     return p
-            return weather_obs
+            # Missing intermediate day: NEVER leak future endpoint observations into earlier dates!
+            # Explicitly declared unobserved intermediate day with zero precipitation and preserved uncertainty
+            if weather_obs and isinstance(weather_obs, dict):
+                imputed = dict(weather_obs)
+            else:
+                imputed = {
+                    "t_max_c": 20.0,
+                    "t_min_c": 10.0,
+                    "wind_speed_2m_m_s": 2.0,
+                    "rh_min_pct": 40.0,
+                    "rh_max_pct": 80.0,
+                    "net_radiation_mj_m2": 15.0,
+                }
+            imputed["date"] = d_str
+            imputed["precipitation_mm"] = 0.0
+            imputed["precipitation"] = 0.0
+            imputed["rain"] = 0.0
+            imputed["imputation_method"] = "missing_intermediate_zero_rain"
+            imputed["imputation_uncertainty_flag"] = True
+            return imputed
 
-        # Multi-day interval integration: if sparse execution (e.g. Jan 1 then Jan 11),
+        def _compute_step_forcing_hash(w: dict, irr: float) -> str:
+            w_items = tuple(sorted((k, str(v)) for k, v in w.items()))
+            return hashlib.sha256(repr((w_items, round(irr, 4))).encode("utf-8")).hexdigest()[:16]
+
+        # Invalidate any cached history whose input forcing or predecessor changed in current inputs:
+        # A correction anywhere in the consumed interval must invalidate the affected result and its successors.
+        earliest_invalid_day = None
+        for hist_k in sorted(plot_hist.keys()):
+            if hist_k > day_key:
+                continue
+            hist_entry = plot_hist[hist_k]
+            try:
+                hist_d = datetime.date.fromisoformat(hist_k)
+            except Exception:
+                continue
+            curr_w = _extract_weather_for_date(hist_d)
+            curr_irr = _get_irrigation_for_date(hist_d)
+            curr_f_hash = _compute_step_forcing_hash(curr_w, curr_irr)
+            if hist_entry.get("step_forcing_hash") and hist_entry["step_forcing_hash"] != curr_f_hash:
+                earliest_invalid_day = hist_k
+                break
+
+        if earliest_invalid_day is not None:
+            to_delete = [k for k in list(plot_hist.keys()) if k >= earliest_invalid_day]
+            for k in to_delete:
+                plot_hist.pop(k, None)
+
+        explicit_soil = op_ctx.get("soil_profile_state") or getattr(inputs, "soil_profile_state", None)
+        explicit_mem = op_ctx.get("previous_hydraulic_memory") or getattr(inputs, "previous_hydraulic_memory", None)
+
+        if explicit_soil is not None:
+            to_delete = [k for k in list(plot_hist.keys()) if k >= day_key]
+            for k in to_delete:
+                plot_hist.pop(k, None)
+
+        # Retrieve or restore explicit predecessor state strictly prior to current timestamp
+        predecessor_time = None
+        cached_soil = None
+        cached_mem = None
+        prior_records = [r for r in plot_hist.values() if r["timestamp"] < ts]
+        if prior_records:
+            prior_records.sort(key=lambda r: r["timestamp"])
+            latest_pred = prior_records[-1]
+            predecessor_time = latest_pred["timestamp"]
+            cached_soil = latest_pred.get("soil_water")
+            cached_mem = latest_pred.get("hydraulic_memory")
+
+        soil_profile_state = explicit_soil or cached_soil
+        hydraulic_memory = explicit_mem or cached_mem
+
+        soil_obs = op_ctx.get("soil_observations") or getattr(inputs, "soil_observations", None)
+        weather_ensemble = op_ctx.get("weather_ensemble") or getattr(inputs, "weather_ensemble", None)
+        soil_type = op_ctx.get("soil_type") or getattr(inputs, "soil_type", "loam") or "loam"
+
+        # Multi-day interval integration bounds: if sparse execution (e.g. Jan 1 then Jan 11),
         # integrate each intervening day with its corresponding forcing
-        if predecessor_time is not None and (ts.date() - predecessor_time.date()).days > 1:
+        if explicit_soil is not None:
+            d_start = ts.date()
+        elif predecessor_time is not None and (ts.date() - predecessor_time.date()).days > 1:
             d_start = predecessor_time.date() + datetime.timedelta(days=1)
         else:
             d_start = ts.date()
         d_end = ts.date()
+
+        # Build comprehensive interval forcing and dependency digest
+        interval_forcing_entries = []
+        d_walk = d_start
+        while d_walk <= d_end:
+            w_walk = _extract_weather_for_date(d_walk)
+            irr_walk = _get_irrigation_for_date(d_walk)
+            interval_forcing_entries.append((
+                d_walk.isoformat(),
+                tuple(sorted((k, str(v)) for k, v in w_walk.items())),
+                round(irr_walk, 4),
+            ))
+            d_walk += datetime.timedelta(days=1)
+
+        def _state_digest(s_obj: Any) -> str:
+            if s_obj is None:
+                return "none"
+            vwc = getattr(s_obj, "volumetric_water_content", None) or getattr(s_obj, "layers_vwc", None) or getattr(s_obj, "theta_profile", None)
+            if vwc is not None:
+                return repr(vwc)
+            return str(type(s_obj)) + repr(getattr(s_obj, "__dict__", str(s_obj)))
+
+        interval_components = (
+            ts.isoformat(),
+            tuple(interval_forcing_entries),
+            _state_digest(explicit_soil),
+            _state_digest(cached_soil),
+            predecessor_time.isoformat() if predecessor_time else "none",
+            _state_digest(soil_obs),
+            _state_digest(weather_ensemble),
+            round(lai, 4),
+            round(fvc, 4),
+            round(root_depth, 4),
+            soil_type,
+        )
+        interval_hash = hashlib.sha256(repr(interval_components).encode("utf-8")).hexdigest()[:24]
+
+        # Check idempotent replay with identical interval history, dependencies, and timestamp
+        if day_key in plot_hist:
+            cached_entry = plot_hist[day_key]
+            if (
+                cached_entry.get("interval_hash") == interval_hash
+                and cached_entry.get("timestamp") == ts
+                and explicit_soil is None
+            ):
+                return cached_entry["water_state"], cached_entry["feedback"]
+            else:
+                to_delete = [
+                    k for k, v in list(plot_hist.items())
+                    if v.get("timestamp", ts) >= cached_entry.get("timestamp", ts) or k >= day_key
+                ]
+                for k in to_delete:
+                    plot_hist.pop(k, None)
 
         curr_d = d_start
         current_soil = soil_profile_state
@@ -1139,7 +1214,7 @@ def _execute_canonical_water_engine(
                 current_soil = getattr(w_state, "soil_water", None)
                 current_mem = getattr(w_state, "hydraulic_memory", None)
                 step_key = curr_d.strftime("%Y-%m-%d")
-                step_ev_hash = evidence_hash if is_target_day else hashlib.sha256(
+                step_ev_hash = interval_hash if is_target_day else hashlib.sha256(
                     repr((curr_d.isoformat(), tuple(sorted(step_weather.items())), round(step_irrigation, 4))).encode("utf-8")
                 ).hexdigest()[:16]
 
@@ -1150,6 +1225,8 @@ def _execute_canonical_water_engine(
                     "water_state": w_state,
                     "feedback": fb,
                     "evidence_hash": step_ev_hash,
+                    "interval_hash": interval_hash if is_target_day else step_ev_hash,
+                    "step_forcing_hash": _compute_step_forcing_hash(step_weather, step_irrigation),
                 }
                 last_water_state = w_state
                 last_feedback = fb

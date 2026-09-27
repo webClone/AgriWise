@@ -125,6 +125,8 @@ class ASMAEInput:
     weather_archive_status: str = "unavailable"
     weather_source_reality: str = "missing"
     weather_daily_series: dict = field(default_factory=dict)
+    weather_forecast: dict = field(default_factory=dict)
+    weather_forecast_series: dict = field(default_factory=dict)
     weather_archive_hash: Optional[str] = None
     missing_variables: list = field(default_factory=list)
     variable_completeness: dict = field(default_factory=dict)

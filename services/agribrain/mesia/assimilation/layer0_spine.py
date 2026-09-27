@@ -45,6 +45,9 @@ class Layer0EvidenceSpine:
 
         CONTAINMENT (Audit Finding #6): Defaults to fail-closed.
         Callers must explicitly prove calibration validity and epoch status.
+        Calibration and epoch failures take precedence over observation absence:
+        an uncalibrated sensor is INVALIDATED regardless of whether it also has
+        missing innovation, because the root cause is calibration failure.
         """
         if not is_calibration_valid:
             return Layer0EvidenceRecord(

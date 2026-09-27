@@ -438,23 +438,75 @@ class Layer2CompositeOutput(Layer2Output):
         """Canopy cover percentage (FVC * 100)."""
         import math
         if self.health_index is not None:
+            # Check explicit percentage field first
+            pct_val = getattr(self.health_index, "canopy_cover_pct", None)
+            if pct_val is not None:
+                try:
+                    f = float(pct_val)
+                    if math.isfinite(f) and f >= 0.0:
+                        return min(100.0, f)
+                except (ValueError, TypeError):
+                    pass
+            # Fractional vegetation cover
             val = getattr(self.health_index, "vegetation_fraction", None)
+            if val is None:
+                val = getattr(self.health_index, "fvc", None)
             if val is not None:
                 try:
                     f = float(val)
                     if math.isfinite(f) and f >= 0.0:
-                        return f * 100.0 if f <= 1.0 else min(100.0, f)
+                        return min(100.0, f * 100.0)
                 except (ValueError, TypeError):
                     pass
+
         if self.growth_metrics is not None:
-            val = getattr(self.growth_metrics, "canopy_cover_pct", None) or getattr(self.growth_metrics, "vegetation_fraction", None)
-            if val is not None:
+            # 1. Distinguish explicit percentage fields (e.g. canopy_cover_pct, canopy_cover_percent)
+            # and preserve explicit zero (do NOT use 'or')
+            pct_val = None
+            if isinstance(self.growth_metrics, dict):
+                for k in ("canopy_cover_pct", "canopy_cover_percent", "canopy_pct"):
+                    if k in self.growth_metrics and self.growth_metrics[k] is not None:
+                        pct_val = self.growth_metrics[k]
+                        break
+            else:
+                for attr in ("canopy_cover_pct", "canopy_cover_percent", "canopy_pct"):
+                    if hasattr(self.growth_metrics, attr):
+                        v = getattr(self.growth_metrics, attr)
+                        if v is not None:
+                            pct_val = v
+                            break
+
+            if pct_val is not None:
                 try:
-                    f = float(val)
+                    f = float(pct_val)
                     if math.isfinite(f) and f >= 0.0:
-                        return f * 100.0 if f <= 1.0 else min(100.0, f)
+                        return min(100.0, f)
                 except (ValueError, TypeError):
                     pass
+
+            # 2. Fractional vegetation cover fields (e.g. vegetation_fraction, fvc, canopy_cover_fraction)
+            frac_val = None
+            if isinstance(self.growth_metrics, dict):
+                for k in ("vegetation_fraction", "fvc", "canopy_cover_fraction", "canopy_fraction"):
+                    if k in self.growth_metrics and self.growth_metrics[k] is not None:
+                        frac_val = self.growth_metrics[k]
+                        break
+            else:
+                for attr in ("vegetation_fraction", "fvc", "canopy_cover_fraction", "canopy_fraction"):
+                    if hasattr(self.growth_metrics, attr):
+                        v = getattr(self.growth_metrics, attr)
+                        if v is not None:
+                            frac_val = v
+                            break
+
+            if frac_val is not None:
+                try:
+                    f = float(frac_val)
+                    if math.isfinite(f) and f >= 0.0:
+                        return min(100.0, f * 100.0)
+                except (ValueError, TypeError):
+                    pass
+
         return 50.0
 
     @property
