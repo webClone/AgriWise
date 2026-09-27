@@ -116,10 +116,13 @@ def enforce_radiometric_consistency(
     else:
         top_mode = "mixed_ht_modes"
 
-    # Full credit: only if ALL observations used true Hₜ per-pixel
+    # Full credit: only if ALL observations used true Hₜ per-pixel,
+    # at least one primary observation was checked, the primary chain passed,
     # and no fallbacks occurred
     full_credit = (
         top_mode == "ht_per_pixel"
+        and result.get("overall_pass", False) is True
+        and result.get("primary_checked_count", 0) > 0
         and not has_shape_fallback
         and not has_scalar_fallback
         and not has_resampled
@@ -184,11 +187,16 @@ def _enforce_ht_per_pixel(
     indices are recorded with full status but cannot veto the primary chain.
     """
     from ..observation.pixel_extraction import extract_pixel_observations
+    from ..observation.index_state_mapping import INDEX_STATE_REGISTRY
+    from ..config import STATE_NAMES
 
     results: Dict[str, Dict[str, Any]] = {}
     check_ledger: List[Dict[str, Any]] = []
-    overall_pass = True
     actions: List[str] = []
+    n_primary_checked = 0
+    n_primary_rejected = 0
+    blocked_states: set[str] = set()
+    blocked_observations: set[str] = set()
 
     node_ids = sorted(state_estimates.keys())
     from ..chain_integrity import assert_scene_operator_binding
@@ -309,12 +317,23 @@ def _enforce_ht_per_pixel(
 
             # Determine per-observation status
             is_primary = obs_name in PRIMARY_OBSERVATIONS
+            if is_primary:
+                n_primary_checked += 1
 
             if rmse is None:
                 status = "reject"
-                # Only primary observation rejections veto overall_pass
                 if is_primary:
-                    overall_pass = False
+                    n_primary_rejected += 1
+                blocked_observations.add(obs_name)
+                mapping = INDEX_STATE_REGISTRY.get(obs_name)
+                if mapping:
+                    for s_idx in mapping.target_state_indices:
+                        if s_idx < len(STATE_NAMES):
+                            blocked_states.add(STATE_NAMES[s_idx])
+                elif obs_name in STATE_NAMES:
+                    blocked_states.add(obs_name)
+                if obs_name == "evi":
+                    blocked_states.add("vigor")
                 actions.append(f"demote_resolution:{obs_name}")
                 actions.append(f"block_state_update:{obs_name}")
             elif rmse <= thresholds["pass"]:
@@ -324,9 +343,18 @@ def _enforce_ht_per_pixel(
                 actions.append(f"increase_uncertainty:{obs_name}")
             else:
                 status = "reject"
-                # Only primary observation rejections veto overall_pass
                 if is_primary:
-                    overall_pass = False
+                    n_primary_rejected += 1
+                blocked_observations.add(obs_name)
+                mapping = INDEX_STATE_REGISTRY.get(obs_name)
+                if mapping:
+                    for s_idx in mapping.target_state_indices:
+                        if s_idx < len(STATE_NAMES):
+                            blocked_states.add(STATE_NAMES[s_idx])
+                elif obs_name in STATE_NAMES:
+                    blocked_states.add(obs_name)
+                if obs_name == "evi":
+                    blocked_states.add("vigor")
                 actions.append(f"demote_resolution:{obs_name}")
                 actions.append(f"block_state_update:{obs_name}")
 
@@ -367,10 +395,18 @@ def _enforce_ht_per_pixel(
             ):
                 results[obs_name] = dict(record)
 
+    overall_pass = bool(n_primary_checked > 0 and n_primary_rejected == 0)
+    for s_name in sorted(blocked_states):
+        actions.append(f"block_state_export:{s_name}")
+
     return {
         "per_index": results,
         "per_scene_observation": check_ledger,
         "overall_pass": overall_pass,
+        "primary_checked_count": n_primary_checked,
+        "primary_rejected_count": n_primary_rejected,
+        "blocked_states": sorted(list(blocked_states)),
+        "blocked_observations": sorted(list(blocked_observations)),
         "actions": actions,
         "n_checked": len(check_ledger),
     }
@@ -382,9 +418,15 @@ def _enforce_proxy_average(
     all_forward: dict,
 ) -> Dict[str, Any]:
     """Proxy average check (no Hₜ). Cannot pass for scientific purposes."""
+    from ..observation.index_state_mapping import INDEX_STATE_REGISTRY
+    from ..config import STATE_NAMES
+
     results: Dict[str, Dict[str, Any]] = {}
-    overall_pass = True
     actions: List[str] = []
+    n_primary_checked = 0
+    n_primary_rejected = 0
+    blocked_states: set[str] = set()
+    blocked_observations: set[str] = set()
 
     for obs_name, obs_value in observations.items():
         forward_fn = all_forward.get(obs_name)
@@ -402,6 +444,10 @@ def _enforce_proxy_average(
         pred_mean = sum(predicted_values) / len(predicted_values)
         rmse = abs(pred_mean - obs_value)
 
+        is_primary = obs_name in PRIMARY_OBSERVATIONS
+        if is_primary:
+            n_primary_checked += 1
+
         if rmse <= thresholds["pass"]:
             status = "pass"
         elif rmse <= thresholds["reject"]:
@@ -409,8 +455,20 @@ def _enforce_proxy_average(
             actions.append(f"increase_uncertainty:{obs_name}")
         else:
             status = "reject"
-            overall_pass = False
+            if is_primary:
+                n_primary_rejected += 1
+            blocked_observations.add(obs_name)
+            mapping = INDEX_STATE_REGISTRY.get(obs_name)
+            if mapping:
+                for s_idx in mapping.target_state_indices:
+                    if s_idx < len(STATE_NAMES):
+                        blocked_states.add(STATE_NAMES[s_idx])
+            elif obs_name in STATE_NAMES:
+                blocked_states.add(obs_name)
+            if obs_name == "evi":
+                blocked_states.add("vigor")
             actions.append(f"demote_resolution:{obs_name}")
+            actions.append(f"block_state_update:{obs_name}")
 
         results[obs_name] = {
             "predicted_method": "proxy_average",
@@ -419,11 +477,20 @@ def _enforce_proxy_average(
             "threshold_pass": thresholds["pass"],
             "threshold_reject": thresholds["reject"],
             "status": status,
+            "is_primary": is_primary,
         }
+
+    overall_pass = bool(n_primary_checked > 0 and n_primary_rejected == 0)
+    for s_name in sorted(blocked_states):
+        actions.append(f"block_state_export:{s_name}")
 
     return {
         "per_index": results,
         "overall_pass": overall_pass,
+        "primary_checked_count": n_primary_checked,
+        "primary_rejected_count": n_primary_rejected,
+        "blocked_states": sorted(list(blocked_states)),
+        "blocked_observations": sorted(list(blocked_observations)),
         "actions": actions,
         "n_checked": len(results),
     }

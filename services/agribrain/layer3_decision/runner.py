@@ -781,6 +781,7 @@ def _execute_canonical_water_engine(
 ) -> tuple[Any, Any]:
     """Execute authoritative Layer 3 Hydrological Water Balance Engine."""
     try:
+        import hashlib
         from layer3_water.runner import WaterIntelligenceEngine
         from layer3_water.contracts import HydrologyMode
         from layer2_contracts.state_contracts import VegetationState
@@ -791,12 +792,6 @@ def _execute_canonical_water_engine(
             ts = ts.replace(tzinfo=timezone.utc)
         day_key = ts.strftime("%Y-%m-%d")
 
-        # 0. Check idempotent replay for identical transition timestamp
-        plot_hist = _PLOT_WATER_STATE_HISTORY.setdefault(plot_id, {})
-        if day_key in plot_hist:
-            cached_entry = plot_hist[day_key]
-            return cached_entry["water_state"], cached_entry["feedback"]
-
         # Typed orchestrator context extraction
         op_ctx = getattr(inputs, "operational_context", None)
         if not isinstance(op_ctx, dict):
@@ -804,20 +799,28 @@ def _execute_canonical_water_engine(
 
         # 1. Weather observations from L1 or inputs
         timeseries = getattr(l1_output, "plot_timeseries", []) or []
-        rec = timeseries[-1] if (timeseries and isinstance(timeseries[-1], dict)) else None
-        if not rec and inputs:
-            # Fallback to weather provided directly in inputs or operational_context
-            weather_daily = (
-                getattr(inputs, "weather_daily_series", None)
-                or getattr(inputs, "weather", None)
-                or op_ctx.get("weather_daily_series")
-                or op_ctx.get("weather")
-            )
-            if isinstance(weather_daily, dict):
-                rec = weather_daily.get(day_key) or next(iter(weather_daily.values()), None)
+        weather_daily = (
+            getattr(inputs, "weather_daily_series", None)
+            or getattr(inputs, "weather", None)
+            or op_ctx.get("weather_daily_series")
+            or op_ctx.get("weather")
+        )
+        rec = None
+        if isinstance(weather_daily, dict):
+            rec = weather_daily.get(day_key)
+        if not rec and timeseries:
+            for t_entry in reversed(timeseries):
+                if isinstance(t_entry, dict):
+                    t_date = t_entry.get("date") or str(t_entry.get("timestamp", ""))[:10]
+                    if t_date == day_key:
+                        rec = t_entry
+                        break
+            if not rec and isinstance(timeseries[-1], dict):
+                rec = timeseries[-1]
+        if not rec and isinstance(weather_daily, dict) and weather_daily:
+            rec = next(iter(weather_daily.values()), None)
 
         if not rec or not isinstance(rec, dict):
-            # Missing weather: preserve missing status, fail closed rather than fabricating clear sunny day
             import logging
             logging.getLogger(__name__).warning(
                 f"[L3] Canonical water engine: missing weather observations for plot {plot_id}. "
@@ -825,114 +828,120 @@ def _execute_canonical_water_engine(
             )
             return None, None
 
-        def _get_val(keys: list, default: Optional[float] = None) -> Optional[float]:
-            for k in keys:
-                v = rec.get(k)
-                if v is not None:
-                    try:
-                        f = float(v)
-                        if math.isfinite(f):
-                            return f
-                    except (ValueError, TypeError):
-                        pass
-            return default
-
-        t_max = _get_val(["temp_max", "temperature_max", "temp", "temperature"])
-        t_min = _get_val(["temp_min", "temperature_min"])
-        precip = _get_val(["precipitation", "rain", "precip", "precipitation_mm"])
-        wind = _get_val(["wind_speed", "wind", "wind_speed_2m_m_s"])
-        hum = _get_val(["humidity", "rh", "relative_humidity"])
-        rh_min = _get_val(["rh_min"])
-        rh_max = _get_val(["rh_max"])
-        rn = _get_val(["net_radiation_mj_m2", "net_radiation", "radiation"])
-
-        # Check for explicit declared weather prior
         weather_prior = op_ctx.get("weather_prior") or getattr(inputs, "weather_prior", None)
-        if isinstance(weather_prior, dict):
-            if t_min is None and "temp_min" in weather_prior: t_min = float(weather_prior["temp_min"])
-            if precip is None and "precipitation" in weather_prior: precip = float(weather_prior["precipitation"])
-            if wind is None and "wind_speed" in weather_prior: wind = float(weather_prior["wind_speed"])
-            if rh_min is None and "rh_min" in weather_prior: rh_min = float(weather_prior["rh_min"])
-            if rh_max is None and "rh_max" in weather_prior: rh_max = float(weather_prior["rh_max"])
-            if rn is None and "net_radiation" in weather_prior: rn = float(weather_prior["net_radiation"])
 
-        if rh_min is None and hum is not None:
-            rh_min = max(10.0, float(hum) - 15.0)
-        if rh_max is None and hum is not None:
-            rh_max = min(100.0, float(hum) + 15.0)
+        def _parse_weather(r: dict) -> Optional[dict]:
+            def _get_val(keys: list, default: Optional[float] = None) -> Optional[float]:
+                for k in keys:
+                    v = r.get(k)
+                    if v is not None:
+                        try:
+                            f = float(v)
+                            if math.isfinite(f):
+                                return f
+                        except (ValueError, TypeError):
+                            pass
+                return default
 
-        # Distinguish None from zero: if any required atmospheric variable is missing, preserve missingness
-        missing_vars = [k for k, v in [
-            ("t_max", t_max), ("t_min", t_min), ("precipitation", precip),
-            ("wind_speed", wind), ("rh_min", rh_min), ("rh_max", rh_max),
-            ("net_radiation", rn)
-        ] if v is None]
+            t_max_v = _get_val(["temp_max", "temperature_max", "temp", "temperature"])
+            t_min_v = _get_val(["temp_min", "temperature_min"])
+            precip_v = _get_val(["precipitation", "rain", "precip", "precipitation_mm"])
+            wind_v = _get_val(["wind_speed", "wind", "wind_speed_2m_m_s"])
+            hum_v = _get_val(["humidity", "rh", "relative_humidity"])
+            rh_min_v = _get_val(["rh_min"])
+            rh_max_v = _get_val(["rh_max"])
+            rn_v = _get_val(["net_radiation_mj_m2", "net_radiation", "radiation"])
 
-        if missing_vars:
+            if isinstance(weather_prior, dict):
+                if t_min_v is None and "temp_min" in weather_prior: t_min_v = float(weather_prior["temp_min"])
+                if precip_v is None and "precipitation" in weather_prior: precip_v = float(weather_prior["precipitation"])
+                if wind_v is None and "wind_speed" in weather_prior: wind_v = float(weather_prior["wind_speed"])
+                if rh_min_v is None and "rh_min" in weather_prior: rh_min_v = float(weather_prior["rh_min"])
+                if rh_max_v is None and "rh_max" in weather_prior: rh_max_v = float(weather_prior["rh_max"])
+                if rn_v is None and "net_radiation" in weather_prior: rn_v = float(weather_prior["net_radiation"])
+
+            if rh_min_v is None and hum_v is not None:
+                rh_min_v = max(10.0, float(hum_v) - 15.0)
+            if rh_max_v is None and hum_v is not None:
+                rh_max_v = min(100.0, float(hum_v) + 15.0)
+
+            missing_vars = [k for k, v in [
+                ("t_max", t_max_v), ("t_min", t_min_v), ("precipitation", precip_v),
+                ("wind_speed", wind_v), ("rh_min", rh_min_v), ("rh_max", rh_max_v),
+                ("net_radiation", rn_v)
+            ] if v is None]
+
+            if missing_vars:
+                return None
+
+            return {
+                "t_max_c": float(t_max_v),
+                "t_min_c": float(t_min_v),
+                "precipitation_mm": float(precip_v),
+                "wind_speed_2m_m_s": float(wind_v),
+                "rh_min_pct": float(rh_min_v),
+                "rh_max_pct": float(rh_max_v),
+                "net_radiation_mj_m2": float(rn_v),
+            }
+
+        weather_obs = _parse_weather(rec)
+        if weather_obs is None:
             import logging
             logging.getLogger(__name__).warning(
                 f"[L3] Canonical water engine: incomplete weather record for plot {plot_id}. "
-                f"Missing variables: {missing_vars}. Preserving missingness rather than fabricating synthetic observations."
+                "Preserving missingness rather than fabricating synthetic observations."
             )
             return None, None
 
-        weather_obs = {
-            "t_max_c": float(t_max),
-            "t_min_c": float(t_min),
-            "precipitation_mm": float(precip),
-            "wind_speed_2m_m_s": float(wind),
-            "rh_min_pct": float(rh_min),
-            "rh_max_pct": float(rh_max),
-            "net_radiation_mj_m2": float(rn),
-        }
-
         # 2. Extract vegetation coordinates from L2 contracts preserving valid zero (bare soil)
+        # Low canopy percentages must always be divided by 100 (/100.0)
         veg_state = None
-        if l2_output:
-            lai = None
-            fvc = None
-            root_depth = 1.0
+        lai = 1.5
+        fvc = 0.5
+        root_depth = 1.0
 
-            # Direct attributes/properties on l2_output
+        if l2_output:
+            lai_extracted = None
+            fvc_extracted = None
+
             if hasattr(l2_output, "lai_mean"):
                 val = getattr(l2_output, "lai_mean")
                 if val is not None:
-                    lai = float(val)
-            if hasattr(l2_output, "canopy_cover_pct"):
+                    lai_extracted = float(val)
+
+            # Check explicit fractional fvc first, else divide canopy_cover_pct by 100 unconditionally
+            if hasattr(l2_output, "fvc") and getattr(l2_output, "fvc", None) is not None:
+                fvc_extracted = max(0.0, min(1.0, float(getattr(l2_output, "fvc"))))
+            elif hasattr(l2_output, "canopy_cover_pct"):
                 val = getattr(l2_output, "canopy_cover_pct")
                 if val is not None:
-                    lai_pct = float(val)
-                    fvc = lai_pct / 100.0 if lai_pct > 1.0 else lai_pct
-            elif hasattr(l2_output, "fvc"):
-                val = getattr(l2_output, "fvc")
-                if val is not None:
-                    fvc = float(val)
+                    fvc_extracted = max(0.0, min(1.0, float(val) / 100.0))
 
             # Health index inspection
             h_idx = getattr(l2_output, "health_index", None)
             if h_idx:
-                if lai is None:
+                if lai_extracted is None:
                     val = getattr(h_idx, "lai_estimate", None)
                     if val is not None:
-                        lai = float(val)
-                if fvc is None:
+                        lai_extracted = float(val)
+                if fvc_extracted is None:
                     val = getattr(h_idx, "vegetation_fraction", None)
                     if val is not None:
-                        fvc = float(val)
+                        fvc_extracted = max(0.0, min(1.0, float(val)))
 
             # Growth metrics inspection
             g_met = getattr(l2_output, "growth_metrics", None)
             if g_met:
-                if lai is None:
+                if lai_extracted is None:
                     val = getattr(g_met, "lai_estimate", None)
                     if val is not None:
-                        lai = float(val)
-                if fvc is None:
-                    val = getattr(g_met, "canopy_cover_pct", None) or getattr(g_met, "vegetation_fraction", None)
-                    if val is not None:
-                        fvc = float(val) / 100.0 if float(val) > 1.0 else float(val)
+                        lai_extracted = float(val)
+                if fvc_extracted is None:
+                    if hasattr(g_met, "vegetation_fraction") and getattr(g_met, "vegetation_fraction", None) is not None:
+                        fvc_extracted = max(0.0, min(1.0, float(getattr(g_met, "vegetation_fraction"))))
+                    elif hasattr(g_met, "canopy_cover_pct") and getattr(g_met, "canopy_cover_pct", None) is not None:
+                        fvc_extracted = max(0.0, min(1.0, float(getattr(g_met, "canopy_cover_pct")) / 100.0))
 
-            # Check crop context for calibrated root depth
             crop_ctx = getattr(inputs, "crop_context", None) or op_ctx.get("crop_context")
             if isinstance(crop_ctx, dict):
                 rd = crop_ctx.get("root_depth_m") or crop_ctx.get("max_root_depth_m")
@@ -942,10 +951,10 @@ def _execute_canonical_water_engine(
                     except (ValueError, TypeError):
                         pass
 
-            if lai is None:
-                lai = 1.5
-            if fvc is None:
-                fvc = 0.5
+            if lai_extracted is not None:
+                lai = lai_extracted
+            if fvc_extracted is not None:
+                fvc = fvc_extracted
 
             veg_state = VegetationState(
                 plot_id=plot_id,
@@ -955,7 +964,88 @@ def _execute_canonical_water_engine(
                 root_depth_proxy_m=root_depth,
             )
 
-        # 3. Retrieve or restore explicit predecessor state strictly prior to current timestamp
+        # 3. Extract confirmed applied irrigation for target timestamp
+        raw_events = (
+            op_ctx.get("management_events")
+            or getattr(inputs, "management_events", [])
+            or []
+        )
+
+        def _get_irrigation_for_date(d_val: datetime.date) -> float:
+            tot = 0.0
+            for ev in raw_events:
+                ev_type = ""
+                ev_status = "applied"
+                ev_amount = 0.0
+                ev_d = None
+                if isinstance(ev, dict):
+                    ev_type = str(ev.get("type") or ev.get("event_type") or "").lower()
+                    ev_status = str(ev.get("status") or "applied").lower()
+                    ev_amount = float(ev.get("amount_mm") or ev.get("volume_mm") or ev.get("depth_mm") or 0.0)
+                    raw_d = ev.get("date") or ev.get("timestamp") or ev.get("time") or ev.get("effective_start")
+                    if raw_d:
+                        try:
+                            ev_d = datetime.date.fromisoformat(str(raw_d)[:10])
+                        except Exception:
+                            pass
+                elif hasattr(ev, "event_type"):
+                    ev_type = str(getattr(ev, "event_type", "")).lower()
+                    ev_status = str(getattr(ev, "status", "applied")).lower()
+                    ev_amount = float(
+                        getattr(ev, "amount_mm", 0.0)
+                        or getattr(ev, "volume_mm", 0.0)
+                        or (getattr(ev, "sensor_evidence", {}) or {}).get("irrigation_mm", 0.0)
+                        or 0.0
+                    )
+                    raw_d = getattr(ev, "effective_start", None) or getattr(ev, "timestamp", None) or getattr(ev, "date", None)
+                    if raw_d:
+                        try:
+                            ev_d = raw_d.date() if hasattr(raw_d, "date") else datetime.date.fromisoformat(str(raw_d)[:10])
+                        except Exception:
+                            pass
+
+                if ev_type != "irrigation":
+                    continue
+                if ev_status in {"planned", "cancelled", "canceled", "draft", "proposed", "pending", "failed"}:
+                    continue
+                if ev_d is not None and ev_d == d_val:
+                    tot += ev_amount
+                elif ev_d is None and d_val == ts.date():
+                    tot += ev_amount
+            return tot
+
+        target_applied_irrigation_mm = _get_irrigation_for_date(ts.date())
+        soil_type = op_ctx.get("soil_type") or getattr(inputs, "soil_type", "loam") or "loam"
+
+        # Evidence / version identity hash
+        evidence_components = (
+            ts.isoformat(),
+            tuple(sorted(weather_obs.items())),
+            round(target_applied_irrigation_mm, 4),
+            round(lai, 4),
+            round(fvc, 4),
+            round(root_depth, 4),
+            soil_type,
+        )
+        evidence_hash = hashlib.sha256(repr(evidence_components).encode("utf-8")).hexdigest()[:16]
+
+        plot_hist = _PLOT_WATER_STATE_HISTORY.setdefault(plot_id, {})
+
+        # Check idempotent replay with identical evidence and timestamp
+        if day_key in plot_hist:
+            cached_entry = plot_hist[day_key]
+            if cached_entry.get("evidence_hash") == evidence_hash and cached_entry.get("timestamp") == ts:
+                return cached_entry["water_state"], cached_entry["feedback"]
+            else:
+                # Inputs or timestamp changed: invalidate this entry and any successor entries
+                to_delete = [
+                    k for k, v in list(plot_hist.items())
+                    if v.get("timestamp", ts) >= cached_entry.get("timestamp", ts) or k >= day_key
+                ]
+                for k in to_delete:
+                    plot_hist.pop(k, None)
+
+        # Retrieve or restore explicit predecessor state strictly prior to current timestamp
         predecessor_time = None
         cached_soil = None
         cached_mem = None
@@ -978,96 +1068,98 @@ def _execute_canonical_water_engine(
             or cached_mem
         )
 
-        # 4. Extract confirmed applied irrigation for the specific transition interval
-        applied_irrigation_mm = 0.0
-        raw_events = (
-            op_ctx.get("management_events")
-            or getattr(inputs, "management_events", [])
-            or []
-        )
-        target_date = ts.date()
-        prev_date = predecessor_time.date() if predecessor_time else None
-
-        for ev in raw_events:
-            ev_type = ""
-            ev_status = "applied"
-            ev_amount = 0.0
-            ev_date_val = None
-
-            if isinstance(ev, dict):
-                ev_type = str(ev.get("type") or ev.get("event_type") or "").lower()
-                ev_status = str(ev.get("status") or "applied").lower()
-                ev_amount = float(ev.get("amount_mm") or ev.get("volume_mm") or ev.get("depth_mm") or 0.0)
-                raw_d = ev.get("date") or ev.get("timestamp") or ev.get("time") or ev.get("effective_start")
-                if raw_d:
-                    try:
-                        ev_date_val = datetime.date.fromisoformat(str(raw_d)[:10])
-                    except Exception:
-                        pass
-            elif hasattr(ev, "event_type"):
-                ev_type = str(getattr(ev, "event_type", "")).lower()
-                ev_status = str(getattr(ev, "status", "applied")).lower()
-                ev_amount = float(
-                    getattr(ev, "amount_mm", 0.0)
-                    or getattr(ev, "volume_mm", 0.0)
-                    or (getattr(ev, "sensor_evidence", {}) or {}).get("irrigation_mm", 0.0)
-                    or 0.0
-                )
-                raw_d = getattr(ev, "effective_start", None) or getattr(ev, "timestamp", None) or getattr(ev, "date", None)
-                if raw_d:
-                    try:
-                        ev_date_val = raw_d.date() if hasattr(raw_d, "date") else datetime.date.fromisoformat(str(raw_d)[:10])
-                    except Exception:
-                        pass
-
-            if ev_type != "irrigation":
-                continue
-            if ev_status in {"planned", "cancelled", "draft", "proposed"}:
-                continue
-
-            if ev_date_val is not None:
-                if prev_date is not None:
-                    if not (prev_date < ev_date_val <= target_date):
-                        continue
-                else:
-                    if ev_date_val != target_date:
-                        continue
-
-            applied_irrigation_mm += ev_amount
-
-        # 5. Extract soil observations & weather ensemble from operational_context or inputs
         soil_obs = op_ctx.get("soil_observations") or getattr(inputs, "soil_observations", None)
         weather_ensemble = op_ctx.get("weather_ensemble") or getattr(inputs, "weather_ensemble", None)
-        soil_type = op_ctx.get("soil_type") or getattr(inputs, "soil_type", "loam") or "loam"
 
-        water_state, feedback = WaterIntelligenceEngine.execute_pipeline(
-            plot_id=plot_id,
-            timestamp=ts,
-            vegetation_state=veg_state,
-            weather_observations=weather_obs,
-            soil_profile_state=soil_profile_state,
-            soil_observations=soil_obs,
-            previous_hydraulic_memory=hydraulic_memory,
-            soil_type=soil_type,
-            irrigation_applied_mm=applied_irrigation_mm,
-            weather_ensemble=weather_ensemble,
-            hydrology_mode=HydrologyMode.FAO56_LAYERED_BUCKET,
-        )
+        def _extract_weather_for_date(d_val: datetime.date) -> dict:
+            d_str = d_val.strftime("%Y-%m-%d")
+            if d_val == ts.date():
+                return weather_obs
+            r_entry = None
+            if isinstance(weather_daily, dict) and d_str in weather_daily:
+                r_entry = weather_daily[d_str]
+            if not r_entry and timeseries:
+                for t_entry in timeseries:
+                    if isinstance(t_entry, dict):
+                        t_d = t_entry.get("date") or str(t_entry.get("timestamp", ""))[:10]
+                        if t_d == d_str:
+                            r_entry = t_entry
+                            break
+            if r_entry and isinstance(r_entry, dict):
+                p = _parse_weather(r_entry)
+                if p:
+                    return p
+            return weather_obs
 
-        # 6. Persist versioned hydraulic record for idempotent replay and forward progression
-        if water_state is not None:
-            sw = getattr(water_state, "soil_water", None)
-            hm = getattr(water_state, "hydraulic_memory", None)
-            plot_hist[day_key] = {
-                "timestamp": ts,
-                "soil_water": sw,
-                "hydraulic_memory": hm,
-                "water_state": water_state,
-                "feedback": feedback,
-            }
-            _PLOT_WATER_STATE_MEMORY[plot_id] = (sw, hm)
+        # Multi-day interval integration: if sparse execution (e.g. Jan 1 then Jan 11),
+        # integrate each intervening day with its corresponding forcing
+        if predecessor_time is not None and (ts.date() - predecessor_time.date()).days > 1:
+            d_start = predecessor_time.date() + datetime.timedelta(days=1)
+        else:
+            d_start = ts.date()
+        d_end = ts.date()
 
-        return water_state, feedback
+        curr_d = d_start
+        current_soil = soil_profile_state
+        current_mem = hydraulic_memory
+        last_water_state = None
+        last_feedback = None
+
+        while curr_d <= d_end:
+            is_target_day = (curr_d == ts.date())
+            step_ts = ts if is_target_day else datetime.datetime.combine(curr_d, datetime.time(12, 0, tzinfo=timezone.utc))
+            step_weather = _extract_weather_for_date(curr_d)
+            step_irrigation = _get_irrigation_for_date(curr_d)
+
+            step_veg = veg_state
+            if step_veg is not None and not is_target_day:
+                step_veg = VegetationState(
+                    plot_id=plot_id,
+                    timestamp=step_ts,
+                    lai=lai,
+                    fvc=fvc,
+                    root_depth_proxy_m=root_depth,
+                )
+
+            w_state, fb = WaterIntelligenceEngine.execute_pipeline(
+                plot_id=plot_id,
+                timestamp=step_ts,
+                vegetation_state=step_veg,
+                weather_observations=step_weather,
+                soil_profile_state=current_soil,
+                soil_observations=soil_obs if is_target_day else None,
+                previous_hydraulic_memory=current_mem,
+                soil_type=soil_type,
+                irrigation_applied_mm=step_irrigation,
+                weather_ensemble=weather_ensemble if is_target_day else None,
+                hydrology_mode=HydrologyMode.FAO56_LAYERED_BUCKET,
+            )
+
+            if w_state is not None:
+                current_soil = getattr(w_state, "soil_water", None)
+                current_mem = getattr(w_state, "hydraulic_memory", None)
+                step_key = curr_d.strftime("%Y-%m-%d")
+                step_ev_hash = evidence_hash if is_target_day else hashlib.sha256(
+                    repr((curr_d.isoformat(), tuple(sorted(step_weather.items())), round(step_irrigation, 4))).encode("utf-8")
+                ).hexdigest()[:16]
+
+                plot_hist[step_key] = {
+                    "timestamp": step_ts,
+                    "soil_water": current_soil,
+                    "hydraulic_memory": current_mem,
+                    "water_state": w_state,
+                    "feedback": fb,
+                    "evidence_hash": step_ev_hash,
+                }
+                last_water_state = w_state
+                last_feedback = fb
+
+            curr_d += datetime.timedelta(days=1)
+
+        if last_water_state is not None:
+            _PLOT_WATER_STATE_MEMORY[plot_id] = (current_soil, current_mem)
+
+        return last_water_state, last_feedback
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning(f"[L3] Canonical water engine execution note: {e}")

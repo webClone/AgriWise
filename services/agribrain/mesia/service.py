@@ -522,18 +522,52 @@ class MesiaProductionService:
                 mean_ndvi = snap.get("mean_ndvi") or snap.get("optical_indices", {}).get("mean_ndvi")
 
             target_grid = None
-            grid_dict = snap.get("asmae", {}).get("target_grid") or snap.get("target_grid")
+            grid_dict = (
+                snap.get("asmae", {}).get("target_grid")
+                or snap.get("target_grid")
+                or snap.get("asmae", {}).get("grid_spec")
+                or snap.get("grid_spec")
+                or snap.get("metadata", {}).get("grid_spec")
+                or snap.get("asmae", {}).get("metadata", {}).get("grid_spec")
+            )
+            boundary_mask = (
+                snap.get("asmae", {}).get("boundary_mask")
+                or snap.get("boundary_mask")
+                or snap.get("masks", {}).get("boundary_mask")
+            )
             if isinstance(grid_dict, dict):
                 try:
+                    origin_x = grid_dict.get("origin_x")
+                    origin_y = grid_dict.get("origin_y")
+                    resolution_m = int(grid_dict.get("resolution_m") or grid_dict.get("native_resolution_m", 10))
+                    n_rows = int(grid_dict.get("n_rows") or grid_dict.get("height") or grid_dict.get("rows", 6))
+                    n_cols = int(grid_dict.get("n_cols") or grid_dict.get("width") or grid_dict.get("cols", 6))
+                    transform = grid_dict.get("transform")
+                    if transform and len(transform) >= 6:
+                        if origin_x is None:
+                            origin_x = float(transform[0])
+                        if origin_y is None:
+                            origin_y = float(transform[3])
+                        if resolution_m is None or resolution_m <= 0:
+                            resolution_m = int(round(abs(float(transform[1]))))
+                    bounds = grid_dict.get("bounds")
+                    if bounds and len(bounds) >= 4:
+                        if origin_x is None:
+                            origin_x = float(bounds[0])
+                        if origin_y is None:
+                            origin_y = float(bounds[3])
+                    width_m = float(grid_dict.get("width_m") or (n_cols * resolution_m))
+                    height_m = float(grid_dict.get("height_m") or (n_rows * resolution_m))
+
                     target_grid = TargetMicrozoneGrid(
                         crs=str(grid_dict.get("crs", "EPSG:32631")),
-                        origin_x=float(grid_dict.get("origin_x", 0.0)),
-                        origin_y=float(grid_dict.get("origin_y", 0.0)),
-                        width_m=float(grid_dict.get("width_m", 100.0)),
-                        height_m=float(grid_dict.get("height_m", 100.0)),
-                        n_rows=int(grid_dict.get("n_rows", grid_dict.get("rows", 6))),
-                        n_cols=int(grid_dict.get("n_cols", grid_dict.get("cols", 6))),
-                        resolution_m=int(grid_dict.get("resolution_m", 10)),
+                        origin_x=float(origin_x if origin_x is not None else 0.0),
+                        origin_y=float(origin_y if origin_y is not None else 0.0),
+                        width_m=width_m,
+                        height_m=height_m,
+                        n_rows=n_rows,
+                        n_cols=n_cols,
+                        resolution_m=resolution_m,
                     )
                 except Exception:
                     pass
@@ -546,9 +580,11 @@ class MesiaProductionService:
                 "uncertainty": unc_grid,
                 "mean_ndvi": mean_ndvi,
                 "target_grid": target_grid,
+                "boundary_mask": boundary_mask,
+                "grid_spec": grid_dict if isinstance(grid_dict, dict) else None,
             }
         except Exception:
-            return {"root_zone": None, "canopy": None, "uncertainty": None, "target_grid": None}
+            return {"root_zone": None, "canopy": None, "uncertainty": None, "target_grid": None, "boundary_mask": None}
 
     @classmethod
     def _compute_dubois_sentinel1_backscatter(
@@ -2512,6 +2548,7 @@ class MesiaProductionService:
             plot_id=plot_id,
             target_grid=target_grid,
             grid_dim=(grid_dim, grid_dim),
+            boundary_mask=raster_bundle.get("boundary_mask"),
         )
         cls._last_bridge = bridge
         lane_packet_configs = [

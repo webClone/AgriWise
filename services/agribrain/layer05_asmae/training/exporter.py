@@ -80,6 +80,19 @@ def export_weak_labels(
     bma_status = bma_result.get("status", "none")
     bma_disagreement_map = bma_result.get("per_microzone_disagreement", {})
     radiometric_pass = consistency_result.get("overall_pass", False)
+    blocked_states = set(consistency_result.get("blocked_states", []))
+    for act in consistency_result.get("actions", []):
+        if act.startswith("block_state_export:"):
+            blocked_states.add(act.split(":", 1)[1])
+        elif act.startswith("block_state_update:"):
+            obs = act.split(":", 1)[1]
+            if obs in STATE_NAMES:
+                blocked_states.add(obs)
+            elif obs == "evi":
+                blocked_states.add("vigor")
+            elif obs in ("sar_vv", "sar_vh"):
+                blocked_states.add("structure")
+                blocked_states.add("surface_wetness_event")
 
     # Global gates (apply to every label)
     global_reasons: List[str] = []
@@ -148,6 +161,10 @@ def export_weak_labels(
             # Gate 4: 1m without certification
             if resolution_m <= 1 and certification_level not in ("certified", "retrovalidated"):
                 reasons.append("1m_without_certification")
+
+            # Gate 4b: radiometric observation failure blocked this state
+            if s_name in blocked_states:
+                reasons.append(f"radiometric_state_blocked:{s_name}")
 
             # Compute weight: 0 if any reason, else capped at WEAK_LABEL_MAX_WEIGHT
             if reasons:

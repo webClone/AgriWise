@@ -43,15 +43,28 @@ class BehaviourLikelihoodEngine:
         contract_ref = contract.contract_id if contract else f"contract-{family.lower()}-default"
 
         # 3. Calculate target variable & likelihood
-        # Observation innovation: evaluated against expected calibrated baseline rather than fixed scalar
-        snr = float(feat.features.get("snr_db", 20.0))
-        expected_baseline = float(feat.features.get("expected_baseline_snr_db", 20.0))
-        innovation = float(snr - expected_baseline)
-        # Likelihood value based on nuisance safety
-        likelihood_val = math.exp(-0.5 * (innovation / 3.0) ** 2) if nuisance.is_safe_for_soil_assimilation else 0.01
+        # Check if measured observation exists (preserve missing observations)
+        raw_snr = feat.features.get("snr_db")
+        expected_baseline = feat.features.get("expected_baseline_snr_db")
+        cal_unc = float(feat.features.get("calibration_uncertainty_db", 1.0))
 
-        # Uncertainty variance covariance
-        cov = 0.25 if nuisance.is_safe_for_soil_assimilation else 2.50
+        # Propagate calibration uncertainty into observation error covariance:
+        # sigma_total^2 = sigma_nuisance^2 + sigma_calibration^2
+        base_cov = 0.25 if nuisance.is_safe_for_soil_assimilation else 2.50
+        cov = float(base_cov + (cal_unc ** 2))
+
+        if raw_snr is not None and expected_baseline is not None:
+            snr = float(raw_snr)
+            exp_base = float(expected_baseline)
+            innovation = float(snr - exp_base)
+            std_total = max(0.5, math.sqrt(cov))
+            likelihood_val = math.exp(-0.5 * (innovation / std_total) ** 2) if nuisance.is_safe_for_soil_assimilation else 0.01
+            support = 1.0 if nuisance.is_safe_for_soil_assimilation else 0.1
+        else:
+            # Missing observation: preserve missingness, do NOT fabricate innovation or likelihood
+            innovation = None
+            likelihood_val = None
+            support = 0.0
 
         # Alternative causes
         alternatives = [

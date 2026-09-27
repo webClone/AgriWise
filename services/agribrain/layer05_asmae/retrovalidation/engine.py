@@ -346,7 +346,11 @@ def run_retrovalidation(
         t_holdout_dt = holdout_time if isinstance(holdout_time, datetime) else None
 
         raw_weather_daily = (evidence_context or {}).get("weather_daily_series", {})
-        archived_forecast = (evidence_context or {}).get("weather_forecast", {})
+        archived_forecast = (
+            (evidence_context or {}).get("weather_forecast")
+            or (evidence_context or {}).get("weather_forecast_series")
+            or {}
+        )
         raw_mgmt_events = (evidence_context or {}).get("management_events", [])
 
         training_weather_series = _training_weather(
@@ -356,15 +360,20 @@ def run_retrovalidation(
         )
 
         # Distinguish archived issuance-time forecast vs declared weather persistence
+        # vs retrospective historical reanalysis forcing (R2 §§54 and 86.2)
         interval_weather_series = {}
         forecast_forcing_source = "declared_weather_persistence"
+        is_issuance_forecast = True
+        forcing_provenance = "issuance_weather_persistence"
 
         if archived_forecast and isinstance(archived_forecast, dict):
             interval_weather_series = dict(archived_forecast)
             forecast_forcing_source = "archived_issuance_forecast"
+            is_issuance_forecast = True
+            forcing_provenance = "archived_issuance_forecast"
         elif raw_weather_daily and t_train_dt and t_holdout_dt:
-            # Check if interval between training end and holdout is present in daily series
-            d_curr = t_train_dt.date() + timedelta(days=1)
+            # Check if interval from training day through holdout day is present in daily series
+            d_curr = t_train_dt.date()
             all_present = True
             while d_curr <= t_holdout_dt.date():
                 ds = d_curr.strftime("%Y-%m-%d")
@@ -374,14 +383,19 @@ def run_retrovalidation(
                     all_present = False
                 d_curr += timedelta(days=1)
             if all_present and interval_weather_series:
+                # Consuming post-training observed weather is a retrospective hindcast reanalysis
                 forecast_forcing_source = "retrieved_historical_forcing"
+                is_issuance_forecast = False
+                forcing_provenance = "hindcast_reanalysis_observed_forcing"
 
         # Explicit declared weather-persistence fallback if no forecast was archived
         if not interval_weather_series:
             forecast_forcing_source = "declared_weather_persistence"
+            is_issuance_forecast = True
+            forcing_provenance = "issuance_weather_persistence"
             last_known_weather = next(iter(reversed(list(training_weather_series.values()))), {}) if training_weather_series else {}
             if t_train_dt and t_holdout_dt:
-                d_curr = t_train_dt.date() + timedelta(days=1)
+                d_curr = t_train_dt.date()
                 while d_curr <= t_holdout_dt.date():
                     interval_weather_series[d_curr.strftime("%Y-%m-%d")] = last_known_weather
                     d_curr += timedelta(days=1)
@@ -398,7 +412,7 @@ def run_retrovalidation(
                 if t_train_dt and t_holdout_dt:
                     train_str = t_train_dt.strftime("%Y-%m-%d")
                     holdout_str = t_holdout_dt.strftime("%Y-%m-%d")
-                    if train_str < raw_d <= holdout_str:
+                    if train_str <= raw_d <= holdout_str:
                         interval_mgmt_events.append(ev)
                 elif raw_d == holdout_date_str:
                     interval_mgmt_events.append(ev)
@@ -424,10 +438,13 @@ def run_retrovalidation(
             management_events=interval_mgmt_events,
         )
         fold_proof["forecast_forcing_source"] = forecast_forcing_source
+        fold_proof["is_issuance_forecast"] = is_issuance_forecast
+        fold_proof["forcing_provenance"] = forcing_provenance
         fold_proof["status"] = pred_result.get("status", "unknown")
         fold_proof["prediction_mode"] = pred_result.get("prediction_mode", "none")
         fold_proof["mean_error"] = pred_result.get("mean_error")
-        fold_proof["prospective_forecast_rmse"] = pred_result.get("prospective_forecast_rmse")
+        fold_proof["prospective_forecast_rmse"] = pred_result.get("prospective_forecast_rmse") if is_issuance_forecast else None
+        fold_proof["retrospective_reconstruction_rmse"] = pred_result.get("prospective_forecast_rmse") if not is_issuance_forecast else None
         fold_proof["persistence_rmse"] = pred_result.get("persistence_rmse")
         fold_proof["forecast_skill_score"] = pred_result.get("forecast_skill_score")
         fold_proof["per_microzone_error"] = pred_result.get("per_microzone_error", {})

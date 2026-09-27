@@ -1068,7 +1068,7 @@ class ASMAEEngine:
                     return dst_arr
             except Exception:
                 pass
-            return arr
+            return None
 
         import numpy as np
         candidate_scenes = []
@@ -1512,6 +1512,8 @@ class ASMAEEngine:
             evidence_context={
                 'asmae_input': inp,
                 "weather_daily_series": getattr(inp, "weather_daily_series", {}) or {},
+                "weather_forecast": getattr(inp, "weather_forecast", {}) or getattr(inp, "weather_forecast_series", {}) or {},
+                "weather_forecast_series": getattr(inp, "weather_forecast_series", {}) or getattr(inp, "weather_forecast", {}) or {},
                 "soil_context": getattr(inp, "soil_context", {}) or {},
                 "crop_context": getattr(inp, "crop_context", {}) or {},
                 "polygon_geojson": getattr(inp, "polygon_geojson", {}) or {},

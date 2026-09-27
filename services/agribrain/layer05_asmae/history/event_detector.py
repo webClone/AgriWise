@@ -74,21 +74,64 @@ class IntraSeasonalEventDetector:
             key=lambda s: s["runtime"].acquisition_time
         )
 
-        # Track irrigation from management events
+        # Track irrigation from management events (count only qualified delivered irrigation)
         irrigation_by_day: Dict[str, float] = {}
         if management_events:
             for ev in management_events:
-                ev_type = str(getattr(ev, "event_type", "") if hasattr(ev, "event_type") else (ev.get("type", "") if isinstance(ev, dict) else "")).lower()
-                if "irrigation" in ev_type:
-                    dt = getattr(ev, "start_date", None) or getattr(ev, "date", None) if hasattr(ev, "start_date") or hasattr(ev, "date") else (ev.get("start_date") or ev.get("date") if isinstance(ev, dict) else None)
-                    if isinstance(dt, datetime):
-                        d_str = dt.strftime("%Y-%m-%d")
-                    elif isinstance(dt, str):
-                        d_str = dt[:10]
-                    else:
-                        continue
-                    amt = float(getattr(ev, "amount_mm", 0.0) if hasattr(ev, "amount_mm") else (ev.get("amount_mm") or ev.get("volume_mm") or ev.get("depth_mm") or 0.0))
-                    irrigation_by_day[d_str] = irrigation_by_day.get(d_str, 0.0) + amt
+                ev_type = str(
+                    getattr(ev, "event_type", None)
+                    or getattr(ev, "type", None)
+                    or (ev.get("type") or ev.get("event_type") if isinstance(ev, dict) else "")
+                    or ""
+                ).lower()
+                if "irrigation" not in ev_type:
+                    continue
+
+                ev_status = str(
+                    getattr(ev, "status", None)
+                    or (ev.get("status") if isinstance(ev, dict) else "applied")
+                    or "applied"
+                ).lower()
+                if ev_status in {"planned", "cancelled", "canceled", "draft", "proposed", "pending", "failed"}:
+                    continue
+
+                dt = (
+                    getattr(ev, "effective_start", None)
+                    or getattr(ev, "timestamp", None)
+                    or getattr(ev, "start_date", None)
+                    or getattr(ev, "date", None)
+                    if not isinstance(ev, dict)
+                    else (
+                        ev.get("effective_start")
+                        or ev.get("timestamp")
+                        or ev.get("start_date")
+                        or ev.get("date")
+                        or ev.get("time")
+                    )
+                )
+                if isinstance(dt, datetime):
+                    d_str = dt.strftime("%Y-%m-%d")
+                elif isinstance(dt, str):
+                    d_str = dt[:10]
+                elif hasattr(dt, "strftime"):
+                    d_str = dt.strftime("%Y-%m-%d")
+                else:
+                    continue
+
+                amt = float(
+                    getattr(ev, "amount_mm", 0.0)
+                    or getattr(ev, "volume_mm", 0.0)
+                    or (getattr(ev, "sensor_evidence", {}) or {}).get("irrigation_mm", 0.0)
+                    if not isinstance(ev, dict)
+                    else (
+                        ev.get("amount_mm")
+                        or ev.get("volume_mm")
+                        or ev.get("depth_mm")
+                        or (ev.get("sensor_evidence", {}) or {}).get("irrigation_mm")
+                        or 0.0
+                    )
+                )
+                irrigation_by_day[d_str] = irrigation_by_day.get(d_str, 0.0) + amt
 
         # 1. Weather Timeline & Cumulative Deficit (Drought & Rain Detection)
         weather_days: List[datetime] = []
@@ -133,7 +176,19 @@ class IntraSeasonalEventDetector:
                 drought_start_dt = None
                 continue
 
-            raw_precip = w.get("precipitation") if w.get("precipitation") is not None else w.get("rain")
+            raw_precip = (
+                w.get("precipitation")
+                if w.get("precipitation") is not None
+                else (
+                    w.get("precip")
+                    if w.get("precip") is not None
+                    else (
+                        w.get("rain")
+                        if w.get("rain") is not None
+                        else w.get("precipitation_mm")
+                    )
+                )
+            )
             precip = float(raw_precip) if raw_precip is not None else None
 
             raw_et0 = w.get("et0")
