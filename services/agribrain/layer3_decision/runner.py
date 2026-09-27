@@ -1391,8 +1391,12 @@ def _execute_canonical_water_engine(
         def _extract_soil_obs_for_date(d_val: datetime.date) -> Optional[Any]:
             d_str = d_val.strftime("%Y-%m-%d")
             # Explicitly supplied dated records in current request take top precedence
-            if d_val in supplied_soil_obs_dates and d_str in plot_so_hist and plot_so_hist[d_str] is not None:
-                return plot_so_hist[d_str]
+            if d_val in supplied_soil_obs_dates:
+                val = plot_so_hist.get(d_str)
+                # Check for explicit withdrawal / deletion
+                if val is None or getattr(val, "deleted", False) or getattr(val, "status", "") in {"cancelled", "deleted", "withdrawn"}:
+                    return None
+                return val
             if soil_obs_date is not None and d_val == soil_obs_date and soil_obs is not None:
                 return soil_obs
             if d_str in retained_soil_obs_map and retained_soil_obs_map[d_str] is not None:
@@ -1432,6 +1436,19 @@ def _execute_canonical_water_engine(
             | supplied_veg_dates
             | supplied_soil_obs_dates
         )
+
+        # Check for newly received evidence preceding existing cached history
+        earlier_than_cache = None
+        if plot_hist:
+            cached_dates = [datetime.date.fromisoformat(k) for k in plot_hist.keys() if len(k) >= 10]
+            if cached_dates:
+                min_cached_d = min(cached_dates)
+                earlier_supplied = [d for d in supplied_dates if d <= ts.date() and d < min_cached_d]
+                if earlier_supplied:
+                    earlier_than_cache = min(earlier_supplied)
+                    # All cached history is invalidated because its predecessor state is changing
+                    earliest_invalid_day = min_cached_d.strftime("%Y-%m-%d")
+
         for hist_k in sorted(plot_hist.keys()):
             if hist_k > day_key:
                 continue
@@ -1455,7 +1472,8 @@ def _execute_canonical_water_engine(
             curr_so = _extract_soil_obs_for_date(hist_d)
             curr_f_hash = _compute_step_forcing_hash(curr_w, curr_irr, curr_veg, curr_so)
             if hist_entry.get("step_forcing_hash") and hist_entry["step_forcing_hash"] != curr_f_hash:
-                earliest_invalid_day = hist_k
+                if earliest_invalid_day is None or hist_k < earliest_invalid_day:
+                    earliest_invalid_day = hist_k
                 break
 
         if earliest_invalid_day is not None:
@@ -1501,6 +1519,8 @@ def _execute_canonical_water_engine(
         # Determine the earliest date where integration must begin
         if explicit_soil is not None:
             d_start = ts.date()
+        elif earlier_than_cache is not None:
+            d_start = earlier_than_cache
         elif earliest_invalid_day is not None:
             # Rebuild from the earliest affected transition!
             d_start = datetime.date.fromisoformat(earliest_invalid_day)

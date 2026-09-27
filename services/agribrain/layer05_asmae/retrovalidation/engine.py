@@ -318,6 +318,21 @@ def run_retrovalidation(
             except Exception as exc:
                 fold_proof['initialization_frozen'] = False
                 fold_proof['initialization_failure'] = str(exc)
+
+        condition_on_interventions = bool(
+            (evidence_context or {}).get("condition_on_observed_interventions")
+            or (evidence_context or {}).get("condition_on_interventions")
+        )
+        training_events = _training_management_events(
+            (evidence_context or {}).get("management_events", []),
+            training_scenes,
+            holdout_scene,
+            condition_on_interventions=condition_on_interventions,
+        )
+        consumed_post_issuance_interventions = getattr(
+            training_events, "consumed_post_issuance", False
+        )
+
         fold_state = run_enkf(
             scenes=training_scenes,
             operators=training_operators,
@@ -338,11 +353,7 @@ def run_retrovalidation(
                 holdout_scene,
             ),
             soil_context=(evidence_context or {}).get("soil_context", {}),
-            management_events=_training_management_events(
-                (evidence_context or {}).get("management_events", []),
-                training_scenes,
-                holdout_scene,
-            ),
+            management_events=training_events,
             initial_posterior=initial_posterior,
             deadline_check=deadline_check,
         )
@@ -469,12 +480,7 @@ def run_retrovalidation(
         # Interval management events
         # Interventions known at issuance vs subsequently observed interventions (R2 §§54 and 86.2)
         train_utc = _to_utc_datetime(t_train_dt)
-        condition_on_interventions = bool(
-            (evidence_context or {}).get("condition_on_observed_interventions")
-            or (evidence_context or {}).get("condition_on_interventions")
-        )
         interval_mgmt_events = []
-        consumed_post_issuance_interventions = False
 
         for ev in raw_mgmt_events or []:
             if isinstance(ev, dict):
@@ -997,35 +1003,46 @@ def _training_weather(
     }
 
 
+class TrainingEventsList(list):
+    consumed_post_issuance: bool = False
+
+
 def _training_management_events(
     events: Any,
     scenes: List[Any],
     holdout_scene: Any,
-) -> List[Dict[str, Any]]:
+    condition_on_interventions: bool = False,
+) -> TrainingEventsList:
     training_times = [
         getattr(scene, 'acquisition_time', None) for scene in scenes
         if getattr(scene, 'acquisition_time', None) is not None
     ]
     if not training_times:
-        return []
+        return TrainingEventsList()
     latest_training = max(training_times)
-    latest_day = latest_training.date().isoformat()
+    latest_day = latest_training.date().isoformat() if hasattr(latest_training, "date") else str(latest_training)[:10]
+    train_utc = _to_utc_datetime(latest_training)
     holdout_time = getattr(holdout_scene, 'acquisition_time', None)
-    holdout_day = holdout_time.date().isoformat() if holdout_time is not None else None
-    result = []
+    holdout_day = (
+        holdout_time.date().isoformat()
+        if hasattr(holdout_time, "date")
+        else (str(holdout_time)[:10] if holdout_time is not None else None)
+    )
+    result = TrainingEventsList()
+    consumed_post = False
     for event in events or []:
         if not isinstance(event, dict):
             continue
-        raw_stamp = str(event.get('timestamp') or event.get('date') or '')
+        raw_stamp = str(event.get('effective_start') or event.get('timestamp') or event.get('date') or '')
         stamp = raw_stamp[:10]
         if not stamp or stamp > latest_day:
             continue
         if holdout_day and stamp >= holdout_day:
             continue
         if len(raw_stamp) > 10 and stamp == latest_day:
-            from datetime import datetime
+            from datetime import datetime as dt_cls
             try:
-                event_time = datetime.fromisoformat(
+                event_time = dt_cls.fromisoformat(
                     raw_stamp.replace('Z', '+00:00'),
                 )
                 if latest_training.tzinfo is not None and event_time.tzinfo is None:
@@ -1036,7 +1053,32 @@ def _training_management_events(
                     continue
             except ValueError:
                 continue
-        result.append(dict(event))
+
+        # Check demonstrable pre-issuance availability (R2 §§54 and 86.2)
+        raw_rec = (
+            event.get("recorded_at")
+            or event.get("created_at")
+            or event.get("logged_at")
+            or event.get("issued_at")
+            or event.get("known_at")
+            or event.get("record_time")
+            or (event.get("metadata", {}) if isinstance(event.get("metadata"), dict) else {}).get("recorded_at")
+            or (event.get("metadata", {}) if isinstance(event.get("metadata"), dict) else {}).get("created_at")
+        )
+        rec_dt = _to_utc_datetime(raw_rec)
+        is_demonstrably_pre_issuance = (
+            rec_dt is not None and train_utc is not None and rec_dt <= train_utc
+        )
+        if is_demonstrably_pre_issuance:
+            result.append(dict(event))
+        else:
+            if condition_on_interventions:
+                result.append(dict(event))
+                consumed_post = True
+            else:
+                continue
+
+    result.consumed_post_issuance = consumed_post
     return result
 
 
