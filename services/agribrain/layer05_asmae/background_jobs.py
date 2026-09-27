@@ -52,7 +52,7 @@ PROCESS_HARD_TIMEOUT_SECONDS = float(
     os.environ.get("ASMAE_PROCESS_HARD_TIMEOUT_SECONDS", "1800")
 )
 MAX_WORKER_MEMORY_MB = float(
-    os.environ.get("AGRIBRAIN_MAX_WORKER_MEMORY_MB", "6144")
+    os.environ.get("AGRIBRAIN_MAX_WORKER_MEMORY_MB", "8192")
 )
 
 
@@ -1889,8 +1889,9 @@ def supervise_job(job_path: Path, launch_token: str) -> None:
 
     try:
         child.wait(timeout=PROCESS_HARD_TIMEOUT_SECONDS)
-        bounded_executor.on_worker_completed(job_path)
-        return
+        if not memory_exceeded and getattr(child, "returncode", 0) == 0:
+            bounded_executor.on_worker_completed(job_path)
+            return
     except subprocess.TimeoutExpired:
         child.terminate()
     try:

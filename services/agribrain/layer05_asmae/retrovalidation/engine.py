@@ -253,6 +253,7 @@ def run_retrovalidation(
     prospective_mean_errors: List[float] = []
     retrospective_mean_errors: List[float] = []
     refit_folds: List[Dict[str, Any]] = []
+    fold_expert_errors: Dict[str, List[float]] = {}
 
     from ..assimilation.filter import run_enkf
     from ..deterministic import make_rng
@@ -553,14 +554,42 @@ def run_retrovalidation(
         fold_proof["forecast_skill_score"] = pred_result.get("forecast_skill_score")
         fold_proof["per_microzone_error"] = pred_result.get("per_microzone_error", {})
         fold_proof["forecast_state"] = pred_result.get("forecast_state")
-        fold_proof["training_state"] = training_state
+
+        # Compute fold-local plausibility and spatial agreement scores immediately
+        fold_proof["temporal_score"] = _compute_temporal_plausibility(
+            fold_state.get('state_timeline', [])
+        )
+        fold_proof["spatial_score"] = _compute_spatial_agreement(
+            training_state, fold_graph,
+        )
+
+        # Compute physics expert holdout errors on this fold immediately
+        from ..bma.physics_experts import compute_physics_experts
+        if (
+            training_state
+            and holdout_scene is not None
+            and pred_result.get("status") == "predicted"
+        ):
+            f_ctx = dict(evidence_context or {})
+            f_ctx["scenes"] = training_scenes
+            exp_specs = compute_physics_experts(training_state, f_ctx)
+            for exp_name, spec in exp_specs.items():
+                prediction = spec.get("predictions", {})
+                e_pred_res = predict_held_out_scene(
+                    training_state=prediction,
+                    holdout_scene=holdout_scene,
+                    operator=holdout_op,
+                )
+                if e_pred_res.get("status") == "predicted" and isinstance(e_pred_res.get("mean_error"), (int, float)):
+                    fold_expert_errors.setdefault(exp_name, []).append(float(e_pred_res["mean_error"]))
+
         fold_proof['training_sigmas'] = fold_state.get('uncertainty_maps', {})
-        fold_proof['training_timeline'] = fold_state.get('state_timeline', [])
-        fold_proof['training_graph'] = fold_graph
-        fold_proof["training_scenes"] = training_scenes
-        fold_proof["holdout_scene"] = holdout_scene
-        fold_proof["holdout_operator"] = holdout_op
         refit_folds.append(fold_proof)
+
+        # Free fold-local heavy structures immediately to release memory before the next fold
+        del fold_graph, fold_state, training_state, training_operators, holdout_op
+        import gc
+        gc.collect()
         if (
             pred_result.get('status') == 'predicted'
             and isinstance(pred_result.get('mean_error'), (int, float))
@@ -623,15 +652,15 @@ def run_retrovalidation(
 
     # ── Component 3: Temporal plausibility ──────────────────────────
     temporal_score = sum(
-        _compute_temporal_plausibility(fold.get('training_timeline', []))
+        fold.get('temporal_score', _compute_temporal_plausibility(fold.get('training_timeline', [])))
         for fold in successful_refits
     ) / len(successful_refits)
 
     # ── Component 4: Spatial agreement ─────────────────────────────
     spatial_score = sum(
-        _compute_spatial_agreement(
+        fold.get('spatial_score', _compute_spatial_agreement(
             fold.get('training_state', {}), fold.get('training_graph'),
-        )
+        ))
         for fold in successful_refits
     ) / len(successful_refits)
 
@@ -725,9 +754,16 @@ def run_retrovalidation(
         }
 
     # ── V79B: Produce expert holdout errors for BMA ────────────────
-    expert_holdout_errors = _compute_expert_holdout_errors(
-        successful_refits, evidence_context or {},
-    )
+    if fold_expert_errors:
+        expert_holdout_errors = {
+            name: sum(errs) / len(errs)
+            for name, errs in fold_expert_errors.items()
+            if errs
+        }
+    else:
+        expert_holdout_errors = _compute_expert_holdout_errors(
+            successful_refits, evidence_context or {},
+        )
 
     # ── V79B: Produce holdout observation targets for BMA ──────────
     holdout_targets = _compute_holdout_observation_targets(
