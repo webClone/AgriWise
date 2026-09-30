@@ -167,6 +167,8 @@ def forecast_held_out_scene(
     current_time: Optional[Any] = None,
     weather_daily_series: Optional[dict] = None,
     management_events: Optional[List[dict]] = None,
+    nuisance_state: Optional[Dict[str, List[float]]] = None,
+    expert_state_indices: Optional[Set[int]] = None,
 ) -> Dict[str, Any]:
     """Propagate training state forward to holdout time and evaluate closure against H_holdout.
 
@@ -183,6 +185,8 @@ def forecast_held_out_scene(
         training_state=training_state,
         holdout_scene=holdout_scene,
         operator=operator,
+        nuisance_state=nuisance_state,
+        expert_state_indices=expert_state_indices,
     )
     persistence_rmse = persistence_result.get("mean_error")
 
@@ -191,10 +195,22 @@ def forecast_held_out_scene(
         return persistence_result
 
     # 2. Dynamic Forward Propagation via ASMAE transition equations (shared daily temporal integration)
-    if delta_days > 0.0 and training_state:
+    effective_state = training_state
+    if nuisance_state:
+        effective_state = {}
+        for nid, st in training_state.items():
+            base = nuisance_state.get(nid, [])
+            merged = [
+                st[i] if (i < len(st) and st[i] is not None)
+                else (base[i] if i < len(base) else None)
+                for i in range(max(len(st), len(base)))
+            ]
+            effective_state[nid] = merged
+
+    if delta_days > 0.0 and effective_state:
         ensemble_in = {
             node: [list(state)]
-            for node, state in training_state.items()
+            for node, state in effective_state.items()
             if isinstance(state, (list, tuple))
         }
         if ensemble_in:
@@ -252,6 +268,8 @@ def forecast_held_out_scene(
         training_state=propagated_state,
         holdout_scene=holdout_scene,
         operator=operator,
+        nuisance_state=nuisance_state,
+        expert_state_indices=expert_state_indices,
     )
     forecast_rmse = forecast_result.get("mean_error")
 

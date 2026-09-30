@@ -286,11 +286,13 @@ def test_zero_spatial_scene_preflight_creates_no_job(monkeypatch, tmp_path):
 @pytest.mark.parametrize("status", ["partial", "unavailable", "error", "failed_spatial_timeout"])
 def test_failure_lineage_is_secondary_and_never_raises(monkeypatch, status):
     from services.agribrain.layer05_asmae.history.worldline_service import PlotWorldlineService
+    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
 
     def fail_commit(*args, **kwargs):
         raise OSError("lineage store unavailable")
 
     monkeypatch.setattr(PlotWorldlineService, "commit_event", fail_commit)
+    monkeypatch.setattr(CanonicalWorldlineService, "commit_event", fail_commit)
     outcome, event_id = background_jobs._commit_job_failure_event(
         {"status": status, "reason": "PRIMARY_SCIENTIFIC_FAILURE"},
         {"job_id": "a" * 24, "plot_id": "plot-a", "run_id": "run-a"},
