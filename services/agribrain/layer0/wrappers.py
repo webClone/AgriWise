@@ -125,7 +125,10 @@ def _extract_timestamp(pkt: Any, fallback: Optional[datetime] = None) -> datetim
 
 
 def _infer_data_status(payload: dict, source: ObservationSource) -> DataStatus:
-    pkt_type = payload.get("packet_type") or payload.get("type") or ""
+    pkt_type = str(payload.get("packet_type") or payload.get("type") or "").upper()
+    declared = DataStatus.from_value(payload["data_status"]) if "data_status" in payload else None
+    if declared == DataStatus.UNAVAILABLE:
+        return DataStatus.UNAVAILABLE
 
     if payload.get("source_reality") == "raster_composite_proxy":
         return DataStatus.FALLBACK
@@ -142,25 +145,22 @@ def _infer_data_status(payload: dict, source: ObservationSource) -> DataStatus:
     if payload.get("diagnostic_only") is True:
         return DataStatus.FALLBACK
 
-    if payload.get("data_status"):
-        return DataStatus.from_value(payload["data_status"])
-
-    if payload.get("simulated") is True:
+    if payload.get("simulated") is True or declared == DataStatus.SIMULATED:
         return DataStatus.SIMULATED
 
-    if payload.get("fallback") is True:
+    if payload.get("fallback") is True or declared == DataStatus.FALLBACK:
         return DataStatus.FALLBACK
-
-    if "FORECAST" in pkt_type or source == ObservationSource.WEATHER_FORECAST:
-        return DataStatus.ESTIMATED
 
     if "CALIBRATION_FAILED" in pkt_type:
         return DataStatus.UNAVAILABLE
 
+    if "FORECAST" in pkt_type or source == ObservationSource.WEATHER_FORECAST:
+        return DataStatus.ESTIMATED
+
     if "DERIVED" in pkt_type or "ESTIMATED" in pkt_type:
         return DataStatus.ESTIMATED
 
-    return DataStatus.OBSERVED
+    return declared or DataStatus.OBSERVED
 
 
 def aggregate_data_status(packets: List[ObservationPacket], available: bool) -> DataStatus:
@@ -181,7 +181,13 @@ def aggregate_data_status(packets: List[ObservationPacket], available: bool) -> 
     if DataStatus.ESTIMATED in statuses or DataStatus.INTERPOLATED in statuses:
         return DataStatus.ESTIMATED
 
-    return DataStatus.OBSERVED
+    if DataStatus.ASSIMILATED in statuses:
+        return DataStatus.ASSIMILATED
+
+    if DataStatus.UNAVAILABLE in statuses:
+        return DataStatus.ESTIMATED if DataStatus.OBSERVED in statuses else DataStatus.UNAVAILABLE
+
+    return DataStatus.UNAVAILABLE
 
 
 def ensure_observation_packet(
@@ -205,22 +211,28 @@ def ensure_observation_packet(
             changed = True
 
         # Re-normalize data_status based on updated validation rules
+        status_payload = dict(pkt.payload)
+        existing_status = DataStatus.from_value(pkt.data_status)
+        if existing_status != DataStatus.OBSERVED:
+            # Missing payload metadata cannot promote an already rejected,
+            # simulated or reconstructed packet back to a native measurement.
+            status_payload["data_status"] = existing_status.value
         if pkt.source.value in ("sentinel1", "sentinel2"):
             has_crs = (
                 pkt.payload.get("crs") is not None
                 and (pkt.payload.get("transform") is not None or pkt.payload.get("affine") is not None)
             )
             if not has_crs:
-                if pkt.data_status != DataStatus.FALLBACK:
+                if pkt.data_status not in (DataStatus.UNAVAILABLE, DataStatus.FALLBACK):
                     pkt.data_status = DataStatus.FALLBACK
                     changed = True
             else:
-                inferred = _infer_data_status(pkt.payload, pkt.source)
+                inferred = _infer_data_status(status_payload, pkt.source)
                 if pkt.data_status != inferred:
                     pkt.data_status = inferred
                     changed = True
         else:
-            inferred = _infer_data_status(pkt.payload, pkt.source)
+            inferred = _infer_data_status(status_payload, pkt.source)
             if pkt.data_status != inferred:
                 pkt.data_status = inferred
                 changed = True

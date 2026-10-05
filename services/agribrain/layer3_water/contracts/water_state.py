@@ -223,6 +223,7 @@ class AssimilationDiagnostic:
     posterior_profile_variance: float = 0.0             # Trace(P^+)
     variance_reduction_fraction: float = 0.0            # 1.0 - (Trace(P^+) / Trace(P^-))
     assimilated_sensor_sources: List[str] = field(default_factory=list)
+    rejected_observations: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
