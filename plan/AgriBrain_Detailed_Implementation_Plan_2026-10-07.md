@@ -77,7 +77,7 @@ GaussianMixture is imported from sklearn.cluster and the module fails to load. T
 4. Verify service, worker, CLI and public module startup in fresh processes with declared dependency extras.
 
 **Domain Invariants & Edge Case Handling**:
-- Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+- Validate clean Python module import under Python 3.12/3.13 without ImportError, and verify ZonalSegmentationEngine clustering execution on sample pixel arrays.
 - Fail-closed guarantee: any malformed input, non-finite float, or contract violation produces an explicit failure receipt.
 - Multi-tenant isolation: enforce scoped tenant keys on all state caches and queries.
 
@@ -92,7 +92,7 @@ GaussianMixture is imported from sklearn.cluster and the module fails to load. T
 - The two successfully loaded cycles are not treated as demonstrated circular-import failures.
 
 **Verification & Recovery Strategy**:
-- **Verification**: Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+- **Verification**: Validate clean Python module import under Python 3.12/3.13 without ImportError, and verify ZonalSegmentationEngine clustering execution on sample pixel arrays.
 - **Recovery**: Safe UI fallback: return explicit UNAVAILABLE status to users rather than synthetic mocks or empty collections during service degradation.
 
 ---
@@ -1580,7 +1580,7 @@ Dispatcher imports drivers.mock_driver, absent from the pinned tree. The current
 4. Fence all child writes and publish final cleanup/ownership receipts.
 
 **Domain Invariants & Edge Case Handling**:
-- Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+- Validate driver availability checking: missing optional drivers (e.g. mock or vendor SDK) return explicit UNAVAILABLE capability without crashing drone_control package import; simulation mode remains explicitly labelled.
 - Fail-closed guarantee: any malformed input, non-finite float, or contract violation produces an explicit failure receipt.
 - Multi-tenant isolation: enforce scoped tenant keys on all state caches and queries.
 
@@ -1594,7 +1594,7 @@ Dispatcher imports drivers.mock_driver, absent from the pinned tree. The current
 - Forced-kill cleanup confirms process exit before resource ownership is released.
 
 **Verification & Recovery Strategy**:
-- **Verification**: Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+- **Verification**: Validate driver availability checking: missing optional drivers (e.g. mock or vendor SDK) return explicit UNAVAILABLE capability without crashing drone_control package import; simulation mode remains explicitly labelled.
 - **Recovery**: Safe UI fallback: return explicit UNAVAILABLE status to users rather than synthetic mocks or empty collections during service degradation.
 
 ---

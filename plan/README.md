@@ -3,7 +3,7 @@
 **Folder Revision**: 7 October 2026  
 **Repository**: [webClone/AgriWise](https://github.com/webClone/AgriWise)  
 **Historical Production Baseline**: `26d5c3f475cabdbb6edb0fa6fd8ccea5879f2bb4`  
-**Plan Revision Commit**: `96e515d6b1593f4b38756e79000313302971b936`  
+**Plan Revision Commit**: `f243953a1ff10d98f70bab78061dd4892af0718c`  
 **Draft PR #1 Head**: `bcb9eda6b8ef1aa6425f5828669f753a191227bc` (draft, unmerged)
 
 ---

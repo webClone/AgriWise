@@ -19,79 +19,89 @@ Every ticket is actionable and reviewable. Prerequisites encode strict dataflow 
 
 ### Master Execution Dashboard
 
-| Stage | Packages | Focus Area | Hours Budget | Readiness Status |
+> **Note on Lane Concurrency vs. Full Acceptance**: The 17 stages below specify the validated sequence for **full package acceptance**. Individual architectural lanes (such as the Safety Lane F16–F19 or immediate startup slices) proceed by their actual package/ticket dataflow prerequisites as soon as upstream artifacts exist (e.g. F01 is ready immediately, and F16 starts as soon as F01 passes without waiting for Stage 05).
+
+| Stage | Packages | Focus Area | Hours Budget | Full-Acceptance Gate |
 |:---:|---|---|:---:|:---:|
-| **Stage 00** | F37 | Core Delivery | 24–48 hrs | `[ ] Ready to Start` |
-| **Stage 01** | F01, F02 | Core Delivery | 48–80 hrs | `[ ] Blocked on Stage 00 (F37)` |
-| **Stage 02** | F03, F04 | Core Delivery | 36–60 hrs | `[ ] Blocked on Stage 01` |
-| **Stage 03** | F06, F07, F08, F09, F39 | Core Delivery | 148–252 hrs | `[ ] Blocked on Stage 02` |
-| **Stage 04** | F05, F10, F11, F12 | Core Delivery | 100–176 hrs | `[ ] Blocked on Stage 03` |
-| **Stage 05** | F13, F14, F15 | Core Delivery | 68–124 hrs | `[ ] Blocked on Stage 04` |
-| **Stage 06** | F16, F17, F18, F19 | Core Delivery | 88–148 hrs | `[ ] Blocked on Stage 05` |
-| **Stage 07** | F20, F34 | Core Delivery | 64–104 hrs | `[ ] Blocked on Stage 06` |
-| **Stage 08** | F21, F22, F23, F24 | Core Delivery | 88–144 hrs | `[ ] Blocked on Stage 07` |
-| **Stage 09** | F25, F26, F27, F28, F29 | Core Delivery | 140–232 hrs | `[ ] Blocked on Stage 08` |
-| **Stage 10** | F30, F31, F32, F33, F38, F40 | Core Delivery | 172–296 hrs | `[ ] Blocked on Stage 09` |
-| **Stage 11** | F35, F36, T11 | Core Delivery | 168–296 hrs | `[ ] Blocked on Stage 10` |
-| **Stage 12** | T01, T02, T12 | Core Delivery | 240–420 hrs | `[ ] Blocked on Stage 11` |
-| **Stage 13** | T03, T06 | Core Delivery | 280–520 hrs | `[ ] Blocked on Stage 12` |
-| **Stage 14** | T04, T05 | Core Delivery | 240–440 hrs | `[ ] Blocked on Stage 13` |
-| **Stage 15** | T08, T09 | Core Delivery | 300–540 hrs | `[ ] Blocked on Stage 14` |
-| **Stage 16** | T07, T10 | Core Delivery | 360–660 hrs | `[ ] Blocked on Stage 15` |
+| **Stage 00** | F37 | Core Delivery | 24–48 hrs | `[ ] Ready to Start (Startup Slices)` |
+| **Stage 01** | F01, F02 | Core Delivery | 48–80 hrs | `[ ] Ready to Start (F01 Foundation)` |
+| **Stage 02** | F03, F04 | Core Delivery | 36–60 hrs | `[ ] Blocked on Stage 01 Acceptance` |
+| **Stage 03** | F06, F07, F08, F09, F39 | Core Delivery | 148–252 hrs | `[ ] Blocked on Stage 02 Acceptance` |
+| **Stage 04** | F05, F10, F11, F12 | Core Delivery | 100–176 hrs | `[ ] Blocked on Stage 03 Acceptance` |
+| **Stage 05** | F13, F14, F15 | Core Delivery | 68–124 hrs | `[ ] Blocked on Stage 04 Acceptance` |
+| **Stage 06** | F16, F17, F18, F19 | Core Delivery | 88–148 hrs | `[ ] Blocked on Stage 05 Acceptance` |
+| **Stage 07** | F20, F34 | Core Delivery | 64–104 hrs | `[ ] Blocked on Stage 06 Acceptance` |
+| **Stage 08** | F21, F22, F23, F24 | Core Delivery | 88–144 hrs | `[ ] Blocked on Stage 07 Acceptance` |
+| **Stage 09** | F25, F26, F27, F28, F29 | Core Delivery | 140–232 hrs | `[ ] Blocked on Stage 08 Acceptance` |
+| **Stage 10** | F30, F31, F32, F33, F38, F40 | Core Delivery | 172–296 hrs | `[ ] Blocked on Stage 09 Acceptance` |
+| **Stage 11** | F35, F36, T11 | Core Delivery | 168–296 hrs | `[ ] Blocked on Stage 10 Acceptance` |
+| **Stage 12** | T01, T02, T12 | Core Delivery | 240–420 hrs | `[ ] Blocked on Stage 11 Acceptance` |
+| **Stage 13** | T03, T06 | Core Delivery | 280–520 hrs | `[ ] Blocked on Stage 12 Acceptance` |
+| **Stage 14** | T04, T05 | Core Delivery | 240–440 hrs | `[ ] Blocked on Stage 13 Acceptance` |
+| **Stage 15** | T08, T09 | Core Delivery | 300–540 hrs | `[ ] Blocked on Stage 14 Acceptance` |
+| **Stage 16** | T07, T10 | Core Delivery | 360–660 hrs | `[ ] Blocked on Stage 15 Acceptance` |
 | **TOTAL** | **52 Packages** | **Full Remediation & Extension Program** | **2,564–4,540 hrs** | **Planned** |
 
 ---
 
 ## 2. Early-Slice Ticket Register (Immediate Cold-Start & Local Boundaries)
 
-These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from parent package allocations:
+These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from parent package allocations; effort and acceptance are counted once:
 
 - [ ] **`ST00-F37-ES01`: [F37 Early Slice] Correct GaussianMixture import from sklearn.mixture; verify clean cold module im**
   - **Target File**: [`../services/agribrain/layer1_fusion/segmentation.py`](../services/agribrain/layer1_fusion/segmentation.py)
   - **Action**: Correct GaussianMixture import from sklearn.mixture; verify clean cold module import.
   - **Estimate**: 4–8 hours (allocated from F37) | **Prerequisites**: `none`
-  - **Verification**: Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+  - **Full-Delivery Link**: Unblocks immediate local boundary; linked to `ST00-F37-01` and `ST00-F37-FA`. Hours are counted once inside parent F37 budget.
+  - **Verification**: Validate clean Python module import under Python 3.12/3.13 without ImportError, and verify ZonalSegmentationEngine clustering execution on sample pixel arrays.
 
 - [ ] **`ST00-F35-ES01`: [F35 Early Slice] Isolate optional mock_driver behind dynamic capability check; ensure simulation **
   - **Target File**: [`../services/agribrain/drone_control/dispatcher.py`](../services/agribrain/drone_control/dispatcher.py)
   - **Action**: Isolate optional mock_driver behind dynamic capability check; ensure simulation mode remains explicitly labelled.
   - **Estimate**: 4–8 hours (allocated from F35) | **Prerequisites**: `none`
-  - **Verification**: Validate autonomous duration watchdog execution regardless of telemetry presence, non-bypassable pre-flight quota checks, immutable hard caps (salinity leaching), and strict physical actuator interlocks.
+  - **Full-Delivery Link**: Unblocks immediate local boundary; linked to `ST11-F35-01` and `ST11-F35-FA`. Hours are counted once inside parent F35 budget.
+  - **Verification**: Validate driver availability checking: missing optional drivers (e.g. mock or vendor SDK) return explicit UNAVAILABLE capability without crashing drone_control package import; simulation mode remains explicitly labelled.
 
 - [ ] **`ST00-F38-ES01`: [F38 Early Slice] Import statistics module for Savitzky-Golay derivative spacing at line 296.**
   - **Target File**: [`../services/agribrain/layer2_veg_int/growth_engine.py`](../services/agribrain/layer2_veg_int/growth_engine.py)
   - **Action**: Import statistics module for Savitzky-Golay derivative spacing at line 296.
   - **Estimate**: 2–4 hours (allocated from F38) | **Prerequisites**: `none`
-  - **Verification**: Validate finite numeric filtering (`math.isfinite`), legitimate zero round-trip, observation vs knowledge cutoffs, and truthful failure receipts without fabricated defaults.
+  - **Full-Delivery Link**: Unblocks immediate local boundary; linked to `ST10-F38-07` and `ST10-F38-FA`. Hours are counted once inside parent F38 budget.
+  - **Verification**: Validate statistics.mean import in growth_engine.py with non-empty/empty/valid interval arrays.
 
 - [ ] **`ST00-F38-ES02`: [F38 Early Slice] Import IrrigationSystemType enum in CommandDispatcher device construction at lin**
   - **Target File**: [`../services/agribrain/irrigation_runtime/dispatcher.py`](../services/agribrain/irrigation_runtime/dispatcher.py)
   - **Action**: Import IrrigationSystemType enum in CommandDispatcher device construction at line 272.
   - **Estimate**: 2–4 hours (allocated from F38) | **Prerequisites**: `none`
-  - **Verification**: Validate autonomous duration watchdog execution regardless of telemetry presence, non-bypassable pre-flight quota checks, immutable hard caps (salinity leaching), and strict physical actuator interlocks.
+  - **Full-Delivery Link**: Unblocks immediate local boundary; linked to `ST10-F38-07` and `ST10-F38-FA`. Hours are counted once inside parent F38 budget.
+  - **Verification**: Validate IrrigationSystemType import in dispatcher.py and device construction without NameError.
 
 - [ ] **`ST00-F38-ES03`: [F38 Early Slice] Initialize resolution_m from scene metadata to stop discarding valid external gr**
   - **Target File**: [`../services/agribrain/layer05_asmae/geometry/external_scene_loader.py`](../services/agribrain/layer05_asmae/geometry/external_scene_loader.py)
   - **Action**: Initialize resolution_m from scene metadata to stop discarding valid external grid scenes at line 115.
   - **Estimate**: 4–8 hours (allocated from F38) | **Prerequisites**: `none`
-  - **Verification**: Validate finite numeric filtering (`math.isfinite`), legitimate zero round-trip, observation vs knowledge cutoffs, and truthful failure receipts without fabricated defaults.
+  - **Full-Delivery Link**: Unblocks immediate local boundary; linked to `ST10-F38-05` and `ST10-F38-FA`. Hours are counted once inside parent F38 budget.
+  - **Verification**: Validate external scene loader resolution_m initialization from metadata without NameError.
 
 - [ ] **`ST00-F39-ES01`: [F39 Early Slice] Reproduce concurrent nonce lost-update race; implement atomic conditional insert**
   - **Target File**: [`../services/agribrain/sensor_runtime/security.py`](../services/agribrain/sensor_runtime/security.py)
   - **Action**: Reproduce concurrent nonce lost-update race; implement atomic conditional insert with process lock.
   - **Estimate**: 6–10 hours (allocated from F39) | **Prerequisites**: `none`
+  - **Full-Delivery Link**: Unblocks immediate local boundary; linked to `ST03-F39-01` and `ST03-F39-FA`. Hours are counted once inside parent F39 budget.
   - **Verification**: Validate atomic multi-worker replay protection, nonce idempotency, finite sensor telemetry filtering, and strict hardware failure receipts.
 
 - [ ] **`ST00-F40-ES01`: [F40 Early Slice] Resolve runtime numpy and typing annotations so get_type_hints() passes without **
   - **Target File**: [`../services/agribrain/layer0/kalman_engine.py`](../services/agribrain/layer0/kalman_engine.py)
   - **Action**: Resolve runtime numpy and typing annotations so get_type_hints() passes without NameError.
   - **Estimate**: 4–8 hours (allocated from F40) | **Prerequisites**: `ST00-F37-ES01`
+  - **Full-Delivery Link**: Unblocks immediate local boundary; linked to `ST10-F40-01` and `ST10-F40-FA`. Hours are counted once inside parent F40 budget.
   - **Verification**: Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
 
 - [ ] **`ST01-F32-ES01`: [F32 Early Slice] Return explicit 503 unavailable on database failure while preserving authentic z**
   - **Target File**: [`../src/app/api/dashboard/stats/route.ts`](../src/app/api/dashboard/stats/route.ts)
   - **Action**: Return explicit 503 unavailable on database failure while preserving authentic zero statistics for empty farms.
   - **Estimate**: 4–8 hours (allocated from F32) | **Prerequisites**: `none`
+  - **Full-Delivery Link**: Unblocks immediate local boundary; linked to `ST10-F32-01` and `ST10-F32-FA`. Hours are counted once inside parent F32 budget.
   - **Verification**: Validate Next.js/TypeScript clean build (`tsc --noEmit`), Prisma migration schema consistency, 503 HTTP status on DB outage (preserving authentic zeros), and zero client bundle errors.
 
 ---
@@ -107,25 +117,25 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/layer1_fusion/segmentation.py`](../services/agribrain/layer1_fusion/segmentation.py)
   - **Action**: 1. Import GaussianMixture from sklearn.mixture and identify actual consumers of the legacy segmentation module.
   - **Estimate**: 6–12 hours | **Prerequisites**: `none`
-  - **Verification**: Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+  - **Verification**: Validate clean Python module import under Python 3.12/3.13 without ImportError, and verify ZonalSegmentationEngine clustering execution on sample pixel arrays.
 
 - [ ] **`ST00-F37-02`: 2. Isolate optional drivers and model backends behind explicit capability loadin...**
   - **Target File**: [`../services/agribrain/layer1_fusion/engine.py`](../services/agribrain/layer1_fusion/engine.py)
   - **Action**: 2. Isolate optional drivers and model backends behind explicit capability loading, retaining simulation as a qualified mode.
   - **Estimate**: 6–12 hours | **Prerequisites**: `ST00-F37-01`
-  - **Verification**: Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+  - **Verification**: Validate clean Python module import under Python 3.12/3.13 without ImportError, and verify ZonalSegmentationEngine clustering execution on sample pixel arrays.
 
 - [ ] **`ST00-F37-03`: 3. Select one installed package namespace and migrate entrypoints/imports cohere...**
   - **Target File**: [`../services/agribrain/drone_control/dispatcher.py`](../services/agribrain/drone_control/dispatcher.py)
   - **Action**: 3. Select one installed package namespace and migrate entrypoints/imports coherently instead of mechanically prefixing every import.
   - **Estimate**: 6–12 hours | **Prerequisites**: `ST00-F37-02`
-  - **Verification**: Validate autonomous duration watchdog execution regardless of telemetry presence, non-bypassable pre-flight quota checks, immutable hard caps (salinity leaching), and strict physical actuator interlocks.
+  - **Verification**: Validate clean Python module import under Python 3.12/3.13 without ImportError, and verify ZonalSegmentationEngine clustering execution on sample pixel arrays.
 
 - [ ] **`ST00-F37-04`: 4. Verify service, worker, CLI and public module startup in fresh processes with...**
   - **Target File**: [`../services/agribrain/drone_mission/__init__.py`](../services/agribrain/drone_mission/__init__.py)
   - **Action**: 4. Verify service, worker, CLI and public module startup in fresh processes with declared dependency extras.
   - **Estimate**: 6–12 hours | **Prerequisites**: `ST00-F37-03`
-  - **Verification**: Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+  - **Verification**: Validate clean Python module import under Python 3.12/3.13 without ImportError, and verify ZonalSegmentationEngine clustering execution on sample pixel arrays.
 
 - [ ] **`ST00-F37-FA`: Package F37 End-to-End Acceptance Sign-off**
   - **Target Files**: All package targets (6 files) | **Prerequisites**: `ST00-F37-01 through ST00-F37-04`
@@ -459,13 +469,13 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/app/main.py`](../services/agribrain/app/main.py)
   - **Action**: 3. Keep memory caches bounded by byte/cardinality budgets and expose retention/eviction metrics.
   - **Estimate**: 6–12 hours | **Prerequisites**: `ST03-F39-02`
-  - **Verification**: Validate physical mass conservation ($S_- - S_{prev} = \text{Infil} + \text{Rise} - \text{Evap} - \text{Transp} - \text{Drain}$), strictly increasing depth increments ($\Delta z_i > 0$), exact dated weather matching, and atomic multi-worker replay protection.
+  - **Verification**: Validate bounded plot-cache lock lifecycle, mutual exclusion under concurrency, and process-local vs shared persistence boundaries.
 
 - [ ] **`ST03-F39-04`: Implement bounded plot-lock lifecycle (_plot_cache_locks, _plot_cache_locks_lock...**
   - **Target File**: [`../services/agribrain/app/main.py`](../services/agribrain/app/main.py)
   - **Action**: Implement bounded plot-lock lifecycle (_plot_cache_locks, _plot_cache_locks_lock) at lines 3803–3830 without losing mutual exclusion.
   - **Estimate**: 6–12 hours | **Prerequisites**: `ST03-F39-03`
-  - **Verification**: Validate physical mass conservation ($S_- - S_{prev} = \text{Infil} + \text{Rise} - \text{Evap} - \text{Transp} - \text{Drain}$), strictly increasing depth increments ($\Delta z_i > 0$), exact dated weather matching, and atomic multi-worker replay protection.
+  - **Verification**: Validate bounded plot-cache lock lifecycle, mutual exclusion under concurrency, and process-local vs shared persistence boundaries.
 
 - [ ] **`ST03-F39-05`: 5. Bound rate-limiter identity retention without permitting an eviction/reset by...**
   - **Target File**: [`../services/agribrain/sensor_runtime/security.py`](../services/agribrain/sensor_runtime/security.py)
@@ -477,7 +487,7 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/visual_sources/tile_proxy.py`](../services/agribrain/visual_sources/tile_proxy.py)
   - **Action**: Scope and invalidate bounding-box cache (_plot_bbox_cache) at lines 66–71 with LRU cardinality bounds.
   - **Estimate**: 10–12 hours | **Prerequisites**: `ST03-F39-05`
-  - **Verification**: Validate physical mass conservation ($S_- - S_{prev} = \text{Infil} + \text{Rise} - \text{Evap} - \text{Transp} - \text{Drain}$), strictly increasing depth increments ($\Delta z_i > 0$), exact dated weather matching, and atomic multi-worker replay protection.
+  - **Verification**: Validate bounding-box cache keying by tenant/plot/epoch and eviction on geometry change.
 
 - [ ] **`ST03-F39-FA`: Package F39 End-to-End Acceptance Sign-off**
   - **Target Files**: All package targets (4 files) | **Prerequisites**: `ST03-F39-01 through ST03-F39-06`
@@ -1100,7 +1110,7 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/world_model/forecast_archive.py`](../services/agribrain/world_model/forecast_archive.py)
   - **Action**: 1. Require finite consistent horizon, timezone-aware origin/target and a supported finite distribution.
   - **Estimate**: 5–8 hours | **Prerequisites**: `F13, F23`
-  - **Verification**: Validate immutable dataset window hashes, explicit UNAVAILABLE scores on invalid distributions, exact Gaussian multipliers ($1.28155\sigma$ for P10/P90), and truthful backend reporting (`spectral_basis_v2` vs `onnx_foundation`).
+  - **Verification**: Validate sparse quantile scoring: finite ordered quantiles, explicit UNAVAILABLE reason on missing/invalid input, never RMSE 0 on missing p50.
 
 - [ ] **`ST08-F24-02`: 2. Validate quantile levels and monotonicity, variable units/domain and nonnegat...**
   - **Target File**: [`../services/agribrain/layer6_yield/yield_forecast.py`](../services/agribrain/layer6_yield/yield_forecast.py)
@@ -1112,13 +1122,13 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/world_model/forecast_archive.py`](../services/agribrain/world_model/forecast_archive.py)
   - **Action**: 3. Return unavailable with reason for missing distributions and reject invalid sigma.
   - **Estimate**: 5–8 hours | **Prerequisites**: `ST08-F24-02`
-  - **Verification**: Validate immutable dataset window hashes, explicit UNAVAILABLE scores on invalid distributions, exact Gaussian multipliers ($1.28155\sigma$ for P10/P90), and truthful backend reporting (`spectral_basis_v2` vs `onnx_foundation`).
+  - **Verification**: Validate sparse quantile scoring: finite ordered quantiles, explicit UNAVAILABLE reason on missing/invalid input, never RMSE 0 on missing p50.
 
 - [ ] **`ST08-F24-04`: Implement accurate sparse quantile scoring (compute_crps_quantiles lines 163–199...**
   - **Target File**: [`../services/agribrain/world_model/forecast_archive.py`](../services/agribrain/world_model/forecast_archive.py)
   - **Action**: Implement accurate sparse quantile scoring (compute_crps_quantiles lines 163–199); require explicit p50 (never obs fallback).
   - **Estimate**: 5–8 hours | **Prerequisites**: `ST08-F24-03`
-  - **Verification**: Validate immutable dataset window hashes, explicit UNAVAILABLE scores on invalid distributions, exact Gaussian multipliers ($1.28155\sigma$ for P10/P90), and truthful backend reporting (`spectral_basis_v2` vs `onnx_foundation`).
+  - **Verification**: Validate sparse quantile scoring: finite ordered quantiles, explicit UNAVAILABLE reason on missing/invalid input, never RMSE 0 on missing p50.
 
 - [ ] **`ST08-F24-FA`: Package F24 End-to-End Acceptance Sign-off**
   - **Target Files**: All package targets (2 files) | **Prerequisites**: `ST08-F24-01 through ST08-F24-04`
@@ -1287,13 +1297,14 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/mesia/learning/asmae_evaluator.py`](../services/agribrain/mesia/learning/asmae_evaluator.py)
   - **Action**: 1. Bind evaluation channels to the actual state registry and support contract.
   - **Estimate**: 10–18 hours | **Prerequisites**: `F05, F24, F27, F28`
-  - **Verification**: Validate immutable dataset window hashes, explicit UNAVAILABLE scores on invalid distributions, exact Gaussian multipliers ($1.28155\sigma$ for P10/P90), and truthful backend reporting (`spectral_basis_v2` vs `onnx_foundation`).
+  - **Verification**: Validate non-empty target masks, authentic zero metrics, and legitimate R² score calculation without division-by-zero.
 
-- [ ] **`ST09-F29-02`: 2. Label R-squared, correlation and predictive error as distinct metrics with co...**
-  - **Target File**: [`../services/agribrain/mesia/behaviour/likelihood_engine.py`](../services/agribrain/mesia/behaviour/likelihood_engine.py)
-  - **Action**: 2. Label R-squared, correlation and predictive error as distinct metrics with constant-target handling.
+- [ ] **`ST09-F29-02`: Compute non-empty target mask evaluation and valid R² score calculation without ...**
+  - **Target File**: [`../services/agribrain/mesia/learning/asmae_evaluator.py`](../services/agribrain/mesia/learning/asmae_evaluator.py)
+  - **Co-target File**: [`../services/agribrain/layer05_asmae/likelihood/likelihood_engine.py`](../services/agribrain/layer05_asmae/likelihood/likelihood_engine.py)
+  - **Action**: Compute non-empty target mask evaluation and valid R² score calculation without division-by-zero.
   - **Estimate**: 10–18 hours | **Prerequisites**: `ST09-F29-01`
-  - **Verification**: Validate immutable dataset window hashes, explicit UNAVAILABLE scores on invalid distributions, exact Gaussian multipliers ($1.28155\sigma$ for P10/P90), and truthful backend reporting (`spectral_basis_v2` vs `onnx_foundation`).
+  - **Verification**: Validate non-empty target masks, authentic zero metrics, and legitimate R² score calculation without division-by-zero.
 
 - [ ] **`ST09-F29-03`: 3. Evaluate held-out sites, instruments, seasons and nuisance interventions agai...**
   - **Target File**: [`../services/agribrain/mesia/assimilation/observability_analyzer.py`](../services/agribrain/mesia/assimilation/observability_analyzer.py)
@@ -1305,7 +1316,7 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/mesia/learning/asmae_evaluator.py`](../services/agribrain/mesia/learning/asmae_evaluator.py)
   - **Action**: 4. Promote only demonstrated per-variable capabilities and keep discovery representations available without biological claims.
   - **Estimate**: 10–18 hours | **Prerequisites**: `ST09-F29-03`
-  - **Verification**: Validate immutable dataset window hashes, explicit UNAVAILABLE scores on invalid distributions, exact Gaussian multipliers ($1.28155\sigma$ for P10/P90), and truthful backend reporting (`spectral_basis_v2` vs `onnx_foundation`).
+  - **Verification**: Validate non-empty target masks, authentic zero metrics, and legitimate R² score calculation without division-by-zero.
 
 - [ ] **`ST09-F29-FA`: Package F29 End-to-End Acceptance Sign-off**
   - **Target Files**: All package targets (3 files) | **Prerequisites**: `ST09-F29-01 through ST09-F29-04`
@@ -1478,9 +1489,10 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
 
 - [ ] **`ST10-F38-02`: Thread intent and user mode through chat_adapter and run_entrypoint.py lines 444...**
   - **Target File**: [`../services/agribrain/orchestrator_v2/chat_adapter.py`](../services/agribrain/orchestrator_v2/chat_adapter.py)
+  - **Co-target File**: [`../services/agribrain/orchestrator_v2/run_entrypoint.py`](../services/agribrain/orchestrator_v2/run_entrypoint.py)
   - **Action**: Thread intent and user mode through chat_adapter and run_entrypoint.py lines 444, 471.
   - **Estimate**: 5–8 hours | **Prerequisites**: `ST10-F38-01`
-  - **Verification**: Validate finite numeric filtering (`math.isfinite`), legitimate zero round-trip, observation vs knowledge cutoffs, and truthful failure receipts without fabricated defaults.
+  - **Verification**: Validate threading of intent and userMode from typed context into compression, routing, and response policy without locals() fallback.
 
 - [ ] **`ST10-F38-03`: 3. Build geometry explicitly in the synthetic bridge helper and isolate that hel...**
   - **Target File**: [`../services/agribrain/layer10_sire/l10_frontend_bridge.py`](../services/agribrain/layer10_sire/l10_frontend_bridge.py)
@@ -1498,7 +1510,7 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/layer05_asmae/geometry/external_scene_loader.py`](../services/agribrain/layer05_asmae/geometry/external_scene_loader.py)
   - **Action**: 5. Resolve external-scene resolution from validated grid metadata and preserve each rejected-scene reason.
   - **Estimate**: 5–8 hours | **Prerequisites**: `ST10-F38-04`
-  - **Verification**: Validate finite numeric filtering (`math.isfinite`), legitimate zero round-trip, observation vs knowledge cutoffs, and truthful failure receipts without fabricated defaults.
+  - **Verification**: Validate external scene loader resolution_m initialization from metadata without NameError.
 
 - [ ] **`ST10-F38-06`: 6. Require qualified MESIA namespace rather than fabricated default scope....**
   - **Target File**: [`../services/agribrain/mesia/service.py`](../services/agribrain/mesia/service.py)
@@ -1508,9 +1520,10 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
 
 - [ ] **`ST10-F38-07`: Import statistics.mean in growth_engine.py line 296 and IrrigationSystemType in ...**
   - **Target File**: [`../services/agribrain/layer2_veg_int/growth_engine.py`](../services/agribrain/layer2_veg_int/growth_engine.py)
+  - **Co-target File**: [`../services/agribrain/irrigation_runtime/dispatcher.py`](../services/agribrain/irrigation_runtime/dispatcher.py)
   - **Action**: Import statistics.mean in growth_engine.py line 296 and IrrigationSystemType in dispatcher.py line 272.
   - **Estimate**: 5–8 hours | **Prerequisites**: `ST10-F38-06`
-  - **Verification**: Validate finite numeric filtering (`math.isfinite`), legitimate zero round-trip, observation vs knowledge cutoffs, and truthful failure receipts without fabricated defaults.
+  - **Verification**: Validate statistics.mean import in growth_engine.py with non-empty/empty/valid interval arrays.
 
 - [ ] **`ST10-F38-08`: 8. Parse completed timestamps robustly but derive published only from the exact ...**
   - **Target File**: [`../services/agribrain/app/main.py`](../services/agribrain/app/main.py)
@@ -1522,7 +1535,7 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/irrigation_runtime/dispatcher.py`](../services/agribrain/irrigation_runtime/dispatcher.py)
   - **Action**: 9. Classify each caught failure as unavailable capability or partial result with observable diagnostic instead of silently manufacturing success.
   - **Estimate**: 8–16 hours | **Prerequisites**: `ST10-F38-08`
-  - **Verification**: Validate autonomous duration watchdog execution regardless of telemetry presence, non-bypassable pre-flight quota checks, immutable hard caps (salinity leaching), and strict physical actuator interlocks.
+  - **Verification**: Validate IrrigationSystemType import in dispatcher.py and device construction without NameError.
 
 - [ ] **`ST10-F38-FA`: Package F38 End-to-End Acceptance Sign-off**
   - **Target Files**: All package targets (10 files) | **Prerequisites**: `ST10-F38-01 through ST10-F38-09`
@@ -1602,25 +1615,25 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/drone_control/dispatcher.py`](../services/agribrain/drone_control/dispatcher.py)
   - **Action**: 1. Lazy-load explicitly configured real drivers and move simulation behind an explicit test/development capability.
   - **Estimate**: 5–9 hours | **Prerequisites**: `F09`
-  - **Verification**: Validate autonomous duration watchdog execution regardless of telemetry presence, non-bypassable pre-flight quota checks, immutable hard caps (salinity leaching), and strict physical actuator interlocks.
+  - **Verification**: Validate driver availability checking: missing optional drivers (e.g. mock or vendor SDK) return explicit UNAVAILABLE capability without crashing drone_control package import; simulation mode remains explicitly labelled.
 
 - [ ] **`ST11-F35-02`: 2. Return unavailable driver capability without breaking unrelated service impor...**
   - **Target File**: [`../services/agribrain/app/drone_routes.py`](../services/agribrain/app/drone_routes.py)
   - **Action**: 2. Return unavailable driver capability without breaking unrelated service import.
   - **Estimate**: 5–9 hours | **Prerequisites**: `ST11-F35-01`
-  - **Verification**: Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+  - **Verification**: Validate driver availability checking: missing optional drivers (e.g. mock or vendor SDK) return explicit UNAVAILABLE capability without crashing drone_control package import; simulation mode remains explicitly labelled.
 
 - [ ] **`ST11-F35-03`: 3. Complete terminate-kill-wait lifecycle and process-group cleanup under a boun...**
   - **Target File**: [`../services/agribrain/layer05_asmae/background_jobs.py`](../services/agribrain/layer05_asmae/background_jobs.py)
   - **Action**: 3. Complete terminate-kill-wait lifecycle and process-group cleanup under a bounded deadline.
   - **Estimate**: 5–9 hours | **Prerequisites**: `ST11-F35-02`
-  - **Verification**: Validate Next.js/TypeScript clean build, Prisma migration consistency, 503 unavailable on database outage (preserving authentic zero stats), and runtime type introspection without deferred NameError.
+  - **Verification**: Validate driver availability checking: missing optional drivers (e.g. mock or vendor SDK) return explicit UNAVAILABLE capability without crashing drone_control package import; simulation mode remains explicitly labelled.
 
 - [ ] **`ST11-F35-04`: 4. Fence all child writes and publish final cleanup/ownership receipts....**
   - **Target File**: [`../services/agribrain/drone_control/dispatcher.py`](../services/agribrain/drone_control/dispatcher.py)
   - **Action**: 4. Fence all child writes and publish final cleanup/ownership receipts.
   - **Estimate**: 5–9 hours | **Prerequisites**: `ST11-F35-03`
-  - **Verification**: Validate autonomous duration watchdog execution regardless of telemetry presence, non-bypassable pre-flight quota checks, immutable hard caps (salinity leaching), and strict physical actuator interlocks.
+  - **Verification**: Validate driver availability checking: missing optional drivers (e.g. mock or vendor SDK) return explicit UNAVAILABLE capability without crashing drone_control package import; simulation mode remains explicitly labelled.
 
 - [ ] **`ST11-F35-FA`: Package F35 End-to-End Acceptance Sign-off**
   - **Target Files**: All package targets (3 files) | **Prerequisites**: `ST11-F35-01 through ST11-F35-04`
@@ -1653,11 +1666,12 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Estimate**: 12–20 hours | **Prerequisites**: `ST11-F36-02`
   - **Verification**: Validate immutable dataset window hashes, explicit UNAVAILABLE scores on invalid distributions, exact Gaussian multipliers ($1.28155\sigma$ for P10/P90), and truthful backend reporting (`spectral_basis_v2` vs `onnx_foundation`).
 
-- [ ] **`ST11-F36-04`: 4. Tune process noise and rejection thresholds on frozen independent cohorts ins...**
-  - **Target File**: [`../services/agribrain/layer05_asmae/retrovalidation/engine.py`](../services/agribrain/layer05_asmae/retrovalidation/engine.py)
-  - **Action**: 4. Tune process noise and rejection thresholds on frozen independent cohorts instead of selecting values for a passing pipeline flag.
+- [ ] **`ST11-F36-04`: Enforce sensor noise covariance bounds in filter.py lines 969-976 and threshold ...**
+  - **Target File**: [`../services/agribrain/layer05_asmae/assimilation/filter.py`](../services/agribrain/layer05_asmae/assimilation/filter.py)
+  - **Co-target File**: [`../services/agribrain/layer05_asmae/config.py`](../services/agribrain/layer05_asmae/config.py)
+  - **Action**: Enforce sensor noise covariance bounds in filter.py lines 969-976 and threshold tuning in config.py lines 170-185.
   - **Estimate**: 12–20 hours | **Prerequisites**: `ST11-F36-03`
-  - **Verification**: Validate immutable dataset window hashes, explicit UNAVAILABLE scores on invalid distributions, exact Gaussian multipliers ($1.28155\sigma$ for P10/P90), and truthful backend reporting (`spectral_basis_v2` vs `onnx_foundation`).
+  - **Verification**: Validate sensor noise covariance bounds, observation assimilation gating, and finite state updates.
 
 - [ ] **`ST11-F36-FA`: Package F36 End-to-End Acceptance Sign-off**
   - **Target Files**: All package targets (4 files) | **Prerequisites**: `ST11-F36-01 through ST11-F36-04`
@@ -1801,7 +1815,7 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/mesia/learning/asmae_evaluator.py`](../services/agribrain/mesia/learning/asmae_evaluator.py)
   - **Action**: [Empirical Milestone] 3. Compare simpler mechanistic/statistical baselines and inspect calibration, missingness and measurement selection.
   - **Estimate**: 20–35 hours | **Prerequisites**: `ST12-T12-02`
-  - **Verification**: Validate empirical protocol: out-of-domain holdouts, sample size and power calculation, independent biological reference plots, and explicit falsification thresholds.
+  - **Verification**: Validate non-empty target masks, authentic zero metrics, and legitimate R² score calculation without division-by-zero.
 
 - [ ] **`ST12-T12-04`: [Empirical Milestone] 4. Run safe discriminating studies separating water shorta...**
   - **Target File**: [`../services/agribrain/ground_truth/registry.py`](../services/agribrain/ground_truth/registry.py)
@@ -1877,7 +1891,7 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
   - **Target File**: [`../services/agribrain/mesia/behaviour/likelihood_engine.py`](../services/agribrain/mesia/behaviour/likelihood_engine.py)
   - **Action**: [Empirical Milestone] 3. Qualify missingness, nuisance covariance and geometric kernels against the canonical lattice.
   - **Estimate**: 30–55 hours | **Prerequisites**: `ST13-T06-02`
-  - **Verification**: Validate empirical protocol: out-of-domain holdouts, sample size and power calculation, independent biological reference plots, and explicit falsification thresholds.
+  - **Verification**: Validate non-empty target masks, authentic zero metrics, and legitimate R² score calculation without division-by-zero.
 
 - [ ] **`ST13-T06-04`: [Empirical Milestone] 4. Progress discovery/configuration/commissioning/calibrat...**
   - **Target File**: [`../services/agribrain/mesia/assimilation/spatial_lattice.py`](../services/agribrain/mesia/assimilation/spatial_lattice.py)
@@ -2055,7 +2069,7 @@ These tickets are executed in Stage 00 and Stage 01. Their hours are drawn from 
 - [ ] **`ST16-T07-01`: [O1 Case & Epistemic History] Define ScientificCase schema, immutable evidence cutoffs, branching alternatives...**
   - **Target File**: [`../services/agribrain/world_model/scientific_case.py`](../services/agribrain/world_model/scientific_case.py)
   - **Action**: Define ScientificCase schema, immutable evidence cutoffs, branching alternatives, and replayable theory versions.
-  - **Estimate**: 20–36 hours | **Requirements**: `AB-OMG-001, AB-OMG-002` | **Prerequisites**: `Stage 15 (ST15-T06-FA, ST15-T08-FA, ST15-T10-FA)`
+  - **Estimate**: 20–36 hours | **Requirements**: `AB-OMG-001, AB-OMG-002` | **Prerequisites**: `ST04-F12-FA, ST08-F21-FA, ST11-F36-FA, ST12-T01-FA, ST12-T02-FA, ST14-T04-FA`
   - **Verification**: Validate discriminating agricultural hypothesis cases, Bayesian posterior-predictive convergence, causal identification assumptions, and independent falsification/replication.
 
 - [ ] **`ST16-T07-02`: [O2 Surprise & Candidate-Space Inadequacy] Compare instrument faults, missing management, domain/parameter shifts, and mode...**
