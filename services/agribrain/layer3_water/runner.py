@@ -191,14 +191,39 @@ class WaterIntelligenceEngine:
         
         # Initialize or retrieve multi-layer soil profile
         current_soil = soil_profile_state or SoilProfileDatabase.get_canonical_soil_profile(soil_type=soil_type)
-        top_storage = current_soil.theta_profile[0] * 100.0
+        top_thickness_mm = current_soil.layer_depths_cm[0] * 10.0 if current_soil.layer_depths_cm else 100.0
+        top_storage = current_soil.theta_profile[0] * top_thickness_mm
         
+        # Effective days since wetting from parameter or previous soil evaporation state
+        effective_days_since_wetting = days_since_wetting
+        if effective_days_since_wetting == 0 and current_soil and getattr(current_soil, "evaporation_state", None):
+            effective_days_since_wetting = current_soil.evaporation_state.days_since_wetting
+
+        # Method-specific wetted fraction mapping per FAO-56 Table 20
+        method_wetted_fractions = {
+            IrrigationMethod.DRIP: 0.35,
+            IrrigationMethod.MICRO_SPRINKLER: 0.60,
+            IrrigationMethod.SPRINKLER: 1.00,
+            IrrigationMethod.CENTER_PIVOT: 1.00,
+            IrrigationMethod.SURFACE_FURROW: 0.70,
+            IrrigationMethod.SURFACE_FLOOD: 1.00,
+        }
+        if precip > 0.0:
+            fw = 1.0
+        elif irrigation_applied_mm > 0.0:
+            fw = method_wetted_fractions.get(irrigation_method, 1.0)
+        elif current_soil and getattr(current_soil, "evaporation_state", None):
+            fw = current_soil.evaporation_state.few_exposed_wetted_fraction
+        else:
+            fw = 1.0
+
         ke, evap_state = DualKcEngine.calculate_soil_evaporation_ke(
             kcb=kcb,
             kc_max=kc_max,
             fvc=fvc,
             surface_storage_mm=top_storage,
-            days_since_wetting=days_since_wetting,
+            fraction_wetted_by_irrigation=fw,
+            days_since_wetting=effective_days_since_wetting,
         )
 
         pot_etp = (kcb + ke) * et0_res.et0_mm_day
@@ -228,7 +253,8 @@ class WaterIntelligenceEngine:
             irrigation_mm=irrigation_applied_mm,
             actual_transpiration_mm=prior_flux_state.actual.actual_transpiration_mm,
             actual_soil_evaporation_mm=prior_flux_state.actual.actual_soil_evaporation_mm,
-            days_since_wetting=days_since_wetting,
+            days_since_wetting=effective_days_since_wetting,
+            fraction_wetted=fw,
         )
         prognostic_soil = step_result[0]
         actual_infil = step_result[1]

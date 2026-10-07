@@ -138,7 +138,12 @@ def test_assimilation_recomputes_fluxes_from_posterior_ks() -> None:
         soil_profile_state=prior,
         soil_observations=observations,
     )
-    assert state.fluxes.actual.ks == state.root_zone.stress_factor_ks
+    # Under F03: realized fluxes over the completed interval are preserved from the transition receipt
+    # rather than retroactively rewritten by assimilation; posterior root-zone reflects the new post-assimilation state
+    assert state.root_zone.stress_factor_ks == 0.0
+    assert state.fluxes.actual.ks == 0.956
+    assert state.fluxes.actual.ks != state.root_zone.stress_factor_ks
+    assert state.transition_receipt is not None
 
 
 def test_fao56_ke_uses_upper_bound_minimum() -> None:

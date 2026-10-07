@@ -805,7 +805,7 @@ def _execute_canonical_water_engine(
     try:
         import hashlib
         from layer3_water.runner import WaterIntelligenceEngine
-        from layer3_water.contracts import HydrologyMode
+        from layer3_water.contracts import HydrologyMode, SoilWaterState
         from layer2_contracts.state_contracts import VegetationState
 
         plot_id = getattr(inputs, "plot_id", "P1") if inputs else "P1"
@@ -823,8 +823,10 @@ def _execute_canonical_water_engine(
         timeseries = getattr(l1_output, "plot_timeseries", []) or []
         weather_daily = (
             getattr(inputs, "weather_daily_series", None)
+            or getattr(inputs, "weather_daily", None)
             or getattr(inputs, "weather", None)
             or op_ctx.get("weather_daily_series")
+            or op_ctx.get("weather_daily")
             or op_ctx.get("weather")
         )
         rec = None
@@ -833,24 +835,31 @@ def _execute_canonical_water_engine(
         if not rec and timeseries:
             for t_entry in reversed(timeseries):
                 if isinstance(t_entry, dict):
-                    t_date = t_entry.get("date") or str(t_entry.get("timestamp", ""))[:10]
+                    t_date = t_entry.get("date")
+                    if not t_date and "timestamp" in t_entry:
+                        raw_ts = t_entry["timestamp"]
+                        if isinstance(raw_ts, datetime.datetime):
+                            t_date = raw_ts.astimezone(ts.tzinfo).strftime("%Y-%m-%d")
+                        elif isinstance(raw_ts, str) and len(raw_ts) >= 10:
+                            t_date = raw_ts[:10]
                     if t_date == day_key:
                         rec = t_entry
                         break
-            if not rec and isinstance(timeseries[-1], dict):
-                rec = timeseries[-1]
-        if not rec and isinstance(weather_daily, dict) and weather_daily:
-            rec = next(iter(weather_daily.values()), None)
+
+        weather_prior = op_ctx.get("weather_prior") or getattr(inputs, "weather_prior", None)
+
+        if not rec and isinstance(weather_prior, dict):
+            rec = dict(weather_prior)
+            rec["date"] = day_key
+            rec["is_prior"] = True
 
         if not rec or not isinstance(rec, dict):
             import logging
             logging.getLogger(__name__).warning(
-                f"[L3] Canonical water engine: missing weather observations for plot {plot_id}. "
-                "Preserving missingness rather than substituting synthetic atmospheric state."
+                f"[L3] Canonical water engine: missing weather observations for plot {plot_id} on {day_key}. "
+                "Preserving missingness rather than substituting another date's atmospheric state."
             )
             return None, None
-
-        weather_prior = op_ctx.get("weather_prior") or getattr(inputs, "weather_prior", None)
 
         def _parse_weather(r: dict) -> Optional[dict]:
             def _get_val(keys: list, default: Optional[float] = None) -> Optional[float]:
@@ -1346,12 +1355,35 @@ def _execute_canonical_water_engine(
         def _state_digest(s_obj: Any) -> str:
             if s_obj is None:
                 return "none"
-            vwc = getattr(s_obj, "volumetric_water_content", None) or getattr(s_obj, "layers_vwc", None) or getattr(s_obj, "theta_profile", None)
+            if isinstance(s_obj, SoilWaterState) or hasattr(s_obj, "layer_depths_cm"):
+                evap_days = (
+                    s_obj.evaporation_state.days_since_wetting
+                    if getattr(s_obj, "evaporation_state", None) is not None
+                    else None
+                )
+                soil_payload = (
+                    "SoilWaterState",
+                    tuple(getattr(s_obj, "layer_depths_cm", None) or ()),
+                    tuple(round(v, 4) for v in (getattr(s_obj, "theta_profile", None) or ())),
+                    tuple(round(v, 4) for v in (getattr(s_obj, "field_capacity_profile", None) or ())),
+                    tuple(round(v, 4) for v in (getattr(s_obj, "wilting_point_profile", None) or ())),
+                    tuple(round(v, 4) for v in (getattr(s_obj, "saturation_profile", None) or ())),
+                    tuple(round(v, 4) for v in (getattr(s_obj, "residual_profile", None) or ())),
+                    tuple(round(v, 4) for v in (getattr(s_obj, "hydraulic_conductivity_profile", None) or ())),
+                    tuple(round(v, 4) for v in (getattr(s_obj, "van_genuchten_alpha", None) or ())),
+                    tuple(round(v, 4) for v in (getattr(s_obj, "van_genuchten_n", None) or ())),
+                    str(getattr(s_obj, "parameter_provenance", "TEXTURE_PRIOR")),
+                    evap_days,
+                )
+                return hashlib.sha256(repr(soil_payload).encode("utf-8")).hexdigest()[:24]
+            vwc = getattr(s_obj, "volumetric_water_content", None) or getattr(s_obj, "layers_vwc", None)
             if vwc is not None:
-                return repr(vwc)
+                return hashlib.sha256(repr(vwc).encode("utf-8")).hexdigest()[:24]
             if hasattr(s_obj, "__dict__"):
-                return str(type(s_obj)) + repr(sorted((k, str(v)) for k, v in s_obj.__dict__.items()))
-            return str(type(s_obj)) + repr(s_obj)
+                return hashlib.sha256(
+                    (str(type(s_obj)) + repr(sorted((k, str(v)) for k, v in s_obj.__dict__.items()))).encode("utf-8")
+                ).hexdigest()[:24]
+            return hashlib.sha256((str(type(s_obj)) + repr(s_obj)).encode("utf-8")).hexdigest()[:24]
 
         def _extract_veg_for_date(d_val: datetime.date, step_ts: datetime.datetime) -> Optional[VegetationState]:
             d_str = d_val.strftime("%Y-%m-%d")
@@ -1399,13 +1431,15 @@ def _execute_canonical_water_engine(
                 closest_prior_k = max(prior_dates)
                 cand_prior = plot_veg_hist[closest_prior_k]
                 if isinstance(cand_prior, VegetationState):
-                    return VegetationState(
+                    v_res = VegetationState(
                         plot_id=plot_id,
                         timestamp=step_ts,
                         lai=float(cand_prior.lai),
                         fvc=float(cand_prior.fvc),
                         root_depth_proxy_m=float(cand_prior.root_depth_proxy_m),
                     )
+                    setattr(v_res, "is_persisted_prior", True)
+                    return v_res
                 elif isinstance(cand_prior, dict):
                     c_lai = cand_prior.get("lai") if cand_prior.get("lai") is not None else cand_prior.get("lai_estimate", lai)
                     c_fvc = cand_prior.get("fvc") if cand_prior.get("fvc") is not None else cand_prior.get("vegetation_fraction", fvc)
@@ -1414,15 +1448,18 @@ def _execute_canonical_water_engine(
                         if cand_prior.get("root_depth_proxy_m") is not None
                         else cand_prior.get("root_depth_m", cand_prior.get("root_depth", root_depth))
                     )
-                    return VegetationState(
+                    v_res = VegetationState(
                         plot_id=plot_id,
                         timestamp=step_ts,
                         lai=float(c_lai),
                         fvc=float(c_fvc),
                         root_depth_proxy_m=float(c_rd),
                     )
+                    setattr(v_res, "is_persisted_prior", True)
+                    return v_res
 
-            if veg_state is not None:
+            # If step date is at or beyond target timestamp date, prospective persistence from current veg_state is valid
+            if d_val >= ts.date() and veg_state is not None:
                 return VegetationState(
                     plot_id=plot_id,
                     timestamp=step_ts,
@@ -1430,6 +1467,8 @@ def _execute_canonical_water_engine(
                     fvc=fvc,
                     root_depth_proxy_m=root_depth,
                 )
+            # For historical past dates (d_val < ts.date()): never fall back to future/current endpoint canopy!
+            # Return None to represent unmeasured baseline rather than leaking future vegetation state.
             return None
 
         def _extract_soil_obs_for_date(d_val: datetime.date) -> Optional[Any]:
@@ -1463,6 +1502,8 @@ def _execute_canonical_water_engine(
             irr: float,
             veg: Optional[VegetationState] = None,
             so: Optional[Any] = None,
+            predecessor_hash: Optional[str] = None,
+            soil_param_digest: Optional[str] = None,
         ) -> str:
             w_items = tuple(sorted((k, str(v)) for k, v in (w or {}).items()))
             v_items = (
@@ -1470,13 +1511,22 @@ def _execute_canonical_water_engine(
                     round(getattr(veg, "lai", 0.0), 4),
                     round(getattr(veg, "fvc", 0.0), 4),
                     round(getattr(veg, "root_depth_proxy_m", 0.0), 4),
+                    getattr(veg, "is_persisted_prior", False),
                 )
                 if veg is not None
                 else "none"
             )
             so_item = _state_digest(so)
-            payload = (w_items, round(irr, 4), v_items, so_item)
-            return hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()[:16]
+            payload = (
+                w_items,
+                round(irr, 4),
+                v_items,
+                so_item,
+                str(predecessor_hash or "none"),
+                str(soil_param_digest or "none"),
+                "fao56_v1",  # solver model version
+            )
+            return hashlib.sha256(repr(payload).encode("utf-8")).hexdigest()[:24]
 
         # Invalidate any cached history whose input forcing or predecessor changed in current inputs:
         # Distinguish "not supplied in this request" (rolling daily inputs) from "historical evidence was corrected"
@@ -1500,6 +1550,9 @@ def _execute_canonical_water_engine(
                     # All cached history is invalidated because its predecessor state is changing
                     earliest_invalid_day = min_cached_d.strftime("%Y-%m-%d")
 
+        explicit_soil = op_ctx.get("soil_profile_state") or getattr(inputs, "soil_profile_state", None)
+        explicit_mem = op_ctx.get("previous_hydraulic_memory") or getattr(inputs, "previous_hydraulic_memory", None)
+
         for hist_k in sorted(plot_hist.keys()):
             if hist_k > day_key:
                 continue
@@ -1508,6 +1561,14 @@ def _execute_canonical_water_engine(
             except Exception:
                 continue
             hist_entry = plot_hist[hist_k]
+
+            # Invalidate if explicit soil parameter changed from the initial soil used for that history
+            if explicit_soil is not None:
+                cached_init_soil = hist_entry.get("initial_soil_water")
+                if cached_init_soil is not None and _state_digest(cached_init_soil) != _state_digest(explicit_soil):
+                    if earliest_invalid_day is None or hist_k < earliest_invalid_day:
+                        earliest_invalid_day = hist_k
+                    break
 
             if hist_d not in supplied_dates:
                 continue
@@ -1521,7 +1582,16 @@ def _execute_canonical_water_engine(
             )
             curr_veg = _extract_veg_for_date(hist_d, step_ts_hist)
             curr_so = _extract_soil_obs_for_date(hist_d)
-            curr_f_hash = _compute_step_forcing_hash(curr_w, curr_irr, curr_veg, curr_so)
+            cached_init = hist_entry.get("initial_soil_water")
+            cached_pred = hist_entry.get("predecessor_hash")
+            curr_f_hash = _compute_step_forcing_hash(
+                curr_w,
+                curr_irr,
+                curr_veg,
+                curr_so,
+                predecessor_hash=cached_pred,
+                soil_param_digest=_state_digest(cached_init) if cached_init else None,
+            )
             if hist_entry.get("step_forcing_hash") and hist_entry["step_forcing_hash"] != curr_f_hash:
                 if earliest_invalid_day is None or hist_k < earliest_invalid_day:
                     earliest_invalid_day = hist_k
@@ -1563,9 +1633,6 @@ def _execute_canonical_water_engine(
             to_delete = [k for k in list(plot_hist.keys()) if k >= earliest_invalid_day]
             for k in to_delete:
                 plot_hist.pop(k, None)
-
-        explicit_soil = op_ctx.get("soil_profile_state") or getattr(inputs, "soil_profile_state", None)
-        explicit_mem = op_ctx.get("previous_hydraulic_memory") or getattr(inputs, "previous_hydraulic_memory", None)
 
         if explicit_soil is not None or explicit_mem is not None:
             to_delete = [k for k in list(plot_hist.keys()) if k >= day_key]
@@ -1682,6 +1749,10 @@ def _execute_canonical_water_engine(
         current_mem = hydraulic_memory
         last_water_state = None
         last_feedback = None
+        current_days_since_wetting = 0
+        if current_soil and getattr(current_soil, "evaporation_state", None):
+            current_days_since_wetting = current_soil.evaporation_state.days_since_wetting
+        prev_step_hash = _state_digest(current_soil)
 
         while curr_d <= d_end:
             is_target_day = (curr_d == ts.date())
@@ -1705,15 +1776,29 @@ def _execute_canonical_water_engine(
                 irrigation_applied_mm=step_irrigation,
                 weather_ensemble=weather_ensemble if is_target_day else None,
                 hydrology_mode=HydrologyMode.FAO56_LAYERED_BUCKET,
+                days_since_wetting=current_days_since_wetting,
             )
 
             if w_state is not None:
                 current_soil = getattr(w_state, "soil_water", None)
                 current_mem = getattr(w_state, "hydraulic_memory", None)
+                if current_soil and getattr(current_soil, "evaporation_state", None):
+                    current_days_since_wetting = current_soil.evaporation_state.days_since_wetting
+                else:
+                    current_days_since_wetting = current_days_since_wetting + 1
+
                 step_key = curr_d.strftime("%Y-%m-%d")
-                step_ev_hash = interval_hash if is_target_day else hashlib.sha256(
-                    repr((curr_d.isoformat(), tuple(sorted(step_weather.items())), round(step_irrigation, 4))).encode("utf-8")
-                ).hexdigest()[:16]
+                soil_param_digest = _state_digest(step_init_soil)
+                step_forcing_h = _compute_step_forcing_hash(
+                    step_weather,
+                    step_irrigation,
+                    step_veg,
+                    step_soil_obs,
+                    predecessor_hash=prev_step_hash,
+                    soil_param_digest=soil_param_digest,
+                )
+                prev_step_hash = step_forcing_h
+                step_ev_hash = interval_hash if is_target_day else step_forcing_h[:16]
 
                 plot_hist[step_key] = {
                     "timestamp": step_ts,
@@ -1732,7 +1817,8 @@ def _execute_canonical_water_engine(
                     "initial_hydraulic_memory": step_init_mem,
                     "evidence_hash": step_ev_hash,
                     "interval_hash": interval_hash if is_target_day else step_ev_hash,
-                    "step_forcing_hash": _compute_step_forcing_hash(step_weather, step_irrigation, step_veg, step_soil_obs),
+                    "predecessor_hash": prev_step_hash,
+                    "step_forcing_hash": step_forcing_h,
                 }
                 if step_veg:
                     plot_veg_hist[step_key] = step_veg

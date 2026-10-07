@@ -73,6 +73,7 @@ class LayeredWaterBalanceEngine:
         actual_soil_evaporation_mm: float,
         capillary_rise_mm: float = 0.0,
         days_since_wetting: int = 0,
+        fraction_wetted: Optional[float] = None,
     ) -> StepWaterBalanceResult:
         """Propagate multi-layer soil water state through daily hydrological flux cycle.
         
@@ -198,17 +199,25 @@ class LayeredWaterBalanceEngine:
             )
         ]
 
-        # Topsoil evaporation memory state
-        rew_mm = max(2.0, (prev_soil.field_capacity_profile[0] - prev_soil.wilting_point_profile[0]) * 100.0 * 0.5)
+        # Topsoil evaporation memory state derived from actual layer thickness
+        rew_mm = max(2.0, (prev_soil.field_capacity_profile[0] - prev_soil.wilting_point_profile[0]) * layer_thickness_mm[0] * 0.5)
         top_storage_avail = max(0.0, new_storage[0] - wp_storage_mm[0])
         days_wet = 0 if total_surface_water > 5.0 else (days_since_wetting + 1)
         
+        # Method-specific or propagated exposed wetted fraction
+        if fraction_wetted is not None:
+            few_val = round(max(0.01, min(1.0, float(fraction_wetted))), 3)
+        elif prev_soil.evaporation_state is not None:
+            few_val = prev_soil.evaporation_state.few_exposed_wetted_fraction
+        else:
+            few_val = 0.65
+
         evap_state = SoilEvaporationState(
             surface_storage_mm=round(min(rew_mm, top_storage_avail), 2),
             max_surface_storage_mm=round(rew_mm, 2),
             days_since_wetting=days_wet,
             kr_reduction_factor=round(min(1.0, top_storage_avail / rew_mm) if rew_mm > 0 else 1.0, 3),
-            few_exposed_wetted_fraction=0.65,
+            few_exposed_wetted_fraction=few_val,
         )
 
         updated_soil = WaterStateFactory.create_soil_water_state(
