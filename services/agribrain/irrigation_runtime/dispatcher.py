@@ -62,13 +62,15 @@ class CommandDispatcher:
         self,
         registry: ActuatorRegistry = actuator_registry,
         safety: SafetyMonitor = safety_monitor,
+        max_retries: int = 3,
+        retry_base_delay: float = 2.0,
     ):
         self._registry = registry
         self._safety = safety
         self._active_events: Dict[str, IrrigationEvent] = {}
         self._event_history: List[IrrigationEvent] = []
-        self._max_retries = 3
-        self._retry_base_delay = 2.0  # seconds
+        self._max_retries = max_retries
+        self._retry_base_delay = retry_base_delay  # seconds
 
         # Callbacks
         self._on_event_complete: List[Callable] = []
@@ -185,8 +187,13 @@ class CommandDispatcher:
     # Command Building
     # ================================================================
 
-    def _build_command(self, event: IrrigationEvent) -> IrrigationCommand:
-        """Build an IrrigationCommand from an IrrigationEvent."""
+    def _build_command(
+        self,
+        event: IrrigationEvent,
+        attempt: int = 1,
+        operation_id: Optional[str] = None,
+    ) -> IrrigationCommand:
+        """Build an IrrigationCommand from an IrrigationEvent with stable operation identity."""
         # Map urgency to command priority
         priority_map = {
             "LOW": CommandPriority.LOW,
@@ -195,8 +202,9 @@ class CommandDispatcher:
             "CRITICAL": CommandPriority.CRITICAL,
         }
 
+        op_id = operation_id or f"OP-{event.event_id}"
         return IrrigationCommand(
-            command_id=f"CMD-{uuid.uuid4().hex[:12]}",
+            command_id=f"CMD-{event.event_id}-A{attempt}",
             command_type=CommandType.START_ZONE,
             device_id=event.device_id,
             zone_id=event.zone_id,
@@ -210,7 +218,9 @@ class CommandDispatcher:
             automation_mode=event.automation_mode,
             approved_by=event.approved_by,
             approved_at=event.approved_at,
-            request_id=str(uuid.uuid4()),
+            request_id=f"REQ-{event.event_id}-A{attempt}",
+            operation_id=op_id,
+            attempt_number=attempt,
         )
 
     # ================================================================
@@ -222,11 +232,16 @@ class CommandDispatcher:
         event: IrrigationEvent,
         actuator: IrrigationActuator,
     ) -> CommandResult:
-        """Dispatch a command with exponential backoff retry."""
+        """Dispatch a command with exponential backoff retry and stable operation identity."""
         last_result: Optional[CommandResult] = None
+        op_id = f"OP-{event.event_id}"
 
         for attempt in range(self._max_retries + 1):
-            command = self._build_command(event)
+            command = self._build_command(
+                event,
+                attempt=attempt + 1,
+                operation_id=op_id,
+            )
             result = await actuator.execute_with_safety(command)
 
             if result.success:
@@ -236,8 +251,8 @@ class CommandDispatcher:
 
             if not result.retry_recommended:
                 logger.warning(
-                    "Non-retryable failure for event %s: %s",
-                    event.event_id, result.error_message,
+                    "Non-retryable failure for event %s (attempt %d/%d): %s",
+                    event.event_id, attempt + 1, self._max_retries + 1, result.error_message,
                 )
                 break
 
@@ -389,6 +404,55 @@ class CommandDispatcher:
         # Also stop all actuators
         await self._registry.emergency_stop_all()
         return results
+
+    async def reconcile_on_restart(
+        self,
+        persisted_events: List[IrrigationEvent],
+    ) -> List[IrrigationEvent]:
+        """Restore event and controller reconciliation on process restart.
+
+        Queries real-time hardware status for events in DISPATCHING or EXECUTING
+        to reconcile whether the controller is actually running or stopped.
+        """
+        reconciled = []
+        for event in persisted_events:
+            if event.status not in (EventStatus.DISPATCHING, EventStatus.EXECUTING):
+                continue
+
+            actuator = self._registry.get_actuator(event.device_id)
+            if not actuator:
+                event.transition(EventStatus.FAILED, "Actuator not registered on process restart")
+                self._safety.release_quota(event.event_id)
+                reconciled.append(event)
+                continue
+
+            try:
+                from irrigation_runtime.schemas import ActuatorStatus
+                status = await actuator.get_status()
+                if status == ActuatorStatus.EXECUTING:
+                    event.transition(EventStatus.EXECUTING, "Reconciled with active controller on process restart")
+                    self._active_events[event.event_id] = event
+                    actuator.set_active_command(self._build_command(event))
+                    self._safety.track_event_start(
+                        event.event_id,
+                        event.device_id,
+                        event.target_duration_minutes,
+                        plot_id=event.plot_id,
+                        volume_mm=event.target_volume_mm,
+                    )
+                elif status == ActuatorStatus.ONLINE:
+                    event.transition(EventStatus.COMPLETED, "Reconciled after process restart: actuator is stopped/idle")
+                    self._safety.release_quota(event.event_id)
+                else:
+                    event.transition(EventStatus.FAILED, f"Reconciled after process restart: actuator in {status.value}")
+                    self._safety.release_quota(event.event_id)
+            except Exception as exc:
+                logger.error("Failed to query actuator %s during restart reconciliation: %s", event.device_id, exc)
+                event.transition(EventStatus.FAILED, f"Failed to reconcile on restart: {exc}")
+                self._safety.release_quota(event.event_id)
+
+            reconciled.append(event)
+        return reconciled
 
     # ================================================================
     # Internal Helpers

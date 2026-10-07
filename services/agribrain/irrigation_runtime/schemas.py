@@ -217,6 +217,10 @@ class IrrigationCommand:
     approved_by: str = ""                     # Farmer ID (empty if FULL_AUTO)
     approved_at: str = ""                     # ISO timestamp
 
+    # Operation Identity & Retry Sequence
+    operation_id: str = ""                    # Logical operation ID (stable across retries)
+    attempt_number: int = 1                   # Monotonic attempt sequence (1, 2, 3...)
+
     def validate(self) -> List[str]:
         """Pre-flight validation. Returns list of error messages."""
         errors = []

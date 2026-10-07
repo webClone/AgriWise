@@ -143,51 +143,68 @@ class IrrigationActuator(ABC):
         errors = command.validate()
         caps = self.registration.capabilities
 
-        # Flow rate bounds
-        if command.flow_rate_lpm > caps.max_flow_rate_lpm > 0:
-            errors.append(
-                f"Flow rate {command.flow_rate_lpm} L/min exceeds max "
-                f"{caps.max_flow_rate_lpm} L/min for device {self.device_id}"
-            )
+        # Flow rate and duration bounds (apply only to active irrigation commands)
+        if command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
+            if command.flow_rate_lpm > caps.max_flow_rate_lpm > 0:
+                errors.append(
+                    f"Flow rate {command.flow_rate_lpm} L/min exceeds max "
+                    f"{caps.max_flow_rate_lpm} L/min for device {self.device_id}"
+                )
 
-        if command.flow_rate_lpm < caps.min_flow_rate_lpm:
-            errors.append(
-                f"Flow rate {command.flow_rate_lpm} L/min below min "
-                f"{caps.min_flow_rate_lpm} L/min for device {self.device_id}"
-            )
+            if command.flow_rate_lpm < caps.min_flow_rate_lpm:
+                errors.append(
+                    f"Flow rate {command.flow_rate_lpm} L/min below min "
+                    f"{caps.min_flow_rate_lpm} L/min for device {self.device_id}"
+                )
 
-        # Duration watchdog
-        if command.duration_minutes > caps.max_duration_minutes:
-            errors.append(
-                f"Duration {command.duration_minutes} min exceeds max "
-                f"{caps.max_duration_minutes} min watchdog"
-            )
+            # Duration watchdog
+            if command.duration_minutes > caps.max_duration_minutes:
+                errors.append(
+                    f"Duration {command.duration_minutes} min exceeds max "
+                    f"{caps.max_duration_minutes} min watchdog"
+                )
 
         # Actuator status check
         if self._status == ActuatorStatus.OFFLINE:
             errors.append(f"Actuator {self.device_id} is OFFLINE")
 
-        if self._status == ActuatorStatus.ERROR:
+        # Allow STOP_ZONE and EMERGENCY_STOP even if in ERROR or MAINTENANCE
+        if (self._status == ActuatorStatus.ERROR
+                and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
             errors.append(f"Actuator {self.device_id} is in ERROR state")
 
-        if self._status == ActuatorStatus.MAINTENANCE:
+        if (self._status == ActuatorStatus.MAINTENANCE
+                and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
             errors.append(f"Actuator {self.device_id} is in MAINTENANCE mode")
 
         # Check if already executing (unless stop or emergency stop)
         if (self._status == ActuatorStatus.EXECUTING
                 and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
-            errors.append(
-                f"Actuator {self.device_id} is already EXECUTING. "
-                f"Send STOP_ZONE or EMERGENCY_STOP first."
+            is_own_retry = (
+                self._active_command is not None
+                and (
+                    self._active_command.source_event_id == command.source_event_id
+                    or (bool(command.operation_id) and self._active_command.operation_id == command.operation_id)
+                )
             )
+            if not is_own_retry:
+                errors.append(
+                    f"Actuator {self.device_id} is already EXECUTING. "
+                    f"Send STOP_ZONE or EMERGENCY_STOP first."
+                )
 
         return errors
+
+    def set_active_command(self, command: IrrigationCommand) -> None:
+        """Rehydrate active command and status (e.g. on process restart)."""
+        self._active_command = command
+        self._status = ActuatorStatus.EXECUTING
 
     async def execute_with_safety(self, command: IrrigationCommand) -> CommandResult:
         """Validate, dispatch, and log a command with full safety checks.
 
         This is the primary entry point for dispatching commands.
-        It wraps send_command() with validation and audit logging.
+        It wraps send_command() with validation, reconciliation, and audit logging.
         """
         # Pre-flight validation
         errors = self.validate_command(command)
@@ -204,6 +221,28 @@ class IrrigationActuator(ABC):
                 error_code="VALIDATION_FAILED",
                 error_message="; ".join(errors),
             )
+
+        # Idempotent stop check: if already ONLINE and idle, STOP_ZONE succeeds idempotently
+        if (command.command_type == CommandType.STOP_ZONE
+                and self._status == ActuatorStatus.ONLINE
+                and self._active_command is None):
+            logger.info("Device %s is already stopped (ONLINE); STOP_ZONE succeeded idempotently.", self.device_id)
+            result = CommandResult(
+                command_id=command.command_id,
+                device_id=self.device_id,
+                success=True,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                error_code="ALREADY_STOPPED",
+                error_message="Actuator is already stopped",
+            )
+            self._command_history.append({
+                "command_id": command.command_id,
+                "command_type": command.command_type.value,
+                "success": result.success,
+                "timestamp": result.timestamp,
+                "error_code": result.error_code,
+            })
+            return result
 
         # Dispatch
         self._active_command = command
@@ -231,17 +270,64 @@ class IrrigationActuator(ABC):
                 error_message=str(exc),
                 retry_recommended=True,
             )
-        finally:
-            if not result.success:
-                if command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
-                    self._status = ActuatorStatus.ERROR
+
+        # Reconcile ambiguous failures on START commands before retry or failure
+        if not result.success and command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
+            try:
+                controller_status = await self.get_status()
+                if controller_status == ActuatorStatus.EXECUTING:
+                    # Physical application succeeded; transient failure was acknowledgment only
+                    logger.info(
+                        "Reconciliation: Device %s is EXECUTING on controller after unacknowledged %s. Reconciled as success.",
+                        self.device_id, command.command_id,
+                    )
+                    result = CommandResult(
+                        command_id=command.command_id,
+                        device_id=self.device_id,
+                        success=True,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        actual_flow_rate_lpm=command.flow_rate_lpm,
+                        error_code="RECONCILED_EXECUTING",
+                        error_message="Controller confirmed running after ACK failure",
+                    )
+                elif controller_status == ActuatorStatus.ONLINE:
+                    # Controller confirmed not running; command was NOT physically applied
+                    logger.info(
+                        "Reconciliation: Device %s is ONLINE on controller after unacknowledged %s. Safe to retry.",
+                        self.device_id, command.command_id,
+                    )
+                    self._status = ActuatorStatus.ONLINE
                     self._active_command = None
-            elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
-                self._status = ActuatorStatus.ONLINE
-                self._active_command = None
-            elif command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
-                self._status = ActuatorStatus.EXECUTING
+                    result.retry_recommended = True
+                else:
+                    # Uncertainty: controller OFFLINE, ERROR, or UNKNOWN
+                    # Retain ownership during uncertainty; do not blindly duplicate START
+                    logger.warning(
+                        "Reconciliation: Device %s status %s during uncertainty for %s. Retaining ownership.",
+                        self.device_id, controller_status.value, command.command_id,
+                    )
+                    self._status = ActuatorStatus.ERROR
+                    self._active_command = command
+                    result.retry_recommended = False
+            except Exception as rec_exc:
+                logger.error(
+                    "Reconciliation query failed on %s for %s: %s. Retaining ownership during uncertainty.",
+                    self.device_id, command.command_id, rec_exc,
+                )
+                self._status = ActuatorStatus.ERROR
                 self._active_command = command
+        # State transition according to resolved result
+        if not result.success:
+            if command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
+                # If status is not ONLINE (safe retry), keep ERROR to hold lease during uncertainty
+                if self._status != ActuatorStatus.ONLINE:
+                    self._status = ActuatorStatus.ERROR
+        elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
+            self._status = ActuatorStatus.ONLINE
+            self._active_command = None
+        elif command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
+            self._status = ActuatorStatus.EXECUTING
+            self._active_command = command
 
         # Audit log
         self._command_history.append({

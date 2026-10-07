@@ -27,6 +27,7 @@ import math
 import time
 import uuid
 from datetime import datetime, timezone
+from numbers import Real
 from typing import Any, Callable, Dict, List, Optional
 
 from irrigation_runtime.schemas import (
@@ -125,8 +126,9 @@ class SafetyMonitor:
         → feed SafetyViolation to L6 ConflictRecord
     """
 
-    def __init__(self):
+    def __init__(self, clock: Optional[Callable[[], float]] = None):
         self._interlocks: List[SafetyInterlock] = list(DEFAULT_INTERLOCKS)
+        # Active violations indexed by stable key: f"{interlock_id}:{device_id}"
         self._active_violations: Dict[str, SafetyViolation] = {}
         self._violation_history: List[SafetyViolation] = []
         self._violation_callbacks: List[Callable] = []
@@ -135,6 +137,12 @@ class SafetyMonitor:
         self._active_events: Dict[str, Dict[str, Any]] = {}
         # Quota reservation: event_id → {plot_id, volume_mm}
         self._reserved_quota: Dict[str, Dict[str, Any]] = {}
+
+        # Debounce breach tracking: active_key -> {first_breach_monotonic, last_breach_monotonic, ...}
+        self._breach_tracking: Dict[str, Dict[str, Any]] = {}
+
+        # Monotonic clock source (injected for deterministic testing)
+        self._clock: Callable[[], float] = clock if clock is not None else time.monotonic
 
     # ================================================================
     # Interlock Management
@@ -178,7 +186,7 @@ class SafetyMonitor:
         now_dt = datetime.now(timezone.utc)
         self._active_events[event_id] = {
             "start_time": now_dt,
-            "start_monotonic": time.monotonic(),
+            "start_monotonic": self._clock(),
             "max_duration_minutes": max_duration_minutes,
             "device_id": device_id,
             "plot_id": plot_id,
@@ -262,7 +270,8 @@ class SafetyMonitor:
             )
             if violation:
                 new_violations.append(violation)
-                self._active_violations[violation.violation_id] = violation
+                active_key = f"{violation.interlock_id}:{device_id}"
+                self._active_violations[active_key] = violation
                 self._violation_history.append(violation)
 
                 # Notify callbacks
@@ -281,16 +290,28 @@ class SafetyMonitor:
         sensor_readings: Dict[str, float],
         active_command: Optional[IrrigationCommand],
     ) -> Optional[SafetyViolation]:
-        """Check a single interlock against sensor data."""
+        """Check a single interlock against sensor data with debounce and recovery."""
 
         # Skip timer-based interlocks (handled by _check_duration_watchdog)
         if not interlock.sensor_variable:
             return None
 
+        active_key = f"{interlock.interlock_id}:{device_id}"
+
+        # If sensor reading is missing or non-finite:
+        # "Missing or nonfinite readings cannot count as normal pressure."
         if interlock.sensor_variable not in sensor_readings:
             return None
 
-        value = sensor_readings[interlock.sensor_variable]
+        raw_val = sensor_readings[interlock.sensor_variable]
+        if raw_val is None or isinstance(raw_val, bool) or not isinstance(raw_val, Real):
+            return None
+
+        val_float = float(raw_val)
+        if math.isnan(val_float) or math.isinf(val_float):
+            return None
+
+        value = val_float
 
         # Dynamic threshold for flow excessive (based on commanded flow)
         threshold_max = interlock.threshold_max
@@ -314,46 +335,81 @@ class SafetyMonitor:
             threshold_type = "max"
             threshold_val = threshold_max
 
-        if not breached:
+        now_mono = self._clock()
+
+        if breached:
+            # Check if this breach already triggered an active violation
+            if active_key in self._active_violations:
+                # Sustained breach emits only ONE active violation until qualifying reset
+                return None
+
+            # Debounce tracking
+            if active_key not in self._breach_tracking:
+                self._breach_tracking[active_key] = {
+                    "first_breach_monotonic": now_mono,
+                    "last_breach_monotonic": now_mono,
+                    "last_breach_value": value,
+                    "threshold_type": threshold_type,
+                    "threshold_val": threshold_val,
+                }
+            else:
+                self._breach_tracking[active_key]["last_breach_monotonic"] = now_mono
+                self._breach_tracking[active_key]["last_breach_value"] = value
+
+            elapsed = now_mono - self._breach_tracking[active_key]["first_breach_monotonic"]
+            if elapsed < interlock.duration_seconds:
+                # Debounce period has not elapsed yet
+                return None
+
+            # Debounce duration elapsed! Emit violation
+            violation = SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id=interlock.interlock_id,
+                interlock_type=interlock.interlock_type,
+                device_id=device_id,
+                zone_id=active_command.zone_id if active_command else "",
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=value,
+                threshold_breached=threshold_type,
+                threshold_value=threshold_val,
+                action_taken=interlock.action_on_trigger.value,
+                event_id_affected=(
+                    active_command.source_event_id if active_command else ""
+                ),
+            )
+
+            logger.warning(
+                "🚨 SAFETY VIOLATION: %s on device %s — %s=%s "
+                "(threshold %s=%s) → action: %s",
+                interlock.interlock_type.value, device_id,
+                interlock.sensor_variable, value,
+                threshold_type, threshold_val,
+                interlock.action_on_trigger.value,
+            )
+
+            return violation
+        else:
+            # Reading is valid, finite, and within nominal bounds
+            # 1. Clear un-triggered debounce tracking
+            self._breach_tracking.pop(active_key, None)
+
+            # 2. Check for auto-reset qualifying condition
+            if active_key in self._active_violations:
+                if interlock.auto_reset and not interlock.requires_manual_reset:
+                    violation = self._active_violations.pop(active_key)
+                    violation.resolved_at = datetime.now(timezone.utc).isoformat()
+                    violation.notes = "Auto-reset: telemetry returned to normal range"
+                    logger.info(
+                        "✅ Interlock %s on device %s auto-reset (value %.2f in normal range)",
+                        interlock.interlock_id, device_id, value,
+                    )
             return None
-
-        # Check if already in active violations (avoid duplicates)
-        active_key = f"{interlock.interlock_id}:{device_id}"
-        if active_key in self._active_violations:
-            return None
-
-        violation = SafetyViolation(
-            violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
-            interlock_id=interlock.interlock_id,
-            interlock_type=interlock.interlock_type,
-            device_id=device_id,
-            zone_id=active_command.zone_id if active_command else "",
-            detected_at=datetime.now(timezone.utc).isoformat(),
-            sensor_value=value,
-            threshold_breached=threshold_type,
-            threshold_value=threshold_val,
-            action_taken=interlock.action_on_trigger.value,
-            event_id_affected=(
-                active_command.source_event_id if active_command else ""
-            ),
-        )
-
-        logger.warning(
-            "🚨 SAFETY VIOLATION: %s on device %s — %s=%s "
-            "(threshold %s=%s) → action: %s",
-            interlock.interlock_type.value, device_id,
-            interlock.sensor_variable, value,
-            threshold_type, threshold_val,
-            interlock.action_on_trigger.value,
-        )
-
-        return violation
 
     def _check_duration_watchdog(self, device_id: str) -> List[SafetyViolation]:
         """Check if any active events on this device have exceeded max duration."""
         violations = []
         now_dt = datetime.now(timezone.utc)
-        now_mono = time.monotonic()
+        now_mono = self._clock()
 
         expired_events = []
         for event_id, info in list(self._active_events.items()):
@@ -366,6 +422,10 @@ class SafetyMonitor:
                 elapsed = (now_dt - info["start_time"]).total_seconds() / 60.0
 
             if elapsed > info["max_duration_minutes"]:
+                active_key = f"INT-DURATION:{device_id}"
+                if active_key in self._active_violations:
+                    continue
+
                 violation = SafetyViolation(
                     violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
                     interlock_id="INT-DURATION",
@@ -380,7 +440,7 @@ class SafetyMonitor:
                     event_id_affected=event_id,
                 )
                 violations.append(violation)
-                self._active_violations[violation.violation_id] = violation
+                self._active_violations[active_key] = violation
                 self._violation_history.append(violation)
                 expired_events.append(event_id)
 
@@ -564,22 +624,52 @@ class SafetyMonitor:
 
     def resolve_violation(
         self,
-        violation_id: str,
+        identifier: str,
         acknowledged_by: str,
         notes: str = "",
     ) -> bool:
-        """Mark a safety violation as resolved/acknowledged."""
-        violation = self._active_violations.pop(violation_id, None)
+        """Mark a safety violation as resolved/acknowledged.
+
+        Supports resolving either by violation_id (e.g. VIO-...) or active_key (e.g. INT-PRESSURE-HIGH:DEV-01).
+        """
+        matched_key = None
+        violation = None
+
+        if identifier in self._active_violations:
+            matched_key = identifier
+            violation = self._active_violations.pop(identifier)
+        else:
+            for k, v in self._active_violations.items():
+                if v.violation_id == identifier:
+                    matched_key = k
+                    violation = self._active_violations.pop(k)
+                    break
+
         if violation is None:
             return False
+
+        if matched_key:
+            self._breach_tracking.pop(matched_key, None)
 
         violation.resolved_at = datetime.now(timezone.utc).isoformat()
         violation.acknowledged_by = acknowledged_by
         violation.acknowledged_at = violation.resolved_at
         violation.notes = notes
 
-        logger.info("Violation %s resolved by %s", violation_id, acknowledged_by)
+        logger.info("Violation %s resolved by %s", violation.violation_id, acknowledged_by)
         return True
+
+    def rehydrate_active_violations(
+        self,
+        violations: List[SafetyViolation],
+    ) -> None:
+        """Rehydrate active violations on process restart."""
+        for v in violations:
+            if not v.resolved_at:
+                active_key = f"{v.interlock_id}:{v.device_id}"
+                self._active_violations[active_key] = v
+                if v not in self._violation_history:
+                    self._violation_history.append(v)
 
     def get_active_violations(self) -> List[SafetyViolation]:
         """Get all unresolved safety violations."""
