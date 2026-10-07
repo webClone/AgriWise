@@ -23,6 +23,8 @@ All violations are logged with full provenance for the L6 audit trail.
 from __future__ import annotations
 
 import logging
+import math
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -129,9 +131,10 @@ class SafetyMonitor:
         self._violation_history: List[SafetyViolation] = []
         self._violation_callbacks: List[Callable] = []
 
-        # Duration tracking
+        # Duration tracking: event_id → {start_time, start_monotonic, max_duration_minutes, device_id, plot_id, volume_mm}
         self._active_events: Dict[str, Dict[str, Any]] = {}
-        # event_id → {start_time, max_duration_minutes, device_id}
+        # Quota reservation: event_id → {plot_id, volume_mm}
+        self._reserved_quota: Dict[str, Dict[str, Any]] = {}
 
     # ================================================================
     # Interlock Management
@@ -168,18 +171,51 @@ class SafetyMonitor:
         event_id: str,
         device_id: str,
         max_duration_minutes: float,
+        plot_id: str = "",
+        volume_mm: float = 0.0,
     ) -> None:
-        """Register an active irrigation event for duration monitoring."""
+        """Register an active irrigation event for duration monitoring and quota reservation."""
+        now_dt = datetime.now(timezone.utc)
         self._active_events[event_id] = {
-            "start_time": datetime.now(timezone.utc),
+            "start_time": now_dt,
+            "start_monotonic": time.monotonic(),
             "max_duration_minutes": max_duration_minutes,
             "device_id": device_id,
+            "plot_id": plot_id,
+            "volume_mm": volume_mm,
         }
-        logger.debug("Tracking event %s (max %.0f min)", event_id, max_duration_minutes)
+        if plot_id and volume_mm > 0:
+            self._reserved_quota[event_id] = {
+                "plot_id": plot_id,
+                "volume_mm": volume_mm,
+            }
+        logger.debug("Tracking event %s (max %.0f min, reserved %.1f mm)",
+                     event_id, max_duration_minutes, volume_mm)
 
     def track_event_end(self, event_id: str) -> None:
-        """Remove an event from duration tracking."""
+        """Remove an event from duration tracking and release any reservation."""
         self._active_events.pop(event_id, None)
+        self._reserved_quota.pop(event_id, None)
+
+    def reserve_quota(self, event_id: str, plot_id: str, volume_mm: float) -> None:
+        """Explicitly record a quota reservation."""
+        if volume_mm > 0:
+            self._reserved_quota[event_id] = {
+                "plot_id": plot_id,
+                "volume_mm": volume_mm,
+            }
+
+    def release_quota(self, event_id: str) -> None:
+        """Explicitly release a quota reservation."""
+        self._reserved_quota.pop(event_id, None)
+
+    def get_reserved_quota(self, plot_id: str, exclude_event_id: Optional[str] = None) -> float:
+        """Calculate total reserved volume (mm) for a plot across all active uncommitted events."""
+        total = 0.0
+        for eid, res in self._reserved_quota.items():
+            if eid != exclude_event_id and res.get("plot_id") == plot_id:
+                total += res.get("volume_mm", 0.0)
+        return total
 
     # ================================================================
     # Core Evaluation
@@ -188,17 +224,17 @@ class SafetyMonitor:
     def evaluate(
         self,
         device_id: str,
-        sensor_readings: Dict[str, float],
+        sensor_readings: Optional[Dict[str, float]] = None,
         active_command: Optional[IrrigationCommand] = None,
     ) -> List[SafetyViolation]:
         """Evaluate all interlocks against current sensor data.
 
-        This method should be called each time new sensor telemetry
-        arrives for a device that has active irrigation.
+        Monitors duration watchdog independently and evaluates sensor telemetry.
+        Runs unconditionally whether sensor telemetry is present, empty, or None.
 
         Args:
             device_id: The actuator being monitored
-            sensor_readings: Dict of CanonicalVariable → current value
+            sensor_readings: Optional dict of CanonicalVariable → current value
             active_command: The currently executing command (for flow limits)
 
         Returns:
@@ -206,6 +242,12 @@ class SafetyMonitor:
         """
         new_violations = []
 
+        # 1. Independent duration watchdog check (runs on monotonic timer)
+        duration_violations = self._check_duration_watchdog(device_id)
+        new_violations.extend(duration_violations)
+
+        # 2. Telemetry sensor interlocks
+        readings = sensor_readings if sensor_readings is not None else {}
         for interlock in self._interlocks:
             if not interlock.enabled:
                 continue
@@ -216,7 +258,7 @@ class SafetyMonitor:
                 continue
 
             violation = self._check_interlock(
-                interlock, device_id, sensor_readings, active_command
+                interlock, device_id, readings, active_command
             )
             if violation:
                 new_violations.append(violation)
@@ -229,10 +271,6 @@ class SafetyMonitor:
                         cb(violation)
                     except Exception as exc:
                         logger.error("Violation callback error: %s", exc)
-
-        # Check duration watchdog
-        duration_violations = self._check_duration_watchdog(device_id)
-        new_violations.extend(duration_violations)
 
         return new_violations
 
@@ -314,14 +352,19 @@ class SafetyMonitor:
     def _check_duration_watchdog(self, device_id: str) -> List[SafetyViolation]:
         """Check if any active events on this device have exceeded max duration."""
         violations = []
-        now = datetime.now(timezone.utc)
+        now_dt = datetime.now(timezone.utc)
+        now_mono = time.monotonic()
 
         expired_events = []
-        for event_id, info in self._active_events.items():
+        for event_id, info in list(self._active_events.items()):
             if info["device_id"] != device_id:
                 continue
 
-            elapsed = (now - info["start_time"]).total_seconds() / 60.0
+            if "start_monotonic" in info:
+                elapsed = (now_mono - info["start_monotonic"]) / 60.0
+            else:
+                elapsed = (now_dt - info["start_time"]).total_seconds() / 60.0
+
             if elapsed > info["max_duration_minutes"]:
                 violation = SafetyViolation(
                     violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
@@ -329,7 +372,7 @@ class SafetyMonitor:
                     interlock_type=InterlockType.DURATION_EXCEEDED,
                     device_id=device_id,
                     zone_id="",
-                    detected_at=now.isoformat(),
+                    detected_at=now_dt.isoformat(),
                     sensor_value=elapsed,
                     threshold_breached="max",
                     threshold_value=info["max_duration_minutes"],
@@ -343,12 +386,19 @@ class SafetyMonitor:
 
                 logger.warning(
                     "🚨 DURATION WATCHDOG: Event %s on device %s exceeded "
-                    "max duration (%.0f > %.0f min)",
+                    "max duration (%.1f > %.1f min)",
                     event_id, device_id, elapsed, info["max_duration_minutes"]
                 )
 
+                for cb in self._violation_callbacks:
+                    try:
+                        cb(violation)
+                    except Exception as exc:
+                        logger.error("Violation callback error: %s", exc)
+
         for eid in expired_events:
             self._active_events.pop(eid, None)
+            self._reserved_quota.pop(eid, None)
 
         return violations
 
@@ -360,37 +410,91 @@ class SafetyMonitor:
         self,
         budget: WaterBudget,
         requested_volume_mm: float,
+        event_id: Optional[str] = None,
     ) -> Optional[SafetyViolation]:
         """Check if an irrigation request would exceed water quota.
+
+        Accounts for baseline budget limits as well as active concurrent reservations.
 
         Args:
             budget: Current water budget for the plot
             requested_volume_mm: Volume requested in mm
+            event_id: Optional event ID being evaluated
 
         Returns:
             SafetyViolation if quota would be exceeded, None otherwise
         """
         can_irrigate, reason = budget.can_irrigate(requested_volume_mm)
-        if can_irrigate:
-            return None
+        if not can_irrigate:
+            violation = SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id="INT-QUOTA",
+                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                device_id="",
+                zone_id="",
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=requested_volume_mm,
+                threshold_breached="max",
+                threshold_value=budget.season_remaining_mm,
+                action_taken="BLOCK",
+                notes=reason,
+            )
+            logger.warning("🚨 WATER QUOTA VIOLATION: %s", reason)
+            self._violation_history.append(violation)
+            return violation
 
-        violation = SafetyViolation(
-            violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
-            interlock_id="INT-QUOTA",
-            interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
-            device_id="",
-            zone_id="",
-            detected_at=datetime.now(timezone.utc).isoformat(),
-            sensor_value=requested_volume_mm,
-            threshold_breached="max",
-            threshold_value=budget.season_remaining_mm,
-            action_taken="BLOCK",
-            notes=reason,
-        )
+        # Account for concurrent uncommitted reservations on the same plot
+        already_reserved = self.get_reserved_quota(budget.plot_id, exclude_event_id=event_id)
+        effective_season_remaining = budget.season_remaining_mm - already_reserved
+        effective_daily_remaining = budget.daily_remaining_mm - already_reserved
 
-        logger.warning("🚨 WATER QUOTA VIOLATION: %s", reason)
-        self._violation_history.append(violation)
-        return violation
+        if requested_volume_mm > effective_season_remaining:
+            reason = (
+                f"Season quota exceeded by concurrent reservations: need {requested_volume_mm:.1f}mm, "
+                f"remaining unreserved {effective_season_remaining:.1f}mm "
+                f"({already_reserved:.1f}mm reserved)"
+            )
+            violation = SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id="INT-QUOTA",
+                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                device_id="",
+                zone_id="",
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=requested_volume_mm,
+                threshold_breached="max",
+                threshold_value=effective_season_remaining,
+                action_taken="BLOCK",
+                notes=reason,
+            )
+            logger.warning("🚨 WATER QUOTA CONCURRENT VIOLATION: %s", reason)
+            self._violation_history.append(violation)
+            return violation
+
+        if requested_volume_mm > effective_daily_remaining:
+            reason = (
+                f"Daily quota exceeded by concurrent reservations: need {requested_volume_mm:.1f}mm, "
+                f"remaining unreserved {effective_daily_remaining:.1f}mm "
+                f"({already_reserved:.1f}mm reserved)"
+            )
+            violation = SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id="INT-QUOTA",
+                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                device_id="",
+                zone_id="",
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=requested_volume_mm,
+                threshold_breached="max",
+                threshold_value=effective_daily_remaining,
+                action_taken="BLOCK",
+                notes=reason,
+            )
+            logger.warning("🚨 WATER QUOTA CONCURRENT VIOLATION: %s", reason)
+            self._violation_history.append(violation)
+            return violation
+
+        return None
 
     # ================================================================
     # Pre-flight Safety Assessment
@@ -399,40 +503,43 @@ class SafetyMonitor:
     def pre_flight_check(
         self,
         command: IrrigationCommand,
-        sensor_readings: Dict[str, float],
+        sensor_readings: Optional[Dict[str, float]] = None,
         budget: Optional[WaterBudget] = None,
     ) -> List[SafetyViolation]:
         """Comprehensive pre-dispatch safety assessment.
 
         Runs all checks before a command is sent to hardware:
           1. Sensor-based interlocks (frost, existing pressure issues)
-          2. Water quota check
+          2. Water quota check (evaluated unconditionally whenever budget is provided)
           3. Environmental conditions
 
         Args:
             command: The command about to be dispatched
-            sensor_readings: Latest sensor data for the zone
+            sensor_readings: Optional latest sensor data for the zone
             budget: Optional water budget for quota enforcement
 
         Returns:
             List of blocking violations (empty = safe to proceed)
         """
         violations = []
+        readings = sensor_readings if sensor_readings is not None else {}
 
         # Sensor interlocks (pre-existing conditions)
         sensor_violations = self.evaluate(
-            command.device_id, sensor_readings, command
+            command.device_id, readings, command
         )
         violations.extend(sensor_violations)
 
-        # Water quota
-        if budget and command.volume_mm > 0:
-            quota_violation = self.check_water_quota(budget, command.volume_mm)
+        # Water quota check - ALWAYS executed when budget is provided
+        if budget is not None and command.volume_mm > 0:
+            quota_violation = self.check_water_quota(
+                budget, command.volume_mm, event_id=command.source_event_id
+            )
             if quota_violation:
                 violations.append(quota_violation)
 
         # Frost check
-        air_temp = sensor_readings.get("air_temperature_c")
+        air_temp = readings.get("air_temperature_c")
         if air_temp is not None and air_temp < 2.0:
             violation = SafetyViolation(
                 violation_id=f"VIO-{uuid.uuid4().hex[:12]}",

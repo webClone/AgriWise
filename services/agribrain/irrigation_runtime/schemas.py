@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -328,10 +328,17 @@ class IrrigationEvent:
         self.status_log.append({
             "from": self.status.value,
             "to": new_status.value,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "reason": reason,
         })
         self.status = new_status
+
+    @property
+    def failure_reason(self) -> str:
+        """Convenience property returning the latest transition reason if failed."""
+        if self.status in (EventStatus.FAILED, EventStatus.EMERGENCY_STOPPED) and self.status_log:
+            return self.status_log[-1].get("reason", "")
+        return ""
 
     def content_hash(self) -> str:
         """Deterministic hash for audit reproducibility."""

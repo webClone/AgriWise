@@ -125,24 +125,27 @@ class CommandDispatcher:
             self._emit_failed(event)
             return event
 
-        # Pre-flight safety check
-        if sensor_readings:
-            command = self._build_command(event)
-            violations = self._safety.pre_flight_check(
-                command, sensor_readings, budget
+        # Pre-flight safety check (runs unconditionally regardless of telemetry presence)
+        command = self._build_command(event)
+        violations = self._safety.pre_flight_check(
+            command, sensor_readings, budget
+        )
+        if violations:
+            violation_msgs = [
+                f"{v.interlock_type.value}: {v.notes or v.action_taken}"
+                for v in violations
+            ]
+            event.safety_violations = [v.violation_id for v in violations]
+            event.transition(
+                EventStatus.FAILED,
+                f"Pre-flight safety check failed: {'; '.join(violation_msgs)}"
             )
-            if violations:
-                violation_msgs = [
-                    f"{v.interlock_type.value}: {v.notes or v.action_taken}"
-                    for v in violations
-                ]
-                event.safety_violations = [v.violation_id for v in violations]
-                event.transition(
-                    EventStatus.FAILED,
-                    f"Pre-flight safety check failed: {'; '.join(violation_msgs)}"
-                )
-                self._emit_failed(event)
-                return event
+            self._emit_failed(event)
+            return event
+
+        # Reserve water quota prior to dispatch
+        if budget and event.target_volume_mm > 0:
+            self._safety.reserve_quota(event.event_id, event.plot_id, event.target_volume_mm)
 
         # Begin dispatch
         event.transition(EventStatus.DISPATCHING, "Starting command dispatch")
@@ -156,11 +159,13 @@ class CommandDispatcher:
             event.actual_start = datetime.now(timezone.utc).isoformat()
             event.command_ids.append(result.command_id)
 
-            # Register with safety monitor for duration watchdog
+            # Register with safety monitor for monotonic duration watchdog and active quota
             self._safety.track_event_start(
                 event.event_id,
                 event.device_id,
                 event.target_duration_minutes,
+                plot_id=event.plot_id,
+                volume_mm=event.target_volume_mm,
             )
 
             logger.info("Event %s executing on device %s",
@@ -171,6 +176,7 @@ class CommandDispatcher:
                 f"Dispatch failed after retries: {result.error_message}"
             )
             self._active_events.pop(event.event_id, None)
+            self._safety.release_quota(event.event_id)
             self._emit_failed(event)
 
         return event
@@ -290,24 +296,24 @@ class CommandDispatcher:
             self._emit_failed(event)
             return event
 
-        # Check safety interlocks
-        if sensor_readings:
-            violations = self._safety.evaluate(
-                event.device_id, sensor_readings, actuator.active_command
+        # Check safety interlocks & duration watchdog unconditionally (even without sensor_readings)
+        violations = self._safety.evaluate(
+            event.device_id, sensor_readings, actuator.active_command
+        )
+        if violations:
+            # Emergency stop
+            await actuator.emergency_stop()
+            event.emergency_stopped = True
+            event.emergency_stop_reason = "; ".join(
+                v.interlock_type.value for v in violations
             )
-            if violations:
-                # Emergency stop
-                await actuator.emergency_stop()
-                event.emergency_stopped = True
-                event.emergency_stop_reason = "; ".join(
-                    v.interlock_type.value for v in violations
-                )
-                event.safety_violations.extend(v.violation_id for v in violations)
-                event.transition(EventStatus.EMERGENCY_STOPPED,
-                                 f"Safety violation: {event.emergency_stop_reason}")
-                self._finalize_event(event)
-                self._emit_failed(event)
-                return event
+            event.safety_violations.extend(v.violation_id for v in violations)
+            event.transition(EventStatus.EMERGENCY_STOPPED,
+                             f"Safety violation: {event.emergency_stop_reason}")
+            self._safety.release_quota(event.event_id)
+            self._finalize_event(event)
+            self._emit_failed(event)
+            return event
 
         # Check if execution is complete (actuator no longer running)
         if status != ActuatorStatus.EXECUTING and event.status == EventStatus.EXECUTING:

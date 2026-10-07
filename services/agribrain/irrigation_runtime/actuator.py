@@ -173,9 +173,9 @@ class IrrigationActuator(ABC):
         if self._status == ActuatorStatus.MAINTENANCE:
             errors.append(f"Actuator {self.device_id} is in MAINTENANCE mode")
 
-        # Check if already executing (unless emergency stop)
+        # Check if already executing (unless stop or emergency stop)
         if (self._status == ActuatorStatus.EXECUTING
-                and command.command_type != CommandType.EMERGENCY_STOP):
+                and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
             errors.append(
                 f"Actuator {self.device_id} is already EXECUTING. "
                 f"Send STOP_ZONE or EMERGENCY_STOP first."
@@ -232,9 +232,16 @@ class IrrigationActuator(ABC):
                 retry_recommended=True,
             )
         finally:
-            self._active_command = None
-            if result.success:
+            if not result.success:
+                if command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
+                    self._status = ActuatorStatus.ERROR
+                    self._active_command = None
+            elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
                 self._status = ActuatorStatus.ONLINE
+                self._active_command = None
+            elif command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
+                self._status = ActuatorStatus.EXECUTING
+                self._active_command = command
 
         # Audit log
         self._command_history.append({
