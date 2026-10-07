@@ -89,3 +89,5 @@ prisma/dev.db
 
 # Large video assets
 public/videos/
+
+*.pdf

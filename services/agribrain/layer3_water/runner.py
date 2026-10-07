@@ -45,6 +45,10 @@ from layer3_water.decision import MPCPrescriptiveOptimizer
 from layer3_water.assimilation import WaterStateAssimilator
 from layer3_water.solver import SolverSelector
 from services.agribrain.scientific_contracts.exceptions import ContractViolation
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 
 
 class WaterIntelligenceEngine:
@@ -95,6 +99,32 @@ class WaterIntelligenceEngine:
                 "Layer 3 water missing explicit weather elements: "
                 + ", ".join(missing_weather)
             )
+
+        weather_observations = dict(weather_observations)
+        for key in required_weather | {"dew_point_c", "weather_sigma", "weather_sigma_override"}:
+            if weather_observations.get(key) is None:
+                continue
+            value = finite_real(weather_observations[key])
+            if value is None:
+                raise ContractViolation(f"Layer 3 water requires finite numeric weather: {key}")
+            weather_observations[key] = value
+        if weather_observations["t_min_c"] > weather_observations["t_max_c"]:
+            raise ContractViolation("Layer 3 water requires t_min_c <= t_max_c")
+        for key in ("precipitation_mm", "wind_speed_2m_m_s"):
+            if weather_observations[key] < 0.0:
+                raise ContractViolation(f"Layer 3 water requires non-negative weather: {key}")
+        for key in ("rh_min_pct", "rh_max_pct"):
+            if not 0.0 <= weather_observations[key] <= 100.0:
+                raise ContractViolation(f"Layer 3 water humidity outside [0, 100]: {key}")
+        if weather_observations["rh_min_pct"] > weather_observations["rh_max_pct"]:
+            raise ContractViolation("Layer 3 water requires rh_min_pct <= rh_max_pct")
+        for key in ("weather_sigma", "weather_sigma_override"):
+            if weather_observations.get(key) is not None and weather_observations[key] < 0.0:
+                raise ContractViolation(f"Layer 3 water requires non-negative weather uncertainty: {key}")
+        applied = finite_real(irrigation_applied_mm)
+        if applied is None or applied < 0.0:
+            raise ContractViolation("Layer 3 water requires finite non-negative applied irrigation")
+        irrigation_applied_mm = applied
 
         mode = requested_hydrology_mode or hydrology_mode
         weather = weather_observations or {}
@@ -272,7 +302,7 @@ class WaterIntelligenceEngine:
         )
 
         # Determine physical authority level
-        if soil_observations and soil_observations.soil_probe_moisture_profile:
+        if "IN_SITU_PROBE_TDR" in assim_diag.assimilated_sensor_sources:
             authority = WaterPhysicsAuthority.OBSERVED
         elif assim_diag.observations_assimilated_count > 0 or vegetation_state:
             authority = WaterPhysicsAuthority.ASSIMILATED

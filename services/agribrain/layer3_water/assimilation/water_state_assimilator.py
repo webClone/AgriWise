@@ -14,6 +14,10 @@ from layer3_water.contracts.water_state import (
 )
 from layer3_water.contracts.assimilation_state import SoilObservationVector
 from layer3_water.contracts.state_factory import WaterStateFactory
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 
 
 class WaterStateAssimilator:
@@ -54,6 +58,16 @@ class WaterStateAssimilator:
         Returns:
             (posterior_soil_state, assimilation_diagnostic)
         """
+        background_uncertainty_sigma = finite_real(background_uncertainty_sigma)
+        if (
+            background_uncertainty_sigma is None or background_uncertainty_sigma <= 0.0
+            or not math.isfinite(background_uncertainty_sigma * background_uncertainty_sigma)
+            or background_uncertainty_sigma * background_uncertainty_sigma == 0.0
+            or not math.isfinite(
+                background_uncertainty_sigma * background_uncertainty_sigma * len(prior_soil.layer_depths_cm)
+            )
+        ):
+            raise ValueError("background_uncertainty_sigma must be finite and strictly positive")
         if observations is None:
             diag = AssimilationDiagnostic(
                 assimilation_method="NONE",
@@ -78,40 +92,64 @@ class WaterStateAssimilator:
         obs_values = []
         obs_sigmas = []
         sources = []
+        rejected = []
+
+        def add_observation(idx: int, raw_value: Any, raw_sigma: Any, source: str) -> bool:
+            value = finite_real(raw_value)
+            sigma = finite_real(raw_sigma)
+            reason = None
+            if value is None:
+                reason = "missing_or_non_finite_value"
+            elif (
+                sigma is None or sigma <= 0.0
+                or not math.isfinite(sigma * sigma) or sigma * sigma == 0.0
+            ):
+                reason = "invalid_observation_uncertainty"
+            elif not 0.0 <= value <= prior_soil.saturation_profile[idx]:
+                reason = "outside_soil_moisture_range"
+            if reason:
+                rejected.append({
+                    "source": source, "layer_index": idx, "reason": reason,
+                    "value_repr": repr(raw_value), "sigma_repr": repr(raw_sigma),
+                })
+                return False
+            obs_indices.append(idx)
+            obs_values.append(value)
+            obs_sigmas.append(sigma)
+            if source not in sources:
+                sources.append(source)
+            return True
 
         # 1. In-situ probe profile observations
         if observations.soil_probe_moisture_profile:
             probe_vals = observations.soil_probe_moisture_profile
             probe_sigma = observations.observation_uncertainties.get("soil_probe", 0.015)
             for idx in range(min(n_layers, len(probe_vals))):
-                if probe_vals[idx] is not None and not math.isnan(probe_vals[idx]):
-                    obs_indices.append(idx)
-                    obs_values.append(probe_vals[idx])
-                    obs_sigmas.append(probe_sigma)
-            sources.append("IN_SITU_PROBE_TDR")
+                add_observation(idx, probe_vals[idx], probe_sigma, "IN_SITU_PROBE_TDR")
 
         # 2. Satellite surface soil moisture (Top layer)
         if observations.satellite_surface_moisture_m3_m3 is not None and 0 not in obs_indices:
             sat_val = observations.satellite_surface_moisture_m3_m3
             sat_sigma = observations.observation_uncertainties.get("satellite_smap", 0.040)
-            obs_indices.append(0)
-            obs_values.append(sat_val)
-            obs_sigmas.append(sat_sigma)
-            sources.append("SATELLITE_SMAP_SENTINEL1")
+            add_observation(0, sat_val, sat_sigma, "SATELLITE_SMAP_SENTINEL1")
 
         # 3. Thermal cooling differential proxy (Upper root zone constraint)
         if observations.canopy_cooling_differential_c is not None and not obs_indices:
             # If Tc - Ta is severely positive (+4C), soil is dry; if negative (-2C), soil is well-watered
-            dt = observations.canopy_cooling_differential_c
+            dt = finite_real(observations.canopy_cooling_differential_c)
             # Linear surrogate constraint on root-zone layer 1 & 2
-            fc = prior_soil.field_capacity_profile[0]
-            wp = prior_soil.wilting_point_profile[0]
-            if dt > 2.0:
+            target_idx = 1 if n_layers > 1 else 0
+            fc = prior_soil.field_capacity_profile[target_idx]
+            wp = prior_soil.wilting_point_profile[target_idx]
+            if dt is None:
+                rejected.append({
+                    "source": "THERMAL_CANOPY_COOLING_SURROGATE",
+                    "layer_index": target_idx, "reason": "missing_or_non_finite_value",
+                    "value_repr": repr(observations.canopy_cooling_differential_c),
+                })
+            elif dt > 2.0:
                 est_th = wp + 0.20 * (fc - wp)
-                obs_indices.append(1 if n_layers > 1 else 0)
-                obs_values.append(est_th)
-                obs_sigmas.append(0.050)
-                sources.append("THERMAL_CANOPY_COOLING_SURROGATE")
+                add_observation(target_idx, est_th, 0.050, "THERMAL_CANOPY_COOLING_SURROGATE")
 
         if not obs_indices:
             diag = AssimilationDiagnostic(
@@ -121,6 +159,7 @@ class WaterStateAssimilator:
                 posterior_profile_variance=round(float(np.trace(P_prior)), 5),
                 variance_reduction_fraction=0.0,
                 assimilated_sensor_sources=[],
+                rejected_observations=rejected,
             )
             return prior_soil, diag
 
@@ -170,6 +209,7 @@ class WaterStateAssimilator:
             posterior_profile_variance=round(trace_post, 5),
             variance_reduction_fraction=round(var_reduct, 3),
             assimilated_sensor_sources=sources,
+            rejected_observations=rejected,
         )
 
         posterior_soil = WaterStateFactory.create_soil_water_state(

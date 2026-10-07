@@ -13,6 +13,14 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .config import STATE_BOUNDS, STATE_NAMES
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+try:
+    from layer0.observation_packet import DataStatus
+except ImportError:
+    from services.agribrain.layer0.observation_packet import DataStatus
 
 
 ARCHIVE_POSTERIOR_CONTRACT_VERSION = "asmae_archive_posterior_v1"
@@ -31,11 +39,9 @@ def _clip(state: str, value: float) -> float:
 
 
 def _finite_scalar(value: Any) -> Optional[float]:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        value = float(value)
-        return value if math.isfinite(value) else None
+    scalar = finite_real(value)
+    if scalar is not None:
+        return scalar
     if isinstance(value, Mapping):
         for key in ("mean", "value", "estimate", "current", "median"):
             if key in value:
@@ -95,10 +101,7 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            try:
-                parsed = datetime.combine(date.fromisoformat(value[:10]), datetime.min.time())
-            except ValueError:
-                return None
+            return None
     else:
         return None
     if parsed.tzinfo is None:
@@ -106,11 +109,15 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
-_TIMESTAMP_KEYS = frozenset({
-    "source_timestamp", "timestamp", "date", "recorded_at",
-    "acquired_at", "as_of", "valid_time", "generated_at",
-    "created_at", "logged_at", "available_at", "issued_at", "known_at",
+_OBSERVATION_TIME_KEYS = frozenset({
+    "source_timestamp", "acquired_at", "timestamp", "date",
+    "as_of", "valid_time", "observed_at",
 })
+_AVAILABILITY_TIME_KEYS = frozenset({
+    "recorded_at", "created_at", "logged_at", "available_at", "issued_at",
+    "known_at", "received_at", "ingested_at", "generated_at",
+})
+_TIMESTAMP_KEYS = _OBSERVATION_TIME_KEYS | _AVAILABILITY_TIME_KEYS
 
 _DYNAMIC_SOIL_KEYS = frozenset({
     "root_zone_water", "soil_moisture", "sm_10_40", "water_content",
@@ -132,37 +139,36 @@ def _is_proven_before_cutoff(data: Mapping[str, Any], cutoff: datetime) -> bool:
     """
     if not isinstance(data, Mapping) or not data:
         return False
-
-    avail_raw = (
-        data.get("recorded_at")
-        or data.get("created_at")
-        or data.get("logged_at")
-        or data.get("available_at")
-        or data.get("issued_at")
-        or data.get("known_at")
-    )
-    obs_raw = (
-        data.get("source_timestamp")
-        or data.get("acquired_at")
-        or data.get("timestamp")
-        or data.get("date")
-        or data.get("as_of")
-        or data.get("valid_time")
-        or data.get("generated_at")
-    )
-
-    if not avail_raw and not obs_raw:
+    cutoff = _parse_datetime(cutoff)
+    if cutoff is None or _is_rejected_dynamic_record(data):
         return False
-
-    timestamps_checked = 0
-    for raw in (avail_raw, obs_raw):
-        if raw is not None:
+    for keys in (_OBSERVATION_TIME_KEYS, _AVAILABILITY_TIME_KEYS):
+        present = [data[key] for key in keys if key in data]
+        if not present:
+            return False
+        for raw in present:
             parsed = _parse_datetime(raw)
             if parsed is None or parsed > cutoff:
                 return False
-            timestamps_checked += 1
+    return True
 
-    return timestamps_checked > 0
+
+def _is_forecast_record(data: Mapping[str, Any]) -> bool:
+    """Forecast validity describes a scenario, not an observed initial state."""
+    if data.get("is_forecast") is True:
+        return True
+    return any(
+        "forecast" in str(data.get(key, "")).lower()
+        for key in ("data_status", "truth_class", "role", "source", "type", "packet_type")
+    )
+
+
+def _is_rejected_dynamic_record(data: Mapping[str, Any]) -> bool:
+    if _is_forecast_record(data) or data.get("simulated") is True or data.get("fallback") is True:
+        return True
+    return "data_status" in data and DataStatus.from_value(data["data_status"]) in {
+        DataStatus.UNAVAILABLE, DataStatus.SIMULATED, DataStatus.FALLBACK,
+    }
 
 
 def _strip_dynamic_recursive(
@@ -182,24 +188,33 @@ def _strip_dynamic_recursive(
     the sub-dict carries a timestamp exceeding *cutoff* or is an unproven
     dynamic measurement container, it is stripped.
     """
-    if _depth > 8 or not isinstance(data, dict):
-        return data
-    result = {}
-    for key, value in data.items():
-        key_lower = str(key).lower()
-        if not is_proven and key_lower in _DYNAMIC_SOIL_KEYS:
-            continue
-        if isinstance(value, dict):
-            child_has_ts = any(value.get(tk) is not None for tk in _TIMESTAMP_KEYS)
-            child_proven = _is_proven_before_cutoff(value, cutoff) if child_has_ts else is_proven
-            filtered_child = _strip_dynamic_recursive(
-                value, cutoff, is_proven=child_proven, _depth=_depth + 1
-            )
-            if filtered_child:
-                result[key] = filtered_child
-        else:
-            result[key] = value
-    return result
+    def qualify(value: Any, inherited: bool, dynamic: bool, depth: int) -> Any:
+        if depth > 8:
+            return None
+        if isinstance(value, Mapping):
+            has_times = any(key in value for key in _TIMESTAMP_KEYS)
+            proven = _is_proven_before_cutoff(value, cutoff) if has_times else inherited
+            if _is_rejected_dynamic_record(value):
+                proven = False
+            # Drop the whole rejected measurement, including generic value/mean
+            # fields. They must not survive under a formerly qualified alias.
+            if dynamic and not proven:
+                return None
+            result = {}
+            for key, item in value.items():
+                child_dynamic = dynamic or str(key).lower() in _DYNAMIC_SOIL_KEYS
+                qualified = qualify(item, proven, child_dynamic, depth + 1)
+                if qualified is not None:
+                    result[key] = qualified
+            return result or None
+        if isinstance(value, (list, tuple)):
+            items = [qualify(item, inherited, dynamic, depth + 1) for item in value]
+            return [item for item in items if item is not None] or None
+        if dynamic and not inherited:
+            return None
+        return value
+
+    return qualify(data, is_proven, False, _depth) or {}
 
 
 def _crop_identity(value: Any) -> str:
@@ -335,24 +350,34 @@ def _records_as_of(records: List[Dict[str, Any]], as_of: Any) -> List[Dict[str, 
     cutoff = _parse_datetime(as_of)
     if cutoff is None:
         return []
+    rejected = object()
+
+    def qualify_components(value: Any, depth: int = 0) -> Any:
+        if depth > 8:
+            return rejected
+        if isinstance(value, Mapping):
+            if _is_rejected_dynamic_record(value):
+                return rejected
+            if any(key in value for key in _TIMESTAMP_KEYS) and not _is_proven_before_cutoff(value, cutoff):
+                return rejected
+            qualified = {}
+            for key, item in value.items():
+                component = qualify_components(item, depth + 1)
+                if component is not rejected:
+                    qualified[key] = component
+            return qualified
+        if isinstance(value, (list, tuple)):
+            items = [qualify_components(item, depth + 1) for item in value]
+            return [item for item in items if item is not rejected]
+        return value
+
     frozen = []
     for row in records:
-        raw_date = (
-            row.get('acquired_at') or row.get('datetime')
-            or row.get('timestamp') or row.get('date')
-        )
-        stamp = _parse_datetime(raw_date)
-        if stamp is None or stamp > cutoff:
+        if not _is_proven_before_cutoff(row, cutoff):
             continue
-        rec_raw = (
-            row.get('recorded_at') or row.get('created_at')
-            or row.get('logged_at') or row.get('available_at')
-        )
-        if rec_raw is not None:
-            rec_stamp = _parse_datetime(rec_raw)
-            if rec_stamp is None or rec_stamp > cutoff:
-                continue
-        frozen.append(row)
+        # Nested signal records are atomic: removing only their clock would
+        # leave a generic value/mean available to recursive signal extraction.
+        frozen.append(qualify_components(row))
     return frozen
 
 
@@ -741,6 +766,8 @@ def _prior_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, A
     soil = dict(getattr(inp, "soil_context", {}) or {})
     result: Dict[str, Dict[str, Any]] = {}
     cutoff = _parse_datetime(as_of) if as_of is not None else None
+    if as_of is not None and cutoff is None:
+        return {}
     if cutoff is not None:
         coarse = {}
         # Dynamic soil evidence requires verifiable proof of pre-cutoff availability.
@@ -812,7 +839,7 @@ def _prior_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, A
     if weather:
         tmax = [
             value for row in weather[-14:]
-            if (value := _finite_scalar(row.get("temp_max") or row.get("temperature_max") or row.get("tmax"))) is not None
+            if (value := _first_finite(row, "temp_max", "temperature_max", "tmax")) is not None
         ]
         if tmax:
             crop = _as_dict(getattr(inp, "crop_context", {}))
@@ -841,6 +868,8 @@ def estimate_resilient_plot_posterior(inp: Any, as_of: Any = None) -> Dict[str, 
 
     requested_as_of = as_of
     effective_as_of = _parse_datetime(requested_as_of)
+    if requested_as_of is not None and effective_as_of is None:
+        raise ValueError("as_of must be a valid observation availability cutoff")
     if effective_as_of is None:
         effective_as_of = _parse_datetime(getattr(inp, 'end_date', None))
     states: Dict[str, Dict[str, Any]] = {}

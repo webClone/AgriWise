@@ -61,15 +61,9 @@ export async function GET() {
     });
   } catch (error) {
     console.error("Dashboard stats error:", error);
-    return NextResponse.json({
-      success: true,
-      stats: {
-        farmCount: 0,
-        plotCount: 0,
-        totalArea: "0",
-        activeCropCount: 0,
-        upcomingTaskCount: 0
-      }
-    });
+    return NextResponse.json(
+      { success: false, stats: null, error: "Dashboard statistics unavailable" },
+      { status: 503 },
+    );
   }
 }
