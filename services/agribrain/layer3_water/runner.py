@@ -21,11 +21,15 @@ from layer3_water.contracts import (
     IrrigationObjective,
     WaterDecision,
     SoilWaterState,
+    PotentialWaterFlux,
+    ActualWaterFlux,
     WaterFluxState,
     RootZoneWaterState,
     WaterLimitationForecast,
     HydraulicStressMemoryState,
     AssimilationDiagnostic,
+    IntervalFluxReceipt,
+    AnalysisIncrementReceipt,
     WaterState,
     WaterStateFactory,
     WaterUncertaintyBudget,
@@ -206,8 +210,8 @@ class WaterIntelligenceEngine:
             etp_mm_day=pot_etp,
         )
 
-        # 6. Dual Flux Partitioning
-        flux_state = DualKcEngine.partition_evapotranspiration(
+        # 6. Dual Flux Partitioning (Prognostic Prior Demand)
+        prior_flux_state = DualKcEngine.partition_evapotranspiration(
             et0_mm=et0_res.et0_mm_day,
             kcb=kcb,
             ke=ke,
@@ -217,21 +221,41 @@ class WaterIntelligenceEngine:
         )
 
         # 7. Multi-Layer Soil Water Balance Propagation (Prognostic Prior X^-)
-        prognostic_soil, actual_infil, runoff, deep_drainage, mass_balance_err = LayeredWaterBalanceEngine.step_water_balance(
+        step_result = LayeredWaterBalanceEngine.step_water_balance(
             prev_soil=current_soil,
             root_zone=root_zone,
             precipitation_mm=precip,
             irrigation_mm=irrigation_applied_mm,
-            actual_transpiration_mm=flux_state.actual.actual_transpiration_mm,
-            actual_soil_evaporation_mm=flux_state.actual.actual_soil_evaporation_mm,
+            actual_transpiration_mm=prior_flux_state.actual.actual_transpiration_mm,
+            actual_soil_evaporation_mm=prior_flux_state.actual.actual_soil_evaporation_mm,
             days_since_wetting=days_since_wetting,
         )
+        prognostic_soil = step_result[0]
+        actual_infil = step_result[1]
+        runoff = step_result[2]
+        deep_drainage = step_result[3]
+        mass_balance_err = step_result[4]
+        flux_receipt = getattr(step_result, "receipt", None)
 
         # 8. Data Assimilation Update (Posterior X^+ = X^- + K(y - H X^-))
         posterior_soil, assim_diag = WaterStateAssimilator.assimilate_observations(
             prior_soil=prognostic_soil,
             observations=soil_observations,
             background_uncertainty_sigma=et0_res.uncertainty.soil_sigma,
+        )
+
+        # Build explicit AnalysisIncrementReceipt
+        pre_storage = prognostic_soil.total_profile_water_mm
+        post_storage = posterior_soil.total_profile_water_mm
+        analysis_receipt = AnalysisIncrementReceipt(
+            pre_assimilation_storage_mm=pre_storage,
+            post_assimilation_storage_mm=post_storage,
+            storage_increment_mm=round(post_storage - pre_storage, 4),
+            prior_profile_variance=assim_diag.prior_profile_variance,
+            posterior_profile_variance=assim_diag.posterior_profile_variance,
+            variance_reduction_fraction=assim_diag.variance_reduction_fraction,
+            bound_corrections_applied=getattr(assim_diag, "bound_corrections_applied", 0),
+            assimilated_sensor_sources=list(assim_diag.assimilated_sensor_sources),
         )
 
         # GAP-3 FIX: Extract assimilation posterior variance to propagate
@@ -253,23 +277,52 @@ class WaterIntelligenceEngine:
             etp_mm_day=pot_etp,
         )
 
-        # Assimilation changes the root-zone stress factor.  Publish fluxes
-        # computed from that posterior state rather than stale prior Ks.
-        flux_state = DualKcEngine.partition_evapotranspiration(
+        # Realized interval fluxes: Publish the fluxes actually integrated in the transition receipt
+        realized_transp = (
+            flux_receipt.actual_transpiration_mm
+            if flux_receipt
+            else prior_flux_state.actual.actual_transpiration_mm
+        )
+        realized_evap = (
+            flux_receipt.actual_soil_evaporation_mm
+            if flux_receipt
+            else prior_flux_state.actual.actual_soil_evaporation_mm
+        )
+        realized_drainage = flux_receipt.deep_drainage_mm if flux_receipt else deep_drainage
+        realized_runoff = flux_receipt.surface_runoff_mm if flux_receipt else runoff
+        realized_capillary = flux_receipt.capillary_rise_mm if flux_receipt else 0.0
+        tpot = prior_flux_state.potential.tpot_mm
+        realized_ks = round(realized_transp / tpot, 3) if tpot > 0.0 else 1.0
+        realized_tdef = round(max(0.0, tpot - realized_transp), 2)
+
+        published_actual = ActualWaterFlux(
+            ks=round(min(1.0, max(0.0, realized_ks)), 3),
+            precipitation_mm=precip,
+            irrigation_mm=irrigation_applied_mm,
+            deep_drainage_mm=round(realized_drainage, 2),
+            runoff_mm=round(realized_runoff, 2),
+            capillary_rise_mm=round(realized_capillary, 2),
+            actual_transpiration_mm=round(realized_transp, 2),
+            actual_soil_evaporation_mm=round(realized_evap, 2),
+            actual_eta_mm=round(realized_transp + realized_evap, 2),
+            transpiration_deficit_mm=realized_tdef,
+        )
+        published_flux_state = WaterFluxState(
+            potential=prior_flux_state.potential,
+            actual=published_actual,
+        )
+
+        # Expose posterior demand as next-interval diagnostic
+        posterior_demand = PotentialWaterFlux(
             et0_mm=et0_res.et0_mm_day,
             kcb=kcb,
             ke=ke,
-            ks=final_root_zone.stress_factor_ks,
-            precipitation_mm=precip,
-            irrigation_mm=irrigation_applied_mm,
-            deep_drainage_mm=deep_drainage,
-            runoff_mm=runoff,
         )
 
         # 9. Physical Water Limitation Evaluation with uncertainty propagation
         limitation_state = WaterLimitationEngine.evaluate_limitation(
             root_zone=final_root_zone,
-            potential_flux=flux_state.potential,
+            potential_flux=published_flux_state.potential,
             et0_uncertainty_sigma=et0_res.uncertainty.total_sigma,
         )
 
@@ -278,7 +331,7 @@ class WaterIntelligenceEngine:
         hydraulic_memory = HydraulicStressMemoryState.step_memory(
             prev_memory=previous_hydraulic_memory,
             current_ks=final_root_zone.stress_factor_ks,
-            current_tdeficit_mm=flux_state.actual.transpiration_deficit_mm,
+            current_tdeficit_mm=published_flux_state.actual.transpiration_deficit_mm,
             current_vpd_kpa=vpd_val,
         )
 
@@ -294,7 +347,7 @@ class WaterIntelligenceEngine:
         # 12. MPC Prescriptive Irrigation Optimization
         decision = MPCPrescriptiveOptimizer.optimize_irrigation_schedule(
             root_zone=final_root_zone,
-            potential_flux=flux_state.potential,
+            potential_flux=published_flux_state.potential,
             limitation_forecast=lim_forecast,
             method=irrigation_method,
             constraints=irrigation_constraints,
@@ -317,11 +370,13 @@ class WaterIntelligenceEngine:
             model_sigma=et0_res.uncertainty.model_sigma,
         )
 
+        serialized_closure_err = flux_receipt.water_closure_error_mm if flux_receipt else mass_balance_err
+
         water_state = WaterStateFactory.create_water_state(
             plot_id=plot_id,
             timestamp=timestamp,
             soil_water=posterior_soil,
-            fluxes=flux_state,
+            fluxes=published_flux_state,
             root_zone=final_root_zone,
             hydraulic_memory=hydraulic_memory,
             limitation_forecast=lim_forecast,
@@ -333,8 +388,11 @@ class WaterIntelligenceEngine:
             physics_authority=authority,
             hydrology_mode=solver_decision.hydrology_mode,
             solver_fidelity=solver_decision.solver_fidelity,
-            mass_balance_error_mm=mass_balance_err,
+            mass_balance_error_mm=serialized_closure_err,
             uncertainty=posterior_uncertainty,
+            transition_receipt=flux_receipt,
+            analysis_receipt=analysis_receipt,
+            posterior_demand=posterior_demand,
         )
 
         # 14. Hydrological Feedback Receipt to Layer 2
@@ -346,7 +404,7 @@ class WaterIntelligenceEngine:
             plot_id=plot_id,
             timestamp=timestamp,
             transpiration_constraint_factor=final_root_zone.stress_factor_ks,
-            transpiration_deficit_mm=flux_state.actual.transpiration_deficit_mm,
+            transpiration_deficit_mm=published_flux_state.actual.transpiration_deficit_mm,
             soil_water_availability_ratio=round(avail_ratio, 3),
             root_zone_depletion_fraction=round(final_root_zone.root_zone_depletion_mm / max(1.0, final_root_zone.total_available_water_mm), 3),
             ks_uncertainty_sigma=final_root_zone.ks_uncertainty_sigma,

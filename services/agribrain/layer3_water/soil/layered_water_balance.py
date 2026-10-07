@@ -11,8 +11,52 @@ from layer3_water.contracts.water_state import (
     SoilEvaporationState,
     SoilWaterState,
     RootZoneWaterState,
+    IntervalFluxReceipt,
 )
 from layer3_water.contracts.state_factory import WaterStateFactory
+
+
+class StepWaterBalanceResult(tuple):
+    """5-element tuple backward-compatible result providing access to transition receipt."""
+
+    def __new__(
+        cls,
+        updated_soil: SoilWaterState,
+        actual_infil: float,
+        runoff: float,
+        deep_drainage: float,
+        mass_balance_error: float,
+        receipt: Optional[IntervalFluxReceipt] = None,
+    ):
+        instance = super().__new__(
+            cls, (updated_soil, actual_infil, runoff, deep_drainage, mass_balance_error)
+        )
+        instance._receipt = receipt
+        return instance
+
+    @property
+    def updated_soil(self) -> SoilWaterState:
+        return self[0]
+
+    @property
+    def actual_infil(self) -> float:
+        return self[1]
+
+    @property
+    def runoff(self) -> float:
+        return self[2]
+
+    @property
+    def deep_drainage(self) -> float:
+        return self[3]
+
+    @property
+    def mass_balance_error(self) -> float:
+        return self[4]
+
+    @property
+    def receipt(self) -> Optional[IntervalFluxReceipt]:
+        return getattr(self, "_receipt", None)
 
 
 class LayeredWaterBalanceEngine:
@@ -29,17 +73,31 @@ class LayeredWaterBalanceEngine:
         actual_soil_evaporation_mm: float,
         capillary_rise_mm: float = 0.0,
         days_since_wetting: int = 0,
-    ) -> Tuple[SoilWaterState, float, float, float]:
+    ) -> StepWaterBalanceResult:
         """Propagate multi-layer soil water state through daily hydrological flux cycle.
         
         Returns:
-            (updated_soil_state, actual_infiltration_mm, surface_runoff_mm, deep_drainage_mm)
+            StepWaterBalanceResult: 5-element tuple (updated_soil, actual_infil, runoff, deep_drainage, mass_balance_error)
+            with .receipt providing IntervalFluxReceipt.
         """
+        if not prev_soil.layer_depths_cm:
+            raise ValueError("layer_depths_cm must be a non-empty list")
+        for i, d in enumerate(prev_soil.layer_depths_cm):
+            if not (isinstance(d, (int, float)) and math.isfinite(d) and d > 0.0):
+                raise ValueError(f"Layer {i} depth {d} must be a finite positive number (> 0.0)")
+            if i > 0 and d <= prev_soil.layer_depths_cm[i - 1]:
+                raise ValueError(
+                    f"Layer depths must be strictly monotonically increasing: layer {i} ({d}) <= layer {i-1} ({prev_soil.layer_depths_cm[i-1]})"
+                )
+
         n_layers = len(prev_soil.layer_depths_cm)
         layer_thickness_mm = []
         prev_d = 0.0
         for d in prev_soil.layer_depths_cm:
-            layer_thickness_mm.append((d - prev_d) * 10.0)
+            thickness = (d - prev_d) * 10.0
+            if thickness <= 0.0:
+                raise ValueError(f"Layer thickness must be positive: {thickness}")
+            layer_thickness_mm.append(thickness)
             prev_d = d
 
         # Current water storage per layer (mm)
@@ -140,14 +198,6 @@ class LayeredWaterBalanceEngine:
             )
         ]
 
-        # Mass balance closure error calculation (mm)
-        s_prev = sum(layer_storage_mm)
-        s_next = sum(new_storage)
-        delta_s = s_next - s_prev
-        inflows = actual_infil + actual_capillary_rise
-        outflows = total_plant_extracted + actual_top_evap + deep_drainage
-        mass_balance_error = round(abs(delta_s - (inflows - outflows)), 4)
-
         # Topsoil evaporation memory state
         rew_mm = max(2.0, (prev_soil.field_capacity_profile[0] - prev_soil.wilting_point_profile[0]) * 100.0 * 0.5)
         top_storage_avail = max(0.0, new_storage[0] - wp_storage_mm[0])
@@ -173,6 +223,39 @@ class LayeredWaterBalanceEngine:
             van_genuchten_n=prev_soil.van_genuchten_n,
             infiltration=infil_state,
             evaporation_state=evap_state,
+            parameter_provenance=getattr(prev_soil, "parameter_provenance", "TEXTURE_PRIOR"),
         )
 
-        return updated_soil, round(actual_infil, 2), round(runoff, 2), deep_drainage, mass_balance_error
+        # Serialized storage closure
+        initial_storage_mm = prev_soil.total_profile_water_mm
+        final_storage_mm = updated_soil.total_profile_water_mm
+        serialized_delta_s = round(final_storage_mm - initial_storage_mm, 4)
+        inflows = round(actual_infil + actual_capillary_rise, 4)
+        outflows = round(total_plant_extracted + actual_top_evap + deep_drainage, 4)
+        serialized_closure_error = round(abs(serialized_delta_s - (inflows - outflows)), 4)
+
+        receipt = IntervalFluxReceipt(
+            initial_storage_mm=initial_storage_mm,
+            final_storage_mm=final_storage_mm,
+            storage_change_mm=serialized_delta_s,
+            actual_infiltration_mm=round(actual_infil, 4),
+            surface_runoff_mm=round(runoff, 4),
+            actual_transpiration_mm=round(total_plant_extracted, 4),
+            actual_soil_evaporation_mm=round(actual_top_evap, 4),
+            actual_eta_mm=round(total_plant_extracted + actual_top_evap, 4),
+            deep_drainage_mm=round(deep_drainage, 4),
+            capillary_rise_mm=round(actual_capillary_rise, 4),
+            precipitation_mm=round(precipitation_mm, 4),
+            irrigation_mm=round(irrigation_mm, 4),
+            water_closure_error_mm=serialized_closure_error,
+            mass_conserved=(serialized_closure_error <= 0.05),
+        )
+
+        return StepWaterBalanceResult(
+            updated_soil,
+            round(actual_infil, 2),
+            round(runoff, 2),
+            deep_drainage,
+            serialized_closure_error,
+            receipt=receipt,
+        )

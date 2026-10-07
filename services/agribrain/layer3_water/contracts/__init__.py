@@ -40,6 +40,8 @@ from layer3_water.contracts.water_state import (
     WaterLimitationForecast,
     HydraulicStressMemoryState,
     AssimilationDiagnostic,
+    IntervalFluxReceipt,
+    AnalysisIncrementReceipt,
     WaterState,
 )
 from layer3_water.contracts.state_factory import WaterStateFactory
@@ -83,6 +85,8 @@ __all__ = [
     "WaterLimitationForecast",
     "HydraulicStressMemoryState",
     "AssimilationDiagnostic",
+    "IntervalFluxReceipt",
+    "AnalysisIncrementReceipt",
     "WaterState",
     "WaterStateFactory",
     "WaterProcessStage",

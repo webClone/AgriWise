@@ -23,6 +23,8 @@ from layer3_water.contracts.water_state import (
     WaterLimitationForecast,
     HydraulicStressMemoryState,
     AssimilationDiagnostic,
+    IntervalFluxReceipt,
+    AnalysisIncrementReceipt,
     WaterState,
 )
 
@@ -43,11 +45,39 @@ class WaterStateFactory:
         van_genuchten_n: Optional[List[float]] = None,
         infiltration: Optional[InfiltrationState] = None,
         evaporation_state: Optional[SoilEvaporationState] = None,
+        parameter_provenance: str = "TEXTURE_PRIOR",
     ) -> SoilWaterState:
         """Create and validate vertical soil moisture profile and compute Van Genuchten suction potentials."""
+        if not layer_depths_cm or not isinstance(layer_depths_cm, (list, tuple)):
+            raise ValueError("layer_depths_cm must be a non-empty list of depths")
+        for i, d in enumerate(layer_depths_cm):
+            if not (isinstance(d, (int, float)) and math.isfinite(d) and d > 0.0):
+                raise ValueError(f"Layer {i} depth {d} must be a finite positive number (> 0.0)")
+            if i > 0 and d <= layer_depths_cm[i - 1]:
+                raise ValueError(
+                    f"Layer depths must be strictly monotonically increasing: layer {i} ({d}) <= layer {i-1} ({layer_depths_cm[i-1]})"
+                )
+
         n_layers = len(layer_depths_cm)
-        if not (len(theta_profile) == len(field_capacity_profile) == len(wilting_point_profile) == len(saturation_profile) == len(residual_profile) == n_layers):
-            raise ValueError(f"All soil profile dimensions must match layer count {n_layers}")
+        for name, prof in [
+            ("theta_profile", theta_profile),
+            ("field_capacity_profile", field_capacity_profile),
+            ("wilting_point_profile", wilting_point_profile),
+            ("saturation_profile", saturation_profile),
+            ("residual_profile", residual_profile),
+        ]:
+            if not isinstance(prof, (list, tuple)) or len(prof) != n_layers:
+                raise ValueError(f"{name} length must match layer count {n_layers}")
+
+        if hydraulic_conductivity_profile is not None:
+            if not isinstance(hydraulic_conductivity_profile, (list, tuple)) or len(hydraulic_conductivity_profile) != n_layers:
+                raise ValueError(f"hydraulic_conductivity_profile length must match layer count {n_layers}")
+        if van_genuchten_alpha is not None:
+            if not isinstance(van_genuchten_alpha, (list, tuple)) or len(van_genuchten_alpha) != n_layers:
+                raise ValueError(f"van_genuchten_alpha length must match layer count {n_layers}")
+        if van_genuchten_n is not None:
+            if not isinstance(van_genuchten_n, (list, tuple)) or len(van_genuchten_n) != n_layers:
+                raise ValueError(f"van_genuchten_n length must match layer count {n_layers}")
 
         # Validate physical boundaries per layer
         for i in range(n_layers):
@@ -57,9 +87,23 @@ class WaterStateFactory:
             th_s = saturation_profile[i]
             th = theta_profile[i]
 
-            if not (th_r <= th_wp <= th_fc <= th_s):
+            for val_name, val in [
+                ("residual", th_r),
+                ("wilting_point", th_wp),
+                ("field_capacity", th_fc),
+                ("saturation", th_s),
+                ("theta", th),
+            ]:
+                if not (isinstance(val, (int, float)) and math.isfinite(val)):
+                    raise ValueError(f"Layer {i} {val_name} must be a finite number")
+
+            if not (0.0 <= th_r <= th_wp <= th_fc <= th_s <= 1.0):
                 raise ValueError(
                     f"Layer {i} physical retention ordering violated: theta_r({th_r}) <= theta_wp({th_wp}) <= theta_fc({th_fc}) <= theta_s({th_s})"
+                )
+            if th_s <= th_r + 1e-4:
+                raise ValueError(
+                    f"Layer {i} has degenerate saturation/residual interval: theta_s({th_s}) <= theta_r({th_r}) + 1e-4"
                 )
             if not (th_r <= th <= th_s + 1e-4):
                 raise ValueError(
@@ -67,9 +111,26 @@ class WaterStateFactory:
                 )
 
         ks_prof = hydraulic_conductivity_profile or [25.0] * n_layers
+        for i, ks in enumerate(ks_prof):
+            if not (isinstance(ks, (int, float)) and math.isfinite(ks) and ks > 0.0):
+                raise ValueError(f"Layer {i} hydraulic conductivity {ks} must be a finite strictly positive number (> 0.0)")
+
         vg_alpha = van_genuchten_alpha or [0.03] * n_layers
+        for i, a in enumerate(vg_alpha):
+            if not (isinstance(a, (int, float)) and math.isfinite(a) and a > 0.0):
+                raise ValueError(f"Layer {i} van Genuchten alpha {a} must be a finite strictly positive number (> 0.0)")
+
         vg_n = van_genuchten_n or [1.5] * n_layers
+        for i, n_val in enumerate(vg_n):
+            if not (isinstance(n_val, (int, float)) and math.isfinite(n_val) and n_val > 1.0):
+                raise ValueError(f"Layer {i} van Genuchten n {n_val} must be a finite number strictly greater than 1.0 (> 1.0)")
+
         vg_m = [round(1.0 - 1.0 / n_val, 4) for n_val in vg_n]
+
+        valid_provenance = {"TEXTURE_PRIOR", "IN_SITU_CALIBRATED", "LAB_MEASURED", "PEDOTRANSFER"}
+        prov = parameter_provenance.upper() if isinstance(parameter_provenance, str) else "TEXTURE_PRIOR"
+        if prov not in valid_provenance:
+            prov = "TEXTURE_PRIOR"
 
         # Compute matric suction h(cm) and matric potential psi_m(MPa) via Van Genuchten retention inversion
         matric_pot = []
@@ -111,6 +172,7 @@ class WaterStateFactory:
             unsaturated_conductivity_profile_cm_day=k_unsat,
             infiltration=infiltration,
             evaporation_state=evaporation_state,
+            parameter_provenance=prov,
         )
 
     @staticmethod
@@ -126,8 +188,38 @@ class WaterStateFactory:
         soil_uncertainty_sigma: float = 0.04,
     ) -> RootZoneWaterState:
         """Calculate root-zone TAW, RAW, depletion Dr, root uptake weighting U(z), and stress factor Ks."""
-        root_depth_cm = root_depth_m * 100.0
+        if not (isinstance(root_depth_m, (int, float)) and math.isfinite(root_depth_m) and root_depth_m > 0.0):
+            raise ValueError(f"root_depth_m ({root_depth_m}) must be a finite strictly positive number (> 0.0)")
+        if not layer_depths_cm or not isinstance(layer_depths_cm, (list, tuple)):
+            raise ValueError("layer_depths_cm must be a non-empty list of depths")
+        for i, d in enumerate(layer_depths_cm):
+            if not (isinstance(d, (int, float)) and math.isfinite(d) and d > 0.0):
+                raise ValueError(f"Layer {i} depth {d} must be a finite positive number (> 0.0)")
+            if i > 0 and d <= layer_depths_cm[i - 1]:
+                raise ValueError(
+                    f"Layer depths must be strictly monotonically increasing: layer {i} ({d}) <= layer {i-1} ({layer_depths_cm[i-1]})"
+                )
+
         n_layers = len(layer_depths_cm)
+        for name, prof in [
+            ("theta_profile", theta_profile),
+            ("field_capacity_profile", field_capacity_profile),
+            ("wilting_point_profile", wilting_point_profile),
+        ]:
+            if not isinstance(prof, (list, tuple)) or len(prof) != n_layers:
+                raise ValueError(f"{name} length must match layer count {n_layers}")
+
+        for i in range(n_layers):
+            th = theta_profile[i]
+            fc = field_capacity_profile[i]
+            wp = wilting_point_profile[i]
+            for pname, pval in [("theta", th), ("field_capacity", fc), ("wilting_point", wp)]:
+                if not (isinstance(pval, (int, float)) and math.isfinite(pval)):
+                    raise ValueError(f"Layer {i} {pname} must be a finite number")
+            if not (0.0 <= wp <= fc <= 1.0):
+                raise ValueError(f"Layer {i} wilting point ({wp}) cannot exceed field capacity ({fc}) in [0, 1]")
+
+        root_depth_cm = root_depth_m * 100.0
         
         # Calculate layer root density fractions R_i if not explicitly supplied
         if root_fraction_profile is None:
@@ -281,6 +373,9 @@ class WaterStateFactory:
         mass_balance_error_mm: float = 0.0,
         uncertainty: Optional[WaterUncertaintyBudget] = None,
         data_health_score: float = 1.0,
+        transition_receipt: Optional[IntervalFluxReceipt] = None,
+        analysis_receipt: Optional[AnalysisIncrementReceipt] = None,
+        posterior_demand: Optional[PotentialWaterFlux] = None,
     ) -> WaterState:
         """Construct canonical unified WaterState (X_t^L3)."""
         forecast = limitation_forecast or WaterLimitationForecast(
@@ -335,4 +430,7 @@ class WaterStateFactory:
                 authority_level=vegetation_boundary.crop_authority if vegetation_boundary else "TRANSFER",
                 execution_timestamp=timestamp,
             ),
+            transition_receipt=transition_receipt,
+            analysis_receipt=analysis_receipt,
+            posterior_demand=posterior_demand,
         )

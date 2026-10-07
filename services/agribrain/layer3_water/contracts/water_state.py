@@ -60,6 +60,7 @@ class SoilWaterState:
     # Infiltration and evaporation state
     infiltration: Optional[InfiltrationState] = None
     evaporation_state: Optional[SoilEvaporationState] = None
+    parameter_provenance: str = "TEXTURE_PRIOR"
 
     @property
     def total_profile_water_mm(self) -> float:
@@ -222,8 +223,41 @@ class AssimilationDiagnostic:
     prior_profile_variance: float = 0.0                 # Trace(P^-)
     posterior_profile_variance: float = 0.0             # Trace(P^+)
     variance_reduction_fraction: float = 0.0            # 1.0 - (Trace(P^+) / Trace(P^-))
+    bound_corrections_applied: int = 0                  # Count of layer moistures clamped to [theta_r, theta_s]
     assimilated_sensor_sources: List[str] = field(default_factory=list)
     rejected_observations: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class IntervalFluxReceipt:
+    """Transition receipt recording the hydrological fluxes physically integrated across the interval."""
+    initial_storage_mm: float                     # S_prev (mm)
+    final_storage_mm: float                       # S_minus (mm) prior to data assimilation
+    storage_change_mm: float                      # delta_S = S_minus - S_prev (mm)
+    actual_infiltration_mm: float                 # Infiltration entering soil (mm)
+    surface_runoff_mm: float                      # Infiltration excess surface runoff (mm)
+    actual_transpiration_mm: float                # Bounded actual plant transpiration extracted (mm)
+    actual_soil_evaporation_mm: float             # Bounded actual topsoil evaporation extracted (mm)
+    actual_eta_mm: float                          # Realized ETa = Transpiration + Evaporation (mm)
+    deep_drainage_mm: float                       # Percolation below soil profile (mm)
+    capillary_rise_mm: float = 0.0                # Capillary rise entering soil profile (mm)
+    precipitation_mm: float = 0.0                 # Applied precipitation depth (mm)
+    irrigation_mm: float = 0.0                    # Applied irrigation depth (mm)
+    water_closure_error_mm: float = 0.0           # abs(delta_S - (Inflow - Outflow)) (mm)
+    mass_conserved: bool = True                   # True if water_closure_error_mm <= 0.05
+
+
+@dataclass(frozen=True)
+class AnalysisIncrementReceipt:
+    """Analysis receipt recording state and covariance increments introduced by data assimilation."""
+    pre_assimilation_storage_mm: float            # Total storage S_minus before assimilation (mm)
+    post_assimilation_storage_mm: float           # Total storage S_plus after assimilation (mm)
+    storage_increment_mm: float                   # delta_S_assim = S_plus - S_minus (mm)
+    prior_profile_variance: float                 # Trace(P^-)
+    posterior_profile_variance: float             # Trace(P^+)
+    variance_reduction_fraction: float            # 1.0 - (Trace(P^+) / Trace(P^-))
+    bound_corrections_applied: int = 0            # Number of layer moisture values clamped to [theta_r, theta_s]
+    assimilated_sensor_sources: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -276,6 +310,11 @@ class WaterState:
     data_health_score: float = 1.0
     uncertainty: WaterUncertaintyBudget = field(default_factory=WaterUncertaintyBudget)
     provenance: InferenceProvenance = field(default_factory=InferenceProvenance)
+
+    # 12. Transition & Analysis Receipts
+    transition_receipt: Optional[IntervalFluxReceipt] = None
+    analysis_receipt: Optional[AnalysisIncrementReceipt] = None
+    posterior_demand: Optional[PotentialWaterFlux] = None
 
     def to_layer4_boundary_receipt(self) -> Layer3ToLayer4BoundaryReceipt:
         """Extract canonical biophysical boundary receipt for Layer 4 Biological Engine."""

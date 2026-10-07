@@ -191,10 +191,14 @@ class WaterStateAssimilator:
 
         # Enforce physical constraints: theta_r <= theta_post <= theta_s
         clamped_theta = []
+        bound_corrections = 0
         for i in range(n_layers):
             th_r = prior_soil.residual_profile[i]
             th_s = prior_soil.saturation_profile[i]
-            clamped_theta.append(float(np.clip(x_post[i], th_r + 1e-4, th_s - 1e-4)))
+            raw_v = float(x_post[i])
+            if raw_v < th_r + 1e-4 or raw_v > th_s - 1e-4:
+                bound_corrections += 1
+            clamped_theta.append(float(np.clip(raw_v, th_r + 1e-4, th_s - 1e-4)))
 
         trace_prior = float(np.trace(P_prior))
         trace_post = float(np.trace(P_post))
@@ -208,6 +212,7 @@ class WaterStateAssimilator:
             prior_profile_variance=round(trace_prior, 5),
             posterior_profile_variance=round(trace_post, 5),
             variance_reduction_fraction=round(var_reduct, 3),
+            bound_corrections_applied=bound_corrections,
             assimilated_sensor_sources=sources,
             rejected_observations=rejected,
         )
@@ -224,6 +229,7 @@ class WaterStateAssimilator:
             van_genuchten_n=prior_soil.van_genuchten_n,
             infiltration=prior_soil.infiltration,
             evaporation_state=prior_soil.evaporation_state,
+            parameter_provenance=getattr(prior_soil, "parameter_provenance", "TEXTURE_PRIOR"),
         )
 
         return posterior_soil, diag
