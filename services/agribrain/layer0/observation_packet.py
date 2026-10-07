@@ -90,11 +90,11 @@ class DataStatus(str, Enum):
 
     @classmethod
     def from_value(cls, value: str) -> "DataStatus":
-        """Parse a string into DataStatus, defaulting to OBSERVED."""
+        """Parse known provenance; unknown or malformed status is unavailable."""
         try:
             return cls(value)
-        except ValueError:
-            return cls.OBSERVED
+        except (ValueError, TypeError):
+            return cls.UNAVAILABLE
 
     def is_real_observation(self) -> bool:
         """True if this status represents a direct measurement."""
@@ -260,8 +260,14 @@ class ObservationPacket:
     
     # Content-sensitive hash (payload + QA + uncertainty + provenance + status)
     content_hash: str = ""
+    unrecognized_data_status: Optional[str] = None
     
     def __post_init__(self):
+        parsed_status = DataStatus.from_value(self.data_status)
+        if self.data_status != parsed_status:
+            self.unrecognized_data_status = repr(self.data_status)
+            self.content_hash = ""
+        self.data_status = parsed_status
         if not self.packet_id:
             self.packet_id = self._generate_id()
         if not self.content_hash:
@@ -297,11 +303,15 @@ class ObservationPacket:
             str(self.geometry_version),
             self.spatial_scope,
         ]
+        if self.unrecognized_data_status is not None:
+            parts.append(self.unrecognized_data_status)
         raw = "|".join(parts).encode()
         return hashlib.sha256(raw).hexdigest()[:20]
     
     def effective_weight(self) -> float:
         """Combined quality × reliability weight for assimilation."""
+        if self.data_status == DataStatus.UNAVAILABLE:
+            return 0.0
         return self.qa.scene_score * self.reliability_weight
     
     def to_dict(self) -> Dict[str, Any]:
@@ -311,6 +321,7 @@ class ObservationPacket:
             "source": self.source.value,
             "obs_type": self.obs_type.value,
             "data_status": self.data_status.value,
+            "unrecognized_data_status": self.unrecognized_data_status,
             "timestamp": self.timestamp.isoformat(),
             "timestamp_end": self.timestamp_end.isoformat() if self.timestamp_end else None,
             "geometry_type": self.geometry_type,

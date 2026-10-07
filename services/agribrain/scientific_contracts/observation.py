@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from .numeric import finite_real
+
 
 @dataclass(frozen=True)
 class ASMAEObservationPayload:
@@ -33,17 +35,25 @@ class ASMAEObservationPayload:
     def __post_init__(self) -> None:
         if not self.observation_id:
             raise ValueError("observation_id must not be empty")
+        value = finite_real(self.observation_value)
+        variance = finite_real(self.observation_variance)
+        if value is None:
+            raise ValueError("observation_value must be a finite real scalar")
+        if variance is None or variance <= 0.0:
+            raise ValueError("observation_variance must be a finite strictly positive real scalar")
+        object.__setattr__(self, "observation_value", value)
+        object.__setattr__(self, "observation_variance", variance)
+        if not isinstance(self.observation_units, str) or not self.observation_units.strip():
+            raise ValueError("observation_units must not be empty")
         if self.target_state_variable == "root_zone_water":
             if self.observation_units != "volumetric fraction [0,1]":
                 raise ValueError(
                     f"Invalid units for root_zone_water: expected 'volumetric fraction [0,1]', got {self.observation_units!r}"
                 )
-            if not (0.0 <= self.observation_value <= 0.65):
+            if not (0.0 <= value <= 0.65):
                 raise ValueError(
                     f"Physical boundary violation for root_zone_water: value {self.observation_value} is outside realistic soil porosity range [0.0, 0.65]"
                 )
-        if self.observation_variance <= 0.0:
-            raise ValueError(f"observation_variance must be strictly positive, got {self.observation_variance}")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
