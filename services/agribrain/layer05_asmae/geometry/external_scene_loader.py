@@ -106,6 +106,18 @@ def load_external_scenes(
             quality.compute()
             runtime.qa_score = quality.overall
 
+            # Resolve spatial resolution from metadata or transform
+            raw_res = record.get("resolution_m")
+            if raw_res is not None:
+                try:
+                    resolution_m = float(raw_res)
+                except (ValueError, TypeError):
+                    resolution_m = float(abs(transform[0])) if transform[0] else 10.0
+            elif isinstance(transform, (list, tuple)) and len(transform) >= 2 and transform[0]:
+                resolution_m = float(abs(transform[0]))
+            else:
+                resolution_m = 10.0
+
             results.append({
                 "runtime": runtime,
                 "quality": quality,

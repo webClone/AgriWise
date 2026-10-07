@@ -38,6 +38,7 @@ from irrigation_runtime.schemas import (
     EventStatus,
     IrrigationCommand,
     IrrigationEvent,
+    IrrigationSystemType,
     WaterBudget,
 )
 

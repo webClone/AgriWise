@@ -30,9 +30,6 @@ from .schemas import (
     TelemetryPacket,
 )
 from .driver_base import DroneDriverBase
-from .drivers.mock_driver import MockDriver
-from .drivers.dji_wayline_driver import DJIWaylineDriver
-from .drivers.mavsdk_driver import MAVSDKDriver
 from .mission_compiler import MissionCompiler
 from .mission_state_machine import MissionStateMachine
 from .preflight import PreflightGate
@@ -43,12 +40,31 @@ from .failsafe_controller import FailsafeController
 logger = logging.getLogger(__name__)
 
 
-# Driver registry
-_DRIVER_REGISTRY: Dict[str, Type[DroneDriverBase]] = {
-    "mock": MockDriver,
-    "dji_wayline": DJIWaylineDriver,
-    "mavsdk": MAVSDKDriver,
-}
+# Driver registry with dynamic/optional driver registration
+_DRIVER_REGISTRY: Dict[str, Type[DroneDriverBase]] = {}
+
+# DJI Wayline driver
+try:
+    from .drivers.dji_wayline_driver import DJIWaylineDriver
+    _DRIVER_REGISTRY["dji_wayline"] = DJIWaylineDriver
+except (ImportError, ModuleNotFoundError) as e:
+    DJIWaylineDriver = None
+    logger.debug("[Dispatcher] Optional driver 'dji_wayline' unavailable: %s", e)
+
+# MAVSDK driver
+try:
+    from .drivers.mavsdk_driver import MAVSDKDriver
+    _DRIVER_REGISTRY["mavsdk"] = MAVSDKDriver
+except (ImportError, ModuleNotFoundError) as e:
+    MAVSDKDriver = None
+    logger.debug("[Dispatcher] Optional driver 'mavsdk' unavailable: %s", e)
+
+# Mock driver (optional development/simulation driver)
+try:
+    from .drivers.mock_driver import MockDriver
+    _DRIVER_REGISTRY["mock"] = MockDriver
+except (ImportError, ModuleNotFoundError):
+    MockDriver = None
 
 
 def register_driver(name: str, driver_class: Type[DroneDriverBase]):

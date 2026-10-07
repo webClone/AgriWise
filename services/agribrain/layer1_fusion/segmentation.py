@@ -4,7 +4,8 @@ Clusters field data into management zones (High/Medium/Low performance).
 """
 
 import numpy as np
-from sklearn.cluster import KMeans, GaussianMixture
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score
 from typing import List, Dict, Any
 
@@ -47,7 +48,7 @@ class ZonalSegmentationEngine:
         best_k_bic = np.argmin(bics) + 2
         best_k_sil = np.argmax(silhouettes) + 2
         
-        print(f"🧐 Zoning Analysis: Best K (BIC)={best_k_bic}, Best K (Sil)={best_k_sil}")
+        print(f"[Zoning Analysis] Best K (BIC)={best_k_bic}, Best K (Sil)={best_k_sil}")
         
         # Prefer Silhouette for spatial distinctness if reasonable
         return best_k_sil
