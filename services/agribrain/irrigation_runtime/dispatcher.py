@@ -120,7 +120,37 @@ class CommandDispatcher:
                            event.event_id, event.status.value)
             return event
 
-        # Idempotency check: if already active or queued, return existing event
+        # BA-04: Validate raw event scalar parameters before any transformations
+        validation_errors = event.validate()
+        if validation_errors:
+            event.transition(EventStatus.FAILED, f"Event validation failed: {'; '.join(validation_errors)}")
+            self._emit_failed(event)
+            return event
+
+        # BA-04: Validate budget quantities if provided
+        if budget is not None:
+            budget_errors = budget.validate()
+            if budget_errors:
+                from irrigation_runtime.schemas import SafetyViolation, InterlockType
+                violation = SafetyViolation(
+                    violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                    interlock_id="INT-QUOTA",
+                    interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                    device_id=event.device_id,
+                    zone_id=event.zone_id,
+                    detected_at=datetime.now(timezone.utc).isoformat(),
+                    sensor_value=float(event.target_volume_mm) if finite_real(event.target_volume_mm) is not None else 0.0,
+                    threshold_breached="max",
+                    threshold_value=0.0,
+                    action_taken="BLOCK",
+                    notes=f"Budget validation failed: {'; '.join(budget_errors)}",
+                )
+                event.safety_violations.append(violation.violation_id)
+                event.transition(EventStatus.FAILED, f"WaterBudget validation failed: {'; '.join(budget_errors)}")
+                self._emit_failed(event)
+                return event
+
+        # Idempotency check: if already active or queued in local dispatcher, return existing event
         if event.event_id in self._active_events:
             existing = self._active_events[event.event_id]
             if existing.status in (EventStatus.DISPATCHING, EventStatus.EXECUTING, EventStatus.VALIDATING, EventStatus.STOP_REQUESTED):
@@ -128,12 +158,23 @@ class CommandDispatcher:
                                event.event_id, existing.status.value)
                 return existing
 
-        # Check if already finalized in history
+        # Check if already finalized in local history
         for past in self._event_history:
             if past.event_id == event.event_id:
                 logger.warning("Event %s already finalized with status %s; returning historical event.",
                                event.event_id, past.status.value)
                 return past
+
+        # BA-03: Durable idempotency across fresh dispatcher instances via shared store
+        from irrigation_runtime.safety import SharedQuotaStore
+        if SharedQuotaStore.is_settled(event.event_id):
+            logger.warning("Event %s already finalized and settled in shared store; returning completed event.", event.event_id)
+            event.status = EventStatus.COMPLETED
+            return event
+        if SharedQuotaStore.is_active(event.event_id) and event.event_id not in self._active_events:
+            logger.warning("Event %s already active in shared store; returning active event.", event.event_id)
+            event.status = EventStatus.EXECUTING
+            return event
 
         # Resolve actuator
         actuator = self._registry.get_actuator(event.device_id)
@@ -141,6 +182,23 @@ class CommandDispatcher:
             event.transition(EventStatus.FAILED, f"Actuator {event.device_id} not found in registry")
             self._emit_failed(event)
             return event
+
+        # BA-02: Atomic check-and-reserve under cross-process lock BEFORE dispatch
+        if budget and event.target_volume_mm > 0:
+            quota_violation = SharedQuotaStore.atomic_check_and_reserve(
+                plot_id=event.plot_id,
+                requested_volume_mm=event.target_volume_mm,
+                budget=budget,
+                event_id=event.event_id,
+            )
+            if quota_violation:
+                event.safety_violations.append(quota_violation.violation_id)
+                event.transition(
+                    EventStatus.FAILED,
+                    f"Pre-flight safety check failed: {quota_violation.interlock_type.value}: {quota_violation.notes or quota_violation.action_taken}"
+                )
+                self._emit_failed(event)
+                return event
 
         # Pre-flight safety check (runs unconditionally regardless of telemetry presence)
         command = self._build_command(event)
@@ -157,12 +215,9 @@ class CommandDispatcher:
                 EventStatus.FAILED,
                 f"Pre-flight safety check failed: {'; '.join(violation_msgs)}"
             )
+            self._safety.release_quota(event.event_id)
             self._emit_failed(event)
             return event
-
-        # Reserve water quota prior to dispatch
-        if budget and event.target_volume_mm > 0:
-            self._safety.reserve_quota(event.event_id, event.plot_id, event.target_volume_mm)
 
         # Begin dispatch
         event.transition(EventStatus.DISPATCHING, "Starting command dispatch")
@@ -188,13 +243,35 @@ class CommandDispatcher:
             logger.info("Event %s executing on device %s",
                         event.event_id, event.device_id)
         else:
-            event.transition(
-                EventStatus.FAILED,
-                f"Dispatch failed after retries: {result.error_message}"
+            # BA-01: Uncertain physical outcomes must retain dispatcher ownership, tracking, and quota
+            from irrigation_runtime.schemas import ActuatorStatus
+            is_uncertain = (
+                result.error_code in ("UNCERTAIN_OUTCOME", "ACK_TIMEOUT", "DISPATCH_EXCEPTION")
+                or actuator.active_command is not None
+                or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
             )
-            self._active_events.pop(event.event_id, None)
-            self._safety.release_quota(event.event_id)
-            self._emit_failed(event)
+            if is_uncertain:
+                logger.error(
+                    "Uncertain dispatch outcome for event %s on device %s: %s. Preserving ownership and reservation.",
+                    event.event_id, event.device_id, result.error_message
+                )
+                event.transition(EventStatus.STOP_REQUESTED, f"Uncertain physical outcome: {result.error_message}")
+                self._safety.track_event_start(
+                    event.event_id,
+                    event.device_id,
+                    event.target_duration_minutes,
+                    plot_id=event.plot_id,
+                    volume_mm=event.target_volume_mm,
+                )
+                self._emit_failed(event)
+            else:
+                event.transition(
+                    EventStatus.FAILED,
+                    f"Dispatch failed after retries: {result.error_message}"
+                )
+                self._active_events.pop(event.event_id, None)
+                self._safety.release_quota(event.event_id)
+                self._emit_failed(event)
 
         return event
 
@@ -218,9 +295,8 @@ class CommandDispatcher:
         }
 
         op_id = operation_id or f"OP-{event.event_id}"
+        # BA-04: Do not rewrite flow_rate to 15.0 L/min; preserve raw scalar for qualification
         flow_rate = event.target_flow_rate_lpm
-        if flow_rate <= 0.0:
-            flow_rate = 15.0
 
         return IrrigationCommand(
             command_id=f"CMD-{event.event_id}-A{attempt}",
@@ -316,8 +392,10 @@ class CommandDispatcher:
 
         actuator = self._registry.get_actuator(event.device_id)
         if not actuator:
-            event.transition(EventStatus.FAILED, "Actuator lost during execution")
-            self._finalize_event(event)
+            # BA-01: Registry loss requires degraded reconciliation; must not mean physically stopped
+            logger.error("Actuator %s lost from registry during execution of event %s. Retaining exposure.",
+                         event.device_id, event.event_id)
+            event.transition(EventStatus.STOP_REQUESTED, "Actuator lost from registry during execution")
             return event
 
         from irrigation_runtime.schemas import ActuatorStatus
@@ -383,6 +461,13 @@ class CommandDispatcher:
             logger.error("Actuator status query failed or timed out for device %s: %s", event.device_id, exc)
             status = ActuatorStatus.ERROR
 
+        # BA-01: OFFLINE status means communications lost, NOT confirmed stopped!
+        if status == ActuatorStatus.OFFLINE:
+            logger.warning("Actuator %s is OFFLINE during execution of event %s. Retaining exposure and tracking.",
+                           event.device_id, event.event_id)
+            event.transition(EventStatus.STOP_REQUESTED, "Actuator OFFLINE during execution; communications lost")
+            return event
+
         if status == ActuatorStatus.ERROR:
             stop_result = await actuator.emergency_stop()
             if stop_result.success:
@@ -398,8 +483,8 @@ class CommandDispatcher:
                 logger.error("Stop attempt failed for device in ERROR state %s: %s", event.device_id, stop_result.error_message)
             return event
 
-        # Check if execution is complete (actuator no longer running)
-        if status != ActuatorStatus.EXECUTING and event.status == EventStatus.EXECUTING:
+        # Check if execution is complete: actuator must be confirmed ONLINE and idle
+        if status == ActuatorStatus.ONLINE and event.status == EventStatus.EXECUTING:
             event.actual_end = datetime.now(timezone.utc).isoformat()
             event.transition(EventStatus.VALIDATING, "Execution completed, entering validation")
             self._safety.track_event_end(event.event_id)
@@ -519,8 +604,16 @@ class CommandDispatcher:
 
             actuator = self._registry.get_actuator(event.device_id)
             if not actuator:
-                event.transition(EventStatus.FAILED, "Actuator not registered on process restart")
-                self._safety.release_quota(event.event_id)
+                # BA-01: Actuator missing on restart: retain STOP_REQUESTED, do not silently free quota
+                event.transition(EventStatus.STOP_REQUESTED, "Actuator not registered on process restart")
+                self._active_events[event.event_id] = event
+                self._safety.track_event_start(
+                    event.event_id,
+                    event.device_id,
+                    event.target_duration_minutes,
+                    plot_id=event.plot_id,
+                    volume_mm=event.target_volume_mm,
+                )
                 reconciled.append(event)
                 continue
 
@@ -529,12 +622,51 @@ class CommandDispatcher:
             if event.actual_start:
                 try:
                     start_dt = datetime.fromisoformat(event.actual_start)
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
                     now_dt = datetime.now(timezone.utc)
                     elapsed_minutes = max(0.0, (now_dt - start_dt).total_seconds() / 60.0)
                 except Exception:
-                    pass
+                    elapsed_minutes = 0.0
 
             remaining_duration = max(0.0, event.target_duration_minutes - elapsed_minutes)
+
+            # BA-05: Persisted STOP_REQUESTED must retain stop intent; do not revert to EXECUTING!
+            if event.status == EventStatus.STOP_REQUESTED:
+                try:
+                    stop_res = await actuator.emergency_stop()
+                    if stop_res.success:
+                        event.transition(
+                            EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED,
+                            "Confirmed stopped on restart"
+                        )
+                        self._safety.release_quota(event.event_id)
+                    else:
+                        event.transition(EventStatus.STOP_REQUESTED, "Stop failed on restart")
+                        self._active_events[event.event_id] = event
+                        actuator.set_active_command(self._build_command(event))
+                        self._safety.track_event_start(
+                            event.event_id,
+                            event.device_id,
+                            event.target_duration_minutes,
+                            plot_id=event.plot_id,
+                            volume_mm=event.target_volume_mm,
+                            elapsed_minutes=elapsed_minutes,
+                        )
+                except Exception as exc:
+                    event.transition(EventStatus.STOP_REQUESTED, f"Stop query failed on restart: {exc}")
+                    self._active_events[event.event_id] = event
+                    actuator.set_active_command(self._build_command(event))
+                    self._safety.track_event_start(
+                        event.event_id,
+                        event.device_id,
+                        event.target_duration_minutes,
+                        plot_id=event.plot_id,
+                        volume_mm=event.target_volume_mm,
+                        elapsed_minutes=elapsed_minutes,
+                    )
+                reconciled.append(event)
+                continue
 
             try:
                 from irrigation_runtime.schemas import ActuatorStatus
@@ -550,6 +682,15 @@ class CommandDispatcher:
                         else:
                             event.transition(EventStatus.STOP_REQUESTED, "Duration expired on restart but stop failed")
                             self._active_events[event.event_id] = event
+                            actuator.set_active_command(self._build_command(event))
+                            self._safety.track_event_start(
+                                event.event_id,
+                                event.device_id,
+                                event.target_duration_minutes,
+                                plot_id=event.plot_id,
+                                volume_mm=event.target_volume_mm,
+                                elapsed_minutes=elapsed_minutes,
+                            )
                     else:
                         event.transition(EventStatus.EXECUTING, "Reconciled with active controller on process restart")
                         self._active_events[event.event_id] = event
@@ -566,12 +707,31 @@ class CommandDispatcher:
                     event.transition(EventStatus.COMPLETED, "Reconciled after process restart: actuator is stopped/idle")
                     self._safety.settle_quota(event.event_id, event.plot_id, event.target_volume_mm)
                 else:
-                    event.transition(EventStatus.FAILED, f"Reconciled after process restart: actuator in {status.value}")
-                    self._safety.release_quota(event.event_id)
+                    event.transition(EventStatus.STOP_REQUESTED, f"Reconciled after process restart: actuator in {status.value}")
+                    self._active_events[event.event_id] = event
+                    actuator.set_active_command(self._build_command(event))
+                    self._safety.track_event_start(
+                        event.event_id,
+                        event.device_id,
+                        event.target_duration_minutes,
+                        plot_id=event.plot_id,
+                        volume_mm=event.target_volume_mm,
+                        elapsed_minutes=elapsed_minutes,
+                    )
             except Exception as exc:
+                # BA-01 / BA-05: Query failure must retain ownership, active events, and reservations
                 logger.error("Failed to query actuator %s during restart reconciliation: %s", event.device_id, exc)
-                event.transition(EventStatus.FAILED, f"Failed to reconcile on restart: {exc}")
-                self._safety.release_quota(event.event_id)
+                event.transition(EventStatus.STOP_REQUESTED, f"Failed to reconcile on restart: {exc}")
+                self._active_events[event.event_id] = event
+                actuator.set_active_command(self._build_command(event))
+                self._safety.track_event_start(
+                    event.event_id,
+                    event.device_id,
+                    event.target_duration_minutes,
+                    plot_id=event.plot_id,
+                    volume_mm=event.target_volume_mm,
+                    elapsed_minutes=elapsed_minutes,
+                )
 
             reconciled.append(event)
         return reconciled

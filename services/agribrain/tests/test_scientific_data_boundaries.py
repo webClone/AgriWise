@@ -14,7 +14,7 @@ import numpy as np
 
 from layer0.observation_packet import DataStatus, ObservationPacket, ObservationSource
 from layer0.wrappers import _infer_data_status, aggregate_data_status, ensure_observation_packet
-from layer05_asmae.resilient_posterior import (
+from services.agribrain.layer05_asmae.resilient_posterior import (
     _is_proven_before_cutoff, _prior_state_estimates, _records_as_of,
     _strip_dynamic_recursive, _extract_signal, estimate_resilient_plot_posterior,
 )
@@ -24,8 +24,8 @@ from layer3_water.contracts.state_factory import WaterStateFactory
 from layer3_water.runner import WaterIntelligenceEngine
 from layer3_water.contracts.authority import WaterPhysicsAuthority
 from services.agribrain.scientific_contracts.exceptions import ContractViolation
-from scientific_contracts.numeric import finite_real
-from scientific_contracts.observation import ASMAEObservationPayload
+from services.agribrain.scientific_contracts.numeric import finite_real
+from services.agribrain.scientific_contracts.observation import ASMAEObservationPayload
 
 
 CUTOFF = datetime(2026, 1, 2, tzinfo=timezone.utc)

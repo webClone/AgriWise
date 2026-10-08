@@ -22,13 +22,18 @@ All violations are logged with full provenance for the L6 audit trail.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
+import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from numbers import Real
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from irrigation_runtime.schemas import (
@@ -62,59 +67,334 @@ logger = logging.getLogger(__name__)
 
 
 class SharedQuotaStore:
-    """Thread-safe / multi-instance shared quota reservation and settlement store.
+    """Thread-safe and cross-process atomic shared quota reservation and settlement store.
 
-    Ensures that independent SafetyMonitor and CommandDispatcher instances share
-    active reservations and cumulative settled deliveries per plot scope.
+    Backed by an atomic state file and cross-process file lock so that independent
+    SafetyMonitor and CommandDispatcher instances across processes and threads share
+    active reservations, unsettled delivery, and cumulative settled deliveries per plot scope.
     """
-    _lock = threading.Lock()
-    _reservations: Dict[str, Dict[str, Any]] = {}
-    _settled_deliveries: Dict[str, float] = {}
+    _thread_lock = threading.RLock()
+
+    @classmethod
+    def _store_dir(cls) -> Path:
+        env_dir = os.environ.get("AGRIBRAIN_QUOTA_DIR")
+        if env_dir:
+            p = Path(env_dir)
+        else:
+            p = Path(tempfile.gettempdir()) / "agribrain_runtime" / "quota"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @classmethod
+    def _store_file(cls) -> Path:
+        return cls._store_dir() / "quota_store.json"
+
+    @classmethod
+    @contextmanager
+    def _lock(cls):
+        with cls._thread_lock:
+            lock_path = cls._store_dir() / "quota.lock"
+            descriptor = None
+            for _ in range(500):
+                try:
+                    descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    break
+                except FileExistsError:
+                    try:
+                        if time.time() - lock_path.stat().st_mtime > 30.0:
+                            lock_path.unlink(missing_ok=True)
+                            continue
+                    except OSError:
+                        pass
+                    time.sleep(0.005)
+            if descriptor is None:
+                raise TimeoutError("Timeout acquiring cross-process quota lock")
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(str(os.getpid()))
+                yield
+            finally:
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @classmethod
+    def _read_state(cls) -> Dict[str, Any]:
+        p = cls._store_file()
+        if not p.exists():
+            return {
+                "reservations": {},
+                "settled_receipts": {},
+                "settled_daily": {},
+                "settled_season": {},
+                "settled_plot_total": {},
+            }
+        try:
+            content = p.read_text(encoding="utf-8")
+            if not content.strip():
+                return {
+                    "reservations": {},
+                    "settled_receipts": {},
+                    "settled_daily": {},
+                    "settled_season": {},
+                    "settled_plot_total": {},
+                }
+            data = json.loads(content)
+            if not isinstance(data, dict):
+                return {
+                    "reservations": {},
+                    "settled_receipts": {},
+                    "settled_daily": {},
+                    "settled_season": {},
+                    "settled_plot_total": {},
+                }
+            return data
+        except Exception:
+            return {
+                "reservations": {},
+                "settled_receipts": {},
+                "settled_daily": {},
+                "settled_season": {},
+                "settled_plot_total": {},
+            }
+
+    @classmethod
+    def _write_state(cls, state: Dict[str, Any]) -> None:
+        p = cls._store_file()
+        tmp = p.with_suffix(f".{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8") as handle:
+                json.dump(state, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, p)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     @classmethod
     def reset(cls) -> None:
-        with cls._lock:
-            cls._reservations.clear()
-            cls._settled_deliveries.clear()
+        with cls._lock():
+            state = {
+                "reservations": {},
+                "settled_receipts": {},
+                "settled_daily": {},
+                "settled_season": {},
+                "settled_plot_total": {},
+            }
+            cls._write_state(state)
+
+    @classmethod
+    def atomic_check_and_reserve(
+        cls,
+        plot_id: str,
+        requested_volume_mm: float,
+        budget: WaterBudget,
+        event_id: str,
+    ) -> Optional[SafetyViolation]:
+        """Atomically validate budget and reserve quota under a cross-process lock."""
+        req_vol = finite_real(requested_volume_mm)
+        if req_vol is None or req_vol < 0:
+            return SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id="INT-QUOTA",
+                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                device_id="",
+                zone_id="",
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=float(requested_volume_mm) if isinstance(requested_volume_mm, (int, float)) and not math.isnan(requested_volume_mm) else 0.0,
+                threshold_breached="max",
+                threshold_value=0.0,
+                action_taken="BLOCK",
+                notes=f"Invalid requested volume {requested_volume_mm}: must be a non-negative finite real number",
+            )
+
+        s_rem = finite_real(budget.season_remaining_mm)
+        d_rem = finite_real(budget.daily_remaining_mm)
+        if s_rem is None or d_rem is None:
+            return SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id="INT-QUOTA",
+                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                device_id="",
+                zone_id="",
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=req_vol,
+                threshold_breached="max",
+                threshold_value=0.0,
+                action_taken="BLOCK",
+                notes=f"Non-finite budget limits: season_remaining={budget.season_remaining_mm}, daily_remaining={budget.daily_remaining_mm}",
+            )
+
+        with cls._lock():
+            state = cls._read_state()
+            reservations = state.get("reservations", {})
+
+            already_reserved = 0.0
+            for eid, res in reservations.items():
+                if eid != event_id and res.get("plot_id") == plot_id:
+                    already_reserved += float(res.get("volume_mm", 0.0))
+
+            today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            season_key = str(getattr(budget, "season", "default_season"))
+            settled_today = float(state.get("settled_daily", {}).get(f"{plot_id}:{today_key}", 0.0))
+            settled_season = float(state.get("settled_season", {}).get(f"{plot_id}:{season_key}", 0.0))
+
+            daily_consumed = finite_real(budget.daily_consumed_mm) or 0.0
+            season_consumed = finite_real(budget.season_consumed_mm) or 0.0
+
+            untracked_daily = max(0.0, settled_today - daily_consumed)
+            untracked_season = max(0.0, settled_season - season_consumed)
+
+            eff_season = s_rem - already_reserved - untracked_season
+            eff_daily = d_rem - already_reserved - untracked_daily
+
+            if req_vol > eff_season:
+                reason = (
+                    f"Season quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
+                    f"remaining unreserved {eff_season:.1f}mm "
+                    f"({already_reserved:.1f}mm reserved, {untracked_season:.1f}mm untracked settled)"
+                )
+                return SafetyViolation(
+                    violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                    interlock_id="INT-QUOTA",
+                    interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                    device_id="",
+                    zone_id="",
+                    detected_at=datetime.now(timezone.utc).isoformat(),
+                    sensor_value=req_vol,
+                    threshold_breached="max",
+                    threshold_value=eff_season,
+                    action_taken="BLOCK",
+                    notes=reason,
+                )
+
+            if req_vol > eff_daily:
+                reason = (
+                    f"Daily quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
+                    f"remaining unreserved {eff_daily:.1f}mm "
+                    f"({already_reserved:.1f}mm reserved, {untracked_daily:.1f}mm untracked settled)"
+                )
+                return SafetyViolation(
+                    violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                    interlock_id="INT-QUOTA",
+                    interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                    device_id="",
+                    zone_id="",
+                    detected_at=datetime.now(timezone.utc).isoformat(),
+                    sensor_value=req_vol,
+                    threshold_breached="max",
+                    threshold_value=eff_daily,
+                    action_taken="BLOCK",
+                    notes=reason,
+                )
+
+            # Admitted! Reserve atomically.
+            if req_vol > 0:
+                reservations[event_id] = {
+                    "plot_id": plot_id,
+                    "volume_mm": req_vol,
+                    "status": "RESERVED",
+                    "date": today_key,
+                    "season": season_key,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                state["reservations"] = reservations
+                cls._write_state(state)
+            return None
 
     @classmethod
     def reserve(cls, event_id: str, plot_id: str, volume_mm: float) -> None:
         val = finite_real(volume_mm)
         if val is None or val <= 0:
             return
-        with cls._lock:
-            cls._reservations[event_id] = {
+        with cls._lock():
+            state = cls._read_state()
+            today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            state.setdefault("reservations", {})[event_id] = {
                 "plot_id": plot_id,
                 "volume_mm": val,
+                "status": "RESERVED",
+                "date": today_key,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
+            cls._write_state(state)
+
+    @classmethod
+    def mark_unsettled(cls, event_id: str) -> None:
+        """Mark an active reservation as pending validation/settlement without releasing quota."""
+        with cls._lock():
+            state = cls._read_state()
+            reservations = state.get("reservations", {})
+            if event_id in reservations:
+                reservations[event_id]["status"] = "UNSETTLED"
+                cls._write_state(state)
 
     @classmethod
     def release(cls, event_id: str) -> None:
-        with cls._lock:
-            cls._reservations.pop(event_id, None)
+        with cls._lock():
+            state = cls._read_state()
+            reservations = state.get("reservations", {})
+            if event_id in reservations:
+                reservations.pop(event_id, None)
+                cls._write_state(state)
 
     @classmethod
-    def settle(cls, event_id: str, plot_id: str, volume_mm: float) -> None:
-        with cls._lock:
-            cls._reservations.pop(event_id, None)
+    def settle(cls, event_id: str, plot_id: str, volume_mm: float, date: Optional[str] = None, season: Optional[str] = None) -> None:
+        with cls._lock():
+            state = cls._read_state()
+            state.setdefault("reservations", {}).pop(event_id, None)
+            settled_receipts = state.setdefault("settled_receipts", {})
+            if event_id in settled_receipts:
+                cls._write_state(state)
+                return  # Idempotent!
+
             val = finite_real(volume_mm)
             if val is not None and val > 0:
-                cls._settled_deliveries[plot_id] = cls._settled_deliveries.get(plot_id, 0.0) + val
+                date_key = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                season_key = season or "default_season"
+                settled_receipts[event_id] = {
+                    "plot_id": plot_id,
+                    "volume_mm": val,
+                    "date": date_key,
+                    "season": season_key,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                pk_daily = f"{plot_id}:{date_key}"
+                pk_season = f"{plot_id}:{season_key}"
+                state.setdefault("settled_daily", {})[pk_daily] = float(state.get("settled_daily", {}).get(pk_daily, 0.0)) + val
+                state.setdefault("settled_season", {})[pk_season] = float(state.get("settled_season", {}).get(pk_season, 0.0)) + val
+                state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + val
+
+            cls._write_state(state)
 
     @classmethod
     def get_reserved(cls, plot_id: str, exclude_event_id: Optional[str] = None) -> float:
-        with cls._lock:
+        with cls._lock():
+            state = cls._read_state()
             total = 0.0
-            for eid, res in cls._reservations.items():
+            for eid, res in state.get("reservations", {}).items():
                 if eid != exclude_event_id and res.get("plot_id") == plot_id:
-                    total += res.get("volume_mm", 0.0)
+                    total += float(res.get("volume_mm", 0.0))
             return total
 
     @classmethod
     def get_settled(cls, plot_id: str) -> float:
-        with cls._lock:
-            return cls._settled_deliveries.get(plot_id, 0.0)
+        with cls._lock():
+            state = cls._read_state()
+            return float(state.get("settled_plot_total", {}).get(plot_id, 0.0))
+
+    @classmethod
+    def is_settled(cls, event_id: str, plot_id: Optional[str] = None) -> bool:
+        with cls._lock():
+            state = cls._read_state()
+            return event_id in state.get("settled_receipts", {})
+
+    @classmethod
+    def is_active(cls, event_id: str, plot_id: Optional[str] = None) -> bool:
+        with cls._lock():
+            state = cls._read_state()
+            return event_id in state.get("reservations", {})
 
 
 # ============================================================================
@@ -272,9 +552,9 @@ class SafetyMonitor:
                      event_id, max_duration_minutes, elapsed_minutes, volume_mm)
 
     def track_event_end(self, event_id: str) -> None:
-        """Remove an event from duration tracking and release any reservation."""
+        """Remove an event from duration watchdog while preserving unsettled quota."""
         self._active_events.pop(event_id, None)
-        self.release_quota(event_id)
+        SharedQuotaStore.mark_unsettled(event_id)
 
     def reserve_quota(self, event_id: str, plot_id: str, volume_mm: float) -> None:
         """Explicitly record a quota reservation in the shared store."""
@@ -552,16 +832,47 @@ class SafetyMonitor:
         """Check if an irrigation request would exceed water quota.
 
         Accounts for baseline budget limits as well as active concurrent reservations.
-
-        Args:
-            budget: Current water budget for the plot
-            requested_volume_mm: Volume requested in mm
-            event_id: Optional event ID being evaluated
-
-        Returns:
-            SafetyViolation if quota would be exceeded, None otherwise
         """
-        can_irrigate, reason = budget.can_irrigate(requested_volume_mm)
+        req_vol = finite_real(requested_volume_mm)
+        if req_vol is None or req_vol < 0:
+            reason = f"Invalid requested volume {requested_volume_mm}: must be a non-negative finite real number"
+            violation = SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id="INT-QUOTA",
+                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                device_id="",
+                zone_id="",
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=0.0,
+                threshold_breached="max",
+                threshold_value=0.0,
+                action_taken="BLOCK",
+                notes=reason,
+            )
+            self._violation_history.append(violation)
+            return violation
+
+        s_rem = finite_real(budget.season_remaining_mm)
+        d_rem = finite_real(budget.daily_remaining_mm)
+        if s_rem is None or d_rem is None:
+            reason = f"Non-finite budget limits: season_remaining={budget.season_remaining_mm}, daily_remaining={budget.daily_remaining_mm}"
+            violation = SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id="INT-QUOTA",
+                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                device_id="",
+                zone_id="",
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=req_vol,
+                threshold_breached="max",
+                threshold_value=0.0,
+                action_taken="BLOCK",
+                notes=reason,
+            )
+            self._violation_history.append(violation)
+            return violation
+
+        can_irrigate, reason = budget.can_irrigate(req_vol)
         if not can_irrigate:
             violation = SafetyViolation(
                 violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
@@ -570,9 +881,9 @@ class SafetyMonitor:
                 device_id="",
                 zone_id="",
                 detected_at=datetime.now(timezone.utc).isoformat(),
-                sensor_value=requested_volume_mm,
+                sensor_value=req_vol,
                 threshold_breached="max",
-                threshold_value=budget.season_remaining_mm,
+                threshold_value=budget.season_remaining_mm if s_rem is not None else 0.0,
                 action_taken="BLOCK",
                 notes=reason,
             )
@@ -580,19 +891,30 @@ class SafetyMonitor:
             self._violation_history.append(violation)
             return violation
 
-        # Account for concurrent uncommitted reservations and cumulative settled deliveries on the same plot
+        # Account for concurrent uncommitted reservations and period-specific settled deliveries
         already_reserved = self.get_reserved_quota(budget.plot_id, exclude_event_id=event_id)
-        settled_on_plot = SharedQuotaStore.get_settled(budget.plot_id)
-        untracked_settled = max(0.0, settled_on_plot - budget.daily_consumed_mm)
+        today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        season_key = str(getattr(budget, "season", "default_season"))
 
-        effective_season_remaining = budget.season_remaining_mm - already_reserved - untracked_settled
-        effective_daily_remaining = budget.daily_remaining_mm - already_reserved - untracked_settled
+        with SharedQuotaStore._lock():
+            state = SharedQuotaStore._read_state()
+            settled_today = float(state.get("settled_daily", {}).get(f"{budget.plot_id}:{today_key}", 0.0))
+            settled_season = float(state.get("settled_season", {}).get(f"{budget.plot_id}:{season_key}", 0.0))
 
-        if requested_volume_mm > effective_season_remaining:
+        daily_consumed = finite_real(budget.daily_consumed_mm) or 0.0
+        season_consumed = finite_real(budget.season_consumed_mm) or 0.0
+
+        untracked_daily = max(0.0, settled_today - daily_consumed)
+        untracked_season = max(0.0, settled_season - season_consumed)
+
+        effective_season_remaining = s_rem - already_reserved - untracked_season
+        effective_daily_remaining = d_rem - already_reserved - untracked_daily
+
+        if req_vol > effective_season_remaining:
             reason = (
-                f"Season quota exceeded by concurrent reservations: need {requested_volume_mm:.1f}mm, "
+                f"Season quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
                 f"remaining unreserved {effective_season_remaining:.1f}mm "
-                f"({already_reserved:.1f}mm reserved, {untracked_settled:.1f}mm untracked settled)"
+                f"({already_reserved:.1f}mm reserved, {untracked_season:.1f}mm untracked settled)"
             )
             violation = SafetyViolation(
                 violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
@@ -601,7 +923,7 @@ class SafetyMonitor:
                 device_id="",
                 zone_id="",
                 detected_at=datetime.now(timezone.utc).isoformat(),
-                sensor_value=requested_volume_mm,
+                sensor_value=req_vol,
                 threshold_breached="max",
                 threshold_value=effective_season_remaining,
                 action_taken="BLOCK",
@@ -611,11 +933,11 @@ class SafetyMonitor:
             self._violation_history.append(violation)
             return violation
 
-        if requested_volume_mm > effective_daily_remaining:
+        if req_vol > effective_daily_remaining:
             reason = (
-                f"Daily quota exceeded by concurrent reservations: need {requested_volume_mm:.1f}mm, "
+                f"Daily quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
                 f"remaining unreserved {effective_daily_remaining:.1f}mm "
-                f"({already_reserved:.1f}mm reserved, {untracked_settled:.1f}mm untracked settled)"
+                f"({already_reserved:.1f}mm reserved, {untracked_daily:.1f}mm untracked settled)"
             )
             violation = SafetyViolation(
                 violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
@@ -624,7 +946,7 @@ class SafetyMonitor:
                 device_id="",
                 zone_id="",
                 detected_at=datetime.now(timezone.utc).isoformat(),
-                sensor_value=requested_volume_mm,
+                sensor_value=req_vol,
                 threshold_breached="max",
                 threshold_value=effective_daily_remaining,
                 action_taken="BLOCK",

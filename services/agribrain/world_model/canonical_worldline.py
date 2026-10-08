@@ -235,7 +235,16 @@ class CanonicalWorldlineService:
         return self._plot_dir(plot_id, tenant_id, namespace) / "hydraulic_head.json"
 
     def _hydraulic_checkpoint_path(self, plot_id: str, checkpoint_id: str, tenant_id: str = "default_tenant", namespace: str = "default") -> Path:
-        return self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints" / f"{checkpoint_id}.json"
+        clean_id = str(checkpoint_id).strip()
+        if not clean_id or ".." in clean_id or "/" in clean_id or "\\" in clean_id:
+            raise ValueError(f"Invalid checkpoint_id {checkpoint_id}: path traversal characters not permitted")
+        checkpoints_dir = (self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints").resolve()
+        target_path = (checkpoints_dir / f"{clean_id}.json").resolve()
+        try:
+            target_path.relative_to(checkpoints_dir)
+        except ValueError:
+            raise ValueError(f"Checkpoint ID {checkpoint_id} escapes checkpoints directory")
+        return target_path
 
     def load_latest_hydraulic_checkpoint(
         self,
@@ -263,10 +272,29 @@ class CanonicalWorldlineService:
         expected_predecessor_head: Any = CAS_UNSET,
     ) -> Dict[str, Any]:
         """Commit a scoped hydraulic checkpoint with compare-and-swap on predecessor head."""
+        # R08 + R17: Checkpoint path containment validation
+        cp_path = self._hydraulic_checkpoint_path(plot_id, checkpoint_id, tenant_id, namespace)
+
         with self._head_lock(plot_id, tenant_id, namespace):
             head_path = self._hydraulic_head_path(plot_id, tenant_id, namespace)
             current_head = self._read(head_path)
             current_head_id = current_head.get("head_hash") or current_head.get("latest_checkpoint_id")
+
+            # R08: Immutability and identical retry receipt
+            if cp_path.exists():
+                existing = self._read(cp_path)
+                if existing and existing.get("payload") == _public(checkpoint_payload):
+                    # Identical retry: return existing record without advancing sequence or head
+                    return existing
+                raise ConcurrencyConflictError(
+                    f"Checkpoint {checkpoint_id} already exists with differing payload; checkpoints are immutable"
+                )
+
+            # R08: Self-parent loop prevention
+            if checkpoint_id == current_head_id:
+                raise ValueError(f"Self-parent loop rejected: checkpoint {checkpoint_id} cannot have itself as predecessor head")
+            if expected_predecessor_head is not CAS_UNSET and checkpoint_id == expected_predecessor_head:
+                raise ValueError(f"Self-parent loop rejected: checkpoint {checkpoint_id} cannot have itself as predecessor head")
 
             if expected_predecessor_head is not CAS_UNSET and current_head_id != expected_predecessor_head:
                 raise ConcurrencyConflictError(
@@ -287,7 +315,6 @@ class CanonicalWorldlineService:
                 "payload": _public(checkpoint_payload),
             }
 
-            cp_path = self._hydraulic_checkpoint_path(plot_id, checkpoint_id, tenant_id, namespace)
             self._atomic(cp_path, record)
 
             new_head = {

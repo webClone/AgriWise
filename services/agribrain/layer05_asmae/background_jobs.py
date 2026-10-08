@@ -179,7 +179,7 @@ class BoundedJobExecutor:
                 payload = _read_json(job_path)
                 if not payload:
                     continue
-                if payload.get("status") == "queued" and not payload.get("superseded") and payload.get("manifest_hash"):
+                if payload.get("status") == "queued" and not payload.get("superseded"):
                     queued.append((_job_created_at(payload), job_path))
             except Exception:
                 pass

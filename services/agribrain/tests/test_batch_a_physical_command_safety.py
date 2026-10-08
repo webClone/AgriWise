@@ -571,7 +571,9 @@ class TestBatchAPhysicalCommandSafety(unittest.IsolatedAsyncioTestCase):
         )
 
         res = await dispatcher.submit_event(event)
-        self.assertEqual(res.status, EventStatus.FAILED)
+        # BA-01: Retains STOP_REQUESTED ownership and tracking under uncertain outcome
+        self.assertEqual(res.status, EventStatus.STOP_REQUESTED)
+        self.assertIn("EVT-NO-RECON-01", dispatcher._active_events)
         # R02: Because the driver could not confirm whether the dose occurred, it did NOT send a second dose!
         self.assertEqual(actuator.sent_count, 1)
 

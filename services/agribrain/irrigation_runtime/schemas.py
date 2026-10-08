@@ -404,6 +404,29 @@ class IrrigationEvent:
             return self.status_log[-1].get("reason", "")
         return ""
 
+    def validate(self) -> List[str]:
+        """Validate raw event scalar parameters before building commands."""
+        errors = []
+        vol = finite_real(self.target_volume_mm)
+        if vol is None:
+            errors.append(f"Target volume {self.target_volume_mm} must be a finite real number")
+        elif vol < 0:
+            errors.append(f"Target volume {self.target_volume_mm} cannot be negative")
+
+        dur = finite_real(self.target_duration_minutes)
+        if dur is None:
+            errors.append(f"Target duration {self.target_duration_minutes} must be a finite real number")
+        elif dur < 0:
+            errors.append(f"Target duration {self.target_duration_minutes} cannot be negative")
+
+        flow = finite_real(self.target_flow_rate_lpm)
+        if flow is None:
+            errors.append(f"Target flow rate {self.target_flow_rate_lpm} must be a finite real number")
+        elif flow < 0:
+            errors.append(f"Target flow rate {self.target_flow_rate_lpm} cannot be negative")
+
+        return errors
+
     def content_hash(self) -> str:
         """Deterministic hash for audit reproducibility."""
         payload = {
@@ -641,11 +664,33 @@ class WaterBudget:
 
     def can_irrigate(self, volume_mm: float) -> Tuple[bool, str]:
         """Check if a given volume can be allocated."""
-        if volume_mm > self.season_remaining_mm:
-            return False, f"Season quota exceeded: need {volume_mm:.1f}mm, remaining {self.season_remaining_mm:.1f}mm"
-        if volume_mm > self.daily_remaining_mm:
-            return False, f"Daily quota exceeded: need {volume_mm:.1f}mm, remaining {self.daily_remaining_mm:.1f}mm"
+        vol = finite_real(volume_mm)
+        if vol is None or vol < 0:
+            return False, f"Invalid requested volume {volume_mm}: must be a non-negative finite real number"
+        s_rem = finite_real(self.season_remaining_mm)
+        d_rem = finite_real(self.daily_remaining_mm)
+        if s_rem is None:
+            return False, f"Invalid season_remaining_mm {self.season_remaining_mm}: must be a finite real number"
+        if d_rem is None:
+            return False, f"Invalid daily_remaining_mm {self.daily_remaining_mm}: must be a finite real number"
+        if vol > s_rem:
+            return False, f"Season quota exceeded: need {vol:.1f}mm, remaining {s_rem:.1f}mm"
+        if vol > d_rem:
+            return False, f"Daily quota exceeded: need {vol:.1f}mm, remaining {d_rem:.1f}mm"
         return True, "OK"
+
+    def validate(self) -> List[str]:
+        """Validate that all budget parameters are finite real numbers."""
+        errors = []
+        for field_name in ("season_quota_mm", "season_consumed_mm", "season_remaining_mm",
+                           "daily_quota_mm", "daily_consumed_mm", "daily_remaining_mm"):
+            val = getattr(self, field_name, None)
+            v = finite_real(val)
+            if v is None:
+                errors.append(f"WaterBudget {field_name} must be a finite real number, got {val}")
+            elif v < 0:
+                errors.append(f"WaterBudget {field_name} cannot be negative, got {val}")
+        return errors
 
     def debit(self, volume_mm: float) -> None:
         """Debit delivered volume from remaining quotas."""

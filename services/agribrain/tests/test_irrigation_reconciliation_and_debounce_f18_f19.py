@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 from irrigation_runtime.actuator import IrrigationActuator
 from irrigation_runtime.dispatcher import CommandDispatcher
 from irrigation_runtime.registry import ActuatorRegistry
-from irrigation_runtime.safety import SafetyMonitor
+from irrigation_runtime.safety import SafetyMonitor, SharedQuotaStore
 from irrigation_runtime.schemas import (
     ActuatorCapabilities,
     ActuatorRegistration,
@@ -141,6 +141,12 @@ class MockRegistry:
 class TestIrrigationF18Reconciliation(unittest.IsolatedAsyncioTestCase):
     """Test suite for F18: Command retry reconciliation & controller state queries."""
 
+    def setUp(self):
+        SharedQuotaStore.reset()
+
+    def tearDown(self):
+        SharedQuotaStore.reset()
+
     async def test_ack_timeout_reconciled_when_controller_is_executing_no_duplicate_dose(self):
         """When ACK times out but controller confirms EXECUTING, command is reconciled as success without duplicate send."""
         actuator = MockReconciliationActuator("VALVE-F18-01")
@@ -259,6 +265,12 @@ class TestIrrigationF18Reconciliation(unittest.IsolatedAsyncioTestCase):
 
 class TestIrrigationF19DebounceAndStableKeys(unittest.TestCase):
     """Test suite for F19: Debounce, monotonic timing, stable violation keys, and reset rules."""
+
+    def setUp(self):
+        SharedQuotaStore.reset()
+
+    def tearDown(self):
+        SharedQuotaStore.reset()
 
     def test_configured_debounce_is_honored_with_fake_clock(self):
         """Pressure spike emits violation ONLY after configured duration_seconds (5s) has elapsed."""

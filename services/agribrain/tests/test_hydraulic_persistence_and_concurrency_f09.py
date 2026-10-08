@@ -273,3 +273,179 @@ def test_f09_withdrawn_and_cancelled_events_survive_restart():
     assert state_after is not None
     # Still 0.0, because cancelled status was checkpointed
     assert state_after.fluxes.actual.irrigation_mm == 0.0
+
+
+def test_r08_r17_checkpoint_path_containment():
+    """R17: Checkpoint ID path traversal is rejected and contained within checkpoints directory."""
+    svc = CanonicalWorldlineService()
+    tenant = "test_f09_containment"
+    plot_id = "P_CONTAIN_01"
+
+    with pytest.raises(ValueError, match="traversal"):
+        svc.save_hydraulic_checkpoint(
+            plot_id=plot_id,
+            checkpoint_id="../../escaped_checkpoint",
+            checkpoint_payload={"data": 1},
+            tenant_id=tenant,
+        )
+
+    with pytest.raises(ValueError, match="traversal"):
+        svc.save_hydraulic_checkpoint(
+            plot_id=plot_id,
+            checkpoint_id="sub/nested/cp",
+            checkpoint_payload={"data": 1},
+            tenant_id=tenant,
+        )
+
+
+def test_r08_checkpoint_immutability_and_identical_retry():
+    """R08: Checkpoint is immutable; identical retry succeeds idempotently, differing payload raises conflict."""
+    svc = CanonicalWorldlineService()
+    tenant = "test_f09_immutability"
+    plot_id = "P_IMMUTABLE_01"
+
+    rec1 = svc.save_hydraulic_checkpoint(
+        plot_id=plot_id,
+        checkpoint_id="cp_imm_01",
+        checkpoint_payload={"value": 100, "status": "committed"},
+        tenant_id=tenant,
+    )
+    assert rec1["checkpoint_id"] == "cp_imm_01"
+
+    # Identical retry: returns existing record idempotently
+    rec2 = svc.save_hydraulic_checkpoint(
+        plot_id=plot_id,
+        checkpoint_id="cp_imm_01",
+        checkpoint_payload={"value": 100, "status": "committed"},
+        tenant_id=tenant,
+    )
+    assert rec2["sequence"] == rec1["sequence"]
+
+    # Differing payload under same checkpoint ID: rejected
+    with pytest.raises(ConcurrencyConflictError, match="immutable"):
+        svc.save_hydraulic_checkpoint(
+            plot_id=plot_id,
+            checkpoint_id="cp_imm_01",
+            checkpoint_payload={"value": 999, "status": "conflict"},
+            tenant_id=tenant,
+        )
+
+
+def test_r08_self_parent_loop_rejection():
+    """R08: Checkpoint cannot reference itself as predecessor head."""
+    svc = CanonicalWorldlineService()
+    tenant = "test_f09_self_parent"
+    plot_id = "P_SELF_PARENT_01"
+
+    with pytest.raises(ValueError, match="Self-parent"):
+        svc.save_hydraulic_checkpoint(
+            plot_id=plot_id,
+            checkpoint_id="cp_loop_01",
+            checkpoint_payload={"value": 1},
+            tenant_id=tenant,
+            expected_predecessor_head="cp_loop_01",
+        )
+
+
+def test_r07_transition_identity_exact_repeat():
+    """R07: Identical transition request returns committed result without advancing head or re-solving."""
+    plot_id = "P_F09_R07_IDENTITY"
+    tenant = "test_f09_r07"
+    ns = "default"
+    w1 = _make_weather("2026-06-01", et0=4.5, precip=0.0)
+
+    ts_d1 = datetime.datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    inp1 = DummyInput(
+        plot_id=plot_id,
+        tenant_id=tenant,
+        namespace=ns,
+        weather_daily={"2026-06-01": w1},
+        operational_context={"tenant_id": tenant, "namespace": ns},
+    )
+
+    state1, fb1 = _execute_canonical_water_engine(inp1, None, None, ts_d1)
+    assert state1 is not None
+
+    svc = CanonicalWorldlineService()
+    head1 = svc.load_latest_hydraulic_checkpoint(plot_id, tenant_id=tenant, namespace=ns)
+    seq1 = head1["sequence"]
+
+    # Repeat exact same request
+    state2, fb2 = _execute_canonical_water_engine(inp1, None, None, ts_d1)
+    assert state2 is not None
+
+    head2 = svc.load_latest_hydraulic_checkpoint(plot_id, tenant_id=tenant, namespace=ns)
+    # Head and sequence must NOT advance on identical transition repeat
+    assert head2["sequence"] == seq1
+    assert head2["checkpoint_id"] == head1["checkpoint_id"]
+
+
+def test_r10_r11_cas_failure_leaves_ram_cache_untouched():
+    """R10 + R11: When CAS fails, candidate state is not published to authoritative RAM cache."""
+    plot_id = "P_F09_CAS_ISOLATION"
+    tenant = "test_f09_cas_iso"
+    ns = "default"
+    w1 = _make_weather("2026-06-01", et0=4.0)
+
+    # Pre-commit an external conflicting head in the durable store
+    svc = CanonicalWorldlineService()
+    svc.save_hydraulic_checkpoint(
+        plot_id=plot_id,
+        checkpoint_id="cp_external_winner",
+        checkpoint_payload={"state": "external"},
+        tenant_id=tenant,
+        namespace=ns,
+    )
+
+    # Attempt to solve Day 1 with expected head None
+    ts_d1 = datetime.datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    inp = DummyInput(
+        plot_id=plot_id,
+        tenant_id=tenant,
+        namespace=ns,
+        weather_daily={"2026-06-01": w1},
+        operational_context={"tenant_id": tenant, "namespace": ns},
+    )
+
+    import unittest.mock
+    with unittest.mock.patch.object(CanonicalWorldlineService, "save_hydraulic_checkpoint", side_effect=ConcurrencyConflictError("Predecessor conflict")):
+        with pytest.raises(ConcurrencyConflictError):
+            _execute_canonical_water_engine(inp, None, None, ts_d1)
+
+    # Verify candidate state was NOT committed into RAM cache
+    from services.agribrain.layer3_decision.runner import _PLOT_WATER_STATE_HISTORY
+    assert "2026-06-01" not in _PLOT_WATER_STATE_HISTORY.get(f"{tenant}:{ns}:{plot_id}", {})
+
+
+def test_r12_withdrawal_date_string_serialization():
+    """R12: Withdrawn soil and veg dates handle string formats without AttributeError."""
+    plot_id = "P_F09_R12_WITHDRAWAL"
+    tenant = "test_f09_r12"
+    ns = "default"
+    w1 = _make_weather("2026-06-01", et0=4.0)
+
+    withdrawn_soil_item = {
+        "date": "2026-06-01",
+        "status": "withdrawn",
+        "layer_theta": [0.20, 0.25],
+    }
+
+    ts_d1 = datetime.datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    inp = DummyInput(
+        plot_id=plot_id,
+        tenant_id=tenant,
+        namespace=ns,
+        weather_daily={"2026-06-01": w1},
+        soil_observations_daily=[withdrawn_soil_item],
+        operational_context={"tenant_id": tenant, "namespace": ns},
+    )
+
+    # Must complete without AttributeError: 'str' object has no attribute 'isoformat'
+    state, fb = _execute_canonical_water_engine(inp, None, None, ts_d1)
+    assert state is not None
+
+    svc = CanonicalWorldlineService()
+    cp = svc.load_latest_hydraulic_checkpoint(plot_id, tenant_id=tenant, namespace=ns)
+    assert cp is not None
+    assert "2026-06-01" in cp["payload"]["withdrawn_soil_dates"]
+
