@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -42,7 +43,78 @@ from irrigation_runtime.schemas import (
     WaterBudget,
 )
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    try:
+        from services.agribrain.scientific_contracts.numeric import finite_real
+    except ImportError:
+        def finite_real(val: Any) -> Optional[float]:
+            if isinstance(val, bool) or not isinstance(val, Real):
+                return None
+            try:
+                res = float(val)
+                return res if math.isfinite(res) else None
+            except Exception:
+                return None
+
 logger = logging.getLogger(__name__)
+
+
+class SharedQuotaStore:
+    """Thread-safe / multi-instance shared quota reservation and settlement store.
+
+    Ensures that independent SafetyMonitor and CommandDispatcher instances share
+    active reservations and cumulative settled deliveries per plot scope.
+    """
+    _lock = threading.Lock()
+    _reservations: Dict[str, Dict[str, Any]] = {}
+    _settled_deliveries: Dict[str, float] = {}
+
+    @classmethod
+    def reset(cls) -> None:
+        with cls._lock:
+            cls._reservations.clear()
+            cls._settled_deliveries.clear()
+
+    @classmethod
+    def reserve(cls, event_id: str, plot_id: str, volume_mm: float) -> None:
+        val = finite_real(volume_mm)
+        if val is None or val <= 0:
+            return
+        with cls._lock:
+            cls._reservations[event_id] = {
+                "plot_id": plot_id,
+                "volume_mm": val,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+    @classmethod
+    def release(cls, event_id: str) -> None:
+        with cls._lock:
+            cls._reservations.pop(event_id, None)
+
+    @classmethod
+    def settle(cls, event_id: str, plot_id: str, volume_mm: float) -> None:
+        with cls._lock:
+            cls._reservations.pop(event_id, None)
+            val = finite_real(volume_mm)
+            if val is not None and val > 0:
+                cls._settled_deliveries[plot_id] = cls._settled_deliveries.get(plot_id, 0.0) + val
+
+    @classmethod
+    def get_reserved(cls, plot_id: str, exclude_event_id: Optional[str] = None) -> float:
+        with cls._lock:
+            total = 0.0
+            for eid, res in cls._reservations.items():
+                if eid != exclude_event_id and res.get("plot_id") == plot_id:
+                    total += res.get("volume_mm", 0.0)
+            return total
+
+    @classmethod
+    def get_settled(cls, plot_id: str) -> float:
+        with cls._lock:
+            return cls._settled_deliveries.get(plot_id, 0.0)
 
 
 # ============================================================================
@@ -181,32 +253,32 @@ class SafetyMonitor:
         max_duration_minutes: float,
         plot_id: str = "",
         volume_mm: float = 0.0,
+        elapsed_minutes: float = 0.0,
     ) -> None:
         """Register an active irrigation event for duration monitoring and quota reservation."""
         now_dt = datetime.now(timezone.utc)
+        start_mono = self._clock() - (max(0.0, elapsed_minutes) * 60.0)
         self._active_events[event_id] = {
             "start_time": now_dt,
-            "start_monotonic": self._clock(),
+            "start_monotonic": start_mono,
             "max_duration_minutes": max_duration_minutes,
             "device_id": device_id,
             "plot_id": plot_id,
             "volume_mm": volume_mm,
         }
         if plot_id and volume_mm > 0:
-            self._reserved_quota[event_id] = {
-                "plot_id": plot_id,
-                "volume_mm": volume_mm,
-            }
-        logger.debug("Tracking event %s (max %.0f min, reserved %.1f mm)",
-                     event_id, max_duration_minutes, volume_mm)
+            self.reserve_quota(event_id, plot_id, volume_mm)
+        logger.debug("Tracking event %s (max %.0f min, elapsed %.1f min, reserved %.1f mm)",
+                     event_id, max_duration_minutes, elapsed_minutes, volume_mm)
 
     def track_event_end(self, event_id: str) -> None:
         """Remove an event from duration tracking and release any reservation."""
         self._active_events.pop(event_id, None)
-        self._reserved_quota.pop(event_id, None)
+        self.release_quota(event_id)
 
     def reserve_quota(self, event_id: str, plot_id: str, volume_mm: float) -> None:
-        """Explicitly record a quota reservation."""
+        """Explicitly record a quota reservation in the shared store."""
+        SharedQuotaStore.reserve(event_id, plot_id, volume_mm)
         if volume_mm > 0:
             self._reserved_quota[event_id] = {
                 "plot_id": plot_id,
@@ -214,16 +286,23 @@ class SafetyMonitor:
             }
 
     def release_quota(self, event_id: str) -> None:
-        """Explicitly release a quota reservation."""
+        """Explicitly release a quota reservation in the shared store."""
+        SharedQuotaStore.release(event_id)
+        self._reserved_quota.pop(event_id, None)
+
+    def settle_quota(self, event_id: str, plot_id: str, volume_mm: float) -> None:
+        """Settle a delivered event: release reservation and debit cumulative budget."""
+        SharedQuotaStore.settle(event_id, plot_id, volume_mm)
         self._reserved_quota.pop(event_id, None)
 
     def get_reserved_quota(self, plot_id: str, exclude_event_id: Optional[str] = None) -> float:
         """Calculate total reserved volume (mm) for a plot across all active uncommitted events."""
-        total = 0.0
+        shared_total = SharedQuotaStore.get_reserved(plot_id, exclude_event_id=exclude_event_id)
+        local_total = 0.0
         for eid, res in self._reserved_quota.items():
             if eid != exclude_event_id and res.get("plot_id") == plot_id:
-                total += res.get("volume_mm", 0.0)
-        return total
+                local_total += res.get("volume_mm", 0.0)
+        return max(shared_total, local_total)
 
     # ================================================================
     # Core Evaluation
@@ -456,10 +535,8 @@ class SafetyMonitor:
                     except Exception as exc:
                         logger.error("Violation callback error: %s", exc)
 
-        for eid in expired_events:
-            self._active_events.pop(eid, None)
-            self._reserved_quota.pop(eid, None)
-
+        # R01: Do NOT remove expired events or release quota here before confirmed stop!
+        # The dispatcher will attempt stop, and only on confirmed stop will quota/tracking be released.
         return violations
 
     # ================================================================
@@ -503,16 +580,19 @@ class SafetyMonitor:
             self._violation_history.append(violation)
             return violation
 
-        # Account for concurrent uncommitted reservations on the same plot
+        # Account for concurrent uncommitted reservations and cumulative settled deliveries on the same plot
         already_reserved = self.get_reserved_quota(budget.plot_id, exclude_event_id=event_id)
-        effective_season_remaining = budget.season_remaining_mm - already_reserved
-        effective_daily_remaining = budget.daily_remaining_mm - already_reserved
+        settled_on_plot = SharedQuotaStore.get_settled(budget.plot_id)
+        untracked_settled = max(0.0, settled_on_plot - budget.daily_consumed_mm)
+
+        effective_season_remaining = budget.season_remaining_mm - already_reserved - untracked_settled
+        effective_daily_remaining = budget.daily_remaining_mm - already_reserved - untracked_settled
 
         if requested_volume_mm > effective_season_remaining:
             reason = (
                 f"Season quota exceeded by concurrent reservations: need {requested_volume_mm:.1f}mm, "
                 f"remaining unreserved {effective_season_remaining:.1f}mm "
-                f"({already_reserved:.1f}mm reserved)"
+                f"({already_reserved:.1f}mm reserved, {untracked_settled:.1f}mm untracked settled)"
             )
             violation = SafetyViolation(
                 violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
@@ -535,7 +615,7 @@ class SafetyMonitor:
             reason = (
                 f"Daily quota exceeded by concurrent reservations: need {requested_volume_mm:.1f}mm, "
                 f"remaining unreserved {effective_daily_remaining:.1f}mm "
-                f"({already_reserved:.1f}mm reserved)"
+                f"({already_reserved:.1f}mm reserved, {untracked_settled:.1f}mm untracked settled)"
             )
             violation = SafetyViolation(
                 violation_id=f"VIO-{uuid.uuid4().hex[:12]}",

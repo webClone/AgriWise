@@ -33,6 +33,23 @@ from irrigation_runtime.schemas import (
     InterlockType,
 )
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    try:
+        from services.agribrain.scientific_contracts.numeric import finite_real
+    except ImportError:
+        import math
+        from numbers import Real
+        def finite_real(val: Any) -> Optional[float]:
+            if isinstance(val, bool) or not isinstance(val, Real):
+                return None
+            try:
+                res = float(val)
+                return res if math.isfinite(res) else None
+            except Exception:
+                return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,6 +140,14 @@ class IrrigationActuator(ABC):
         """
         ...
 
+    async def get_operation_status(self, operation_id: str) -> Optional[Dict[str, Any]]:
+        """Query driver/controller for operation-specific execution receipt.
+
+        Returns None if driver does not support operation-level querying or
+        if operation is unknown to the controller.
+        """
+        return None
+
     # ================================================================
     # Common Methods (shared across all drivers)
     # ================================================================
@@ -141,6 +166,9 @@ class IrrigationActuator(ABC):
             List of error messages (empty = valid)
         """
         errors = command.validate()
+        if errors:
+            return errors
+
         caps = self.registration.capabilities
 
         # Flow rate and duration bounds (apply only to active irrigation commands)
@@ -180,13 +208,12 @@ class IrrigationActuator(ABC):
         # Check if already executing (unless stop or emergency stop)
         if (self._status == ActuatorStatus.EXECUTING
                 and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
-            is_own_retry = (
-                self._active_command is not None
-                and (
-                    self._active_command.source_event_id == command.source_event_id
-                    or (bool(command.operation_id) and self._active_command.operation_id == command.operation_id)
-                )
-            )
+            is_own_retry = False
+            if self._active_command is not None:
+                op_matches = bool(command.operation_id) and bool(self._active_command.operation_id) and self._active_command.operation_id == command.operation_id
+                event_matches = bool(command.source_event_id) and bool(self._active_command.source_event_id) and self._active_command.source_event_id == command.source_event_id
+                is_own_retry = op_matches or event_matches
+
             if not is_own_retry:
                 errors.append(
                     f"Actuator {self.device_id} is already EXECUTING. "
@@ -244,9 +271,45 @@ class IrrigationActuator(ABC):
             })
             return result
 
+        # Idempotent execution check: if already EXECUTING this own-operation, do not duplicate physical START
+        if (command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE)
+                and self._status == ActuatorStatus.EXECUTING):
+            is_own_retry = False
+            if self._active_command is not None:
+                op_matches = bool(command.operation_id) and bool(self._active_command.operation_id) and self._active_command.operation_id == command.operation_id
+                event_matches = bool(command.source_event_id) and bool(self._active_command.source_event_id) and self._active_command.source_event_id == command.source_event_id
+                is_own_retry = op_matches or event_matches
+
+            if is_own_retry:
+                logger.info(
+                    "Operation %s is already EXECUTING on device %s. Returning active execution status idempotently without duplicate physical dispatch.",
+                    command.operation_id or command.source_event_id, self.device_id
+                )
+                result = CommandResult(
+                    command_id=command.command_id,
+                    device_id=self.device_id,
+                    success=True,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    actual_flow_rate_lpm=self._active_command.flow_rate_lpm if self._active_command else command.flow_rate_lpm,
+                    error_code="ALREADY_EXECUTING",
+                    error_message="Operation is already executing on actuator",
+                )
+                self._command_history.append({
+                    "command_id": command.command_id,
+                    "command_type": command.command_type.value,
+                    "success": result.success,
+                    "timestamp": result.timestamp,
+                    "error_code": result.error_code,
+                })
+                return result
+
+        prev_active_command = self._active_command
+
         # Dispatch
-        self._active_command = command
-        self._status = ActuatorStatus.EXECUTING
+        if command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
+            self._active_command = command
+            self._status = ActuatorStatus.EXECUTING
+
         logger.info(
             "Dispatching %s to device %s (zone=%s, volume=%.1fmm, duration=%.0fmin)",
             command.command_type.value, self.device_id,
@@ -268,47 +331,83 @@ class IrrigationActuator(ABC):
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 error_code="DISPATCH_EXCEPTION",
                 error_message=str(exc),
-                retry_recommended=True,
+                retry_recommended=False,
             )
 
         # Reconcile ambiguous failures on START commands before retry or failure
         if not result.success and command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
             try:
-                controller_status = await self.get_status()
-                if controller_status == ActuatorStatus.EXECUTING:
-                    # Physical application succeeded; transient failure was acknowledgment only
-                    logger.info(
-                        "Reconciliation: Device %s is EXECUTING on controller after unacknowledged %s. Reconciled as success.",
-                        self.device_id, command.command_id,
-                    )
-                    result = CommandResult(
-                        command_id=command.command_id,
-                        device_id=self.device_id,
-                        success=True,
-                        timestamp=datetime.now(timezone.utc).isoformat(),
-                        actual_flow_rate_lpm=command.flow_rate_lpm,
-                        error_code="RECONCILED_EXECUTING",
-                        error_message="Controller confirmed running after ACK failure",
-                    )
-                elif controller_status == ActuatorStatus.ONLINE:
-                    # Controller confirmed not running; command was NOT physically applied
-                    logger.info(
-                        "Reconciliation: Device %s is ONLINE on controller after unacknowledged %s. Safe to retry.",
-                        self.device_id, command.command_id,
-                    )
-                    self._status = ActuatorStatus.ONLINE
-                    self._active_command = None
-                    result.retry_recommended = True
+                op_receipt = None
+                if getattr(self.registration.capabilities, "supports_operation_reconciliation", False) and bool(command.operation_id):
+                    op_receipt = await self.get_operation_status(command.operation_id)
+
+                if op_receipt is not None:
+                    if op_receipt.get("executing") or op_receipt.get("completed"):
+                        logger.info(
+                            "Reconciliation: Device %s confirmed operation %s via operation receipt.",
+                            self.device_id, command.operation_id,
+                        )
+                        result = CommandResult(
+                            command_id=command.command_id,
+                            device_id=self.device_id,
+                            success=True,
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            actual_flow_rate_lpm=command.flow_rate_lpm,
+                            error_code="RECONCILED_OPERATION",
+                            error_message="Operation confirmed by controller",
+                        )
+                        if op_receipt.get("executing"):
+                            self._status = ActuatorStatus.EXECUTING
+                            self._active_command = command
+                        else:
+                            self._status = ActuatorStatus.ONLINE
+                            self._active_command = None
+                    elif op_receipt.get("not_applied"):
+                        logger.info(
+                            "Reconciliation: Device %s confirmed operation %s NOT applied. Safe to retry.",
+                            self.device_id, command.operation_id,
+                        )
+                        self._status = ActuatorStatus.ONLINE
+                        self._active_command = None
+                        result.retry_recommended = True
+                    else:
+                        self._status = ActuatorStatus.ERROR
+                        self._active_command = command
+                        result.retry_recommended = False
                 else:
-                    # Uncertainty: controller OFFLINE, ERROR, or UNKNOWN
-                    # Retain ownership during uncertainty; do not blindly duplicate START
-                    logger.warning(
-                        "Reconciliation: Device %s status %s during uncertainty for %s. Retaining ownership.",
-                        self.device_id, controller_status.value, command.command_id,
-                    )
-                    self._status = ActuatorStatus.ERROR
-                    self._active_command = command
-                    result.retry_recommended = False
+                    controller_status = await self.get_status()
+                    if controller_status == ActuatorStatus.EXECUTING:
+                        # Physical application succeeded; transient failure was acknowledgment only
+                        logger.info(
+                            "Reconciliation: Device %s is EXECUTING on controller after unacknowledged %s. Reconciled as success.",
+                            self.device_id, command.command_id,
+                        )
+                        result = CommandResult(
+                            command_id=command.command_id,
+                            device_id=self.device_id,
+                            success=True,
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            actual_flow_rate_lpm=command.flow_rate_lpm,
+                            error_code="RECONCILED_EXECUTING",
+                            error_message="Controller confirmed running after ACK failure",
+                        )
+                        self._status = ActuatorStatus.EXECUTING
+                        self._active_command = command
+                    elif controller_status == ActuatorStatus.ONLINE:
+                        # R02: Confirmed idle state alone must not authorize a new dose without operation attribution.
+                        logger.warning(
+                            "Reconciliation: Device %s is ONLINE after unacknowledged %s, but lacks operation-level reconciliation. Retaining uncertainty boundary without blind retry.",
+                            self.device_id, command.command_id,
+                        )
+                        self._status = ActuatorStatus.ERROR
+                        self._active_command = command
+                        result.retry_recommended = False
+                        result.error_code = "UNCERTAIN_OUTCOME"
+                        result.error_message = "Controller is ONLINE but driver lacks operation-level reconciliation; cannot confirm whether dose was applied."
+                    else:
+                        self._status = ActuatorStatus.ERROR
+                        self._active_command = command
+                        result.retry_recommended = False
             except Exception as rec_exc:
                 logger.error(
                     "Reconciliation query failed on %s for %s: %s. Retaining ownership during uncertainty.",
@@ -316,10 +415,15 @@ class IrrigationActuator(ABC):
                 )
                 self._status = ActuatorStatus.ERROR
                 self._active_command = command
+                result.retry_recommended = False
+
         # State transition according to resolved result
         if not result.success:
-            if command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
-                # If status is not ONLINE (safe retry), keep ERROR to hold lease during uncertainty
+            if command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
+                self._status = ActuatorStatus.ERROR
+                self._active_command = prev_active_command  # Preserve original delivery command
+                logger.error("Stop command failed on device %s. Retaining active command and ERROR state.", self.device_id)
+            elif command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
                 if self._status != ActuatorStatus.ONLINE:
                     self._status = ActuatorStatus.ERROR
         elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):

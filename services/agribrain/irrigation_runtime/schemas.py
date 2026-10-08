@@ -35,6 +35,23 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    try:
+        from services.agribrain.scientific_contracts.numeric import finite_real
+    except ImportError:
+        import math
+        from numbers import Real
+        def finite_real(val: Any) -> Optional[float]:
+            if isinstance(val, bool) or not isinstance(val, Real):
+                return None
+            try:
+                res = float(val)
+                return res if math.isfinite(res) else None
+            except Exception:
+                return None
+
 
 # ============================================================================
 # Enums (Locked)
@@ -89,6 +106,7 @@ class EventStatus(str, Enum):
     CANCELLED = "CANCELLED"           # Farmer or system cancelled
     DEFERRED = "DEFERRED"             # Postponed (rain/frost/quota)
     EMERGENCY_STOPPED = "EMERGENCY_STOPPED"
+    STOP_REQUESTED = "STOP_REQUESTED" # Stop dispatched/attempted, unconfirmed physical outcome
 
 
 class ActuatorStatus(str, Enum):
@@ -222,17 +240,59 @@ class IrrigationCommand:
     attempt_number: int = 1                   # Monotonic attempt sequence (1, 2, 3...)
 
     def validate(self) -> List[str]:
-        """Pre-flight validation. Returns list of error messages."""
+        """Pre-flight validation with strict scientific numeric qualification.
+
+        Enforces finite-real scalar contracts:
+          - volume_mm >= 0, not NaN/Inf/bool/string
+          - duration_minutes > 0 for START/PULSE, >= 0 for other commands
+          - flow_rate_lpm >= 0
+          - pressure_bar >= 0
+          - pivot_speed_pct in [0, 100]
+          - angles in [0, 360]
+        """
         errors = []
-        if self.volume_mm < 0:
-            errors.append(f"volume_mm must be >= 0, got {self.volume_mm}")
+        vol = finite_real(self.volume_mm)
+        if vol is None or vol < 0:
+            errors.append(f"volume_mm must be a finite real >= 0, got {self.volume_mm}")
+
+        dur = finite_real(self.duration_minutes)
         if self.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
-            if self.duration_minutes <= 0:
-                errors.append(f"duration_minutes must be > 0 for {self.command_type.value}")
-        if self.flow_rate_lpm < 0:
-            errors.append(f"flow_rate_lpm must be >= 0, got {self.flow_rate_lpm}")
-        if self.pivot_speed_pct < 0 or self.pivot_speed_pct > 100:
-            errors.append(f"pivot_speed_pct must be 0-100, got {self.pivot_speed_pct}")
+            if dur is None or dur <= 0:
+                errors.append(f"duration_minutes must be a finite real > 0 for {self.command_type.value}, got {self.duration_minutes}")
+        else:
+            if dur is None or dur < 0:
+                errors.append(f"duration_minutes must be a finite real >= 0, got {self.duration_minutes}")
+
+        flow = finite_real(self.flow_rate_lpm)
+        if flow is None or flow < 0:
+            errors.append(f"flow_rate_lpm must be a finite real >= 0, got {self.flow_rate_lpm}")
+
+        press = finite_real(self.pressure_bar)
+        if press is None or press < 0:
+            errors.append(f"pressure_bar must be a finite real >= 0, got {self.pressure_bar}")
+
+        speed = finite_real(self.pivot_speed_pct)
+        if speed is None or speed < 0 or speed > 100:
+            errors.append(f"pivot_speed_pct must be a finite real in [0, 100], got {self.pivot_speed_pct}")
+
+        angle_start = finite_real(self.pivot_start_angle_deg)
+        if angle_start is None or angle_start < 0 or angle_start > 360:
+            errors.append(f"pivot_start_angle_deg must be a finite real in [0, 360], got {self.pivot_start_angle_deg}")
+
+        angle_end = finite_real(self.pivot_end_angle_deg)
+        if angle_end is None or angle_end < 0 or angle_end > 360:
+            errors.append(f"pivot_end_angle_deg must be a finite real in [0, 360], got {self.pivot_end_angle_deg}")
+
+        if self.command_type == CommandType.PULSE_IRRIGATE:
+            pon = finite_real(self.pulse_on_minutes)
+            if pon is None or pon <= 0:
+                errors.append(f"pulse_on_minutes must be a finite real > 0 for PULSE_IRRIGATE, got {self.pulse_on_minutes}")
+            poff = finite_real(self.pulse_off_minutes)
+            if poff is None or poff <= 0:
+                errors.append(f"pulse_off_minutes must be a finite real > 0 for PULSE_IRRIGATE, got {self.pulse_off_minutes}")
+            if isinstance(self.pulse_cycles, bool) or not isinstance(self.pulse_cycles, int) or self.pulse_cycles <= 0:
+                errors.append(f"pulse_cycles must be a positive integer for PULSE_IRRIGATE, got {self.pulse_cycles}")
+
         return errors
 
 
@@ -392,6 +452,7 @@ class ActuatorCapabilities:
 
     supports_pulse: bool = False
     supports_variable_rate: bool = False       # VRI for pivots
+    supports_operation_reconciliation: bool = False  # Controller provides operation-attributed receipt
 
 
 @dataclass
@@ -585,6 +646,17 @@ class WaterBudget:
         if volume_mm > self.daily_remaining_mm:
             return False, f"Daily quota exceeded: need {volume_mm:.1f}mm, remaining {self.daily_remaining_mm:.1f}mm"
         return True, "OK"
+
+    def debit(self, volume_mm: float) -> None:
+        """Debit delivered volume from remaining quotas."""
+        v = finite_real(volume_mm)
+        if v is None or v <= 0:
+            return
+        self.season_consumed_mm += v
+        self.season_remaining_mm = max(0.0, self.season_remaining_mm - v)
+        self.daily_consumed_mm += v
+        self.daily_remaining_mm = max(0.0, self.daily_remaining_mm - v)
+        self.last_updated = datetime.now(timezone.utc).isoformat()
 
 
 # ============================================================================

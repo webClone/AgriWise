@@ -120,6 +120,21 @@ class CommandDispatcher:
                            event.event_id, event.status.value)
             return event
 
+        # Idempotency check: if already active or queued, return existing event
+        if event.event_id in self._active_events:
+            existing = self._active_events[event.event_id]
+            if existing.status in (EventStatus.DISPATCHING, EventStatus.EXECUTING, EventStatus.VALIDATING, EventStatus.STOP_REQUESTED):
+                logger.warning("Event %s is already active with status %s; returning existing event without duplicate dispatch.",
+                               event.event_id, existing.status.value)
+                return existing
+
+        # Check if already finalized in history
+        for past in self._event_history:
+            if past.event_id == event.event_id:
+                logger.warning("Event %s already finalized with status %s; returning historical event.",
+                               event.event_id, past.status.value)
+                return past
+
         # Resolve actuator
         actuator = self._registry.get_actuator(event.device_id)
         if actuator is None:
@@ -203,6 +218,10 @@ class CommandDispatcher:
         }
 
         op_id = operation_id or f"OP-{event.event_id}"
+        flow_rate = event.target_flow_rate_lpm
+        if flow_rate <= 0.0:
+            flow_rate = 15.0
+
         return IrrigationCommand(
             command_id=f"CMD-{event.event_id}-A{attempt}",
             command_type=CommandType.START_ZONE,
@@ -211,7 +230,7 @@ class CommandDispatcher:
             plot_id=event.plot_id,
             volume_mm=event.target_volume_mm,
             duration_minutes=event.target_duration_minutes,
-            flow_rate_lpm=event.target_flow_rate_lpm,
+            flow_rate_lpm=flow_rate,
             priority=priority_map.get("NORMAL", CommandPriority.NORMAL),
             source_event_id=event.event_id,
             source_action_id=event.source_action_id,
@@ -301,33 +320,82 @@ class CommandDispatcher:
             self._finalize_event(event)
             return event
 
-        # Check actuator status
         from irrigation_runtime.schemas import ActuatorStatus
-        status = await actuator.get_status()
 
-        if status == ActuatorStatus.ERROR:
-            event.transition(EventStatus.FAILED, "Actuator entered ERROR state")
-            self._finalize_event(event)
-            self._emit_failed(event)
-            return event
+        # If already in STOP_REQUESTED, attempt stop reconciliation/retry
+        if event.status == EventStatus.STOP_REQUESTED:
+            try:
+                status = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+            except Exception:
+                status = ActuatorStatus.ERROR
 
-        # Check safety interlocks & duration watchdog unconditionally (even without sensor_readings)
+            if status == ActuatorStatus.ONLINE:
+                term_status = EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED
+                event.transition(term_status, "Confirmed stopped on actuator after reconciliation")
+                self._safety.release_quota(event.event_id)
+                self._finalize_event(event)
+                if term_status == EventStatus.EMERGENCY_STOPPED:
+                    self._emit_failed(event)
+                return event
+            else:
+                stop_retry = await actuator.emergency_stop()
+                if stop_retry.success:
+                    term_status = EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED
+                    event.transition(term_status, "Confirmed stopped on actuator after retry")
+                    self._safety.release_quota(event.event_id)
+                    self._finalize_event(event)
+                    if term_status == EventStatus.EMERGENCY_STOPPED:
+                        self._emit_failed(event)
+                    return event
+                return event
+
+        # Check safety interlocks & duration watchdog unconditionally FIRST (without waiting for telemetry)
         violations = self._safety.evaluate(
             event.device_id, sensor_readings, actuator.active_command
         )
         if violations:
-            # Emergency stop
-            await actuator.emergency_stop()
+            stop_result = await actuator.emergency_stop()
             event.emergency_stopped = True
             event.emergency_stop_reason = "; ".join(
                 v.interlock_type.value for v in violations
             )
             event.safety_violations.extend(v.violation_id for v in violations)
-            event.transition(EventStatus.EMERGENCY_STOPPED,
-                             f"Safety violation: {event.emergency_stop_reason}")
-            self._safety.release_quota(event.event_id)
-            self._finalize_event(event)
-            self._emit_failed(event)
+            if stop_result.success:
+                actuator._status = ActuatorStatus.ONLINE
+                actuator._active_command = None
+                event.transition(EventStatus.EMERGENCY_STOPPED,
+                                 f"Safety violation: {event.emergency_stop_reason}")
+                self._safety.release_quota(event.event_id)
+                self._finalize_event(event)
+                self._emit_failed(event)
+            else:
+                actuator._status = ActuatorStatus.ERROR
+                event.transition(EventStatus.STOP_REQUESTED,
+                                 f"Emergency stop attempt failed: {stop_result.error_message}")
+                logger.error("Emergency stop failed on device %s for event %s. Retaining tracking and quota.",
+                             event.device_id, event.event_id)
+            return event
+
+        # Check actuator status with timeout to avoid stalling on hung status queries
+        try:
+            status = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+        except Exception as exc:
+            logger.error("Actuator status query failed or timed out for device %s: %s", event.device_id, exc)
+            status = ActuatorStatus.ERROR
+
+        if status == ActuatorStatus.ERROR:
+            stop_result = await actuator.emergency_stop()
+            if stop_result.success:
+                actuator._status = ActuatorStatus.ONLINE
+                actuator._active_command = None
+                event.transition(EventStatus.FAILED, "Actuator entered ERROR state (stopped)")
+                self._safety.release_quota(event.event_id)
+                self._finalize_event(event)
+                self._emit_failed(event)
+            else:
+                actuator._status = ActuatorStatus.ERROR
+                event.transition(EventStatus.STOP_REQUESTED, "Actuator entered ERROR state and stop failed")
+                logger.error("Stop attempt failed for device in ERROR state %s: %s", event.device_id, stop_result.error_message)
             return event
 
         # Check if execution is complete (actuator no longer running)
@@ -359,6 +427,8 @@ class CommandDispatcher:
         event.actual_volume_l = actual_volume_l
         event.actual_duration_minutes = actual_duration_minutes
         event.transition(EventStatus.COMPLETED, "Validated and completed")
+        # Settle quota in shared store
+        self._safety.settle_quota(event.event_id, event.plot_id, event.target_volume_mm)
         self._finalize_event(event)
 
         for cb in self._on_event_complete:
@@ -377,6 +447,7 @@ class CommandDispatcher:
 
         # Stop the actuator
         actuator = self._registry.get_actuator(event.device_id)
+        stop_success = False
         if actuator:
             stop_cmd = IrrigationCommand(
                 command_id=f"CMD-STOP-{uuid.uuid4().hex[:8]}",
@@ -384,24 +455,50 @@ class CommandDispatcher:
                 device_id=event.device_id,
                 zone_id=event.zone_id,
                 plot_id=event.plot_id,
+                source_event_id=event.event_id,
+                operation_id=f"OP-STOP-{event.event_id}",
             )
-            await actuator.execute_with_safety(stop_cmd)
+            stop_res = await actuator.execute_with_safety(stop_cmd)
+            stop_success = stop_res.success
 
-        event.transition(EventStatus.CANCELLED, reason or "Cancelled by user")
-        self._finalize_event(event)
+        if stop_success:
+            event.transition(EventStatus.CANCELLED, reason or "Cancelled by user")
+            self._safety.release_quota(event.event_id)
+            self._finalize_event(event)
+        else:
+            event.transition(EventStatus.STOP_REQUESTED, f"Cancellation stop failed: {reason or 'stop unconfirmed'}")
+            logger.error("Cancel stop failed on device %s for event %s. Retaining active tracking and quota.",
+                         event.device_id, event.event_id)
         return event
 
     async def emergency_stop_all(self) -> Dict[str, str]:
         """Emergency stop all active events."""
         results = {}
         for event_id, event in list(self._active_events.items()):
-            event.emergency_stopped = True
-            event.emergency_stop_reason = "Global emergency stop"
-            event.transition(EventStatus.EMERGENCY_STOPPED, "Global emergency stop")
-            self._finalize_event(event)
-            results[event_id] = "STOPPED"
+            actuator = self._registry.get_actuator(event.device_id)
+            stop_success = False
+            if actuator:
+                stop_res = await actuator.emergency_stop()
+                stop_success = stop_res.success
+                if stop_success:
+                    actuator._status = ActuatorStatus.ONLINE
+                    actuator._active_command = None
+                else:
+                    actuator._status = ActuatorStatus.ERROR
+            if stop_success:
+                event.emergency_stopped = True
+                event.emergency_stop_reason = "Global emergency stop"
+                event.transition(EventStatus.EMERGENCY_STOPPED, "Global emergency stop")
+                self._safety.release_quota(event.event_id)
+                self._finalize_event(event)
+                results[event_id] = "STOPPED"
+            else:
+                event.emergency_stopped = True
+                event.emergency_stop_reason = "Global emergency stop (stop unconfirmed)"
+                event.transition(EventStatus.STOP_REQUESTED, "Global emergency stop failed on actuator")
+                results[event_id] = "STOP_FAILED"
 
-        # Also stop all actuators
+        # Also stop all actuators in registry
         await self._registry.emergency_stop_all()
         return results
 
@@ -411,12 +508,13 @@ class CommandDispatcher:
     ) -> List[IrrigationEvent]:
         """Restore event and controller reconciliation on process restart.
 
-        Queries real-time hardware status for events in DISPATCHING or EXECUTING
+        Queries real-time hardware status for events in DISPATCHING, EXECUTING, or STOP_REQUESTED
         to reconcile whether the controller is actually running or stopped.
+        Deducts elapsed time from the original planned duration so restart does not reset watchdog limits.
         """
         reconciled = []
         for event in persisted_events:
-            if event.status not in (EventStatus.DISPATCHING, EventStatus.EXECUTING):
+            if event.status not in (EventStatus.DISPATCHING, EventStatus.EXECUTING, EventStatus.STOP_REQUESTED):
                 continue
 
             actuator = self._registry.get_actuator(event.device_id)
@@ -426,23 +524,47 @@ class CommandDispatcher:
                 reconciled.append(event)
                 continue
 
+            # Calculate elapsed time from original start
+            elapsed_minutes = 0.0
+            if event.actual_start:
+                try:
+                    start_dt = datetime.fromisoformat(event.actual_start)
+                    now_dt = datetime.now(timezone.utc)
+                    elapsed_minutes = max(0.0, (now_dt - start_dt).total_seconds() / 60.0)
+                except Exception:
+                    pass
+
+            remaining_duration = max(0.0, event.target_duration_minutes - elapsed_minutes)
+
             try:
                 from irrigation_runtime.schemas import ActuatorStatus
-                status = await actuator.get_status()
+                status = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+
                 if status == ActuatorStatus.EXECUTING:
-                    event.transition(EventStatus.EXECUTING, "Reconciled with active controller on process restart")
-                    self._active_events[event.event_id] = event
-                    actuator.set_active_command(self._build_command(event))
-                    self._safety.track_event_start(
-                        event.event_id,
-                        event.device_id,
-                        event.target_duration_minutes,
-                        plot_id=event.plot_id,
-                        volume_mm=event.target_volume_mm,
-                    )
+                    if remaining_duration <= 0.0:
+                        # Runtime expired before or during restart; stop immediately
+                        stop_res = await actuator.emergency_stop()
+                        if stop_res.success:
+                            event.transition(EventStatus.EMERGENCY_STOPPED, "Duration expired prior to or during restart")
+                            self._safety.release_quota(event.event_id)
+                        else:
+                            event.transition(EventStatus.STOP_REQUESTED, "Duration expired on restart but stop failed")
+                            self._active_events[event.event_id] = event
+                    else:
+                        event.transition(EventStatus.EXECUTING, "Reconciled with active controller on process restart")
+                        self._active_events[event.event_id] = event
+                        actuator.set_active_command(self._build_command(event))
+                        self._safety.track_event_start(
+                            event.event_id,
+                            event.device_id,
+                            event.target_duration_minutes,
+                            plot_id=event.plot_id,
+                            volume_mm=event.target_volume_mm,
+                            elapsed_minutes=elapsed_minutes,
+                        )
                 elif status == ActuatorStatus.ONLINE:
                     event.transition(EventStatus.COMPLETED, "Reconciled after process restart: actuator is stopped/idle")
-                    self._safety.release_quota(event.event_id)
+                    self._safety.settle_quota(event.event_id, event.plot_id, event.target_volume_mm)
                 else:
                     event.transition(EventStatus.FAILED, f"Reconciled after process restart: actuator in {status.value}")
                     self._safety.release_quota(event.event_id)

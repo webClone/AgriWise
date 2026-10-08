@@ -28,6 +28,23 @@ from typing import Any, Dict, List, Optional
 
 from layer1_fusion.schemas import DataHealthScore
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    try:
+        from services.agribrain.scientific_contracts.numeric import finite_real
+    except ImportError:
+        def finite_real(val: Any) -> Optional[float]:
+            import math
+            from numbers import Real
+            if isinstance(val, bool) or not isinstance(val, Real):
+                return None
+            try:
+                res = float(val)
+                return res if math.isfinite(res) else None
+            except Exception:
+                return None
+
 from layer2_intelligence.outputs.layer3_adapter import Layer3InputContext
 
 from layer3_decision.schema import (
@@ -904,9 +921,10 @@ def _deserialize_veg_state(data: Any) -> Optional[Any]:
 
 def _execute_canonical_water_engine(
     inputs: Any,
-    l1_output: Any,
-    l2_output: Any,
+    l1_output: Any = None,
+    l2_output: Any = None,
     run_timestamp: Optional[datetime.datetime] = None,
+    **kwargs: Any,
 ) -> tuple[Any, Any]:
     """Execute authoritative Layer 3 Hydrological Water Balance Engine."""
     try:
@@ -915,14 +933,26 @@ def _execute_canonical_water_engine(
         from layer3_water.contracts import HydrologyMode, SoilWaterState
         from layer2_contracts.state_contracts import VegetationState
 
-        plot_id = getattr(inputs, "plot_id", "P1") if inputs else "P1"
-        ts = run_timestamp or datetime.datetime.now(timezone.utc)
+        plot_id = kwargs.get("plot_id") or (getattr(inputs, "plot_id", "P1") if inputs else "P1")
+        ts = run_timestamp
+        if ts is None:
+            target_date = getattr(inputs, "target_date", None)
+            if target_date:
+                try:
+                    if isinstance(target_date, str):
+                        ts = datetime.datetime.fromisoformat(target_date).replace(tzinfo=timezone.utc)
+                    elif isinstance(target_date, datetime.date):
+                        ts = datetime.datetime(target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc)
+                except Exception:
+                    pass
+        if ts is None:
+            ts = datetime.datetime.now(timezone.utc)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         day_key = ts.strftime("%Y-%m-%d")
 
         # Typed orchestrator context extraction
-        op_ctx = getattr(inputs, "operational_context", None)
+        op_ctx = kwargs.get("op_ctx") or getattr(inputs, "operational_context", None)
         if not isinstance(op_ctx, dict):
             op_ctx = {}
 
@@ -939,6 +969,19 @@ def _execute_canonical_water_engine(
         rec = None
         if isinstance(weather_daily, dict):
             rec = weather_daily.get(day_key)
+        elif isinstance(weather_daily, list):
+            for t_entry in reversed(weather_daily):
+                if isinstance(t_entry, dict):
+                    t_date = t_entry.get("date")
+                    if not t_date and "timestamp" in t_entry:
+                        raw_ts = t_entry["timestamp"]
+                        if isinstance(raw_ts, datetime.datetime):
+                            t_date = raw_ts.astimezone(ts.tzinfo).strftime("%Y-%m-%d")
+                        elif isinstance(raw_ts, str) and len(raw_ts) >= 10:
+                            t_date = raw_ts[:10]
+                    if t_date == day_key:
+                        rec = t_entry
+                        break
         if not rec and timeseries:
             for t_entry in reversed(timeseries):
                 if isinstance(t_entry, dict):
@@ -973,12 +1016,9 @@ def _execute_canonical_water_engine(
                 for k in keys:
                     v = r.get(k)
                     if v is not None:
-                        try:
-                            f = float(v)
-                            if math.isfinite(f):
-                                return f
-                        except (ValueError, TypeError):
-                            pass
+                        val = finite_real(v)
+                        if val is not None:
+                            return val
                 return default
 
             t_max_v = _get_val(["t_max_c", "temp_max", "temperature_max", "temp", "temperature", "t_max"])
@@ -991,17 +1031,17 @@ def _execute_canonical_water_engine(
             rn_v = _get_val(["net_radiation_mj_m2", "net_radiation", "radiation"])
 
             if isinstance(weather_prior, dict):
-                if t_min_v is None and "temp_min" in weather_prior: t_min_v = float(weather_prior["temp_min"])
-                if precip_v is None and "precipitation" in weather_prior: precip_v = float(weather_prior["precipitation"])
-                if wind_v is None and "wind_speed" in weather_prior: wind_v = float(weather_prior["wind_speed"])
-                if rh_min_v is None and "rh_min" in weather_prior: rh_min_v = float(weather_prior["rh_min"])
-                if rh_max_v is None and "rh_max" in weather_prior: rh_max_v = float(weather_prior["rh_max"])
-                if rn_v is None and "net_radiation" in weather_prior: rn_v = float(weather_prior["net_radiation"])
+                if t_min_v is None and "temp_min" in weather_prior: t_min_v = finite_real(weather_prior["temp_min"])
+                if precip_v is None and "precipitation" in weather_prior: precip_v = finite_real(weather_prior["precipitation"])
+                if wind_v is None and "wind_speed" in weather_prior: wind_v = finite_real(weather_prior["wind_speed"])
+                if rh_min_v is None and "rh_min" in weather_prior: rh_min_v = finite_real(weather_prior["rh_min"])
+                if rh_max_v is None and "rh_max" in weather_prior: rh_max_v = finite_real(weather_prior["rh_max"])
+                if rn_v is None and "net_radiation" in weather_prior: rn_v = finite_real(weather_prior["net_radiation"])
 
             if rh_min_v is None and hum_v is not None:
-                rh_min_v = max(10.0, float(hum_v) - 15.0)
+                rh_min_v = max(10.0, hum_v - 15.0)
             if rh_max_v is None and hum_v is not None:
-                rh_max_v = min(100.0, float(hum_v) + 15.0)
+                rh_max_v = min(100.0, hum_v + 15.0)
 
             missing_vars = [k for k, v in [
                 ("t_max", t_max_v), ("t_min", t_min_v), ("precipitation", precip_v),
@@ -1045,15 +1085,19 @@ def _execute_canonical_water_engine(
             if hasattr(l2_output, "lai_mean"):
                 val = getattr(l2_output, "lai_mean")
                 if val is not None:
-                    lai_extracted = float(val)
+                    lai_extracted = finite_real(val)
 
             # Check explicit fractional fvc first, else divide canopy_cover_pct by 100 unconditionally
             if hasattr(l2_output, "fvc") and getattr(l2_output, "fvc", None) is not None:
-                fvc_extracted = max(0.0, min(1.0, float(getattr(l2_output, "fvc"))))
+                f_val = finite_real(getattr(l2_output, "fvc"))
+                if f_val is not None:
+                    fvc_extracted = max(0.0, min(1.0, f_val))
             elif hasattr(l2_output, "canopy_cover_pct"):
                 val = getattr(l2_output, "canopy_cover_pct")
                 if val is not None:
-                    fvc_extracted = max(0.0, min(1.0, float(val) / 100.0))
+                    c_val = finite_real(val)
+                    if c_val is not None:
+                        fvc_extracted = max(0.0, min(1.0, c_val / 100.0))
 
             # Health index inspection
             h_idx = getattr(l2_output, "health_index", None)
@@ -1061,11 +1105,13 @@ def _execute_canonical_water_engine(
                 if lai_extracted is None:
                     val = getattr(h_idx, "lai_estimate", None)
                     if val is not None:
-                        lai_extracted = float(val)
+                        lai_extracted = finite_real(val)
                 if fvc_extracted is None:
                     val = getattr(h_idx, "vegetation_fraction", None)
                     if val is not None:
-                        fvc_extracted = max(0.0, min(1.0, float(val)))
+                        f_val = finite_real(val)
+                        if f_val is not None:
+                            fvc_extracted = max(0.0, min(1.0, f_val))
 
             # Growth metrics inspection
             g_met = getattr(l2_output, "growth_metrics", None)
@@ -1073,12 +1119,16 @@ def _execute_canonical_water_engine(
                 if lai_extracted is None:
                     val = getattr(g_met, "lai_estimate", None)
                     if val is not None:
-                        lai_extracted = float(val)
+                        lai_extracted = finite_real(val)
                 if fvc_extracted is None:
                     if hasattr(g_met, "vegetation_fraction") and getattr(g_met, "vegetation_fraction", None) is not None:
-                        fvc_extracted = max(0.0, min(1.0, float(getattr(g_met, "vegetation_fraction"))))
+                        f_val = finite_real(getattr(g_met, "vegetation_fraction"))
+                        if f_val is not None:
+                            fvc_extracted = max(0.0, min(1.0, f_val))
                     elif hasattr(g_met, "canopy_cover_pct") and getattr(g_met, "canopy_cover_pct", None) is not None:
-                        fvc_extracted = max(0.0, min(1.0, float(getattr(g_met, "canopy_cover_pct")) / 100.0))
+                        c_val = finite_real(getattr(g_met, "canopy_cover_pct"))
+                        if c_val is not None:
+                            fvc_extracted = max(0.0, min(1.0, c_val / 100.0))
 
             crop_ctx = getattr(inputs, "crop_context", None) or op_ctx.get("crop_context")
             if isinstance(crop_ctx, dict):
@@ -2041,7 +2091,7 @@ def _execute_canonical_water_engine(
             _PLOT_WATER_STATE_MEMORY[plot_id] = (current_soil, current_mem)
 
             try:
-                from world_model.canonical_worldline import CanonicalWorldlineService, ConcurrencyConflictError
+                from world_model.canonical_worldline import CanonicalWorldlineService
                 cw_svc = CanonicalWorldlineService()
                 cp_id = f"cp_hyd_{plot_id}_{day_key}_{hashlib.sha256(f'{plot_id}:{day_key}:{prev_step_hash}'.encode()).hexdigest()[:12]}"
                 cp_payload = {

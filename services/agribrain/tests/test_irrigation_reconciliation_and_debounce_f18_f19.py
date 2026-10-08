@@ -53,6 +53,7 @@ class MockReconciliationActuator(IrrigationActuator):
                 max_flow_rate_lpm=100.0,
                 min_flow_rate_lpm=1.0,
                 max_duration_minutes=120.0,
+                supports_operation_reconciliation=True,
             ),
             fail_safe_state=FailSafeState.NORMALLY_CLOSED,
             connection_config={},
@@ -64,6 +65,15 @@ class MockReconciliationActuator(IrrigationActuator):
         self.simulated_hardware_status: ActuatorStatus = ActuatorStatus.ONLINE
         self.fail_send_with_ack_timeout: bool = False
         self.fail_first_send_only: bool = False
+
+    async def get_operation_status(self, operation_id: str) -> Optional[Dict[str, Any]]:
+        if self.simulated_hardware_status == ActuatorStatus.EXECUTING:
+            return {"executing": True}
+        if self.simulated_hardware_status == ActuatorStatus.ONLINE:
+            if self.fail_first_send_only and len(self.sent_commands) == 1:
+                return {"not_applied": True}
+            return {"completed": True}
+        return None
 
     async def connect(self) -> bool:
         self._connected = True
