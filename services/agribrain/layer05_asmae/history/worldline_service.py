@@ -37,6 +37,8 @@ try:
         WORLDLINE_CONTRACT_VERSION,
         CanonicalWorldlineService,
         WorldlineEventProposal,
+        ConcurrencyConflictError,
+        CAS_UNSET,
         _public,
         _stable,
     )
@@ -47,6 +49,8 @@ except ImportError:
             WORLDLINE_CONTRACT_VERSION,
             CanonicalWorldlineService,
             WorldlineEventProposal,
+            ConcurrencyConflictError,
+            CAS_UNSET,
             _public,
             _stable,
         )
@@ -56,6 +60,8 @@ except ImportError:
             WORLDLINE_CONTRACT_VERSION,
             CanonicalWorldlineService,
             WorldlineEventProposal,
+            ConcurrencyConflictError,
+            CAS_UNSET,
             _public,
             _stable,
         )
@@ -106,6 +112,36 @@ class PlotWorldlineService:
     ) -> Dict[str, Any]:
         """Delegate event read to canonical service."""
         return self._canonical.load_event(plot_id, event_id, tenant_id, namespace)
+
+    def load_latest_hydraulic_checkpoint(
+        self, plot_id: str, tenant_id: str = "default_tenant", namespace: str = "default",
+    ) -> Optional[Dict[str, Any]]:
+        """Delegate hydraulic checkpoint read to canonical service."""
+        return self._canonical.load_latest_hydraulic_checkpoint(plot_id, tenant_id, namespace)
+
+    def save_hydraulic_checkpoint(
+        self,
+        *,
+        plot_id: str,
+        checkpoint_id: str,
+        checkpoint_payload: Dict[str, Any],
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+        cycle_id: str = "default_cycle",
+        geometry_version: str = "default_geom",
+        expected_predecessor_head: Any = CAS_UNSET,
+    ) -> Dict[str, Any]:
+        """Delegate hydraulic checkpoint commit to canonical service."""
+        return self._canonical.save_hydraulic_checkpoint(
+            plot_id=plot_id,
+            checkpoint_id=checkpoint_id,
+            checkpoint_payload=checkpoint_payload,
+            tenant_id=tenant_id,
+            namespace=namespace,
+            cycle_id=cycle_id,
+            geometry_version=geometry_version,
+            expected_predecessor_head=expected_predecessor_head,
+        )
 
     def commit_event(
         self,

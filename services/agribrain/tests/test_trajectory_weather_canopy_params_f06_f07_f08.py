@@ -21,7 +21,23 @@ from services.agribrain.layer3_water.contracts import (
 from services.agribrain.layer3_water.soil import SoilProfileDatabase
 from services.agribrain.layer3_water.runner import WaterIntelligenceEngine
 from services.agribrain.layer2_contracts.state_contracts import VegetationState
-from services.agribrain.layer3_decision.runner import _execute_canonical_water_engine, _PLOT_WATER_STATE_HISTORY
+import shutil
+from services.agribrain.layer3_decision.runner import _execute_canonical_water_engine, _PLOT_WATER_STATE_HISTORY, _PLOT_WATER_STATE_MEMORY
+from services.agribrain.world_model.canonical_worldline import CANONICAL_WORLDLINE_ROOT
+
+
+@pytest.fixture(autouse=True)
+def cleanup_f06_f08_state():
+    _PLOT_WATER_STATE_HISTORY.clear()
+    _PLOT_WATER_STATE_MEMORY.clear()
+    target_dir = CANONICAL_WORLDLINE_ROOT / "default_tenant" / "default"
+    if target_dir.exists():
+        shutil.rmtree(target_dir, ignore_errors=True)
+    yield
+    _PLOT_WATER_STATE_HISTORY.clear()
+    _PLOT_WATER_STATE_MEMORY.clear()
+    if target_dir.exists():
+        shutil.rmtree(target_dir, ignore_errors=True)
 
 
 def _make_base_weather(precip: float = 0.0) -> dict:

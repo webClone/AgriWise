@@ -40,6 +40,14 @@ class CorruptedWorldlineError(ContractViolation):
     pass
 
 
+class ConcurrencyConflictError(ContractViolation):
+    """Raised when a compare-and-swap on predecessor head detects concurrent update."""
+    pass
+
+
+CAS_UNSET = object()
+
+
 from .event_identity import (
     WORLDLINE_CONTRACT_VERSION,
     WORLDLINE_IDENTITY_V2,
@@ -222,6 +230,77 @@ class CanonicalWorldlineService:
     def load_head(self, plot_id: str, tenant_id: str = "default_tenant", namespace: str = "default") -> Dict[str, Any]:
         """Load current head state for a tenant plot."""
         return self._read(self._head_path(plot_id, tenant_id, namespace))
+
+    def _hydraulic_head_path(self, plot_id: str, tenant_id: str = "default_tenant", namespace: str = "default") -> Path:
+        return self._plot_dir(plot_id, tenant_id, namespace) / "hydraulic_head.json"
+
+    def _hydraulic_checkpoint_path(self, plot_id: str, checkpoint_id: str, tenant_id: str = "default_tenant", namespace: str = "default") -> Path:
+        return self._plot_dir(plot_id, tenant_id, namespace) / "checkpoints" / f"{checkpoint_id}.json"
+
+    def load_latest_hydraulic_checkpoint(
+        self,
+        plot_id: str,
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+    ) -> Optional[Dict[str, Any]]:
+        """Load latest committed hydraulic checkpoint for a tenant plot."""
+        head_data = self._read(self._hydraulic_head_path(plot_id, tenant_id, namespace))
+        if not head_data or not head_data.get("latest_checkpoint_id"):
+            return None
+        cp_path = self._hydraulic_checkpoint_path(plot_id, head_data["latest_checkpoint_id"], tenant_id, namespace)
+        return self._read(cp_path) or None
+
+    def save_hydraulic_checkpoint(
+        self,
+        *,
+        plot_id: str,
+        checkpoint_id: str,
+        checkpoint_payload: Dict[str, Any],
+        tenant_id: str = "default_tenant",
+        namespace: str = "default",
+        cycle_id: str = "default_cycle",
+        geometry_version: str = "default_geom",
+        expected_predecessor_head: Any = CAS_UNSET,
+    ) -> Dict[str, Any]:
+        """Commit a scoped hydraulic checkpoint with compare-and-swap on predecessor head."""
+        with self._head_lock(plot_id, tenant_id, namespace):
+            head_path = self._hydraulic_head_path(plot_id, tenant_id, namespace)
+            current_head = self._read(head_path)
+            current_head_id = current_head.get("head_hash") or current_head.get("latest_checkpoint_id")
+
+            if expected_predecessor_head is not CAS_UNSET and current_head_id != expected_predecessor_head:
+                raise ConcurrencyConflictError(
+                    f"Predecessor head conflict for plot {plot_id}: expected {expected_predecessor_head}, found {current_head_id}"
+                )
+
+            seq = int(current_head.get("sequence", 0) or 0) + 1
+            record = {
+                "checkpoint_id": checkpoint_id,
+                "tenant_id": tenant_id,
+                "namespace": namespace,
+                "plot_id": plot_id,
+                "cycle_id": cycle_id,
+                "geometry_version": geometry_version,
+                "sequence": seq,
+                "predecessor_head": current_head_id,
+                "committed_at": _now(),
+                "payload": _public(checkpoint_payload),
+            }
+
+            cp_path = self._hydraulic_checkpoint_path(plot_id, checkpoint_id, tenant_id, namespace)
+            self._atomic(cp_path, record)
+
+            new_head = {
+                "tenant_id": tenant_id,
+                "namespace": namespace,
+                "plot_id": plot_id,
+                "sequence": seq,
+                "latest_checkpoint_id": checkpoint_id,
+                "head_hash": checkpoint_id,
+                "updated_at": _now(),
+            }
+            self._atomic(head_path, new_head)
+            return record
 
     def load_event(self, plot_id: str, event_id: str, tenant_id: str = "default_tenant", namespace: str = "default") -> Dict[str, Any]:
         """Load specific event by ID for a tenant plot."""
