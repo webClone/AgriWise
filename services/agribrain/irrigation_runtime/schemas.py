@@ -404,6 +404,11 @@ class IrrigationEvent:
             return self.status_log[-1].get("reason", "")
         return ""
 
+    @property
+    def error_message(self) -> str:
+        """Convenience alias for failure_reason."""
+        return self.failure_reason
+
     def validate(self) -> List[str]:
         """Validate raw event scalar parameters before building commands."""
         errors = []

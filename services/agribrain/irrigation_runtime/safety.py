@@ -66,6 +66,38 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class CorruptedQuotaStoreError(RuntimeError):
+    """Raised when the persistent quota store is malformed, blank, or has invalid schema."""
+    pass
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Check if process with given PID is currently alive."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
+        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+        if handle:
+            exit_code = ctypes.c_ulong()
+            if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                STILL_ACTIVE = 259
+                is_alive = (exit_code.value == STILL_ACTIVE)
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return is_alive
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
 class SharedQuotaStore:
     """Thread-safe and cross-process atomic shared quota reservation and settlement store.
 
@@ -95,6 +127,7 @@ class SharedQuotaStore:
         with cls._thread_lock:
             lock_path = cls._store_dir() / "quota.lock"
             descriptor = None
+            owner_token = f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
             for _ in range(500):
                 try:
                     descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -102,8 +135,24 @@ class SharedQuotaStore:
                 except FileExistsError:
                     try:
                         if time.time() - lock_path.stat().st_mtime > 30.0:
-                            lock_path.unlink(missing_ok=True)
-                            continue
+                            # V02: Only displace lock if owner PID is confirmed dead!
+                            lock_txt = ""
+                            try:
+                                lock_txt = lock_path.read_text(encoding="utf-8").strip()
+                            except OSError:
+                                pass
+                            owner_pid = -1
+                            if lock_txt:
+                                try:
+                                    owner_pid = int(lock_txt.split(":")[0])
+                                except ValueError:
+                                    owner_pid = -1
+                            if owner_pid > 0 and _is_pid_alive(owner_pid):
+                                # Owner is alive: do NOT steal lock
+                                pass
+                            else:
+                                lock_path.unlink(missing_ok=True)
+                                continue
                     except OSError:
                         pass
                     time.sleep(0.005)
@@ -111,11 +160,15 @@ class SharedQuotaStore:
                 raise TimeoutError("Timeout acquiring cross-process quota lock")
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    handle.write(str(os.getpid()))
+                    handle.write(owner_token)
                 yield
             finally:
+                # V02: Only release lock if it still belongs to our token
                 try:
-                    lock_path.unlink(missing_ok=True)
+                    if lock_path.exists():
+                        cur_token = lock_path.read_text(encoding="utf-8").strip()
+                        if cur_token == owner_token:
+                            lock_path.unlink(missing_ok=True)
                 except OSError:
                     pass
 
@@ -129,35 +182,23 @@ class SharedQuotaStore:
                 "settled_daily": {},
                 "settled_season": {},
                 "settled_plot_total": {},
+                "stopped_receipts": {},
             }
         try:
             content = p.read_text(encoding="utf-8")
             if not content.strip():
-                return {
-                    "reservations": {},
-                    "settled_receipts": {},
-                    "settled_daily": {},
-                    "settled_season": {},
-                    "settled_plot_total": {},
-                }
+                raise CorruptedQuotaStoreError(f"Quota store file {p} is empty or blank")
             data = json.loads(content)
             if not isinstance(data, dict):
-                return {
-                    "reservations": {},
-                    "settled_receipts": {},
-                    "settled_daily": {},
-                    "settled_season": {},
-                    "settled_plot_total": {},
-                }
+                raise CorruptedQuotaStoreError(f"Quota store file {p} is not a JSON object: got {type(data).__name__}")
+            required_keys = {"reservations", "settled_receipts", "settled_daily", "settled_season", "settled_plot_total"}
+            if not required_keys.issubset(data.keys()) or not isinstance(data.get("reservations"), dict):
+                raise CorruptedQuotaStoreError(f"Quota store file {p} has missing or invalid schema keys")
             return data
-        except Exception:
-            return {
-                "reservations": {},
-                "settled_receipts": {},
-                "settled_daily": {},
-                "settled_season": {},
-                "settled_plot_total": {},
-            }
+        except CorruptedQuotaStoreError:
+            raise
+        except Exception as exc:
+            raise CorruptedQuotaStoreError(f"Quota store file {p} is malformed or unreadable: {exc}") from exc
 
     @classmethod
     def _write_state(cls, state: Dict[str, Any]) -> None:
@@ -181,6 +222,7 @@ class SharedQuotaStore:
                 "settled_daily": {},
                 "settled_season": {},
                 "settled_plot_total": {},
+                "stopped_receipts": {},
             }
             cls._write_state(state)
 
@@ -191,6 +233,10 @@ class SharedQuotaStore:
         requested_volume_mm: float,
         budget: WaterBudget,
         event_id: str,
+        device_id: str = "",
+        zone_id: str = "",
+        duration_minutes: float = 0.0,
+        owner_token: str = "",
     ) -> Optional[SafetyViolation]:
         """Atomically validate budget and reserve quota under a cross-process lock."""
         req_vol = finite_real(requested_volume_mm)
@@ -199,8 +245,8 @@ class SharedQuotaStore:
                 violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
                 interlock_id="INT-QUOTA",
                 interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
-                device_id="",
-                zone_id="",
+                device_id=device_id,
+                zone_id=zone_id,
                 detected_at=datetime.now(timezone.utc).isoformat(),
                 sensor_value=float(requested_volume_mm) if isinstance(requested_volume_mm, (int, float)) and not math.isnan(requested_volume_mm) else 0.0,
                 threshold_breached="max",
@@ -216,8 +262,8 @@ class SharedQuotaStore:
                 violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
                 interlock_id="INT-QUOTA",
                 interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
-                device_id="",
-                zone_id="",
+                device_id=device_id,
+                zone_id=zone_id,
                 detected_at=datetime.now(timezone.utc).isoformat(),
                 sensor_value=req_vol,
                 threshold_breached="max",
@@ -226,96 +272,217 @@ class SharedQuotaStore:
                 notes=f"Non-finite budget limits: season_remaining={budget.season_remaining_mm}, daily_remaining={budget.daily_remaining_mm}",
             )
 
-        with cls._lock():
-            state = cls._read_state()
-            reservations = state.get("reservations", {})
+        try:
+            with cls._lock():
+                state = cls._read_state()
+                settled_receipts = state.get("settled_receipts", {})
+                if event_id in settled_receipts:
+                    rec = settled_receipts[event_id]
+                    rec_vol = float(rec.get("volume_mm", 0.0))
+                    rec_plot = rec.get("plot_id", "")
+                    rec_dev = rec.get("device_id", "")
+                    is_conflict = (abs(rec_vol - req_vol) > 1e-4) or (rec_plot and rec_plot != plot_id) or (device_id and rec_dev and rec_dev != device_id)
+                    if is_conflict:
+                        return SafetyViolation(
+                            violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                            interlock_id="INT-QUOTA",
+                            interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                            device_id=device_id,
+                            zone_id=zone_id,
+                            detected_at=datetime.now(timezone.utc).isoformat(),
+                            sensor_value=req_vol,
+                            threshold_breached="max",
+                            threshold_value=rec_vol,
+                            action_taken="BLOCK",
+                            notes=f"Payload conflict with settled receipt: event {event_id} already settled with {rec_vol}mm vs requested {req_vol}mm",
+                        )
+                    return SafetyViolation(
+                        violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                        interlock_id="INT-QUOTA",
+                        interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                        device_id=device_id,
+                        zone_id=zone_id,
+                        detected_at=datetime.now(timezone.utc).isoformat(),
+                        sensor_value=req_vol,
+                        threshold_breached="max",
+                        threshold_value=rec_vol,
+                        action_taken="ALREADY_SETTLED",
+                        notes=f"Event {event_id} already settled",
+                    )
 
-            already_reserved = 0.0
-            for eid, res in reservations.items():
-                if eid != event_id and res.get("plot_id") == plot_id:
-                    already_reserved += float(res.get("volume_mm", 0.0))
+                reservations = state.get("reservations", {})
+                if event_id in reservations:
+                    res = reservations[event_id]
+                    res_vol = float(res.get("volume_mm", 0.0))
+                    res_plot = res.get("plot_id", "")
+                    res_dev = res.get("device_id", "")
+                    is_conflict = (abs(res_vol - req_vol) > 1e-4) or (res_plot and res_plot != plot_id) or (device_id and res_dev and res_dev != device_id)
+                    if is_conflict:
+                        return SafetyViolation(
+                            violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                            interlock_id="INT-QUOTA",
+                            interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                            device_id=device_id,
+                            zone_id=zone_id,
+                            detected_at=datetime.now(timezone.utc).isoformat(),
+                            sensor_value=req_vol,
+                            threshold_breached="max",
+                            threshold_value=res_vol,
+                            action_taken="BLOCK",
+                            notes=f"Payload conflict with active reservation: event {event_id} already reserved with {res_vol}mm vs requested {req_vol}mm",
+                        )
+                    # V03: Concurrent identical operation already claimed
+                    return SafetyViolation(
+                        violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                        interlock_id="INT-QUOTA",
+                        interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                        device_id=device_id,
+                        zone_id=zone_id,
+                        detected_at=datetime.now(timezone.utc).isoformat(),
+                        sensor_value=req_vol,
+                        threshold_breached="max",
+                        threshold_value=res_vol,
+                        action_taken="ALREADY_RESERVED",
+                        notes=f"Event {event_id} already reserved by concurrent worker",
+                    )
 
-            today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            season_key = str(getattr(budget, "season", "default_season"))
-            settled_today = float(state.get("settled_daily", {}).get(f"{plot_id}:{today_key}", 0.0))
-            settled_season = float(state.get("settled_season", {}).get(f"{plot_id}:{season_key}", 0.0))
+                already_reserved = 0.0
+                for eid, res in reservations.items():
+                    if eid != event_id and res.get("plot_id") == plot_id:
+                        already_reserved += float(res.get("volume_mm", 0.0))
 
-            daily_consumed = finite_real(budget.daily_consumed_mm) or 0.0
-            season_consumed = finite_real(budget.season_consumed_mm) or 0.0
+                today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                season_key = str(getattr(budget, "season", "default_season"))
+                settled_today = float(state.get("settled_daily", {}).get(f"{plot_id}:{today_key}", 0.0))
+                settled_season = float(state.get("settled_season", {}).get(f"{plot_id}:{season_key}", 0.0))
 
-            untracked_daily = max(0.0, settled_today - daily_consumed)
-            untracked_season = max(0.0, settled_season - season_consumed)
+                daily_consumed = finite_real(budget.daily_consumed_mm) or 0.0
+                season_consumed = finite_real(budget.season_consumed_mm) or 0.0
 
-            eff_season = s_rem - already_reserved - untracked_season
-            eff_daily = d_rem - already_reserved - untracked_daily
+                untracked_daily = max(0.0, settled_today - daily_consumed)
+                untracked_season = max(0.0, settled_season - season_consumed)
 
-            if req_vol > eff_season:
-                reason = (
-                    f"Season quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
-                    f"remaining unreserved {eff_season:.1f}mm "
-                    f"({already_reserved:.1f}mm reserved, {untracked_season:.1f}mm untracked settled)"
-                )
-                return SafetyViolation(
-                    violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
-                    interlock_id="INT-QUOTA",
-                    interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
-                    device_id="",
-                    zone_id="",
-                    detected_at=datetime.now(timezone.utc).isoformat(),
-                    sensor_value=req_vol,
-                    threshold_breached="max",
-                    threshold_value=eff_season,
-                    action_taken="BLOCK",
-                    notes=reason,
-                )
+                eff_season = s_rem - already_reserved - untracked_season
+                eff_daily = d_rem - already_reserved - untracked_daily
 
-            if req_vol > eff_daily:
-                reason = (
-                    f"Daily quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
-                    f"remaining unreserved {eff_daily:.1f}mm "
-                    f"({already_reserved:.1f}mm reserved, {untracked_daily:.1f}mm untracked settled)"
-                )
-                return SafetyViolation(
-                    violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
-                    interlock_id="INT-QUOTA",
-                    interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
-                    device_id="",
-                    zone_id="",
-                    detected_at=datetime.now(timezone.utc).isoformat(),
-                    sensor_value=req_vol,
-                    threshold_breached="max",
-                    threshold_value=eff_daily,
-                    action_taken="BLOCK",
-                    notes=reason,
-                )
+                if req_vol > eff_season:
+                    reason = (
+                        f"Season quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
+                        f"remaining unreserved {eff_season:.1f}mm "
+                        f"({already_reserved:.1f}mm reserved, {untracked_season:.1f}mm untracked settled)"
+                    )
+                    return SafetyViolation(
+                        violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                        interlock_id="INT-QUOTA",
+                        interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                        device_id=device_id,
+                        zone_id=zone_id,
+                        detected_at=datetime.now(timezone.utc).isoformat(),
+                        sensor_value=req_vol,
+                        threshold_breached="max",
+                        threshold_value=eff_season,
+                        action_taken="BLOCK",
+                        notes=reason,
+                    )
 
-            # Admitted! Reserve atomically.
-            if req_vol > 0:
-                reservations[event_id] = {
-                    "plot_id": plot_id,
-                    "volume_mm": req_vol,
-                    "status": "RESERVED",
-                    "date": today_key,
-                    "season": season_key,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-                state["reservations"] = reservations
-                cls._write_state(state)
-            return None
+                if req_vol > eff_daily:
+                    reason = (
+                        f"Daily quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
+                        f"remaining unreserved {eff_daily:.1f}mm "
+                        f"({already_reserved:.1f}mm reserved, {untracked_daily:.1f}mm untracked settled)"
+                    )
+                    return SafetyViolation(
+                        violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                        interlock_id="INT-QUOTA",
+                        interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                        device_id=device_id,
+                        zone_id=zone_id,
+                        detected_at=datetime.now(timezone.utc).isoformat(),
+                        sensor_value=req_vol,
+                        threshold_breached="max",
+                        threshold_value=eff_daily,
+                        action_taken="BLOCK",
+                        notes=reason,
+                    )
+
+                # Admitted! Reserve atomically with full payload binding and season retention (V03 + V04).
+                if req_vol > 0:
+                    reservations[event_id] = {
+                        "plot_id": plot_id,
+                        "device_id": device_id,
+                        "zone_id": zone_id,
+                        "volume_mm": req_vol,
+                        "duration_minutes": duration_minutes,
+                        "status": "RESERVED",
+                        "date": today_key,
+                        "season": season_key,
+                        "owner_token": owner_token,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                    state["reservations"] = reservations
+                    cls._write_state(state)
+                return None
+        except CorruptedQuotaStoreError as c_err:
+            # V01: Corrupt quota store must block new physical dispatches rather than resetting to zero
+            return SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id="INT-QUOTA",
+                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                device_id=device_id,
+                zone_id=zone_id,
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=req_vol,
+                threshold_breached="max",
+                threshold_value=0.0,
+                action_taken="BLOCK",
+                notes=f"Quota store corrupted or unreadable: {c_err}",
+            )
+        except OSError as os_err:
+            return SafetyViolation(
+                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                interlock_id="INT-QUOTA",
+                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                device_id=device_id,
+                zone_id=zone_id,
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                sensor_value=req_vol,
+                threshold_breached="max",
+                threshold_value=0.0,
+                action_taken="BLOCK",
+                notes=f"Quota store I/O error: {os_err}",
+            )
 
     @classmethod
-    def reserve(cls, event_id: str, plot_id: str, volume_mm: float) -> None:
+    def reserve(
+        cls,
+        event_id: str,
+        plot_id: str,
+        volume_mm: float,
+        season: Optional[str] = None,
+        date: Optional[str] = None,
+        device_id: str = "",
+        zone_id: str = "",
+        duration_minutes: float = 0.0,
+    ) -> None:
         val = finite_real(volume_mm)
         if val is None or val <= 0:
             return
         with cls._lock():
             state = cls._read_state()
             today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            state.setdefault("reservations", {})[event_id] = {
+            existing = state.setdefault("reservations", {}).get(event_id, {})
+            # V04: Preserve season from existing atomic reservation if not supplied
+            season_key = season or existing.get("season") or "default_season"
+            date_key = date or existing.get("date") or today_key
+            state["reservations"][event_id] = {
                 "plot_id": plot_id,
+                "device_id": device_id or existing.get("device_id", ""),
+                "zone_id": zone_id or existing.get("zone_id", ""),
                 "volume_mm": val,
+                "duration_minutes": duration_minutes or existing.get("duration_minutes", 0.0),
                 "status": "RESERVED",
-                "date": today_key,
+                "date": date_key,
+                "season": season_key,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             cls._write_state(state)
@@ -340,10 +507,17 @@ class SharedQuotaStore:
                 cls._write_state(state)
 
     @classmethod
-    def settle(cls, event_id: str, plot_id: str, volume_mm: float, date: Optional[str] = None, season: Optional[str] = None) -> None:
+    def settle(
+        cls,
+        event_id: str,
+        plot_id: str,
+        volume_mm: float,
+        date: Optional[str] = None,
+        season: Optional[str] = None,
+    ) -> None:
         with cls._lock():
             state = cls._read_state()
-            state.setdefault("reservations", {}).pop(event_id, None)
+            existing_res = state.setdefault("reservations", {}).pop(event_id, {})
             settled_receipts = state.setdefault("settled_receipts", {})
             if event_id in settled_receipts:
                 cls._write_state(state)
@@ -351,10 +525,15 @@ class SharedQuotaStore:
 
             val = finite_real(volume_mm)
             if val is not None and val > 0:
-                date_key = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                season_key = season or "default_season"
+                # V04: Retain season and date from existing reservation if omitted
+                date_key = date or existing_res.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                season_key = season or existing_res.get("season") or "default_season"
+                device_id = existing_res.get("device_id", "")
+                zone_id = existing_res.get("zone_id", "")
                 settled_receipts[event_id] = {
                     "plot_id": plot_id,
+                    "device_id": device_id,
+                    "zone_id": zone_id,
                     "volume_mm": val,
                     "date": date_key,
                     "season": season_key,
@@ -366,6 +545,41 @@ class SharedQuotaStore:
                 state.setdefault("settled_season", {})[pk_season] = float(state.get("settled_season", {}).get(pk_season, 0.0)) + val
                 state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + val
 
+            cls._write_state(state)
+
+    @classmethod
+    def record_stopped_delivery(
+        cls,
+        event_id: str,
+        plot_id: str,
+        target_volume_mm: float,
+        delivered_volume_mm: float = 0.0,
+        season: Optional[str] = None,
+        date: Optional[str] = None,
+    ) -> None:
+        """Record partial/stopped delivery so delivered or reserved exposure is not lost on cancellation (V04)."""
+        with cls._lock():
+            state = cls._read_state()
+            existing_res = state.setdefault("reservations", {}).pop(event_id, {})
+            del_val = finite_real(delivered_volume_mm) or 0.0
+            date_key = date or existing_res.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            season_key = season or existing_res.get("season") or "default_season"
+            device_id = existing_res.get("device_id", "")
+            state.setdefault("stopped_receipts", {})[event_id] = {
+                "plot_id": plot_id,
+                "device_id": device_id,
+                "target_volume_mm": target_volume_mm,
+                "delivered_volume_mm": del_val,
+                "date": date_key,
+                "season": season_key,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            if del_val > 0:
+                pk_daily = f"{plot_id}:{date_key}"
+                pk_season = f"{plot_id}:{season_key}"
+                state.setdefault("settled_daily", {})[pk_daily] = float(state.get("settled_daily", {}).get(pk_daily, 0.0)) + del_val
+                state.setdefault("settled_season", {})[pk_season] = float(state.get("settled_season", {}).get(pk_season, 0.0)) + del_val
+                state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + del_val
             cls._write_state(state)
 
     @classmethod
@@ -395,6 +609,18 @@ class SharedQuotaStore:
         with cls._lock():
             state = cls._read_state()
             return event_id in state.get("reservations", {})
+
+    @classmethod
+    def get_active_record(cls, event_id: str) -> Optional[Dict[str, Any]]:
+        with cls._lock():
+            state = cls._read_state()
+            return state.get("reservations", {}).get(event_id)
+
+    @classmethod
+    def get_settled_receipt(cls, event_id: str) -> Optional[Dict[str, Any]]:
+        with cls._lock():
+            state = cls._read_state()
+            return state.get("settled_receipts", {}).get(event_id)
 
 
 # ============================================================================
@@ -534,6 +760,8 @@ class SafetyMonitor:
         plot_id: str = "",
         volume_mm: float = 0.0,
         elapsed_minutes: float = 0.0,
+        season: Optional[str] = None,
+        date: Optional[str] = None,
     ) -> None:
         """Register an active irrigation event for duration monitoring and quota reservation."""
         now_dt = datetime.now(timezone.utc)
@@ -545,9 +773,19 @@ class SafetyMonitor:
             "device_id": device_id,
             "plot_id": plot_id,
             "volume_mm": volume_mm,
+            "season": season,
+            "date": date,
         }
         if plot_id and volume_mm > 0:
-            self.reserve_quota(event_id, plot_id, volume_mm)
+            self.reserve_quota(
+                event_id,
+                plot_id,
+                volume_mm,
+                season=season,
+                date=date,
+                device_id=device_id,
+                duration_minutes=max_duration_minutes,
+            )
         logger.debug("Tracking event %s (max %.0f min, elapsed %.1f min, reserved %.1f mm)",
                      event_id, max_duration_minutes, elapsed_minutes, volume_mm)
 
@@ -556,13 +794,38 @@ class SafetyMonitor:
         self._active_events.pop(event_id, None)
         SharedQuotaStore.mark_unsettled(event_id)
 
-    def reserve_quota(self, event_id: str, plot_id: str, volume_mm: float) -> None:
+    def is_event_active(self, event_id: str) -> bool:
+        """Check if an event is currently being tracked by the duration watchdog."""
+        return event_id in self._active_events
+
+    def reserve_quota(
+        self,
+        event_id: str,
+        plot_id: str,
+        volume_mm: float,
+        season: Optional[str] = None,
+        date: Optional[str] = None,
+        device_id: str = "",
+        zone_id: str = "",
+        duration_minutes: float = 0.0,
+    ) -> None:
         """Explicitly record a quota reservation in the shared store."""
-        SharedQuotaStore.reserve(event_id, plot_id, volume_mm)
+        SharedQuotaStore.reserve(
+            event_id,
+            plot_id,
+            volume_mm,
+            season=season,
+            date=date,
+            device_id=device_id,
+            zone_id=zone_id,
+            duration_minutes=duration_minutes,
+        )
         if volume_mm > 0:
             self._reserved_quota[event_id] = {
                 "plot_id": plot_id,
                 "volume_mm": volume_mm,
+                "season": season,
+                "date": date,
             }
 
     def release_quota(self, event_id: str) -> None:
@@ -570,9 +833,16 @@ class SafetyMonitor:
         SharedQuotaStore.release(event_id)
         self._reserved_quota.pop(event_id, None)
 
-    def settle_quota(self, event_id: str, plot_id: str, volume_mm: float) -> None:
+    def settle_quota(
+        self,
+        event_id: str,
+        plot_id: str,
+        volume_mm: float,
+        date: Optional[str] = None,
+        season: Optional[str] = None,
+    ) -> None:
         """Settle a delivered event: release reservation and debit cumulative budget."""
-        SharedQuotaStore.settle(event_id, plot_id, volume_mm)
+        SharedQuotaStore.settle(event_id, plot_id, volume_mm, date=date, season=season)
         self._reserved_quota.pop(event_id, None)
 
     def get_reserved_quota(self, plot_id: str, exclude_event_id: Optional[str] = None) -> float:

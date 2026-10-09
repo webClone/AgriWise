@@ -256,6 +256,83 @@ class IrrigationActuator(ABC):
         self._active_command = command
         self._status = ActuatorStatus.EXECUTING
 
+    async def _execute_stop_direct(self, command: IrrigationCommand) -> CommandResult:
+        """Execute STOP or EMERGENCY_STOP directly without waiting behind a hung START lock (V06)."""
+        errors = self.validate_command(command)
+        if errors:
+            logger.warning(
+                "Command %s rejected for device %s: %s",
+                command.command_id, self.device_id, errors
+            )
+            return CommandResult(
+                command_id=command.command_id,
+                device_id=self.device_id,
+                success=False,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                error_code="VALIDATION_FAILED",
+                error_message="; ".join(errors),
+            )
+
+        if (command.command_type == CommandType.STOP_ZONE
+                and self._status == ActuatorStatus.ONLINE
+                and self._active_command is None):
+            logger.info("Device %s is already stopped (ONLINE); STOP_ZONE succeeded idempotently.", self.device_id)
+            result = CommandResult(
+                command_id=command.command_id,
+                device_id=self.device_id,
+                success=True,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                error_code="ALREADY_STOPPED",
+                error_message="Actuator is already stopped",
+            )
+            self._command_history.append({
+                "command_id": command.command_id,
+                "command_type": command.command_type.value,
+                "success": result.success,
+                "timestamp": result.timestamp,
+                "error_code": result.error_code,
+            })
+            return result
+
+        logger.info(
+            "Direct stop dispatch %s to device %s (zone=%s)",
+            command.command_type.value, self.device_id, command.zone_id
+        )
+
+        try:
+            result = await self.send_command(command)
+        except Exception as exc:
+            logger.error(
+                "Stop command %s failed on device %s: %s",
+                command.command_id, self.device_id, exc
+            )
+            self._status = ActuatorStatus.ERROR
+            result = CommandResult(
+                command_id=command.command_id,
+                device_id=self.device_id,
+                success=False,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                error_code="DISPATCH_EXCEPTION",
+                error_message=str(exc),
+                retry_recommended=False,
+            )
+
+        if result.success:
+            self._status = ActuatorStatus.ONLINE
+            self._active_command = None
+            self._pending_command = None
+        else:
+            self._status = ActuatorStatus.ERROR
+
+        self._command_history.append({
+            "command_id": command.command_id,
+            "command_type": command.command_type.value,
+            "success": result.success,
+            "timestamp": result.timestamp,
+            "error_code": result.error_code,
+        })
+        return result
+
     async def execute_with_safety(self, command: IrrigationCommand) -> CommandResult:
         """Validate, dispatch, and log a command with full safety checks.
 
@@ -264,6 +341,10 @@ class IrrigationActuator(ABC):
         Uses dispatch locking so in-flight commands are serialized and duplicates do not
         fabricate false success before initial outcome resolution.
         """
+        # V06: STOP and EMERGENCY_STOP must preempt hung START dispatches without blocking
+        if command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
+            return await self._execute_stop_direct(command)
+
         async with self.dispatch_lock:
             # Pre-flight validation
             errors = self.validate_command(command)

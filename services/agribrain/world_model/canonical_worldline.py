@@ -280,14 +280,39 @@ class CanonicalWorldlineService:
             current_head = self._read(head_path)
             current_head_id = current_head.get("head_hash") or current_head.get("latest_checkpoint_id")
 
-            # R08: Immutability and identical retry receipt
+            # R08 + V11: Immutability, full record identity, and interrupted publication recovery
             if cp_path.exists():
                 existing = self._read(cp_path)
-                if existing and existing.get("payload") == _public(checkpoint_payload):
-                    # Identical retry: return existing record without advancing sequence or head
-                    return existing
+                matches_payload = existing and existing.get("payload") == _public(checkpoint_payload)
+                matches_cycle = existing and (existing.get("cycle_id", "default_cycle") == cycle_id)
+                matches_geom = existing and (existing.get("geometry_version", "default_geom") == geometry_version)
+                if matches_payload and matches_cycle and matches_geom:
+                    # Check if head publication is committed
+                    if current_head_id == checkpoint_id:
+                        # Already published head: return existing record idempotently
+                        return existing
+
+                    # V11: Interrupted publication recovery: checkpoint exists, head was not updated
+                    # Recover head ONLY if predecessor_head matches the current head!
+                    if existing.get("predecessor_head") == current_head_id:
+                        seq = existing.get("sequence", (int(current_head.get("sequence", 0) or 0) + 1))
+                        new_head = {
+                            "tenant_id": tenant_id,
+                            "namespace": namespace,
+                            "plot_id": plot_id,
+                            "sequence": seq,
+                            "latest_checkpoint_id": checkpoint_id,
+                            "head_hash": checkpoint_id,
+                            "updated_at": _now(),
+                        }
+                        self._atomic(head_path, new_head)
+                        return existing
+                    else:
+                        raise ConcurrencyConflictError(
+                            f"Checkpoint {checkpoint_id} exists but is an uncommitted orphan whose predecessor does not match current head {current_head_id}"
+                        )
                 raise ConcurrencyConflictError(
-                    f"Checkpoint {checkpoint_id} already exists with differing payload; checkpoints are immutable"
+                    f"Checkpoint {checkpoint_id} already exists with differing payload/metadata; checkpoints are immutable"
                 )
 
             # R08: Self-parent loop prevention
