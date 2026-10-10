@@ -517,6 +517,7 @@ class IrrigationActuator(ABC):
                     "Command %s on device %s completed after STOP/cancellation (gen %d -> %d). Fencing execution.",
                     command.command_id, self.device_id, start_gen, current_gen
                 )
+                fence_ok = False
                 try:
                     fence_stop = IrrigationCommand(
                         command_id=f"CMD-FENCE-{uuid.uuid4().hex[:8]}",
@@ -526,19 +527,31 @@ class IrrigationActuator(ABC):
                         plot_id=command.plot_id,
                         operation_id=f"OP-FENCE-{command.operation_id}" if command.operation_id else "",
                     )
-                    await self.send_command(fence_stop)
+                    fence_res = await self.send_command(fence_stop)
+                    fence_ok = bool(fence_res and fence_res.success)
                 except Exception as fence_exc:
                     logger.error("Fence stop command failed on device %s: %s", self.device_id, fence_exc)
+                    fence_ok = False
 
-                self._status = ActuatorStatus.ONLINE
-                self._active_command = None
+                if fence_ok:
+                    self._status = ActuatorStatus.ONLINE
+                    self._active_command = None
+                    err_code = "PREEMPTED_BY_STOP"
+                    err_msg = "Command was preempted by STOP or cancellation"
+                else:
+                    # D01: If fence stop failed or threw exception, do not certify stopped; preserve ERROR and active command
+                    self._status = ActuatorStatus.ERROR
+                    self._active_command = command
+                    err_code = "STOP_FAILED"
+                    err_msg = "Late fence stop command failed or was rejected on actuator driver"
+
                 result = CommandResult(
                     command_id=command.command_id,
                     device_id=self.device_id,
                     success=False,
                     timestamp=datetime.now(timezone.utc).isoformat(),
-                    error_code="PREEMPTED_BY_STOP",
-                    error_message="Command was preempted by STOP or cancellation",
+                    error_code=err_code,
+                    error_message=err_msg,
                     retry_recommended=False,
                 )
                 self._command_history.append({

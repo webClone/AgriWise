@@ -663,6 +663,12 @@ class TestBatchAPhysicalCommandSafety(unittest.IsolatedAsyncioTestCase):
         )
         await dispatcher.submit_event(event1, budget=budget)
 
+        # Simulate actuator physical completion -> enters VALIDATING
+        actuator._status = ActuatorStatus.ONLINE
+        actuator._active_command = None
+        await dispatcher.check_execution_status("EVT-SETTLE-01")
+        self.assertEqual(event1.status, EventStatus.VALIDATING)
+
         # Complete event 1
         await dispatcher.complete_event("EVT-SETTLE-01", actual_volume_l=8000.0, actual_duration_minutes=15.0)
 

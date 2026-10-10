@@ -187,13 +187,22 @@ class SharedQuotaStore:
         if "stopped_receipts" in data and not isinstance(data["stopped_receipts"], dict):
             raise CorruptedQuotaStoreError("Quota store key 'stopped_receipts' must be a dictionary")
 
-        # C03: Validate all nested records and values (reject booleans, NaNs, infinities, and negatives)
+        # C03 + D04: Validate all nested records and scalar types (reject booleans, NaNs, infinities, and negatives)
         for eid, res in data["reservations"].items():
             if not isinstance(res, dict):
                 raise CorruptedQuotaStoreError(f"Reservation '{eid}' must be a dictionary")
             vol = res.get("volume_mm")
             if isinstance(vol, bool) or not isinstance(vol, (int, float)) or not math.isfinite(vol) or vol < 0:
                 raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid volume_mm: {vol}")
+            dur = res.get("duration_minutes")
+            if dur is not None and (isinstance(dur, bool) or not isinstance(dur, (int, float)) or not math.isfinite(dur) or dur < 0):
+                raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid duration_minutes: {dur}")
+            flow = res.get("flow_rate_lpm")
+            if flow is not None and (isinstance(flow, bool) or not isinstance(flow, (int, float)) or not math.isfinite(flow) or flow < 0):
+                raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid flow_rate_lpm: {flow}")
+            area = res.get("effective_area_ha")
+            if area is not None and (isinstance(area, bool) or not isinstance(area, (int, float)) or not math.isfinite(area) or area <= 0):
+                raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid effective_area_ha: {area}")
 
         for eid, rec in data["settled_receipts"].items():
             if not isinstance(rec, dict):
@@ -201,10 +210,27 @@ class SharedQuotaStore:
             vol = rec.get("volume_mm")
             if isinstance(vol, bool) or not isinstance(vol, (int, float)) or not math.isfinite(vol) or vol < 0:
                 raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' has invalid volume_mm: {vol}")
+            if "target_volume_mm" in rec:
+                tvol = rec["target_volume_mm"]
+                if isinstance(tvol, bool) or not isinstance(tvol, (int, float)) or not math.isfinite(tvol) or tvol < 0:
+                    raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' has invalid target_volume_mm: {tvol}")
             if "actual_volume_l" in rec:
                 avl = rec["actual_volume_l"]
                 if isinstance(avl, bool) or not isinstance(avl, (int, float)) or not math.isfinite(avl) or avl < 0:
                     raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' has invalid actual_volume_l: {avl}")
+            if "actual_duration_minutes" in rec:
+                adur = rec["actual_duration_minutes"]
+                if isinstance(adur, bool) or not isinstance(adur, (int, float)) or not math.isfinite(adur) or adur < 0:
+                    raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' has invalid actual_duration_minutes: {adur}")
+            dur = rec.get("duration_minutes")
+            if dur is not None and (isinstance(dur, bool) or not isinstance(dur, (int, float)) or not math.isfinite(dur) or dur < 0):
+                raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' has invalid duration_minutes: {dur}")
+            flow = rec.get("flow_rate_lpm")
+            if flow is not None and (isinstance(flow, bool) or not isinstance(flow, (int, float)) or not math.isfinite(flow) or flow < 0):
+                raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' has invalid flow_rate_lpm: {flow}")
+            area = rec.get("effective_area_ha")
+            if area is not None and (isinstance(area, bool) or not isinstance(area, (int, float)) or not math.isfinite(area) or area <= 0):
+                raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' has invalid effective_area_ha: {area}")
 
         for eid, srec in data.get("stopped_receipts", {}).items():
             if not isinstance(srec, dict):
@@ -212,11 +238,69 @@ class SharedQuotaStore:
             dvol = srec.get("delivered_volume_mm")
             if isinstance(dvol, bool) or not isinstance(dvol, (int, float)) or not math.isfinite(dvol) or dvol < 0:
                 raise CorruptedQuotaStoreError(f"Stopped receipt '{eid}' has invalid delivered_volume_mm: {dvol}")
+            tvol = srec.get("target_volume_mm")
+            if tvol is not None and (isinstance(tvol, bool) or not isinstance(tvol, (int, float)) or not math.isfinite(tvol) or tvol < 0):
+                raise CorruptedQuotaStoreError(f"Stopped receipt '{eid}' has invalid target_volume_mm: {tvol}")
+            dur = srec.get("duration_minutes")
+            if dur is not None and (isinstance(dur, bool) or not isinstance(dur, (int, float)) or not math.isfinite(dur) or dur < 0):
+                raise CorruptedQuotaStoreError(f"Stopped receipt '{eid}' has invalid duration_minutes: {dur}")
+            flow = srec.get("flow_rate_lpm")
+            if flow is not None and (isinstance(flow, bool) or not isinstance(flow, (int, float)) or not math.isfinite(flow) or flow < 0):
+                raise CorruptedQuotaStoreError(f"Stopped receipt '{eid}' has invalid flow_rate_lpm: {flow}")
+            area = srec.get("effective_area_ha")
+            if area is not None and (isinstance(area, bool) or not isinstance(area, (int, float)) or not math.isfinite(area) or area <= 0):
+                raise CorruptedQuotaStoreError(f"Stopped receipt '{eid}' has invalid effective_area_ha: {area}")
 
         for agg_key in ("settled_daily", "settled_season", "settled_plot_total"):
             for k, v in data[agg_key].items():
                 if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
                     raise CorruptedQuotaStoreError(f"Aggregate '{agg_key}' key '{k}' has invalid amount: {v}")
+
+        # D04: Reconcile aggregates against receipts to prevent contradictory rollups
+        expected_daily: Dict[str, float] = {}
+        expected_season: Dict[str, float] = {}
+        expected_plot: Dict[str, float] = {}
+
+        for rec in data["settled_receipts"].values():
+            p = rec.get("plot_id", "")
+            d = rec.get("date", "")
+            s = rec.get("season", "default_season")
+            v = float(rec.get("volume_mm", 0.0))
+            if v > 0:
+                if p and d:
+                    expected_daily[f"{p}:{d}"] = expected_daily.get(f"{p}:{d}", 0.0) + v
+                if p and s:
+                    expected_season[f"{p}:{s}"] = expected_season.get(f"{p}:{s}", 0.0) + v
+                if p:
+                    expected_plot[p] = expected_plot.get(p, 0.0) + v
+
+        for srec in data.get("stopped_receipts", {}).values():
+            p = srec.get("plot_id", "")
+            d = srec.get("date", "")
+            s = srec.get("season", "default_season")
+            v = float(srec.get("delivered_volume_mm", 0.0))
+            if v > 0:
+                if p and d:
+                    expected_daily[f"{p}:{d}"] = expected_daily.get(f"{p}:{d}", 0.0) + v
+                if p and s:
+                    expected_season[f"{p}:{s}"] = expected_season.get(f"{p}:{s}", 0.0) + v
+                if p:
+                    expected_plot[p] = expected_plot.get(p, 0.0) + v
+
+        for k, exp_val in expected_daily.items():
+            act_val = float(data["settled_daily"].get(k, 0.0))
+            if abs(exp_val - act_val) > 1e-4:
+                raise CorruptedQuotaStoreError(f"Aggregate settled_daily[{k}]={act_val} contradicts receipts sum {exp_val}")
+
+        for k, exp_val in expected_season.items():
+            act_val = float(data["settled_season"].get(k, 0.0))
+            if abs(exp_val - act_val) > 1e-4:
+                raise CorruptedQuotaStoreError(f"Aggregate settled_season[{k}]={act_val} contradicts receipts sum {exp_val}")
+
+        for p, exp_val in expected_plot.items():
+            act_val = float(data["settled_plot_total"].get(p, 0.0))
+            if abs(exp_val - act_val) > 1e-4:
+                raise CorruptedQuotaStoreError(f"Aggregate settled_plot_total[{p}]={act_val} contradicts receipts sum {exp_val}")
 
     @classmethod
     def _read_state(cls) -> Dict[str, Any]:
@@ -263,12 +347,10 @@ class SharedQuotaStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, p)
-            # C03: Mark established so store disappearance cannot silently reset to zero
-            try:
-                if not marker.exists():
-                    marker.write_text("established", encoding="utf-8")
-            except Exception:
-                pass
+            # C03 + D04: Mark established so store disappearance cannot silently reset to zero.
+            # Do NOT swallow exceptions on marker write!
+            if not marker.exists():
+                marker.write_text("established", encoding="utf-8")
         finally:
             tmp.unlink(missing_ok=True)
 
@@ -295,15 +377,16 @@ class SharedQuotaStore:
         cls,
         plot_id: str,
         requested_volume_mm: float,
-        budget: WaterBudget,
-        event_id: str,
+        budget: Optional[WaterBudget] = None,
+        event_id: str = "",
         device_id: str = "",
         zone_id: str = "",
         duration_minutes: float = 0.0,
         owner_token: str = "",
         flow_rate_lpm: float = 0.0,
+        effective_area_ha: Optional[float] = None,
     ) -> Optional[SafetyViolation]:
-        """Atomically validate budget and reserve quota under a cross-process lock."""
+        """Atomically validate budget and reserve quota under a cross-process lock (D05 + D06)."""
         req_vol = finite_real(requested_volume_mm)
         if req_vol is None or req_vol < 0:
             return SafetyViolation(
@@ -320,44 +403,54 @@ class SharedQuotaStore:
                 notes=f"Invalid requested volume {requested_volume_mm}: must be a non-negative finite real number",
             )
 
-        s_rem = finite_real(budget.season_remaining_mm)
-        d_rem = finite_real(budget.daily_remaining_mm)
-        if s_rem is None or d_rem is None:
-            return SafetyViolation(
-                violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
-                interlock_id="INT-QUOTA",
-                interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
-                device_id=device_id,
-                zone_id=zone_id,
-                detected_at=datetime.now(timezone.utc).isoformat(),
-                sensor_value=req_vol,
-                threshold_breached="max",
-                threshold_value=0.0,
-                action_taken="BLOCK",
-                notes=f"Non-finite budget limits: season_remaining={budget.season_remaining_mm}, daily_remaining={budget.daily_remaining_mm}",
-            )
+        if budget is not None:
+            s_rem = finite_real(budget.season_remaining_mm)
+            d_rem = finite_real(budget.daily_remaining_mm)
+            if s_rem is None or d_rem is None:
+                return SafetyViolation(
+                    violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                    interlock_id="INT-QUOTA",
+                    interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                    device_id=device_id,
+                    zone_id=zone_id,
+                    detected_at=datetime.now(timezone.utc).isoformat(),
+                    sensor_value=req_vol,
+                    threshold_breached="max",
+                    threshold_value=0.0,
+                    action_taken="BLOCK",
+                    notes=f"Non-finite budget limits: season_remaining={budget.season_remaining_mm}, daily_remaining={budget.daily_remaining_mm}",
+                )
+        else:
+            s_rem = None
+            d_rem = None
+
+        e_dur = finite_real(duration_minutes)
+        e_flow = finite_real(flow_rate_lpm)
+        e_area = finite_real(effective_area_ha)
 
         try:
             with cls._lock():
                 state = cls._read_state()
 
-                # C05: Stopped receipts check
+                # C05 + D06: Stopped receipts check
                 stopped_receipts = state.get("stopped_receipts", {})
                 if event_id in stopped_receipts:
                     srec = stopped_receipts[event_id]
-                    s_target = float(srec.get("target_volume_mm", 0.0))
+                    s_target = finite_real(srec.get("target_volume_mm", 0.0))
                     s_plot = srec.get("plot_id", "")
                     s_dev = srec.get("device_id", "")
                     s_zone = srec.get("zone_id", "")
-                    s_dur = float(srec.get("duration_minutes", 0.0)) if "duration_minutes" in srec else None
-                    s_flow = float(srec.get("flow_rate_lpm", 0.0)) if "flow_rate_lpm" in srec else None
+                    s_dur = finite_real(srec.get("duration_minutes"))
+                    s_flow = finite_real(srec.get("flow_rate_lpm"))
+                    s_area = finite_real(srec.get("effective_area_ha"))
                     is_conflict = (
-                        (abs(s_target - req_vol) > 1e-4)
-                        or (s_plot and s_plot != plot_id)
-                        or (device_id and s_dev and s_dev != device_id)
-                        or (zone_id and s_zone and s_zone != zone_id)
-                        or (s_dur is not None and s_dur > 0 and duration_minutes > 0 and abs(s_dur - duration_minutes) > 1e-4)
-                        or (s_flow is not None and s_flow > 0 and flow_rate_lpm > 0 and abs(s_flow - flow_rate_lpm) > 1e-4)
+                        (s_target is not None and abs(s_target - req_vol) > 1e-4)
+                        or (bool(s_plot) and bool(plot_id) and s_plot != plot_id)
+                        or (bool(device_id) and bool(s_dev) and s_dev != device_id)
+                        or (bool(zone_id) and bool(s_zone) and s_zone != zone_id)
+                        or (s_dur is not None and e_dur is not None and abs(s_dur - e_dur) > 1e-4)
+                        or (s_flow is not None and e_flow is not None and abs(s_flow - e_flow) > 1e-4)
+                        or (s_area is not None and e_area is not None and abs(s_area - e_area) > 1e-4)
                     )
                     if is_conflict:
                         return SafetyViolation(
@@ -369,7 +462,7 @@ class SharedQuotaStore:
                             detected_at=datetime.now(timezone.utc).isoformat(),
                             sensor_value=req_vol,
                             threshold_breached="max",
-                            threshold_value=s_target,
+                            threshold_value=s_target or 0.0,
                             action_taken="BLOCK",
                             notes=f"Payload conflict with stopped receipt: event {event_id}",
                         )
@@ -382,28 +475,30 @@ class SharedQuotaStore:
                         detected_at=datetime.now(timezone.utc).isoformat(),
                         sensor_value=req_vol,
                         threshold_breached="max",
-                        threshold_value=s_target,
+                        threshold_value=s_target or 0.0,
                         action_taken="ALREADY_STOPPED",
                         notes=f"Event {event_id} already stopped/cancelled",
                     )
 
-                # C09: Settled receipts check (compare against commanded target, not delivered volume!)
+                # C09 + D06: Settled receipts check (compare against commanded target, not delivered volume!)
                 settled_receipts = state.get("settled_receipts", {})
                 if event_id in settled_receipts:
                     rec = settled_receipts[event_id]
-                    rec_target = float(rec.get("target_volume_mm", rec.get("volume_mm", 0.0)))
+                    rec_target = finite_real(rec.get("target_volume_mm", rec.get("volume_mm", 0.0)))
                     rec_plot = rec.get("plot_id", "")
                     rec_dev = rec.get("device_id", "")
                     rec_zone = rec.get("zone_id", "")
-                    rec_dur = float(rec.get("duration_minutes", 0.0)) if "duration_minutes" in rec else None
-                    rec_flow = float(rec.get("flow_rate_lpm", 0.0)) if "flow_rate_lpm" in rec else None
+                    rec_dur = finite_real(rec.get("duration_minutes"))
+                    rec_flow = finite_real(rec.get("flow_rate_lpm"))
+                    rec_area = finite_real(rec.get("effective_area_ha"))
                     is_conflict = (
-                        (abs(rec_target - req_vol) > 1e-4)
-                        or (rec_plot and rec_plot != plot_id)
-                        or (device_id and rec_dev and rec_dev != device_id)
-                        or (zone_id and rec_zone and rec_zone != zone_id)
-                        or (rec_dur is not None and duration_minutes > 0 and abs(rec_dur - duration_minutes) > 1e-4)
-                        or (rec_flow is not None and flow_rate_lpm > 0 and abs(rec_flow - flow_rate_lpm) > 1e-4)
+                        (rec_target is not None and abs(rec_target - req_vol) > 1e-4)
+                        or (bool(rec_plot) and bool(plot_id) and rec_plot != plot_id)
+                        or (bool(device_id) and bool(rec_dev) and rec_dev != device_id)
+                        or (bool(zone_id) and bool(rec_zone) and rec_zone != zone_id)
+                        or (rec_dur is not None and e_dur is not None and abs(rec_dur - e_dur) > 1e-4)
+                        or (rec_flow is not None and e_flow is not None and abs(rec_flow - e_flow) > 1e-4)
+                        or (rec_area is not None and e_area is not None and abs(rec_area - e_area) > 1e-4)
                     )
                     if is_conflict:
                         return SafetyViolation(
@@ -415,7 +510,7 @@ class SharedQuotaStore:
                             detected_at=datetime.now(timezone.utc).isoformat(),
                             sensor_value=req_vol,
                             threshold_breached="max",
-                            threshold_value=rec_target,
+                            threshold_value=rec_target or 0.0,
                             action_taken="BLOCK",
                             notes=f"Payload conflict with settled receipt: event {event_id} already settled with target {rec_target}mm vs requested {req_vol}mm",
                         )
@@ -428,28 +523,30 @@ class SharedQuotaStore:
                         detected_at=datetime.now(timezone.utc).isoformat(),
                         sensor_value=req_vol,
                         threshold_breached="max",
-                        threshold_value=rec_target,
+                        threshold_value=rec_target or 0.0,
                         action_taken="ALREADY_SETTLED",
                         notes=f"Event {event_id} already settled",
                     )
 
-                # C06: Active reservation check with full payload binding (volume, duration, flow, zone, plot, device)
+                # C06 + D06: Active reservation check with full payload binding (volume, duration, flow, zone, plot, device, area)
                 reservations = state.get("reservations", {})
                 if event_id in reservations:
                     res = reservations[event_id]
-                    res_vol = float(res.get("volume_mm", 0.0))
+                    res_vol = finite_real(res.get("volume_mm", 0.0))
                     res_plot = res.get("plot_id", "")
                     res_dev = res.get("device_id", "")
                     res_zone = res.get("zone_id", "")
-                    res_dur = float(res.get("duration_minutes", 0.0)) if "duration_minutes" in res else None
-                    res_flow = float(res.get("flow_rate_lpm", 0.0)) if "flow_rate_lpm" in res else None
+                    res_dur = finite_real(res.get("duration_minutes"))
+                    res_flow = finite_real(res.get("flow_rate_lpm"))
+                    res_area = finite_real(res.get("effective_area_ha"))
                     is_conflict = (
-                        (abs(res_vol - req_vol) > 1e-4)
-                        or (res_plot and res_plot != plot_id)
-                        or (device_id and res_dev and res_dev != device_id)
-                        or (zone_id and res_zone and res_zone != zone_id)
-                        or (res_dur is not None and res_dur > 0 and duration_minutes > 0 and abs(res_dur - duration_minutes) > 1e-4)
-                        or (res_flow is not None and res_flow > 0 and flow_rate_lpm > 0 and abs(res_flow - flow_rate_lpm) > 1e-4)
+                        (res_vol is not None and abs(res_vol - req_vol) > 1e-4)
+                        or (bool(res_plot) and bool(plot_id) and res_plot != plot_id)
+                        or (bool(device_id) and bool(res_dev) and res_dev != device_id)
+                        or (bool(zone_id) and bool(res_zone) and res_zone != zone_id)
+                        or (res_dur is not None and e_dur is not None and abs(res_dur - e_dur) > 1e-4)
+                        or (res_flow is not None and e_flow is not None and abs(res_flow - e_flow) > 1e-4)
+                        or (res_area is not None and e_area is not None and abs(res_area - e_area) > 1e-4)
                     )
                     if is_conflict:
                         return SafetyViolation(
@@ -461,7 +558,7 @@ class SharedQuotaStore:
                             detected_at=datetime.now(timezone.utc).isoformat(),
                             sensor_value=req_vol,
                             threshold_breached="max",
-                            threshold_value=res_vol,
+                            threshold_value=res_vol or 0.0,
                             action_taken="BLOCK",
                             notes=f"Payload conflict with active reservation: event {event_id}",
                         )
@@ -475,78 +572,82 @@ class SharedQuotaStore:
                         detected_at=datetime.now(timezone.utc).isoformat(),
                         sensor_value=req_vol,
                         threshold_breached="max",
-                        threshold_value=res_vol,
+                        threshold_value=res_vol or 0.0,
                         action_taken="ALREADY_RESERVED",
                         notes=f"Event {event_id} already reserved by concurrent worker",
                     )
 
-                already_reserved = 0.0
-                for eid, res in reservations.items():
-                    if eid != event_id and res.get("plot_id") == plot_id:
-                        already_reserved += float(res.get("volume_mm", 0.0))
-
                 today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                season_key = str(getattr(budget, "season", "default_season"))
-                settled_today = float(state.get("settled_daily", {}).get(f"{plot_id}:{today_key}", 0.0))
-                settled_season = float(state.get("settled_season", {}).get(f"{plot_id}:{season_key}", 0.0))
+                season_key = str(getattr(budget, "season", "default_season")) if budget else "default_season"
 
-                daily_consumed = finite_real(budget.daily_consumed_mm) or 0.0
-                season_consumed = finite_real(budget.season_consumed_mm) or 0.0
+                # If budget is provided, enforce concurrent quota conservation
+                if budget is not None and s_rem is not None and d_rem is not None:
+                    already_reserved = 0.0
+                    for eid, res in reservations.items():
+                        if eid != event_id and res.get("plot_id") == plot_id:
+                            already_reserved += float(res.get("volume_mm", 0.0))
 
-                untracked_daily = max(0.0, settled_today - daily_consumed)
-                untracked_season = max(0.0, settled_season - season_consumed)
+                    settled_today = float(state.get("settled_daily", {}).get(f"{plot_id}:{today_key}", 0.0))
+                    settled_season = float(state.get("settled_season", {}).get(f"{plot_id}:{season_key}", 0.0))
 
-                eff_season = s_rem - already_reserved - untracked_season
-                eff_daily = d_rem - already_reserved - untracked_daily
+                    daily_consumed = finite_real(budget.daily_consumed_mm) or 0.0
+                    season_consumed = finite_real(budget.season_consumed_mm) or 0.0
 
-                if req_vol > eff_season:
-                    reason = (
-                        f"Season quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
-                        f"remaining unreserved {eff_season:.1f}mm "
-                        f"({already_reserved:.1f}mm reserved, {untracked_season:.1f}mm untracked settled)"
-                    )
-                    return SafetyViolation(
-                        violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
-                        interlock_id="INT-QUOTA",
-                        interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
-                        device_id=device_id,
-                        zone_id=zone_id,
-                        detected_at=datetime.now(timezone.utc).isoformat(),
-                        sensor_value=req_vol,
-                        threshold_breached="max",
-                        threshold_value=eff_season,
-                        action_taken="BLOCK",
-                        notes=reason,
-                    )
+                    untracked_daily = max(0.0, settled_today - daily_consumed)
+                    untracked_season = max(0.0, settled_season - season_consumed)
 
-                if req_vol > eff_daily:
-                    reason = (
-                        f"Daily quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
-                        f"remaining unreserved {eff_daily:.1f}mm "
-                        f"({already_reserved:.1f}mm reserved, {untracked_daily:.1f}mm untracked settled)"
-                    )
-                    return SafetyViolation(
-                        violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
-                        interlock_id="INT-QUOTA",
-                        interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
-                        device_id=device_id,
-                        zone_id=zone_id,
-                        detected_at=datetime.now(timezone.utc).isoformat(),
-                        sensor_value=req_vol,
-                        threshold_breached="max",
-                        threshold_value=eff_daily,
-                        action_taken="BLOCK",
-                        notes=reason,
-                    )
+                    eff_season = s_rem - already_reserved - untracked_season
+                    eff_daily = d_rem - already_reserved - untracked_daily
 
-                # C06: Claim operation atomically EVEN IF req_vol == 0.0!
+                    if req_vol > eff_season:
+                        reason = (
+                            f"Season quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
+                            f"remaining unreserved {eff_season:.1f}mm "
+                            f"({already_reserved:.1f}mm reserved, {untracked_season:.1f}mm untracked settled)"
+                        )
+                        return SafetyViolation(
+                            violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                            interlock_id="INT-QUOTA",
+                            interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                            device_id=device_id,
+                            zone_id=zone_id,
+                            detected_at=datetime.now(timezone.utc).isoformat(),
+                            sensor_value=req_vol,
+                            threshold_breached="max",
+                            threshold_value=eff_season,
+                            action_taken="BLOCK",
+                            notes=reason,
+                        )
+
+                    if req_vol > eff_daily:
+                        reason = (
+                            f"Daily quota exceeded by concurrent reservations: need {req_vol:.1f}mm, "
+                            f"remaining unreserved {eff_daily:.1f}mm "
+                            f"({already_reserved:.1f}mm reserved, {untracked_daily:.1f}mm untracked settled)"
+                        )
+                        return SafetyViolation(
+                            violation_id=f"VIO-{uuid.uuid4().hex[:12]}",
+                            interlock_id="INT-QUOTA",
+                            interlock_type=InterlockType.WATER_QUOTA_EXCEEDED,
+                            device_id=device_id,
+                            zone_id=zone_id,
+                            detected_at=datetime.now(timezone.utc).isoformat(),
+                            sensor_value=req_vol,
+                            threshold_breached="max",
+                            threshold_value=eff_daily,
+                            action_taken="BLOCK",
+                            notes=reason,
+                        )
+
+                # D05 + D06: Claim operation atomically EVEN IF req_vol == 0.0 OR budget is None!
                 reservations[event_id] = {
                     "plot_id": plot_id,
                     "device_id": device_id,
                     "zone_id": zone_id,
                     "volume_mm": req_vol,
-                    "duration_minutes": duration_minutes,
-                    "flow_rate_lpm": flow_rate_lpm,
+                    "duration_minutes": e_dur if e_dur is not None else 0.0,
+                    "flow_rate_lpm": e_flow if e_flow is not None else 0.0,
+                    "effective_area_ha": e_area if (e_area is not None and e_area > 0) else None,
                     "status": "DISPATCHING",
                     "date": today_key,
                     "season": season_key,
@@ -598,6 +699,7 @@ class SharedQuotaStore:
         zone_id: str = "",
         duration_minutes: float = 0.0,
         flow_rate_lpm: float = 0.0,
+        effective_area_ha: Optional[float] = None,
     ) -> None:
         val = finite_real(volume_mm)
         if val is None or val < 0:
@@ -609,13 +711,20 @@ class SharedQuotaStore:
             # V04: Preserve season from existing atomic reservation if not supplied
             season_key = season or existing.get("season") or "default_season"
             date_key = date or existing.get("date") or today_key
+            eff_area = effective_area_ha if effective_area_ha is not None else existing.get("effective_area_ha")
+            r_dur = finite_real(duration_minutes) if duration_minutes is not None else finite_real(existing.get("duration_minutes"))
+            r_flow = finite_real(flow_rate_lpm) if flow_rate_lpm is not None else finite_real(existing.get("flow_rate_lpm"))
+            r_area = finite_real(eff_area)
+            if r_area is not None and r_area <= 0:
+                r_area = None
             state["reservations"][event_id] = {
                 "plot_id": plot_id,
                 "device_id": device_id or existing.get("device_id", ""),
                 "zone_id": zone_id or existing.get("zone_id", ""),
                 "volume_mm": val,
-                "duration_minutes": duration_minutes or existing.get("duration_minutes", 0.0),
-                "flow_rate_lpm": flow_rate_lpm or existing.get("flow_rate_lpm", 0.0),
+                "duration_minutes": r_dur if r_dur is not None else 0.0,
+                "flow_rate_lpm": r_flow if r_flow is not None else 0.0,
+                "effective_area_ha": r_area,
                 "status": existing.get("status", "RESERVED"),
                 "date": date_key,
                 "season": season_key,
@@ -634,12 +743,13 @@ class SharedQuotaStore:
 
     @classmethod
     def mark_unsettled(cls, event_id: str) -> None:
-        """Mark an active reservation as pending validation/settlement without releasing quota."""
+        """Mark an active reservation as pending validation/settlement without releasing quota (D07)."""
         with cls._lock():
             state = cls._read_state()
             reservations = state.get("reservations", {})
             if event_id in reservations:
-                reservations[event_id]["status"] = "UNSETTLED"
+                reservations[event_id]["status"] = "VALIDATING"
+                reservations[event_id]["accounting_status"] = "UNSETTLED"
                 cls._write_state(state)
 
     @classmethod
@@ -666,6 +776,7 @@ class SharedQuotaStore:
         zone_id: Optional[str] = None,
         duration_minutes: Optional[float] = None,
         flow_rate_lpm: Optional[float] = None,
+        effective_area_ha: Optional[float] = None,
     ) -> None:
         # C08: Strictly validate volume_mm BEFORE modifying any state
         val = finite_real(volume_mm)
@@ -676,18 +787,62 @@ class SharedQuotaStore:
             state = cls._read_state()
             settled_receipts = state.setdefault("settled_receipts", {})
             if event_id in settled_receipts:
-                return  # Idempotent!
+                # D08 Probe C: Verify retry compatibility instead of silently ignoring conflicting retries!
+                existing = settled_receipts[event_id]
+                ex_target = float(existing.get("target_volume_mm", existing.get("volume_mm", 0.0)))
+                ex_del = float(existing.get("delivered_volume_mm", existing.get("volume_mm", 0.0)))
+                ex_plot = existing.get("plot_id", "")
+                ex_dur = finite_real(existing.get("duration_minutes"))
+                ex_flow = finite_real(existing.get("flow_rate_lpm"))
+                ex_area = finite_real(existing.get("effective_area_ha"))
+
+                t_check = target_volume_mm if target_volume_mm is not None else val
+                e_dur = finite_real(duration_minutes)
+                e_flow = finite_real(flow_rate_lpm)
+                e_area = finite_real(effective_area_ha)
+
+                is_conflict = (
+                    abs(ex_del - val) > 1e-4
+                    or abs(ex_target - t_check) > 1e-4
+                    or (bool(plot_id) and bool(ex_plot) and ex_plot != plot_id)
+                    or (ex_dur is not None and e_dur is not None and abs(ex_dur - e_dur) > 1e-4)
+                    or (ex_flow is not None and e_flow is not None and abs(ex_flow - e_flow) > 1e-4)
+                    or (ex_area is not None and e_area is not None and abs(ex_area - e_area) > 1e-4)
+                )
+                if is_conflict:
+                    raise ValueError(
+                        f"Conflicting settlement retry for event {event_id}: existing target {ex_target}mm/del {ex_del}mm "
+                        f"vs requested target {t_check}mm/del {val}mm"
+                    )
+                return  # Identical retry: idempotent success
 
             existing_res = state.setdefault("reservations", {}).pop(event_id, {})
-            date_key = date or existing_res.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            season_key = season or existing_res.get("season") or "default_season"
-            dev_id = device_id or existing_res.get("device_id", "")
-            z_id = zone_id or existing_res.get("zone_id", "")
-            t_vol = target_volume_mm if target_volume_mm is not None else float(existing_res.get("volume_mm", val))
-            dur_m = duration_minutes if duration_minutes is not None else existing_res.get("duration_minutes", 0.0)
-            f_lpm = flow_rate_lpm if flow_rate_lpm is not None else existing_res.get("flow_rate_lpm", 0.0)
+            # D08 Probe B: Reconcile prior stopped receipt if this event was previously stopped!
+            stopped_receipts = state.setdefault("stopped_receipts", {})
+            prior_stopped = stopped_receipts.pop(event_id, None)
 
-            # C09: Preserve commanded target and actual delivery observations separately
+            date_key = date or existing_res.get("date") or (prior_stopped.get("date") if prior_stopped else None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            season_key = season or existing_res.get("season") or (prior_stopped.get("season") if prior_stopped else None) or "default_season"
+            dev_id = device_id or existing_res.get("device_id", "") or (prior_stopped.get("device_id", "") if prior_stopped else "")
+            z_id = zone_id or existing_res.get("zone_id", "") or (prior_stopped.get("zone_id", "") if prior_stopped else "")
+            t_vol = target_volume_mm if target_volume_mm is not None else float(existing_res.get("volume_mm", prior_stopped.get("target_volume_mm", val) if prior_stopped else val))
+            dur_m = duration_minutes if duration_minutes is not None else existing_res.get("duration_minutes", prior_stopped.get("duration_minutes", 0.0) if prior_stopped else 0.0)
+            f_lpm = flow_rate_lpm if flow_rate_lpm is not None else existing_res.get("flow_rate_lpm", prior_stopped.get("flow_rate_lpm", 0.0) if prior_stopped else 0.0)
+            eff_area = effective_area_ha if effective_area_ha is not None else existing_res.get("effective_area_ha", prior_stopped.get("effective_area_ha") if prior_stopped else None)
+
+            # Deduct prior stopped delivery if present
+            if prior_stopped is not None:
+                p_del = float(prior_stopped.get("delivered_volume_mm", 0.0))
+                p_date = prior_stopped.get("date", date_key)
+                p_season = prior_stopped.get("season", season_key)
+                if p_del > 0:
+                    pk_daily_p = f"{plot_id}:{p_date}"
+                    pk_season_p = f"{plot_id}:{p_season}"
+                    state.setdefault("settled_daily", {})[pk_daily_p] = max(0.0, float(state.get("settled_daily", {}).get(pk_daily_p, 0.0)) - p_del)
+                    state.setdefault("settled_season", {})[pk_season_p] = max(0.0, float(state.get("settled_season", {}).get(pk_season_p, 0.0)) - p_del)
+                    state.setdefault("settled_plot_total", {})[plot_id] = max(0.0, float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) - p_del)
+
+            # C09 + D10: Preserve commanded target and actual delivery observations separately
             settled_receipts[event_id] = {
                 "plot_id": plot_id,
                 "device_id": dev_id,
@@ -699,6 +854,7 @@ class SharedQuotaStore:
                 "actual_duration_minutes": finite_real(actual_duration_minutes) or 0.0,
                 "duration_minutes": dur_m,
                 "flow_rate_lpm": f_lpm,
+                "effective_area_ha": eff_area,
                 "date": date_key,
                 "season": season_key,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -725,33 +881,73 @@ class SharedQuotaStore:
         zone_id: Optional[str] = None,
         duration_minutes: Optional[float] = None,
         flow_rate_lpm: Optional[float] = None,
+        effective_area_ha: Optional[float] = None,
     ) -> None:
-        """Record partial/stopped delivery so delivered or reserved exposure is not lost on cancellation (V04 + C04 + C05)."""
+        """Record partial/stopped delivery so delivered or reserved exposure is not lost on cancellation (V04 + C04 + C05 + D08)."""
         with cls._lock():
             state = cls._read_state()
             existing_receipt = state.get("stopped_receipts", {}).get(event_id)
 
-            # C04: If delivered depth is unmeasured/unknown, keep conservative target volume
             del_val = finite_real(delivered_volume_mm)
             if del_val is None:
                 del_val = float(target_volume_mm)
 
+            existing_res = state.setdefault("reservations", {}).pop(event_id, {})
+
             if existing_receipt is not None:
-                # C05: Idempotent terminal receipt check - do NOT re-debit on identical retry!
+                # D08 Probe A: Preserve original receipt's date and season on corrections!
+                orig_date = existing_receipt.get("date")
+                orig_season = existing_receipt.get("season")
+                date_key = date or orig_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                season_key = season or orig_season or "default_season"
+                dev_id = device_id or existing_receipt.get("device_id", "")
+                z_id = zone_id or existing_receipt.get("zone_id", "")
+                dur_m = duration_minutes if duration_minutes is not None else existing_receipt.get("duration_minutes", 0.0)
+                f_lpm = flow_rate_lpm if flow_rate_lpm is not None else existing_receipt.get("flow_rate_lpm", 0.0)
+                eff_area = effective_area_ha if effective_area_ha is not None else existing_receipt.get("effective_area_ha")
+
                 old_del = float(existing_receipt.get("delivered_volume_mm", 0.0))
                 if abs(old_del - del_val) < 1e-6:
-                    return
+                    return  # Identical retry
                 diff = del_val - old_del
-            else:
-                diff = del_val
 
-            existing_res = state.setdefault("reservations", {}).pop(event_id, {})
-            date_key = date or existing_res.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            season_key = season or existing_res.get("season") or "default_season"
-            dev_id = device_id or existing_res.get("device_id", "")
-            z_id = zone_id or existing_res.get("zone_id", "")
-            dur_m = duration_minutes if duration_minutes is not None else existing_res.get("duration_minutes", 0.0)
-            f_lpm = flow_rate_lpm if flow_rate_lpm is not None else existing_res.get("flow_rate_lpm", 0.0)
+                # If correcting within the same period:
+                if orig_date == date_key and orig_season == season_key:
+                    if diff != 0.0:
+                        pk_daily = f"{plot_id}:{date_key}"
+                        pk_season = f"{plot_id}:{season_key}"
+                        state.setdefault("settled_daily", {})[pk_daily] = float(state.get("settled_daily", {}).get(pk_daily, 0.0)) + diff
+                        state.setdefault("settled_season", {})[pk_season] = float(state.get("settled_season", {}).get(pk_season, 0.0)) + diff
+                        state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + diff
+                else:
+                    # Period changed: deduct old_del from original period and add del_val to new period
+                    if old_del > 0:
+                        pk_d_old = f"{plot_id}:{orig_date}"
+                        pk_s_old = f"{plot_id}:{orig_season}"
+                        state.setdefault("settled_daily", {})[pk_d_old] = max(0.0, float(state.get("settled_daily", {}).get(pk_d_old, 0.0)) - old_del)
+                        state.setdefault("settled_season", {})[pk_s_old] = max(0.0, float(state.get("settled_season", {}).get(pk_s_old, 0.0)) - old_del)
+                        state.setdefault("settled_plot_total", {})[plot_id] = max(0.0, float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) - old_del)
+                    if del_val > 0:
+                        pk_d_new = f"{plot_id}:{date_key}"
+                        pk_s_new = f"{plot_id}:{season_key}"
+                        state.setdefault("settled_daily", {})[pk_d_new] = float(state.get("settled_daily", {}).get(pk_d_new, 0.0)) + del_val
+                        state.setdefault("settled_season", {})[pk_s_new] = float(state.get("settled_season", {}).get(pk_s_new, 0.0)) + del_val
+                        state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + del_val
+            else:
+                date_key = date or existing_res.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                season_key = season or existing_res.get("season") or "default_season"
+                dev_id = device_id or existing_res.get("device_id", "")
+                z_id = zone_id or existing_res.get("zone_id", "")
+                dur_m = duration_minutes if duration_minutes is not None else existing_res.get("duration_minutes", 0.0)
+                f_lpm = flow_rate_lpm if flow_rate_lpm is not None else existing_res.get("flow_rate_lpm", 0.0)
+                eff_area = effective_area_ha if effective_area_ha is not None else existing_res.get("effective_area_ha")
+
+                if del_val > 0:
+                    pk_daily = f"{plot_id}:{date_key}"
+                    pk_season = f"{plot_id}:{season_key}"
+                    state.setdefault("settled_daily", {})[pk_daily] = float(state.get("settled_daily", {}).get(pk_daily, 0.0)) + del_val
+                    state.setdefault("settled_season", {})[pk_season] = float(state.get("settled_season", {}).get(pk_season, 0.0)) + del_val
+                    state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + del_val
 
             state.setdefault("stopped_receipts", {})[event_id] = {
                 "plot_id": plot_id,
@@ -761,16 +957,11 @@ class SharedQuotaStore:
                 "delivered_volume_mm": del_val,
                 "duration_minutes": dur_m,
                 "flow_rate_lpm": f_lpm,
+                "effective_area_ha": eff_area,
                 "date": date_key,
                 "season": season_key,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-            if diff != 0.0:
-                pk_daily = f"{plot_id}:{date_key}"
-                pk_season = f"{plot_id}:{season_key}"
-                state.setdefault("settled_daily", {})[pk_daily] = float(state.get("settled_daily", {}).get(pk_daily, 0.0)) + diff
-                state.setdefault("settled_season", {})[pk_season] = float(state.get("settled_season", {}).get(pk_season, 0.0)) + diff
-                state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + diff
             cls._write_state(state)
 
     @classmethod
@@ -977,6 +1168,7 @@ class SafetyMonitor:
         date: Optional[str] = None,
         zone_id: str = "",
         flow_rate_lpm: float = 0.0,
+        effective_area_ha: Optional[float] = None,
     ) -> None:
         """Register an active irrigation event for duration monitoring and quota reservation."""
         now_dt = datetime.now(timezone.utc)
@@ -992,6 +1184,7 @@ class SafetyMonitor:
             "date": date,
             "zone_id": zone_id,
             "flow_rate_lpm": flow_rate_lpm,
+            "effective_area_ha": effective_area_ha,
         }
         if plot_id and volume_mm > 0:
             self.reserve_quota(
@@ -1004,6 +1197,7 @@ class SafetyMonitor:
                 zone_id=zone_id,
                 duration_minutes=max_duration_minutes,
                 flow_rate_lpm=flow_rate_lpm,
+                effective_area_ha=effective_area_ha,
             )
         logger.debug("Tracking event %s (max %.0f min, elapsed %.1f min, reserved %.1f mm)",
                      event_id, max_duration_minutes, elapsed_minutes, volume_mm)
@@ -1028,6 +1222,7 @@ class SafetyMonitor:
         zone_id: str = "",
         duration_minutes: float = 0.0,
         flow_rate_lpm: float = 0.0,
+        effective_area_ha: Optional[float] = None,
     ) -> None:
         """Explicitly record a quota reservation in the shared store."""
         SharedQuotaStore.reserve(
@@ -1040,6 +1235,7 @@ class SafetyMonitor:
             zone_id=zone_id,
             duration_minutes=duration_minutes,
             flow_rate_lpm=flow_rate_lpm,
+            effective_area_ha=effective_area_ha,
         )
         if volume_mm > 0:
             self._reserved_quota[event_id] = {
@@ -1068,6 +1264,7 @@ class SafetyMonitor:
         zone_id: Optional[str] = None,
         duration_minutes: Optional[float] = None,
         flow_rate_lpm: Optional[float] = None,
+        effective_area_ha: Optional[float] = None,
     ) -> None:
         """Settle a delivered event: release reservation and debit cumulative budget."""
         SharedQuotaStore.settle(
@@ -1083,6 +1280,7 @@ class SafetyMonitor:
             zone_id=zone_id,
             duration_minutes=duration_minutes,
             flow_rate_lpm=flow_rate_lpm,
+            effective_area_ha=effective_area_ha,
         )
         self._reserved_quota.pop(event_id, None)
 
@@ -1098,6 +1296,7 @@ class SafetyMonitor:
         zone_id: Optional[str] = None,
         duration_minutes: Optional[float] = None,
         flow_rate_lpm: Optional[float] = None,
+        effective_area_ha: Optional[float] = None,
     ) -> None:
         """Record stopped delivery in shared store and release uncommitted quota tracking (C04/C05)."""
         SharedQuotaStore.record_stopped_delivery(
@@ -1111,6 +1310,7 @@ class SafetyMonitor:
             zone_id=zone_id,
             duration_minutes=duration_minutes,
             flow_rate_lpm=flow_rate_lpm,
+            effective_area_ha=effective_area_ha,
         )
         self._reserved_quota.pop(event_id, None)
 

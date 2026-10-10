@@ -492,35 +492,67 @@ async def test_c08_settlement_validation_and_zero_litres_conversion():
     dispatcher = CommandDispatcher()
     dispatcher.register_actuator(actuator)
 
-    # Test 1: Infinite litres fails closed
+    # Test 1: Premature completion while actuator is executing fails closed (D02)
+    ev_premature = _make_event("EV-PREMATURE", volume_mm=8.0)
+    ev_premature.effective_area_ha = 1.0
+    await dispatcher.submit_event(ev_premature)
+    res_premature = await dispatcher.complete_event(ev_premature.event_id, actual_volume_l=0.0)
+    assert res_premature.status == EventStatus.EXECUTING
+    assert not SharedQuotaStore.is_settled(ev_premature.event_id)
+
+    # Test 2: Infinite litres in VALIDATING fails closed
+    actuator._status = ActuatorStatus.ONLINE
+    actuator._active_command = None
     ev_inf = _make_event("EV-INF", volume_mm=8.0)
     ev_inf.effective_area_ha = 1.0
     await dispatcher.submit_event(ev_inf)
+    actuator._status = ActuatorStatus.ONLINE
+    actuator._active_command = None
+    await dispatcher.check_execution_status(ev_inf.event_id)
+    assert ev_inf.status == EventStatus.VALIDATING
     res_inf = await dispatcher.complete_event(ev_inf.event_id, actual_volume_l=float("inf"))
     assert res_inf.status == EventStatus.FAILED
     assert not SharedQuotaStore.is_settled(ev_inf.event_id)
 
-    # Test 2: Boolean area fails closed
+    # Test 3: Boolean area in VALIDATING fails closed
+    actuator._status = ActuatorStatus.ONLINE
+    actuator._active_command = None
     ev_bool_area = _make_event("EV-BOOL-A", volume_mm=8.0)
     ev_bool_area.effective_area_ha = True
     await dispatcher.submit_event(ev_bool_area)
+    actuator._status = ActuatorStatus.ONLINE
+    actuator._active_command = None
+    await dispatcher.check_execution_status(ev_bool_area.event_id)
+    assert ev_bool_area.status == EventStatus.VALIDATING
     res_bool = await dispatcher.complete_event(ev_bool_area.event_id, actual_volume_l=80000.0)
     assert res_bool.status == EventStatus.FAILED
 
-    # Test 3: Explicit 0 L settles 0.0 mm
+    # Test 4: Explicit 0 L settles 0.0 mm
+    actuator._status = ActuatorStatus.ONLINE
+    actuator._active_command = None
     ev_zero_l = _make_event("EV-ZERO-L", volume_mm=8.0)
     ev_zero_l.effective_area_ha = 1.0
     await dispatcher.submit_event(ev_zero_l)
+    actuator._status = ActuatorStatus.ONLINE
+    actuator._active_command = None
+    await dispatcher.check_execution_status(ev_zero_l.event_id)
+    assert ev_zero_l.status == EventStatus.VALIDATING
     res_zero = await dispatcher.complete_event(ev_zero_l.event_id, actual_volume_l=0.0)
     assert res_zero.status == EventStatus.COMPLETED
     assert res_zero.delivered_volume_mm == 0.0
     rcpt = SharedQuotaStore.get_settled_receipt(ev_zero_l.event_id)
     assert rcpt["volume_mm"] == 0.0
 
-    # Test 4: 160,000 L / 1 ha produces 16.0 mm
+    # Test 5: 160,000 L / 1 ha produces 16.0 mm
+    actuator._status = ActuatorStatus.ONLINE
+    actuator._active_command = None
     ev_16 = _make_event("EV-16MM", volume_mm=8.0)
     ev_16.effective_area_ha = 1.0
     await dispatcher.submit_event(ev_16)
+    actuator._status = ActuatorStatus.ONLINE
+    actuator._active_command = None
+    await dispatcher.check_execution_status(ev_16.event_id)
+    assert ev_16.status == EventStatus.VALIDATING
     res_16 = await dispatcher.complete_event(ev_16.event_id, actual_volume_l=160000.0)
     assert res_16.status == EventStatus.COMPLETED
     assert res_16.delivered_volume_mm == 16.0
@@ -540,6 +572,9 @@ async def test_c09_command_vs_outcome_identity_and_observation_rehydration():
     ev = _make_event("EV-C09", volume_mm=8.0)
     ev.effective_area_ha = 1.0
     await disp1.submit_event(ev)
+    actuator._status = ActuatorStatus.ONLINE
+    await disp1.check_execution_status(ev.event_id)
+    assert ev.status == EventStatus.VALIDATING
     await disp1.complete_event(ev.event_id, actual_volume_l=40000.0)
 
     # Receipt records target=8mm, delivered=4mm, actual_l=40000

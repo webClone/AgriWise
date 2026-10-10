@@ -222,6 +222,12 @@ class TestIrrigationSafetyF16(unittest.TestCase):
         self.assertEqual(len(self.actuator.start_calls), 1)
         self.assertEqual(self.actuator.start_calls[0].source_event_id, "EVT-RES-1")
 
+        # Simulate actuator physical completion -> enters VALIDATING
+        self.actuator._status = ActuatorStatus.ONLINE
+        self.actuator._active_command = None
+        asyncio.run(self.dispatcher.check_execution_status("EVT-RES-1"))
+        self.assertEqual(event1.status, EventStatus.VALIDATING)
+
         # Completing event 1 releases its reservation
         asyncio.run(self.dispatcher.complete_event("EVT-RES-1", actual_volume_l=30000.0, actual_duration_minutes=30.0))
         self.assertEqual(self.safety.get_reserved_quota("plot-1"), 0.0)

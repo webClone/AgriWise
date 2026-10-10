@@ -329,6 +329,12 @@ async def test_v04_season_retained_in_settlement_and_stopped_delivery():
     budget = WaterBudget(plot_id="plot_v04", season="dry_season_2026", daily_remaining_mm=100.0, season_remaining_mm=10.0)
     await dispatcher.submit_event(event, budget=budget)
 
+    # Simulate actuator physical completion -> enters VALIDATING
+    actuator._status = ActuatorStatus.ONLINE
+    actuator._active_command = None
+    await dispatcher.check_execution_status(event.event_id)
+    assert event.status == EventStatus.VALIDATING
+
     # Complete the event
     await dispatcher.complete_event(event, actual_volume_l=80000.0, actual_duration_minutes=10.0)
 
