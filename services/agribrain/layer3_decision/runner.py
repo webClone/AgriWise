@@ -1195,6 +1195,8 @@ def _execute_canonical_water_engine(
 
         # Cold restart recovery and head-cache binding (R09):
         expected_head = None
+        cp_step_key = None
+        cp_payload = {}
         try:
             try:
                 from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
@@ -1237,7 +1239,19 @@ def _execute_canonical_water_engine(
                             _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (init_soil, init_mem)
                             _PLOT_WATER_STATE_MEMORY[plot_id] = (init_soil, init_mem)
                             plot_init_hist[day_key] = (init_soil, init_mem or HydraulicStressMemoryState())
-                    else:
+                    elif "history_summary" in cp_payload and day_key in cp_payload["history_summary"]:
+                        # C10: For historical cold replay (day_key < cp_step_key), hydrate initial prior of that day, NEVER future posterior!
+                        h_entry = cp_payload["history_summary"][day_key]
+                        init_soil_raw = h_entry.get("initial_soil_water")
+                        init_mem_raw = h_entry.get("initial_hydraulic_memory")
+                        init_soil = _deserialize_soil_water(init_soil_raw) if init_soil_raw else None
+                        init_mem = _deserialize_hydraulic_memory(init_mem_raw) if init_mem_raw else None
+                        if init_soil:
+                            _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (init_soil, init_mem)
+                            _PLOT_WATER_STATE_MEMORY[plot_id] = (init_soil, init_mem)
+                            plot_init_hist[day_key] = (init_soil, init_mem or HydraulicStressMemoryState())
+                    elif cp_step_key and day_key > cp_step_key:
+                        # Moving forward in time: starting prior is the latest committed posterior
                         if "soil_water" in cp_payload and isinstance(cp_payload["soil_water"], dict):
                             hyd_soil = _deserialize_soil_water(cp_payload["soil_water"])
                             hyd_mem = _deserialize_hydraulic_memory(cp_payload.get("hydraulic_memory", {}))
@@ -1301,7 +1315,7 @@ def _execute_canonical_water_engine(
             import logging
             logging.getLogger(__name__).warning(f"[L3] Checkpoint hydration note: {e}")
 
-        # V09: Snapshot pre-execution RAM state so that any failure completely rolls back all registries
+        # V09 + C11: Snapshot pre-execution RAM state
         snapshot_hist = dict(plot_hist)
         snapshot_events = dict(plot_events)
         snapshot_veg = dict(plot_veg_hist)
@@ -1314,6 +1328,64 @@ def _execute_canonical_water_engine(
         snapshot_head = _PLOT_CURRENT_HEAD.get(plot_scope_key)
 
         def _rollback_ram_state():
+            try:
+                try:
+                    from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService
+                except ImportError:
+                    from world_model.canonical_worldline import CanonicalWorldlineService
+                cur_cw = CanonicalWorldlineService()
+                cur_latest = cur_cw.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace)
+                cur_head = cur_latest.get("checkpoint_id") if cur_latest else None
+            except Exception:
+                cur_latest = None
+                cur_head = None
+
+            # C11: If disk has a newer/different committed head than our starting snapshot,
+            # a concurrent winner won CAS on disk! Do NOT restore stale pre-run snapshot over winner's RAM state!
+            if cur_head is not None and cur_head != expected_head:
+                if cur_latest and isinstance(cur_latest.get("payload"), dict):
+                    winner_payload = cur_latest["payload"]
+                    _PLOT_CURRENT_HEAD[plot_scope_key] = cur_head
+                    winner_soil = _deserialize_soil_water(winner_payload.get("soil_water"))
+                    winner_mem = _deserialize_hydraulic_memory(winner_payload.get("hydraulic_memory"))
+                    if winner_soil:
+                        _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (winner_soil, winner_mem)
+                        _PLOT_WATER_STATE_MEMORY[plot_id] = (winner_soil, winner_mem)
+                    if "history_summary" in winner_payload and isinstance(winner_payload["history_summary"], dict):
+                        plot_hist.clear()
+                        for h_key, h_data in winner_payload["history_summary"].items():
+                            if isinstance(h_data, dict):
+                                h_soil = _deserialize_soil_water(h_data.get("soil_water"))
+                                h_mem = _deserialize_hydraulic_memory(h_data.get("hydraulic_memory"))
+                                h_veg = _deserialize_veg_state(h_data.get("vegetation"))
+                                ts_raw = h_data.get("timestamp")
+                                try:
+                                    ts_obj = datetime.datetime.fromisoformat(ts_raw) if ts_raw else ts
+                                except Exception:
+                                    ts_obj = ts
+                                plot_hist[h_key] = {
+                                    "timestamp": ts_obj,
+                                    "soil_water": h_soil,
+                                    "hydraulic_memory": h_mem,
+                                    "water_state": None,
+                                    "feedback": None,
+                                    "weather": h_data.get("weather", {}),
+                                    "irrigation": float(h_data.get("irrigation", 0.0)),
+                                    "vegetation_state": h_veg,
+                                    "lai": getattr(h_veg, "lai", 0.0) if h_veg else 0.0,
+                                    "fvc": getattr(h_veg, "fvc", 0.0) if h_veg else 0.0,
+                                    "root_depth": getattr(h_veg, "root_depth_proxy_m", 0.4) if h_veg else 0.4,
+                                    "soil_observations": None,
+                                    "initial_soil_water": _deserialize_soil_water(h_data.get("initial_soil_water")),
+                                    "initial_hydraulic_memory": _deserialize_hydraulic_memory(h_data.get("initial_hydraulic_memory")),
+                                    "evidence_hash": h_data.get("evidence_hash"),
+                                    "interval_hash": h_data.get("interval_hash"),
+                                    "predecessor_hash": h_data.get("predecessor_hash"),
+                                    "step_forcing_hash": h_data.get("step_forcing_hash"),
+                                }
+                    return
+
+            # Otherwise, no concurrent winner intervened on disk; restore pre-execution snapshot
             plot_hist.clear()
             plot_hist.update(snapshot_hist)
             plot_events.clear()
@@ -2233,6 +2305,31 @@ def _execute_canonical_water_engine(
             curr_d += datetime.timedelta(days=1)
 
         if last_water_state is not None:
+            # C10: Exact historical query (day_key < cp_step_key with identical step forcing)
+            # should return/reconstruct the original qualified transition WITHOUT replacing the operational head or advancing sequence!
+            h_entry = cp_payload.get("history_summary", {}).get(day_key) if isinstance(cp_payload, dict) else None
+            is_exact_historical_replay = (
+                bool(cp_step_key)
+                and day_key < cp_step_key
+                and h_entry is not None
+                and h_entry.get("step_forcing_hash") == prev_step_hash
+            )
+            if is_exact_historical_replay:
+                plot_hist.update(candidate_hist)
+                if candidate_veg:
+                    plot_veg_hist.update(candidate_veg)
+                if candidate_so:
+                    plot_so_hist.update(candidate_so)
+                if candidate_init:
+                    plot_init_hist.update(candidate_init)
+                if "soil_water" in cp_payload and isinstance(cp_payload["soil_water"], dict):
+                    hyd_soil = _deserialize_soil_water(cp_payload["soil_water"])
+                    hyd_mem = _deserialize_hydraulic_memory(cp_payload.get("hydraulic_memory", {}))
+                    if hyd_soil:
+                        _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (hyd_soil, hyd_mem)
+                        _PLOT_WATER_STATE_MEMORY[plot_id] = (hyd_soil, hyd_mem)
+                return last_water_state, last_feedback
+
             try:
                 try:
                     from services.agribrain.world_model.canonical_worldline import CanonicalWorldlineService

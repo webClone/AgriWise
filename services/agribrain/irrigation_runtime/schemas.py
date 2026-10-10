@@ -351,6 +351,7 @@ class IrrigationEvent:
     # Actual delivery
     actual_volume_l: float = 0.0
     actual_duration_minutes: float = 0.0
+    effective_area_ha: Optional[float] = None
 
     # Timing
     scheduled_start: str = ""                 # ISO

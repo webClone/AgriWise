@@ -81,6 +81,9 @@ class IrrigationActuator(ABC):
         self._dispatch_lock: Optional[asyncio.Lock] = None
         self._command_history: List[Dict[str, Any]] = []
         self._interlocks: List[SafetyInterlock] = []
+        self._stop_generation: int = 0
+        self._cancelled_commands: set[str] = set()
+        self._cancelled_operations: set[str] = set()
 
     @property
     def dispatch_lock(self) -> asyncio.Lock:
@@ -273,9 +276,29 @@ class IrrigationActuator(ABC):
                 error_message="; ".join(errors),
             )
 
+        # C01 / C02: Bump stop generation and track cancelled commands/operations
+        if getattr(self, "_stop_generation", None) is None:
+            self._stop_generation = 0
+        self._stop_generation += 1
+
+        if getattr(self, "_cancelled_commands", None) is None:
+            self._cancelled_commands = set()
+        if getattr(self, "_cancelled_operations", None) is None:
+            self._cancelled_operations = set()
+
+        if self._pending_command is not None:
+            self._cancelled_commands.add(self._pending_command.command_id)
+            if self._pending_command.operation_id:
+                self._cancelled_operations.add(self._pending_command.operation_id)
+        if command.source_event_id:
+            self._cancelled_operations.add(command.source_event_id)
+        if command.operation_id:
+            self._cancelled_operations.add(command.operation_id)
+
         if (command.command_type == CommandType.STOP_ZONE
                 and self._status == ActuatorStatus.ONLINE
-                and self._active_command is None):
+                and self._active_command is None
+                and self._pending_command is None):
             logger.info("Device %s is already stopped (ONLINE); STOP_ZONE succeeded idempotently.", self.device_id)
             result = CommandResult(
                 command_id=command.command_id,
@@ -451,6 +474,7 @@ class IrrigationActuator(ABC):
                     return result
 
             prev_active_command = self._active_command
+            start_gen = getattr(self, "_stop_generation", 0)
 
             # Mark command pending dispatch (do NOT prematurely set EXECUTING before actual physical send)
             self._pending_command = command
@@ -480,6 +504,51 @@ class IrrigationActuator(ABC):
                 )
             finally:
                 self._pending_command = None
+
+            # C02: Check if STOP or EMERGENCY_STOP occurred while START was in flight
+            current_gen = getattr(self, "_stop_generation", 0)
+            is_preempted = (
+                current_gen > start_gen
+                or command.command_id in getattr(self, "_cancelled_commands", set())
+                or (bool(command.operation_id) and command.operation_id in getattr(self, "_cancelled_operations", set()))
+            )
+            if is_preempted:
+                logger.warning(
+                    "Command %s on device %s completed after STOP/cancellation (gen %d -> %d). Fencing execution.",
+                    command.command_id, self.device_id, start_gen, current_gen
+                )
+                try:
+                    fence_stop = IrrigationCommand(
+                        command_id=f"CMD-FENCE-{uuid.uuid4().hex[:8]}",
+                        command_type=CommandType.STOP_ZONE,
+                        device_id=self.device_id,
+                        zone_id=command.zone_id,
+                        plot_id=command.plot_id,
+                        operation_id=f"OP-FENCE-{command.operation_id}" if command.operation_id else "",
+                    )
+                    await self.send_command(fence_stop)
+                except Exception as fence_exc:
+                    logger.error("Fence stop command failed on device %s: %s", self.device_id, fence_exc)
+
+                self._status = ActuatorStatus.ONLINE
+                self._active_command = None
+                result = CommandResult(
+                    command_id=command.command_id,
+                    device_id=self.device_id,
+                    success=False,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    error_code="PREEMPTED_BY_STOP",
+                    error_message="Command was preempted by STOP or cancellation",
+                    retry_recommended=False,
+                )
+                self._command_history.append({
+                    "command_id": command.command_id,
+                    "command_type": command.command_type.value,
+                    "success": result.success,
+                    "timestamp": result.timestamp,
+                    "error_code": result.error_code,
+                })
+                return result
 
             # Reconcile ambiguous failures on START commands before retry or failure
             if not result.success and command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
@@ -571,8 +640,12 @@ class IrrigationActuator(ABC):
                 self._status = ActuatorStatus.ONLINE
                 self._active_command = None
             elif command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
-                self._status = ActuatorStatus.EXECUTING
-                self._active_command = command
+                if getattr(self, "_stop_generation", 0) > start_gen:
+                    self._status = ActuatorStatus.ONLINE
+                    self._active_command = None
+                else:
+                    self._status = ActuatorStatus.EXECUTING
+                    self._active_command = command
 
             # Audit log
         self._command_history.append({
@@ -660,6 +733,10 @@ class IrrigationActuator(ABC):
     @property
     def active_command(self) -> Optional[IrrigationCommand]:
         return self._active_command
+
+    @property
+    def pending_command(self) -> Optional[IrrigationCommand]:
+        return self._pending_command
 
     def __repr__(self) -> str:
         return (
