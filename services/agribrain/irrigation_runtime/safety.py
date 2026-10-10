@@ -22,6 +22,7 @@ All violations are logged with full provenance for the L6 audit trail.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import math
@@ -210,6 +211,12 @@ class SharedQuotaStore:
             vol = rec.get("volume_mm")
             if isinstance(vol, bool) or not isinstance(vol, (int, float)) or not math.isfinite(vol) or vol < 0:
                 raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' has invalid volume_mm: {vol}")
+            if "delivered_volume_mm" in rec:
+                dvol = rec["delivered_volume_mm"]
+                if isinstance(dvol, bool) or not isinstance(dvol, (int, float)) or not math.isfinite(dvol) or dvol < 0:
+                    raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' has invalid delivered_volume_mm: {dvol}")
+                if abs(float(dvol) - float(vol)) > 1e-4:
+                    raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' delivered_volume_mm={dvol} contradicts volume_mm={vol}")
             if "target_volume_mm" in rec:
                 tvol = rec["target_volume_mm"]
                 if isinstance(tvol, bool) or not isinstance(tvol, (int, float)) or not math.isfinite(tvol) or tvol < 0:
@@ -256,7 +263,7 @@ class SharedQuotaStore:
                 if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
                     raise CorruptedQuotaStoreError(f"Aggregate '{agg_key}' key '{k}' has invalid amount: {v}")
 
-        # D04: Reconcile aggregates against receipts to prevent contradictory rollups
+        # D04 & N03: Two-way aggregate reconciliation over the union of keys
         expected_daily: Dict[str, float] = {}
         expected_season: Dict[str, float] = {}
         expected_plot: Dict[str, float] = {}
@@ -287,20 +294,29 @@ class SharedQuotaStore:
                 if p:
                     expected_plot[p] = expected_plot.get(p, 0.0) + v
 
-        for k, exp_val in expected_daily.items():
+        all_daily_keys = set(expected_daily.keys()) | set(data["settled_daily"].keys())
+        for k in all_daily_keys:
+            exp_val = expected_daily.get(k, 0.0)
             act_val = float(data["settled_daily"].get(k, 0.0))
             if abs(exp_val - act_val) > 1e-4:
                 raise CorruptedQuotaStoreError(f"Aggregate settled_daily[{k}]={act_val} contradicts receipts sum {exp_val}")
 
-        for k, exp_val in expected_season.items():
+        all_season_keys = set(expected_season.keys()) | set(data["settled_season"].keys())
+        for k in all_season_keys:
+            exp_val = expected_season.get(k, 0.0)
             act_val = float(data["settled_season"].get(k, 0.0))
             if abs(exp_val - act_val) > 1e-4:
                 raise CorruptedQuotaStoreError(f"Aggregate settled_season[{k}]={act_val} contradicts receipts sum {exp_val}")
 
-        for p, exp_val in expected_plot.items():
+        all_plot_keys = set(expected_plot.keys()) | set(data["settled_plot_total"].keys())
+        for p in all_plot_keys:
+            exp_val = expected_plot.get(p, 0.0)
             act_val = float(data["settled_plot_total"].get(p, 0.0))
             if abs(exp_val - act_val) > 1e-4:
                 raise CorruptedQuotaStoreError(f"Aggregate settled_plot_total[{p}]={act_val} contradicts receipts sum {exp_val}")
+
+        if "receipt_journal" in data and not isinstance(data["receipt_journal"], list):
+            raise CorruptedQuotaStoreError("Quota store key 'receipt_journal' must be a list")
 
     @classmethod
     def _read_state(cls) -> Dict[str, Any]:
@@ -317,6 +333,7 @@ class SharedQuotaStore:
                 "settled_season": {},
                 "settled_plot_total": {},
                 "stopped_receipts": {},
+                "receipt_journal": [],
             }
 
         def _reject_constant(c: str) -> None:
@@ -330,6 +347,7 @@ class SharedQuotaStore:
             if not isinstance(data, dict):
                 raise CorruptedQuotaStoreError(f"Quota store file {p} is not a JSON object: got {type(data).__name__}")
             cls._validate_state(data)
+            data.setdefault("receipt_journal", [])
             return data
         except CorruptedQuotaStoreError:
             raise
@@ -369,6 +387,7 @@ class SharedQuotaStore:
                 "settled_season": {},
                 "settled_plot_total": {},
                 "stopped_receipts": {},
+                "receipt_journal": [],
             }
             cls._write_state(state)
 
@@ -730,6 +749,21 @@ class SharedQuotaStore:
                 "season": season_key,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
+            state.setdefault("receipt_journal", []).append({
+                "entry_id": f"j_{event_id}_{len(state.get('receipt_journal', [])) + 1}",
+                "type": "RESERVATION",
+                "event_id": event_id,
+                "plot_id": plot_id,
+                "volume_mm": val,
+                "device_id": device_id or existing.get("device_id", ""),
+                "zone_id": zone_id or existing.get("zone_id", ""),
+                "duration_minutes": r_dur if r_dur is not None else 0.0,
+                "flow_rate_lpm": r_flow if r_flow is not None else 0.0,
+                "effective_area_ha": r_area,
+                "date": date_key,
+                "season": season_key,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
             cls._write_state(state)
 
     @classmethod
@@ -778,16 +812,22 @@ class SharedQuotaStore:
         flow_rate_lpm: Optional[float] = None,
         effective_area_ha: Optional[float] = None,
     ) -> None:
-        # C08: Strictly validate volume_mm BEFORE modifying any state
+        # C08 & N03: Strictly validate volume_mm, actual_volume_l, and actual_duration_minutes BEFORE modifying any state
         val = finite_real(volume_mm)
         if val is None or val < 0:
             raise ValueError(f"Invalid settlement volume {volume_mm}: must be a non-negative finite real number")
+        if actual_volume_l is not None:
+            if isinstance(actual_volume_l, bool) or not isinstance(actual_volume_l, (int, float)) or not math.isfinite(actual_volume_l) or actual_volume_l < 0:
+                raise ValueError(f"Invalid actual_volume_l {actual_volume_l}: must be a non-negative finite real number")
+        if actual_duration_minutes is not None:
+            if isinstance(actual_duration_minutes, bool) or not isinstance(actual_duration_minutes, (int, float)) or not math.isfinite(actual_duration_minutes) or actual_duration_minutes < 0:
+                raise ValueError(f"Invalid actual_duration_minutes {actual_duration_minutes}: must be a non-negative finite real number")
 
         with cls._lock():
             state = cls._read_state()
             settled_receipts = state.setdefault("settled_receipts", {})
             if event_id in settled_receipts:
-                # D08 Probe C: Verify retry compatibility instead of silently ignoring conflicting retries!
+                # D08 Probe C & N04: Verify complete retry compatibility across all dimensions!
                 existing = settled_receipts[event_id]
                 ex_target = float(existing.get("target_volume_mm", existing.get("volume_mm", 0.0)))
                 ex_del = float(existing.get("delivered_volume_mm", existing.get("volume_mm", 0.0)))
@@ -795,11 +835,23 @@ class SharedQuotaStore:
                 ex_dur = finite_real(existing.get("duration_minutes"))
                 ex_flow = finite_real(existing.get("flow_rate_lpm"))
                 ex_area = finite_real(existing.get("effective_area_ha"))
+                ex_avl = finite_real(existing.get("actual_volume_l"))
+                ex_adur = finite_real(existing.get("actual_duration_minutes"))
+                ex_dev = existing.get("device_id", "")
+                ex_zone = existing.get("zone_id", "")
+                ex_date = existing.get("date", "")
+                ex_season = existing.get("season", "")
 
                 t_check = target_volume_mm if target_volume_mm is not None else val
                 e_dur = finite_real(duration_minutes)
                 e_flow = finite_real(flow_rate_lpm)
                 e_area = finite_real(effective_area_ha)
+                e_avl = finite_real(actual_volume_l) if actual_volume_l is not None else None
+                e_adur = finite_real(actual_duration_minutes) if actual_duration_minutes is not None else None
+                e_dev = device_id or ""
+                e_zone = zone_id or ""
+                e_date = date or ""
+                e_season = season or ""
 
                 is_conflict = (
                     abs(ex_del - val) > 1e-4
@@ -807,12 +859,17 @@ class SharedQuotaStore:
                     or (bool(plot_id) and bool(ex_plot) and ex_plot != plot_id)
                     or (ex_dur is not None and e_dur is not None and abs(ex_dur - e_dur) > 1e-4)
                     or (ex_flow is not None and e_flow is not None and abs(ex_flow - e_flow) > 1e-4)
-                    or (ex_area is not None and e_area is not None and abs(ex_area - e_area) > 1e-4)
+                    or (ex_area != e_area if (ex_area is None or e_area is None) else abs(ex_area - e_area) > 1e-4)
+                    or (ex_avl is not None and e_avl is not None and abs(ex_avl - e_avl) > 1e-4)
+                    or (ex_adur is not None and e_adur is not None and abs(ex_adur - e_adur) > 1e-4)
+                    or (bool(e_dev) and bool(ex_dev) and ex_dev != e_dev)
+                    or (bool(e_zone) and bool(ex_zone) and ex_zone != e_zone)
+                    or (bool(e_date) and bool(ex_date) and ex_date != e_date)
+                    or (bool(e_season) and bool(ex_season) and ex_season != e_season)
                 )
                 if is_conflict:
                     raise ValueError(
-                        f"Conflicting settlement retry for event {event_id}: existing target {ex_target}mm/del {ex_del}mm "
-                        f"vs requested target {t_check}mm/del {val}mm"
+                        f"Conflicting settlement retry for event {event_id}: existing vs requested parameters mismatch"
                     )
                 return  # Identical retry: idempotent success
 
@@ -843,6 +900,8 @@ class SharedQuotaStore:
                     state.setdefault("settled_plot_total", {})[plot_id] = max(0.0, float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) - p_del)
 
             # C09 + D10: Preserve commanded target and actual delivery observations separately
+            act_vol_l = finite_real(actual_volume_l) if actual_volume_l is not None else 0.0
+            act_dur_m = finite_real(actual_duration_minutes) if actual_duration_minutes is not None else 0.0
             settled_receipts[event_id] = {
                 "plot_id": plot_id,
                 "device_id": dev_id,
@@ -850,8 +909,8 @@ class SharedQuotaStore:
                 "volume_mm": val,
                 "delivered_volume_mm": val,
                 "target_volume_mm": t_vol,
-                "actual_volume_l": finite_real(actual_volume_l) or 0.0,
-                "actual_duration_minutes": finite_real(actual_duration_minutes) or 0.0,
+                "actual_volume_l": act_vol_l,
+                "actual_duration_minutes": act_dur_m,
                 "duration_minutes": dur_m,
                 "flow_rate_lpm": f_lpm,
                 "effective_area_ha": eff_area,
@@ -865,6 +924,27 @@ class SharedQuotaStore:
                 state.setdefault("settled_daily", {})[pk_daily] = float(state.get("settled_daily", {}).get(pk_daily, 0.0)) + val
                 state.setdefault("settled_season", {})[pk_season] = float(state.get("settled_season", {}).get(pk_season, 0.0)) + val
                 state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + val
+
+            state.setdefault("receipt_journal", []).append({
+                "entry_id": f"j_{event_id}_{len(state.get('receipt_journal', [])) + 1}",
+                "type": "SETTLED",
+                "event_id": event_id,
+                "plot_id": plot_id,
+                "volume_mm": val,
+                "target_volume_mm": t_vol,
+                "delivered_volume_mm": val,
+                "actual_volume_l": act_vol_l,
+                "actual_duration_minutes": act_dur_m,
+                "duration_minutes": dur_m,
+                "flow_rate_lpm": f_lpm,
+                "effective_area_ha": eff_area,
+                "device_id": dev_id,
+                "zone_id": z_id,
+                "date": date_key,
+                "season": season_key,
+                "supersedes_receipt": copy.deepcopy(prior_stopped) if prior_stopped else None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
 
             cls._write_state(state)
 
@@ -886,6 +966,10 @@ class SharedQuotaStore:
         """Record partial/stopped delivery so delivered or reserved exposure is not lost on cancellation (V04 + C04 + C05 + D08)."""
         with cls._lock():
             state = cls._read_state()
+            # N05: Settled state is definitive and terminal; do not create duplicate debit or overwrite settled outcome
+            if event_id in state.get("settled_receipts", {}):
+                return
+
             existing_receipt = state.get("stopped_receipts", {}).get(event_id)
 
             del_val = finite_real(delivered_volume_mm)
@@ -933,6 +1017,23 @@ class SharedQuotaStore:
                         state.setdefault("settled_daily", {})[pk_d_new] = float(state.get("settled_daily", {}).get(pk_d_new, 0.0)) + del_val
                         state.setdefault("settled_season", {})[pk_s_new] = float(state.get("settled_season", {}).get(pk_s_new, 0.0)) + del_val
                         state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + del_val
+
+                state.setdefault("receipt_journal", []).append({
+                    "entry_id": f"j_{event_id}_{len(state.get('receipt_journal', [])) + 1}",
+                    "type": "CORRECTION",
+                    "event_id": event_id,
+                    "plot_id": plot_id,
+                    "target_volume_mm": target_volume_mm,
+                    "delivered_volume_mm": del_val,
+                    "previous_delivered_volume_mm": old_del,
+                    "delta_volume_mm": diff,
+                    "supersedes_receipt": copy.deepcopy(existing_receipt),
+                    "device_id": dev_id,
+                    "zone_id": z_id,
+                    "date": date_key,
+                    "season": season_key,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
             else:
                 date_key = date or existing_res.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 season_key = season or existing_res.get("season") or "default_season"
@@ -949,6 +1050,20 @@ class SharedQuotaStore:
                     state.setdefault("settled_season", {})[pk_season] = float(state.get("settled_season", {}).get(pk_season, 0.0)) + del_val
                     state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + del_val
 
+                state.setdefault("receipt_journal", []).append({
+                    "entry_id": f"j_{event_id}_{len(state.get('receipt_journal', [])) + 1}",
+                    "type": "STOPPED",
+                    "event_id": event_id,
+                    "plot_id": plot_id,
+                    "target_volume_mm": target_volume_mm,
+                    "delivered_volume_mm": del_val,
+                    "device_id": dev_id,
+                    "zone_id": z_id,
+                    "date": date_key,
+                    "season": season_key,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+
             state.setdefault("stopped_receipts", {})[event_id] = {
                 "plot_id": plot_id,
                 "device_id": dev_id,
@@ -962,6 +1077,72 @@ class SharedQuotaStore:
                 "season": season_key,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
+            cls._write_state(state)
+
+    @classmethod
+    def reopen_active(
+        cls,
+        event_id: str,
+        plot_id: str,
+        volume_mm: float,
+        season: Optional[str] = None,
+        date: Optional[str] = None,
+        device_id: str = "",
+        zone_id: str = "",
+        duration_minutes: float = 0.0,
+        flow_rate_lpm: float = 0.0,
+        effective_area_ha: Optional[float] = None,
+    ) -> None:
+        """Reopen an active reservation after a failed stop/late-fence, superseding any premature stopped receipt (N01)."""
+        val = finite_real(volume_mm) or 0.0
+        dur_m = finite_real(duration_minutes) or 0.0
+        f_lpm = finite_real(flow_rate_lpm) or 0.0
+        eff_area = finite_real(effective_area_ha)
+
+        with cls._lock():
+            state = cls._read_state()
+            stopped_receipts = state.setdefault("stopped_receipts", {})
+            stopped = stopped_receipts.pop(event_id, None)
+            if stopped:
+                s_del = float(stopped.get("delivered_volume_mm", 0.0))
+                s_date = stopped.get("date") or date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                s_season = stopped.get("season") or season or "default_season"
+                if s_del > 0:
+                    pk_daily = f"{plot_id}:{s_date}"
+                    pk_season = f"{plot_id}:{s_season}"
+                    state.setdefault("settled_daily", {})[pk_daily] = max(0.0, float(state.get("settled_daily", {}).get(pk_daily, 0.0)) - s_del)
+                    state.setdefault("settled_season", {})[pk_season] = max(0.0, float(state.get("settled_season", {}).get(pk_season, 0.0)) - s_del)
+                    state.setdefault("settled_plot_total", {})[plot_id] = max(0.0, float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) - s_del)
+
+            date_key = date or (stopped.get("date") if stopped else None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            season_key = season or (stopped.get("season") if stopped else None) or "default_season"
+            dev_id = device_id or (stopped.get("device_id") if stopped else "")
+            z_id = zone_id or (stopped.get("zone_id") if stopped else "")
+
+            state.setdefault("reservations", {})[event_id] = {
+                "plot_id": plot_id,
+                "volume_mm": val,
+                "status": "STOP_REQUESTED",
+                "date": date_key,
+                "season": season_key,
+                "device_id": dev_id,
+                "zone_id": z_id,
+                "duration_minutes": dur_m,
+                "flow_rate_lpm": f_lpm,
+                "effective_area_ha": eff_area,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+            state.setdefault("receipt_journal", []).append({
+                "entry_id": f"j_{event_id}_{len(state.get('receipt_journal', [])) + 1}",
+                "type": "REOPEN_ACTIVE",
+                "event_id": event_id,
+                "plot_id": plot_id,
+                "volume_mm": val,
+                "supersedes_receipt": copy.deepcopy(stopped) if stopped else None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
             cls._write_state(state)
 
     @classmethod
@@ -1249,6 +1430,40 @@ class SafetyMonitor:
         """Explicitly release a quota reservation in the shared store."""
         SharedQuotaStore.release(event_id)
         self._reserved_quota.pop(event_id, None)
+
+    def reopen_active(
+        self,
+        event_id: str,
+        plot_id: str,
+        volume_mm: float,
+        season: Optional[str] = None,
+        date: Optional[str] = None,
+        device_id: str = "",
+        zone_id: str = "",
+        duration_minutes: float = 0.0,
+        flow_rate_lpm: float = 0.0,
+        effective_area_ha: Optional[float] = None,
+    ) -> None:
+        """Reopen active tracking and quota in SharedQuotaStore after a failed stop/late-fence."""
+        SharedQuotaStore.reopen_active(
+            event_id,
+            plot_id,
+            volume_mm,
+            season=season,
+            date=date,
+            device_id=device_id,
+            zone_id=zone_id,
+            duration_minutes=duration_minutes,
+            flow_rate_lpm=flow_rate_lpm,
+            effective_area_ha=effective_area_ha,
+        )
+        if volume_mm > 0:
+            self._reserved_quota[event_id] = {
+                "plot_id": plot_id,
+                "volume_mm": volume_mm,
+                "season": season,
+                "date": date,
+            }
 
     def settle_quota(
         self,

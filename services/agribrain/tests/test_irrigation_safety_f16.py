@@ -120,7 +120,7 @@ class TestIrrigationSafetyF16(unittest.TestCase):
         self.safety = SafetyMonitor()
         self.dispatcher = CommandDispatcher(registry=self.registry, safety=self.safety)
 
-    def _make_event(self, event_id: str = "EVT-01", volume_mm: float = 10.0, duration_min: float = 30.0) -> IrrigationEvent:
+    def _make_event(self, event_id: str = "EVT-01", volume_mm: float = 10.0, duration_min: float = 30.0, effective_area_ha: float = 1.0) -> IrrigationEvent:
         return IrrigationEvent(
             event_id=event_id,
             plot_id="plot-1",
@@ -132,6 +132,7 @@ class TestIrrigationSafetyF16(unittest.TestCase):
             target_flow_rate_lpm=15.0,
             automation_mode=AutomationMode.SEMI_AUTO,
             status=EventStatus.QUEUED,
+            effective_area_ha=effective_area_ha,
         )
 
     def test_zero_budget_produces_zero_physical_start_calls_across_telemetry_states(self):

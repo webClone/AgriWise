@@ -47,6 +47,7 @@ from irrigation_runtime.actuator import IrrigationActuator
 from irrigation_runtime.registry import ActuatorRegistry, actuator_registry
 from irrigation_runtime.safety import SafetyMonitor, safety_monitor
 from irrigation_runtime.schemas import (
+    ActuatorStatus,
     AutomationMode,
     CommandPriority,
     CommandResult,
@@ -59,6 +60,17 @@ from irrigation_runtime.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _check_area_conflict(a1: Any, a2: Any) -> bool:
+    v1 = finite_real(a1)
+    v2 = finite_real(a2)
+    if (v1 is None) != (v2 is None):
+        return True
+    if v1 is not None and v2 is not None:
+        return abs(v1 - v2) > 1e-4
+    return False
+
 
 
 class CommandDispatcher:
@@ -177,13 +189,9 @@ class CommandDispatcher:
         if event.event_id in self._active_events:
             existing = self._active_events[event.event_id]
             if existing.status in (EventStatus.DISPATCHING, EventStatus.EXECUTING, EventStatus.VALIDATING, EventStatus.STOP_REQUESTED):
-                ex_area = finite_real(getattr(existing, "effective_area_ha", None))
-                ev_area = finite_real(getattr(event, "effective_area_ha", None))
-                area_mismatch = (
-                    (ex_area is None and ev_area is not None)
-                    or (ex_area is not None and ev_area is None)
-                    or (ex_area is not None and ev_area is not None and abs(ex_area - ev_area) > 1e-4)
-                )
+                ex_area = getattr(existing, "effective_area_ha", None)
+                ev_area = getattr(event, "effective_area_ha", None)
+                area_mismatch = _check_area_conflict(ex_area, ev_area)
                 if (
                     abs(existing.target_volume_mm - event.target_volume_mm) > 1e-4
                     or abs(existing.target_duration_minutes - event.target_duration_minutes) > 1e-4
@@ -207,47 +215,60 @@ class CommandDispatcher:
                                event.event_id, past.status.value)
                 return past
 
-        # BA-03 + C05 + D06: Terminal idempotency for stopped/cancelled events across fresh instances
         from irrigation_runtime.safety import SharedQuotaStore
-        if SharedQuotaStore.is_stopped(event.event_id):
-            stopped_rcpt = SharedQuotaStore.get_stopped_receipt(event.event_id)
-            if stopped_rcpt:
-                r_target = finite_real(stopped_rcpt.get("target_volume_mm"))
-                e_target = finite_real(event.target_volume_mm)
-                r_plot = stopped_rcpt.get("plot_id")
-                r_dev = stopped_rcpt.get("device_id")
-                r_zone = stopped_rcpt.get("zone_id")
-                r_dur = finite_real(stopped_rcpt.get("duration_minutes"))
-                r_flow = finite_real(stopped_rcpt.get("flow_rate_lpm"))
-                r_area = finite_real(stopped_rcpt.get("effective_area_ha"))
+
+        # N01: Authoritative active reservation check takes PRECEDENCE over terminal/stopped receipts!
+        if SharedQuotaStore.is_active(event.event_id) and event.event_id not in self._active_events:
+            res = SharedQuotaStore.get_active_record(event.event_id)
+            if res:
+                r_vol = finite_real(res.get("volume_mm"))
+                e_vol = finite_real(event.target_volume_mm)
+                r_plot = res.get("plot_id")
+                r_dev = res.get("device_id")
+                r_zone = res.get("zone_id")
+                r_dur = finite_real(res.get("duration_minutes"))
+                r_flow = finite_real(res.get("flow_rate_lpm"))
+                r_area = res.get("effective_area_ha")
                 e_dur = finite_real(event.target_duration_minutes)
                 e_flow = finite_real(event.target_flow_rate_lpm)
-                e_area = finite_real(getattr(event, "effective_area_ha", None))
+                e_area = getattr(event, "effective_area_ha", None)
                 is_conflict = (
-                    (r_target is not None and e_target is not None and abs(r_target - e_target) > 1e-4)
+                    (r_vol is not None and e_vol is not None and abs(r_vol - e_vol) > 1e-4)
                     or (bool(r_plot) and bool(event.plot_id) and r_plot != event.plot_id)
                     or (bool(r_dev) and bool(event.device_id) and r_dev != event.device_id)
                     or (bool(r_zone) and bool(event.zone_id) and r_zone != event.zone_id)
                     or (r_dur is not None and e_dur is not None and abs(r_dur - e_dur) > 1e-4)
                     or (r_flow is not None and e_flow is not None and abs(r_flow - e_flow) > 1e-4)
-                    or (r_area is not None and e_area is not None and abs(r_area - e_area) > 1e-4)
+                    or _check_area_conflict(r_area, e_area)
                 )
                 if is_conflict:
-                    logger.warning("Event %s has payload conflict with existing stopped receipt", event.event_id)
-                    event.transition(EventStatus.FAILED, f"Payload conflict with stopped receipt: event {event.event_id}")
+                    logger.warning("Event %s has payload conflict with active reservation: requested %.1fmm vs active %.1fmm",
+                                   event.event_id, e_vol or 0.0, r_vol or 0.0)
+                    event.transition(EventStatus.FAILED, f"Payload conflict with active reservation: requested {e_vol}mm vs active {r_vol}mm")
                     self._emit_failed(event)
                     return event
-                if "delivered_volume_mm" in stopped_rcpt:
-                    event.delivered_volume_mm = float(stopped_rcpt["delivered_volume_mm"])
-                if "effective_area_ha" in stopped_rcpt and stopped_rcpt["effective_area_ha"] is not None:
-                    event.effective_area_ha = float(stopped_rcpt["effective_area_ha"])
-                if "duration_minutes" in stopped_rcpt and stopped_rcpt["duration_minutes"] is not None:
-                    event.target_duration_minutes = float(stopped_rcpt["duration_minutes"])
-            logger.warning("Event %s already stopped/cancelled in shared store; returning cancelled event.", event.event_id)
-            event.status = EventStatus.CANCELLED
-            return event
+                raw_st = res.get("status", "DISPATCHING")
+                if raw_st == "UNSETTLED":
+                    raw_st = "VALIDATING"
+                try:
+                    event.status = EventStatus(raw_st)
+                except Exception:
+                    event.status = EventStatus.DISPATCHING
+                event.target_volume_mm = float(res.get("volume_mm", event.target_volume_mm))
+                if res.get("flow_rate_lpm") is not None:
+                    event.target_flow_rate_lpm = float(res["flow_rate_lpm"])
+                if res.get("duration_minutes") is not None:
+                    event.target_duration_minutes = float(res["duration_minutes"])
+                if res.get("effective_area_ha") is not None:
+                    event.effective_area_ha = float(res["effective_area_ha"])
+                logger.warning("Event %s already active in shared store with status %s; returning existing event.", event.event_id, event.status.value)
+                return event
+            else:
+                logger.warning("Event %s already active in shared store; returning active event.", event.event_id)
+                event.status = EventStatus.DISPATCHING
+                return event
 
-        # BA-03 + C09 + D06 + D10: Settled idempotency compares commanded target to command target and restores observations
+        # N05 + BA-03 + C09 + D06 + D10: Settled idempotency takes precedence over stopped receipts
         if SharedQuotaStore.is_settled(event.event_id):
             receipt = SharedQuotaStore.get_settled_receipt(event.event_id)
             if receipt:
@@ -258,10 +279,10 @@ class CommandDispatcher:
                 r_zone = receipt.get("zone_id")
                 r_dur = finite_real(receipt.get("duration_minutes"))
                 r_flow = finite_real(receipt.get("flow_rate_lpm"))
-                r_area = finite_real(receipt.get("effective_area_ha"))
+                r_area = receipt.get("effective_area_ha")
                 e_dur = finite_real(event.target_duration_minutes)
                 e_flow = finite_real(event.target_flow_rate_lpm)
-                e_area = finite_real(getattr(event, "effective_area_ha", None))
+                e_area = getattr(event, "effective_area_ha", None)
                 is_conflict = (
                     (r_target is not None and e_target is not None and abs(r_target - e_target) > 1e-4)
                     or (bool(r_plot) and bool(event.plot_id) and r_plot != event.plot_id)
@@ -269,7 +290,7 @@ class CommandDispatcher:
                     or (bool(r_zone) and bool(event.zone_id) and r_zone != event.zone_id)
                     or (r_dur is not None and e_dur is not None and abs(r_dur - e_dur) > 1e-4)
                     or (r_flow is not None and e_flow is not None and abs(r_flow - e_flow) > 1e-4)
-                    or (r_area is not None and e_area is not None and abs(r_area - e_area) > 1e-4)
+                    or _check_area_conflict(r_area, e_area)
                 )
                 if is_conflict:
                     logger.warning("Event %s has payload conflict with existing settled receipt: requested %.1fmm vs target %.1fmm",
@@ -289,56 +310,56 @@ class CommandDispatcher:
                     event.actual_duration_minutes = float(receipt["actual_duration_minutes"])
                 if receipt.get("effective_area_ha") is not None:
                     event.effective_area_ha = float(receipt["effective_area_ha"])
+                if receipt.get("duration_minutes") is not None:
+                    event.target_duration_minutes = float(receipt["duration_minutes"])
+                if receipt.get("flow_rate_lpm") is not None:
+                    event.target_flow_rate_lpm = float(receipt["flow_rate_lpm"])
                 return event
             else:
                 logger.warning("Event %s already finalized and settled in shared store; returning completed event.", event.event_id)
                 event.status = EventStatus.COMPLETED
                 return event
 
-        # C06 + C07 + D06: Active reservation check preserves exact phase and validates full payload
-        if SharedQuotaStore.is_active(event.event_id) and event.event_id not in self._active_events:
-            res = SharedQuotaStore.get_active_record(event.event_id)
-            if res:
-                r_vol = finite_real(res.get("volume_mm"))
-                e_vol = finite_real(event.target_volume_mm)
-                r_plot = res.get("plot_id")
-                r_dev = res.get("device_id")
-                r_zone = res.get("zone_id")
-                r_dur = finite_real(res.get("duration_minutes"))
-                r_flow = finite_real(res.get("flow_rate_lpm"))
-                r_area = finite_real(res.get("effective_area_ha"))
+        # BA-03 + C05 + D06: Terminal idempotency for stopped/cancelled events
+        if SharedQuotaStore.is_stopped(event.event_id):
+            stopped_rcpt = SharedQuotaStore.get_stopped_receipt(event.event_id)
+            if stopped_rcpt:
+                r_target = finite_real(stopped_rcpt.get("target_volume_mm"))
+                e_target = finite_real(event.target_volume_mm)
+                r_plot = stopped_rcpt.get("plot_id")
+                r_dev = stopped_rcpt.get("device_id")
+                r_zone = stopped_rcpt.get("zone_id")
+                r_dur = finite_real(stopped_rcpt.get("duration_minutes"))
+                r_flow = finite_real(stopped_rcpt.get("flow_rate_lpm"))
+                r_area = stopped_rcpt.get("effective_area_ha")
                 e_dur = finite_real(event.target_duration_minutes)
                 e_flow = finite_real(event.target_flow_rate_lpm)
-                e_area = finite_real(getattr(event, "effective_area_ha", None))
+                e_area = getattr(event, "effective_area_ha", None)
                 is_conflict = (
-                    (r_vol is not None and e_vol is not None and abs(r_vol - e_vol) > 1e-4)
+                    (r_target is not None and e_target is not None and abs(r_target - e_target) > 1e-4)
                     or (bool(r_plot) and bool(event.plot_id) and r_plot != event.plot_id)
                     or (bool(r_dev) and bool(event.device_id) and r_dev != event.device_id)
                     or (bool(r_zone) and bool(event.zone_id) and r_zone != event.zone_id)
                     or (r_dur is not None and e_dur is not None and abs(r_dur - e_dur) > 1e-4)
                     or (r_flow is not None and e_flow is not None and abs(r_flow - e_flow) > 1e-4)
-                    or (r_area is not None and e_area is not None and abs(r_area - e_area) > 1e-4)
+                    or _check_area_conflict(r_area, e_area)
                 )
                 if is_conflict:
-                    logger.warning("Event %s has payload conflict with active reservation: requested %.1fmm vs active %.1fmm",
-                                   event.event_id, e_vol or 0.0, r_vol or 0.0)
-                    event.transition(EventStatus.FAILED, f"Payload conflict with active reservation: requested {e_vol}mm vs active {r_vol}mm")
+                    logger.warning("Event %s has payload conflict with existing stopped receipt", event.event_id)
+                    event.transition(EventStatus.FAILED, f"Payload conflict with stopped receipt: event {event.event_id}")
                     self._emit_failed(event)
                     return event
-                raw_st = res.get("status", "DISPATCHING")
-                if raw_st == "UNSETTLED":
-                    raw_st = "VALIDATING"
-                try:
-                    event.status = EventStatus(raw_st)
-                except Exception:
-                    event.status = EventStatus.DISPATCHING
-                event.target_volume_mm = float(res.get("volume_mm", event.target_volume_mm))
-                logger.warning("Event %s already active in shared store with status %s; returning existing event.", event.event_id, event.status.value)
-                return event
-            else:
-                logger.warning("Event %s already active in shared store; returning active event.", event.event_id)
-                event.status = EventStatus.DISPATCHING
-                return event
+                if "delivered_volume_mm" in stopped_rcpt:
+                    event.delivered_volume_mm = float(stopped_rcpt["delivered_volume_mm"])
+                if "effective_area_ha" in stopped_rcpt and stopped_rcpt["effective_area_ha"] is not None:
+                    event.effective_area_ha = float(stopped_rcpt["effective_area_ha"])
+                if "duration_minutes" in stopped_rcpt and stopped_rcpt["duration_minutes"] is not None:
+                    event.target_duration_minutes = float(stopped_rcpt["duration_minutes"])
+                if "flow_rate_lpm" in stopped_rcpt and stopped_rcpt["flow_rate_lpm"] is not None:
+                    event.target_flow_rate_lpm = float(stopped_rcpt["flow_rate_lpm"])
+            logger.warning("Event %s already stopped/cancelled in shared store; returning cancelled event.", event.event_id)
+            event.status = EventStatus.CANCELLED
+            return event
 
         # Resolve actuator
         actuator = self._registry.get_actuator(event.device_id)
@@ -414,6 +435,7 @@ class CommandDispatcher:
         self._active_events[event.event_id] = event
 
         # V06 + V04: Register with safety monitor BEFORE dispatch to establish duration watchdog and active quota immediately
+        event._start_monotonic = self._safety._clock()
         self._safety.track_event_start(
             event.event_id,
             event.device_id,
@@ -439,7 +461,6 @@ class CommandDispatcher:
                 "Event %s was preempted/cancelled (status %s, code %s) while START was in flight; evaluating late START outcome.",
                 event.event_id, event.status.value, result.error_code
             )
-            from irrigation_runtime.schemas import ActuatorStatus
             fence_failed = (result.error_code == "STOP_FAILED")
             if actuator and getattr(actuator, "_status", None) in (ActuatorStatus.EXECUTING, ActuatorStatus.ERROR):
                 try:
@@ -454,6 +475,31 @@ class CommandDispatcher:
                 # Fail-closed: retain STOP_REQUESTED ownership, monitoring, and conservative exposure!
                 event.status = EventStatus.STOP_REQUESTED
                 self._active_events[event.event_id] = event
+
+                orig_mono = getattr(event, "_start_monotonic", None)
+                elapsed_minutes = 0.0
+                if orig_mono is not None:
+                    elapsed_minutes = max(0.0, (self._safety._clock() - orig_mono) / 60.0)
+                elif event.actual_start:
+                    try:
+                        start_dt = datetime.fromisoformat(event.actual_start)
+                        if start_dt.tzinfo is None:
+                            start_dt = start_dt.replace(tzinfo=timezone.utc)
+                        elapsed_minutes = max(0.0, (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0)
+                    except Exception:
+                        elapsed_minutes = 0.0
+
+                self._safety.reopen_active(
+                    event_id=event.event_id,
+                    plot_id=event.plot_id,
+                    volume_mm=event.target_volume_mm,
+                    season=getattr(budget, "season", None) if budget else None,
+                    device_id=event.device_id,
+                    zone_id=event.zone_id,
+                    duration_minutes=event.target_duration_minutes,
+                    flow_rate_lpm=event.target_flow_rate_lpm,
+                    effective_area_ha=getattr(event, "effective_area_ha", None),
+                )
                 self._safety.track_event_start(
                     event.event_id,
                     event.device_id,
@@ -464,6 +510,7 @@ class CommandDispatcher:
                     zone_id=event.zone_id,
                     flow_rate_lpm=event.target_flow_rate_lpm,
                     effective_area_ha=getattr(event, "effective_area_ha", None),
+                    elapsed_minutes=elapsed_minutes,
                 )
                 SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
                 logger.error(
@@ -481,7 +528,6 @@ class CommandDispatcher:
                         event.event_id, event.device_id)
         else:
             # BA-01 + C07: Uncertain physical outcomes must retain dispatcher ownership, tracking, and quota
-            from irrigation_runtime.schemas import ActuatorStatus
             is_uncertain = (
                 result.error_code in ("UNCERTAIN_OUTCOME", "ACK_TIMEOUT", "DISPATCH_EXCEPTION")
                 or actuator.active_command is not None
@@ -633,8 +679,6 @@ class CommandDispatcher:
             from irrigation_runtime.safety import SharedQuotaStore
             SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
             return event
-
-        from irrigation_runtime.schemas import ActuatorStatus
 
         # If already in STOP_REQUESTED, attempt stop reconciliation/retry
         if event.status == EventStatus.STOP_REQUESTED:
@@ -810,8 +854,8 @@ class CommandDispatcher:
     async def complete_event(
         self,
         event_id: str,
-        actual_volume_l: float = 0.0,
-        actual_duration_minutes: float = 0.0,
+        actual_volume_l: Optional[float] = None,
+        actual_duration_minutes: Optional[float] = None,
     ) -> Optional[IrrigationEvent]:
         """Mark an event as completed with actual delivery data."""
         eid = getattr(event_id, "event_id", event_id)
@@ -821,7 +865,6 @@ class CommandDispatcher:
 
         # D02: Guard against completing an event while actuator is physically executing or event is not yet in VALIDATING
         actuator = self._registry.get_actuator(event.device_id)
-        from irrigation_runtime.schemas import ActuatorStatus
         if actuator and getattr(actuator, "_status", None) == ActuatorStatus.EXECUTING:
             logger.error("Cannot complete event %s while actuator %s is still EXECUTING. Retaining active execution.",
                          eid, event.device_id)
@@ -831,19 +874,31 @@ class CommandDispatcher:
             logger.error("Cannot complete event %s: current status %s is not VALIDATING.", eid, event.status.value)
             return event
 
-        # C08 + D09: Strictly validate volume and duration BEFORE mutating status or accounting
+        # N02: Omitted measurements retain unresolved accounting in VALIDATING phase
+        if actual_volume_l is None and actual_duration_minutes is None:
+            logger.warning("Omitted measurements for event %s. Retaining unresolved accounting in VALIDATING phase.", eid)
+            return event
+
+        if actual_volume_l is None:
+            logger.warning("Omitted volume measurement for event %s. Retaining unresolved accounting in VALIDATING phase.", eid)
+            return event
+
+        # C08 + D09: Strictly validate volume BEFORE mutating status or accounting
         val_vol = finite_real(actual_volume_l)
-        val_dur = finite_real(actual_duration_minutes)
         if val_vol is None or val_vol < 0:
             logger.error("Invalid actual volume %r for event %s. Retaining unsettled exposure.", actual_volume_l, eid)
             event.transition(EventStatus.FAILED, f"Invalid settlement volume {actual_volume_l}")
             return event
 
-        # D09: Do NOT coerce invalid/non-finite duration to 0.0; reject!
-        if val_dur is None or val_dur < 0:
-            logger.error("Invalid actual duration %r for event %s. Retaining unsettled exposure.", actual_duration_minutes, eid)
-            event.transition(EventStatus.FAILED, f"Invalid settlement duration {actual_duration_minutes}")
-            return event
+        # D09: Validate duration if explicitly provided; otherwise default for explicit 0 L or target duration
+        if actual_duration_minutes is not None:
+            val_dur = finite_real(actual_duration_minutes)
+            if val_dur is None or val_dur < 0:
+                logger.error("Invalid actual duration %r for event %s. Retaining unsettled exposure.", actual_duration_minutes, eid)
+                event.transition(EventStatus.FAILED, f"Invalid settlement duration {actual_duration_minutes}")
+                return event
+        else:
+            val_dur = 0.0 if val_vol == 0.0 else (finite_real(event.target_duration_minutes) or 0.0)
 
         # Validate effective_area_ha if present
         area_ha = None
@@ -855,14 +910,17 @@ class CommandDispatcher:
                 event.transition(EventStatus.FAILED, f"Invalid effective area {event.effective_area_ha}")
                 return event
 
-        # D09: Calculate settled depth: explicit 0 L settles as 0.0 mm independently of area!
+        # N02 + D09: Calculate settled depth
+        # Explicit 0 L settles as 0.0 mm independently of area!
+        # Nonzero litres require effective_area_ha support; cannot fabricate commanded target depth!
         if val_vol == 0.0:
             settled_mm = 0.0
         elif area_ha is not None and area_ha > 0:
             # I_mm = V_L / (10,000 * A_ha)
             settled_mm = round(val_vol / (10000.0 * area_ha), 6)
         else:
-            settled_mm = event.target_volume_mm
+            logger.warning("Nonzero volume %r for event %s without effective_area_ha support cannot certify depth. Retaining VALIDATING phase.", val_vol, eid)
+            return event
 
         # Validate settled_mm
         val_settled = finite_real(settled_mm)
@@ -962,49 +1020,66 @@ class CommandDispatcher:
         return event
 
     async def emergency_stop_all(self) -> Dict[str, str]:
-        """Emergency stop all active events."""
+        """Emergency stop all active events (N09: reliable global cutoff)."""
         results = {}
         for event_id, event in list(self._active_events.items()):
-            actuator = self._registry.get_actuator(event.device_id)
-            stop_success = False
-            if actuator:
-                stop_res = await actuator.emergency_stop()
-                stop_success = stop_res.success
+            try:
+                actuator = self._registry.get_actuator(event.device_id)
+                stop_success = False
+                if actuator:
+                    stop_res = await actuator.emergency_stop()
+                    stop_success = bool(stop_res and stop_res.success)
+                    if stop_success:
+                        actuator._status = ActuatorStatus.ONLINE
+                        actuator._active_command = None
+                    else:
+                        actuator._status = ActuatorStatus.ERROR
                 if stop_success:
-                    actuator._status = ActuatorStatus.ONLINE
-                    actuator._active_command = None
+                    event.emergency_stopped = True
+                    event.emergency_stop_reason = "Global emergency stop"
+                    event.transition(EventStatus.EMERGENCY_STOPPED, "Global emergency stop")
+                    from irrigation_runtime.safety import SharedQuotaStore
+                    res = SharedQuotaStore.get_active_record(event.event_id) or {}
+                    season_key = res.get("season")
+                    del_mm = getattr(event, "delivered_volume_mm", None)
+                    self._safety.record_stopped_delivery(
+                        event_id=event.event_id,
+                        plot_id=event.plot_id,
+                        target_volume_mm=event.target_volume_mm,
+                        delivered_volume_mm=del_mm,
+                        season=season_key,
+                        device_id=event.device_id,
+                        zone_id=event.zone_id,
+                        duration_minutes=event.target_duration_minutes,
+                        flow_rate_lpm=event.target_flow_rate_lpm,
+                        effective_area_ha=getattr(event, "effective_area_ha", None),
+                    )
+                    self._safety.track_event_end(event.event_id)
+                    self._finalize_event(event)
+                    results[event_id] = "STOPPED"
                 else:
-                    actuator._status = ActuatorStatus.ERROR
-            if stop_success:
+                    event.emergency_stopped = True
+                    event.emergency_stop_reason = "Global emergency stop (stop unconfirmed)"
+                    event.transition(EventStatus.STOP_REQUESTED, "Global emergency stop failed on actuator")
+                    from irrigation_runtime.safety import SharedQuotaStore
+                    SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                    results[event_id] = "STOP_FAILED"
+            except Exception as exc:
+                logger.error("Error during emergency stop of event %s: %s", event_id, exc)
                 event.emergency_stopped = True
-                event.emergency_stop_reason = "Global emergency stop"
-                event.transition(EventStatus.EMERGENCY_STOPPED, "Global emergency stop")
+                event.emergency_stop_reason = f"Global emergency stop exception: {exc}"
+                if event.status != EventStatus.STOP_REQUESTED:
+                    event.transition(EventStatus.STOP_REQUESTED, f"Exception during stop: {exc}")
                 from irrigation_runtime.safety import SharedQuotaStore
-                res = SharedQuotaStore.get_active_record(event.event_id) or {}
-                season_key = res.get("season")
-                del_mm = getattr(event, "delivered_volume_mm", None)
-                self._safety.record_stopped_delivery(
-                    event_id=event.event_id,
-                    plot_id=event.plot_id,
-                    target_volume_mm=event.target_volume_mm,
-                    delivered_volume_mm=del_mm,
-                    season=season_key,
-                    device_id=event.device_id,
-                    zone_id=event.zone_id,
-                    duration_minutes=event.target_duration_minutes,
-                    flow_rate_lpm=event.target_flow_rate_lpm,
-                )
-                self._safety.track_event_end(event.event_id)
-                self._finalize_event(event)
-                results[event_id] = "STOPPED"
-            else:
-                event.emergency_stopped = True
-                event.emergency_stop_reason = "Global emergency stop (stop unconfirmed)"
-                event.transition(EventStatus.STOP_REQUESTED, "Global emergency stop failed on actuator")
-                results[event_id] = "STOP_FAILED"
+                SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                results[event_id] = "STOP_ERROR"
 
-        # Also stop all actuators in registry
-        await self._registry.emergency_stop_all()
+        # Also stop all actuators in registry (guaranteed fallback)
+        try:
+            await self._registry.emergency_stop_all()
+        except Exception as exc:
+            logger.error("Registry emergency_stop_all failed: %s", exc)
+
         return results
 
     async def reconcile_on_restart(
@@ -1019,6 +1094,21 @@ class CommandDispatcher:
         """
         reconciled = []
         for event in persisted_events:
+            from irrigation_runtime.safety import SharedQuotaStore
+            active_rec = SharedQuotaStore.get_active_record(event.event_id)
+            if active_rec and active_rec.get("status") in (
+                EventStatus.DISPATCHING.value,
+                EventStatus.EXECUTING.value,
+                EventStatus.STOP_REQUESTED.value,
+            ):
+                event.status = EventStatus(active_rec["status"])
+                if active_rec.get("flow_rate_lpm") is not None:
+                    event.target_flow_rate_lpm = float(active_rec["flow_rate_lpm"])
+                if active_rec.get("duration_minutes") is not None:
+                    event.target_duration_minutes = float(active_rec["duration_minutes"])
+                if active_rec.get("effective_area_ha") is not None:
+                    event.effective_area_ha = float(active_rec["effective_area_ha"])
+
             if event.status not in (EventStatus.DISPATCHING, EventStatus.EXECUTING, EventStatus.STOP_REQUESTED):
                 continue
 
@@ -1052,6 +1142,9 @@ class CommandDispatcher:
                     plot_id=event.plot_id,
                     volume_mm=event.target_volume_mm,
                     elapsed_minutes=elapsed_minutes,
+                    zone_id=event.zone_id,
+                    flow_rate_lpm=event.target_flow_rate_lpm,
+                    effective_area_ha=getattr(event, "effective_area_ha", None),
                 )
                 reconciled.append(event)
                 continue
@@ -1065,7 +1158,6 @@ class CommandDispatcher:
                             EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED,
                             "Confirmed stopped on restart"
                         )
-                        from irrigation_runtime.safety import SharedQuotaStore
                         res = SharedQuotaStore.get_active_record(event.event_id) or {}
                         season_key = res.get("season")
                         del_mm = getattr(event, "delivered_volume_mm", None)
@@ -1079,6 +1171,7 @@ class CommandDispatcher:
                             zone_id=event.zone_id,
                             duration_minutes=event.target_duration_minutes,
                             flow_rate_lpm=event.target_flow_rate_lpm,
+                            effective_area_ha=getattr(event, "effective_area_ha", None),
                         )
                         self._safety.track_event_end(event.event_id)
                     else:
@@ -1092,6 +1185,9 @@ class CommandDispatcher:
                             plot_id=event.plot_id,
                             volume_mm=event.target_volume_mm,
                             elapsed_minutes=elapsed_minutes,
+                            zone_id=event.zone_id,
+                            flow_rate_lpm=event.target_flow_rate_lpm,
+                            effective_area_ha=getattr(event, "effective_area_ha", None),
                         )
                 except Exception as exc:
                     event.transition(EventStatus.STOP_REQUESTED, f"Stop query failed on restart: {exc}")
@@ -1104,12 +1200,14 @@ class CommandDispatcher:
                         plot_id=event.plot_id,
                         volume_mm=event.target_volume_mm,
                         elapsed_minutes=elapsed_minutes,
+                        zone_id=event.zone_id,
+                        flow_rate_lpm=event.target_flow_rate_lpm,
+                        effective_area_ha=getattr(event, "effective_area_ha", None),
                     )
                 reconciled.append(event)
                 continue
 
             try:
-                from irrigation_runtime.schemas import ActuatorStatus
                 status = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
 
                 if status == ActuatorStatus.EXECUTING:
@@ -1118,7 +1216,6 @@ class CommandDispatcher:
                         stop_res = await actuator.emergency_stop()
                         if stop_res.success:
                             event.transition(EventStatus.EMERGENCY_STOPPED, "Duration expired prior to or during restart")
-                            from irrigation_runtime.safety import SharedQuotaStore
                             res = SharedQuotaStore.get_active_record(event.event_id) or {}
                             season_key = res.get("season")
                             del_mm = getattr(event, "delivered_volume_mm", None)
@@ -1132,6 +1229,7 @@ class CommandDispatcher:
                                 zone_id=event.zone_id,
                                 duration_minutes=event.target_duration_minutes,
                                 flow_rate_lpm=event.target_flow_rate_lpm,
+                                effective_area_ha=getattr(event, "effective_area_ha", None),
                             )
                             self._safety.track_event_end(event.event_id)
                         else:
@@ -1145,6 +1243,9 @@ class CommandDispatcher:
                                 plot_id=event.plot_id,
                                 volume_mm=event.target_volume_mm,
                                 elapsed_minutes=elapsed_minutes,
+                                zone_id=event.zone_id,
+                                flow_rate_lpm=event.target_flow_rate_lpm,
+                                effective_area_ha=getattr(event, "effective_area_ha", None),
                             )
                     else:
                         event.transition(EventStatus.EXECUTING, "Reconciled with active controller on process restart")
@@ -1157,6 +1258,9 @@ class CommandDispatcher:
                             plot_id=event.plot_id,
                             volume_mm=event.target_volume_mm,
                             elapsed_minutes=elapsed_minutes,
+                            zone_id=event.zone_id,
+                            flow_rate_lpm=event.target_flow_rate_lpm,
+                            effective_area_ha=getattr(event, "effective_area_ha", None),
                         )
                 elif status == ActuatorStatus.ONLINE:
                     event.transition(EventStatus.COMPLETED, "Reconciled after process restart: actuator is stopped/idle")
@@ -1172,6 +1276,9 @@ class CommandDispatcher:
                         plot_id=event.plot_id,
                         volume_mm=event.target_volume_mm,
                         elapsed_minutes=elapsed_minutes,
+                        zone_id=event.zone_id,
+                        flow_rate_lpm=event.target_flow_rate_lpm,
+                        effective_area_ha=getattr(event, "effective_area_ha", None),
                     )
             except Exception as exc:
                 # BA-01 / BA-05: Query failure must retain ownership, active events, and reservations
@@ -1186,8 +1293,10 @@ class CommandDispatcher:
                     plot_id=event.plot_id,
                     volume_mm=event.target_volume_mm,
                     elapsed_minutes=elapsed_minutes,
+                    zone_id=event.zone_id,
+                    flow_rate_lpm=event.target_flow_rate_lpm,
+                    effective_area_ha=getattr(event, "effective_area_ha", None),
                 )
-
             reconciled.append(event)
         return reconciled
 

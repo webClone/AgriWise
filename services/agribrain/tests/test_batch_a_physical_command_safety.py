@@ -660,6 +660,7 @@ class TestBatchAPhysicalCommandSafety(unittest.IsolatedAsyncioTestCase):
             target_volume_mm=8.0,
             target_duration_minutes=15.0,
             target_flow_rate_lpm=15.0,
+            effective_area_ha=0.1,
         )
         await dispatcher.submit_event(event1, budget=budget)
 
@@ -688,6 +689,7 @@ class TestBatchAPhysicalCommandSafety(unittest.IsolatedAsyncioTestCase):
             target_volume_mm=8.0,
             target_duration_minutes=15.0,
             target_flow_rate_lpm=15.0,
+            effective_area_ha=0.1,
         )
         res2 = await dispatcher.submit_event(event2, budget=budget)
 

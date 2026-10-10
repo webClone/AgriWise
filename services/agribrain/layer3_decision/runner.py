@@ -797,6 +797,8 @@ _PLOT_INITIAL_STATE_HISTORY: dict = {}
 _PLOT_WITHDRAWN_SOIL_OBS: dict = {}
 _PLOT_WITHDRAWN_VEG: dict = {}
 _PLOT_CURRENT_HEAD: dict = {}
+_PLOT_CURRENT_SEQUENCE: dict = {}
+_PLOT_CURRENT_STEP: dict = {}
 _PLOT_SCOPE_LOCKS: dict = {}
 _PLOT_SCOPE_LOCKS_GUARD = threading.Lock()
 
@@ -1214,20 +1216,36 @@ def _execute_canonical_water_engine(
                 from world_model.canonical_worldline import CanonicalWorldlineService
             cw_svc = CanonicalWorldlineService()
             latest_cp = cw_svc.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace)
-            durable_head_id = latest_cp.get("checkpoint_id") if latest_cp else None
 
-            # R09: If durable head on disk differs from cached head token, reload to prevent stale RAM
-            if plot_scope_key in _PLOT_CURRENT_HEAD and _PLOT_CURRENT_HEAD[plot_scope_key] != durable_head_id:
-                plot_hist.clear()
-                plot_veg_hist.clear()
-                plot_so_hist.clear()
-                plot_init_hist.clear()
-                plot_withdrawn_so.clear()
-                plot_withdrawn_veg.clear()
-                _PLOT_WATER_STATE_MEMORY.pop(plot_scope_key, None)
-                _PLOT_WATER_STATE_MEMORY.pop(plot_id, None)
+            with _get_plot_scope_lock(plot_scope_key):
+                ram_head = _PLOT_CURRENT_HEAD.get(plot_scope_key)
+                ram_seq = _PLOT_CURRENT_SEQUENCE.get(plot_scope_key, 0)
+                ram_step = _PLOT_CURRENT_STEP.get(plot_scope_key, "")
 
-            _PLOT_CURRENT_HEAD[plot_scope_key] = durable_head_id
+                durable_head_id = latest_cp.get("checkpoint_id") if latest_cp else None
+                durable_seq = (latest_cp.get("payload", {}).get("sequence", 0) if latest_cp else 0) or (latest_cp.get("sequence", 0) if latest_cp else 0)
+                durable_step = latest_cp.get("payload", {}).get("step_key", "") if latest_cp else ""
+
+                ram_is_ahead = (
+                    ram_head is not None
+                    and (ram_seq > durable_seq or (ram_seq == durable_seq and ram_step >= durable_step))
+                )
+
+                if not ram_is_ahead:
+                    # R09: If durable head on disk differs from cached head token, reload to prevent stale RAM
+                    if ram_head is not None and ram_head != durable_head_id:
+                        plot_hist.clear()
+                        plot_veg_hist.clear()
+                        plot_so_hist.clear()
+                        plot_init_hist.clear()
+                        plot_withdrawn_so.clear()
+                        plot_withdrawn_veg.clear()
+                        _PLOT_WATER_STATE_MEMORY.pop(plot_scope_key, None)
+                        _PLOT_WATER_STATE_MEMORY.pop(plot_id, None)
+
+                    _PLOT_CURRENT_HEAD[plot_scope_key] = durable_head_id
+                    _PLOT_CURRENT_SEQUENCE[plot_scope_key] = durable_seq
+                    _PLOT_CURRENT_STEP[plot_scope_key] = durable_step
 
             if latest_cp and isinstance(latest_cp.get("payload"), dict):
                 expected_head = latest_cp.get("checkpoint_id")
@@ -2188,8 +2206,6 @@ def _execute_canonical_water_engine(
             cached_mem = plot_init_hist[d_start_str][1]
         if cached_soil is None and plot_scope_key in _PLOT_WATER_STATE_MEMORY:
             cached_soil, cached_mem = _PLOT_WATER_STATE_MEMORY[plot_scope_key]
-        elif cached_soil is None and plot_id in _PLOT_WATER_STATE_MEMORY:
-            cached_soil, cached_mem = _PLOT_WATER_STATE_MEMORY[plot_id]
 
         soil_profile_state = explicit_soil or cached_soil
         hydraulic_memory = explicit_mem or cached_mem
@@ -2370,54 +2386,64 @@ def _execute_canonical_water_engine(
                 and h_entry.get("step_forcing_hash") == prev_step_hash
             )
             if is_exact_historical_replay:
-                if "history_summary" in cp_payload and isinstance(cp_payload["history_summary"], dict):
-                    for h_key, h_data in cp_payload["history_summary"].items():
-                        if isinstance(h_data, dict):
-                            h_soil = _deserialize_soil_water(h_data.get("soil_water"))
-                            h_mem = _deserialize_hydraulic_memory(h_data.get("hydraulic_memory"))
-                            h_veg = _deserialize_veg_state(h_data.get("vegetation"))
-                            ts_raw = h_data.get("timestamp")
-                            try:
-                                ts_obj = datetime.datetime.fromisoformat(ts_raw) if ts_raw else ts
-                            except Exception:
-                                ts_obj = ts
-                            plot_hist[h_key] = {
-                                "timestamp": ts_obj,
-                                "soil_water": h_soil,
-                                "hydraulic_memory": h_mem,
-                                "water_state": None,
-                                "feedback": None,
-                                "weather": h_data.get("weather", {}),
-                                "irrigation": float(h_data.get("irrigation", 0.0)),
-                                "vegetation_state": h_veg,
-                                "lai": getattr(h_veg, "lai", 0.0) if h_veg else 0.0,
-                                "fvc": getattr(h_veg, "fvc", 0.0) if h_veg else 0.0,
-                                "root_depth": getattr(h_veg, "root_depth_proxy_m", 0.4) if h_veg else 0.4,
-                                "soil_observations": None,
-                                "initial_soil_water": _deserialize_soil_water(h_data.get("initial_soil_water")),
-                                "initial_hydraulic_memory": _deserialize_hydraulic_memory(h_data.get("initial_hydraulic_memory")),
-                                "evidence_hash": h_data.get("evidence_hash"),
-                                "interval_hash": h_data.get("interval_hash"),
-                                "predecessor_hash": h_data.get("predecessor_hash"),
-                                "step_forcing_hash": h_data.get("step_forcing_hash"),
-                            }
-                plot_hist.update(candidate_hist)
-                _PLOT_WATER_STATE_HISTORY[plot_id] = plot_hist
-                if candidate_veg:
-                    plot_veg_hist.update(candidate_veg)
-                    _PLOT_VEGETATION_HISTORY[plot_id] = plot_veg_hist
-                if candidate_so:
-                    plot_so_hist.update(candidate_so)
-                    _PLOT_SOIL_OBS_HISTORY[plot_id] = plot_so_hist
-                if candidate_init:
-                    plot_init_hist.update(candidate_init)
-                    _PLOT_INITIAL_STATE_HISTORY[plot_id] = plot_init_hist
-                if "soil_water" in cp_payload and isinstance(cp_payload["soil_water"], dict):
-                    hyd_soil = _deserialize_soil_water(cp_payload["soil_water"])
-                    hyd_mem = _deserialize_hydraulic_memory(cp_payload.get("hydraulic_memory", {}))
-                    if hyd_soil:
-                        _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (hyd_soil, hyd_mem)
-                        _PLOT_WATER_STATE_MEMORY[plot_id] = (hyd_soil, hyd_mem)
+                with _get_plot_scope_lock(plot_scope_key):
+                    ram_seq = _PLOT_CURRENT_SEQUENCE.get(plot_scope_key, 0)
+                    cp_seq = (cp_payload.get("sequence", 0) if isinstance(cp_payload, dict) else 0)
+                    ram_head = _PLOT_CURRENT_HEAD.get(plot_scope_key)
+                    # N07: If RAM already has a newer publication head/sequence, do not overwrite RAM with stale history!
+                    ram_is_ahead = (
+                        ram_head is not None
+                        and (ram_seq > cp_seq or (ram_seq == cp_seq and day_key < cp_step_key))
+                    )
+                    if not ram_is_ahead:
+                        if "history_summary" in cp_payload and isinstance(cp_payload["history_summary"], dict):
+                            for h_key, h_data in cp_payload["history_summary"].items():
+                                if isinstance(h_data, dict):
+                                    h_soil = _deserialize_soil_water(h_data.get("soil_water"))
+                                    h_mem = _deserialize_hydraulic_memory(h_data.get("hydraulic_memory"))
+                                    h_veg = _deserialize_veg_state(h_data.get("vegetation"))
+                                    ts_raw = h_data.get("timestamp")
+                                    try:
+                                        ts_obj = datetime.datetime.fromisoformat(ts_raw) if ts_raw else ts
+                                    except Exception:
+                                        ts_obj = ts
+                                    plot_hist[h_key] = {
+                                        "timestamp": ts_obj,
+                                        "soil_water": h_soil,
+                                        "hydraulic_memory": h_mem,
+                                        "water_state": None,
+                                        "feedback": None,
+                                        "weather": h_data.get("weather", {}),
+                                        "irrigation": float(h_data.get("irrigation", 0.0)),
+                                        "vegetation_state": h_veg,
+                                        "lai": getattr(h_veg, "lai", 0.0) if h_veg else 0.0,
+                                        "fvc": getattr(h_veg, "fvc", 0.0) if h_veg else 0.0,
+                                        "root_depth": getattr(h_veg, "root_depth_proxy_m", 0.4) if h_veg else 0.4,
+                                        "soil_observations": None,
+                                        "initial_soil_water": _deserialize_soil_water(h_data.get("initial_soil_water")),
+                                        "initial_hydraulic_memory": _deserialize_hydraulic_memory(h_data.get("initial_hydraulic_memory")),
+                                        "evidence_hash": h_data.get("evidence_hash"),
+                                        "interval_hash": h_data.get("interval_hash"),
+                                        "predecessor_hash": h_data.get("predecessor_hash"),
+                                        "step_forcing_hash": h_data.get("step_forcing_hash"),
+                                    }
+                        plot_hist.update(candidate_hist)
+                        _PLOT_WATER_STATE_HISTORY[plot_id] = plot_hist
+                        if candidate_veg:
+                            plot_veg_hist.update(candidate_veg)
+                            _PLOT_VEGETATION_HISTORY[plot_id] = plot_veg_hist
+                        if candidate_so:
+                            plot_so_hist.update(candidate_so)
+                            _PLOT_SOIL_OBS_HISTORY[plot_id] = plot_so_hist
+                        if candidate_init:
+                            plot_init_hist.update(candidate_init)
+                            _PLOT_INITIAL_STATE_HISTORY[plot_id] = plot_init_hist
+                        if "soil_water" in cp_payload and isinstance(cp_payload["soil_water"], dict):
+                            hyd_soil = _deserialize_soil_water(cp_payload["soil_water"])
+                            hyd_mem = _deserialize_hydraulic_memory(cp_payload.get("hydraulic_memory", {}))
+                            if hyd_soil:
+                                _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (hyd_soil, hyd_mem)
+                                _PLOT_WATER_STATE_MEMORY[plot_id] = (hyd_soil, hyd_mem)
                 return last_water_state, last_feedback
 
             try:
@@ -2519,6 +2545,8 @@ def _execute_canonical_water_engine(
                     _PLOT_WATER_STATE_MEMORY[plot_id] = (current_soil, current_mem)
                     _PLOT_CURRENT_HEAD[plot_scope_key] = cp_id
                     _PLOT_CURRENT_HEAD[plot_id] = cp_id
+                    _PLOT_CURRENT_SEQUENCE[plot_scope_key] = cp_payload.get("sequence", len(merged_history))
+                    _PLOT_CURRENT_STEP[plot_scope_key] = day_key
             except ConcurrencyConflictError:
                 _rollback_ram_state()
                 raise

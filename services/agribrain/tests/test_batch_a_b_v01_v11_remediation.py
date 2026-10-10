@@ -134,6 +134,7 @@ def _make_event(
     duration_minutes=15.0,
     status=EventStatus.QUEUED,
     actual_start=None,
+    effective_area_ha=1.0,
 ):
     return IrrigationEvent(
         event_id=event_id,
@@ -146,6 +147,7 @@ def _make_event(
         target_volume_mm=volume_mm,
         target_duration_minutes=duration_minutes,
         actual_start=actual_start,
+        effective_area_ha=effective_area_ha,
     )
 
 

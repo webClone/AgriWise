@@ -587,6 +587,7 @@ async def test_c09_command_vs_outcome_identity_and_observation_rehydration():
     disp2 = CommandDispatcher()
     disp2.register_actuator(actuator)
     retry_ev = _make_event("EV-C09", volume_mm=8.0)
+    retry_ev.effective_area_ha = 1.0
     res = await disp2.submit_event(retry_ev)
 
     assert res.status == EventStatus.COMPLETED
