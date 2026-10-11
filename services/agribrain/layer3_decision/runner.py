@@ -1218,21 +1218,27 @@ def _execute_canonical_water_engine(
             latest_cp = cw_svc.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace)
 
             with _get_plot_scope_lock(plot_scope_key):
+                # Re-read latest checkpoint under lock to guarantee fresh durable head
+                latest_cp = cw_svc.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace)
                 ram_head = _PLOT_CURRENT_HEAD.get(plot_scope_key)
-                ram_seq = _PLOT_CURRENT_SEQUENCE.get(plot_scope_key, 0)
+                ram_pub_seq = _PLOT_CURRENT_SEQUENCE.get(plot_scope_key, 0)
                 ram_step = _PLOT_CURRENT_STEP.get(plot_scope_key, "")
 
                 durable_head_id = latest_cp.get("checkpoint_id") if latest_cp else None
-                durable_seq = (latest_cp.get("payload", {}).get("sequence", 0) if latest_cp else 0) or (latest_cp.get("sequence", 0) if latest_cp else 0)
+                durable_pub_seq = latest_cp.get("sequence", 0) if latest_cp else 0
                 durable_step = latest_cp.get("payload", {}).get("step_key", "") if latest_cp else ""
 
+                # RV02: Use monotonically increasing committed publication generation (sequence) for generation fencing.
+                # If disk publication sequence is newer, or disk head differs from cached RAM head, disk takes precedence
+                # even if a historical correction shortened history length!
                 ram_is_ahead = (
                     ram_head is not None
-                    and (ram_seq > durable_seq or (ram_seq == durable_seq and ram_step >= durable_step))
+                    and durable_pub_seq > 0
+                    and ram_pub_seq > durable_pub_seq
                 )
 
                 if not ram_is_ahead:
-                    # R09: If durable head on disk differs from cached head token, reload to prevent stale RAM
+                    # Invalidate RAM cache when durable head on disk differs from cached head token
                     if ram_head is not None and ram_head != durable_head_id:
                         plot_hist.clear()
                         plot_veg_hist.clear()
@@ -1244,7 +1250,9 @@ def _execute_canonical_water_engine(
                         _PLOT_WATER_STATE_MEMORY.pop(plot_id, None)
 
                     _PLOT_CURRENT_HEAD[plot_scope_key] = durable_head_id
-                    _PLOT_CURRENT_SEQUENCE[plot_scope_key] = durable_seq
+                    _PLOT_CURRENT_HEAD[plot_id] = durable_head_id
+                    _PLOT_CURRENT_SEQUENCE[plot_scope_key] = durable_pub_seq
+                    _PLOT_CURRENT_SEQUENCE[plot_id] = durable_pub_seq
                     _PLOT_CURRENT_STEP[plot_scope_key] = durable_step
 
             if latest_cp and isinstance(latest_cp.get("payload"), dict):
@@ -1354,6 +1362,7 @@ def _execute_canonical_water_engine(
         snapshot_mem_scope = _PLOT_WATER_STATE_MEMORY.get(plot_scope_key)
         snapshot_mem_plot = _PLOT_WATER_STATE_MEMORY.get(plot_id)
         snapshot_head = _PLOT_CURRENT_HEAD.get(plot_scope_key)
+        snapshot_seq = _PLOT_CURRENT_SEQUENCE.get(plot_scope_key)
 
         # D12: Candidate registries isolated from concurrent workers until CAS persistence
         candidate_events = dict(plot_events)
@@ -1387,8 +1396,11 @@ def _execute_canonical_water_engine(
                         return
                     if cur_latest and isinstance(cur_latest.get("payload"), dict):
                         winner_payload = cur_latest["payload"]
+                        winner_seq = cur_latest.get("sequence", 0)
                         _PLOT_CURRENT_HEAD[plot_scope_key] = cur_head
                         _PLOT_CURRENT_HEAD[plot_id] = cur_head
+                        _PLOT_CURRENT_SEQUENCE[plot_scope_key] = winner_seq
+                        _PLOT_CURRENT_SEQUENCE[plot_id] = winner_seq
                         winner_soil = _deserialize_soil_water(winner_payload.get("soil_water"))
                         winner_mem = _deserialize_hydraulic_memory(winner_payload.get("hydraulic_memory"))
                         if winner_soil:
@@ -1482,6 +1494,12 @@ def _execute_canonical_water_engine(
                 else:
                     _PLOT_CURRENT_HEAD.pop(plot_scope_key, None)
                     _PLOT_CURRENT_HEAD.pop(plot_id, None)
+                if snapshot_seq is not None:
+                    _PLOT_CURRENT_SEQUENCE[plot_scope_key] = snapshot_seq
+                    _PLOT_CURRENT_SEQUENCE[plot_id] = snapshot_seq
+                else:
+                    _PLOT_CURRENT_SEQUENCE.pop(plot_scope_key, None)
+                    _PLOT_CURRENT_SEQUENCE.pop(plot_id, None)
 
         raw_events = (
             op_ctx.get("management_events")
@@ -2388,7 +2406,7 @@ def _execute_canonical_water_engine(
             if is_exact_historical_replay:
                 with _get_plot_scope_lock(plot_scope_key):
                     ram_seq = _PLOT_CURRENT_SEQUENCE.get(plot_scope_key, 0)
-                    cp_seq = (cp_payload.get("sequence", 0) if isinstance(cp_payload, dict) else 0)
+                    cp_seq = latest_cp.get("sequence", 0) if latest_cp else (cp_payload.get("sequence", 0) if isinstance(cp_payload, dict) else 0)
                     ram_head = _PLOT_CURRENT_HEAD.get(plot_scope_key)
                     # N07: If RAM already has a newer publication head/sequence, do not overwrite RAM with stale history!
                     ram_is_ahead = (
@@ -2545,7 +2563,9 @@ def _execute_canonical_water_engine(
                     _PLOT_WATER_STATE_MEMORY[plot_id] = (current_soil, current_mem)
                     _PLOT_CURRENT_HEAD[plot_scope_key] = cp_id
                     _PLOT_CURRENT_HEAD[plot_id] = cp_id
-                    _PLOT_CURRENT_SEQUENCE[plot_scope_key] = cp_payload.get("sequence", len(merged_history))
+                    pub_seq = latest_durable.get("sequence", 0) if latest_durable else cp_payload.get("sequence", len(merged_history))
+                    _PLOT_CURRENT_SEQUENCE[plot_scope_key] = pub_seq
+                    _PLOT_CURRENT_SEQUENCE[plot_id] = pub_seq
                     _PLOT_CURRENT_STEP[plot_scope_key] = day_key
             except ConcurrencyConflictError:
                 _rollback_ram_state()

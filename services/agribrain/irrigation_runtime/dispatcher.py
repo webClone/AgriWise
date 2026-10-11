@@ -208,9 +208,35 @@ class CommandDispatcher:
                                event.event_id, existing.status.value)
                 return existing
 
-        # Check if already finalized in local history
+        # Check if already finalized in local history (RV07: enforce payload and support binding)
         for past in self._event_history:
             if past.event_id == event.event_id:
+                p_target = finite_real(past.target_volume_mm)
+                e_target = finite_real(event.target_volume_mm)
+                p_plot = past.plot_id
+                p_dev = past.device_id
+                p_zone = past.zone_id
+                p_dur = finite_real(past.target_duration_minutes)
+                p_flow = finite_real(past.target_flow_rate_lpm)
+                p_area = getattr(past, "effective_area_ha", None)
+                e_dur = finite_real(event.target_duration_minutes)
+                e_flow = finite_real(event.target_flow_rate_lpm)
+                e_area = getattr(event, "effective_area_ha", None)
+                is_conflict = (
+                    (p_target is not None and e_target is not None and abs(p_target - e_target) > 1e-4)
+                    or (bool(p_plot) and bool(event.plot_id) and p_plot != event.plot_id)
+                    or (bool(p_dev) and bool(event.device_id) and p_dev != event.device_id)
+                    or (bool(p_zone) and bool(event.zone_id) and p_zone != event.zone_id)
+                    or (p_dur is not None and e_dur is not None and abs(p_dur - e_dur) > 1e-4)
+                    or (p_flow is not None and e_flow is not None and abs(p_flow - e_flow) > 1e-4)
+                    or _check_area_conflict(p_area, e_area)
+                )
+                if is_conflict:
+                    logger.warning("Event %s has payload conflict with local history: requested %.1fmm vs target %.1fmm",
+                                   event.event_id, e_target or 0.0, p_target or 0.0)
+                    event.transition(EventStatus.FAILED, f"Payload conflict with local history: requested {e_target}mm vs target {p_target}mm")
+                    self._emit_failed(event)
+                    return event
                 logger.warning("Event %s already finalized with status %s; returning historical event.",
                                event.event_id, past.status.value)
                 return past
@@ -259,8 +285,9 @@ class CommandDispatcher:
                     event.target_flow_rate_lpm = float(res["flow_rate_lpm"])
                 if res.get("duration_minutes") is not None:
                     event.target_duration_minutes = float(res["duration_minutes"])
-                if res.get("effective_area_ha") is not None:
-                    event.effective_area_ha = float(res["effective_area_ha"])
+                event.effective_area_ha = res.get("effective_area_ha")
+                if not event.actual_start and res.get("actual_start"):
+                    event.actual_start = res["actual_start"]
                 logger.warning("Event %s already active in shared store with status %s; returning existing event.", event.event_id, event.status.value)
                 return event
             else:
@@ -392,6 +419,14 @@ class CommandDispatcher:
                         event.status = EventStatus(raw_st)
                     except Exception:
                         event.status = EventStatus.DISPATCHING
+                    event.target_volume_mm = float(res.get("volume_mm", event.target_volume_mm))
+                    if res.get("flow_rate_lpm") is not None:
+                        event.target_flow_rate_lpm = float(res["flow_rate_lpm"])
+                    if res.get("duration_minutes") is not None:
+                        event.target_duration_minutes = float(res["duration_minutes"])
+                    event.effective_area_ha = res.get("effective_area_ha")
+                    if not event.actual_start and res.get("actual_start"):
+                        event.actual_start = res["actual_start"]
                     logger.warning("Event %s already claimed by concurrent worker; joining active execution as %s without duplicate START.",
                                    event.event_id, event.status.value)
                     return event
@@ -670,6 +705,11 @@ class CommandDispatcher:
                                     automation_mode=AutomationMode.MANUAL,
                                     status=EventStatus.FAILED)
 
+        # RV03: Ensure actual_start is synced to shared store for active recovery
+        if event.actual_start:
+            from irrigation_runtime.safety import SharedQuotaStore
+            SharedQuotaStore.set_actual_start(event.event_id, event.actual_start)
+
         actuator = self._registry.get_actuator(event.device_id)
         if not actuator:
             # BA-01: Registry loss requires degraded reconciliation; must not mean physically stopped
@@ -890,15 +930,16 @@ class CommandDispatcher:
             event.transition(EventStatus.FAILED, f"Invalid settlement volume {actual_volume_l}")
             return event
 
-        # D09: Validate duration if explicitly provided; otherwise default for explicit 0 L or target duration
+        # D09, RV05: Validate duration if explicitly provided; keep None if omitted (do not fabricate target duration as actual duration)
+        val_dur = None
         if actual_duration_minutes is not None:
             val_dur = finite_real(actual_duration_minutes)
             if val_dur is None or val_dur < 0:
                 logger.error("Invalid actual duration %r for event %s. Retaining unsettled exposure.", actual_duration_minutes, eid)
                 event.transition(EventStatus.FAILED, f"Invalid settlement duration {actual_duration_minutes}")
                 return event
-        else:
-            val_dur = 0.0 if val_vol == 0.0 else (finite_real(event.target_duration_minutes) or 0.0)
+        elif val_vol == 0.0:
+            val_dur = 0.0
 
         # Validate effective_area_ha if present
         area_ha = None
@@ -1020,65 +1061,75 @@ class CommandDispatcher:
         return event
 
     async def emergency_stop_all(self) -> Dict[str, str]:
-        """Emergency stop all active events (N09: reliable global cutoff)."""
+        """Emergency stop all active events (N09, RV01: reliable global cutoff)."""
         results = {}
-        for event_id, event in list(self._active_events.items()):
-            try:
-                actuator = self._registry.get_actuator(event.device_id)
-                stop_success = False
-                if actuator:
-                    stop_res = await actuator.emergency_stop()
-                    stop_success = bool(stop_res and stop_res.success)
-                    if stop_success:
-                        actuator._status = ActuatorStatus.ONLINE
-                        actuator._active_command = None
-                    else:
-                        actuator._status = ActuatorStatus.ERROR
-                if stop_success:
-                    event.emergency_stopped = True
-                    event.emergency_stop_reason = "Global emergency stop"
-                    event.transition(EventStatus.EMERGENCY_STOPPED, "Global emergency stop")
-                    from irrigation_runtime.safety import SharedQuotaStore
-                    res = SharedQuotaStore.get_active_record(event.event_id) or {}
-                    season_key = res.get("season")
-                    del_mm = getattr(event, "delivered_volume_mm", None)
-                    self._safety.record_stopped_delivery(
-                        event_id=event.event_id,
-                        plot_id=event.plot_id,
-                        target_volume_mm=event.target_volume_mm,
-                        delivered_volume_mm=del_mm,
-                        season=season_key,
-                        device_id=event.device_id,
-                        zone_id=event.zone_id,
-                        duration_minutes=event.target_duration_minutes,
-                        flow_rate_lpm=event.target_flow_rate_lpm,
-                        effective_area_ha=getattr(event, "effective_area_ha", None),
-                    )
-                    self._safety.track_event_end(event.event_id)
-                    self._finalize_event(event)
-                    results[event_id] = "STOPPED"
-                else:
-                    event.emergency_stopped = True
-                    event.emergency_stop_reason = "Global emergency stop (stop unconfirmed)"
-                    event.transition(EventStatus.STOP_REQUESTED, "Global emergency stop failed on actuator")
-                    from irrigation_runtime.safety import SharedQuotaStore
-                    SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
-                    results[event_id] = "STOP_FAILED"
-            except Exception as exc:
-                logger.error("Error during emergency stop of event %s: %s", event_id, exc)
-                event.emergency_stopped = True
-                event.emergency_stop_reason = f"Global emergency stop exception: {exc}"
-                if event.status != EventStatus.STOP_REQUESTED:
-                    event.transition(EventStatus.STOP_REQUESTED, f"Exception during stop: {exc}")
-                from irrigation_runtime.safety import SharedQuotaStore
-                SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
-                results[event_id] = "STOP_ERROR"
-
-        # Also stop all actuators in registry (guaranteed fallback)
         try:
-            await self._registry.emergency_stop_all()
-        except Exception as exc:
-            logger.error("Registry emergency_stop_all failed: %s", exc)
+            for event_id, event in list(self._active_events.items()):
+                try:
+                    actuator = self._registry.get_actuator(event.device_id)
+                    stop_success = False
+                    if actuator:
+                        stop_res = await actuator.emergency_stop()
+                        stop_success = bool(stop_res and stop_res.success)
+                        if stop_success:
+                            actuator._status = ActuatorStatus.ONLINE
+                            actuator._active_command = None
+                        else:
+                            actuator._status = ActuatorStatus.ERROR
+                    if stop_success:
+                        event.emergency_stopped = True
+                        event.emergency_stop_reason = "Global emergency stop"
+                        event.transition(EventStatus.EMERGENCY_STOPPED, "Global emergency stop")
+                        try:
+                            from irrigation_runtime.safety import SharedQuotaStore
+                            res = SharedQuotaStore.get_active_record(event.event_id) or {}
+                            season_key = res.get("season")
+                            del_mm = getattr(event, "delivered_volume_mm", None)
+                            self._safety.record_stopped_delivery(
+                                event_id=event.event_id,
+                                plot_id=event.plot_id,
+                                target_volume_mm=event.target_volume_mm,
+                                delivered_volume_mm=del_mm,
+                                season=season_key,
+                                device_id=event.device_id,
+                                zone_id=event.zone_id,
+                                duration_minutes=event.target_duration_minutes,
+                                flow_rate_lpm=event.target_flow_rate_lpm,
+                                effective_area_ha=getattr(event, "effective_area_ha", None),
+                            )
+                        except Exception as store_err:
+                            logger.error("Ledger update failed during emergency stop of %s: %s", event_id, store_err)
+                        self._safety.track_event_end(event.event_id)
+                        self._finalize_event(event)
+                        results[event_id] = "STOPPED"
+                    else:
+                        event.emergency_stopped = True
+                        event.emergency_stop_reason = "Global emergency stop (stop unconfirmed)"
+                        event.transition(EventStatus.STOP_REQUESTED, "Global emergency stop failed on actuator")
+                        try:
+                            from irrigation_runtime.safety import SharedQuotaStore
+                            SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                        except Exception as store_err:
+                            logger.error("Ledger update failed during emergency stop of %s: %s", event_id, store_err)
+                        results[event_id] = "STOP_FAILED"
+                except Exception as exc:
+                    logger.error("Error during emergency stop of event %s: %s", event_id, exc)
+                    event.emergency_stopped = True
+                    event.emergency_stop_reason = f"Global emergency stop exception: {exc}"
+                    if event.status != EventStatus.STOP_REQUESTED:
+                        event.transition(EventStatus.STOP_REQUESTED, f"Exception during stop: {exc}")
+                    try:
+                        from irrigation_runtime.safety import SharedQuotaStore
+                        SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                    except Exception as store_err:
+                        logger.error("Ledger update failed in error handler for %s: %s", event_id, store_err)
+                    results[event_id] = "STOP_ERROR"
+        finally:
+            # RV01: Guaranteed fallback stop of all actuators in registry even if ledger or exceptions occur
+            try:
+                await self._registry.emergency_stop_all()
+            except Exception as exc:
+                logger.error("Registry emergency_stop_all failed: %s", exc)
 
         return results
 
@@ -1096,18 +1147,33 @@ class CommandDispatcher:
         for event in persisted_events:
             from irrigation_runtime.safety import SharedQuotaStore
             active_rec = SharedQuotaStore.get_active_record(event.event_id)
-            if active_rec and active_rec.get("status") in (
-                EventStatus.DISPATCHING.value,
-                EventStatus.EXECUTING.value,
-                EventStatus.STOP_REQUESTED.value,
-            ):
-                event.status = EventStatus(active_rec["status"])
+            if active_rec:
+                raw_st = active_rec.get("status")
+                if raw_st in (
+                    EventStatus.DISPATCHING.value,
+                    EventStatus.EXECUTING.value,
+                    EventStatus.STOP_REQUESTED.value,
+                    EventStatus.VALIDATING.value,
+                    "UNSETTLED",
+                ):
+                    if raw_st == "UNSETTLED":
+                        event.status = EventStatus.VALIDATING
+                    else:
+                        event.status = EventStatus(raw_st)
                 if active_rec.get("flow_rate_lpm") is not None:
                     event.target_flow_rate_lpm = float(active_rec["flow_rate_lpm"])
                 if active_rec.get("duration_minutes") is not None:
                     event.target_duration_minutes = float(active_rec["duration_minutes"])
                 if active_rec.get("effective_area_ha") is not None:
                     event.effective_area_ha = float(active_rec["effective_area_ha"])
+                if not event.actual_start and active_rec.get("actual_start"):
+                    event.actual_start = active_rec["actual_start"]
+
+            # RV04: VALIDATING survives restart and must be restored to active events so measured completion can proceed
+            if event.status == EventStatus.VALIDATING:
+                self._active_events[event.event_id] = event
+                reconciled.append(event)
+                continue
 
             if event.status not in (EventStatus.DISPATCHING, EventStatus.EXECUTING, EventStatus.STOP_REQUESTED):
                 continue
@@ -1127,6 +1193,9 @@ class CommandDispatcher:
                         elapsed_minutes = float(event.target_duration_minutes)
                     else:
                         elapsed_minutes = 0.0
+            elif event.status in (EventStatus.EXECUTING, EventStatus.STOP_REQUESTED):
+                # RV03: Executing/stop-requested event with no established start time cannot be granted fresh runtime: treat as expired!
+                elapsed_minutes = float(event.target_duration_minutes)
 
             remaining_duration = max(0.0, event.target_duration_minutes - elapsed_minutes)
 
@@ -1263,8 +1332,15 @@ class CommandDispatcher:
                             effective_area_ha=getattr(event, "effective_area_ha", None),
                         )
                 elif status == ActuatorStatus.ONLINE:
-                    event.transition(EventStatus.COMPLETED, "Reconciled after process restart: actuator is stopped/idle")
-                    self._safety.settle_quota(event.event_id, event.plot_id, event.target_volume_mm)
+                    if active_rec:
+                        # RV05: Idle actuator on restart does NOT qualify commanded depth as measured delivery.
+                        # Route to VALIDATING and retain unsettled reservation so delivery measurements can be supplied.
+                        event.transition(EventStatus.VALIDATING, "Reconciled after process restart: actuator idle, awaiting validation")
+                        self._active_events[event.event_id] = event
+                        SharedQuotaStore.mark_unsettled(event.event_id)
+                    else:
+                        event.transition(EventStatus.COMPLETED, "Reconciled after process restart: actuator is stopped/idle")
+                        self._safety.settle_quota(event.event_id, event.plot_id, event.target_volume_mm)
                 else:
                     event.transition(EventStatus.STOP_REQUESTED, f"Reconciled after process restart: actuator in {status.value}")
                     self._active_events[event.event_id] = event
