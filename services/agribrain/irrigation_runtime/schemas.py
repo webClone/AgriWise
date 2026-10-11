@@ -431,6 +431,16 @@ class IrrigationEvent:
         elif flow < 0:
             errors.append(f"Target flow rate {self.target_flow_rate_lpm} cannot be negative")
 
+        if hasattr(self, "effective_area_ha") and self.effective_area_ha is not None:
+            if isinstance(self.effective_area_ha, bool):
+                errors.append(f"Effective area {self.effective_area_ha} cannot be boolean")
+            else:
+                area = finite_real(self.effective_area_ha)
+                if area is None:
+                    errors.append(f"Effective area {self.effective_area_ha} must be a finite real number")
+                elif area <= 0:
+                    errors.append(f"Effective area {self.effective_area_ha} must be positive")
+
         return errors
 
     def content_hash(self) -> str:

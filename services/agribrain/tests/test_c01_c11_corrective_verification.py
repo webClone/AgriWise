@@ -518,12 +518,13 @@ async def test_c08_settlement_validation_and_zero_litres_conversion():
     actuator._status = ActuatorStatus.ONLINE
     actuator._active_command = None
     ev_bool_area = _make_event("EV-BOOL-A", volume_mm=8.0)
-    ev_bool_area.effective_area_ha = True
+    ev_bool_area.effective_area_ha = 1.0
     await dispatcher.submit_event(ev_bool_area)
     actuator._status = ActuatorStatus.ONLINE
     actuator._active_command = None
     await dispatcher.check_execution_status(ev_bool_area.event_id)
     assert ev_bool_area.status == EventStatus.VALIDATING
+    ev_bool_area.effective_area_ha = True
     res_bool = await dispatcher.complete_event(ev_bool_area.event_id, actual_volume_l=80000.0)
     assert res_bool.status == EventStatus.FAILED
 

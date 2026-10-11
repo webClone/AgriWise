@@ -979,7 +979,18 @@ class SharedQuotaStore:
                 ex_date = existing.get("date", "")
                 ex_season = existing.get("season", "")
 
-                t_check = target_volume_mm if target_volume_mm is not None else val
+                t_check = ex_target  # Canonical target from receipt is authoritative
+
+                # PB06: Normalize candidate depth and target for comparison against canonical existing receipt
+                norm_val = val
+                if actual_volume_l is not None:
+                    if float(actual_volume_l) == 0.0:
+                        norm_val = 0.0
+                    elif effective_area_ha is not None and float(effective_area_ha) > 0:
+                        norm_val = round(float(actual_volume_l) / (10000.0 * float(effective_area_ha)), 6)
+                elif ex_avl is not None and ex_avl == 0.0:
+                    norm_val = 0.0
+
                 e_dur = finite_real(duration_minutes)
                 e_flow = finite_real(flow_rate_lpm)
                 e_area = finite_real(effective_area_ha)
@@ -991,8 +1002,7 @@ class SharedQuotaStore:
                 e_season = season or ""
 
                 is_conflict = (
-                    abs(ex_del - val) > 1e-4
-                    or abs(ex_target - t_check) > 1e-4
+                    abs(ex_del - norm_val) > 1e-4
                     or (bool(plot_id) and bool(ex_plot) and ex_plot != plot_id)
                     or (ex_dur is not None and e_dur is not None and abs(ex_dur - e_dur) > 1e-4)
                     or (ex_flow is not None and e_flow is not None and abs(ex_flow - e_flow) > 1e-4)
@@ -1040,10 +1050,12 @@ class SharedQuotaStore:
                     state.setdefault("settled_season", {})[pk_season_p] = max(0.0, float(state.get("settled_season", {}).get(pk_season_p, 0.0)) - p_del)
                     state.setdefault("settled_plot_total", {})[target_plot] = max(0.0, float(state.get("settled_plot_total", {}).get(target_plot, 0.0)) - p_del)
 
-            # C09 + D10, RV05, BV04: Preserve commanded target and actual delivery observations separately; enforce mathematical depth consistency
+            # C09 + D10, RV05, BV04, PB07: Preserve commanded target and actual delivery observations separately; enforce mathematical depth consistency
             act_vol_l = finite_real(actual_volume_l) if actual_volume_l is not None else None
             act_dur_m = finite_real(actual_duration_minutes) if actual_duration_minutes is not None else None
-            if act_vol_l is not None and eff_area is not None and eff_area > 0:
+            if act_vol_l == 0.0:
+                val = 0.0
+            elif act_vol_l is not None and eff_area is not None and eff_area > 0:
                 val = round(act_vol_l / (10000.0 * float(eff_area)), 6)
             settled_receipts[event_id] = {
                 "plot_id": target_plot,
@@ -1252,37 +1264,60 @@ class SharedQuotaStore:
         with cls._lock():
             state = cls._read_state()
             existing_res = state.get("reservations", {}).get(event_id, {})
-            # RC03, BV04: Prevent rebinding reservation to conflicting plot or mutating admitted envelope
-            if existing_res.get("plot_id") and existing_res["plot_id"] != plot_id:
-                raise ValueError(f"Payload conflict: event {event_id} already reserved on plot {existing_res['plot_id']}, cannot rebind to {plot_id}")
-            if existing_res.get("volume_mm") is not None:
-                val = float(existing_res["volume_mm"])
             stopped_receipts = state.setdefault("stopped_receipts", {})
             stopped = stopped_receipts.pop(event_id, None)
+
+            # PB05: Canonical operation envelope is authoritative across active and stopped-only records
+            canonical_plot = existing_res.get("plot_id") or (stopped.get("plot_id") if stopped else None) or plot_id
+            if canonical_plot != plot_id:
+                if stopped:
+                    stopped_receipts[event_id] = stopped
+                raise ValueError(f"Payload conflict: event {event_id} already reserved on plot {canonical_plot}, cannot rebind to {plot_id}")
+
+            if existing_res.get("volume_mm") is not None:
+                val = float(existing_res["volume_mm"])
+            elif stopped and stopped.get("target_volume_mm") is not None:
+                val = float(stopped["target_volume_mm"])
+            elif stopped and stopped.get("volume_mm") is not None:
+                val = float(stopped["volume_mm"])
+
+            if existing_res.get("duration_minutes") is not None:
+                dur_m = float(existing_res["duration_minutes"])
+            elif stopped and stopped.get("duration_minutes") is not None:
+                dur_m = float(stopped["duration_minutes"])
+
+            if existing_res.get("flow_rate_lpm") is not None:
+                f_lpm = float(existing_res["flow_rate_lpm"])
+            elif stopped and stopped.get("flow_rate_lpm") is not None:
+                f_lpm = float(stopped["flow_rate_lpm"])
+
+            if "effective_area_ha" in existing_res:
+                eff_area = existing_res["effective_area_ha"]
+            elif stopped and "effective_area_ha" in stopped:
+                eff_area = stopped["effective_area_ha"]
+
             if stopped:
                 s_del = float(stopped.get("delivered_volume_mm", 0.0))
-                s_date = existing_res.get("date") or stopped.get("date") or date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                s_season = existing_res.get("season") or stopped.get("season") or season or "default_season"
+                orig_plot = stopped.get("plot_id") or canonical_plot
+                s_date = stopped.get("date") or existing_res.get("date") or date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                s_season = stopped.get("season") or existing_res.get("season") or season or "default_season"
                 if s_del > 0:
-                    pk_daily = f"{plot_id}:{s_date}"
-                    pk_season = f"{plot_id}:{s_season}"
+                    pk_daily = f"{orig_plot}:{s_date}"
+                    pk_season = f"{orig_plot}:{s_season}"
                     state.setdefault("settled_daily", {})[pk_daily] = max(0.0, float(state.get("settled_daily", {}).get(pk_daily, 0.0)) - s_del)
                     state.setdefault("settled_season", {})[pk_season] = max(0.0, float(state.get("settled_season", {}).get(pk_season, 0.0)) - s_del)
-                    state.setdefault("settled_plot_total", {})[plot_id] = max(0.0, float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) - s_del)
+                    state.setdefault("settled_plot_total", {})[orig_plot] = max(0.0, float(state.get("settled_plot_total", {}).get(orig_plot, 0.0)) - s_del)
 
-            # BV04: Preserve canonical admitted dimensions from existing_res
+            # BV04, PB05: Preserve canonical admitted dimensions from existing_res or stopped
             date_key = existing_res.get("date") or (stopped.get("date") if stopped else None) or date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
             season_key = existing_res.get("season") or (stopped.get("season") if stopped else None) or season or "default_season"
             dev_id = existing_res.get("device_id") or (stopped.get("device_id") if stopped else "") or device_id
             z_id = existing_res.get("zone_id") or (stopped.get("zone_id") if stopped else "") or zone_id
-            dur_m = existing_res.get("duration_minutes") if existing_res.get("duration_minutes") is not None else dur_m
-            f_lpm = existing_res.get("flow_rate_lpm") if existing_res.get("flow_rate_lpm") is not None else f_lpm
-            eff_area = existing_res.get("effective_area_ha") if "effective_area_ha" in existing_res else (eff_area if (eff_area is not None and not isinstance(eff_area, (bool, str)) and finite_real(eff_area) > 0) else None)
-            f_disp = existing_res.get("first_dispatched_at")
-            act_start = existing_res.get("actual_start")
+            f_disp = existing_res.get("first_dispatched_at") or (stopped.get("first_dispatched_at") if stopped else None)
+            act_start = existing_res.get("actual_start") or (stopped.get("actual_start") if stopped else None)
 
             res_record = {
-                "plot_id": plot_id,
+                "plot_id": canonical_plot,
                 "volume_mm": val,
                 "status": "STOP_REQUESTED",
                 "date": date_key,
@@ -1305,7 +1340,7 @@ class SharedQuotaStore:
                 "entry_id": f"j_{event_id}_{len(state.get('receipt_journal', [])) + 1}",
                 "type": "REOPEN_ACTIVE",
                 "event_id": event_id,
-                "plot_id": plot_id,
+                "plot_id": canonical_plot,
                 "volume_mm": val,
                 "supersedes_receipt": copy.deepcopy(stopped) if stopped else None,
                 "timestamp": datetime.now(timezone.utc).isoformat(),

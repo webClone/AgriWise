@@ -53,6 +53,7 @@ from irrigation_runtime.schemas import (
     CommandResult,
     CommandType,
     EventStatus,
+    InterlockType,
     IrrigationCommand,
     IrrigationEvent,
     IrrigationSystemType,
@@ -566,6 +567,28 @@ class CommandDispatcher:
             return event
 
         if result.success:
+            # PB01: Before promoting local event to EXECUTING, check whether event was already finalized or settled concurrently
+            durable_rec = SharedQuotaStore.get_active_record(event.event_id)
+            durable_status = durable_rec.get("status") if durable_rec else None
+            is_terminal = (
+                SharedQuotaStore.is_settled(event.event_id)
+                or SharedQuotaStore.is_stopped(event.event_id)
+                or durable_status in ("COMPLETED", "CANCELLED", "EMERGENCY_STOPPED")
+            )
+            if is_terminal:
+                logger.warning("Event %s was finalized concurrently during dispatch; fencing actuator immediately.", event.event_id)
+                try:
+                    await actuator.emergency_stop()
+                except Exception as stop_err:
+                    logger.error("Failed to fence actuator after concurrent finalization for %s: %s", event.event_id, stop_err)
+                if SharedQuotaStore.is_settled(event.event_id):
+                    event.status = EventStatus.COMPLETED
+                else:
+                    event.status = EventStatus.CANCELLED
+                self._active_events.pop(event.event_id, None)
+                self._safety.track_event_end(event.event_id)
+                return event
+
             event.transition(EventStatus.EXECUTING, "Command acknowledged by actuator")
             event.actual_start = datetime.now(timezone.utc).isoformat()
             event.command_ids.append(result.command_id)
@@ -806,7 +829,17 @@ class CommandDispatcher:
         if violations:
             act_cmd = getattr(actuator, "active_command", None)
             act_cmd_eid = getattr(act_cmd, "source_event_id", getattr(act_cmd, "event_id", None))
-            if act_cmd_eid and act_cmd_eid != event.event_id:
+
+            # PB03: Distinguish stale-event duration watchdog from active-device / active-command safety hazards
+            is_only_stale_duration = (
+                act_cmd_eid is not None
+                and act_cmd_eid != event.event_id
+                and all(
+                    v.interlock_type == InterlockType.DURATION_EXCEEDED and v.event_id_affected == event.event_id
+                    for v in violations
+                )
+            )
+            if is_only_stale_duration:
                 event.emergency_stopped = True
                 event.emergency_stop_reason = "; ".join(v.interlock_type.value for v in violations)
                 event.transition(EventStatus.EMERGENCY_STOPPED, f"Safety violation: {event.emergency_stop_reason}; actuator occupied by different event")
@@ -830,18 +863,49 @@ class CommandDispatcher:
                 self._finalize_event(event)
                 self._emit_failed(event)
                 return event
+
+            # Device-level fault or active operation fault: physical emergency stop MUST be dispatched!
             stop_result = await actuator.emergency_stop()
             event.emergency_stopped = True
             event.emergency_stop_reason = "; ".join(
                 v.interlock_type.value for v in violations
             )
             event.safety_violations.extend(v.violation_id for v in violations)
+
+            from irrigation_runtime.safety import SharedQuotaStore
+            # If a different live operation owns the actuator, update its status and record stopped delivery
+            if act_cmd_eid and act_cmd_eid != event.event_id:
+                try:
+                    SharedQuotaStore.update_status(act_cmd_eid, "EMERGENCY_STOPPED")
+                    res_act = SharedQuotaStore.get_active_record(act_cmd_eid) or {}
+                    self._safety.record_stopped_delivery(
+                        event_id=act_cmd_eid,
+                        plot_id=res_act.get("plot_id", event.plot_id),
+                        target_volume_mm=float(res_act.get("volume_mm", 0.0)),
+                        delivered_volume_mm=None,
+                        season=res_act.get("season"),
+                        device_id=event.device_id,
+                        zone_id=res_act.get("zone_id", event.zone_id),
+                        duration_minutes=float(res_act["duration_minutes"]) if res_act.get("duration_minutes") is not None else None,
+                        flow_rate_lpm=float(res_act["flow_rate_lpm"]) if res_act.get("flow_rate_lpm") is not None else None,
+                        effective_area_ha=res_act.get("effective_area_ha"),
+                    )
+                except Exception as store_err:
+                    logger.error("Failed to update status for active command %s on emergency stop: %s", act_cmd_eid, store_err)
+                if act_cmd_eid in self._active_events:
+                    other_ev = self._active_events[act_cmd_eid]
+                    other_ev.emergency_stopped = True
+                    other_ev.emergency_stop_reason = event.emergency_stop_reason
+                    other_ev.transition(EventStatus.EMERGENCY_STOPPED, f"Safety violation on device {event.device_id}: {event.emergency_stop_reason}")
+                    self._safety.track_event_end(act_cmd_eid)
+                    self._finalize_event(other_ev)
+                    self._emit_failed(other_ev)
+
             if stop_result.success:
                 actuator._status = ActuatorStatus.ONLINE
                 actuator._active_command = None
                 event.transition(EventStatus.EMERGENCY_STOPPED,
                                  f"Safety violation: {event.emergency_stop_reason}")
-                from irrigation_runtime.safety import SharedQuotaStore
                 res = SharedQuotaStore.get_active_record(event.event_id) or {}
                 season_key = res.get("season")
                 del_mm = getattr(event, "delivered_volume_mm", None)
@@ -866,6 +930,8 @@ class CommandDispatcher:
                                  f"Emergency stop attempt failed: {stop_result.error_message}")
                 from irrigation_runtime.safety import SharedQuotaStore
                 SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                if act_cmd_eid and act_cmd_eid != event.event_id:
+                    SharedQuotaStore.update_status(act_cmd_eid, "STOP_REQUESTED")
                 logger.error("Emergency stop failed on device %s for event %s. Retaining tracking and quota.",
                              event.device_id, event.event_id)
             return event
@@ -965,6 +1031,16 @@ class CommandDispatcher:
         except Exception as exc:
             logger.error("Could not query actuator status for %s before completion: %s. Retaining unresolved execution.",
                          event.device_id, exc)
+            return event
+
+        # PB01: If actuator has a pending command in flight, completion cannot proceed
+        has_pending = (
+            getattr(actuator, "pending_command", None) is not None
+            or getattr(actuator, "_pending_command", None) is not None
+        )
+        if has_pending:
+            logger.error("Cannot complete event %s: actuator %s has pending command in flight. Retaining active execution.",
+                         eid, event.device_id)
             return event
 
         if cur_status != ActuatorStatus.ONLINE or getattr(actuator, "is_running", False):
@@ -1080,17 +1156,30 @@ class CommandDispatcher:
         actuator = self._registry.get_actuator(event.device_id)
         stop_success = False
         if actuator:
-            stop_cmd = IrrigationCommand(
-                command_id=f"CMD-STOP-{uuid.uuid4().hex[:8]}",
-                command_type=CommandType.STOP_ZONE,
-                device_id=event.device_id,
-                zone_id=event.zone_id,
-                plot_id=event.plot_id,
-                source_event_id=event.event_id,
-                operation_id=f"OP-STOP-{event.event_id}",
+            act_cmd = getattr(actuator, "active_command", None)
+            pending_cmd = getattr(actuator, "pending_command", None) or getattr(actuator, "_pending_command", None)
+            other_active = (
+                (act_cmd is not None and getattr(act_cmd, "source_event_id", getattr(act_cmd, "event_id", None)) != event.event_id)
+                or (pending_cmd is not None and getattr(pending_cmd, "source_event_id", getattr(pending_cmd, "event_id", None)) != event.event_id)
             )
-            stop_res = await actuator.execute_with_safety(stop_cmd)
-            stop_success = stop_res.success
+            if other_active:
+                logger.info(
+                    "Event %s cancelled while device %s is executing different operation %s; suppressing physical STOP.",
+                    event.event_id, event.device_id, getattr(act_cmd, "source_event_id", None)
+                )
+                stop_success = True
+            else:
+                stop_cmd = IrrigationCommand(
+                    command_id=f"CMD-STOP-{uuid.uuid4().hex[:8]}",
+                    command_type=CommandType.STOP_ZONE,
+                    device_id=event.device_id,
+                    zone_id=event.zone_id,
+                    plot_id=event.plot_id,
+                    source_event_id=event.event_id,
+                    operation_id=f"OP-STOP-{event.event_id}",
+                )
+                stop_res = await actuator.execute_with_safety(stop_cmd)
+                stop_success = stop_res.success
 
         if stop_success:
             event.transition(EventStatus.CANCELLED, reason or "Cancelled by user")
@@ -1484,12 +1573,33 @@ class CommandDispatcher:
                             effective_area_ha=getattr(event, "effective_area_ha", None),
                         )
                 elif status == ActuatorStatus.ONLINE:
-                    # RV05, RC06: Idle actuator on restart does NOT qualify commanded depth as measured delivery.
-                    # Route to VALIDATING and retain unsettled reservation so delivery measurements can be supplied.
-                    event.transition(EventStatus.VALIDATING, "Reconciled after process restart: actuator idle, awaiting validation")
-                    self._active_events[event.event_id] = event
-                    if active_rec:
-                        SharedQuotaStore.mark_unsettled(event.event_id)
+                    # PB01: If actuator has a pending command in flight, retain active tracking rather than assuming idle
+                    has_pending = (
+                        getattr(actuator, "pending_command", None) is not None
+                        or getattr(actuator, "_pending_command", None) is not None
+                    )
+                    if has_pending:
+                        event.transition(EventStatus.STOP_REQUESTED, "Reconciled after process restart: pending command in flight")
+                        self._active_events[event.event_id] = event
+                        actuator.set_active_command(self._build_command(event))
+                        self._safety.track_event_start(
+                            event.event_id,
+                            event.device_id,
+                            event.target_duration_minutes,
+                            plot_id=event.plot_id,
+                            volume_mm=event.target_volume_mm,
+                            elapsed_minutes=elapsed_minutes,
+                            zone_id=event.zone_id,
+                            flow_rate_lpm=event.target_flow_rate_lpm,
+                            effective_area_ha=getattr(event, "effective_area_ha", None),
+                        )
+                    else:
+                        # RV05, RC06: Idle actuator on restart does NOT qualify commanded depth as measured delivery.
+                        # Route to VALIDATING and retain unsettled reservation so delivery measurements can be supplied.
+                        event.transition(EventStatus.VALIDATING, "Reconciled after process restart: actuator idle, awaiting validation")
+                        self._active_events[event.event_id] = event
+                        if active_rec:
+                            SharedQuotaStore.mark_unsettled(event.event_id)
                 else:
                     event.transition(EventStatus.STOP_REQUESTED, f"Reconciled after process restart: actuator in {status.value}")
                     self._active_events[event.event_id] = event
