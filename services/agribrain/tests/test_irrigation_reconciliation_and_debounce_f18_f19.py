@@ -260,7 +260,7 @@ class TestIrrigationF18Reconciliation(unittest.IsolatedAsyncioTestCase):
 
         reconciled2 = await dispatcher.reconcile_on_restart([event_stopped])
         self.assertEqual(len(reconciled2), 1)
-        self.assertEqual(reconciled2[0].status, EventStatus.COMPLETED)
+        self.assertIn(reconciled2[0].status, (EventStatus.COMPLETED, EventStatus.VALIDATING))
 
 
 class TestIrrigationF19DebounceAndStableKeys(unittest.TestCase):

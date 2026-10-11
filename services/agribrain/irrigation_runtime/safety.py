@@ -77,6 +77,33 @@ def _check_area_conflict(a1: Any, a2: Any) -> bool:
     return False
 
 
+def _validate_writer_scalars(
+    volume_mm: Any = 0.0,
+    duration_minutes: Any = None,
+    flow_rate_lpm: Any = None,
+    effective_area_ha: Any = None,
+) -> None:
+    """RC07: Strictly validate input scalar parameters before mutating store state or writing candidate."""
+    if volume_mm is not None:
+        if isinstance(volume_mm, bool):
+            raise ValueError(f"Invalid volume_mm {volume_mm}: booleans are not valid numeric volumes")
+        v = finite_real(volume_mm)
+        if v is None or v < 0:
+            raise ValueError(f"Invalid volume_mm {volume_mm}: must be a non-negative finite real number")
+    if duration_minutes is not None:
+        if isinstance(duration_minutes, bool):
+            raise ValueError(f"Invalid duration_minutes {duration_minutes}: booleans are not valid numeric durations")
+        d = finite_real(duration_minutes)
+        if d is None or d < 0:
+            raise ValueError(f"Invalid duration_minutes {duration_minutes}: must be a non-negative finite real number")
+    if flow_rate_lpm is not None:
+        if isinstance(flow_rate_lpm, bool):
+            raise ValueError(f"Invalid flow_rate_lpm {flow_rate_lpm}: booleans are not valid numeric flow rates")
+        f = finite_real(flow_rate_lpm)
+        if f is None or f < 0:
+            raise ValueError(f"Invalid flow_rate_lpm {flow_rate_lpm}: must be a non-negative finite real number")
+
+
 class CorruptedQuotaStoreError(RuntimeError):
     """Raised when the persistent quota store is malformed, blank, or has invalid schema."""
     pass
@@ -417,6 +444,14 @@ class SharedQuotaStore:
         effective_area_ha: Optional[float] = None,
     ) -> Optional[SafetyViolation]:
         """Atomically validate budget and reserve quota under a cross-process lock (D05 + D06)."""
+        # RC07: Strictly validate all scalar inputs before mutating state or checking budget
+        _validate_writer_scalars(
+            volume_mm=requested_volume_mm,
+            duration_minutes=duration_minutes,
+            flow_rate_lpm=flow_rate_lpm,
+            effective_area_ha=effective_area_ha,
+        )
+
         req_vol = finite_real(requested_volume_mm)
         if req_vol is None or req_vol < 0:
             return SafetyViolation(
@@ -749,6 +784,13 @@ class SharedQuotaStore:
         flow_rate_lpm: float = 0.0,
         effective_area_ha: Optional[float] = None,
     ) -> None:
+        # RC07: Strictly validate input scalar parameters before mutating store state
+        _validate_writer_scalars(
+            volume_mm=volume_mm,
+            duration_minutes=duration_minutes,
+            flow_rate_lpm=flow_rate_lpm,
+            effective_area_ha=effective_area_ha,
+        )
         val = finite_real(volume_mm)
         if val is None or val < 0:
             return
@@ -756,6 +798,9 @@ class SharedQuotaStore:
             state = cls._read_state()
             today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             existing = state.setdefault("reservations", {}).get(event_id, {})
+            # RC03: Prevent rebinding reservation to conflicting plot
+            if existing.get("plot_id") and existing["plot_id"] != plot_id:
+                raise ValueError(f"Payload conflict: event {event_id} already reserved on plot {existing['plot_id']}, cannot rebind to {plot_id}")
             # V04: Preserve season from existing atomic reservation if not supplied
             season_key = season or existing.get("season") or "default_season"
             date_key = date or existing.get("date") or today_key
@@ -812,22 +857,41 @@ class SharedQuotaStore:
 
     @classmethod
     def set_actual_start(cls, event_id: str, actual_start: str) -> None:
-        """RV03: Persist actual start timestamp for active reservation."""
+        """RV03, RC04: Persist actual start timestamp for active reservation without permitting advancing established start."""
         with cls._lock():
             state = cls._read_state()
             if event_id in state.get("reservations", {}):
+                cur = state["reservations"][event_id].get("actual_start")
+                if cur:
+                    try:
+                        cur_dt = datetime.fromisoformat(cur)
+                        new_dt = datetime.fromisoformat(actual_start)
+                        if new_dt > cur_dt:
+                            return  # Established start cannot advance
+                    except Exception:
+                        return
                 state["reservations"][event_id]["actual_start"] = actual_start
                 cls._write_state(state)
 
     @classmethod
     def update_status(cls, event_id: str, new_status: str, actual_start: Optional[str] = None) -> None:
-        """C07, RV03: Update active operation phase and actual_start in shared store."""
+        """C07, RV03, RC04: Update active operation phase and actual_start in shared store."""
         with cls._lock():
             state = cls._read_state()
             if event_id in state.get("reservations", {}):
                 state["reservations"][event_id]["status"] = new_status
                 if actual_start:
-                    state["reservations"][event_id]["actual_start"] = actual_start
+                    cur = state["reservations"][event_id].get("actual_start")
+                    if cur:
+                        try:
+                            cur_dt = datetime.fromisoformat(cur)
+                            new_dt = datetime.fromisoformat(actual_start)
+                            if new_dt <= cur_dt:
+                                state["reservations"][event_id]["actual_start"] = actual_start
+                        except Exception:
+                            pass
+                    else:
+                        state["reservations"][event_id]["actual_start"] = actual_start
                 cls._write_state(state)
 
     @classmethod
@@ -945,6 +1009,10 @@ class SharedQuotaStore:
             stopped_receipts = state.setdefault("stopped_receipts", {})
             prior_stopped = stopped_receipts.pop(event_id, None)
 
+            # RC03: Preserve canonical plot envelope from existing reservation or stopped receipt
+            canonical_plot = existing_res.get("plot_id") or (prior_stopped.get("plot_id") if prior_stopped else None) or plot_id
+            target_plot = canonical_plot
+
             date_key = date or existing_res.get("date") or (prior_stopped.get("date") if prior_stopped else None) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
             season_key = season or existing_res.get("season") or (prior_stopped.get("season") if prior_stopped else None) or "default_season"
             dev_id = device_id or existing_res.get("device_id", "") or (prior_stopped.get("device_id", "") if prior_stopped else "")
@@ -960,17 +1028,17 @@ class SharedQuotaStore:
                 p_date = prior_stopped.get("date", date_key)
                 p_season = prior_stopped.get("season", season_key)
                 if p_del > 0:
-                    pk_daily_p = f"{plot_id}:{p_date}"
-                    pk_season_p = f"{plot_id}:{p_season}"
+                    pk_daily_p = f"{target_plot}:{p_date}"
+                    pk_season_p = f"{target_plot}:{p_season}"
                     state.setdefault("settled_daily", {})[pk_daily_p] = max(0.0, float(state.get("settled_daily", {}).get(pk_daily_p, 0.0)) - p_del)
                     state.setdefault("settled_season", {})[pk_season_p] = max(0.0, float(state.get("settled_season", {}).get(pk_season_p, 0.0)) - p_del)
-                    state.setdefault("settled_plot_total", {})[plot_id] = max(0.0, float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) - p_del)
+                    state.setdefault("settled_plot_total", {})[target_plot] = max(0.0, float(state.get("settled_plot_total", {}).get(target_plot, 0.0)) - p_del)
 
             # C09 + D10, RV05: Preserve commanded target and actual delivery observations separately (do not fabricate defaults)
             act_vol_l = finite_real(actual_volume_l) if actual_volume_l is not None else None
             act_dur_m = finite_real(actual_duration_minutes) if actual_duration_minutes is not None else None
             settled_receipts[event_id] = {
-                "plot_id": plot_id,
+                "plot_id": target_plot,
                 "device_id": dev_id,
                 "zone_id": z_id,
                 "volume_mm": val,
@@ -986,17 +1054,17 @@ class SharedQuotaStore:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             if val > 0:
-                pk_daily = f"{plot_id}:{date_key}"
-                pk_season = f"{plot_id}:{season_key}"
+                pk_daily = f"{target_plot}:{date_key}"
+                pk_season = f"{target_plot}:{season_key}"
                 state.setdefault("settled_daily", {})[pk_daily] = float(state.get("settled_daily", {}).get(pk_daily, 0.0)) + val
                 state.setdefault("settled_season", {})[pk_season] = float(state.get("settled_season", {}).get(pk_season, 0.0)) + val
-                state.setdefault("settled_plot_total", {})[plot_id] = float(state.get("settled_plot_total", {}).get(plot_id, 0.0)) + val
+                state.setdefault("settled_plot_total", {})[target_plot] = float(state.get("settled_plot_total", {}).get(target_plot, 0.0)) + val
 
             state.setdefault("receipt_journal", []).append({
                 "entry_id": f"j_{event_id}_{len(state.get('receipt_journal', [])) + 1}",
                 "type": "SETTLED",
                 "event_id": event_id,
-                "plot_id": plot_id,
+                "plot_id": target_plot,
                 "volume_mm": val,
                 "target_volume_mm": t_vol,
                 "delivered_volume_mm": val,
@@ -1161,6 +1229,13 @@ class SharedQuotaStore:
         effective_area_ha: Optional[float] = None,
     ) -> None:
         """Reopen an active reservation after a failed stop/late-fence, superseding any premature stopped receipt (N01)."""
+        # RC07: Strictly validate input scalar parameters before mutating store state
+        _validate_writer_scalars(
+            volume_mm=volume_mm,
+            duration_minutes=duration_minutes,
+            flow_rate_lpm=flow_rate_lpm,
+            effective_area_ha=effective_area_ha,
+        )
         val = finite_real(volume_mm) or 0.0
         dur_m = finite_real(duration_minutes) or 0.0
         f_lpm = finite_real(flow_rate_lpm) or 0.0
@@ -1169,6 +1244,9 @@ class SharedQuotaStore:
         with cls._lock():
             state = cls._read_state()
             existing_res = state.get("reservations", {}).get(event_id, {})
+            # RC03: Prevent rebinding reservation to conflicting plot
+            if existing_res.get("plot_id") and existing_res["plot_id"] != plot_id:
+                raise ValueError(f"Payload conflict: event {event_id} already reserved on plot {existing_res['plot_id']}, cannot rebind to {plot_id}")
             stopped_receipts = state.setdefault("stopped_receipts", {})
             stopped = stopped_receipts.pop(event_id, None)
             if stopped:

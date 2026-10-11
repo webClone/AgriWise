@@ -281,12 +281,15 @@ class CommandDispatcher:
                 except Exception:
                     event.status = EventStatus.DISPATCHING
                 event.target_volume_mm = float(res.get("volume_mm", event.target_volume_mm))
+                if res.get("plot_id"):
+                    event.plot_id = res["plot_id"]
                 if res.get("flow_rate_lpm") is not None:
                     event.target_flow_rate_lpm = float(res["flow_rate_lpm"])
                 if res.get("duration_minutes") is not None:
                     event.target_duration_minutes = float(res["duration_minutes"])
                 event.effective_area_ha = res.get("effective_area_ha")
-                if not event.actual_start and res.get("actual_start"):
+                # RC04: Durable actual_start is authoritative over caller snapshot
+                if res.get("actual_start"):
                     event.actual_start = res["actual_start"]
                 logger.warning("Event %s already active in shared store with status %s; returning existing event.", event.event_id, event.status.value)
                 return event
@@ -558,7 +561,11 @@ class CommandDispatcher:
             event.transition(EventStatus.EXECUTING, "Command acknowledged by actuator")
             event.actual_start = datetime.now(timezone.utc).isoformat()
             event.command_ids.append(result.command_id)
-            SharedQuotaStore.update_status(event.event_id, "EXECUTING")
+            # RC01, RC04: Persist acknowledged phase and start together immediately
+            try:
+                SharedQuotaStore.update_status(event.event_id, "EXECUTING", actual_start=event.actual_start)
+            except Exception as store_err:
+                logger.warning("Could not persist EXECUTING / actual_start for event %s: %s", event.event_id, store_err)
             logger.info("Event %s executing on device %s",
                         event.event_id, event.device_id)
         else:
@@ -704,11 +711,6 @@ class CommandDispatcher:
                                     device_id="", system_type=IrrigationSystemType.DRIP,
                                     automation_mode=AutomationMode.MANUAL,
                                     status=EventStatus.FAILED)
-
-        # RV03: Ensure actual_start is synced to shared store for active recovery
-        if event.actual_start:
-            from irrigation_runtime.safety import SharedQuotaStore
-            SharedQuotaStore.set_actual_start(event.event_id, event.actual_start)
 
         actuator = self._registry.get_actuator(event.device_id)
         if not actuator:
@@ -903,9 +905,14 @@ class CommandDispatcher:
         if not event:
             return None
 
-        # D02: Guard against completing an event while actuator is physically executing or event is not yet in VALIDATING
+        # D02, RC05: Guard against completing an event while actuator is physically executing or event is not yet in VALIDATING
         actuator = self._registry.get_actuator(event.device_id)
-        if actuator and getattr(actuator, "_status", None) == ActuatorStatus.EXECUTING:
+        if actuator:
+            try:
+                await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+            except Exception as exc:
+                logger.warning("Could not query actuator status in complete_event: %s", exc)
+        if actuator and (getattr(actuator, "_status", None) == ActuatorStatus.EXECUTING or getattr(actuator, "is_running", False)):
             logger.error("Cannot complete event %s while actuator %s is still EXECUTING. Retaining active execution.",
                          eid, event.device_id)
             return event
@@ -930,7 +937,7 @@ class CommandDispatcher:
             event.transition(EventStatus.FAILED, f"Invalid settlement volume {actual_volume_l}")
             return event
 
-        # D09, RV05: Validate duration if explicitly provided; keep None if omitted (do not fabricate target duration as actual duration)
+        # D09, RV05, RC06: Validate duration if explicitly provided; keep None if omitted (do not fabricate duration)
         val_dur = None
         if actual_duration_minutes is not None:
             val_dur = finite_real(actual_duration_minutes)
@@ -938,8 +945,6 @@ class CommandDispatcher:
                 logger.error("Invalid actual duration %r for event %s. Retaining unsettled exposure.", actual_duration_minutes, eid)
                 event.transition(EventStatus.FAILED, f"Invalid settlement duration {actual_duration_minutes}")
                 return event
-        elif val_vol == 0.0:
-            val_dur = 0.0
 
         # Validate effective_area_ha if present
         area_ha = None
@@ -1147,7 +1152,42 @@ class CommandDispatcher:
         for event in persisted_events:
             from irrigation_runtime.safety import SharedQuotaStore
             active_rec = SharedQuotaStore.get_active_record(event.event_id)
+            # RC02: Terminal receipts must fence stale restart snapshots without contacting actuator
             if active_rec:
+                raw_st = active_rec.get("status")
+                if raw_st in ("COMPLETED", "CANCELLED", EventStatus.COMPLETED.value, EventStatus.CANCELLED.value, EventStatus.EMERGENCY_STOPPED.value):
+                    event.status = EventStatus(raw_st) if hasattr(EventStatus, str(raw_st)) else EventStatus[str(raw_st)]
+                    reconciled.append(event)
+                    continue
+            if SharedQuotaStore.is_settled(event.event_id):
+                event.status = EventStatus.COMPLETED
+                reconciled.append(event)
+                continue
+            if SharedQuotaStore.is_stopped(event.event_id):
+                event.status = EventStatus.CANCELLED
+                reconciled.append(event)
+                continue
+
+            if active_rec:
+                # RC03: Restore immutable canonical scope envelope from active_rec
+                if active_rec.get("plot_id"):
+                    event.plot_id = active_rec["plot_id"]
+                if active_rec.get("volume_mm") is not None:
+                    event.target_volume_mm = float(active_rec["volume_mm"])
+                if active_rec.get("device_id"):
+                    event.device_id = active_rec["device_id"]
+                if active_rec.get("zone_id"):
+                    event.zone_id = active_rec["zone_id"]
+                if active_rec.get("flow_rate_lpm") is not None:
+                    event.target_flow_rate_lpm = float(active_rec["flow_rate_lpm"])
+                if active_rec.get("duration_minutes") is not None:
+                    event.target_duration_minutes = float(active_rec["duration_minutes"])
+                if active_rec.get("effective_area_ha") is not None:
+                    event.effective_area_ha = float(active_rec["effective_area_ha"])
+                # RC04: Durable actual_start is authoritative over caller snapshot
+                if active_rec.get("actual_start"):
+                    event.actual_start = active_rec["actual_start"]
+
                 raw_st = active_rec.get("status")
                 if raw_st in (
                     EventStatus.DISPATCHING.value,
@@ -1160,17 +1200,15 @@ class CommandDispatcher:
                         event.status = EventStatus.VALIDATING
                     else:
                         event.status = EventStatus(raw_st)
-                if active_rec.get("flow_rate_lpm") is not None:
-                    event.target_flow_rate_lpm = float(active_rec["flow_rate_lpm"])
-                if active_rec.get("duration_minutes") is not None:
-                    event.target_duration_minutes = float(active_rec["duration_minutes"])
-                if active_rec.get("effective_area_ha") is not None:
-                    event.effective_area_ha = float(active_rec["effective_area_ha"])
-                if not event.actual_start and active_rec.get("actual_start"):
-                    event.actual_start = active_rec["actual_start"]
 
-            # RV04: VALIDATING survives restart and must be restored to active events so measured completion can proceed
+            # RV04, RC05: VALIDATING survives restart; query actuator status so driver cache is fresh
             if event.status == EventStatus.VALIDATING:
+                actuator = self._registry.get_actuator(event.device_id)
+                if actuator:
+                    try:
+                        await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+                    except Exception as exc:
+                        logger.warning("Could not query actuator status for %s on restart: %s", event.event_id, exc)
                 self._active_events[event.event_id] = event
                 reconciled.append(event)
                 continue
@@ -1280,6 +1318,35 @@ class CommandDispatcher:
                 status = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
 
                 if status == ActuatorStatus.EXECUTING:
+                    # RC02: Bind live controller reconciliation to event identity.
+                    # If actuator is executing a DIFFERENT event, do NOT issue emergency stop to that actuator!
+                    act_cmd = getattr(actuator, "active_command", None)
+                    act_cmd_eid = getattr(act_cmd, "source_event_id", getattr(act_cmd, "event_id", None))
+                    if act_cmd_eid and act_cmd_eid != event.event_id:
+                        if remaining_duration <= 0.0:
+                            event.transition(EventStatus.EMERGENCY_STOPPED, "Duration expired prior to restart; actuator executing different event")
+                            res = SharedQuotaStore.get_active_record(event.event_id) or {}
+                            season_key = res.get("season")
+                            del_mm = getattr(event, "delivered_volume_mm", None)
+                            self._safety.record_stopped_delivery(
+                                event_id=event.event_id,
+                                plot_id=event.plot_id,
+                                target_volume_mm=event.target_volume_mm,
+                                delivered_volume_mm=del_mm,
+                                season=season_key,
+                                device_id=event.device_id,
+                                zone_id=event.zone_id,
+                                duration_minutes=event.target_duration_minutes,
+                                flow_rate_lpm=event.target_flow_rate_lpm,
+                                effective_area_ha=getattr(event, "effective_area_ha", None),
+                            )
+                            self._safety.track_event_end(event.event_id)
+                        else:
+                            event.transition(EventStatus.STOP_REQUESTED, "Actuator executing different event")
+                            self._active_events[event.event_id] = event
+                        reconciled.append(event)
+                        continue
+
                     if remaining_duration <= 0.0:
                         # Runtime expired before or during restart; stop immediately
                         stop_res = await actuator.emergency_stop()
@@ -1332,15 +1399,12 @@ class CommandDispatcher:
                             effective_area_ha=getattr(event, "effective_area_ha", None),
                         )
                 elif status == ActuatorStatus.ONLINE:
+                    # RV05, RC06: Idle actuator on restart does NOT qualify commanded depth as measured delivery.
+                    # Route to VALIDATING and retain unsettled reservation so delivery measurements can be supplied.
+                    event.transition(EventStatus.VALIDATING, "Reconciled after process restart: actuator idle, awaiting validation")
+                    self._active_events[event.event_id] = event
                     if active_rec:
-                        # RV05: Idle actuator on restart does NOT qualify commanded depth as measured delivery.
-                        # Route to VALIDATING and retain unsettled reservation so delivery measurements can be supplied.
-                        event.transition(EventStatus.VALIDATING, "Reconciled after process restart: actuator idle, awaiting validation")
-                        self._active_events[event.event_id] = event
                         SharedQuotaStore.mark_unsettled(event.event_id)
-                    else:
-                        event.transition(EventStatus.COMPLETED, "Reconciled after process restart: actuator is stopped/idle")
-                        self._safety.settle_quota(event.event_id, event.plot_id, event.target_volume_mm)
                 else:
                     event.transition(EventStatus.STOP_REQUESTED, f"Reconciled after process restart: actuator in {status.value}")
                     self._active_events[event.event_id] = event
