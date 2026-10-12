@@ -967,8 +967,8 @@ class SharedQuotaStore:
         with cls._lock():
             state = cls._read_state()
             settled_receipts = state.setdefault("settled_receipts", {})
-            if event_id in settled_receipts and event_id not in state.get("reservations", {}):
-                # D08 Probe C & N04, PB06, RP04: Verify retry compatibility across all envelope and measurement dimensions!
+            if event_id in settled_receipts:
+                # D08 Probe C & N04, PB06, RP04, ER05: Verify retry compatibility across all envelope and measurement dimensions!
                 existing = settled_receipts[event_id]
                 ex_target = float(existing.get("target_volume_mm", existing.get("volume_mm", 0.0)))
                 ex_del = float(existing.get("delivered_volume_mm", existing.get("volume_mm", 0.0)))
@@ -1066,6 +1066,19 @@ class SharedQuotaStore:
                     state.setdefault("settled_daily", {})[pk_daily_p] = max(0.0, float(state.get("settled_daily", {}).get(pk_daily_p, 0.0)) - p_del)
                     state.setdefault("settled_season", {})[pk_season_p] = max(0.0, float(state.get("settled_season", {}).get(pk_season_p, 0.0)) - p_del)
                     state.setdefault("settled_plot_total", {})[target_plot] = max(0.0, float(state.get("settled_plot_total", {}).get(target_plot, 0.0)) - p_del)
+
+            # ER05: Deduct prior settled delivery if coexisting settled receipt is being replaced
+            prior_settled = settled_receipts.pop(event_id, None)
+            if prior_settled is not None:
+                ps_del = float(prior_settled.get("delivered_volume_mm", 0.0))
+                ps_date = prior_settled.get("date", date_key)
+                ps_season = prior_settled.get("season", season_key)
+                if ps_del > 0:
+                    pk_daily_ps = f"{target_plot}:{ps_date}"
+                    pk_season_ps = f"{target_plot}:{ps_season}"
+                    state.setdefault("settled_daily", {})[pk_daily_ps] = max(0.0, float(state.get("settled_daily", {}).get(pk_daily_ps, 0.0)) - ps_del)
+                    state.setdefault("settled_season", {})[pk_season_ps] = max(0.0, float(state.get("settled_season", {}).get(pk_season_ps, 0.0)) - ps_del)
+                    state.setdefault("settled_plot_total", {})[target_plot] = max(0.0, float(state.get("settled_plot_total", {}).get(target_plot, 0.0)) - ps_del)
 
             # C09 + D10, RV05, BV04, PB07: Preserve commanded target and actual delivery observations separately; enforce mathematical depth consistency
             act_vol_l = finite_real(actual_volume_l) if actual_volume_l is not None else None
@@ -1333,6 +1346,8 @@ class SharedQuotaStore:
 
             if prior_rcpt:
                 s_del = float(prior_rcpt.get("delivered_volume_mm", 0.0))
+                # ER04: Effective budget exposure must satisfy: effective exposure >= qualified delivered depth!
+                val = max(val, s_del)
                 orig_plot = prior_rcpt.get("plot_id") or canonical_plot
                 s_date = prior_rcpt.get("date") or existing_res.get("date") or date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 s_season = prior_rcpt.get("season") or existing_res.get("season") or season or "default_season"
@@ -1354,6 +1369,7 @@ class SharedQuotaStore:
             res_record = {
                 "plot_id": canonical_plot,
                 "volume_mm": val,
+                "delivered_volume_mm": s_del if prior_rcpt else None,
                 "status": "STOP_REQUESTED",
                 "date": date_key,
                 "season": season_key,

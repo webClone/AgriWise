@@ -627,6 +627,21 @@ class CommandDispatcher:
                         SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
                     except Exception as store_err:
                         logger.warning("Could not persist STOP_REQUESTED status for event %s: %s", event.event_id, store_err)
+
+                    orig_track = self._safety._active_events.get(event.event_id)
+                    orig_mono = orig_track.get("start_monotonic") if orig_track else getattr(event, "_start_monotonic", None)
+                    elapsed_minutes = 0.0
+                    if orig_mono is not None:
+                        elapsed_minutes = max(0.0, (self._safety._clock() - orig_mono) / 60.0)
+                    elif event.actual_start:
+                        try:
+                            start_dt = datetime.fromisoformat(event.actual_start)
+                            if start_dt.tzinfo is None:
+                                start_dt = start_dt.replace(tzinfo=timezone.utc)
+                            elapsed_minutes = max(0.0, (datetime.now(timezone.utc) - start_dt).total_seconds() / 60.0)
+                        except Exception:
+                            elapsed_minutes = 0.0
+
                     self._safety.track_event_start(
                         event.event_id,
                         event.device_id,
@@ -638,6 +653,7 @@ class CommandDispatcher:
                         zone_id=event.zone_id,
                         flow_rate_lpm=event.target_flow_rate_lpm,
                         effective_area_ha=getattr(event, "effective_area_ha", None),
+                        elapsed_minutes=elapsed_minutes,
                     )
                     return event
 
@@ -806,10 +822,22 @@ class CommandDispatcher:
 
         # If already in STOP_REQUESTED, attempt stop reconciliation/retry
         if event.status == EventStatus.STOP_REQUESTED:
-            # BV01: Check current operation identity on actuator before issuing STOP
             act_cmd = getattr(actuator, "active_command", None)
             act_cmd_eid = getattr(act_cmd, "source_event_id", getattr(act_cmd, "event_id", None))
-            if act_cmd_eid and act_cmd_eid != event.event_id:
+
+            latched_hazards = [
+                v for (k, v) in getattr(self._safety, "_active_violations", {}).items()
+                if (k.endswith(f":{event.device_id}") or v.device_id == event.device_id)
+                and v.interlock_type != InterlockType.DURATION_EXCEEDED
+            ]
+            has_device_hazard = bool(latched_hazards)
+            if not has_device_hazard and sensor_readings:
+                new_v = self._safety.evaluate(event.device_id, sensor_readings, act_cmd)
+                if new_v:
+                    has_device_hazard = any(v.interlock_type != InterlockType.DURATION_EXCEEDED for v in new_v)
+
+            # BV01: Check current operation identity on actuator before issuing STOP, UNLESS there is an un-cleared device hazard
+            if act_cmd_eid and act_cmd_eid != event.event_id and not has_device_hazard:
                 logger.warning(
                     "Actuator %s is executing different event %s; ignoring STOP retry for %s",
                     event.device_id, act_cmd_eid, event.event_id
@@ -821,7 +849,18 @@ class CommandDispatcher:
             except Exception:
                 status = ActuatorStatus.ERROR
 
-            if status == ActuatorStatus.ONLINE:
+            pending_cmd = getattr(actuator, "pending_command", getattr(actuator, "_pending_command", None))
+            pending_eid = getattr(pending_cmd, "source_event_id", getattr(pending_cmd, "event_id", None)) if pending_cmd else None
+            durable_rec = SharedQuotaStore.get_active_record(event.event_id)
+            durable_st = (durable_rec.get("status") if durable_rec else "") or ""
+            has_pending = (
+                (pending_cmd is not None and (not pending_eid or pending_eid == event.event_id))
+                or durable_st == "DISPATCHING"
+                or not bool(durable_rec and durable_rec.get("actual_start"))
+            )
+
+            # ER01: Online actuator cannot certify STOP if command dispatch or START is pending/unresolved
+            if status == ActuatorStatus.ONLINE and not has_pending and not has_device_hazard:
                 term_status = EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED
                 event.transition(term_status, "Confirmed stopped on actuator after reconciliation")
                 res = SharedQuotaStore.get_active_record(event.event_id) or {}
@@ -845,8 +884,21 @@ class CommandDispatcher:
                     self._emit_failed(event)
                 return event
             else:
-                stop_retry = await actuator.emergency_stop()
-                if stop_retry.success:
+                stop_retry = None
+                try:
+                    stop_retry = await actuator.emergency_stop()
+                except Exception as stop_err:
+                    logger.error("STOP retry exception on device %s for event %s: %s", event.device_id, event.event_id, stop_err)
+                    stop_retry = CommandResult(
+                        command_id="stop_retry_exc",
+                        device_id=event.device_id,
+                        success=False,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        error_code="STOP_EXCEPTION",
+                        error_message=str(stop_err),
+                    )
+
+                if stop_retry and stop_retry.success and not has_pending and not has_device_hazard:
                     term_status = EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED
                     event.transition(term_status, "Confirmed stopped on actuator after retry")
                     res = SharedQuotaStore.get_active_record(event.event_id) or {}
@@ -869,12 +921,33 @@ class CommandDispatcher:
                     if term_status == EventStatus.EMERGENCY_STOPPED:
                         self._emit_failed(event)
                     return event
-                return event
+                else:
+                    actuator._status = ActuatorStatus.ERROR
+                    SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                    if act_cmd_eid and act_cmd_eid != event.event_id:
+                        SharedQuotaStore.update_status(act_cmd_eid, "STOP_REQUESTED")
+                        if act_cmd_eid in self._active_events:
+                            other_ev = self._active_events[act_cmd_eid]
+                            other_ev.emergency_stopped = True
+                            other_ev.transition(EventStatus.STOP_REQUESTED, f"Safety violation on device {event.device_id}: emergency stop failed")
+                    logger.error("STOP retry on device %s for event %s unresolved/failed. Retaining tracking and quota.",
+                                 event.device_id, event.event_id)
+                    return event
 
         # Check safety interlocks & duration watchdog unconditionally FIRST (without waiting for telemetry)
         violations = self._safety.evaluate(
             event.device_id, sensor_readings, actuator.active_command
         )
+        if not violations:
+            # ER02: Check for latched device hazards where cutoff has not succeeded
+            latched_vios = [
+                v for (k, v) in getattr(self._safety, "_active_violations", {}).items()
+                if (k.endswith(f":{event.device_id}") or v.device_id == event.device_id)
+                and v.interlock_type != InterlockType.DURATION_EXCEEDED
+            ]
+            if latched_vios and (getattr(actuator, "running", False) or getattr(actuator, "_status", None) in (ActuatorStatus.EXECUTING, ActuatorStatus.ERROR) or actuator.active_command is not None):
+                violations = latched_vios
+
         if violations:
             act_cmd = getattr(actuator, "active_command", None)
             act_cmd_eid = getattr(act_cmd, "source_event_id", getattr(act_cmd, "event_id", None))
@@ -913,14 +986,27 @@ class CommandDispatcher:
                 return event
 
             # Device-level fault or active operation fault: physical emergency stop MUST be dispatched!
-            stop_result = await actuator.emergency_stop()
+            stop_result = None
+            try:
+                stop_result = await actuator.emergency_stop()
+            except Exception as stop_err:
+                logger.error("Emergency stop raised exception on device %s for event %s: %s", event.device_id, event.event_id, stop_err)
+                stop_result = CommandResult(
+                    command_id=f"stop_{uuid.uuid4().hex[:8]}",
+                    device_id=event.device_id,
+                    success=False,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    error_code="STOP_EXCEPTION",
+                    error_message=str(stop_err),
+                )
+
             event.emergency_stopped = True
             event.emergency_stop_reason = "; ".join(
                 v.interlock_type.value for v in violations
             )
             event.safety_violations.extend(v.violation_id for v in violations)
 
-            if stop_result.success:
+            if stop_result and stop_result.success:
                 actuator._status = ActuatorStatus.ONLINE
                 actuator._active_command = None
 
@@ -975,7 +1061,7 @@ class CommandDispatcher:
             else:
                 actuator._status = ActuatorStatus.ERROR
                 event.transition(EventStatus.STOP_REQUESTED,
-                                 f"Emergency stop attempt failed: {stop_result.error_message}")
+                                 f"Emergency stop attempt failed: {stop_result.error_message if stop_result else 'STOP failed'}")
                 SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
                 if act_cmd_eid and act_cmd_eid != event.event_id:
                     SharedQuotaStore.update_status(act_cmd_eid, "STOP_REQUESTED")
@@ -1207,15 +1293,42 @@ class CommandDispatcher:
         actuator = self._registry.get_actuator(event.device_id)
         stop_success = False
         if actuator:
+            try:
+                status = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+            except Exception:
+                status = ActuatorStatus.ERROR
+
             act_cmd = getattr(actuator, "active_command", None)
             pending_cmd = getattr(actuator, "pending_command", None) or getattr(actuator, "_pending_command", None)
             act_eid = getattr(act_cmd, "source_event_id", getattr(act_cmd, "event_id", None)) if act_cmd is not None else None
             pending_eid = getattr(pending_cmd, "source_event_id", getattr(pending_cmd, "event_id", None)) if pending_cmd is not None else None
-            is_running = getattr(actuator, "is_running", False) or act_cmd is not None or pending_cmd is not None
+            is_running = (
+                status == ActuatorStatus.EXECUTING
+                or getattr(actuator, "running", False)
+                or act_cmd is not None
+                or pending_cmd is not None
+            )
 
-            # RP03: 3-way identity qualification
-            # 1. Qualified same owner: definitely running this event
-            if (act_eid == event.event_id) or (pending_eid == event.event_id):
+            # ER03: 1. Qualified different pending owner: another operation is in flight to take over device.
+            # Suppress physical STOP so we do NOT preempt pending NEW!
+            if bool(pending_eid) and pending_eid != event.event_id:
+                logger.info(
+                    "Event %s cancelled while device %s has pending different operation %s; suppressing physical STOP to avoid preemption.",
+                    event.event_id, event.device_id, pending_eid
+                )
+                stop_success = True
+
+            # 2. Qualified different active owner: actuator is executing a confirmed different event.
+            # Suppress physical STOP so we do NOT stop the other running event.
+            elif bool(act_eid) and act_eid != event.event_id:
+                logger.info(
+                    "Event %s cancelled while device %s is executing confirmed different operation %s; suppressing physical STOP.",
+                    event.event_id, event.device_id, act_eid
+                )
+                stop_success = True
+
+            # 3. Qualified same owner: this event is actively running or pending on the device.
+            elif (act_eid == event.event_id) or (pending_eid == event.event_id):
                 stop_cmd = IrrigationCommand(
                     command_id=f"CMD-STOP-{uuid.uuid4().hex[:8]}",
                     command_type=CommandType.STOP_ZONE,
@@ -1225,28 +1338,26 @@ class CommandDispatcher:
                     source_event_id=event.event_id,
                     operation_id=f"OP-STOP-{event.event_id}",
                 )
-                stop_res = await actuator.execute_with_safety(stop_cmd)
-                stop_success = bool(stop_res.success)
+                try:
+                    stop_res = await actuator.execute_with_safety(stop_cmd)
+                    stop_success = bool(stop_res and stop_res.success)
+                except Exception as stop_err:
+                    logger.error("Exception sending STOP command for %s: %s", event.event_id, stop_err)
+                    stop_success = False
 
-            # 2. Qualified different owner: non-empty, confirmed different event
-            elif (bool(act_eid) and act_eid != event.event_id) or (bool(pending_eid) and pending_eid != event.event_id):
-                logger.info(
-                    "Event %s cancelled while device %s is executing confirmed different operation %s; suppressing physical STOP.",
-                    event.event_id, event.device_id, act_eid or pending_eid
-                )
-                stop_success = True
-
-            # 3. Unqualified / unknown identity while actuator is active or running
-            elif is_running:
+            # ER03: 4. Unqualified / unknown identity while actuator is active, executing, or in unconfirmed status
+            elif is_running or status in (ActuatorStatus.OFFLINE, ActuatorStatus.UNKNOWN, ActuatorStatus.ERROR):
                 logger.warning(
-                    "Event %s cancellation attempted on device %s with active execution but unresolved/empty identity (act_eid=%r, pending_eid=%r); cannot confirm different owner.",
-                    event.event_id, event.device_id, act_eid, pending_eid
+                    "Event %s cancellation attempted on device %s in %s state with unresolved identity (act_eid=%r, pending_eid=%r); cannot confirm idle.",
+                    event.event_id, event.device_id, status.value if hasattr(status, "value") else status, act_eid, pending_eid
                 )
                 stop_success = False
 
-            # 4. Actuator confirmed idle
-            else:
+            # 5. Actuator positively confirmed idle (ONLINE with no commands in flight)
+            elif status == ActuatorStatus.ONLINE and not is_running:
                 stop_success = True
+            else:
+                stop_success = False
 
         if stop_success:
             event.transition(EventStatus.CANCELLED, reason or "Cancelled by user")
@@ -1374,21 +1485,40 @@ class CommandDispatcher:
                 continue
 
             if (not SharedQuotaStore.is_active(event.event_id)) and (SharedQuotaStore.is_stopped(event.event_id) or (active_rec and active_rec.get("status") in ("CANCELLED", "EMERGENCY_STOPPED", EventStatus.CANCELLED.value, EventStatus.EMERGENCY_STOPPED.value))):
-                raw_st = (active_rec.get("status") if active_rec else None) or "CANCELLED"
-                try:
-                    event.status = EventStatus(raw_st)
-                except Exception:
-                    event.status = EventStatus.CANCELLED
-                s_rcpt = SharedQuotaStore.get_stopped_receipt(event.event_id) or {}
-                if s_rcpt:
-                    event.delivered_volume_mm = s_rcpt.get("delivered_volume_mm")
-                    event.target_volume_mm = float(s_rcpt.get("target_volume_mm", event.target_volume_mm))
-                    event.plot_id = s_rcpt.get("plot_id", event.plot_id)
-                    event.device_id = s_rcpt.get("device_id", event.device_id)
-                    event.zone_id = s_rcpt.get("zone_id", event.zone_id)
-                    event.effective_area_ha = s_rcpt.get("effective_area_ha")
-                reconciled.append(event)
-                continue
+                actuator = self._registry.get_actuator(event.device_id) if hasattr(self, "_registry") and self._registry else None
+                actuator_running = getattr(actuator, "running", False) or getattr(actuator, "_status", None) == ActuatorStatus.EXECUTING
+                if not actuator_running:
+                    raw_st = (active_rec.get("status") if active_rec else None) or "CANCELLED"
+                    try:
+                        event.status = EventStatus(raw_st)
+                    except Exception:
+                        event.status = EventStatus.CANCELLED
+                    s_rcpt = SharedQuotaStore.get_stopped_receipt(event.event_id) or {}
+                    if s_rcpt:
+                        event.delivered_volume_mm = s_rcpt.get("delivered_volume_mm")
+                        event.target_volume_mm = float(s_rcpt.get("target_volume_mm", event.target_volume_mm))
+                        event.plot_id = s_rcpt.get("plot_id", event.plot_id)
+                        event.device_id = s_rcpt.get("device_id", event.device_id)
+                        event.zone_id = s_rcpt.get("zone_id", event.zone_id)
+                        event.effective_area_ha = s_rcpt.get("effective_area_ha")
+                    reconciled.append(event)
+                    continue
+                else:
+                    # ER01: Actuator is actively running despite stopped record; reopen active reservation and reconcile as STOP_REQUESTED
+                    logger.warning("Actuator %s is running for event %s despite stopped record; reopening active reservation.",
+                                   event.device_id, event.event_id)
+                    try:
+                        SharedQuotaStore.reopen_active(
+                            event.event_id,
+                            event.plot_id,
+                            event.target_volume_mm,
+                            device_id=event.device_id,
+                            zone_id=event.zone_id,
+                        )
+                        active_rec = SharedQuotaStore.get_active_record(event.event_id)
+                        event.status = EventStatus.STOP_REQUESTED
+                    except Exception as ro_err:
+                        logger.error("Failed to reopen active reservation on restart for running actuator %s: %s", event.event_id, ro_err)
 
             if active_rec:
                 # RC03: Restore immutable canonical scope envelope from active_rec
@@ -1619,7 +1749,10 @@ class CommandDispatcher:
                                 effective_area_ha=getattr(event, "effective_area_ha", None),
                             )
                     else:
-                        event.transition(EventStatus.EXECUTING, "Reconciled with active controller on process restart")
+                        if event.status == EventStatus.STOP_REQUESTED or (active_rec and active_rec.get("status") == "STOP_REQUESTED"):
+                            event.transition(EventStatus.STOP_REQUESTED, "Reconciled with active controller on process restart: stop previously requested")
+                        else:
+                            event.transition(EventStatus.EXECUTING, "Reconciled with active controller on process restart")
                         self._active_events[event.event_id] = event
                         actuator.set_active_command(self._build_command(event))
                         self._safety.track_event_start(
