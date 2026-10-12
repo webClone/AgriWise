@@ -334,15 +334,32 @@ class ModbusActuator(IrrigationActuator):
     async def _stop_zone(self, command: IrrigationCommand) -> CommandResult:
         """Stop irrigation on a zone."""
         now = datetime.now(timezone.utc).isoformat()
+        if not self._client or not self._connected:
+            return CommandResult(
+                command_id=command.command_id,
+                device_id=self.device_id,
+                success=False,
+                timestamp=now,
+                error_code="NOT_CONNECTED",
+                error_message="Modbus client not connected",
+            )
 
         coil_address = self._zone_coil_map.get(command.zone_id)
         if coil_address is None:
             coil_key = f"valve_{command.zone_id}"
             coil_address = self._coil_map.get(coil_key)
 
-        success = True
-        if coil_address is not None:
-            success = await self._write_coil(coil_address, False)
+        if coil_address is None:
+            return CommandResult(
+                command_id=command.command_id,
+                device_id=self.device_id,
+                success=False,
+                timestamp=now,
+                error_code="ZONE_NOT_MAPPED",
+                error_message=f"No coil mapping for zone {command.zone_id}",
+            )
+
+        success = await self._write_coil(coil_address, False)
 
         # Read totalizer for actual volume
         volume_reg = self._input_map.get("total_volume_liters")
@@ -358,6 +375,8 @@ class ModbusActuator(IrrigationActuator):
             success=success,
             timestamp=now,
             actual_volume_l=actual_volume,
+            error_code="" if success else "WRITE_FAILED",
+            error_message="" if success else "Failed to write stop coil",
         )
 
     async def _set_flow_rate(self, command: IrrigationCommand) -> CommandResult:
@@ -468,33 +487,59 @@ class ModbusActuator(IrrigationActuator):
     async def emergency_stop(self) -> CommandResult:
         """Emergency stop all outputs via Modbus."""
         now = datetime.now(timezone.utc).isoformat()
+        if not self._client or not self._connected:
+            return CommandResult(
+                command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",
+                device_id=self.device_id,
+                success=False,
+                timestamp=now,
+                error_code="NOT_CONNECTED",
+                error_message="Cannot send emergency stop — Modbus client not connected",
+            )
+
         success = True
+        failed_outputs = []
 
         try:
             # Trigger E-Stop coil
             estop_coil = self._coil_map.get("emergency_stop")
             if estop_coil is not None:
-                await self._write_coil(estop_coil, True)
+                ok = await self._write_coil(estop_coil, True)
+                if not ok:
+                    success = False
+                    failed_outputs.append("emergency_stop")
 
             # Close all valve coils
             for key, address in self._coil_map.items():
                 if key.startswith("valve_"):
-                    await self._write_coil(address, False)
+                    ok = await self._write_coil(address, False)
+                    if not ok:
+                        success = False
+                        failed_outputs.append(key)
 
             # Disable pump
             pump_coil = self._coil_map.get("pump_enable")
             if pump_coil is not None:
-                await self._write_coil(pump_coil, False)
+                ok = await self._write_coil(pump_coil, False)
+                if not ok:
+                    success = False
+                    failed_outputs.append("pump_enable")
 
-            logger.critical("🚨 EMERGENCY STOP sent via Modbus to %s", self.device_id)
+            if success:
+                logger.critical("🚨 EMERGENCY STOP sent via Modbus to %s", self.device_id)
+            else:
+                logger.error("Modbus emergency stop partial or total failure on coils: %s", failed_outputs)
 
         except Exception as exc:
             logger.error("Modbus emergency stop failed for %s: %s", self.device_id, exc)
             success = False
+            failed_outputs.append(str(exc))
 
         return CommandResult(
             command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",
             device_id=self.device_id,
             success=success,
             timestamp=now,
+            error_code="" if success else "WRITE_FAILED",
+            error_message="" if success else f"Coil writes failed on: {', '.join(failed_outputs)}",
         )

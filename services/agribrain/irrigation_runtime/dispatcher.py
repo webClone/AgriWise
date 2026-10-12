@@ -254,7 +254,7 @@ class CommandDispatcher:
         if SharedQuotaStore.is_active(event.event_id) and event.event_id not in self._active_events:
             res = SharedQuotaStore.get_active_record(event.event_id)
             if res:
-                r_vol = finite_real(res.get("volume_mm"))
+                r_vol = finite_real(res.get("target_volume_mm", res.get("volume_mm")))
                 e_vol = finite_real(event.target_volume_mm)
                 r_plot = res.get("plot_id")
                 r_dev = res.get("device_id")
@@ -287,7 +287,7 @@ class CommandDispatcher:
                     event.status = EventStatus(raw_st)
                 except Exception:
                     event.status = EventStatus.DISPATCHING
-                event.target_volume_mm = float(res.get("volume_mm", event.target_volume_mm))
+                event.target_volume_mm = float(res.get("target_volume_mm", res.get("volume_mm", event.target_volume_mm)))
                 if res.get("plot_id"):
                     event.plot_id = res["plot_id"]
                 if res.get("flow_rate_lpm") is not None:
@@ -430,7 +430,7 @@ class CommandDispatcher:
                         event.status = EventStatus(raw_st)
                     except Exception:
                         event.status = EventStatus.DISPATCHING
-                    event.target_volume_mm = float(res.get("volume_mm", event.target_volume_mm))
+                    event.target_volume_mm = float(res.get("target_volume_mm", res.get("volume_mm", event.target_volume_mm)))
                     if res.get("flow_rate_lpm") is not None:
                         event.target_flow_rate_lpm = float(res["flow_rate_lpm"])
                     if res.get("duration_minutes") is not None:
@@ -1018,7 +1018,7 @@ class CommandDispatcher:
                         self._safety.record_stopped_delivery(
                             event_id=act_cmd_eid,
                             plot_id=res_act.get("plot_id", event.plot_id),
-                            target_volume_mm=float(res_act.get("volume_mm", 0.0)),
+                            target_volume_mm=float(res_act.get("target_volume_mm", res_act.get("volume_mm", 0.0))),
                             delivered_volume_mm=None,
                             season=res_act.get("season"),
                             device_id=event.device_id,
@@ -1042,11 +1042,12 @@ class CommandDispatcher:
                                  f"Safety violation: {event.emergency_stop_reason}")
                 res = SharedQuotaStore.get_active_record(event.event_id) or {}
                 season_key = res.get("season")
-                del_mm = getattr(event, "delivered_volume_mm", None)
+                del_mm = getattr(event, "delivered_volume_mm", None) or (res.get("delivered_volume_mm") if res else None)
+                cmd_tgt = getattr(event, "target_volume_mm", None) or (res.get("target_volume_mm") if res else None) or float(res.get("volume_mm", 0.0) if res else 0.0)
                 self._safety.record_stopped_delivery(
                     event_id=event.event_id,
                     plot_id=event.plot_id,
-                    target_volume_mm=event.target_volume_mm,
+                    target_volume_mm=cmd_tgt,
                     delivered_volume_mm=del_mm,
                     season=season_key,
                     device_id=event.device_id,
@@ -1486,8 +1487,44 @@ class CommandDispatcher:
 
             if (not SharedQuotaStore.is_active(event.event_id)) and (SharedQuotaStore.is_stopped(event.event_id) or (active_rec and active_rec.get("status") in ("CANCELLED", "EMERGENCY_STOPPED", EventStatus.CANCELLED.value, EventStatus.EMERGENCY_STOPPED.value))):
                 actuator = self._registry.get_actuator(event.device_id) if hasattr(self, "_registry") and self._registry else None
-                actuator_running = getattr(actuator, "running", False) or getattr(actuator, "_status", None) == ActuatorStatus.EXECUTING
-                if not actuator_running:
+                actuator_running = False
+                if actuator:
+                    try:
+                        st = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+                        actuator_running = (st == ActuatorStatus.EXECUTING)
+                    except Exception as q_exc:
+                        logger.warning("Could not query live status for %s on restart: %s", event.device_id, q_exc)
+                        actuator_running = getattr(actuator, "running", False) or getattr(actuator, "_status", None) == ActuatorStatus.EXECUTING
+
+                # NR01: Check operation ownership if actuator is running
+                actuator_running_for_this_event = False
+                if actuator_running:
+                    act_cmd = getattr(actuator, "active_command", None)
+                    act_eid = getattr(act_cmd, "source_event_id", getattr(act_cmd, "event_id", None))
+                    pend_cmd = getattr(actuator, "_pending_command", None)
+                    pend_eid = getattr(pend_cmd, "source_event_id", getattr(pend_cmd, "event_id", None))
+
+                    other_active_eid = None
+                    if bool(act_eid) and act_eid != event.event_id:
+                        other_active_eid = act_eid
+                    elif bool(pend_eid) and pend_eid != event.event_id:
+                        other_active_eid = pend_eid
+                    else:
+                        state_res = SharedQuotaStore._read_state().get("reservations", {})
+                        for oe_id, oe_res in state_res.items():
+                            if oe_id != event.event_id and oe_res.get("device_id") == event.device_id:
+                                oe_st = oe_res.get("status", "")
+                                if oe_st in ("DISPATCHING", "EXECUTING", "RESERVED", "VALIDATING"):
+                                    other_active_eid = oe_id
+                                    break
+
+                    if not other_active_eid:
+                        actuator_running_for_this_event = True
+                    else:
+                        logger.info("Actuator %s is running for confirmed different event %s; stopped event %s remains terminal.",
+                                    event.device_id, other_active_eid, event.event_id)
+
+                if not actuator_running_for_this_event:
                     raw_st = (active_rec.get("status") if active_rec else None) or "CANCELLED"
                     try:
                         event.status = EventStatus(raw_st)
@@ -1504,7 +1541,7 @@ class CommandDispatcher:
                     reconciled.append(event)
                     continue
                 else:
-                    # ER01: Actuator is actively running despite stopped record; reopen active reservation and reconcile as STOP_REQUESTED
+                    # NR01 / ER01: Actuator is actively running for this event despite stopped record; reopen active reservation and reconcile as STOP_REQUESTED
                     logger.warning("Actuator %s is running for event %s despite stopped record; reopening active reservation.",
                                    event.device_id, event.event_id)
                     try:
@@ -1524,7 +1561,9 @@ class CommandDispatcher:
                 # RC03: Restore immutable canonical scope envelope from active_rec
                 if active_rec.get("plot_id"):
                     event.plot_id = active_rec["plot_id"]
-                if active_rec.get("volume_mm") is not None:
+                if active_rec.get("target_volume_mm") is not None:
+                    event.target_volume_mm = float(active_rec["target_volume_mm"])
+                elif active_rec.get("volume_mm") is not None:
                     event.target_volume_mm = float(active_rec["volume_mm"])
                 if active_rec.get("device_id"):
                     event.device_id = active_rec["device_id"]
@@ -1632,11 +1671,12 @@ class CommandDispatcher:
                         )
                         res = SharedQuotaStore.get_active_record(event.event_id) or {}
                         season_key = res.get("season")
-                        del_mm = getattr(event, "delivered_volume_mm", None)
+                        del_mm = getattr(event, "delivered_volume_mm", None) or (res.get("delivered_volume_mm") if res else None)
+                        cmd_tgt = getattr(event, "target_volume_mm", None) or (res.get("target_volume_mm") if res else None) or float(res.get("volume_mm", 0.0) if res else 0.0)
                         SharedQuotaStore.record_stopped_delivery(
                             event_id=event.event_id,
                             plot_id=event.plot_id,
-                            target_volume_mm=event.target_volume_mm,
+                            target_volume_mm=cmd_tgt,
                             delivered_volume_mm=del_mm,
                             season=season_key,
                             device_id=event.device_id,

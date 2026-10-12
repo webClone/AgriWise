@@ -603,7 +603,8 @@ class SharedQuotaStore:
                 reservations = state.get("reservations", {})
                 if event_id in reservations:
                     res = reservations[event_id]
-                    res_vol = finite_real(res.get("volume_mm", 0.0))
+                    # NR02: Payload comparison binds to commanded target_volume_mm rather than effective exposure volume_mm
+                    res_vol = finite_real(res.get("target_volume_mm", res.get("volume_mm", 0.0)))
                     res_plot = res.get("plot_id", "")
                     res_dev = res.get("device_id", "")
                     res_zone = res.get("zone_id", "")
@@ -803,6 +804,32 @@ class SharedQuotaStore:
         with cls._lock():
             state = cls._read_state()
             today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+            # NR04: Enforce terminal/reservation transition semantics at writer boundary
+            settled_receipts = state.get("settled_receipts", {})
+            if event_id in settled_receipts:
+                s_rcpt = settled_receipts[event_id]
+                s_plot = s_rcpt.get("plot_id", "")
+                if s_plot and plot_id and s_plot != plot_id:
+                    raise ValueError(f"Payload conflict: event {event_id} already settled on plot {s_plot}, cannot rebind to {plot_id}")
+                s_target = finite_real(s_rcpt.get("target_volume_mm", s_rcpt.get("volume_mm")))
+                if s_target is not None and val is not None and abs(s_target - val) > 1e-4:
+                    raise ValueError(f"Payload conflict: event {event_id} already settled with target {s_target}mm vs requested {val}mm")
+                # Compatible retry of already settled event: do not create phantom active reservation!
+                return
+
+            stopped_receipts = state.get("stopped_receipts", {})
+            if event_id in stopped_receipts:
+                st_rcpt = stopped_receipts[event_id]
+                st_plot = st_rcpt.get("plot_id", "")
+                if st_plot and plot_id and st_plot != plot_id:
+                    raise ValueError(f"Payload conflict: event {event_id} already stopped on plot {st_plot}, cannot rebind to {plot_id}")
+                st_target = finite_real(st_rcpt.get("target_volume_mm", st_rcpt.get("volume_mm")))
+                if st_target is not None and val is not None and abs(st_target - val) > 1e-4:
+                    raise ValueError(f"Payload conflict: event {event_id} already stopped with target {st_target}mm vs requested {val}mm")
+                # Compatible retry of already stopped event: do not create phantom active reservation!
+                return
+
             existing = state.setdefault("reservations", {}).get(event_id, {})
             # RC03, BV04: Prevent rebinding reservation to conflicting plot or mutating admitted envelope
             if existing.get("plot_id") and existing["plot_id"] != plot_id:
@@ -1322,12 +1349,15 @@ class SharedQuotaStore:
                     settled_receipts[event_id] = settled
                 raise ValueError(f"Payload conflict: event {event_id} already reserved on plot {canonical_plot}, cannot rebind to {plot_id}")
 
-            if existing_res.get("volume_mm") is not None:
-                val = float(existing_res["volume_mm"])
+            cmd_target = val
+            if existing_res.get("target_volume_mm") is not None:
+                cmd_target = float(existing_res["target_volume_mm"])
             elif prior_rcpt and prior_rcpt.get("target_volume_mm") is not None:
-                val = float(prior_rcpt["target_volume_mm"])
+                cmd_target = float(prior_rcpt["target_volume_mm"])
             elif prior_rcpt and prior_rcpt.get("volume_mm") is not None:
-                val = float(prior_rcpt["volume_mm"])
+                cmd_target = float(prior_rcpt["volume_mm"])
+            elif existing_res.get("volume_mm") is not None:
+                cmd_target = float(existing_res["volume_mm"])
 
             if existing_res.get("duration_minutes") is not None:
                 dur_m = float(existing_res["duration_minutes"])
@@ -1344,10 +1374,11 @@ class SharedQuotaStore:
             elif prior_rcpt and "effective_area_ha" in prior_rcpt:
                 eff_area = prior_rcpt["effective_area_ha"]
 
+            s_del = 0.0
             if prior_rcpt:
                 s_del = float(prior_rcpt.get("delivered_volume_mm", 0.0))
-                # ER04: Effective budget exposure must satisfy: effective exposure >= qualified delivered depth!
-                val = max(val, s_del)
+                # NR02: Maintain distinction between immutable commanded target, measured delivery, and effective exposure!
+                eff_exposure = max(cmd_target, s_del)
                 orig_plot = prior_rcpt.get("plot_id") or canonical_plot
                 s_date = prior_rcpt.get("date") or existing_res.get("date") or date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 s_season = prior_rcpt.get("season") or existing_res.get("season") or season or "default_season"
@@ -1357,6 +1388,9 @@ class SharedQuotaStore:
                     state.setdefault("settled_daily", {})[pk_daily] = max(0.0, float(state.get("settled_daily", {}).get(pk_daily, 0.0)) - s_del)
                     state.setdefault("settled_season", {})[pk_season] = max(0.0, float(state.get("settled_season", {}).get(pk_season, 0.0)) - s_del)
                     state.setdefault("settled_plot_total", {})[orig_plot] = max(0.0, float(state.get("settled_plot_total", {}).get(orig_plot, 0.0)) - s_del)
+            else:
+                s_del = float(existing_res.get("delivered_volume_mm", 0.0))
+                eff_exposure = max(cmd_target, s_del)
 
             # BV04, PB05, RP01: Preserve canonical admitted dimensions from existing_res, settled, or stopped
             date_key = existing_res.get("date") or (prior_rcpt.get("date") if prior_rcpt else None) or date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1368,8 +1402,10 @@ class SharedQuotaStore:
 
             res_record = {
                 "plot_id": canonical_plot,
-                "volume_mm": val,
-                "delivered_volume_mm": s_del if prior_rcpt else None,
+                "volume_mm": eff_exposure,
+                "target_volume_mm": cmd_target,
+                "delivered_volume_mm": s_del if (prior_rcpt or s_del > 0) else None,
+                "effective_exposure_mm": eff_exposure,
                 "status": "STOP_REQUESTED",
                 "date": date_key,
                 "season": season_key,
@@ -1392,7 +1428,10 @@ class SharedQuotaStore:
                 "type": "REOPEN_ACTIVE",
                 "event_id": event_id,
                 "plot_id": canonical_plot,
-                "volume_mm": val,
+                "volume_mm": eff_exposure,
+                "target_volume_mm": cmd_target,
+                "delivered_volume_mm": s_del if (prior_rcpt or s_del > 0) else None,
+                "effective_exposure_mm": eff_exposure,
                 "supersedes_receipt": copy.deepcopy(prior_rcpt) if prior_rcpt else None,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
@@ -1406,7 +1445,7 @@ class SharedQuotaStore:
             total = 0.0
             for eid, res in state.get("reservations", {}).items():
                 if eid != exclude_event_id and res.get("plot_id") == plot_id:
-                    total += float(res.get("volume_mm", 0.0))
+                    total += float(res.get("effective_exposure_mm", res.get("volume_mm", 0.0)))
             return total
 
     @classmethod
@@ -1419,8 +1458,6 @@ class SharedQuotaStore:
     def is_settled(cls, event_id: str, plot_id: Optional[str] = None) -> bool:
         with cls._lock():
             state = cls._read_state()
-            if event_id in state.get("reservations", {}):
-                return False
             return event_id in state.get("settled_receipts", {})
 
     @classmethod
@@ -1428,8 +1465,6 @@ class SharedQuotaStore:
         """C05: Query whether event has a terminal stopped receipt."""
         with cls._lock():
             state = cls._read_state()
-            if event_id in state.get("reservations", {}):
-                return False
             return event_id in state.get("stopped_receipts", {})
 
     @classmethod
@@ -1457,8 +1492,6 @@ class SharedQuotaStore:
     def get_settled_receipt(cls, event_id: str) -> Optional[Dict[str, Any]]:
         with cls._lock():
             state = cls._read_state()
-            if event_id in state.get("reservations", {}):
-                return None
             return state.get("settled_receipts", {}).get(event_id)
 
     @classmethod
@@ -1466,8 +1499,6 @@ class SharedQuotaStore:
         """C05: Retrieve terminal stopped receipt."""
         with cls._lock():
             state = cls._read_state()
-            if event_id in state.get("reservations", {}):
-                return None
             return state.get("stopped_receipts", {}).get(event_id)
 
 

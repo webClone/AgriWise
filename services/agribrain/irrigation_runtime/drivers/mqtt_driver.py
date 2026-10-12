@@ -331,11 +331,34 @@ class MQTTActuator(IrrigationActuator):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
-        if self._client and self._connected:
+        if not self._client or not self._connected:
+            return CommandResult(
+                command_id=f"ESTOP-{request_id[:8]}",
+                device_id=self.device_id,
+                success=False,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                error_code="NOT_CONNECTED",
+                error_message="Cannot send emergency stop — MQTT disconnected",
+            )
+
+        try:
             # Fire-and-forget at QoS 0 for speed
-            self._client.publish(self._cmd_topic, payload, qos=0)
+            r0 = self._client.publish(self._cmd_topic, payload, qos=0)
             # Also send at QoS 1 for reliability
-            self._client.publish(self._cmd_topic, payload, qos=1)
+            r1 = self._client.publish(self._cmd_topic, payload, qos=1)
+
+            rc0 = getattr(r0, "rc", 0)
+            rc1 = getattr(r1, "rc", 0)
+            if rc0 != 0 and rc1 != 0:
+                logger.error("🚨 EMERGENCY STOP publish failed on both QoS 0 (rc=%s) and QoS 1 (rc=%s)", rc0, rc1)
+                return CommandResult(
+                    command_id=f"ESTOP-{request_id[:8]}",
+                    device_id=self.device_id,
+                    success=False,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    error_code="PUBLISH_FAILED",
+                    error_message=f"MQTT publish failed: rc0={rc0}, rc1={rc1}",
+                )
 
             logger.critical("🚨 EMERGENCY STOP sent to %s via MQTT", self.device_id)
 
@@ -345,12 +368,13 @@ class MQTTActuator(IrrigationActuator):
                 success=True,
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
-
-        return CommandResult(
-            command_id=f"ESTOP-{request_id[:8]}",
-            device_id=self.device_id,
-            success=False,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            error_code="NOT_CONNECTED",
-            error_message="Cannot send emergency stop — MQTT disconnected",
-        )
+        except Exception as exc:
+            logger.error("🚨 EMERGENCY STOP exception on device %s: %s", self.device_id, exc)
+            return CommandResult(
+                command_id=f"ESTOP-{request_id[:8]}",
+                device_id=self.device_id,
+                success=False,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                error_code="EXCEPTION",
+                error_message=str(exc),
+            )
