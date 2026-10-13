@@ -26,6 +26,19 @@ class SprayDriftGateEngine:
                 except (TypeError, ValueError):
                     continue
 
+        if not wind_values:
+            has_spray = any(c.action_type == ActionType.SPRAY for c in action_cards)
+            if has_spray:
+                reason = "Spray blocked: missing qualified weather/wind forecast; cannot confirm spray-drift safety"
+                for card in action_cards:
+                    if card.action_type == ActionType.SPRAY:
+                        card.is_allowed = False
+                        if reason not in card.blocked_reason:
+                            card.blocked_reason.append(reason)
+                        card.explain += " [DRIFT: {}]".format(reason)
+                logger.warning(reason)
+            return action_cards
+
         max_wind = max(wind_values, default=0.0)
         if max_wind <= _MAX_WIND_KMH:
             return action_cards

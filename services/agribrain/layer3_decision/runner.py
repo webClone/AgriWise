@@ -2085,9 +2085,13 @@ def _execute_canonical_water_engine(
             curr_w = _extract_weather_for_date(hist_d)
             curr_irr = _get_irrigation_for_date(hist_d)
             step_ts_hist = (
-                ts
-                if (hist_d == ts.date())
-                else datetime.datetime.combine(hist_d, datetime.time(12, 0, tzinfo=timezone.utc))
+                hist_entry.get("timestamp")
+                if hist_entry.get("timestamp") is not None
+                else (
+                    ts
+                    if (hist_d == ts.date())
+                    else datetime.datetime.combine(hist_d, datetime.time(12, 0, tzinfo=timezone.utc))
+                )
             )
             curr_veg = _extract_veg_for_date(hist_d, step_ts_hist)
             curr_so = _extract_soil_obs_for_date(hist_d)
@@ -2164,9 +2168,21 @@ def _execute_canonical_water_engine(
                 else:
                     d_start = ts.date()
             else:
-                # No predecessor in cache: start from earliest date in supplied inputs or target date
-                earliest_supplied_d = min(supplied_dates) if supplied_dates else ts.date()
-                d_start = min(earliest_supplied_d, ts.date())
+                # Check if we have a valid committed checkpoint predecessor
+                if cp_step_key and earliest_invalid_day is None:
+                    try:
+                        cp_step_d = datetime.date.fromisoformat(cp_step_key)
+                        if cp_step_d < ts.date():
+                            d_start = cp_step_d + datetime.timedelta(days=1)
+                        else:
+                            d_start = ts.date()
+                    except Exception:
+                        earliest_supplied_d = min(supplied_dates) if supplied_dates else ts.date()
+                        d_start = min(earliest_supplied_d, ts.date())
+                else:
+                    # No predecessor in cache: start from earliest date in supplied inputs or target date
+                    earliest_supplied_d = min(supplied_dates) if supplied_dates else ts.date()
+                    d_start = min(earliest_supplied_d, ts.date())
         d_end = ts.date()
 
         # R07: Transition identity check

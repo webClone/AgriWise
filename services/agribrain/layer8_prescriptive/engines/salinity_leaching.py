@@ -59,12 +59,14 @@ class SalinityLeachingEngine:
         for card in action_cards:
             if card.action_type == ActionType.IRRIGATE and card.rate is not None:
                 orig = card.rate.recommended
-                adj = round(orig * (1.0 + lr), 1)
+                hard_cap = card.rate.max_safe
+                raw_adj = round(orig * (1.0 + lr), 1)
+                adj = min(raw_adj, hard_cap) if (hard_cap is not None and hard_cap > 0) else raw_adj
                 
                 card.rate = RateRange(
                     recommended=adj,
                     min_safe=card.rate.min_safe,
-                    max_safe=max(card.rate.max_safe, round(adj * 1.2, 1)),
+                    max_safe=hard_cap,
                     unit=card.rate.unit
                 )
                 

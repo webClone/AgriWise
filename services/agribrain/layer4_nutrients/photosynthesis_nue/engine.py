@@ -160,7 +160,7 @@ class PhotosynthesisNUEEngine:
         if nni < 1.0 and biomass > 0:
             n_deficit_pct = critical_n - actual_n_pct
             n_needed_kg_ha = n_deficit_pct * biomass * 10.0 / 0.60
-            optimal_n = max(0, n_needed_kg_ha - n_applied_kg_ha)
+            optimal_n = max(0.0, n_needed_kg_ha)
         else:
             optimal_n = 0.0
 

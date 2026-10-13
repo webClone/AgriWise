@@ -171,7 +171,8 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
         Realized ground truth observation value.
     """
     if not quantiles:
-        return 0.0
+        raise ContractViolation("Cannot compute CRPS: predictive quantiles are missing or empty; cannot return synthetic perfect score")
+
 
     parsed: List[Tuple[float, float]] = []
     for k, v in quantiles.items():
@@ -375,7 +376,18 @@ class ImmutableForecastArchive:
         forecast.validate()
         fid = forecast.forecast_id
 
+        # Contamination prevention: rejected forecasts cannot contaminate the archive
+        meta = forecast.metadata or {}
+        if (
+            meta.get("status") in ("rejected", "aborted", "failed")
+            or meta.get("is_rejected") is True
+            or meta.get("rejected") is True
+            or str(meta.get("rejection_reason") or "").strip() != ""
+        ):
+            raise ContractViolation(f"Rejected forecast {fid} cannot be committed to forecast archive")
+
         if fid in self._forecasts:
+
             existing = self._forecasts[fid]
             # Verify exact content match
             if existing.to_dict() != forecast.to_dict():

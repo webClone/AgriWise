@@ -146,26 +146,36 @@ class ConstraintScheduler:
                 day_reasons: List[str] = []
                 
                 # Check weather constraints
-                rain = day_fc.get("precip_mm") or day_fc.get("precipitation") or 0
-                wind = day_fc.get("wind_speed") or day_fc.get("wind_kmh") or 0
-                temp_max = day_fc.get("temp_max") if day_fc.get("temp_max") is not None else 25
-                temp_min = day_fc.get("temp_min") if day_fc.get("temp_min") is not None else 10
+                raw_rain = day_fc.get("precip_mm") if day_fc.get("precip_mm") is not None else day_fc.get("precipitation")
+                raw_wind = day_fc.get("wind_speed") if day_fc.get("wind_speed") is not None else (day_fc.get("wind_kmh") if day_fc.get("wind_kmh") is not None else day_fc.get("wind_gust"))
                 
-                if "max_rain_mm" in constraints and rain > constraints["max_rain_mm"]:
+                if constraints and not day_fc:
                     day_blocked = True
-                    day_reasons.append(f"rain={rain:.1f}mm > {constraints['max_rain_mm']}mm")
-                
-                if "max_wind_kmh" in constraints and wind > constraints["max_wind_kmh"]:
+                    day_reasons.append("Empty weather forecast record")
+                elif card.action_type == ActionType.SPRAY and raw_wind is None:
                     day_blocked = True
-                    day_reasons.append(f"wind={wind:.0f}km/h > {constraints['max_wind_kmh']}km/h")
-                
-                if "min_temp_c" in constraints and temp_min < constraints["min_temp_c"]:
-                    day_blocked = True
-                    day_reasons.append(f"temp_min={temp_min:.0f}°C < {constraints['min_temp_c']}°C")
-                
-                if "max_temp_c" in constraints and temp_max > constraints["max_temp_c"]:
-                    day_blocked = True
-                    day_reasons.append(f"temp_max={temp_max:.0f}°C > {constraints['max_temp_c']}°C")
+                    day_reasons.append("Missing required wind forecast for spray")
+                else:
+                    rain = raw_rain if raw_rain is not None else 0
+                    wind = raw_wind if raw_wind is not None else 0
+                    temp_max = day_fc.get("temp_max") if day_fc.get("temp_max") is not None else 25
+                    temp_min = day_fc.get("temp_min") if day_fc.get("temp_min") is not None else 10
+                    
+                    if "max_rain_mm" in constraints and rain > constraints["max_rain_mm"]:
+                        day_blocked = True
+                        day_reasons.append(f"rain={rain:.1f}mm > {constraints['max_rain_mm']}mm")
+                    
+                    if "max_wind_kmh" in constraints and wind > constraints["max_wind_kmh"]:
+                        day_blocked = True
+                        day_reasons.append(f"wind={wind:.0f}km/h > {constraints['max_wind_kmh']}km/h")
+                    
+                    if "min_temp_c" in constraints and temp_min < constraints["min_temp_c"]:
+                        day_blocked = True
+                        day_reasons.append(f"temp_min={temp_min:.0f}°C < {constraints['min_temp_c']}°C")
+                    
+                    if "max_temp_c" in constraints and temp_max > constraints["max_temp_c"]:
+                        day_blocked = True
+                        day_reasons.append(f"temp_max={temp_max:.0f}°C > {constraints['max_temp_c']}°C")
                 
                 if not day_blocked:
                     best_date = candidate_date
