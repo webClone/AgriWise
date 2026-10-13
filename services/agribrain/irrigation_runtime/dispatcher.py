@@ -1486,17 +1486,34 @@ class CommandDispatcher:
                 continue
 
             if (not SharedQuotaStore.is_active(event.event_id)) and (SharedQuotaStore.is_stopped(event.event_id) or (active_rec and active_rec.get("status") in ("CANCELLED", "EMERGENCY_STOPPED", EventStatus.CANCELLED.value, EventStatus.EMERGENCY_STOPPED.value))):
+                s_rcpt = SharedQuotaStore.get_stopped_receipt(event.event_id) or {}
+                # XR03: Hydrate canonical scope before querying or looking up actuator
+                canonical_dev = (active_rec.get("device_id") if active_rec else None) or s_rcpt.get("device_id") or event.device_id
+                event.device_id = canonical_dev
+                if s_rcpt:
+                    event.plot_id = s_rcpt.get("plot_id", event.plot_id)
+                    event.zone_id = s_rcpt.get("zone_id", event.zone_id)
+                    event.delivered_volume_mm = s_rcpt.get("delivered_volume_mm", getattr(event, "delivered_volume_mm", None))
+                    event.target_volume_mm = float(s_rcpt.get("target_volume_mm", event.target_volume_mm))
+                    event.effective_area_ha = s_rcpt.get("effective_area_ha", getattr(event, "effective_area_ha", None))
+
                 actuator = self._registry.get_actuator(event.device_id) if hasattr(self, "_registry") and self._registry else None
                 actuator_running = False
                 if actuator:
                     try:
                         st = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
-                        actuator_running = (st == ActuatorStatus.EXECUTING)
+                        if st == ActuatorStatus.EXECUTING:
+                            actuator_running = True
+                        elif st == ActuatorStatus.ONLINE:
+                            actuator_running = getattr(actuator, "running", False)
+                        else:
+                            # OFFLINE, UNKNOWN, ERROR cannot certify idle
+                            actuator_running = True
                     except Exception as q_exc:
                         logger.warning("Could not query live status for %s on restart: %s", event.device_id, q_exc)
-                        actuator_running = getattr(actuator, "running", False) or getattr(actuator, "_status", None) == ActuatorStatus.EXECUTING
+                        actuator_running = True
 
-                # NR01: Check operation ownership if actuator is running
+                # NR01 / XR03: Check operation ownership if actuator is running
                 actuator_running_for_this_event = False
                 if actuator_running:
                     act_cmd = getattr(actuator, "active_command", None)
@@ -1514,7 +1531,8 @@ class CommandDispatcher:
                         for oe_id, oe_res in state_res.items():
                             if oe_id != event.event_id and oe_res.get("device_id") == event.device_id:
                                 oe_st = oe_res.get("status", "")
-                                if oe_st in ("DISPATCHING", "EXECUTING", "RESERVED", "VALIDATING"):
+                                # XR03: Include STOP_REQUESTED, EXECUTING, DISPATCHING, RESERVED; exclude VALIDATING (settlement phase is not physically executing)
+                                if oe_st in ("DISPATCHING", "EXECUTING", "RESERVED", "STOP_REQUESTED"):
                                     other_active_eid = oe_id
                                     break
 
@@ -1530,18 +1548,10 @@ class CommandDispatcher:
                         event.status = EventStatus(raw_st)
                     except Exception:
                         event.status = EventStatus.CANCELLED
-                    s_rcpt = SharedQuotaStore.get_stopped_receipt(event.event_id) or {}
-                    if s_rcpt:
-                        event.delivered_volume_mm = s_rcpt.get("delivered_volume_mm")
-                        event.target_volume_mm = float(s_rcpt.get("target_volume_mm", event.target_volume_mm))
-                        event.plot_id = s_rcpt.get("plot_id", event.plot_id)
-                        event.device_id = s_rcpt.get("device_id", event.device_id)
-                        event.zone_id = s_rcpt.get("zone_id", event.zone_id)
-                        event.effective_area_ha = s_rcpt.get("effective_area_ha")
                     reconciled.append(event)
                     continue
                 else:
-                    # NR01 / ER01: Actuator is actively running for this event despite stopped record; reopen active reservation and reconcile as STOP_REQUESTED
+                    # NR01 / ER01 / XR03: Actuator is actively running for this event despite stopped record; reopen active reservation and reconcile as STOP_REQUESTED
                     logger.warning("Actuator %s is running for event %s despite stopped record; reopening active reservation.",
                                    event.device_id, event.event_id)
                     try:
@@ -1551,6 +1561,9 @@ class CommandDispatcher:
                             event.target_volume_mm,
                             device_id=event.device_id,
                             zone_id=event.zone_id,
+                            duration_minutes=event.target_duration_minutes,
+                            flow_rate_lpm=event.target_flow_rate_lpm,
+                            effective_area_ha=getattr(event, "effective_area_ha", None),
                         )
                         active_rec = SharedQuotaStore.get_active_record(event.event_id)
                         event.status = EventStatus.STOP_REQUESTED

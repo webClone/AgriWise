@@ -470,11 +470,15 @@ class ModbusActuator(IrrigationActuator):
 
         try:
             status = await self._read_status()
+            if not status or "status_word" not in status:
+                self._status = ActuatorStatus.ERROR
+                return self._status
+
             fault_code = status.get("fault_code", 0)
             if fault_code != 0:
                 self._status = ActuatorStatus.ERROR
             else:
-                status_word = status.get("status_word", 0)
+                status_word = status["status_word"]
                 if status_word & 0x01:  # Bit 0: running
                     self._status = ActuatorStatus.EXECUTING
                 else:
@@ -499,41 +503,70 @@ class ModbusActuator(IrrigationActuator):
 
         success = True
         failed_outputs = []
+        attempted_coils = 0
 
-        try:
-            # Trigger E-Stop coil
-            estop_coil = self._coil_map.get("emergency_stop")
-            if estop_coil is not None:
+        # Trigger E-Stop coil
+        estop_coil = self._coil_map.get("emergency_stop")
+        if estop_coil is not None:
+            attempted_coils += 1
+            try:
                 ok = await self._write_coil(estop_coil, True)
                 if not ok:
                     success = False
-                    failed_outputs.append("emergency_stop")
+                    failed_outputs.append(f"emergency_stop({estop_coil})")
+            except Exception as exc:
+                success = False
+                failed_outputs.append(f"emergency_stop({estop_coil}):{exc}")
 
-            # Close all valve coils
-            for key, address in self._coil_map.items():
-                if key.startswith("valve_"):
-                    ok = await self._write_coil(address, False)
-                    if not ok:
-                        success = False
-                        failed_outputs.append(key)
+        # Close all valve coils from coil_map
+        valve_addrs = set()
+        for key, address in self._coil_map.items():
+            if key.startswith("valve_") or "valve" in key:
+                valve_addrs.add(address)
 
-            # Disable pump
-            pump_coil = self._coil_map.get("pump_enable")
-            if pump_coil is not None:
+        # Close all zone coils from zone_coil_map
+        for zone_key, address in self._zone_coil_map.items():
+            valve_addrs.add(address)
+
+        for address in sorted(valve_addrs):
+            attempted_coils += 1
+            try:
+                ok = await self._write_coil(address, False)
+                if not ok:
+                    success = False
+                    failed_outputs.append(f"coil({address})")
+            except Exception as exc:
+                success = False
+                failed_outputs.append(f"coil({address}):{exc}")
+
+        # Disable pump
+        pump_coil = self._coil_map.get("pump_enable")
+        if pump_coil is not None:
+            attempted_coils += 1
+            try:
                 ok = await self._write_coil(pump_coil, False)
                 if not ok:
                     success = False
-                    failed_outputs.append("pump_enable")
+                    failed_outputs.append(f"pump_enable({pump_coil})")
+            except Exception as exc:
+                success = False
+                failed_outputs.append(f"pump_enable({pump_coil}):{exc}")
 
-            if success:
-                logger.critical("🚨 EMERGENCY STOP sent via Modbus to %s", self.device_id)
-            else:
-                logger.error("Modbus emergency stop partial or total failure on coils: %s", failed_outputs)
+        if attempted_coils == 0:
+            logger.error("Modbus emergency stop: no coils configured to trigger or stop on %s", self.device_id)
+            return CommandResult(
+                command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",
+                device_id=self.device_id,
+                success=False,
+                timestamp=now,
+                error_code="NO_OUTPUTS_CONFIGURED",
+                error_message="No emergency stop or zone/pump coils configured",
+            )
 
-        except Exception as exc:
-            logger.error("Modbus emergency stop failed for %s: %s", self.device_id, exc)
-            success = False
-            failed_outputs.append(str(exc))
+        if success:
+            logger.critical("🚨 EMERGENCY STOP sent via Modbus to %s across %d coils", self.device_id, attempted_coils)
+        else:
+            logger.error("Modbus emergency stop partial or total failure on coils: %s", failed_outputs)
 
         return CommandResult(
             command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",

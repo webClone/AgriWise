@@ -312,17 +312,35 @@ class MQTTActuator(IrrigationActuator):
 
         # Publish status request
         if self._client:
+            req_id = str(uuid.uuid4())
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.get_event_loop()
+            ack_future: asyncio.Future = loop.create_future()
+            self._pending_acks[req_id] = ack_future
             self._client.publish(
                 self._cmd_topic,
-                json.dumps({"cmd": "QUERY_STATUS", "request_id": str(uuid.uuid4())}),
+                json.dumps({"cmd": "QUERY_STATUS", "request_id": req_id}),
                 qos=self._qos,
             )
-            await asyncio.sleep(2)  # Brief wait for response
+            query_timeout = float(self._config.get("query_timeout_s", 0.1))
+            try:
+                await asyncio.wait_for(ack_future, timeout=query_timeout)
+            except asyncio.TimeoutError:
+                self._pending_acks.pop(req_id, None)
+                if not self._last_status_payload:
+                    self._status = ActuatorStatus.UNKNOWN
+                    return ActuatorStatus.UNKNOWN
+                hb = getattr(self, "_last_heartbeat", None)
+                if hb and (datetime.now(timezone.utc) - hb).total_seconds() > self._timeout:
+                    self._status = ActuatorStatus.UNKNOWN
+                    return ActuatorStatus.UNKNOWN
 
         return self._status
 
     async def emergency_stop(self) -> CommandResult:
-        """Send emergency stop command via MQTT (fire-and-forget + confirmed)."""
+        """Send emergency stop command via MQTT and await controller confirmation."""
         request_id = str(uuid.uuid4())
         payload = json.dumps({
             "request_id": request_id,
@@ -342,14 +360,22 @@ class MQTTActuator(IrrigationActuator):
             )
 
         try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        ack_future: asyncio.Future = loop.create_future()
+        self._pending_acks[request_id] = ack_future
+
+        try:
             # Fire-and-forget at QoS 0 for speed
             r0 = self._client.publish(self._cmd_topic, payload, qos=0)
             # Also send at QoS 1 for reliability
             r1 = self._client.publish(self._cmd_topic, payload, qos=1)
 
-            rc0 = getattr(r0, "rc", 0)
-            rc1 = getattr(r1, "rc", 0)
+            rc0 = getattr(r0, "rc", -1) if r0 is not None else -1
+            rc1 = getattr(r1, "rc", -1) if r1 is not None else -1
             if rc0 != 0 and rc1 != 0:
+                self._pending_acks.pop(request_id, None)
                 logger.error("🚨 EMERGENCY STOP publish failed on both QoS 0 (rc=%s) and QoS 1 (rc=%s)", rc0, rc1)
                 return CommandResult(
                     command_id=f"ESTOP-{request_id[:8]}",
@@ -360,15 +386,41 @@ class MQTTActuator(IrrigationActuator):
                     error_message=f"MQTT publish failed: rc0={rc0}, rc1={rc1}",
                 )
 
-            logger.critical("🚨 EMERGENCY STOP sent to %s via MQTT", self.device_id)
+            logger.critical("🚨 EMERGENCY STOP published to %s via MQTT (awaiting confirmation)", self.device_id)
 
-            return CommandResult(
-                command_id=f"ESTOP-{request_id[:8]}",
-                device_id=self.device_id,
-                success=True,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            )
+            stop_timeout = float(self._config.get("stop_timeout_s", 0.1))
+            try:
+                ack_payload = await asyncio.wait_for(ack_future, timeout=stop_timeout)
+                is_ok = ack_payload.get("status") in ("OK", "STOPPED") or ack_payload.get("stopped") is True
+                if not is_ok:
+                    return CommandResult(
+                        command_id=f"ESTOP-{request_id[:8]}",
+                        device_id=self.device_id,
+                        success=False,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        error_code="CONTROLLER_REJECTED",
+                        error_message=f"Controller rejected STOP: {ack_payload}",
+                    )
+                self._status = ActuatorStatus.ONLINE
+                return CommandResult(
+                    command_id=f"ESTOP-{request_id[:8]}",
+                    device_id=self.device_id,
+                    success=True,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                )
+            except asyncio.TimeoutError:
+                self._pending_acks.pop(request_id, None)
+                logger.warning("🚨 EMERGENCY STOP publish accepted but no controller ACK received within %ss", stop_timeout)
+                return CommandResult(
+                    command_id=f"ESTOP-{request_id[:8]}",
+                    device_id=self.device_id,
+                    success=False,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    error_code="ACK_TIMEOUT",
+                    error_message=f"No STOP ACK received from controller within {stop_timeout}s",
+                )
         except Exception as exc:
+            self._pending_acks.pop(request_id, None)
             logger.error("🚨 EMERGENCY STOP exception on device %s: %s", self.device_id, exc)
             return CommandResult(
                 command_id=f"ESTOP-{request_id[:8]}",

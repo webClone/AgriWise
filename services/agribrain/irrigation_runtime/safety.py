@@ -248,6 +248,28 @@ class SharedQuotaStore:
             if area is not None and (isinstance(area, bool) or not isinstance(area, (int, float)) or not math.isfinite(area) or area <= 0):
                 raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid effective_area_ha: {area}")
 
+            # XR05: Validate new target_volume_mm, delivered_volume_mm, and effective_exposure_mm
+            tvol = res.get("target_volume_mm")
+            if tvol is not None:
+                if isinstance(tvol, bool) or not isinstance(tvol, (int, float)) or not math.isfinite(tvol) or tvol < 0:
+                    raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid target_volume_mm: {tvol}")
+            dvol = res.get("delivered_volume_mm")
+            if dvol is not None:
+                if isinstance(dvol, bool) or not isinstance(dvol, (int, float)) or not math.isfinite(dvol) or dvol < 0:
+                    raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid delivered_volume_mm: {dvol}")
+            exp = res.get("effective_exposure_mm")
+            if exp is not None:
+                if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp) or exp <= 0:
+                    raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid effective_exposure_mm: {exp}")
+
+            # Conservation lower bound: exposure and volume must be >= max(target_volume_mm, delivered_volume_mm)
+            min_exp = max(float(tvol or 0.0), float(dvol or 0.0))
+            if min_exp > 0:
+                if exp is not None and exp < min_exp - 1e-4:
+                    raise CorruptedQuotaStoreError(f"Reservation '{eid}' effective_exposure_mm={exp} violates lower bound {min_exp}")
+                if vol is not None and vol < min_exp - 1e-4:
+                    raise CorruptedQuotaStoreError(f"Reservation '{eid}' volume_mm={vol} violates lower bound {min_exp}")
+
         for eid, rec in data["settled_receipts"].items():
             if not isinstance(rec, dict):
                 raise CorruptedQuotaStoreError(f"Settled receipt '{eid}' must be a dictionary")
@@ -408,7 +430,14 @@ class SharedQuotaStore:
                 json.dump(state, handle, sort_keys=True, allow_nan=False)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp, p)
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, p)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.02)
             # C03 + D04: Mark established so store disappearance cannot silently reset to zero.
             # Do NOT swallow exceptions on marker write!
             if not marker.exists():
@@ -657,7 +686,7 @@ class SharedQuotaStore:
                     already_reserved = 0.0
                     for eid, res in reservations.items():
                         if eid != event_id and res.get("plot_id") == plot_id:
-                            already_reserved += float(res.get("volume_mm", 0.0))
+                            already_reserved += float(res.get("effective_exposure_mm", res.get("volume_mm", 0.0)))
 
                     settled_today = float(state.get("settled_daily", {}).get(f"{plot_id}:{today_key}", 0.0))
                     settled_season = float(state.get("settled_season", {}).get(f"{plot_id}:{season_key}", 0.0))
@@ -846,6 +875,9 @@ class SharedQuotaStore:
             now_iso = datetime.now(timezone.utc).isoformat()
             f_disp = existing.get("first_dispatched_at") or now_iso
             act_start = existing.get("actual_start")
+            ex_target = existing.get("target_volume_mm")
+            ex_del = existing.get("delivered_volume_mm")
+            ex_exp = existing.get("effective_exposure_mm")
             res_entry = {
                 "plot_id": plot_id,
                 "device_id": dev_id,
@@ -860,6 +892,23 @@ class SharedQuotaStore:
                 "first_dispatched_at": f_disp,
                 "timestamp": now_iso,
             }
+            if ex_target is not None:
+                res_entry["target_volume_mm"] = ex_target
+            elif existing.get("volume_mm") is not None:
+                res_entry["target_volume_mm"] = float(existing["volume_mm"])
+            else:
+                res_entry["target_volume_mm"] = val
+
+            if ex_del is not None:
+                res_entry["delivered_volume_mm"] = ex_del
+
+            if ex_exp is not None:
+                res_entry["effective_exposure_mm"] = ex_exp
+                res_entry["volume_mm"] = ex_exp
+            elif ex_del is not None and float(ex_del) > val:
+                res_entry["effective_exposure_mm"] = float(ex_del)
+                res_entry["volume_mm"] = float(ex_del)
+
             if act_start:
                 res_entry["actual_start"] = act_start
             state["reservations"][event_id] = res_entry
@@ -1077,7 +1126,19 @@ class SharedQuotaStore:
             season_key = existing_res.get("season") or (prior_stopped.get("season") if prior_stopped else None) or season or "default_season"
             dev_id = existing_res.get("device_id") or (prior_stopped.get("device_id") if prior_stopped else "") or device_id or ""
             z_id = existing_res.get("zone_id") or (prior_stopped.get("zone_id") if prior_stopped else "") or zone_id or ""
-            t_vol = float(existing_res.get("volume_mm", prior_stopped.get("target_volume_mm", target_volume_mm if target_volume_mm is not None else val) if prior_stopped else (target_volume_mm if target_volume_mm is not None else val)))
+            t_vol = float(
+                existing_res.get("target_volume_mm")
+                if existing_res.get("target_volume_mm") is not None
+                else (
+                    target_volume_mm
+                    if target_volume_mm is not None
+                    else (
+                        prior_stopped.get("target_volume_mm")
+                        if prior_stopped and prior_stopped.get("target_volume_mm") is not None
+                        else existing_res.get("volume_mm", val)
+                    )
+                )
+            )
             dur_m = existing_res.get("duration_minutes") if existing_res.get("duration_minutes") is not None else (prior_stopped.get("duration_minutes", duration_minutes if duration_minutes is not None else 0.0) if prior_stopped else (duration_minutes if duration_minutes is not None else 0.0))
             f_lpm = existing_res.get("flow_rate_lpm") if existing_res.get("flow_rate_lpm") is not None else (prior_stopped.get("flow_rate_lpm", flow_rate_lpm if flow_rate_lpm is not None else 0.0) if prior_stopped else (flow_rate_lpm if flow_rate_lpm is not None else 0.0))
             eff_area = existing_res.get("effective_area_ha") if "effective_area_ha" in existing_res else (prior_stopped.get("effective_area_ha") if prior_stopped and "effective_area_ha" in prior_stopped else effective_area_ha)
@@ -1195,12 +1256,20 @@ class SharedQuotaStore:
                 return
 
             existing_receipt = state.get("stopped_receipts", {}).get(event_id)
+            existing_res = state.setdefault("reservations", {}).pop(event_id, {})
 
             del_val = finite_real(delivered_volume_mm)
             if del_val is None:
-                del_val = float(target_volume_mm)
+                if existing_res.get("delivered_volume_mm") is not None:
+                    del_val = float(existing_res["delivered_volume_mm"])
+                else:
+                    del_val = float(target_volume_mm)
+            else:
+                if existing_res.get("delivered_volume_mm") is not None:
+                    del_val = max(del_val, float(existing_res["delivered_volume_mm"]))
 
-            existing_res = state.setdefault("reservations", {}).pop(event_id, {})
+            if existing_res.get("target_volume_mm") is not None:
+                target_volume_mm = float(existing_res["target_volume_mm"])
 
             if existing_receipt is not None:
                 # D08 Probe A: Preserve original receipt's date and season on corrections!
@@ -1374,23 +1443,27 @@ class SharedQuotaStore:
             elif prior_rcpt and "effective_area_ha" in prior_rcpt:
                 eff_area = prior_rcpt["effective_area_ha"]
 
-            s_del = 0.0
+            s_del = None
             if prior_rcpt:
-                s_del = float(prior_rcpt.get("delivered_volume_mm", 0.0))
+                p_del = prior_rcpt.get("delivered_volume_mm")
+                if p_del is not None:
+                    s_del = float(p_del)
                 # NR02: Maintain distinction between immutable commanded target, measured delivery, and effective exposure!
-                eff_exposure = max(cmd_target, s_del)
+                eff_exposure = max(cmd_target, s_del if s_del is not None else 0.0)
                 orig_plot = prior_rcpt.get("plot_id") or canonical_plot
                 s_date = prior_rcpt.get("date") or existing_res.get("date") or date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 s_season = prior_rcpt.get("season") or existing_res.get("season") or season or "default_season"
-                if s_del > 0:
+                if s_del is not None and s_del > 0:
                     pk_daily = f"{orig_plot}:{s_date}"
                     pk_season = f"{orig_plot}:{s_season}"
                     state.setdefault("settled_daily", {})[pk_daily] = max(0.0, float(state.get("settled_daily", {}).get(pk_daily, 0.0)) - s_del)
                     state.setdefault("settled_season", {})[pk_season] = max(0.0, float(state.get("settled_season", {}).get(pk_season, 0.0)) - s_del)
                     state.setdefault("settled_plot_total", {})[orig_plot] = max(0.0, float(state.get("settled_plot_total", {}).get(orig_plot, 0.0)) - s_del)
             else:
-                s_del = float(existing_res.get("delivered_volume_mm", 0.0))
-                eff_exposure = max(cmd_target, s_del)
+                ex_del = existing_res.get("delivered_volume_mm")
+                if ex_del is not None:
+                    s_del = float(ex_del)
+                eff_exposure = max(cmd_target, s_del if s_del is not None else 0.0)
 
             # BV04, PB05, RP01: Preserve canonical admitted dimensions from existing_res, settled, or stopped
             date_key = existing_res.get("date") or (prior_rcpt.get("date") if prior_rcpt else None) or date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1404,7 +1477,7 @@ class SharedQuotaStore:
                 "plot_id": canonical_plot,
                 "volume_mm": eff_exposure,
                 "target_volume_mm": cmd_target,
-                "delivered_volume_mm": s_del if (prior_rcpt or s_del > 0) else None,
+                "delivered_volume_mm": s_del,
                 "effective_exposure_mm": eff_exposure,
                 "status": "STOP_REQUESTED",
                 "date": date_key,
@@ -1430,7 +1503,7 @@ class SharedQuotaStore:
                 "plot_id": canonical_plot,
                 "volume_mm": eff_exposure,
                 "target_volume_mm": cmd_target,
-                "delivered_volume_mm": s_del if (prior_rcpt or s_del > 0) else None,
+                "delivered_volume_mm": s_del,
                 "effective_exposure_mm": eff_exposure,
                 "supersedes_receipt": copy.deepcopy(prior_rcpt) if prior_rcpt else None,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1656,20 +1729,22 @@ class SafetyMonitor:
         """Register an active irrigation event for duration monitoring and quota reservation."""
         now_dt = datetime.now(timezone.utc)
         start_mono = self._clock() - (max(0.0, elapsed_minutes) * 60.0)
+        existing_claim = SharedQuotaStore.get_active_record(event_id) if SharedQuotaStore.is_active(event_id) else None
+        eff_vol = float(existing_claim.get("effective_exposure_mm", existing_claim.get("volume_mm", volume_mm))) if existing_claim else volume_mm
         self._active_events[event_id] = {
             "start_time": now_dt,
             "start_monotonic": start_mono,
             "max_duration_minutes": max_duration_minutes,
             "device_id": device_id,
             "plot_id": plot_id,
-            "volume_mm": volume_mm,
+            "volume_mm": eff_vol,
             "season": season,
             "date": date,
             "zone_id": zone_id,
             "flow_rate_lpm": flow_rate_lpm,
             "effective_area_ha": effective_area_ha,
         }
-        if plot_id and volume_mm >= 0:
+        if plot_id and volume_mm >= 0 and existing_claim is None:
             self.reserve_quota(
                 event_id,
                 plot_id,
@@ -1683,7 +1758,7 @@ class SafetyMonitor:
                 effective_area_ha=effective_area_ha,
             )
         logger.debug("Tracking event %s (max %.0f min, elapsed %.1f min, reserved %.1f mm)",
-                     event_id, max_duration_minutes, elapsed_minutes, volume_mm)
+                     event_id, max_duration_minutes, elapsed_minutes, eff_vol)
 
     def track_event_end(self, event_id: str) -> None:
         """Remove an event from duration watchdog while preserving unsettled quota."""
