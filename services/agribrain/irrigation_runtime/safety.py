@@ -259,7 +259,7 @@ class SharedQuotaStore:
                     raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid delivered_volume_mm: {dvol}")
             exp = res.get("effective_exposure_mm")
             if exp is not None:
-                if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp) or exp <= 0:
+                if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp) or exp < 0:
                     raise CorruptedQuotaStoreError(f"Reservation '{eid}' has invalid effective_exposure_mm: {exp}")
 
             # Conservation lower bound: exposure and volume must be >= max(target_volume_mm, delivered_volume_mm)
@@ -747,6 +747,8 @@ class SharedQuotaStore:
                     "device_id": device_id,
                     "zone_id": zone_id,
                     "volume_mm": req_vol,
+                    "target_volume_mm": req_vol,
+                    "effective_exposure_mm": req_vol,
                     "duration_minutes": e_dur if e_dur is not None else 0.0,
                     "flow_rate_lpm": e_flow if e_flow is not None else 0.0,
                     "effective_area_ha": e_area if (e_area is not None and e_area > 0) else None,
@@ -764,6 +766,8 @@ class SharedQuotaStore:
                     "event_id": event_id,
                     "plot_id": plot_id,
                     "volume_mm": req_vol,
+                    "target_volume_mm": req_vol,
+                    "effective_exposure_mm": req_vol,
                     "device_id": device_id,
                     "zone_id": zone_id,
                     "duration_minutes": e_dur if e_dur is not None else 0.0,
@@ -1126,19 +1130,18 @@ class SharedQuotaStore:
             season_key = existing_res.get("season") or (prior_stopped.get("season") if prior_stopped else None) or season or "default_season"
             dev_id = existing_res.get("device_id") or (prior_stopped.get("device_id") if prior_stopped else "") or device_id or ""
             z_id = existing_res.get("zone_id") or (prior_stopped.get("zone_id") if prior_stopped else "") or zone_id or ""
-            t_vol = float(
-                existing_res.get("target_volume_mm")
-                if existing_res.get("target_volume_mm") is not None
-                else (
-                    target_volume_mm
-                    if target_volume_mm is not None
-                    else (
-                        prior_stopped.get("target_volume_mm")
-                        if prior_stopped and prior_stopped.get("target_volume_mm") is not None
-                        else existing_res.get("volume_mm", val)
-                    )
-                )
-            )
+            canonical_tgt = None
+            if existing_res.get("target_volume_mm") is not None:
+                canonical_tgt = existing_res["target_volume_mm"]
+            elif prior_stopped and prior_stopped.get("target_volume_mm") is not None:
+                canonical_tgt = prior_stopped["target_volume_mm"]
+            elif existing_res.get("volume_mm") is not None:
+                canonical_tgt = existing_res["volume_mm"]
+            elif target_volume_mm is not None:
+                canonical_tgt = target_volume_mm
+            else:
+                canonical_tgt = val
+            t_vol = float(canonical_tgt)
             dur_m = existing_res.get("duration_minutes") if existing_res.get("duration_minutes") is not None else (prior_stopped.get("duration_minutes", duration_minutes if duration_minutes is not None else 0.0) if prior_stopped else (duration_minutes if duration_minutes is not None else 0.0))
             f_lpm = existing_res.get("flow_rate_lpm") if existing_res.get("flow_rate_lpm") is not None else (prior_stopped.get("flow_rate_lpm", flow_rate_lpm if flow_rate_lpm is not None else 0.0) if prior_stopped else (flow_rate_lpm if flow_rate_lpm is not None else 0.0))
             eff_area = existing_res.get("effective_area_ha") if "effective_area_ha" in existing_res else (prior_stopped.get("effective_area_ha") if prior_stopped and "effective_area_ha" in prior_stopped else effective_area_ha)

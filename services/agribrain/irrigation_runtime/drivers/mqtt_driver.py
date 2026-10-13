@@ -305,6 +305,53 @@ class MQTTActuator(IrrigationActuator):
     # Status & Emergency
     # ================================================================
 
+    def _decode_status_payload(self, payload: Dict[str, Any]) -> ActuatorStatus:
+        """Decode status/ACK payload from MQTT controller.
+
+        Distinguishes operational execution, idle/stopped confirmation, and error/fault conditions.
+        Contradictions or indeterminate states map to UNKNOWN or ERROR.
+        """
+        if not isinstance(payload, dict):
+            return ActuatorStatus.UNKNOWN
+
+        raw_status = str(payload.get("status", "")).upper()
+        is_running = payload.get("running")
+        is_stopped = payload.get("stopped")
+        fault_code = payload.get("fault_code", 0)
+
+        # Fault / Error check
+        if raw_status in ("ERROR", "FAULT", "FAILED") or (isinstance(fault_code, (int, float)) and fault_code != 0):
+            return ActuatorStatus.ERROR
+
+        # Running flag takes precedence for active execution
+        if is_running is True:
+            return ActuatorStatus.EXECUTING
+
+        # Explicit stopped confirmation without running
+        if is_stopped is True and is_running is not True:
+            return ActuatorStatus.ONLINE
+
+        if raw_status in ("EXECUTING", "RUNNING", "BUSY"):
+            return ActuatorStatus.EXECUTING
+
+        if raw_status in ("STOPPED", "IDLE"):
+            if is_stopped is False or is_running is True:
+                return ActuatorStatus.EXECUTING if is_running is True else ActuatorStatus.UNKNOWN
+            return ActuatorStatus.ONLINE
+
+        if raw_status == "ONLINE":
+            if is_running is True or is_stopped is False:
+                return ActuatorStatus.EXECUTING if is_running is True else ActuatorStatus.UNKNOWN
+            return ActuatorStatus.ONLINE
+
+        # Generic OK / ACK status without explicit stopped / running
+        if raw_status in ("OK", "ACK"):
+            if is_running is False and is_stopped is not False:
+                return ActuatorStatus.ONLINE
+            return ActuatorStatus.UNKNOWN
+
+        return ActuatorStatus.UNKNOWN
+
     async def get_status(self) -> ActuatorStatus:
         """Query actuator status via MQTT."""
         if not self._connected:
@@ -326,16 +373,13 @@ class MQTTActuator(IrrigationActuator):
             )
             query_timeout = float(self._config.get("query_timeout_s", 0.1))
             try:
-                await asyncio.wait_for(ack_future, timeout=query_timeout)
+                ack_payload = await asyncio.wait_for(ack_future, timeout=query_timeout)
+                self._status = self._decode_status_payload(ack_payload)
+                return self._status
             except asyncio.TimeoutError:
                 self._pending_acks.pop(req_id, None)
-                if not self._last_status_payload:
-                    self._status = ActuatorStatus.UNKNOWN
-                    return ActuatorStatus.UNKNOWN
-                hb = getattr(self, "_last_heartbeat", None)
-                if hb and (datetime.now(timezone.utc) - hb).total_seconds() > self._timeout:
-                    self._status = ActuatorStatus.UNKNOWN
-                    return ActuatorStatus.UNKNOWN
+                self._status = ActuatorStatus.UNKNOWN
+                return ActuatorStatus.UNKNOWN
 
         return self._status
 
@@ -391,8 +435,32 @@ class MQTTActuator(IrrigationActuator):
             stop_timeout = float(self._config.get("stop_timeout_s", 0.1))
             try:
                 ack_payload = await asyncio.wait_for(ack_future, timeout=stop_timeout)
-                is_ok = ack_payload.get("status") in ("OK", "STOPPED") or ack_payload.get("stopped") is True
+                # SR01: Qualified stop validation:
+                # Contradictory check: if running=True or stopped=False, controller is NOT confirmed stopped!
+                is_running = ack_payload.get("running")
+                is_stopped = ack_payload.get("stopped")
+                raw_status = str(ack_payload.get("status", "")).upper()
+
+                if is_running is True or is_stopped is False:
+                    logger.error(
+                        "🚨 EMERGENCY STOP rejected or contradictory: running=%s, stopped=%s on %s (payload=%s)",
+                        is_running, is_stopped, self.device_id, ack_payload
+                    )
+                    self._status = ActuatorStatus.EXECUTING if is_running is True else ActuatorStatus.UNKNOWN
+                    return CommandResult(
+                        command_id=f"ESTOP-{request_id[:8]}",
+                        device_id=self.device_id,
+                        success=False,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        error_code="CONTROLLER_STILL_RUNNING",
+                        error_message=f"Controller reported still running or not stopped: {ack_payload}",
+                    )
+
+                # Positive stopped confirmation
+                is_ok = (is_stopped is True) or (raw_status in ("STOPPED", "IDLE")) or (raw_status == "OK" and is_running is False)
                 if not is_ok:
+                    logger.error("🚨 EMERGENCY STOP not confirmed by controller on %s: payload=%s", self.device_id, ack_payload)
+                    self._status = ActuatorStatus.ERROR
                     return CommandResult(
                         command_id=f"ESTOP-{request_id[:8]}",
                         device_id=self.device_id,
@@ -401,6 +469,7 @@ class MQTTActuator(IrrigationActuator):
                         error_code="CONTROLLER_REJECTED",
                         error_message=f"Controller rejected STOP: {ack_payload}",
                     )
+
                 self._status = ActuatorStatus.ONLINE
                 return CommandResult(
                     command_id=f"ESTOP-{request_id[:8]}",

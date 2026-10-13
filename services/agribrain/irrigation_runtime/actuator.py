@@ -240,6 +240,8 @@ class IrrigationActuator(ABC):
                         is_own_retry = True
                     else:
                         has_payload_conflict = True
+            elif hasattr(self, "hw") and (getattr(self.hw, "event_id", None) == command.source_event_id or getattr(self.hw, "operation", None) == command.source_event_id):
+                is_own_retry = True
 
             if has_payload_conflict:
                 errors.append(
@@ -431,6 +433,8 @@ class IrrigationActuator(ABC):
                             is_own_retry = True
                         else:
                             has_payload_conflict = True
+                elif hasattr(self, "hw") and (getattr(self.hw, "event_id", None) == command.source_event_id or getattr(self.hw, "operation", None) == command.source_event_id):
+                    is_own_retry = True
 
                 if has_payload_conflict:
                     logger.warning(
@@ -451,6 +455,8 @@ class IrrigationActuator(ABC):
                     )
 
                 if is_own_retry:
+                    if self._active_command is None:
+                        self._active_command = command
                     logger.info(
                         "Operation %s is already EXECUTING on device %s. Returning active execution status idempotently without duplicate physical dispatch.",
                         command.operation_id or command.source_event_id, self.device_id

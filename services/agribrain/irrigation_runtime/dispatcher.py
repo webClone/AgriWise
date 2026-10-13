@@ -498,6 +498,12 @@ class CommandDispatcher:
             effective_area_ha=eff_area,
         )
 
+        # SR04: Query live physical controller status before physical dispatch to detect already-running device
+        try:
+            await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+        except Exception as q_err:
+            logger.warning("Could not query actuator status for %s before dispatch: %s", event.device_id, q_err)
+
         # Dispatch with retry
         result = await self._dispatch_with_retry(event, actuator)
 
@@ -672,7 +678,7 @@ class CommandDispatcher:
             is_uncertain = (
                 result.error_code in ("UNCERTAIN_OUTCOME", "ACK_TIMEOUT", "DISPATCH_EXCEPTION")
                 or actuator.active_command is not None
-                or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
+                or getattr(actuator, "_status", None) in (ActuatorStatus.ERROR, ActuatorStatus.EXECUTING)
             )
             if is_uncertain:
                 logger.error(
