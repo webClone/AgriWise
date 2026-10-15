@@ -73,6 +73,8 @@ VOLATILE_IDENTITY_KEYS = {
     "run_completed_at",
     "artifact_published_at",
     "render_published_at",
+    "evidence_hash",
+    "interval_hash",
 }
 
 
@@ -251,11 +253,43 @@ class CanonicalWorldlineService:
         plot_id: str,
         tenant_id: str = "default_tenant",
         namespace: str = "default",
+        cycle_id: Optional[str] = None,
+        geometry_version: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Load latest committed hydraulic checkpoint for a tenant plot."""
+        """Load latest committed hydraulic checkpoint for a tenant plot, optionally scoped by cycle/geometry."""
         head_data = self._read(self._hydraulic_head_path(plot_id, tenant_id, namespace))
         if not head_data or not head_data.get("latest_checkpoint_id"):
             return None
+
+        # Check if caller requested specific cycle/geometry scope
+        if cycle_id is not None or geometry_version is not None:
+            c_target = cycle_id or "default_cycle"
+            g_target = geometry_version or "default_geom"
+            scope_key = f"{c_target}::{g_target}"
+            scoped_heads = head_data.get("scoped_heads", {}) or {}
+            if scope_key in scoped_heads:
+                cp_path = self._hydraulic_checkpoint_path(plot_id, scoped_heads[scope_key], tenant_id, namespace)
+                res = self._read(cp_path)
+                if res:
+                    return res
+
+            # Fallback: traverse predecessor chain starting from latest_checkpoint_id
+            curr_id = head_data.get("latest_checkpoint_id")
+            visited = set()
+            while curr_id and curr_id not in visited:
+                visited.add(curr_id)
+                cp_path = self._hydraulic_checkpoint_path(plot_id, curr_id, tenant_id, namespace)
+                cp_data = self._read(cp_path)
+                if not cp_data:
+                    break
+                cp_cycle = cp_data.get("cycle_id", "default_cycle")
+                cp_geom = cp_data.get("geometry_version", "default_geom")
+                if cp_cycle == c_target and cp_geom == g_target:
+                    return cp_data
+                curr_id = cp_data.get("predecessor_head")
+
+            return None
+
         cp_path = self._hydraulic_checkpoint_path(plot_id, head_data["latest_checkpoint_id"], tenant_id, namespace)
         return self._read(cp_path) or None
 
@@ -283,7 +317,9 @@ class CanonicalWorldlineService:
             # R08 + V11: Immutability, full record identity, and interrupted publication recovery
             if cp_path.exists():
                 existing = self._read(cp_path)
-                matches_payload = existing and existing.get("payload") == _public(checkpoint_payload)
+                existing_payload = _public(existing.get("payload")) if existing else None
+                new_payload = _public(checkpoint_payload)
+                matches_payload = (existing_payload is not None) and (existing_payload == new_payload)
                 matches_cycle = existing and (existing.get("cycle_id", "default_cycle") == cycle_id)
                 matches_geom = existing and (existing.get("geometry_version", "default_geom") == geometry_version)
                 if matches_payload and matches_cycle and matches_geom:
@@ -296,6 +332,8 @@ class CanonicalWorldlineService:
                     # Recover head ONLY if predecessor_head matches the current head!
                     if existing.get("predecessor_head") == current_head_id:
                         seq = existing.get("sequence", (int(current_head.get("sequence", 0) or 0) + 1))
+                        scoped_heads = dict(current_head.get("scoped_heads", {}) or {})
+                        scoped_heads[f"{cycle_id}::{geometry_version}"] = checkpoint_id
                         new_head = {
                             "tenant_id": tenant_id,
                             "namespace": namespace,
@@ -303,6 +341,9 @@ class CanonicalWorldlineService:
                             "sequence": seq,
                             "latest_checkpoint_id": checkpoint_id,
                             "head_hash": checkpoint_id,
+                            "cycle_id": cycle_id,
+                            "geometry_version": geometry_version,
+                            "scoped_heads": scoped_heads,
                             "updated_at": _now(),
                         }
                         self._atomic(head_path, new_head)
@@ -342,6 +383,8 @@ class CanonicalWorldlineService:
 
             self._atomic(cp_path, record)
 
+            scoped_heads = dict(current_head.get("scoped_heads", {}) or {})
+            scoped_heads[f"{cycle_id}::{geometry_version}"] = checkpoint_id
             new_head = {
                 "tenant_id": tenant_id,
                 "namespace": namespace,
@@ -349,6 +392,9 @@ class CanonicalWorldlineService:
                 "sequence": seq,
                 "latest_checkpoint_id": checkpoint_id,
                 "head_hash": checkpoint_id,
+                "cycle_id": cycle_id,
+                "geometry_version": geometry_version,
+                "scoped_heads": scoped_heads,
                 "updated_at": _now(),
             }
             self._atomic(head_path, new_head)

@@ -62,8 +62,9 @@ def enforce_layer8_invariants(output: Layer8Output) -> List[InvariantViolation]:
                     check_name="rate_non_negative",
                     severity="error",
                     description=f"{card.action_id}: rate={card.rate.recommended} < 0 or invalid",
-                    auto_fixed=True,
+                    auto_fixed=False,
                 ))
+                card.is_allowed = False
                 card.rate.recommended = 0.0
 
     # 2. Rate max safe
@@ -75,8 +76,9 @@ def enforce_layer8_invariants(output: Layer8Output) -> List[InvariantViolation]:
                     check_name="rate_max_safe",
                     severity="warning",
                     description=f"{card.action_id}: max_safe={card.rate.max_safe} is invalid or negative",
-                    auto_fixed=True,
+                    auto_fixed=False,
                 ))
+                card.is_allowed = False
                 card.rate.max_safe = 0.0
 
             if card.rate.recommended > card.rate.max_safe:
@@ -87,6 +89,38 @@ def enforce_layer8_invariants(output: Layer8Output) -> List[InvariantViolation]:
                     auto_fixed=True,
                 ))
                 card.rate.recommended = max(0.0, card.rate.max_safe)
+
+    # 2b. Rate min safe and bounds consistency
+    for card in output.actions:
+        if card.rate is not None:
+            ms_min = card.rate.min_safe
+            if ms_min is not None:
+                if isinstance(ms_min, bool) or not isinstance(ms_min, (int, float)) or not math.isfinite(ms_min) or ms_min < 0:
+                    violations.append(InvariantViolation(
+                        check_name="rate_min_safe",
+                        severity="error",
+                        description=f"{card.action_id}: min_safe={card.rate.min_safe} is invalid or negative",
+                        auto_fixed=False,
+                    ))
+                    card.is_allowed = False
+                elif card.rate.recommended < ms_min:
+                    violations.append(InvariantViolation(
+                        check_name="rate_min_safe",
+                        severity="error",
+                        description=f"{card.action_id}: rate={card.rate.recommended} < min={ms_min}",
+                        auto_fixed=False,
+                    ))
+                    card.is_allowed = False
+
+            if card.rate.min_safe is not None and card.rate.max_safe is not None:
+                if card.rate.min_safe > card.rate.max_safe:
+                    violations.append(InvariantViolation(
+                        check_name="rate_inconsistent_bounds",
+                        severity="error",
+                        description=f"{card.action_id}: min_safe={card.rate.min_safe} > max_safe={card.rate.max_safe}",
+                        auto_fixed=False,
+                    ))
+                    card.is_allowed = False
 
     # 3. Zone allocation sum <= 1.0
     for card in output.actions:
@@ -111,7 +145,10 @@ def enforce_layer8_invariants(output: Layer8Output) -> List[InvariantViolation]:
                     check_name="schedule_date_format",
                     severity="error",
                     description=f"{sched.action_id}: invalid date '{sched.scheduled_date}'",
+                    auto_fixed=True,
                 ))
+                sched.status = ScheduleStatus.BLOCKED
+                sched.blocking_constraints.append("invalid_schedule_date_format")
 
     # 5. Blocked -> no CONFIRMED
     blocked_ids = {card.action_id for card in output.actions if not card.is_allowed}

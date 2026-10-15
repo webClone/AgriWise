@@ -29,32 +29,27 @@ from services.agribrain.scientific_contracts.exceptions import ContractViolation
 
 def _atomic_write_json(path: Path, data: Dict[str, Any], exclusive: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if exclusive:
-        try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0))
-            with open(fd, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            return
-        except FileExistsError:
-            try:
-                existing_payload = json.loads(path.read_text(encoding="utf-8"))
-                new_hash = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
-                existing_hash = hashlib.sha256(json.dumps(existing_payload, sort_keys=True).encode("utf-8")).hexdigest()
-                if new_hash != existing_hash:
-                    raise ContractViolation(f"Forecast immutability violation: conflicting content exists at {path}")
-                return
-            except json.JSONDecodeError:
-                raise ContractViolation(f"Corrupted forecast file at {path}")
-
     tmp_path = path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
+        if exclusive:
+            try:
+                os.link(str(tmp_path), str(path))
+            except FileExistsError:
+                try:
+                    existing_payload = json.loads(path.read_text(encoding="utf-8"))
+                    new_hash = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()
+                    existing_hash = hashlib.sha256(json.dumps(existing_payload, sort_keys=True).encode("utf-8")).hexdigest()
+                    if new_hash != existing_hash:
+                        raise ContractViolation(f"Forecast immutability violation: conflicting content exists at {path}")
+                    return
+                except json.JSONDecodeError:
+                    raise ContractViolation(f"Corrupted forecast file at {path}")
+        else:
+            os.replace(tmp_path, path)
     finally:
         if tmp_path.exists():
             try:
@@ -202,6 +197,9 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
     if not quantiles:
         raise ContractViolation("Cannot compute CRPS: predictive quantiles are missing or empty; cannot return synthetic perfect score")
 
+    if isinstance(observed, bool) or not isinstance(observed, (int, float)) or not math.isfinite(observed):
+        raise ContractViolation(f"Observed value must be finite real number, got {observed}")
+
     parsed: List[Tuple[float, float]] = []
     for k, v in quantiles.items():
         k_str = str(k).lower().strip()
@@ -213,6 +211,8 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
                 alpha /= 100.0
         if not (0.0 <= alpha <= 1.0) or math.isnan(alpha) or math.isinf(alpha):
             raise ContractViolation(f"Invalid quantile level {k}: level must be in [0.0, 1.0]")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ContractViolation(f"Invalid quantile value {v} for level {k}: must be numeric")
         val = float(v)
         if math.isnan(val) or math.isinf(val):
             raise ContractViolation(f"Invalid quantile value {v} for level {k}: must be finite")
@@ -220,6 +220,13 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
 
     # Sort by quantile level
     parsed.sort(key=lambda x: x[0])
+
+    # Validate monotonicity of quantile values
+    for i in range(len(parsed) - 1):
+        if parsed[i][1] > parsed[i + 1][1]:
+            raise ContractViolation(
+                f"Quantile values must be monotonic: level {parsed[i][0]} value {parsed[i][1]} > level {parsed[i+1][0]} value {parsed[i+1][1]}"
+            )
 
     losses: List[float] = []
     for alpha, q in parsed:
@@ -234,7 +241,11 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
 
 def compute_crps_gaussian(mean: float, std: float, observed: float) -> float:
     """Analytical CRPS for a univariate normal distribution N(mean, std^2)."""
-    if std < 0.0 or math.isnan(std) or math.isinf(std):
+    if isinstance(mean, bool) or not isinstance(mean, (int, float)) or not math.isfinite(mean):
+        raise ContractViolation(f"Gaussian mean must be a finite real number, got {mean}")
+    if isinstance(observed, bool) or not isinstance(observed, (int, float)) or not math.isfinite(observed):
+        raise ContractViolation(f"Observed value must be a finite real number, got {observed}")
+    if isinstance(std, bool) or not isinstance(std, (int, float)) or std < 0.0 or not math.isfinite(std):
         raise ContractViolation(f"Gaussian sigma must be finite non-negative, got {std}")
     if std <= 1e-9:
         return abs(observed - mean)
@@ -337,8 +348,17 @@ class ForecastRecord:
                 f"target_epoch ({self.target_epoch}) must be strictly after "
                 f"issued_at_knowledge_time ({self.issued_at_knowledge_time})"
             )
-        if self.horizon_days <= 0.0:
-            raise ContractViolation(f"horizon_days must be positive, got {self.horizon_days}")
+        if isinstance(self.horizon_days, bool) or not isinstance(self.horizon_days, (int, float)) or not math.isfinite(self.horizon_days) or self.horizon_days <= 0.0:
+            raise ContractViolation(f"horizon_days must be finite positive number, got {self.horizon_days}")
+        actual_days = (self.target_epoch - self.issued_at_knowledge_time).total_seconds() / 86400.0
+        if abs(self.horizon_days - actual_days) > 1.05 and abs(self.horizon_days - math.ceil(actual_days)) > 1.05:
+            raise ContractViolation(f"horizon_days ({self.horizon_days}) is inconsistent with target_epoch - issued_at interval ({actual_days:.2f} days)")
+        if self.predicted_mean is not None:
+            if isinstance(self.predicted_mean, bool) or not isinstance(self.predicted_mean, (int, float)) or not math.isfinite(self.predicted_mean):
+                raise ContractViolation(f"predicted_mean must be finite, got {self.predicted_mean}")
+        if self.predicted_std is not None:
+            if isinstance(self.predicted_std, bool) or not isinstance(self.predicted_std, (int, float)) or self.predicted_std < 0.0 or not math.isfinite(self.predicted_std):
+                raise ContractViolation(f"predicted_std must be non-negative finite, got {self.predicted_std}")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -371,10 +391,10 @@ class ForecastEvaluationRecord:
     verifying_evidence_ids: Tuple[str, ...]
     observed_value: float
     crps: float
-    rmse: float
-    sharpness: float
-    coverage_hit: bool
-    evaluated_at: datetime
+    rmse: Optional[float] = None
+    sharpness: Optional[float] = None
+    coverage_hit: Optional[bool] = None
+    evaluated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     domain_status: DomainStatus = DomainStatus.IN_DOMAIN
     evaluation_space: EvaluationSpace = EvaluationSpace.OBSERVATION_SPACE
     schema_version: str = FORECAST_EVAL_RECORD_SCHEMA_VERSION
@@ -414,14 +434,15 @@ class ImmutableForecastArchive:
 
     def store_forecast(self, forecast: ForecastRecord) -> ForecastRecord:
         """Store a forecast record with strict immutability check."""
-        forecast.validate()
-        fid = forecast.forecast_id
+        snapshot = copy.deepcopy(forecast)
+        snapshot.validate()
+        fid = snapshot.forecast_id
 
         if ".." in fid or "/" in fid or "\\" in fid or Path(fid).name != fid or fid in (".", ".."):
             raise ContractViolation(f"Unsafe forecast_id: {fid}")
 
         # Contamination prevention: rejected forecasts cannot contaminate the archive
-        meta = forecast.metadata or {}
+        meta = snapshot.metadata or {}
         if (
             meta.get("status") in ("rejected", "aborted", "failed")
             or meta.get("is_rejected") is True
@@ -433,7 +454,7 @@ class ImmutableForecastArchive:
         with self._lock:
             if fid in self._forecasts:
                 existing = self._forecasts[fid]
-                if existing.to_dict() != forecast.to_dict():
+                if existing.to_dict() != snapshot.to_dict():
                     raise ContractViolation(
                         f"Forecast immutability violation: forecast_id {fid} already exists with conflicting content"
                     )
@@ -442,7 +463,7 @@ class ImmutableForecastArchive:
                 fc_dir = self.root / "forecasts"
                 fc_dir.mkdir(parents=True, exist_ok=True)
                 path = fc_dir / f"{fid}.json"
-                new_payload = forecast.to_dict()
+                new_payload = snapshot.to_dict()
                 if path.exists():
                     try:
                         existing_payload = json.loads(path.read_text(encoding="utf-8"))
@@ -457,9 +478,9 @@ class ImmutableForecastArchive:
                 else:
                     _atomic_write_json(path, new_payload, exclusive=True)
 
-            self._forecasts[fid] = copy.deepcopy(forecast)
+            self._forecasts[fid] = copy.deepcopy(snapshot)
 
-        return copy.deepcopy(forecast)
+        return copy.deepcopy(snapshot)
 
     def get_forecast(self, forecast_id: str) -> Optional[ForecastRecord]:
         """Retrieve forecast by ID."""
@@ -556,8 +577,26 @@ class ImmutableForecastArchive:
         ):
             raise ContractViolation(f"Forecast {forecast_id} is rejected/aborted and cannot be evaluated")
 
+        if isinstance(observed_value, bool) or not isinstance(observed_value, (int, float)):
+            raise ContractViolation(f"Observed value must be a real finite number, got {type(observed_value).__name__}: {observed_value!r}")
         obs = float(observed_value)
+        if not math.isfinite(obs):
+            raise ContractViolation(f"Observed value must be finite, got {obs}")
+
+        if not verifying_evidence_ids:
+            raise ContractViolation("Verifying evidence IDs cannot be empty")
+        canon_evidence = tuple(sorted(str(x) for x in verifying_evidence_ids))
+
+        if not (forecast.predicted_quantiles or (forecast.predicted_mean is not None and forecast.predicted_std is not None)):
+            raise ContractViolation(
+                f"Forecast {forecast_id} has neither predictive quantiles nor valid mean/std"
+            )
+
         eval_time = evaluated_at or datetime.now(timezone.utc)
+        if forecast.target_epoch and eval_time < forecast.target_epoch:
+            raise ContractViolation(f"Evaluation time {eval_time} cannot precede forecast target epoch {forecast.target_epoch}")
+        if forecast.issued_at_knowledge_time and eval_time < forecast.issued_at_knowledge_time:
+            raise ContractViolation(f"Evaluation time {eval_time} cannot precede forecast issuance time {forecast.issued_at_knowledge_time}")
 
         # Compute CRPS and evaluation metrics
         if forecast.predicted_quantiles:
@@ -574,7 +613,7 @@ class ImmutableForecastArchive:
             if p50 is not None:
                 rmse = abs(obs - p50)
             else:
-                rmse = float("nan")
+                rmse = None
 
             p10 = None
             if "p10" in forecast.predicted_quantiles:
@@ -592,8 +631,8 @@ class ImmutableForecastArchive:
                 sharpness = max(0.0, p90 - p10)
                 coverage_hit = (p10 <= obs <= p90)
             else:
-                sharpness = float("nan")
-                coverage_hit = False
+                sharpness = None
+                coverage_hit = None
 
         elif forecast.predicted_mean is not None and forecast.predicted_std is not None:
             crps = compute_crps_gaussian(forecast.predicted_mean, forecast.predicted_std, obs)
@@ -607,7 +646,7 @@ class ImmutableForecastArchive:
                 f"Forecast {forecast_id} has neither predictive quantiles nor valid mean/std distribution"
             )
 
-        ev_sig = ":".join(str(x) for x in sorted(verifying_evidence_ids))
+        ev_sig = ":".join(canon_evidence)
         h = hashlib.sha256(f"{forecast_id}:{obs}:{ev_sig}:{eval_time.isoformat()}".encode("utf-8")).hexdigest()[:12]
         eval_id = f"eval-{forecast_id[:16]}-{int(eval_time.timestamp())}-{h}"
 
@@ -615,7 +654,7 @@ class ImmutableForecastArchive:
             evaluation_id=eval_id,
             forecast_id=forecast_id,
             target_variable=forecast.target_variable,
-            verifying_evidence_ids=tuple(verifying_evidence_ids),
+            verifying_evidence_ids=canon_evidence,
             observed_value=obs,
             crps=crps,
             rmse=rmse,
@@ -625,13 +664,13 @@ class ImmutableForecastArchive:
         )
 
         with self._lock:
-            self._evaluations.setdefault(forecast_id, []).append(record)
-
             if self.root:
                 eval_dir = self.root / "evaluations"
                 eval_dir.mkdir(parents=True, exist_ok=True)
                 path = eval_dir / f"{eval_id}.json"
                 _atomic_write_json(path, record.to_dict(), exclusive=True)
+
+            self._evaluations.setdefault(forecast_id, []).append(record)
 
         return record
 

@@ -650,15 +650,24 @@ def serialize_and_cache_asmae(inp: ASMAEInput, output_dict: Dict[str, Any]) -> b
     reason_str = str(output_dict.get("reason") or "").lower()
     res_status = str(output_dict.get("result_status") or "").lower()
     status_str = str(output_dict.get("status") or "").lower()
+    diag_reason = str(diagnostics.get("reason") or "").lower()
+    diag_failure = str(diagnostics.get("failure_code") or "").lower()
+    status_override = str(diagnostics.get("status_override") or "").lower()
     if (
         diagnostics.get("chain_integrity_error")
-        or res_status in ("failed_spatial_fallback", "failed", "unavailable", "rejected", "aborted")
-        or status_str in ("rejected", "aborted", "failed")
+        or res_status in ("failed_spatial_fallback", "failed", "unavailable", "rejected", "aborted", "failed_spatial_timeout")
+        or status_str in ("rejected", "aborted", "failed", "failed_spatial_timeout", "failed_spatial_fallback")
+        or status_override in ("failed_spatial_timeout", "failed_spatial_fallback")
         or output_dict.get("is_rejected") is True
         or output_dict.get("rejected") is True
         or "rejected" in reason_str
         or "chain_integrity" in reason_str
         or "timeout" in reason_str
+        or "timeout" in status_str
+        or "timeout" in diag_reason
+        or "timeout" in diag_failure
+        or "state_estimation_timeout" in diag_failure
+        or "state_estimation_timeout" in diag_reason
     ):
         logger.warning("Refusing to commit failed/rejected/fallback ASMAE spatial result to canonical cache for %s", inp.plot_id)
         return False
@@ -733,15 +742,24 @@ def deserialize_cached_asmae(inp: ASMAEInput) -> Optional[Dict[str, Any]]:
             reason_str = str(output_dict.get("reason") or "").lower()
             res_status = str(output_dict.get("result_status") or "").lower()
             status_str = str(output_dict.get("status") or "").lower()
+            diag_reason = str(diagnostics.get("reason") or "").lower()
+            diag_failure = str(diagnostics.get("failure_code") or "").lower()
+            status_override = str(diagnostics.get("status_override") or "").lower()
             if (
                 diagnostics.get("chain_integrity_error")
-                or res_status in ("failed_spatial_fallback", "failed", "unavailable", "rejected", "aborted")
-                or status_str in ("rejected", "aborted", "failed")
+                or res_status in ("failed_spatial_fallback", "failed", "unavailable", "rejected", "aborted", "failed_spatial_timeout")
+                or status_str in ("rejected", "aborted", "failed", "failed_spatial_timeout", "failed_spatial_fallback")
+                or status_override in ("failed_spatial_timeout", "failed_spatial_fallback")
                 or output_dict.get("is_rejected") is True
                 or output_dict.get("rejected") is True
                 or "rejected" in reason_str
                 or "chain_integrity" in reason_str
                 or "timeout" in reason_str
+                or "timeout" in status_str
+                or "timeout" in diag_reason
+                or "timeout" in diag_failure
+                or "state_estimation_timeout" in diag_failure
+                or "state_estimation_timeout" in diag_reason
             ):
                 raise ValueError("cached ASMAE payload represents a failed/rejected/fallback spatial execution")
 

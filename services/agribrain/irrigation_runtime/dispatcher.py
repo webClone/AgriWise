@@ -501,9 +501,16 @@ class CommandDispatcher:
             effective_area_ha=eff_area,
         )
 
-        # SR04: Query live physical controller status before physical dispatch to detect already-running device
+        # SR04: Query live physical controller status before physical dispatch to detect latched fault
         try:
-            await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+            live_st = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+            if live_st == ActuatorStatus.ERROR and getattr(actuator, "_fault_latched", False):
+                logger.error("Pre-dispatch actuator status check failed for %s: Actuator has latched fault", event.device_id)
+                self._active_events.pop(event.event_id, None)
+                self._safety.release_quota(event.event_id)
+                event.transition(EventStatus.FAILED, f"Actuator {event.device_id} has latched fault: status is ERROR")
+                self._emit_failed(event)
+                return event
         except Exception as q_err:
             logger.warning("Could not query actuator status for %s before dispatch: %s", event.device_id, q_err)
 
@@ -862,11 +869,19 @@ class CommandDispatcher:
             pending_eid = getattr(pending_cmd, "source_event_id", getattr(pending_cmd, "event_id", None)) if pending_cmd else None
             durable_rec = SharedQuotaStore.get_active_record(event.event_id)
             durable_st = (durable_rec.get("status") if durable_rec else "") or ""
-            # V04 / SR04: If event was refused or never physically started (and no active command belongs to it),
-            # never issue emergency STOP against a running device executing another operation!
+            # V04 / SR04 / DV01: Distinguish positively refused-before-send from applied-without-ACK
             was_ever_started = bool(event.actual_start or (durable_rec and durable_rec.get("actual_start")))
-            has_active_cmd = (pending_cmd is not None and (not pending_eid or pending_eid == event.event_id))
-            if not was_ever_started and not has_active_cmd:
+            has_pending_cmd = (pending_cmd is not None and (not pending_eid or pending_eid == event.event_id))
+            has_active_cmd = (act_cmd is not None and (not act_cmd_eid or act_cmd_eid == event.event_id))
+            device_executing = (status == ActuatorStatus.EXECUTING)
+            is_positively_unstarted = (
+                not was_ever_started
+                and not has_pending_cmd
+                and not has_active_cmd
+                and not device_executing
+                and durable_st not in ("DISPATCHING", "EXECUTING", "STOP_REQUESTED")
+            )
+            if is_positively_unstarted:
                 term_status = EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED
                 event.transition(term_status, "Confirmed stopped (event never physically started on actuator)")
                 res = SharedQuotaStore.get_active_record(event.event_id) or {}
@@ -891,7 +906,7 @@ class CommandDispatcher:
                 return event
 
             has_pending = (
-                has_active_cmd
+                has_pending_cmd
                 or durable_st == "DISPATCHING"
             )
 
@@ -937,6 +952,12 @@ class CommandDispatcher:
                 if stop_retry and stop_retry.success and not has_pending and not has_device_hazard:
                     term_status = EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED
                     event.transition(term_status, "Confirmed stopped on actuator after retry")
+                    has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_retry, "fault_code", 0)) or getattr(stop_retry, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR")
+                    if has_fault:
+                        actuator._status = ActuatorStatus.ERROR
+                    else:
+                        actuator._status = ActuatorStatus.ONLINE
+                    actuator._active_command = None
                     res = SharedQuotaStore.get_active_record(event.event_id) or {}
                     season_key = res.get("season")
                     del_mm = getattr(event, "delivered_volume_mm", None)
@@ -1043,7 +1064,11 @@ class CommandDispatcher:
             event.safety_violations.extend(v.violation_id for v in violations)
 
             if stop_result and stop_result.success:
-                actuator._status = ActuatorStatus.ONLINE
+                has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_result, "fault_code", 0)) or getattr(stop_result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR") or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
+                if has_fault:
+                    actuator._status = ActuatorStatus.ERROR
+                else:
+                    actuator._status = ActuatorStatus.ONLINE
                 actuator._active_command = None
 
                 # RP02: If a different live operation owns the actuator, only finalize after STOP confirmed
@@ -1133,7 +1158,11 @@ class CommandDispatcher:
                 return event
             stop_result = await actuator.emergency_stop()
             if stop_result.success:
-                actuator._status = ActuatorStatus.ONLINE
+                has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_result, "fault_code", 0)) or getattr(stop_result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR") or status == ActuatorStatus.ERROR or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
+                if has_fault:
+                    actuator._status = ActuatorStatus.ERROR
+                else:
+                    actuator._status = ActuatorStatus.ONLINE
                 actuator._active_command = None
                 event.transition(EventStatus.FAILED, "Actuator entered ERROR state (stopped)")
                 # D03: Stop path must record stopped delivery exposure, NOT release quota!
@@ -1457,7 +1486,11 @@ class CommandDispatcher:
                         stop_res = await actuator.emergency_stop()
                         stop_success = bool(stop_res and stop_res.success)
                         if stop_success:
-                            actuator._status = ActuatorStatus.ONLINE
+                            has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_res, "fault_code", 0)) or getattr(stop_res, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR") or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
+                            if has_fault:
+                                actuator._status = ActuatorStatus.ERROR
+                            else:
+                                actuator._status = ActuatorStatus.ONLINE
                             actuator._active_command = None
                         else:
                             actuator._status = ActuatorStatus.ERROR

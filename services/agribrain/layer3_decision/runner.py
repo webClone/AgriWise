@@ -1268,11 +1268,11 @@ def _execute_canonical_water_engine(
             except ImportError:
                 from world_model.canonical_worldline import CanonicalWorldlineService
             cw_svc = CanonicalWorldlineService()
-            latest_cp = cw_svc.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace)
+            latest_cp = cw_svc.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace, cycle_id=cycle_id, geometry_version=geometry_version)
 
             with _get_plot_scope_lock(plot_scope_key):
                 # Re-read latest checkpoint under lock to guarantee fresh durable head
-                latest_cp = cw_svc.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace)
+                latest_cp = cw_svc.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace, cycle_id=cycle_id, geometry_version=geometry_version)
                 ram_head = _PLOT_CURRENT_HEAD.get(plot_scope_key)
                 ram_pub_seq = _PLOT_CURRENT_SEQUENCE.get(plot_scope_key, 0)
                 ram_step = _PLOT_CURRENT_STEP.get(plot_scope_key, "")
@@ -1445,7 +1445,7 @@ def _execute_canonical_water_engine(
                     except ImportError:
                         from world_model.canonical_worldline import CanonicalWorldlineService
                     cur_cw = CanonicalWorldlineService()
-                    cur_latest = cur_cw.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace)
+                    cur_latest = cur_cw.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace, cycle_id=cycle_id, geometry_version=geometry_version)
                     cur_head = cur_latest.get("checkpoint_id") if cur_latest else None
                 except Exception:
                     cur_latest = None
@@ -1461,6 +1461,16 @@ def _execute_canonical_water_engine(
                         return
                     if cur_latest and isinstance(cur_latest.get("payload"), dict):
                         winner_payload = cur_latest["payload"]
+                        winner_cycle = winner_payload.get("cycle_id", cur_latest.get("cycle_id", "default_cycle"))
+                        winner_geom = winner_payload.get("geometry_version", cur_latest.get("geometry_version", "default_geom"))
+                        is_same_scope = (
+                            (winner_cycle == cycle_id or (winner_cycle == "default_cycle" and cycle_id == "default_cycle"))
+                            and (winner_geom == geometry_version or (winner_geom == "default_geom" and geometry_version == "default_geom"))
+                        )
+                        if not is_same_scope:
+                            # DV08: Cross-scope winner; do not install into this scope's RAM!
+                            return
+
                         winner_seq = cur_latest.get("sequence", 0)
                         _PLOT_CURRENT_HEAD[plot_scope_key] = cur_head
                         _PLOT_CURRENT_HEAD[legacy_scope_key] = cur_head
@@ -1494,7 +1504,16 @@ def _execute_canonical_water_engine(
                                 if isinstance(h_data, dict):
                                     h_soil = _deserialize_soil_water(h_data.get("soil_water"))
                                     h_mem = _deserialize_hydraulic_memory(h_data.get("hydraulic_memory"))
+                                    h_init_soil = _deserialize_soil_water(h_data.get("initial_soil_water"))
+                                    h_init_mem = _deserialize_hydraulic_memory(h_data.get("initial_hydraulic_memory"))
                                     h_veg = _deserialize_veg_state(h_data.get("vegetation"))
+                                    h_so = _deserialize_soil_observation(h_data.get("soil_observations"))
+                                    if h_init_soil:
+                                        plot_init_hist[h_key] = (h_init_soil, h_init_mem or HydraulicStressMemoryState())
+                                    if h_veg:
+                                        plot_veg_hist[h_key] = h_veg
+                                    if h_so:
+                                        plot_so_hist[h_key] = h_so
                                     ts_raw = h_data.get("timestamp")
                                     try:
                                         ts_obj = datetime.datetime.fromisoformat(ts_raw) if ts_raw else ts
@@ -1512,15 +1531,17 @@ def _execute_canonical_water_engine(
                                         "lai": getattr(h_veg, "lai", 0.0) if h_veg else 0.0,
                                         "fvc": getattr(h_veg, "fvc", 0.0) if h_veg else 0.0,
                                         "root_depth": getattr(h_veg, "root_depth_proxy_m", 0.4) if h_veg else 0.4,
-                                        "soil_observations": None,
-                                        "initial_soil_water": _deserialize_soil_water(h_data.get("initial_soil_water")),
-                                        "initial_hydraulic_memory": _deserialize_hydraulic_memory(h_data.get("initial_hydraulic_memory")),
+                                        "soil_observations": h_so,
+                                        "initial_soil_water": h_init_soil,
+                                        "initial_hydraulic_memory": h_init_mem,
                                         "evidence_hash": h_data.get("evidence_hash"),
                                         "interval_hash": h_data.get("interval_hash"),
                                         "predecessor_hash": h_data.get("predecessor_hash"),
                                         "step_forcing_hash": h_data.get("step_forcing_hash"),
                                     }
                             _PLOT_WATER_STATE_HISTORY[plot_id] = plot_hist
+                            _PLOT_SOIL_OBS_HISTORY[plot_id] = plot_so_hist
+                            _PLOT_INIT_WATER_STATE_HISTORY[plot_id] = plot_init_hist
                         return
 
                 # D11: If RAM head has already moved to a newer head or differs from expected_head and snapshot_head,
@@ -1888,6 +1909,27 @@ def _execute_canonical_water_engine(
             # Also check retained_weather_map if replaying an invalidated trajectory
             if d_str in retained_weather_map and isinstance(retained_weather_map[d_str], dict):
                 return retained_weather_map[d_str]
+
+            # DV10: Check if this date was previously recorded in canonical worldline checkpoints for this plot
+            try:
+                from world_model.canonical_worldline import CanonicalWorldlineService
+                _cw_tmp = CanonicalWorldlineService()
+                _cp_dir = _cw_tmp._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"
+                if _cp_dir.exists():
+                    for _cp_f in sorted(_cp_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+                        try:
+                            _cp_obj = _cw_tmp._read(_cp_f)
+                            _cp_hist = _cp_obj.get("payload", {}).get("history_summary", {})
+                            if isinstance(_cp_hist, dict) and d_str in _cp_hist:
+                                _w_candidate = _cp_hist[d_str].get("weather")
+                                if _w_candidate and isinstance(_w_candidate, dict):
+                                    _pw = _parse_weather(_w_candidate)
+                                    if _pw:
+                                        return _pw
+                        except Exception:
+                            continue
+            except Exception:
+                pass
 
             # Missing intermediate day: NEVER leak future endpoint observations into earlier dates!
             # Impute from evidence available BEFORE the missing interval (persistence forward with 0 rain),
@@ -2657,7 +2699,7 @@ def _execute_canonical_water_engine(
                 # Authoritative RAM cache commit ONLY after successful checkpoint save
                 # V11 & D11 & D12: Synchronized atomic commit to RAM under scoped publication lock
                 with _get_plot_scope_lock(plot_scope_key):
-                    latest_durable = cw_svc.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace)
+                    latest_durable = cw_svc.load_latest_hydraulic_checkpoint(plot_id=plot_id, tenant_id=tenant_id, namespace=namespace, cycle_id=cycle_id, geometry_version=geometry_version)
                     if not latest_durable or latest_durable.get("checkpoint_id") != cp_id:
                         raise RuntimeError(f"Durable head verification failed: expected {cp_id}, found {latest_durable.get('checkpoint_id') if latest_durable else None}")
 

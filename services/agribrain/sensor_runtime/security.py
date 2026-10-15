@@ -137,9 +137,32 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                 try:
                     if os.path.exists(lock_path) and time.time() - os.path.getmtime(lock_path) > 30.0:
                         rec_path = f"{lock_path}.recovery"
+                        if os.path.exists(rec_path):
+                            try:
+                                rec_age = time.time() - os.path.getmtime(rec_path)
+                                rec_pid = -1
+                                try:
+                                    with open(rec_path, "r", encoding="utf-8") as rf:
+                                        rf_txt = rf.read().strip()
+                                        if rf_txt:
+                                            rec_pid = int(rf_txt.split(":")[0])
+                                except Exception:
+                                    pass
+                                if rec_age > 30.0 or (rec_pid > 0 and not _is_pid_alive(rec_pid)):
+                                    try:
+                                        os.unlink(rec_path)
+                                    except OSError:
+                                        pass
+                            except OSError:
+                                pass
+
                         rec_fd = None
                         try:
                             rec_fd = os.open(str(rec_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                            try:
+                                os.write(rec_fd, f"{os.getpid()}:{time.time()}".encode("utf-8"))
+                            except OSError:
+                                pass
                         except (FileExistsError, OSError):
                             rec_fd = None
 
@@ -302,10 +325,13 @@ def release_nonce(nonce: str, seen_messages: Optional[set] = None) -> None:
                 with open(path, "r", encoding="utf-8") as f:
                     nonces = set(json.load(f))
         except Exception:
+            if is_production() or os.getenv("AGRIWISE_STRICT_SECURITY") == "true":
+                raise
             return
 
         if nonce in nonces:
             nonces.discard(nonce)
+            tmp_path = None
             try:
                 dir_name = os.path.dirname(path)
                 if dir_name:
@@ -315,8 +341,21 @@ def release_nonce(nonce: str, seen_messages: Optional[set] = None) -> None:
                 with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(list(nonces), f)
                 os.replace(tmp_path, path)
+                tmp_path = None
             except Exception:
-                pass
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                if is_production() or os.getenv("AGRIWISE_STRICT_SECURITY") == "true":
+                    raise
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
         if seen_messages is not None:
             seen_messages.discard(nonce)

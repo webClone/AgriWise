@@ -12,8 +12,8 @@ Output: List[ScheduledAction] with ScheduleStatus (CONFIRMED / TENTATIVE / BLOCK
 
 import logging
 import math
-from typing import List, Dict, Any
-from datetime import datetime, timedelta
+from typing import List, Dict, Any, Tuple, Optional
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,34 @@ def _parse_weather_val(val, multiplier=1.0):
     return None, "invalid_type"
 
 
+def _parse_row_date_and_instant(row: Dict[str, Any]) -> Tuple[Optional[str], Optional[datetime], Optional[str]]:
+    """Returns (date_str_yyyy_mm_dd, utc_datetime, error_string)"""
+    if not isinstance(row, dict):
+        return None, None, "not_a_dict"
+    raw = row.get("date") or row.get("timestamp")
+    if raw is None:
+        return None, None, "missing_date"
+    s = str(raw).strip()
+    if not s:
+        return None, None, "empty_date"
+    
+    try:
+        if len(s) == 10 and s[4] == '-' and s[7] == '-':
+            parts = [int(p) for p in s.split('-')]
+            dt = datetime(parts[0], parts[1], parts[2], tzinfo=timezone.utc)
+            return s, dt, None
+        norm_s = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(norm_s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        date_str = dt.strftime("%Y-%m-%d")
+        return date_str, dt, None
+    except Exception:
+        return None, None, f"invalid_date_format: {s}"
+
+
 # ============================================================================
 # Core Scheduler
 # ============================================================================
@@ -113,16 +141,42 @@ class ConstraintScheduler:
         """
         scheduled: List[ScheduledAction] = []
         
-        # Sort forecast rows chronologically if dated
-        def _get_row_date(row):
+        # Sort forecast rows chronologically by UTC instant if dated
+        def _get_row_instant(row):
             if isinstance(row, dict):
-                return str(row.get("date") or row.get("timestamp") or "")
-            return ""
+                _, dt, _ = _parse_row_date_and_instant(row)
+                if dt is not None:
+                    return dt
+            return datetime.max.replace(tzinfo=timezone.utc)
 
         try:
-            sorted_forecast = sorted(forecast, key=_get_row_date) if forecast else []
+            sorted_forecast = sorted(forecast, key=_get_row_instant) if forecast else []
         except Exception:
             sorted_forecast = list(forecast) if forecast else []
+
+        # Detect conflicting duplicate same-day rows and deduplicate
+        conflicted_dates = set()
+        seen_dates: Dict[str, Dict[str, Any]] = {}
+        deduped_forecast = []
+        for row in sorted_forecast:
+            if not isinstance(row, dict):
+                deduped_forecast.append(row)
+                continue
+            d_str, dt, err = _parse_row_date_and_instant(row)
+            if d_str is None or err is not None:
+                deduped_forecast.append(row)
+                continue
+            if d_str in seen_dates:
+                prev_row = seen_dates[d_str]
+                r1 = prev_row.get("precip_mm") if prev_row.get("precip_mm") is not None else prev_row.get("precipitation")
+                r2 = row.get("precip_mm") if row.get("precip_mm") is not None else row.get("precipitation")
+                p1, _ = _parse_weather_val(r1)
+                p2, _ = _parse_weather_val(r2)
+                if p1 is not None and p2 is not None and abs(p1 - p2) > 5.0:
+                    conflicted_dates.add(d_str)
+            else:
+                seen_dates[d_str] = row
+                deduped_forecast.append(row)
 
         for card in action_cards:
             if not card.is_allowed:
@@ -155,6 +209,12 @@ class ConstraintScheduler:
                         rate_invalid = True
                 
                 if c_min is not None and c_max is not None and c_min > c_max:
+                    rate_invalid = True
+
+                if c_min is not None and rec < c_min:
+                    rate_invalid = True
+
+                if c_max is not None and rec > c_max:
                     rate_invalid = True
 
                 if rate_invalid:
@@ -207,27 +267,59 @@ class ConstraintScheduler:
             best_date = None
             block_reasons: List[str] = []
             
-            scan_days = min(horizon_days, len(sorted_forecast)) if sorted_forecast else 0
+            scan_days = min(horizon_days, len(deduped_forecast)) if deduped_forecast else 0
+            start_d = start_date.date() if isinstance(start_date, datetime) else start_date
+            end_horizon_d = start_d + timedelta(days=horizon_days)
             
             for i in range(scan_days):
-                day_fc = sorted_forecast[i] if i < len(sorted_forecast) else {}
+                day_fc = deduped_forecast[i] if i < len(deduped_forecast) else {}
                 if not isinstance(day_fc, dict) or not day_fc:
                     day_blocked = True
                     day_reasons = ["Empty weather forecast record"]
                     block_reasons = day_reasons
                     continue
 
-                row_date = day_fc.get("date") or day_fc.get("timestamp")
-                if row_date:
-                    candidate_date = str(row_date)
-                else:
-                    candidate_date = (start_date + timedelta(days=i)).strftime("%Y-%m-%d")
-                
+                d_str, cand_dt, date_err = _parse_row_date_and_instant(day_fc)
+                if date_err:
+                    day_blocked = True
+                    day_reasons = [f"Unqualified forecast date: {date_err}"]
+                    block_reasons = day_reasons
+                    continue
+
+                if d_str is None:
+                    day_blocked = True
+                    day_reasons = ["Missing forecast date"]
+                    block_reasons = day_reasons
+                    continue
+
+                candidate_date = d_str
+                cand_d = cand_dt.date() if cand_dt else None
+
                 day_blocked = False
                 day_reasons = []
 
+                # Check planning horizon interval
+                if cand_d and (cand_d < start_d or cand_d >= end_horizon_d):
+                    day_blocked = True
+                    day_reasons.append(f"Date {candidate_date} is outside planning horizon [{start_d}, {end_horizon_d})")
+
+                # Check conflicting same-day forecast
+                if candidate_date in conflicted_dates:
+                    day_blocked = True
+                    day_reasons.append(f"Conflicting same-day forecast records for {candidate_date}")
+
+                # Check expiration / validity window
+                valid_until_raw = day_fc.get("valid_until") or day_fc.get("expires_at")
+                if valid_until_raw:
+                    _, v_until_dt, _ = _parse_row_date_and_instant({"date": valid_until_raw})
+                    if v_until_dt is not None:
+                        ref_dt = cand_dt if cand_dt is not None else datetime.combine(start_d, datetime.min.time(), tzinfo=timezone.utc)
+                        if ref_dt > v_until_dt:
+                            day_blocked = True
+                            day_reasons.append(f"Forecast expired: valid_until={valid_until_raw} passed")
+
                 unit = str(day_fc.get("wind_speed_unit") or day_fc.get("wind_unit") or day_fc.get("unit") or "").lower().strip()
-                wind_mult = 3.6 if unit in ("m/s", "mps") else 1.0
+                wind_mult = 3.6 if unit in ("m/s", "mps") else (1.852 if unit in ("knots", "knot", "kt", "kts") else 1.0)
 
                 raw_wind_speed = day_fc.get("wind_speed") if day_fc.get("wind_speed") is not None else day_fc.get("wind_kmh")
                 raw_wind_gust = day_fc.get("wind_gust")

@@ -84,11 +84,14 @@ def ingest_sensor_payload(
     if detect_replay(message_id, _SEEN_MESSAGES):
         return []
 
+    nonce_released = False
     try:
         # 4. Validate registry/calibration
         reg = get_device_registration(device_id)
         if not reg or not reg.plot_id:
-            release_nonce(message_id, _SEEN_MESSAGES)
+            if not nonce_released:
+                release_nonce(message_id, _SEEN_MESSAGES)
+                nonce_released = True
             return []
 
         # Device Status Normalization & Validation
@@ -96,7 +99,9 @@ def ingest_sensor_payload(
         if not status:
             status = "missing"
         if status != "active":
-            release_nonce(message_id, _SEEN_MESSAGES)
+            if not nonce_released:
+                release_nonce(message_id, _SEEN_MESSAGES)
+                nonce_released = True
             ex = ValueError(f"device_inactive: {status}")
             ex.device_status = status
             raise ex
@@ -190,7 +195,9 @@ def ingest_sensor_payload(
         if not is_volatile:
             store_raw_message(raw_msg)
     except Exception:
-        release_nonce(message_id, _SEEN_MESSAGES)
+        if not nonce_released:
+            release_nonce(message_id, _SEEN_MESSAGES)
+            nonce_released = True
         raise
 
     # Override plot_id, zone_id, and prefix reading_id

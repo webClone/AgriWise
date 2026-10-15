@@ -80,65 +80,119 @@ class SalinityLeachingEngine:
                 hard_cap = card.rate.max_safe
                 min_safe = card.rate.min_safe
 
-                # Sanitize orig
-                if isinstance(orig, bool) or orig is None:
-                    safe_orig = 0.0
+                # Validate orig
+                if orig is None or isinstance(orig, bool):
+                    card.is_allowed = False
+                    reason = "Invalid rate envelope: recommended rate is missing or boolean"
+                    if reason not in card.blocked_reason:
+                        card.blocked_reason.append(reason)
+                    continue
                 else:
                     try:
                         safe_orig = float(orig)
                         if not math.isfinite(safe_orig):
-                            safe_orig = 0.0
+                            card.is_allowed = False
+                            reason = "Invalid rate envelope: recommended rate is non-finite"
+                            if reason not in card.blocked_reason:
+                                card.blocked_reason.append(reason)
+                            continue
                     except (TypeError, ValueError):
-                        safe_orig = 0.0
-                safe_orig = max(0.0, safe_orig)
+                        card.is_allowed = False
+                        reason = "Invalid rate envelope: recommended rate is invalid format"
+                        if reason not in card.blocked_reason:
+                            card.blocked_reason.append(reason)
+                        continue
 
-                # Sanitize hard_cap
+                # Validate hard_cap
                 safe_cap = None
                 if hard_cap is not None:
                     if isinstance(hard_cap, bool):
+                        card.is_allowed = False
+                        reason = "Invalid rate envelope: max_safe is boolean"
+                        if reason not in card.blocked_reason:
+                            card.blocked_reason.append(reason)
                         safe_cap = 0.0
                     else:
                         try:
                             f_cap = float(hard_cap)
                             if not math.isfinite(f_cap) or f_cap < 0.0:
+                                card.is_allowed = False
+                                reason = "Invalid rate envelope: max_safe is non-finite or negative"
+                                if reason not in card.blocked_reason:
+                                    card.blocked_reason.append(reason)
                                 safe_cap = 0.0
                             else:
                                 safe_cap = f_cap
                         except (TypeError, ValueError):
+                            card.is_allowed = False
+                            reason = "Invalid rate envelope: max_safe is invalid format"
+                            if reason not in card.blocked_reason:
+                                card.blocked_reason.append(reason)
                             safe_cap = 0.0
 
-                # Sanitize min_safe
+                # Validate min_safe
                 safe_min = None
                 if min_safe is not None:
                     if isinstance(min_safe, bool):
+                        card.is_allowed = False
+                        reason = "Invalid rate envelope: min_safe is boolean"
+                        if reason not in card.blocked_reason:
+                            card.blocked_reason.append(reason)
                         safe_min = 0.0
                     else:
                         try:
                             f_min = float(min_safe)
                             if not math.isfinite(f_min) or f_min < 0.0:
+                                card.is_allowed = False
+                                reason = "Invalid rate envelope: min_safe is non-finite or negative"
+                                if reason not in card.blocked_reason:
+                                    card.blocked_reason.append(reason)
                                 safe_min = 0.0
                             else:
                                 safe_min = f_min
                         except (TypeError, ValueError):
+                            card.is_allowed = False
+                            reason = "Invalid rate envelope: min_safe is invalid format"
+                            if reason not in card.blocked_reason:
+                                card.blocked_reason.append(reason)
                             safe_min = 0.0
 
-                # Inconsistent bounds: if min_safe > max_safe, clamp min_safe = safe_cap
+                # Inconsistent bounds: if min_safe > max_safe
                 if safe_min is not None and safe_cap is not None and safe_min > safe_cap:
+                    card.is_allowed = False
+                    reason = f"Contradictory bounds: min_safe ({min_safe}) > max_safe ({hard_cap})"
+                    if reason not in card.blocked_reason:
+                        card.blocked_reason.append(reason)
                     safe_min = safe_cap
 
-                raw_adj = round(safe_orig * (1.0 + lr), 1)
+                if safe_orig < 0.0:
+                    card.is_allowed = False
+                    reason = f"Invalid rate envelope: recommended ({safe_orig}) < 0"
+                    if reason not in card.blocked_reason:
+                        card.blocked_reason.append(reason)
+                    safe_orig = 0.0
+                elif safe_min is not None and safe_orig < safe_min:
+                    card.is_allowed = False
+                    reason = f"Invalid rate envelope: recommended ({safe_orig}) < min_safe ({safe_min})"
+                    if reason not in card.blocked_reason:
+                        card.blocked_reason.append(reason)
 
-                if safe_cap is not None and safe_cap >= 0.0:
-                    adj = max(0.0, min(raw_adj, safe_cap))
+                if safe_orig == 0.0:
+                    adj = 0.0
+                    if safe_min is not None and safe_min > 0.0 and card.is_allowed:
+                        adj = safe_min
+                    elif safe_min is not None and not card.is_allowed:
+                        adj = safe_min
                 else:
-                    adj = max(0.0, raw_adj)
+                    raw_adj = round(safe_orig * (1.0 + lr), 1)
+                    adj = raw_adj
+                    if safe_cap is not None:
+                        adj = min(adj, safe_cap)
+                    if safe_min is not None:
+                        adj = max(adj, safe_min)
+                    if safe_cap is not None:
+                        adj = min(adj, safe_cap)
 
-                if safe_min is not None:
-                    adj = max(safe_min, adj)
-
-                if safe_cap is not None:
-                    adj = min(adj, safe_cap)
-                
                 card.rate = RateRange(
                     recommended=adj,
                     min_safe=safe_min if card.rate.min_safe is not None else None,

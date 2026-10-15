@@ -50,6 +50,8 @@ def _to_bool(val: Any) -> Optional[bool]:
     if isinstance(val, bool):
         return val
     if isinstance(val, (int, float)):
+        if math.isnan(val) or math.isinf(val):
+            return None
         return bool(val != 0)
     if isinstance(val, str):
         v = val.strip().lower()
@@ -261,9 +263,10 @@ class MQTTActuator(IrrigationActuator):
 
         # Check for ACK to pending command
         request_id = payload.get("request_id")
-        if isinstance(request_id, str) and request_id in self._pending_acks:
-            future = self._pending_acks.pop(request_id)
-            _complete_future(future, payload)
+        if isinstance(request_id, str):
+            future = self._pending_acks.pop(request_id, None)
+            if future is not None:
+                _complete_future(future, payload)
 
     def _handle_telemetry(self, payload: Dict[str, Any]):
         """Process telemetry data from the actuator."""
@@ -333,7 +336,8 @@ class MQTTActuator(IrrigationActuator):
                 self._cmd_topic, payload_json, qos=self._qos
             )
         except Exception as pub_exc:
-            self._pending_acks.pop(request_id, None)
+            if self._pending_acks.get(request_id) is ack_future:
+                self._pending_acks.pop(request_id, None)
             logger.error("MQTT publish exception for %s: %s", self.device_id, pub_exc)
             return CommandResult(
                 command_id=command.command_id,
@@ -346,7 +350,8 @@ class MQTTActuator(IrrigationActuator):
             )
 
         if getattr(result, "rc", -1) != 0:
-            self._pending_acks.pop(request_id, None)
+            if self._pending_acks.get(request_id) is ack_future:
+                self._pending_acks.pop(request_id, None)
             return CommandResult(
                 command_id=command.command_id,
                 device_id=self.device_id,
@@ -395,18 +400,31 @@ class MQTTActuator(IrrigationActuator):
                         self._status = ActuatorStatus.UNKNOWN
 
             elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
-                if is_running is True or is_stopped is False:
+                is_contradiction = (
+                    (is_running is True and is_stopped is True)
+                    or (raw_status in ("RUNNING", "EXECUTING", "BUSY") and (is_stopped is True or is_running is False))
+                    or (raw_status in ("STOPPED", "IDLE") and (is_running is True or is_stopped is False))
+                )
+                if has_fault:
+                    self._fault_latched = True
+
+                if is_contradiction:
+                    success = False
+                    err_code = ack_payload.get("error_code") or "CONTRADICTORY_STATUS"
+                    err_msg = ack_payload.get("error_message") or f"Controller reported contradictory status/flags: status={raw_status}, running={is_running}, stopped={is_stopped}"
+                    self._status = ActuatorStatus.UNKNOWN
+                elif is_running is True or is_stopped is False:
                     success = False
                     err_code = ack_payload.get("error_code") or "STOP_FAILED_STILL_RUNNING"
                     err_msg = ack_payload.get("error_message") or f"Controller reported still running: {ack_payload}"
                     self._status = ActuatorStatus.EXECUTING if is_running is True else ActuatorStatus.UNKNOWN
                 else:
-                    is_ok = (is_stopped is True) or (raw_status in ("STOPPED", "IDLE")) or (raw_status in ("OK", "ACK") and is_running is not True)
+                    is_ok = (is_stopped is True) or (raw_status in ("STOPPED", "IDLE")) or (raw_status in ("OK", "ACK") and is_running is False and is_stopped is not False)
                     if is_ok:
                         success = True
                         err_code = ""
                         err_msg = ""
-                        if has_fault:
+                        if has_fault or getattr(self, "_fault_latched", False):
                             self._status = ActuatorStatus.ERROR
                         else:
                             self._status = ActuatorStatus.ONLINE
@@ -414,7 +432,7 @@ class MQTTActuator(IrrigationActuator):
                         success = False
                         err_code = ack_payload.get("error_code") or "STOP_REJECTED"
                         err_msg = ack_payload.get("error_message") or f"Controller rejected STOP: {ack_payload}"
-                        if has_fault:
+                        if has_fault or getattr(self, "_fault_latched", False):
                             self._status = ActuatorStatus.ERROR
                         else:
                             self._status = ActuatorStatus.UNKNOWN
@@ -447,7 +465,8 @@ class MQTTActuator(IrrigationActuator):
                 retry_recommended=True,
             )
         finally:
-            self._pending_acks.pop(request_id, None)
+            if self._pending_acks.get(request_id) is ack_future:
+                self._pending_acks.pop(request_id, None)
 
     # ================================================================
     # Status & Emergency
@@ -468,7 +487,7 @@ class MQTTActuator(IrrigationActuator):
         fault_code = payload.get("fault_code", 0)
 
         # Fault / Error check
-        if _has_fault(raw_status, fault_code):
+        if _has_fault(raw_status, fault_code) or getattr(self, "_fault_latched", False):
             return ActuatorStatus.ERROR
 
         # Detect contradictions:
@@ -476,12 +495,12 @@ class MQTTActuator(IrrigationActuator):
         if is_running is True and is_stopped is True:
             return ActuatorStatus.UNKNOWN
 
-        # 2. Status says running/executing/busy, but stopped is True
-        if raw_status in ("RUNNING", "EXECUTING", "BUSY") and is_stopped is True:
+        # 2. Status says running/executing/busy, but stopped is True or running is False
+        if raw_status in ("RUNNING", "EXECUTING", "BUSY") and (is_stopped is True or is_running is False):
             return ActuatorStatus.UNKNOWN
 
-        # 3. Status says stopped/idle, but running is True
-        if raw_status in ("STOPPED", "IDLE") and is_running is True:
+        # 3. Status says stopped/idle, but running is True or stopped is False
+        if raw_status in ("STOPPED", "IDLE") and (is_running is True or is_stopped is False):
             return ActuatorStatus.UNKNOWN
 
         # Positive execution flag
@@ -507,7 +526,7 @@ class MQTTActuator(IrrigationActuator):
 
         # Generic OK / ACK status without explicit stopped / running
         if raw_status in ("OK", "ACK"):
-            if is_running is False and is_stopped is not False:
+            if is_running is False and is_stopped is True:
                 return ActuatorStatus.ONLINE
             return ActuatorStatus.UNKNOWN
 
@@ -537,7 +556,8 @@ class MQTTActuator(IrrigationActuator):
                         qos=self._qos,
                     )
                 except Exception as pub_exc:
-                    self._pending_acks.pop(req_id, None)
+                    if self._pending_acks.get(req_id) is ack_future:
+                        self._pending_acks.pop(req_id, None)
                     logger.error("MQTT query_status publish exception for %s: %s", self.device_id, pub_exc)
                     self._status = ActuatorStatus.UNKNOWN
                     return ActuatorStatus.UNKNOWN
@@ -550,7 +570,8 @@ class MQTTActuator(IrrigationActuator):
                     self._status = ActuatorStatus.UNKNOWN
                     return ActuatorStatus.UNKNOWN
             finally:
-                self._pending_acks.pop(req_id, None)
+                if self._pending_acks.get(req_id) is ack_future:
+                    self._pending_acks.pop(req_id, None)
 
         return self._status
 
@@ -593,7 +614,8 @@ class MQTTActuator(IrrigationActuator):
                 rc0 = getattr(r0, "rc", -1) if r0 is not None else -1
                 rc1 = getattr(r1, "rc", -1) if r1 is not None else -1
                 if rc0 != 0 and rc1 != 0:
-                    self._pending_acks.pop(request_id, None)
+                    if self._pending_acks.get(request_id) is ack_future:
+                        self._pending_acks.pop(request_id, None)
                     logger.error("🚨 EMERGENCY STOP publish failed on both QoS 0 (rc=%s) and QoS 1 (rc=%s)", rc0, rc1)
                     return CommandResult(
                         command_id=f"ESTOP-{request_id[:8]}",
@@ -604,7 +626,8 @@ class MQTTActuator(IrrigationActuator):
                         error_message=f"MQTT publish failed: rc0={rc0}, rc1={rc1}",
                     )
             except Exception as pub_exc:
-                self._pending_acks.pop(request_id, None)
+                if self._pending_acks.get(request_id) is ack_future:
+                    self._pending_acks.pop(request_id, None)
                 logger.error("🚨 EMERGENCY STOP publish exception on %s: %s", self.device_id, pub_exc)
                 return CommandResult(
                     command_id=f"ESTOP-{request_id[:8]}",
@@ -626,6 +649,29 @@ class MQTTActuator(IrrigationActuator):
                 raw_status = str(ack_payload.get("status", "")).upper()
                 fault_code = ack_payload.get("fault_code", 0)
                 has_fault = _has_fault(raw_status, fault_code)
+
+                is_contradiction = (
+                    (is_running is True and is_stopped is True)
+                    or (raw_status in ("RUNNING", "EXECUTING", "BUSY") and (is_stopped is True or is_running is False))
+                    or (raw_status in ("STOPPED", "IDLE") and (is_running is True or is_stopped is False))
+                )
+                if has_fault:
+                    self._fault_latched = True
+
+                if is_contradiction:
+                    logger.error(
+                        "🚨 EMERGENCY STOP rejected due to contradictory status/flags: status=%s, running=%s, stopped=%s on %s (payload=%s)",
+                        raw_status, is_running, is_stopped, self.device_id, ack_payload
+                    )
+                    self._status = ActuatorStatus.UNKNOWN
+                    return CommandResult(
+                        command_id=f"ESTOP-{request_id[:8]}",
+                        device_id=self.device_id,
+                        success=False,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        error_code="CONTRADICTORY_STATUS",
+                        error_message=f"Controller reported contradictory status/flags: status={raw_status}, running={is_running}, stopped={is_stopped}",
+                    )
 
                 if is_running is True or is_stopped is False:
                     logger.error(
@@ -656,7 +702,7 @@ class MQTTActuator(IrrigationActuator):
                         error_message=f"Controller rejected STOP: {ack_payload}",
                     )
 
-                if has_fault:
+                if has_fault or getattr(self, "_fault_latched", False):
                     self._status = ActuatorStatus.ERROR
                 else:
                     self._status = ActuatorStatus.ONLINE
@@ -688,4 +734,5 @@ class MQTTActuator(IrrigationActuator):
                 error_message=str(exc),
             )
         finally:
-            self._pending_acks.pop(request_id, None)
+            if self._pending_acks.get(request_id) is ack_future:
+                self._pending_acks.pop(request_id, None)

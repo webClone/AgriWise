@@ -343,7 +343,15 @@ class IrrigationActuator(ABC):
             )
 
         if result.success:
-            if getattr(self, "_status", None) != ActuatorStatus.ERROR:
+            has_fault = (
+                getattr(self, "_fault_latched", False)
+                or getattr(self, "_status", None) == ActuatorStatus.ERROR
+                or bool(getattr(result, "fault_code", 0))
+                or getattr(result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR")
+            )
+            if has_fault:
+                self._status = ActuatorStatus.ERROR
+            else:
                 self._status = ActuatorStatus.ONLINE
             self._active_command = None
             self._pending_command = None
@@ -541,7 +549,8 @@ class IrrigationActuator(ABC):
                     fence_ok = False
 
                 if fence_ok:
-                    self._status = ActuatorStatus.ONLINE
+                    has_fault = getattr(self, "_fault_latched", False) or bool(fence_res and getattr(fence_res, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR"))
+                    self._status = ActuatorStatus.ERROR if has_fault else ActuatorStatus.ONLINE
                     self._active_command = None
                     err_code = "PREEMPTED_BY_STOP"
                     err_msg = "Command was preempted by STOP or cancellation"
@@ -657,7 +666,15 @@ class IrrigationActuator(ABC):
                     if self._status != ActuatorStatus.ONLINE:
                         self._status = ActuatorStatus.ERROR
             elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
-                if getattr(self, "_status", None) != ActuatorStatus.ERROR:
+                has_fault = (
+                    getattr(self, "_fault_latched", False)
+                    or getattr(self, "_status", None) == ActuatorStatus.ERROR
+                    or bool(getattr(result, "fault_code", 0))
+                    or getattr(result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR")
+                )
+                if has_fault:
+                    self._status = ActuatorStatus.ERROR
+                else:
                     self._status = ActuatorStatus.ONLINE
                 self._active_command = None
             elif command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):

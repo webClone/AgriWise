@@ -24,6 +24,7 @@ Production-grade with:
 """
 
 import logging
+import math
 import hashlib
 import json
 from typing import List, Dict, Any, Optional
@@ -287,6 +288,32 @@ def run_layer8(l8_input, forecast=None, start_date=None):
     ranker = ActionRankingEngine()
     action_cards = ranker.rank_actions(l8_input)
     logger.debug("Step 1/12 RANK: %d action cards", len(action_cards))
+
+    # Normalize weather forecast numeric fields before engines
+    normalized_forecast = []
+    if forecast:
+        for day in forecast:
+            if isinstance(day, dict):
+                norm_day = dict(day)
+                for num_key in (
+                    "temp_min", "temp_max", "t_min_c", "t_max_c",
+                    "wind_speed", "wind_gust", "wind_kmh",
+                    "precip_mm", "precipitation", "precipitation_mm",
+                    "rh_min_pct", "rh_max_pct", "et0_mm"
+                ):
+                    v = norm_day.get(num_key)
+                    if v is not None and not isinstance(v, bool):
+                        if isinstance(v, str):
+                            try:
+                                fv = float(v.strip())
+                                if math.isfinite(fv):
+                                    norm_day[num_key] = fv
+                            except (ValueError, TypeError):
+                                pass
+                normalized_forecast.append(norm_day)
+            else:
+                normalized_forecast.append(day)
+        forecast = normalized_forecast
 
     # ---------------------------------------------------------------
     # Step 2: Phenology-aware dosing (BBCH rate scaling)
