@@ -939,6 +939,51 @@ def _deserialize_veg_state(data: Any) -> Optional[Any]:
         return None
 
 
+def _serialize_soil_observation(so: Any) -> Optional[dict]:
+    if so is None:
+        return None
+    try:
+        import dataclasses
+        if dataclasses.is_dataclass(so):
+            d = dataclasses.asdict(so)
+            if "timestamp" in d and isinstance(d["timestamp"], (datetime.datetime, datetime.date)):
+                d["timestamp"] = d["timestamp"].isoformat()
+            return d
+        elif isinstance(so, dict):
+            d = dict(so)
+            if "timestamp" in d and isinstance(d["timestamp"], (datetime.datetime, datetime.date)):
+                d["timestamp"] = d["timestamp"].isoformat()
+            return d
+        return None
+    except Exception:
+        return None
+
+
+def _deserialize_soil_observation(data: Any) -> Optional[Any]:
+    if not isinstance(data, dict):
+        return None
+    try:
+        from layer3_water.contracts.assimilation_state import SoilObservationVector
+        ts_val = data.get("timestamp")
+        if isinstance(ts_val, str):
+            ts_val = datetime.datetime.fromisoformat(ts_val)
+        known_fields = {
+            "soil_probe_moisture_profile",
+            "satellite_surface_moisture_m3_m3",
+            "canopy_cooling_differential_c",
+            "flux_tower_eta_mm",
+            "observation_uncertainties",
+            "provenance_sources",
+        }
+        kwargs = {k: v for k, v in data.items() if k in known_fields}
+        return SoilObservationVector(
+            timestamp=ts_val or datetime.datetime.now(timezone.utc),
+            **kwargs,
+        )
+    except Exception:
+        return None
+
+
 def _execute_canonical_water_engine(
     inputs: Any,
     l1_output: Any = None,
@@ -1181,28 +1226,36 @@ def _execute_canonical_water_engine(
         parameter_epoch = str(getattr(inputs, "parameter_epoch", None) or op_ctx.get("parameter_epoch") or "v1")
         weather_ensemble = op_ctx.get("weather_ensemble") or getattr(inputs, "weather_ensemble", None)
         soil_type = op_ctx.get("soil_type") or getattr(inputs, "soil_type", "loam") or "loam"
-        plot_scope_key = (tenant_id, namespace, plot_id)
+        plot_scope_key = (tenant_id, namespace, plot_id, cycle_id, geometry_version)
+        legacy_scope_key = (tenant_id, namespace, plot_id)
 
         # 3. Persistent registries and event tracking
         plot_hist = _PLOT_WATER_STATE_HISTORY.setdefault(plot_scope_key, {})
+        _PLOT_WATER_STATE_HISTORY[legacy_scope_key] = plot_hist
         _PLOT_WATER_STATE_HISTORY[plot_id] = plot_hist
 
         plot_events = _PLOT_MANAGEMENT_EVENTS.setdefault(plot_scope_key, {})
+        _PLOT_MANAGEMENT_EVENTS[legacy_scope_key] = plot_events
         _PLOT_MANAGEMENT_EVENTS[plot_id] = plot_events
 
         plot_veg_hist = _PLOT_VEGETATION_HISTORY.setdefault(plot_scope_key, {})
+        _PLOT_VEGETATION_HISTORY[legacy_scope_key] = plot_veg_hist
         _PLOT_VEGETATION_HISTORY[plot_id] = plot_veg_hist
 
         plot_so_hist = _PLOT_SOIL_OBS_HISTORY.setdefault(plot_scope_key, {})
+        _PLOT_SOIL_OBS_HISTORY[legacy_scope_key] = plot_so_hist
         _PLOT_SOIL_OBS_HISTORY[plot_id] = plot_so_hist
 
         plot_init_hist = _PLOT_INITIAL_STATE_HISTORY.setdefault(plot_scope_key, {})
+        _PLOT_INITIAL_STATE_HISTORY[legacy_scope_key] = plot_init_hist
         _PLOT_INITIAL_STATE_HISTORY[plot_id] = plot_init_hist
 
         plot_withdrawn_so = _PLOT_WITHDRAWN_SOIL_OBS.setdefault(plot_scope_key, set())
+        _PLOT_WITHDRAWN_SOIL_OBS[legacy_scope_key] = plot_withdrawn_so
         _PLOT_WITHDRAWN_SOIL_OBS[plot_id] = plot_withdrawn_so
 
         plot_withdrawn_veg = _PLOT_WITHDRAWN_VEG.setdefault(plot_scope_key, set())
+        _PLOT_WITHDRAWN_VEG[legacy_scope_key] = plot_withdrawn_veg
         _PLOT_WITHDRAWN_VEG[plot_id] = plot_withdrawn_veg
 
         # Cold restart recovery and head-cache binding (R09):
@@ -1225,6 +1278,7 @@ def _execute_canonical_water_engine(
                 ram_step = _PLOT_CURRENT_STEP.get(plot_scope_key, "")
 
                 durable_head_id = latest_cp.get("checkpoint_id") if latest_cp else None
+                expected_head = durable_head_id
                 durable_pub_seq = latest_cp.get("sequence", 0) if latest_cp else 0
                 durable_step = latest_cp.get("payload", {}).get("step_key", "") if latest_cp else ""
 
@@ -1247,103 +1301,114 @@ def _execute_canonical_water_engine(
                         plot_withdrawn_so.clear()
                         plot_withdrawn_veg.clear()
                         _PLOT_WATER_STATE_MEMORY.pop(plot_scope_key, None)
+                        _PLOT_WATER_STATE_MEMORY.pop(legacy_scope_key, None)
                         _PLOT_WATER_STATE_MEMORY.pop(plot_id, None)
 
                     _PLOT_CURRENT_HEAD[plot_scope_key] = durable_head_id
+                    _PLOT_CURRENT_HEAD[legacy_scope_key] = durable_head_id
                     _PLOT_CURRENT_HEAD[plot_id] = durable_head_id
                     _PLOT_CURRENT_SEQUENCE[plot_scope_key] = durable_pub_seq
+                    _PLOT_CURRENT_SEQUENCE[legacy_scope_key] = durable_pub_seq
                     _PLOT_CURRENT_SEQUENCE[plot_id] = durable_pub_seq
                     _PLOT_CURRENT_STEP[plot_scope_key] = durable_step
+                    _PLOT_CURRENT_STEP[legacy_scope_key] = durable_step
 
             if latest_cp and isinstance(latest_cp.get("payload"), dict):
-                expected_head = latest_cp.get("checkpoint_id")
                 cp_payload = latest_cp["payload"]
-                cp_step_key = cp_payload.get("step_key")
+                cp_cycle = cp_payload.get("cycle_id", "default_cycle")
+                cp_geom = cp_payload.get("geometry_version", "default_geom")
+                # Scope isolation: do not hydrate cross-cycle or cross-geometry checkpoint
+                if (cp_cycle == cycle_id or cp_cycle == "default_cycle" and cycle_id == "default_cycle") and (cp_geom == geometry_version or cp_geom == "default_geom" and geometry_version == "default_geom"):
+                    expected_head = latest_cp.get("checkpoint_id")
+                    cp_step_key = cp_payload.get("step_key")
 
-                if not plot_hist:
-                    if cp_step_key == day_key:
-                        # V07: For cold replay of the same day, hydrate initial prior before that day was solved
-                        init_soil_raw = cp_payload.get("initial_soil_water")
-                        init_mem_raw = cp_payload.get("initial_hydraulic_memory")
-                        if not init_soil_raw and "history_summary" in cp_payload:
-                            h_entry = cp_payload["history_summary"].get(day_key, {})
+                    if not plot_hist:
+                        if cp_step_key == day_key:
+                            # V07: For cold replay of the same day, hydrate initial prior before that day was solved
+                            init_soil_raw = cp_payload.get("initial_soil_water")
+                            init_mem_raw = cp_payload.get("initial_hydraulic_memory")
+                            if not init_soil_raw and "history_summary" in cp_payload:
+                                h_entry = cp_payload["history_summary"].get(day_key, {})
+                                init_soil_raw = h_entry.get("initial_soil_water")
+                                init_mem_raw = h_entry.get("initial_hydraulic_memory")
+                            init_soil = _deserialize_soil_water(init_soil_raw) if init_soil_raw else None
+                            init_mem = _deserialize_hydraulic_memory(init_mem_raw) if init_mem_raw else None
+                            if init_soil:
+                                _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (init_soil, init_mem)
+                                _PLOT_WATER_STATE_MEMORY[plot_id] = (init_soil, init_mem)
+                                plot_init_hist[day_key] = (init_soil, init_mem or HydraulicStressMemoryState())
+                        elif "history_summary" in cp_payload and day_key in cp_payload["history_summary"]:
+                            # C10: For historical cold replay (day_key < cp_step_key), hydrate initial prior of that day, NEVER future posterior!
+                            h_entry = cp_payload["history_summary"][day_key]
                             init_soil_raw = h_entry.get("initial_soil_water")
                             init_mem_raw = h_entry.get("initial_hydraulic_memory")
-                        init_soil = _deserialize_soil_water(init_soil_raw) if init_soil_raw else None
-                        init_mem = _deserialize_hydraulic_memory(init_mem_raw) if init_mem_raw else None
-                        if init_soil:
-                            _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (init_soil, init_mem)
-                            _PLOT_WATER_STATE_MEMORY[plot_id] = (init_soil, init_mem)
-                            plot_init_hist[day_key] = (init_soil, init_mem or HydraulicStressMemoryState())
-                    elif "history_summary" in cp_payload and day_key in cp_payload["history_summary"]:
-                        # C10: For historical cold replay (day_key < cp_step_key), hydrate initial prior of that day, NEVER future posterior!
-                        h_entry = cp_payload["history_summary"][day_key]
-                        init_soil_raw = h_entry.get("initial_soil_water")
-                        init_mem_raw = h_entry.get("initial_hydraulic_memory")
-                        init_soil = _deserialize_soil_water(init_soil_raw) if init_soil_raw else None
-                        init_mem = _deserialize_hydraulic_memory(init_mem_raw) if init_mem_raw else None
-                        if init_soil:
-                            _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (init_soil, init_mem)
-                            _PLOT_WATER_STATE_MEMORY[plot_id] = (init_soil, init_mem)
-                            plot_init_hist[day_key] = (init_soil, init_mem or HydraulicStressMemoryState())
-                    elif cp_step_key and day_key > cp_step_key:
-                        # Moving forward in time: starting prior is the latest committed posterior
-                        if "soil_water" in cp_payload and isinstance(cp_payload["soil_water"], dict):
-                            hyd_soil = _deserialize_soil_water(cp_payload["soil_water"])
-                            hyd_mem = _deserialize_hydraulic_memory(cp_payload.get("hydraulic_memory", {}))
-                            if hyd_soil:
-                                _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (hyd_soil, hyd_mem)
-                                _PLOT_WATER_STATE_MEMORY[plot_id] = (hyd_soil, hyd_mem)
-                    if "events" in cp_payload and isinstance(cp_payload["events"], dict):
-                        plot_events.update(cp_payload["events"])
-                    # R12: Canonical ISO string representation for withdrawals
-                    if "withdrawn_soil_dates" in cp_payload and isinstance(cp_payload["withdrawn_soil_dates"], list):
-                        for sd in cp_payload["withdrawn_soil_dates"]:
-                            plot_withdrawn_so.add(str(sd))
-                    if "withdrawn_veg_dates" in cp_payload and isinstance(cp_payload["withdrawn_veg_dates"], list):
-                        for vd in cp_payload["withdrawn_veg_dates"]:
-                            plot_withdrawn_veg.add(str(vd))
-                    if "history_summary" in cp_payload and isinstance(cp_payload["history_summary"], dict):
-                        for h_key, h_data in cp_payload["history_summary"].items():
-                            if isinstance(h_data, dict):
-                                step_soil = _deserialize_soil_water(h_data.get("soil_water"))
-                                step_mem = _deserialize_hydraulic_memory(h_data.get("hydraulic_memory"))
-                                step_init_soil = _deserialize_soil_water(h_data.get("initial_soil_water"))
-                                step_init_mem = _deserialize_hydraulic_memory(h_data.get("initial_hydraulic_memory"))
-                                step_veg = _deserialize_veg_state(h_data.get("vegetation"))
-                                if step_init_soil:
-                                    plot_init_hist[h_key] = (step_init_soil, step_init_mem or HydraulicStressMemoryState())
-                                if step_veg:
-                                    plot_veg_hist[h_key] = step_veg
-                                if h_key < day_key and h_key not in plot_hist:
-                                    ts_raw = h_data.get("timestamp")
-                                    if ts_raw:
-                                        try:
-                                            ts_obj = datetime.datetime.fromisoformat(ts_raw)
-                                        except Exception:
+                            init_soil = _deserialize_soil_water(init_soil_raw) if init_soil_raw else None
+                            init_mem = _deserialize_hydraulic_memory(init_mem_raw) if init_mem_raw else None
+                            if init_soil:
+                                _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (init_soil, init_mem)
+                                _PLOT_WATER_STATE_MEMORY[plot_id] = (init_soil, init_mem)
+                                plot_init_hist[day_key] = (init_soil, init_mem or HydraulicStressMemoryState())
+                        elif cp_step_key and day_key > cp_step_key:
+                            # Moving forward in time: starting prior is the latest committed posterior
+                            if "soil_water" in cp_payload and isinstance(cp_payload["soil_water"], dict):
+                                hyd_soil = _deserialize_soil_water(cp_payload["soil_water"])
+                                hyd_mem = _deserialize_hydraulic_memory(cp_payload.get("hydraulic_memory", {}))
+                                if hyd_soil:
+                                    _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (hyd_soil, hyd_mem)
+                                    _PLOT_WATER_STATE_MEMORY[plot_id] = (hyd_soil, hyd_mem)
+                        if "events" in cp_payload and isinstance(cp_payload["events"], dict):
+                            plot_events.update(cp_payload["events"])
+                        # R12: Canonical ISO string representation for withdrawals
+                        if "withdrawn_soil_dates" in cp_payload and isinstance(cp_payload["withdrawn_soil_dates"], list):
+                            for sd in cp_payload["withdrawn_soil_dates"]:
+                                plot_withdrawn_so.add(str(sd))
+                        if "withdrawn_veg_dates" in cp_payload and isinstance(cp_payload["withdrawn_veg_dates"], list):
+                            for vd in cp_payload["withdrawn_veg_dates"]:
+                                plot_withdrawn_veg.add(str(vd))
+                        if "history_summary" in cp_payload and isinstance(cp_payload["history_summary"], dict):
+                            for h_key, h_data in cp_payload["history_summary"].items():
+                                if isinstance(h_data, dict):
+                                    step_soil = _deserialize_soil_water(h_data.get("soil_water"))
+                                    step_mem = _deserialize_hydraulic_memory(h_data.get("hydraulic_memory"))
+                                    step_init_soil = _deserialize_soil_water(h_data.get("initial_soil_water"))
+                                    step_init_mem = _deserialize_hydraulic_memory(h_data.get("initial_hydraulic_memory"))
+                                    step_veg = _deserialize_veg_state(h_data.get("vegetation"))
+                                    step_so = _deserialize_soil_observation(h_data.get("soil_observations"))
+                                    if step_init_soil:
+                                        plot_init_hist[h_key] = (step_init_soil, step_init_mem or HydraulicStressMemoryState())
+                                    if step_veg:
+                                        plot_veg_hist[h_key] = step_veg
+                                    if step_so:
+                                        plot_so_hist[h_key] = step_so
+                                    if h_key < day_key and h_key not in plot_hist:
+                                        ts_raw = h_data.get("timestamp")
+                                        if ts_raw:
+                                            try:
+                                                ts_obj = datetime.datetime.fromisoformat(ts_raw)
+                                            except Exception:
+                                                ts_obj = ts
+                                        else:
                                             ts_obj = ts
-                                    else:
-                                        ts_obj = ts
-                                    plot_hist[h_key] = {
-                                        "timestamp": ts_obj,
-                                        "soil_water": step_soil,
-                                        "hydraulic_memory": step_mem,
-                                        "water_state": None,
-                                        "feedback": None,
-                                        "weather": h_data.get("weather", {}),
-                                        "irrigation": float(h_data.get("irrigation", 0.0)),
-                                        "vegetation_state": step_veg,
-                                        "lai": getattr(step_veg, "lai", 0.0) if step_veg else 0.0,
-                                        "fvc": getattr(step_veg, "fvc", 0.0) if step_veg else 0.0,
-                                        "root_depth": getattr(step_veg, "root_depth_proxy_m", 0.4) if step_veg else 0.4,
-                                        "soil_observations": None,
-                                        "initial_soil_water": step_init_soil,
-                                        "initial_hydraulic_memory": step_init_mem,
-                                        "evidence_hash": h_data.get("evidence_hash"),
-                                        "interval_hash": h_data.get("interval_hash"),
-                                        "predecessor_hash": h_data.get("predecessor_hash"),
-                                        "step_forcing_hash": h_data.get("step_forcing_hash"),
-                                    }
+                                        plot_hist[h_key] = {
+                                            "timestamp": ts_obj,
+                                            "soil_water": step_soil,
+                                            "hydraulic_memory": step_mem,
+                                            "water_state": None,
+                                            "feedback": None,
+                                            "weather": h_data.get("weather", {}),
+                                            "irrigation": float(h_data.get("irrigation", 0.0)),
+                                            "vegetation_state": step_veg,
+                                            "lai": getattr(step_veg, "lai", 0.0) if step_veg else 0.0,
+                                            "fvc": getattr(step_veg, "fvc", 0.0) if step_veg else 0.0,
+                                            "root_depth": getattr(step_veg, "root_depth_proxy_m", 0.4) if step_veg else 0.4,
+                                            "soil_observations": step_so,
+                                            "initial_soil_water": step_init_soil,
+                                            "initial_hydraulic_memory": step_init_mem,
+                                            "evidence_hash": h_data.get("evidence_hash"),
+                                            "interval_hash": h_data.get("interval_hash"),
+                                            "predecessor_hash": h_data.get("predecessor_hash"),
+                                            "step_forcing_hash": h_data.get("step_forcing_hash"),
+                                        }
             else:
                 head_rec = cw_svc._read(cw_svc._hydraulic_head_path(plot_id, tenant_id, namespace))
                 expected_head = head_rec.get("head_hash") or head_rec.get("latest_checkpoint_id")
@@ -1398,13 +1463,16 @@ def _execute_canonical_water_engine(
                         winner_payload = cur_latest["payload"]
                         winner_seq = cur_latest.get("sequence", 0)
                         _PLOT_CURRENT_HEAD[plot_scope_key] = cur_head
+                        _PLOT_CURRENT_HEAD[legacy_scope_key] = cur_head
                         _PLOT_CURRENT_HEAD[plot_id] = cur_head
                         _PLOT_CURRENT_SEQUENCE[plot_scope_key] = winner_seq
+                        _PLOT_CURRENT_SEQUENCE[legacy_scope_key] = winner_seq
                         _PLOT_CURRENT_SEQUENCE[plot_id] = winner_seq
                         winner_soil = _deserialize_soil_water(winner_payload.get("soil_water"))
                         winner_mem = _deserialize_hydraulic_memory(winner_payload.get("hydraulic_memory"))
                         if winner_soil:
                             _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (winner_soil, winner_mem)
+                            _PLOT_WATER_STATE_MEMORY[legacy_scope_key] = (winner_soil, winner_mem)
                             _PLOT_WATER_STATE_MEMORY[plot_id] = (winner_soil, winner_mem)
                         if "events" in winner_payload and isinstance(winner_payload["events"], dict):
                             plot_events.clear()
@@ -1484,21 +1552,27 @@ def _execute_canonical_water_engine(
                 _PLOT_WITHDRAWN_VEG[plot_id] = plot_withdrawn_veg
                 if snapshot_mem_scope is not None:
                     _PLOT_WATER_STATE_MEMORY[plot_scope_key] = snapshot_mem_scope
+                    _PLOT_WATER_STATE_MEMORY[legacy_scope_key] = snapshot_mem_scope
                     _PLOT_WATER_STATE_MEMORY[plot_id] = snapshot_mem_scope
                 else:
                     _PLOT_WATER_STATE_MEMORY.pop(plot_scope_key, None)
+                    _PLOT_WATER_STATE_MEMORY.pop(legacy_scope_key, None)
                     _PLOT_WATER_STATE_MEMORY.pop(plot_id, None)
                 if snapshot_head is not None:
                     _PLOT_CURRENT_HEAD[plot_scope_key] = snapshot_head
+                    _PLOT_CURRENT_HEAD[legacy_scope_key] = snapshot_head
                     _PLOT_CURRENT_HEAD[plot_id] = snapshot_head
                 else:
                     _PLOT_CURRENT_HEAD.pop(plot_scope_key, None)
+                    _PLOT_CURRENT_HEAD.pop(legacy_scope_key, None)
                     _PLOT_CURRENT_HEAD.pop(plot_id, None)
                 if snapshot_seq is not None:
                     _PLOT_CURRENT_SEQUENCE[plot_scope_key] = snapshot_seq
+                    _PLOT_CURRENT_SEQUENCE[legacy_scope_key] = snapshot_seq
                     _PLOT_CURRENT_SEQUENCE[plot_id] = snapshot_seq
                 else:
                     _PLOT_CURRENT_SEQUENCE.pop(plot_scope_key, None)
+                    _PLOT_CURRENT_SEQUENCE.pop(legacy_scope_key, None)
                     _PLOT_CURRENT_SEQUENCE.pop(plot_id, None)
 
         raw_events = (
@@ -1512,6 +1586,16 @@ def _execute_canonical_water_engine(
         retained_weather_map: Dict[str, dict] = {}
         retained_veg_map: Dict[str, Any] = {}
         retained_soil_obs_map: Dict[str, Any] = {}
+        for k, v in candidate_so.items():
+            if v is not None and k not in candidate_withdrawn_so:
+                retained_soil_obs_map[k] = v
+        for k, v in plot_hist.items():
+            if isinstance(v, dict):
+                so_val = v.get("soil_observations")
+                if so_val is not None and k not in candidate_withdrawn_so:
+                    retained_soil_obs_map.setdefault(k, so_val)
+                    candidate_so.setdefault(k, so_val)
+
         retained_init_soil_map: Dict[str, Any] = {}
         retained_init_mem_map: Dict[str, Any] = {}
         retained_events_map: Dict[str, Any] = {}
@@ -1579,13 +1663,30 @@ def _execute_canonical_water_engine(
                     continue
 
                 prev_d = existing_ev.get("date")
-                if prev_d and prev_d != target_d:
-                    explicit_event_dates.add(prev_d)
-                    retained_irrigation_map.pop(prev_d.strftime("%Y-%m-%d"), None)
+                if prev_d is not None:
+                    if isinstance(prev_d, (datetime.date, datetime.datetime)):
+                        prev_d_date = prev_d if isinstance(prev_d, datetime.date) else prev_d.date()
+                        prev_d_str = prev_d.strftime("%Y-%m-%d")
+                    else:
+                        prev_d_str = str(prev_d)[:10]
+                        try:
+                            prev_d_date = datetime.date.fromisoformat(prev_d_str)
+                        except Exception:
+                            prev_d_date = None
+                    if prev_d_date and prev_d_date != target_d:
+                        explicit_event_dates.add(prev_d_date)
+                        retained_irrigation_map.pop(prev_d_str, None)
 
-            explicit_event_dates.add(target_d)
+            if isinstance(target_d, (datetime.date, datetime.datetime)):
+                target_d_str = target_d.strftime("%Y-%m-%d")
+                target_d_date = target_d if isinstance(target_d, datetime.date) else target_d.date()
+            else:
+                target_d_str = str(target_d)[:10]
+                target_d_date = datetime.date.fromisoformat(target_d_str)
+
+            explicit_event_dates.add(target_d_date)
             if is_deletion:
-                retained_irrigation_map.pop(target_d.strftime("%Y-%m-%d"), None)
+                retained_irrigation_map.pop(target_d_str, None)
 
             candidate_events[ev_id] = {
                 "id": ev_id,
@@ -2113,8 +2214,12 @@ def _execute_canonical_water_engine(
 
         # Coherent withdrawal invalidation: any withdrawn soil date directly invalidates the trajectory from that day onward
         if withdrawn_soil_dates:
-            earliest_withdrawn = min(withdrawn_soil_dates).strftime("%Y-%m-%d")
-            if earliest_invalid_day is None or earliest_withdrawn < earliest_invalid_day:
+            earliest_withdrawn = None
+            for wsd in withdrawn_soil_dates:
+                wsd_str = wsd.strftime("%Y-%m-%d") if isinstance(wsd, (datetime.date, datetime.datetime)) else str(wsd)[:10]
+                if earliest_withdrawn is None or wsd_str < earliest_withdrawn:
+                    earliest_withdrawn = wsd_str
+            if earliest_withdrawn and (earliest_invalid_day is None or earliest_withdrawn < earliest_invalid_day):
                 earliest_invalid_day = earliest_withdrawn
 
         if earliest_invalid_day is not None:
@@ -2132,7 +2237,10 @@ def _execute_canonical_water_engine(
                     if "irrigation" in v and (k_d not in explicit_event_dates):
                         retained_irrigation_map[k] = v["irrigation"]
                     if "soil_observations" in v and (k_d not in supplied_soil_obs_dates) and (k not in candidate_withdrawn_so):
-                        retained_soil_obs_map[k] = v["soil_observations"]
+                        if v["soil_observations"] is not None:
+                            retained_soil_obs_map[k] = v["soil_observations"]
+                            if k not in candidate_so:
+                                candidate_so[k] = v["soil_observations"]
                     if "initial_soil_water" in v:
                         retained_init_soil_map[k] = v["initial_soil_water"]
                     if "initial_hydraulic_memory" in v:
@@ -2436,6 +2544,7 @@ def _execute_canonical_water_engine(
                                     h_soil = _deserialize_soil_water(h_data.get("soil_water"))
                                     h_mem = _deserialize_hydraulic_memory(h_data.get("hydraulic_memory"))
                                     h_veg = _deserialize_veg_state(h_data.get("vegetation"))
+                                    h_so = _deserialize_soil_observation(h_data.get("soil_observations"))
                                     ts_raw = h_data.get("timestamp")
                                     try:
                                         ts_obj = datetime.datetime.fromisoformat(ts_raw) if ts_raw else ts
@@ -2453,7 +2562,7 @@ def _execute_canonical_water_engine(
                                         "lai": getattr(h_veg, "lai", 0.0) if h_veg else 0.0,
                                         "fvc": getattr(h_veg, "fvc", 0.0) if h_veg else 0.0,
                                         "root_depth": getattr(h_veg, "root_depth_proxy_m", 0.4) if h_veg else 0.4,
-                                        "soil_observations": None,
+                                        "soil_observations": h_so,
                                         "initial_soil_water": _deserialize_soil_water(h_data.get("initial_soil_water")),
                                         "initial_hydraulic_memory": _deserialize_hydraulic_memory(h_data.get("initial_hydraulic_memory")),
                                         "evidence_hash": h_data.get("evidence_hash"),
@@ -2461,6 +2570,8 @@ def _execute_canonical_water_engine(
                                         "predecessor_hash": h_data.get("predecessor_hash"),
                                         "step_forcing_hash": h_data.get("step_forcing_hash"),
                                     }
+                                    if h_so:
+                                        candidate_so[h_key] = h_so
                         plot_hist.update(candidate_hist)
                         _PLOT_WATER_STATE_HISTORY[plot_id] = plot_hist
                         if candidate_veg:
@@ -2501,6 +2612,7 @@ def _execute_canonical_water_engine(
                     "hydraulic_memory": _serialize_hydraulic_memory(current_mem),
                     "initial_soil_water": _serialize_soil_water(candidate_init.get(day_key, (None, None))[0] or (plot_init_hist.get(day_key, (None, None))[0])),
                     "initial_hydraulic_memory": _serialize_hydraulic_memory(candidate_init.get(day_key, (None, None))[1] or (plot_init_hist.get(day_key, (None, None))[1])),
+                    "soil_observations": _serialize_soil_observation(candidate_so.get(day_key) or plot_so_hist.get(day_key) or soil_obs),
                     "step_forcing_hash": prev_step_hash,
                     "evidence_hash": last_water_state.metadata.evidence_hash if hasattr(last_water_state, "metadata") and hasattr(last_water_state.metadata, "evidence_hash") else prev_step_hash[:16],
                     "events": dict(candidate_events),
@@ -2524,6 +2636,7 @@ def _execute_canonical_water_engine(
                             "irrigation": float(v.get("irrigation", 0.0)),
                             "weather": v.get("weather", {}),
                             "vegetation": _serialize_veg_state(v.get("vegetation_state")),
+                            "soil_observations": _serialize_soil_observation(v.get("soil_observations")),
                         }
                         for k, v in merged_history.items()
                         if isinstance(v, dict) and "timestamp" in v
@@ -2576,13 +2689,17 @@ def _execute_canonical_water_engine(
                         _PLOT_INITIAL_STATE_HISTORY[plot_id] = plot_init_hist
 
                     _PLOT_WATER_STATE_MEMORY[plot_scope_key] = (current_soil, current_mem)
+                    _PLOT_WATER_STATE_MEMORY[legacy_scope_key] = (current_soil, current_mem)
                     _PLOT_WATER_STATE_MEMORY[plot_id] = (current_soil, current_mem)
                     _PLOT_CURRENT_HEAD[plot_scope_key] = cp_id
+                    _PLOT_CURRENT_HEAD[legacy_scope_key] = cp_id
                     _PLOT_CURRENT_HEAD[plot_id] = cp_id
                     pub_seq = latest_durable.get("sequence", 0) if latest_durable else cp_payload.get("sequence", len(merged_history))
                     _PLOT_CURRENT_SEQUENCE[plot_scope_key] = pub_seq
+                    _PLOT_CURRENT_SEQUENCE[legacy_scope_key] = pub_seq
                     _PLOT_CURRENT_SEQUENCE[plot_id] = pub_seq
                     _PLOT_CURRENT_STEP[plot_scope_key] = day_key
+                    _PLOT_CURRENT_STEP[legacy_scope_key] = day_key
             except ConcurrencyConflictError:
                 _rollback_ram_state()
                 raise

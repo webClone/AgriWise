@@ -6,6 +6,7 @@ salinity tolerance thresholds (ECe) to wash salts below the root zone.
 Based on FAO Irrigation and Drainage Paper 29 / 56.
 """
 import logging
+import math
 from layer8_prescriptive.schema import ActionCard, ActionType, RateRange
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,24 @@ class SalinityLeachingEngine:
         Returns:
             list of ActionCards with adjusted rates
         """
-        crop_threshold = _CROP_SALINITY_THRESHOLD.get(crop.lower(), 2.0)
+        if not action_cards:
+            return action_cards
+
+        try:
+            soil_salinity_ece = float(soil_salinity_ece)
+            if not math.isfinite(soil_salinity_ece) or soil_salinity_ece < 0.0:
+                return action_cards
+        except (TypeError, ValueError):
+            return action_cards
+
+        try:
+            water_salinity_ecw = float(water_salinity_ecw)
+            if not math.isfinite(water_salinity_ecw) or water_salinity_ecw <= 0.0:
+                water_salinity_ecw = 1.0
+        except (TypeError, ValueError):
+            water_salinity_ecw = 1.0
+
+        crop_threshold = _CROP_SALINITY_THRESHOLD.get(str(crop).lower(), 2.0)
         
         # If soil salinity is below threshold, no leaching requirement is needed
         if soil_salinity_ece <= crop_threshold:
@@ -60,13 +78,71 @@ class SalinityLeachingEngine:
             if card.action_type == ActionType.IRRIGATE and card.rate is not None:
                 orig = card.rate.recommended
                 hard_cap = card.rate.max_safe
-                raw_adj = round(orig * (1.0 + lr), 1)
-                adj = min(raw_adj, hard_cap) if (hard_cap is not None and hard_cap > 0) else raw_adj
+                min_safe = card.rate.min_safe
+
+                # Sanitize orig
+                if isinstance(orig, bool) or orig is None:
+                    safe_orig = 0.0
+                else:
+                    try:
+                        safe_orig = float(orig)
+                        if not math.isfinite(safe_orig):
+                            safe_orig = 0.0
+                    except (TypeError, ValueError):
+                        safe_orig = 0.0
+                safe_orig = max(0.0, safe_orig)
+
+                # Sanitize hard_cap
+                safe_cap = None
+                if hard_cap is not None:
+                    if isinstance(hard_cap, bool):
+                        safe_cap = 0.0
+                    else:
+                        try:
+                            f_cap = float(hard_cap)
+                            if not math.isfinite(f_cap) or f_cap < 0.0:
+                                safe_cap = 0.0
+                            else:
+                                safe_cap = f_cap
+                        except (TypeError, ValueError):
+                            safe_cap = 0.0
+
+                # Sanitize min_safe
+                safe_min = None
+                if min_safe is not None:
+                    if isinstance(min_safe, bool):
+                        safe_min = 0.0
+                    else:
+                        try:
+                            f_min = float(min_safe)
+                            if not math.isfinite(f_min) or f_min < 0.0:
+                                safe_min = 0.0
+                            else:
+                                safe_min = f_min
+                        except (TypeError, ValueError):
+                            safe_min = 0.0
+
+                # Inconsistent bounds: if min_safe > max_safe, clamp min_safe = safe_cap
+                if safe_min is not None and safe_cap is not None and safe_min > safe_cap:
+                    safe_min = safe_cap
+
+                raw_adj = round(safe_orig * (1.0 + lr), 1)
+
+                if safe_cap is not None and safe_cap >= 0.0:
+                    adj = max(0.0, min(raw_adj, safe_cap))
+                else:
+                    adj = max(0.0, raw_adj)
+
+                if safe_min is not None:
+                    adj = max(safe_min, adj)
+
+                if safe_cap is not None:
+                    adj = min(adj, safe_cap)
                 
                 card.rate = RateRange(
                     recommended=adj,
-                    min_safe=card.rate.min_safe,
-                    max_safe=hard_cap,
+                    min_safe=safe_min if card.rate.min_safe is not None else None,
+                    max_safe=safe_cap if card.rate.max_safe is not None else None,
                     unit=card.rate.unit
                 )
                 

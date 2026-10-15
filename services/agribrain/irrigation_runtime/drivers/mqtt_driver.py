@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -43,6 +44,63 @@ from irrigation_runtime.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _to_bool(val: Any) -> Optional[bool]:
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val != 0)
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ("true", "1", "yes", "t"):
+            return True
+        if v in ("false", "0", "no", "f"):
+            return False
+    return None
+
+
+def _has_fault(raw_status: str, fault_code: Any) -> bool:
+    if raw_status in ("ERROR", "FAULT", "FAILED"):
+        return True
+    if fault_code is not None and fault_code is not False:
+        try:
+            return float(fault_code) != 0.0
+        except (ValueError, TypeError):
+            return True
+    return False
+
+
+def _validate_timeout(val: Any, default: float = 0.1, max_limit: float = 300.0) -> float:
+    if isinstance(val, bool):
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f) or f <= 0:
+            return default
+        return min(f, max_limit)
+    except (ValueError, TypeError):
+        return default
+
+
+def _complete_future(future: asyncio.Future, result: Any) -> None:
+    if future.done():
+        return
+    try:
+        loop = future.get_loop()
+    except Exception:
+        loop = getattr(future, "_loop", None)
+    if loop and loop.is_running():
+        try:
+            curr_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            curr_loop = None
+        if curr_loop is loop:
+            future.set_result(result)
+        else:
+            loop.call_soon_threadsafe(lambda: future.set_result(result) if not future.done() else None)
+    else:
+        future.set_result(result)
 
 
 class MQTTActuator(IrrigationActuator):
@@ -185,6 +243,10 @@ class MQTTActuator(IrrigationActuator):
             logger.warning("Invalid MQTT payload from %s", msg.topic)
             return
 
+        if not isinstance(payload, dict):
+            logger.warning("Invalid non-dict MQTT payload from %s: %s", msg.topic, type(payload))
+            return
+
         if msg.topic == self._status_topic:
             self._handle_status(payload)
         elif msg.topic == self._telemetry_topic:
@@ -192,18 +254,23 @@ class MQTTActuator(IrrigationActuator):
 
     def _handle_status(self, payload: Dict[str, Any]):
         """Process actuator status response."""
+        if not isinstance(payload, dict):
+            return
         self._last_status_payload = payload
         self._last_heartbeat = datetime.now(timezone.utc)
 
         # Check for ACK to pending command
         request_id = payload.get("request_id")
-        if request_id and request_id in self._pending_acks:
+        if isinstance(request_id, str) and request_id in self._pending_acks:
             future = self._pending_acks.pop(request_id)
-            if not future.done():
-                future.set_result(payload)
+            _complete_future(future, payload)
 
     def _handle_telemetry(self, payload: Dict[str, Any]):
         """Process telemetry data from the actuator."""
+        if not isinstance(payload, dict):
+            return
+        if not isinstance(self._last_status_payload, dict):
+            self._last_status_payload = {}
         # Store latest telemetry for safety monitoring
         self._last_status_payload.update(payload)
 
@@ -252,16 +319,33 @@ class MQTTActuator(IrrigationActuator):
             mqtt_payload["pivot_end_deg"] = command.pivot_end_angle_deg
 
         # Create ACK future
-        ack_future: asyncio.Future = asyncio.get_event_loop().create_future()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        ack_future: asyncio.Future = loop.create_future()
         self._pending_acks[request_id] = ack_future
 
         # Publish command
         payload_json = json.dumps(mqtt_payload)
-        result = self._client.publish(
-            self._cmd_topic, payload_json, qos=self._qos
-        )
+        try:
+            result = self._client.publish(
+                self._cmd_topic, payload_json, qos=self._qos
+            )
+        except Exception as pub_exc:
+            self._pending_acks.pop(request_id, None)
+            logger.error("MQTT publish exception for %s: %s", self.device_id, pub_exc)
+            return CommandResult(
+                command_id=command.command_id,
+                device_id=self.device_id,
+                success=False,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                error_code="PUBLISH_FAILED",
+                error_message=f"MQTT publish exception: {pub_exc}",
+                retry_recommended=True,
+            )
 
-        if result.rc != 0:
+        if getattr(result, "rc", -1) != 0:
             self._pending_acks.pop(request_id, None)
             return CommandResult(
                 command_id=command.command_id,
@@ -269,37 +353,101 @@ class MQTTActuator(IrrigationActuator):
                 success=False,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 error_code="PUBLISH_FAILED",
-                error_message=f"MQTT publish failed with rc={result.rc}",
+                error_message=f"MQTT publish failed with rc={getattr(result, 'rc', -1)}",
                 retry_recommended=True,
             )
 
         logger.debug("Published to %s: %s", self._cmd_topic, payload_json)
 
+        cmd_timeout = _validate_timeout(self._timeout, default=5.0)
+
         # Wait for ACK with timeout
         try:
-            ack_payload = await asyncio.wait_for(ack_future, timeout=self._timeout)
+            ack_payload = await asyncio.wait_for(ack_future, timeout=cmd_timeout)
+            if not isinstance(ack_payload, dict):
+                ack_payload = {}
+            raw_status = str(ack_payload.get("status", "")).upper()
+            is_running = _to_bool(ack_payload.get("running"))
+            is_stopped = _to_bool(ack_payload.get("stopped"))
+            fault_code = ack_payload.get("fault_code", 0)
+            has_fault = _has_fault(raw_status, fault_code)
+
+            if command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
+                if is_stopped is True or is_running is False or has_fault:
+                    success = False
+                    err_code = ack_payload.get("error_code") or ("CONTROLLER_FAULT" if has_fault else "START_FAILED_NOT_RUNNING")
+                    err_msg = ack_payload.get("error_message") or f"Controller reported stopped or not running: {ack_payload}"
+                    if has_fault:
+                        self._status = ActuatorStatus.ERROR
+                    elif is_stopped is True:
+                        self._status = ActuatorStatus.ONLINE
+                    else:
+                        self._status = ActuatorStatus.UNKNOWN
+                else:
+                    success = (is_running is True) or (raw_status in ("OK", "RUNNING", "EXECUTING"))
+                    if success:
+                        self._status = ActuatorStatus.EXECUTING
+                        err_code = ""
+                        err_msg = ""
+                    else:
+                        err_code = ack_payload.get("error_code") or "START_REJECTED"
+                        err_msg = ack_payload.get("error_message") or f"Controller rejected START: {ack_payload}"
+                        self._status = ActuatorStatus.UNKNOWN
+
+            elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
+                if is_running is True or is_stopped is False:
+                    success = False
+                    err_code = ack_payload.get("error_code") or "STOP_FAILED_STILL_RUNNING"
+                    err_msg = ack_payload.get("error_message") or f"Controller reported still running: {ack_payload}"
+                    self._status = ActuatorStatus.EXECUTING if is_running is True else ActuatorStatus.UNKNOWN
+                else:
+                    is_ok = (is_stopped is True) or (raw_status in ("STOPPED", "IDLE")) or (raw_status in ("OK", "ACK") and is_running is not True)
+                    if is_ok:
+                        success = True
+                        err_code = ""
+                        err_msg = ""
+                        if has_fault:
+                            self._status = ActuatorStatus.ERROR
+                        else:
+                            self._status = ActuatorStatus.ONLINE
+                    else:
+                        success = False
+                        err_code = ack_payload.get("error_code") or "STOP_REJECTED"
+                        err_msg = ack_payload.get("error_message") or f"Controller rejected STOP: {ack_payload}"
+                        if has_fault:
+                            self._status = ActuatorStatus.ERROR
+                        else:
+                            self._status = ActuatorStatus.UNKNOWN
+            else:
+                success = (raw_status in ("OK", "ACK")) and not has_fault
+                err_code = ack_payload.get("error_code", "") if not success else ""
+                err_msg = ack_payload.get("error_message", "") if not success else ""
+                if has_fault:
+                    self._status = ActuatorStatus.ERROR
+
             return CommandResult(
                 command_id=command.command_id,
                 device_id=self.device_id,
-                success=ack_payload.get("status") == "OK",
+                success=success,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 actual_flow_rate_lpm=ack_payload.get("actual_flow_lpm", 0.0),
                 actual_pressure_bar=ack_payload.get("actual_pressure_bar", 0.0),
-                error_code=ack_payload.get("error_code", ""),
-                error_message=ack_payload.get("error_message", ""),
+                error_code=err_code,
+                error_message=err_msg,
                 ack_latency_ms=ack_payload.get("ack_latency_ms", 0),
             )
         except asyncio.TimeoutError:
-            self._pending_acks.pop(request_id, None)
             return CommandResult(
                 command_id=command.command_id,
                 device_id=self.device_id,
                 success=False,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 error_code="ACK_TIMEOUT",
-                error_message=f"No ACK received within {self._timeout}s",
+                error_message=f"No ACK received within {cmd_timeout}s",
                 retry_recommended=True,
             )
+        finally:
+            self._pending_acks.pop(request_id, None)
 
     # ================================================================
     # Status & Emergency
@@ -315,19 +463,32 @@ class MQTTActuator(IrrigationActuator):
             return ActuatorStatus.UNKNOWN
 
         raw_status = str(payload.get("status", "")).upper()
-        is_running = payload.get("running")
-        is_stopped = payload.get("stopped")
+        is_running = _to_bool(payload.get("running"))
+        is_stopped = _to_bool(payload.get("stopped"))
         fault_code = payload.get("fault_code", 0)
 
         # Fault / Error check
-        if raw_status in ("ERROR", "FAULT", "FAILED") or (isinstance(fault_code, (int, float)) and fault_code != 0):
+        if _has_fault(raw_status, fault_code):
             return ActuatorStatus.ERROR
 
-        # Running flag takes precedence for active execution
-        if is_running is True:
+        # Detect contradictions:
+        # 1. Both running and stopped are true
+        if is_running is True and is_stopped is True:
+            return ActuatorStatus.UNKNOWN
+
+        # 2. Status says running/executing/busy, but stopped is True
+        if raw_status in ("RUNNING", "EXECUTING", "BUSY") and is_stopped is True:
+            return ActuatorStatus.UNKNOWN
+
+        # 3. Status says stopped/idle, but running is True
+        if raw_status in ("STOPPED", "IDLE") and is_running is True:
+            return ActuatorStatus.UNKNOWN
+
+        # Positive execution flag
+        if is_running is True and is_stopped is not True:
             return ActuatorStatus.EXECUTING
 
-        # Explicit stopped confirmation without running
+        # Positive stopped flag
         if is_stopped is True and is_running is not True:
             return ActuatorStatus.ONLINE
 
@@ -336,12 +497,12 @@ class MQTTActuator(IrrigationActuator):
 
         if raw_status in ("STOPPED", "IDLE"):
             if is_stopped is False or is_running is True:
-                return ActuatorStatus.EXECUTING if is_running is True else ActuatorStatus.UNKNOWN
+                return ActuatorStatus.UNKNOWN
             return ActuatorStatus.ONLINE
 
         if raw_status == "ONLINE":
             if is_running is True or is_stopped is False:
-                return ActuatorStatus.EXECUTING if is_running is True else ActuatorStatus.UNKNOWN
+                return ActuatorStatus.UNKNOWN
             return ActuatorStatus.ONLINE
 
         # Generic OK / ACK status without explicit stopped / running
@@ -366,20 +527,30 @@ class MQTTActuator(IrrigationActuator):
                 loop = asyncio.get_event_loop()
             ack_future: asyncio.Future = loop.create_future()
             self._pending_acks[req_id] = ack_future
-            self._client.publish(
-                self._cmd_topic,
-                json.dumps({"cmd": "QUERY_STATUS", "request_id": req_id}),
-                qos=self._qos,
-            )
-            query_timeout = float(self._config.get("query_timeout_s", 0.1))
+            query_timeout = _validate_timeout(self._config.get("query_timeout_s", 0.1), default=0.1)
+
             try:
-                ack_payload = await asyncio.wait_for(ack_future, timeout=query_timeout)
-                self._status = self._decode_status_payload(ack_payload)
-                return self._status
-            except asyncio.TimeoutError:
+                try:
+                    self._client.publish(
+                        self._cmd_topic,
+                        json.dumps({"cmd": "QUERY_STATUS", "request_id": req_id}),
+                        qos=self._qos,
+                    )
+                except Exception as pub_exc:
+                    self._pending_acks.pop(req_id, None)
+                    logger.error("MQTT query_status publish exception for %s: %s", self.device_id, pub_exc)
+                    self._status = ActuatorStatus.UNKNOWN
+                    return ActuatorStatus.UNKNOWN
+
+                try:
+                    ack_payload = await asyncio.wait_for(ack_future, timeout=query_timeout)
+                    self._status = self._decode_status_payload(ack_payload)
+                    return self._status
+                except asyncio.TimeoutError:
+                    self._status = ActuatorStatus.UNKNOWN
+                    return ActuatorStatus.UNKNOWN
+            finally:
                 self._pending_acks.pop(req_id, None)
-                self._status = ActuatorStatus.UNKNOWN
-                return ActuatorStatus.UNKNOWN
 
         return self._status
 
@@ -410,36 +581,51 @@ class MQTTActuator(IrrigationActuator):
         ack_future: asyncio.Future = loop.create_future()
         self._pending_acks[request_id] = ack_future
 
-        try:
-            # Fire-and-forget at QoS 0 for speed
-            r0 = self._client.publish(self._cmd_topic, payload, qos=0)
-            # Also send at QoS 1 for reliability
-            r1 = self._client.publish(self._cmd_topic, payload, qos=1)
+        stop_timeout = _validate_timeout(self._config.get("stop_timeout_s", 0.1), default=0.1)
 
-            rc0 = getattr(r0, "rc", -1) if r0 is not None else -1
-            rc1 = getattr(r1, "rc", -1) if r1 is not None else -1
-            if rc0 != 0 and rc1 != 0:
+        try:
+            try:
+                # Fire-and-forget at QoS 0 for speed
+                r0 = self._client.publish(self._cmd_topic, payload, qos=0)
+                # Also send at QoS 1 for reliability
+                r1 = self._client.publish(self._cmd_topic, payload, qos=1)
+
+                rc0 = getattr(r0, "rc", -1) if r0 is not None else -1
+                rc1 = getattr(r1, "rc", -1) if r1 is not None else -1
+                if rc0 != 0 and rc1 != 0:
+                    self._pending_acks.pop(request_id, None)
+                    logger.error("🚨 EMERGENCY STOP publish failed on both QoS 0 (rc=%s) and QoS 1 (rc=%s)", rc0, rc1)
+                    return CommandResult(
+                        command_id=f"ESTOP-{request_id[:8]}",
+                        device_id=self.device_id,
+                        success=False,
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        error_code="PUBLISH_FAILED",
+                        error_message=f"MQTT publish failed: rc0={rc0}, rc1={rc1}",
+                    )
+            except Exception as pub_exc:
                 self._pending_acks.pop(request_id, None)
-                logger.error("🚨 EMERGENCY STOP publish failed on both QoS 0 (rc=%s) and QoS 1 (rc=%s)", rc0, rc1)
+                logger.error("🚨 EMERGENCY STOP publish exception on %s: %s", self.device_id, pub_exc)
                 return CommandResult(
                     command_id=f"ESTOP-{request_id[:8]}",
                     device_id=self.device_id,
                     success=False,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     error_code="PUBLISH_FAILED",
-                    error_message=f"MQTT publish failed: rc0={rc0}, rc1={rc1}",
+                    error_message=f"MQTT publish exception: {pub_exc}",
                 )
 
             logger.critical("🚨 EMERGENCY STOP published to %s via MQTT (awaiting confirmation)", self.device_id)
 
-            stop_timeout = float(self._config.get("stop_timeout_s", 0.1))
             try:
                 ack_payload = await asyncio.wait_for(ack_future, timeout=stop_timeout)
-                # SR01: Qualified stop validation:
-                # Contradictory check: if running=True or stopped=False, controller is NOT confirmed stopped!
-                is_running = ack_payload.get("running")
-                is_stopped = ack_payload.get("stopped")
+                if not isinstance(ack_payload, dict):
+                    ack_payload = {}
+                is_running = _to_bool(ack_payload.get("running"))
+                is_stopped = _to_bool(ack_payload.get("stopped"))
                 raw_status = str(ack_payload.get("status", "")).upper()
+                fault_code = ack_payload.get("fault_code", 0)
+                has_fault = _has_fault(raw_status, fault_code)
 
                 if is_running is True or is_stopped is False:
                     logger.error(
@@ -470,7 +656,11 @@ class MQTTActuator(IrrigationActuator):
                         error_message=f"Controller rejected STOP: {ack_payload}",
                     )
 
-                self._status = ActuatorStatus.ONLINE
+                if has_fault:
+                    self._status = ActuatorStatus.ERROR
+                else:
+                    self._status = ActuatorStatus.ONLINE
+
                 return CommandResult(
                     command_id=f"ESTOP-{request_id[:8]}",
                     device_id=self.device_id,
@@ -478,7 +668,6 @@ class MQTTActuator(IrrigationActuator):
                     timestamp=datetime.now(timezone.utc).isoformat(),
                 )
             except asyncio.TimeoutError:
-                self._pending_acks.pop(request_id, None)
                 logger.warning("🚨 EMERGENCY STOP publish accepted but no controller ACK received within %ss", stop_timeout)
                 return CommandResult(
                     command_id=f"ESTOP-{request_id[:8]}",
@@ -489,7 +678,6 @@ class MQTTActuator(IrrigationActuator):
                     error_message=f"No STOP ACK received from controller within {stop_timeout}s",
                 )
         except Exception as exc:
-            self._pending_acks.pop(request_id, None)
             logger.error("🚨 EMERGENCY STOP exception on device %s: %s", self.device_id, exc)
             return CommandResult(
                 command_id=f"ESTOP-{request_id[:8]}",
@@ -499,3 +687,5 @@ class MQTTActuator(IrrigationActuator):
                 error_code="EXCEPTION",
                 error_message=str(exc),
             )
+        finally:
+            self._pending_acks.pop(request_id, None)

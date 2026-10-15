@@ -136,26 +136,46 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                     raise TimeoutError(f"Timeout acquiring sensor nonce lock on {lock_path}")
                 try:
                     if os.path.exists(lock_path) and time.time() - os.path.getmtime(lock_path) > 30.0:
-                        lock_txt = ""
+                        rec_path = f"{lock_path}.recovery"
+                        rec_fd = None
                         try:
-                            with open(lock_path, "r", encoding="utf-8") as f:
-                                lock_txt = f.read().strip()
-                        except OSError:
-                            pass
-                        owner_pid = -1
-                        if lock_txt:
+                            rec_fd = os.open(str(rec_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        except (FileExistsError, OSError):
+                            rec_fd = None
+
+                        if rec_fd is not None:
                             try:
-                                owner_pid = int(lock_txt.split(":")[0])
-                            except ValueError:
-                                owner_pid = -1
-                        if owner_pid > 0 and _is_pid_alive(owner_pid):
-                            pass
-                        else:
-                            try:
-                                os.unlink(lock_path)
-                            except OSError:
-                                pass
-                            continue
+                                if os.path.exists(lock_path) and time.time() - os.path.getmtime(lock_path) > 30.0:
+                                    lock_txt = ""
+                                    try:
+                                        with open(lock_path, "r", encoding="utf-8") as f:
+                                            lock_txt = f.read().strip()
+                                    except OSError:
+                                        pass
+                                    owner_pid = -1
+                                    if lock_txt:
+                                        try:
+                                            owner_pid = int(lock_txt.split(":")[0])
+                                        except ValueError:
+                                            owner_pid = -1
+                                    if owner_pid <= 0 or not _is_pid_alive(owner_pid):
+                                        try:
+                                            with open(lock_path, "r", encoding="utf-8") as f:
+                                                cur_txt = f.read().strip()
+                                            if cur_txt == lock_txt:
+                                                os.unlink(lock_path)
+                                        except OSError:
+                                            pass
+                            finally:
+                                try:
+                                    os.close(rec_fd)
+                                except OSError:
+                                    pass
+                                try:
+                                    os.unlink(rec_path)
+                                except OSError:
+                                    pass
+                                continue
                 except OSError:
                     pass
                 time.sleep(0.005)
@@ -270,4 +290,35 @@ def detect_replay(message_id: str, seen_messages: set, reserve: bool = True) -> 
         if message_id in nonces or (seen_messages is not None and message_id in seen_messages):
             return True
         return False
+
+
+def release_nonce(nonce: str, seen_messages: Optional[set] = None) -> None:
+    """Atomically release/rollback a reserved nonce when transient ingestion failures occur."""
+    with _nonce_store_lock():
+        path = get_nonce_store_path()
+        nonces = set()
+        try:
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    nonces = set(json.load(f))
+        except Exception:
+            return
+
+        if nonce in nonces:
+            nonces.discard(nonce)
+            try:
+                dir_name = os.path.dirname(path)
+                if dir_name:
+                    os.makedirs(dir_name, exist_ok=True)
+                fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+                os.close(fd)
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(list(nonces), f)
+                os.replace(tmp_path, path)
+            except Exception:
+                pass
+
+        if seen_messages is not None:
+            seen_messages.discard(nonce)
+
 

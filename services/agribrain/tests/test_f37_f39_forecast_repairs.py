@@ -233,3 +233,149 @@ def test_f15_spray_drift_gate_blocks_on_missing_weather_forecast():
     res_cards = engine.enforce_drift_limits([card], forecast=[{}])
     assert res_cards[0].is_allowed is False
     assert any("Spray blocked" in r for r in res_cards[0].blocked_reason)
+
+
+def test_f15_salinity_hard_envelopes():
+    import math
+    from services.agribrain.layer8_prescriptive.engines.salinity_leaching import SalinityLeachingEngine
+    from services.agribrain.layer8_prescriptive.schema import (
+        ActionCard, ActionType, RateRange, PriorityBreakdown, PrescriptiveEvidence, ConfidenceLevel
+    )
+    from services.agribrain.layer8_prescriptive.invariants import enforce_layer8_invariants
+    from services.agribrain.layer8_prescriptive.schema import Layer8Output, ScheduledAction, ScheduleStatus, OutcomeForecast
+
+    engine = SalinityLeachingEngine()
+
+    def make_card(rec=20.0, min_s=0.0, max_s=21.0):
+        return ActionCard(
+            action_id="CARD_TEST",
+            action_type=ActionType.IRRIGATE,
+            priority_score=0.5,
+            priority_breakdown=PriorityBreakdown(0.5, 0.5, 0.5, 0.5, 0.5),
+            zone_targets=["zone_1"],
+            zone_allocation={"zone_1": 1.0},
+            rate=RateRange(recommended=rec, min_safe=min_s, max_safe=max_s, unit="mm"),
+            evidence=[PrescriptiveEvidence("L3", "diagnosis", "REF1", 0.8, "salinity", source_type="sensor"),
+                      PrescriptiveEvidence("L2", "observation", "REF2", 0.5, "satellite", source_type="satellite")],
+            confidence=ConfidenceLevel.HIGH,
+            explain="salinity test",
+        )
+
+    # 1. Negative cap (-1.0) -> clamped safely to 0.0, never negative
+    c = make_card(rec=20.0, min_s=0.0, max_s=-1.0)
+    res = engine.adjust_irrigation_for_salinity([c], crop="potato", soil_salinity_ece=3.0)[0]
+    assert res.rate.recommended >= 0.0
+    assert res.rate.max_safe == 0.0
+
+    # 2. None cap -> no TypeError, recommended rate adjusted
+    c = make_card(rec=20.0, min_s=0.0, max_s=None)
+    res = engine.adjust_irrigation_for_salinity([c], crop="potato", soil_salinity_ece=3.0)[0]
+    assert res.rate.recommended > 20.0
+    assert res.rate.max_safe is None
+
+    # 3. NaN cap -> clamped safely to 0.0
+    c = make_card(rec=20.0, min_s=0.0, max_s=float("nan"))
+    res = engine.adjust_irrigation_for_salinity([c], crop="potato", soil_salinity_ece=3.0)[0]
+    assert res.rate.recommended >= 0.0
+    assert res.rate.max_safe == 0.0
+
+    # 4. Inf cap -> clamped safely to 0.0
+    c = make_card(rec=20.0, min_s=0.0, max_s=float("inf"))
+    res = engine.adjust_irrigation_for_salinity([c], crop="potato", soil_salinity_ece=3.0)[0]
+    assert res.rate.recommended >= 0.0
+    assert res.rate.max_safe == 0.0
+
+    # 5. Bool cap (True) -> clamped safely to 0.0, not boolean
+    c = make_card(rec=20.0, min_s=0.0, max_s=True)
+    res = engine.adjust_irrigation_for_salinity([c], crop="potato", soil_salinity_ece=3.0)[0]
+    assert res.rate.recommended == 0.0
+    assert not isinstance(res.rate.recommended, bool)
+
+    # 6. Inconsistent min_safe > max_safe (min 25, max 21) -> clamped min_safe = 21, recommended = 21
+    c = make_card(rec=20.0, min_s=25.0, max_s=21.0)
+    res = engine.adjust_irrigation_for_salinity([c], crop="potato", soil_salinity_ece=3.0)[0]
+    assert res.rate.min_safe == 21.0
+    assert res.rate.max_safe == 21.0
+    assert res.rate.recommended == 21.0
+
+    # 7. Negative recommended (-2.0) with min_safe (5.0) -> adjusted to min_safe (5.0)
+    c = make_card(rec=-2.0, min_s=5.0, max_s=21.0)
+    res = engine.adjust_irrigation_for_salinity([c], crop="potato", soil_salinity_ece=3.0)[0]
+    assert res.rate.recommended == 5.0
+    assert res.rate.min_safe == 5.0
+
+    # 8. Positive rate zero cap (rec=20.0, max_safe=0.0) -> clamped to 0.0
+    c = make_card(rec=20.0, min_s=0.0, max_s=0.0)
+    res = engine.adjust_irrigation_for_salinity([c], crop="potato", soil_salinity_ece=3.0)[0]
+    assert res.rate.recommended == 0.0
+    assert res.rate.max_safe == 0.0
+
+
+def test_f15_scheduler_weather_and_envelope_qualification():
+    from datetime import datetime
+    from services.agribrain.layer8_prescriptive.scheduler import ConstraintScheduler
+    from services.agribrain.layer8_prescriptive.schema import (
+        ActionCard, ActionType, RateRange, PriorityBreakdown, PrescriptiveEvidence, ConfidenceLevel, ScheduleStatus
+    )
+
+    scheduler = ConstraintScheduler()
+
+    def make_spray_card(rec=2.0, min_s=1.0, max_s=5.0):
+        return ActionCard(
+            action_id="CARD_SPRAY_TEST",
+            action_type=ActionType.SPRAY,
+            priority_score=0.8,
+            priority_breakdown=PriorityBreakdown(0.8, 0.7, 0.2, 0.3, 0.9),
+            zone_targets=["zone_1"],
+            zone_allocation={"zone_1": 1.0},
+            rate=RateRange(recommended=rec, min_safe=min_s, max_safe=max_s, unit="L/ha"),
+            evidence=[PrescriptiveEvidence("L5", "threat", "REF_PEST", 0.8, "Pest", source_type="sensor"),
+                      PrescriptiveEvidence("L2", "observation", "REF2", 0.5, "satellite", source_type="satellite")],
+            confidence=ConfidenceLevel.HIGH,
+            explain="Spray action",
+        )
+
+    base_date = datetime(2026, 10, 13)
+
+    # 1. Invalid rate envelope (NaN / Inf) blocks action card in scheduler
+    c_nan = make_spray_card(rec=float("nan"))
+    sched = scheduler.schedule_actions([c_nan], [{"date": "2026-10-14", "wind_speed": 5.0, "precip_mm": 0.0, "temp_max": 25.0, "temp_min": 10.0}], base_date)[0]
+    assert sched.status == ScheduleStatus.BLOCKED
+    assert not c_nan.is_allowed
+
+    # 2. String numeric wind ('5') converts cleanly and confirms
+    c = make_spray_card()
+    sched = scheduler.schedule_actions([c], [{"date": "2026-10-14", "wind_speed": "5", "precip_mm": 0.0, "temp_max": 25.0, "temp_min": 10.0}], base_date)[0]
+    assert sched.status == ScheduleStatus.CONFIRMED
+
+    # 3. Empty string wind ('') blocks without TypeError
+    c = make_spray_card()
+    sched = scheduler.schedule_actions([c], [{"date": "2026-10-14", "wind_speed": "", "precip_mm": 0.0, "temp_max": 25.0, "temp_min": 10.0}], base_date)[0]
+    assert sched.status == ScheduleStatus.BLOCKED
+
+    # 4. m/s units conversion (10 m/s = 36 km/h) blocks spray (> 15 km/h)
+    c = make_spray_card()
+    sched = scheduler.schedule_actions([c], [{"date": "2026-10-14", "wind_speed": 10.0, "wind_speed_unit": "m/s", "precip_mm": 0.0, "temp_max": 25.0, "temp_min": 10.0}], base_date)[0]
+    assert sched.status == ScheduleStatus.BLOCKED
+
+    # 5. Wind gust higher than speed (speed 5, gust 20) blocks spray (> 15 km/h)
+    c = make_spray_card()
+    sched = scheduler.schedule_actions([c], [{"date": "2026-10-14", "wind_speed": 5.0, "wind_gust": 20.0, "precip_mm": 0.0, "temp_max": 25.0, "temp_min": 10.0}], base_date)[0]
+    assert sched.status == ScheduleStatus.BLOCKED
+
+    # 6. Chronological ordering: dated_forward vs dated_reverse both select safe day (2026-10-15)
+    fc_forward = [
+        {"date": "2026-10-15", "wind_speed": 5.0, "precip_mm": 0.0, "temp_max": 25.0, "temp_min": 10.0},
+        {"date": "2026-10-14", "wind_speed": 20.0, "precip_mm": 0.0, "temp_max": 25.0, "temp_min": 10.0},
+    ]
+    fc_reverse = [
+        {"date": "2026-10-14", "wind_speed": 20.0, "precip_mm": 0.0, "temp_max": 25.0, "temp_min": 10.0},
+        {"date": "2026-10-15", "wind_speed": 5.0, "precip_mm": 0.0, "temp_max": 25.0, "temp_min": 10.0},
+    ]
+    c1 = make_spray_card()
+    c2 = make_spray_card()
+    s1 = scheduler.schedule_actions([c1], fc_forward, base_date)[0]
+    s2 = scheduler.schedule_actions([c2], fc_reverse, base_date)[0]
+    assert s1.status == ScheduleStatus.CONFIRMED and s1.scheduled_date == "2026-10-15"
+    assert s2.status == ScheduleStatus.CONFIRMED and s2.scheduled_date == "2026-10-15"
+

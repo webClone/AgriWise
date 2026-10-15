@@ -4,7 +4,7 @@ import uuid
 
 from sensor_runtime.schemas import RawSensorMessage, NormalizedSensorReading
 from sensor_runtime.device_identity import DeviceIdentity
-from sensor_runtime.security import detect_replay, check_rate_limit, quarantine_payload, is_production, save_nonce
+from sensor_runtime.security import detect_replay, check_rate_limit, quarantine_payload, is_production, save_nonce, release_nonce
 from sensor_runtime.decoder import decode_raw_message, DecoderResult
 from sensor_runtime.registry import get_device_registration
 from sensor_runtime.calibration import get_calibration_profile
@@ -84,114 +84,114 @@ def ingest_sensor_payload(
     if detect_replay(message_id, _SEEN_MESSAGES):
         return []
 
-    # 4. Validate registry/calibration
-    reg = get_device_registration(device_id)
-    if not reg or not reg.plot_id:
-        return []
+    try:
+        # 4. Validate registry/calibration
+        reg = get_device_registration(device_id)
+        if not reg or not reg.plot_id:
+            release_nonce(message_id, _SEEN_MESSAGES)
+            return []
 
-    # Device Status Normalization & Validation
-    status = str(reg.status or "").strip().lower()
-    if not status:
-        status = "missing"
-    if status != "active":
-        ex = ValueError(f"device_inactive: {status}")
-        ex.device_status = status
-        raise ex
+        # Device Status Normalization & Validation
+        status = str(reg.status or "").strip().lower()
+        if not status:
+            status = "missing"
+        if status != "active":
+            release_nonce(message_id, _SEEN_MESSAGES)
+            ex = ValueError(f"device_inactive: {status}")
+            ex.device_status = status
+            raise ex
 
-    # Temporary raw message construction to pass to decoder
-    temp_msg = RawSensorMessage(
-        message_id=message_id,
-        protocol=protocol,
-        received_at=received_at,
-        device_id=device_id,
-        payload=payload,
-        gateway_id=gateway_id,
-        rssi=rssi,
-        snr=snr,
-        raw_payload_ref=f"s3://raw-sensors/{device_id}/{message_id}",
-        provenance={"ingested_at": datetime.now(timezone.utc).isoformat(), "volatile": False}
-    )
-    
-    decoder_result = decode_raw_message(temp_msg)
-    readings = decoder_result.readings
+        # Temporary raw message construction to pass to decoder
+        temp_msg = RawSensorMessage(
+            message_id=message_id,
+            protocol=protocol,
+            received_at=received_at,
+            device_id=device_id,
+            payload=payload,
+            gateway_id=gateway_id,
+            rssi=rssi,
+            snr=snr,
+            raw_payload_ref=f"s3://raw-sensors/{device_id}/{message_id}",
+            provenance={"ingested_at": datetime.now(timezone.utc).isoformat(), "volatile": False}
+        )
+        
+        decoder_result = decode_raw_message(temp_msg)
+        readings = decoder_result.readings
 
-    # Identify agronomic readings
-    agronomic_readings = []
-    for r in readings:
-        if r.variable in {
-            "battery_voltage",
-            "battery_voltage_v",
-            "battery_pct",
-            "signal_strength",
-            "rssi",
-            "firmware_version",
-            "device_temperature_internal",
-            "signal_rssi_dbm",
-            "signal_snr_db",
-        }:
-            continue
-        agronomic_readings.append(r)
+        # Identify agronomic readings
+        agronomic_readings = []
+        for r in readings:
+            if r.variable in {
+                "battery_voltage",
+                "battery_voltage_v",
+                "battery_pct",
+                "signal_strength",
+                "rssi",
+                "firmware_version",
+                "device_temperature_internal",
+                "signal_rssi_dbm",
+                "signal_snr_db",
+            }:
+                continue
+            agronomic_readings.append(r)
 
-    # For every decoded agronomic reading, find a compatible calibration profile
-    for r in agronomic_readings:
-        reg_vars = reg.variables if reg else []
-        if not is_registered_variable_allowed(r.variable, reg_vars):
-            raise ValueError("sensor_variable_not_registered")
+        # For every decoded agronomic reading, find a compatible calibration profile
+        for r in agronomic_readings:
+            reg_vars = reg.variables if reg else []
+            if not is_registered_variable_allowed(r.variable, reg_vars):
+                raise ValueError("sensor_variable_not_registered")
 
-        cal = get_calibration_profile(device_id, r.variable)
-        if not cal:
-            raise ValueError("sensor_calibration_unavailable")
-        if cal.calibration_type == "uncalibrated":
-            raise ValueError("sensor_uncalibrated")
-        if not are_variables_compatible(r.variable, cal.variable):
-            raise ValueError("calibration_variable_mismatch")
-            
-        # Timezone-safe calibration expiry validation
-        if cal.valid_until is None:
-            if is_production() or os.getenv("AGRIWISE_STRICT_SECURITY") == "true":
-                raise ValueError("calibration_expiry_missing")
-        else:
-            if ensure_tz(cal.valid_until) < ensure_tz(received_at):
-                raise ValueError("calibration_expired")
+            cal = get_calibration_profile(device_id, r.variable)
+            if not cal:
+                raise ValueError("sensor_calibration_unavailable")
+            if cal.calibration_type == "uncalibrated":
+                raise ValueError("sensor_uncalibrated")
+            if not are_variables_compatible(r.variable, cal.variable):
+                raise ValueError("calibration_variable_mismatch")
+                
+            # Timezone-safe calibration expiry validation
+            if cal.valid_until is None:
+                if is_production() or os.getenv("AGRIWISE_STRICT_SECURITY") == "true":
+                    raise ValueError("calibration_expiry_missing")
+            else:
+                if ensure_tz(cal.valid_until) < ensure_tz(received_at):
+                    raise ValueError("calibration_expired")
 
-        # Calibration quality validation
-        q = cal.calibration_quality
-        if q is None:
-            raise ValueError("calibration_quality_missing")
-        if not isinstance(q, (int, float)) or isinstance(q, bool):
-            raise ValueError("calibration_quality_invalid")
-        if q < 0.5:
-            raise ValueError("calibration_quality_too_low")
+            # Calibration quality validation
+            q = cal.calibration_quality
+            if q is None:
+                raise ValueError("calibration_quality_missing")
+            if not isinstance(q, (int, float)) or isinstance(q, bool):
+                raise ValueError("calibration_quality_invalid")
+            if q < 0.5:
+                raise ValueError("calibration_quality_too_low")
 
-    # 5. Persist nonce atomically FIRST
-    save_nonce(message_id)
+        # Detect if payload is volatile
+        is_volatile = False
+        if isinstance(payload, dict):
+            if payload.get("provenance", {}).get("volatile") is True:
+                is_volatile = True
+            elif payload.get("volatile") is True:
+                is_volatile = True
 
-    # 6. Only then accept/store/process normalized readings
-    _SEEN_MESSAGES.add(message_id)
+        raw_msg = RawSensorMessage(
+            message_id=message_id,
+            protocol=protocol,
+            received_at=received_at,
+            device_id=device_id,
+            payload=payload,
+            gateway_id=gateway_id,
+            rssi=rssi,
+            snr=snr,
+            raw_payload_ref=f"s3://raw-sensors/{device_id}/{message_id}",
+            provenance={"ingested_at": datetime.now(timezone.utc).isoformat(), "volatile": is_volatile}
+        )
 
-    # Detect if payload is volatile
-    is_volatile = False
-    if isinstance(payload, dict):
-        if payload.get("provenance", {}).get("volatile") is True:
-            is_volatile = True
-        elif payload.get("volatile") is True:
-            is_volatile = True
-
-    raw_msg = RawSensorMessage(
-        message_id=message_id,
-        protocol=protocol,
-        received_at=received_at,
-        device_id=device_id,
-        payload=payload,
-        gateway_id=gateway_id,
-        rssi=rssi,
-        snr=snr,
-        raw_payload_ref=f"s3://raw-sensors/{device_id}/{message_id}",
-        provenance={"ingested_at": datetime.now(timezone.utc).isoformat(), "volatile": is_volatile}
-    )
-
-    if not is_volatile:
-        store_raw_message(raw_msg)
+        if not is_volatile:
+            store_raw_message(raw_msg)
+    except Exception:
+        release_nonce(message_id, _SEEN_MESSAGES)
+        raise
 
     # Override plot_id, zone_id, and prefix reading_id
     for r in readings:

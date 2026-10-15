@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -409,6 +410,7 @@ class CommandDispatcher:
         eff_area = _clean_effective_area(getattr(event, "effective_area_ha", None))
         v_req = finite_real(event.target_volume_mm)
         if v_req is not None and v_req >= 0:
+            owner_tok = f"{os.getpid()}:{event.event_id}"
             quota_violation = SharedQuotaStore.atomic_check_and_reserve(
                 plot_id=event.plot_id,
                 requested_volume_mm=event.target_volume_mm,
@@ -417,6 +419,7 @@ class CommandDispatcher:
                 device_id=event.device_id,
                 zone_id=event.zone_id,
                 duration_minutes=event.target_duration_minutes,
+                owner_token=owner_tok,
                 flow_rate_lpm=event.target_flow_rate_lpm,
                 effective_area_ha=eff_area,
             )
@@ -859,10 +862,37 @@ class CommandDispatcher:
             pending_eid = getattr(pending_cmd, "source_event_id", getattr(pending_cmd, "event_id", None)) if pending_cmd else None
             durable_rec = SharedQuotaStore.get_active_record(event.event_id)
             durable_st = (durable_rec.get("status") if durable_rec else "") or ""
+            # V04 / SR04: If event was refused or never physically started (and no active command belongs to it),
+            # never issue emergency STOP against a running device executing another operation!
+            was_ever_started = bool(event.actual_start or (durable_rec and durable_rec.get("actual_start")))
+            has_active_cmd = (pending_cmd is not None and (not pending_eid or pending_eid == event.event_id))
+            if not was_ever_started and not has_active_cmd:
+                term_status = EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED
+                event.transition(term_status, "Confirmed stopped (event never physically started on actuator)")
+                res = SharedQuotaStore.get_active_record(event.event_id) or {}
+                season_key = res.get("season")
+                del_mm = getattr(event, "delivered_volume_mm", 0.0) or 0.0
+                self._safety.record_stopped_delivery(
+                    event_id=event.event_id,
+                    plot_id=event.plot_id,
+                    target_volume_mm=event.target_volume_mm,
+                    delivered_volume_mm=del_mm,
+                    season=season_key,
+                    device_id=event.device_id,
+                    zone_id=event.zone_id,
+                    duration_minutes=event.target_duration_minutes,
+                    flow_rate_lpm=event.target_flow_rate_lpm,
+                    effective_area_ha=getattr(event, "effective_area_ha", None),
+                )
+                self._safety.track_event_end(event.event_id)
+                self._finalize_event(event)
+                if term_status == EventStatus.EMERGENCY_STOPPED:
+                    self._emit_failed(event)
+                return event
+
             has_pending = (
-                (pending_cmd is not None and (not pending_eid or pending_eid == event.event_id))
+                has_active_cmd
                 or durable_st == "DISPATCHING"
-                or not bool(durable_rec and durable_rec.get("actual_start"))
             )
 
             # ER01: Online actuator cannot certify STOP if command dispatch or START is pending/unresolved
@@ -1222,7 +1252,7 @@ class CommandDispatcher:
                 event.transition(EventStatus.FAILED, f"Invalid settlement duration {actual_duration_minutes}")
                 return event
 
-        # Validate effective_area_ha if present
+        # Validate effective_area_ha if explicitly present on event
         area_ha = None
         if hasattr(event, "effective_area_ha") and event.effective_area_ha is not None:
             area_ha = finite_real(event.effective_area_ha)
@@ -1231,6 +1261,20 @@ class CommandDispatcher:
                              event.effective_area_ha, eid)
                 event.transition(EventStatus.FAILED, f"Invalid effective area {event.effective_area_ha}")
                 return event
+
+        # Hydrate canonical target volume and effective area from SharedQuotaStore if omitted
+        durable_active = SharedQuotaStore.get_active_record(event.event_id) or {}
+        if area_ha is None and durable_active.get("effective_area_ha") is not None:
+            hyd_area = finite_real(durable_active["effective_area_ha"])
+            if hyd_area is not None and hyd_area > 0:
+                event.effective_area_ha = hyd_area
+                area_ha = hyd_area
+        if getattr(event, "target_volume_mm", None) is None and durable_active.get("target_volume_mm") is not None:
+            event.target_volume_mm = float(durable_active["target_volume_mm"])
+        if getattr(event, "target_flow_rate_lpm", None) is None and durable_active.get("flow_rate_lpm") is not None:
+            event.target_flow_rate_lpm = float(durable_active["flow_rate_lpm"])
+        if getattr(event, "target_duration_minutes", None) is None and durable_active.get("duration_minutes") is not None:
+            event.target_duration_minutes = float(durable_active["duration_minutes"])
 
         # N02 + D09: Calculate settled depth
         # Explicit 0 L settles as 0.0 mm independently of area!
@@ -1277,6 +1321,15 @@ class CommandDispatcher:
         event.actual_volume_l = val_vol
         event.actual_duration_minutes = val_dur
         event.delivered_volume_mm = val_settled
+
+        # Hydrate exact committed canonical receipt
+        durable_settled = SharedQuotaStore.get_settled_receipt(event.event_id) or {}
+        if durable_settled.get("volume_mm") is not None:
+            event.delivered_volume_mm = float(durable_settled["volume_mm"])
+        if durable_settled.get("target_volume_mm") is not None:
+            event.target_volume_mm = float(durable_settled["target_volume_mm"])
+        if durable_settled.get("effective_area_ha") is not None:
+            event.effective_area_ha = float(durable_settled["effective_area_ha"])
         event.transition(EventStatus.COMPLETED, "Validated and completed")
         self._safety.track_event_end(event.event_id)
         self._finalize_event(event)

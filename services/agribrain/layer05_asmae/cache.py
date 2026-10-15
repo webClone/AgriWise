@@ -730,14 +730,20 @@ def deserialize_cached_asmae(inp: ASMAEInput) -> Optional[Dict[str, Any]]:
                 raise ValueError("cache JSON root is not an object")
 
             diagnostics = output_dict.get("diagnostics") or {}
-            reason_str = str(output_dict.get("reason") or "")
+            reason_str = str(output_dict.get("reason") or "").lower()
+            res_status = str(output_dict.get("result_status") or "").lower()
+            status_str = str(output_dict.get("status") or "").lower()
             if (
                 diagnostics.get("chain_integrity_error")
-                or output_dict.get("result_status") in ("failed_spatial_fallback", "failed", "unavailable")
+                or res_status in ("failed_spatial_fallback", "failed", "unavailable", "rejected", "aborted")
+                or status_str in ("rejected", "aborted", "failed")
+                or output_dict.get("is_rejected") is True
+                or output_dict.get("rejected") is True
+                or "rejected" in reason_str
                 or "chain_integrity" in reason_str
                 or "timeout" in reason_str
             ):
-                raise ValueError("cached ASMAE payload represents a failed/fallback spatial execution")
+                raise ValueError("cached ASMAE payload represents a failed/rejected/fallback spatial execution")
 
             commit = output_dict.get("_asmae_cache_commit")
             if not isinstance(commit, dict):

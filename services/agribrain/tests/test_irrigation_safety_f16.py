@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 
 from irrigation_runtime.actuator import IrrigationActuator
 from irrigation_runtime.dispatcher import CommandDispatcher
-from irrigation_runtime.safety import SafetyMonitor
+from irrigation_runtime.safety import SafetyMonitor, SharedQuotaStore
 from irrigation_runtime.schemas import (
     ActuatorCapabilities,
     ActuatorRegistration,
@@ -98,6 +98,7 @@ class MockActuatorRegistry:
 
 class TestIrrigationSafetyF16(unittest.TestCase):
     def setUp(self):
+        SharedQuotaStore.reset()
         self.reg = ActuatorRegistration(
             device_id="VALVE-01",
             vendor=VendorId.NETAFIM,
@@ -119,6 +120,9 @@ class TestIrrigationSafetyF16(unittest.TestCase):
         self.registry = MockActuatorRegistry(self.actuator)
         self.safety = SafetyMonitor()
         self.dispatcher = CommandDispatcher(registry=self.registry, safety=self.safety)
+
+    def tearDown(self):
+        SharedQuotaStore.reset()
 
     def _make_event(self, event_id: str = "EVT-01", volume_mm: float = 10.0, duration_min: float = 30.0, effective_area_ha: float = 1.0) -> IrrigationEvent:
         return IrrigationEvent(

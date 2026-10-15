@@ -343,7 +343,8 @@ class IrrigationActuator(ABC):
             )
 
         if result.success:
-            self._status = ActuatorStatus.ONLINE
+            if getattr(self, "_status", None) != ActuatorStatus.ERROR:
+                self._status = ActuatorStatus.ONLINE
             self._active_command = None
             self._pending_command = None
         else:
@@ -656,7 +657,8 @@ class IrrigationActuator(ABC):
                     if self._status != ActuatorStatus.ONLINE:
                         self._status = ActuatorStatus.ERROR
             elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
-                self._status = ActuatorStatus.ONLINE
+                if getattr(self, "_status", None) != ActuatorStatus.ERROR:
+                    self._status = ActuatorStatus.ONLINE
                 self._active_command = None
             elif command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
                 if getattr(self, "_stop_generation", 0) > start_gen:

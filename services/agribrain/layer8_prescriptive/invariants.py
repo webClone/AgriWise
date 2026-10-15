@@ -23,6 +23,7 @@ Auto-clamp where possible, log violations via structured logger.
 """
 
 import logging
+import math
 from typing import List
 from dataclasses import dataclass
 from datetime import datetime
@@ -52,21 +53,32 @@ def enforce_layer8_invariants(output: Layer8Output) -> List[InvariantViolation]:
     """
     violations: List[InvariantViolation] = []
 
-    # 1. Rate non-negative
+    # 1. Rate non-negative and finite
     for card in output.actions:
         if card.rate is not None:
-            if card.rate.recommended < 0:
+            rec = card.rate.recommended
+            if isinstance(rec, bool) or not isinstance(rec, (int, float)) or not math.isfinite(rec) or rec < 0:
                 violations.append(InvariantViolation(
                     check_name="rate_non_negative",
                     severity="error",
-                    description=f"{card.action_id}: rate={card.rate.recommended} < 0",
+                    description=f"{card.action_id}: rate={card.rate.recommended} < 0 or invalid",
                     auto_fixed=True,
                 ))
-                card.rate.recommended = 0
+                card.rate.recommended = 0.0
 
     # 2. Rate max safe
     for card in output.actions:
-        if card.rate is not None:
+        if card.rate is not None and card.rate.max_safe is not None:
+            ms = card.rate.max_safe
+            if isinstance(ms, bool) or not isinstance(ms, (int, float)) or not math.isfinite(ms) or ms < 0:
+                violations.append(InvariantViolation(
+                    check_name="rate_max_safe",
+                    severity="warning",
+                    description=f"{card.action_id}: max_safe={card.rate.max_safe} is invalid or negative",
+                    auto_fixed=True,
+                ))
+                card.rate.max_safe = 0.0
+
             if card.rate.recommended > card.rate.max_safe:
                 violations.append(InvariantViolation(
                     check_name="rate_max_safe",
@@ -74,7 +86,7 @@ def enforce_layer8_invariants(output: Layer8Output) -> List[InvariantViolation]:
                     description=f"{card.action_id}: rate={card.rate.recommended} > max={card.rate.max_safe}",
                     auto_fixed=True,
                 ))
-                card.rate.recommended = card.rate.max_safe
+                card.rate.recommended = max(0.0, card.rate.max_safe)
 
     # 3. Zone allocation sum <= 1.0
     for card in output.actions:
