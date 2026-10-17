@@ -168,11 +168,49 @@ class ConstraintScheduler:
                 continue
             if d_str in seen_dates:
                 prev_row = seen_dates[d_str]
+                u1 = str(prev_row.get("wind_speed_unit") or prev_row.get("wind_unit") or prev_row.get("unit") or "").lower().strip()
+                m1 = 3.6 if u1 in ("m/s", "mps") else (1.852 if u1 in ("knots", "knot", "kt", "kts") else (1.60934 if u1 in ("mph", "mi/h") else 1.0))
+                u2 = str(row.get("wind_speed_unit") or row.get("wind_unit") or row.get("unit") or "").lower().strip()
+                m2 = 3.6 if u2 in ("m/s", "mps") else (1.852 if u2 in ("knots", "knot", "kt", "kts") else (1.60934 if u2 in ("mph", "mi/h") else 1.0))
+
+                # Rain conflict: difference > 0.5 mm
                 r1 = prev_row.get("precip_mm") if prev_row.get("precip_mm") is not None else prev_row.get("precipitation")
                 r2 = row.get("precip_mm") if row.get("precip_mm") is not None else row.get("precipitation")
                 p1, _ = _parse_weather_val(r1)
                 p2, _ = _parse_weather_val(r2)
-                if p1 is not None and p2 is not None and abs(p1 - p2) > 5.0:
+                if p1 is not None and p2 is not None and abs(p1 - p2) > 0.5:
+                    conflicted_dates.add(d_str)
+
+                # Wind speed conflict: difference > 2.0 km/h
+                w1_raw = prev_row.get("wind_speed") if prev_row.get("wind_speed") is not None else prev_row.get("wind_kmh")
+                w2_raw = row.get("wind_speed") if row.get("wind_speed") is not None else row.get("wind_kmh")
+                w1, _ = _parse_weather_val(w1_raw, m1)
+                w2, _ = _parse_weather_val(w2_raw, m2)
+                if w1 is not None and w2 is not None and abs(w1 - w2) > 2.0:
+                    conflicted_dates.add(d_str)
+
+                # Wind gust conflict: difference > 2.0 km/h
+                g1_raw = prev_row.get("wind_gust")
+                g2_raw = row.get("wind_gust")
+                g1, _ = _parse_weather_val(g1_raw, m1)
+                g2, _ = _parse_weather_val(g2_raw, m2)
+                if g1 is not None and g2 is not None and abs(g1 - g2) > 2.0:
+                    conflicted_dates.add(d_str)
+
+                # Temp max conflict: difference > 3.0 C
+                t1_raw = prev_row.get("temp_max") if prev_row.get("temp_max") is not None else prev_row.get("t_max_c")
+                t2_raw = row.get("temp_max") if row.get("temp_max") is not None else row.get("t_max_c")
+                t1, _ = _parse_weather_val(t1_raw)
+                t2, _ = _parse_weather_val(t2_raw)
+                if t1 is not None and t2 is not None and abs(t1 - t2) > 3.0:
+                    conflicted_dates.add(d_str)
+
+                # Temp min conflict: difference > 3.0 C
+                tm1_raw = prev_row.get("temp_min") if prev_row.get("temp_min") is not None else prev_row.get("t_min_c")
+                tm2_raw = row.get("temp_min") if row.get("temp_min") is not None else row.get("t_min_c")
+                tm1, _ = _parse_weather_val(tm1_raw)
+                tm2, _ = _parse_weather_val(tm2_raw)
+                if tm1 is not None and tm2 is not None and abs(tm1 - tm2) > 3.0:
                     conflicted_dates.add(d_str)
             else:
                 seen_dates[d_str] = row
@@ -310,16 +348,24 @@ class ConstraintScheduler:
 
                 # Check expiration / validity window
                 valid_until_raw = day_fc.get("valid_until") or day_fc.get("expires_at")
-                if valid_until_raw:
-                    _, v_until_dt, _ = _parse_row_date_and_instant({"date": valid_until_raw})
-                    if v_until_dt is not None:
-                        ref_dt = cand_dt if cand_dt is not None else datetime.combine(start_d, datetime.min.time(), tzinfo=timezone.utc)
+                if valid_until_raw is not None:
+                    _, v_until_dt, v_err = _parse_row_date_and_instant({"date": valid_until_raw})
+                    if v_err is not None or v_until_dt is None:
+                        day_blocked = True
+                        day_reasons.append(f"Unqualified forecast valid_until: {valid_until_raw}")
+                    else:
+                        start_instant = start_date if isinstance(start_date, datetime) else datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+                        if start_instant.tzinfo is None:
+                            start_instant = start_instant.replace(tzinfo=timezone.utc)
+                        else:
+                            start_instant = start_instant.astimezone(timezone.utc)
+                        ref_dt = start_instant if cand_d == start_d else (cand_dt if cand_dt is not None else datetime.combine(cand_d, datetime.min.time(), tzinfo=timezone.utc))
                         if ref_dt > v_until_dt:
                             day_blocked = True
                             day_reasons.append(f"Forecast expired: valid_until={valid_until_raw} passed")
 
                 unit = str(day_fc.get("wind_speed_unit") or day_fc.get("wind_unit") or day_fc.get("unit") or "").lower().strip()
-                wind_mult = 3.6 if unit in ("m/s", "mps") else (1.852 if unit in ("knots", "knot", "kt", "kts") else 1.0)
+                wind_mult = 3.6 if unit in ("m/s", "mps") else (1.852 if unit in ("knots", "knot", "kt", "kts") else (1.60934 if unit in ("mph", "mi/h") else 1.0))
 
                 raw_wind_speed = day_fc.get("wind_speed") if day_fc.get("wind_speed") is not None else day_fc.get("wind_kmh")
                 raw_wind_gust = day_fc.get("wind_gust")

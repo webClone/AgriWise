@@ -501,18 +501,75 @@ class CommandDispatcher:
             effective_area_ha=eff_area,
         )
 
-        # SR04: Query live physical controller status before physical dispatch to detect latched fault
+        # Enforce latched fault independently of connectivity/query status before every START path
+        if getattr(actuator, "_fault_latched", False):
+            logger.error("Pre-dispatch check failed for %s: Actuator has latched fault", event.device_id)
+            self._active_events.pop(event.event_id, None)
+            self._safety.track_event_end(event.event_id)
+            self._safety.release_quota(event.event_id)
+            try:
+                SharedQuotaStore.release(event.event_id)
+            except Exception:
+                pass
+            event.transition(EventStatus.FAILED, f"Actuator {event.device_id} has latched fault")
+            self._emit_failed(event)
+            return event
+
+        # SR04: Query live physical controller status before physical dispatch to detect latched fault or active foreign execution
         try:
             live_st = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
-            if live_st == ActuatorStatus.ERROR and getattr(actuator, "_fault_latched", False):
-                logger.error("Pre-dispatch actuator status check failed for %s: Actuator has latched fault", event.device_id)
+            if getattr(actuator, "_fault_latched", False) or live_st == ActuatorStatus.ERROR:
+                logger.error("Pre-dispatch actuator status check failed for %s: Actuator has latched fault or status ERROR", event.device_id)
                 self._active_events.pop(event.event_id, None)
+                self._safety.track_event_end(event.event_id)
                 self._safety.release_quota(event.event_id)
-                event.transition(EventStatus.FAILED, f"Actuator {event.device_id} has latched fault: status is ERROR")
+                try:
+                    SharedQuotaStore.release(event.event_id)
+                except Exception:
+                    pass
+                event.transition(EventStatus.FAILED, f"Actuator {event.device_id} has latched fault or status ERROR")
                 self._emit_failed(event)
                 return event
+
+            if live_st == ActuatorStatus.EXECUTING:
+                act_cmd = getattr(actuator, "active_command", None)
+                act_eid = getattr(act_cmd, "source_event_id", getattr(act_cmd, "event_id", None)) if act_cmd else None
+                hw_eid = getattr(getattr(actuator, "hw", None), "event_id", None)
+                live_owner = None
+                try:
+                    live_owner = SharedQuotaStore.get_active_record_for_resource(event.device_id, event.zone_id)
+                except Exception:
+                    pass
+                foreign_eid = None
+                if act_eid and act_eid != event.event_id:
+                    foreign_eid = act_eid
+                elif hw_eid and hw_eid != event.event_id:
+                    foreign_eid = hw_eid
+                elif live_owner and live_owner.get("event_id") != event.event_id and live_owner.get("status") in ("EXECUTING", "DISPATCHING"):
+                    foreign_eid = live_owner.get("event_id")
+
+                if foreign_eid:
+                    logger.warning("Pre-dispatch check: Actuator %s is already EXECUTING another operation (%s); refusing NEW before send", event.device_id, foreign_eid)
+                    event.transition(EventStatus.STOP_REQUESTED, f"Actuator {event.device_id} is already EXECUTING another operation ({foreign_eid})")
+                    try:
+                        SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                    except Exception:
+                        pass
+                    self._emit_failed(event)
+                    return event
         except Exception as q_err:
             logger.warning("Could not query actuator status for %s before dispatch: %s", event.device_id, q_err)
+            if getattr(actuator, "_fault_latched", False):
+                self._active_events.pop(event.event_id, None)
+                self._safety.track_event_end(event.event_id)
+                self._safety.release_quota(event.event_id)
+                try:
+                    SharedQuotaStore.release(event.event_id)
+                except Exception:
+                    pass
+                event.transition(EventStatus.FAILED, f"Actuator {event.device_id} has latched fault")
+                self._emit_failed(event)
+                return event
 
         # Dispatch with retry
         result = await self._dispatch_with_retry(event, actuator)
@@ -685,10 +742,23 @@ class CommandDispatcher:
                         event.event_id, event.device_id)
         else:
             # BA-01 + C07: Uncertain physical outcomes must retain dispatcher ownership, tracking, and quota
+            # Distinguish positively refused-before-send from uncertain-after-send
+            is_refused_before_send = (
+                result.error_code in ("VALIDATION_FAILED", "PREFLIGHT_FAILED", "REJECTED_BEFORE_SEND", "COMMAND_VALIDATION_ERROR", "RESOURCE_CLAIM_FAILED", "DEVICE_ALREADY_EXECUTING")
+                or (not getattr(result, "command_sent", True) and result.error_code not in ("ACK_TIMEOUT", "UNCERTAIN_OUTCOME"))
+            )
+            is_own_command = False
+            act_cmd = getattr(actuator, "active_command", None)
+            if act_cmd:
+                act_eid = getattr(act_cmd, "source_event_id", getattr(act_cmd, "event_id", None))
+                is_own_command = (act_eid == event.event_id)
+
             is_uncertain = (
-                result.error_code in ("UNCERTAIN_OUTCOME", "ACK_TIMEOUT", "DISPATCH_EXCEPTION")
-                or actuator.active_command is not None
-                or getattr(actuator, "_status", None) in (ActuatorStatus.ERROR, ActuatorStatus.EXECUTING)
+                not is_refused_before_send and (
+                    result.error_code in ("UNCERTAIN_OUTCOME", "ACK_TIMEOUT", "DISPATCH_EXCEPTION")
+                    or is_own_command
+                    or getattr(actuator, "_pending_command", None) is not None
+                )
             )
             if is_uncertain:
                 logger.error(
@@ -706,6 +776,10 @@ class CommandDispatcher:
                 self._active_events.pop(event.event_id, None)
                 self._safety.track_event_end(event.event_id)
                 self._safety.release_quota(event.event_id)
+                try:
+                    SharedQuotaStore.release(event.event_id)
+                except Exception:
+                    pass
                 self._emit_failed(event)
 
         return event
@@ -852,13 +926,21 @@ class CommandDispatcher:
                 if new_v:
                     has_device_hazard = any(v.interlock_type != InterlockType.DURATION_EXCEEDED for v in new_v)
 
-            # BV01: Check current operation identity on actuator before issuing STOP, UNLESS there is an un-cleared device hazard
-            if act_cmd_eid and act_cmd_eid != event.event_id and not has_device_hazard:
-                logger.warning(
-                    "Actuator %s is executing different event %s; ignoring STOP retry for %s",
-                    event.device_id, act_cmd_eid, event.event_id
-                )
-                return event
+            # BV01: Check current operation identity on actuator or durable store before issuing STOP, UNLESS there is an un-cleared device hazard
+            if not has_device_hazard:
+                if act_cmd_eid and act_cmd_eid != event.event_id:
+                    logger.warning(
+                        "Actuator %s is executing different event %s; ignoring STOP retry for %s",
+                        event.device_id, act_cmd_eid, event.event_id
+                    )
+                    return event
+                live_owner = SharedQuotaStore.get_active_record_for_resource(event.device_id, event.zone_id)
+                if live_owner and live_owner.get("event_id") != event.event_id and live_owner.get("status") in ("EXECUTING", "DISPATCHING"):
+                    logger.warning(
+                        "Actuator %s is owned by live event %s in durable store; ignoring STOP retry for %s",
+                        event.device_id, live_owner.get("event_id"), event.event_id
+                    )
+                    return event
 
             try:
                 status = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
@@ -874,12 +956,17 @@ class CommandDispatcher:
             has_pending_cmd = (pending_cmd is not None and (not pending_eid or pending_eid == event.event_id))
             has_active_cmd = (act_cmd is not None and (not act_cmd_eid or act_cmd_eid == event.event_id))
             device_executing = (status == ActuatorStatus.EXECUTING)
+            live_res_owner = SharedQuotaStore.get_active_record_for_resource(event.device_id, event.zone_id)
+            is_foreign_owner = (
+                (act_cmd_eid is not None and act_cmd_eid != event.event_id)
+                or (live_res_owner is not None and live_res_owner.get("event_id") != event.event_id)
+            )
             is_positively_unstarted = (
                 not was_ever_started
                 and not has_pending_cmd
                 and not has_active_cmd
-                and not device_executing
-                and durable_st not in ("DISPATCHING", "EXECUTING", "STOP_REQUESTED")
+                and (not device_executing or is_foreign_owner)
+                and durable_st not in ("DISPATCHING", "EXECUTING")
             )
             if is_positively_unstarted:
                 term_status = EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED

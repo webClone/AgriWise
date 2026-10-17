@@ -1411,7 +1411,12 @@ def _execute_canonical_water_engine(
                                         }
             else:
                 head_rec = cw_svc._read(cw_svc._hydraulic_head_path(plot_id, tenant_id, namespace))
-                expected_head = head_rec.get("head_hash") or head_rec.get("latest_checkpoint_id")
+                scoped_heads = head_rec.get("scoped_heads", {}) if head_rec else {}
+                expected_head = scoped_heads.get(f"{cycle_id}::{geometry_version}")
+                if expected_head is None and not scoped_heads and head_rec:
+                    if (head_rec.get("cycle_id", "default_cycle") == cycle_id and
+                        head_rec.get("geometry_version", "default_geom") == geometry_version):
+                        expected_head = head_rec.get("head_hash") or head_rec.get("latest_checkpoint_id")
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"[L3] Checkpoint hydration note: {e}")
@@ -1541,7 +1546,7 @@ def _execute_canonical_water_engine(
                                     }
                             _PLOT_WATER_STATE_HISTORY[plot_id] = plot_hist
                             _PLOT_SOIL_OBS_HISTORY[plot_id] = plot_so_hist
-                            _PLOT_INIT_WATER_STATE_HISTORY[plot_id] = plot_init_hist
+                            _PLOT_INITIAL_STATE_HISTORY[plot_id] = plot_init_hist
                         return
 
                 # D11: If RAM head has already moved to a newer head or differs from expected_head and snapshot_head,

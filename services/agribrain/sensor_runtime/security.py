@@ -148,7 +148,7 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                                             rec_pid = int(rf_txt.split(":")[0])
                                 except Exception:
                                     pass
-                                if rec_age > 30.0 or (rec_pid > 0 and not _is_pid_alive(rec_pid)):
+                                if (rec_pid > 0 and not _is_pid_alive(rec_pid)) or (rec_pid <= 0 and rec_age > 30.0):
                                     try:
                                         os.unlink(rec_path)
                                     except OSError:
@@ -195,7 +195,14 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                                 except OSError:
                                     pass
                                 try:
-                                    os.unlink(rec_path)
+                                    rec_cur = ""
+                                    try:
+                                        with open(rec_path, "r", encoding="utf-8") as rf:
+                                            rec_cur = rf.read().strip()
+                                    except OSError:
+                                        pass
+                                    if rec_cur.startswith(f"{os.getpid()}:"):
+                                        os.unlink(rec_path)
                                 except OSError:
                                     pass
                                 continue

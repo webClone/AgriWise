@@ -32,7 +32,7 @@ def _atomic_write_json(path: Path, data: Dict[str, Any], exclusive: bool = True)
     tmp_path = path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, indent=2, sort_keys=True)
+            json.dump(data, handle, indent=2, sort_keys=True, allow_nan=False)
             handle.flush()
             os.fsync(handle.fileno())
         if exclusive:
@@ -201,6 +201,7 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
         raise ContractViolation(f"Observed value must be finite real number, got {observed}")
 
     parsed: List[Tuple[float, float]] = []
+    level_map: Dict[float, float] = {}
     for k, v in quantiles.items():
         k_str = str(k).lower().strip()
         if k_str.startswith("p"):
@@ -216,6 +217,9 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
         val = float(v)
         if math.isnan(val) or math.isinf(val):
             raise ContractViolation(f"Invalid quantile value {v} for level {k}: must be finite")
+        if alpha in level_map and abs(level_map[alpha] - val) > 1e-6:
+            raise ContractViolation(f"Conflicting duplicate quantile level {alpha}: {level_map[alpha]} vs {val}")
+        level_map[alpha] = val
         parsed.append((alpha, val))
 
     # Sort by quantile level
@@ -359,6 +363,43 @@ class ForecastRecord:
         if self.predicted_std is not None:
             if isinstance(self.predicted_std, bool) or not isinstance(self.predicted_std, (int, float)) or self.predicted_std < 0.0 or not math.isfinite(self.predicted_std):
                 raise ContractViolation(f"predicted_std must be non-negative finite, got {self.predicted_std}")
+        if self.predicted_quantiles:
+            if not isinstance(self.predicted_quantiles, dict):
+                raise ContractViolation("predicted_quantiles must be a dictionary")
+            parsed_q: List[Tuple[float, float]] = []
+            level_map: Dict[float, float] = {}
+            for k, v in self.predicted_quantiles.items():
+                k_str = str(k).lower().strip()
+                if k_str.startswith("p"):
+                    try:
+                        alpha = float(k_str[1:]) / 100.0
+                    except Exception:
+                        raise ContractViolation(f"Invalid quantile level key: {k}")
+                else:
+                    try:
+                        alpha = float(k_str)
+                        if alpha > 1.0:
+                            alpha /= 100.0
+                    except Exception:
+                        raise ContractViolation(f"Invalid quantile level key: {k}")
+                if not (0.0 <= alpha <= 1.0) or math.isnan(alpha) or math.isinf(alpha):
+                    raise ContractViolation(f"Invalid quantile level {k}: level must be in [0.0, 1.0]")
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    raise ContractViolation(f"Invalid quantile value {v} for level {k}: must be numeric")
+                val = float(v)
+                if math.isnan(val) or math.isinf(val):
+                    raise ContractViolation(f"Invalid quantile value {v} for level {k}: must be finite")
+                if alpha in level_map and abs(level_map[alpha] - val) > 1e-6:
+                    raise ContractViolation(f"Conflicting duplicate quantile level {alpha}: {level_map[alpha]} vs {val}")
+                level_map[alpha] = val
+                parsed_q.append((alpha, val))
+
+            parsed_q.sort(key=lambda x: x[0])
+            for i in range(len(parsed_q) - 1):
+                if parsed_q[i][1] > parsed_q[i + 1][1]:
+                    raise ContractViolation(
+                        f"Quantile values must be monotonic: level {parsed_q[i][0]} value {parsed_q[i][1]} > level {parsed_q[i+1][0]} value {parsed_q[i+1][1]}"
+                    )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -533,7 +574,9 @@ class ImmutableForecastArchive:
                         )
                         self._forecasts[fid] = record
                         return copy.deepcopy(record)
-                    except Exception:
+                    except Exception as e:
+                        if isinstance(e, (ContractViolation, json.JSONDecodeError, KeyError, ValueError)):
+                            raise ContractViolation(f"Corrupt or unreadable forecast record at {path}: {e}") from e
                         return None
         return None
 
@@ -583,9 +626,18 @@ class ImmutableForecastArchive:
         if not math.isfinite(obs):
             raise ContractViolation(f"Observed value must be finite, got {obs}")
 
+        if isinstance(verifying_evidence_ids, (str, bytes)) or not hasattr(verifying_evidence_ids, "__iter__"):
+            raise ContractViolation("verifying_evidence_ids must be a collection of string IDs")
         if not verifying_evidence_ids:
             raise ContractViolation("Verifying evidence IDs cannot be empty")
-        canon_evidence = tuple(sorted(str(x) for x in verifying_evidence_ids))
+        cleaned_evidence = []
+        for x in verifying_evidence_ids:
+            if x is None or not isinstance(x, str) or not x.strip():
+                raise ContractViolation(f"Verifying evidence ID must be non-blank string, got: {x!r}")
+            cleaned_evidence.append(x.strip())
+        if not cleaned_evidence:
+            raise ContractViolation("Verifying evidence IDs cannot be empty")
+        canon_evidence = tuple(sorted(cleaned_evidence))
 
         if not (forecast.predicted_quantiles or (forecast.predicted_mean is not None and forecast.predicted_std is not None)):
             raise ContractViolation(
@@ -636,9 +688,9 @@ class ImmutableForecastArchive:
 
         elif forecast.predicted_mean is not None and forecast.predicted_std is not None:
             crps = compute_crps_gaussian(forecast.predicted_mean, forecast.predicted_std, obs)
-            sharpness = 2.0 * 1.645 * forecast.predicted_std
-            p10 = forecast.predicted_mean - 1.645 * forecast.predicted_std
-            p90 = forecast.predicted_mean + 1.645 * forecast.predicted_std
+            sharpness = 2.0 * 1.28155 * forecast.predicted_std
+            p10 = forecast.predicted_mean - 1.28155 * forecast.predicted_std
+            p90 = forecast.predicted_mean + 1.28155 * forecast.predicted_std
             coverage_hit = (p10 <= obs <= p90)
             rmse = abs(obs - forecast.predicted_mean)
         else:
@@ -646,7 +698,7 @@ class ImmutableForecastArchive:
                 f"Forecast {forecast_id} has neither predictive quantiles nor valid mean/std distribution"
             )
 
-        ev_sig = ":".join(canon_evidence)
+        ev_sig = hashlib.sha256(json.dumps(list(canon_evidence)).encode("utf-8")).hexdigest()
         h = hashlib.sha256(f"{forecast_id}:{obs}:{ev_sig}:{eval_time.isoformat()}".encode("utf-8")).hexdigest()[:12]
         eval_id = f"eval-{forecast_id[:16]}-{int(eval_time.timestamp())}-{h}"
 
@@ -670,7 +722,9 @@ class ImmutableForecastArchive:
                 path = eval_dir / f"{eval_id}.json"
                 _atomic_write_json(path, record.to_dict(), exclusive=True)
 
-            self._evaluations.setdefault(forecast_id, []).append(record)
+            existing_evals = self._evaluations.setdefault(forecast_id, [])
+            if not any(e.evaluation_id == record.evaluation_id for e in existing_evals):
+                existing_evals.append(record)
 
         return record
 

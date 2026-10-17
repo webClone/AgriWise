@@ -207,10 +207,10 @@ class IrrigationActuator(ABC):
         if self._status == ActuatorStatus.OFFLINE:
             errors.append(f"Actuator {self.device_id} is OFFLINE")
 
-        # Allow STOP_ZONE and EMERGENCY_STOP even if in ERROR or MAINTENANCE
-        if (self._status == ActuatorStatus.ERROR
+        # Allow STOP_ZONE and EMERGENCY_STOP even if in ERROR or MAINTENANCE or latched fault
+        if ((self._status == ActuatorStatus.ERROR or getattr(self, "_fault_latched", False))
                 and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
-            errors.append(f"Actuator {self.device_id} is in ERROR state")
+            errors.append(f"Actuator {self.device_id} is in ERROR state or has latched fault")
 
         if (self._status == ActuatorStatus.MAINTENANCE
                 and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):

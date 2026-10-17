@@ -678,6 +678,8 @@ class SharedQuotaStore:
                         notes=f"Event {event_id} already reserved by concurrent worker",
                     )
 
+
+
                 today_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 season_key = str(getattr(budget, "season", "default_season")) if budget else "default_season"
 
@@ -1562,6 +1564,17 @@ class SharedQuotaStore:
             stopped = state.get("stopped_receipts", {}).get(event_id)
             if stopped is not None:
                 return {"status": "CANCELLED", **stopped}
+            return None
+
+    @classmethod
+    def get_active_record_for_resource(cls, device_id: str, zone_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        with cls._lock():
+            state = cls._read_state()
+            for eid, res in state.get("reservations", {}).items():
+                if res.get("status") in ("DISPATCHING", "EXECUTING", "VALIDATING"):
+                    if res.get("device_id") == device_id:
+                        if not zone_id or not res.get("zone_id") or res.get("zone_id") == zone_id:
+                            return {"event_id": eid, **res}
             return None
 
     @classmethod

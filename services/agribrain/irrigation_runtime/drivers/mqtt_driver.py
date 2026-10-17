@@ -377,13 +377,25 @@ class MQTTActuator(IrrigationActuator):
             fault_code = ack_payload.get("fault_code", 0)
             has_fault = _has_fault(raw_status, fault_code)
 
+            is_contradiction = (
+                (is_running is True and is_stopped is True)
+                or (raw_status in ("RUNNING", "EXECUTING", "BUSY") and (is_stopped is True or is_running is False))
+                or (raw_status in ("STOPPED", "IDLE") and (is_running is True or is_stopped is False))
+            )
+
             if command.command_type in (CommandType.START_ZONE, CommandType.PULSE_IRRIGATE):
-                if is_stopped is True or is_running is False or has_fault:
+                if is_contradiction or is_stopped is True or is_running is False or has_fault:
                     success = False
-                    err_code = ack_payload.get("error_code") or ("CONTROLLER_FAULT" if has_fault else "START_FAILED_NOT_RUNNING")
-                    err_msg = ack_payload.get("error_message") or f"Controller reported stopped or not running: {ack_payload}"
+                    err_code = ack_payload.get("error_code") or (
+                        "CONTRADICTORY_STATUS" if is_contradiction else ("CONTROLLER_FAULT" if has_fault else "START_FAILED_NOT_RUNNING")
+                    )
+                    err_msg = ack_payload.get("error_message") or (
+                        f"Controller reported contradictory status/flags: status={raw_status}, running={is_running}, stopped={is_stopped}"
+                        if is_contradiction else f"Controller reported stopped or not running: {ack_payload}"
+                    )
                     if has_fault:
                         self._status = ActuatorStatus.ERROR
+                        self._fault_latched = True
                     elif is_stopped is True:
                         self._status = ActuatorStatus.ONLINE
                     else:

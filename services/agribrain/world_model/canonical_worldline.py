@@ -314,6 +314,15 @@ class CanonicalWorldlineService:
             current_head = self._read(head_path)
             current_head_id = current_head.get("head_hash") or current_head.get("latest_checkpoint_id")
 
+            scope_key = f"{cycle_id}::{geometry_version}"
+            scoped_heads = dict(current_head.get("scoped_heads", {}) or {})
+            scoped_head = scoped_heads.get(scope_key)
+            if scoped_head is None and not scoped_heads:
+                if (current_head.get("cycle_id", "default_cycle") == cycle_id and
+                    current_head.get("geometry_version", "default_geom") == geometry_version):
+                    scoped_head = current_head_id
+            target_predecessor = scoped_head
+
             # R08 + V11: Immutability, full record identity, and interrupted publication recovery
             if cp_path.exists():
                 existing = self._read(cp_path)
@@ -324,16 +333,16 @@ class CanonicalWorldlineService:
                 matches_geom = existing and (existing.get("geometry_version", "default_geom") == geometry_version)
                 if matches_payload and matches_cycle and matches_geom:
                     # Check if head publication is committed
-                    if current_head_id == checkpoint_id:
+                    if current_head_id == checkpoint_id or scoped_heads.get(scope_key) == checkpoint_id:
                         # Already published head: return existing record idempotently
                         return existing
 
                     # V11: Interrupted publication recovery: checkpoint exists, head was not updated
-                    # Recover head ONLY if predecessor_head matches the current head!
-                    if existing.get("predecessor_head") == current_head_id:
+                    # Recover head ONLY if predecessor_head matches the expected predecessor head!
+                    if existing.get("predecessor_head") in (target_predecessor, current_head_id):
                         seq = existing.get("sequence", (int(current_head.get("sequence", 0) or 0) + 1))
                         scoped_heads = dict(current_head.get("scoped_heads", {}) or {})
-                        scoped_heads[f"{cycle_id}::{geometry_version}"] = checkpoint_id
+                        scoped_heads[scope_key] = checkpoint_id
                         new_head = {
                             "tenant_id": tenant_id,
                             "namespace": namespace,
@@ -357,14 +366,14 @@ class CanonicalWorldlineService:
                 )
 
             # R08: Self-parent loop prevention
-            if checkpoint_id == current_head_id:
+            if checkpoint_id == target_predecessor or checkpoint_id == current_head_id:
                 raise ValueError(f"Self-parent loop rejected: checkpoint {checkpoint_id} cannot have itself as predecessor head")
             if expected_predecessor_head is not CAS_UNSET and checkpoint_id == expected_predecessor_head:
                 raise ValueError(f"Self-parent loop rejected: checkpoint {checkpoint_id} cannot have itself as predecessor head")
 
-            if expected_predecessor_head is not CAS_UNSET and current_head_id != expected_predecessor_head:
+            if expected_predecessor_head is not CAS_UNSET and target_predecessor != expected_predecessor_head:
                 raise ConcurrencyConflictError(
-                    f"Predecessor head conflict for plot {plot_id}: expected {expected_predecessor_head}, found {current_head_id}"
+                    f"Predecessor head conflict for plot {plot_id}: expected {expected_predecessor_head}, found {target_predecessor}"
                 )
 
             seq = int(current_head.get("sequence", 0) or 0) + 1
@@ -376,7 +385,7 @@ class CanonicalWorldlineService:
                 "cycle_id": cycle_id,
                 "geometry_version": geometry_version,
                 "sequence": seq,
-                "predecessor_head": current_head_id,
+                "predecessor_head": target_predecessor,
                 "committed_at": _now(),
                 "payload": _public(checkpoint_payload),
             }
