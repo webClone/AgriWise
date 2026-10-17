@@ -221,9 +221,16 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                                         pass
                                     if other_pid > 0 and _is_pid_alive(other_pid):
                                         try:
-                                            if not os.path.exists(lock_path):
-                                                with open(lock_path, "w", encoding="utf-8") as lf:
-                                                    lf.write(f"{other_pid}:{time.time()}:restored")
+                                            with open(lock_path, "w", encoding="utf-8") as lf:
+                                                lf.write(f"{other_pid}:{time.time()}:restored")
+                                        except OSError:
+                                            pass
+                                        time.sleep(0.01)
+                                        continue
+                                    else:
+                                        try:
+                                            if os.path.exists(lock_path) and os.path.getsize(lock_path) == 0:
+                                                os.unlink(lock_path)
                                         except OSError:
                                             pass
                                         time.sleep(0.01)
@@ -249,7 +256,7 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                 if os.path.exists(lock_path):
                     with open(lock_path, "r", encoding="utf-8") as f:
                         cur_token = f.read().strip()
-                    if cur_token == owner_token or cur_token.startswith(f"{os.getpid()}:"):
+                    if cur_token == owner_token or cur_token.startswith(f"{os.getpid()}:") or not cur_token:
                         os.unlink(lock_path)
             except OSError:
                 pass

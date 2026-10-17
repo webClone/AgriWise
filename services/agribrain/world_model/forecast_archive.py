@@ -184,6 +184,28 @@ class ForecastEvaluation:
 # PROBABILISTIC SCORING & CALIBRATION (CRPS, SHARPNESS, COVERAGE)
 # ============================================================================
 
+def parse_quantile_level(k: Any) -> float:
+    """Normalize and validate quantile level key (e.g. 'p50', '50%', '0.5', '50', 'q50') to float in [0.0, 1.0]."""
+    k_str = str(k).lower().strip()
+    try:
+        if k_str.startswith("p") or k_str.startswith("q"):
+            val = float(k_str[1:])
+            if val > 1.0:
+                val /= 100.0
+        elif k_str.endswith("%"):
+            val = float(k_str[:-1]) / 100.0
+        else:
+            val = float(k_str)
+            if val > 1.0:
+                val /= 100.0
+        val = round(val, 6)
+    except Exception as exc:
+        raise ContractViolation(f"Invalid quantile level key: {k}") from exc
+    if not (0.0 <= val <= 1.0) or math.isnan(val) or math.isinf(val):
+        raise ContractViolation(f"Invalid quantile level {k}: level must be in [0.0, 1.0]")
+    return val
+
+
 def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> float:
     """Continuous Ranked Probability Score (CRPS) for quantile forecasts via pinball loss.
 
@@ -202,18 +224,7 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
 
     level_map: Dict[float, float] = {}
     for k, v in quantiles.items():
-        k_str = str(k).lower().strip()
-        if k_str.startswith("p"):
-            alpha = round(float(k_str[1:]) / 100.0, 6)
-        elif k_str.endswith("%"):
-            alpha = round(float(k_str[:-1]) / 100.0, 6)
-        else:
-            alpha = float(k_str)
-            if alpha > 1.0:
-                alpha /= 100.0
-            alpha = round(alpha, 6)
-        if not (0.0 <= alpha <= 1.0) or math.isnan(alpha) or math.isinf(alpha):
-            raise ContractViolation(f"Invalid quantile level {k}: level must be in [0.0, 1.0]")
+        alpha = parse_quantile_level(k)
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise ContractViolation(f"Invalid quantile value {v} for level {k}: must be numeric")
         val = float(v)
@@ -348,8 +359,13 @@ class ForecastRecord:
             raise ContractViolation("ForecastRecord requires non-blank target_variable")
         if not isinstance(self.issued_at_knowledge_time, datetime) or not isinstance(self.target_epoch, datetime):
             raise ContractViolation("issued_at_knowledge_time and target_epoch must be datetime objects")
-        if self.issued_at_knowledge_time.tzinfo is None or self.target_epoch.tzinfo is None:
-            raise ContractViolation("issued_at_knowledge_time and target_epoch must be timezone-aware datetime objects")
+        if (
+            self.issued_at_knowledge_time.tzinfo is None
+            or self.issued_at_knowledge_time.utcoffset() is None
+            or self.target_epoch.tzinfo is None
+            or self.target_epoch.utcoffset() is None
+        ):
+            raise ContractViolation("issued_at_knowledge_time and target_epoch must be timezone-aware datetime objects with defined utcoffset")
         if self.target_epoch <= self.issued_at_knowledge_time:
             raise ContractViolation(
                 f"target_epoch ({self.target_epoch}) must be strictly after "
@@ -371,27 +387,7 @@ class ForecastRecord:
                 raise ContractViolation("predicted_quantiles must be a dictionary")
             level_map: Dict[float, float] = {}
             for k, v in self.predicted_quantiles.items():
-                k_str = str(k).lower().strip()
-                if k_str.startswith("p"):
-                    try:
-                        alpha = round(float(k_str[1:]) / 100.0, 6)
-                    except Exception:
-                        raise ContractViolation(f"Invalid quantile level key: {k}")
-                elif k_str.endswith("%"):
-                    try:
-                        alpha = round(float(k_str[:-1]) / 100.0, 6)
-                    except Exception:
-                        raise ContractViolation(f"Invalid quantile level key: {k}")
-                else:
-                    try:
-                        alpha = float(k_str)
-                        if alpha > 1.0:
-                            alpha /= 100.0
-                        alpha = round(alpha, 6)
-                    except Exception:
-                        raise ContractViolation(f"Invalid quantile level key: {k}")
-                if not (0.0 <= alpha <= 1.0) or math.isnan(alpha) or math.isinf(alpha):
-                    raise ContractViolation(f"Invalid quantile level {k}: level must be in [0.0, 1.0]")
+                alpha = parse_quantile_level(k)
                 if isinstance(v, bool) or not isinstance(v, (int, float)):
                     raise ContractViolation(f"Invalid quantile value {v} for level {k}: must be numeric")
                 val = float(v)
@@ -668,16 +664,8 @@ class ImmutableForecastArchive:
             norm_q = {}
             for k, v in forecast.predicted_quantiles.items():
                 try:
-                    s = str(k).strip().lower()
-                    if s.endswith("%"):
-                        alpha = float(s[:-1]) / 100.0
-                    elif s.startswith("p") or s.startswith("q"):
-                        alpha = float(s[1:])
-                        if alpha > 1.0:
-                            alpha = alpha / 100.0
-                    else:
-                        alpha = float(s)
-                    norm_q[round(alpha, 6)] = float(v)
+                    alpha = parse_quantile_level(k)
+                    norm_q[alpha] = float(v)
                 except Exception:
                     continue
 

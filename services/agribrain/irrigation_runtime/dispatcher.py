@@ -25,6 +25,7 @@ import asyncio
 import logging
 import math
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -515,8 +516,10 @@ class CommandDispatcher:
             self._emit_failed(event)
             return event
 
+        query_ts = None
         # SR04: Query live physical controller status before physical dispatch to detect latched fault or active foreign execution
         try:
+            query_ts = time.time()
             live_st = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
             if getattr(actuator, "_fault_latched", False) or live_st == ActuatorStatus.ERROR:
                 logger.error("Pre-dispatch actuator status check failed for %s: Actuator has latched fault or status ERROR", event.device_id)
@@ -530,6 +533,16 @@ class CommandDispatcher:
                 event.transition(EventStatus.FAILED, f"Actuator {event.device_id} has latched fault or status ERROR")
                 self._emit_failed(event)
                 return event
+
+            if live_st == ActuatorStatus.ONLINE:
+                for prev_eid, prev_ev in list(self._active_events.items()):
+                    if prev_eid != event.event_id and prev_ev.device_id == event.device_id:
+                        if prev_ev.status == EventStatus.EXECUTING:
+                            logger.info("Prior event %s owned by this dispatcher on device %s is no longer executing (actuator ONLINE); updating status", prev_eid, event.device_id)
+                            try:
+                                SharedQuotaStore.update_status(prev_eid, "COMPLETED")
+                            except Exception:
+                                pass
 
             if live_st == ActuatorStatus.EXECUTING:
                 act_cmd = getattr(actuator, "active_command", None)
@@ -575,7 +588,7 @@ class CommandDispatcher:
         # R01: Atomic exclusive resource claim before physical START dispatch
         live_executing = (live_st == ActuatorStatus.EXECUTING)
         claimed, holding_eid = SharedQuotaStore.claim_resource(
-            event.device_id, event.zone_id, event.event_id, live_executing=live_executing
+            event.device_id, event.zone_id, event.event_id, live_executing=live_executing, query_ts=query_ts
         )
         if not claimed:
             logger.warning(
@@ -1731,8 +1744,8 @@ class CommandDispatcher:
                         for oe_id, oe_res in state_res.items():
                             if oe_id != event.event_id and oe_res.get("device_id") == event.device_id:
                                 oe_st = oe_res.get("status", "")
-                                # XR03: Include STOP_REQUESTED, EXECUTING, DISPATCHING, RESERVED; exclude VALIDATING (settlement phase is not physically executing)
-                                if oe_st in ("DISPATCHING", "EXECUTING", "RESERVED", "STOP_REQUESTED"):
+                                # XR03: Include STARTING, STOP_REQUESTED, EXECUTING, DISPATCHING, RESERVED; exclude VALIDATING (settlement phase is not physically executing)
+                                if oe_st in ("STARTING", "DISPATCHING", "EXECUTING", "RESERVED", "STOP_REQUESTED"):
                                     other_active_eid = oe_id
                                     break
 
@@ -1800,6 +1813,7 @@ class CommandDispatcher:
 
                 raw_st = active_rec.get("status")
                 if raw_st in (
+                    "STARTING",
                     EventStatus.DISPATCHING.value,
                     EventStatus.EXECUTING.value,
                     EventStatus.STOP_REQUESTED.value,
@@ -1808,6 +1822,8 @@ class CommandDispatcher:
                 ):
                     if raw_st == "UNSETTLED":
                         event.status = EventStatus.VALIDATING
+                    elif raw_st == "STARTING":
+                        event.status = EventStatus.DISPATCHING
                     else:
                         event.status = EventStatus(raw_st)
 
@@ -2026,7 +2042,7 @@ class CommandDispatcher:
                     has_pending = (
                         getattr(actuator, "pending_command", None) is not None
                         or getattr(actuator, "_pending_command", None) is not None
-                        or durable_st in ("DISPATCHING", "STOP_REQUESTED")
+                        or durable_st in ("STARTING", "DISPATCHING", "STOP_REQUESTED")
                         or event.status in (EventStatus.DISPATCHING, EventStatus.STOP_REQUESTED)
                     )
                     if has_pending:

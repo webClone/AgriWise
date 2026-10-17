@@ -974,8 +974,13 @@ class SharedQuotaStore:
                 state["reservations"][event_id]["status"] = new_status
                 if new_status in ("STOP_REQUESTED", "CANCELLED", "COMPLETED", "SETTLED", "FAILED"):
                     state["reservations"][event_id]["claimed"] = False
+                    state["reservations"][event_id].pop("starting_ts", None)
                 elif new_status in ("STARTING", "EXECUTING"):
                     state["reservations"][event_id]["claimed"] = True
+                    if "starting_ts" in state["reservations"][event_id]:
+                        state["reservations"][event_id]["claimed_ts"] = state["reservations"][event_id].pop("starting_ts")
+                    elif "claimed_ts" not in state["reservations"][event_id]:
+                        state["reservations"][event_id]["claimed_ts"] = time.time()
                 if actual_start:
                     cur = state["reservations"][event_id].get("actual_start")
                     if cur:
@@ -1588,6 +1593,7 @@ class SharedQuotaStore:
         zone_id: Optional[str],
         event_id: str,
         live_executing: bool = False,
+        query_ts: Optional[float] = None,
     ) -> Tuple[bool, Optional[str]]:
         """Atomically claim exclusive execution rights on (device_id, zone_id) for event_id.
 
@@ -1613,14 +1619,40 @@ class SharedQuotaStore:
                             starting_ts = res.get("starting_ts", 0.0)
                             if now_ts - starting_ts < 30.0:
                                 return False, eid
-                        # 2. Hardware is currently executing another confirmed operation
-                        if live_executing and st in ("EXECUTING", "DISPATCHING", "STARTING"):
+                        # 2. Another operation has requested stop but is not yet settled
+                        elif st in ("STOP_REQUESTED",):
+                            return False, eid
+                        # 3. Hardware or store has confirmed operation
+                        elif st in ("EXECUTING", "DISPATCHING"):
+                            if live_executing:
+                                return False, eid
+                            claim_ts = res.get("claimed_ts") or res.get("starting_ts")
+                            if not claim_ts and res.get("owner_token"):
+                                try:
+                                    claim_ts = float(res["owner_token"].split(":")[1])
+                                except Exception:
+                                    pass
+                            if not claim_ts and res.get("claimed_at"):
+                                try:
+                                    claim_ts = datetime.fromisoformat(res["claimed_at"]).timestamp()
+                                except Exception:
+                                    pass
+                            claim_ts = claim_ts or 0.0
+                            if query_ts is not None and claim_ts >= query_ts:
+                                return False, eid
+                            if query_ts is None:
+                                return False, eid
+                        elif live_executing and st in ("RESERVED",):
                             return False, eid
 
             if event_id in reservations:
+                gen = reservations[event_id].get("generation", 0) + 1
                 reservations[event_id]["status"] = "STARTING"
                 reservations[event_id]["starting_ts"] = now_ts
                 reservations[event_id]["claimed_at"] = datetime.now(timezone.utc).isoformat()
+                reservations[event_id]["claimed"] = True
+                reservations[event_id]["generation"] = gen
+                reservations[event_id]["owner_token"] = f"{event_id}:{now_ts}:{gen}"
                 cls._write_state(state)
 
             return True, None
@@ -1637,7 +1669,8 @@ class SharedQuotaStore:
             state = cls._read_state()
             reservations = state.get("reservations", {})
             if event_id in reservations and reservations[event_id].get("status") == "STARTING":
-                reservations[event_id]["status"] = "DISPATCHING"
+                reservations[event_id]["status"] = "RESERVED"
+                reservations[event_id]["claimed"] = False
                 reservations[event_id].pop("starting_ts", None)
                 cls._write_state(state)
 

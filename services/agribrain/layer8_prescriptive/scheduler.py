@@ -342,7 +342,12 @@ class ConstraintScheduler:
             block_reasons: List[str] = []
             
             scan_days = min(horizon_days, len(deduped_forecast)) if deduped_forecast else 0
-            start_d = start_date.date() if isinstance(start_date, datetime) else start_date
+            start_instant = start_date if isinstance(start_date, datetime) else datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+            if start_instant.tzinfo is None:
+                start_instant = start_instant.replace(tzinfo=timezone.utc)
+            else:
+                start_instant = start_instant.astimezone(timezone.utc)
+            start_d = start_instant.date()
             end_horizon_d = start_d + timedelta(days=horizon_days)
             
             for i in range(scan_days):
@@ -367,13 +372,22 @@ class ConstraintScheduler:
                     continue
 
                 candidate_date = d_str
-                cand_d = cand_dt.date() if cand_dt else None
+                cand_d_pre = cand_dt.date() if cand_dt else None
+                candidate_instant = cand_dt if cand_dt is not None else datetime.combine(cand_d_pre, datetime.min.time(), tzinfo=timezone.utc)
+                if candidate_instant.tzinfo is None:
+                    candidate_instant = candidate_instant.replace(tzinfo=timezone.utc)
+                else:
+                    candidate_instant = candidate_instant.astimezone(timezone.utc)
+                cand_d = candidate_instant.date()
 
                 day_blocked = False
                 day_reasons = []
 
-                # Check planning horizon interval
-                if cand_d and (cand_d < start_d or cand_d >= end_horizon_d):
+                # Check planning horizon interval and start instant
+                if cand_dt is not None and candidate_instant < start_instant:
+                    day_blocked = True
+                    day_reasons.append(f"Candidate instant {candidate_instant.isoformat()} precedes planning start {start_instant.isoformat()}")
+                elif cand_d and (cand_d < start_d or cand_d >= end_horizon_d):
                     day_blocked = True
                     day_reasons.append(f"Date {candidate_date} is outside planning horizon [{start_d}, {end_horizon_d})")
 
@@ -390,16 +404,6 @@ class ConstraintScheduler:
                         day_blocked = True
                         day_reasons.append(f"Unqualified forecast valid_until: {valid_until_raw}")
                     else:
-                        start_instant = start_date if isinstance(start_date, datetime) else datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
-                        if start_instant.tzinfo is None:
-                            start_instant = start_instant.replace(tzinfo=timezone.utc)
-                        else:
-                            start_instant = start_instant.astimezone(timezone.utc)
-                        candidate_instant = cand_dt if cand_dt is not None else datetime.combine(cand_d, datetime.min.time(), tzinfo=timezone.utc)
-                        if candidate_instant.tzinfo is None:
-                            candidate_instant = candidate_instant.replace(tzinfo=timezone.utc)
-                        else:
-                            candidate_instant = candidate_instant.astimezone(timezone.utc)
                         ref_dt = max(start_instant, candidate_instant)
                         if ref_dt > v_until_dt:
                             day_blocked = True

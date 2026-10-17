@@ -268,10 +268,25 @@ class CanonicalWorldlineService:
             scope_key = f"{c_target}::{g_target}"
             scoped_heads = head_data.get("scoped_heads", {}) or {}
             if scope_key in scoped_heads:
-                cp_path = self._hydraulic_checkpoint_path(plot_id, scoped_heads[scope_key], tenant_id, namespace)
+                cp_id = scoped_heads[scope_key]
+                cp_path = self._hydraulic_checkpoint_path(plot_id, cp_id, tenant_id, namespace)
                 res = self._read(cp_path)
                 if res:
-                    return res
+                    res_out = dict(res)
+                    cp_seqs = head_data.get("checkpoint_sequences", {}) or {}
+                    pub_seq = cp_seqs.get(cp_id)
+                    if pub_seq is not None:
+                        res_out["sequence"] = pub_seq
+                        res_out["publication_generation"] = pub_seq
+                    elif head_data.get("scoped_sequences", {}).get(scope_key) is not None:
+                        pub_seq = head_data["scoped_sequences"][scope_key]
+                        res_out["sequence"] = pub_seq
+                        res_out["publication_generation"] = pub_seq
+                    elif head_data.get("latest_checkpoint_id") == cp_id and head_data.get("sequence"):
+                        pub_seq = int(head_data["sequence"])
+                        res_out["sequence"] = pub_seq
+                        res_out["publication_generation"] = pub_seq
+                    return res_out
 
             # Fallback: traverse predecessor chain starting from latest_checkpoint_id
             curr_id = head_data.get("latest_checkpoint_id")
@@ -285,13 +300,32 @@ class CanonicalWorldlineService:
                 cp_cycle = cp_data.get("cycle_id", "default_cycle")
                 cp_geom = cp_data.get("geometry_version", "default_geom")
                 if cp_cycle == c_target and cp_geom == g_target:
-                    return cp_data
+                    res_out = dict(cp_data)
+                    cp_seqs = head_data.get("checkpoint_sequences", {}) or {}
+                    pub_seq = cp_seqs.get(curr_id)
+                    if pub_seq is not None:
+                        res_out["sequence"] = pub_seq
+                        res_out["publication_generation"] = pub_seq
+                    return res_out
                 curr_id = cp_data.get("predecessor_head")
 
             return None
 
-        cp_path = self._hydraulic_checkpoint_path(plot_id, head_data["latest_checkpoint_id"], tenant_id, namespace)
-        return self._read(cp_path) or None
+        cp_id = head_data.get("latest_checkpoint_id")
+        cp_path = self._hydraulic_checkpoint_path(plot_id, cp_id, tenant_id, namespace)
+        res = self._read(cp_path)
+        if res:
+            res_out = dict(res)
+            cp_seqs = head_data.get("checkpoint_sequences", {}) or {}
+            pub_seq = cp_seqs.get(cp_id)
+            if pub_seq is not None:
+                res_out["sequence"] = pub_seq
+                res_out["publication_generation"] = pub_seq
+            elif head_data.get("sequence"):
+                res_out["sequence"] = int(head_data["sequence"])
+                res_out["publication_generation"] = int(head_data["sequence"])
+            return res_out
+        return None
 
     def save_hydraulic_checkpoint(
         self,
@@ -352,7 +386,21 @@ class CanonicalWorldlineService:
                     # Check if head publication is committed
                     if current_head_id == checkpoint_id or scoped_heads.get(scope_key) == checkpoint_id:
                         # Already published head: return existing record idempotently
-                        return existing
+                        rec_out = dict(existing)
+                        cp_seqs = current_head.get("checkpoint_sequences", {}) or {}
+                        pub_seq = cp_seqs.get(checkpoint_id)
+                        if pub_seq is not None:
+                            rec_out["sequence"] = pub_seq
+                            rec_out["publication_generation"] = pub_seq
+                        elif current_head.get("scoped_sequences", {}).get(scope_key) is not None:
+                            pub_seq = current_head["scoped_sequences"][scope_key]
+                            rec_out["sequence"] = pub_seq
+                            rec_out["publication_generation"] = pub_seq
+                        elif current_head_id == checkpoint_id and current_head.get("sequence"):
+                            pub_seq = int(current_head["sequence"])
+                            rec_out["sequence"] = pub_seq
+                            rec_out["publication_generation"] = pub_seq
+                        return rec_out
 
                     # V11: Interrupted publication recovery: checkpoint exists, head was not updated
                     # Recover head ONLY if predecessor_head matches the expected predecessor head!
@@ -361,6 +409,10 @@ class CanonicalWorldlineService:
                         orphan_seq = int(existing.get("sequence", 0) or 0)
                         seq = max(head_seq + 1, orphan_seq)
                         scoped_heads[scope_key] = checkpoint_id
+                        scoped_seqs = dict(current_head.get("scoped_sequences", {}) or {})
+                        scoped_seqs[scope_key] = seq
+                        cp_seqs = dict(current_head.get("checkpoint_sequences", {}) or {})
+                        cp_seqs[checkpoint_id] = seq
                         new_head = {
                             "tenant_id": tenant_id,
                             "namespace": namespace,
@@ -371,11 +423,14 @@ class CanonicalWorldlineService:
                             "cycle_id": cycle_id,
                             "geometry_version": geometry_version,
                             "scoped_heads": scoped_heads,
+                            "scoped_sequences": scoped_seqs,
+                            "checkpoint_sequences": cp_seqs,
                             "updated_at": _now(),
                         }
                         self._atomic(head_path, new_head)
                         rec_out = dict(existing)
                         rec_out["sequence"] = seq
+                        rec_out["publication_generation"] = seq
                         return rec_out
                     else:
                         raise ConcurrencyConflictError(
@@ -413,6 +468,10 @@ class CanonicalWorldlineService:
             self._atomic(cp_path, record)
 
             scoped_heads[f"{cycle_id}::{geometry_version}"] = checkpoint_id
+            scoped_seqs = dict(current_head.get("scoped_sequences", {}) or {})
+            scoped_seqs[f"{cycle_id}::{geometry_version}"] = seq
+            cp_seqs = dict(current_head.get("checkpoint_sequences", {}) or {})
+            cp_seqs[checkpoint_id] = seq
             new_head = {
                 "tenant_id": tenant_id,
                 "namespace": namespace,
@@ -423,9 +482,12 @@ class CanonicalWorldlineService:
                 "cycle_id": cycle_id,
                 "geometry_version": geometry_version,
                 "scoped_heads": scoped_heads,
+                "scoped_sequences": scoped_seqs,
+                "checkpoint_sequences": cp_seqs,
                 "updated_at": _now(),
             }
             self._atomic(head_path, new_head)
+            record["publication_generation"] = seq
             return record
 
     def load_event(self, plot_id: str, event_id: str, tenant_id: str = "default_tenant", namespace: str = "default") -> Dict[str, Any]:
