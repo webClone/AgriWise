@@ -559,6 +559,7 @@ class CommandDispatcher:
                     return event
         except Exception as q_err:
             logger.warning("Could not query actuator status for %s before dispatch: %s", event.device_id, q_err)
+            live_st = ActuatorStatus.UNKNOWN
             if getattr(actuator, "_fault_latched", False):
                 self._active_events.pop(event.event_id, None)
                 self._safety.track_event_end(event.event_id)
@@ -571,8 +572,28 @@ class CommandDispatcher:
                 self._emit_failed(event)
                 return event
 
+        # R01: Atomic exclusive resource claim before physical START dispatch
+        live_executing = (live_st == ActuatorStatus.EXECUTING)
+        claimed, holding_eid = SharedQuotaStore.claim_resource(
+            event.device_id, event.zone_id, event.event_id, live_executing=live_executing
+        )
+        if not claimed:
+            logger.warning(
+                "Resource claim failed for event %s: Actuator %s is already claimed/executing operation %s; refusing START",
+                event.event_id, event.device_id, holding_eid
+            )
+            event.transition(EventStatus.STOP_REQUESTED, f"Actuator {event.device_id} is already EXECUTING another operation ({holding_eid})")
+            try:
+                SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+            except Exception:
+                pass
+            self._emit_failed(event)
+            return event
+
         # Dispatch with retry
         result = await self._dispatch_with_retry(event, actuator)
+        if not result.success:
+            SharedQuotaStore.release_resource_claim(event.device_id, event.zone_id, event.event_id)
 
         # C02 + D01: If event was already cancelled/stopped or preempted while dispatch was in-flight, preserve status!
         if (

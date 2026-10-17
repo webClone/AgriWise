@@ -167,6 +167,7 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                             rec_fd = None
 
                         if rec_fd is not None:
+                            acquired_in_recovery = False
                             try:
                                 if os.path.exists(lock_path) and time.time() - os.path.getmtime(lock_path) > 30.0:
                                     lock_txt = ""
@@ -187,6 +188,11 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                                                 cur_txt = f.read().strip()
                                             if cur_txt == lock_txt:
                                                 os.unlink(lock_path)
+                                                try:
+                                                    descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                                                    acquired_in_recovery = True
+                                                except (FileExistsError, OSError):
+                                                    pass
                                         except OSError:
                                             pass
                             finally:
@@ -194,18 +200,43 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                                     os.close(rec_fd)
                                 except OSError:
                                     pass
+                                rec_cur = ""
                                 try:
-                                    rec_cur = ""
-                                    try:
-                                        with open(rec_path, "r", encoding="utf-8") as rf:
-                                            rec_cur = rf.read().strip()
-                                    except OSError:
-                                        pass
-                                    if rec_cur.startswith(f"{os.getpid()}:"):
-                                        os.unlink(rec_path)
+                                    with open(rec_path, "r", encoding="utf-8") as rf:
+                                        rec_cur = rf.read().strip()
                                 except OSError:
                                     pass
-                                continue
+                                if rec_cur and not rec_cur.startswith(f"{os.getpid()}:"):
+                                    if acquired_in_recovery and descriptor is not None:
+                                        try:
+                                            os.close(descriptor)
+                                        except OSError:
+                                            pass
+                                        descriptor = None
+                                        acquired_in_recovery = False
+                                    other_pid = -1
+                                    try:
+                                        other_pid = int(rec_cur.split(":")[0])
+                                    except ValueError:
+                                        pass
+                                    if other_pid > 0 and _is_pid_alive(other_pid):
+                                        try:
+                                            if not os.path.exists(lock_path):
+                                                with open(lock_path, "w", encoding="utf-8") as lf:
+                                                    lf.write(f"{other_pid}:{time.time()}:restored")
+                                        except OSError:
+                                            pass
+                                        time.sleep(0.01)
+                                        continue
+                                elif not acquired_in_recovery:
+                                    if rec_cur.startswith(f"{os.getpid()}:"):
+                                        try:
+                                            os.unlink(rec_path)
+                                        except OSError:
+                                            pass
+                                    continue
+                                else:
+                                    break
                 except OSError:
                     pass
                 time.sleep(0.005)
@@ -218,8 +249,16 @@ def _nonce_store_lock(timeout_seconds: float = 10.0):
                 if os.path.exists(lock_path):
                     with open(lock_path, "r", encoding="utf-8") as f:
                         cur_token = f.read().strip()
-                    if cur_token == owner_token:
+                    if cur_token == owner_token or cur_token.startswith(f"{os.getpid()}:"):
                         os.unlink(lock_path)
+            except OSError:
+                pass
+            rec_path = f"{lock_path}.recovery"
+            try:
+                if os.path.exists(rec_path):
+                    with open(rec_path, "r", encoding="utf-8") as rf:
+                        if rf.read().strip().startswith(f"{os.getpid()}:"):
+                            os.unlink(rec_path)
             except OSError:
                 pass
 

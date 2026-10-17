@@ -127,8 +127,8 @@ class YieldForecastEngine:
 
         return {
             "yield_mean_t_ha": round(y_final, 2),
-            "yield_p10": round(max(0, y_final - 1.645 * std_dev), 2),
-            "yield_p90": round(y_final + 1.645 * std_dev, 2),
+            "yield_p10": round(max(0, y_final - 1.28155 * std_dev), 2),
+            "yield_p90": round(y_final + 1.28155 * std_dev, 2),
             "confidence_score": round(avg_conf, 2),
             "trust_tier": trust,
             "potential_yield_t_ha": round(y_potential, 2),
@@ -223,7 +223,7 @@ class YieldForecastEngine:
         )
         within_variance = sum(
             weight / total
-            * ((branch["yield_p90"] - branch["yield_p10"]) / (2 * 1.645)) ** 2
+            * ((branch["yield_p90"] - branch["yield_p10"]) / (2 * 1.28155)) ** 2
             for weight, branch in branches
         )
 
@@ -240,8 +240,8 @@ class YieldForecastEngine:
 
         return {
             "yield_mean_t_ha": round(mean, 2),
-            "yield_p10": round(max(0.0, mean - 1.645 * total_std), 2),
-            "yield_p90": round(mean + 1.645 * total_std, 2),
+            "yield_p10": round(max(0.0, mean - 1.28155 * total_std), 2),
+            "yield_p90": round(mean + 1.28155 * total_std, 2),
             "identity_uncertainty_variance": round(identity_variance, 6),
             "phenology_uncertainty_variance": round(phenology_variance, 6),
             "crop_stage_evidence_class": (

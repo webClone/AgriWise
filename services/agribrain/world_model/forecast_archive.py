@@ -200,16 +200,18 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
     if isinstance(observed, bool) or not isinstance(observed, (int, float)) or not math.isfinite(observed):
         raise ContractViolation(f"Observed value must be finite real number, got {observed}")
 
-    parsed: List[Tuple[float, float]] = []
     level_map: Dict[float, float] = {}
     for k, v in quantiles.items():
         k_str = str(k).lower().strip()
         if k_str.startswith("p"):
-            alpha = float(k_str[1:]) / 100.0
+            alpha = round(float(k_str[1:]) / 100.0, 6)
+        elif k_str.endswith("%"):
+            alpha = round(float(k_str[:-1]) / 100.0, 6)
         else:
             alpha = float(k_str)
             if alpha > 1.0:
                 alpha /= 100.0
+            alpha = round(alpha, 6)
         if not (0.0 <= alpha <= 1.0) or math.isnan(alpha) or math.isinf(alpha):
             raise ContractViolation(f"Invalid quantile level {k}: level must be in [0.0, 1.0]")
         if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -220,10 +222,9 @@ def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> floa
         if alpha in level_map and abs(level_map[alpha] - val) > 1e-6:
             raise ContractViolation(f"Conflicting duplicate quantile level {alpha}: {level_map[alpha]} vs {val}")
         level_map[alpha] = val
-        parsed.append((alpha, val))
 
-    # Sort by quantile level
-    parsed.sort(key=lambda x: x[0])
+    # Sort by quantile level, deduplicating aliases via level_map
+    parsed: List[Tuple[float, float]] = sorted(level_map.items(), key=lambda x: x[0])
 
     # Validate monotonicity of quantile values
     for i in range(len(parsed) - 1):
@@ -347,6 +348,8 @@ class ForecastRecord:
             raise ContractViolation("ForecastRecord requires non-blank target_variable")
         if not isinstance(self.issued_at_knowledge_time, datetime) or not isinstance(self.target_epoch, datetime):
             raise ContractViolation("issued_at_knowledge_time and target_epoch must be datetime objects")
+        if self.issued_at_knowledge_time.tzinfo is None or self.target_epoch.tzinfo is None:
+            raise ContractViolation("issued_at_knowledge_time and target_epoch must be timezone-aware datetime objects")
         if self.target_epoch <= self.issued_at_knowledge_time:
             raise ContractViolation(
                 f"target_epoch ({self.target_epoch}) must be strictly after "
@@ -355,7 +358,7 @@ class ForecastRecord:
         if isinstance(self.horizon_days, bool) or not isinstance(self.horizon_days, (int, float)) or not math.isfinite(self.horizon_days) or self.horizon_days <= 0.0:
             raise ContractViolation(f"horizon_days must be finite positive number, got {self.horizon_days}")
         actual_days = (self.target_epoch - self.issued_at_knowledge_time).total_seconds() / 86400.0
-        if abs(self.horizon_days - actual_days) > 1.05 and abs(self.horizon_days - math.ceil(actual_days)) > 1.05:
+        if abs(self.horizon_days - actual_days) > 0.05:
             raise ContractViolation(f"horizon_days ({self.horizon_days}) is inconsistent with target_epoch - issued_at interval ({actual_days:.2f} days)")
         if self.predicted_mean is not None:
             if isinstance(self.predicted_mean, bool) or not isinstance(self.predicted_mean, (int, float)) or not math.isfinite(self.predicted_mean):
@@ -366,13 +369,17 @@ class ForecastRecord:
         if self.predicted_quantiles:
             if not isinstance(self.predicted_quantiles, dict):
                 raise ContractViolation("predicted_quantiles must be a dictionary")
-            parsed_q: List[Tuple[float, float]] = []
             level_map: Dict[float, float] = {}
             for k, v in self.predicted_quantiles.items():
                 k_str = str(k).lower().strip()
                 if k_str.startswith("p"):
                     try:
-                        alpha = float(k_str[1:]) / 100.0
+                        alpha = round(float(k_str[1:]) / 100.0, 6)
+                    except Exception:
+                        raise ContractViolation(f"Invalid quantile level key: {k}")
+                elif k_str.endswith("%"):
+                    try:
+                        alpha = round(float(k_str[:-1]) / 100.0, 6)
                     except Exception:
                         raise ContractViolation(f"Invalid quantile level key: {k}")
                 else:
@@ -380,6 +387,7 @@ class ForecastRecord:
                         alpha = float(k_str)
                         if alpha > 1.0:
                             alpha /= 100.0
+                        alpha = round(alpha, 6)
                     except Exception:
                         raise ContractViolation(f"Invalid quantile level key: {k}")
                 if not (0.0 <= alpha <= 1.0) or math.isnan(alpha) or math.isinf(alpha):
@@ -392,9 +400,8 @@ class ForecastRecord:
                 if alpha in level_map and abs(level_map[alpha] - val) > 1e-6:
                     raise ContractViolation(f"Conflicting duplicate quantile level {alpha}: {level_map[alpha]} vs {val}")
                 level_map[alpha] = val
-                parsed_q.append((alpha, val))
 
-            parsed_q.sort(key=lambda x: x[0])
+            parsed_q = sorted(level_map.items(), key=lambda x: x[0])
             for i in range(len(parsed_q) - 1):
                 if parsed_q[i][1] > parsed_q[i + 1][1]:
                     raise ContractViolation(
@@ -546,7 +553,11 @@ class ImmutableForecastArchive:
                 if path.exists():
                     try:
                         data = json.loads(path.read_text(encoding="utf-8"))
+                        if not isinstance(data, dict):
+                            raise ContractViolation(f"Corrupt forecast record at {path}: expected dict, got {type(data).__name__}")
                         meta = data.get("metadata", {})
+                        if not isinstance(meta, dict):
+                            raise ContractViolation(f"Corrupt forecast metadata at {path}: expected dict, got {type(meta).__name__}")
                         if (
                             meta.get("status") in ("rejected", "aborted", "failed")
                             or meta.get("is_rejected") is True
@@ -569,13 +580,13 @@ class ImmutableForecastArchive:
                             calibration_version=data.get("calibration_version", ""),
                             authority_scope=AuthorityScope(data.get("authority_scope", "OPERATIONAL_SHADOW")),
                             is_shadow=data.get("is_shadow", True),
-                            metadata=data.get("metadata", {}),
+                            metadata=meta,
                             schema_version=data.get("schema_version", FORECAST_RECORD_SCHEMA_VERSION),
                         )
                         self._forecasts[fid] = record
                         return copy.deepcopy(record)
                     except Exception as e:
-                        if isinstance(e, (ContractViolation, json.JSONDecodeError, KeyError, ValueError)):
+                        if isinstance(e, (ContractViolation, json.JSONDecodeError, KeyError, ValueError, AttributeError, TypeError)):
                             raise ContractViolation(f"Corrupt or unreadable forecast record at {path}: {e}") from e
                         return None
         return None
@@ -654,12 +665,24 @@ class ImmutableForecastArchive:
         if forecast.predicted_quantiles:
             crps = compute_crps_quantiles(forecast.predicted_quantiles, obs)
 
-            p50 = None
-            if "p50" in forecast.predicted_quantiles:
-                p50 = float(forecast.predicted_quantiles["p50"])
-            elif "0.5" in forecast.predicted_quantiles:
-                p50 = float(forecast.predicted_quantiles["0.5"])
-            elif forecast.predicted_mean is not None:
+            norm_q = {}
+            for k, v in forecast.predicted_quantiles.items():
+                try:
+                    s = str(k).strip().lower()
+                    if s.endswith("%"):
+                        alpha = float(s[:-1]) / 100.0
+                    elif s.startswith("p") or s.startswith("q"):
+                        alpha = float(s[1:])
+                        if alpha > 1.0:
+                            alpha = alpha / 100.0
+                    else:
+                        alpha = float(s)
+                    norm_q[round(alpha, 6)] = float(v)
+                except Exception:
+                    continue
+
+            p50 = norm_q.get(0.5)
+            if p50 is None and forecast.predicted_mean is not None:
                 p50 = float(forecast.predicted_mean)
 
             if p50 is not None:
@@ -667,17 +690,8 @@ class ImmutableForecastArchive:
             else:
                 rmse = None
 
-            p10 = None
-            if "p10" in forecast.predicted_quantiles:
-                p10 = float(forecast.predicted_quantiles["p10"])
-            elif "0.1" in forecast.predicted_quantiles:
-                p10 = float(forecast.predicted_quantiles["0.1"])
-
-            p90 = None
-            if "p90" in forecast.predicted_quantiles:
-                p90 = float(forecast.predicted_quantiles["p90"])
-            elif "0.9" in forecast.predicted_quantiles:
-                p90 = float(forecast.predicted_quantiles["0.9"])
+            p10 = norm_q.get(0.1)
+            p90 = norm_q.get(0.9)
 
             if p10 is not None and p90 is not None:
                 sharpness = max(0.0, p90 - p10)

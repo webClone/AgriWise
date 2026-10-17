@@ -258,6 +258,9 @@ class MQTTActuator(IrrigationActuator):
         """Process actuator status response."""
         if not isinstance(payload, dict):
             return
+        if _has_fault(str(payload.get("status", "")).upper(), payload.get("fault_code", 0)):
+            self._fault_latched = True
+            self._status = ActuatorStatus.ERROR
         self._last_status_payload = payload
         self._last_heartbeat = datetime.now(timezone.utc)
 
@@ -272,6 +275,9 @@ class MQTTActuator(IrrigationActuator):
         """Process telemetry data from the actuator."""
         if not isinstance(payload, dict):
             return
+        if _has_fault(str(payload.get("status", "")).upper(), payload.get("fault_code", 0)):
+            self._fault_latched = True
+            self._status = ActuatorStatus.ERROR
         if not isinstance(self._last_status_payload, dict):
             self._last_status_payload = {}
         # Store latest telemetry for safety monitoring
@@ -500,6 +506,8 @@ class MQTTActuator(IrrigationActuator):
 
         # Fault / Error check
         if _has_fault(raw_status, fault_code) or getattr(self, "_fault_latched", False):
+            if _has_fault(raw_status, fault_code):
+                self._fault_latched = True
             return ActuatorStatus.ERROR
 
         # Detect contradictions:
@@ -571,6 +579,9 @@ class MQTTActuator(IrrigationActuator):
                     if self._pending_acks.get(req_id) is ack_future:
                         self._pending_acks.pop(req_id, None)
                     logger.error("MQTT query_status publish exception for %s: %s", self.device_id, pub_exc)
+                    if getattr(self, "_fault_latched", False):
+                        self._status = ActuatorStatus.ERROR
+                        return ActuatorStatus.ERROR
                     self._status = ActuatorStatus.UNKNOWN
                     return ActuatorStatus.UNKNOWN
 
@@ -579,6 +590,9 @@ class MQTTActuator(IrrigationActuator):
                     self._status = self._decode_status_payload(ack_payload)
                     return self._status
                 except asyncio.TimeoutError:
+                    if getattr(self, "_fault_latched", False):
+                        self._status = ActuatorStatus.ERROR
+                        return ActuatorStatus.ERROR
                     self._status = ActuatorStatus.UNKNOWN
                     return ActuatorStatus.UNKNOWN
             finally:

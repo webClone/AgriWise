@@ -316,6 +316,23 @@ class CanonicalWorldlineService:
 
             scope_key = f"{cycle_id}::{geometry_version}"
             scoped_heads = dict(current_head.get("scoped_heads", {}) or {})
+            if not scoped_heads and current_head_id:
+                # Migrate legacy un-scoped head: traverse chain and seed latest head for each scope
+                curr_mig = current_head_id
+                visited_mig = set()
+                while curr_mig and curr_mig not in visited_mig:
+                    visited_mig.add(curr_mig)
+                    c_path = self._hydraulic_checkpoint_path(plot_id, curr_mig, tenant_id, namespace)
+                    c_data = self._read(c_path)
+                    if not c_data:
+                        break
+                    c_cyc = c_data.get("cycle_id", "default_cycle")
+                    c_geom = c_data.get("geometry_version", "default_geom")
+                    c_key = f"{c_cyc}::{c_geom}"
+                    if c_key not in scoped_heads:
+                        scoped_heads[c_key] = curr_mig
+                    curr_mig = c_data.get("predecessor_head")
+
             scoped_head = scoped_heads.get(scope_key)
             if scoped_head is None and not scoped_heads:
                 if (current_head.get("cycle_id", "default_cycle") == cycle_id and
@@ -340,8 +357,9 @@ class CanonicalWorldlineService:
                     # V11: Interrupted publication recovery: checkpoint exists, head was not updated
                     # Recover head ONLY if predecessor_head matches the expected predecessor head!
                     if existing.get("predecessor_head") in (target_predecessor, current_head_id):
-                        seq = existing.get("sequence", (int(current_head.get("sequence", 0) or 0) + 1))
-                        scoped_heads = dict(current_head.get("scoped_heads", {}) or {})
+                        head_seq = int(current_head.get("sequence", 0) or 0)
+                        orphan_seq = int(existing.get("sequence", 0) or 0)
+                        seq = max(head_seq + 1, orphan_seq)
                         scoped_heads[scope_key] = checkpoint_id
                         new_head = {
                             "tenant_id": tenant_id,
@@ -356,7 +374,9 @@ class CanonicalWorldlineService:
                             "updated_at": _now(),
                         }
                         self._atomic(head_path, new_head)
-                        return existing
+                        rec_out = dict(existing)
+                        rec_out["sequence"] = seq
+                        return rec_out
                     else:
                         raise ConcurrencyConflictError(
                             f"Checkpoint {checkpoint_id} exists but is an uncommitted orphan whose predecessor does not match current head {current_head_id}"
@@ -392,7 +412,6 @@ class CanonicalWorldlineService:
 
             self._atomic(cp_path, record)
 
-            scoped_heads = dict(current_head.get("scoped_heads", {}) or {})
             scoped_heads[f"{cycle_id}::{geometry_version}"] = checkpoint_id
             new_head = {
                 "tenant_id": tenant_id,

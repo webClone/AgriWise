@@ -972,6 +972,10 @@ class SharedQuotaStore:
                 if cur_status == "STOP_REQUESTED" and new_status == "EXECUTING":
                     return
                 state["reservations"][event_id]["status"] = new_status
+                if new_status in ("STOP_REQUESTED", "CANCELLED", "COMPLETED", "SETTLED", "FAILED"):
+                    state["reservations"][event_id]["claimed"] = False
+                elif new_status in ("STARTING", "EXECUTING"):
+                    state["reservations"][event_id]["claimed"] = True
                 if actual_start:
                     cur = state["reservations"][event_id].get("actual_start")
                     if cur:
@@ -1571,11 +1575,71 @@ class SharedQuotaStore:
         with cls._lock():
             state = cls._read_state()
             for eid, res in state.get("reservations", {}).items():
-                if res.get("status") in ("DISPATCHING", "EXECUTING", "VALIDATING"):
+                if res.get("status") in ("STARTING", "DISPATCHING", "EXECUTING", "VALIDATING") or res.get("claimed") is True:
                     if res.get("device_id") == device_id:
                         if not zone_id or not res.get("zone_id") or res.get("zone_id") == zone_id:
                             return {"event_id": eid, **res}
             return None
+
+    @classmethod
+    def claim_resource(
+        cls,
+        device_id: str,
+        zone_id: Optional[str],
+        event_id: str,
+        live_executing: bool = False,
+    ) -> Tuple[bool, Optional[str]]:
+        """Atomically claim exclusive execution rights on (device_id, zone_id) for event_id.
+
+        Returns:
+            (True, None) if claim succeeded (or event_id already holds the claim).
+            (False, holding_event_id) if another active event holds the claim.
+        """
+        if not device_id:
+            return True, None
+
+        now_ts = time.time()
+        with cls._lock():
+            state = cls._read_state()
+            reservations = state.get("reservations", {})
+
+            for eid, res in reservations.items():
+                if eid != event_id and res.get("device_id") == device_id:
+                    r_zone = res.get("zone_id")
+                    if not zone_id or not r_zone or zone_id == r_zone:
+                        st = res.get("status")
+                        # 1. In-flight dispatch: another worker is actively sending START right now
+                        if st == "STARTING":
+                            starting_ts = res.get("starting_ts", 0.0)
+                            if now_ts - starting_ts < 30.0:
+                                return False, eid
+                        # 2. Hardware is currently executing another confirmed operation
+                        if live_executing and st in ("EXECUTING", "DISPATCHING", "STARTING"):
+                            return False, eid
+
+            if event_id in reservations:
+                reservations[event_id]["status"] = "STARTING"
+                reservations[event_id]["starting_ts"] = now_ts
+                reservations[event_id]["claimed_at"] = datetime.now(timezone.utc).isoformat()
+                cls._write_state(state)
+
+            return True, None
+
+    @classmethod
+    def release_resource_claim(
+        cls,
+        device_id: str,
+        zone_id: Optional[str],
+        event_id: str,
+    ) -> None:
+        """Release an exclusive resource claim for event_id."""
+        with cls._lock():
+            state = cls._read_state()
+            reservations = state.get("reservations", {})
+            if event_id in reservations and reservations[event_id].get("status") == "STARTING":
+                reservations[event_id]["status"] = "DISPATCHING"
+                reservations[event_id].pop("starting_ts", None)
+                cls._write_state(state)
 
     @classmethod
     def get_settled_receipt(cls, event_id: str) -> Optional[Dict[str, Any]]:

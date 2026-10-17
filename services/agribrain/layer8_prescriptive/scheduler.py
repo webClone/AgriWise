@@ -158,63 +158,99 @@ class ConstraintScheduler:
         conflicted_dates = set()
         seen_dates: Dict[str, Dict[str, Any]] = {}
         deduped_forecast = []
+        # Group forecast rows by date to enforce order-invariant conflict and boundary checking
+        date_groups: Dict[str, List[Dict[str, Any]]] = {}
         for row in sorted_forecast:
             if not isinstance(row, dict):
                 deduped_forecast.append(row)
                 continue
-            d_str, dt, err = _parse_row_date_and_instant(row)
-            if d_str is None or err is not None:
+            d_str, _, d_err = _parse_row_date_and_instant(row)
+            if d_str is None or d_err is not None:
                 deduped_forecast.append(row)
                 continue
-            if d_str in seen_dates:
-                prev_row = seen_dates[d_str]
-                u1 = str(prev_row.get("wind_speed_unit") or prev_row.get("wind_unit") or prev_row.get("unit") or "").lower().strip()
-                m1 = 3.6 if u1 in ("m/s", "mps") else (1.852 if u1 in ("knots", "knot", "kt", "kts") else (1.60934 if u1 in ("mph", "mi/h") else 1.0))
-                u2 = str(row.get("wind_speed_unit") or row.get("wind_unit") or row.get("unit") or "").lower().strip()
-                m2 = 3.6 if u2 in ("m/s", "mps") else (1.852 if u2 in ("knots", "knot", "kt", "kts") else (1.60934 if u2 in ("mph", "mi/h") else 1.0))
+            date_groups.setdefault(d_str, []).append(row)
 
-                # Rain conflict: difference > 0.5 mm
-                r1 = prev_row.get("precip_mm") if prev_row.get("precip_mm") is not None else prev_row.get("precipitation")
-                r2 = row.get("precip_mm") if row.get("precip_mm") is not None else row.get("precipitation")
-                p1, _ = _parse_weather_val(r1)
-                p2, _ = _parse_weather_val(r2)
-                if p1 is not None and p2 is not None and abs(p1 - p2) > 0.5:
-                    conflicted_dates.add(d_str)
+        for d_str, group in date_groups.items():
+            if len(group) == 1:
+                seen_dates[d_str] = group[0]
+                deduped_forecast.append(group[0])
+                continue
 
-                # Wind speed conflict: difference > 2.0 km/h
-                w1_raw = prev_row.get("wind_speed") if prev_row.get("wind_speed") is not None else prev_row.get("wind_kmh")
-                w2_raw = row.get("wind_speed") if row.get("wind_speed") is not None else row.get("wind_kmh")
-                w1, _ = _parse_weather_val(w1_raw, m1)
-                w2, _ = _parse_weather_val(w2_raw, m2)
-                if w1 is not None and w2 is not None and abs(w1 - w2) > 2.0:
-                    conflicted_dates.add(d_str)
+            # Multi-row support for same date: evaluate conflicts and action feasibility boundaries symmetrically
+            p_vals: List[float] = []
+            w_vals: List[float] = []
+            g_vals: List[float] = []
+            tmax_vals: List[float] = []
+            tmin_vals: List[float] = []
 
-                # Wind gust conflict: difference > 2.0 km/h
-                g1_raw = prev_row.get("wind_gust")
-                g2_raw = row.get("wind_gust")
-                g1, _ = _parse_weather_val(g1_raw, m1)
-                g2, _ = _parse_weather_val(g2_raw, m2)
-                if g1 is not None and g2 is not None and abs(g1 - g2) > 2.0:
-                    conflicted_dates.add(d_str)
+            for r in group:
+                u = str(r.get("wind_speed_unit") or r.get("wind_unit") or r.get("unit") or "").lower().strip()
+                m = 3.6 if u in ("m/s", "mps") else (1.852 if u in ("knots", "knot", "kt", "kts") else (1.60934 if u in ("mph", "mi/h") else 1.0))
+                p_raw = r.get("precip_mm") if r.get("precip_mm") is not None else r.get("precipitation")
+                p, _ = _parse_weather_val(p_raw)
+                if p is not None:
+                    p_vals.append(p)
+                w_raw = r.get("wind_speed") if r.get("wind_speed") is not None else r.get("wind_kmh")
+                w, _ = _parse_weather_val(w_raw, m)
+                if w is not None:
+                    w_vals.append(w)
+                g_raw = r.get("wind_gust")
+                g, _ = _parse_weather_val(g_raw, m)
+                if g is not None:
+                    g_vals.append(g)
+                tmax_raw = r.get("temp_max") if r.get("temp_max") is not None else r.get("t_max_c")
+                tmax, _ = _parse_weather_val(tmax_raw)
+                if tmax is not None:
+                    tmax_vals.append(tmax)
+                tmin_raw = r.get("temp_min") if r.get("temp_min") is not None else r.get("t_min_c")
+                tmin, _ = _parse_weather_val(tmin_raw)
+                if tmin is not None:
+                    tmin_vals.append(tmin)
 
-                # Temp max conflict: difference > 3.0 C
-                t1_raw = prev_row.get("temp_max") if prev_row.get("temp_max") is not None else prev_row.get("t_max_c")
-                t2_raw = row.get("temp_max") if row.get("temp_max") is not None else row.get("t_max_c")
-                t1, _ = _parse_weather_val(t1_raw)
-                t2, _ = _parse_weather_val(t2_raw)
-                if t1 is not None and t2 is not None and abs(t1 - t2) > 3.0:
-                    conflicted_dates.add(d_str)
+            has_conflict = False
+            # Check numerical discrepancies (>= 0.5mm rain, >= 2.0km/h wind/gust, >= 3.0°C temp)
+            if p_vals and (max(p_vals) - min(p_vals) >= 0.5):
+                has_conflict = True
+            if w_vals and (max(w_vals) - min(w_vals) >= 2.0):
+                has_conflict = True
+            if g_vals and (max(g_vals) - min(g_vals) >= 2.0):
+                has_conflict = True
+            if tmax_vals and (max(tmax_vals) - min(tmax_vals) >= 3.0):
+                has_conflict = True
+            if tmin_vals and (max(tmin_vals) - min(tmin_vals) >= 3.0):
+                has_conflict = True
 
-                # Temp min conflict: difference > 3.0 C
-                tm1_raw = prev_row.get("temp_min") if prev_row.get("temp_min") is not None else prev_row.get("t_min_c")
-                tm2_raw = row.get("temp_min") if row.get("temp_min") is not None else row.get("t_min_c")
-                tm1, _ = _parse_weather_val(tm1_raw)
-                tm2, _ = _parse_weather_val(tm2_raw)
-                if tm1 is not None and tm2 is not None and abs(tm1 - tm2) > 3.0:
-                    conflicted_dates.add(d_str)
-            else:
-                seen_dates[d_str] = row
-                deduped_forecast.append(row)
+            # Check action feasibility boundary crossings across duplicates
+            if p_vals and (min(p_vals) <= 0.5 and max(p_vals) > 0.5):
+                has_conflict = True
+            if w_vals and (min(w_vals) <= 15.0 and max(w_vals) > 15.0):
+                has_conflict = True
+            if g_vals and (min(g_vals) <= 15.0 and max(g_vals) > 15.0):
+                has_conflict = True
+            if tmax_vals and (min(tmax_vals) <= 38.0 and max(tmax_vals) > 38.0):
+                has_conflict = True
+            if tmin_vals and (min(tmin_vals) < 5.0 and max(tmin_vals) >= 5.0):
+                has_conflict = True
+
+            if has_conflict:
+                conflicted_dates.add(d_str)
+
+            # Build conservative representative row for the date
+            merged_row = dict(group[0])
+            if p_vals:
+                merged_row["precip_mm"] = max(p_vals)
+            if w_vals:
+                merged_row["wind_speed"] = max(w_vals)
+                merged_row["wind_speed_unit"] = "km/h"
+            if g_vals:
+                merged_row["wind_gust"] = max(g_vals)
+            if tmax_vals:
+                merged_row["temp_max"] = max(tmax_vals)
+            if tmin_vals:
+                merged_row["temp_min"] = min(tmin_vals)
+
+            seen_dates[d_str] = merged_row
+            deduped_forecast.append(merged_row)
 
         for card in action_cards:
             if not card.is_allowed:
@@ -359,7 +395,12 @@ class ConstraintScheduler:
                             start_instant = start_instant.replace(tzinfo=timezone.utc)
                         else:
                             start_instant = start_instant.astimezone(timezone.utc)
-                        ref_dt = start_instant if cand_d == start_d else (cand_dt if cand_dt is not None else datetime.combine(cand_d, datetime.min.time(), tzinfo=timezone.utc))
+                        candidate_instant = cand_dt if cand_dt is not None else datetime.combine(cand_d, datetime.min.time(), tzinfo=timezone.utc)
+                        if candidate_instant.tzinfo is None:
+                            candidate_instant = candidate_instant.replace(tzinfo=timezone.utc)
+                        else:
+                            candidate_instant = candidate_instant.astimezone(timezone.utc)
+                        ref_dt = max(start_instant, candidate_instant)
                         if ref_dt > v_until_dt:
                             day_blocked = True
                             day_reasons.append(f"Forecast expired: valid_until={valid_until_raw} passed")
