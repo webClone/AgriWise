@@ -410,8 +410,21 @@ class CanonicalWorldlineService:
                         seq = max(head_seq + 1, orphan_seq)
                         scoped_heads[scope_key] = checkpoint_id
                         scoped_seqs = dict(current_head.get("scoped_sequences", {}) or {})
-                        scoped_seqs[scope_key] = seq
                         cp_seqs = dict(current_head.get("checkpoint_sequences", {}) or {})
+                        latest_cp = current_head.get("latest_checkpoint_id") or current_head_id
+                        if (latest_cp or current_head_id) and current_head.get("sequence"):
+                            prev_seq = int(current_head["sequence"])
+                            if latest_cp and latest_cp not in cp_seqs:
+                                cp_seqs[latest_cp] = prev_seq
+                            if current_head_id and current_head_id not in cp_seqs:
+                                cp_seqs[current_head_id] = prev_seq
+                            for s_key, s_head in scoped_heads.items():
+                                if s_head in (latest_cp, current_head_id) and s_key not in scoped_seqs:
+                                    scoped_seqs[s_key] = prev_seq
+                            cur_sc = f"{current_head.get('cycle_id', 'default_cycle')}::{current_head.get('geometry_version', 'default_geom')}"
+                            if cur_sc not in scoped_seqs and (not scoped_heads or scoped_heads.get(cur_sc) in (latest_cp, current_head_id)):
+                                scoped_seqs[cur_sc] = prev_seq
+                        scoped_seqs[scope_key] = seq
                         cp_seqs[checkpoint_id] = seq
                         new_head = {
                             "tenant_id": tenant_id,
@@ -469,8 +482,21 @@ class CanonicalWorldlineService:
 
             scoped_heads[f"{cycle_id}::{geometry_version}"] = checkpoint_id
             scoped_seqs = dict(current_head.get("scoped_sequences", {}) or {})
-            scoped_seqs[f"{cycle_id}::{geometry_version}"] = seq
             cp_seqs = dict(current_head.get("checkpoint_sequences", {}) or {})
+            latest_cp = current_head.get("latest_checkpoint_id") or current_head_id
+            if (latest_cp or current_head_id) and current_head.get("sequence"):
+                prev_seq = int(current_head["sequence"])
+                if latest_cp and latest_cp not in cp_seqs:
+                    cp_seqs[latest_cp] = prev_seq
+                if current_head_id and current_head_id not in cp_seqs:
+                    cp_seqs[current_head_id] = prev_seq
+                for s_key, s_head in scoped_heads.items():
+                    if s_head in (latest_cp, current_head_id) and s_key not in scoped_seqs:
+                        scoped_seqs[s_key] = prev_seq
+                cur_sc = f"{current_head.get('cycle_id', 'default_cycle')}::{current_head.get('geometry_version', 'default_geom')}"
+                if cur_sc not in scoped_seqs and (not scoped_heads or scoped_heads.get(cur_sc) in (latest_cp, current_head_id)):
+                    scoped_seqs[cur_sc] = prev_seq
+            scoped_seqs[f"{cycle_id}::{geometry_version}"] = seq
             cp_seqs[checkpoint_id] = seq
             new_head = {
                 "tenant_id": tenant_id,

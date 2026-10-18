@@ -977,10 +977,13 @@ class SharedQuotaStore:
                     state["reservations"][event_id].pop("starting_ts", None)
                 elif new_status in ("STARTING", "EXECUTING"):
                     state["reservations"][event_id]["claimed"] = True
+                    now_t = time.time()
+                    if new_status == "EXECUTING":
+                        state["reservations"][event_id]["executing_ts"] = now_t
                     if "starting_ts" in state["reservations"][event_id]:
                         state["reservations"][event_id]["claimed_ts"] = state["reservations"][event_id].pop("starting_ts")
                     elif "claimed_ts" not in state["reservations"][event_id]:
-                        state["reservations"][event_id]["claimed_ts"] = time.time()
+                        state["reservations"][event_id]["claimed_ts"] = now_t
                 if actual_start:
                     cur = state["reservations"][event_id].get("actual_start")
                     if cur:
@@ -1622,40 +1625,41 @@ class SharedQuotaStore:
                         # 2. Another operation has requested stop but is not yet settled
                         elif st in ("STOP_REQUESTED",):
                             return False, eid
-                        # 3. Hardware or store has confirmed operation
-                        elif st in ("EXECUTING", "DISPATCHING"):
+                        # 3. Hardware or store has confirmed operation: exclusive execution
+                        elif st in ("EXECUTING", "DISPATCHING", "RESERVED"):
                             if live_executing:
-                                return False, eid
-                            claim_ts = res.get("claimed_ts") or res.get("starting_ts")
-                            if not claim_ts and res.get("owner_token"):
-                                try:
-                                    claim_ts = float(res["owner_token"].split(":")[1])
-                                except Exception:
-                                    pass
-                            if not claim_ts and res.get("claimed_at"):
-                                try:
-                                    claim_ts = datetime.fromisoformat(res["claimed_at"]).timestamp()
-                                except Exception:
-                                    pass
-                            claim_ts = claim_ts or 0.0
-                            if query_ts is not None and claim_ts >= query_ts:
                                 return False, eid
                             if query_ts is None:
                                 return False, eid
-                        elif live_executing and st in ("RESERVED",):
-                            return False, eid
+                            exec_ts = res.get("executing_ts", res.get("claimed_ts", res.get("starting_ts", 0.0)))
+                            if query_ts <= exec_ts:
+                                return False, eid
+                            res["status"] = "COMPLETED"
+                            res["completed_at"] = datetime.now(timezone.utc).isoformat()
 
-            if event_id in reservations:
-                gen = reservations[event_id].get("generation", 0) + 1
-                reservations[event_id]["status"] = "STARTING"
-                reservations[event_id]["starting_ts"] = now_ts
-                reservations[event_id]["claimed_at"] = datetime.now(timezone.utc).isoformat()
-                reservations[event_id]["claimed"] = True
-                reservations[event_id]["generation"] = gen
-                reservations[event_id]["owner_token"] = f"{event_id}:{now_ts}:{gen}"
-                cls._write_state(state)
+            if event_id not in reservations:
+                reservations[event_id] = {
+                    "event_id": event_id,
+                    "device_id": device_id,
+                    "zone_id": zone_id,
+                    "volume_mm": 0.0,
+                    "generation": 0,
+                }
+            gen = reservations[event_id].get("generation", 0) + 1
+            owner_token = f"{event_id}:{now_ts}:{gen}"
+            reservations[event_id]["status"] = "STARTING"
+            reservations[event_id]["starting_ts"] = now_ts
+            reservations[event_id]["claimed_ts"] = now_ts
+            reservations[event_id]["claimed_at"] = datetime.now(timezone.utc).isoformat()
+            reservations[event_id]["claimed"] = True
+            reservations[event_id]["generation"] = gen
+            reservations[event_id]["owner_token"] = owner_token
+            reservations[event_id]["device_id"] = device_id
+            if zone_id:
+                reservations[event_id]["zone_id"] = zone_id
+            cls._write_state(state)
 
-            return True, None
+            return True, owner_token
 
     @classmethod
     def release_resource_claim(

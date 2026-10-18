@@ -190,13 +190,40 @@ def run_layer4_standalone(
     canonical_water = getattr(l3_decision, "canonical_water_state", None) if l3_decision else None
 
     if canonical_water is not None and hasattr(canonical_water, "root_zone") and hasattr(canonical_water, "soil_water"):
+        receipt = canonical_water.to_layer4_boundary_receipt() if hasattr(canonical_water, "to_layer4_boundary_receipt") else None
         rz = canonical_water.root_zone
         sw = canonical_water.soil_water
         fx = canonical_water.fluxes.actual if hasattr(canonical_water, "fluxes") and hasattr(canonical_water.fluxes, "actual") else None
-        ks = getattr(rz, "stress_factor_ks", 1.0)
-        drainage_mm = getattr(fx, "deep_drainage_mm", 0.0) if fx else 0.0
-        taw_val = getattr(rz, "total_available_water_mm", 150.0)
-        raw_val = getattr(rz, "readily_available_water_mm", 75.0)
+
+        if receipt is not None:
+            ks = receipt.stress_factor_ks
+            drainage_mm = receipt.deep_drainage_mm
+            taw_val = receipt.total_available_water_mm
+            raw_val = receipt.readily_available_water_mm
+            theta_fc = receipt.theta_fc_root
+            theta_wp = receipt.theta_wp_root
+            theta_sat = receipt.theta_sat_root
+            root_storage = receipt.root_zone_storage_mm
+            supp_depth_cm = receipt.supported_root_depth_cm
+            is_conserved = receipt.mass_conserved
+            closure_err = receipt.water_closure_error_mm
+            is_degraded = receipt.is_degraded or (not is_conserved)
+        else:
+            ks = getattr(rz, "stress_factor_ks", 1.0)
+            drainage_mm = getattr(fx, "deep_drainage_mm", 0.0) if fx else 0.0
+            taw_val = getattr(rz, "total_available_water_mm", 150.0)
+            raw_val = getattr(rz, "readily_available_water_mm", 75.0)
+            root_storage = getattr(rz, "root_zone_storage_mm", getattr(sw, "root_zone_storage_mm", taw_val * 0.7))
+            theta_fc = getattr(rz, "depth_weighted_theta_fc", getattr(sw, "theta_fc", 0.30))
+            theta_wp = getattr(rz, "depth_weighted_theta_wp", getattr(sw, "theta_wp", 0.15))
+            theta_sat = getattr(rz, "depth_weighted_theta_sat", getattr(sw, "theta_sat", 0.45))
+            supp_depth_cm = getattr(rz, "supported_root_depth_cm", getattr(rz, "root_depth_m", 0.6) * 100.0)
+            is_conserved = getattr(canonical_water, "mass_conserved", True)
+            closure_err = getattr(canonical_water, "mass_balance_error_mm", 0.0)
+            is_degraded = not is_conserved
+
+        status_val = "DEGRADED_NONCONSERVED_WATER" if not is_conserved else ("DEGRADED" if is_degraded else "OK")
+        unc_mult = 2.0 if not is_conserved else (1.5 if is_degraded else 1.0)
 
         # Transition comparison audit: compute legacy SWB for comparison only; cannot drive decisions
         legacy_swb_comparison = None
@@ -221,24 +248,27 @@ def run_layer4_standalone(
                 pass
 
         swb = SoilWaterBalanceOutput(
-            theta_fc=float(getattr(sw, "theta_fc", 0.30)),
-            theta_wp=float(getattr(sw, "theta_wp", 0.15)),
-            theta_sat=float(getattr(sw, "theta_sat", 0.45)),
+            theta_fc=float(theta_fc),
+            theta_wp=float(theta_wp),
+            theta_sat=float(theta_sat),
             taw_mm=float(taw_val),
             raw_mm=float(raw_val),
             water_stress_index=round(max(0.0, min(1.0, 1.0 - ks)), 4),
             leaching_risk_index=round(min(1.0, drainage_mm / 25.0), 4),
             drainage_accum_mm=float(drainage_mm),
-            soil_moisture_mm=float(getattr(sw, "root_zone_storage_mm", taw_val * 0.7)),
+            soil_moisture_mm=float(root_storage),
             is_water_limiting=(ks < 0.90),
             deep_percolation_mm=float(drainage_mm),
             n_leaching_kg_ha=0.0,
             irrigation_applied_mm=float(getattr(fx, "irrigation_mm", 0.0)) if fx else 0.0,
             effective_precipitation_mm=float(getattr(fx, "precipitation_mm", 0.0)) if fx else 0.0,
-            status="OK",
-            is_degraded=False,
+            status=status_val,
+            is_degraded=is_degraded,
             missing_weather_days=0,
-            uncertainty_multiplier=1.0,
+            uncertainty_multiplier=unc_mult,
+            supported_root_depth_cm=float(supp_depth_cm),
+            mass_conserved=is_conserved,
+            water_closure_error_mm=float(closure_err),
         )
     elif daily_weather:
         swb_engine = SoilWaterBalanceEngine()
@@ -484,6 +514,12 @@ def run_layer4_standalone(
     n_state = states.get(Nutrient.N)
     if n_state and n_state.estimated_demand_kg_ha:
         preliminary_n_rate = max(0, (n_state.estimated_demand_kg_ha or 0))
+    supp_depth_cm = getattr(swb, "supported_root_depth_cm", 60.0) if swb else 60.0
+    if supp_depth_cm <= 0.0:
+        supp_depth_cm = 60.0
+    supp_depth_mm = supp_depth_cm * 10.0
+    computed_vwc = (swb.soil_moisture_mm / supp_depth_mm) if (swb and swb.soil_moisture_mm and supp_depth_mm > 0.0) else 0.25
+
     env_loss_result = env_loss_engine.compute_all_losses(
         n_applied_kg_ha=preliminary_n_rate,
         soil_ph=soil_props.get("ph", 6.5),
@@ -491,10 +527,10 @@ def run_layer4_standalone(
         organic_matter_pct=soil_props.get("organic_matter_pct", 2.0),
         temperature_c=avg_temp,
         total_drainage_mm=swb.deep_percolation_mm if swb else 0.0,
-        soil_moisture_vwc=swb.soil_moisture_mm / 300.0 if swb and swb.soil_moisture_mm else 0.25,
+        soil_moisture_vwc=round(min(swb.theta_sat if swb else 0.45, max(0.01, computed_vwc)), 4),
         theta_fc=swb.theta_fc if swb else 0.30,
         theta_sat=swb.theta_sat if swb else 0.45,
-        root_depth_cm=60.0,
+        root_depth_cm=supp_depth_cm,
         slope_pct=slope_pct,
         crop_cover_fraction=l2bp.get("vegetation_fraction", 0.5),
     )
@@ -616,6 +652,20 @@ def run_layer4_standalone(
         for s in states.values():
             s.confidence = round(max(0.1, float(s.confidence) * 0.75), 3)
 
+    # Physical water conservation failure gate: fail closed on nonconserved transition
+    if swb and not getattr(swb, "mass_conserved", True):
+        for state in states.values():
+            state.confidence = min(float(state.confidence), 0.20)
+            nonconserved_note = (
+                f"Degraded due to unclosed hydrological mass balance (closure error {getattr(swb, 'water_closure_error_mm', 0.0)} mm); "
+                "leaching, denitrification and nutrient transport estimates carry wide epistemic uncertainty."
+            )
+            state.notes = f"{state.notes} {nonconserved_note}".strip()
+        for prescription in prescriptions:
+            prescription.is_allowed = False
+            if "nonconserved_water_transition" not in prescription.blocked_reason:
+                prescription.blocked_reason.append("nonconserved_water_transition")
+
     # 10. Quality metrics
     user_soil_available = any(k in soil_props for k in ("nitrogen_ppm", "phosphorus_ppm", "potassium_ppm"))
     quality = QualityMetricsL4(
@@ -710,6 +760,18 @@ def run_layer4_standalone(
         dh_overall = min(dh_overall, 0.3)
         dh_ceiling = min(dh_ceiling, 0.3)
         dh_status = "degraded"
+
+    if swb and not getattr(swb, "mass_conserved", True):
+        dh_overall = min(dh_overall, 0.2)
+        dh_ceiling = min(dh_ceiling, 0.2)
+        dh_status = "degraded"
+        if "PHYSICALLY_CONSERVED_WATER_BOUNDARY" not in quality.missing_drivers:
+            quality.missing_drivers.append("PHYSICALLY_CONSERVED_WATER_BOUNDARY")
+        quality.penalties_applied.append({
+            "driver": "hydrology_mass_balance",
+            "penalty": 0.50,
+            "reason": f"Water closure error {getattr(swb, 'water_closure_error_mm', 0.0)} mm exceeds physical conservation threshold",
+        })
 
     data_health = DataHealthScore(
         overall=dh_overall,

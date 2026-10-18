@@ -118,6 +118,15 @@ def test_l3_l4_information_barrier_encapsulation():
         "solver_fidelity",
         "water_confidence_score",
         "assimilation_status",
+        "root_zone_storage_mm",
+        "theta_fc_root",
+        "theta_wp_root",
+        "theta_sat_root",
+        "supported_root_depth_cm",
+        "deep_drainage_mm",
+        "mass_conserved",
+        "water_closure_error_mm",
+        "is_degraded",
     }
 
     assert receipt_fields == permitted_fields

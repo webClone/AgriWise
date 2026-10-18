@@ -80,3 +80,14 @@ class Layer3ToLayer4BoundaryReceipt:
     solver_fidelity: str = "EMPIRICAL_BUCKET"   # Numerical solver fidelity
     water_confidence_score: float = 0.92        # Multi-source simulation confidence
     assimilation_status: str = "NONE"           # "ASSIMILATED_IN_SITU", "ASSIMILATED_SATELLITE", "PROGNOSTIC_MODEL"
+
+    # 4. Root-supported boundary properties & physical conservation
+    root_zone_storage_mm: float = 0.0           # S_root = sum(theta_i * delta_z_i,root) (mm)
+    theta_fc_root: float = 0.30                 # Depth-weighted FC over supported root depth (m3/m3)
+    theta_wp_root: float = 0.15                 # Depth-weighted WP over supported root depth (m3/m3)
+    theta_sat_root: float = 0.45                # Depth-weighted Saturation over supported root depth (m3/m3)
+    supported_root_depth_cm: float = 60.0       # Effective supported root thickness (cm)
+    deep_drainage_mm: float = 0.0               # Interval deep drainage flux (mm)
+    mass_conserved: bool = True                 # True if water conservation holds (closure error <= 0.05 mm)
+    water_closure_error_mm: float = 0.0         # Closure error (mm)
+    is_degraded: bool = False                   # True if nonconserved or degraded boundary

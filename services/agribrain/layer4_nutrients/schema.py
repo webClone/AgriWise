@@ -281,6 +281,9 @@ class SoilWaterBalanceOutput:
     is_degraded: bool = False
     missing_weather_days: int = 0
     uncertainty_multiplier: float = 1.0
+    supported_root_depth_cm: float = 60.0
+    mass_conserved: bool = True
+    water_closure_error_mm: float = 0.0
 
 
 # ============================================================================

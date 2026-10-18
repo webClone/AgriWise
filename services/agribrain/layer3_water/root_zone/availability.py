@@ -32,4 +32,5 @@ class RootZoneAvailabilityEngine:
             etp_mm_day=etp_mm_day,
             root_fraction_profile=root_fraction_profile,
             soil_uncertainty_sigma=soil_uncertainty_sigma,
+            saturation_profile=soil_state.saturation_profile,
         )

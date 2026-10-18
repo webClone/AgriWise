@@ -189,9 +189,7 @@ def parse_quantile_level(k: Any) -> float:
     k_str = str(k).lower().strip()
     try:
         if k_str.startswith("p") or k_str.startswith("q"):
-            val = float(k_str[1:])
-            if val > 1.0:
-                val /= 100.0
+            val = float(k_str[1:]) / 100.0
         elif k_str.endswith("%"):
             val = float(k_str[:-1]) / 100.0
         else:

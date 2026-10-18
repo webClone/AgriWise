@@ -519,8 +519,9 @@ class CommandDispatcher:
         query_ts = None
         # SR04: Query live physical controller status before physical dispatch to detect latched fault or active foreign execution
         try:
-            query_ts = time.time()
             live_st = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
+            if live_st == ActuatorStatus.ONLINE:
+                query_ts = time.time()
             if getattr(actuator, "_fault_latched", False) or live_st == ActuatorStatus.ERROR:
                 logger.error("Pre-dispatch actuator status check failed for %s: Actuator has latched fault or status ERROR", event.device_id)
                 self._active_events.pop(event.event_id, None)
@@ -573,6 +574,7 @@ class CommandDispatcher:
         except Exception as q_err:
             logger.warning("Could not query actuator status for %s before dispatch: %s", event.device_id, q_err)
             live_st = ActuatorStatus.UNKNOWN
+            query_ts = None
             if getattr(actuator, "_fault_latched", False):
                 self._active_events.pop(event.event_id, None)
                 self._safety.track_event_end(event.event_id)
@@ -602,6 +604,9 @@ class CommandDispatcher:
                 pass
             self._emit_failed(event)
             return event
+
+        if holding_eid:
+            event.owner_token = holding_eid
 
         # Dispatch with retry
         result = await self._dispatch_with_retry(event, actuator)
@@ -877,6 +882,34 @@ class CommandDispatcher:
         for attempt in range(self._max_retries + 1):
             if event.status in (EventStatus.CANCELLED, EventStatus.EMERGENCY_STOPPED, EventStatus.STOP_REQUESTED):
                 break
+            # Pre-send fencing check: ensure claim is still active in SharedQuotaStore
+            rec = SharedQuotaStore.get_active_record(event.event_id)
+            claim_lost = False
+            if rec is None:
+                if getattr(event, "owner_token", None):
+                    claim_lost = True
+            elif (
+                rec.get("status") not in ("STARTING", "DISPATCHING", "EXECUTING")
+                or not rec.get("claimed", False)
+                or (getattr(event, "owner_token", None) and rec.get("owner_token") != event.owner_token)
+            ):
+                claim_lost = True
+
+            if claim_lost:
+                logger.error(
+                    "Pre-send fencing check failed for event %s: claim lost or superseded (status=%s)",
+                    event.event_id,
+                    rec.get("status") if rec else None,
+                )
+                return CommandResult(
+                    command_id=f"CMD-{event.event_id}-{attempt+1}",
+                    device_id=event.device_id,
+                    success=False,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    error_code="RESOURCE_CLAIM_FAILED",
+                    error_message=f"Pre-send fencing check failed: claim lost or superseded",
+                    retry_recommended=False,
+                )
             command = self._build_command(
                 event,
                 attempt=attempt + 1,

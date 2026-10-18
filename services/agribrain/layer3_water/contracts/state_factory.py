@@ -186,6 +186,7 @@ class WaterStateFactory:
         etp_mm_day: float = 5.0,
         root_fraction_profile: Optional[List[float]] = None,
         soil_uncertainty_sigma: float = 0.04,
+        saturation_profile: Optional[List[float]] = None,
     ) -> RootZoneWaterState:
         """Calculate root-zone TAW, RAW, depletion Dr, root uptake weighting U(z), and stress factor Ks."""
         if not (isinstance(root_depth_m, (int, float)) and math.isfinite(root_depth_m) and root_depth_m > 0.0):
@@ -250,12 +251,16 @@ class WaterStateFactory:
         taw_mm = 0.0
         current_water_mm = 0.0
         fc_water_mm = 0.0
+        wp_water_mm = 0.0
+        sat_water_mm = 0.0
+        z_supported_mm = 0.0
         
         prev_d = 0.0
         for i, d in enumerate(layer_depths_cm):
             th = theta_profile[i]
             fc = field_capacity_profile[i]
             wp = wilting_point_profile[i]
+            sat = saturation_profile[i] if (saturation_profile and i < len(saturation_profile)) else 0.45
             
             # Feddes threshold: optimal above theta_lim = wp + (1 - p) * (fc - wp)
             th_lim = wp + (1.0 - adj_p) * (fc - wp) if fc > wp else wp
@@ -274,7 +279,10 @@ class WaterStateFactory:
                 layer_taw = (fc - wp) * active_thickness_mm
                 taw_mm += layer_taw
                 fc_water_mm += fc * active_thickness_mm
+                wp_water_mm += wp * active_thickness_mm
+                sat_water_mm += sat * active_thickness_mm
                 current_water_mm += th * active_thickness_mm
+                z_supported_mm += active_thickness_mm
                 
                 # Active uptake potential in layer: U_i_raw = R_i * alpha_i
                 raw_uptake.append(root_fracs[i] * max(0.01, alpha_i))
@@ -298,6 +306,12 @@ class WaterStateFactory:
         else:
             ks = round((taw_mm - dr_mm) / (taw_mm - raw_mm), 3)
 
+        rz_storage = round(current_water_mm, 2)
+        rz_fc = round(fc_water_mm / z_supported_mm, 7) if z_supported_mm > 0 else 0.30
+        rz_wp = round(wp_water_mm / z_supported_mm, 7) if z_supported_mm > 0 else 0.15
+        rz_sat = round(sat_water_mm / z_supported_mm, 7) if z_supported_mm > 0 else 0.45
+        supp_depth_cm = round(z_supported_mm / 10.0, 2)
+
         return RootZoneWaterState(
             root_depth_m=round(root_depth_m, 2),
             root_fraction_profile=root_fracs,
@@ -310,6 +324,11 @@ class WaterStateFactory:
             root_zone_depletion_mm=dr_mm,
             stress_factor_ks=ks,
             ks_uncertainty_sigma=round(soil_uncertainty_sigma * 1.2, 4),
+            root_zone_storage_mm=rz_storage,
+            depth_weighted_theta_fc=rz_fc,
+            depth_weighted_theta_wp=rz_wp,
+            depth_weighted_theta_sat=rz_sat,
+            supported_root_depth_cm=supp_depth_cm,
         )
 
     @staticmethod

@@ -241,9 +241,14 @@ class ConstraintScheduler:
                 merged_row["precip_mm"] = max(p_vals)
             if w_vals:
                 merged_row["wind_speed"] = max(w_vals)
-                merged_row["wind_speed_unit"] = "km/h"
             if g_vals:
                 merged_row["wind_gust"] = max(g_vals)
+            if w_vals or g_vals:
+                merged_row["wind_speed_unit"] = "km/h"
+                if "wind_unit" in merged_row:
+                    merged_row["wind_unit"] = "km/h"
+                if "unit" in merged_row:
+                    merged_row["unit"] = "km/h"
             if tmax_vals:
                 merged_row["temp_max"] = max(tmax_vals)
             if tmin_vals:
