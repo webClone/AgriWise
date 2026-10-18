@@ -196,12 +196,14 @@ def parse_quantile_level(k: Any) -> float:
             val = float(k_str)
             if val > 1.0:
                 val /= 100.0
-        val = round(val, 6)
     except Exception as exc:
         raise ContractViolation(f"Invalid quantile level key: {k}") from exc
-    if not (0.0 <= val <= 1.0) or math.isnan(val) or math.isinf(val):
+
+    # CEB07: Validate finite bounds strictly BEFORE precision rounding
+    if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val) or not (0.0 <= val <= 1.0):
         raise ContractViolation(f"Invalid quantile level {k}: level must be in [0.0, 1.0]")
-    return val
+
+    return round(val, 6)
 
 
 def compute_crps_quantiles(quantiles: Dict[str, float], observed: float) -> float:

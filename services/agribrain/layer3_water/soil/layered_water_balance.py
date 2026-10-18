@@ -91,6 +91,19 @@ class LayeredWaterBalanceEngine:
                     f"Layer depths must be strictly monotonically increasing: layer {i} ({d}) <= layer {i-1} ({prev_soil.layer_depths_cm[i-1]})"
                 )
 
+        # CEB05: Validate all hydrological fluxes as finite, non-boolean real scalars >= 0.0
+        for name, val in [
+            ("precipitation_mm", precipitation_mm),
+            ("irrigation_mm", irrigation_mm),
+            ("actual_transpiration_mm", actual_transpiration_mm),
+            ("actual_soil_evaporation_mm", actual_soil_evaporation_mm),
+            ("capillary_rise_mm", capillary_rise_mm),
+        ]:
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val):
+                raise ValueError(f"{name} must be a finite real number, got {val!r}")
+            if val < 0.0:
+                raise ValueError(f"{name} cannot be negative, got {val}")
+
         n_layers = len(prev_soil.layer_depths_cm)
         layer_thickness_mm = []
         prev_d = 0.0
@@ -123,10 +136,19 @@ class LayeredWaterBalanceEngine:
             for th_r, thickness in zip(prev_soil.residual_profile, layer_thickness_mm)
         ]
 
-        # Explicit initial surface / depression storage
+        # CEB05: Explicit initial surface / depression storage validation
         prev_infil = getattr(prev_soil, "infiltration", None)
-        init_surface_storage_mm = float(getattr(prev_infil, "surface_storage_mm", 0.0) or 0.0)
-        max_surface_storage_mm = float(getattr(prev_infil, "max_surface_storage_mm", 0.0) or 0.0)
+        raw_init_surface = getattr(prev_infil, "surface_storage_mm", 0.0) if prev_infil else 0.0
+        raw_max_surface = getattr(prev_infil, "max_surface_storage_mm", 0.0) if prev_infil else 0.0
+        for name, val in [("surface_storage_mm", raw_init_surface), ("max_surface_storage_mm", raw_max_surface)]:
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val):
+                raise ValueError(f"{name} must be a finite real number, got {val!r}")
+            if val < 0.0:
+                raise ValueError(f"{name} cannot be negative, got {val}")
+        init_surface_storage_mm = float(raw_init_surface)
+        max_surface_storage_mm = float(raw_max_surface)
+        if max_surface_storage_mm > 0.0 and init_surface_storage_mm > max_surface_storage_mm:
+            raise ValueError(f"Initial surface storage ({init_surface_storage_mm}) cannot exceed max capacity ({max_surface_storage_mm})")
 
         # 1. Surface Infiltration & Runoff Partitioning
         # Total water available at the surface (precipitation + irrigation + initial surface storage)
@@ -271,6 +293,7 @@ class LayeredWaterBalanceEngine:
             return_flow_runoff_mm=round(return_flow_runoff_mm, 2),
             surface_storage_mm=round(final_surface_storage_mm, 2),
             max_surface_storage_mm=round(max_surface_storage_mm, 2),
+            surface_water_evaporation_mm=round(evap_from_surface, 2),
         )
 
         updated_soil = WaterStateFactory.create_soil_water_state(
@@ -307,7 +330,7 @@ class LayeredWaterBalanceEngine:
             actual_infiltration_mm=round(net_infil, 4),
             surface_runoff_mm=round(total_runoff, 4),
             actual_transpiration_mm=round(total_plant_extracted, 4),
-            actual_soil_evaporation_mm=round(total_evap, 4),
+            actual_soil_evaporation_mm=round(actual_top_evap, 4),
             actual_eta_mm=round(total_plant_extracted + total_evap, 4),
             deep_drainage_mm=round(deep_drainage, 4),
             capillary_rise_mm=round(actual_capillary_rise, 4),
@@ -319,6 +342,7 @@ class LayeredWaterBalanceEngine:
             final_surface_storage_mm=round(final_surface_storage_mm, 4),
             gross_infiltration_mm=round(gross_infil, 4),
             return_flow_runoff_mm=round(return_flow_runoff_mm, 4),
+            surface_water_evaporation_mm=round(evap_from_surface, 4),
         )
 
         return StepWaterBalanceResult(

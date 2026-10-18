@@ -473,7 +473,7 @@ def run_layer4_standalone(
     resp_engine = SoilRespirationEngine()
     tillage_cls = tillage.tillage_class.value if tillage and tillage.tillage_class else "UNKNOWN"
     resp_result = resp_engine.compute_seasonal_mineralization(
-        daily_weather=daily_weather,
+        daily_weather=daily_weather or [],
         soc_pct=soc.soc_pct if soc and soc.soc_pct else 1.5,
         clay_pct=soil_props.get("clay_pct", 22.0),
         organic_matter_pct=soil_props.get("organic_matter_pct", 2.0),
@@ -500,7 +500,7 @@ def run_layer4_standalone(
             residual_credits.total_n_credit_kg_ha
         ),
         growth_stage=current_stage,
-        days_in_season=len(daily_weather),
+        days_in_season=len(daily_weather) if daily_weather else 0,
     )
 
     # ===========================================================
@@ -665,6 +665,18 @@ def run_layer4_standalone(
             prescription.is_allowed = False
             if "nonconserved_water_transition" not in prescription.blocked_reason:
                 prescription.blocked_reason.append("nonconserved_water_transition")
+    elif swb and getattr(swb, "is_degraded", False):
+        unc_factor = getattr(swb, "uncertainty_multiplier", 1.5) or 1.5
+        for state in states.values():
+            state.confidence = round(max(0.10, min(float(state.confidence), float(state.confidence) / unc_factor)), 3)
+            degraded_note = (
+                f"Water boundary is degraded (uncertainty multiplier {unc_factor}); "
+                "nutrient transport and availability estimates carry elevated uncertainty."
+            )
+            state.notes = f"{state.notes} {degraded_note}".strip()
+        for prescription in prescriptions:
+            if prescription.is_allowed:
+                prescription.notes = f"{getattr(prescription, 'notes', '')} Water boundary degraded (uncertainty multiplier {unc_factor}).".strip()
 
     # 10. Quality metrics
     user_soil_available = any(k in soil_props for k in ("nitrogen_ppm", "phosphorus_ppm", "potassium_ppm"))
@@ -771,6 +783,17 @@ def run_layer4_standalone(
             "driver": "hydrology_mass_balance",
             "penalty": 0.50,
             "reason": f"Water closure error {getattr(swb, 'water_closure_error_mm', 0.0)} mm exceeds physical conservation threshold",
+        })
+    elif swb and getattr(swb, "is_degraded", False):
+        dh_overall = min(dh_overall, 0.40)
+        dh_ceiling = min(dh_ceiling, 0.40)
+        dh_status = "degraded"
+        if "DEGRADED_WATER_BOUNDARY" not in quality.missing_drivers:
+            quality.missing_drivers.append("DEGRADED_WATER_BOUNDARY")
+        quality.penalties_applied.append({
+            "driver": "hydrology_degraded_boundary",
+            "penalty": 0.35,
+            "reason": f"Water boundary declared degraded (uncertainty multiplier {getattr(swb, 'uncertainty_multiplier', 1.5)})",
         })
 
     data_health = DataHealthScore(

@@ -58,6 +58,13 @@ class WaterStateFactory:
                     f"Layer depths must be strictly monotonically increasing: layer {i} ({d}) <= layer {i-1} ({layer_depths_cm[i-1]})"
                 )
 
+        if infiltration is not None:
+            if not isinstance(infiltration, InfiltrationState):
+                if isinstance(infiltration, dict):
+                    infiltration = InfiltrationState(**infiltration)
+                else:
+                    raise ValueError(f"infiltration must be an InfiltrationState instance or dict, got {type(infiltration)}")
+
         n_layers = len(layer_depths_cm)
         for name, prof in [
             ("theta_profile", theta_profile),
@@ -413,6 +420,24 @@ class WaterStateFactory:
             solver_fidelity=solver_fidelity,
             weather_quality=atmos.overall_confidence,
         )
+
+        # CEB04: Evaluate root coverage against requested depth and propagate to data health and confidence
+        supp_depth_cm = getattr(root_zone, "supported_root_depth_cm", 0.0)
+        req_depth_cm = getattr(root_zone, "requested_root_depth_cm", getattr(root_zone, "root_depth_m", 0.6) * 100.0)
+        cov_frac = (
+            min(1.0, supp_depth_cm / max(0.1, req_depth_cm))
+            if req_depth_cm > 0.0
+            else 1.0
+        )
+        if cov_frac < 0.50:
+            data_health_score = min(data_health_score, round(cov_frac, 2))
+            confidence = WaterPhysicsConfidence(
+                mass_balance_quality=confidence.mass_balance_quality,
+                solver_fidelity=confidence.solver_fidelity,
+                soil_parameter_quality=confidence.soil_parameter_quality,
+                weather_quality=confidence.weather_quality,
+                overall_water_confidence=round(confidence.overall_water_confidence * max(0.2, cov_frac), 3),
+            )
         
         memory = hydraulic_memory or HydraulicStressMemoryState.step_memory(
             prev_memory=None,

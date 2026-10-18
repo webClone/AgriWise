@@ -306,6 +306,10 @@ class CanonicalWorldlineService:
                     if pub_seq is not None:
                         res_out["sequence"] = pub_seq
                         res_out["publication_generation"] = pub_seq
+                    elif head_data.get("latest_checkpoint_id") == curr_id and head_data.get("sequence"):
+                        pub_seq = int(head_data["sequence"])
+                        res_out["sequence"] = pub_seq
+                        res_out["publication_generation"] = pub_seq
                     return res_out
                 curr_id = cp_data.get("predecessor_head")
 

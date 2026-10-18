@@ -1,0 +1,181 @@
+{
+  "candidate": "ceb5dd47250a9aca5482dcb2904a5bb3f4105626",
+  "parent": "2e1fbcb79ccf283d4614bfe0d5579a0597f7ddfc",
+  "date": "2026-10-18",
+  "scope": "Corrective production review of12changedfiles and active dependencies, sixparallel lanes; not whole-repository certification.",
+  "claims": [
+    {
+      "id": "W01",
+      "status": "original_repaired_with_adjacent_qualification",
+      "evidence": "trajectory/results.json",
+      "summary": "Original impedance closure0; full pipeline0.02 within0.05; repeated ponding warm/cold agrees; compartment evaporation semantics and invalid surface admission remain."
+    },
+    {
+      "id": "W02",
+      "status": "original_repaired_local_gate_verified_integration_open",
+      "evidence": "decision/results.json",
+      "summary": "Candidate posterior137.55 reaches full L4 unchanged; weighted retention/support preserved; nonempty N/P blocked on injected nonconservation. Conserved degradation and L8 restriction continuity remain."
+    },
+    {
+      "id": "2E01",
+      "status": "partially_repaired_original_branch_remaining",
+      "evidence": "protocol/original-results.json",
+      "summary": "Query-exception and simultaneous admission controls repaired; delayed sampled-idle reply after another ACK still yields two START effects. Real lease-expiry schedule also yields two."
+    },
+    {
+      "id": "2E02",
+      "status": "original_repaired_adjacent_legacy_first_read_open",
+      "evidence": "ownership/results.json",
+      "summary": "Indexed pre-map receipt generation5 survives B6/retry/restart. Older no-index first read still allocation2 before migration."
+    },
+    {
+      "id": "2E03",
+      "status": "original_repaired_narrow_adjacent_range_gap",
+      "evidence": "ledger/results.json",
+      "summary": "Uniform p/q percentage grammar repaired across all callers; raw out-of-range rounding ordering remains."
+    },
+    {
+      "id": "2E04",
+      "status": "original_repaired_tested_alias_controls_pass",
+      "evidence": "ownership/results.json",
+      "summary": "Equivalent gust-only inputs confirm in both orders; alias and unsafe gust controls retained."
+    }
+  ],
+  "findings": [
+    {
+      "id": "CEB01",
+      "priority": "P1",
+      "kind": "reproduced_OS_process_resource_admission",
+      "packages": [
+        "F16",
+        "F17",
+        "F18"
+      ],
+      "status": "open",
+      "evidence": [
+        "protocol/original-results.json",
+        "protocol/adjacent-results.json"
+      ],
+      "summary": "Delayed idle evidence and expired STARTING owner revival permit competing START effects.",
+      "limit": "Inert command effects; no measured water delivery or deployed controller claim."
+    },
+    {
+      "id": "CEB02",
+      "priority": "P2",
+      "kind": "reproduced_valid_input_component_receipt",
+      "packages": [
+        "F03",
+        "F07"
+      ],
+      "status": "open",
+      "evidence": [
+        "trajectory/results.json"
+      ],
+      "summary": "7mm pond evaporation is published as soil evaporation; whole system closes while soil-only interpretation does not.",
+      "limit": "Original valid whole-system conservation repair retained."
+    },
+    {
+      "id": "CEB03",
+      "priority": "P1",
+      "kind": "reproduced_exact_adapter_and_ranker_composition",
+      "packages": [
+        "F10",
+        "F15",
+        "F38"
+      ],
+      "status": "open",
+      "evidence": [
+        "platform/results.json"
+      ],
+      "summary": "L4 nonconservation block lost by normalizer; ranker recreates allowed120kg_N/ha fertilizer candidate.",
+      "limit": "Stops at ranker; later independent gates, publication and actuation not exercised."
+    },
+    {
+      "id": "CEB04",
+      "priority": "P2",
+      "kind": "reproduced_qualification_propagation",
+      "packages": [
+        "F04",
+        "F05",
+        "F10"
+      ],
+      "status": "open",
+      "evidence": [
+        "decision/results.json",
+        "platform/results.json"
+      ],
+      "summary": "Correct supported geometry lacks consistent unknown-root and declared low-health qualification downstream.",
+      "limit": "Actual thin-profile engine fixture plus deliberate low-health full-L4 fixture; no deployed request or wrong physical dose established."
+    },
+    {
+      "id": "CEB05",
+      "priority": "P2",
+      "kind": "reproduced_scientific_API_domain_admission",
+      "packages": [
+        "F03",
+        "F04"
+      ],
+      "status": "open",
+      "evidence": [
+        "trajectory/results.json"
+      ],
+      "summary": "Negative surface inventory accepted by full pipeline; direct transition accepts invalid flux requests.",
+      "limit": "No externally reachable exploitation or ordinary negative-ET producer established."
+    },
+    {
+      "id": "CEB06",
+      "priority": "P2",
+      "kind": "reproduced_older_legacy_receipt_first_read",
+      "packages": [
+        "F09"
+      ],
+      "status": "open",
+      "evidence": [
+        "ownership/results.json"
+      ],
+      "summary": "No-index known-latest legacy read returns allocation2 before first migration write restores publication5.",
+      "limit": "Explicit older head format; not original post-write regression or numerical water change."
+    },
+    {
+      "id": "CEB07",
+      "priority": "P3",
+      "kind": "reproduced_narrow_probability_domain_boundary",
+      "packages": [
+        "F24"
+      ],
+      "status": "open",
+      "evidence": [
+        "ledger/results.json"
+      ],
+      "summary": "Small invalid probabilities round into legal endpoints before validation.",
+      "limit": "Original grammar repaired; tiny input-validation issue, valid zero scores retained."
+    }
+  ],
+  "static_acceptance_limits": [
+    {
+      "packages": [
+        "F03",
+        "F08",
+        "F09"
+      ],
+      "summary": "Durable checkpoint projection omits full transition/analysis/failure eligibility receipts; restart corruption or promotion not reproduced."
+    }
+  ],
+  "governance": {
+    "total_full_acceptance": 52,
+    "open": 52,
+    "checked": 0,
+    "normative_blobs_verified": true
+  },
+  "verification": {
+    "repository_tests_run": false,
+    "user_reported_tests": [
+      64,
+      490
+    ],
+    "independent_changed_file_syntax_count": 12,
+    "hardware_used": false,
+    "production_or_git_modified": false
+  },
+  "decision": "Proceed with bounded corrective implementation and objective-qualified research; do not close full package acceptance from this batch."
+}

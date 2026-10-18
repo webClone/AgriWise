@@ -87,6 +87,8 @@ class Layer3ToLayer4BoundaryReceipt:
     theta_wp_root: float = 0.15                 # Depth-weighted WP over supported root depth (m3/m3)
     theta_sat_root: float = 0.45                # Depth-weighted Saturation over supported root depth (m3/m3)
     supported_root_depth_cm: float = 60.0       # Effective supported root thickness (cm)
+    requested_root_depth_cm: float = 60.0       # Requested/assumed root depth (cm)
+    root_support_coverage_fraction: float = 1.0 # Supported / requested root depth fraction [0.0, 1.0]
     deep_drainage_mm: float = 0.0               # Interval deep drainage flux (mm)
     mass_conserved: bool = True                 # True if water conservation holds (closure error <= 0.05 mm)
     water_closure_error_mm: float = 0.0         # Closure error (mm)

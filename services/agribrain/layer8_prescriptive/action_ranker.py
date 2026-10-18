@@ -209,7 +209,22 @@ class ActionRankingEngine:
                     action_type = ActionType.SCOUT
                 
                 rate_val = min(prob_def * 150, MAX_SAFE_RATES[ActionType.FERTILIZE]["max"])
-                
+
+                # CEB03: Check upstream restrictions and conservation blockers
+                is_card_allowed = state.get("is_allowed", True) if isinstance(state, dict) else True
+                card_blocked_reasons = list(state.get("blocked_reasons", [])) if isinstance(state, dict) else []
+                if isinstance(state, dict) and not state.get("mass_conserved", True):
+                    is_card_allowed = False
+                    if "nonconserved_water_transition" not in card_blocked_reasons:
+                        card_blocked_reasons.append("nonconserved_water_transition")
+
+                card_confidence = confidence
+                conf_score = state.get("confidence", 0.5) if isinstance(state, dict) else 0.5
+                if not is_card_allowed or conf_score < 0.3:
+                    card_confidence = ConfidenceLevel.LOW
+                elif conf_score < 0.6 and card_confidence == ConfidenceLevel.HIGH:
+                    card_confidence = ConfidenceLevel.MODERATE
+
                 cards.append(ActionCard(
                     action_id=self._make_id(f"{nutrient}_DEF", action_type),
                     action_type=action_type,
@@ -219,7 +234,7 @@ class ActionRankingEngine:
                         urgency_score=0.5,
                         risk_score=prob_def * 0.6,
                         cost_score=0.3,
-                        confidence_score=state.get("confidence", 0.5) if isinstance(state, dict) else 0.5,
+                        confidence_score=conf_score,
                     ),
                     zone_targets=zones,
                     zone_allocation={z: 1.0 / len(zones) for z in zones},
@@ -230,7 +245,9 @@ class ActionRankingEngine:
                         unit="kg_N/ha",
                     ) if action_type == ActionType.FERTILIZE else None,
                     evidence=evidence,
-                    confidence=confidence,
+                    is_allowed=is_card_allowed,
+                    blocked_reason=card_blocked_reasons,
+                    confidence=card_confidence,
                     explain=f"{'Fertilize' if action_type == ActionType.FERTILIZE else 'Scout'} for {nutrient} deficiency (p={prob_def:.0%})",
                 ))
         

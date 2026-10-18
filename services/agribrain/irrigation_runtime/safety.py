@@ -972,14 +972,26 @@ class SharedQuotaStore:
                 if cur_status == "STOP_REQUESTED" and new_status == "EXECUTING":
                     return
                 state["reservations"][event_id]["status"] = new_status
-                if new_status in ("STOP_REQUESTED", "CANCELLED", "COMPLETED", "SETTLED", "FAILED"):
+                if new_status in ("STOP_REQUESTED", "CANCELLED", "COMPLETED", "SETTLED", "FAILED", "EXPIRED", "SUPERSEDED"):
                     state["reservations"][event_id]["claimed"] = False
                     state["reservations"][event_id].pop("starting_ts", None)
+                    dev_id = state["reservations"][event_id].get("device_id")
+                    z_id = state["reservations"][event_id].get("zone_id")
+                    if dev_id and "resource_claims" in state:
+                        rkey = f"{dev_id}::{z_id or '*'}"
+                        if state["resource_claims"].get(rkey, {}).get("event_id") == event_id:
+                            state["resource_claims"].pop(rkey, None)
                 elif new_status in ("STARTING", "EXECUTING"):
                     state["reservations"][event_id]["claimed"] = True
                     now_t = time.time()
                     if new_status == "EXECUTING":
                         state["reservations"][event_id]["executing_ts"] = now_t
+                        dev_id = state["reservations"][event_id].get("device_id")
+                        z_id = state["reservations"][event_id].get("zone_id")
+                        if dev_id and "resource_claims" in state:
+                            rkey = f"{dev_id}::{z_id or '*'}"
+                            if rkey in state["resource_claims"] and state["resource_claims"][rkey].get("event_id") == event_id:
+                                state["resource_claims"][rkey]["status"] = "EXECUTING"
                     if "starting_ts" in state["reservations"][event_id]:
                         state["reservations"][event_id]["claimed_ts"] = state["reservations"][event_id].pop("starting_ts")
                     elif "claimed_ts" not in state["reservations"][event_id]:
@@ -1622,6 +1634,12 @@ class SharedQuotaStore:
                             starting_ts = res.get("starting_ts", 0.0)
                             if now_ts - starting_ts < 30.0:
                                 return False, eid
+                            else:
+                                # Stale / expired STARTING lease: atomically revoke expired claim
+                                res["status"] = "EXPIRED"
+                                res["claimed"] = False
+                                res["owner_token"] = None
+                                res["expired_at"] = datetime.now(timezone.utc).isoformat()
                         # 2. Another operation has requested stop but is not yet settled
                         elif st in ("STOP_REQUESTED",):
                             return False, eid
@@ -1635,6 +1653,8 @@ class SharedQuotaStore:
                             if query_ts <= exec_ts:
                                 return False, eid
                             res["status"] = "COMPLETED"
+                            res["claimed"] = False
+                            res["owner_token"] = None
                             res["completed_at"] = datetime.now(timezone.utc).isoformat()
 
             if event_id not in reservations:
@@ -1657,9 +1677,28 @@ class SharedQuotaStore:
             reservations[event_id]["device_id"] = device_id
             if zone_id:
                 reservations[event_id]["zone_id"] = zone_id
+
+            res_key = f"{device_id}::{zone_id or '*'}"
+            state.setdefault("resource_claims", {})[res_key] = {
+                "event_id": event_id,
+                "owner_token": owner_token,
+                "status": "STARTING",
+                "claimed_at": now_ts,
+            }
             cls._write_state(state)
 
             return True, owner_token
+
+    @classmethod
+    def get_resource_claim(cls, device_id: str, zone_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Retrieve active resource claim for device and zone."""
+        with cls._lock():
+            state = cls._read_state()
+            res_claims = state.get("resource_claims", {})
+            claim = res_claims.get(f"{device_id}::{zone_id or '*'}")
+            if not claim and zone_id:
+                claim = res_claims.get(f"{device_id}::*")
+            return claim
 
     @classmethod
     def release_resource_claim(
@@ -1676,7 +1715,11 @@ class SharedQuotaStore:
                 reservations[event_id]["status"] = "RESERVED"
                 reservations[event_id]["claimed"] = False
                 reservations[event_id].pop("starting_ts", None)
-                cls._write_state(state)
+            res_key = f"{device_id}::{zone_id or '*'}"
+            if "resource_claims" in state and res_key in state["resource_claims"]:
+                if state["resource_claims"][res_key].get("event_id") == event_id:
+                    state["resource_claims"].pop(res_key, None)
+            cls._write_state(state)
 
     @classmethod
     def get_settled_receipt(cls, event_id: str) -> Optional[Dict[str, Any]]:

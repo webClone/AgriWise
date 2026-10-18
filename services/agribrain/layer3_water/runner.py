@@ -321,6 +321,8 @@ class WaterIntelligenceEngine:
         realized_ks = round(realized_transp / tpot, 3) if tpot > 0.0 else 1.0
         realized_tdef = round(max(0.0, tpot - realized_transp), 2)
 
+        realized_surface_evap = flux_receipt.surface_water_evaporation_mm if flux_receipt else 0.0
+
         published_actual = ActualWaterFlux(
             ks=round(min(1.0, max(0.0, realized_ks)), 3),
             precipitation_mm=precip,
@@ -330,7 +332,8 @@ class WaterIntelligenceEngine:
             capillary_rise_mm=round(realized_capillary, 2),
             actual_transpiration_mm=round(realized_transp, 2),
             actual_soil_evaporation_mm=round(realized_evap, 2),
-            actual_eta_mm=round(realized_transp + realized_evap, 2),
+            surface_water_evaporation_mm=round(realized_surface_evap, 2),
+            actual_eta_mm=round(realized_transp + realized_evap + realized_surface_evap, 2),
             transpiration_deficit_mm=realized_tdef,
         )
         published_flux_state = WaterFluxState(

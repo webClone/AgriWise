@@ -3433,16 +3433,41 @@ def _normalize_nutrient_states(l4_output) -> Dict[str, Any]:
     """
     Convert L4's Dict[Nutrient, NutrientState] dataclasses into the
     Dict[str, dict] shape that action_ranker actually reads:
-    { "N": {"probability_deficient": 0.6, "confidence": 0.8, "severity": "HIGH"}, ... }
+    { "N": {"probability_deficient": 0.6, "confidence": 0.8, "severity": "HIGH", "is_allowed": True, ...}, ... }
     """
     if not l4_output:
         return {}
     raw = getattr(l4_output, "nutrient_states", {})
     if not raw:
         return {}
+
+    prescriptions = getattr(l4_output, "prescriptions", []) or []
+    swb = getattr(l4_output, "swb_output", None)
+    mass_conserved = getattr(swb, "mass_conserved", True) if swb else True
+    water_closure_error_mm = getattr(swb, "water_closure_error_mm", 0.0) if swb else 0.0
+
     result = {}
     for key, state in raw.items():
         k = key.value if hasattr(key, "value") else str(key)
+
+        nut_prescriptions = [
+            p for p in prescriptions
+            if (getattr(getattr(p, "nutrient", None), "value", None) == k
+                or getattr(getattr(p, "nutrient", None), "name", None) == k
+                or str(getattr(p, "nutrient", "")) == k)
+        ]
+        is_allowed = True
+        blocked_reasons = []
+        if not mass_conserved:
+            is_allowed = False
+            blocked_reasons.append("nonconserved_water_transition")
+        for p in nut_prescriptions:
+            if not getattr(p, "is_allowed", True):
+                is_allowed = False
+            for br in getattr(p, "blocked_reason", []):
+                if br not in blocked_reasons:
+                    blocked_reasons.append(br)
+
         if hasattr(state, "probability_deficient"):
             # Dataclass → dict
             result[k] = {
@@ -3451,11 +3476,33 @@ def _normalize_nutrient_states(l4_output) -> Dict[str, Any]:
                 "severity": getattr(state, "severity", "LOW"),
                 "state_index": getattr(state, "state_index", 0.0),
                 "drivers_used": [str(d) for d in getattr(state, "drivers_used", [])],
+                "is_allowed": is_allowed,
+                "blocked_reasons": blocked_reasons,
+                "mass_conserved": mass_conserved,
+                "water_closure_error_mm": water_closure_error_mm,
             }
         elif isinstance(state, dict):
-            result[k] = state
+            entry = dict(state)
+            entry.setdefault("is_allowed", is_allowed)
+            existing_reasons = list(entry.get("blocked_reasons", []))
+            for br in blocked_reasons:
+                if br not in existing_reasons:
+                    existing_reasons.append(br)
+            entry["blocked_reasons"] = existing_reasons
+            entry.setdefault("mass_conserved", mass_conserved)
+            entry.setdefault("water_closure_error_mm", water_closure_error_mm)
+            if not mass_conserved:
+                entry["is_allowed"] = False
+            result[k] = entry
         else:
-            result[k] = {"probability_deficient": 0.0, "confidence": 0.5}
+            result[k] = {
+                "probability_deficient": 0.0,
+                "confidence": 0.5,
+                "is_allowed": is_allowed,
+                "blocked_reasons": blocked_reasons,
+                "mass_conserved": mass_conserved,
+                "water_closure_error_mm": water_closure_error_mm,
+            }
     return result
 
 

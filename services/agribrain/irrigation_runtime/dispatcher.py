@@ -516,12 +516,13 @@ class CommandDispatcher:
             self._emit_failed(event)
             return event
 
+        query_start_ts = time.time()
         query_ts = None
         # SR04: Query live physical controller status before physical dispatch to detect latched fault or active foreign execution
         try:
             live_st = await asyncio.wait_for(actuator.get_status(), timeout=5.0)
             if live_st == ActuatorStatus.ONLINE:
-                query_ts = time.time()
+                query_ts = query_start_ts
             if getattr(actuator, "_fault_latched", False) or live_st == ActuatorStatus.ERROR:
                 logger.error("Pre-dispatch actuator status check failed for %s: Actuator has latched fault or status ERROR", event.device_id)
                 self._active_events.pop(event.event_id, None)
@@ -884,7 +885,9 @@ class CommandDispatcher:
                 break
             # Pre-send fencing check: ensure claim is still active in SharedQuotaStore
             rec = SharedQuotaStore.get_active_record(event.event_id)
+            res_claim = SharedQuotaStore.get_resource_claim(event.device_id, event.zone_id)
             claim_lost = False
+            now_ts = time.time()
             if rec is None:
                 if getattr(event, "owner_token", None):
                     claim_lost = True
@@ -892,7 +895,10 @@ class CommandDispatcher:
                 rec.get("status") not in ("STARTING", "DISPATCHING", "EXECUTING")
                 or not rec.get("claimed", False)
                 or (getattr(event, "owner_token", None) and rec.get("owner_token") != event.owner_token)
+                or (rec.get("status") == "STARTING" and (now_ts - rec.get("starting_ts", 0.0) >= 30.0))
             ):
+                claim_lost = True
+            elif res_claim and getattr(event, "owner_token", None) and res_claim.get("owner_token") != event.owner_token:
                 claim_lost = True
 
             if claim_lost:
