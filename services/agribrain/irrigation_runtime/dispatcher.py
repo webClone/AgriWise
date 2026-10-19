@@ -561,17 +561,11 @@ class CommandDispatcher:
 
                 if foreign_eid:
                     logger.warning("Pre-dispatch check: Actuator %s is already EXECUTING another operation (%s); refusing NEW before send", event.device_id, foreign_eid)
-                    self._active_events.pop(event.event_id, None)
-                    self._safety.track_event_end(event.event_id)
-                    self._safety.release_quota(event.event_id)
+                    event.transition(EventStatus.STOP_REQUESTED, f"Actuator {event.device_id} is already EXECUTING another operation ({foreign_eid})")
                     try:
-                        SharedQuotaStore.release(event.event_id)
+                        SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
                     except Exception:
                         pass
-                    event.transition(
-                        EventStatus.FAILED,
-                        f"Pre-dispatch check: Actuator {event.device_id} is already EXECUTING another operation ({foreign_eid}); pre-transport refused without transport"
-                    )
                     self._emit_failed(event)
                     return event
         except Exception as q_err:
@@ -730,12 +724,14 @@ class CommandDispatcher:
                     fence_stop_success = False
 
                 if fence_stop_success:
-                    if claim_lost:
-                        event.status = EventStatus.FAILED
-                    elif SharedQuotaStore.is_settled(event.event_id) or durable_status == "COMPLETED":
+                    if SharedQuotaStore.is_settled(event.event_id) or durable_status == "COMPLETED":
                         event.status = EventStatus.COMPLETED
                     elif durable_status == "EMERGENCY_STOPPED":
                         event.status = EventStatus.EMERGENCY_STOPPED
+                    elif durable_status in ("STOP_REQUESTED", "CANCELLED"):
+                        event.status = EventStatus.CANCELLED
+                    elif claim_lost:
+                        event.status = EventStatus.FAILED
                     else:
                         event.status = EventStatus.CANCELLED
                     self._active_events.pop(event.event_id, None)
@@ -1901,6 +1897,8 @@ class CommandDispatcher:
                 raw_st = active_rec.get("status")
                 if raw_st in (
                     "STARTING",
+                    "ADMITTED",
+                    "RESERVED",
                     EventStatus.DISPATCHING.value,
                     EventStatus.EXECUTING.value,
                     EventStatus.STOP_REQUESTED.value,
@@ -1909,7 +1907,7 @@ class CommandDispatcher:
                 ):
                     if raw_st == "UNSETTLED":
                         event.status = EventStatus.VALIDATING
-                    elif raw_st == "STARTING":
+                    elif raw_st in ("STARTING", "ADMITTED", "RESERVED"):
                         event.status = EventStatus.DISPATCHING
                     else:
                         event.status = EventStatus(raw_st)

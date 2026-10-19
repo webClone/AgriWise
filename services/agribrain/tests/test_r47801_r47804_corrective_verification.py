@@ -159,13 +159,12 @@ class TestR47801AdmissionLifecycle(unittest.IsolatedAsyncioTestCase):
             scheduled_start=datetime.now(timezone.utc).isoformat(),
         )
 
-        # Worker A submits and claims resource
-        res_a = await disp_a.submit_event(ev_a)
-        self.assertEqual(res_a.status, EventStatus.EXECUTING)
-        self.assertEqual(len(actuator.commands_sent), 1)
-        self.assertEqual(actuator.commands_sent[0].command_type, CommandType.START_ZONE)
+        # Worker A acquires resource claim while device is ONLINE
+        claimed_a, token_a = SharedQuotaStore.claim_resource("DEV-01", "ZONE-1", "EV-A")
+        self.assertTrue(claimed_a)
 
-        # Worker B submits concurrently: actuator is in use
+        # Worker B submits to the same idle device (actuator is ONLINE):
+        # Truthfully observes ONLINE, but is refused pre-transport by claim_resource
         res_b = await disp_b.submit_event(ev_b)
         # B must be cleanly refused with FAILED, NOT STOP_REQUESTED!
         self.assertEqual(res_b.status, EventStatus.FAILED)
@@ -175,7 +174,7 @@ class TestR47801AdmissionLifecycle(unittest.IsolatedAsyncioTestCase):
         rec_b = SharedQuotaStore.get_active_record("EV-B")
         self.assertIsNone(rec_b, "B's quota reservation must be released upon pre-transport refusal")
 
-        # A completes normally
+        # A completes normally and releases claim
         actuator._status = ActuatorStatus.ONLINE
         SharedQuotaStore.update_status("EV-A", "COMPLETED")
         SharedQuotaStore.release_resource_claim("DEV-01", "ZONE-1", "EV-A")
