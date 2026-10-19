@@ -3483,16 +3483,24 @@ def _normalize_nutrient_states(l4_output) -> Dict[str, Any]:
             }
         elif isinstance(state, dict):
             entry = dict(state)
-            entry.setdefault("is_allowed", is_allowed)
+            # 8AE04: Monotone conjunctive permission merge:
+            # Existing true permission cannot override a newly imposed false (e.g. from blocked prescription);
+            # preexisting false permission cannot be erased.
+            existing_allowed = bool(entry.get("is_allowed", True))
+            incoming_allowed = bool(is_allowed and mass_conserved)
+            combined_allowed = existing_allowed and incoming_allowed
+            entry["is_allowed"] = combined_allowed
+
             existing_reasons = list(entry.get("blocked_reasons", []))
             for br in blocked_reasons:
                 if br not in existing_reasons:
                     existing_reasons.append(br)
             entry["blocked_reasons"] = existing_reasons
-            entry.setdefault("mass_conserved", mass_conserved)
-            entry.setdefault("water_closure_error_mm", water_closure_error_mm)
-            if not mass_conserved:
-                entry["is_allowed"] = False
+            entry["mass_conserved"] = bool(entry.get("mass_conserved", True) and mass_conserved)
+            entry["water_closure_error_mm"] = max(
+                float(entry.get("water_closure_error_mm", 0.0) or 0.0),
+                float(water_closure_error_mm or 0.0),
+            )
             result[k] = entry
         else:
             result[k] = {

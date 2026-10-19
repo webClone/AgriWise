@@ -44,7 +44,7 @@ class InfiltrationState:
                 raise ValueError(f"InfiltrationState.{name} must be a finite real number, got {val!r}")
             if val < 0.0:
                 raise ValueError(f"InfiltrationState.{name} cannot be negative, got {val}")
-        if self.max_surface_storage_mm > 0.0 and self.surface_storage_mm > self.max_surface_storage_mm:
+        if self.surface_storage_mm > self.max_surface_storage_mm:
             raise ValueError(
                 f"surface_storage_mm ({self.surface_storage_mm}) cannot exceed max_surface_storage_mm ({self.max_surface_storage_mm})"
             )

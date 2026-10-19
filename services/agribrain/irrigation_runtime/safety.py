@@ -968,9 +968,23 @@ class SharedQuotaStore:
             state = cls._read_state()
             if event_id in state.get("reservations", {}):
                 cur_status = state["reservations"][event_id].get("status")
-                # RP01: If current status is STOP_REQUESTED, a late ACK promotion to EXECUTING must not erase stop intent
-                if cur_status == "STOP_REQUESTED" and new_status == "EXECUTING":
+                # 8AE01 / RP01: If current status is STOP_REQUESTED, EXPIRED, SUPERSEDED, COMPLETED, CANCELLED, or FAILED,
+                # an unowned / revoked / late ACK promotion to EXECUTING must not resurrect the reservation or erase stop/expiry intent!
+                if new_status in ("EXECUTING", "DISPATCHING") and cur_status in ("STOP_REQUESTED", "EXPIRED", "SUPERSEDED", "COMPLETED", "CANCELLED", "FAILED"):
                     return
+                # A reservation with no owner token or false claimed flag cannot be promoted to EXECUTING!
+                if new_status == "EXECUTING" and (not state["reservations"][event_id].get("claimed") or not state["reservations"][event_id].get("owner_token")):
+                    return
+                # If resource claim has been transferred to another event or token, do not promote!
+                if new_status == "EXECUTING":
+                    dev_id = state["reservations"][event_id].get("device_id")
+                    z_id = state["reservations"][event_id].get("zone_id")
+                    if dev_id and "resource_claims" in state:
+                        rkey = f"{dev_id}::{z_id or '*'}"
+                        res_claim = state["resource_claims"].get(rkey)
+                        if res_claim:
+                            if res_claim.get("event_id") != event_id or res_claim.get("owner_token") != state["reservations"][event_id].get("owner_token"):
+                                return
                 state["reservations"][event_id]["status"] = new_status
                 if new_status in ("STOP_REQUESTED", "CANCELLED", "COMPLETED", "SETTLED", "FAILED", "EXPIRED", "SUPERSEDED"):
                     state["reservations"][event_id]["claimed"] = False
@@ -981,17 +995,17 @@ class SharedQuotaStore:
                         rkey = f"{dev_id}::{z_id or '*'}"
                         if state["resource_claims"].get(rkey, {}).get("event_id") == event_id:
                             state["resource_claims"].pop(rkey, None)
-                elif new_status in ("STARTING", "EXECUTING"):
+                elif new_status in ("STARTING", "DISPATCHING", "EXECUTING"):
                     state["reservations"][event_id]["claimed"] = True
                     now_t = time.time()
-                    if new_status == "EXECUTING":
+                    if new_status in ("DISPATCHING", "EXECUTING"):
                         state["reservations"][event_id]["executing_ts"] = now_t
                         dev_id = state["reservations"][event_id].get("device_id")
                         z_id = state["reservations"][event_id].get("zone_id")
                         if dev_id and "resource_claims" in state:
                             rkey = f"{dev_id}::{z_id or '*'}"
                             if rkey in state["resource_claims"] and state["resource_claims"][rkey].get("event_id") == event_id:
-                                state["resource_claims"][rkey]["status"] = "EXECUTING"
+                                state["resource_claims"][rkey]["status"] = new_status
                     if "starting_ts" in state["reservations"][event_id]:
                         state["reservations"][event_id]["claimed_ts"] = state["reservations"][event_id].pop("starting_ts")
                     elif "claimed_ts" not in state["reservations"][event_id]:
@@ -1629,7 +1643,7 @@ class SharedQuotaStore:
                     r_zone = res.get("zone_id")
                     if not zone_id or not r_zone or zone_id == r_zone:
                         st = res.get("status")
-                        # 1. In-flight dispatch: another worker is actively sending START right now
+                        # 1. Pre-transport admission: worker is preparing to dispatch START
                         if st == "STARTING":
                             starting_ts = res.get("starting_ts", 0.0)
                             if now_ts - starting_ts < 30.0:
@@ -1640,11 +1654,18 @@ class SharedQuotaStore:
                                 res["claimed"] = False
                                 res["owner_token"] = None
                                 res["expired_at"] = datetime.now(timezone.utc).isoformat()
-                        # 2. Another operation has requested stop but is not yet settled
+                                if "resource_claims" in state:
+                                    rkey = f"{device_id}::{r_zone or '*'}"
+                                    if state["resource_claims"].get(rkey, {}).get("event_id") == eid:
+                                        state["resource_claims"].pop(rkey, None)
+                        # 2. In-flight effect-producing transport: cannot be revoked by lease timeout alone
+                        elif st in ("DISPATCHING", "SENDING"):
+                            return False, eid
+                        # 3. Another operation has requested stop but is not yet settled
                         elif st in ("STOP_REQUESTED",):
                             return False, eid
-                        # 3. Hardware or store has confirmed operation: exclusive execution
-                        elif st in ("EXECUTING", "DISPATCHING", "RESERVED"):
+                        # 4. Hardware or store has confirmed operation: exclusive execution
+                        elif st in ("EXECUTING", "RESERVED"):
                             if live_executing:
                                 return False, eid
                             if query_ts is None:
@@ -1656,6 +1677,10 @@ class SharedQuotaStore:
                             res["claimed"] = False
                             res["owner_token"] = None
                             res["completed_at"] = datetime.now(timezone.utc).isoformat()
+                            if "resource_claims" in state:
+                                rkey = f"{device_id}::{r_zone or '*'}"
+                                if state["resource_claims"].get(rkey, {}).get("event_id") == eid:
+                                    state["resource_claims"].pop(rkey, None)
 
             if event_id not in reservations:
                 reservations[event_id] = {
@@ -1699,6 +1724,67 @@ class SharedQuotaStore:
             if not claim and zone_id:
                 claim = res_claims.get(f"{device_id}::*")
             return claim
+
+    @classmethod
+    def transition_to_dispatching(
+        cls,
+        event_id: str,
+        owner_token: Optional[str],
+        device_id: str,
+        zone_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Atomically transition an admitted reservation from STARTING to DISPATCHING
+        immediately before entering effect-producing transport.
+        Verifies that owner_token is still the valid active owner and has not expired.
+        """
+        now_ts = time.time()
+        with cls._lock():
+            state = cls._read_state()
+            reservations = state.get("reservations", {})
+            if event_id not in reservations:
+                return False
+            res = reservations[event_id]
+            st = res.get("status")
+            if st not in ("STARTING", "DISPATCHING"):
+                return False
+            if not res.get("claimed", False):
+                return False
+            res_token = res.get("owner_token")
+            if owner_token and res_token != owner_token:
+                return False
+            # Check if STARTING lease expired (>= 30s)
+            if st == "STARTING" and (now_ts - res.get("starting_ts", 0.0) >= 30.0):
+                res["status"] = "EXPIRED"
+                res["claimed"] = False
+                res["owner_token"] = None
+                res["expired_at"] = datetime.now(timezone.utc).isoformat()
+                rkey = f"{device_id}::{zone_id or '*'}"
+                if "resource_claims" in state and state["resource_claims"].get(rkey, {}).get("event_id") == event_id:
+                    state["resource_claims"].pop(rkey, None)
+                cls._write_state(state)
+                return False
+
+            # Verify resource-level claim
+            rkey = f"{device_id}::{zone_id or '*'}"
+            res_claims = state.setdefault("resource_claims", {})
+            claim = res_claims.get(rkey)
+            if claim:
+                if claim.get("event_id") != event_id or (owner_token and claim.get("owner_token") != owner_token):
+                    return False
+            else:
+                res_claims[rkey] = {
+                    "event_id": event_id,
+                    "owner_token": res_token,
+                    "status": "DISPATCHING",
+                    "claimed_at": now_ts,
+                }
+
+            res["status"] = "DISPATCHING"
+            res["dispatching_ts"] = now_ts
+            res_claims[rkey]["status"] = "DISPATCHING"
+            cls._write_state(state)
+            return True
 
     @classmethod
     def release_resource_claim(

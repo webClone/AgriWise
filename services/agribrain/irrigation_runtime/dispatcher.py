@@ -683,19 +683,31 @@ class CommandDispatcher:
             return event
 
         if result.success:
-            # PB01, RP01: Before promoting local event to EXECUTING, check whether event was already finalized, settled, or stopped
+            # PB01, RP01, 8AE01: Before promoting local event to EXECUTING, check whether event was already finalized, settled, stopped, or if claim was lost
             durable_rec = SharedQuotaStore.get_active_record(event.event_id)
+            res_claim = SharedQuotaStore.get_resource_claim(event.device_id, event.zone_id)
+            owner_token = getattr(event, "owner_token", None)
             durable_status = durable_rec.get("status") if durable_rec else None
+
+            claim_lost = (
+                durable_rec is None
+                or durable_status in ("EXPIRED", "SUPERSEDED", "COMPLETED", "CANCELLED", "EMERGENCY_STOPPED", "FAILED")
+                or not durable_rec.get("claimed", False)
+                or (owner_token and durable_rec.get("owner_token") != owner_token)
+                or (res_claim and owner_token and res_claim.get("owner_token") != owner_token)
+            )
+
             needs_fence = (
-                SharedQuotaStore.is_settled(event.event_id)
+                claim_lost
+                or SharedQuotaStore.is_settled(event.event_id)
                 or SharedQuotaStore.is_stopped(event.event_id)
                 or durable_status in ("COMPLETED", "CANCELLED", "EMERGENCY_STOPPED", "STOP_REQUESTED")
                 or event.status == EventStatus.STOP_REQUESTED
             )
             if needs_fence:
                 logger.warning(
-                    "Event %s was finalized, cancelled, or stopped concurrently during dispatch (durable_status=%s); fencing actuator immediately.",
-                    event.event_id, durable_status
+                    "Event %s was finalized, cancelled, expired, or lost claim during dispatch (durable_status=%s, claim_lost=%s); fencing actuator immediately.",
+                    event.event_id, durable_status, claim_lost
                 )
                 stop_res = None
                 fence_stop_success = False
@@ -703,11 +715,13 @@ class CommandDispatcher:
                     stop_res = await actuator.emergency_stop()
                     fence_stop_success = bool(getattr(stop_res, "success", False))
                 except Exception as stop_err:
-                    logger.error("Failed to fence actuator after concurrent finalization for %s: %s", event.event_id, stop_err)
+                    logger.error("Failed to fence actuator after concurrent finalization/claim loss for %s: %s", event.event_id, stop_err)
                     fence_stop_success = False
 
                 if fence_stop_success:
-                    if SharedQuotaStore.is_settled(event.event_id) or durable_status == "COMPLETED":
+                    if claim_lost:
+                        event.status = EventStatus.FAILED
+                    elif SharedQuotaStore.is_settled(event.event_id) or durable_status == "COMPLETED":
                         event.status = EventStatus.COMPLETED
                     elif durable_status == "EMERGENCY_STOPPED":
                         event.status = EventStatus.EMERGENCY_STOPPED
@@ -916,6 +930,29 @@ class CommandDispatcher:
                     error_message=f"Pre-send fencing check failed: claim lost or superseded",
                     retry_recommended=False,
                 )
+
+            # 8AE01: Atomically transition admitted claim to DISPATCHING immediately before entering transport
+            transition_ok = SharedQuotaStore.transition_to_dispatching(
+                event.event_id,
+                getattr(event, "owner_token", None),
+                event.device_id,
+                event.zone_id,
+            )
+            if not transition_ok:
+                logger.error(
+                    "Transition to DISPATCHING failed for event %s on %s: claim lost or expired",
+                    event.event_id, event.device_id,
+                )
+                return CommandResult(
+                    command_id=f"CMD-{event.event_id}-{attempt+1}",
+                    device_id=event.device_id,
+                    success=False,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    error_code="RESOURCE_CLAIM_FAILED",
+                    error_message="Transition to DISPATCHING failed: claim lost or expired",
+                    retry_recommended=False,
+                )
+
             command = self._build_command(
                 event,
                 attempt=attempt + 1,

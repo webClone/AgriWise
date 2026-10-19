@@ -514,11 +514,21 @@ def run_layer4_standalone(
     n_state = states.get(Nutrient.N)
     if n_state and n_state.estimated_demand_kg_ha:
         preliminary_n_rate = max(0, (n_state.estimated_demand_kg_ha or 0))
-    supp_depth_cm = getattr(swb, "supported_root_depth_cm", 60.0) if swb else 60.0
-    if supp_depth_cm <= 0.0:
-        supp_depth_cm = 60.0
-    supp_depth_mm = supp_depth_cm * 10.0
-    computed_vwc = (swb.soil_moisture_mm / supp_depth_mm) if (swb and swb.soil_moisture_mm and supp_depth_mm > 0.0) else 0.25
+    raw_supp_depth = getattr(swb, "supported_root_depth_cm", None) if swb else None
+    is_root_supported = (raw_supp_depth is not None and raw_supp_depth > 0.0)
+    if not is_root_supported:
+        supp_depth_cm = 0.0
+        supp_depth_mm = 0.0
+        computed_vwc = 0.0
+        soil_moisture_vwc = 0.0
+    else:
+        supp_depth_cm = float(raw_supp_depth)
+        supp_depth_mm = supp_depth_cm * 10.0
+        if swb and swb.soil_moisture_mm is not None:
+            computed_vwc = (swb.soil_moisture_mm / supp_depth_mm) if supp_depth_mm > 0.0 else 0.0
+        else:
+            computed_vwc = 0.25
+        soil_moisture_vwc = round(min(swb.theta_sat if swb else 0.45, max(0.0, computed_vwc)), 4)
 
     env_loss_result = env_loss_engine.compute_all_losses(
         n_applied_kg_ha=preliminary_n_rate,
@@ -527,7 +537,7 @@ def run_layer4_standalone(
         organic_matter_pct=soil_props.get("organic_matter_pct", 2.0),
         temperature_c=avg_temp,
         total_drainage_mm=swb.deep_percolation_mm if swb else 0.0,
-        soil_moisture_vwc=round(min(swb.theta_sat if swb else 0.45, max(0.01, computed_vwc)), 4),
+        soil_moisture_vwc=soil_moisture_vwc,
         theta_fc=swb.theta_fc if swb else 0.30,
         theta_sat=swb.theta_sat if swb else 0.45,
         root_depth_cm=supp_depth_cm,
@@ -665,6 +675,19 @@ def run_layer4_standalone(
             prescription.is_allowed = False
             if "nonconserved_water_transition" not in prescription.blocked_reason:
                 prescription.blocked_reason.append("nonconserved_water_transition")
+    elif swb and not is_root_supported:
+        for state in states.values():
+            state.confidence = min(float(state.confidence), 0.10)
+            unsupported_note = (
+                "Root boundary has zero supported depth; physical root support is unavailable. "
+                "Nutrient transport and uptake cannot be evaluated on an unsupported root domain."
+            )
+            state.notes = f"{state.notes} {unsupported_note}".strip()
+        for prescription in prescriptions:
+            prescription.is_allowed = False
+            if "unsupported_root_boundary" not in prescription.blocked_reason:
+                prescription.blocked_reason.append("unsupported_root_boundary")
+            prescription.notes = f"{getattr(prescription, 'notes', '')} Root support depth is zero; fertilizer recommendations blocked on unsupported boundary.".strip()
     elif swb and getattr(swb, "is_degraded", False):
         unc_factor = getattr(swb, "uncertainty_multiplier", 1.5) or 1.5
         for state in states.values():
@@ -783,6 +806,17 @@ def run_layer4_standalone(
             "driver": "hydrology_mass_balance",
             "penalty": 0.50,
             "reason": f"Water closure error {getattr(swb, 'water_closure_error_mm', 0.0)} mm exceeds physical conservation threshold",
+        })
+    elif swb and not is_root_supported:
+        dh_overall = min(dh_overall, 0.10)
+        dh_ceiling = min(dh_ceiling, 0.10)
+        dh_status = "degraded"
+        if "UNSUPPORTED_ROOT_BOUNDARY" not in quality.missing_drivers:
+            quality.missing_drivers.append("UNSUPPORTED_ROOT_BOUNDARY")
+        quality.penalties_applied.append({
+            "driver": "hydrology_unsupported_root_boundary",
+            "penalty": 0.90,
+            "reason": "Root support depth is zero; physical root boundary is unsupported",
         })
     elif swb and getattr(swb, "is_degraded", False):
         dh_overall = min(dh_overall, 0.40)

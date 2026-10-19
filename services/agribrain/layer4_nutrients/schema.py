@@ -462,6 +462,7 @@ class Prescription:
     environmental_risk: EnvironmentalRisk = field(default_factory=EnvironmentalRisk)
     regulatory: RegulatoryCompliance = field(default_factory=RegulatoryCompliance)
     audit: PrescriptionAudit = field(default_factory=PrescriptionAudit)
+    notes: str = ""
 
 
 # ============================================================================

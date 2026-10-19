@@ -147,7 +147,7 @@ class LayeredWaterBalanceEngine:
                 raise ValueError(f"{name} cannot be negative, got {val}")
         init_surface_storage_mm = float(raw_init_surface)
         max_surface_storage_mm = float(raw_max_surface)
-        if max_surface_storage_mm > 0.0 and init_surface_storage_mm > max_surface_storage_mm:
+        if init_surface_storage_mm > max_surface_storage_mm:
             raise ValueError(f"Initial surface storage ({init_surface_storage_mm}) cannot exceed max capacity ({max_surface_storage_mm})")
 
         # 1. Surface Infiltration & Runoff Partitioning

@@ -1,0 +1,175 @@
+{
+  "candidate": "8ae4b7499766ce9e8a8acd020078e2a152aca5d6",
+  "parent": "ceb5dd47250a9aca5482dcb2904a5bb3f4105626",
+  "review_date": "2026-10-18",
+  "scope": "Twelve-file corrective delta and active dependencies; parallel specialist work plus direct follow-up, not whole-repository certification.",
+  "claims": [
+    {
+      "id": "CEB01",
+      "status": "original_schedules_repaired_adjacent_transport_case_open",
+      "evidence": [
+        "protocol/original-results.json",
+        "protocol/original-TTL-results.json",
+        "protocol/transport-boundary-results.json"
+      ],
+      "summary": "Original delayed idle and before-fence expired lease cases now one START. Distinct after-fence in-flight transport case produces two."
+    },
+    {
+      "id": "CEB02",
+      "status": "original_repaired_full_pipeline_components_verified",
+      "evidence": [
+        "trajectory/results.json"
+      ],
+      "summary": "Separate soil/pond ET closes component ledgers; full pipeline T .59 + soil E5.71 + pond E3.50 = total9.80."
+    },
+    {
+      "id": "CEB03",
+      "status": "actual_typed_path_repaired_full_standalone_L8_verified",
+      "evidence": [
+        "platform/results.json"
+      ],
+      "summary": "Actual full L4 output restrictions survive normalizer, ranker, complete standalone L8 and scheduler; dictionary compatibility permission merge remains narrower follow-up."
+    },
+    {
+      "id": "CEB04",
+      "status": "qualitative_propagation_and_coverage_repaired_calibration_not_established",
+      "evidence": [
+        "decision/results.json",
+        "platform/root-support-results.json"
+      ],
+      "summary": "Declared conserved degradation affects confidences/health; real root coverage below threshold degrades; original missing-root thin-profile case now qualified. Zero-support receiver priors and quantitative uncertainty limits remain."
+    },
+    {
+      "id": "CEB05",
+      "status": "original_invalid_input_cases_repaired_zero_capacity_case_open",
+      "evidence": [
+        "trajectory/results.json"
+      ],
+      "summary": "Negative/nonfinite/bool fluxes and negative pond reject. Pond5 with capacity0 remains admissible."
+    },
+    {
+      "id": "CEB06",
+      "status": "original_repaired_no_new_bounded_finding",
+      "evidence": [
+        "ownership/results.json"
+      ],
+      "summary": "First unindexed known-latest scoped load/retry/restart return generation5 before migration; original indexed legacy and two scoped controls pass."
+    },
+    {
+      "id": "CEB07",
+      "status": "original_repaired_no_new_bounded_finding",
+      "evidence": [
+        "ledger/results.json"
+      ],
+      "summary": "Pre-rounding raw bounds reject invalid tiny probabilities; valid endpoints, aliases and true-zero/missingness controls preserved."
+    }
+  ],
+  "findings": [
+    {
+      "id": "8AE01",
+      "priority": "P1",
+      "packages": [
+        "F16",
+        "F17",
+        "F18"
+      ],
+      "kind": "ordinary_submit_two_OS_processes_after_fence_transport",
+      "summary": "In-flight START resumes after lease takeover and produces a competing command effect; both reservations EXECUTING, old token null.",
+      "evidence": [
+        "protocol/transport-boundary-results.json"
+      ],
+      "limit": "Controlled local collaborator; no delivered-volume or deployed controller claim."
+    },
+    {
+      "id": "8AE02",
+      "priority": "P2",
+      "packages": [
+        "F04",
+        "F07"
+      ],
+      "kind": "actual_factory_and_full_water_pipeline_invalid_capacity",
+      "summary": "Positive pond store with zero maximum capacity bypasses capacity validation.",
+      "evidence": [
+        "trajectory/results.json"
+      ],
+      "limit": "Ledger conserves supplied store; not water creation on valid input or an external exploit."
+    },
+    {
+      "id": "8AE03",
+      "priority": "P2",
+      "packages": [
+        "F10"
+      ],
+      "kind": "declared_typed_zero_support_full_L4_receiver",
+      "summary": "Zero supported depth/storage produces implicit 60cm and VWC .25 in actual loss engine.",
+      "evidence": [
+        "decision/results.json"
+      ],
+      "limit": "Explicit inconsistent/unsupported receiving-contract fixture; validated producer not shown to generate it."
+    },
+    {
+      "id": "8AE04",
+      "priority": "P2",
+      "packages": [
+        "F10",
+        "F15"
+      ],
+      "kind": "dictionary_state_compatibility_permission_merge",
+      "summary": "setdefault retains stale true permission despite blocked prescription; ranker/direct scheduler allow candidate.",
+      "evidence": [
+        "platform/results.json"
+      ],
+      "limit": "Actual typed path fixed. Complete L8 fixture independently blocks on evidence invariant; no public promotion/actuation bypass."
+    },
+    {
+      "id": "8AE05",
+      "priority": "P3",
+      "packages": [
+        "F10"
+      ],
+      "kind": "prescription_dataclass_serialization",
+      "summary": "Dynamically assigned degraded-water notes absent from declared dataclass serialization.",
+      "evidence": [
+        "decision/results.json"
+      ],
+      "limit": "Nutrient notes and overall quality remain visible; deployed API/UI omission not established."
+    }
+  ],
+  "scientific_acceptance_limits": [
+    {
+      "packages": [
+        "F05",
+        "F10"
+      ],
+      "summary": "Coverage threshold and generic confidence discount are policy heuristics; distinct inherited quantitative uncertainty not fully propagated or calibrated."
+    },
+    {
+      "packages": [
+        "F03",
+        "F08",
+        "F09"
+      ],
+      "summary": "Durable transition/analysis/eligibility receipt reconstruction and public promotion require separate integrated acceptance."
+    }
+  ],
+  "governance": {
+    "FA_total": 52,
+    "FA_open": 52,
+    "FA_checked": 0,
+    "package_ids": "F01-F40 and T01-T12",
+    "normative_blobs_verified": true
+  },
+  "verification": {
+    "user_reported_suite_counts": [
+      12,
+      6,
+      6,
+      4
+    ],
+    "repository_test_suites_rerun": false,
+    "changed_production_files_syntax_checked": 12,
+    "hardware_used": false,
+    "production_or_git_modified": false
+  },
+  "decision": "Proceed with focused repairs and plan implementation/qualified research; execution exclusivity and full package acceptance remain open."
+}
