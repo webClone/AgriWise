@@ -38,9 +38,11 @@ class LossPathway:
     pathway: str = ""                     # "leaching", "volatilization", etc.
     loss_kg_ha: float = 0.0               # Estimated N loss (kg/ha)
     risk_index: float = 0.0               # [0-1]
-    risk_class: str = "LOW"               # LOW, MODERATE, HIGH, CRITICAL
+    risk_class: str = "LOW"               # LOW, MODERATE, HIGH, CRITICAL, UNAVAILABLE
     fraction_of_applied: float = 0.0      # Loss as fraction of applied N
     mitigation: List[str] = field(default_factory=list)
+    availability: str = "AVAILABLE"       # AVAILABLE, UNAVAILABLE_UNSUPPORTED_ROOT
+    is_supported: bool = True
 
 
 @dataclass
@@ -64,6 +66,8 @@ class EnvLossResult:
     # Adjusted budget
     effective_n_available_kg_ha: float = 0.0  # Applied - losses
     notes: str = ""
+    availability: str = "AVAILABLE"       # AVAILABLE, UNAVAILABLE_UNSUPPORTED_ROOT
+    is_root_supported: bool = True
 
 
 class EnvironmentalLossEngine:
@@ -124,11 +128,23 @@ class EnvironmentalLossEngine:
         )
 
         # 3. Denitrification
-        wfps = self._water_filled_pore_space(soil_moisture_vwc, theta_sat)
-        no3_proxy = n_applied_kg_ha * 0.3  # Rough: 30% of applied N as NO₃⁻
-        denitrification = self._denitrification_daycent(
-            wfps, no3_proxy, temperature_c, organic_matter_pct,
-        )
+        if root_depth_cm <= 0.0:
+            denitrification = LossPathway(
+                pathway="denitrification",
+                loss_kg_ha=0.0,
+                risk_index=0.0,
+                risk_class="UNAVAILABLE",
+                fraction_of_applied=0.0,
+                mitigation=["Root zone depth is zero or unsupported; denitrification pathway is physically unavailable."],
+                availability="UNAVAILABLE_UNSUPPORTED_ROOT",
+                is_supported=False,
+            )
+        else:
+            wfps = self._water_filled_pore_space(soil_moisture_vwc, theta_sat)
+            no3_proxy = n_applied_kg_ha * 0.3  # Rough: 30% of applied N as NO₃⁻
+            denitrification = self._denitrification_daycent(
+                wfps, no3_proxy, temperature_c, organic_matter_pct,
+            )
 
         # 4. Runoff
         runoff = self._runoff_loss(
@@ -175,6 +191,15 @@ class EnvironmentalLossEngine:
                 f"All pathways within acceptable limits."
             )
 
+        if root_depth_cm <= 0.0:
+            notes_str = "Root boundary is unsupported (depth=0.0); water-dependent root-zone loss pathways (leaching, denitrification) are physically unavailable and excluded from loss debit."
+            res_avail = "UNAVAILABLE_UNSUPPORTED_ROOT"
+            is_supp = False
+        else:
+            notes_str = "; ".join(notes_parts)
+            res_avail = "AVAILABLE"
+            is_supp = True
+
         return EnvLossResult(
             leaching=leaching,
             volatilization=volatilization,
@@ -186,7 +211,9 @@ class EnvironmentalLossEngine:
             n2o_emission_kg_ha=round(n2o, 3),
             co2_equivalent_kg_ha=round(co2_eq, 1),
             effective_n_available_kg_ha=round(effective_n, 2),
-            notes="; ".join(notes_parts),
+            notes=notes_str,
+            availability=res_avail,
+            is_root_supported=is_supp,
         )
 
     # ------------------------------------------------------------------
@@ -204,6 +231,18 @@ class EnvironmentalLossEngine:
         N in soil solution moves with water. Drainage beyond root zone
         carries dissolved NO₃⁻ with it.
         """
+        if root_depth_cm <= 0.0:
+            return LossPathway(
+                pathway="leaching",
+                loss_kg_ha=0.0,
+                risk_index=0.0,
+                risk_class="UNAVAILABLE",
+                fraction_of_applied=0.0,
+                mitigation=["Root zone depth is zero or unsupported; root-zone leaching pathway is physically unavailable."],
+                availability="UNAVAILABLE_UNSUPPORTED_ROOT",
+                is_supported=False,
+            )
+
         if drainage_mm <= 0 or n_applied <= 0:
             return LossPathway(
                 pathway="leaching", loss_kg_ha=0.0, risk_index=0.0,

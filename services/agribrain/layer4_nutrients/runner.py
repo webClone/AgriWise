@@ -296,6 +296,13 @@ def run_layer4_standalone(
             n_leaching_kg_ha=0.0,
             irrigation_applied_mm=0.0,
             effective_precipitation_mm=0.0,
+            status="UNAVAILABLE_MISSING_WATER_AND_WEATHER",
+            is_degraded=True,
+            missing_weather_days=len(stages) if stages else 1,
+            uncertainty_multiplier=2.5,
+            supported_root_depth_cm=0.0,
+            mass_conserved=False,
+            water_closure_error_mm=0.0,
         )
 
     # 4. CDU
@@ -594,8 +601,16 @@ def run_layer4_standalone(
             immob_loss = 0.0
             if nut == Nutrient.N:
                 vol_loss = env_loss_result.volatilization.loss_kg_ha
-                denitrif_loss = env_loss_result.denitrification.loss_kg_ha
-                leach_loss = env_loss_result.leaching.loss_kg_ha
+                # R47803: Water-dependent loss pathways (denitrification, leaching) require valid root support
+                if is_root_supported and getattr(env_loss_result.denitrification, "availability", "AVAILABLE") == "AVAILABLE":
+                    denitrif_loss = env_loss_result.denitrification.loss_kg_ha
+                else:
+                    denitrif_loss = 0.0
+
+                if is_root_supported and getattr(env_loss_result.leaching, "availability", "AVAILABLE") == "AVAILABLE":
+                    leach_loss = env_loss_result.leaching.loss_kg_ha
+                else:
+                    leach_loss = 0.0
                 # Immobilization: high C:N residue ties up N
                 immob_loss = max(0, -residual_credits.previous_crop_n_credit_kg_ha)
 
@@ -662,20 +677,8 @@ def run_layer4_standalone(
         for s in states.values():
             s.confidence = round(max(0.1, float(s.confidence) * 0.75), 3)
 
-    # Physical water conservation failure gate: fail closed on nonconserved transition
-    if swb and not getattr(swb, "mass_conserved", True):
-        for state in states.values():
-            state.confidence = min(float(state.confidence), 0.20)
-            nonconserved_note = (
-                f"Degraded due to unclosed hydrological mass balance (closure error {getattr(swb, 'water_closure_error_mm', 0.0)} mm); "
-                "leaching, denitrification and nutrient transport estimates carry wide epistemic uncertainty."
-            )
-            state.notes = f"{state.notes} {nonconserved_note}".strip()
-        for prescription in prescriptions:
-            prescription.is_allowed = False
-            if "nonconserved_water_transition" not in prescription.blocked_reason:
-                prescription.blocked_reason.append("nonconserved_water_transition")
-    elif swb and not is_root_supported:
+    # Physical water boundary failure gates: fail closed on unsupported root domain or nonconserved transition
+    if swb and not is_root_supported:
         for state in states.values():
             state.confidence = min(float(state.confidence), 0.10)
             unsupported_note = (
@@ -688,6 +691,18 @@ def run_layer4_standalone(
             if "unsupported_root_boundary" not in prescription.blocked_reason:
                 prescription.blocked_reason.append("unsupported_root_boundary")
             prescription.notes = f"{getattr(prescription, 'notes', '')} Root support depth is zero; fertilizer recommendations blocked on unsupported boundary.".strip()
+    elif swb and not getattr(swb, "mass_conserved", True):
+        for state in states.values():
+            state.confidence = min(float(state.confidence), 0.20)
+            nonconserved_note = (
+                f"Degraded due to unclosed hydrological mass balance (closure error {getattr(swb, 'water_closure_error_mm', 0.0)} mm); "
+                "leaching, denitrification and nutrient transport estimates carry wide epistemic uncertainty."
+            )
+            state.notes = f"{state.notes} {nonconserved_note}".strip()
+        for prescription in prescriptions:
+            prescription.is_allowed = False
+            if "nonconserved_water_transition" not in prescription.blocked_reason:
+                prescription.blocked_reason.append("nonconserved_water_transition")
     elif swb and getattr(swb, "is_degraded", False):
         unc_factor = getattr(swb, "uncertainty_multiplier", 1.5) or 1.5
         for state in states.values():
@@ -796,7 +811,21 @@ def run_layer4_standalone(
         dh_ceiling = min(dh_ceiling, 0.3)
         dh_status = "degraded"
 
-    if swb and not getattr(swb, "mass_conserved", True):
+    if swb and not is_root_supported:
+        dh_overall = min(dh_overall, 0.10)
+        dh_ceiling = min(dh_ceiling, 0.10)
+        dh_status = "degraded"
+        if not canonical_water and not daily_weather:
+            if "MISSING_HYDROLOGY_AND_WEATHER" not in quality.missing_drivers:
+                quality.missing_drivers.append("MISSING_HYDROLOGY_AND_WEATHER")
+        if "UNSUPPORTED_ROOT_BOUNDARY" not in quality.missing_drivers:
+            quality.missing_drivers.append("UNSUPPORTED_ROOT_BOUNDARY")
+        quality.penalties_applied.append({
+            "driver": "hydrology_unsupported_root_boundary",
+            "penalty": 0.90,
+            "reason": "Root support depth is zero; physical root boundary is unsupported",
+        })
+    elif swb and not getattr(swb, "mass_conserved", True):
         dh_overall = min(dh_overall, 0.2)
         dh_ceiling = min(dh_ceiling, 0.2)
         dh_status = "degraded"
@@ -806,17 +835,6 @@ def run_layer4_standalone(
             "driver": "hydrology_mass_balance",
             "penalty": 0.50,
             "reason": f"Water closure error {getattr(swb, 'water_closure_error_mm', 0.0)} mm exceeds physical conservation threshold",
-        })
-    elif swb and not is_root_supported:
-        dh_overall = min(dh_overall, 0.10)
-        dh_ceiling = min(dh_ceiling, 0.10)
-        dh_status = "degraded"
-        if "UNSUPPORTED_ROOT_BOUNDARY" not in quality.missing_drivers:
-            quality.missing_drivers.append("UNSUPPORTED_ROOT_BOUNDARY")
-        quality.penalties_applied.append({
-            "driver": "hydrology_unsupported_root_boundary",
-            "penalty": 0.90,
-            "reason": "Root support depth is zero; physical root boundary is unsupported",
         })
     elif swb and getattr(swb, "is_degraded", False):
         dh_overall = min(dh_overall, 0.40)

@@ -754,11 +754,12 @@ class SharedQuotaStore:
                     "duration_minutes": e_dur if e_dur is not None else 0.0,
                     "flow_rate_lpm": e_flow if e_flow is not None else 0.0,
                     "effective_area_ha": e_area if (e_area is not None and e_area > 0) else None,
-                    "status": "DISPATCHING",
+                    "status": "ADMITTED",
+                    "claimed": False,
                     "date": today_key,
                     "season": season_key,
                     "owner_token": owner_token,
-                    "first_dispatched_at": now_iso,
+                    "first_dispatched_at": None,
                     "timestamp": now_iso,
                 }
                 # RV08: Append admission to receipt_journal for all operations (including req_vol == 0.0)
@@ -986,7 +987,7 @@ class SharedQuotaStore:
                             if res_claim.get("event_id") != event_id or res_claim.get("owner_token") != state["reservations"][event_id].get("owner_token"):
                                 return
                 state["reservations"][event_id]["status"] = new_status
-                if new_status in ("STOP_REQUESTED", "CANCELLED", "COMPLETED", "SETTLED", "FAILED", "EXPIRED", "SUPERSEDED"):
+                if new_status in ("STOP_REQUESTED", "CANCELLED", "COMPLETED", "SETTLED", "FAILED", "EXPIRED", "SUPERSEDED", "DEFERRED"):
                     state["reservations"][event_id]["claimed"] = False
                     state["reservations"][event_id].pop("starting_ts", None)
                     dev_id = state["reservations"][event_id].get("device_id")
@@ -1681,6 +1682,18 @@ class SharedQuotaStore:
                                 rkey = f"{device_id}::{r_zone or '*'}"
                                 if state["resource_claims"].get(rkey, {}).get("event_id") == eid:
                                     state["resource_claims"].pop(rkey, None)
+
+            # R47802: If event_id already holds an active claim on this device/zone,
+            # return the existing token idempotently without resetting status to STARTING or bumping generation!
+            if event_id in reservations:
+                existing_res = reservations[event_id]
+                existing_st = existing_res.get("status")
+                if (
+                    existing_res.get("claimed")
+                    and existing_st in ("STARTING", "DISPATCHING", "SENDING", "EXECUTING")
+                    and existing_res.get("owner_token")
+                ):
+                    return True, existing_res["owner_token"]
 
             if event_id not in reservations:
                 reservations[event_id] = {

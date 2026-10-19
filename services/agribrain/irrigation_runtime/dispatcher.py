@@ -480,13 +480,9 @@ class CommandDispatcher:
             self._emit_failed(event)
             return event
 
-        # Begin dispatch
-        event.transition(EventStatus.DISPATCHING, "Starting command dispatch")
+        # Begin dispatch preparation
+        event.transition(EventStatus.QUEUED, "Pre-flight safety passed; preparing dispatch")
         self._active_events[event.event_id] = event
-        try:
-            SharedQuotaStore.update_status(event.event_id, "DISPATCHING")
-        except Exception as store_err:
-            logger.warning("Could not persist DISPATCHING status for event %s: %s", event.event_id, store_err)
 
         # V06 + V04: Register with safety monitor BEFORE dispatch to establish duration watchdog and active quota immediately
         event._start_monotonic = self._safety._clock()
@@ -565,11 +561,17 @@ class CommandDispatcher:
 
                 if foreign_eid:
                     logger.warning("Pre-dispatch check: Actuator %s is already EXECUTING another operation (%s); refusing NEW before send", event.device_id, foreign_eid)
-                    event.transition(EventStatus.STOP_REQUESTED, f"Actuator {event.device_id} is already EXECUTING another operation ({foreign_eid})")
+                    self._active_events.pop(event.event_id, None)
+                    self._safety.track_event_end(event.event_id)
+                    self._safety.release_quota(event.event_id)
                     try:
-                        SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                        SharedQuotaStore.release(event.event_id)
                     except Exception:
                         pass
+                    event.transition(
+                        EventStatus.FAILED,
+                        f"Pre-dispatch check: Actuator {event.device_id} is already EXECUTING another operation ({foreign_eid}); pre-transport refused without transport"
+                    )
                     self._emit_failed(event)
                     return event
         except Exception as q_err:
@@ -595,19 +597,28 @@ class CommandDispatcher:
         )
         if not claimed:
             logger.warning(
-                "Resource claim failed for event %s: Actuator %s is already claimed/executing operation %s; refusing START",
+                "Resource claim failed for event %s: Actuator %s is already claimed/executing operation %s; pre-transport refused",
                 event.event_id, event.device_id, holding_eid
             )
-            event.transition(EventStatus.STOP_REQUESTED, f"Actuator {event.device_id} is already EXECUTING another operation ({holding_eid})")
+            self._active_events.pop(event.event_id, None)
+            self._safety.track_event_end(event.event_id)
+            self._safety.release_quota(event.event_id)
             try:
-                SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                SharedQuotaStore.update_status(event.event_id, "FAILED")
+                SharedQuotaStore.release(event.event_id)
             except Exception:
                 pass
+            event.transition(
+                EventStatus.FAILED,
+                f"Actuator {event.device_id} is already claimed/executing operation {holding_eid}; pre-transport refused without transport",
+            )
             self._emit_failed(event)
             return event
 
         if holding_eid:
             event.owner_token = holding_eid
+
+        event.transition(EventStatus.DISPATCHING, "Resource claimed; starting command dispatch")
 
         # Dispatch with retry
         result = await self._dispatch_with_retry(event, actuator)

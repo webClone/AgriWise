@@ -1,0 +1,189 @@
+{
+  "candidate": "4788dac8c56e4ec8d2caecc53317fd5c5144f675",
+  "parent": "8ae4b7499766ce9e8a8acd020078e2a152aca5d6",
+  "review_date": "2026-10-19",
+  "mode": "six_agent_production_code_corrective_review",
+  "claims": [
+    {
+      "id": "8AE01",
+      "status": "original_counterexample_repaired_with_new_adjacent_findings",
+      "credit": "Real31.1s after-fence schedule yields one START; in-flight claim protected",
+      "remaining": [
+        "R47801",
+        "R47802"
+      ],
+      "evidence": [
+        "protocol/transport-boundary-results.json",
+        "protocol/original-TTL-results.json",
+        "protocol/original-results.json",
+        "protocol/admission-lifecycle-results.json",
+        "ownership/results.json"
+      ]
+    },
+    {
+      "id": "8AE02",
+      "status": "repaired_in_executed_scope",
+      "credit": "Zero capacity rejects positive storage across constructor, solver, hydration; valid controls retained",
+      "remaining": [],
+      "evidence": [
+        "trajectory/results.json"
+      ]
+    },
+    {
+      "id": "8AE03",
+      "status": "explicit_zero_gate_repaired_scientific_availability_partial",
+      "credit": "Explicit-zero root/vwc placeholders, blocked N/P/K, health/confidence<=0.1, fullL8 blocker continuity",
+      "remaining": [
+        "R47803",
+        "R47804"
+      ],
+      "evidence": [
+        "decision/results.json",
+        "platform/results.json"
+      ]
+    },
+    {
+      "id": "8AE04",
+      "status": "repaired_in_executed_scope",
+      "credit": "Dictionary/typed false permission and reasons remain blocked through actual full standalone L8",
+      "remaining": [],
+      "evidence": [
+        "platform/results.json"
+      ]
+    },
+    {
+      "id": "8AE05",
+      "status": "repaired_for_raw_serialization",
+      "credit": "Declared notes retained by actual asdict and raw serializer; API summary projection qualified separately",
+      "remaining": [],
+      "evidence": [
+        "decision/results.json",
+        "ledger/results.json"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "R47801",
+      "priority": "P1",
+      "title": "Quota admission mislabeled as entered transport stalls ordinary concurrent admission",
+      "reproduction": "actual_OS_process_normal_submit_and_independent_public_store",
+      "evidence": [
+        "protocol/original-results.json",
+        "protocol/admission-lifecycle-results.json",
+        "ownership/results.json"
+      ],
+      "scope_limit": "Zero STARTs; monitor/recovery not invoked; no universal permanent-deadlock or unsafe duplicate-dose claim",
+      "packages": [
+        "F16",
+        "F17",
+        "F18"
+      ],
+      "sources": [
+        {
+          "path": "irrigation_runtime/safety.py",
+          "lines": "745-763,998-1012,1661-1666"
+        },
+        {
+          "path": "irrigation_runtime/dispatcher.py",
+          "lines": "483-493,593-610"
+        }
+      ],
+      "acceptance": "Separate admitted quota, resource preparation, and entered transport; retain real31.1s in-flight exclusion; ordinary contenders and later third caller resolve with truthful phases/accounting"
+    },
+    {
+      "id": "R47802",
+      "priority": "P2",
+      "title": "Same-event resource claim demotes in-flight operation into expiring preparation",
+      "reproduction": "public_store_injected_clock_only",
+      "evidence": [
+        "ownership/results.json"
+      ],
+      "scope_limit": "Normal duplicate-submit reachability and physical overlapping START not established",
+      "packages": [
+        "F16",
+        "F17",
+        "F18"
+      ],
+      "sources": [
+        {
+          "path": "irrigation_runtime/safety.py",
+          "lines": "1627-1715"
+        }
+      ],
+      "acceptance": "Existing same-owner claim returns same token/generation/current phase; explicit fenced recovery changes ownership without losing uncertainty"
+    },
+    {
+      "id": "R47803",
+      "priority": "P2",
+      "title": "Unsupported root placeholders produce ordinary loss/risk/N-budget estimates",
+      "reproduction": "actual_full_standalone_L4_explicit_unsupported_dataclass_fixtures",
+      "evidence": [
+        "decision/results.json"
+      ],
+      "scope_limit": "All prescriptions remain blocked; drainage20 is declared on unsupported fixture, not naturally generated validated solver state or field measurement",
+      "packages": [
+        "F10",
+        "F11"
+      ],
+      "sources": [
+        {
+          "path": "layer4_nutrients/environmental_losses/engine.py",
+          "lines": "37-66,134-139,163-189,219-231,328-365"
+        },
+        {
+          "path": "layer4_nutrients/runner.py",
+          "lines": "513-546,590-623,678-690"
+        }
+      ],
+      "acceptance": "Typed per-path support/availability; unknown physical loss distinguished from valid zero; no unqualified loss debit into N budget"
+    },
+    {
+      "id": "R47804",
+      "priority": "P2",
+      "title": "Absent canonical water and weather retains healthy default-positive root support",
+      "reproduction": "actual_full_standalone_research_L4_missing_canonical_and_weather",
+      "evidence": [
+        "decision/results.json"
+      ],
+      "scope_limit": "Outer lineage authority and authenticated full-orchestrator route unexecuted; no public live-advice or actuation bypass established",
+      "packages": [
+        "F10",
+        "F11"
+      ],
+      "sources": [
+        {
+          "path": "layer4_nutrients/runner.py",
+          "lines": "284-301,517-518"
+        },
+        {
+          "path": "layer4_nutrients/schema.py",
+          "lines": "279-286"
+        }
+      ],
+      "acceptance": "Boundary presence/provenance independent of numeric defaults; unavailable or explicitly prior/scenario outputs propagated to health/losses/budgets/authority"
+    }
+  ],
+  "deduplication": "Protocol and public-store pre-admission phase repros merged as R47801",
+  "normative_register": {
+    "packages": 52,
+    "code_partition": "F01-F40,T01-T12",
+    "FA_open": 52,
+    "FA_checked": 0,
+    "textual_FA_mentions": 68,
+    "meaning": "Acceptance register state, not implementation absence or progress percentage"
+  },
+  "exclusions": [
+    "repository tests as correctness evidence",
+    "historical audits as correctness evidence",
+    "production/Git edits",
+    "service/provider/hardware/controller/drone operations"
+  ],
+  "readiness": {
+    "planned_development": "proceed with dependencies",
+    "concurrent_operational_admission": "repair R47801 before operational staging",
+    "research": "objective-qualified shadow/scenario Omega and world-model work can proceed",
+    "full_acceptance": "not closed by this review"
+  },
+  "source_reference_prefix": "services/agribrain/"
+}
