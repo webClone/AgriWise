@@ -173,10 +173,12 @@ def to_observation_packets(
             reliability = max(0.0, min(1.0, min(fin_weight, fin_conf)))
 
         # Build QA metadata for this packet
+        fin_qa = finite_real(output.qa_score)
+        effective_qa = 0.0 if (fin_qa is None or reliability == 0.0) else max(0.0, min(1.0, fin_qa))
         qa_meta = QAMetadata(
             flags=qa_flags,
-            scene_score=output.qa_score,
-            valid_pixel_fraction=output.qa_score,
+            scene_score=effective_qa,
+            valid_pixel_fraction=effective_qa,
         )
 
         # Build uncertainty

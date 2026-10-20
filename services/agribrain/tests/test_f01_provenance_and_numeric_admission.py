@@ -1589,6 +1589,219 @@ class TestR39FollowUpVerification(unittest.TestCase):
             self.assertEqual(samples_cat[0]["target_value"], "low")
 
 
+class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
+    """Integration evidence verifying downstream zero-influence of zero-confidence perception inputs."""
+
+    def test_zero_confidence_perception_fails_closed_in_packet_and_evidence(self):
+        """Zero-confidence perception produces zero reliability_weight, zero qa scene_score, and diagnostic-only evidence."""
+        from services.agribrain.layer0.perception.common.contracts import (
+            PerceptionEngineFamily,
+            PerceptionEngineOutput,
+            PerceptionVariable,
+        )
+        from services.agribrain.layer0.perception.common.packet_adapter import to_observation_packets
+        from services.agribrain.layer1_fusion.adapters.observation_packet import observation_packet_to_evidence
+        from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+
+        # 1. Perception output with 0.0 variable confidence
+        out_zero_conf = PerceptionEngineOutput(
+            engine_family=PerceptionEngineFamily.DRONE,
+            plot_id="plot_test_1",
+            qa_score=0.9,
+            reliability_weight=0.8,
+            variables=[
+                PerceptionVariable(name="vegetation_fraction", value=0.45, sigma=0.03, confidence=0.0),
+            ],
+        )
+        pkts = to_observation_packets(out_zero_conf)
+        self.assertEqual(len(pkts), 1)
+        pkt = pkts[0]
+        self.assertEqual(pkt.reliability_weight, 0.0)
+        self.assertEqual(pkt.qa.scene_score, 0.0)
+        self.assertEqual(pkt.effective_weight(), 0.0)
+
+        # 2. Bridge to Layer 1 EvidenceItem
+        bundle = Layer1InputBundle(
+            plot_id="plot_test_1",
+            run_id="run_test_1",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+        )
+        items = observation_packet_to_evidence(pkt, bundle)
+        self.assertEqual(len(items), 1)
+        ev = items[0]
+        self.assertEqual(ev.confidence, 0.0)
+        self.assertEqual(ev.reliability, 0.0)
+        self.assertTrue(ev.diagnostic_only)
+        self.assertFalse(ev.state_update_allowed)
+
+        # 3. Positive control: valid perception item retains positive confidence and state update permission
+        out_valid = PerceptionEngineOutput(
+            engine_family=PerceptionEngineFamily.DRONE,
+            plot_id="plot_test_1",
+            qa_score=0.9,
+            reliability_weight=0.85,
+            variables=[
+                PerceptionVariable(name="vegetation_fraction", value=0.45, sigma=0.03, confidence=0.8),
+            ],
+        )
+        pkts_valid = to_observation_packets(out_valid)
+        self.assertEqual(pkts_valid[0].reliability_weight, 0.8)
+        self.assertGreater(pkts_valid[0].qa.scene_score, 0.0)
+        items_valid = observation_packet_to_evidence(pkts_valid[0], bundle)
+        self.assertGreater(items_valid[0].confidence, 0.0)
+        self.assertGreater(items_valid[0].reliability, 0.0)
+        self.assertTrue(items_valid[0].state_update_allowed)
+        self.assertFalse(items_valid[0].diagnostic_only)
+
+    def test_evidence_validator_rejects_zero_confidence_with_state_update(self):
+        """validate_evidence catches any zero confidence or zero reliability item claiming state update permission."""
+        from services.agribrain.layer1_fusion.evidence_validation import validate_evidence
+        from services.agribrain.layer1_fusion.schemas import EvidenceItem
+
+        # Item with zero confidence but state_update_allowed=True must be rejected
+        item_bad_conf = EvidenceItem(
+            evidence_id="ev_zero_conf",
+            plot_id="plot_1",
+            variable="vegetation_fraction",
+            value=0.35,
+            unit="fraction",
+            source_family="perception",
+            source_id="drone_01",
+            observation_type="derived_feature",
+            spatial_scope="plot",
+            observed_at=CUTOFF,
+            confidence=0.0,
+            reliability=0.8,
+            provenance_ref="ref_zero_conf",
+            data_status="observed",
+            production_usable=True,
+            state_update_allowed=True,
+            diagnostic_only=False,
+        )
+        violations = validate_evidence(item_bad_conf)
+        self.assertTrue(any("ZERO_CONFIDENCE_OR_RELIABILITY_CANNOT_UPDATE_STATE" in v for v in violations))
+
+        # Item with zero reliability but state_update_allowed=True must be rejected
+        item_bad_rel = EvidenceItem(
+            evidence_id="ev_zero_rel",
+            plot_id="plot_1",
+            variable="vegetation_fraction",
+            value=0.35,
+            unit="fraction",
+            source_family="perception",
+            source_id="drone_01",
+            observation_type="derived_feature",
+            spatial_scope="plot",
+            observed_at=CUTOFF,
+            confidence=0.8,
+            reliability=0.0,
+            provenance_ref="ref_zero_rel",
+            data_status="observed",
+            production_usable=True,
+            state_update_allowed=True,
+            diagnostic_only=False,
+        )
+        violations_rel = validate_evidence(item_bad_rel)
+        self.assertTrue(any("ZERO_CONFIDENCE_OR_RELIABILITY_CANNOT_UPDATE_STATE" in v for v in violations_rel))
+
+        # Conforming diagnostic item passes cleanly
+        item_diagnostic = EvidenceItem(
+            evidence_id="ev_diag_ok",
+            plot_id="plot_1",
+            variable="vegetation_fraction",
+            value=0.35,
+            unit="fraction",
+            source_family="perception",
+            source_id="drone_01",
+            observation_type="derived_feature",
+            spatial_scope="plot",
+            observed_at=CUTOFF,
+            confidence=0.0,
+            reliability=0.0,
+            provenance_ref="ref_diag_ok",
+            data_status="observed",
+            production_usable=True,
+            state_update_allowed=False,
+            diagnostic_only=True,
+        )
+        self.assertEqual(validate_evidence(item_diagnostic), [])
+
+    def test_fusion_engine_zero_confidence_perception_has_zero_downstream_state_influence(self):
+        """Zero-confidence perception packets processed by Layer 1 FusionEngine cannot alter state or fabricate confidence."""
+        from services.agribrain.layer0.perception.common.contracts import (
+            PerceptionEngineFamily,
+            PerceptionEngineOutput,
+            PerceptionVariable,
+        )
+        from services.agribrain.layer0.perception.common.packet_adapter import to_observation_packets
+        from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+        from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+
+        from services.agribrain.layer0.source_package import Layer0SourcePackage
+
+        out_zero = PerceptionEngineOutput(
+            engine_family=PerceptionEngineFamily.DRONE,
+            plot_id="plot_pilot",
+            qa_score=0.9,
+            reliability_weight=0.0,  # Zero quality/reliability
+            variables=[
+                PerceptionVariable(name="vegetation_fraction", value=0.62, sigma=0.02, confidence=0.0),
+            ],
+        )
+        pkts_zero = to_observation_packets(out_zero)
+        src_pkg = Layer0SourcePackage(
+            source_family="perception",
+            plot_id="plot_pilot",
+            packets=pkts_zero,
+        )
+
+        bundle = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_zero_inf_test",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            perception_packages=[src_pkg],
+        )
+
+        engine = Layer1FusionEngine()
+        context_pkg = engine.fuse(bundle)
+
+        # 1. Ledger admission records item as diagnostic without state update
+        ledger_items = context_pkg.evidence_items
+        self.assertEqual(len(ledger_items), 1)
+        self.assertFalse(ledger_items[0].state_update_allowed)
+        self.assertTrue(ledger_items[0].diagnostic_only)
+        self.assertEqual(ledger_items[0].confidence, 0.0)
+
+        # 2. Fused feature set contains NO state feature with positive confidence for vegetation_fraction
+        veg_features = context_pkg.fused_features.vegetation_context
+        for feat in veg_features:
+            if feat.name == "vegetation_fraction":
+                self.assertEqual(feat.confidence, 0.0, "Zero-weight evidence cannot produce positive confidence")
+                self.assertTrue(feat.diagnostic_only)
+
+        # 3. Downstream L2/L3 adapter does not extract active drone structural signals
+        from services.agribrain.layer2_intelligence.outputs.layer3_adapter import _extract_drone_structural_signals
+        from services.agribrain.layer2_intelligence.schemas import Layer2Output
+
+        fake_l2_output = Layer2Output(
+            plot_id="plot_pilot",
+            run_id="run_zero_inf_test",
+            generated_at=CUTOFF,
+            vegetation_intelligence=veg_features,
+            stress_context=[],
+        )
+        signals = {}
+        _extract_drone_structural_signals(fake_l2_output, signals)
+        self.assertFalse(signals.get("has_drone_structural", False))
+        self.assertNotIn("canopy_cover_fraction", signals)
+        self.assertNotIn("bare_soil_fraction", signals)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

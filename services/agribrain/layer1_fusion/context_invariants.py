@@ -195,7 +195,8 @@ def check_confidence_floor(
     """
     violations = []
     for e in evidence:
-        if e.confidence < CONFIDENCE_MIN:
+        # Preserve authentic zeroes for zero-confidence and zero-reliability evidence
+        if 0.0 < e.confidence < CONFIDENCE_MIN:
             if auto_clamp:
                 violations.append(ContextInvariantViolation(
                     "confidence_floor", "fixed",
@@ -211,7 +212,7 @@ def check_confidence_floor(
                     f"Confidence {e.confidence:.4f} < {CONFIDENCE_MIN}",
                 ))
 
-        if e.reliability < RELIABILITY_MIN:
+        if 0.0 < e.reliability < RELIABILITY_MIN:
             if auto_clamp:
                 violations.append(ContextInvariantViolation(
                     "reliability_floor", "fixed",

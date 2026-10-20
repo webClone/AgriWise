@@ -1,0 +1,243 @@
+{
+  "candidate": "5344930dfc7fbab7f7277bf61f99fc252dd88bc6",
+  "parent": "39b94d8de2911cdbaa9e86d24a46f40464cba101",
+  "legacy_writer_control": "4157ac1d51d83f75f3379c13741fc9bc77b4f4fe",
+  "branch": "review/f01-r415-residuals",
+  "observed_main": "4157ac1d51d83f75f3379c13741fc9bc77b4f4fe",
+  "date": "2026-10-20",
+  "package": "F01",
+  "requirements": [
+    "AB-DAT-005",
+    "AB-DAT-006",
+    "AB-ARC-005",
+    "AB-ARC-006"
+  ],
+  "verdict": "MERGE_RECOMMENDED_BOUNDED_CORRECTIVE_BATCH",
+  "meaning": "All3 R39 follow-ups and7original R415 named software boundaries closed; no new bounded blocker. FullF01FA and otherpackageFA remainopen. No merge or publication toGitHub performed.",
+  "original_groups": [
+    {
+      "id": "R415-01",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Valid finite/zero weak labels reach the actual declared consumer without NameError.",
+      "lanes": [
+        "trajectory"
+      ],
+      "evidence": [
+        "review-5344930-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "R415-02",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Restrictions survive reconstruction/DRONE consumers and unavailable/conflicting canonical weather crop-feature seam.",
+      "lanes": [
+        "ledger",
+        "platform",
+        "ownership"
+      ],
+      "evidence": [
+        "review-5344930-f01/ledger/results.json",
+        "review-5344930-f01/platform/results.json",
+        "review-5344930-f01/ownership/results.json"
+      ]
+    },
+    {
+      "id": "R415-03",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Named water quality and component role controls retained; R39-01 legacy exclusion now blocks native/full analysis.",
+      "lanes": [
+        "decision"
+      ],
+      "evidence": [
+        "review-5344930-f01/decision/results.json"
+      ]
+    },
+    {
+      "id": "R415-04",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Native perception/sensor malformed and zero quality no longer fabricates positive output confidence; no posterior zero-influence certification.",
+      "lanes": [
+        "platform"
+      ],
+      "evidence": [
+        "review-5344930-f01/platform/results.json"
+      ]
+    },
+    {
+      "id": "R415-05",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Registered soil strings/bools/nonfinites rejected; finite/zero/missing and sibling controls retained.",
+      "lanes": [
+        "ledger"
+      ],
+      "evidence": [
+        "review-5344930-f01/ledger/results.json"
+      ]
+    },
+    {
+      "id": "R415-06",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Named target/confidence/uncertainty/retro/comparator gates retained; explicit invalid resolution and fractional legacy reader seams now close.",
+      "lanes": [
+        "trajectory"
+      ],
+      "evidence": [
+        "review-5344930-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "R415-07",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Explicit invalid covariance absent with no event/queue; truly missing documented model default remains distinct.",
+      "lanes": [
+        "protocol"
+      ],
+      "evidence": [
+        "review-5344930-f01/protocol/results.json"
+      ]
+    }
+  ],
+  "closure_counts": {
+    "R415_closed_bounded": 7,
+    "R415_partial": 0,
+    "R39_closed_bounded": 3,
+    "R39_open": 0
+  },
+  "followups": [
+    {
+      "id": "R39-01",
+      "priority": "P1",
+      "related": [
+        "R415-03"
+      ],
+      "observation": "Both generic EXCLUDED/TDR orderings admit zero rows, direct/full analysis0mm, MODELLED on candidate; fresh exact39 admits3 rows/+82.05 native/+89.70mm full, ASSIMILATED. Satellite-scoped exclusion retains3TDR/OBSERVED on both.",
+      "lane": "decision",
+      "targets": [
+        "services/agribrain/layer3_water/assimilation/water_state_assimilator.py"
+      ],
+      "status": "CLOSED_BOUNDED",
+      "evidence": [
+        "review-5344930-f01/decision/results.json"
+      ]
+    },
+    {
+      "id": "R39-02",
+      "priority": "P1",
+      "related": [
+        "R415-06"
+      ],
+      "observation": "Current writer denies selected0/False and reader rejects identical actual39-approved ledgers; absent/None with10m fallback remains approved with sample.",
+      "lane": "trajectory",
+      "targets": [
+        "services/agribrain/asmae_learn/candidate_builder.py",
+        "services/agribrain/asmae_learn/dataset_builder.py"
+      ],
+      "status": "CLOSED_BOUNDED",
+      "evidence": [
+        "review-5344930-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "R39-03",
+      "priority": "P2",
+      "related": [
+        "R415-06"
+      ],
+      "observation": "Same shared classifier used in writer/disagreement/reader. Same freshly actual415-approved fractional string ledgers emit1sample each on exact39reader versus0candidate with before/after hash equality. Finite/zero/category controls survive.",
+      "lane": "trajectory",
+      "targets": [
+        "services/agribrain/asmae_learn/schemas.py",
+        "services/agribrain/asmae_learn/disagreement.py",
+        "services/agribrain/asmae_learn/dataset_builder.py"
+      ],
+      "status": "CLOSED_BOUNDED",
+      "evidence": [
+        "review-5344930-f01/trajectory/results.json"
+      ]
+    }
+  ],
+  "full_acceptance": {
+    "total": 52,
+    "open": 52,
+    "checked": 0,
+    "changed": false,
+    "F01_detailed_task_rows": 4,
+    "F01_detailed_task_rows_checked": 0,
+    "F01_FA_checked": false
+  },
+  "method": {
+    "independent_lanes": 6,
+    "candidate_source_files_verified": 876,
+    "parent_source_files_verified": 876,
+    "legacy_source_files_verified": 876,
+    "changed_production_modules": 5,
+    "compiled_changed_modules": 5,
+    "top_level_portable_replay_commands": 8,
+    "fresh_training_control_subprocesses": 2,
+    "tests_audits_and_reported_totals_used_as_correctness_proof": false,
+    "correctness_inputs": "Pinned production source,3exact normative plans and suppliedR3 only. Fresh authored offline probes use actual consumers; selective AST helper isolation disclosed.",
+    "source_or_git_edits": false,
+    "live_services_or_hardware_or_training": false
+  },
+  "fresh_lane_evidence": {
+    "ledger": {
+      "rows": 112,
+      "groups": 7,
+      "bounded_assertions_pass": true
+    },
+    "platform": {
+      "checks": 21,
+      "all_pass": true
+    },
+    "decision": {
+      "variants": 45,
+      "checks": 52,
+      "pass": 52,
+      "parent_expected_failures": 5,
+      "parent_expected_failure_mechanism": "one generic-exclusion defect exercised at direct/full and history boundaries"
+    },
+    "ownership": {
+      "cases": 43,
+      "checks": 241,
+      "pass": 241
+    },
+    "trajectory": {
+      "closure_checks": 22,
+      "all_pass": true,
+      "observed_assertions": 5,
+      "harness_checks": 3,
+      "fresh_parent39": true,
+      "fresh_legacy415": true,
+      "same_legacy_bytes_compared_in_both_readers": true
+    },
+    "protocol": {
+      "cases": 80,
+      "checks": 18,
+      "all_pass": true,
+      "QUEUED": 13,
+      "ABSTAINED": 1,
+      "COMMITTED": 0
+    }
+  },
+  "prior_closures": {
+    "R51901": "Retain unsent contender cleanup/quota software closure; five relevant target files unchanged toexact39.",
+    "R51902": "Retain invalid-root-support software closure; same sourceidentity only, no new whole-runtime/suite guarantee."
+  },
+  "limitations": [
+    "NativeDRONE confidence0 is observed with QA-scene reliability1 and state-update permissiontrue; posterior/training zeroinfluence was not measured.",
+    "Full fusion orchestration and full durable canonicalL3 history not run.",
+    "Exact admission/history AST helper isolation disclosed.",
+    "Crop input qualification is not classifier accuracy.",
+    "Training-view generation is not optimizer fitting.",
+    "RF actual queue admission is not committed posterior or physical calibration.",
+    "Truly absent RF covariance0.25 remains documented model assumption.",
+    "No entire-repository or Omega/worldmodel production-readiness certification.",
+    "Git-object materializer syntax/layoutchecked; fresh portable replay uses exact reconstructed sourcecopy layout."
+  ],
+  "next_steps": [
+    "Proceed merge ofbounded corrective branch through normalrepository workflow.",
+    "Record named software finding closures separately frompackage fullacceptance.",
+    "Complete remainingF01 finalconsumer influence/authority/roundtrip evidence beforeST01-F01-FA.",
+    "Continue next ready work under execution addendum without treating this review as all52package completion."
+  ]
+}

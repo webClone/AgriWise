@@ -124,7 +124,15 @@ def observation_packet_to_evidence(
         "soil_ph": ("soil_ph", "pH"),
     }
 
-    reliability = packet.qa.scene_score if packet.qa else 0.5
+    fin_scene = finite_real(packet.qa.scene_score) if packet.qa else 0.5
+    fin_rel_w = finite_real(getattr(packet, "reliability_weight", 1.0))
+    if fin_scene is None or fin_rel_w is None or fin_scene < 0.0 or fin_rel_w < 0.0:
+        reliability = 0.0
+    elif fin_scene == 0.0 or fin_rel_w == 0.0:
+        reliability = 0.0
+    else:
+        reliability = max(0.0, min(1.0, min(fin_scene, fin_rel_w)))
+
     cloud_frac = getattr(packet.qa, "cloud_probability", 0.0) or 0.0
     base_confidence = packet.effective_weight()
     
@@ -179,10 +187,12 @@ def observation_packet_to_evidence(
     else:
         final_data_status = truth_status
 
-    final_diagnostic_only = bool(truth.diagnostic_only or diagnostic_only or (final_data_status != "observed"))
-    final_state_update_allowed = bool(truth.state_update_allowed and state_update_allowed and (final_data_status == "observed"))
+    fin_base_conf = finite_real(base_confidence)
+    if fin_base_conf is None or fin_base_conf < 0.0:
+        final_confidence = 0.0
+    else:
+        final_confidence = fin_base_conf
 
-    final_confidence = base_confidence
     if final_data_status == "unavailable":
         final_confidence = 0.0
     elif final_data_status == "simulated":
@@ -193,6 +203,10 @@ def observation_packet_to_evidence(
         final_confidence = min(final_confidence, 0.65)
     elif final_data_status == "estimated":
         final_confidence = min(final_confidence, 0.75)
+
+    is_zero_confidence_or_reliability = (final_confidence == 0.0) or (reliability == 0.0)
+    final_diagnostic_only = bool(truth.diagnostic_only or diagnostic_only or (final_data_status != "observed") or is_zero_confidence_or_reliability)
+    final_state_update_allowed = bool(truth.state_update_allowed and state_update_allowed and (final_data_status == "observed") and not is_zero_confidence_or_reliability)
 
     pkg_hash = getattr(source_package, "package_hash", "") or ""
     pkt_hash = getattr(packet, "content_hash", "") or packet.packet_id

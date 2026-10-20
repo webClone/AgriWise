@@ -100,6 +100,9 @@ def validate_evidence(item: EvidenceItem) -> List[str]:
         if item.production_usable is False and item.state_update_allowed:
             violations.append("NON_PRODUCTION_EVIDENCE_CANNOT_UPDATE_STATE")
 
+        if (item.confidence == 0.0 or item.reliability == 0.0) and item.state_update_allowed:
+            violations.append("ZERO_CONFIDENCE_OR_RELIABILITY_CANNOT_UPDATE_STATE")
+
         if (
             item.real_provider_product is False
             and not item.diagnostic_only

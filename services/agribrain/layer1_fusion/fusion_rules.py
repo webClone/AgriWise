@@ -310,9 +310,9 @@ def _fuse_group(
             flags = []
             if total_weight_raw == 0.0:
                 fused_value = sum(e.value for e in numeric) / len(numeric)
-                max_confidence = min(max_ceiling, 0.10)
+                max_confidence = 0.0
                 flags.append("ZERO_WEIGHT_UNWEIGHTED_AVERAGE")
-                source_weights = {sf: round(1.0 / len(source_families), 4) for sf in source_families}
+                source_weights = {sf: 0.0 for sf in source_families}
             else:
                 total_weight = total_weight_raw
                 fused_value = sum(e.value * w for e, w in weights_raw) / total_weight
