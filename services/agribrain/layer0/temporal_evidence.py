@@ -17,10 +17,15 @@ ADMITTED_SOURCE_REALITIES = {
 }
 
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
+
 def _has_numeric(record: Dict[str, Any], keys: Tuple[str, ...]) -> bool:
     return any(
-        isinstance(record.get(key), (int, float))
-        and not isinstance(record.get(key), bool)
+        finite_real(record.get(key)) is not None
         for key in keys
     )
 

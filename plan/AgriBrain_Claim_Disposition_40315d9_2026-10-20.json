@@ -1,0 +1,111 @@
+{
+  "candidate": "40315d95ff875914bd2f83cd1e75d88fdae859ff",
+  "parent": "51932bfd7c588395b45e353d41f9519a0fe08bc4",
+  "review_date": "2026-10-20",
+  "review_mode": "three_parallel_specialist_reviews_plus_three_root_control_lanes",
+  "claims": [
+    {
+      "id": "R51901",
+      "status": "verified_resolved_in_executed_contract",
+      "priority_at_discovery": "P1",
+      "credit": "Actual three-process Astart,BunsentFAILED/Bpoll,ApositiveSTOP,Cstart lifecycle; Breservation/watchdoggone; exactlySTART_A_STOP_A_START_C",
+      "evidence": [
+        "protocol/admission-lifecycle-results.json",
+        "protocol/original-results.json",
+        "protocol/original-TTL-results.json",
+        "protocol/transport-boundary-results.json"
+      ],
+      "sources": [
+        {
+          "path": "irrigation_runtime/dispatcher.py",
+          "lines": "562-577,594-617,948-968"
+        }
+      ],
+      "packages": [
+        "F16",
+        "F17",
+        "F18"
+      ],
+      "scope_limit": "Inert local controller/store; physical delivery and full device/recovery/settlement acceptance not certified"
+    },
+    {
+      "id": "R51902",
+      "status": "verified_resolved_in_executed_contract",
+      "priority_at_discovery": "P2",
+      "credit": "OriginalInf-supported-depth nowroot0/coverage0/degraded,rootlossunavailable,budgetdebitexcluded,allRxblocked/health.1; directInfNaNboolguards and finitecontrol pass; fullL8blockersretained",
+      "evidence": [
+        "decision/results.json",
+        "platform/results.json",
+        "ledger/results.json"
+      ],
+      "sources": [
+        {
+          "path": "layer3_water/contracts/water_state.py",
+          "lines": "429-456"
+        },
+        {
+          "path": "layer4_nutrients/runner.py",
+          "lines": "226-235,535-550"
+        },
+        {
+          "path": "layer4_nutrients/environmental_losses/engine.py",
+          "lines": "130-147,239-255"
+        }
+      ],
+      "packages": [
+        "F01",
+        "F04",
+        "F10"
+      ],
+      "scope_limit": "Malformed dataclass contract fixture and standalone functions; solver-generated invalidstate or public operationalbypass not asserted"
+    }
+  ],
+  "new_findings": [],
+  "finding_resolution": "Both corrective IDs verifiedresolved in executed softwarecontracts; no newreproduciblefinding in boundedfollowup",
+  "documentation_qualifications": [
+    {
+      "id": "Q403-01",
+      "description": "Invalidrequestedextent withknownfinite supportedprofile retainsfinite supporteddepth anddegradation/coverage0; not everyinvalidrequestzerosallsupportedfields",
+      "is_new_defect": false,
+      "evidence": [
+        "decision/results.json"
+      ]
+    },
+    {
+      "id": "Q403-02",
+      "description": "Finite-depthchecks aretwoblocksinside actualrun_layer4_standalone; no _extract_soil_water_boundary definitioninthatfile",
+      "is_new_defect": false
+    }
+  ],
+  "retained_regressions": [
+    "R47801_ADMITTED_and_idlecontention",
+    "R47802_sameeventclaims",
+    "R47803_zero/missinglossavailability",
+    "R47804_missingcanonicalweather",
+    "8AE02_zero_capacity",
+    "8AE04_permissionconjunction",
+    "8AE05_notesserialization",
+    "W01_CEB02_waterledgers_ETcomponents"
+  ],
+  "normative_register": {
+    "packages": 52,
+    "code_partition": "F01-F40,T01-T12",
+    "FA_open": 52,
+    "FA_checked": 0,
+    "textual_FA_mentions": 68,
+    "meaning": "Packageacceptancestate,notabsenceorcompletionpercentage"
+  },
+  "readiness": {
+    "corrective_batch": "proceedbeyondthisbatch",
+    "implementation": "nextdependencyreadyticketinexistingaddendum",
+    "research": "objectivequalifiedOmega/worldmodelresearchcancontinue",
+    "full_acceptance": "unchanged; eachpackageusesowncriteria,notblanketunrelatedhardwaregate"
+  },
+  "exclusions": [
+    "repositorytestsascorrectnessproof",
+    "historicalauditconclusionsascorrectnessproof",
+    "production/Gitedits",
+    "provider/service/fieldhardware/controller/droneoperations"
+  ],
+  "source_reference_prefix": "services/agribrain/"
+}

@@ -19,6 +19,11 @@ from typing import Any, Dict, List, Optional
 from .source_package import Layer0SourcePackage
 from .observation_packet import DataStatus, ObservationPacket, ObservationSource
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
 
 def _selected_consensus_value(variables: Any, *names: str) -> Any:
     """Read a consensus value from either native dataclasses or dictionaries."""
@@ -126,9 +131,19 @@ def _extract_timestamp(pkt: Any, fallback: Optional[datetime] = None) -> datetim
 
 def _infer_data_status(payload: dict, source: ObservationSource) -> DataStatus:
     pkt_type = str(payload.get("packet_type") or payload.get("type") or "").upper()
+    role = str(payload.get("role") or payload.get("source_role") or payload.get("data_role") or "").upper()
     declared = DataStatus.from_value(payload["data_status"]) if "data_status" in payload else None
-    if declared == DataStatus.UNAVAILABLE:
+    if declared == DataStatus.UNAVAILABLE or role in ("UNAVAILABLE", "EXCLUDED", "REJECTED"):
         return DataStatus.UNAVAILABLE
+
+    if role in ("SIMULATED", "SYNTHETIC", "SCENARIO"):
+        return DataStatus.SIMULATED
+
+    if role in ("FORECAST", "ESTIMATED", "DERIVED", "PREDICTION", "MODELLED", "PRIOR"):
+        return DataStatus.ESTIMATED
+
+    if role in ("FALLBACK", "PROXY"):
+        return DataStatus.FALLBACK
 
     if payload.get("source_reality") == "raster_composite_proxy":
         return DataStatus.FALLBACK
@@ -279,9 +294,18 @@ def ensure_observation_packet(
         if QAFlag.LOW_CONFIDENCE not in qa_flags:
             qa_flags.append(QAFlag.LOW_CONFIDENCE)
             
+    raw_rel = finite_real(payload.get("reading_reliability"))
+    raw_weight = finite_real(payload.get("reliability_weight"))
+    if raw_rel is not None:
+        rel_val = float(raw_rel)
+    elif raw_weight is not None:
+        rel_val = float(raw_weight)
+    else:
+        rel_val = 1.0
+
     qa = QAMetadata(
         flags=qa_flags,
-        scene_score=payload.get("reading_reliability") or payload.get("reliability_weight") or 1.0,
+        scene_score=rel_val,
     )
     
     spatial_scope = payload.get("spatial_scope") or "plot"
@@ -292,6 +316,7 @@ def ensure_observation_packet(
     if timestamp_missing and data_status == DataStatus.OBSERVED:
         data_status = DataStatus.FALLBACK
 
+    raw_unc = finite_real(payload.get("uncertainty"))
     return ObservationPacket(
         source=refined_source,
         obs_type=ObservationType.TABULAR,
@@ -303,9 +328,9 @@ def ensure_observation_packet(
         data_status=data_status,
         qa=qa,
         uncertainty=UncertaintyModel(sigmas={
-            "observation": float(payload.get("uncertainty"))
-        }) if isinstance(payload.get("uncertainty"), (int, float)) else UncertaintyModel(),
-        reliability_weight=float(payload.get("reading_reliability") or 1.0),
+            "observation": float(raw_unc)
+        }) if raw_unc is not None and raw_unc > 0.0 else UncertaintyModel(),
+        reliability_weight=rel_val,
         spatial_scope=spatial_scope,
     )
 

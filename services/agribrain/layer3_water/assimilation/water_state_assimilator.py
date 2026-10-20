@@ -94,7 +94,7 @@ class WaterStateAssimilator:
         sources = []
         rejected = []
 
-        def add_observation(idx: int, raw_value: Any, raw_sigma: Any, source: str) -> bool:
+        def add_observation(idx: int, raw_value: Any, raw_sigma: Any, source: str, role: str = "OBSERVED") -> bool:
             value = finite_real(raw_value)
             sigma = finite_real(raw_sigma)
             reason = None
@@ -107,10 +107,13 @@ class WaterStateAssimilator:
                 reason = "invalid_observation_uncertainty"
             elif not 0.0 <= value <= prior_soil.saturation_profile[idx]:
                 reason = "outside_soil_moisture_range"
+            elif str(role).upper() in ("REJECTED", "EXCLUDED", "UNUSABLE"):
+                reason = "explicitly_excluded_role"
             if reason:
                 rejected.append({
                     "source": source, "layer_index": idx, "reason": reason,
                     "value_repr": repr(raw_value), "sigma_repr": repr(raw_sigma),
+                    "role": role,
                 })
                 return False
             obs_indices.append(idx)
@@ -124,8 +127,17 @@ class WaterStateAssimilator:
         if observations.soil_probe_moisture_profile:
             probe_vals = observations.soil_probe_moisture_profile
             probe_sigma = observations.observation_uncertainties.get("soil_probe", 0.015)
+            probe_source = observations.provenance_sources[0] if observations.provenance_sources else "IN_SITU_PROBE_TDR"
+            is_excluded = any(term in s.upper() for s in getattr(observations, "provenance_sources", []) for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
+            is_simulated = any(term in s.upper() for s in getattr(observations, "provenance_sources", []) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED")) or any(term in probe_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED"))
+            if is_excluded:
+                probe_role = "EXCLUDED"
+            elif is_simulated:
+                probe_role = "SIMULATED"
+            else:
+                probe_role = "OBSERVED"
             for idx in range(min(n_layers, len(probe_vals))):
-                add_observation(idx, probe_vals[idx], probe_sigma, "IN_SITU_PROBE_TDR")
+                add_observation(idx, probe_vals[idx], probe_sigma, probe_source, role=probe_role)
 
         # 2. Satellite surface soil moisture (Top layer)
         if observations.satellite_surface_moisture_m3_m3 is not None and 0 not in obs_indices:

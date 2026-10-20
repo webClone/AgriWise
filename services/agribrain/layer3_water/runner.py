@@ -384,7 +384,12 @@ class WaterIntelligenceEngine:
         )
 
         # Determine physical authority level
-        if "IN_SITU_PROBE_TDR" in assim_diag.assimilated_sensor_sources:
+        has_observed_probe = (
+            "IN_SITU_PROBE_TDR" in assim_diag.assimilated_sensor_sources
+            and not any(term in s.upper() for s in getattr(soil_observations, "provenance_sources", []) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED"))
+            and not any(term in s.upper() for s in assim_diag.assimilated_sensor_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED"))
+        )
+        if has_observed_probe:
             authority = WaterPhysicsAuthority.OBSERVED
         elif assim_diag.observations_assimilated_count > 0 or vegetation_state:
             authority = WaterPhysicsAuthority.ASSIMILATED
