@@ -561,11 +561,18 @@ class CommandDispatcher:
 
                 if foreign_eid:
                     logger.warning("Pre-dispatch check: Actuator %s is already EXECUTING another operation (%s); refusing NEW before send", event.device_id, foreign_eid)
-                    event.transition(EventStatus.STOP_REQUESTED, f"Actuator {event.device_id} is already EXECUTING another operation ({foreign_eid})")
+                    self._active_events.pop(event.event_id, None)
+                    self._safety.track_event_end(event.event_id)
+                    self._safety.release_quota(event.event_id)
                     try:
-                        SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                        SharedQuotaStore.update_status(event.event_id, "FAILED")
+                        SharedQuotaStore.release(event.event_id)
                     except Exception:
                         pass
+                    event.transition(
+                        EventStatus.FAILED,
+                        f"Pre-dispatch check: Actuator {event.device_id} is already EXECUTING another operation ({foreign_eid}); pre-transport refused without transport"
+                    )
                     self._emit_failed(event)
                     return event
         except Exception as q_err:

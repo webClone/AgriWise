@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -221,6 +222,16 @@ def run_layer4_standalone(
             is_conserved = getattr(canonical_water, "mass_conserved", True)
             closure_err = getattr(canonical_water, "mass_balance_error_mm", 0.0)
             is_degraded = not is_conserved
+
+        is_finite_supp = (
+            isinstance(supp_depth_cm, (int, float))
+            and not isinstance(supp_depth_cm, bool)
+            and math.isfinite(supp_depth_cm)
+            and supp_depth_cm > 0.0
+        )
+        if not is_finite_supp:
+            is_degraded = True
+            supp_depth_cm = 0.0
 
         status_val = "DEGRADED_NONCONSERVED_WATER" if not is_conserved else ("DEGRADED" if is_degraded else "OK")
         unc_mult = 2.0 if not is_conserved else (1.5 if is_degraded else 1.0)
@@ -522,7 +533,13 @@ def run_layer4_standalone(
     if n_state and n_state.estimated_demand_kg_ha:
         preliminary_n_rate = max(0, (n_state.estimated_demand_kg_ha or 0))
     raw_supp_depth = getattr(swb, "supported_root_depth_cm", None) if swb else None
-    is_root_supported = (raw_supp_depth is not None and raw_supp_depth > 0.0)
+    is_valid_finite_depth = (
+        isinstance(raw_supp_depth, (int, float))
+        and not isinstance(raw_supp_depth, bool)
+        and math.isfinite(raw_supp_depth)
+        and raw_supp_depth > 0.0
+    )
+    is_root_supported = is_valid_finite_depth
     if not is_root_supported:
         supp_depth_cm = 0.0
         supp_depth_mm = 0.0

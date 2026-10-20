@@ -1,0 +1,153 @@
+{
+  "candidate": "51932bfd7c588395b45e353d41f9519a0fe08bc4",
+  "immediate_parent": "26d47b17dc419797964eeca7dcfda262d71b87da",
+  "reviewed_patch_base": "4788dac8c56e4ec8d2caecc53317fd5c5144f675",
+  "observed_main_final": "51932bfd7c588395b45e353d41f9519a0fe08bc4",
+  "review_date": "2026-10-19",
+  "mode": "six_assigned_lanes_root_finalized_incomplete_summaries_and_serialization",
+  "review_completion_qualification": "Three specialist final reportscompleted; decision/protocolprobescompleted; rootfinishedremainingnarratives/receiptsandboundedserializerlane afteragentusage-limitinterruption",
+  "claims": [
+    {
+      "id": "R47801",
+      "status": "original_idle_mutual_refusal_repaired_residual_entry_path",
+      "credit": "ADMITTED quota and QUEUED preflight fix actual idle contention; one ownerEXECUTING/oneunsentFAILED/oneSTART",
+      "remaining": [
+        "R51901"
+      ],
+      "evidence": [
+        "protocol/original-results.json",
+        "protocol/admission-lifecycle-results.json",
+        "ownership/results.json"
+      ]
+    },
+    {
+      "id": "R47802",
+      "status": "repaired_in_checked_public_store_scope",
+      "credit": "Same-event phase/token/generation/timestamps/storebytes preserved across STARTING,DISPATCHING,SENDING,EXECUTING; stale preparation notrenewed",
+      "remaining": [],
+      "evidence": [
+        "ownership/results.json",
+        "protocol/transport-boundary-results.json"
+      ]
+    },
+    {
+      "id": "R47803",
+      "status": "original_zero_root_counterexamples_repaired",
+      "credit": "Unavailable root pathways explicitlytyped and excluded fromNbudget;104.4debitremoved; rawflagsserialize",
+      "remaining": [],
+      "adjacent_hardening": [
+        "R51902"
+      ],
+      "evidence": [
+        "decision/results.json",
+        "ledger/results.json"
+      ]
+    },
+    {
+      "id": "R47804",
+      "status": "original_missing_canonical_and_weather_counterexample_repaired",
+      "credit": "SWBUNAVAILABLE/root0/massfalse,health.1,blockedprescriptions,bothmissingflags;fullL8restrictionsretained",
+      "remaining": [],
+      "evidence": [
+        "decision/results.json",
+        "platform/results.json"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "R51901",
+      "priority": "P1",
+      "relationship": "Residual R47801 positively-unsent foreign-running preflight branch",
+      "title": "Unsent event retains STOP_REQUESTED exposure and blocks later ordinary admission after real owner stopped",
+      "reproduction": "three_actual_OS_workers_public_submit_poll_cancel_then_later_submit",
+      "evidence": [
+        "protocol/admission-lifecycle-results.json"
+      ],
+      "observations": [
+        "Aexecutes",
+        "BunsentSTOP_REQUESTEDwith8mm",
+        "BpollwhileAliveprotectsA",
+        "ApositivelySTOPPED/CANCELLED",
+        "CafterAstopFAILED",
+        "effectsSTART_A_STOP_Aonly"
+      ],
+      "scope_limit": "No B poll after A stop; no permanent-deadlock claim, unsafe duplicate-dose claim or field operation",
+      "packages": [
+        "F16",
+        "F17",
+        "F18"
+      ],
+      "sources": [
+        {
+          "path": "irrigation_runtime/dispatcher.py",
+          "lines": "561-570,597-609"
+        },
+        {
+          "path": "irrigation_runtime/safety.py",
+          "lines": "1645-1668"
+        }
+      ],
+      "acceptance": "Central positively-unsent refusal cleanup protectsA, removes Bfalseownership/exposure, allows eligible C after Apositive stop; retaininflightuncertainty and oneSTARTcontrols"
+    },
+    {
+      "id": "R51902",
+      "priority": "P2",
+      "relationship": "One new adjacent finite-domain admission fixture; original R47803/04 repaired",
+      "title": "Positive-infinite root support accepted as healthy available domain in standalone L4",
+      "reproduction": "actual_full_standalone_L4_deliberately_malformed_typed_boundary",
+      "evidence": [
+        "decision/results.json"
+      ],
+      "observations": [
+        "coverage1withInfdepth",
+        "rootdependentAVAILABLElowrisk",
+        "N163.1_P43.8allowed",
+        "health.75_statusok"
+      ],
+      "scope_limit": "Explicit dataclass replacement plusdeclared20mmdrainage; not validatedsolver output, publicroute bypass or hardwareexecution",
+      "packages": [
+        "F01",
+        "F04",
+        "F10"
+      ],
+      "sources": [
+        {
+          "path": "layer3_water/contracts/water_state.py",
+          "lines": "429-440"
+        },
+        {
+          "path": "layer4_nutrients/runner.py",
+          "lines": "524-550"
+        },
+        {
+          "path": "layer4_nutrients/environmental_losses/engine.py",
+          "lines": "129-151,194-217,234-249"
+        }
+      ],
+      "acceptance": "Strict finite/nonboolean supported-domain admission beforecoverage/VWC/loss, reject or unavailable/block; retain validfinite and repairedzero/missingcontrols"
+    }
+  ],
+  "normative_register": {
+    "packages": 52,
+    "code_partition": "F01-F40,T01-T12",
+    "FA_open": 52,
+    "FA_checked": 0,
+    "textual_FA_mentions": 68,
+    "meaning": "Registerstate,notabsenceorpercentage"
+  },
+  "exclusions": [
+    "repositorytestsascorrectnessproof",
+    "historicalauditsascorrectnessproof",
+    "production/Gitedits",
+    "service/provider/hardware/controller/droneoperations"
+  ],
+  "readiness": {
+    "planned_implementation": "proceedwithdependencies",
+    "concurrent_operational_admission": "repairresidualR51901beforestaging",
+    "scientific_boundary": "finite-domainR51902hardeninginparallel",
+    "research": "objectivequalifiedOmega/worldmodelshadow/scenarioworkcanproceed",
+    "full_acceptance": "all52remainopen"
+  },
+  "source_reference_prefix": "services/agribrain/"
+}

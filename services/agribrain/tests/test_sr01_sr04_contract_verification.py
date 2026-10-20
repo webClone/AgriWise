@@ -342,14 +342,13 @@ class TestSR01ThroughSR04(unittest.IsolatedAsyncioTestCase):
         ev_new = self._make_event("NEW", dev="device", vol=1.0, dur=20.0, flow=10.0, zone="zone")
         await dispatcher2.submit_event(ev_new, budget=WaterBudget("plot", "s", 10, 10))
 
-        # NEW must be held without dispatching a second START
-        self.assertEqual(ev_new.status, EventStatus.STOP_REQUESTED)
+        # NEW must be refused pre-transport without dispatching a second START
+        self.assertEqual(ev_new.status, EventStatus.FAILED)
         self.assertEqual(hw.starts, 1, "Competing worker dispatched duplicate START to physical hardware")
         self.assertEqual(hw.event_id, "OLD", "Competing worker overwrote active hardware operation")
 
         durable_new = SharedQuotaStore.get_active_record("NEW")
-        self.assertIsNotNone(durable_new)
-        self.assertEqual(durable_new["status"], "STOP_REQUESTED")
+        self.assertIsNone(durable_new, "Positively unsent loser quota reservation must be released")
 
 
 if __name__ == "__main__":

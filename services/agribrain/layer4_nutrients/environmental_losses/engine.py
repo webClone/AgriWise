@@ -128,7 +128,13 @@ class EnvironmentalLossEngine:
         )
 
         # 3. Denitrification
-        if root_depth_cm <= 0.0:
+        is_valid_root = (
+            isinstance(root_depth_cm, (int, float))
+            and not isinstance(root_depth_cm, bool)
+            and math.isfinite(root_depth_cm)
+            and root_depth_cm > 0.0
+        )
+        if not is_valid_root:
             denitrification = LossPathway(
                 pathway="denitrification",
                 loss_kg_ha=0.0,
@@ -191,7 +197,7 @@ class EnvironmentalLossEngine:
                 f"All pathways within acceptable limits."
             )
 
-        if root_depth_cm <= 0.0:
+        if not is_valid_root:
             notes_str = "Root boundary is unsupported (depth=0.0); water-dependent root-zone loss pathways (leaching, denitrification) are physically unavailable and excluded from loss debit."
             res_avail = "UNAVAILABLE_UNSUPPORTED_ROOT"
             is_supp = False
@@ -231,7 +237,13 @@ class EnvironmentalLossEngine:
         N in soil solution moves with water. Drainage beyond root zone
         carries dissolved NO₃⁻ with it.
         """
-        if root_depth_cm <= 0.0:
+        is_valid_root = (
+            isinstance(root_depth_cm, (int, float))
+            and not isinstance(root_depth_cm, bool)
+            and math.isfinite(root_depth_cm)
+            and root_depth_cm > 0.0
+        )
+        if not is_valid_root:
             return LossPathway(
                 pathway="leaching",
                 loss_kg_ha=0.0,

@@ -426,18 +426,33 @@ class WaterState:
         rz_fc = getattr(self.root_zone, "depth_weighted_theta_fc", 0.30)
         rz_wp = getattr(self.root_zone, "depth_weighted_theta_wp", 0.15)
         rz_sat = getattr(self.root_zone, "depth_weighted_theta_sat", 0.45)
-        rz_depth_cm = getattr(self.root_zone, "supported_root_depth_cm", getattr(self.root_zone, "root_depth_m", 0.6) * 100.0)
-        req_root_depth_cm = getattr(self.root_zone, "requested_root_depth_cm", getattr(self.root_zone, "root_depth_m", 0.6) * 100.0)
-        cov_frac = (
-            min(1.0, rz_depth_cm / max(0.1, req_root_depth_cm))
-            if req_root_depth_cm > 0.0
-            else 1.0
+        raw_rz = getattr(self.root_zone, "supported_root_depth_cm", getattr(self.root_zone, "root_depth_m", 0.6) * 100.0)
+        raw_req = getattr(self.root_zone, "requested_root_depth_cm", getattr(self.root_zone, "root_depth_m", 0.6) * 100.0)
+        is_finite_rz = (
+            isinstance(raw_rz, (int, float))
+            and not isinstance(raw_rz, bool)
+            and math.isfinite(raw_rz)
+            and raw_rz > 0.0
         )
-        drainage_val = getattr(self.fluxes.actual, "deep_drainage_mm", 0.0) if self.fluxes else 0.0
-
+        is_finite_req = (
+            isinstance(raw_req, (int, float))
+            and not isinstance(raw_req, bool)
+            and math.isfinite(raw_req)
+            and raw_req > 0.0
+        )
         is_conserved = self.mass_conserved
         closure_err = self.transition_receipt.water_closure_error_mm if self.transition_receipt else self.mass_balance_error_mm
-        degraded = (not is_conserved) or (self.data_health_score < 0.8) or (cov_frac < 0.50)
+        if not is_finite_rz or not is_finite_req:
+            rz_depth_cm = float(raw_rz) if (isinstance(raw_rz, (int, float)) and not isinstance(raw_rz, bool) and math.isfinite(raw_rz) and raw_rz >= 0.0) else 0.0
+            req_root_depth_cm = float(raw_req) if (isinstance(raw_req, (int, float)) and not isinstance(raw_req, bool) and math.isfinite(raw_req) and raw_req >= 0.0) else 0.0
+            cov_frac = 0.0
+            degraded = True
+        else:
+            rz_depth_cm = float(raw_rz)
+            req_root_depth_cm = float(raw_req)
+            cov_frac = min(1.0, rz_depth_cm / max(0.1, req_root_depth_cm))
+            degraded = (not is_conserved) or (self.data_health_score < 0.8) or (cov_frac < 0.50)
+        drainage_val = getattr(self.fluxes.actual, "deep_drainage_mm", 0.0) if self.fluxes else 0.0
 
         return Layer3ToLayer4BoundaryReceipt(
             plot_id=self.plot_id,
