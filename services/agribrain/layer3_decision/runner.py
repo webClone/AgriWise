@@ -974,8 +974,17 @@ def _deserialize_soil_observation(data: Any) -> Optional[Any]:
             "flux_tower_eta_mm",
             "observation_uncertainties",
             "provenance_sources",
+            "role",
+            "reading_reliability",
+            "reliability_weight",
+            "component_roles",
+            "component_reliabilities",
         }
         kwargs = {k: v for k, v in data.items() if k in known_fields}
+        if "source" in data and "provenance_sources" not in kwargs:
+            kwargs["provenance_sources"] = [data["source"]]
+        elif "source" in data and not kwargs.get("provenance_sources"):
+            kwargs["provenance_sources"] = [data["source"]]
         return SoilObservationVector(
             timestamp=ts_val or datetime.datetime.now(timezone.utc),
             **kwargs,

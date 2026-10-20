@@ -1,10 +1,14 @@
+from __future__ import annotations
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 """MESIA Source-Native Feature Extraction Engine — R6 §9.2 / P7.2.
 
 Extracts calibrated physical features (amplitude, relative phase, delay,
 Doppler, attenuation, reflection coefficient) with verifiable native lineage.
 """
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -241,11 +245,11 @@ class NativeFeatureExtractor:
         """Extract family-specific features preserving exact lineage."""
         features: Dict[str, Any] = {}
 
-        # 1. Common signal properties (preserve missing observations)
-        features["snr_db"] = float(packet.snr_db) if packet.snr_db is not None else None
-        features["noise_floor_dbm"] = float(packet.noise_floor_dbm) if packet.noise_floor_dbm is not None else None
-        features["carrier_frequency_hz"] = float(packet.carrier_frequency_hz) if packet.carrier_frequency_hz is not None else None
-        features["bandwidth_hz"] = float(packet.bandwidth_hz) if packet.bandwidth_hz is not None else None
+        # 1. Common signal properties (preserve missing observations, reject non-finite/bool)
+        features["snr_db"] = finite_real(packet.snr_db)
+        features["noise_floor_dbm"] = finite_real(packet.noise_floor_dbm)
+        features["carrier_frequency_hz"] = finite_real(packet.carrier_frequency_hz)
+        features["bandwidth_hz"] = finite_real(packet.bandwidth_hz)
 
         # Determine radio family from registered profile mapping (unknown remains unknown)
         detected_family = resolve_profile_to_family(packet.source_profile)

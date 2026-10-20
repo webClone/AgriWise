@@ -1,10 +1,14 @@
+from __future__ import annotations
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 """MESIA Layer 0 Canonical Evidence Spine — R6 §11.7 / P9.7.
 
 Manages evidence lifecycle admission, absence, quarantine, and invalidation
 into AgriBrain's Layer 0 canonical evidence spine.
 """
 
-from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
@@ -67,13 +71,23 @@ class Layer0EvidenceSpine:
                 is_usable_for_assimilation=False,
             )
 
-        # Absence gate: missing innovation or nonpositive confidence support is ABSENT and not usable for assimilation
-        if proposal.innovation_value is None or proposal.confidence_support <= 0.0:
+        # Numeric qualification: finite innovation, strictly positive support and variance
+        fin_innov = finite_real(proposal.innovation_value)
+        fin_support = finite_real(proposal.confidence_support)
+        fin_var = finite_real(proposal.observation_variance)
+
+        if (
+            fin_innov is None
+            or fin_support is None
+            or fin_support <= 0.0
+            or fin_var is None
+            or fin_var <= 0.0
+        ):
             return Layer0EvidenceRecord(
                 record_id=f"l0-rec-{proposal.proposal_id}",
                 status=EvidenceAdmissionStatus.ABSENT,
                 proposal=proposal,
-                admission_notes="Observation missing or confidence support is non-positive",
+                admission_notes="Observation missing, non-finite, or confidence support / variance is non-positive",
                 is_usable_for_assimilation=False,
             )
 

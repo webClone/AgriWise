@@ -1,4 +1,8 @@
 from __future__ import annotations
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 import json
 import hashlib
 from pathlib import Path
@@ -161,6 +165,19 @@ def build_validated_training_view(ledger_path: Optional[Path] = None) -> List[Di
         # Explicitly exclude ASMAE or BMA consensus alone as ground truth labels
         if target_value is None or target_confidence is None:
             continue
+
+        fin_conf = finite_real(target_confidence)
+        if fin_conf is None or fin_conf <= 0.0:
+            continue
+
+        CONTINUOUS_VARS = {"vigor", "canopy_water", "salinity_stress", "yield_observed"}
+        if target_var in CONTINUOUS_VARS:
+            fin_val = finite_real(target_value)
+            if fin_val is None:
+                continue
+            target_value = fin_val
+
+        target_confidence = fin_conf
 
         validation_event_ids = [e.get("event_id") for e in events if e.get("event_id")]
         disagreement_report_hash = run_view.get("candidate", {}).get("disagreement_report_hash", "")

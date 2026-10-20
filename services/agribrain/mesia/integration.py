@@ -199,14 +199,38 @@ class MesiaAgriBrainBridge:
         )
 
         # 6. ASMAE ObservationEvent Adapter
-        # Phase 3: Conditionally enable state updates if a matching capability is QUALIFIED
+        # Enforce per-packet evidence role (F01-B07)
+        role_str = str(getattr(packet, "evidence_role", "") or "").strip().upper()
+        if not role_str:
+            profile_name = getattr(packet, "source_profile", "").split("/")[0]
+            try:
+                from .radio_families.registry import RadioFamily, RADIO_FAMILY_REGISTRY
+                rf_enum = RadioFamily(profile_name)
+                role_str = RADIO_FAMILY_REGISTRY[rf_enum].default_evidence_role.value
+            except Exception:
+                role_str = "SENSING"
+        role_norm = role_str.split(".")[-1]
+        is_sensing = (role_norm == "SENSING")
+
+        # Phase 3: Conditionally enable state updates only if packet is SENSING and capability is QUALIFIED
         is_qualified = False
-        for cap in self.list_active_capabilities():
-            # Check if this capability authorizes the packet's target variable and radio family
-            if likelihood.target_variable == cap.target_variable:
-                if packet.source_profile.split("/")[0] in cap.supported_radio_families:
-                    is_qualified = True
-                    break
+        if is_sensing:
+            for cap in self.list_active_capabilities():
+                # Check if this capability authorizes the packet's target variable and radio family
+                if likelihood.target_variable == cap.target_variable:
+                    if packet.source_profile.split("/")[0] in cap.supported_radio_families:
+                        is_qualified = True
+                        break
+
+        if not is_sensing and l0_record.status == EvidenceAdmissionStatus.ADMITTED:
+            # Non-sensing roles are for diagnostics/nuisance only, not state assimilation
+            l0_record = Layer0EvidenceRecord(
+                record_id=l0_record.record_id,
+                status=EvidenceAdmissionStatus.ABSENT,
+                proposal=l0_record.proposal,
+                admission_notes=f"Evidence role {role_str} is diagnostic/nuisance only; not eligible for state assimilation",
+                is_usable_for_assimilation=False,
+            )
 
         from ..layer05_asmae.adapters.mesia_adapter import MesiaAsmaeAdapter
         asmae_event = MesiaAsmaeAdapter.to_asmae_observation_event(
@@ -228,3 +252,5 @@ class MesiaAgriBrainBridge:
             self._revocation_history.append(rev_event)
             return rev_event
         return None
+
+    ingest_radio_observation_packet = process_and_admit_observation

@@ -94,9 +94,10 @@ class WaterStateAssimilator:
         sources = []
         rejected = []
 
-        def add_observation(idx: int, raw_value: Any, raw_sigma: Any, source: str, role: str = "OBSERVED") -> bool:
+        def add_observation(idx: int, raw_value: Any, raw_sigma: Any, source: str, role: str = "OBSERVED", reliability: float = 1.0) -> bool:
             value = finite_real(raw_value)
             sigma = finite_real(raw_sigma)
+            rel = finite_real(reliability)
             reason = None
             if value is None:
                 reason = "missing_or_non_finite_value"
@@ -109,6 +110,8 @@ class WaterStateAssimilator:
                 reason = "outside_soil_moisture_range"
             elif str(role).upper() in ("REJECTED", "EXCLUDED", "UNUSABLE"):
                 reason = "explicitly_excluded_role"
+            elif rel is not None and rel <= 0.0:
+                reason = "zero_reliability"
             if reason:
                 rejected.append({
                     "source": source, "layer_index": idx, "reason": reason,
@@ -123,13 +126,30 @@ class WaterStateAssimilator:
                 sources.append(source)
             return True
 
+        vec_role = getattr(observations, "role", "OBSERVED")
+        comp_roles = getattr(observations, "component_roles", {})
+        vec_rel = getattr(observations, "reliability_weight", None)
+        if vec_rel is None:
+            vec_rel = getattr(observations, "reading_reliability", 1.0)
+        comp_rels = getattr(observations, "component_reliabilities", {})
+
         # 1. In-situ probe profile observations
         if observations.soil_probe_moisture_profile:
             probe_vals = observations.soil_probe_moisture_profile
             probe_sigma = observations.observation_uncertainties.get("soil_probe", 0.015)
             probe_source = observations.provenance_sources[0] if observations.provenance_sources else "IN_SITU_PROBE_TDR"
-            is_excluded = any(term in s.upper() for s in getattr(observations, "provenance_sources", []) for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
-            is_simulated = any(term in s.upper() for s in getattr(observations, "provenance_sources", []) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED")) or any(term in probe_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED"))
+            probe_role_override = comp_roles.get("soil_probe") or comp_roles.get("probe") or vec_role
+            probe_rel = comp_rels.get("soil_probe", comp_rels.get("probe", vec_rel))
+
+            is_excluded = (
+                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
+                or str(probe_role_override).upper() in ("REJECTED", "EXCLUDED", "UNUSABLE")
+            )
+            is_simulated = (
+                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
+                or any(term in probe_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
+                or str(probe_role_override).upper() in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")
+            )
             if is_excluded:
                 probe_role = "EXCLUDED"
             elif is_simulated:
@@ -137,31 +157,79 @@ class WaterStateAssimilator:
             else:
                 probe_role = "OBSERVED"
             for idx in range(min(n_layers, len(probe_vals))):
-                add_observation(idx, probe_vals[idx], probe_sigma, probe_source, role=probe_role)
+                add_observation(idx, probe_vals[idx], probe_sigma, probe_source, role=probe_role, reliability=probe_rel)
 
         # 2. Satellite surface soil moisture (Top layer)
         if observations.satellite_surface_moisture_m3_m3 is not None and 0 not in obs_indices:
             sat_val = observations.satellite_surface_moisture_m3_m3
             sat_sigma = observations.observation_uncertainties.get("satellite_smap", 0.040)
-            add_observation(0, sat_val, sat_sigma, "SATELLITE_SMAP_SENTINEL1")
+            sat_source = "SATELLITE_SMAP_SENTINEL1"
+            for s in getattr(observations, "provenance_sources", []):
+                if any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1")):
+                    sat_source = s
+                    break
+
+            sat_role_override = comp_roles.get("satellite") or vec_role
+            sat_rel = comp_rels.get("satellite", vec_rel)
+            sat_excluded = (
+                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1")) for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
+                or str(sat_role_override).upper() in ("REJECTED", "EXCLUDED", "UNUSABLE")
+                or any(term in sat_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
+            )
+            sat_simulated = (
+                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1")) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
+                or str(sat_role_override).upper() in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")
+                or any(term in sat_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
+            )
+            if sat_excluded:
+                sat_role = "EXCLUDED"
+            elif sat_simulated:
+                sat_role = "SIMULATED"
+            else:
+                sat_role = "OBSERVED"
+            add_observation(0, sat_val, sat_sigma, sat_source, role=sat_role, reliability=sat_rel)
 
         # 3. Thermal cooling differential proxy (Upper root zone constraint)
         if observations.canopy_cooling_differential_c is not None and not obs_indices:
-            # If Tc - Ta is severely positive (+4C), soil is dry; if negative (-2C), soil is well-watered
             dt = finite_real(observations.canopy_cooling_differential_c)
-            # Linear surrogate constraint on root-zone layer 1 & 2
             target_idx = 1 if n_layers > 1 else 0
             fc = prior_soil.field_capacity_profile[target_idx]
             wp = prior_soil.wilting_point_profile[target_idx]
+            thermal_source = "THERMAL_CANOPY_COOLING_SURROGATE"
+            for s in getattr(observations, "provenance_sources", []):
+                if any(k in s.upper() for k in ("THERMAL", "CANOPY_COOLING", "RADIOMETER")):
+                    thermal_source = s
+                    break
+
+            thermal_role_override = comp_roles.get("thermal") or vec_role
+            thermal_rel = comp_rels.get("thermal", vec_rel)
+            thermal_excluded = (
+                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("THERMAL", "CANOPY_COOLING")) for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
+                or str(thermal_role_override).upper() in ("REJECTED", "EXCLUDED", "UNUSABLE")
+                or any(term in thermal_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
+            )
+            thermal_simulated = (
+                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("THERMAL", "CANOPY_COOLING")) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
+                or str(thermal_role_override).upper() in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")
+                or any(term in thermal_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
+            )
+            if thermal_excluded:
+                thermal_role = "EXCLUDED"
+            elif thermal_simulated:
+                thermal_role = "SIMULATED"
+            else:
+                thermal_role = "OBSERVED"
+
             if dt is None:
                 rejected.append({
-                    "source": "THERMAL_CANOPY_COOLING_SURROGATE",
+                    "source": thermal_source,
                     "layer_index": target_idx, "reason": "missing_or_non_finite_value",
                     "value_repr": repr(observations.canopy_cooling_differential_c),
+                    "role": thermal_role,
                 })
             elif dt > 2.0:
                 est_th = wp + 0.20 * (fc - wp)
-                add_observation(target_idx, est_th, 0.050, "THERMAL_CANOPY_COOLING_SURROGATE")
+                add_observation(target_idx, est_th, 0.050, thermal_source, role=thermal_role, reliability=thermal_rel)
 
         if not obs_indices:
             diag = AssimilationDiagnostic(

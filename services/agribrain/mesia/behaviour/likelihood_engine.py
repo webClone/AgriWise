@@ -1,10 +1,14 @@
+from __future__ import annotations
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 """MESIA Behaviour Likelihood Engine (ASMAE Interface) — R6 §9.7 / P7.7.
 
 Generates calibrated BehaviourLikelihood proposals for ASMAE, complete with
 decomposed uncertainty budgets, alternative nuisance explanations, and explicit abstentions.
 """
 
-from __future__ import annotations
 
 import math
 from dataclasses import dataclass
@@ -46,22 +50,24 @@ class BehaviourLikelihoodEngine:
         # Check if measured observation exists (preserve missing observations)
         raw_snr = feat.features.get("snr_db")
         expected_baseline = feat.features.get("expected_baseline_snr_db")
-        cal_unc = float(feat.features.get("calibration_uncertainty_db", 1.0))
+        fin_unc = finite_real(feat.features.get("calibration_uncertainty_db", 1.0))
+        cal_unc = fin_unc if fin_unc is not None and fin_unc > 0.0 else 1.0
 
         # Propagate calibration uncertainty into observation error covariance:
         # sigma_total^2 = sigma_nuisance^2 + sigma_calibration^2
         base_cov = 0.25 if nuisance.is_safe_for_soil_assimilation else 2.50
         cov = float(base_cov + (cal_unc ** 2))
 
-        if raw_snr is not None and expected_baseline is not None:
-            snr = float(raw_snr)
-            exp_base = float(expected_baseline)
+        snr = finite_real(raw_snr)
+        exp_base = finite_real(expected_baseline)
+
+        if snr is not None and exp_base is not None and math.isfinite(cov) and cov > 0.0:
             innovation = float(snr - exp_base)
             std_total = max(0.5, math.sqrt(cov))
             likelihood_val = math.exp(-0.5 * (innovation / std_total) ** 2) if nuisance.is_safe_for_soil_assimilation else 0.01
             support = 1.0 if nuisance.is_safe_for_soil_assimilation else 0.1
         else:
-            # Missing observation: preserve missingness, do NOT fabricate innovation or likelihood
+            # Missing or malformed observation: preserve missingness, do NOT fabricate innovation or likelihood
             innovation = None
             likelihood_val = None
             support = 0.0

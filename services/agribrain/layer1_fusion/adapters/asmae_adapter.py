@@ -409,7 +409,16 @@ class ASMAEAdapter:
             # 4. Training labels (weak labels)
             if asmae_training_allowed(package):
                 w_labels = package.get("weak_labels", [])
-                avg_weight = sum(l.get("training_weight", 0.0) for l in w_labels) / len(w_labels) if w_labels else 0.0
+                valid_weights = []
+                for l in w_labels:
+                    est = finite_real(l.get("estimate"))
+                    reasons = l.get("zero_weight_reasons", [])
+                    raw_w = finite_real(l.get("training_weight"))
+                    if est is None or reasons or raw_w is None or raw_w <= 0.0:
+                        valid_weights.append(0.0)
+                    else:
+                        valid_weights.append(raw_w)
+                avg_weight = sum(valid_weights) / len(valid_weights) if valid_weights else 0.0
                 items.append(EvidenceItem(
                     evidence_id=f"asmae_{run_id}_training_weight",
                     plot_id=plot_id,

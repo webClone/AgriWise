@@ -1,3 +1,8 @@
+from __future__ import annotations
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 """
 V79A Phase 9: Weak-label exporter with 10-gate safety system.
 
@@ -18,7 +23,6 @@ Every weak label collects ALL zero-weight reasons (not just the first).
 Max weight capped at 0.3. Labels are always 'weak_assimilated_reference'.
 """
 
-from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
@@ -135,7 +139,7 @@ def export_weak_labels(
 
         sigma = sigmas.get(nid, [0.1] * N_STATES)
         retro_info = retro_per_mz.get(nid, {})
-        retro_score = retro_info.get("retro_score", 0.0)
+        retro_score = retro_info.get("retro_score", retro_result.get("aggregate", {}).get("retro_score", 0.0))
         bma_dis = bma_disagreement_map.get(nid, 0.0)
 
         for s_idx in range(min(N_STATES, len(state))):
@@ -146,17 +150,31 @@ def export_weak_labels(
             # Collect ALL zero-weight reasons for this label
             reasons = list(global_reasons)  # Copy global reasons
 
+            fin_val = finite_real(s_val)
+            fin_sigma = finite_real(s_sigma)
+            fin_retro = finite_real(retro_score)
+            fin_bma = finite_real(bma_dis)
+
+            if fin_val is None:
+                reasons.append(f"invalid_state_estimate:{s_name}={s_val!r}")
+            if fin_sigma is None or fin_sigma <= 0.0:
+                reasons.append(f"invalid_uncertainty:{s_sigma!r}")
+            if fin_retro is None or not (0.0 <= fin_retro <= 1.0):
+                reasons.append(f"invalid_retro_score:{retro_score!r}")
+            if fin_bma is None or fin_bma < 0.0:
+                reasons.append(f"invalid_bma_disagreement:{bma_dis!r}")
+
             # Gate 1: retro_score < 0.5
-            if retro_score < 0.5:
-                reasons.append(f"retro_score_low:{retro_score:.3f}")
+            if fin_retro is not None and fin_retro < 0.5:
+                reasons.append(f"retro_score_low:{fin_retro:.3f}")
 
             # Gate 2: uncertainty > 0.5
-            if s_sigma > 0.5:
-                reasons.append(f"uncertainty_too_high:{s_sigma:.3f}")
+            if fin_sigma is not None and fin_sigma > 0.5:
+                reasons.append(f"uncertainty_too_high:{fin_sigma:.3f}")
 
             # Gate 3: BMA disagreement > 0.20
-            if bma_dis > 0.20:
-                reasons.append(f"bma_disagreement_too_high:{bma_dis:.3f}")
+            if fin_bma is not None and fin_bma > 0.20:
+                reasons.append(f"bma_disagreement_too_high:{fin_bma:.3f}")
 
             # Gate 4: 1m without certification
             if resolution_m <= 1 and certification_level not in ("certified", "retrovalidated"):
@@ -167,27 +185,27 @@ def export_weak_labels(
                 reasons.append(f"radiometric_state_blocked:{s_name}")
 
             # Compute weight: 0 if any reason, else capped at WEAK_LABEL_MAX_WEIGHT
-            if reasons:
+            if reasons or fin_val is None or fin_sigma is None or fin_retro is None:
                 training_weight = 0.0
+                confidence_val = 0.0
             else:
-                # Weight based on confidence (retro_score * (1 - uncertainty))
-                confidence = retro_score * max(0.0, 1.0 - s_sigma)
-                training_weight = min(confidence, WEAK_LABEL_MAX_WEIGHT)
+                confidence_val = fin_retro * max(0.0, 1.0 - fin_sigma)
+                training_weight = min(confidence_val, WEAK_LABEL_MAX_WEIGHT)
                 training_weight = round(training_weight, 4)
 
             label_entry = {
                 "microzone_id": nid,
                 "state_name": s_name,
                 "state_index": s_idx,
-                "estimate": round(s_val, 6),
-                "uncertainty": round(s_sigma, 6),
-                "retro_score": round(retro_score, 4),
-                "bma_disagreement": round(bma_dis, 6),
+                "estimate": round(fin_val, 6) if fin_val is not None else s_val,
+                "uncertainty": round(fin_sigma, 6) if fin_sigma is not None else s_sigma,
+                "retro_score": round(fin_retro, 4) if fin_retro is not None else retro_score,
+                "bma_disagreement": round(fin_bma, 6) if fin_bma is not None else bma_dis,
                 "certification_level": certification_level,
                 "resolution_m": resolution_m,
                 "training_weight": training_weight,
                 "label_type": "weak_assimilated_reference",  # NEVER "ground_truth"
-                "confidence": round(retro_score * max(0.0, 1.0 - s_sigma), 4),
+                "confidence": round(confidence_val, 4),
                 "plot_id": plot_id,
                 "run_id": run_id,
                 "zero_weight_reasons": reasons,  # All reasons, not just first

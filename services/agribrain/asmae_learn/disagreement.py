@@ -1,4 +1,8 @@
 from __future__ import annotations
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 from datetime import datetime, timezone
 import json
 from typing import Any, Dict, List, Optional
@@ -180,6 +184,19 @@ def check_disagreement(asmae_output: Dict[str, Any], validation_events: List[Val
         threshold = VARIABLE_THRESHOLDS.get(var, 0.30)
         has_mismatch = False
         severity = "minor"
+
+        CONTINUOUS_VARS = {"vigor", "canopy_water", "salinity_stress", "yield_observed"}
+        if var in CONTINUOUS_VARS:
+            fin_val = finite_real(validated_val)
+            if fin_val is None:
+                contradictions.append({
+                    "type": "malformed_continuous_target",
+                    "variable": var,
+                    "observed_value": repr(validated_val),
+                    "severity": "critical",
+                })
+                continue
+            validated_val = fin_val
         
         if isinstance(validated_val, (int, float)):
             diff = abs(asmae_val - validated_val)

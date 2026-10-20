@@ -30,6 +30,11 @@ except ModuleNotFoundError:  # package-qualified test/import mode
         CropEvidenceLedgerV2,
     )
 
+try:
+    from scientific_contracts.numeric import finite_real
+except (ModuleNotFoundError, ImportError):
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
 
 _S2_PRODUCT_RE = re.compile(
     r"(?P<mission>S2[A-Z])_MSIL\w+_"
@@ -881,21 +886,36 @@ def _gdd_coordinates_until(
         day = _parse_day(row.get("date") or row.get("timestamp"))
         if day is None or day < start or day > acquisition_day:
             continue
+        
+        status = str(row.get("data_status") or "").lower()
+        role = str(row.get("role") or row.get("data_role") or row.get("source_role") or "").upper()
+        if (
+            status in ("unavailable", "excluded", "rejected")
+            or role in ("UNAVAILABLE", "EXCLUDED", "REJECTED")
+            or row.get("excluded") is True
+            or row.get("production_usable") is False
+        ):
+            continue
+
         explicit = row.get("gdd")
         mean = row.get("temp_mean", row.get("temp_mean_c", row.get("tmean")))
-        if not isinstance(mean, (int, float)):
+        fin_mean = finite_real(mean)
+        if fin_mean is None:
             low, high = row.get("temp_min"), row.get("temp_max")
-            if isinstance(low, (int, float)) and isinstance(high, (int, float)):
-                mean = (float(low) + float(high)) / 2.0
-        if isinstance(mean, (int, float)) and math.isfinite(float(mean)):
+            fin_low = finite_real(low)
+            fin_high = finite_real(high)
+            if fin_low is not None and fin_high is not None:
+                fin_mean = (fin_low + fin_high) / 2.0
+        if fin_mean is not None:
             for base in bases:
-                totals[base] += max(0.0, float(mean) - base)
+                totals[base] += max(0.0, fin_mean - base)
                 used[base] += 1
             continue
         # A provider-supplied daily GDD value has no transferable base
         # semantics.  Preserve it only on the historical base-10 axis.
-        if isinstance(explicit, (int, float)) and math.isfinite(float(explicit)):
-            totals[10.0] += max(0.0, float(explicit))
+        fin_explicit = finite_real(explicit)
+        if fin_explicit is not None:
+            totals[10.0] += max(0.0, fin_explicit)
             used[10.0] += 1
     coordinates = {
         f"GDD{int(base)}": round(totals[base], 3)
@@ -964,6 +984,9 @@ def build_sentinel2_crop_observation(
             array = np.asarray(arrays[name])
             if array.shape != shape:
                 rejection_reasons.append(f"misaligned_band:{name}")
+                continue
+            if np.issubdtype(array.dtype, np.bool_) or not (np.issubdtype(array.dtype, np.floating) or np.issubdtype(array.dtype, np.integer)):
+                rejection_reasons.append(f"malformed_reflectance_dtype:{name}")
                 continue
             scale = _band_scale(normalized_units.get(name))
             if scale is None:
@@ -1119,6 +1142,25 @@ def build_sentinel2_crop_observation(
         "process_request_hash": combined.get("process_request_hash"),
         "provider_response_hash": combined.get("provider_response_hash"),
     }
+    declared_roles = [
+        str(combined.get(k)).upper()
+        for k in ("role", "data_role", "source_role", "status_role")
+        if k in combined and combined[k] is not None
+    ]
+    decl_status = str(combined.get("data_status") or "").lower()
+    if decl_status in ("unavailable", "excluded", "rejected") or any(r in ("UNAVAILABLE", "EXCLUDED", "REJECTED") for r in declared_roles):
+        admitted = False
+        rejection_reasons.append("source_role_excluded")
+        eff_status = "unavailable"
+    elif decl_status == "simulated" or any(r in ("SIMULATED", "SYNTHETIC", "SCENARIO") for r in declared_roles):
+        eff_status = "simulated"
+    elif decl_status == "fallback" or any(r in ("FALLBACK", "PROXY") for r in declared_roles):
+        eff_status = "fallback"
+    elif decl_status == "estimated" or any(r in ("FORECAST", "ESTIMATED", "DERIVED", "PREDICTION", "MODELLED", "PRIOR") for r in declared_roles):
+        eff_status = "estimated"
+    else:
+        eff_status = "observed"
+
     observation = {
         "contract_version": CROP_OBSERVATION_CONTRACT_VERSION,
         "record_type": "CanonicalCropObservation",
@@ -1144,11 +1186,11 @@ def build_sentinel2_crop_observation(
         "sensor": str(combined.get("sensor") or "MSI"),
         "source_reality": "real_raster",
         "temporal_basis": "physical_scene_observation",
-        "data_status": "observed" if admitted else "unavailable",
-        "production_usable": combined.get("production_usable") is True,
+        "data_status": eff_status if admitted else "unavailable",
+        "production_usable": (combined.get("production_usable") is True) and (eff_status != "unavailable"),
         "real_provider_product": combined.get("real_provider_product") is True,
-        "diagnostic_only": combined.get("diagnostic_only") is not False,
-        "state_update_allowed": admitted,
+        "diagnostic_only": True if eff_status != "observed" else (combined.get("diagnostic_only") is not False),
+        "state_update_allowed": admitted and (eff_status == "observed"),
         "usable": admitted,
         "quality_admitted": admitted,
         "quality_class": quality_class,
@@ -1181,7 +1223,7 @@ def build_sentinel2_crop_observation(
         "independence_identity_available": bool(
             identity.get("physical_acquisition_key")
         ),
-        "independent_observation_count": 1 if admitted else 0,
+        "independent_observation_count": 1 if (admitted and eff_status == "observed") else 0,
         "processing_lineage": [lineage],
         "processing_lineage_count": 1,
         "band_statistics": band_statistics,
@@ -1204,7 +1246,7 @@ def build_sentinel2_crop_observation(
             **gdd_coordinates,
             "season_start": str(season_start) if season_start else None,
         },
-        "direct_observation": True,
+        "direct_observation": bool(admitted and eff_status == "observed"),
         "parent_observation_ids": [],
         **metrics,
     }

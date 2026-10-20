@@ -19,6 +19,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import hashlib
 import json
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
 
 # ============================================================================
 # Enums
@@ -268,6 +273,20 @@ class ObservationPacket:
             self.unrecognized_data_status = repr(self.data_status)
             self.content_hash = ""
         self.data_status = parsed_status
+
+        fin_rel = finite_real(self.reliability_weight)
+        if fin_rel is None or fin_rel < 0.0:
+            self.reliability_weight = 0.0
+        else:
+            self.reliability_weight = min(1.0, float(fin_rel))
+
+        if self.qa:
+            fin_scene = finite_real(self.qa.scene_score)
+            if fin_scene is None or fin_scene < 0.0:
+                self.qa.scene_score = 0.0
+            else:
+                self.qa.scene_score = min(1.0, float(fin_scene))
+
         if not self.packet_id:
             self.packet_id = self._generate_id()
         if not self.content_hash:

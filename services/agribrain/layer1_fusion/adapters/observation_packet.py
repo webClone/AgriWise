@@ -13,6 +13,11 @@ from layer1_fusion.schemas import EvidenceItem, Layer1InputBundle
 from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAFlag
 from layer1_fusion.source_family import normalize_source_family
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
 
 def observation_packet_to_evidence(
     packet: ObservationPacket,
@@ -159,6 +164,36 @@ def observation_packet_to_evidence(
 
     truth = normalize_truth_from_packet(packet, source_package)
 
+    STATUS_RANKS = {
+        "unavailable": 5,
+        "simulated": 4,
+        "fallback": 3,
+        "estimated": 2,
+        "interpolated": 1,
+        "observed": 0,
+    }
+    packet_status = packet.data_status.value
+    truth_status = truth.data_status
+    if STATUS_RANKS.get(packet_status, 0) >= STATUS_RANKS.get(truth_status, 0):
+        final_data_status = packet_status
+    else:
+        final_data_status = truth_status
+
+    final_diagnostic_only = bool(truth.diagnostic_only or diagnostic_only or (final_data_status != "observed"))
+    final_state_update_allowed = bool(truth.state_update_allowed and state_update_allowed and (final_data_status == "observed"))
+
+    final_confidence = base_confidence
+    if final_data_status == "unavailable":
+        final_confidence = 0.0
+    elif final_data_status == "simulated":
+        final_confidence = min(final_confidence, 0.20)
+    elif final_data_status == "fallback":
+        final_confidence = min(final_confidence, 0.35)
+    elif final_data_status == "interpolated":
+        final_confidence = min(final_confidence, 0.65)
+    elif final_data_status == "estimated":
+        final_confidence = min(final_confidence, 0.75)
+
     pkg_hash = getattr(source_package, "package_hash", "") or ""
     pkt_hash = getattr(packet, "content_hash", "") or packet.packet_id
     if pkg_hash:
@@ -191,26 +226,26 @@ def observation_packet_to_evidence(
                 spatial_scope=packet.spatial_scope or "plot",
                 scope_id=payload.get("zone_id") or payload.get("zone") or payload.get("device_id"),
                 observed_at=packet.timestamp,
-                confidence=base_confidence,
+                confidence=final_confidence,
                 sigma=base_sigma,
                 reliability=reliability,
                 freshness_score=0.0,
                 provenance_ref=provenance_ref,
                 flags=flags.copy(),
-                data_status=truth.data_status,
+                data_status=final_data_status,
                 truth_class=truth.truth_class,
                 source_reality=truth.source_reality,
-                production_usable=truth.production_usable,
+                production_usable=truth.production_usable and (final_data_status != "unavailable"),
                 real_provider_product=truth.real_provider_product,
-                diagnostic_only=truth.diagnostic_only,
-                state_update_allowed=truth.state_update_allowed,
+                diagnostic_only=final_diagnostic_only,
+                state_update_allowed=final_state_update_allowed,
                 grounding_class=truth.grounding_class,
                 visualization_allowed=truth.visualization_allowed,
                 experimental_visual_allowed=truth.experimental_visual_allowed,
                 composite_advisory_allowed=truth.composite_advisory_allowed,
-                scientific_surface_allowed=truth.scientific_surface_allowed,
-                prescription_driver_allowed=truth.prescription_driver_allowed,
-                current_1m_approval_allowed=truth.current_1m_approval_allowed,
+                scientific_surface_allowed=truth.scientific_surface_allowed and (final_data_status == "observed"),
+                prescription_driver_allowed=truth.prescription_driver_allowed and (final_data_status == "observed"),
+                current_1m_approval_allowed=truth.current_1m_approval_allowed and (final_data_status == "observed"),
                 temporal_basis=payload.get("temporal_basis"),
                 content_hash=payload.get("content_hash") or getattr(packet, "content_hash", None),
                 provider_product_id=payload.get("provider_product_id") or payload.get("observation_id"),
@@ -233,26 +268,26 @@ def observation_packet_to_evidence(
             spatial_scope=packet.spatial_scope or "plot",
             scope_id=payload.get("zone_id") or payload.get("zone") or payload.get("device_id"),
             observed_at=packet.timestamp,
-            confidence=base_confidence,
+            confidence=final_confidence,
             sigma=base_sigma,
             reliability=reliability,
             freshness_score=0.0,
             provenance_ref=provenance_ref,
             flags=flags.copy(),
-            data_status=truth.data_status,
+            data_status=final_data_status,
             truth_class=truth.truth_class,
             source_reality=truth.source_reality,
-            production_usable=truth.production_usable,
+            production_usable=truth.production_usable and (final_data_status != "unavailable"),
             real_provider_product=truth.real_provider_product,
-            diagnostic_only=truth.diagnostic_only,
-            state_update_allowed=truth.state_update_allowed,
+            diagnostic_only=final_diagnostic_only,
+            state_update_allowed=final_state_update_allowed,
             grounding_class=truth.grounding_class,
             visualization_allowed=truth.visualization_allowed,
             experimental_visual_allowed=truth.experimental_visual_allowed,
             composite_advisory_allowed=truth.composite_advisory_allowed,
-            scientific_surface_allowed=truth.scientific_surface_allowed,
-            prescription_driver_allowed=truth.prescription_driver_allowed,
-            current_1m_approval_allowed=truth.current_1m_approval_allowed,
+            scientific_surface_allowed=truth.scientific_surface_allowed and (final_data_status == "observed"),
+            prescription_driver_allowed=truth.prescription_driver_allowed and (final_data_status == "observed"),
+            current_1m_approval_allowed=truth.current_1m_approval_allowed and (final_data_status == "observed"),
             temporal_basis=payload.get("temporal_basis"),
             content_hash=payload.get("content_hash") or getattr(packet, "content_hash", None),
             provider_product_id=payload.get("provider_product_id") or payload.get("observation_id"),

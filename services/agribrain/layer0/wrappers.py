@@ -86,13 +86,25 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
             if not date:
                 continue
 
+            daily_role = str(daily.get("role") or daily.get("data_role") or daily.get("source_role") or "").upper() if isinstance(daily, dict) else ""
+            if forecast or "FORECAST" in data_kind.upper() or daily_role in ("FORECAST", "ESTIMATED", "DERIVED", "MODELLED", "PRIOR"):
+                rec_status = "estimated"
+            elif daily_role in ("SIMULATED", "SYNTHETIC", "SCENARIO"):
+                rec_status = "simulated"
+            elif daily_role in ("UNAVAILABLE", "EXCLUDED", "REJECTED"):
+                rec_status = "unavailable"
+            elif daily_role in ("FALLBACK", "PROXY"):
+                rec_status = "fallback"
+            else:
+                rec_status = "observed"
+
             record = {
                 "date": date,
                 "data_kind": data_kind,
                 "packet_type": packet_type,
                 "source": "environment_weather_consensus",
                 "evidence_id": packet_ids.get((packet_type, date)) or packet_ids.get(("WEATHER_CONSENSUS_DAILY", date)),
-                "data_status": "estimated" if forecast else "observed",
+                "data_status": rec_status,
                 "authority": "process_forcing_only",
                 "state_update_allowed": False,
                 "overall_confidence": confidence,
@@ -131,48 +143,51 @@ def _extract_timestamp(pkt: Any, fallback: Optional[datetime] = None) -> datetim
 
 def _infer_data_status(payload: dict, source: ObservationSource) -> DataStatus:
     pkt_type = str(payload.get("packet_type") or payload.get("type") or "").upper()
-    role = str(payload.get("role") or payload.get("source_role") or payload.get("data_role") or "").upper()
+    role_keys = ("role", "source_role", "data_role", "status_role", "truth_class")
+    declared_roles = [
+        str(payload[k]).upper()
+        for k in role_keys
+        if k in payload and payload[k] is not None
+    ]
     declared = DataStatus.from_value(payload["data_status"]) if "data_status" in payload else None
-    if declared == DataStatus.UNAVAILABLE or role in ("UNAVAILABLE", "EXCLUDED", "REJECTED"):
+
+    # Monotone demotion: most restrictive role wins across all aliases
+    if (
+        declared == DataStatus.UNAVAILABLE
+        or any(r in ("UNAVAILABLE", "EXCLUDED", "REJECTED") for r in declared_roles)
+        or "CALIBRATION_FAILED" in pkt_type
+    ):
         return DataStatus.UNAVAILABLE
 
-    if role in ("SIMULATED", "SYNTHETIC", "SCENARIO"):
+    if (
+        declared == DataStatus.SIMULATED
+        or payload.get("simulated") is True
+        or any(r in ("SIMULATED", "SYNTHETIC", "SCENARIO") for r in declared_roles)
+    ):
         return DataStatus.SIMULATED
 
-    if role in ("FORECAST", "ESTIMATED", "DERIVED", "PREDICTION", "MODELLED", "PRIOR"):
-        return DataStatus.ESTIMATED
-
-    if role in ("FALLBACK", "PROXY"):
-        return DataStatus.FALLBACK
-
-    if payload.get("source_reality") == "raster_composite_proxy":
-        return DataStatus.FALLBACK
-
-    if payload.get("production_usable") is False:
-        return DataStatus.FALLBACK
-
     if (
-        payload.get("real_provider_product") is False
-        and payload.get("source_reality") != "provider_daily_statistical_aggregate"
+        declared == DataStatus.FALLBACK
+        or payload.get("fallback") is True
+        or any(r in ("FALLBACK", "PROXY") for r in declared_roles)
+        or payload.get("source_reality") == "raster_composite_proxy"
+        or payload.get("production_usable") is False
+        or (
+            payload.get("real_provider_product") is False
+            and payload.get("source_reality") != "provider_daily_statistical_aggregate"
+        )
+        or payload.get("diagnostic_only") is True
     ):
         return DataStatus.FALLBACK
 
-    if payload.get("diagnostic_only") is True:
-        return DataStatus.FALLBACK
-
-    if payload.get("simulated") is True or declared == DataStatus.SIMULATED:
-        return DataStatus.SIMULATED
-
-    if payload.get("fallback") is True or declared == DataStatus.FALLBACK:
-        return DataStatus.FALLBACK
-
-    if "CALIBRATION_FAILED" in pkt_type:
-        return DataStatus.UNAVAILABLE
-
-    if "FORECAST" in pkt_type or source == ObservationSource.WEATHER_FORECAST:
-        return DataStatus.ESTIMATED
-
-    if "DERIVED" in pkt_type or "ESTIMATED" in pkt_type:
+    if (
+        declared == DataStatus.ESTIMATED
+        or any(r in ("FORECAST", "ESTIMATED", "DERIVED", "PREDICTION", "MODELLED", "PRIOR") for r in declared_roles)
+        or "FORECAST" in pkt_type
+        or source == ObservationSource.WEATHER_FORECAST
+        or "DERIVED" in pkt_type
+        or "ESTIMATED" in pkt_type
+    ):
         return DataStatus.ESTIMATED
 
     return declared or DataStatus.OBSERVED
@@ -294,12 +309,26 @@ def ensure_observation_packet(
         if QAFlag.LOW_CONFIDENCE not in qa_flags:
             qa_flags.append(QAFlag.LOW_CONFIDENCE)
             
-    raw_rel = finite_real(payload.get("reading_reliability"))
-    raw_weight = finite_real(payload.get("reliability_weight"))
-    if raw_rel is not None:
-        rel_val = float(raw_rel)
-    elif raw_weight is not None:
-        rel_val = float(raw_weight)
+    has_explicit_rel = "reading_reliability" in payload
+    has_explicit_weight = "reliability_weight" in payload
+    raw_rel = finite_real(payload.get("reading_reliability")) if has_explicit_rel else None
+    raw_weight = finite_real(payload.get("reliability_weight")) if has_explicit_weight else None
+
+    # Distinguish absent vs invalid explicit reliability (F01-B03)
+    if has_explicit_rel:
+        if raw_rel is not None and 0.0 <= raw_rel <= 1.0:
+            rel_val = float(raw_rel)
+        else:
+            rel_val = 0.0
+            if QAFlag.LOW_CONFIDENCE not in qa_flags:
+                qa_flags.append(QAFlag.LOW_CONFIDENCE)
+    elif has_explicit_weight:
+        if raw_weight is not None and 0.0 <= raw_weight <= 1.0:
+            rel_val = float(raw_weight)
+        else:
+            rel_val = 0.0
+            if QAFlag.LOW_CONFIDENCE not in qa_flags:
+                qa_flags.append(QAFlag.LOW_CONFIDENCE)
     else:
         rel_val = 1.0
 

@@ -384,10 +384,15 @@ class WaterIntelligenceEngine:
         )
 
         # Determine physical authority level
+        RESTRICTED_WATER_TERMS = (
+            "SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED",
+            "FORECAST", "ESTIMATED", "DERIVED", "PREDICTION", "EXCLUDED", "REJECTED", "UNUSABLE"
+        )
         has_observed_probe = (
             "IN_SITU_PROBE_TDR" in assim_diag.assimilated_sensor_sources
-            and not any(term in s.upper() for s in getattr(soil_observations, "provenance_sources", []) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED"))
-            and not any(term in s.upper() for s in assim_diag.assimilated_sensor_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED"))
+            and not any(term in s.upper() for s in getattr(soil_observations, "provenance_sources", []) for term in RESTRICTED_WATER_TERMS)
+            and not any(term in s.upper() for s in assim_diag.assimilated_sensor_sources for term in RESTRICTED_WATER_TERMS)
+            and str(getattr(soil_observations, "role", "OBSERVED")).upper() == "OBSERVED"
         )
         if has_observed_probe:
             authority = WaterPhysicsAuthority.OBSERVED

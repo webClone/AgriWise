@@ -539,13 +539,97 @@ def truth_for_observation_packet(packet: ObservationPacket, package: Optional[An
             diagnostic_only=True,
             state_update_allowed=False,
         )
+    payload = packet.payload if isinstance(packet.payload, dict) else {}
+    declared_roles = [
+        str(payload[k]).upper()
+        for k in ("role", "source_role", "data_role", "status_role", "truth_class")
+        if k in payload and payload[k] is not None
+    ]
+    is_excluded = (
+        packet.data_status.value == "unavailable"
+        or any(r in ("UNAVAILABLE", "EXCLUDED", "REJECTED") for r in declared_roles)
+    )
+    is_simulated = (
+        packet.data_status.value == "simulated"
+        or any(r in ("SIMULATED", "SYNTHETIC", "SCENARIO") for r in declared_roles)
+        or payload.get("simulated") is True
+    )
+    is_fallback = (
+        packet.data_status.value == "fallback"
+        or any(r in ("FALLBACK", "PROXY") for r in declared_roles)
+        or payload.get("source_reality") == "raster_composite_proxy"
+        or payload.get("production_usable") is False
+        or (
+            payload.get("real_provider_product") is False
+            and payload.get("source_reality") != "provider_daily_statistical_aggregate"
+        )
+        or payload.get("diagnostic_only") is True
+    )
+    is_estimated = (
+        packet.data_status.value == "estimated"
+        or any(r in ("FORECAST", "ESTIMATED", "DERIVED", "PREDICTION", "MODELLED", "PRIOR") for r in declared_roles)
+    )
+
+    if is_excluded:
+        return EvidenceTruth(
+            data_status="unavailable",
+            truth_class="unavailable",
+            source_reality="unavailable",
+            real_provider_product=False,
+            production_usable=False,
+            diagnostic_only=True,
+            state_update_allowed=False,
+        )
+
+    if is_simulated:
+        return EvidenceTruth(
+            data_status="simulated",
+            truth_class="simulated_proxy",
+            source_reality="simulated_proxy",
+            real_provider_product=False,
+            production_usable=False,
+            diagnostic_only=True,
+            state_update_allowed=False,
+            visualization_allowed=True,
+            composite_advisory_allowed=True,
+            experimental_visual_allowed=True,
+        )
+
+    if is_fallback:
+        return EvidenceTruth(
+            data_status="fallback",
+            truth_class="raster_composite_proxy",
+            source_reality="raster_composite_proxy",
+            production_usable=False,
+            real_provider_product=False,
+            diagnostic_only=True,
+            state_update_allowed=False,
+            visualization_allowed=True,
+            composite_advisory_allowed=True,
+            experimental_visual_allowed=True,
+        )
+
+    if is_estimated:
+        return EvidenceTruth(
+            data_status="estimated",
+            truth_class="estimated_proxy",
+            source_reality="estimated_proxy",
+            production_usable=True,
+            real_provider_product=False,
+            diagnostic_only=False,
+            state_update_allowed=False,
+            visualization_allowed=True,
+            composite_advisory_allowed=True,
+            experimental_visual_allowed=True,
+        )
+
     is_daily_plot_statistic = (
-        packet.payload.get("source_reality") == "provider_daily_statistical_aggregate"
-        and packet.payload.get("temporal_basis") == "daily_plot_statistic"
+        payload.get("source_reality") == "provider_daily_statistical_aggregate"
+        and payload.get("temporal_basis") == "daily_plot_statistic"
     )
     if is_daily_plot_statistic:
         from layer0.temporal_evidence import is_admitted_temporal_record
-        if is_admitted_temporal_record(packet.payload):
+        if is_admitted_temporal_record(payload):
             return EvidenceTruth(
                 data_status="observed",
                 truth_class="provider_plot_timeseries",
@@ -563,32 +647,9 @@ def truth_for_observation_packet(packet: ObservationPacket, package: Optional[An
                 current_1m_approval_allowed=False,
             )
 
-    is_proxy = (
-        packet.payload.get("source_reality") == "raster_composite_proxy"
-        or packet.payload.get("production_usable") is False
-        or packet.payload.get("real_provider_product") is False
-        or packet.payload.get("diagnostic_only") is True
-        or packet.data_status.value == "fallback"
-        or packet.data_status.value == "simulated"
-        or packet.data_status.value == "unavailable"
-    )
-    if is_proxy:
-        return EvidenceTruth(
-            data_status="fallback",
-            truth_class="raster_composite_proxy",
-            source_reality="raster_composite_proxy",
-            production_usable=False,
-            real_provider_product=False,
-            diagnostic_only=True,
-            state_update_allowed=False,
-            visualization_allowed=True,
-            composite_advisory_allowed=True,
-            experimental_visual_allowed=True,
-        )
-        
     if packet.source.value in ("user_observation", "user_event"):
         return EvidenceTruth(
-            data_status="observed",
+            data_status=packet.data_status.value,
             truth_class="observed_user",
             source_reality="user_observation",
             production_usable=True,

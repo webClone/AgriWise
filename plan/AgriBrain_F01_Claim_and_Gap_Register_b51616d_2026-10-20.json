@@ -1,0 +1,315 @@
+{
+  "candidate": "b51616da5a6f67a7a194439485c7aac71c7396ed",
+  "parent": "40315d95ff875914bd2f83cd1e75d88fdae859ff",
+  "review_date": "2026-10-20",
+  "package": "F01",
+  "verdict": "Partial verified implementation; proceed with the bounded F01 completion batch, keep full acceptance open.",
+  "scope": "Candidate production code against master/addendum/task register and supplied R3; repository tests, historical audits and generated artifacts excluded as correctness evidence.",
+  "review_streams": {
+    "assigned": 6,
+    "independently_completed_final_reports": 3,
+    "root_completed_narratives_from_existing_scripts_and_results": 3,
+    "lanes": [
+      "ledger",
+      "platform",
+      "decision",
+      "ownership",
+      "trajectory",
+      "protocol"
+    ]
+  },
+  "package_requirements": [
+    "AB-DAT-005",
+    "AB-DAT-006",
+    "AB-ARC-005",
+    "AB-ARC-006"
+  ],
+  "full_acceptance": {
+    "total": 52,
+    "open": 52,
+    "checked": 0,
+    "modified": false
+  },
+  "credited_slices": [
+    "Temporal finite-real and zero admission",
+    "Individual wrapper role aliases",
+    "Explicit zero reliability",
+    "Excluded probe rejection",
+    "Simulated/synthetic water probes retain ASSIMILATED, not OBSERVED",
+    "Strong typed numeric/variance guards and zero roundtrip"
+  ],
+  "previous_findings": {
+    "R51901": "Retain prior reviewed software closure; relevant targets unchanged; no fresh runtime rerun.",
+    "R51902": "Retain prior reviewed software closure; relevant targets unchanged; no fresh runtime rerun."
+  },
+  "findings": [
+    {
+      "id": "F01-B01",
+      "priority": "P1",
+      "title": "Quantitative component qualification incomplete",
+      "status": "OPEN_REPRODUCED",
+      "introduced_by_candidate": "Not established; most involved consumers unchanged",
+      "lanes": [
+        "ledger",
+        "platform",
+        "ownership"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Actual Layer1 accepts bool/malformed numeric components; actual crop feature/token generation accepts bool reflectance/temperature.",
+      "limitation": "No full fusion posterior, crop classifier or optimizer executed.",
+      "acceptance": "Target-aware component qualification before authority/arithmetic; preserve valid zeros, siblings, boolean QA and categories.",
+      "targets": [
+        "services/agribrain/layer1_fusion/evidence_validation.py",
+        "services/agribrain/layer1_fusion/adapters/observation_packet.py",
+        "services/agribrain/layer2_veg_int/crop_observations.py"
+      ],
+      "evidence": [
+        "review-b51616d-f01/ledger/results.json",
+        "review-b51616d-f01/platform/results.json",
+        "review-b51616d-f01/ownership/results.json"
+      ]
+    },
+    {
+      "id": "F01-B02",
+      "priority": "P1",
+      "title": "Restrictive roles promoted across adapters/truth/features",
+      "status": "OPEN_REPRODUCED",
+      "introduced_by_candidate": "Not established; most involved consumers unchanged",
+      "lanes": [
+        "ledger",
+        "platform",
+        "ownership",
+        "trajectory"
+      ],
+      "requirements": [
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Conflicting aliases/daily-statistic truth pass non-observation roles as observed/state-eligible; weather/crop feature roles also lost.",
+      "limitation": "Confidence ceilings, weather forcing-only and user-source state-update-false controls survive; no blanket authority claim.",
+      "acceptance": "Monotone role and permission merging before source shortcuts; role propagation into generated features.",
+      "targets": [
+        "services/agribrain/layer0/wrappers.py",
+        "services/agribrain/layer1_fusion/truth_bridge.py",
+        "services/agribrain/layer1_fusion/adapters/observation_packet.py",
+        "services/agribrain/layer2_veg_int/crop_observations.py"
+      ],
+      "evidence": [
+        "review-b51616d-f01/ledger/results.json",
+        "review-b51616d-f01/platform/results.json",
+        "review-b51616d-f01/ownership/results.json",
+        "review-b51616d-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "F01-B03",
+      "priority": "P2",
+      "title": "Invalid explicit reliability defaults to one",
+      "status": "OPEN_REPRODUCED",
+      "introduced_by_candidate": "Not established; most involved consumers unchanged",
+      "lanes": [
+        "platform",
+        "ownership",
+        "trajectory"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Dictionary NaN/Inf/bool/string reliability normalizes to1; actual effective weight/admission positive.",
+      "limitation": "Explicit0 survives; typed nonfinite quality is rejected later; weighting multiplication itself not a finding.",
+      "acceptance": "Separate absent from invalid quality; reject or zero invalid supplied reliability with receipt.",
+      "targets": [
+        "services/agribrain/layer0/wrappers.py",
+        "services/agribrain/layer0/observation_packet.py"
+      ],
+      "evidence": [
+        "review-b51616d-f01/platform/results.json",
+        "review-b51616d-f01/ownership/results.json",
+        "review-b51616d-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "F01-B04",
+      "priority": "P1",
+      "title": "Water component roles and history qualification incomplete",
+      "status": "OPEN_REPRODUCED",
+      "introduced_by_candidate": "Not established; most involved consumers unchanged",
+      "lanes": [
+        "decision"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Forecast probe becomes OBSERVED with +89.70mm analysis; excluded satellite changes state +33.43mm; isolated history helper drops SIMULATED/zero reliability before water engine.",
+      "limitation": "Actual full water runner executed; history seam is exact isolated helpers, not full durable L3 integration.",
+      "acceptance": "Per-component probe/satellite/thermal role/reliability carrier, admission receipts, authority from actual admitted components, versioned history migration.",
+      "targets": [
+        "services/agribrain/layer3_water/assimilation/water_state_assimilator.py",
+        "services/agribrain/layer3_water/runner.py",
+        "services/agribrain/layer3_decision/runner.py",
+        "services/agribrain/layer3_water/contracts/assimilation_state.py"
+      ],
+      "evidence": [
+        "review-b51616d-f01/decision/results.json"
+      ]
+    },
+    {
+      "id": "F01-B05",
+      "priority": "P1",
+      "title": "Malformed weak-label targets receive positive weight",
+      "status": "OPEN_REPRODUCED",
+      "introduced_by_candidate": "Not established; most involved consumers unchanged",
+      "lanes": [
+        "trajectory"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Actual exporter assigns vigor NaN/Inf/bool training_weight0.30; actual Layer1 diagnostic consumes weights.",
+      "limitation": "Declared upstream eligibility fixture, no upstream EnKF/empirical holdout/optimizer; diagnostic-only/state-update-false retained.",
+      "acceptance": "Target validation before export/rounding and consumption; invalid target weight0 with reason; retain mode/authority controls.",
+      "targets": [
+        "services/agribrain/layer05_asmae/training/exporter.py",
+        "services/agribrain/layer1_fusion/adapters/asmae_adapter.py"
+      ],
+      "evidence": [
+        "review-b51616d-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "F01-B06",
+      "priority": "P1",
+      "title": "Validated supervised view emits malformed continuous targets",
+      "status": "OPEN_REPRODUCED",
+      "introduced_by_candidate": "Not established; most involved consumers unchanged",
+      "lanes": [
+        "trajectory"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Actual writer/schema/disagreement/candidate/view chain approves NaN/bool/string vigor and boolean confidence; approval generated by production code.",
+      "limitation": "Private Python/JSONL composition, no HTTP reachability/fitting/deployed model claim; legitimate categorical strings remain allowed by schema.",
+      "acceptance": "Target/unit-aware event contracts, finite nonboolean confidence, read/write validation and append-only legacy quarantine.",
+      "targets": [
+        "services/agribrain/asmae_learn/schemas.py",
+        "services/agribrain/asmae_learn/disagreement.py",
+        "services/agribrain/asmae_learn/candidate_builder.py",
+        "services/agribrain/asmae_learn/dataset_builder.py"
+      ],
+      "evidence": [
+        "review-b51616d-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "F01-B07",
+      "priority": "P2",
+      "title": "Contained RF internal numeric/role admission gap",
+      "status": "OPEN_REPRODUCED",
+      "introduced_by_candidate": "Not established; most involved consumers unchanged",
+      "lanes": [
+        "protocol"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Explicitly qualified internal bridge admits nonfinite/bool SNR, NaN support/covariance and non-SENSING roles with state-eligible event.",
+      "limitation": "Visible service calibrationfalse/epochfalse blocks; no actual calibration, deployed posterior, training/prescription/execution authority or field activity.",
+      "acceptance": "Numeric/support/covariance and role qualification before ADMITTED/state-eligible event; retain diagnostics and service containment.",
+      "targets": [
+        "services/agribrain/mesia/behaviour/feature_extraction.py",
+        "services/agribrain/mesia/behaviour/likelihood_engine.py",
+        "services/agribrain/mesia/assimilation/asmae_operator.py",
+        "services/agribrain/mesia/assimilation/layer0_spine.py",
+        "services/agribrain/mesia/ontology/evidence_roles.py",
+        "services/agribrain/mesia/service.py"
+      ],
+      "evidence": [
+        "review-b51616d-f01/protocol/results.json"
+      ]
+    }
+  ],
+  "deduplication": {
+    "ledger:F01-R1": [
+      "F01-B02"
+    ],
+    "ledger:F01-R2": [
+      "F01-B01"
+    ],
+    "platform:role_conflict": [
+      "F01-B02"
+    ],
+    "platform:invalid_reliability": [
+      "F01-B03"
+    ],
+    "platform:invalid_quantitative": [
+      "F01-B01"
+    ],
+    "decision:D1": [
+      "F01-B04"
+    ],
+    "decision:D2": [
+      "F01-B04"
+    ],
+    "decision:D3": [
+      "F01-B04"
+    ],
+    "ownership:numeric": [
+      "F01-B01"
+    ],
+    "ownership:role": [
+      "F01-B02"
+    ],
+    "ownership:quality": [
+      "F01-B03"
+    ],
+    "trajectory:F01-T01": [
+      "F01-B05"
+    ],
+    "trajectory:F01-T02": [
+      "F01-B06"
+    ],
+    "trajectory:F01-T03": [
+      "F01-B03"
+    ],
+    "trajectory:F01-T04": [
+      "F01-B02"
+    ],
+    "protocol:numeric_and_role": [
+      "F01-B07"
+    ]
+  },
+  "exclusions": [
+    "No full repository suite rerun/adopted as proof",
+    "No production or Git edits",
+    "No live provider/service/controller/radio/drone/field operation",
+    "No actual model fitting or trained model effect",
+    "No full fusion posterior; RF service containment retained",
+    "No universal F02/cutoff or whole-repository certification"
+  ],
+  "next_batch": [
+    "Target-aware admission receipt and numeric/quality policy",
+    "Monotone roles and permissions across wrappers/truth/features",
+    "Water carrier/history migration with component receipts",
+    "Weather/crop consumer parity",
+    "Weak and supervised training write/read guards",
+    "Contained RF role/scalar guards",
+    "One bounded actual-consumer acceptance matrix with positive controls"
+  ]
+}

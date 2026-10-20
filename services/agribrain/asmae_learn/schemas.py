@@ -1,4 +1,8 @@
 from __future__ import annotations
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 import hashlib
 import json
 from dataclasses import dataclass, field, asdict
@@ -76,9 +80,25 @@ class ValidationEvent:
     event_hash: str = ""
 
     def __post_init__(self):
-        # 0. Validate confidence range
-        if self.confidence is None or not (0.0 <= self.confidence <= 1.0):
-            raise ValueError("confidence must be between 0.0 and 1.0")
+        # 0. Validate confidence range and numeric types
+        fin_conf = finite_real(self.confidence)
+        if fin_conf is None or not (0.0 <= fin_conf <= 1.0):
+            raise ValueError(f"confidence must be a finite real between 0.0 and 1.0, got: {self.confidence!r}")
+        self.confidence = fin_conf
+
+        CONTINUOUS_TARGET_VARIABLES = {
+            "vigor",
+            "canopy_water",
+            "salinity_stress",
+            "yield_observed",
+        }
+        if self.target_variable in CONTINUOUS_TARGET_VARIABLES:
+            fin_val = finite_real(self.observed_value)
+            if fin_val is None:
+                raise ValueError(
+                    f"Continuous target variable '{self.target_variable}' requires a finite real number, got: {self.observed_value!r}"
+                )
+            self.observed_value = fin_val
 
         # 1. Plot and geometry hash validation
         if not self.plot_id or not self.plot_id.strip():

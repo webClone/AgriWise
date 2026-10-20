@@ -20,6 +20,11 @@ from __future__ import annotations
 import math
 from typing import List
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
 from .schemas import (
     CANONICAL_UNITS,
     EvidenceItem,
@@ -116,11 +121,7 @@ def validate_evidence(item: EvidenceItem) -> List[str]:
     if not item.provenance_ref:
         violations.append("MISSING_PROVENANCE_REF")
 
-    # NaN/Inf check on numeric values
-    if isinstance(item.value, float) and (math.isnan(item.value) or math.isinf(item.value)):
-        violations.append(f"NAN_INF_VALUE:{item.value}")
-
-    # Physical value bounds for known variables
+    # Physical value bounds and numeric qualification for known variables
     _BOUNDS = {
         "ndvi": (-1.0, 1.0), "ndmi": (-1.0, 1.0), "ndre": (-1.0, 1.0),
         "evi": (-1.0, 1.0), "bsi": (-1.0, 1.0),
@@ -140,12 +141,27 @@ def validate_evidence(item: EvidenceItem) -> List[str]:
         "ec": (0.0, 20.0),
         "soil_temperature": (-40.0, 60.0),
     }
-    if isinstance(item.value, (int, float)) and item.variable in _BOUNDS:
-        lo, hi = _BOUNDS[item.variable]
-        if item.value < lo or item.value > hi:
-            violations.append(
-                f"VALUE_OUT_OF_BOUNDS:{item.variable}={item.value:.4f} not in [{lo},{hi}]"
-            )
+
+    if item.variable in _BOUNDS:
+        if isinstance(item.value, bool):
+            violations.append(f"BOOLEAN_VALUE_DISALLOWED:{item.variable}={item.value}")
+        else:
+            val = finite_real(item.value)
+            if val is None:
+                violations.append(f"NON_FINITE_OR_MALFORMED_VALUE:{item.variable}={item.value!r}")
+            else:
+                lo, hi = _BOUNDS[item.variable]
+                if val < lo or val > hi:
+                    violations.append(
+                        f"VALUE_OUT_OF_BOUNDS:{item.variable}={val:.4f} not in [{lo},{hi}]"
+                    )
+    else:
+        # General non-finite check for other numeric items
+        if isinstance(item.value, bool):
+            if item.observation_type in ("measurement", "model_estimate", "derived_feature", "state_estimate"):
+                violations.append(f"BOOLEAN_VALUE_DISALLOWED:{item.variable}={item.value}")
+        elif isinstance(item.value, float) and (math.isnan(item.value) or math.isinf(item.value)):
+            violations.append(f"NAN_INF_VALUE:{item.value}")
 
     return violations
 

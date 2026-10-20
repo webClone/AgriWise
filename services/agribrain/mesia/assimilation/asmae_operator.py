@@ -1,10 +1,14 @@
+from __future__ import annotations
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 """MESIA ASMAE Observation Operator — R6 §11.6 / P9.6.
 
 Translates qualified BehaviourLikelihood proposals into state innovations and observation
 covariances for ASMAE assimilation while strictly enforcing Principle P-08.
 """
 
-from __future__ import annotations
 
 import hashlib
 import json
@@ -68,14 +72,13 @@ class ASMAEObservationOperator:
         if likelihood.authority_scope != "evidence_proposal":
             raise ValueError(f"Principle P-08 violation: MESIA authority_scope must be 'evidence_proposal', got {likelihood.authority_scope}")
 
-        if likelihood.innovation is not None:
-            innovation = float(likelihood.innovation)
-        else:
-            # Missingness preservation: absent observation has None innovation
-            innovation = None
+        fin_innov = finite_real(likelihood.innovation)
+        fin_cov = finite_real(likelihood.covariance)
+        fin_support = finite_real(likelihood.support)
 
-        variance = likelihood.covariance if likelihood.covariance is not None else 0.25
-        support = float(likelihood.support) if likelihood.support is not None else 0.0
+        innovation = float(fin_innov) if fin_innov is not None else None
+        variance = float(fin_cov) if (fin_cov is not None and fin_cov > 0.0) else (None if fin_cov is not None else 0.25)
+        support = float(fin_support) if (fin_support is not None and fin_support > 0.0) else 0.0
 
         now = datetime.now(timezone.utc)
 
