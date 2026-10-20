@@ -58,10 +58,12 @@ def validate_evidence(item: EvidenceItem) -> List[str]:
     if item.unit is not None and item.unit not in CANONICAL_UNITS:
         violations.append(f"NON_CANONICAL_UNIT:{item.unit}")
 
-    # Confidence bounds
-    if not (0.0 <= item.confidence <= 1.0):
+    # Confidence and reliability bounds: strictly finite real and non-boolean
+    fin_conf = finite_real(item.confidence)
+    if fin_conf is None or not (0.0 <= fin_conf <= 1.0):
         violations.append(f"CONFIDENCE_OUT_OF_BOUNDS:{item.confidence}")
-    if not (0.0 <= item.reliability <= 1.0):
+    fin_rel = finite_real(item.reliability)
+    if fin_rel is None or not (0.0 <= fin_rel <= 1.0):
         violations.append(f"RELIABILITY_OUT_OF_BOUNDS:{item.reliability}")
 
     # Check data_status is set and valid
@@ -78,7 +80,7 @@ def validate_evidence(item: EvidenceItem) -> List[str]:
             violations.append(f"{status.upper()}_CONFIDENCE_EXCEEDS_CEILING:{item.confidence}")
 
         # Behavioral rules
-        if status == "simulated":
+        if status in ("simulated", "reconstruction"):
             if not item.diagnostic_only or item.state_update_allowed:
                 violations.append("SIMULATED_DATA_MUST_BE_DIAGNOSTIC_AND_NOT_STATE_UPDATE")
         elif status == "unavailable":
@@ -142,14 +144,40 @@ def validate_evidence(item: EvidenceItem) -> List[str]:
         "soil_temperature": (-40.0, 60.0),
     }
 
-    if item.variable in _BOUNDS:
+    _QUANTITATIVE_VARIABLES = frozenset({
+        "soil_clay_pct", "soil_sand_pct", "soil_silt_pct",
+        "soil_organic_carbon", "soil_ph", "soil_cec",
+        "soil_bulk_density", "elevation", "slope", "aspect",
+        "wapor_et", "wapor_aet", "wapor",
+        "soil_moisture", "soil_moisture_vwc",
+    })
+
+    NUMERIC_UNITS = {
+        "degC", "fraction", "percent", "mm", "mm_day", "m_s", "kPa",
+        "dS_m", "pH", "kg_ha", "W_m2", "umol_m2_s", "dBm", "dB",
+        "m2", "m", "cm", "L", "L_min", "deg", "min", "bar", "V",
+        "mm_h", "ratio", "score", "index", "count", "linear_power", "db",
+    }
+
+    is_quantitative = (
+        item.variable in _BOUNDS
+        or item.variable in _QUANTITATIVE_VARIABLES
+        or (item.unit is not None and item.unit in NUMERIC_UNITS)
+        or (
+            item.observation_type in ("measurement", "model_estimate", "state_estimate", "derived_feature")
+            and item.unit not in ("bool", "class")
+            and item.variable not in ("crop_stage", "variety", "texture_class", "soil_texture_class", "landcover", "land_use", "cropland")
+        )
+    )
+
+    if is_quantitative:
         if isinstance(item.value, bool):
             violations.append(f"BOOLEAN_VALUE_DISALLOWED:{item.variable}={item.value}")
         else:
             val = finite_real(item.value)
             if val is None:
                 violations.append(f"NON_FINITE_OR_MALFORMED_VALUE:{item.variable}={item.value!r}")
-            else:
+            elif item.variable in _BOUNDS:
                 lo, hi = _BOUNDS[item.variable]
                 if val < lo or val > hi:
                     violations.append(

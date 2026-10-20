@@ -2,6 +2,10 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any, Dict, List, Optional
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
 from asmae_learn.schemas import ValidationEvent
 from asmae_learn.disagreement import check_disagreement
 
@@ -72,22 +76,26 @@ def build_learning_candidate(run_record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
     # Zero-eligibility checks
-    res_m = run_record.get("diagnostics", {}).get("resolution_selected_m") or run_record.get("resolution_m", 10.0)
-    if res_m <= 1.0 or candidate["target_variable"] == "vigor" and res_m <= 1.0:
+    diagnostics = run_record.get("diagnostics", {})
+    raw_res = diagnostics.get("resolution_selected_m") or run_record.get("resolution_m", 10.0)
+    res_m = finite_real(raw_res)
+    if res_m is None or res_m <= 0.0:
+        candidate["eligible"] = False
+        candidate["blocked_reasons"].append("invalid_resolution")
+    elif res_m <= 1.0 or (candidate["target_variable"] == "vigor" and res_m <= 1.0):
         candidate["candidate_type"] = "1m_certification_candidate"
         candidate["learning_candidate_status"] = "pending_1m_candidate"
         candidate["eligible"] = False
         candidate["blocked_reasons"].append("no_v86_certified_1m_status")
 
-    if run_record.get("visual_only") or run_record.get("diagnostics", {}).get("visual_only"):
+    if run_record.get("visual_only") or diagnostics.get("visual_only"):
         candidate["eligible"] = False
         candidate["blocked_reasons"].append("visual_only_asmae")
-    if run_record.get("diagnostic_only") or run_record.get("diagnostics", {}).get("diagnostic_only"):
+    if run_record.get("diagnostic_only") or diagnostics.get("diagnostic_only"):
         candidate["eligible"] = False
         candidate["blocked_reasons"].append("diagnostic_only_asmae")
 
     # BMA status
-    diagnostics = run_record.get("diagnostics", {})
     bma_status = diagnostics.get("bma_status") if "bma_status" in diagnostics else run_record.get("bma_status")
     if bma_status is None:
         candidate["eligible"] = False
@@ -108,39 +116,41 @@ def build_learning_candidate(run_record: Dict[str, Any]) -> Dict[str, Any]:
     candidate["retro_status"] = retro_status
 
     # Uncertainty
-    uncertainty = diagnostics.get("uncertainty") if "uncertainty" in diagnostics else run_record.get("uncertainty")
-    if uncertainty is None:
+    raw_uncertainty = diagnostics.get("uncertainty") if "uncertainty" in diagnostics else run_record.get("uncertainty")
+    if raw_uncertainty is None:
         candidate["eligible"] = False
         candidate["blocked_reasons"].append("missing_uncertainty")
+        candidate["uncertainty"] = None
     else:
-        try:
-            uncertainty = float(uncertainty)
-        except Exception:
-            pass
-        if not isinstance(uncertainty, (int, float)) or uncertainty > 0.4:
+        uncertainty = finite_real(raw_uncertainty)
+        if uncertainty is None or uncertainty < 0.0 or uncertainty > 0.4:
             candidate["eligible"] = False
-            candidate["blocked_reasons"].append("uncertainty_above_threshold")
-    candidate["uncertainty"] = uncertainty
+            if uncertainty is not None and uncertainty > 0.4:
+                candidate["blocked_reasons"].append("uncertainty_above_threshold")
+            else:
+                candidate["blocked_reasons"].append("invalid_or_unqualified_uncertainty")
+        candidate["uncertainty"] = uncertainty
 
     # Retro score
-    retro_score = None
+    raw_retro = None
     if "retro_mean_score" in diagnostics:
-        retro_score = diagnostics["retro_mean_score"]
+        raw_retro = diagnostics["retro_mean_score"]
     elif "retrovalidation_score" in run_record:
-        retro_score = run_record["retrovalidation_score"]
+        raw_retro = run_record["retrovalidation_score"]
 
-    if retro_score is None:
+    if raw_retro is None:
         candidate["eligible"] = False
         candidate["blocked_reasons"].append("missing_retro_score")
+        candidate["retro_score"] = None
     else:
-        try:
-            retro_score = float(retro_score)
-        except Exception:
-            pass
-        if not isinstance(retro_score, (int, float)) or retro_score < 0.7:
+        retro_score = finite_real(raw_retro)
+        if retro_score is None or retro_score < 0.7 or retro_score > 1.0:
             candidate["eligible"] = False
-            candidate["blocked_reasons"].append("retro_score_below_threshold")
-    candidate["retro_score"] = retro_score
+            if retro_score is not None and retro_score < 0.7:
+                candidate["blocked_reasons"].append("retro_score_below_threshold")
+            else:
+                candidate["blocked_reasons"].append("invalid_or_unqualified_retro_score")
+        candidate["retro_score"] = retro_score
 
     if candidate["validation_trust_score"] < 0.5:
         candidate["eligible"] = False

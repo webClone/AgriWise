@@ -17,6 +17,11 @@ from layer1_fusion.schemas import (
     SourceEnvelope,
 )
 
+try:
+    from scientific_contracts.numeric import finite_real
+except (ImportError, ModuleNotFoundError):
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
 
 def asmae_audit_allowed(output: Dict[str, Any]) -> bool:
     """Audit is always allowed if output has a run_id and diagnostics."""

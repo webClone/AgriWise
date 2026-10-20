@@ -30,8 +30,8 @@ class SoilObservationVector:
     observation_uncertainties: Dict[str, float] = field(default_factory=dict)
     provenance_sources: List[str] = field(default_factory=list)
     role: str = "OBSERVED"
-    reading_reliability: float = 1.0
-    reliability_weight: float = 1.0
+    reading_reliability: Optional[float] = None
+    reliability_weight: Optional[float] = None
     component_roles: Dict[str, str] = field(default_factory=dict)
     component_reliabilities: Dict[str, float] = field(default_factory=dict)
 

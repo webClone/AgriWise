@@ -21,6 +21,11 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 import hashlib
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
 from services.agribrain.layer0.perception.common.contracts import (
     PerceptionEngineFamily,
     PerceptionEngineOutput,
@@ -158,11 +163,14 @@ def to_observation_packets(
         effective_sigma = var.sigma * output.sigma_inflation
 
         # Reliability bounded by QA and variable confidence
-        reliability = min(
-            output.reliability_weight,
-            var.confidence,
-        )
-        reliability = max(0.05, min(1.0, reliability))
+        fin_weight = finite_real(output.reliability_weight)
+        fin_conf = finite_real(var.confidence)
+        if fin_weight is None or fin_conf is None or fin_weight < 0.0 or fin_conf < 0.0:
+            reliability = 0.0
+        elif fin_weight == 0.0 or fin_conf == 0.0:
+            reliability = 0.0
+        else:
+            reliability = max(0.0, min(1.0, min(fin_weight, fin_conf)))
 
         # Build QA metadata for this packet
         qa_meta = QAMetadata(

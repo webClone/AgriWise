@@ -92,7 +92,15 @@ class ValidationEvent:
             "salinity_stress",
             "yield_observed",
         }
-        if self.target_variable in CONTINUOUS_TARGET_VARIABLES:
+        is_continuous = (
+            self.target_variable in CONTINUOUS_TARGET_VARIABLES
+            or (
+                self.target_variable == "biotic_confounder"
+                and getattr(self, "observed_unit", None) in ("fraction", "unitless", "ratio", "percent")
+                and not (isinstance(self.observed_value, str) and self.observed_value.lower() in ("low", "medium", "high"))
+            )
+        )
+        if is_continuous:
             fin_val = finite_real(self.observed_value)
             if fin_val is None:
                 raise ValueError(

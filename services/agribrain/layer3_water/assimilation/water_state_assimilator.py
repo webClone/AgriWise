@@ -47,6 +47,18 @@ class WaterStateAssimilator:
         return P
 
     @classmethod
+    def _resolve_role(cls, global_role: str, comp_role: Optional[str]) -> str:
+        g_upper = str(global_role).upper()
+        c_upper = str(comp_role).upper() if comp_role else ""
+        if g_upper in ("REJECTED", "EXCLUDED", "UNUSABLE") or c_upper in ("REJECTED", "EXCLUDED", "UNUSABLE"):
+            return "EXCLUDED"
+        if g_upper in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"):
+            return "SIMULATED"
+        if c_upper in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"):
+            return "SIMULATED"
+        return "OBSERVED"
+
+    @classmethod
     def assimilate_observations(
         cls,
         prior_soil: SoilWaterState,
@@ -94,10 +106,35 @@ class WaterStateAssimilator:
         sources = []
         rejected = []
 
-        def add_observation(idx: int, raw_value: Any, raw_sigma: Any, source: str, role: str = "OBSERVED", reliability: float = 1.0) -> bool:
+        def _resolve_quality(component_val: Any, reading_val: Any, weight_val: Any) -> Optional[float]:
+            candidates = [component_val, reading_val, weight_val]
+            specified = [c for c in candidates if c is not None]
+            if not specified:
+                return 1.0
+            valid_floats = []
+            for c in specified:
+                fin = finite_real(c)
+                if fin is None:
+                    return None
+                if fin <= 0.0:
+                    return 0.0
+                valid_floats.append(fin)
+            return min(valid_floats)
+
+        def _resolve_role(global_role: str, comp_role: Optional[str]) -> str:
+            g_upper = str(global_role).upper()
+            c_upper = str(comp_role).upper() if comp_role else ""
+            if g_upper in ("REJECTED", "EXCLUDED", "UNUSABLE") or c_upper in ("REJECTED", "EXCLUDED", "UNUSABLE"):
+                return "EXCLUDED"
+            if g_upper in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"):
+                return "SIMULATED"
+            if c_upper in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"):
+                return "SIMULATED"
+            return "OBSERVED"
+
+        def add_observation(idx: int, raw_value: Any, raw_sigma: Any, source: str, role: str = "OBSERVED", reliability: Any = 1.0) -> bool:
             value = finite_real(raw_value)
             sigma = finite_real(raw_sigma)
-            rel = finite_real(reliability)
             reason = None
             if value is None:
                 reason = "missing_or_non_finite_value"
@@ -110,8 +147,15 @@ class WaterStateAssimilator:
                 reason = "outside_soil_moisture_range"
             elif str(role).upper() in ("REJECTED", "EXCLUDED", "UNUSABLE"):
                 reason = "explicitly_excluded_role"
-            elif rel is not None and rel <= 0.0:
-                reason = "zero_reliability"
+            else:
+                if reliability is None:
+                    reason = "invalid_observation_reliability"
+                else:
+                    rel = finite_real(reliability)
+                    if rel is None:
+                        reason = "invalid_observation_reliability"
+                    elif rel <= 0.0:
+                        reason = "zero_reliability"
             if reason:
                 rejected.append({
                     "source": source, "layer_index": idx, "reason": reason,
@@ -127,35 +171,38 @@ class WaterStateAssimilator:
             return True
 
         vec_role = getattr(observations, "role", "OBSERVED")
-        comp_roles = getattr(observations, "component_roles", {})
-        vec_rel = getattr(observations, "reliability_weight", None)
-        if vec_rel is None:
-            vec_rel = getattr(observations, "reading_reliability", 1.0)
-        comp_rels = getattr(observations, "component_reliabilities", {})
+        comp_roles = getattr(observations, "component_roles", {}) or {}
+        comp_rels = getattr(observations, "component_reliabilities", {}) or {}
+        reading_rel = getattr(observations, "reading_reliability", None)
+        weight_rel = getattr(observations, "reliability_weight", None)
 
         # 1. In-situ probe profile observations
         if observations.soil_probe_moisture_profile:
             probe_vals = observations.soil_probe_moisture_profile
             probe_sigma = observations.observation_uncertainties.get("soil_probe", 0.015)
-            probe_source = observations.provenance_sources[0] if observations.provenance_sources else "IN_SITU_PROBE_TDR"
-            probe_role_override = comp_roles.get("soil_probe") or comp_roles.get("probe") or vec_role
-            probe_rel = comp_rels.get("soil_probe", comp_rels.get("probe", vec_rel))
-
-            is_excluded = (
-                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
-                or str(probe_role_override).upper() in ("REJECTED", "EXCLUDED", "UNUSABLE")
-            )
-            is_simulated = (
-                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
-                or any(term in probe_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
-                or str(probe_role_override).upper() in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")
-            )
-            if is_excluded:
+            probe_sources = [
+                s for s in getattr(observations, "provenance_sources", [])
+                if any(k in s.upper() for k in ("PROBE", "TDR", "IN_SITU", "CAPACITANCE", "SENSOR"))
+            ]
+            if not probe_sources:
+                probe_sources = [
+                    s for s in getattr(observations, "provenance_sources", [])
+                    if not any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1", "THERMAL", "CANOPY_COOLING", "RADIOMETER", "FLUX"))
+                ]
+            probe_source = probe_sources[0] if probe_sources else (observations.provenance_sources[0] if observations.provenance_sources else "IN_SITU_PROBE_TDR")
+            probe_role_comp = comp_roles.get("soil_probe") or comp_roles.get("probe")
+            probe_role = _resolve_role(vec_role, probe_role_comp)
+            if any(term in s.upper() for s in probe_sources for term in ("REJECTED", "EXCLUDED", "UNUSABLE")) or any(term in probe_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE")):
                 probe_role = "EXCLUDED"
-            elif is_simulated:
-                probe_role = "SIMULATED"
-            else:
-                probe_role = "OBSERVED"
+            elif any(term in s.upper() for s in probe_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")) or any(term in probe_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")):
+                if probe_role != "EXCLUDED":
+                    probe_role = "SIMULATED"
+
+            probe_rel = _resolve_quality(
+                comp_rels.get("soil_probe", comp_rels.get("probe")),
+                reading_rel,
+                weight_rel,
+            )
             for idx in range(min(n_layers, len(probe_vals))):
                 add_observation(idx, probe_vals[idx], probe_sigma, probe_source, role=probe_role, reliability=probe_rel)
 
@@ -164,29 +211,23 @@ class WaterStateAssimilator:
             sat_val = observations.satellite_surface_moisture_m3_m3
             sat_sigma = observations.observation_uncertainties.get("satellite_smap", 0.040)
             sat_source = "SATELLITE_SMAP_SENTINEL1"
-            for s in getattr(observations, "provenance_sources", []):
-                if any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1")):
-                    sat_source = s
-                    break
+            sat_sources = [s for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1"))]
+            if sat_sources:
+                sat_source = sat_sources[0]
 
-            sat_role_override = comp_roles.get("satellite") or vec_role
-            sat_rel = comp_rels.get("satellite", vec_rel)
-            sat_excluded = (
-                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1")) for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
-                or str(sat_role_override).upper() in ("REJECTED", "EXCLUDED", "UNUSABLE")
-                or any(term in sat_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
-            )
-            sat_simulated = (
-                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1")) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
-                or str(sat_role_override).upper() in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")
-                or any(term in sat_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
-            )
-            if sat_excluded:
+            sat_role_comp = comp_roles.get("satellite")
+            sat_role = _resolve_role(vec_role, sat_role_comp)
+            if any(term in s.upper() for s in sat_sources for term in ("REJECTED", "EXCLUDED", "UNUSABLE")) or any(term in sat_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE")):
                 sat_role = "EXCLUDED"
-            elif sat_simulated:
-                sat_role = "SIMULATED"
-            else:
-                sat_role = "OBSERVED"
+            elif any(term in s.upper() for s in sat_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")) or any(term in sat_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")):
+                if sat_role != "EXCLUDED":
+                    sat_role = "SIMULATED"
+
+            sat_rel = _resolve_quality(
+                comp_rels.get("satellite"),
+                reading_rel,
+                weight_rel,
+            )
             add_observation(0, sat_val, sat_sigma, sat_source, role=sat_role, reliability=sat_rel)
 
         # 3. Thermal cooling differential proxy (Upper root zone constraint)
@@ -196,29 +237,23 @@ class WaterStateAssimilator:
             fc = prior_soil.field_capacity_profile[target_idx]
             wp = prior_soil.wilting_point_profile[target_idx]
             thermal_source = "THERMAL_CANOPY_COOLING_SURROGATE"
-            for s in getattr(observations, "provenance_sources", []):
-                if any(k in s.upper() for k in ("THERMAL", "CANOPY_COOLING", "RADIOMETER")):
-                    thermal_source = s
-                    break
+            thermal_sources = [s for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("THERMAL", "CANOPY_COOLING", "RADIOMETER"))]
+            if thermal_sources:
+                thermal_source = thermal_sources[0]
 
-            thermal_role_override = comp_roles.get("thermal") or vec_role
-            thermal_rel = comp_rels.get("thermal", vec_rel)
-            thermal_excluded = (
-                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("THERMAL", "CANOPY_COOLING")) for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
-                or str(thermal_role_override).upper() in ("REJECTED", "EXCLUDED", "UNUSABLE")
-                or any(term in thermal_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE"))
-            )
-            thermal_simulated = (
-                any(term in s.upper() for s in getattr(observations, "provenance_sources", []) if any(k in s.upper() for k in ("THERMAL", "CANOPY_COOLING")) for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
-                or str(thermal_role_override).upper() in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")
-                or any(term in thermal_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED"))
-            )
-            if thermal_excluded:
+            thermal_role_comp = comp_roles.get("thermal")
+            thermal_role = _resolve_role(vec_role, thermal_role_comp)
+            if any(term in s.upper() for s in thermal_sources for term in ("REJECTED", "EXCLUDED", "UNUSABLE")) or any(term in thermal_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE")):
                 thermal_role = "EXCLUDED"
-            elif thermal_simulated:
-                thermal_role = "SIMULATED"
-            else:
-                thermal_role = "OBSERVED"
+            elif any(term in s.upper() for s in thermal_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")) or any(term in thermal_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")):
+                if thermal_role != "EXCLUDED":
+                    thermal_role = "SIMULATED"
+
+            thermal_rel = _resolve_quality(
+                comp_rels.get("thermal"),
+                reading_rel,
+                weight_rel,
+            )
 
             if dt is None:
                 rejected.append({

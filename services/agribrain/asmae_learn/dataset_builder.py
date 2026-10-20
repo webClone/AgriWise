@@ -167,11 +167,14 @@ def build_validated_training_view(ledger_path: Optional[Path] = None) -> List[Di
             continue
 
         fin_conf = finite_real(target_confidence)
-        if fin_conf is None or fin_conf <= 0.0:
+        if fin_conf is None or not (0.0 < fin_conf <= 1.0):
             continue
 
         CONTINUOUS_VARS = {"vigor", "canopy_water", "salinity_stress", "yield_observed"}
-        if target_var in CONTINUOUS_VARS:
+        is_cont = (target_var in CONTINUOUS_VARS) or (
+            target_var == "biotic_confounder" and isinstance(target_value, (float, int)) and not isinstance(target_value, bool)
+        )
+        if is_cont:
             fin_val = finite_real(target_value)
             if fin_val is None:
                 continue

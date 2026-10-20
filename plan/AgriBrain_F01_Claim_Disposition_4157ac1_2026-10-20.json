@@ -1,0 +1,364 @@
+{
+  "candidate": "4157ac1d51d83f75f3379c13741fc9bc77b4f4fe",
+  "parent": "b51616da5a6f67a7a194439485c7aac71c7396ed",
+  "review_date": "2026-10-20",
+  "package": "F01",
+  "requirements": [
+    "AB-DAT-005",
+    "AB-DAT-006",
+    "AB-ARC-005",
+    "AB-ARC-006"
+  ],
+  "verdict": "Meaningful original repairs verified; F01 not ready for full acceptance. Proceed with the bounded named integration repairs and retained controls.",
+  "method": {
+    "reviewers": 6,
+    "independently_completed_reports": 6,
+    "changed_production_modules": 20,
+    "changed_production_modules_compile": 20,
+    "candidate_source_files_exact": 876,
+    "parent_control_source_files_exact": 875,
+    "commands": 8,
+    "correctness_inputs": "Production source, three exact normative plans and supplied R3 only; no repository tests/audits/generated artifacts as proof.",
+    "reported_suite_results": "User reported547core+124MESIA; not independently rerun or adopted as verification.",
+    "hardware_or_model_fitting": false,
+    "production_or_Git_edits": false
+  },
+  "original_repairs": [
+    {
+      "id": "F01-B01",
+      "verified": "Known NDVI/S2 reflectance/thermal original cases repaired",
+      "disposition": "Verified bounded slices; whole package acceptance remains open",
+      "remaining_group_ids": [
+        "R415-05"
+      ]
+    },
+    {
+      "id": "F01-B02",
+      "verified": "Immediate roles/alias conflicts/daily-user fastpaths/S2 roles repaired in tested paths",
+      "disposition": "Verified bounded slices; whole package acceptance remains open",
+      "remaining_group_ids": [
+        "R415-02"
+      ]
+    },
+    {
+      "id": "F01-B03",
+      "verified": "Direct wrapper invalid/absent/zero quality and typed packet constructor repaired",
+      "disposition": "Verified bounded slices; whole package acceptance remains open",
+      "remaining_group_ids": [
+        "R415-04"
+      ]
+    },
+    {
+      "id": "F01-B04",
+      "verified": "All3original forecast/excludedSat/history repros repaired",
+      "disposition": "Verified bounded slices; whole package acceptance remains open",
+      "remaining_group_ids": [
+        "R415-03"
+      ]
+    },
+    {
+      "id": "F01-B05",
+      "verified": "Malformed exporter estimates/gate scalars zero weight; validzero export retained",
+      "disposition": "Verified bounded slices; whole package acceptance remains open",
+      "remaining_group_ids": [
+        "R415-01"
+      ]
+    },
+    {
+      "id": "F01-B06",
+      "verified": "Original continuous target/confidence writer failures reject; fourzeros/categories preserved",
+      "disposition": "Verified bounded slices; whole package acceptance remains open",
+      "remaining_group_ids": [
+        "R415-06"
+      ]
+    },
+    {
+      "id": "F01-B07",
+      "verified": "BadSNR/innovation/support and documented non-SENSING roles repaired; covariance fallback remains",
+      "disposition": "Verified bounded slices; whole package acceptance remains open",
+      "remaining_group_ids": [
+        "R415-07"
+      ]
+    }
+  ],
+  "residual_groups": [
+    {
+      "id": "R415-01",
+      "priority": "P1",
+      "title": "Introduced NameError in valid weak-label consumption",
+      "origin": "introduced_reproduced",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "trajectory"
+      ],
+      "prior_ids": [
+        "F01-B05"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Valid exporter estimates0/.5 yield weight.30, but actual Layer1 ASMAE adapter raises NameError finite_real. Fresh exact-parent controls succeed.",
+      "scope": "Actual exporter→adapter, upstream ASMAE engine static-only; no fitting or full EnKF.",
+      "repair": "Import shared helper and rerun validzero/finite/malformed/blocked label consumers.",
+      "targets": [
+        "services/agribrain/layer1_fusion/adapters/asmae_adapter.py"
+      ],
+      "evidence": [
+        "review-4157ac1-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "R415-02",
+      "priority": "P1",
+      "title": "Restrictive role propagation fails at final consumers",
+      "origin": "residual_reproduced",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "ledger",
+        "platform",
+        "ownership"
+      ],
+      "prior_ids": [
+        "F01-B02"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Source-aware DRONE normalization restores observed/state permission; unavailable canonical weather regains thermal features; RECONSTRUCTION becomes observed nondiagnostic NDVI.",
+      "scope": "Actual ledger/fused features/model-input receipts; no full fusion posterior, crop classifier execution or publication.",
+      "repair": "One monotone role/permission contract through final source normalizer and canonical weather; preserve RECONSTRUCTION.",
+      "targets": [
+        "services/agribrain/layer1_fusion/truth_bridge.py",
+        "services/agribrain/layer1_fusion/engine.py",
+        "services/agribrain/layer0/wrappers.py"
+      ],
+      "evidence": [
+        "review-4157ac1-f01/ledger/results.json",
+        "review-4157ac1-f01/platform/results.json",
+        "review-4157ac1-f01/ownership/results.json"
+      ]
+    },
+    {
+      "id": "R415-03",
+      "priority": "P1",
+      "title": "Water admitted-component authority and quality resolution incomplete",
+      "origin": "residual_reproduced",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "decision"
+      ],
+      "prior_ids": [
+        "F01-B04"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Typed component SIMULATED receives OBSERVED; reading_reliability0 or NaN weight plus reading0 can admit3rows/+89.70mm. Scoped role/quality overrides also differ.",
+      "scope": "Actual full water pipeline and isolated unchanged history helpers; no full durable L3 run. Modeled synthetic/forecast assimilation may be legitimate.",
+      "repair": "Carry admitted role/quality/source receipts; preserve explicit0, reject invalid quality, define scoped global/component restriction composition.",
+      "targets": [
+        "services/agribrain/layer3_water/assimilation/water_state_assimilator.py",
+        "services/agribrain/layer3_water/contracts/assimilation_state.py",
+        "services/agribrain/layer3_water/runner.py"
+      ],
+      "evidence": [
+        "review-4157ac1-f01/decision/results.json"
+      ]
+    },
+    {
+      "id": "R415-04",
+      "priority": "P2",
+      "title": "Native perception/sensor quality bypasses corrected wrapper",
+      "origin": "residual_reproduced",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "platform"
+      ],
+      "prior_ids": [
+        "F01-B03"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Typed perception maps NaN/Inf/True reliability to1 and0 to.05 before packet validation. Sensor QA boolean reliability is accepted with confidence.95.",
+      "scope": "Actual native dataclasses, producer/adapters and ledger; no solver or posterior execution.",
+      "repair": "Qualify quality before coercion/clamps/floors and at final EvidenceItem boundary; preserve boolean metadata in other declared types.",
+      "targets": [
+        "services/agribrain/layer0/perception/common/packet_adapter.py",
+        "services/agribrain/layer1_fusion/adapters/sensors.py",
+        "services/agribrain/layer1_fusion/evidence_validation.py"
+      ],
+      "evidence": [
+        "review-4157ac1-f01/platform/results.json"
+      ]
+    },
+    {
+      "id": "R415-05",
+      "priority": "P1",
+      "title": "Quantitative type qualification is coupled to physical-bounds membership",
+      "origin": "residual_reproduced",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "ledger"
+      ],
+      "prior_ids": [
+        "F01-B01"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Natural SOILGRIDS/environment route accepts string soil_clay_pct and retains it as nondiagnostic fused quantitative soil feature; valid sand40 sibling survives.",
+      "scope": "Actual registered source, validation/ledger/fuse_features; no full fusion engine or final soil-state update.",
+      "repair": "Declare quantitative types independently of bounds; explicit normalization policy for numeric strings, reject malformed physical values.",
+      "targets": [
+        "services/agribrain/layer1_fusion/evidence_validation.py",
+        "services/agribrain/layer1_fusion/adapters/observation_packet.py",
+        "services/agribrain/layer1_fusion/fusion_rules.py"
+      ],
+      "evidence": [
+        "review-4157ac1-f01/ledger/results.json"
+      ]
+    },
+    {
+      "id": "R415-06",
+      "priority": "P1",
+      "title": "Training eligibility diagnostics and comparison remain numerically unqualified",
+      "origin": "residual_reproduced",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "trajectory"
+      ],
+      "prior_ids": [
+        "F01-B06"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Actual writer-generated candidates approve samples with nonfinite/bool uncertainty/retro/resolution; NaN model comparator suppresses finite contradiction.",
+      "scope": "Actual schema/writer/candidate/replay/view; no handwritten approval or optimizer. Target-registry and mutated legacy confidence>1 cases are adjacent scope, not current-writer bypass.",
+      "repair": "Validate all numeric decision inputs and comparison availability; use shared target/quality rules at write and replay.",
+      "targets": [
+        "services/agribrain/asmae_learn/candidate_builder.py",
+        "services/agribrain/asmae_learn/disagreement.py",
+        "services/agribrain/asmae_learn/dataset_builder.py",
+        "services/agribrain/asmae_learn/schemas.py"
+      ],
+      "evidence": [
+        "review-4157ac1-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "R415-07",
+      "priority": "P2",
+      "title": "Contained RF invalid covariance converted to admissible default",
+      "origin": "residual_reproduced",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "protocol"
+      ],
+      "prior_ids": [
+        "F01-B07"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Operator maps explicit invalid typed covariance to.25; spine admits, adapter grants state permission, actual private dispatcher queues7variants.",
+      "scope": "Explicit internal capability/calibration/epochtrue fixture; visible service defaults block. QUEUED only, no posterior/training/machine effect.",
+      "repair": "Separate missing default covariance from explicit invalid input and retain invalidity through operator/spine/adapter/queue.",
+      "targets": [
+        "services/agribrain/mesia/assimilation/asmae_operator.py",
+        "services/agribrain/mesia/assimilation/layer0_spine.py",
+        "services/agribrain/layer05_asmae/adapters/mesia_adapter.py",
+        "services/agribrain/layer05_asmae/observation/dispatcher.py"
+      ],
+      "evidence": [
+        "review-4157ac1-f01/protocol/results.json"
+      ]
+    }
+  ],
+  "prioritization": "Main consolidated priorities govern; appendices retain lane-specific assessments. Scalar variants and overlapping lanes are not separate counted groups.",
+  "full_acceptance": {
+    "total": 52,
+    "open": 52,
+    "checked": 0,
+    "modified": false,
+    "F01_task_rows": 5,
+    "F01_checked_rows": 0
+  },
+  "prior_closures": {
+    "R51901": "Preserved prior software closure; five relevant targets unchanged, no fresh whole-runtime guarantee",
+    "R51902": "Preserved prior software closure; five relevant targets unchanged, no fresh whole-runtime guarantee"
+  },
+  "local_mapping": {
+    "ledger:F01-L01": [
+      "R415-02"
+    ],
+    "ledger:F01-L02": [
+      "R415-05"
+    ],
+    "platform:residual1": [
+      "R415-02"
+    ],
+    "platform:residual2": [
+      "R415-04"
+    ],
+    "platform:residual3": [
+      "R415-04"
+    ],
+    "decision:W1": [
+      "R415-03"
+    ],
+    "decision:W2": [
+      "R415-03"
+    ],
+    "ownership:canonical-weather": [
+      "R415-02"
+    ],
+    "trajectory:R1": [
+      "R415-01"
+    ],
+    "trajectory:R2": [
+      "R415-06"
+    ],
+    "protocol:F01-B07-R1": [
+      "R415-07"
+    ]
+  },
+  "adjacent_not_extra_findings": [
+    "Malformed dotted RF role has no demonstrated documented producer",
+    "Training numeric strings require policy, not blanket prohibition",
+    "Mixed categorical/numeric target form and legacy confidence>1 have explicitly bounded write/read scope",
+    "No new F02cutoff finding",
+    "Static solver-order limitation uses same current solver, no distinct numeric solver regression"
+  ],
+  "next_sequence": [
+    "Fix undefined helper and actual valid-label consumer first",
+    "Quantitative and quality contract before coercion and final admission",
+    "Monotone source normalization/canonical weather/reconstruction handling",
+    "Water admitted component receipts and quality scope",
+    "Training decision/comparator write-read parity",
+    "Contained RF covariance invalidity",
+    "Rerun same bounded actual-consumer matrix; preserve unrelated operational gates"
+  ]
+}

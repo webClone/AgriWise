@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from layer1_fusion.schemas import EvidenceItem
 from layer0.observation_packet import ObservationPacket
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
 @dataclass
 class EvidenceTruth:
     data_status: str
@@ -90,15 +95,34 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
     if source_family is not None:
         item.source_family = source_family
     is_proxy = False
-    
+
+    prior_status = getattr(item, "data_status", None)
+    prior_diagnostic_only = bool(getattr(item, "diagnostic_only", False))
+    prior_state_update_allowed = bool(getattr(item, "state_update_allowed", True))
+
     # 1. Sentinel-2 / Sentinel-1 provider raster
     if item.source_family in ("sentinel1", "sentinel2"):
+        if item.data_status == "reconstruction":
+            item.truth_class = "reconstruction_proxy"
+            item.production_usable = True
+            item.real_provider_product = False
+            item.diagnostic_only = True
+            item.state_update_allowed = False
+            item.scientific_surface_allowed = False
+            item.visualization_allowed = True
+            item.experimental_visual_allowed = True
+            item.composite_advisory_allowed = True
+            item.prescription_driver_allowed = False
+            item.current_1m_approval_allowed = False
+            item.grounding_class = None
+            return item
+
         is_daily_plot_statistic = (
             item.spatial_scope == "plot"
             and item.temporal_basis == "daily_plot_statistic"
             and bool(item.content_hash)
             and bool(item.provider_product_id or item.source_id)
-            and item.data_status != "fallback"
+            and item.data_status not in ("fallback", "reconstruction", "simulated", "unavailable", "estimated")
             and item.source_reality == "provider_daily_statistical_aggregate"
         )
         if is_daily_plot_statistic:
@@ -122,7 +146,7 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
             and item.temporal_basis == "scene_observation"
             and bool(item.content_hash)
             and bool(item.provider_product_id or item.source_id)
-            and item.data_status != "fallback"
+            and item.data_status not in ("fallback", "reconstruction", "simulated", "unavailable", "estimated")
             and item.source_reality in {
                 "provider_scene_observation",
                 "provider_temporal_observation",
@@ -373,13 +397,23 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
 
     # 6b. Drone
     elif item.source_family in ("drone_structural", "drone"):
-        item.data_status = "observed"
-        item.truth_class = "provider_observation"
-        item.source_reality = "user_observation"
-        item.production_usable = True
-        item.real_provider_product = True
-        item.diagnostic_only = False
-        item.state_update_allowed = True
+        is_restricted = prior_status in ("simulated", "estimated", "fallback", "unavailable", "reconstruction")
+        if is_restricted:
+            item.data_status = prior_status
+            item.truth_class = f"{prior_status}_proxy" if prior_status != "unavailable" else "unavailable"
+            item.source_reality = "user_observation"
+            item.production_usable = prior_status != "unavailable"
+            item.real_provider_product = False
+            item.diagnostic_only = True
+            item.state_update_allowed = False
+        else:
+            item.data_status = "observed"
+            item.truth_class = "provider_observation"
+            item.source_reality = "user_observation"
+            item.production_usable = True
+            item.real_provider_product = True
+            item.diagnostic_only = prior_diagnostic_only
+            item.state_update_allowed = prior_state_update_allowed and not prior_diagnostic_only
         item.scientific_surface_allowed = False
         item.prescription_driver_allowed = False
         item.current_1m_approval_allowed = False
@@ -526,6 +560,28 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
         item.prescription_driver_allowed = False
         item.current_1m_approval_allowed = False
 
+    # Monotone role and permission preservation: restrictive status cannot be promoted
+    if prior_status in ("unavailable", "simulated", "fallback", "reconstruction"):
+        item.data_status = prior_status
+        item.diagnostic_only = True
+        item.state_update_allowed = False
+    elif prior_status == "estimated":
+        if item.data_status == "observed":
+            item.data_status = "estimated"
+        item.state_update_allowed = False if not prior_state_update_allowed else item.state_update_allowed
+    elif prior_diagnostic_only:
+        item.diagnostic_only = True
+        item.state_update_allowed = False
+
+    # Enforce status-based confidence ceilings
+    from .schemas import DATA_STATUS_CEILING
+    if item.data_status in DATA_STATUS_CEILING:
+        ceil_val = DATA_STATUS_CEILING[item.data_status]
+        if item.confidence is not None:
+            fin_c = finite_real(item.confidence)
+            if fin_c is not None:
+                item.confidence = min(fin_c, ceil_val)
+
     return item
 
 def truth_for_observation_packet(packet: ObservationPacket, package: Optional[Any] = None) -> EvidenceTruth:
@@ -565,6 +621,10 @@ def truth_for_observation_packet(packet: ObservationPacket, package: Optional[An
         )
         or payload.get("diagnostic_only") is True
     )
+    is_reconstruction = (
+        packet.data_status.value == "reconstruction"
+        or any(r == "RECONSTRUCTION" for r in declared_roles)
+    )
     is_estimated = (
         packet.data_status.value == "estimated"
         or any(r in ("FORECAST", "ESTIMATED", "DERIVED", "PREDICTION", "MODELLED", "PRIOR") for r in declared_roles)
@@ -601,6 +661,20 @@ def truth_for_observation_packet(packet: ObservationPacket, package: Optional[An
             truth_class="raster_composite_proxy",
             source_reality="raster_composite_proxy",
             production_usable=False,
+            real_provider_product=False,
+            diagnostic_only=True,
+            state_update_allowed=False,
+            visualization_allowed=True,
+            composite_advisory_allowed=True,
+            experimental_visual_allowed=True,
+        )
+
+    if is_reconstruction:
+        return EvidenceTruth(
+            data_status="reconstruction",
+            truth_class="reconstruction_proxy",
+            source_reality="reconstruction_proxy",
+            production_usable=True,
             real_provider_product=False,
             diagnostic_only=True,
             state_update_allowed=False,

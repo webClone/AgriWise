@@ -898,5 +898,372 @@ class TestF01B07RFInternalAdmission(unittest.TestCase):
         self.assertIsNone(asmae_ev)
 
 
+class TestR415ConsolidatedResiduals(unittest.TestCase):
+    """Explicit verification for R415-01 through R415-07 residual findings."""
+
+    def test_r415_01_asmae_adapter_weak_label_finite_real(self):
+        """R415-01: finite_real import prevents NameError on weak-label processing with valid scalars and zeros."""
+        from services.agribrain.layer1_fusion.adapters.asmae_adapter import ASMAEAdapter
+        from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+
+        bundle = Layer1InputBundle(
+            plot_id="plot_415",
+            run_id="run_weak_001",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+        )
+        package = {
+            "run_id": "run_weak_001",
+            "plot_id": "plot_415",
+            "generated_at": CUTOFF.isoformat(),
+            "status": "success",
+            "production_usable": True,
+            "weak_label_export_allowed": True,
+            "provenance": {"mode": "training_export"},
+            "diagnostics": {"mode": "training_export"},
+            "weak_labels": [
+                {"estimate": 0.0, "training_weight": 0.85, "zero_weight_reasons": []},
+                {"estimate": 0.42, "training_weight": 0.90, "zero_weight_reasons": []},
+            ],
+        }
+        items = ASMAEAdapter().extract_evidence(package, bundle)
+        w_item = next((item for item in items if item.variable == "ASMAE_TRAINING_WEIGHT"), None)
+        self.assertIsNotNone(w_item)
+        self.assertAlmostEqual(w_item.value, 0.875)
+
+    def test_r415_02_reconstruction_role_and_monotonic_weather_exclusion(self):
+        """R415-02: Later normalization restores restricted roles; unavailable weather re-enters crop features."""
+        from services.agribrain.layer0.observation_packet import DataStatus
+        from services.agribrain.layer0.wrappers import _canonical_weather_records
+        from services.agribrain.layer2_veg_int.crop_observations import _gdd_coordinates_until
+        from services.agribrain.layer1_fusion.truth_bridge import normalize_evidence_truth
+        from services.agribrain.layer1_fusion.schemas import EvidenceItem, DATA_STATUSES, DATA_STATUS_CEILING
+
+        # 1. DataStatus has RECONSTRUCTION
+        self.assertIn("reconstruction", [s.value for s in DataStatus])
+        self.assertIn("reconstruction", DATA_STATUSES)
+        self.assertEqual(DATA_STATUS_CEILING["reconstruction"], 0.50)
+
+        # 2. _canonical_weather_records checks data_status and declared roles monotonically
+        records = [
+            {"date": "2026-10-15", "temp_mean_c": 20.0, "data_status": "reconstruction"},
+            {"date": "2026-10-16", "temp_mean_c": 21.0, "role": "fallback"},
+            {"date": "2026-10-17", "temp_mean_c": 22.0, "source_role": "simulated"},
+            {"date": "2026-10-18", "temp_mean_c": 23.0, "data_role": "unavailable"},
+            {"date": "2026-10-19", "temp_mean_c": 24.0, "status_role": "estimated"},
+            {"date": "2026-10-20", "temp_mean_c": 25.0, "data_status": "observed", "role": "observed"},
+        ]
+        env_package = {"weather_consensus": records}
+        canonical = _canonical_weather_records(env_package, [])
+        self.assertEqual(len(canonical), 6)
+        self.assertEqual(canonical[0]["data_status"], "estimated")
+        self.assertEqual(canonical[1]["data_status"], "fallback")
+        self.assertEqual(canonical[2]["data_status"], "simulated")
+        self.assertEqual(canonical[3]["data_status"], "unavailable")
+        self.assertEqual(canonical[4]["data_status"], "estimated")
+        self.assertEqual(canonical[5]["data_status"], "observed")
+
+        # 3. _gdd_coordinates_until excludes restricted weather records
+        crop_records = [
+            {"date": "2026-10-18", "temp_mean": 23.0, "data_role": "unavailable"},
+            {"date": "2026-10-19", "temp_mean": 24.0, "status_role": "excluded"},
+            {"date": "2026-10-20", "temp_mean": 25.0, "data_status": "observed", "role": "observed"},
+        ]
+        coords, primary = _gdd_coordinates_until(
+            acquisition_day=datetime(2026, 10, 20).date(),
+            weather_records=crop_records,
+            season_start=datetime(2026, 10, 1).date(),
+        )
+        self.assertEqual(coords.get("GDD0"), 25.0)
+
+        # 4. normalize_evidence_truth does not promote restricted status to observed
+        item = EvidenceItem(
+            evidence_id="ev_rec_1",
+            plot_id="plot_1",
+            variable="DRONE_NDVI",
+            value=0.55,
+            unit="unitless",
+            source_family="drone",
+            source_id="d_1",
+            observation_type="direct",
+            spatial_scope="plot",
+            observed_at=CUTOFF,
+            confidence=0.9,
+            reliability=0.9,
+            provenance_ref="drone_reconstructed",
+            data_status="reconstruction",
+            diagnostic_only=True,
+            state_update_allowed=False,
+        )
+        norm = normalize_evidence_truth(item)
+        self.assertEqual(norm.data_status, "reconstruction")
+        self.assertTrue(norm.diagnostic_only)
+        self.assertFalse(norm.state_update_allowed)
+        self.assertLessEqual(norm.confidence, 0.50)
+
+    def test_r415_03_water_component_roles_and_probe_reliability(self):
+        """R415-03: Water component roles/quality govern influence and authority (+89.70 mm reproduction fails closed)."""
+        # 1. Simulated probe vector does NOT confer OBSERVED authority
+        comp_role = WaterStateAssimilator._resolve_role("OBSERVED", "SIMULATED")
+        self.assertEqual(comp_role, "SIMULATED")
+
+        # 2. Zero reliability reading (0.0) must not default to 1.0 or gain update authority
+        prior_soil = WaterStateFactory.create_soil_water_state(
+            layer_depths_cm=[10.0, 20.0, 30.0],
+            theta_profile=[0.20, 0.22, 0.24],
+            field_capacity_profile=[0.30, 0.30, 0.30],
+            wilting_point_profile=[0.12, 0.12, 0.12],
+            saturation_profile=[0.45, 0.45, 0.45],
+            residual_profile=[0.05, 0.05, 0.05],
+        )
+        vec_zero = SoilObservationVector(
+            timestamp=CUTOFF,
+            soil_probe_moisture_profile=[0.25, 0.27, 0.29],
+            provenance_sources=["probe_tdr_hardware"],
+            reading_reliability=0.0,
+        )
+        _, diag_zero = WaterStateAssimilator.assimilate_observations(prior_soil, vec_zero)
+        self.assertTrue(any(r["reason"] == "zero_reliability" for r in diag_zero.rejected_observations))
+
+        # 3. Non-finite or boolean reliability rejected
+        vec_nan = SoilObservationVector(
+            timestamp=CUTOFF,
+            soil_probe_moisture_profile=[0.25, 0.27, 0.29],
+            provenance_sources=["probe_tdr_hardware"],
+            reading_reliability=float("nan"),
+        )
+        _, diag_nan = WaterStateAssimilator.assimilate_observations(prior_soil, vec_nan)
+        self.assertTrue(any(r["reason"] == "invalid_observation_reliability" for r in diag_nan.rejected_observations))
+
+        vec_bool = SoilObservationVector(
+            timestamp=CUTOFF,
+            soil_probe_moisture_profile=[0.25, 0.27, 0.29],
+            provenance_sources=["probe_tdr_hardware"],
+            reading_reliability=True,
+        )
+        _, diag_bool = WaterStateAssimilator.assimilate_observations(prior_soil, vec_bool)
+        self.assertTrue(any(r["reason"] == "invalid_observation_reliability" for r in diag_bool.rejected_observations))
+
+    def test_r415_04_producer_reliability_qualification(self):
+        """R415-04: Supported typed producers qualify reliability without bumping zero to 0.05 or accepting boolean."""
+        from services.agribrain.layer0.perception.common.packet_adapter import to_observation_packets
+        from services.agribrain.layer0.perception.common.contracts import (
+            PerceptionEngineOutput,
+            PerceptionEngineFamily,
+            PerceptionVariable,
+        )
+        from services.agribrain.layer1_fusion.adapters.sensors import SensorAdapter
+        from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+
+        # 1. Native perception adapter preserves 0.0 and rejects non-finite/bool
+        out_zero = PerceptionEngineOutput(
+            engine_family=PerceptionEngineFamily.SATELLITE_RGB,
+            plot_id="plot_1",
+            reliability_weight=0.0,
+            variables=[PerceptionVariable(name="vegetation_fraction", value=0.45, sigma=0.05, confidence=0.0)],
+        )
+        pkts_zero = to_observation_packets(out_zero)
+        self.assertEqual(len(pkts_zero), 1)
+        self.assertEqual(pkts_zero[0].reliability_weight, 0.0)
+
+        # Invalid reliability fails closed to 0.0
+        out_nan = PerceptionEngineOutput(
+            engine_family=PerceptionEngineFamily.SATELLITE_RGB,
+            plot_id="plot_1",
+            reliability_weight=float("nan"),
+            variables=[PerceptionVariable(name="vegetation_fraction", value=0.45, sigma=0.05, confidence=1.0)],
+        )
+        pkts_nan = to_observation_packets(out_nan)
+        self.assertEqual(len(pkts_nan), 1)
+        self.assertEqual(pkts_nan[0].reliability_weight, 0.0)
+
+        # 2. Sensor QA rejects boolean reliability
+        bundle = Layer1InputBundle(
+            plot_id="plot_1",
+            run_id="run_1",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+        )
+
+        class DummyQA:
+            usable = True
+            reading_reliability = True  # boolean!
+            update_allowed = True
+
+        class DummyReading:
+            device_id = "sensor_01"
+            variable = "soil_moisture"
+            value = 0.22
+            unit = "fraction"
+            timestamp = CUTOFF
+
+        class DummyPackage:
+            plot_id = "plot_1"
+            readings = [DummyReading()]
+            qa_results = [DummyQA()]
+
+        items = SensorAdapter().extract_evidence(DummyPackage(), bundle)
+        self.assertEqual(len(items), 1)
+        self.assertFalse(items[0].state_update_allowed)
+        self.assertTrue(items[0].diagnostic_only)
+        self.assertEqual(items[0].reliability, 0.0)
+
+    def test_r415_05_quantitative_soil_strings_rejected(self):
+        """R415-05: Registered quantitative soil strings reach nondiagnostic fused features rejected as NON_FINITE_OR_MALFORMED_VALUE."""
+        from services.agribrain.layer1_fusion.evidence_validation import validate_evidence
+        from services.agribrain.layer1_fusion.schemas import EvidenceItem
+
+        item_str = EvidenceItem(
+            evidence_id="soil_str_1",
+            plot_id="plot_1",
+            variable="SOIL_CLAY_PCT",
+            value="35.5",
+            unit="percent",
+            source_family="soil_survey",
+            source_id="ss_1",
+            observation_type="direct",
+            spatial_scope="plot",
+            observed_at=CUTOFF,
+            confidence=0.8,
+            reliability=0.8,
+            provenance_ref="survey_lab_doc",
+        )
+        violations_str = validate_evidence(item_str)
+        self.assertTrue(any(v.startswith("NON_FINITE_OR_MALFORMED_VALUE") for v in violations_str))
+
+        # Legitimate numeric float is admitted
+        item_float = EvidenceItem(
+            evidence_id="soil_flt_1",
+            plot_id="plot_1",
+            variable="SOIL_CLAY_PCT",
+            value=35.5,
+            unit="percent",
+            source_family="soil_survey",
+            source_id="ss_1",
+            observation_type="direct",
+            spatial_scope="plot",
+            observed_at=CUTOFF,
+            confidence=0.8,
+            reliability=0.8,
+            provenance_ref="survey_lab_doc",
+        )
+        violations_flt = validate_evidence(item_float)
+        self.assertFalse(any(v.startswith("NON_FINITE_OR_MALFORMED_VALUE") for v in violations_flt))
+
+    def test_r415_06_asmae_learn_non_finite_diagnostics_and_nan_comparator(self):
+        """R415-06: Invalid training diagnostics/comparators generate approved training-view samples."""
+        from services.agribrain.asmae_learn.candidate_builder import build_learning_candidate
+        from services.agribrain.asmae_learn.disagreement import check_disagreement
+        from services.agribrain.asmae_learn.schemas import ValidationEvent
+
+        # 1. Candidate builder rejects NaN uncertainty, retro_score, resolution
+        ev_dict = {
+            "event_id": "ev_01",
+            "plot_id": "plot_1",
+            "geometry_hash": "a" * 64,
+            "event_time": CUTOFF.isoformat(),
+            "source_type": "farmer_observation",
+            "target_variable": "canopy_water",
+            "observed_value": 0.45,
+            "spatial_scope": "plot",
+            "temporal_scope": "instant",
+            "confidence": 0.8,
+            "validator_role": "farmer",
+            "trust_weight": 0.8,
+            "evidence_hash": "e" * 64,
+        }
+        run_record_base = {
+            "plot_id": "plot_1",
+            "run_id": "run_test_01",
+            "geometry_hash": "a" * 64,
+            "layer0_output_hash": "b" * 64,
+            "asmae_content_hash": "c" * 64,
+            "asmae_artifact_instance_hash": "d" * 64,
+            "target_variable": "canopy_water",
+            "validation_events": [ev_dict],
+            "diagnostics": {
+                "bma_status": "success",
+                "retro_status": "success_with_holdouts",
+                "uncertainty": float("nan"),
+                "retro_mean_score": 0.85,
+                "resolution_selected_m": 10.0,
+            },
+        }
+        cand = build_learning_candidate(run_record_base)
+        self.assertFalse(cand["eligible"])
+        self.assertIn("invalid_or_unqualified_uncertainty", cand["blocked_reasons"])
+
+        # 2. check_disagreement treats NaN model comparator as critical contradiction
+        ev = ValidationEvent(
+            event_id="ev_02",
+            plot_id="plot_1",
+            geometry_hash="a" * 64,
+            event_time=CUTOFF.isoformat(),
+            source_type="farmer_observation",
+            target_variable="vigor",
+            observed_value=0.65,
+            spatial_scope="plot",
+            temporal_scope="instant",
+            confidence=0.85,
+            validator_role="farmer",
+            trust_weight=0.85,
+            evidence_hash="e" * 64,
+        )
+        asmae_output_nan = {
+            "timestamp": CUTOFF.isoformat(),
+            "raster_maps": {"vigor": [[float("nan"), float("nan")]]},
+        }
+        diag_report = check_disagreement(asmae_output_nan, [ev])
+        self.assertEqual(diag_report["candidate_status"], "rejected")
+        self.assertTrue(any(c["type"] == "unqualified_model_comparator" for c in diag_report["contradictions"]))
+
+    def test_r415_07_invalid_rf_covariance_fails_closed(self):
+        """R415-07: Invalid RF covariance fails closed as None and is marked ABSENT by layer0 spine."""
+        from services.agribrain.mesia.contracts.behaviour import BehaviourLikelihood
+        from services.agribrain.mesia.assimilation.asmae_operator import ASMAEObservationOperator
+        from services.agribrain.mesia.assimilation.layer0_spine import Layer0EvidenceSpine, EvidenceAdmissionStatus
+
+        # 1. Invalid covariance (NaN) produces variance=None
+        lik_nan = BehaviourLikelihood(
+            likelihood_id="lik_nan_01",
+            radio_family="wifi_csi",
+            contract_ref="contract_wifi_01",
+            target_variable="soil_moisture",
+            innovation=0.05,
+            covariance=float("nan"),
+            support=0.8,
+            authority_scope="evidence_proposal",
+            native_observation_ref="hash_ref_01",
+        )
+        proposal_nan = ASMAEObservationOperator.create_innovation(lik_nan, 0.25, "mz_1", "ROOT_ZONE")
+        self.assertIsNone(proposal_nan.observation_variance)
+
+        # Layer 0 spine marks it ABSENT
+        rec_nan = Layer0EvidenceSpine.evaluate_admission(proposal_nan, is_calibration_valid=True, is_epoch_active=True)
+        self.assertEqual(rec_nan.status, EvidenceAdmissionStatus.ABSENT)
+        self.assertFalse(rec_nan.is_usable_for_assimilation)
+
+        # 2. Truly absent covariance (None) receives default 0.25 and is admitted
+        lik_none = BehaviourLikelihood(
+            likelihood_id="lik_none_02",
+            radio_family="wifi_csi",
+            contract_ref="contract_wifi_01",
+            target_variable="soil_moisture",
+            innovation=0.05,
+            covariance=None,
+            support=0.8,
+            authority_scope="evidence_proposal",
+            native_observation_ref="hash_ref_02",
+        )
+        proposal_none = ASMAEObservationOperator.create_innovation(lik_none, 0.25, "mz_1", "ROOT_ZONE")
+        self.assertEqual(proposal_none.observation_variance, 0.25)
+
+        rec_none = Layer0EvidenceSpine.evaluate_admission(proposal_none, is_calibration_valid=True, is_epoch_active=True)
+        self.assertEqual(rec_none.status, EvidenceAdmissionStatus.ADMITTED)
+        self.assertTrue(rec_none.is_usable_for_assimilation)
+
+
 if __name__ == "__main__":
     unittest.main()

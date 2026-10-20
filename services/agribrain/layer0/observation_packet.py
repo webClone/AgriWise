@@ -92,6 +92,7 @@ class DataStatus(str, Enum):
     FALLBACK = "fallback"
     SIMULATED = "simulated"
     UNAVAILABLE = "unavailable"
+    RECONSTRUCTION = "reconstruction"
 
     @classmethod
     def from_value(cls, value: str) -> "DataStatus":

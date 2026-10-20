@@ -63,9 +63,19 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
             packet_ids[(packet_type, date)] = packet.content_hash
 
     records: List[Dict[str, Any]] = []
+    weather_consensus = (
+        env_package.get("weather_consensus")
+        if isinstance(env_package, dict)
+        else getattr(env_package, "weather_consensus", None)
+    ) or []
+    forecast_consensus = (
+        env_package.get("forecast_consensus")
+        if isinstance(env_package, dict)
+        else getattr(env_package, "forecast_consensus", None)
+    ) or []
     streams = (
-        (getattr(env_package, "weather_consensus", None) or [], "WEATHER_CONSENSUS_DAILY", False),
-        (getattr(env_package, "forecast_consensus", None) or [], "WEATHER_FORECAST_CONSENSUS_DAILY", True),
+        (weather_consensus, "WEATHER_CONSENSUS_DAILY", False),
+        (forecast_consensus, "WEATHER_FORECAST_CONSENSUS_DAILY", True),
     )
     for daily_records, packet_type, forecast in streams:
         for daily in daily_records:
@@ -86,15 +96,35 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
             if not date:
                 continue
 
-            daily_role = str(daily.get("role") or daily.get("data_role") or daily.get("source_role") or "").upper() if isinstance(daily, dict) else ""
-            if forecast or "FORECAST" in data_kind.upper() or daily_role in ("FORECAST", "ESTIMATED", "DERIVED", "MODELLED", "PRIOR"):
-                rec_status = "estimated"
-            elif daily_role in ("SIMULATED", "SYNTHETIC", "SCENARIO"):
-                rec_status = "simulated"
-            elif daily_role in ("UNAVAILABLE", "EXCLUDED", "REJECTED"):
+            declared_roles = [
+                str(daily[k]).upper()
+                for k in ("role", "source_role", "data_role", "status_role", "truth_class")
+                if isinstance(daily, dict) and k in daily and daily[k] is not None
+            ]
+            declared_status = str(daily.get("data_status") or "").lower() if isinstance(daily, dict) else ""
+
+            if (
+                declared_status in ("unavailable", "excluded", "rejected")
+                or any(r in ("UNAVAILABLE", "EXCLUDED", "REJECTED") for r in declared_roles)
+            ):
                 rec_status = "unavailable"
-            elif daily_role in ("FALLBACK", "PROXY"):
+            elif (
+                declared_status in ("simulated", "synthetic", "scenario")
+                or any(r in ("SIMULATED", "SYNTHETIC", "SCENARIO") for r in declared_roles)
+            ):
+                rec_status = "simulated"
+            elif (
+                declared_status in ("fallback", "proxy")
+                or any(r in ("FALLBACK", "PROXY") for r in declared_roles)
+            ):
                 rec_status = "fallback"
+            elif (
+                forecast
+                or "FORECAST" in data_kind.upper()
+                or declared_status in ("estimated", "reconstruction")
+                or any(r in ("FORECAST", "ESTIMATED", "DERIVED", "MODELLED", "PRIOR", "RECONSTRUCTION") for r in declared_roles)
+            ):
+                rec_status = "estimated"
             else:
                 rec_status = "observed"
 
@@ -165,6 +195,12 @@ def _infer_data_status(payload: dict, source: ObservationSource) -> DataStatus:
         or any(r in ("SIMULATED", "SYNTHETIC", "SCENARIO") for r in declared_roles)
     ):
         return DataStatus.SIMULATED
+
+    if (
+        declared == DataStatus.RECONSTRUCTION
+        or any(r == "RECONSTRUCTION" for r in declared_roles)
+    ):
+        return DataStatus.RECONSTRUCTION
 
     if (
         declared == DataStatus.FALLBACK

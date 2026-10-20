@@ -66,6 +66,7 @@ DATA_STATUSES = (
     "fallback",
     "simulated",
     "unavailable",
+    "reconstruction",
 )
 
 DATA_STATUS_CEILING = {
@@ -73,6 +74,7 @@ DATA_STATUS_CEILING = {
     "estimated": 0.75,
     "interpolated": 0.65,
     "assimilated": 0.80,
+    "reconstruction": 0.50,
     "fallback": 0.35,
     "simulated": 0.20,
     "unavailable": 0.05,

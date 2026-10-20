@@ -77,7 +77,12 @@ class ASMAEObservationOperator:
         fin_support = finite_real(likelihood.support)
 
         innovation = float(fin_innov) if fin_innov is not None else None
-        variance = float(fin_cov) if (fin_cov is not None and fin_cov > 0.0) else (None if fin_cov is not None else 0.25)
+        if likelihood.covariance is None:
+            variance = 0.25  # documented model default for truly absent covariance
+        elif fin_cov is not None and fin_cov > 0.0:
+            variance = float(fin_cov)
+        else:
+            variance = None  # Explicit invalid, boolean, or non-positive covariance fails closed
         support = float(fin_support) if (fin_support is not None and fin_support > 0.0) else 0.0
 
         now = datetime.now(timezone.utc)

@@ -888,10 +888,14 @@ def _gdd_coordinates_until(
             continue
         
         status = str(row.get("data_status") or "").lower()
-        role = str(row.get("role") or row.get("data_role") or row.get("source_role") or "").upper()
+        declared_roles = [
+            str(row[k]).upper()
+            for k in ("role", "source_role", "data_role", "status_role", "truth_class")
+            if k in row and row[k] is not None
+        ]
         if (
             status in ("unavailable", "excluded", "rejected")
-            or role in ("UNAVAILABLE", "EXCLUDED", "REJECTED")
+            or any(r in ("UNAVAILABLE", "EXCLUDED", "REJECTED") for r in declared_roles)
             or row.get("excluded") is True
             or row.get("production_usable") is False
         ):

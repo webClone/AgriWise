@@ -47,13 +47,13 @@ def has_zone_data(asmae_output: Dict[str, Any], zone_id: str, var: str) -> bool:
                         return True
     return False
 
-def get_zone_asmae_value(asmae_output: Dict[str, Any], zone_id: str, var: str) -> float:
+def get_zone_asmae_value(asmae_output: Dict[str, Any], zone_id: str, var: str) -> Optional[float]:
     if "zone_states" in asmae_output:
         zone_states = asmae_output["zone_states"]
         if isinstance(zone_states, dict) and zone_id in zone_states:
             zone_data = zone_states[zone_id]
             if isinstance(zone_data, dict) and var in zone_data:
-                return float(zone_data[var])
+                return finite_real(zone_data[var])
 
     if "zones" in asmae_output:
         zones = asmae_output["zones"]
@@ -62,9 +62,9 @@ def get_zone_asmae_value(asmae_output: Dict[str, Any], zone_id: str, var: str) -
                 if isinstance(z, dict) and z.get("zone_id") == zone_id:
                     states = z.get("states", {})
                     if isinstance(states, dict) and var in states:
-                        return float(states[var])
+                        return finite_real(states[var])
                     if var in z:
-                        return float(z[var])
+                        return finite_real(z[var])
     return 0.5
 
 def check_disagreement(asmae_output: Dict[str, Any], validation_events: List[ValidationEvent]) -> Dict[str, Any]:
@@ -79,20 +79,31 @@ def check_disagreement(asmae_output: Dict[str, Any], validation_events: List[Val
             pass
 
     # Helper to extract a mean value from ASMAE raster_maps
-    def get_asmae_value(var: str, zone_id: Optional[str] = None) -> float:
+    def get_asmae_value(var: str, zone_id: Optional[str] = None) -> Optional[float]:
         raster_maps = asmae_output.get("raster_maps", {})
-        grid = raster_maps.get(var)
-        if grid:
+        if var in raster_maps:
+            grid = raster_maps[var]
             if isinstance(grid, list):
-                flat = [val for row in grid for val in row if val is not None]
+                flat = []
+                for row in grid:
+                    if isinstance(row, list):
+                        for val in row:
+                            fv = finite_real(val)
+                            if fv is not None:
+                                flat.append(fv)
+                    else:
+                        fv = finite_real(row)
+                        if fv is not None:
+                            flat.append(fv)
                 if flat:
                     return sum(flat) / len(flat)
-            elif isinstance(grid, (int, float)):
-                return float(grid)
+                return None  # All cells non-finite or empty grid
+            else:
+                return finite_real(grid)
                 
         for feat in asmae_output.get("features", []):
             if feat.get("name") == var or feat.get("variable") == var:
-                return float(feat.get("value", 0.0))
+                return finite_real(feat.get("value"))
         return 0.5
 
     # Check validation events for conflicts among themselves
@@ -175,10 +186,23 @@ def check_disagreement(asmae_output: Dict[str, Any], validation_events: List[Val
 
         # 3. State value mismatch check
         if ev.spatial_scope == "zone":
-            asmae_val = get_zone_asmae_value(asmae_output, ev.zone_id, var)
+            raw_asmae = get_zone_asmae_value(asmae_output, ev.zone_id, var)
         else:
-            asmae_val = get_asmae_value(var, ev.zone_id)
+            raw_asmae = get_asmae_value(var, ev.zone_id)
             
+        asmae_val = finite_real(raw_asmae)
+        if asmae_val is None:
+            contradictions.append({
+                "type": "unqualified_model_comparator",
+                "variable": var,
+                "asmae_value": repr(raw_asmae),
+                "severity": "critical",
+                "scope": ev.spatial_scope,
+                "zone_id": ev.zone_id,
+                "notes": "Model mean or comparator is non-finite or missing, cannot evaluate agreement."
+            })
+            continue
+
         validated_val = ev.observed_value
         
         threshold = VARIABLE_THRESHOLDS.get(var, 0.30)
@@ -186,7 +210,10 @@ def check_disagreement(asmae_output: Dict[str, Any], validation_events: List[Val
         severity = "minor"
 
         CONTINUOUS_VARS = {"vigor", "canopy_water", "salinity_stress", "yield_observed"}
-        if var in CONTINUOUS_VARS:
+        is_cont = (var in CONTINUOUS_VARS) or (
+            var == "biotic_confounder" and isinstance(validated_val, (float, int)) and not isinstance(validated_val, bool)
+        )
+        if is_cont:
             fin_val = finite_real(validated_val)
             if fin_val is None:
                 contradictions.append({
@@ -198,7 +225,7 @@ def check_disagreement(asmae_output: Dict[str, Any], validation_events: List[Val
                 continue
             validated_val = fin_val
         
-        if isinstance(validated_val, (int, float)):
+        if isinstance(validated_val, (int, float)) and not isinstance(validated_val, bool):
             diff = abs(asmae_val - validated_val)
             if diff > threshold:
                 has_mismatch = True

@@ -19,6 +19,11 @@ from typing import Any, List
 
 from layer1_fusion.schemas import EvidenceItem, Layer1InputBundle, SourceEnvelope
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
 # Variables that are always diagnostic (never direct state update)
 _DIAGNOSTIC_VARIABLES = frozenset({
     "leaf_wetness", "leaf_wetness_index", "signal_rssi_dbm", "signal_snr_db",
@@ -65,8 +70,12 @@ class SensorAdapter:
             if not usable:
                 continue
 
-            reliability = getattr(qa, "reading_reliability", 0.5) if qa else 0.5
+            raw_rel = getattr(qa, "reading_reliability", 0.5) if qa else 0.5
+            fin_rel = finite_real(raw_rel)
+            reliability = fin_rel if fin_rel is not None else 0.0
             update_allowed = getattr(qa, "update_allowed", True) if qa else True
+            if fin_rel is None or fin_rel <= 0.0:
+                update_allowed = False
 
             # Determine scope from placement
             scope = "point"  # default

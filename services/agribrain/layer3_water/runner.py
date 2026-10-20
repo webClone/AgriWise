@@ -388,11 +388,20 @@ class WaterIntelligenceEngine:
             "SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED",
             "FORECAST", "ESTIMATED", "DERIVED", "PREDICTION", "EXCLUDED", "REJECTED", "UNUSABLE"
         )
+        comp_roles = getattr(soil_observations, "component_roles", {}) or {}
+        probe_comp_role = str(comp_roles.get("soil_probe") or comp_roles.get("probe") or getattr(soil_observations, "role", "OBSERVED")).upper()
+        global_role = str(getattr(soil_observations, "role", "OBSERVED")).upper()
+
+        probe_sources = [
+            s for s in getattr(soil_observations, "provenance_sources", [])
+            if not any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1", "THERMAL", "CANOPY_COOLING", "RADIOMETER", "FLUX"))
+        ]
         has_observed_probe = (
             "IN_SITU_PROBE_TDR" in assim_diag.assimilated_sensor_sources
-            and not any(term in s.upper() for s in getattr(soil_observations, "provenance_sources", []) for term in RESTRICTED_WATER_TERMS)
+            and not any(term in s.upper() for s in probe_sources for term in RESTRICTED_WATER_TERMS)
             and not any(term in s.upper() for s in assim_diag.assimilated_sensor_sources for term in RESTRICTED_WATER_TERMS)
-            and str(getattr(soil_observations, "role", "OBSERVED")).upper() == "OBSERVED"
+            and global_role == "OBSERVED"
+            and probe_comp_role == "OBSERVED"
         )
         if has_observed_probe:
             authority = WaterPhysicsAuthority.OBSERVED
