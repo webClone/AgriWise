@@ -56,6 +56,37 @@ ALLOWED_VALIDATOR_ROLES = {
     "system",
 }
 
+CONTINUOUS_TARGET_VARIABLES = {
+    "vigor",
+    "canopy_water",
+    "salinity_stress",
+    "yield_observed",
+}
+
+FRACTIONAL_UNITS = {"fraction", "unitless", "ratio", "percent"}
+QUALITATIVE_BIOTIC_CATEGORIES = {"low", "medium", "high"}
+
+def is_continuous_target(
+    target_variable: str,
+    observed_unit: Optional[str] = None,
+    observed_value: Any = None,
+) -> bool:
+    """Determine whether a target variable represents a continuous numeric quantity.
+    
+    Shared qualifier across validation writer, candidate evaluation, and training dataset reader.
+    """
+    if target_variable in CONTINUOUS_TARGET_VARIABLES:
+        return True
+    if target_variable == "biotic_confounder":
+        unit = str(observed_unit).lower().strip() if observed_unit else ""
+        if unit in FRACTIONAL_UNITS:
+            if isinstance(observed_value, str) and observed_value.lower().strip() in QUALITATIVE_BIOTIC_CATEGORIES:
+                return False
+            return True
+        if isinstance(observed_value, (float, int)) and not isinstance(observed_value, bool):
+            return True
+    return False
+
 @dataclass
 class ValidationEvent:
     event_id: str
@@ -86,21 +117,7 @@ class ValidationEvent:
             raise ValueError(f"confidence must be a finite real between 0.0 and 1.0, got: {self.confidence!r}")
         self.confidence = fin_conf
 
-        CONTINUOUS_TARGET_VARIABLES = {
-            "vigor",
-            "canopy_water",
-            "salinity_stress",
-            "yield_observed",
-        }
-        is_continuous = (
-            self.target_variable in CONTINUOUS_TARGET_VARIABLES
-            or (
-                self.target_variable == "biotic_confounder"
-                and getattr(self, "observed_unit", None) in ("fraction", "unitless", "ratio", "percent")
-                and not (isinstance(self.observed_value, str) and self.observed_value.lower() in ("low", "medium", "high"))
-            )
-        )
-        if is_continuous:
+        if is_continuous_target(self.target_variable, getattr(self, "observed_unit", None), self.observed_value):
             fin_val = finite_real(self.observed_value)
             if fin_val is None:
                 raise ValueError(

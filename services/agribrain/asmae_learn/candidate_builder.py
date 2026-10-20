@@ -77,8 +77,13 @@ def build_learning_candidate(run_record: Dict[str, Any]) -> Dict[str, Any]:
 
     # Zero-eligibility checks
     diagnostics = run_record.get("diagnostics", {})
-    raw_res = diagnostics.get("resolution_selected_m") or run_record.get("resolution_m", 10.0)
-    res_m = finite_real(raw_res)
+    if "resolution_selected_m" in diagnostics and diagnostics["resolution_selected_m"] is not None:
+        raw_res = diagnostics["resolution_selected_m"]
+        res_m = finite_real(raw_res) if not isinstance(raw_res, bool) else None
+    else:
+        raw_fallback = run_record.get("resolution_m", 10.0)
+        res_m = finite_real(raw_fallback) if not isinstance(raw_fallback, bool) else None
+
     if res_m is None or res_m <= 0.0:
         candidate["eligible"] = False
         candidate["blocked_reasons"].append("invalid_resolution")

@@ -1265,5 +1265,330 @@ class TestR415ConsolidatedResiduals(unittest.TestCase):
         self.assertTrue(rec_none.is_usable_for_assimilation)
 
 
+class TestR39FollowUpVerification(unittest.TestCase):
+    """R39-01, R39-02, R39-03: Precise follow-ups on legacy water exclusion, resolution fallback, and target parity."""
+
+    def setUp(self):
+        self.prior = WaterStateFactory.create_soil_water_state(
+            layer_depths_cm=[10.0, 30.0, 60.0],
+            theta_profile=[0.20, 0.20, 0.20],
+            field_capacity_profile=[0.35, 0.35, 0.35],
+            wilting_point_profile=[0.12, 0.12, 0.12],
+            saturation_profile=[0.45, 0.45, 0.45],
+            residual_profile=[0.05, 0.05, 0.05],
+        )
+        self.weather = {
+            "t_max_c": 25.0,
+            "t_min_c": 15.0,
+            "precipitation_mm": 0.0,
+            "wind_speed_2m_m_s": 2.0,
+            "rh_min_pct": 30.0,
+            "rh_max_pct": 60.0,
+            "net_radiation_mj_m2": 10.0,
+        }
+
+    def _write_ledger(self, ledger_path, run_id, target_var, observed_val, observed_unit, res_selected_m=None, resolution_m=10.0):
+        import json
+        diag = {}
+        if res_selected_m is not None:
+            diag["resolution_selected_m"] = res_selected_m
+        run_record = {
+            "record_type": "asmae_run",
+            "run_id": run_id,
+            "plot_id": "plot_1",
+            "geometry_hash": "a" * 64,
+            "layer0_output_hash": "b" * 64,
+            "asmae_content_hash": "c" * 64,
+            "asmae_artifact_instance_hash": "d" * 64,
+            "resolution_m": resolution_m,
+            "diagnostics": diag,
+        }
+        val_event = {
+            "record_type": "validation_event",
+            "run_id": run_id,
+            "event_id": f"ev_{run_id}",
+            "source_type": "agronomist_observation",
+            "target_variable": target_var,
+            "observed_value": observed_val,
+            "observed_unit": observed_unit,
+            "confidence": 0.85,
+        }
+        cand_update = {
+            "record_type": "candidate_update",
+            "run_id": run_id,
+            "learning_candidate_status": "approved",
+            "eligible_for_asmae_learn": True,
+            "candidate": {
+                "candidate_id": f"cand_{run_id}",
+                "candidate_type": "standard_learning",
+                "disagreement_report_hash": "h" * 64,
+                "target_variable": target_var,
+            },
+        }
+        with open(ledger_path, "w") as f:
+            f.write(json.dumps(run_record) + "\n")
+            f.write(json.dumps(val_event) + "\n")
+            f.write(json.dumps(cand_update) + "\n")
+
+    def test_r39_01_legacy_exclusion_marker_preservation_with_tdr_identity(self):
+        """R39-01: ['IN_SITU_PROBE_TDR', 'EXCLUDED'] must reject observations and yield 0 mm analysis increment."""
+        # 1. Order 1: ['IN_SITU_PROBE_TDR', 'EXCLUDED']
+        obs1 = SoilObservationVector(
+            timestamp=CUTOFF,
+            soil_probe_moisture_profile=[0.35, 0.35, 0.35],
+            observation_uncertainties={"soil_probe": 0.015, "satellite_smap": 0.04},
+            provenance_sources=["IN_SITU_PROBE_TDR", "EXCLUDED"],
+        )
+        post1, diag1 = WaterStateAssimilator.assimilate_observations(self.prior, obs1)
+        self.assertEqual(diag1.observations_assimilated_count, 0)
+        self.assertEqual(len(diag1.rejected_observations), 3)
+        for r in diag1.rejected_observations:
+            self.assertEqual(r["reason"], "explicitly_excluded_role")
+            self.assertEqual(r["role"], "EXCLUDED")
+
+        state1, receipt1 = WaterIntelligenceEngine.execute_pipeline(
+            plot_id="plot-1",
+            timestamp=CUTOFF,
+            weather_observations=self.weather,
+            soil_observations=obs1,
+            soil_profile_state=self.prior,
+        )
+        self.assertEqual(state1.physics_authority, WaterPhysicsAuthority.MODELLED)
+        self.assertEqual(state1.analysis_receipt.storage_increment_mm, 0.0)
+
+        # 2. Order 2: ['EXCLUDED', 'IN_SITU_PROBE_TDR']
+        obs2 = SoilObservationVector(
+            timestamp=CUTOFF,
+            soil_probe_moisture_profile=[0.35, 0.35, 0.35],
+            observation_uncertainties={"soil_probe": 0.015, "satellite_smap": 0.04},
+            provenance_sources=["EXCLUDED", "IN_SITU_PROBE_TDR"],
+        )
+        post2, diag2 = WaterStateAssimilator.assimilate_observations(self.prior, obs2)
+        self.assertEqual(diag2.observations_assimilated_count, 0)
+        self.assertEqual(len(diag2.rejected_observations), 3)
+
+        state2, receipt2 = WaterIntelligenceEngine.execute_pipeline(
+            plot_id="plot-1",
+            timestamp=CUTOFF,
+            weather_observations=self.weather,
+            soil_observations=obs2,
+            soil_profile_state=self.prior,
+        )
+        self.assertEqual(state2.physics_authority, WaterPhysicsAuthority.MODELLED)
+        self.assertEqual(state2.analysis_receipt.storage_increment_mm, 0.0)
+
+        # 3. Scoped satellite exclusion preserves independent valid TDR probe
+        obs_scoped = SoilObservationVector(
+            timestamp=CUTOFF,
+            soil_probe_moisture_profile=[0.35, 0.35, 0.35],
+            observation_uncertainties={"soil_probe": 0.015, "satellite_smap": 0.04},
+            provenance_sources=["IN_SITU_PROBE_TDR", "EXCLUDED_SATELLITE_SMAP"],
+        )
+        post_scoped, diag_scoped = WaterStateAssimilator.assimilate_observations(self.prior, obs_scoped)
+        self.assertEqual(diag_scoped.observations_assimilated_count, 3)
+        state_scoped, receipt_scoped = WaterIntelligenceEngine.execute_pipeline(
+            plot_id="plot-1",
+            timestamp=CUTOFF,
+            weather_observations=self.weather,
+            soil_observations=obs_scoped,
+            soil_profile_state=self.prior,
+        )
+        self.assertEqual(state_scoped.physics_authority, WaterPhysicsAuthority.OBSERVED)
+        self.assertGreater(state_scoped.analysis_receipt.storage_increment_mm, 0.0)
+
+    def test_r39_02_resolution_fallback_distinguishes_absence_from_invalid_zero_and_false(self):
+        """R39-02: Explicit selected resolution 0.0 or False must reject candidate and not use fallback 10.0."""
+        from services.agribrain.asmae_learn.candidate_builder import build_learning_candidate
+        import tempfile
+        from pathlib import Path
+        from services.agribrain.asmae_learn.dataset_builder import build_validated_training_view
+
+        base_event = {
+            "event_id": "ev_res_01",
+            "plot_id": "plot_1",
+            "geometry_hash": "a" * 64,
+            "event_time": CUTOFF.isoformat(),
+            "source_type": "agronomist_observation",
+            "target_variable": "canopy_water",
+            "observed_value": 0.45,
+            "spatial_scope": "plot",
+            "temporal_scope": "instant",
+            "confidence": 0.85,
+            "validator_role": "agronomist",
+            "evidence_hash": "e" * 64,
+        }
+
+        # 1. Candidate builder rejects explicit 0.0
+        rec_zero = {
+            "plot_id": "plot_1",
+            "run_id": "run_res_0",
+            "geometry_hash": "a" * 64,
+            "layer0_output_hash": "b" * 64,
+            "asmae_content_hash": "c" * 64,
+            "asmae_artifact_instance_hash": "d" * 64,
+            "target_variable": "canopy_water",
+            "resolution_m": 10.0,
+            "validation_events": [base_event],
+            "diagnostics": {
+                "bma_status": "success",
+                "retro_status": "success_with_holdouts",
+                "uncertainty": 0.15,
+                "retro_mean_score": 0.85,
+                "resolution_selected_m": 0.0,
+            },
+        }
+        cand_zero = build_learning_candidate(rec_zero)
+        self.assertFalse(cand_zero["eligible"])
+        self.assertIn("invalid_resolution", cand_zero["blocked_reasons"])
+
+        # 2. Candidate builder rejects explicit False
+        rec_false = dict(rec_zero)
+        rec_false["diagnostics"] = dict(rec_zero["diagnostics"])
+        rec_false["diagnostics"]["resolution_selected_m"] = False
+        cand_false = build_learning_candidate(rec_false)
+        self.assertFalse(cand_false["eligible"])
+        self.assertIn("invalid_resolution", cand_false["blocked_reasons"])
+
+        # 3. Candidate builder accepts truly absent resolution_selected_m using valid fallback
+        rec_absent = dict(rec_zero)
+        rec_absent["diagnostics"] = dict(rec_zero["diagnostics"])
+        del rec_absent["diagnostics"]["resolution_selected_m"]
+        cand_absent = build_learning_candidate(rec_absent)
+        self.assertTrue(cand_absent["eligible"])
+        self.assertNotIn("invalid_resolution", cand_absent["blocked_reasons"])
+
+        # 4. Replay in dataset builder excludes explicit 0.0 and False, admits absent with 10.0
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger_path = Path(tmpdir) / "validation_ledger.jsonl"
+            
+            # Write run with resolution_selected_m = 0.0
+            self._write_ledger(ledger_path, "run_res_0", "canopy_water", 0.45, "fraction", res_selected_m=0.0)
+            samples_zero = build_validated_training_view(ledger_path)
+            self.assertEqual(len(samples_zero), 0)
+
+            # Write run with resolution_selected_m = False
+            self._write_ledger(ledger_path, "run_res_f", "canopy_water", 0.45, "fraction", res_selected_m=False)
+            samples_false = build_validated_training_view(ledger_path)
+            self.assertEqual(len(samples_false), 0)
+
+            # Write run with absent resolution_selected_m and fallback 10.0
+            self._write_ledger(ledger_path, "run_res_abs", "canopy_water", 0.45, "fraction", res_selected_m=None)
+            samples_absent = build_validated_training_view(ledger_path)
+            self.assertEqual(len(samples_absent), 1)
+            self.assertEqual(samples_absent[0]["target_value"], 0.45)
+
+    def test_r39_03_shared_continuous_target_qualifier_at_write_and_replay(self):
+        """R39-03: Shared target/form/unit qualification rejects string and boolean fractional biotic targets."""
+        import tempfile
+        from pathlib import Path
+        from services.agribrain.asmae_learn.schemas import ValidationEvent, is_continuous_target
+        from services.agribrain.asmae_learn.dataset_builder import build_validated_training_view
+
+        # Helper function
+        self.assertTrue(is_continuous_target("biotic_confounder", "fraction", 0.5))
+        self.assertTrue(is_continuous_target("biotic_confounder", "fraction", "0.5"))
+        self.assertTrue(is_continuous_target("biotic_confounder", "fraction", "not-a-number"))
+        self.assertFalse(is_continuous_target("biotic_confounder", "fraction", "low"))
+        self.assertFalse(is_continuous_target("biotic_confounder", "category", "aphids"))
+
+        # 1. ValidationEvent writer rejects string or boolean values for fractional biotic_confounder
+        with self.assertRaises(ValueError):
+            ValidationEvent(
+                event_id="ev_b_01",
+                plot_id="plot_1",
+                geometry_hash="a" * 64,
+                event_time=CUTOFF.isoformat(),
+                source_type="agronomist_observation",
+                target_variable="biotic_confounder",
+                observed_value="0.5",
+                observed_unit="fraction",
+                spatial_scope="plot",
+                temporal_scope="instant",
+                confidence=0.85,
+                validator_role="agronomist",
+            )
+
+        with self.assertRaises(ValueError):
+            ValidationEvent(
+                event_id="ev_b_02",
+                plot_id="plot_1",
+                geometry_hash="a" * 64,
+                event_time=CUTOFF.isoformat(),
+                source_type="agronomist_observation",
+                target_variable="biotic_confounder",
+                observed_value="not-a-number",
+                observed_unit="fraction",
+                spatial_scope="plot",
+                temporal_scope="instant",
+                confidence=0.85,
+                validator_role="agronomist",
+            )
+
+        with self.assertRaises(ValueError):
+            ValidationEvent(
+                event_id="ev_b_03",
+                plot_id="plot_1",
+                geometry_hash="a" * 64,
+                event_time=CUTOFF.isoformat(),
+                source_type="agronomist_observation",
+                target_variable="biotic_confounder",
+                observed_value=False,
+                observed_unit="fraction",
+                spatial_scope="plot",
+                temporal_scope="instant",
+                confidence=0.85,
+                validator_role="agronomist",
+            )
+
+        # Valid numeric float succeeds
+        ev_valid = ValidationEvent(
+            event_id="ev_b_04",
+            plot_id="plot_1",
+            geometry_hash="a" * 64,
+            event_time=CUTOFF.isoformat(),
+            source_type="agronomist_observation",
+            target_variable="biotic_confounder",
+            observed_value=0.5,
+            observed_unit="fraction",
+            spatial_scope="plot",
+            temporal_scope="instant",
+            confidence=0.85,
+            validator_role="agronomist",
+        )
+        self.assertEqual(ev_valid.observed_value, 0.5)
+
+        # 2. Reader in dataset_builder excludes legacy approved ledger with fractional strings
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger_path = Path(tmpdir) / "validation_ledger.jsonl"
+
+            # Legacy ledger with string observed_value = "0.5"
+            self._write_ledger(ledger_path, "run_leg_1", "biotic_confounder", "0.5", "fraction")
+            samples = build_validated_training_view(ledger_path)
+            self.assertEqual(len(samples), 0, "String fractional biotic target must be excluded by reader")
+
+            # Legacy ledger with string observed_value = "not-a-number"
+            self._write_ledger(ledger_path, "run_leg_2", "biotic_confounder", "not-a-number", "fraction")
+            samples_nan = build_validated_training_view(ledger_path)
+            self.assertEqual(len(samples_nan), 0, "Non-numeric fractional biotic string must be excluded by reader")
+
+            # Legacy ledger with boolean observed_value = False
+            self._write_ledger(ledger_path, "run_leg_3", "biotic_confounder", False, "fraction")
+            samples_bool = build_validated_training_view(ledger_path)
+            self.assertEqual(len(samples_bool), 0, "Boolean fractional biotic must be excluded by reader")
+
+            # Legacy ledger with valid float 0.5 is admitted
+            self._write_ledger(ledger_path, "run_leg_valid", "biotic_confounder", 0.5, "fraction")
+            samples_valid = build_validated_training_view(ledger_path)
+            self.assertEqual(len(samples_valid), 1)
+            self.assertEqual(samples_valid[0]["target_value"], 0.5)
+
+            # Categorical biotic is retained as categorical
+            self._write_ledger(ledger_path, "run_leg_cat", "biotic_confounder", "low", "category")
+            samples_cat = build_validated_training_view(ledger_path)
+            self.assertEqual(len(samples_cat), 1)
+            self.assertEqual(samples_cat[0]["target_value"], "low")
+
+
 if __name__ == "__main__":
     unittest.main()
+

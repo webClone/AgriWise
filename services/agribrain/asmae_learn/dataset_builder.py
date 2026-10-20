@@ -3,6 +3,10 @@ try:
     from scientific_contracts.numeric import finite_real
 except ImportError:
     from services.agribrain.scientific_contracts.numeric import finite_real
+try:
+    from asmae_learn.schemas import is_continuous_target
+except ImportError:
+    from services.agribrain.asmae_learn.schemas import is_continuous_target
 import json
 import hashlib
 from pathlib import Path
@@ -108,8 +112,15 @@ def build_validated_training_view(ledger_path: Optional[Path] = None) -> List[Di
         if run_view.get("weak_labels_as_ground_truth") or run_view.get("validation", {}).get("use_weak_labels_as_ground_truth"):
             continue
         
-        res_m = run_view.get("diagnostics", {}).get("resolution_selected_m") or run_view.get("resolution_m", 10.0)
-        if res_m <= 1.0 or run_view.get("visual_only") or run_view.get("diagnostics", {}).get("visual_only"):
+        diag_dict = run_view.get("diagnostics", {}) or {}
+        if "resolution_selected_m" in diag_dict and diag_dict["resolution_selected_m"] is not None:
+            raw_res = diag_dict["resolution_selected_m"]
+            res_m = finite_real(raw_res) if not isinstance(raw_res, bool) else None
+        else:
+            raw_fallback = run_view.get("resolution_m", 10.0)
+            res_m = finite_real(raw_fallback) if not isinstance(raw_fallback, bool) else None
+
+        if res_m is None or res_m <= 1.0 or run_view.get("visual_only") or diag_dict.get("visual_only"):
             continue
             
         if run_view.get("diagnostic_only") or run_view.get("diagnostics", {}).get("diagnostic_only"):
@@ -170,11 +181,7 @@ def build_validated_training_view(ledger_path: Optional[Path] = None) -> List[Di
         if fin_conf is None or not (0.0 < fin_conf <= 1.0):
             continue
 
-        CONTINUOUS_VARS = {"vigor", "canopy_water", "salinity_stress", "yield_observed"}
-        is_cont = (target_var in CONTINUOUS_VARS) or (
-            target_var == "biotic_confounder" and isinstance(target_value, (float, int)) and not isinstance(target_value, bool)
-        )
-        if is_cont:
+        if is_continuous_target(target_var, event.get("observed_unit"), target_value):
             fin_val = finite_real(target_value)
             if fin_val is None:
                 continue

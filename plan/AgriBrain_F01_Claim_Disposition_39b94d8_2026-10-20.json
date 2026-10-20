@@ -1,0 +1,238 @@
+{
+  "candidate": "39b94d8de2911cdbaa9e86d24a46f40464cba101",
+  "parent": "4157ac1d51d83f75f3379c13741fc9bc77b4f4fe",
+  "branch": "review/f01-r415-residuals",
+  "review_date": "2026-10-20",
+  "package": "F01",
+  "requirements": [
+    "AB-DAT-005",
+    "AB-DAT-006",
+    "AB-ARC-005",
+    "AB-ARC-006"
+  ],
+  "verdict": "Five R415 groups close at named boundaries; R415-03/R415-06 remain partial. Hold merge for three bounded follow-ups; all52 packageFA remainopen.",
+  "original_groups": [
+    {
+      "id": "R415-01",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Actual valid zero/finite weak-label consumer succeeds; fresh parent reproduces NameError.",
+      "lanes": [
+        "trajectory"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "R415-02",
+      "status": "CLOSED_BOUNDED",
+      "observation": "DRONE restrictions, reconstruction diagnostics and unavailable/conflicting weather canonical input remain restrictive through actual consumers.",
+      "lanes": [
+        "ledger",
+        "platform",
+        "ownership"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/ledger/results.json",
+        "review-39b94d8-f01/platform/results.json",
+        "review-39b94d8-f01/ownership/results.json"
+      ]
+    },
+    {
+      "id": "R415-03",
+      "status": "PARTIAL",
+      "observation": "Named component/quality/scope fixes pass; introduced standalone legacy EXCLUDED regression remains.",
+      "lanes": [
+        "decision"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/decision/results.json"
+      ]
+    },
+    {
+      "id": "R415-04",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Named native perception/sensor quality fabrication closes; no unmeasured posterior/zero-influence guarantee.",
+      "lanes": [
+        "platform"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/platform/results.json"
+      ]
+    },
+    {
+      "id": "R415-05",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Registered soil strings reject; zero/finite/missing and sibling sand controls work.",
+      "lanes": [
+        "ledger"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/ledger/results.json"
+      ]
+    },
+    {
+      "id": "R415-06",
+      "status": "PARTIAL",
+      "observation": "Named gates/comparator/confidence fixes largely pass; falsey resolution fallback and fractional legacy read parity remain.",
+      "lanes": [
+        "trajectory"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "R415-07",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Explicit invalid covariance no event/queue; missing covariance follows separate modeldefault policy; containment retained.",
+      "lanes": [
+        "protocol"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/protocol/results.json"
+      ]
+    }
+  ],
+  "closure_counts": {
+    "closed_bounded": 5,
+    "partial": 2
+  },
+  "followups": [
+    {
+      "id": "R39-01",
+      "priority": "P1",
+      "title": "Legacy vector-wide EXCLUDED removed by probe source filtering",
+      "origin": "introduced_regression",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "decision"
+      ],
+      "related": [
+        "R415-03"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Exact parent0rows/0mm/MODELLED; candidate3rows/+89.70mm full analysis/ASSIMILATED for both TDR+EXCLUDED orderings.",
+      "scope": "Actual native OI/full water engine, source compatibility; no durable L3 workflow.",
+      "repair": "Preserve standalone legacy restrictions alongside identity or migrate/quarantine before admission; retain scoped satellite isolation.",
+      "targets": [
+        "services/agribrain/layer3_water/assimilation/water_state_assimilator.py"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/decision/results.json"
+      ]
+    },
+    {
+      "id": "R39-02",
+      "priority": "P1",
+      "title": "Explicit selected resolution0 orFalse erased by fallback",
+      "origin": "preexisting_residual",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "trajectory"
+      ],
+      "related": [
+        "R415-06"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Actual writer-generated candidate and training sample approved when selected_resolution0/False falls back to10.",
+      "scope": "Actual schema/writer/candidate/replay/view; no optimizer.",
+      "repair": "Use explicit absence selection and finite/nonboolean/>0 checks in candidate and reader.",
+      "targets": [
+        "services/agribrain/asmae_learn/candidate_builder.py",
+        "services/agribrain/asmae_learn/dataset_builder.py"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/trajectory/results.json"
+      ]
+    },
+    {
+      "id": "R39-03",
+      "priority": "P2",
+      "title": "Fractional legacy biotic strings pass current reader although current writer rejects",
+      "origin": "legacy_reader_residual",
+      "status": "OPEN_REPRODUCED",
+      "lanes": [
+        "trajectory"
+      ],
+      "related": [
+        "R415-06"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "observed": "Fresh exact-parent writer approves fractional numeric/bad strings; current reader emits samples from those unmodified ledgers while current schema rejects sameevents; NaN legacy control blocks.",
+      "scope": "Actual oldwriter→newreader, byte-preserved parent approvals; no fabricated approval, currentwriter bypass or fitting. Boolean legacy case remains event-only defensive fixture.",
+      "repair": "Share target/form/unit validation at write/read; preserve categories in their legitimate form; explicit legacy normalize/quarantine policy.",
+      "targets": [
+        "services/agribrain/asmae_learn/schemas.py",
+        "services/agribrain/asmae_learn/dataset_builder.py"
+      ],
+      "evidence": [
+        "review-39b94d8-f01/trajectory/results.json"
+      ]
+    }
+  ],
+  "full_acceptance": {
+    "total": 52,
+    "open": 52,
+    "checked": 0,
+    "changed": false,
+    "meaning": "Register state is preserved, not proof all implementations are absent."
+  },
+  "prior_closures": {
+    "R51901": "Retain prior unsent-contender cleanup/quota software closure; five target files unchanged toparent, no new whole-runtime guarantee.",
+    "R51902": "Retain prior invalid-root-support software closure; five target files unchanged toparent, no new whole-suite guarantee."
+  },
+  "method": {
+    "completed_reviewers": 6,
+    "candidate_exact_files": 876,
+    "parent_exact_files": 876,
+    "changed_production_modules": 17,
+    "changed_modules_compile": 17,
+    "top_level_replay_commands": 8,
+    "training_exact_parent_writer_subprocess": true,
+    "correctness_inputs": "Current/parent production source, three exact normative plans and supplied R3 only.",
+    "repository_tests_audits_or_reported_totals_used_as_correctness_proof": false,
+    "source_or_Git_edits": false,
+    "hardware_services_provider_calls_or_fitting": false
+  },
+  "retained_controls": [
+    "Valid zero observations and continuous targets",
+    "Known malformed numeric rejection",
+    "Reconstruction diagnostic retention versus confidence quarantine",
+    "Independent soil/optical support survives rejected siblings/weather",
+    "Scoped satellite exclusion preserves validTDR",
+    "Synthetic/forecast modeled assimilation retains truthful authority",
+    "Current training comparator/quality range and source exclusions",
+    "RF missing default distinctfromexplicit invalid with calibration/epoch/capability containment"
+  ],
+  "limitations": [
+    "Full fusion orchestration not executed",
+    "Exact Layer1 admission and water history AST helpers isolated transparently",
+    "Full durable canonical L3 history not executed",
+    "No upstream ASMAEEnKF or RF posterior commit",
+    "RF actual queue only, no physical calibration/training/machine effect",
+    "No optimizer or trainedmodel outcome",
+    "Materializer syntax/layoutchecked; actual fresh replay uses separately reconstructed exactsource corpora"
+  ],
+  "next_steps": [
+    "Preserve/migrate standalone legacy water exclusion",
+    "Replace falsey resolution fallback in candidate and replay",
+    "Unify fractional target write/read qualification",
+    "Repeat same bounded matrix then decide named closures and separate full-package acceptance"
+  ]
+}

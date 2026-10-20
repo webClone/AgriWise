@@ -176,6 +176,11 @@ class WaterStateAssimilator:
         reading_rel = getattr(observations, "reading_reliability", None)
         weight_rel = getattr(observations, "reliability_weight", None)
 
+        # Domain definitions for provenance scoping
+        NON_PROBE_DOMAINS = ("SATELLITE", "SMAP", "SENTINEL1", "THERMAL", "CANOPY_COOLING", "RADIOMETER", "FLUX")
+        NON_SAT_DOMAINS = ("PROBE", "TDR", "IN_SITU", "CAPACITANCE", "SENSOR", "THERMAL", "CANOPY_COOLING", "RADIOMETER", "FLUX")
+        NON_THERMAL_DOMAINS = ("PROBE", "TDR", "IN_SITU", "CAPACITANCE", "SENSOR", "SATELLITE", "SMAP", "SENTINEL1", "FLUX")
+
         # 1. In-situ probe profile observations
         if observations.soil_probe_moisture_profile:
             probe_vals = observations.soil_probe_moisture_profile
@@ -187,14 +192,21 @@ class WaterStateAssimilator:
             if not probe_sources:
                 probe_sources = [
                     s for s in getattr(observations, "provenance_sources", [])
-                    if not any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1", "THERMAL", "CANOPY_COOLING", "RADIOMETER", "FLUX"))
+                    if not any(k in s.upper() for k in NON_PROBE_DOMAINS)
                 ]
             probe_source = probe_sources[0] if probe_sources else (observations.provenance_sources[0] if observations.provenance_sources else "IN_SITU_PROBE_TDR")
+            
+            # Scoped probe restrictions: probe-specific or generic vector-wide restrictions (not scoped to other domains)
+            probe_restriction_sources = [
+                s for s in getattr(observations, "provenance_sources", [])
+                if any(k in s.upper() for k in ("PROBE", "TDR", "IN_SITU", "CAPACITANCE", "SENSOR"))
+                or not any(k in s.upper() for k in NON_PROBE_DOMAINS)
+            ]
             probe_role_comp = comp_roles.get("soil_probe") or comp_roles.get("probe")
             probe_role = _resolve_role(vec_role, probe_role_comp)
-            if any(term in s.upper() for s in probe_sources for term in ("REJECTED", "EXCLUDED", "UNUSABLE")) or any(term in probe_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE")):
+            if any(term in s.upper() for s in probe_restriction_sources for term in ("REJECTED", "EXCLUDED", "UNUSABLE")) or any(term in probe_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE")):
                 probe_role = "EXCLUDED"
-            elif any(term in s.upper() for s in probe_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")) or any(term in probe_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")):
+            elif any(term in s.upper() for s in probe_restriction_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")) or any(term in probe_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")):
                 if probe_role != "EXCLUDED":
                     probe_role = "SIMULATED"
 
@@ -215,11 +227,16 @@ class WaterStateAssimilator:
             if sat_sources:
                 sat_source = sat_sources[0]
 
+            sat_restriction_sources = [
+                s for s in getattr(observations, "provenance_sources", [])
+                if any(k in s.upper() for k in ("SATELLITE", "SMAP", "SENTINEL1"))
+                or not any(k in s.upper() for k in NON_SAT_DOMAINS)
+            ]
             sat_role_comp = comp_roles.get("satellite")
             sat_role = _resolve_role(vec_role, sat_role_comp)
-            if any(term in s.upper() for s in sat_sources for term in ("REJECTED", "EXCLUDED", "UNUSABLE")) or any(term in sat_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE")):
+            if any(term in s.upper() for s in sat_restriction_sources for term in ("REJECTED", "EXCLUDED", "UNUSABLE")) or any(term in sat_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE")):
                 sat_role = "EXCLUDED"
-            elif any(term in s.upper() for s in sat_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")) or any(term in sat_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")):
+            elif any(term in s.upper() for s in sat_restriction_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")) or any(term in sat_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")):
                 if sat_role != "EXCLUDED":
                     sat_role = "SIMULATED"
 
@@ -241,11 +258,16 @@ class WaterStateAssimilator:
             if thermal_sources:
                 thermal_source = thermal_sources[0]
 
+            thermal_restriction_sources = [
+                s for s in getattr(observations, "provenance_sources", [])
+                if any(k in s.upper() for k in ("THERMAL", "CANOPY_COOLING", "RADIOMETER"))
+                or not any(k in s.upper() for k in NON_THERMAL_DOMAINS)
+            ]
             thermal_role_comp = comp_roles.get("thermal")
             thermal_role = _resolve_role(vec_role, thermal_role_comp)
-            if any(term in s.upper() for s in thermal_sources for term in ("REJECTED", "EXCLUDED", "UNUSABLE")) or any(term in thermal_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE")):
+            if any(term in s.upper() for s in thermal_restriction_sources for term in ("REJECTED", "EXCLUDED", "UNUSABLE")) or any(term in thermal_source.upper() for term in ("REJECTED", "EXCLUDED", "UNUSABLE")):
                 thermal_role = "EXCLUDED"
-            elif any(term in s.upper() for s in thermal_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")) or any(term in thermal_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")):
+            elif any(term in s.upper() for s in thermal_restriction_sources for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")) or any(term in thermal_source.upper() for term in ("SIMULATED", "SYNTHETIC", "SCENARIO", "PRIOR", "MODELLED", "FORECAST", "ESTIMATED")):
                 if thermal_role != "EXCLUDED":
                     thermal_role = "SIMULATED"
 

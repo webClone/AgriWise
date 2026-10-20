@@ -5,8 +5,10 @@ except ImportError:
     from services.agribrain.scientific_contracts.numeric import finite_real
 from datetime import datetime, timezone
 import json
-from typing import Any, Dict, List, Optional
-from asmae_learn.schemas import ValidationEvent
+try:
+    from asmae_learn.schemas import ValidationEvent, is_continuous_target
+except ImportError:
+    from services.agribrain.asmae_learn.schemas import ValidationEvent, is_continuous_target
 
 VARIABLE_THRESHOLDS = {
     "vigor": 0.25,
@@ -209,11 +211,7 @@ def check_disagreement(asmae_output: Dict[str, Any], validation_events: List[Val
         has_mismatch = False
         severity = "minor"
 
-        CONTINUOUS_VARS = {"vigor", "canopy_water", "salinity_stress", "yield_observed"}
-        is_cont = (var in CONTINUOUS_VARS) or (
-            var == "biotic_confounder" and isinstance(validated_val, (float, int)) and not isinstance(validated_val, bool)
-        )
-        if is_cont:
+        if is_continuous_target(var, getattr(ev, "observed_unit", None), validated_val):
             fin_val = finite_real(validated_val)
             if fin_val is None:
                 contradictions.append({
