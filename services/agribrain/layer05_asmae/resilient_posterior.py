@@ -111,11 +111,11 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
 
 _OBSERVATION_TIME_KEYS = frozenset({
     "source_timestamp", "acquired_at", "timestamp", "date",
-    "as_of", "valid_time", "observed_at",
+    "as_of", "valid_time", "observed_at", "observation_time", "obs_time",
 })
 _AVAILABILITY_TIME_KEYS = frozenset({
     "recorded_at", "created_at", "logged_at", "available_at", "issued_at",
-    "known_at", "received_at", "ingested_at", "generated_at",
+    "known_at", "received_at", "ingested_at", "generated_at", "committed_at",
 })
 _TIMESTAMP_KEYS = _OBSERVATION_TIME_KEYS | _AVAILABILITY_TIME_KEYS
 
@@ -134,7 +134,8 @@ def _is_proven_before_cutoff(data: Mapping[str, Any], cutoff: datetime) -> bool:
       1. It was acquired/observed at or before *cutoff*.
       2. It was recorded/available in the system at or before *cutoff*.
 
-    If timestamps are missing, unparseable, or any timestamp exceeds *cutoff*,
+    If timestamps are missing, unparseable, any timestamp exceeds *cutoff*,
+    or availability precedes physical observation (causality violation),
     the evidence cannot be proven available before cutoff and returns False.
     """
     if not isinstance(data, Mapping) or not data:
@@ -142,13 +143,22 @@ def _is_proven_before_cutoff(data: Mapping[str, Any], cutoff: datetime) -> bool:
     cutoff = _parse_datetime(cutoff)
     if cutoff is None or _is_rejected_dynamic_record(data):
         return False
-    for keys in (_OBSERVATION_TIME_KEYS, _AVAILABILITY_TIME_KEYS):
+    obs_times: List[datetime] = []
+    avail_times: List[datetime] = []
+    for keys, target in ((_OBSERVATION_TIME_KEYS, obs_times), (_AVAILABILITY_TIME_KEYS, avail_times)):
         present = [data[key] for key in keys if key in data]
         if not present:
             return False
         for raw in present:
             parsed = _parse_datetime(raw)
             if parsed is None or parsed > cutoff:
+                return False
+            target.append(parsed)
+
+    # Physical causality: physical observation cannot become available before it occurs
+    for ot in obs_times:
+        for at in avail_times:
+            if at < ot:
                 return False
     return True
 
@@ -227,6 +237,7 @@ def validate_archive_posterior(
     *,
     geometry_hash: str,
     crop_context: Any,
+    as_of: Optional[Any] = None,
 ) -> Tuple[bool, List[str]]:
     """Validate the complete historical-posterior authority contract."""
     data = _as_dict(archive)
@@ -262,8 +273,13 @@ def validate_archive_posterior(
 
     if str(data.get("historical_validation_status", "")).lower() not in _VALID_ARCHIVE_STATUSES:
         reasons.append("historical_validation_not_accepted")
-    if _parse_date(data.get("last_update_date")) is None:
+    last_update = _parse_date(data.get("last_update_date"))
+    if last_update is None:
         reasons.append("invalid_last_update_date")
+    elif as_of is not None:
+        effective_cutoff = _parse_datetime(as_of)
+        if effective_cutoff is not None and last_update > effective_cutoff.date():
+            reasons.append("archive_postdates_as_of_cutoff")
 
     means = _as_dict(data.get("state_means"))
     supported_means = {
@@ -344,11 +360,23 @@ def _archive_support(ledger: Any, state: str) -> List[str]:
     return [str(item) for item in support if str(item).strip()]
 
 
-def _records_as_of(records: List[Dict[str, Any]], as_of: Any) -> List[Dict[str, Any]]:
+def _records_as_of(
+    records: List[Dict[str, Any]],
+    as_of: Any,
+    *,
+    excluded_sink: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     if as_of is None:
         return records
     cutoff = _parse_datetime(as_of)
     if cutoff is None:
+        if excluded_sink is not None:
+            for r in records:
+                excluded_sink.append({
+                    "record": r,
+                    "reason": "invalid_cutoff_timestamp",
+                    "cutoff": str(as_of),
+                })
         return []
     rejected = object()
 
@@ -374,6 +402,31 @@ def _records_as_of(records: List[Dict[str, Any]], as_of: Any) -> List[Dict[str, 
     frozen = []
     for row in records:
         if not _is_proven_before_cutoff(row, cutoff):
+            if excluded_sink is not None:
+                reason = "unproven_before_cutoff"
+                if _is_rejected_dynamic_record(row):
+                    reason = "rejected_dynamic_record_or_forecast"
+                else:
+                    obs_present = [row[k] for k in _OBSERVATION_TIME_KEYS if k in row]
+                    avail_present = [row[k] for k in _AVAILABILITY_TIME_KEYS if k in row]
+                    if not obs_present:
+                        reason = "missing_observation_time"
+                    elif not avail_present:
+                        reason = "missing_availability_time"
+                    else:
+                        obs_dt = max((_parse_datetime(x) for x in obs_present if _parse_datetime(x) is not None), default=None)
+                        avail_dt = max((_parse_datetime(x) for x in avail_present if _parse_datetime(x) is not None), default=None)
+                        if obs_dt and obs_dt > cutoff:
+                            reason = "observation_postdates_cutoff"
+                        elif avail_dt and avail_dt > cutoff:
+                            reason = "availability_postdates_cutoff"
+                        elif obs_dt and avail_dt and avail_dt < obs_dt:
+                            reason = "causality_violation_availability_precedes_observation"
+                excluded_sink.append({
+                    "record": row,
+                    "reason": reason,
+                    "cutoff": cutoff.isoformat(),
+                })
             continue
         # Nested signal records are atomic: removing only their clock would
         # leave a generic value/mean available to recursive signal extraction.
@@ -381,7 +434,12 @@ def _records_as_of(records: List[Dict[str, Any]], as_of: Any) -> List[Dict[str, 
     return frozen
 
 
-def _weather_records(inp: Any, as_of: Any = None) -> List[Dict[str, Any]]:
+def _weather_records(
+    inp: Any,
+    as_of: Any = None,
+    *,
+    excluded_sink: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     raw = getattr(inp, "weather_daily_series", {}) or {}
     records: List[Dict[str, Any]] = []
     if isinstance(raw, Mapping):
@@ -391,7 +449,7 @@ def _weather_records(inp: Any, as_of: Any = None) -> List[Dict[str, Any]]:
             records.append(row)
     elif isinstance(raw, (list, tuple)):
         records = [_as_dict(item) for item in raw]
-    return _records_as_of([item for item in records if item], as_of)
+    return _records_as_of([item for item in records if item], as_of, excluded_sink=excluded_sink)
 
 
 def _propagate_archive_state(
@@ -401,6 +459,8 @@ def _propagate_archive_state(
     age_days: int,
     inp: Any,
     as_of: Any = None,
+    *,
+    excluded_sink: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[float, float, List[str]]:
     """Age-propagate a certified state and inflate its covariance."""
     support: List[str] = ["certified_archive_posterior"]
@@ -424,7 +484,7 @@ def _propagate_archive_state(
     }.get(state, 0.0005)
     variance = max(variance, 1e-9) + age * process_rate * (span ** 2)
 
-    weather = _weather_records(inp, as_of)
+    weather = _weather_records(inp, as_of, excluded_sink=excluded_sink)
     if weather and state in {"root_zone_water", "canopy_water", "thermal_stress", "phenology_progress", "stress_memory"}:
         recent = weather[-min(len(weather), max(age, 1), 30):]
         rain = sum(
@@ -642,9 +702,14 @@ def _signal_estimate(records: List[Dict[str, Any]], signal: str) -> Optional[Dic
     }
 
 
-def _timeseries_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, Any]]:
+def _timeseries_state_estimates(
+    inp: Any,
+    as_of: Any = None,
+    *,
+    excluded_sink: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Dict[str, Any]]:
     records = _normalize_timeseries(getattr(inp, "plot_timeseries", []))
-    records = _records_as_of(records, as_of)
+    records = _records_as_of(records, as_of, excluded_sink=excluded_sink)
     signals = {name: _signal_estimate(records, name) for name in _SIGNAL_ALIASES}
     result: Dict[str, Dict[str, Any]] = {}
 
@@ -859,20 +924,37 @@ def _prior_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[str, A
 
 def estimate_resilient_plot_posterior(inp: Any, as_of: Any = None) -> Dict[str, Any]:
     """Build the non-spatial posterior and its per-state evidence ledger."""
-    archive = getattr(inp, "archive_posterior", {}) or {}
-    valid_archive, archive_rejections = validate_archive_posterior(
-        archive,
-        geometry_hash=str(getattr(inp, "geometry_hash", "") or ""),
-        crop_context=getattr(inp, "crop_context", {}),
-    ) if archive else (False, ["archive_posterior_missing"])
-
     requested_as_of = as_of
     effective_as_of = _parse_datetime(requested_as_of)
     if requested_as_of is not None and effective_as_of is None:
         raise ValueError("as_of must be a valid observation availability cutoff")
     if effective_as_of is None:
         effective_as_of = _parse_datetime(getattr(inp, 'end_date', None))
+
+    archive = getattr(inp, "archive_posterior", {}) or {}
+    valid_archive, archive_rejections = validate_archive_posterior(
+        archive,
+        geometry_hash=str(getattr(inp, "geometry_hash", "") or ""),
+        crop_context=getattr(inp, "crop_context", {}),
+        as_of=effective_as_of,
+    ) if archive else (False, ["archive_posterior_missing"])
+
     states: Dict[str, Dict[str, Any]] = {}
+    excluded_revisions: List[Dict[str, Any]] = []
+
+    if archive and requested_as_of is not None and effective_as_of is not None:
+        archive_data = _as_dict(archive)
+        last_update = _parse_date(archive_data.get("last_update_date"))
+        if last_update and last_update > effective_as_of.date():
+            valid_archive = False
+            if "archive_postdates_as_of_cutoff" not in archive_rejections:
+                archive_rejections.append("archive_postdates_as_of_cutoff")
+            excluded_revisions.append({
+                "record": archive,
+                "reason": "archive_postdates_as_of_cutoff",
+                "cutoff": effective_as_of.isoformat(),
+            })
+
     if valid_archive:
         data = _as_dict(archive)
         means = _as_dict(data["state_means"])
@@ -884,9 +966,6 @@ def estimate_resilient_plot_posterior(inp: Any, as_of: Any = None) -> Dict[str, 
         age_days = max(0, (as_of - last_update).days) if last_update else 0
         if requested_as_of is not None and effective_as_of is not None:
             cutoff_date = effective_as_of.date()
-            if last_update and last_update > cutoff_date:
-                valid_archive = False
-                archive_rejections.append('archive_postdates_as_of_cutoff')
             age_days = max(0, (cutoff_date - last_update).days) if last_update else 0
         for state in STATE_NAMES:
             if not valid_archive:
@@ -899,6 +978,7 @@ def estimate_resilient_plot_posterior(inp: Any, as_of: Any = None) -> Dict[str, 
             mean, variance, process_support = _propagate_archive_state(
                 state, _clip(state, mean), variance, age_days, inp,
                 as_of=(effective_as_of if requested_as_of is not None else None),
+                excluded_sink=excluded_revisions,
             )
             states[state] = {
                 "mean": mean,
@@ -911,7 +991,9 @@ def estimate_resilient_plot_posterior(inp: Any, as_of: Any = None) -> Dict[str, 
             }
 
     timeseries_states = _timeseries_state_estimates(
-        inp, effective_as_of if requested_as_of is not None else None,
+        inp,
+        effective_as_of if requested_as_of is not None else None,
+        excluded_sink=excluded_revisions,
     )
     for state, temporal in timeseries_states.items():
         if state in states:
@@ -1037,6 +1119,10 @@ def estimate_resilient_plot_posterior(inp: Any, as_of: Any = None) -> Dict[str, 
         "archive_rejection_reasons": archive_rejections,
         "supported_state_count": len(states),
         "unsupported_state_count": len(STATE_NAMES) - len(states),
+        "excluded_revisions": excluded_revisions,
+        "excluded_revision_count": len(excluded_revisions),
+        "decision_cutoff": effective_as_of.isoformat() if effective_as_of else None,
+        "archived_knowledge_view_used": valid_archive,
     }
 
 

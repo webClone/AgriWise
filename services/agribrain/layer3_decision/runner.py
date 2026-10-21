@@ -993,6 +993,52 @@ def _deserialize_soil_observation(data: Any) -> Optional[Any]:
         return None
 
 
+def _is_weather_available_at_issuance(r: Any, cutoff: Optional[datetime.datetime]) -> bool:
+    """Check if weather record was available at or before decision cutoff."""
+    if not isinstance(r, dict) or cutoff is None:
+        return True
+    avail_raw = (
+        r.get("available_at")
+        or r.get("recorded_at")
+        or r.get("known_at")
+        or r.get("committed_at")
+        or r.get("created_at")
+        or r.get("ingested_at")
+    )
+    if avail_raw:
+        try:
+            if isinstance(avail_raw, datetime.datetime):
+                avail_dt = avail_raw
+            else:
+                avail_dt = datetime.datetime.fromisoformat(str(avail_raw).replace("Z", "+00:00"))
+            c_dt = cutoff
+            if avail_dt.tzinfo is None and c_dt.tzinfo is not None:
+                avail_dt = avail_dt.replace(tzinfo=c_dt.tzinfo)
+            elif avail_dt.tzinfo is not None and c_dt.tzinfo is None:
+                c_dt = c_dt.replace(tzinfo=avail_dt.tzinfo)
+            if avail_dt > c_dt:
+                return False
+        except Exception:
+            return False
+    obs_raw = r.get("observation_time") or r.get("timestamp") or r.get("observed_at") or r.get("valid_time")
+    if obs_raw and not r.get("is_forecast") and not r.get("is_prior"):
+        try:
+            if isinstance(obs_raw, datetime.datetime):
+                obs_dt = obs_raw
+            else:
+                obs_dt = datetime.datetime.fromisoformat(str(obs_raw).replace("Z", "+00:00"))
+            c_dt = cutoff
+            if obs_dt.tzinfo is None and c_dt.tzinfo is not None:
+                obs_dt = obs_dt.replace(tzinfo=c_dt.tzinfo)
+            elif obs_dt.tzinfo is not None and c_dt.tzinfo is None:
+                c_dt = c_dt.replace(tzinfo=obs_dt.tzinfo)
+            if obs_dt > c_dt:
+                return False
+        except Exception:
+            pass
+    return True
+
+
 def _execute_canonical_water_engine(
     inputs: Any,
     l1_output: Any = None,
@@ -1042,7 +1088,9 @@ def _execute_canonical_water_engine(
         )
         rec = None
         if isinstance(weather_daily, dict):
-            rec = weather_daily.get(day_key)
+            cand = weather_daily.get(day_key)
+            if cand and isinstance(cand, dict) and _is_weather_available_at_issuance(cand, ts):
+                rec = cand
         elif isinstance(weather_daily, list):
             for t_entry in reversed(weather_daily):
                 if isinstance(t_entry, dict):
@@ -1053,7 +1101,7 @@ def _execute_canonical_water_engine(
                             t_date = raw_ts.astimezone(ts.tzinfo).strftime("%Y-%m-%d")
                         elif isinstance(raw_ts, str) and len(raw_ts) >= 10:
                             t_date = raw_ts[:10]
-                    if t_date == day_key:
+                    if t_date == day_key and _is_weather_available_at_issuance(t_entry, ts):
                         rec = t_entry
                         break
         if not rec and timeseries:
@@ -1066,7 +1114,7 @@ def _execute_canonical_water_engine(
                             t_date = raw_ts.astimezone(ts.tzinfo).strftime("%Y-%m-%d")
                         elif isinstance(raw_ts, str) and len(raw_ts) >= 10:
                             t_date = raw_ts[:10]
-                    if t_date == day_key:
+                    if t_date == day_key and _is_weather_available_at_issuance(t_entry, ts):
                         rec = t_entry
                         break
 
@@ -1901,12 +1949,14 @@ def _execute_canonical_water_engine(
                 return weather_obs
             r_entry = None
             if isinstance(weather_daily, dict) and d_str in weather_daily:
-                r_entry = weather_daily[d_str]
+                cand = weather_daily[d_str]
+                if isinstance(cand, dict) and _is_weather_available_at_issuance(cand, ts):
+                    r_entry = cand
             if not r_entry and timeseries:
                 for t_entry in timeseries:
                     if isinstance(t_entry, dict):
                         t_d = t_entry.get("date") or str(t_entry.get("timestamp", ""))[:10]
-                        if t_d == d_str:
+                        if t_d == d_str and _is_weather_available_at_issuance(t_entry, ts):
                             r_entry = t_entry
                             break
             if r_entry and isinstance(r_entry, dict):
@@ -1917,12 +1967,14 @@ def _execute_canonical_water_engine(
             # If this date was previously integrated and stored in plot_hist, retain its observation
             if d_str in plot_hist and isinstance(plot_hist[d_str], dict) and "weather" in plot_hist[d_str]:
                 cached_w = plot_hist[d_str]["weather"]
-                if cached_w and isinstance(cached_w, dict):
+                if cached_w and isinstance(cached_w, dict) and _is_weather_available_at_issuance(cached_w, ts):
                     return cached_w
 
             # Also check retained_weather_map if replaying an invalidated trajectory
             if d_str in retained_weather_map and isinstance(retained_weather_map[d_str], dict):
-                return retained_weather_map[d_str]
+                cand = retained_weather_map[d_str]
+                if _is_weather_available_at_issuance(cand, ts):
+                    return cand
 
             # DV10: Check if this date was previously recorded in canonical worldline checkpoints for this plot
             try:
@@ -1933,10 +1985,30 @@ def _execute_canonical_water_engine(
                     for _cp_f in sorted(_cp_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
                         try:
                             _cp_obj = _cw_tmp._read(_cp_f)
+                            # Checkpoint committed time must respect issuance knowledge cutoff
+                            cp_committed = (
+                                _cp_obj.get("committed_at")
+                                or _cp_obj.get("as_of_knowledge_time")
+                                or (_cp_obj.get("payload") or {}).get("as_of")
+                            )
+                            if cp_committed and ts:
+                                try:
+                                    cp_dt = datetime.datetime.fromisoformat(str(cp_committed).replace("Z", "+00:00"))
+                                    c_dt = ts
+                                    if cp_dt.tzinfo is None and c_dt.tzinfo is not None:
+                                        cp_dt = cp_dt.replace(tzinfo=c_dt.tzinfo)
+                                    elif cp_dt.tzinfo is not None and c_dt.tzinfo is None:
+                                        c_dt = c_dt.replace(tzinfo=cp_dt.tzinfo)
+                                    if cp_dt > c_dt:
+                                        continue  # Checkpoint postdates issuance cutoff
+                                except Exception:
+                                    pass
                             _cp_hist = _cp_obj.get("payload", {}).get("history_summary", {})
                             if isinstance(_cp_hist, dict) and d_str in _cp_hist:
                                 _w_candidate = _cp_hist[d_str].get("weather")
                                 if _w_candidate and isinstance(_w_candidate, dict):
+                                    if not _is_weather_available_at_issuance(_w_candidate, ts):
+                                        continue
                                     _pw = _parse_weather(_w_candidate)
                                     if _pw:
                                         return _pw
@@ -1953,15 +2025,17 @@ def _execute_canonical_water_engine(
             while (d_val - d_prior_walk).days <= 365:
                 dp_str = d_prior_walk.strftime("%Y-%m-%d")
                 if isinstance(weather_daily, dict) and dp_str in weather_daily:
-                    p_w = _parse_weather(weather_daily[dp_str])
-                    if p_w:
-                        prior_obs = p_w
-                        break
+                    cand = weather_daily[dp_str]
+                    if isinstance(cand, dict) and _is_weather_available_at_issuance(cand, ts):
+                        p_w = _parse_weather(cand)
+                        if p_w:
+                            prior_obs = p_w
+                            break
                 if timeseries:
                     for t_entry in timeseries:
                         if isinstance(t_entry, dict):
                             t_d = t_entry.get("date") or str(t_entry.get("timestamp", ""))[:10]
-                            if t_d == dp_str:
+                            if t_d == dp_str and _is_weather_available_at_issuance(t_entry, ts):
                                 p_w = _parse_weather(t_entry)
                                 if p_w:
                                     prior_obs = p_w
@@ -1969,11 +2043,15 @@ def _execute_canonical_water_engine(
                     if prior_obs:
                         break
                 if dp_str in plot_hist and isinstance(plot_hist[dp_str], dict) and "weather" in plot_hist[dp_str]:
-                    prior_obs = plot_hist[dp_str]["weather"]
-                    break
+                    cand = plot_hist[dp_str]["weather"]
+                    if isinstance(cand, dict) and _is_weather_available_at_issuance(cand, ts):
+                        prior_obs = cand
+                        break
                 if dp_str in retained_weather_map:
-                    prior_obs = retained_weather_map[dp_str]
-                    break
+                    cand = retained_weather_map[dp_str]
+                    if isinstance(cand, dict) and _is_weather_available_at_issuance(cand, ts):
+                        prior_obs = cand
+                        break
                 d_prior_walk -= datetime.timedelta(days=1)
 
             if prior_obs and isinstance(prior_obs, dict):

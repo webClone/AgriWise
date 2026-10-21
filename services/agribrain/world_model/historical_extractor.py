@@ -68,6 +68,35 @@ def _extract_knowledge_time(event: Dict[str, Any]) -> Optional[datetime]:
         return None
 
 
+def _is_prospective_scenario_event(event: Dict[str, Any]) -> bool:
+    """Check if event is a forward forecast, plan, or scenario rather than realized evidence."""
+    if not isinstance(event, dict):
+        return False
+    ev_type = str(event.get("event_type") or "").upper()
+    if ev_type in (
+        "FORECAST", "WEATHER_FORECAST", "PREDICTION", "SCENARIO",
+        "MANAGEMENT_PLAN", "PRESCRIPTION_PLAN", "PROJECTION", "PRIOR",
+    ):
+        return True
+    role = str(event.get("role") or "").upper()
+    if role in ("FORECAST", "SCENARIO", "PLAN", "PRIOR", "SIMULATION"):
+        return True
+    payload = event.get("payload")
+    if isinstance(payload, dict):
+        if payload.get("is_forecast") is True:
+            return True
+        p_role = str(payload.get("role") or payload.get("truth_class") or "").upper()
+        if p_role in ("FORECAST", "SCENARIO", "PLAN", "PRIOR", "SIMULATED", "MODELLED"):
+            return True
+        p_status = str(payload.get("data_status") or "").upper()
+        if p_status in ("FORECAST", "ESTIMATED", "SIMULATED"):
+            return True
+        p_packet = str(payload.get("packet_type") or "").upper()
+        if "FORECAST" in p_packet or "SCENARIO" in p_packet:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class TrainingTrajectoryWindow:
     """Immutable bitemporal training window.
@@ -103,6 +132,7 @@ class TrainingTrajectoryWindow:
         return [
             e for e in self.active_events
             if str(e.get("event_type", "")).upper() in obs_types
+            and not _is_prospective_scenario_event(e)
         ]
 
     def get_interventions(self) -> List[Dict[str, Any]]:
@@ -111,6 +141,22 @@ class TrainingTrajectoryWindow:
         return [
             e for e in self.active_events
             if str(e.get("event_type", "")).upper() in intervention_types
+        ]
+
+    def get_forecasts(self) -> List[Dict[str, Any]]:
+        """Return forecast / scenario events active in this window."""
+        return [
+            e for e in self.active_events
+            if _is_prospective_scenario_event(e)
+        ]
+
+    def get_scenarios(self) -> List[Dict[str, Any]]:
+        """Return management plan and scenario events active in this window."""
+        scenario_types = {"SCENARIO", "MANAGEMENT_PLAN", "PRESCRIPTION_PLAN", "SIMULATION"}
+        return [
+            e for e in self.active_events
+            if str(e.get("event_type", "")).upper() in scenario_types
+            or (isinstance(e.get("payload"), dict) and str(e["payload"].get("role", "")).upper() in scenario_types)
         ]
 
     def to_dict(self) -> Dict[str, Any]:
@@ -185,15 +231,16 @@ class BitemporalWorldlineExtractor:
             kt = _extract_knowledge_time(event)
             et = _extract_event_time(event)
             status = str(event.get("status") or (event.get("payload") or {}).get("status") or "").upper()
+            is_scenario = _is_prospective_scenario_event(event)
 
             if kt is None:
                 quarantine_reason = "missing_knowledge_time"
             elif et is None:
                 quarantine_reason = "missing_event_time"
-            elif kt < et:
-                quarantine_reason = "causality_violation_knowledge_precedes_event"
             elif kt > knowledge_dt:
                 quarantine_reason = "future_knowledge_leakage"
+            elif not is_scenario and kt < et:
+                quarantine_reason = "causality_violation_knowledge_precedes_event"
             elif status in ("PROVISIONAL", "UNCOMMITTED", "ABORTED", "QUARANTINED", "FAILED"):
                 quarantine_reason = f"uncommitted_or_aborted_status_{status.lower()}"
 

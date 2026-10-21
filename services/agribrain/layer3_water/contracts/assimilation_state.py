@@ -34,6 +34,7 @@ class SoilObservationVector:
     reliability_weight: Optional[float] = None
     component_roles: Dict[str, str] = field(default_factory=dict)
     component_reliabilities: Dict[str, float] = field(default_factory=dict)
+    available_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)

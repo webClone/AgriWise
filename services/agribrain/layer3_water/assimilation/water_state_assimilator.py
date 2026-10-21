@@ -5,6 +5,7 @@ NOTE: Despite early design documents referencing EnKF, the current implementatio
 """
 
 from typing import List, Optional, Tuple, Dict, Any
+from datetime import datetime
 import math
 import numpy as np
 
@@ -64,6 +65,7 @@ class WaterStateAssimilator:
         prior_soil: SoilWaterState,
         observations: Optional[SoilObservationVector] = None,
         background_uncertainty_sigma: float = 0.035,
+        cutoff: Optional[datetime] = None,
     ) -> Tuple[SoilWaterState, AssimilationDiagnostic]:
         """Perform optimal state update: X^+ = X^- + K(y - H X^-).
         
@@ -106,6 +108,17 @@ class WaterStateAssimilator:
         sources = []
         rejected = []
 
+        temporal_reject_reason = None
+        obs_time = getattr(observations, "timestamp", None)
+        avail_time = getattr(observations, "available_at", None)
+        if obs_time and avail_time and avail_time < obs_time:
+            temporal_reject_reason = "causality_violation_availability_precedes_observation"
+        elif cutoff is not None:
+            if obs_time and obs_time > cutoff:
+                temporal_reject_reason = "observation_time_postdates_cutoff"
+            elif avail_time and avail_time > cutoff:
+                temporal_reject_reason = "availability_time_postdates_cutoff"
+
         def _resolve_quality(component_val: Any, reading_val: Any, weight_val: Any) -> Optional[float]:
             candidates = [component_val, reading_val, weight_val]
             specified = [c for c in candidates if c is not None]
@@ -136,7 +149,9 @@ class WaterStateAssimilator:
             value = finite_real(raw_value)
             sigma = finite_real(raw_sigma)
             reason = None
-            if value is None:
+            if temporal_reject_reason:
+                reason = temporal_reject_reason
+            elif value is None:
                 reason = "missing_or_non_finite_value"
             elif (
                 sigma is None or sigma <= 0.0
@@ -370,3 +385,6 @@ class WaterStateAssimilator:
         )
 
         return posterior_soil, diag
+
+    # Alias for assimilate_observations
+    assimilate = assimilate_observations
