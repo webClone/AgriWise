@@ -1,0 +1,168 @@
+{
+  "candidate": "e0e5b1eabee73e8b17ce6849f4a23c05b302501a",
+  "parent": "a263b3033d6e637bef73ddf789d77659cd44e8f7",
+  "branch": "feat/f01-downstream-integration-evidence",
+  "observed_main": "5344930dfc7fbab7f7277bf61f99fc252dd88bc6",
+  "review_date": "2026-10-21",
+  "package": "F01",
+  "requirements": [
+    "AB-DAT-005",
+    "AB-DAT-006",
+    "AB-ARC-005",
+    "AB-ARC-006"
+  ],
+  "verdict": "MERGE_RECOMMENDED_BOUNDED_CORRECTIVE_BATCH",
+  "meaning": "Both named A263 findings close against fresh exact-parent controls. No additional blocker was established within the bounded review. Full F01 and all 52 FA milestones remain open. No Git merge was performed.",
+  "closures": [
+    {
+      "id": "A263-02",
+      "priority": "P1",
+      "status": "CLOSED_BOUNDED",
+      "observation": "Native registered DroneRGBOutput quality now governs contribution. Zero/NaN standalone inputs add no actionable structural value. An invalid sibling leaves qualified weed at 0.30 and L3 severity at 0.24; the exact parent produces 0.45 and 0.36. All 138 native quality checks and 9 specialized checks pass.",
+      "scope": "Actual native L1/L2/L3 feature content. The sparse L3 context is not usable for a final decision. No action, training outcome, or physical response is certified.",
+      "evidence": [
+        "decision/structural-results.json",
+        "decision/parent-compatibility-structural-results.json",
+        "decision/comparison.json"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ]
+    },
+    {
+      "id": "A263-01",
+      "priority": "P2",
+      "status": "CLOSED_BOUNDED",
+      "observation": "All eight invalid DRONE disagreements retain qualified sensor evidence/fused confidence at 0.95 and value at 0.20; the exact parent reduces confidence to 0.85. Qualified disagreement still produces 0.85. Diagnostic conflicts remain visible; the actual Layer2 sensor field and global 0.95 confidence ceiling are preserved.",
+      "scope": "The named individual confidence, output, and ceiling boundary. Equality of all aggregate health/group-confidence summaries is not claimed.",
+      "evidence": [
+        "ledger/full-fusion-candidate-results.json",
+        "ledger/full-fusion-parent-results.json",
+        "ledger/full-fusion-comparison.json"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ]
+    }
+  ],
+  "closure_counts": {
+    "closed_bounded": 2,
+    "partial": 0,
+    "open_named_A263": 0
+  },
+  "qualifications": [
+    {
+      "id": "Q01",
+      "kind": "measured_integration_difference",
+      "subject": "Aggregate confidence and health differ",
+      "observations": {
+        "layer2_vegetation_group_confidence_absent": 0.95,
+        "with_agreeing_zero_diagnostic": 0.475,
+        "health_agreeing": 0.538,
+        "health_disagreeing": 0.518,
+        "status": "ok",
+        "qualified_feature_and_global_ceiling_unchanged": true
+      },
+      "disposition": "Disclosed separately. No additional qualified L3 scientific effect was established; this does not reopen A263-01."
+    },
+    {
+      "id": "Q02",
+      "kind": "inherited_transport_scope",
+      "subject": "Generic/specialized structural payload omissions and canopy projection",
+      "disposition": "The actual registered native route provides nonvacuous closure controls. Typed L2 canopy projection remains an adapter-only check; complete canopy transport is not claimed."
+    },
+    {
+      "id": "Q03",
+      "kind": "inherited_availability_limit",
+      "subject": "Infinity row_count and malformed/defaultQA exceptions",
+      "disposition": "Both snapshots raise OverflowError on infinite row_count. This is an inherited availability exception, not false contribution or an introduced regression. Record it separately from the named closure."
+    }
+  ],
+  "prior_closures": {
+    "R415_01_through_R415_07": "Retained in the exercised review boundaries.",
+    "R39_01_through_R39_03": "Retained in fresh native water and training controls.",
+    "R51901": "Unsent contender cleanup and quota software closure retained through unchanged targets; no new whole-runtime guarantee.",
+    "R51902": "Invalid root-support software closure retained through unchanged targets."
+  },
+  "full_acceptance": {
+    "total": 52,
+    "open": 52,
+    "checked": 0,
+    "changed": false,
+    "F01_FA_open": true
+  },
+  "method": {
+    "completed_lanes": 6,
+    "current_source_files": 885,
+    "exact_parent_source_files": 885,
+    "historical39_source_files": 876,
+    "legacy415_source_files": 876,
+    "changed_production_modules": 3,
+    "changed_modules_compile": true,
+    "top_level_portable_commands": 15,
+    "source_or_git_edits": false,
+    "repository_tests_audits_or_reported686total_used_as_proof": false,
+    "live_services_hardware_or_optimizer_called": false
+  },
+  "fresh_lane_evidence": {
+    "platform": {
+      "corrected_controls_both": 18,
+      "retained_controls_both": 20,
+      "zero_update_mutations_quarantined": true
+    },
+    "ledger": {
+      "component_fixtures_each": 112,
+      "actual_full_fuse_cases_each": 58,
+      "working_controls": 13,
+      "named_confidence_claim_closed": true
+    },
+    "decision": {
+      "water_variants_each": 45,
+      "water_checks_passed_each": 52,
+      "canonical_checks_passed_each": 32,
+      "specialized_candidate_pass": 9,
+      "specialized_parent_pass": 5,
+      "native_quality_variants": 44,
+      "candidate_native_quality_checks_passed": 138
+    },
+    "ownership": {
+      "cases": 43,
+      "checks_passed": 241
+    },
+    "trajectory": {
+      "closure_checks_passed": 22,
+      "bounded_L1checks_passed": 4,
+      "confidence_APIcompatibility_passed": 3,
+      "actual_legacy_identical_bytes": true
+    },
+    "protocol": {
+      "cases": 80,
+      "controls_passed": 18,
+      "QUEUED": 13,
+      "ABSTAINED": 1,
+      "COMMITTED": 0
+    }
+  },
+  "next_steps": [
+    "Proceed with the normal merge of the review branch as a bounded corrective batch.",
+    "Record A263-01 and A263-02 software closures separately from package FA acceptance.",
+    "Continue Stage 1 F02 observation/availability-at-issuance work using the reviewed F01 boundary, respecting full acceptance dependencies.",
+    "Track aggregate confidence, native payload transport, and availability qualifications in remaining integration work."
+  ],
+  "limits": [
+    "Qualified feature closure does not establish universal invariance of downstream summaries.",
+    "Source/import hashes establish identity, not branch coverage.",
+    "The actual sparse L3 fixture is diagnostic-usable, but usable_for_layer3 is false.",
+    "Typed canopy projection is not actual L2 canopy transport.",
+    "No physical posterior, training outcome, or action effect is certified.",
+    "RF queue admission is not a committed posterior or physical calibration.",
+    "All 52 FA milestones remain open; whole-repository, Omega, and world-model readiness are not certified.",
+    "The Git-object materializer was syntax/layout checked. The final fresh replay uses exact reconstructed source copies."
+  ]
+}
