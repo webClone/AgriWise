@@ -380,9 +380,11 @@ def build_diagnostics(
     for env in envelopes:
         source_health[env.source_family] = env.source_status
 
-    # Confidence distribution
+    # Confidence distribution (computed from non-diagnostic, state-updating evidence when available)
     conf_dist: Dict[str, float] = {}
-    for e in evidence:
+    usable_evidence = [e for e in evidence if not e.diagnostic_only and e.state_update_allowed]
+    eval_evidence = usable_evidence if usable_evidence else evidence
+    for e in eval_evidence:
         if e.source_family not in conf_dist:
             conf_dist[e.source_family] = e.confidence
         else:

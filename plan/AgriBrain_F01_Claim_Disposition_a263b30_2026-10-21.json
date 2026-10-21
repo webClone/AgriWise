@@ -1,0 +1,262 @@
+{
+  "candidate": "a263b3033d6e637bef73ddf789d77659cd44e8f7",
+  "parent": "5344930dfc7fbab7f7277bf61f99fc252dd88bc6",
+  "observed_main": "5344930dfc7fbab7f7277bf61f99fc252dd88bc6",
+  "branch": "feat/f01-downstream-integration-evidence",
+  "review_date": "2026-10-21",
+  "package": "F01",
+  "requirements": [
+    "AB-DAT-005",
+    "AB-DAT-006",
+    "AB-ARC-005",
+    "AB-ARC-006"
+  ],
+  "verdict": "PARTIAL_HARDENING_VERIFIED_COMPLETED_BATCH_ACCEPTANCE_HELD",
+  "merge_assessment": "Complete two bounded residuals before closing/publishing this as endtoendzero-influence work. Ifmergedaspartialimprovement, bothfindingsremainopen. No introducedregression established; oldmain534mergeconfirmed.",
+  "claim_dispositions": [
+    {
+      "id": "C01",
+      "claim": "shared native packet QA qualification",
+      "status": "VERIFIED_BOUNDED",
+      "lanes": [
+        "platform",
+        "ledger"
+      ]
+    },
+    {
+      "id": "C02",
+      "claim": "bridge reliability/diagnostic/update boundary",
+      "status": "VERIFIED_BOUNDED",
+      "lanes": [
+        "platform",
+        "ledger"
+      ]
+    },
+    {
+      "id": "C03",
+      "claim": "zero-quality evidence validation",
+      "status": "VERIFIED_BOUNDED",
+      "lanes": [
+        "platform",
+        "ledger"
+      ]
+    },
+    {
+      "id": "C04",
+      "claim": "zero-weight arithmetic confidence",
+      "status": "VERIFIED_BOUNDED_HELPER",
+      "lanes": [
+        "ledger"
+      ]
+    },
+    {
+      "id": "C05",
+      "claim": "context invariant zero preservation",
+      "status": "VERIFIED_BOUNDED",
+      "lanes": [
+        "ledger"
+      ]
+    },
+    {
+      "id": "C06",
+      "claim": "complete downstream zero influence",
+      "status": "PARTIAL_TWO_OPEN_RESIDUALS",
+      "lanes": [
+        "ledger",
+        "decision"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "A263-02",
+      "priority": "P1",
+      "status": "OPEN_REPRODUCED",
+      "origin": "preexisting_unclosed_ingestion_path",
+      "title": "Registered native structural adapter ignores explicit zero/nonfinite output reliability",
+      "targets": [
+        "services/agribrain/layer1_fusion/adapters/drone.py"
+      ],
+      "lane": "decision",
+      "observed": {
+        "native_input": {
+          "qa_score": 1.0,
+          "reliability_weight": "0.0 or NaN",
+          "canopy_cover_fraction": 0.7,
+          "weed_pressure_index": 0.6
+        },
+        "actual_evidence_reliability": 1.0,
+        "actual_fused_confidence": 0.5,
+        "actual_l3_has_drone_structural": true,
+        "actual_l3_weed_severity": 0.48,
+        "mixed_valid_sibling": {
+          "baseline_weed": 0.3,
+          "contaminated_weed": 0.45,
+          "baseline_l3_severity": 0.24,
+          "contaminated_l3_severity": 0.36
+        },
+        "exact_parent_same": true
+      },
+      "limits": "Actual native L1/L2/L3 and feature content; sparse context diagnostic_usable=true, usable_for_layer3=false, overallhealth.38. No authorized final decision, prescription execution, hardware or crop outcome.",
+      "repair": "Qualify native QA/output reliability before coercion/evidence admission; applyeffective bound totyped/dict sourcehealth/evidenceconf/rel andpermissions; retain independent valid support.",
+      "criteria": [
+        "Zero/nonfinite native quality no actionable contribution.",
+        "Qualified weed sibling remains.30/L3severity.24.",
+        "Positive-quality/validzero controls survive."
+      ],
+      "evidence": [
+        "decision/structural-results.json",
+        "decision/parent-compatibility-structural-results.json",
+        "decision/comparison.json"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ]
+    },
+    {
+      "id": "A263-01",
+      "priority": "P2",
+      "status": "OPEN_REPRODUCED",
+      "origin": "preexisting_indirect_confidence_path",
+      "title": "Zero-quality diagnostic conflict still penalizes qualified source",
+      "targets": [
+        "services/agribrain/layer1_fusion/engine.py",
+        "services/agribrain/layer1_fusion/conflict_resolver.py",
+        "services/agribrain/layer1_fusion/confidence_model.py"
+      ],
+      "lane": "ledger",
+      "observed": {
+        "baseline_sensor_confidence": 0.95,
+        "after_disagreeing_zero_quality_drone": 0.85,
+        "sensor_fused_value_unchanged": 0.2,
+        "bad_drone_confidence": 0.0,
+        "bad_drone_reliability": 0.0,
+        "bad_drone_diagnostic_only": true,
+        "bad_drone_state_update_allowed": false,
+        "agreeing_bad_control_sensor_confidence": 0.95,
+        "qualified_conflict_control_sensor_confidence": 0.85,
+        "zero_nonfinite_variants": 8,
+        "exact_parent_same": true
+      },
+      "limits": "Measured evidence/fusedconfidence, not physicalposterior/training/action. Diagnosticcount/conflictpresencealone notdefect.",
+      "repair": "Separate diagnostic conflict reporting from eligible support for penalties on qualified evidence.",
+      "criteria": [
+        "Zero/nonfinite badinput preserves validvalue.20/confidence.95.",
+        "Qualified disagreement stillpenalizes.",
+        "Diagnostic lineage retained."
+      ],
+      "evidence": [
+        "ledger/full-fusion-candidate-results.json",
+        "ledger/full-fusion-parent-results.json",
+        "ledger/full-fusion-comparison.json"
+      ],
+      "requirements": [
+        "AB-DAT-005",
+        "AB-DAT-006",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ]
+    }
+  ],
+  "finding_counts": {
+    "P1": 1,
+    "P2": 1,
+    "introduced_regressions_established": 0,
+    "open": 2
+  },
+  "prior_closures": {
+    "R415_01_through_R415_07": "Retained at named bounded boundaries, not blanket allnativeingestion certification.",
+    "R39_01_through_R39_03": "Retained with fresh water/training controls.",
+    "R51901_R51902": "Relevantfive source targets unchanged; retainpriorsoftwareclosures withoutclaimnewwhole-runtime run."
+  },
+  "full_acceptance": {
+    "total": 52,
+    "open": 52,
+    "checked": 0,
+    "changed": false
+  },
+  "scope_notes": [
+    {
+      "id": "Q01",
+      "subject": "Nonvacuousstructuraltransport",
+      "observation": "Shared named structuralpayloads and specializedsummary_metrics packetroute omitpositiveevidence in exercisedgenericbridge. Actualdirectregisteredroute suppliespositivecontrol andA26302; typedL2projection notrealL2transport.",
+      "counted_as_additional_finding": false
+    },
+    {
+      "id": "Q02",
+      "subject": "MalformeddefaultsceneQA",
+      "observation": "Unchanged defaultflag collector raises TypeError on malformed/nullsceneQA oncandidateandparent beforepackets. Failclosedavailability limitation, no stateadmissionleak inferred.",
+      "counted_as_additional_finding": false
+    }
+  ],
+  "method": {
+    "reviewers": 6,
+    "initial_source_files_each_current_parent": 876,
+    "exact_runtime_dependencies_added_without_changing_existingbytes": 9,
+    "final_source_files_each_current_parent": 885,
+    "comparison39_source_files": 876,
+    "legacy415_source_files": 876,
+    "changed_production_modules": 5,
+    "changed_modules_compile": true,
+    "top_level_replay_commands": 15,
+    "actual_full_fusion_cases_each_revision": 56,
+    "actual_structural_L1_L2_runs_each_revision": 47,
+    "retained_water_variants_each_revision": 45,
+    "retained_water_checks_passed_each": 52,
+    "repository_tests_audits_or_reported684total_used_as_proof": false,
+    "production_or_git_edits": false,
+    "providers_services_hardware_optimizer_or_prescription_execution": false
+  },
+  "retained_evidence": {
+    "platform": {
+      "new_checks_passed": 18,
+      "old_controls_unchanged": 20,
+      "old_zero_update_request_check_superseded_with_stricter_quarantine": 1
+    },
+    "ledger": {
+      "component_rows_each": 112,
+      "full_fusion_direct_checks_passed": 11,
+      "indirect_zero_influence_claim": false
+    },
+    "decision": {
+      "canonical_candidate_checks_passed": 32,
+      "canonical_parent_checks_passed": 8,
+      "specialized_candidate_checks": 9,
+      "specialized_candidate_passed": 5,
+      "specialized_failures_one_mechanism": 4
+    },
+    "weather_crop": {
+      "cases": 43,
+      "checks_passed": 241
+    },
+    "training": {
+      "closure_checks_passed": 22,
+      "bounded_L1_consumer_checks_passed": 4
+    },
+    "RF": {
+      "cases": 80,
+      "controls_passed": 18,
+      "QUEUED": 13,
+      "ABSTAINED": 1,
+      "COMMITTED": 0
+    }
+  },
+  "next_steps": [
+    "First repair nativeDroneStructuralAdapter effectivequality beforeadmission.",
+    "Then separate diagnostic conflicts from scientific penalties requiringqualifiedsupport.",
+    "Repeat same pairedmixed/positive/zero native matrix; retain earlierwater/training/RFclosures.",
+    "Continue otherreadyplanpackages independently; preserve52FAopen untilspecificacceptance."
+  ],
+  "limits": [
+    "FullL1andrealL2/L3softwareexecution doesnot establishphysicalposteriors.",
+    "ActualsparseL3contextnotusable_for_layer3 despite diagnosticfeaturecontent.",
+    "TypedprojectedcanopyboundaryseparatefromactualL2transport.",
+    "Trainingviewsnotoptimizerfitting.",
+    "RFqueuenotposteriorcommit or physicalcalibration.",
+    "Successfulprobedriverexit reproducesopenfailures, notallclear.",
+    "Noallrepository/Omega/worldmodelreadinesscertification."
+  ]
+}

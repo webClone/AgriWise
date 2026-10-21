@@ -35,6 +35,70 @@ from typing import Any, List
 
 from layer1_fusion.schemas import EvidenceItem, Layer1InputBundle, SourceEnvelope
 
+try:
+    from scientific_contracts.numeric import finite_real
+except ImportError:
+    from services.agribrain.scientific_contracts.numeric import finite_real
+
+
+def _qualify_drone_quality(package: Any) -> tuple[float, float, float, bool]:
+    """Qualify native QA score and reliability weight using finite_real.
+
+    Returns:
+        (qa_score, rel_weight, effective_quality, is_valid)
+    """
+    if package is None:
+        return (0.0, 0.0, 0.0, False)
+
+    def _get(key: str, default=None):
+        if isinstance(package, dict):
+            return package.get(key, default)
+        return getattr(package, key, default)
+
+    raw_valid = _get("is_valid", True)
+    is_valid = bool(raw_valid) if raw_valid is not None else False
+
+    # qa_score qualification
+    raw_qa = _get("qa_score")
+    if raw_qa is None:
+        if isinstance(package, dict) and "qa_score" not in package:
+            qa_score = 0.8
+        elif not isinstance(package, dict) and not hasattr(package, "qa_score"):
+            qa_score = 1.0
+        else:
+            qa_score = 0.0
+    else:
+        fin_qa = finite_real(raw_qa)
+        if fin_qa is None or fin_qa < 0.0:
+            qa_score = 0.0
+        else:
+            qa_score = max(0.0, min(1.0, fin_qa))
+
+    # reliability_weight qualification
+    raw_rel = _get("reliability_weight")
+    if raw_rel is None:
+        if isinstance(package, dict) and "reliability_weight" not in package:
+            rel_weight = 1.0
+        elif not isinstance(package, dict) and not hasattr(package, "reliability_weight"):
+            rel_weight = 1.0
+        else:
+            rel_weight = 0.0
+    else:
+        fin_rel = finite_real(raw_rel)
+        if fin_rel is None or fin_rel < 0.0:
+            rel_weight = 0.0
+        else:
+            rel_weight = max(0.0, min(1.0, fin_rel))
+
+    if not is_valid:
+        effective_quality = 0.0
+    elif qa_score == 0.0 or rel_weight == 0.0:
+        effective_quality = 0.0
+    else:
+        effective_quality = min(qa_score, rel_weight)
+
+    return (qa_score, rel_weight, effective_quality, is_valid)
+
 
 class DroneStructuralAdapter:
     source_family = "drone_structural"
@@ -66,25 +130,33 @@ class DroneStructuralAdapter:
                 return package.get(key, default)
             return getattr(package, key, default)
 
+        qa_score, rel_weight, effective_quality, is_valid = _qualify_drone_quality(package)
         mission_id = _get("mission_id", "unknown")
-        qa_score = float(_get("qa_score", 0.8))
         capture_ts = _get("capture_timestamp", None)
 
-        # Base confidence is bounded by the mission QA score
-        base_confidence = min(0.80, qa_score * 0.85)
-        base_reliability = qa_score
-
-        # Allow state updates only for high-quality missions
-        state_update_ok = qa_score >= 0.6
+        if effective_quality == 0.0:
+            base_confidence = 0.0
+            base_reliability = 0.0
+            state_update_ok = False
+            diagnostic_only = True
+        else:
+            base_confidence = min(0.80, effective_quality * 0.85)
+            base_reliability = effective_quality
+            state_update_ok = effective_quality >= 0.6
+            diagnostic_only = False
 
         idx = 0  # evidence counter
 
         def _add(variable: str, value: Any, unit: str,
                  obs_type: str = "derived_feature",
                  spatial_scope: str = "plot",
-                 diagnostic_only: bool = False,
+                 item_diagnostic_only: bool = False,
                  flags: list = None):
             nonlocal idx
+            is_diag = diagnostic_only or item_diagnostic_only or (effective_quality == 0.0)
+            item_flags = list(flags or [])
+            if is_diag and "DIAGNOSTIC_ONLY" not in item_flags:
+                item_flags.append("DIAGNOSTIC_ONLY")
             items.append(EvidenceItem(
                 evidence_id=f"drone_{mission_id}_{variable}_{idx}",
                 plot_id=plot_id,
@@ -96,77 +168,94 @@ class DroneStructuralAdapter:
                 observation_type=obs_type,
                 spatial_scope=spatial_scope,
                 observed_at=capture_ts,
-                confidence=base_confidence,
-                reliability=base_reliability,
+                confidence=base_confidence if not is_diag else 0.0,
+                reliability=base_reliability if not is_diag else 0.0,
                 freshness_score=0.0,  # set by freshness engine later
                 provenance_ref=f"drone_{mission_id}_{plot_id}",
-                diagnostic_only=diagnostic_only,
-                state_update_allowed=state_update_ok,
-                flags=flags or [],
+                diagnostic_only=is_diag,
+                state_update_allowed=state_update_ok and not is_diag,
+                flags=item_flags,
             ))
             idx += 1
 
         # ---- Core structural metrics ----
 
-        canopy = _get("canopy_cover_fraction")
+        canopy = finite_real(_get("canopy_cover_fraction"))
         if canopy is not None:
-            _add("canopy_cover_fraction", float(canopy), "fraction")
+            _add("canopy_cover_fraction", canopy, "fraction")
 
-        bare_soil = _get("bare_soil_fraction")
+        bare_soil = finite_real(_get("bare_soil_fraction"))
         if bare_soil is not None:
-            _add("bare_soil_fraction", float(bare_soil), "fraction")
+            _add("bare_soil_fraction", bare_soil, "fraction")
 
-        weed = _get("weed_pressure_index")
+        weed = finite_real(_get("weed_pressure_index"))
         if weed is not None:
-            _add("weed_pressure_index", float(weed), "index")
+            _add("weed_pressure_index", weed, "index")
 
         # ---- Row geometry metrics ----
 
-        azimuth = _get("row_azimuth_deg")
+        azimuth = finite_real(_get("row_azimuth_deg"))
         if azimuth is not None:
-            _add("row_azimuth_deg", float(azimuth), "deg")
+            _add("row_azimuth_deg", azimuth, "deg")
 
-        spacing = _get("row_spacing_cm")
+        spacing = finite_real(_get("row_spacing_cm"))
         if spacing is not None:
-            _add("row_spacing_cm", float(spacing), "cm")
+            _add("row_spacing_cm", spacing, "cm")
 
         row_count = _get("row_count")
-        if row_count is not None and int(row_count) > 0:
-            _add("row_count", int(row_count), "count")
+        if row_count is not None and not isinstance(row_count, bool):
+            try:
+                rc_int = int(row_count)
+                if rc_int > 0:
+                    _add("row_count", rc_int, "count")
+            except (ValueError, TypeError):
+                pass
 
         # ---- Row continuity (aggregate to mean) ----
         continuity_scores = _get("row_continuity_scores", [])
-        if continuity_scores and len(continuity_scores) > 0:
-            mean_cont = sum(continuity_scores) / len(continuity_scores)
-            _add("row_continuity_mean", round(mean_cont, 4), "score")
+        if continuity_scores and isinstance(continuity_scores, (list, tuple)):
+            valid_scores = [finite_real(s) for s in continuity_scores if finite_real(s) is not None]
+            if valid_scores:
+                mean_cont = sum(valid_scores) / len(valid_scores)
+                _add("row_continuity_mean", round(mean_cont, 4), "score")
 
         # ---- Row breaks (count only — individual breaks are diagnostic) ----
         row_breaks = _get("row_breaks", [])
-        if row_breaks:
+        if row_breaks and isinstance(row_breaks, (list, tuple)):
             _add("row_break_count", len(row_breaks), "count",
-                 diagnostic_only=True)
+                 item_diagnostic_only=True)
 
         # ---- Weed separation metrics ----
-        in_row_weed = _get("in_row_weed_fraction")
-        if in_row_weed is not None and float(in_row_weed) > 0:
-            _add("in_row_weed_fraction", float(in_row_weed), "fraction")
+        in_row_weed = finite_real(_get("in_row_weed_fraction"))
+        if in_row_weed is not None and in_row_weed > 0:
+            _add("in_row_weed_fraction", in_row_weed, "fraction")
 
-        inter_row_weed = _get("inter_row_weed_fraction")
-        if inter_row_weed is not None and float(inter_row_weed) > 0:
-            _add("inter_row_weed_fraction", float(inter_row_weed), "fraction")
+        inter_row_weed = finite_real(_get("inter_row_weed_fraction"))
+        if inter_row_weed is not None and inter_row_weed > 0:
+            _add("inter_row_weed_fraction", inter_row_weed, "fraction")
 
         # ---- Orchard mode metrics ----
         tree_count = _get("tree_count")
-        if tree_count is not None and int(tree_count) > 0:
-            _add("tree_count", int(tree_count), "count")
+        if tree_count is not None and not isinstance(tree_count, bool):
+            try:
+                tc_int = int(tree_count)
+                if tc_int > 0:
+                    _add("tree_count", tc_int, "count")
+            except (ValueError, TypeError):
+                pass
 
-            missing_trees = _get("missing_tree_count", 0)
-            if int(missing_trees) > 0:
-                _add("missing_tree_count", int(missing_trees), "count")
+        missing_trees = _get("missing_tree_count", 0)
+        if missing_trees is not None and not isinstance(missing_trees, bool):
+            try:
+                mt_int = int(missing_trees)
+                if mt_int > 0:
+                    _add("missing_tree_count", mt_int, "count")
+            except (ValueError, TypeError):
+                pass
 
-            uniformity = _get("canopy_uniformity_cv")
-            if uniformity is not None:
-                _add("canopy_uniformity_cv", float(uniformity), "ratio")
+        uniformity = finite_real(_get("canopy_uniformity_cv"))
+        if uniformity is not None:
+            _add("canopy_uniformity_cv", uniformity, "ratio")
 
         from layer1_fusion.truth_bridge import normalize_evidence_truth
         for item in items:
@@ -184,17 +273,15 @@ class DroneStructuralAdapter:
                 source_status="missing",
             )
 
-        # Normalize access
         def _get(key, default=None):
             if isinstance(package, dict):
                 return package.get(key, default)
             return getattr(package, key, default)
 
         mission_id = _get("mission_id", "unknown")
-        qa_score = float(_get("qa_score", 0.8))
-        is_valid = _get("is_valid", True)
+        qa_score, rel_weight, effective_quality, is_valid = _qualify_drone_quality(package)
 
-        if not is_valid:
+        if not is_valid or effective_quality == 0.0:
             return SourceEnvelope(
                 source_id=f"drone_{mission_id}",
                 source_family="drone_structural",
@@ -202,6 +289,8 @@ class DroneStructuralAdapter:
                 package_id=mission_id,
                 package_version="drone_rgb_v1.5",
                 trust_score=0.0,
+                spatial_scope="plot",
+                temporal_scope="instant",
                 source_status="unusable",
             )
 
@@ -211,8 +300,8 @@ class DroneStructuralAdapter:
             source_name="Drone Structural Analysis",
             package_id=mission_id,
             package_version="drone_rgb_v1.5",
-            trust_score=qa_score,
+            trust_score=effective_quality,
             spatial_scope="plot",
             temporal_scope="instant",
-            source_status="ok" if qa_score >= 0.5 else "degraded",
+            source_status="ok" if effective_quality >= 0.5 else "degraded",
         )

@@ -1800,8 +1800,358 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
         self.assertNotIn("canopy_cover_fraction", signals)
         self.assertNotIn("bare_soil_fraction", signals)
 
+    def test_a263_02_native_structural_adapter_quality_qualification_and_sibling_isolation(self):
+        """P1 A263-02: Native structural adapter qualifies qa_score and reliability_weight; zero/NaN reliability does not contaminate siblings."""
+        from services.agribrain.layer0.perception.drone_rgb.schemas import DroneRGBOutput
+        from services.agribrain.layer1_fusion.adapters.drone import DroneStructuralAdapter
+        from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+        from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+        from services.agribrain.layer1_fusion.outputs.layer2_adapter import build_layer2_context
+        from services.agribrain.layer2_intelligence.engine import Layer2IntelligenceEngine
+        from services.agribrain.layer2_intelligence.outputs.layer3_adapter import _extract_drone_structural_signals
+
+        adapter = DroneStructuralAdapter()
+        context_bundle = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_test_a263_02",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+        )
+
+        # 1. Direct adapter checks for zero and NaN reliability_weight
+        d_bad_zero = DroneRGBOutput(
+            plot_id="plot_pilot",
+            mission_id="m_bad_zero",
+            qa_score=1.0,
+            reliability_weight=0.0,
+            weed_pressure_index=0.60,
+            canopy_cover_fraction=0.70,
+            timestamp=CUTOFF,
+        )
+        items_zero = adapter.extract_evidence(d_bad_zero, context_bundle)
+        self.assertTrue(len(items_zero) >= 2)
+        for item in items_zero:
+            self.assertEqual(item.confidence, 0.0)
+            self.assertEqual(item.reliability, 0.0)
+            self.assertTrue(item.diagnostic_only)
+            self.assertFalse(item.state_update_allowed)
+        health_zero = adapter.source_health(d_bad_zero)
+        self.assertEqual(health_zero.trust_score, 0.0)
+        self.assertEqual(health_zero.source_status, "unusable")
+
+        d_bad_nan = DroneRGBOutput(
+            plot_id="plot_pilot",
+            mission_id="m_bad_nan",
+            qa_score=1.0,
+            reliability_weight=float("nan"),
+            weed_pressure_index=0.60,
+            canopy_cover_fraction=0.70,
+            timestamp=CUTOFF,
+        )
+        items_nan = adapter.extract_evidence(d_bad_nan, context_bundle)
+        for item in items_nan:
+            self.assertEqual(item.confidence, 0.0)
+            self.assertEqual(item.reliability, 0.0)
+            self.assertTrue(item.diagnostic_only)
+            self.assertFalse(item.state_update_allowed)
+        health_nan = adapter.source_health(d_bad_nan)
+        self.assertEqual(health_nan.trust_score, 0.0)
+        self.assertEqual(health_nan.source_status, "unusable")
+
+        # Positive control: valid finite reliability
+        d_qual = DroneRGBOutput(
+            plot_id="plot_pilot",
+            mission_id="m_qual",
+            qa_score=1.0,
+            reliability_weight=0.85,
+            weed_pressure_index=0.60,
+            canopy_cover_fraction=0.70,
+            timestamp=CUTOFF,
+        )
+        items_qual = adapter.extract_evidence(d_qual, context_bundle)
+        for item in items_qual:
+            self.assertGreater(item.confidence, 0.0)
+            self.assertEqual(item.reliability, 0.85)
+            self.assertFalse(item.diagnostic_only)
+            self.assertTrue(item.state_update_allowed)
+        health_qual = adapter.source_health(d_qual)
+        self.assertEqual(health_qual.trust_score, 0.85)
+        self.assertEqual(health_qual.source_status, "ok")
+
+        # Legitimate numeric zero values with positive quality survive
+        d_zero_val = DroneRGBOutput(
+            plot_id="plot_pilot",
+            mission_id="m_zero_val",
+            qa_score=1.0,
+            reliability_weight=1.0,
+            canopy_cover_fraction=0.0,
+            bare_soil_fraction=0.0,
+            timestamp=CUTOFF,
+        )
+        items_zero_val = adapter.extract_evidence(d_zero_val, context_bundle)
+        canopy_item = next(it for it in items_zero_val if it.variable == "canopy_cover_fraction")
+        self.assertEqual(canopy_item.value, 0.0)
+        self.assertEqual(canopy_item.reliability, 1.0)
+        self.assertFalse(canopy_item.diagnostic_only)
+        self.assertTrue(canopy_item.state_update_allowed)
+
+        # 2. Mixed valid sibling numerical fusion and downstream L3 isolation
+        # Baseline: qualified sibling alone with weed=0.30
+        d_valid = DroneRGBOutput(
+            plot_id="plot_pilot",
+            mission_id="m_valid",
+            qa_score=1.0,
+            reliability_weight=1.0,
+            weed_pressure_index=0.30,
+            timestamp=CUTOFF,
+        )
+        bundle_baseline = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_base",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            drone_structural_packages=[d_valid],
+        )
+        pkg_baseline = Layer1FusionEngine().fuse(bundle_baseline)
+        weed_baseline = next(f for f in pkg_baseline.fused_features.vegetation_context if f.name == "weed_pressure_index")
+        self.assertAlmostEqual(weed_baseline.value, 0.30, places=2)
+        l2_baseline = Layer2IntelligenceEngine().analyze(build_layer2_context(pkg_baseline))
+        sig_baseline = {}
+        _extract_drone_structural_signals(l2_baseline, sig_baseline)
+        self.assertAlmostEqual(sig_baseline["weed_pressure_severity"], 0.24, places=2)
+
+        # Add invalid sibling with weed=0.60, reliability=0.0: MUST NOT contaminate to 0.45 / 0.36
+        bundle_mixed_zero = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_mixed_zero",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            drone_structural_packages=[d_valid, d_bad_zero],
+        )
+        pkg_mixed_zero = Layer1FusionEngine().fuse(bundle_mixed_zero)
+        weed_mixed_zero = next(f for f in pkg_mixed_zero.fused_features.vegetation_context if f.name == "weed_pressure_index")
+        self.assertAlmostEqual(weed_mixed_zero.value, 0.30, places=2, msg="Fused weed contaminated by zero-reliability sibling")
+        l2_mixed_zero = Layer2IntelligenceEngine().analyze(build_layer2_context(pkg_mixed_zero))
+        sig_mixed_zero = {}
+        _extract_drone_structural_signals(l2_mixed_zero, sig_mixed_zero)
+        self.assertAlmostEqual(sig_mixed_zero["weed_pressure_severity"], 0.24, places=2, msg="L3 weed severity contaminated by zero-reliability sibling")
+
+        # Add invalid sibling with weed=0.60, reliability=NaN: MUST NOT contaminate
+        bundle_mixed_nan = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_mixed_nan",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            drone_structural_packages=[d_valid, d_bad_nan],
+        )
+        pkg_mixed_nan = Layer1FusionEngine().fuse(bundle_mixed_nan)
+        weed_mixed_nan = next(f for f in pkg_mixed_nan.fused_features.vegetation_context if f.name == "weed_pressure_index")
+        self.assertAlmostEqual(weed_mixed_nan.value, 0.30, places=2, msg="Fused weed contaminated by NaN-reliability sibling")
+        l2_mixed_nan = Layer2IntelligenceEngine().analyze(build_layer2_context(pkg_mixed_nan))
+        sig_mixed_nan = {}
+        _extract_drone_structural_signals(l2_mixed_nan, sig_mixed_nan)
+        self.assertAlmostEqual(sig_mixed_nan["weed_pressure_severity"], 0.24, places=2, msg="L3 weed severity contaminated by NaN-reliability sibling")
+
+        # Standalone bad drone: produces no updatable state feature and no active L3 weed severity
+        bundle_bad_alone = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_bad_alone",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            drone_structural_packages=[d_bad_zero],
+        )
+        pkg_bad_alone = Layer1FusionEngine().fuse(bundle_bad_alone)
+        updatable_weeds = [f for f in pkg_bad_alone.fused_features.vegetation_context if f.name == "weed_pressure_index" and not f.diagnostic_only]
+        self.assertEqual(len(updatable_weeds), 0)
+        l2_bad_alone = Layer2IntelligenceEngine().analyze(build_layer2_context(pkg_bad_alone))
+        sig_bad_alone = {}
+        _extract_drone_structural_signals(l2_bad_alone, sig_bad_alone)
+        self.assertFalse(sig_bad_alone.get("has_drone_structural", False))
+        self.assertEqual(sig_bad_alone.get("weed_pressure_severity", 0.0), 0.0)
+
+    def test_a263_01_zero_quality_diagnostic_conflict_does_not_penalize_qualified_source(self):
+        """P2 A263-01: Zero-quality diagnostic conflicts do not penalize qualified source confidence, while retaining diagnostic conflict lineage."""
+        from services.agribrain.layer0.observation_packet import (
+            ObservationPacket,
+            ObservationSource,
+            ObservationType,
+            QAMetadata,
+            UncertaintyModel,
+            DataStatus,
+        )
+        from services.agribrain.layer0.perception.common.contracts import (
+            PerceptionEngineFamily,
+            PerceptionEngineOutput,
+            PerceptionVariable,
+        )
+        from services.agribrain.layer0.perception.common.packet_adapter import to_observation_packets
+        from services.agribrain.layer0.source_package import Layer0SourcePackage
+        from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+        from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+
+        # 1. Baseline: Valid point sensor vegetation_fraction=0.20 alone
+        pkt_sensor = ObservationPacket(
+            packet_id="pkt_sensor_1",
+            source=ObservationSource.SENSOR_IOT,
+            obs_type=ObservationType.POINT_TIMESERIES,
+            data_status=DataStatus.OBSERVED,
+            timestamp=CUTOFF,
+            spatial_scope="point",
+            point=(35.0, 10.0),
+            qa=QAMetadata(scene_score=1.0, sensor_health=1.0),
+            uncertainty=UncertaintyModel(error_model="gaussian", sigmas={"vegetation_fraction": 0.02}),
+            payload={"variable": "vegetation_fraction", "value": 0.20, "unit": "fraction"},
+            reliability_weight=1.0,
+        )
+        sensor_src = Layer0SourcePackage(source_family="sensor", plot_id="plot_pilot", packets=[pkt_sensor])
+
+        bundle_sensor_only = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_sensor_only",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            sensor_context_package=sensor_src,
+        )
+        pkg_sensor_only = Layer1FusionEngine().fuse(bundle_sensor_only)
+        ev_s_base = next(e for e in pkg_sensor_only.evidence_items if e.source_family == "sensor")
+        fused_s_base = next(f for f in pkg_sensor_only.fused_features.vegetation_context if f.name == "vegetation_fraction" and not f.diagnostic_only)
+        self.assertAlmostEqual(ev_s_base.confidence, 0.95, places=2)
+        self.assertAlmostEqual(fused_s_base.confidence, 0.95, places=2)
+        self.assertAlmostEqual(fused_s_base.value, 0.20, places=2)
+
+        # 2. Add disagreeing plot drone with reliability_weight=0.0
+        drone_out_zero = PerceptionEngineOutput(
+            engine_family=PerceptionEngineFamily.DRONE,
+            plot_id="plot_pilot",
+            timestamp=CUTOFF,
+            qa_score=1.0,
+            reliability_weight=0.0,
+            variables=[PerceptionVariable(name="vegetation_fraction", value=0.95, sigma=0.02, confidence=0.0)],
+        )
+        drone_src_zero = Layer0SourcePackage(
+            source_family="perception",
+            plot_id="plot_pilot",
+            packets=to_observation_packets(drone_out_zero),
+        )
+
+        bundle_disagree_zero = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_disagree_zero",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            sensor_context_package=sensor_src,
+            perception_packages=[drone_src_zero],
+        )
+        pkg_disagree_zero = Layer1FusionEngine().fuse(bundle_disagree_zero)
+        ev_s_zero = next(e for e in pkg_disagree_zero.evidence_items if e.source_family == "sensor")
+        fused_s_zero = next(f for f in pkg_disagree_zero.fused_features.vegetation_context if f.name == "vegetation_fraction" and not f.diagnostic_only)
+
+        # Diagnostic lineage is preserved: conflict is detected and reported
+        scope_conflicts_zero = [c for c in pkg_disagree_zero.conflicts if c.conflict_type == "SCOPE_MISMATCH"]
+        self.assertGreater(len(scope_conflicts_zero), 0, "Diagnostic SCOPE_MISMATCH conflict must be retained")
+
+        # But valid sensor evidence and fused confidence must NOT be penalized
+        self.assertAlmostEqual(ev_s_zero.confidence, 0.95, places=2, msg="Valid sensor confidence penalized by zero-weight drone conflict")
+        self.assertAlmostEqual(fused_s_zero.confidence, 0.95, places=2, msg="Valid sensor fused confidence penalized by zero-weight drone conflict")
+        self.assertAlmostEqual(fused_s_zero.value, 0.20, places=2)
+
+        # 3. Add disagreeing plot drone with reliability_weight=NaN
+        drone_out_nan = PerceptionEngineOutput(
+            engine_family=PerceptionEngineFamily.DRONE,
+            plot_id="plot_pilot",
+            timestamp=CUTOFF,
+            qa_score=1.0,
+            reliability_weight=float("nan"),
+            variables=[PerceptionVariable(name="vegetation_fraction", value=0.95, sigma=0.02, confidence=0.0)],
+        )
+        drone_src_nan = Layer0SourcePackage(
+            source_family="perception",
+            plot_id="plot_pilot",
+            packets=to_observation_packets(drone_out_nan),
+        )
+
+        bundle_disagree_nan = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_disagree_nan",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            sensor_context_package=sensor_src,
+            perception_packages=[drone_src_nan],
+        )
+        pkg_disagree_nan = Layer1FusionEngine().fuse(bundle_disagree_nan)
+        ev_s_nan = next(e for e in pkg_disagree_nan.evidence_items if e.source_family == "sensor")
+        fused_s_nan = next(f for f in pkg_disagree_nan.fused_features.vegetation_context if f.name == "vegetation_fraction" and not f.diagnostic_only)
+        self.assertAlmostEqual(ev_s_nan.confidence, 0.95, places=2)
+        self.assertAlmostEqual(fused_s_nan.confidence, 0.95, places=2)
+        self.assertAlmostEqual(fused_s_nan.value, 0.20, places=2)
+
+        # 4. Agreeing control: zero-quality drone with agreeing value 0.20 preserves 0.95 confidence
+        drone_out_agree = PerceptionEngineOutput(
+            engine_family=PerceptionEngineFamily.DRONE,
+            plot_id="plot_pilot",
+            timestamp=CUTOFF,
+            qa_score=1.0,
+            reliability_weight=0.0,
+            variables=[PerceptionVariable(name="vegetation_fraction", value=0.20, sigma=0.02, confidence=0.0)],
+        )
+        drone_src_agree = Layer0SourcePackage(
+            source_family="perception",
+            plot_id="plot_pilot",
+            packets=to_observation_packets(drone_out_agree),
+        )
+        bundle_agree = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_agree",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            sensor_context_package=sensor_src,
+            perception_packages=[drone_src_agree],
+        )
+        pkg_agree = Layer1FusionEngine().fuse(bundle_agree)
+        ev_s_agree = next(e for e in pkg_agree.evidence_items if e.source_family == "sensor")
+        self.assertAlmostEqual(ev_s_agree.confidence, 0.95, places=2)
+
+        # 5. Positive control: Qualified disagreeing drone with reliability_weight=0.85 DOES penalize sensor confidence
+        drone_out_qual = PerceptionEngineOutput(
+            engine_family=PerceptionEngineFamily.DRONE,
+            plot_id="plot_pilot",
+            timestamp=CUTOFF,
+            qa_score=1.0,
+            reliability_weight=0.85,
+            variables=[PerceptionVariable(name="vegetation_fraction", value=0.95, sigma=0.02, confidence=0.85)],
+        )
+        drone_src_qual = Layer0SourcePackage(
+            source_family="perception",
+            plot_id="plot_pilot",
+            packets=to_observation_packets(drone_out_qual),
+        )
+        bundle_qual = Layer1InputBundle(
+            plot_id="plot_pilot",
+            run_id="run_qual",
+            run_timestamp=CUTOFF,
+            window_start=CUTOFF,
+            window_end=CUTOFF,
+            sensor_context_package=sensor_src,
+            perception_packages=[drone_src_qual],
+        )
+        pkg_qual = Layer1FusionEngine().fuse(bundle_qual)
+        ev_s_qual = next(e for e in pkg_qual.evidence_items if e.source_family == "sensor")
+        fused_s_qual = next(f for f in pkg_qual.fused_features.vegetation_context if f.name == "vegetation_fraction" and not f.diagnostic_only)
+        self.assertAlmostEqual(ev_s_qual.confidence, 0.85, places=2, msg="Qualified disagreement failed to apply expected conflict penalty")
+        self.assertAlmostEqual(fused_s_qual.confidence, 0.85, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
