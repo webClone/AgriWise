@@ -5239,9 +5239,30 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             if not family_ok:
                 return False, family_reason
 
+            # S673-02: Deny surfaces with active revocation or blocking reasons
+            prov = getattr(surface, "provenance", {}) or {}
+            surf_blocks = []
+            if prov.get("block_reasons"):
+                surf_blocks.extend(prov["block_reasons"])
+            if getattr(surface, "block_reasons", None):
+                surf_blocks.extend(getattr(surface, "block_reasons"))
+            if prov.get("exclusion_reason"):
+                surf_blocks.append(prov["exclusion_reason"])
+            if surf_blocks:
+                REVOCATION_BLOCK_STRINGS = (
+                    "local_support_revoked",
+                    "support_revoked",
+                    "evidence_revoked",
+                    "blocked",
+                    "revoked",
+                )
+                for b in surf_blocks:
+                    b_str = str(b).lower()
+                    if any(rev in b_str for rev in REVOCATION_BLOCK_STRINGS):
+                        return False, f"surface_blocked:{b}"
+
             # S12-01: Risk composite must have at least one active, qualified ingredient
             if "RISK" in t_upper:
-                prov = getattr(surface, "provenance", {}) or {}
                 risk_ing = prov.get("risk_ingredients")
                 if risk_ing is not None and len(risk_ing) == 0:
                     return False, "missing_qualified_risk_ingredients"

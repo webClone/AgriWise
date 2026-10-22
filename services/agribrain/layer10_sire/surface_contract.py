@@ -157,7 +157,7 @@ def serialize_surface_artifact(surface: Any) -> dict:
                 "INTERPOLATED_PROXY surfaces have an authority ceiling and cannot drive state updates or variable-rate prescriptions"
             )
 
-    return {
+    doc = {
         "surface_id": surface_id,
         "type": semantic_type,
         "semantic_type": semantic_type,
@@ -197,6 +197,12 @@ def serialize_surface_artifact(surface: Any) -> dict:
         "tile_ref": _field(surface, "tile_ref", None),
         "stac_item_ref": _field(surface, "stac_item_ref", None),
     }
+
+    raw_blocks = _surface_value(surface, provenance, "block_reasons", "blockReasons")
+    if raw_blocks:
+        doc["block_reasons"] = list(raw_blocks) if isinstance(raw_blocks, (list, tuple, set)) else [str(raw_blocks)]
+
+    return doc
 
 
 def classify_surface_publication(payload: Any) -> Tuple[str, str]:

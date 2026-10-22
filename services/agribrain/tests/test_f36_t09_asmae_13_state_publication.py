@@ -925,3 +925,229 @@ class TestStage12ResidualCorrections:
         )
         assert res_valid["support_class"] == "directly_assimilated"
         assert res_valid["direct_observation"] is True
+
+    def test_s673_01_runtime_enum_ceiling_matrix(self):
+        """S673-01: STATE_UPDATE and TRAINING_EXPORT ceilings strictly deny management eligibility.
+        
+        Only PRESCRIPTION_ELIGIBLE and PRESCRIPTION_DRIVER can grant management eligibility
+        (subject to static descriptor maximum).
+        """
+        from services.agribrain.layer05_asmae.state.descriptors import AuthorityCeiling
+
+        # Vigor has descriptor maximum PRESCRIPTION_ELIGIBLE
+        for level in AuthorityCeiling:
+            for spelling in (level.value, level.value.upper(), level.name):
+                res = compute_asmae_support_classification(
+                    real_ev=True,
+                    source_reality="real_raster",
+                    meta={"support_class": "directly_assimilated", "direct_observation_count": 1, "authority_ceiling": spelling},
+                    stype=SurfaceType.ASMAE_VIGOR,
+                    state_support_ledger={
+                        "vigor": {
+                            "state": "vigor",
+                            "support_status": "assimilated",
+                            "accepted_update_count": 1,
+                            "direct_observation_count": 1,
+                            "observation_relationship": "direct",
+                            "authority_ceiling": spelling,
+                        }
+                    },
+                    feature_name="vigor",
+                )
+                if level in (AuthorityCeiling.PRESCRIPTION_ELIGIBLE, AuthorityCeiling.PRESCRIPTION_DRIVER):
+                    assert res["management_zone_eligible"] is True, f"Expected {spelling} to be management eligible"
+                else:
+                    assert res["management_zone_eligible"] is False, f"Expected {spelling} to NOT be management eligible"
+
+        # Unknown ceiling fails closed to False
+        res_unknown = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={"support_class": "directly_assimilated", "direct_observation_count": 1, "authority_ceiling": "unknown_ceiling_token"},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_unknown["management_zone_eligible"] is False
+
+    def test_s673_02_revocation_continuity_and_composite_isolation(self, monkeypatch):
+        """S673-02: Revocation in metadata or on surface is preserved and isolates both composites."""
+        monkeypatch.setenv("ASMAE_ENABLED", "true")
+        monkeypatch.setenv("ASMAE_DIAGNOSTIC_SHADOW_RUN_ENABLED", "true")
+        monkeypatch.setenv("L10_ASMAE_SURFACES_ENABLED", "true")
+        grid_spec = {
+            "crs": "EPSG:4326",
+            "bounds": [1.0, 2.0, 1.003, 2.003],
+            "transform": [1.0, 0.001, 0.0, 2.003, 0.0, -0.001],
+            "width": 3,
+            "height": 3,
+            "resolution_m": 10.0,
+            "resolution": 10.0,
+            "transform_convention": "gdal",
+        }
+        inp = Layer10Input(tenant_id="T1", farm_id="F1", plot_id="p1")
+
+        def run_with_scale(scale: float, mode: str):
+            l1 = L1SpatialData(
+                height=3,
+                width=3,
+                grid_spec=copy.deepcopy(grid_spec),
+                asmae_evidence_state={
+                    "real_asmae_evidence": True,
+                    "source_reality": "real_raster",
+                    "state_update_allowed": False,
+                },
+                real_asmae_evidence=True,
+                asmae_feature_pack={"grid_spec": copy.deepcopy(grid_spec)},
+            )
+            keys = [
+                "asmae_cross_layer_conflict",
+                "asmae_bma_disagreement",
+                "asmae_uncertainty",
+                "asmae_thermal_stress",
+            ]
+            for k in keys:
+                base_vals = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
+                if k == "asmae_cross_layer_conflict":
+                    l1.raster_maps[k] = [[scale * v for v in row] for row in base_vals]
+                else:
+                    l1.raster_maps[k] = copy.deepcopy(base_vals)
+                l1.raster_metadata[k] = {
+                    "confidence": 0.8,
+                    "uncertainty": 0.2,
+                    "resolution_m": 10.0,
+                    "diagnostic_only": True,
+                    "state_update_allowed": False,
+                    "scene_stack_mode": "real_raster",
+                }
+                if k == "asmae_cross_layer_conflict" and mode == "metadata":
+                    l1.raster_metadata[k]["block_reasons"] = ["local_support_revoked"]
+
+            native = generate_asmae_surfaces(inp, 3, 3, l1_data=l1)
+            source = next(s for s in native if s.semantic_type == SurfaceType.ASMAE_CROSS_LAYER_CONFLICT)
+
+            if mode == "typed_surface":
+                from dataclasses import replace
+                declared = copy.deepcopy(source.provenance)
+                declared["block_reasons"] = ["local_support_revoked"]
+                replacement = replace(source, provenance=declared, block_reasons=["local_support_revoked"])
+                native = [replacement if x is source else x for x in native]
+
+            aliases = generate_asmae_aliases(3, 3, native, inp, grid_spec_dict=grid_spec)
+            risk = next((s for s in aliases if s.semantic_type == SurfaceType.RISK_ASMAE_DIAGNOSTIC), None)
+            veg = next((s for s in aliases if s.semantic_type == SurfaceType.VEG_ATTENTION_ASMAE_DIAGNOSTIC), None)
+            conflict_surf = next((s for s in native if s.semantic_type == SurfaceType.ASMAE_CROSS_LAYER_CONFLICT), None)
+            return conflict_surf, risk, veg
+
+        # Metadata mode:
+        surf_01, risk_01, veg_01 = run_with_scale(0.1, mode="metadata")
+        surf_10, risk_10, veg_10 = run_with_scale(1.0, mode="metadata")
+
+        # Provenance must preserve block reasons from metadata
+        assert surf_01.provenance.get("block_reasons") == ["local_support_revoked"]
+        assert surf_10.provenance.get("block_reasons") == ["local_support_revoked"]
+        assert surf_01.block_reasons == ["local_support_revoked"]
+
+        # Changing scale of revoked ingredient has zero effect on risk composite
+        assert risk_01 is not None and risk_10 is not None
+        assert risk_01.values == risk_10.values
+
+        # Changing scale of revoked ingredient has zero effect on veg attention composite
+        assert veg_01 is not None and veg_10 is not None
+        assert veg_01.values == veg_10.values
+
+        # Typed surface mode:
+        _, risk_t01, veg_t01 = run_with_scale(0.1, mode="typed_surface")
+        _, risk_t10, veg_t10 = run_with_scale(1.0, mode="typed_surface")
+        assert risk_t01.values == risk_t10.values
+        assert veg_t01.values == veg_t10.values
+
+    def test_s673_03_alternate_prior_distribution_and_spatial_qualification(self):
+        """S673-03: Malformed alternate prior distributions and arbitrary spatial strings fail closed."""
+        # Malformed distribution: NaN mean and negative variance fails closed to unsupported
+        res_nan_dist = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={
+                "vigor": {
+                    "state": "vigor",
+                    "support_status": "prior_constrained",
+                    "prior_distribution": {"mean": float("nan"), "variance": -1.0},
+                }
+            },
+            feature_name="vigor",
+        )
+        assert res_nan_dist["support_class"] == "unsupported"
+        assert res_nan_dist["evidence_class"] == "Unsupported"
+        assert res_nan_dist["scouting_zone_eligible"] is False
+
+        # Malformed distribution: string "not-a-distribution" fails closed to unsupported
+        res_str_dist = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={
+                "vigor": {
+                    "state": "vigor",
+                    "support_status": "prior_constrained",
+                    "prior_distribution": "not-a-distribution",
+                }
+            },
+            feature_name="vigor",
+        )
+        assert res_str_dist["support_class"] == "unsupported"
+
+        # Arbitrary spatial support "not-a-raster" fails closed to unsupported
+        res_bad_spatial = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={
+                "vigor": {
+                    "state": "vigor",
+                    "support_status": "prior_constrained",
+                    "spatial_support": "not-a-raster",
+                }
+            },
+            feature_name="vigor",
+        )
+        assert res_bad_spatial["support_class"] == "unsupported"
+
+        # Recognized spatial support "microzone_grid" qualifies
+        res_good_spatial = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={
+                "vigor": {
+                    "state": "vigor",
+                    "support_status": "prior_constrained",
+                    "spatial_support": "microzone_grid",
+                }
+            },
+            feature_name="vigor",
+        )
+        assert res_good_spatial["support_class"] == "prior_constrained"
+
+        # Valid prior distribution with finite mean and nonnegative variance qualifies
+        res_valid_dist = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={
+                "vigor": {
+                    "state": "vigor",
+                    "support_status": "prior_constrained",
+                    "prior_distribution": {"mean": 0.5, "variance": 0.05},
+                }
+            },
+            feature_name="vigor",
+        )
+        assert res_valid_dist["support_class"] == "prior_constrained"
+        assert res_valid_dist["scouting_zone_eligible"] is True

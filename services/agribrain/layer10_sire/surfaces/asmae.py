@@ -47,6 +47,130 @@ def _is_valid_finite_nonnegative(val: Any) -> bool:
         return False
 
 
+def _is_finite_real(val: Any) -> bool:
+    """Return True if val is a finite real number (not None, bool, NaN, or Inf)."""
+    if val is None or isinstance(val, bool):
+        return False
+    if not isinstance(val, (int, float)):
+        return False
+    try:
+        fval = float(val)
+        return math.isfinite(fval)
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_prior_distribution(dist: Any) -> Tuple[bool, bool]:
+    """Validate an alternate prior_distribution.
+
+    Returns:
+        (has_valid_distribution, is_malformed)
+        - If dist is None: (False, False)
+        - If dist is invalid/malformed: (False, True)
+        - If dist is a valid distribution: (True, False)
+    """
+    if dist is None:
+        return False, False
+    if not isinstance(dist, dict):
+        return False, True
+
+    has_variance = "variance" in dist or "var" in dist
+    has_std = "std" in dist or "sigma" in dist
+    var_val = dist.get("variance", dist.get("var"))
+    std_val = dist.get("std", dist.get("sigma"))
+
+    if has_variance and not _is_valid_finite_nonnegative(var_val):
+        return False, True
+    if has_std and not _is_valid_finite_nonnegative(std_val):
+        return False, True
+
+    has_mean = "mean" in dist or "mu" in dist
+    mean_val = dist.get("mean", dist.get("mu"))
+    if has_mean and not _is_finite_real(mean_val):
+        return False, True
+
+    if "covariance" in dist or "cov" in dist:
+        cov = dist.get("covariance", dist.get("cov"))
+        if not isinstance(cov, (int, float, list)):
+            return False, True
+        if isinstance(cov, (int, float)) and not _is_valid_finite_nonnegative(cov):
+            return False, True
+
+    has_param = has_variance or has_std or has_mean or ("family" in dist or "distribution" in dist)
+    if has_param:
+        return True, False
+
+    return False, True
+
+
+RECOGNIZED_SPATIAL_SUPPORTS = {
+    "microzone_grid",
+    "raster",
+    "pixel_native",
+    "sub_grid",
+    "plot",
+    "zone",
+    "regional",
+    "plot_level_only",
+}
+
+
+def _validate_spatial_support(spatial: Any) -> Tuple[bool, bool]:
+    """Validate spatial_support token.
+
+    Returns:
+        (has_valid_spatial, is_malformed)
+        - If spatial is empty, None, 'none', 'unsupported': (False, False)
+        - If spatial is a recognized spatial support: (True, False)
+        - If spatial is an arbitrary/unknown string (e.g. 'not-a-raster'): (False, True)
+    """
+    if spatial is None:
+        return False, False
+    s_str = str(spatial).strip().lower()
+    if s_str in ("", "none", "unsupported"):
+        return False, False
+    if s_str in RECOGNIZED_SPATIAL_SUPPORTS:
+        return True, False
+    return False, True
+
+
+def _is_surface_revoked_or_unsupported(s: Any) -> Tuple[bool, Optional[str]]:
+    """Determine if an ingredient surface is unsupported or revoked by status or block reasons."""
+    if s is None:
+        return True, "surface_missing"
+    sprov = getattr(s, "provenance", {}) or {}
+    sup_class = sprov.get("support_class")
+    ev_class = sprov.get("evidence_class")
+    if sup_class == "unsupported" or ev_class == "Unsupported":
+        return True, "ingredient_unsupported"
+
+    raw_blocks = []
+    if sprov.get("block_reasons"):
+        raw_blocks.extend(sprov["block_reasons"])
+    if getattr(s, "block_reasons", None):
+        raw_blocks.extend(getattr(s, "block_reasons"))
+    if sprov.get("exclusion_reason"):
+        raw_blocks.append(sprov["exclusion_reason"])
+
+    REVOCATION_BLOCK_STRINGS = (
+        "local_support_revoked",
+        "support_revoked",
+        "evidence_revoked",
+        "blocked",
+        "revoked",
+    )
+    for r in raw_blocks:
+        r_str = str(r).lower()
+        if any(rev in r_str for rev in REVOCATION_BLOCK_STRINGS):
+            return True, "ingredient_blocked"
+
+    raw_status = str(sprov.get("support_status") or "").lower()
+    if raw_status in ("unsupported", "revoked", "blocked", "failed", "none"):
+        return True, "ingredient_unsupported"
+
+    return False, None
+
+
 _ASMAE_NEAREST_RESAMPLE_TYPES = {
     SurfaceType.ASMAE_EXPORT_ELIGIBILITY,
     SurfaceType.ASMAE_1M_ADVISORY_MASK,
@@ -548,7 +672,7 @@ def compute_asmae_support_classification(
             if raw_status_str in ("unsupported", "blocked", "failed", "revoked", "none") or rel_str == "unsupported" or has_revocation_blocks:
                 support_class = "unsupported"
             elif raw_status_str == "prior_constrained":
-                # S12-04: Strict actual-prior qualification
+                # S12-04 / S673-03: Strict actual-prior qualification
                 raw_var = (
                     state_entry.get("prior_variance")
                     if isinstance(state_entry, dict)
@@ -560,20 +684,29 @@ def compute_asmae_support_classification(
                     if isinstance(state_entry, dict)
                     else (getattr(state_entry, "has_actual_prior", None) is True or getattr(state_entry, "has_prior_evidence", None) is True)
                 )
-                has_prior_dist = bool(
-                    (state_entry.get("prior_distribution") if isinstance(state_entry, dict) else getattr(state_entry, "prior_distribution", None))
+                raw_dist = (
+                    state_entry.get("prior_distribution")
+                    if isinstance(state_entry, dict)
+                    else getattr(state_entry, "prior_distribution", None)
                 )
-                spatial_supp = str(
-                    (state_entry.get("spatial_support") if isinstance(state_entry, dict) else getattr(state_entry, "spatial_support", "")) or ""
-                ).lower()
-                has_spatial_prior = spatial_supp not in ("", "none", "unsupported")
+                has_valid_dist, is_dist_malformed = _validate_prior_distribution(raw_dist)
+
+                raw_spatial = (
+                    state_entry.get("spatial_support")
+                    if isinstance(state_entry, dict)
+                    else getattr(state_entry, "spatial_support", None)
+                )
+                has_valid_spatial, is_spatial_malformed = _validate_spatial_support(raw_spatial)
+
+                has_invalid_alternate_proof = is_dist_malformed or is_spatial_malformed
+
                 is_explicitly_denied = (
                     (state_entry.get("has_actual_prior") is False or state_entry.get("has_prior_evidence") is False)
                     if isinstance(state_entry, dict)
                     else (getattr(state_entry, "has_actual_prior", None) is False or getattr(state_entry, "has_prior_evidence", None) is False)
-                ) or (raw_var is not None and not has_valid_var)
+                ) or (raw_var is not None and not has_valid_var) or has_invalid_alternate_proof
 
-                if not is_explicitly_denied and (has_valid_var or has_actual_prior_flag or has_prior_dist or has_spatial_prior):
+                if not is_explicitly_denied and (has_valid_var or has_actual_prior_flag or has_valid_dist or has_valid_spatial):
                     support_class = "prior_constrained"
                 else:
                     support_class = "unsupported"
@@ -607,10 +740,18 @@ def compute_asmae_support_classification(
             or meta.get("has_prior_evidence") is True
             or meta.get("has_enkf_prior") is True
         )
+        raw_dist = meta.get("prior_distribution")
+        has_valid_dist, is_dist_malformed = _validate_prior_distribution(raw_dist)
+
+        raw_spatial = meta.get("spatial_support")
+        has_valid_spatial, is_spatial_malformed = _validate_spatial_support(raw_spatial)
+
         is_prior_denied = (
             meta.get("has_actual_prior") is False
             or meta.get("has_prior_evidence") is False
             or (raw_var is not None and not has_valid_var)
+            or is_dist_malformed
+            or is_spatial_malformed
         )
 
         if raw_class == "directly_assimilated":
@@ -624,11 +765,11 @@ def compute_asmae_support_classification(
         elif raw_class in ("proxy_assimilated", "indirectly_constrained"):
             support_class = raw_class
         elif raw_class == "prior_constrained":
-            if not is_prior_denied and (has_valid_var or has_actual_prior_flag):
+            if not is_prior_denied and (has_valid_var or has_actual_prior_flag or has_valid_dist or has_valid_spatial):
                 support_class = "prior_constrained"
             else:
                 support_class = "unsupported"
-        elif not is_prior_denied and (has_valid_var or has_actual_prior_flag or meta.get("has_enkf_proxy_fallback") is True):
+        elif not is_prior_denied and (has_valid_var or has_actual_prior_flag or has_valid_dist or has_valid_spatial or meta.get("has_enkf_proxy_fallback") is True):
             support_class = "prior_constrained"
         else:
             support_class = "unsupported"
@@ -645,7 +786,7 @@ def compute_asmae_support_classification(
         and descriptor.authority_ceiling == AuthorityCeiling.PRESCRIPTION_ELIGIBLE
     )
 
-    # S12-02: Runtime ceiling and block reasons intersection
+    # S12-02 / S673-01: Runtime ceiling and block reasons intersection
     state_ceiling = None
     state_block_reasons = ()
     if state_entry:
@@ -668,7 +809,8 @@ def compute_asmae_support_classification(
     current_ceiling_restrictive = False
     if state_ceiling:
         c_str = str(state_ceiling.value if hasattr(state_ceiling, "value") else state_ceiling).lower()
-        if c_str in ("diagnostic", "visualization", "monitoring_only", "none", "blocked", "unsupported"):
+        # S673-01: Management eligibility strictly requires prescription-capable runtime authority
+        if c_str not in ("prescription_eligible", "prescription_driver"):
             current_ceiling_restrictive = True
 
     is_management_eligible = (
@@ -724,6 +866,7 @@ def compute_asmae_support_classification(
         "scouting_zone_eligible": scouting,
         "management_zone_eligible": mgmt,
         "zone_statistics_eligible": stats,
+        "block_reasons": list(state_block_reasons) if state_block_reasons else [],
     }
 
 
@@ -1228,6 +1371,21 @@ def generate_asmae_surfaces(
             feature_name=feature_mapping.get(stype, var_name),
         )
 
+        surf_blocks = []
+        for b_source in (
+            meta.get("block_reasons"),
+            meta.get("restriction_reasons"),
+            support_meta.get("block_reasons") if isinstance(support_meta, dict) else None,
+        ):
+            if b_source:
+                if isinstance(b_source, (list, tuple, set)):
+                    for b in b_source:
+                        if b and str(b) not in surf_blocks:
+                            surf_blocks.append(str(b))
+                elif isinstance(b_source, str) and b_source:
+                    if b_source not in surf_blocks:
+                        surf_blocks.append(b_source)
+
         provenance = {
             "real_asmae_evidence": real_ev,
             "source_reality": src_real,
@@ -1289,6 +1447,8 @@ def generate_asmae_surfaces(
             "requires_user_warning": policy["requires_user_warning"],
             "warning_wording": warning_wording,
         }
+        if surf_blocks:
+            provenance["block_reasons"] = list(surf_blocks)
 
         surface_source_grid_spec = None
         surface_display_grid_spec = None
@@ -1438,6 +1598,7 @@ def generate_asmae_surfaces(
             grid_spec=surface_display_grid_spec,
             source_grid_spec=surface_source_grid_spec,
             display_grid_spec=surface_display_grid_spec,
+            block_reasons=list(surf_blocks) if surf_blocks else None,
         ))
 
     return surfaces
@@ -1770,6 +1931,10 @@ def generate_asmae_aliases(
         if rules.get("confounder_warnings"):
             prov["confounder_warnings"] = rules["confounder_warnings"]
         
+        src_blocks = getattr(src_surf, "block_reasons", None) or prov.get("block_reasons")
+        if src_blocks:
+            prov["block_reasons"] = list(src_blocks)
+
         aliases.append(SurfaceArtifact(
             surface_id=f"{rules['alias'].value}_{inp.plot_id}",
             semantic_type=rules["alias"],
@@ -1787,6 +1952,7 @@ def generate_asmae_aliases(
             grid_spec=grid_spec_dict,
             source_grid_spec=src_surf.source_grid_spec,
             display_grid_spec=grid_spec_dict,
+            block_reasons=list(src_blocks) if src_blocks else None,
         ))
 
     # ── V92.4-BC.2: VEG_ATTENTION_ASMAE_DIAGNOSTIC composite ──────────
@@ -1803,9 +1969,9 @@ def generate_asmae_aliases(
     for st, w in veg_attn_ingredients.items():
         s = find_surf(st)
         if s:
-            sprov = getattr(s, "provenance", {}) or {}
-            if sprov.get("support_class") == "unsupported" or sprov.get("evidence_class") == "Unsupported":
-                excluded_veg_ingredients.append({"surface": st.value, "reason": "ingredient_unsupported"})
+            is_bad, bad_reason = _is_surface_revoked_or_unsupported(s)
+            if is_bad:
+                excluded_veg_ingredients.append({"surface": st.value, "reason": bad_reason})
                 continue
             pixel_ok, pixel_reason = asmae_surface_pixel_visual_eligible(s, output_grid_spec=grid_spec_dict)
             if pixel_ok:
@@ -1882,21 +2048,15 @@ def generate_asmae_aliases(
         SurfaceType.ASMAE_CROSS_LAYER_CONFLICT: 0.15,
     }
     
-    # S12-01: Filter risk ingredients on scientific support qualification and pixel_visual eligibility
+    # S12-01 / S673-02: Filter risk ingredients on scientific support qualification and revocation
     active_ingredients = {}
     excluded_ingredients = []
     for st, w in risk_ingredients.items():
         s = find_surf(st)
         if s:
-            sprov = getattr(s, "provenance", {}) or {}
-            sup_class = sprov.get("support_class")
-            ev_class = sprov.get("evidence_class")
-            raw_blocks = sprov.get("block_reasons") or ()
-            if sup_class == "unsupported" or ev_class == "Unsupported":
-                excluded_ingredients.append({"surface": st.value, "reason": "ingredient_unsupported"})
-                continue
-            if any(r in ("local_support_revoked", "support_revoked", "evidence_revoked", "blocked") for r in raw_blocks):
-                excluded_ingredients.append({"surface": st.value, "reason": "ingredient_blocked"})
+            is_bad, bad_reason = _is_surface_revoked_or_unsupported(s)
+            if is_bad:
+                excluded_ingredients.append({"surface": st.value, "reason": bad_reason})
                 continue
             elig, elig_reason = asmae_surface_pixel_visual_eligible(s, output_grid_spec=grid_spec_dict)
             if elig:
