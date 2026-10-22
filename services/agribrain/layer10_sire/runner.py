@@ -5246,6 +5246,8 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 surf_blocks.extend(prov["block_reasons"])
             if getattr(surface, "block_reasons", None):
                 surf_blocks.extend(getattr(surface, "block_reasons"))
+            if prov.get("restriction_reasons"):
+                surf_blocks.extend(prov["restriction_reasons"])
             if prov.get("exclusion_reason"):
                 surf_blocks.append(prov["exclusion_reason"])
             if surf_blocks:

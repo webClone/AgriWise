@@ -6,7 +6,7 @@ envelope without import-mode dependent behaviour.
 """
 
 from enum import Enum
-from typing import Any, Mapping, Tuple
+from typing import Any, List, Mapping, Tuple
 
 
 # Old entries did not bind publication authority or scientific run identity.
@@ -92,6 +92,81 @@ def _surface_value(surface: Any, provenance: Mapping[str, Any], *names: str) -> 
         if value is not None:
             return value
     return None
+
+
+def resolve_surface_block_reasons(*sources: Any) -> List[str]:
+    """Compute a canonical, deduplicated union of restriction/block reasons across all carriers.
+
+    Preserves insertion order, eliminates duplicates, filters out empty/None values,
+    and ensures that no active restriction in any carrier is masked or lost by another carrier.
+    """
+    seen: set = set()
+    result: List[str] = []
+
+    def _add(item: Any) -> None:
+        if item is None:
+            return
+        if isinstance(item, (list, tuple, set)):
+            for sub in item:
+                _add(sub)
+            return
+        s = str(item).strip()
+        if s and s not in seen:
+            seen.add(s)
+            result.append(s)
+
+    for src in sources:
+        if src is None:
+            continue
+        if isinstance(src, Mapping):
+            for key in (
+                "block_reasons",
+                "blockReasons",
+                "restriction_reasons",
+                "restrictionReasons",
+                "exclusion_reason",
+                "exclusionReason",
+            ):
+                val = src.get(key)
+                if val is not None:
+                    _add(val)
+            nested_prov = src.get("provenance")
+            if isinstance(nested_prov, Mapping):
+                for key in (
+                    "block_reasons",
+                    "blockReasons",
+                    "restriction_reasons",
+                    "restrictionReasons",
+                    "exclusion_reason",
+                    "exclusionReason",
+                ):
+                    val = nested_prov.get(key)
+                    if val is not None:
+                        _add(val)
+        elif isinstance(src, (list, tuple, set)):
+            for item in src:
+                _add(item)
+        elif hasattr(src, "block_reasons") or hasattr(src, "provenance"):
+            attr_blocks = getattr(src, "block_reasons", None)
+            if attr_blocks is not None:
+                _add(attr_blocks)
+            prov = getattr(src, "provenance", None)
+            if isinstance(prov, Mapping):
+                for key in (
+                    "block_reasons",
+                    "blockReasons",
+                    "restriction_reasons",
+                    "restrictionReasons",
+                    "exclusion_reason",
+                    "exclusionReason",
+                ):
+                    val = prov.get(key)
+                    if val is not None:
+                        _add(val)
+        else:
+            _add(src)
+
+    return result
 
 
 def serialize_surface_artifact(surface: Any) -> dict:
@@ -198,9 +273,13 @@ def serialize_surface_artifact(surface: Any) -> dict:
         "stac_item_ref": _field(surface, "stac_item_ref", None),
     }
 
-    raw_blocks = _surface_value(surface, provenance, "block_reasons", "blockReasons")
-    if raw_blocks:
-        doc["block_reasons"] = list(raw_blocks) if isinstance(raw_blocks, (list, tuple, set)) else [str(raw_blocks)]
+    combined_blocks = resolve_surface_block_reasons(
+        _field(surface, "block_reasons", None),
+        _field(surface, "blockReasons", None),
+        provenance,
+    )
+    if combined_blocks:
+        doc["block_reasons"] = list(combined_blocks)
 
     return doc
 

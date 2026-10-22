@@ -19,6 +19,7 @@ import pytest
 
 from services.agribrain.layer10_sire.schema import (
     Layer10Input,
+    PlotNamespace,
     SurfaceType,
     ASMAE_STATE_SURFACES,
     ASMAE_DIAGNOSTIC_SURFACES,
@@ -346,7 +347,6 @@ class TestPublicationPredicates:
     def _execute_runner_authorizations(self, output, display_grid_spec=None, pipeline_grid_valid=True):
         grid = display_grid_spec or copy.deepcopy(GRID_SPEC)
 
-        
         # Test helper extracting the exact runner authorization function
         import ast
         from pathlib import Path
@@ -1151,3 +1151,270 @@ class TestStage12ResidualCorrections:
         )
         assert res_valid_dist["support_class"] == "prior_constrained"
         assert res_valid_dist["scouting_zone_eligible"] is True
+
+    def test_s81_01_dual_carrier_restriction_union_and_alias_denial(self):
+        """S81-01: Restriction-carrier union preserves active revocation across alias and serialization boundaries."""
+        from services.agribrain.layer10_sire.surface_contract import (
+            resolve_surface_block_reasons,
+            serialize_surface_artifact,
+        )
+        import copy
+
+        inp = Layer10Input(
+            plot_namespace=PlotNamespace(tenant_id="t1", farm_id="f1", plot_id="p1")
+        )
+        grid_spec = {
+            "crs": "EPSG:4326",
+            "transform": [0.0001, 0, 10.0, 0, -0.0001, 20.0],
+            "width": 3,
+            "height": 3,
+            "bounds": [10.0, 20.0, 10.0003, 20.0003],
+        }
+
+        # 1. Test resolve_surface_block_reasons direct behavior
+        assert resolve_surface_block_reasons(None, ["local_support_revoked"]) == ["local_support_revoked"]
+        assert resolve_surface_block_reasons([], ["local_support_revoked"]) == ["local_support_revoked"]
+        assert resolve_surface_block_reasons(["local_support_revoked"], None) == ["local_support_revoked"]
+        assert resolve_surface_block_reasons(["reference_warning"], ["local_support_revoked"]) == [
+            "reference_warning",
+            "local_support_revoked",
+        ]
+        assert resolve_surface_block_reasons(["local_support_revoked"], ["reference_warning"]) == [
+            "local_support_revoked",
+            "reference_warning",
+        ]
+        assert resolve_surface_block_reasons(["support_revoked"], ["local_support_revoked"]) == [
+            "support_revoked",
+            "local_support_revoked",
+        ]
+        assert resolve_surface_block_reasons(None, None) == []
+        assert resolve_surface_block_reasons([], []) == []
+
+        # 2. Test 16-case serialization matrix
+        block_rows = []
+        for attr in (None, [], ["reference_warning"], ["local_support_revoked"]):
+            for prov in (None, [], ["reference_warning"], ["local_support_revoked"]):
+                prov_dict = {"support_class": "directly_assimilated"}
+                if prov is not None:
+                    prov_dict["block_reasons"] = copy.deepcopy(prov)
+                surface = SurfaceArtifact(
+                    surface_id="TEST-BLOCK-CARRIERS",
+                    semantic_type=SurfaceType.ASMAE_VIGOR,
+                    grid_ref="3x3",
+                    values=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+                    units="index",
+                    native_resolution_m=10.0,
+                    provenance=prov_dict,
+                    state_update_allowed=False,
+                    prescription_driver_allowed=False,
+                    grounding_class="RASTER_GROUNDED",
+                    grid_spec=grid_spec,
+                    block_reasons=copy.deepcopy(attr),
+                )
+                serialized = serialize_surface_artifact(surface)
+                block_rows.append({
+                    "attribute": attr,
+                    "provenance": prov,
+                    "serialized_top": serialized.get("block_reasons"),
+                    "serialized_provenance": serialized.get("provenance", {}).get("block_reasons"),
+                })
+
+        assert all(
+            row["serialized_top"] == ["local_support_revoked"]
+            for row in block_rows
+            if (row["attribute"] == ["local_support_revoked"] and row["provenance"] is None)
+            or (row["attribute"] is None and row["provenance"] == ["local_support_revoked"])
+        )
+        empty_attr_row = next(
+            row for row in block_rows
+            if row["attribute"] == [] and row["provenance"] == ["local_support_revoked"]
+        )
+        assert empty_attr_row["serialized_top"] == ["local_support_revoked"]
+        assert empty_attr_row["serialized_provenance"] == ["local_support_revoked"]
+
+        benign_attr_row = next(
+            row for row in block_rows
+            if row["attribute"] == ["reference_warning"] and row["provenance"] == ["local_support_revoked"]
+        )
+        assert benign_attr_row["serialized_top"] == ["reference_warning", "local_support_revoked"]
+        assert benign_attr_row["serialized_provenance"] == ["local_support_revoked"]
+
+        # 3. Test alias construction and authorization gating across all 5 dual-carrier cases
+        dual_carrier_cases = [
+            ("provenance_only", None, ["local_support_revoked"]),
+            ("empty_attribute_does_not_mask", [], ["local_support_revoked"]),
+            ("benign_attribute_masks_revoked_provenance", ["reference_warning"], ["local_support_revoked"]),
+            ("revoked_attribute_beats_benign_provenance", ["local_support_revoked"], ["reference_warning"]),
+            ("two_distinct_revocations", ["support_revoked"], ["local_support_revoked"]),
+        ]
+
+        for case_name, attr, prov_blocks in dual_carrier_cases:
+            src_prov = {
+                "block_reasons": copy.deepcopy(prov_blocks),
+                "support_class": "directly_assimilated",
+                "evidence_class": "Directly-Assimilated",
+                "direct_observation": True,
+                "has_spatial_grid": True,
+            }
+            raw_surface = SurfaceArtifact(
+                surface_id="ASMAE_VIGOR_p1",
+                semantic_type=SurfaceType.ASMAE_VIGOR,
+                grid_ref="3x3",
+                values=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+                units="fraction",
+                native_resolution_m=10.0,
+                render_range=(0.0, 1.0),
+                palette_id="viridis",
+                source_layers=["L1"],
+                provenance=src_prov,
+                state_update_allowed=False,
+                prescription_driver_allowed=False,
+                grounding_class="RASTER_GROUNDED",
+                grid_spec=grid_spec,
+                block_reasons=copy.deepcopy(attr),
+            )
+            aliases = generate_asmae_aliases(3, 3, [raw_surface], inp, grid_spec_dict=grid_spec)
+            canopy_alias = next(
+                (x for x in aliases if x.semantic_type == SurfaceType.CANOPY_ASMAE_VIGOR),
+                None,
+            )
+            assert canopy_alias is not None, f"Failed to generate canopy alias in {case_name}"
+
+            # Check that alias preserves active revocation in both block_reasons and provenance
+            assert "local_support_revoked" in (canopy_alias.block_reasons or [])
+            assert "local_support_revoked" in (canopy_alias.provenance.get("block_reasons") or [])
+
+            # Check authorization through runner gate AST
+            out = _build_test_output(
+                [raw_surface, canopy_alias],
+                states=_build_test_ledger(["vigor"], count=1),
+            )
+            env = TestPublicationPredicates()._execute_runner_authorizations(out)
+            raw_gate_ok, raw_gate_reason = env["asmae_surface_gate"](raw_surface, "ASMAE_VIGOR")
+            alias_gate_ok, alias_gate_reason = env["asmae_surface_gate"](canopy_alias, "CANOPY_ASMAE_VIGOR")
+
+            # BOTH raw surface and canopy alias MUST BE DENIED
+            assert raw_gate_ok is False, f"Raw surface unexpectedly authorized in {case_name}"
+            assert alias_gate_ok is False, f"Canopy alias unexpectedly authorized in {case_name}"
+            assert "surface_blocked" in alias_gate_reason
+
+        # 4. Positive control: benign warning alone allows authorization
+        benign_src_prov = {
+            "block_reasons": ["reference_warning"],
+            "support_class": "directly_assimilated",
+            "evidence_class": "Directly-Assimilated",
+            "direct_observation": True,
+            "has_spatial_grid": True,
+        }
+        benign_raw = SurfaceArtifact(
+            surface_id="ASMAE_VIGOR_p1",
+            semantic_type=SurfaceType.ASMAE_VIGOR,
+            grid_ref="3x3",
+            values=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]],
+            units="fraction",
+            native_resolution_m=10.0,
+            render_range=(0.0, 1.0),
+            palette_id="viridis",
+            source_layers=["L1"],
+            provenance=benign_src_prov,
+            state_update_allowed=False,
+            prescription_driver_allowed=False,
+            grounding_class="RASTER_GROUNDED",
+            grid_spec=grid_spec,
+            block_reasons=["reference_warning"],
+        )
+        benign_aliases = generate_asmae_aliases(3, 3, [benign_raw], inp, grid_spec_dict=grid_spec)
+        benign_canopy = next(
+            (x for x in benign_aliases if x.semantic_type == SurfaceType.CANOPY_ASMAE_VIGOR),
+            None,
+        )
+        assert benign_canopy is not None
+        out_benign = _build_test_output(
+            [benign_raw, benign_canopy],
+            states=_build_test_ledger(["vigor"], count=1),
+        )
+        env_benign = TestPublicationPredicates()._execute_runner_authorizations(out_benign)
+        raw_b_ok, _ = env_benign["asmae_surface_gate"](benign_raw, "ASMAE_VIGOR")
+        alias_b_ok, _ = env_benign["asmae_surface_gate"](benign_canopy, "CANOPY_ASMAE_VIGOR")
+        assert raw_b_ok is True
+        assert alias_b_ok is True
+
+    def test_s81_02_alternate_prior_distribution_structural_validation(self):
+        """S81-02: Rigorous alternate prior validation rejects content-free keys, invalid covariance arrays, and conflicting numeric aliases."""
+        from services.agribrain.layer10_sire.surfaces.asmae import (
+            _validate_prior_distribution,
+            _validate_covariance,
+        )
+
+        distributions = {
+            "valid_zero": {"mean": 0.0, "variance": 0.0},
+            "valid_finite": {"mean": -0.1, "variance": 0.25},
+            "valid_std_zero": {"mean": 0.0, "std": 0.0},
+            "valid_aliases": {"mu": 0.2, "sigma": 0.5},
+            "family_only": {"family": "gaussian"},
+            "family_false": {"family": False},
+            "family_none": {"family": None},
+            "distribution_none": {"distribution": None},
+            "mean_only": {"mean": 0.2},
+            "covariance_nan": {"mean": 0.2, "covariance": [[float("nan")]]},
+            "covariance_negative": {"mean": 0.2, "covariance": [[-1.0]]},
+            "covariance_boolean": {"mean": 0.2, "covariance": [[True]]},
+            "covariance_string_member": {"mean": 0.2, "covariance": [["not-a-number"]]},
+            "variance_std_conflict": {"mean": 0.2, "variance": 0.0, "std": 1.0},
+            "shadow_var_nan": {"mean": 0.2, "variance": 0.25, "var": float("nan")},
+            "shadow_mu_nan": {"mean": 0.2, "mu": float("nan"), "variance": 0.25},
+            "shadow_sigma_nan": {"mean": 0.2, "std": 0.5, "sigma": float("nan")},
+            "empty": {},
+            "string": "not-a-distribution",
+            "invalid_supplied_mean": {"mean": float("nan"), "variance": 1.0},
+            "invalid_supplied_variance": {"mean": 0.2, "variance": -1.0},
+        }
+
+        # 1. Direct validation tests
+        valid_keys = {"valid_zero", "valid_finite", "valid_std_zero", "valid_aliases"}
+        for key, dist in distributions.items():
+            is_valid, is_malformed = _validate_prior_distribution(dist)
+            if key in valid_keys:
+                assert is_valid is True, f"{key} should be valid"
+                assert is_malformed is False, f"{key} should not be malformed"
+            else:
+                assert is_valid is False, f"{key} should NOT be valid"
+                assert is_malformed is True, f"{key} should be malformed"
+
+        # 2. Both ledger and metadata paths reject malformed cases to "unsupported"
+        for key, dist in distributions.items():
+            # Ledger route
+            res_ledger = compute_asmae_support_classification(
+                real_ev=True,
+                source_reality="real_raster",
+                meta={},
+                stype=SurfaceType.ASMAE_VIGOR,
+                state_support_ledger={
+                    "vigor": {
+                        "state": "vigor",
+                        "support_status": "prior_constrained",
+                        "prior_distribution": dist,
+                    }
+                },
+                feature_name="vigor",
+            )
+            # Metadata route
+            res_meta = compute_asmae_support_classification(
+                real_ev=False,
+                source_reality="unknown",
+                meta={"prior_distribution": dist},
+                stype=SurfaceType.ASMAE_VIGOR,
+                state_support_ledger={},
+                feature_name="vigor",
+            )
+
+            if key in valid_keys:
+                assert res_ledger["support_class"] == "prior_constrained", f"Ledger {key} failed"
+                assert res_ledger["scouting_zone_eligible"] is True
+                assert res_meta["support_class"] == "prior_constrained", f"Meta {key} failed"
+                assert res_meta["scouting_zone_eligible"] is True
+            else:
+                assert res_ledger["support_class"] == "unsupported", f"Ledger {key} should be unsupported"
+                assert res_ledger["scouting_zone_eligible"] is False
+                assert res_meta["support_class"] == "unsupported", f"Meta {key} should be unsupported"
+                assert res_meta["scouting_zone_eligible"] is False

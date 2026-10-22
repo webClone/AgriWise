@@ -19,6 +19,7 @@ from services.agribrain.layer10_sire.schema import (
 )
 from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
 from services.agribrain.scientific_contracts import index_state_support_ledger
+from services.agribrain.layer10_sire.surface_contract import resolve_surface_block_reasons
 
 
 def _is_valid_direct_observation_count(val: Any) -> bool:
@@ -60,47 +61,143 @@ def _is_finite_real(val: Any) -> bool:
         return False
 
 
+def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
+    """Validate covariance scalar or nested array.
+
+    Returns:
+        (is_valid, is_malformed)
+    """
+    if cov is None:
+        return False, False
+    if isinstance(cov, bool):
+        return False, True
+    if isinstance(cov, (int, float)):
+        if _is_valid_finite_nonnegative(cov):
+            return True, False
+        return False, True
+    if isinstance(cov, (list, tuple)):
+        if len(cov) == 0:
+            return False, True
+        if isinstance(cov[0], (list, tuple)):
+            for i, row in enumerate(cov):
+                if not isinstance(row, (list, tuple)):
+                    return False, True
+                for j, elem in enumerate(row):
+                    if not _is_finite_real(elem):
+                        return False, True
+                    if i == j and float(elem) < 0.0:
+                        return False, True
+            return True, False
+        else:
+            for elem in cov:
+                if not _is_finite_real(elem):
+                    return False, True
+                if float(elem) < 0.0:
+                    return False, True
+            return True, False
+    return False, True
+
+
 def _validate_prior_distribution(dist: Any) -> Tuple[bool, bool]:
     """Validate an alternate prior_distribution.
 
     Returns:
         (has_valid_distribution, is_malformed)
         - If dist is None: (False, False)
-        - If dist is invalid/malformed: (False, True)
+        - If dist is invalid/malformed or incomplete: (False, True)
         - If dist is a valid distribution: (True, False)
     """
     if dist is None:
         return False, False
     if not isinstance(dist, dict):
         return False, True
-
-    has_variance = "variance" in dist or "var" in dist
-    has_std = "std" in dist or "sigma" in dist
-    var_val = dist.get("variance", dist.get("var"))
-    std_val = dist.get("std", dist.get("sigma"))
-
-    if has_variance and not _is_valid_finite_nonnegative(var_val):
-        return False, True
-    if has_std and not _is_valid_finite_nonnegative(std_val):
+    if not dist:
         return False, True
 
-    has_mean = "mean" in dist or "mu" in dist
-    mean_val = dist.get("mean", dist.get("mu"))
-    if has_mean and not _is_finite_real(mean_val):
-        return False, True
-
-    if "covariance" in dist or "cov" in dist:
-        cov = dist.get("covariance", dist.get("cov"))
-        if not isinstance(cov, (int, float, list)):
+    # Validate family / distribution keys if present
+    if "family" in dist:
+        fam = dist["family"]
+        if not isinstance(fam, str) or not fam.strip():
             return False, True
-        if isinstance(cov, (int, float)) and not _is_valid_finite_nonnegative(cov):
+    if "distribution" in dist:
+        dval = dist["distribution"]
+        if not isinstance(dval, str) or not dval.strip():
+            return False, True
+    if "family" in dist and "distribution" in dist:
+        if dist["family"].strip().lower() != dist["distribution"].strip().lower():
             return False, True
 
-    has_param = has_variance or has_std or has_mean or ("family" in dist or "distribution" in dist)
-    if has_param:
-        return True, False
+    # Validate mean / mu
+    has_mean = "mean" in dist
+    has_mu = "mu" in dist
+    if has_mean and not _is_finite_real(dist["mean"]):
+        return False, True
+    if has_mu and not _is_finite_real(dist["mu"]):
+        return False, True
+    if has_mean and has_mu:
+        if abs(float(dist["mean"]) - float(dist["mu"])) > 1e-4:
+            return False, True
 
-    return False, True
+    # Validate variance / var
+    has_variance = "variance" in dist
+    has_var = "var" in dist
+    if has_variance and not _is_valid_finite_nonnegative(dist["variance"]):
+        return False, True
+    if has_var and not _is_valid_finite_nonnegative(dist["var"]):
+        return False, True
+    if has_variance and has_var:
+        if abs(float(dist["variance"]) - float(dist["var"])) > 1e-4:
+            return False, True
+
+    # Validate std / sigma
+    has_std = "std" in dist
+    has_sigma = "sigma" in dist
+    if has_std and not _is_valid_finite_nonnegative(dist["std"]):
+        return False, True
+    if has_sigma and not _is_valid_finite_nonnegative(dist["sigma"]):
+        return False, True
+    if has_std and has_sigma:
+        if abs(float(dist["std"]) - float(dist["sigma"])) > 1e-4:
+            return False, True
+
+    # Cross-validate variance and std if both supplied
+    resolved_var: Optional[float] = None
+    if has_variance:
+        resolved_var = float(dist["variance"])
+    elif has_var:
+        resolved_var = float(dist["var"])
+
+    resolved_std: Optional[float] = None
+    if has_std:
+        resolved_std = float(dist["std"])
+    elif has_sigma:
+        resolved_std = float(dist["sigma"])
+
+    if resolved_var is not None and resolved_std is not None:
+        if abs(resolved_std ** 2 - resolved_var) > 1e-4:
+            return False, True
+
+    # Validate covariance / cov
+    has_cov = "covariance" in dist
+    has_cov_alias = "cov" in dist
+    has_valid_cov = False
+    if has_cov:
+        c_valid, c_malformed = _validate_covariance(dist["covariance"])
+        if c_malformed or not c_valid:
+            return False, True
+        has_valid_cov = True
+    if has_cov_alias:
+        c_valid, c_malformed = _validate_covariance(dist["cov"])
+        if c_malformed or not c_valid:
+            return False, True
+        has_valid_cov = True
+
+    # Prior evidence requires an explicit, valid dispersion parameter
+    has_dispersion = (resolved_var is not None) or (resolved_std is not None) or has_valid_cov
+    if not has_dispersion:
+        return False, True
+
+    return True, False
 
 
 RECOGNIZED_SPATIAL_SUPPORTS = {
@@ -144,13 +241,10 @@ def _is_surface_revoked_or_unsupported(s: Any) -> Tuple[bool, Optional[str]]:
     if sup_class == "unsupported" or ev_class == "Unsupported":
         return True, "ingredient_unsupported"
 
-    raw_blocks = []
-    if sprov.get("block_reasons"):
-        raw_blocks.extend(sprov["block_reasons"])
-    if getattr(s, "block_reasons", None):
-        raw_blocks.extend(getattr(s, "block_reasons"))
-    if sprov.get("exclusion_reason"):
-        raw_blocks.append(sprov["exclusion_reason"])
+    raw_blocks = resolve_surface_block_reasons(
+        getattr(s, "block_reasons", None),
+        sprov,
+    )
 
     REVOCATION_BLOCK_STRINGS = (
         "local_support_revoked",
@@ -1931,9 +2025,12 @@ def generate_asmae_aliases(
         if rules.get("confounder_warnings"):
             prov["confounder_warnings"] = rules["confounder_warnings"]
         
-        src_blocks = getattr(src_surf, "block_reasons", None) or prov.get("block_reasons")
-        if src_blocks:
-            prov["block_reasons"] = list(src_blocks)
+        combined_blocks = resolve_surface_block_reasons(
+            getattr(src_surf, "block_reasons", None),
+            prov,
+        )
+        if combined_blocks:
+            prov["block_reasons"] = list(combined_blocks)
 
         aliases.append(SurfaceArtifact(
             surface_id=f"{rules['alias'].value}_{inp.plot_id}",
@@ -1952,7 +2049,7 @@ def generate_asmae_aliases(
             grid_spec=grid_spec_dict,
             source_grid_spec=src_surf.source_grid_spec,
             display_grid_spec=grid_spec_dict,
-            block_reasons=list(src_blocks) if src_blocks else None,
+            block_reasons=list(combined_blocks) if combined_blocks else None,
         ))
 
     # ── V92.4-BC.2: VEG_ATTENTION_ASMAE_DIAGNOSTIC composite ──────────
