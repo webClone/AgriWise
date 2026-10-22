@@ -22,11 +22,16 @@ from services.agribrain.layer10_sire.schema import (
     SurfaceType,
     ASMAE_STATE_SURFACES,
     ASMAE_DIAGNOSTIC_SURFACES,
+    SurfaceArtifact,
 )
 from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
 from services.agribrain.layer10_sire.surfaces.asmae import (
     compute_asmae_support_classification,
     generate_asmae_surfaces,
+    generate_asmae_aliases,
+)
+from services.agribrain.layer10_sire.surface_contract import (
+    serialize_surface_artifact,
 )
 from services.agribrain.layer10_sire.terminal_publication import (
     build_terminal_no_data_output,
@@ -585,3 +590,338 @@ class TestPublicationPredicates:
         # All 11 registered states passed
         assert len(auth_results) == 11
         assert all(res[0] for res in auth_results.values())
+
+
+class TestStage12ResidualCorrections:
+    """Tests verifying the 5 residual groups S12-01 to S12-05 identified in independent review."""
+
+    def test_s12_01_unsupported_biotic_ingredient_excluded_from_risk_composite(self, monkeypatch):
+        """S12-01: Unsupported biotic ingredient is excluded from risk composite, preventing value leakage."""
+        monkeypatch.setenv("ASMAE_ENABLED", "true")
+        monkeypatch.setenv("ASMAE_DIAGNOSTIC_SHADOW_RUN_ENABLED", "true")
+        monkeypatch.setenv("L10_ASMAE_SURFACES_ENABLED", "true")
+        H, W = 3, 3
+        inp = Layer10Input(tenant_id="T1", farm_id="F1", plot_id="p1")
+
+        def _make_surfaces(scale):
+            spatial_data = L1SpatialData(
+                height=H,
+                width=W,
+                grid_spec=copy.deepcopy(GRID_SPEC),
+                asmae_evidence_state={
+                    **BASE_EVIDENCE_STATE,
+                    "real_asmae_evidence": True,
+                    "source_reality": "real_raster",
+                },
+                real_asmae_evidence=True,
+                asmae_feature_pack={"grid_spec": copy.deepcopy(GRID_SPEC)},
+            )
+            # Biotic state with scale and no ledger -> unsupported
+            spatial_data.raster_maps["asmae_biotic_confounder_risk"] = [
+                [scale * 0.5, scale * 0.6, scale * 0.7],
+                [scale * 0.5, scale * 0.6, scale * 0.7],
+                [scale * 0.5, scale * 0.6, scale * 0.7],
+            ]
+            spatial_data.raster_metadata["asmae_biotic_confounder_risk"] = copy.deepcopy(BASE_META)
+            # Add other risk ingredients (thermal stress, bma disagreement, conflict)
+            for st in (SurfaceType.ASMAE_THERMAL_STRESS, SurfaceType.ASMAE_BMA_DISAGREEMENT, SurfaceType.ASMAE_CROSS_LAYER_CONFLICT):
+                spatial_data.raster_maps[st.value.lower()] = [[0.2, 0.3, 0.4]] * 3
+                spatial_data.raster_metadata[st.value.lower()] = copy.deepcopy(BASE_META)
+
+            surfs = generate_asmae_surfaces(inp, H, W, l1_data=spatial_data)
+            aliases = generate_asmae_aliases(H, W, surfs, inp, grid_spec_dict=GRID_SPEC)
+            return surfs, aliases
+
+        surfs_01, aliases_01 = _make_surfaces(0.1)
+        surfs_10, aliases_10 = _make_surfaces(1.0)
+
+        raw_biotic_01 = next(s for s in surfs_01 if s.semantic_type == SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK)
+        assert raw_biotic_01.provenance["support_class"] == "unsupported"
+
+        risk_01 = next(s for s in aliases_01 if s.semantic_type == SurfaceType.RISK_ASMAE_DIAGNOSTIC)
+        risk_10 = next(s for s in aliases_10 if s.semantic_type == SurfaceType.RISK_ASMAE_DIAGNOSTIC)
+
+        # Biotic risk was excluded from active risk ingredients
+        assert SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK.value not in risk_01.provenance["risk_ingredients"]
+        assert any(e["surface"] == SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK.value for e in risk_01.provenance["excluded_ingredients"])
+
+        # Changing the unsupported biotic input scale does NOT alter the risk composite values
+        assert risk_01.values == risk_10.values
+
+    def test_s12_02_current_restrictions_and_block_reasons_override_historical_counts(self):
+        """S12-02: A current unsupported status or block reason fails closed, overriding accepted_update_count > 0."""
+        # A record with accepted_update_count=1, but support_status=unsupported and block reason
+        entry = StateSupportRecord(
+            state="vigor",
+            support_status=StateSupportStatus.UNSUPPORTED,
+            observation_relationship=ObservationRelationship.INDIRECT,
+            source_feature_ids=("TEST_NDVI",),
+            accepted_update_count=1,
+            authority_ceiling="DIAGNOSTIC",
+            block_reasons=("local_support_revoked",),
+        ).to_dict()
+
+        surfaces = [
+            SurfaceArtifact(
+                surface_id="ASMAE_VIGOR_TEST",
+                semantic_type=SurfaceType.ASMAE_VIGOR,
+                grid_ref="3x3",
+                values=[[0.5] * 3] * 3,
+                units="score",
+                native_resolution_m=10.0,
+                render_range=(0.0, 1.0),
+                palette_id="viridis",
+                source_layers=["L1"],
+                provenance={"support_class": "unsupported", "block_reasons": ["local_support_revoked"]},
+                grid_spec=GRID_SPEC,
+            )
+        ]
+        out = _build_test_output(surfaces, states={"vigor": entry})
+        # Execute runner gate
+        runner_test = TestPublicationPredicates()
+        env = runner_test._execute_runner_authorizations(out)
+        gate_ok, reason = env["asmae_state_gate"]("ASMAE_VIGOR")
+        assert gate_ok is False
+        assert "blocked" in reason or "denied" in reason or "missing_state_support" in reason
+
+    def test_s12_02_management_zone_eligibility_intercepted_by_runtime_ceiling_and_block_reasons(self):
+        """S12-02: Static descriptor maximum is intersected with current runtime ceiling and block reasons."""
+        # Vigor has static descriptor ceiling PRESCRIPTION_ELIGIBLE
+        # Case A: runtime ceiling is DIAGNOSTIC -> mgmt must be False
+        res_diag = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={
+                "vigor": {
+                    "support_status": "directly_assimilated",
+                    "direct_observation_count": 1,
+                    "observation_relationship": "direct",
+                    "authority_ceiling": "DIAGNOSTIC",
+                }
+            },
+            feature_name="vigor",
+        )
+        assert res_diag["support_class"] == "directly_assimilated"
+        assert res_diag["management_zone_eligible"] is False
+
+        # Case B: runtime ceiling is VISUALIZATION -> mgmt must be False
+        res_vis = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={
+                "vigor": {
+                    "support_status": "directly_assimilated",
+                    "direct_observation_count": 1,
+                    "observation_relationship": "direct",
+                    "authority_ceiling": "VISUALIZATION",
+                }
+            },
+            feature_name="vigor",
+        )
+        assert res_vis["management_zone_eligible"] is False
+
+        # Case C: has block reasons -> mgmt must be False
+        res_blocked = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={
+                "vigor": {
+                    "support_status": "directly_assimilated",
+                    "direct_observation_count": 1,
+                    "observation_relationship": "direct",
+                    "block_reasons": ["reference_cohort_not_validated"],
+                }
+            },
+            feature_name="vigor",
+        )
+        assert res_blocked["management_zone_eligible"] is False
+
+        # Case D: PRESCRIPTION_ELIGIBLE runtime ceiling with direct proof and no block reasons -> mgmt is True
+        res_ok = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={"support_class": "directly_assimilated", "direct_observation_count": 1},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_ok["management_zone_eligible"] is True
+
+    def test_s12_03_canonical_serialization_preserves_explicit_denials(self):
+        """S12-03: Serializer preserves state_update_allowed=False and prescription_driver_allowed=False."""
+        surf = SurfaceArtifact(
+            surface_id="ASMAE_VIGOR_P1",
+            semantic_type=SurfaceType.ASMAE_VIGOR,
+            grid_ref="3x3",
+            values=[[0.5] * 3] * 3,
+            units="score",
+            native_resolution_m=10.0,
+            render_range=(0.0, 1.0),
+            palette_id="viridis",
+            source_layers=["L1"],
+            provenance={
+                "state_update_allowed": False,
+                "prescription_driver_allowed": False,
+                "diagnostic_only": True,
+            },
+            state_update_allowed=False,
+            prescription_driver_allowed=False,
+        )
+        serialized = serialize_surface_artifact(surf)
+        assert serialized["state_update_allowed"] is False
+        assert serialized["prescription_driver_allowed"] is False
+
+        # Even with legacy SurfaceArtifact defaults (True), explicit False in provenance wins
+        surf_legacy = SurfaceArtifact(
+            surface_id="CANOPY_ASMAE_VIGOR_P1",
+            semantic_type=SurfaceType.CANOPY_ASMAE_VIGOR,
+            grid_ref="3x3",
+            values=[[0.5] * 3] * 3,
+            units="score",
+            native_resolution_m=10.0,
+            render_range=(0.0, 1.0),
+            palette_id="viridis",
+            source_layers=["L1"],
+            provenance={
+                "state_update_allowed": False,
+                "prescription_driver_allowed": False,
+            },
+            # state_update_allowed defaults to True
+            # prescription_driver_allowed defaults to True
+        )
+        serialized_legacy = serialize_surface_artifact(surf_legacy)
+        assert serialized_legacy["state_update_allowed"] is False
+        assert serialized_legacy["prescription_driver_allowed"] is False
+
+    def test_s12_04_strict_prior_variance_qualification(self):
+        """S12-04: Bare labels, NaN, negative, boolean, and string variance fail closed to unsupported."""
+        # Bare label without prior evidence fails closed
+        res_bare = compute_asmae_support_classification(
+            real_ev=False,
+            source_reality="unknown",
+            meta={"support_class": "prior_constrained"},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_bare["support_class"] == "unsupported"
+
+        # NaN variance fails closed
+        res_nan = compute_asmae_support_classification(
+            real_ev=False,
+            source_reality="unknown",
+            meta={"prior_variance": float("nan")},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_nan["support_class"] == "unsupported"
+
+        # Negative variance fails closed
+        res_neg = compute_asmae_support_classification(
+            real_ev=False,
+            source_reality="unknown",
+            meta={"prior_variance": -1.0},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_neg["support_class"] == "unsupported"
+
+        # Boolean False variance fails closed
+        res_bool = compute_asmae_support_classification(
+            real_ev=False,
+            source_reality="unknown",
+            meta={"prior_variance": False},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_bool["support_class"] == "unsupported"
+
+        # String 'false' flag fails closed
+        res_str_flag = compute_asmae_support_classification(
+            real_ev=False,
+            source_reality="unknown",
+            meta={"has_prior_evidence": "false"},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_str_flag["support_class"] == "unsupported"
+
+        # Finite nonnegative zero variance qualifies
+        res_zero = compute_asmae_support_classification(
+            real_ev=False,
+            source_reality="unknown",
+            meta={"prior_variance": 0.0},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_zero["support_class"] == "prior_constrained"
+
+    def test_s12_05_direct_proof_count_non_boolean_qualification_and_null_resilience(self):
+        """S12-05: Direct counts must be non-boolean positive numbers; None and string do not raise exceptions."""
+        # Boolean True count does not qualify as Observed
+        res_bool = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={"support_class": "directly_assimilated", "direct_observation_count": True},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_bool["support_class"] == "indirectly_constrained"
+        assert res_bool["direct_observation"] is False
+
+        # Infinity count does not qualify
+        res_inf = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={"support_class": "directly_assimilated", "direct_observation_count": float("inf")},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_inf["support_class"] == "indirectly_constrained"
+
+        # None direct count does NOT raise TypeError
+        res_none = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={"support_class": "directly_assimilated", "direct_observation_count": None},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_none["support_class"] == "indirectly_constrained"
+
+        # String '1' count does NOT raise TypeError
+        res_str = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={"support_class": "directly_assimilated", "direct_observation_count": "1"},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_str["support_class"] == "indirectly_constrained"
+
+        # Valid positive integer direct count qualifies
+        res_valid = compute_asmae_support_classification(
+            real_ev=True,
+            source_reality="real_raster",
+            meta={"support_class": "directly_assimilated", "direct_observation_count": 1},
+            stype=SurfaceType.ASMAE_VIGOR,
+            state_support_ledger={},
+            feature_name="vigor",
+        )
+        assert res_valid["support_class"] == "directly_assimilated"
+        assert res_valid["direct_observation"] is True

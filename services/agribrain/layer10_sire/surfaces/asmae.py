@@ -10,6 +10,7 @@ and blocks fake full-field broadcasts for state layers.
 from typing import List, Optional, Dict, Any, Tuple
 import hashlib
 import json
+import math
 import numpy as np
 
 from services.agribrain.layer10_sire.schema import (
@@ -18,6 +19,32 @@ from services.agribrain.layer10_sire.schema import (
 )
 from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
 from services.agribrain.scientific_contracts import index_state_support_ledger
+
+
+def _is_valid_direct_observation_count(val: Any) -> bool:
+    """Validate that val is a finite, non-boolean, positive number representing count of direct observations."""
+    if val is None or isinstance(val, bool):
+        return False
+    if not isinstance(val, (int, float)):
+        return False
+    try:
+        fval = float(val)
+        return math.isfinite(fval) and fval > 0 and (isinstance(val, int) or fval.is_integer())
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_valid_finite_nonnegative(val: Any) -> bool:
+    """Validate that val is a finite, non-boolean, nonnegative real number (preserving valid 0.0)."""
+    if val is None or isinstance(val, bool):
+        return False
+    if not isinstance(val, (int, float)):
+        return False
+    try:
+        fval = float(val)
+        return math.isfinite(fval) and fval >= 0.0
+    except (TypeError, ValueError):
+        return False
 
 
 _ASMAE_NEAREST_RESAMPLE_TYPES = {
@@ -479,6 +506,7 @@ def compute_asmae_support_classification(
         }
 
     support_class = None
+    state_entry = None
     if state_support_ledger and feature_name:
         from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
         canon_feature = canonical_state_key(feature_name)
@@ -495,8 +523,62 @@ def compute_asmae_support_classification(
             )
             if hasattr(raw_status, "value"):
                 raw_status = raw_status.value
-            if raw_status in valid_classes:
-                support_class = raw_status
+            raw_status_str = str(raw_status or "").lower()
+
+            raw_rel = (
+                state_entry.get("observation_relationship")
+                if isinstance(state_entry, dict)
+                else getattr(state_entry, "observation_relationship", None)
+            )
+            if hasattr(raw_rel, "value"):
+                raw_rel = raw_rel.value
+            rel_str = str(raw_rel or "").lower()
+
+            raw_blocks = (
+                state_entry.get("block_reasons")
+                if isinstance(state_entry, dict)
+                else getattr(state_entry, "block_reasons", ())
+            ) or ()
+            has_revocation_blocks = any(
+                r in ("local_support_revoked", "support_revoked", "evidence_revoked", "blocked")
+                for r in raw_blocks
+            )
+
+            # S12-02: Denial, revocation, and block reasons take strict precedence
+            if raw_status_str in ("unsupported", "blocked", "failed", "revoked", "none") or rel_str == "unsupported" or has_revocation_blocks:
+                support_class = "unsupported"
+            elif raw_status_str == "prior_constrained":
+                # S12-04: Strict actual-prior qualification
+                raw_var = (
+                    state_entry.get("prior_variance")
+                    if isinstance(state_entry, dict)
+                    else getattr(state_entry, "prior_variance", None)
+                )
+                has_valid_var = _is_valid_finite_nonnegative(raw_var)
+                has_actual_prior_flag = (
+                    (state_entry.get("has_actual_prior") is True or state_entry.get("has_prior_evidence") is True)
+                    if isinstance(state_entry, dict)
+                    else (getattr(state_entry, "has_actual_prior", None) is True or getattr(state_entry, "has_prior_evidence", None) is True)
+                )
+                has_prior_dist = bool(
+                    (state_entry.get("prior_distribution") if isinstance(state_entry, dict) else getattr(state_entry, "prior_distribution", None))
+                )
+                spatial_supp = str(
+                    (state_entry.get("spatial_support") if isinstance(state_entry, dict) else getattr(state_entry, "spatial_support", "")) or ""
+                ).lower()
+                has_spatial_prior = spatial_supp not in ("", "none", "unsupported")
+                is_explicitly_denied = (
+                    (state_entry.get("has_actual_prior") is False or state_entry.get("has_prior_evidence") is False)
+                    if isinstance(state_entry, dict)
+                    else (getattr(state_entry, "has_actual_prior", None) is False or getattr(state_entry, "has_prior_evidence", None) is False)
+                ) or (raw_var is not None and not has_valid_var)
+
+                if not is_explicitly_denied and (has_valid_var or has_actual_prior_flag or has_prior_dist or has_spatial_prior):
+                    support_class = "prior_constrained"
+                else:
+                    support_class = "unsupported"
+            elif raw_status_str in valid_classes:
+                support_class = raw_status_str
             else:
                 try:
                     from services.agribrain.scientific_contracts.state_support import resolve_state_evidence_class
@@ -505,50 +587,50 @@ def compute_asmae_support_classification(
                 except Exception:
                     pass
 
-            # Direct observation status strictly requires verified direct measurement proof
+            # S12-05: Direct observation status strictly requires verified direct measurement proof
             if support_class == "directly_assimilated":
-                direct_count = int(
-                    (
-                        state_entry.get("direct_observation_count", 0)
-                        if isinstance(state_entry, dict)
-                        else getattr(state_entry, "direct_observation_count", 0)
-                    )
-                    or 0
+                raw_direct = (
+                    state_entry.get("direct_observation_count")
+                    if isinstance(state_entry, dict)
+                    else getattr(state_entry, "direct_observation_count", None)
                 )
-                rel = str(
-                    (
-                        state_entry.get("observation_relationship", "")
-                        if isinstance(state_entry, dict)
-                        else getattr(state_entry, "observation_relationship", "")
-                    )
-                    or ""
-                ).lower()
-                if direct_count <= 0 and rel not in ("direct", "direct_observation"):
-                    support_class = "indirectly_constrained" if rel == "indirect" else "proxy_assimilated"
+                has_valid_direct = _is_valid_direct_observation_count(raw_direct)
+                if not has_valid_direct and rel_str not in ("direct", "direct_observation"):
+                    support_class = "indirectly_constrained" if rel_str == "indirect" else "proxy_assimilated"
 
     if not support_class:
         raw_class = meta.get("support_class") or meta.get("evidence_support_class")
-        if raw_class in valid_classes:
-            if raw_class == "directly_assimilated":
-                has_direct = bool(
-                    meta.get("direct_observation_count", 0) > 0
-                    or meta.get("direct_observation") is True
-                )
-                support_class = "directly_assimilated" if has_direct else "indirectly_constrained"
+        raw_var = meta.get("prior_variance")
+        has_valid_var = _is_valid_finite_nonnegative(raw_var)
+        has_actual_prior_flag = (
+            meta.get("has_actual_prior") is True
+            or meta.get("has_prior_evidence") is True
+            or meta.get("has_enkf_prior") is True
+        )
+        is_prior_denied = (
+            meta.get("has_actual_prior") is False
+            or meta.get("has_prior_evidence") is False
+            or (raw_var is not None and not has_valid_var)
+        )
+
+        if raw_class == "directly_assimilated":
+            raw_direct = meta.get("direct_observation_count")
+            has_valid_direct = _is_valid_direct_observation_count(raw_direct)
+            has_direct_flag = meta.get("direct_observation") is True
+            if has_valid_direct or has_direct_flag:
+                support_class = "directly_assimilated"
             else:
-                support_class = raw_class
-        elif (
-            meta.get("has_prior_evidence")
-            or meta.get("has_enkf_prior")
-            or meta.get("prior_status") in ("prior_available", "prior_constrained")
-            or meta.get("prior_variance") is not None
-            or meta.get("has_enkf_proxy_fallback")
-        ):
+                support_class = "indirectly_constrained"
+        elif raw_class in ("proxy_assimilated", "indirectly_constrained"):
+            support_class = raw_class
+        elif raw_class == "prior_constrained":
+            if not is_prior_denied and (has_valid_var or has_actual_prior_flag):
+                support_class = "prior_constrained"
+            else:
+                support_class = "unsupported"
+        elif not is_prior_denied and (has_valid_var or has_actual_prior_flag or meta.get("has_enkf_proxy_fallback") is True):
             support_class = "prior_constrained"
         else:
-            # Missing ledger / no qualified provenance fails closed to unsupported.
-            # A real satellite scene or composite raster CANNOT establish direct
-            # observation or proxy assimilation of modeled biophysical latent states.
             support_class = "unsupported"
 
     from services.agribrain.layer05_asmae.state.descriptors import (
@@ -558,16 +640,48 @@ def compute_asmae_support_classification(
     from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
     canon_name = canonical_state_key(feature_name or stype.value)
     descriptor = STATE_DESCRIPTOR_BY_NAME.get(canon_name)
-    is_prescription_eligible = (
+    descriptor_is_prescription = (
         descriptor is not None
         and descriptor.authority_ceiling == AuthorityCeiling.PRESCRIPTION_ELIGIBLE
+    )
+
+    # S12-02: Runtime ceiling and block reasons intersection
+    state_ceiling = None
+    state_block_reasons = ()
+    if state_entry:
+        state_ceiling = (
+            state_entry.get("authority_ceiling")
+            if isinstance(state_entry, dict)
+            else getattr(state_entry, "authority_ceiling", None)
+        )
+        state_block_reasons = (
+            state_entry.get("block_reasons")
+            if isinstance(state_entry, dict)
+            else getattr(state_entry, "block_reasons", ())
+        ) or ()
+    if not state_ceiling:
+        state_ceiling = meta.get("authority_ceiling") or meta.get("authority")
+    if not state_block_reasons:
+        state_block_reasons = meta.get("block_reasons") or ()
+
+    has_blocking_reasons = bool(state_block_reasons)
+    current_ceiling_restrictive = False
+    if state_ceiling:
+        c_str = str(state_ceiling.value if hasattr(state_ceiling, "value") else state_ceiling).lower()
+        if c_str in ("diagnostic", "visualization", "monitoring_only", "none", "blocked", "unsupported"):
+            current_ceiling_restrictive = True
+
+    is_management_eligible = (
+        descriptor_is_prescription
+        and not current_ceiling_restrictive
+        and not has_blocking_reasons
     )
 
     if support_class == "directly_assimilated":
         evidence_class = "Observed"
         direct_observation = True
         scouting = True
-        mgmt = is_prescription_eligible
+        mgmt = is_management_eligible
         stats = True
     elif support_class == "proxy_assimilated":
         evidence_class = "Proxy-Assimilated"
@@ -1305,6 +1419,8 @@ def generate_asmae_surfaces(
             provenance["scope"] = "plot_level"
             provenance["constant_allowed"] = True
 
+        surf_state_update = bool(provenance.get("state_update_allowed", False))
+        surf_prescription = bool(provenance.get("prescription_driver_allowed", False))
         surfaces.append(SurfaceArtifact(
             surface_id=f"{stype.value}_{inp.plot_id}",
             semantic_type=stype,
@@ -1316,6 +1432,8 @@ def generate_asmae_surfaces(
             palette_id=palettes[stype],
             source_layers=["L1"],
             provenance=provenance,
+            state_update_allowed=surf_state_update,
+            prescription_driver_allowed=surf_prescription,
             grounding_class=grounding,
             grid_spec=surface_display_grid_spec,
             source_grid_spec=surface_source_grid_spec,
@@ -1663,6 +1781,8 @@ def generate_asmae_aliases(
             palette_id=src_surf.palette_id,
             source_layers=src_surf.source_layers,
             provenance=prov,
+            state_update_allowed=bool(prov.get("state_update_allowed", False)),
+            prescription_driver_allowed=bool(prov.get("prescription_driver_allowed", False)),
             grounding_class=src_surf.grounding_class,
             grid_spec=grid_spec_dict,
             source_grid_spec=src_surf.source_grid_spec,
@@ -1683,6 +1803,10 @@ def generate_asmae_aliases(
     for st, w in veg_attn_ingredients.items():
         s = find_surf(st)
         if s:
+            sprov = getattr(s, "provenance", {}) or {}
+            if sprov.get("support_class") == "unsupported" or sprov.get("evidence_class") == "Unsupported":
+                excluded_veg_ingredients.append({"surface": st.value, "reason": "ingredient_unsupported"})
+                continue
             pixel_ok, pixel_reason = asmae_surface_pixel_visual_eligible(s, output_grid_spec=grid_spec_dict)
             if pixel_ok:
                 active_veg_ingredients[st] = (s, w)
@@ -1720,6 +1844,8 @@ def generate_asmae_aliases(
                 render_range=(0.0, 1.0),
                 palette_id=PaletteId.RISK_HEAT,
                 source_layers=["L1"],
+                state_update_allowed=False,
+                prescription_driver_allowed=False,
                 provenance={
                     "alias_of": "ASMAE_VEG_ATTENTION_COMPOSITE",
                     "map_mode": "veg_attention",
@@ -1756,12 +1882,22 @@ def generate_asmae_aliases(
         SurfaceType.ASMAE_CROSS_LAYER_CONFLICT: 0.15,
     }
     
-    # V92.4-BC.2: Gate each risk ingredient on pixel_visual eligibility (not authority)
+    # S12-01: Filter risk ingredients on scientific support qualification and pixel_visual eligibility
     active_ingredients = {}
     excluded_ingredients = []
     for st, w in risk_ingredients.items():
         s = find_surf(st)
         if s:
+            sprov = getattr(s, "provenance", {}) or {}
+            sup_class = sprov.get("support_class")
+            ev_class = sprov.get("evidence_class")
+            raw_blocks = sprov.get("block_reasons") or ()
+            if sup_class == "unsupported" or ev_class == "Unsupported":
+                excluded_ingredients.append({"surface": st.value, "reason": "ingredient_unsupported"})
+                continue
+            if any(r in ("local_support_revoked", "support_revoked", "evidence_revoked", "blocked") for r in raw_blocks):
+                excluded_ingredients.append({"surface": st.value, "reason": "ingredient_blocked"})
+                continue
             elig, elig_reason = asmae_surface_pixel_visual_eligible(s, output_grid_spec=grid_spec_dict)
             if elig:
                 active_ingredients[st] = (s, w)
@@ -1816,6 +1952,8 @@ def generate_asmae_aliases(
                 render_range=(0.0, 1.0),
                 palette_id=PaletteId.RISK_HEAT,
                 source_layers=["L1"],
+                state_update_allowed=False,
+                prescription_driver_allowed=False,
                 provenance={
                     "alias_of": "ASMAE_RISK_COMPOSITE",
                     "map_mode": "composite_risk",

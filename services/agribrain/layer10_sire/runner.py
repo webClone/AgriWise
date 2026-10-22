@@ -5137,8 +5137,31 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
 
             if state is not None:
                 entry = state_support_ledger.get(state) or {}
+                if not entry:
+                    if state == "phenology_progress":
+                        return True, ""
+                    if state == "stress_memory":
+                        return True, ""
+                    return False, f"missing_state_support:{state}"
+
                 accepted_updates = int(entry.get("accepted_update_count", 0) or 0)
                 status = str(entry.get("support_status") or "").lower()
+                block_reasons = entry.get("block_reasons") or ()
+                rel = str(entry.get("observation_relationship", "") or "").lower()
+
+                # S12-02: Denial, revocation, and block reasons take strict precedence
+                # over historical accepted updates.
+                if (
+                    status in ("unsupported", "blocked", "failed", "revoked", "none")
+                    or rel == "unsupported"
+                    or any(r in ("local_support_revoked", "support_revoked", "evidence_revoked", "blocked") for r in block_reasons)
+                ):
+                    reason = f"current_state_support_denied:{state}"
+                    if block_reasons:
+                        reason = f"state_support_blocked:{block_reasons[0]}"
+                    elif status in ("unsupported", "blocked", "revoked"):
+                        reason = f"missing_state_support:{state}"
+                    return False, reason
 
                 # State-specific predicates per scientific role
                 if state == "biotic_confounder_risk":
@@ -5159,9 +5182,10 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                     return False, "missing_state_support:phenology_progress"
 
                 if state == "stress_memory":
+                    # Fix S12-02 / future helper caution: Do not accept relationship 'none' without active memory status
                     if accepted_updates > 0 or status in (
-                        "model_propagated", "temporally_conditioned", "memory_accumulated", "assimilated", "supported", "active"
-                    ) or entry.get("observation_relationship") in ("indirect", "proxy", "none"):
+                        "model_propagated", "temporally_conditioned", "memory_accumulated", "assimilated", "supported", "active", "prior_constrained"
+                    ):
                         return True, ""
                     return False, "missing_state_support:stress_memory"
 
@@ -5214,6 +5238,14 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             family_ok, family_reason = asmae_family_gate(t_upper)
             if not family_ok:
                 return False, family_reason
+
+            # S12-01: Risk composite must have at least one active, qualified ingredient
+            if "RISK" in t_upper:
+                prov = getattr(surface, "provenance", {}) or {}
+                risk_ing = prov.get("risk_ingredients")
+                if risk_ing is not None and len(risk_ing) == 0:
+                    return False, "missing_qualified_risk_ingredients"
+
             return asmae_state_gate(t_upper)
 
         def _surface_provenance(surface):

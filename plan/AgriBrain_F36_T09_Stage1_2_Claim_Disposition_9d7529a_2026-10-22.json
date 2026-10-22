@@ -1,0 +1,128 @@
+{
+  "repository": "webClone/AgriWise",
+  "review_date": "2026-10-22",
+  "branch": "feat/f36-t09-asmae-13-state-publication",
+  "candidate": "9d7529afb411ddabb5fc8f46931cf098e10d9240",
+  "parent": "90ab701714554c7b786bba4ac6b19259e77279ce",
+  "reported_full_sha": "9d7529a7d3c01bf64850bda481fa7ff055f661a1",
+  "reported_full_sha_resolves": false,
+  "verdict": "HOLD_MERGE_FOR_BOUNDED_CORRECTIVE_FOLLOWUP",
+  "meaning": "Retain confirmed raw-boundary fixes; complete support/permission composition and malformed-proof handling before declaring Stage1\u20132 complete.",
+  "confirmed_closures": [
+    {
+      "id": "C01",
+      "subject": "Plain missing-ledger plus real raster",
+      "status": "CLOSED_BOUNDED_NATIVE_CLASSIFIER_GENERATOR"
+    },
+    {
+      "id": "C02",
+      "subject": "Raw canopy/root own-variable lookup",
+      "status": "CLOSED_BOUNDED"
+    },
+    {
+      "id": "C03",
+      "subject": "Five unmapped raw states",
+      "status": "CLOSED_BOUNDED_POSITIVE_FIXTURE"
+    },
+    {
+      "id": "C04",
+      "subject": "Static descriptor maximum for management eligibility",
+      "status": "CLOSED_BOUNDED_STATIC_MAXIMUM_ONLY"
+    }
+  ],
+  "findings": [
+    {
+      "id": "S12-01",
+      "priority": "P1",
+      "status": "OPEN",
+      "origin": "Inherited",
+      "title": "Unsupported state affects authorized, frontend-selected risk composite",
+      "observation": "Native unsupported/denied biotic input changes selected risk pixels 0.0418\u21920.068 and 0.3759\u21920.612 through existing composite/alias authorization.",
+      "evidence": "gating/frontend-risk-results.json"
+    },
+    {
+      "id": "S12-02",
+      "priority": "P1",
+      "status": "OPEN",
+      "origin": "Inherited",
+      "title": "Current restrictions lose to historical count or static descriptor maximum",
+      "observation": "Typed current unsupported record with prior accepted count remains pixel-authorized; current DIAGNOSTIC/VISUALIZATION ceiling and exclusions do not restrict raw management eligibility.",
+      "evidence": "integration/comparison.json"
+    },
+    {
+      "id": "S12-03",
+      "priority": "P1",
+      "status": "OPEN",
+      "origin": "Inherited",
+      "title": "Canonical permissions contradict ASMAE denial",
+      "observation": "Native provenance denies state/prescription use, but SurfaceArtifact true defaults take precedence in canonical serialization; includes current Unsupported input.",
+      "evidence": "integration/results.json"
+    },
+    {
+      "id": "S12-04",
+      "priority": "P2",
+      "status": "OPEN",
+      "origin": "Residual label path plus introduced permissive fallback",
+      "title": "Strict actual-prior qualification is incomplete",
+      "observation": "Bare prior labels and malformed variance qualify; actual unknown-source native NaN-variance input becomes Prior/scouting while parent remains Unsupported. Valid finite zero prior remains a required control.",
+      "evidence": "classification/candidate-results.json"
+    },
+    {
+      "id": "S12-05",
+      "priority": "P2",
+      "status": "OPEN",
+      "origin": "Residual scalar proof gap plus introduced availability regression",
+      "title": "Direct-proof metadata accepts malformed proof or aborts generation",
+      "observation": "Boolean/Infinity direct counts can produce Observed metadata; explicit null/string counts now raise TypeError in actual native generation. Parent returns surfaces with unsafe labels, not an acceptable ideal control.",
+      "evidence": "classification/candidate-results.json"
+    }
+  ],
+  "finding_groups_open": 5,
+  "candidate_positive_raw_surfaces": 11,
+  "parent_positive_raw_surfaces": 6,
+  "static_management_eligible_states": [
+    "vigor",
+    "bare_soil_fraction"
+  ],
+  "risk_selected_pixels": {
+    "input_scale": [
+      0.1,
+      1.0
+    ],
+    "first": [
+      0.0418,
+      0.068
+    ],
+    "last": [
+      0.3759,
+      0.612
+    ]
+  },
+  "full_acceptance": {
+    "total": 52,
+    "open": 52,
+    "checked": 0,
+    "modified": false
+  },
+  "F02_ref": "075f19d318db6fa86d5988c2cabcb680dc17702e",
+  "F02_correctness_newly_certified": false,
+  "stage3_expected_missing_products_counted_as_defects": false,
+  "scope_limits": [
+    "No normal field incidence or external attack reachability established.",
+    "No full integrated runner/provider/job or browser materialization executed.",
+    "No physical state update, prescription or hardware escalation demonstrated.",
+    "Canonical serialization is an actual native component boundary; action execution is not inferred.",
+    "Successful replay reproduces desired fixes and residual counterexamples, not an all-pass production verdict.",
+    "No repository tests/audits or reported698testtotal used as independent proof."
+  ],
+  "method": {
+    "candidate_source_files": 1086,
+    "parent_source_files": 1086,
+    "changed_modules_compile": 3,
+    "top_level_replay_commands": 6,
+    "root_observation_checks": 28,
+    "production_or_Git_edits": false
+  },
+  "immediate_Git_parent": "c6674e846209c50b9aeb6750ae8653d65641566d",
+  "production_parent_control_equivalence": "90ab701 has identical production source to the immediate documentation-only parent."
+}

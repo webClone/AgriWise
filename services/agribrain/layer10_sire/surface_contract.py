@@ -122,10 +122,30 @@ def serialize_surface_artifact(surface: Any) -> dict:
             else "agronomic_surface"
         )
     grounding_class_val = str(_enum_value(_field(surface, "grounding_class", None)) or "UNIFORM")
-    state_update_allowed = _surface_value(surface, provenance, "state_update_allowed", "stateUpdateAllowed")
-    prescription_driver_allowed = _surface_value(
-        surface, provenance, "prescription_driver_allowed", "prescriptionDriverAllowed"
-    )
+    # Restrictive consistency: If either surface attribute or provenance explicitly denies
+    # state updates or prescription driving, the explicit denial (False) must win.
+    attr_state_update = _field(surface, "state_update_allowed", None)
+    prov_state_update = provenance.get("state_update_allowed", provenance.get("stateUpdateAllowed"))
+    if attr_state_update is False or prov_state_update is False:
+        state_update_allowed = False
+    elif attr_state_update is not None:
+        state_update_allowed = bool(attr_state_update)
+    elif prov_state_update is not None:
+        state_update_allowed = bool(prov_state_update)
+    else:
+        state_update_allowed = True
+
+    attr_prescription = _field(surface, "prescription_driver_allowed", None)
+    prov_prescription = provenance.get("prescription_driver_allowed", provenance.get("prescriptionDriverAllowed"))
+    if attr_prescription is False or prov_prescription is False:
+        prescription_driver_allowed = False
+    elif attr_prescription is not None:
+        prescription_driver_allowed = bool(attr_prescription)
+    elif prov_prescription is not None:
+        prescription_driver_allowed = bool(prov_prescription)
+    else:
+        prescription_driver_allowed = True
+
     authority_block_reason = _surface_value(
         surface, provenance, "authority_block_reason", "authorityBlockReason"
     )

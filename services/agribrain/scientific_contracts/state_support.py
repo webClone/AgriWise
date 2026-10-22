@@ -72,8 +72,12 @@ class StateSupportRecord:
 
 def _attr(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+        val = obj.get(key, default)
+    else:
+        val = getattr(obj, key, default)
+    if hasattr(val, "value"):
+        return val.value
+    return val
 
 
 def resolve_state_evidence_class(ledger_entry: Any) -> StateEvidenceClass:
@@ -86,7 +90,11 @@ def resolve_state_evidence_class(ledger_entry: Any) -> StateEvidenceClass:
         return StateEvidenceClass.UNSUPPORTED
 
     support_status = str(_attr(ledger_entry, "support_status", "") or "").lower()
-    if support_status in ("unsupported", "blocked", "failed", "none"):
+    if support_status in ("unsupported", "blocked", "failed", "revoked", "none"):
+        return StateEvidenceClass.UNSUPPORTED
+
+    block_reasons = _attr(ledger_entry, "block_reasons", ()) or ()
+    if any(r in ("local_support_revoked", "support_revoked", "evidence_revoked", "blocked") for r in block_reasons):
         return StateEvidenceClass.UNSUPPORTED
 
     direct_count = int(_attr(ledger_entry, "direct_observation_count", 0) or 0)
