@@ -152,6 +152,17 @@ def _is_variance_compatible_with_covariance(resolved_var: float, cov: Any) -> bo
         return False
 
 
+def _safe_square(val: float) -> Optional[float]:
+    """Square a float safely, returning finite float or None on overflow/nonfinite."""
+    try:
+        sq = val ** 2
+        if not math.isfinite(sq):
+            return None
+        return sq
+    except (OverflowError, ArithmeticError, ValueError):
+        return None
+
+
 def _validate_prior_distribution(dist: Any) -> Tuple[bool, bool]:
     """Validate an alternate prior_distribution.
 
@@ -227,11 +238,15 @@ def _validate_prior_distribution(dist: Any) -> Tuple[bool, bool]:
     elif has_sigma:
         resolved_std = float(dist["sigma"])
 
-    if resolved_var is not None and resolved_std is not None:
-        if abs(resolved_std ** 2 - resolved_var) > 1e-4:
+    if resolved_std is not None:
+        sq_std = _safe_square(resolved_std)
+        if sq_std is None:
             return False, True
-    elif resolved_var is None and resolved_std is not None:
-        resolved_var = resolved_std ** 2
+        if resolved_var is not None:
+            if abs(sq_std - resolved_var) > 1e-4:
+                return False, True
+        else:
+            resolved_var = sq_std
 
     # Validate covariance / cov
     has_cov = "covariance" in dist

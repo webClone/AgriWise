@@ -1540,3 +1540,116 @@ class TestStage12ResidualCorrections:
         assert vigor_surf.state_update_allowed is False
         assert vigor_surf.prescription_driver_allowed is False
 
+    def test_s653_01_checked_finite_variance_derivation_and_sibling_resilience(self, monkeypatch):
+        """S653-01: Checked finite squaring of std/sigma rejects unrepresentable variance locally without aborting siblings."""
+        monkeypatch.setenv("ASMAE_ENABLED", "true")
+        monkeypatch.setenv("ASMAE_DIAGNOSTIC_SHADOW_RUN_ENABLED", "true")
+        monkeypatch.setenv("L10_ASMAE_SURFACES_ENABLED", "true")
+
+        from services.agribrain.layer10_sire.surfaces.asmae import (
+            _validate_prior_distribution,
+        )
+
+        numerical_cases = {
+            "std_normal": ({"std": 0.5}, True),
+            "std_large_square_finite": ({"std": 1e150}, True),
+            "std_square_overflow": ({"std": 1e200}, False),
+            "sigma_square_overflow": ({"sigma": 1e200}, False),
+            "std_overflow_with_variance": ({"std": 1e200, "variance": 1.0}, False),
+        }
+
+        # 1. Direct validator calls without unhandled OverflowError
+        for name, (dist, expected_valid) in numerical_cases.items():
+            is_valid, is_malformed = _validate_prior_distribution(dist)
+            if expected_valid:
+                assert is_valid is True, f"{name} should be valid"
+                assert is_malformed is False, f"{name} should not be malformed"
+            else:
+                assert is_valid is False, f"{name} should be invalid"
+                assert is_malformed is True, f"{name} should be malformed"
+
+        # 2. Both native ledger and metadata routes
+        for name, (dist, expected_valid) in numerical_cases.items():
+            # Ledger route
+            res_ledger = compute_asmae_support_classification(
+                real_ev=True,
+                source_reality="real_raster",
+                meta={},
+                stype=SurfaceType.ASMAE_VIGOR,
+                state_support_ledger={
+                    "vigor": {
+                        "state": "vigor",
+                        "support_status": "prior_constrained",
+                        "prior_distribution": dist,
+                    }
+                },
+                feature_name="vigor",
+            )
+            # Metadata route
+            res_meta = compute_asmae_support_classification(
+                real_ev=False,
+                source_reality="unknown",
+                meta={"prior_distribution": dist},
+                stype=SurfaceType.ASMAE_VIGOR,
+                state_support_ledger={},
+                feature_name="vigor",
+            )
+
+            if expected_valid:
+                assert res_ledger["support_class"] == "prior_constrained", f"Ledger {name} failed"
+                assert res_ledger["scouting_zone_eligible"] is True
+                assert res_meta["support_class"] == "prior_constrained", f"Meta {name} failed"
+                assert res_meta["scouting_zone_eligible"] is True
+            else:
+                assert res_ledger["support_class"] == "unsupported", f"Ledger {name} should be unsupported"
+                assert res_ledger["scouting_zone_eligible"] is False
+                assert res_meta["support_class"] == "unsupported", f"Meta {name} should be unsupported"
+                assert res_meta["scouting_zone_eligible"] is False
+
+        # 3. Native sibling resilience: unrepresentable vigor prior does NOT abort chlorophyll sibling
+        inp = Layer10Input(tenant_id="TEST-TENANT", farm_id="TEST-FARM", plot_id="TEST-PLOT")
+        l1_data = L1SpatialData(
+            height=3,
+            width=3,
+            grid_spec=copy.deepcopy(GRID_SPEC),
+            asmae_evidence_state=copy.deepcopy(BASE_EVIDENCE_STATE),
+            real_asmae_evidence=True,
+            asmae_feature_pack={"grid_spec": copy.deepcopy(GRID_SPEC)},
+        )
+        test_values = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
+        for st in SurfaceType:
+            if st.value.startswith("ASMAE_"):
+                k = st.value.lower()
+                l1_data.raster_metadata[k] = copy.deepcopy(BASE_META)
+                l1_data.raster_maps[k] = copy.deepcopy(test_values)
+
+        l1_data.asmae_feature_pack["state_support_ledger"] = {
+            "vigor": {
+                "state": "vigor",
+                "support_status": "prior_constrained",
+                "prior_distribution": {"std": 1e200},
+            },
+            "chlorophyll": {
+                "state": "chlorophyll",
+                "support_status": "assimilated",
+                "accepted_update_count": 1,
+                "observation_relationship": "indirect",
+                "source_feature_ids": ["INERT_RED_EDGE"],
+                "authority_ceiling": "DIAGNOSTIC",
+            },
+        }
+
+        surfaces = generate_asmae_surfaces(inp, 3, 3, l1_data=l1_data)
+        assert len(surfaces) > 0
+
+        v_surf = next((s for s in surfaces if s.semantic_type == SurfaceType.ASMAE_VIGOR), None)
+        assert v_surf is not None
+        assert v_surf.provenance["support_class"] == "unsupported"
+        assert v_surf.provenance.get("scouting_zone_eligible") is False
+
+        c_surf = next((s for s in surfaces if s.semantic_type == SurfaceType.ASMAE_CHLOROPHYLL), None)
+        assert c_surf is not None
+        assert c_surf.provenance["support_class"] == "indirectly_constrained"
+        assert c_surf.provenance.get("scouting_zone_eligible") is True
+
+
