@@ -62,10 +62,13 @@ def _is_finite_real(val: Any) -> bool:
 
 
 def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
-    """Validate covariance scalar or nested array.
+    """Validate covariance scalar, 1D diagonal vector, or 2D matrix.
 
     Returns:
         (is_valid, is_malformed)
+        - If cov is None: (False, False)
+        - If cov is invalid/malformed: (False, True)
+        - If cov is valid: (True, False)
     """
     if cov is None:
         return False, False
@@ -78,24 +81,75 @@ def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
     if isinstance(cov, (list, tuple)):
         if len(cov) == 0:
             return False, True
-        if isinstance(cov[0], (list, tuple)):
-            for i, row in enumerate(cov):
+        any_nested = any(isinstance(x, (list, tuple)) for x in cov)
+        all_nested = all(isinstance(x, (list, tuple)) for x in cov)
+        if any_nested and not all_nested:
+            return False, True
+        if all_nested:
+            n_rows = len(cov)
+            if n_rows == 0:
+                return False, True
+            for row in cov:
                 if not isinstance(row, (list, tuple)):
                     return False, True
-                for j, elem in enumerate(row):
-                    if not _is_finite_real(elem):
+                if len(row) == 0 or len(row) != n_rows:
+                    return False, True
+                for elem in row:
+                    if isinstance(elem, bool) or not _is_finite_real(elem):
                         return False, True
-                    if i == j and float(elem) < 0.0:
+            for i in range(n_rows):
+                if float(cov[i][i]) < 0.0:
+                    return False, True
+                for j in range(i + 1, n_rows):
+                    if abs(float(cov[i][j]) - float(cov[j][i])) > 1e-4:
                         return False, True
+            try:
+                mat = np.array(cov, dtype=float)
+                eigenvals = np.linalg.eigvalsh(mat)
+                if np.any(eigenvals < -1e-5):
+                    return False, True
+            except Exception:
+                return False, True
             return True, False
         else:
+            if len(cov) == 0:
+                return False, True
             for elem in cov:
-                if not _is_finite_real(elem):
+                if isinstance(elem, bool) or not _is_finite_real(elem):
                     return False, True
                 if float(elem) < 0.0:
                     return False, True
             return True, False
     return False, True
+
+
+def _are_covariances_equivalent(c1: Any, c2: Any) -> bool:
+    """Check if two valid covariance structures represent the same covariance within numerical tolerance."""
+    try:
+        arr1 = np.array(c1, dtype=float)
+        arr2 = np.array(c2, dtype=float)
+        if arr1.shape == arr2.shape:
+            return bool(np.all(np.abs(arr1 - arr2) <= 1e-4))
+        if arr1.size == 1 and arr2.size == 1:
+            return bool(abs(arr1.item() - arr2.item()) <= 1e-4)
+        return False
+    except Exception:
+        return False
+
+
+def _is_variance_compatible_with_covariance(resolved_var: float, cov: Any) -> bool:
+    """Check if a scalar variance is compatible with the supplied covariance structure."""
+    try:
+        arr = np.array(cov, dtype=float)
+        if arr.size == 1:
+            return bool(abs(arr.item() - resolved_var) <= 1e-4)
+        if arr.ndim == 1:
+            return bool(abs(arr[0] - resolved_var) <= 1e-4)
+        if arr.ndim == 2:
+            return bool(abs(arr[0, 0] - resolved_var) <= 1e-4)
+        return False
+    except Exception:
+        return False
 
 
 def _validate_prior_distribution(dist: Any) -> Tuple[bool, bool]:
@@ -176,21 +230,39 @@ def _validate_prior_distribution(dist: Any) -> Tuple[bool, bool]:
     if resolved_var is not None and resolved_std is not None:
         if abs(resolved_std ** 2 - resolved_var) > 1e-4:
             return False, True
+    elif resolved_var is None and resolved_std is not None:
+        resolved_var = resolved_std ** 2
 
     # Validate covariance / cov
     has_cov = "covariance" in dist
     has_cov_alias = "cov" in dist
     has_valid_cov = False
+
     if has_cov:
         c_valid, c_malformed = _validate_covariance(dist["covariance"])
         if c_malformed or not c_valid:
             return False, True
         has_valid_cov = True
+
     if has_cov_alias:
         c_valid, c_malformed = _validate_covariance(dist["cov"])
         if c_malformed or not c_valid:
             return False, True
         has_valid_cov = True
+
+    # Cross-validate covariance aliases if both declared
+    if has_cov and has_cov_alias:
+        if not _are_covariances_equivalent(dist["covariance"], dist["cov"]):
+            return False, True
+
+    # Cross-validate scalar variance against covariance if both declared
+    if resolved_var is not None:
+        if has_cov:
+            if not _is_variance_compatible_with_covariance(resolved_var, dist["covariance"]):
+                return False, True
+        if has_cov_alias:
+            if not _is_variance_compatible_with_covariance(resolved_var, dist["cov"]):
+                return False, True
 
     # Prior evidence requires an explicit, valid dispersion parameter
     has_dispersion = (resolved_var is not None) or (resolved_std is not None) or has_valid_cov

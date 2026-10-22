@@ -1418,3 +1418,125 @@ class TestStage12ResidualCorrections:
                 assert res_ledger["scouting_zone_eligible"] is False
                 assert res_meta["support_class"] == "unsupported", f"Meta {key} should be unsupported"
                 assert res_meta["scouting_zone_eligible"] is False
+
+    def test_s8d_01_covariance_validation_and_dispersion_qualification(self, monkeypatch):
+        """S8D-01: Empty or mathematically invalid covariance matrices fail closed to unsupported without false dispersion promotion."""
+        monkeypatch.setenv("ASMAE_ENABLED", "true")
+        monkeypatch.setenv("ASMAE_DIAGNOSTIC_SHADOW_RUN_ENABLED", "true")
+        monkeypatch.setenv("L10_ASMAE_SURFACES_ENABLED", "true")
+
+        from services.agribrain.layer10_sire.surfaces.asmae import (
+            _validate_covariance,
+            _validate_prior_distribution,
+        )
+
+        covariance_cases = {
+            "only_empty_row": {"covariance": [[]]},
+            "only_empty_rows": {"covariance": [[], []]},
+            "only_zero": {"covariance": [[0.0]]},
+            "psd": {"mean": 0.2, "covariance": [[1.0, 0.2], [0.2, 1.0]]},
+            "singular_zero": {"mean": 0.2, "covariance": [[0.0, 0.0], [0.0, 0.0]]},
+            "scalar_zero": {"mean": 0.2, "covariance": 0.0},
+            "diagonal_vector": {"mean": 0.2, "covariance": [0.0, 0.25]},
+            "indefinite": {"mean": 0.2, "covariance": [[1.0, 2.0], [2.0, 1.0]]},
+            "asymmetric": {"mean": 0.2, "covariance": [[1.0, 0.9], [0.1, 1.0]]},
+            "nonsquare": {"mean": 0.2, "covariance": [[1.0, 2.0]]},
+            "ragged": {"mean": 0.2, "covariance": [[1.0, 0.2], [0.2]]},
+            "empty_rows": {"mean": 0.2, "covariance": [[], []]},
+            "cov_alias_conflict": {"mean": 0.2, "covariance": 0.25, "cov": 1.0},
+            "variance_covariance_conflict": {"mean": 0.2, "variance": 0.25, "covariance": 1.0},
+        }
+
+        valid_controls = {"only_zero", "psd", "singular_zero", "scalar_zero", "diagonal_vector"}
+        invalid_residuals = {
+            "only_empty_row",
+            "only_empty_rows",
+            "empty_rows",
+            "nonsquare",
+            "ragged",
+            "asymmetric",
+            "indefinite",
+            "cov_alias_conflict",
+            "variance_covariance_conflict",
+        }
+
+        # 1. Direct validator assertion
+        for name, dist in covariance_cases.items():
+            is_valid, is_malformed = _validate_prior_distribution(dist)
+            if name in valid_controls:
+                assert is_valid is True, f"Control {name} should be valid"
+                assert is_malformed is False, f"Control {name} should not be malformed"
+            else:
+                assert is_valid is False, f"Residual {name} should be invalid"
+                assert is_malformed is True, f"Residual {name} should be malformed"
+
+        # 2. Both native ledger and metadata routes fail closed on invalid, pass on valid controls
+        for name, dist in covariance_cases.items():
+            # Ledger route
+            res_ledger = compute_asmae_support_classification(
+                real_ev=True,
+                source_reality="real_raster",
+                meta={},
+                stype=SurfaceType.ASMAE_VIGOR,
+                state_support_ledger={
+                    "vigor": {
+                        "state": "vigor",
+                        "support_status": "prior_constrained",
+                        "prior_distribution": dist,
+                    }
+                },
+                feature_name="vigor",
+            )
+            # Metadata route
+            res_meta = compute_asmae_support_classification(
+                real_ev=False,
+                source_reality="unknown",
+                meta={"prior_distribution": dist},
+                stype=SurfaceType.ASMAE_VIGOR,
+                state_support_ledger={},
+                feature_name="vigor",
+            )
+
+            if name in valid_controls:
+                assert res_ledger["support_class"] == "prior_constrained", f"Ledger {name} should be prior_constrained"
+                assert res_ledger["scouting_zone_eligible"] is True
+                assert res_meta["support_class"] == "prior_constrained", f"Meta {name} should be prior_constrained"
+                assert res_meta["scouting_zone_eligible"] is True
+            else:
+                assert res_ledger["support_class"] == "unsupported", f"Ledger {name} must fail closed to unsupported"
+                assert res_ledger["scouting_zone_eligible"] is False
+                assert res_meta["support_class"] == "unsupported", f"Meta {name} must fail closed to unsupported"
+                assert res_meta["scouting_zone_eligible"] is False
+
+            # Management eligibility remains strictly False across all covariance fixtures
+            assert res_ledger["management_zone_eligible"] is False
+            assert res_meta["management_zone_eligible"] is False
+
+        # 3. Native generate_asmae_surfaces execution without aborting siblings
+        inp = Layer10Input(tenant_id="TEST-TENANT", farm_id="TEST-FARM", plot_id="TEST-PLOT")
+        l1_data = L1SpatialData(
+            height=3,
+            width=3,
+            grid_spec=copy.deepcopy(GRID_SPEC),
+            asmae_evidence_state=copy.deepcopy(BASE_EVIDENCE_STATE),
+            real_asmae_evidence=True,
+            asmae_feature_pack={"grid_spec": copy.deepcopy(GRID_SPEC)},
+        )
+        l1_data.raster_metadata["asmae_vigor"] = copy.deepcopy(BASE_META)
+        l1_data.raster_metadata["asmae_vigor"]["prior_distribution"] = {"covariance": [[]]}
+        l1_data.raster_maps["asmae_vigor"] = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
+
+        surfaces = generate_asmae_surfaces(
+            inp,
+            3,
+            3,
+            l1_data=l1_data,
+        )
+        assert len(surfaces) > 0
+        vigor_surf = next((s for s in surfaces if s.semantic_type == SurfaceType.ASMAE_VIGOR), None)
+        assert vigor_surf is not None
+        assert vigor_surf.provenance["support_class"] == "unsupported"
+        assert vigor_surf.provenance.get("scouting_zone_eligible") is False
+        assert vigor_surf.state_update_allowed is False
+        assert vigor_surf.prescription_driver_allowed is False
+
