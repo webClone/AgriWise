@@ -5113,26 +5113,76 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             return t.upper().startswith("COMPOSITE_")
 
         def asmae_family_gate(t_upper: str):
-            if "WATER" in t_upper and not has_water_evidence:
+            if ("WATER" in t_upper or "WETNESS" in t_upper) and not has_water_evidence:
                 return False, "missing_water_evidence_family"
-            if "NUTRIENT" in t_upper and not has_nutrient_evidence:
+            if ("NUTRIENT" in t_upper or "CHLOROPHYLL" in t_upper) and not has_nutrient_evidence:
                 return False, "missing_nutrient_evidence_family"
             if "SALINITY" in t_upper and not has_salinity_evidence:
                 return False, "missing_salinity_evidence_family"
-            if "RISK" in t_upper and not has_risk_evidence:
+            if ("RISK" in t_upper or "BIOTIC" in t_upper) and not has_risk_evidence:
                 return False, "missing_risk_evidence_family"
             return True, ""
 
         def asmae_state_gate(t_upper: str):
-            requirements = []
-            if "CANOPY" in t_upper or "VIGOR" in t_upper:
-                requirements = ["vigor"]
-            elif "WATER" in t_upper:
-                requirements = ["canopy_water", "root_zone_water"]
-            elif "NUTRIENT" in t_upper or "CHLOROPHYLL" in t_upper:
-                requirements = ["chlorophyll"]
-            elif "SALINITY" in t_upper:
-                requirements = ["salinity_stress"]
+            from services.agribrain.scientific_contracts.state_schema_ref import (
+                SURFACE_TO_CANONICAL_STATE,
+                STATE_ORDER,
+                canonical_state_key,
+            )
+            state = SURFACE_TO_CANONICAL_STATE.get(t_upper)
+            if not state:
+                k = canonical_state_key(t_upper)
+                if k in STATE_ORDER:
+                    state = k
+
+            if state is not None:
+                entry = state_support_ledger.get(state) or {}
+                accepted_updates = int(entry.get("accepted_update_count", 0) or 0)
+                status = str(entry.get("support_status") or "").lower()
+
+                # State-specific predicates per scientific role
+                if state == "biotic_confounder_risk":
+                    if not (
+                        output.asmae_proof.get("bma_proof", {}).get("production_bma_valid")
+                        and output.asmae_proof.get("retrovalidation_proof", {}).get("real_holdout_count", 0) > 0
+                    ):
+                        return False, "missing_risk_bma_retro_support"
+                    if accepted_updates <= 0 and status not in ("assimilated", "supported", "active", "hypothesis_active"):
+                        return False, "missing_state_support:biotic_confounder_risk"
+                    return True, ""
+
+                if state == "phenology_progress":
+                    if accepted_updates > 0 or status in (
+                        "model_propagated", "temporally_conditioned", "assimilated", "supported", "active"
+                    ):
+                        return True, ""
+                    return False, "missing_state_support:phenology_progress"
+
+                if state == "stress_memory":
+                    if accepted_updates > 0 or status in (
+                        "model_propagated", "temporally_conditioned", "memory_accumulated", "assimilated", "supported", "active"
+                    ) or entry.get("observation_relationship") in ("indirect", "proxy", "none"):
+                        return True, ""
+                    return False, "missing_state_support:stress_memory"
+
+                # Standard observation-constrained biophysical states require own-state accepted updates
+                if accepted_updates <= 0 and status not in ("assimilated", "supported", "active"):
+                    return False, f"missing_state_support:{state}"
+                return True, ""
+
+            # Diagnostic / Non-latent-state surfaces
+            if "RESOLUTION" in t_upper:
+                if not current_1m_allowed:
+                    return False, "missing_local_resolution_support"
+                return True, ""
+            elif "CONFIDENCE" in t_upper or "UNCERTAINTY" in t_upper:
+                return (current_spatial_asmae, "" if current_spatial_asmae else "missing_spatial_posterior")
+            elif "RETROVALIDATION" in t_upper:
+                has_retro = output.asmae_proof.get("retrovalidation_proof", {}).get("real_holdout_count", 0) > 0
+                return (has_retro, "" if has_retro else "missing_retrovalidation_support")
+            elif "BMA_DISAGREEMENT" in t_upper or "BMA" in t_upper:
+                has_bma = bool(output.asmae_proof.get("bma_proof", {}).get("production_bma_valid"))
+                return (has_bma, "" if has_bma else "missing_bma_proof")
             elif "RISK" in t_upper:
                 if not (
                     output.asmae_proof.get("bma_proof", {}).get("production_bma_valid")
@@ -5140,21 +5190,8 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 ):
                     return False, "missing_risk_bma_retro_support"
                 return True, ""
-            elif "RESOLUTION" in t_upper:
-                if not current_1m_allowed:
-                    return False, "missing_local_resolution_support"
-                return True, ""
-            elif "CONFIDENCE" in t_upper or "UNCERTAINTY" in t_upper:
-                return (current_spatial_asmae, "" if current_spatial_asmae else "missing_spatial_posterior")
-            if not requirements:
-                return False, "surface_state_requirement_unmapped"
-            supported = [
-                state for state in requirements
-                if (state_support_ledger.get(state) or {}).get("accepted_update_count", 0) > 0
-            ]
-            if not supported:
-                return False, "missing_state_support:" + ",".join(requirements)
-            return True, ""
+
+            return False, "surface_state_requirement_unmapped"
 
         def asmae_surface_gate(surface, t_upper: str):
             # Pixel visualization and scientific authority are deliberately

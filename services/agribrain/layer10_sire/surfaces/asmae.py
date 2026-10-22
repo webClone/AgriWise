@@ -487,9 +487,16 @@ def compute_asmae_support_classification(
             or state_support_ledger.get(feature_name)
             or state_support_ledger.get(f"asmae_{canon_feature}")
         )
-        if state_entry and isinstance(state_entry, dict):
-            if state_entry.get("support_status") in valid_classes:
-                support_class = state_entry["support_status"]
+        if state_entry:
+            raw_status = (
+                state_entry.get("support_status")
+                if isinstance(state_entry, dict)
+                else getattr(state_entry, "support_status", None)
+            )
+            if hasattr(raw_status, "value"):
+                raw_status = raw_status.value
+            if raw_status in valid_classes:
+                support_class = raw_status
             else:
                 try:
                     from services.agribrain.scientific_contracts.state_support import resolve_state_evidence_class
@@ -498,26 +505,69 @@ def compute_asmae_support_classification(
                 except Exception:
                     pass
 
+            # Direct observation status strictly requires verified direct measurement proof
+            if support_class == "directly_assimilated":
+                direct_count = int(
+                    (
+                        state_entry.get("direct_observation_count", 0)
+                        if isinstance(state_entry, dict)
+                        else getattr(state_entry, "direct_observation_count", 0)
+                    )
+                    or 0
+                )
+                rel = str(
+                    (
+                        state_entry.get("observation_relationship", "")
+                        if isinstance(state_entry, dict)
+                        else getattr(state_entry, "observation_relationship", "")
+                    )
+                    or ""
+                ).lower()
+                if direct_count <= 0 and rel not in ("direct", "direct_observation"):
+                    support_class = "indirectly_constrained" if rel == "indirect" else "proxy_assimilated"
+
     if not support_class:
         raw_class = meta.get("support_class") or meta.get("evidence_support_class")
         if raw_class in valid_classes:
-            support_class = raw_class
-        elif real_ev and source_reality == "real_raster":
-            support_class = "directly_assimilated"
-        elif real_ev or source_reality in ("raster_composite_proxy", "proxy"):
-            support_class = "proxy_assimilated"
-        elif meta.get("used_archive") or meta.get("used_ml"):
-            support_class = "indirectly_constrained"
-        elif meta.get("has_enkf_proxy_fallback") or meta.get("degraded_mean_only"):
+            if raw_class == "directly_assimilated":
+                has_direct = bool(
+                    meta.get("direct_observation_count", 0) > 0
+                    or meta.get("direct_observation") is True
+                )
+                support_class = "directly_assimilated" if has_direct else "indirectly_constrained"
+            else:
+                support_class = raw_class
+        elif (
+            meta.get("has_prior_evidence")
+            or meta.get("has_enkf_prior")
+            or meta.get("prior_status") in ("prior_available", "prior_constrained")
+            or meta.get("prior_variance") is not None
+            or meta.get("has_enkf_proxy_fallback")
+        ):
             support_class = "prior_constrained"
         else:
+            # Missing ledger / no qualified provenance fails closed to unsupported.
+            # A real satellite scene or composite raster CANNOT establish direct
+            # observation or proxy assimilation of modeled biophysical latent states.
             support_class = "unsupported"
+
+    from services.agribrain.layer05_asmae.state.descriptors import (
+        STATE_DESCRIPTOR_BY_NAME,
+        AuthorityCeiling,
+    )
+    from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+    canon_name = canonical_state_key(feature_name or stype.value)
+    descriptor = STATE_DESCRIPTOR_BY_NAME.get(canon_name)
+    is_prescription_eligible = (
+        descriptor is not None
+        and descriptor.authority_ceiling == AuthorityCeiling.PRESCRIPTION_ELIGIBLE
+    )
 
     if support_class == "directly_assimilated":
         evidence_class = "Observed"
         direct_observation = True
         scouting = True
-        mgmt = True
+        mgmt = is_prescription_eligible
         stats = True
     elif support_class == "proxy_assimilated":
         evidence_class = "Proxy-Assimilated"
@@ -538,6 +588,7 @@ def compute_asmae_support_classification(
         mgmt = False
         stats = False
     else:
+        support_class = "unsupported"
         evidence_class = "Unsupported"
         direct_observation = False
         scouting = False

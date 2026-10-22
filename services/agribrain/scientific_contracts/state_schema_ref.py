@@ -44,9 +44,41 @@ STATE_KEY_ALIASES = {
 }
 
 
+# Explicit surface type and alias to canonical state mapping.
+# Eliminates substring collisions (e.g. CANOPY vs CANOPY_WATER).
+SURFACE_TO_CANONICAL_STATE: dict[str, str] = {
+    "ASMAE_VIGOR": "vigor",
+    "CANOPY_ASMAE_VIGOR": "vigor",
+    "ASMAE_LAI": "lai",
+    "ASMAE_CHLOROPHYLL": "chlorophyll",
+    "NUTRIENT_ASMAE_CHLOROPHYLL_PROXY": "chlorophyll",
+    "ASMAE_CANOPY_WATER": "canopy_water",
+    "WATER_ASMAE_CANOPY_WATER": "canopy_water",
+    "ASMAE_ROOT_ZONE_WATER": "root_zone_water",
+    "WATER_ASMAE_ROOT_ZONE_WATER": "root_zone_water",
+    "ASMAE_SURFACE_WETNESS_EVENT": "surface_wetness_event",
+    "ASMAE_STRUCTURE": "structure",
+    "ASMAE_BARE_SOIL": "bare_soil_fraction",
+    "ASMAE_BARE_SOIL_FRACTION": "bare_soil_fraction",
+    "ASMAE_SALINITY_STRESS": "salinity_stress",
+    "SALINITY_ASMAE_STRESS": "salinity_stress",
+    "ASMAE_THERMAL_STRESS": "thermal_stress",
+    "ASMAE_BIOTIC_CONFOUNDER_RISK": "biotic_confounder_risk",
+    "ASMAE_PHENOLOGY_PROGRESS": "phenology_progress",
+    "ASMAE_STRESS_MEMORY": "stress_memory",
+}
+
+
 def canonical_state_key(value: str | None) -> str:
     """Return the canonical 13-state ledger key for a surface/feature alias."""
-    key = str(value or "").strip().lower()
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    upper = raw.upper()
+    if upper in SURFACE_TO_CANONICAL_STATE:
+        return SURFACE_TO_CANONICAL_STATE[upper]
+    key = raw.lower()
     if key.startswith("asmae_"):
         key = key[6:]
     return STATE_KEY_ALIASES.get(key, key)
+
