@@ -23,6 +23,18 @@ const EXACT_SURFACE_META = Object.freeze({
     stopLabels: ["Very low", "Low", "Moderate", "High", "Very high"],
     colors: ["#c0392b", "#f1c40f", "#1a5276"],
   },
+  ASMAE_PHENOLOGY_PROGRESS: {
+    label: "Phenology Progress", unit: "fraction", lowLabel: "Vegetative / early",
+    midLabel: "Mid cycle", highLabel: "Maturity / senescent",
+    stopLabels: ["Early", "Developing", "Mid cycle", "Advanced", "Mature"],
+    colors: ["#8B0000", "#FFD700", "#006400"],
+  },
+  ASMAE_STRESS_MEMORY: {
+    label: "Stress Memory", unit: "fraction", lowLabel: "Low persistence",
+    midLabel: "Moderate", highLabel: "Severe memory",
+    stopLabels: ["None", "Low", "Moderate", "High", "Critical"],
+    colors: ["#fff7bc", "#fc8d59", "#b91c1c"],
+  },
   NUTRIENT_ASMAE_CHLOROPHYLL_PROXY: {
     label: "Chlorophyll State", unit: "µg/cm²", lowLabel: "Low chlorophyll",
     midLabel: "Moderate", highLabel: "High chlorophyll",

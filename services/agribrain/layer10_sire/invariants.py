@@ -12,6 +12,20 @@ from services.agribrain.layer10_sire.schema import (
 )
 
 
+ASMAE_SURFACE_INVARIANTS = {
+    SurfaceType.ASMAE_VIGOR: (0.0, 1.0),
+    SurfaceType.ASMAE_LAI: (0.0, 8.0),
+    SurfaceType.ASMAE_CHLOROPHYLL: (0.0, 80.0),
+    SurfaceType.ASMAE_PHENOLOGY_PROGRESS: (0.0, 1.0),
+    SurfaceType.ASMAE_STRESS_MEMORY: (0.0, 1.0),
+    SurfaceType.ASMAE_ML_AGREEMENT: (0.0, 1.0),
+    SurfaceType.ASMAE_ARCHIVE_SUPPORT: (0.0, 1.0),
+    SurfaceType.ASMAE_ENKF_SUPPORT: (0.0, 1.0),
+    SurfaceType.ASMAE_RADIOMETRIC_SUPPORT: (0.0, 1.0),
+    SurfaceType.ASMAE_VISUAL_FUSION_CANOPY: (0.0, 1.0),
+}
+
+
 def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) -> List[str]:
     """
     Enforce all Layer 10 invariants. Returns list of violation descriptions.
@@ -73,6 +87,8 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
         SurfaceType.ASMAE_VIGOR: (0.0, 1.0),
         SurfaceType.ASMAE_LAI: (0.0, 8.0),
         SurfaceType.ASMAE_CHLOROPHYLL: (0.0, 80.0),
+        SurfaceType.ASMAE_PHENOLOGY_PROGRESS: (0.0, 1.0),
+        SurfaceType.ASMAE_STRESS_MEMORY: (0.0, 1.0),
         SurfaceType.ASMAE_ML_AGREEMENT: (0.0, 1.0),
         SurfaceType.ASMAE_ARCHIVE_SUPPORT: (0.0, 1.0),
         SurfaceType.ASMAE_ENKF_SUPPORT: (0.0, 1.0),

@@ -1,0 +1,136 @@
+{
+  "schema": "agribrain.bounded_claim_disposition.v1",
+  "candidate": "653da462360bf90a9ec0c05ce6d2c7fbea180520",
+  "exact_immediate_parent": "8d9bd4a073e09a5081a85b8fd2f2b7654152e37a",
+  "branch": "feat/f36-t09-asmae-13-state-publication",
+  "review_date": "2026-10-22",
+  "timezone": "Africa/Algiers",
+  "verdict": "S8D01_verified_repaired_one_introduced_P2_numerical_exception_remains",
+  "read_only_production": true,
+  "remote_git_writes": false,
+  "repository_tests_used_as_correctness_proof": false,
+  "full_pipeline_API_browser_or_hardware_executed": false,
+  "FA": {
+    "total": 52,
+    "open": 52,
+    "checked": 0
+  },
+  "original_claims": [
+    {
+      "id": "S8D-01",
+      "status": "verified_repaired",
+      "scope": "All9originalinvalidcovariancecases reject on both native routes;5validcontrols retained;malformedcovariance doesnotabort siblings.",
+      "evidence": [
+        "classification/results.json:checks.S8D_nine_original_invalid_cases_repaired_ledger",
+        "classification/results.json:checks.S8D_nine_original_invalid_cases_repaired_metadata",
+        "classification/results.json:checks.S8D_five_valid_covariance_controls_ledger",
+        "classification/results.json:checks.S8D_five_valid_covariance_controls_metadata",
+        "integration/results.json:cases.covariance_alias_native_matrix"
+      ],
+      "reopen_original_group": false
+    }
+  ],
+  "retained_closures": "EarlierS81dualcarrier/17invalid4validdistributions,S673/S12mapgatesandpermissioncontrolsreproduced.",
+  "required_residuals": [
+    {
+      "id": "S653-01",
+      "priority": "P2",
+      "status": "open",
+      "title": "Unrepresentable std-only derived variance raises and aborts native generation",
+      "production_path": "services/agribrain/layer10_sire/surfaces/asmae.py",
+      "production_lines": [
+        226,
+        234
+      ],
+      "actual_path": "Authored native canonical support ledger and L1 raster metadata -> generate_asmae_surfaces -> compute_asmae_support_classification -> _validate_prior_distribution -> resolved_std**2",
+      "fixtures": [
+        {
+          "std": 1e+200
+        },
+        {
+          "sigma": 1e+200
+        }
+      ],
+      "lineage": {
+        "introduced": "Std-only/sigma-only finite1e200 nowraisesOverflowError on bothroutes; exactparent returns.",
+        "inherited": "Overflow with separately declared scalar variance also occurs on parent; same numerical group, no extra defect count."
+      },
+      "effect": "One bad vigor prior prevents surface-list return evenwith independently qualified chlorophyll; normalstdcontrol returns11andvalidchlorophyll.",
+      "desired_outcome": "Reject unrepresentable derived variance as malformed/Unsupported locally, retainqualifiedsiblings; do notrestoreparent unqualifiedhugeprior acceptance.",
+      "limits": "Deliberately extreme finite authored input; ordinaryfieldincidence notestablished; no fullpipeline/API/browser/prescription/hardware execution orHTTPfailure claim.",
+      "positive_controls": [
+        "std0.5",
+        "std1e150 with finitely representable square",
+        "validzero",
+        "alloriginalcovariancecontrols"
+      ],
+      "evidence": [
+        "classification/candidate-results.json:native_cases.numeric_ledger_std_square_overflow",
+        "classification/candidate-results.json:native_cases.numeric_metadata_std_square_overflow",
+        "classification/candidate-results.json:native_cases.numeric_*_sigma_square_overflow",
+        "classification/candidate-results.json:native_cases.numeric_sibling_control",
+        "classification/candidate-results.json:native_cases.numeric_sibling_overflow",
+        "numeric-representability.json"
+      ],
+      "requirements": [
+        "AB-ARC-006",
+        "AB-L10-001",
+        "AB-ASM-003"
+      ],
+      "bounded_fix": "Use checked finite std/sigma square derivation on absent/existingvariance paths; convert overflow/nonfinite result into malformedproof; preserveper-state siblingavailability.",
+      "acceptance": "Bothnative routes rejectunrepresentable derivedvariance withoutthrow;qualifiedsiblingreturns;zeroandrepresentablecontrolsretainadmission;S8D01originalclosure remainsclosed."
+    }
+  ],
+  "qualifications": [
+    {
+      "id": "Q653-01",
+      "classification": "representation_compatibility_not_blocking",
+      "subject": "Mixed equivalent diagonal-vector and matrix covariance aliases",
+      "observation": "Currenthelpercompares matching shapes exceptsingletons; equivalentmixedformataliasesreject.",
+      "evidence": "integration/results.json:cases.covariance_alias_native_matrix",
+      "limits": "No ordinarymixedformatemitterorspecifiedmixedformatcontract established; document sameencoding policy orcanonicalize ifrequired."
+    },
+    {
+      "id": "Q8D-01",
+      "classification": "inherited_caller_coverage_not_additional_blocker",
+      "subject": "Helperrestrictionvocabulary broaderthansomecallers",
+      "evidence": [
+        "gating/results.json:carrier_parity_cases",
+        "integration/results.json:cases.canonical_mapping_restriction_alias_matrix"
+      ],
+      "limits": "Authoredrecognizedkeycarriers; no ordinarycamel-keyemitter established; do notreopen verifiedcanonicaldualcarriers."
+    },
+    {
+      "id": "Q653-02",
+      "classification": "inherited_compatibility_policy",
+      "subject": "Absent runtime ceiling metadata-only direct-proof default",
+      "observation": "Descriptor eligibility default retained bothpins; diagnostic actionflagsFalse; normalizedabsentledger defaultsDIAGNOSTIC."
+    },
+    {
+      "id": "Q653-03",
+      "classification": "lineage_precision",
+      "subject": "ImmediateGitparent",
+      "observation": "653da46 directly follows8d9bd4a;81cf8bb and67375aa are earlierancestors."
+    }
+  ],
+  "coverage": {
+    "source_files_each": 1086,
+    "changed_modules_compiled": 1,
+    "classification_helper_cases_each": 94,
+    "classification_native_cases_each": 114,
+    "classification_grouped_observations": 42,
+    "gating_assertions_each": 27,
+    "frontend_checks_each": 9,
+    "integration_case_groups_each": 26,
+    "integration_assertions_each": 48,
+    "root_commands": 7,
+    "root_observation_assertions": 39
+  },
+  "deferred_stages": {
+    "3": "Dedicatedphenology/memoryproducts andcatalog",
+    "4": "Expert13state selector",
+    "5": "Nodata versusphysicalzero",
+    "6": "GIS andrealplot/browserreceipts"
+  },
+  "recommendation": "FixS653-01checked-squareandsiblingbehavior thenboundedfinalreview beforeunconditionalStage1-2 merge; independentStage3registrypreparation mayproceed;FA52open."
+}

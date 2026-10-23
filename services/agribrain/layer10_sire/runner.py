@@ -329,6 +329,60 @@ def validate_spatial_grid_spec(grid_spec: Any, width: int, height: int) -> tuple
     return True, "ok"
 
 
+ALL_BACKEND_KNOWN_SURFACES = (
+    "NDVI_CLEAN", "NDVI_DEVIATION", "BASELINE_ANOMALY",
+    "WATER_STRESS_PROB", "NUTRIENT_STRESS_PROB", "SALINITY_STRESS",
+    "COMPOSITE_RISK", "DATA_RELIABILITY", "DATA_CONFIDENCE", "UNCERTAINTY_SIGMA",
+    "RESOLUTION_COVERAGE", "GAP_FILL_MASK",
+    "CANOPY_ASMAE_VIGOR", "WATER_ASMAE_CANOPY_WATER", "WATER_ASMAE_ROOT_ZONE_WATER",
+    "NUTRIENT_ASMAE_CHLOROPHYLL_PROXY", "SALINITY_ASMAE_STRESS", "RISK_ASMAE_DIAGNOSTIC",
+    "ASMAE_POSTERIOR_CONCENTRATION", "RESOLUTION_ASMAE_EFFECTIVE", "ASMAE_VISUAL_FUSION_CANOPY",
+    "COMPOSITE_ADVISORY_CANOPY", "COMPOSITE_VEG_ATTENTION",
+    "COMPOSITE_WATER_SUPPORT", "COMPOSITE_NUTRIENT_SUPPORT",
+    "COMPOSITE_SALINITY_STRESS", "COMPOSITE_RISK_DIAGNOSTIC",
+    "COMPOSITE_CONFIDENCE", "COMPOSITE_EFFECTIVE_RESOLUTION",
+    "COMPOSITE_TEXTURE_DETAIL",
+    "NDVI_CLEAN_EXPERIMENTAL_FINE_DETAIL",
+    "EXPERIMENTAL_VISUAL_CANOPY",
+    "EXPERIMENTAL_VISUAL_CANOPY_HIGHRES",
+    "EXPERIMENTAL_TEXTURE_SUPPORT_MASK",
+    "EXPERIMENTAL_STRICT_FINE_DETAIL_CANDIDATE_MASK",
+    "EXPERIMENTAL_TEXTURE_CONFIDENCE",
+    "EXPERIMENTAL_GAPFILL_MASK",
+    "EXPERIMENTAL_PARENT_MEAN_ERROR",
+    "COMPOSITE_ARCHIVE_SUPPORT",
+    "COMPOSITE_RETRO_SCORE",
+    "COMPOSITE_ML_SUPPORT",
+    "COMPOSITE_BMA_DISAGREEMENT",
+    "COMPOSITE_UNCERTAINTY",
+    # ASMAE 13 Canonical State Surfaces
+    "ASMAE_VIGOR",
+    "ASMAE_LAI",
+    "ASMAE_CHLOROPHYLL",
+    "ASMAE_CANOPY_WATER",
+    "ASMAE_ROOT_ZONE_WATER",
+    "ASMAE_SURFACE_WETNESS_EVENT",
+    "ASMAE_STRUCTURE",
+    "ASMAE_BARE_SOIL",
+    "ASMAE_SALINITY_STRESS",
+    "ASMAE_THERMAL_STRESS",
+    "ASMAE_BIOTIC_CONFOUNDER_RISK",
+    "ASMAE_PHENOLOGY_PROGRESS",
+    "ASMAE_STRESS_MEMORY",
+)
+
+
+def build_no_data_surface_inventory(reason: str = "insufficient_evidence") -> dict:
+    """Return explicit missing status for all known surfaces in no-data/terminal envelopes."""
+    return {
+        st: {
+            "surfaceType": st,
+            "status": "missing",
+            "reason": reason,
+        }
+        for st in ALL_BACKEND_KNOWN_SURFACES
+    }
+
 RENDER_DEPENDENCY_MASK_TYPES = frozenset({
     SurfaceType.OBSERVED_DATA_MASK_NDVI.value,
     SurfaceType.GAP_FILL_MASK_NDVI.value,
@@ -1766,6 +1820,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         asmae_state["spatial_materialization_block_reason"] = invalid_reason
         output = Layer10Output(
             run_id=run_id,
+            surface_inventory=build_no_data_surface_inventory(invalid_reason),
             publication_run_id=run_id,
             request_run_id=run_id,
             publication_id=f"pub_{cache_key[:16]}",
@@ -3822,12 +3877,31 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             "COMPOSITE_RETRO_SCORE",
             "COMPOSITE_ML_SUPPORT",
             "COMPOSITE_BMA_DISAGREEMENT",
-            "COMPOSITE_UNCERTAINTY"
+            "COMPOSITE_UNCERTAINTY",
+            # ASMAE 13 Canonical State Surfaces
+            "ASMAE_VIGOR",
+            "ASMAE_LAI",
+            "ASMAE_CHLOROPHYLL",
+            "ASMAE_CANOPY_WATER",
+            "ASMAE_ROOT_ZONE_WATER",
+            "ASMAE_SURFACE_WETNESS_EVENT",
+            "ASMAE_STRUCTURE",
+            "ASMAE_BARE_SOIL",
+            "ASMAE_SALINITY_STRESS",
+            "ASMAE_THERMAL_STRESS",
+            "ASMAE_BIOTIC_CONFOUNDER_RISK",
+            "ASMAE_PHENOLOGY_PROGRESS",
+            "ASMAE_STRESS_MEMORY",
         ]
         
         surface_by_type = {s.semantic_type.value if hasattr(s.semantic_type, "value") else str(s.semantic_type): s for s in output.surface_pack}
         
-        for st in ALL_BACKEND_KNOWN_SURFACES:
+        all_inventory_keys = list(ALL_BACKEND_KNOWN_SURFACES)
+        for st in surface_by_type:
+            if st not in all_inventory_keys:
+                all_inventory_keys.append(st)
+
+        for st in all_inventory_keys:
             s = surface_by_type.get(st)
             if s:
                 gc = s.grounding_class or "UNIFORM"
@@ -3839,14 +3913,28 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 prov = s.provenance or {}
                 if not isinstance(prov, dict):
                     prov = {}
+                sup_class = prov.get("support_class")
+                if sup_class == "unsupported":
+                    status = "unsupported"
                 from services.agribrain.layer10_sire.mode_surface_resolver import trust_badges_for_surface
                 trust_badges = trust_badges_for_surface(s, prov.get("trust_badges") if prov else None)
+                
+                reason = prov.get("warning_wording")
+                if not reason:
+                    if status == "unsupported":
+                        block_reasons = prov.get("block_reasons") or []
+                        if block_reasons:
+                            reason = f"{st} is unsupported: {', '.join(block_reasons)}"
+                        else:
+                            reason = f"{st} has no validated observation or prior support"
+                    else:
+                        reason = f"{st.replace('_', ' ').capitalize()} surface is available"
                         
                 surface_inventory[st] = {
                     "surfaceType": st,
                     "status": status,
                     "groundingClass": gc,
-                    "reason": prov.get("warning_wording", f"{st.replace('_', ' ').capitalize()} surface is available"),
+                    "reason": reason,
                     "trust_badges": trust_badges
                 }
             else:
@@ -5138,10 +5226,6 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             if state is not None:
                 entry = state_support_ledger.get(state) or {}
                 if not entry:
-                    if state == "phenology_progress":
-                        return True, ""
-                    if state == "stress_memory":
-                        return True, ""
                     return False, f"missing_state_support:{state}"
 
                 accepted_updates = int(entry.get("accepted_update_count", 0) or 0)

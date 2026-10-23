@@ -1153,6 +1153,8 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_SALINITY_STRESS: PaletteId.SALINITY_TEAL,
         SurfaceType.ASMAE_THERMAL_STRESS: PaletteId.THERMAL_ORANGE,
         SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: PaletteId.STRESS_RED,
+        SurfaceType.ASMAE_PHENOLOGY_PROGRESS: PaletteId.VIGOR_GREEN,
+        SurfaceType.ASMAE_STRESS_MEMORY: PaletteId.STRESS_RED,
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: PaletteId.RAW_GRAYSCALE,
         SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: PaletteId.UNCERTAINTY_GRAY,
         SurfaceType.ASMAE_UNCERTAINTY: PaletteId.UNCERTAINTY_GRAY,
@@ -1213,6 +1215,8 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_SALINITY_STRESS: "fraction",
         SurfaceType.ASMAE_THERMAL_STRESS: "fraction",
         SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: "fraction",
+        SurfaceType.ASMAE_PHENOLOGY_PROGRESS: "fraction",
+        SurfaceType.ASMAE_STRESS_MEMORY: "fraction",
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: "meters",
         SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: "fraction",
         SurfaceType.ASMAE_UNCERTAINTY: "fraction",
@@ -1254,6 +1258,8 @@ def generate_asmae_surfaces(
     render_ranges = {
         SurfaceType.ASMAE_LAI: (0.0, 8.0),
         SurfaceType.ASMAE_CHLOROPHYLL: (0.0, 80.0),
+        SurfaceType.ASMAE_PHENOLOGY_PROGRESS: (0.0, 1.0),
+        SurfaceType.ASMAE_STRESS_MEMORY: (0.0, 1.0),
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: (0.03, 10.0),
     }
 
@@ -1280,6 +1286,10 @@ def generate_asmae_surfaces(
         # Standardize state aliases
         if stype == SurfaceType.ASMAE_BARE_SOIL:
             l1_grid_keys.extend(["asmae_bare_soil_fraction", "asmae_bare_soil", "bare_soil_fraction"])
+        if stype == SurfaceType.ASMAE_PHENOLOGY_PROGRESS:
+            l1_grid_keys.extend(["asmae_phenology_progress", "phenology_progress", "phenology"])
+        if stype == SurfaceType.ASMAE_STRESS_MEMORY:
+            l1_grid_keys.extend(["asmae_stress_memory", "stress_memory", "memory"])
 
         for key in l1_grid_keys:
             if key in l1_data.raster_maps:
@@ -1485,6 +1495,8 @@ def generate_asmae_surfaces(
             SurfaceType.ASMAE_SALINITY_STRESS: "ASMAE_ENKF",
             SurfaceType.ASMAE_THERMAL_STRESS: "ASMAE_ENKF",
             SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: "ASMAE_ENKF",
+            SurfaceType.ASMAE_PHENOLOGY_PROGRESS: "ASMAE_ENKF",
+            SurfaceType.ASMAE_STRESS_MEMORY: "ASMAE_ENKF",
             SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: "ASMAE_ENKF",
             SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: "ASMAE_BMA",
             SurfaceType.ASMAE_UNCERTAINTY: "ASMAE_BMA",
@@ -1520,6 +1532,8 @@ def generate_asmae_surfaces(
             SurfaceType.ASMAE_SALINITY_STRESS: "asmae_salinity_stress",
             SurfaceType.ASMAE_THERMAL_STRESS: "asmae_thermal_stress",
             SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: "asmae_biotic_confounder_risk",
+            SurfaceType.ASMAE_PHENOLOGY_PROGRESS: "asmae_phenology_progress",
+            SurfaceType.ASMAE_STRESS_MEMORY: "asmae_stress_memory",
             SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: "asmae_effective_resolution",
             SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: "asmae_posterior_concentration",
             SurfaceType.ASMAE_UNCERTAINTY: "asmae_uncertainty",

@@ -1,0 +1,82 @@
+{
+  "candidate": "a31a65e631daa7cdc1860861c9184cf05225cb82",
+  "parent": "653da462360bf90a9ec0c05ce6d2c7fbea180520",
+  "review_date": "2026-10-23",
+  "verdict": "verified_bounded_stage_1_2_proceed_stage_3",
+  "original_claims": [
+    {
+      "id": "S653-01",
+      "priority": "P2",
+      "status": "verified_repaired",
+      "evidence": "Native ledger/metadata local Unsupported; valid chlorophyll sibling survives; exact parent OverflowError."
+    }
+  ],
+  "new_required_findings": [],
+  "retained_closures": [
+    "S8D-01",
+    "S81-01",
+    "S81-02",
+    "S673-01",
+    "S673-02",
+    "S673-03",
+    "S12-01",
+    "S12-02",
+    "S12-03",
+    "S12-04",
+    "S12-05"
+  ],
+  "qualifications": [
+    {
+      "id": "Q653-01",
+      "status": "inherited_nonblocking",
+      "meaning": "Mixed equivalent vector/matrix aliases rejected; cross-encoding equivalence not specified."
+    },
+    {
+      "id": "Q8D-01",
+      "status": "inherited_nonblocking",
+      "meaning": "Restriction alternative vocabulary coverage remains qualified; original dual-carrier closures retained."
+    },
+    {
+      "id": "metadata_only_authority",
+      "status": "inherited_nonblocking",
+      "meaning": "Descriptor-based eligibility qualification retained; checked native action permissions remain False."
+    }
+  ],
+  "governance": {
+    "FA_open": 52,
+    "FA_checked": 0,
+    "main": "90ab701714554c7b786bba4ac6b19259e77279ce",
+    "F02": "075f19d318db6fa86d5988c2cabcb680dc17702e",
+    "production_edits": false,
+    "merge_or_push": false
+  },
+  "coverage": {
+    "classification": {
+      "classifier_cases_each": 117,
+      "native_cases_each": 135,
+      "direct_numeric_validators_each": 14,
+      "grouped_assertions": 66
+    },
+    "projection": {
+      "python_assertions_each": 27,
+      "typescript_assertions_each": 9
+    },
+    "integration": {
+      "native_groups_each": 27,
+      "assertions_each": 49
+    },
+    "root": 25,
+    "selected_source_files_each": 1086,
+    "coverage_counts_overlap": true
+  },
+  "next_stage": {
+    "stage": 3,
+    "scope": "Dedicated phenology/memory products and canonical catalog parity",
+    "remaining_stages": [
+      4,
+      5,
+      6
+    ]
+  },
+  "limitations": "No full pipeline/API/browser/provider/hardware or full package acceptance; repository test counts not rerun."
+}

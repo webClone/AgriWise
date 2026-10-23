@@ -185,6 +185,8 @@ class TestSupportClassification:
         assert canonical_state_key("SALINITY_ASMAE_STRESS") == "salinity_stress"
         assert canonical_state_key("ASMAE_BARE_SOIL") == "bare_soil_fraction"
         assert canonical_state_key("ASMAE_SURFACE_WETNESS_EVENT") == "surface_wetness_event"
+        assert canonical_state_key("ASMAE_PHENOLOGY_PROGRESS") == "phenology_progress"
+        assert canonical_state_key("ASMAE_STRESS_MEMORY") == "stress_memory"
 
     def test_missing_ledger_fails_closed_to_unsupported_even_with_real_raster(self):
         """Missing ledger must fail closed to unsupported without manufacturing Observed."""
@@ -574,8 +576,8 @@ class TestPublicationPredicates:
         assert ok_c is True
         assert reason_c == ""
 
-    def test_positive_fixture_authorizes_all_11_registered_states(self):
-        """In positive fixture where all states have accepted updates, all 11 registered states pass."""
+    def test_positive_fixture_authorizes_all_13_registered_states(self):
+        """In positive fixture where all states have accepted updates, all 13 registered states pass."""
         out = _build_test_output(self.surfaces, states=_build_test_ledger(count=1))
         env = self._execute_runner_authorizations(out)
 
@@ -587,8 +589,8 @@ class TestPublicationPredicates:
             assert gate_ok is True, f"Failed state gate for {stype}: {reason}"
             assert reason == ""
 
-        # All 11 registered states passed
-        assert len(auth_results) == 11
+        # All 13 registered states passed
+        assert len(auth_results) == 13
         assert all(res[0] for res in auth_results.values())
 
 
@@ -1653,3 +1655,206 @@ class TestStage12ResidualCorrections:
         assert c_surf.provenance.get("scouting_zone_eligible") is True
 
 
+# ==============================================================================
+# Stage 3: Registry & Catalog Parity Tests
+# ==============================================================================
+
+class TestStage3RegistryAndCatalogParity:
+    """Verifies Stage 3 ASMAE 13-state publication deliverables:
+    1. Canonical 13-state catalog completeness and attribute alignment.
+    2. SurfaceType registration of ASMAE_PHENOLOGY_PROGRESS and ASMAE_STRESS_MEMORY.
+    3. Manifest, palettes, and invariants registration.
+    4. Dedicated surface generation with validated units, ranges, and palettes.
+    5. Fail-closed state gating when ledger entries are absent.
+    6. Positive qualification and revocation precedence for new products.
+    7. Backend surface inventory completeness across all 13 canonical states.
+    """
+
+    def test_canonical_13_state_catalog_structure_and_mappings(self):
+        from services.agribrain.scientific_contracts.state_schema_ref import (
+            CANONICAL_13_STATE_CATALOG,
+            CANONICAL_STATE_TO_SURFACE,
+            get_state_catalog_entry,
+        )
+
+        assert len(CANONICAL_13_STATE_CATALOG) == 13
+        for state_key, entry in CANONICAL_13_STATE_CATALOG.items():
+            for required_key in (
+                "state",
+                "surface_type",
+                "semantic_name",
+                "units",
+                "render_range",
+                "uncertainty_association",
+                "authority_ceiling",
+                "identifiability_class",
+            ):
+                assert required_key in entry, f"Missing {required_key} in catalog entry for {state_key}"
+
+        assert len(CANONICAL_STATE_TO_SURFACE) == 13
+        assert CANONICAL_STATE_TO_SURFACE["phenology_progress"] == "ASMAE_PHENOLOGY_PROGRESS"
+        assert CANONICAL_STATE_TO_SURFACE["stress_memory"] == "ASMAE_STRESS_MEMORY"
+
+        pheno_entry = get_state_catalog_entry("phenology_progress")
+        assert pheno_entry is not None
+        assert pheno_entry["authority_ceiling"] == "DIAGNOSTIC"
+        assert pheno_entry["identifiability_class"] == "PARTIALLY_IDENTIFIED"
+        assert pheno_entry["units"] == "fraction"
+        assert pheno_entry["render_range"] == (0.0, 1.0)
+
+        mem_entry = get_state_catalog_entry("stress_memory")
+        assert mem_entry is not None
+        assert mem_entry["authority_ceiling"] == "VISUALIZATION"
+        assert mem_entry["identifiability_class"] == "NOT_IDENTIFIED"
+        assert mem_entry["units"] == "fraction"
+        assert mem_entry["render_range"] == (0.0, 1.0)
+
+    def test_surface_type_and_render_mode_registration(self):
+        from services.agribrain.layer10_sire.schema import RenderMode
+        from services.agribrain.layer10_sire.products.manifest import SURFACE_TO_MODE, DEFAULT_LEGENDS, MODE_PALETTE
+        from services.agribrain.layer10_sire.invariants import ASMAE_SURFACE_INVARIANTS
+
+        assert hasattr(SurfaceType, "ASMAE_PHENOLOGY_PROGRESS")
+        assert hasattr(SurfaceType, "ASMAE_STRESS_MEMORY")
+        assert len(ASMAE_STATE_SURFACES) == 13
+        assert SurfaceType.ASMAE_PHENOLOGY_PROGRESS in ASMAE_STATE_SURFACES
+        assert SurfaceType.ASMAE_STRESS_MEMORY in ASMAE_STATE_SURFACES
+
+        assert hasattr(RenderMode, "ASMAE_PHENOLOGY_PROGRESS")
+        assert hasattr(RenderMode, "ASMAE_STRESS_MEMORY")
+
+        assert SurfaceType.ASMAE_PHENOLOGY_PROGRESS in SURFACE_TO_MODE
+        assert SurfaceType.ASMAE_STRESS_MEMORY in SURFACE_TO_MODE
+        assert RenderMode.ASMAE_PHENOLOGY_PROGRESS in DEFAULT_LEGENDS
+        assert RenderMode.ASMAE_STRESS_MEMORY in DEFAULT_LEGENDS
+        assert RenderMode.ASMAE_PHENOLOGY_PROGRESS in MODE_PALETTE
+        assert RenderMode.ASMAE_STRESS_MEMORY in MODE_PALETTE
+
+        assert SurfaceType.ASMAE_PHENOLOGY_PROGRESS in ASMAE_SURFACE_INVARIANTS
+        assert SurfaceType.ASMAE_STRESS_MEMORY in ASMAE_SURFACE_INVARIANTS
+
+    def test_dedicated_surface_generation_for_stage3_states(self, monkeypatch):
+        monkeypatch.setenv("ASMAE_ENABLED", "true")
+        monkeypatch.setenv("ASMAE_DIAGNOSTIC_SHADOW_RUN_ENABLED", "true")
+        monkeypatch.setenv("L10_ASMAE_SURFACES_ENABLED", "true")
+        H, W = 3, 3
+        inp = Layer10Input(tenant_id="T1", farm_id="F1", plot_id="p1")
+
+        l1 = L1SpatialData(
+            height=H,
+            width=W,
+            grid_spec=copy.deepcopy(GRID_SPEC),
+            asmae_evidence_state={
+                **BASE_EVIDENCE_STATE,
+                "real_asmae_evidence": True,
+                "source_reality": "real_raster",
+            },
+            real_asmae_evidence=True,
+            asmae_feature_pack={"grid_spec": copy.deepcopy(GRID_SPEC)},
+        )
+        l1.raster_maps["asmae_phenology_progress"] = [[0.4, 0.5, 0.6]] * 3
+        l1.raster_metadata["asmae_phenology_progress"] = copy.deepcopy(BASE_META)
+        l1.raster_maps["asmae_stress_memory"] = [[0.1, 0.2, 0.3]] * 3
+        l1.raster_metadata["asmae_stress_memory"] = copy.deepcopy(BASE_META)
+
+        l1.asmae_feature_pack["state_support_ledger"] = {
+            "phenology_progress": {
+                "state": "phenology_progress",
+                "support_status": "assimilated",
+                "accepted_update_count": 2,
+                "observation_relationship": "indirect",
+                "source_feature_ids": ["SWIR_NDMI"],
+                "authority_ceiling": "DIAGNOSTIC",
+            },
+            "stress_memory": {
+                "state": "stress_memory",
+                "support_status": "temporally_conditioned",
+                "accepted_update_count": 1,
+                "observation_relationship": "indirect",
+                "source_feature_ids": ["THERMAL_ANOMALY"],
+                "authority_ceiling": "VISUALIZATION",
+            },
+        }
+
+        surfs = generate_asmae_surfaces(inp, H, W, l1_data=l1)
+        pheno_surf = next((s for s in surfs if s.semantic_type == SurfaceType.ASMAE_PHENOLOGY_PROGRESS), None)
+        assert pheno_surf is not None
+        assert pheno_surf.units == "fraction"
+        assert pheno_surf.render_range == (0.0, 1.0)
+        assert pheno_surf.palette_id.value == "VIGOR_GREEN"
+        assert pheno_surf.provenance["support_class"] in ("indirectly_constrained", "directly_assimilated")
+
+        mem_surf = next((s for s in surfs if s.semantic_type == SurfaceType.ASMAE_STRESS_MEMORY), None)
+        assert mem_surf is not None
+        assert mem_surf.units == "fraction"
+        assert mem_surf.render_range == (0.0, 1.0)
+        assert mem_surf.palette_id.value == "STRESS_RED"
+        assert mem_surf.provenance["support_class"] in ("indirectly_constrained", "directly_assimilated")
+
+    def test_fail_closed_state_gate_when_ledger_entry_absent(self):
+        """Registration must never manufacture support; missing ledger must fail closed."""
+        surfaces = _generate_test_surfaces(use_ledger=True, ledger_count=1)
+        tester = TestPublicationPredicates()
+        empty_ledger = {}
+        out = _build_test_output(surfaces, states=empty_ledger)
+        env = tester._execute_runner_authorizations(out)
+
+        ok_p, reason_p = env["asmae_state_gate"]("ASMAE_PHENOLOGY_PROGRESS")
+        assert ok_p is False
+        assert reason_p == "missing_state_support:phenology_progress"
+
+        ok_m, reason_m = env["asmae_state_gate"]("ASMAE_STRESS_MEMORY")
+        assert ok_m is False
+        assert reason_m == "missing_state_support:stress_memory"
+
+    def test_revocation_precedence_for_stage3_states(self):
+        """Revocation or denial in ledger strictly denies authorization even if historical updates > 0."""
+        surfaces = _generate_test_surfaces(use_ledger=True, ledger_count=1)
+        tester = TestPublicationPredicates()
+
+        revoked_ledger = {
+            "phenology_progress": {
+                "state": "phenology_progress",
+                "support_status": "unsupported",
+                "accepted_update_count": 5,
+                "block_reasons": ["local_support_revoked"],
+            },
+            "stress_memory": {
+                "state": "stress_memory",
+                "support_status": "unsupported",
+                "accepted_update_count": 3,
+                "block_reasons": ["blocked"],
+            },
+        }
+        out = _build_test_output(surfaces, states=revoked_ledger)
+        env = tester._execute_runner_authorizations(out)
+
+        ok_p, reason_p = env["asmae_state_gate"]("ASMAE_PHENOLOGY_PROGRESS")
+        assert ok_p is False
+        assert "revoked" in reason_p or "blocked" in reason_p
+
+        ok_m, reason_m = env["asmae_state_gate"]("ASMAE_STRESS_MEMORY")
+        assert ok_m is False
+        assert "blocked" in reason_m or "missing" in reason_m
+
+    def test_backend_surface_inventory_covers_all_13_states(self, monkeypatch):
+        """Every one of the 13 canonical ASMAE state surfaces receives an explicit inventory entry."""
+        from services.agribrain.layer10_sire.runner import run_layer10_sire
+        from services.agribrain.scientific_contracts.state_schema_ref import CANONICAL_STATE_TO_SURFACE
+
+        monkeypatch.setenv("ASMAE_ENABLED", "true")
+        monkeypatch.setenv("ASMAE_DIAGNOSTIC_SHADOW_RUN_ENABLED", "true")
+        monkeypatch.setenv("L10_ASMAE_SURFACES_ENABLED", "true")
+
+        inp = Layer10Input(tenant_id="T1", farm_id="F1", plot_id="p1")
+        output = run_layer10_sire(inp)
+
+        inventory = output.surface_inventory
+        assert inventory is not None
+
+        for state, surface_name in CANONICAL_STATE_TO_SURFACE.items():
+            assert surface_name in inventory, f"Surface {surface_name} missing from surface_inventory"
+            entry = inventory[surface_name]
+            assert "status" in entry
+            assert "reason" in entry
+            assert entry["status"] in ("available_raster", "unsupported", "plot_level_only", "proxy_only", "missing")
