@@ -546,13 +546,36 @@ def _align_asmae_grid_to_target(
     target = _validated_north_up_gdal_spec(
         target_raw, height=target_height, width=target_width, label="target"
     )
+    def _clean_row_values(grid_rows: List[List[Optional[float]]], nodata_val: Any) -> List[List[Optional[float]]]:
+        cleaned = []
+        for r in grid_rows:
+            cleaned_row = []
+            for v in r:
+                if v is None:
+                    cleaned_row.append(None)
+                else:
+                    try:
+                        fv = float(v)
+                        if not np.isfinite(fv):
+                            cleaned_row.append(None)
+                        elif nodata_val is not None and np.isclose(fv, float(nodata_val), rtol=0.0, atol=1e-6):
+                            cleaned_row.append(None)
+                        elif np.isclose(fv, -9999.0, rtol=0.0, atol=1e-6):
+                            cleaned_row.append(None)
+                        else:
+                            cleaned_row.append(fv)
+                    except (ValueError, TypeError, OverflowError):
+                        cleaned_row.append(None)
+            cleaned.append(cleaned_row)
+        return cleaned
+
     same_crs = source["crs"].upper() == target["crs"].upper()
     if (
         (source_height, source_width) == (target_height, target_width)
         and same_crs
         and np.allclose(source["transform"], target["transform"], rtol=0.0, atol=1e-12)
     ):
-        return rows, source, target, {
+        return _clean_row_values(rows, source.get("nodata")), source, target, {
             "display_resampled": False,
             "reprojection_applied": False,
             "resampling_method": "identity_grid",
@@ -691,6 +714,10 @@ def _align_asmae_grid_to_target(
         "source_crs": source["crs"],
         "display_crs": target["crs"],
     }
+
+
+align_asmae_grid_to_target = _align_asmae_grid_to_target
+
 
 def get_standard_variable_name(stype: SurfaceType, meta_var: Optional[str] = None) -> str:
     v = (meta_var or "").lower()
@@ -1569,7 +1596,13 @@ def generate_asmae_surfaces(
         surf_blocks = []
         for b_source in (
             meta.get("block_reasons"),
+            meta.get("blockReasons"),
             meta.get("restriction_reasons"),
+            meta.get("restrictionReasons"),
+            meta.get("exclusion_reason"),
+            meta.get("exclusionReason"),
+            meta.get("authority_block_reason"),
+            meta.get("authorityBlockReason"),
             support_meta.get("block_reasons") if isinstance(support_meta, dict) else None,
         ):
             if b_source:
@@ -1774,8 +1807,29 @@ def generate_asmae_surfaces(
             provenance["scope"] = "plot_level"
             provenance["constant_allowed"] = True
 
-        surf_state_update = bool(provenance.get("state_update_allowed", False))
-        surf_prescription = bool(provenance.get("prescription_driver_allowed", False))
+        def _parse_strict_bool(val: Any) -> bool:
+            if val is None:
+                return False
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, (int, float)):
+                return bool(val)
+            if isinstance(val, str):
+                return val.strip().lower() in ("true", "1", "yes", "t")
+            return False
+
+        has_blocks = len(surf_blocks) > 0
+        state_update_req = _parse_strict_bool(provenance.get("state_update_allowed"))
+        presc_req = _parse_strict_bool(provenance.get("prescription_driver_allowed"))
+        auth_ceil = str(provenance.get("authority_ceiling") or "").upper()
+        if auth_ceil in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC"):
+            state_update_req = False
+            presc_req = False
+        elif auth_ceil == "STATE_UPDATE":
+            presc_req = False
+
+        surf_state_update = state_update_req and not has_blocks
+        surf_prescription = presc_req and not has_blocks
         surfaces.append(SurfaceArtifact(
             surface_id=f"{stype.value}_{inp.plot_id}",
             semantic_type=stype,

@@ -1021,6 +1021,32 @@ def _state_variance_summary(
     return result
 
 
+def _state_mean_summary(
+    ensemble: Any,
+    state_indices: List[int],
+) -> Dict[str, float]:
+    """Return average within-node ensemble mean for named states."""
+    result: Dict[str, float] = {}
+    if ensemble is None or len(ensemble) == 0:
+        return result
+    import numpy as np
+
+    if isinstance(ensemble, np.ndarray):
+        values = ensemble
+    elif isinstance(ensemble, dict):
+        values = np.asarray(list(ensemble.values()), dtype=float)
+    else:
+        values = np.asarray(ensemble, dtype=float)
+    if values.ndim != 3 or values.shape[1] == 0:
+        return result
+    for state_index in state_indices:
+        if state_index < 0 or state_index >= values.shape[2]:
+            continue
+        state_name = STATE_NAMES[state_index] if state_index < len(STATE_NAMES) else f"state_{state_index}"
+        result[state_name] = float(np.mean(values[:, :, state_index]))
+    return result
+
+
 def _legacy_order_dependent_update_step_ht(
     ensemble: Dict[str, List[List[float]]],
     scene: Any,
@@ -1579,13 +1605,23 @@ def update_step_ht(
         mapping = INDEX_STATE_REGISTRY.get(obs_name)
         if mapping is None:
             continue
+        from ..state.descriptors import STATE_DESCRIPTORS, AssimilationPolicy
         target_indices = [
             index for index in mapping.target_state_indices
             if 0 <= index < len(STATE_NAMES)
             and not validate_forbidden_state_update(obs_name, index)
+            and STATE_DESCRIPTORS[index].assimilation_policy != AssimilationPolicy.NOT_ASSIMILATED
         ]
         target_states = [STATE_NAMES[index] for index in target_indices]
         if not target_indices:
+            reports.append({
+                'obs_name': obs_name,
+                'sensor': mapping.sensor,
+                'mode': 'excluded_forbidden_or_not_assimilated',
+                'update_applied': False,
+                'target_states': [STATE_NAMES[i] for i in mapping.target_state_indices if 0 <= i < len(STATE_NAMES)],
+                'failure_reason': 'forbidden_or_not_assimilated',
+            })
             continue
         if not pixel_observation.is_per_pixel or pixel_observation.n_pixels != h_matrix.shape[0]:
             reports.append({
@@ -1645,6 +1681,7 @@ def update_step_ht(
             ),
         )
         prior_variance = _state_variance_summary(state_cube, target_indices)
+        prior_mean = _state_mean_summary(state_cube, target_indices)
         valid_predictions = pixel_predictions[valid_indices, :]
         valid_observed = observed[valid_indices]
         prediction_mean = np.mean(valid_predictions, axis=1)
@@ -1666,38 +1703,98 @@ def update_step_ht(
             support_sums = np.sum(local_support, axis=0)
         active_positions = np.flatnonzero(support_sums > 1e-12)
         localized_updates = int(active_positions.size)
-        if localized_updates:
-            weighted_observed = np.asarray(
-                local_support.T @ valid_observed, dtype=float,
-            ).reshape(-1)
-            active_sums = support_sums[active_positions]
-            # Construct predictions in consistent observation space (H-weighted support matching local_observed)
-            # to guarantee that zero innovation produces zero mean adjustment.
-            weighted_predictions = np.asarray(
-                local_support.T @ valid_predictions, dtype=float,
-            )
-            local_predictions = (
-                weighted_predictions[active_positions, :] / active_sums[:, None]
-            )
-            local_observed = (
-                weighted_observed[active_positions] / active_sums
-            )
-            state_cube = _batch_scalar_etkf_target_update(
-                state_cube,
-                node_ids,
-                target_indices,
-                local_predictions,
-                local_observed,
-                sigma_observation * sigma_observation,
-                active_positions,
-            )
+        if localized_updates == 0:
+            reports.append({
+                'obs_name': obs_name,
+                'sensor': mapping.sensor,
+                'mode': 'excluded_zero_localized_support',
+                'update_applied': False,
+                'target_states': target_states,
+                'failure_reason': 'zero_localized_support',
+            })
+            continue
+
+        weighted_observed = np.asarray(
+            local_support.T @ valid_observed, dtype=float,
+        ).reshape(-1)
+        active_sums = support_sums[active_positions]
+        # Construct predictions in consistent observation space (H-weighted support matching local_observed)
+        # to guarantee that zero innovation produces zero mean adjustment.
+        weighted_predictions = np.asarray(
+            local_support.T @ valid_predictions, dtype=float,
+        )
+        local_predictions = (
+            weighted_predictions[active_positions, :] / active_sums[:, None]
+        )
+        local_observed = (
+            weighted_observed[active_positions] / active_sums
+        )
+        state_cube = _batch_scalar_etkf_target_update(
+            state_cube,
+            node_ids,
+            target_indices,
+            local_predictions,
+            local_observed,
+            sigma_observation * sigma_observation,
+            active_positions,
+        )
         if deadline_check is not None:
             deadline_check()
         posterior_variance = _state_variance_summary(state_cube, target_indices)
+        posterior_mean = _state_mean_summary(state_cube, target_indices)
         information_gain = {
             state: max(0.0, prior - posterior_variance.get(state, prior))
             for state, prior in prior_variance.items()
         }
+
+        # Qualify actual per-state influence
+        per_state_influence: Dict[str, Dict[str, Any]] = {}
+        has_actual_influence = False
+        for state_index in target_indices:
+            state_name = STATE_NAMES[state_index]
+            desc = STATE_DESCRIPTORS[state_index]
+            scale = (desc.bounds[1] - desc.bounds[0]) if (desc.bounds and desc.bounds[1] > desc.bounds[0]) else 1.0
+            p_mean = prior_mean.get(state_name, 0.0)
+            post_m = posterior_mean.get(state_name, p_mean)
+            p_var = prior_variance.get(state_name, 0.0)
+            post_v = posterior_variance.get(state_name, p_var)
+            delta_mean = abs(post_m - p_mean)
+            variance_reduction = max(0.0, p_var - post_v)
+            tol_mean = 1e-5 * scale
+            tol_var = 1e-7 * (scale ** 2)
+            state_influenced = (delta_mean > tol_mean) or (variance_reduction > tol_var)
+            if state_influenced:
+                has_actual_influence = True
+            per_state_influence[state_name] = {
+                'delta_mean': float(delta_mean),
+                'variance_reduction': float(variance_reduction),
+                'state_influenced': state_influenced,
+            }
+
+        if not has_actual_influence:
+            reports.append({
+                'obs_name': obs_name,
+                'sensor': mapping.sensor,
+                'mode': 'excluded_negligible_influence',
+                'update_applied': False,
+                'target_states': target_states,
+                'failure_reason': 'negligible_influence',
+                'per_state_influence': per_state_influence,
+            })
+            continue
+
+        # Determine directness from measurement/operator receipt and descriptor policy
+        is_receipt_direct = bool(
+            getattr(operator, 'is_direct_measurement', False)
+            or getattr(pixel_observation, 'is_direct_measurement', False)
+        )
+        target_descs = [STATE_DESCRIPTORS[idx] for idx in target_indices]
+        allows_direct = all(d.assimilation_policy == AssimilationPolicy.DIRECT_OBSERVATION for d in target_descs)
+        if is_receipt_direct and allows_direct:
+            evidence_kind = 'direct_observation'
+        else:
+            evidence_kind = 'indirect_observation'
+
         reports.append({
             'obs_name': obs_name,
             'sensor': mapping.sensor,
@@ -1709,7 +1806,7 @@ def update_step_ht(
             'mode': 'ht_per_pixel_ensrf',
             'update_applied': True,
             'target_states': target_states,
-            'evidence_kind': 'direct_observation',
+            'evidence_kind': evidence_kind,
             'prior_variance': prior_variance,
             'posterior_variance': posterior_variance,
             'information_gain': information_gain,
@@ -1723,6 +1820,7 @@ def update_step_ht(
                 'localized_zone_updates': localized_updates,
                 'correlated_pixel_policy': 'one_weighted_observation_per_zone',
             },
+            'per_state_influence': per_state_influence,
         })
 
     if is_ndarray:

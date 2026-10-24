@@ -3904,15 +3904,33 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         for st in all_inventory_keys:
             s = surface_by_type.get(st)
             if s:
+                vals = s.values or []
+                has_finite = any(
+                    v is not None and not (isinstance(v, float) and (math.isnan(v) or math.isinf(v)))
+                    for row in vals
+                    for v in row
+                )
+                prov = s.provenance or {}
+                if not isinstance(prov, dict):
+                    prov = {}
+                has_scalar = bool(prov.get("has_scalar_estimate") or prov.get("scalar_value") is not None)
+
+                if not has_finite and not has_scalar:
+                    surface_inventory[st] = {
+                        "surfaceType": st,
+                        "status": "missing",
+                        "groundingClass": "NONE",
+                        "reason": f"No valid pixels or scalar estimate for {st}",
+                        "trust_badges": ["DATA_UNAVAILABLE"],
+                    }
+                    continue
+
                 gc = s.grounding_class or "UNIFORM"
                 status = "available_raster"
                 if gc in ["UNIFORM", "BROADCAST"]:
                     status = "plot_level_only"
                 elif gc == "PROXY_SPATIAL":
                     status = "proxy_only"
-                prov = s.provenance or {}
-                if not isinstance(prov, dict):
-                    prov = {}
                 sup_class = prov.get("support_class")
                 if sup_class == "unsupported":
                     status = "unsupported"

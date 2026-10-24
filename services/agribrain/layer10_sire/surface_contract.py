@@ -6,7 +6,7 @@ envelope without import-mode dependent behaviour.
 """
 
 from enum import Enum
-from typing import Any, List, Mapping, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
 # Old entries did not bind publication authority or scientific run identity.
@@ -65,6 +65,22 @@ def _non_empty_mapping(value: Any) -> bool:
 
 def _enum_value(value: Any) -> Any:
     return value.value if hasattr(value, "value") else value
+
+
+def _strict_bool(val: Any) -> Optional[bool]:
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ("true", "1", "t", "yes", "y"):
+            return True
+        if v in ("false", "0", "f", "no", "n", ""):
+            return False
+    return False
 
 
 def _grid_spec_dict(value: Any) -> Any:
@@ -197,33 +213,58 @@ def serialize_surface_artifact(surface: Any) -> dict:
             else "agronomic_surface"
         )
     grounding_class_val = str(_enum_value(_field(surface, "grounding_class", None)) or "UNIFORM")
-    # Restrictive consistency: If either surface attribute or provenance explicitly denies
-    # state updates or prescription driving, the explicit denial (False) must win.
-    attr_state_update = _field(surface, "state_update_allowed", None)
-    prov_state_update = provenance.get("state_update_allowed", provenance.get("stateUpdateAllowed"))
-    if attr_state_update is False or prov_state_update is False:
-        state_update_allowed = False
-    elif attr_state_update is not None:
-        state_update_allowed = bool(attr_state_update)
-    elif prov_state_update is not None:
-        state_update_allowed = bool(prov_state_update)
-    else:
-        state_update_allowed = True
-
-    attr_prescription = _field(surface, "prescription_driver_allowed", None)
-    prov_prescription = provenance.get("prescription_driver_allowed", provenance.get("prescriptionDriverAllowed"))
-    if attr_prescription is False or prov_prescription is False:
-        prescription_driver_allowed = False
-    elif attr_prescription is not None:
-        prescription_driver_allowed = bool(attr_prescription)
-    elif prov_prescription is not None:
-        prescription_driver_allowed = bool(prov_prescription)
-    else:
-        prescription_driver_allowed = True
-
+    # Restrictive consistency: default permissions to False, intersect ceilings and restrictions
+    block_reasons_raw = _surface_value(surface, provenance, "block_reasons", "blockReasons") or []
+    restriction_reasons_raw = _surface_value(surface, provenance, "restriction_reasons", "restrictionReasons") or []
+    exclusion_reason_raw = _surface_value(surface, provenance, "exclusion_reason", "exclusionReason")
     authority_block_reason = _surface_value(
         surface, provenance, "authority_block_reason", "authorityBlockReason"
     )
+    all_restrictions = []
+    for r in (block_reasons_raw, restriction_reasons_raw):
+        if isinstance(r, (list, tuple, set)):
+            all_restrictions.extend(str(item) for item in r if item)
+        elif isinstance(r, str) and r:
+            all_restrictions.append(r)
+    if exclusion_reason_raw:
+        all_restrictions.append(str(exclusion_reason_raw))
+    if authority_block_reason:
+        all_restrictions.append(str(authority_block_reason))
+    has_restrictions = len(all_restrictions) > 0
+
+    attr_state_update = _strict_bool(_field(surface, "state_update_allowed", None))
+    prov_state_update = _strict_bool(provenance.get("state_update_allowed"))
+    prov_camel_state = _strict_bool(provenance.get("stateUpdateAllowed"))
+    state_candidates = [c for c in (attr_state_update, prov_state_update, prov_camel_state) if c is not None]
+
+    if False in state_candidates or has_restrictions or grounding_class_val == "INTERPOLATED_PROXY":
+        state_update_allowed = False
+    elif True in state_candidates:
+        state_update_allowed = True
+    else:
+        state_update_allowed = False
+
+    attr_prescription = _strict_bool(_field(surface, "prescription_driver_allowed", None))
+    prov_prescription = _strict_bool(provenance.get("prescription_driver_allowed"))
+    prov_camel_presc = _strict_bool(provenance.get("prescriptionDriverAllowed"))
+    presc_candidates = [c for c in (attr_prescription, prov_prescription, prov_camel_presc) if c is not None]
+
+    if False in presc_candidates or has_restrictions or grounding_class_val == "INTERPOLATED_PROXY":
+        prescription_driver_allowed = False
+    elif True in presc_candidates:
+        prescription_driver_allowed = True
+    else:
+        prescription_driver_allowed = False
+
+    authority_ceiling = str(
+        _surface_value(surface, provenance, "authority_ceiling", "authorityCeiling") or ""
+    ).upper()
+    if authority_ceiling in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC"):
+        state_update_allowed = False
+        prescription_driver_allowed = False
+    elif authority_ceiling == "STATE_UPDATE":
+        prescription_driver_allowed = False
+
     if grounding_class_val == "INTERPOLATED_PROXY":
         state_update_allowed = False
         prescription_driver_allowed = False
@@ -282,6 +323,15 @@ def serialize_surface_artifact(surface: Any) -> dict:
         doc["block_reasons"] = list(combined_blocks)
 
     return doc
+
+
+def serialize_surface_pack(surfaces: Any) -> List[dict]:
+    """Serialize a collection or sequence of surface artifacts."""
+    if surfaces is None:
+        return []
+    if isinstance(surfaces, Mapping):
+        surfaces = surfaces.values()
+    return [serialize_surface_artifact(s) for s in surfaces]
 
 
 def classify_surface_publication(payload: Any) -> Tuple[str, str]:

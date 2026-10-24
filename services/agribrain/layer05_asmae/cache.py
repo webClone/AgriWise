@@ -501,29 +501,40 @@ def save_ht_matrix_artifact(operator_id: str, h_matrix: Any) -> str:
 
 
 def save_rasters_artifact(cache_key: str, raster_dict: Dict[str, Any]) -> str:
-    """Atomically save every 2D numeric raster into one pickle-free NPZ."""
+    """Atomically save every 2D numeric raster into one pickle-free NPZ with generation addressing."""
     if np is None or not raster_dict:
         return ""
 
-    rel_ref = f"asmae_rasters/raster_{cache_key}.npz"
+    generation_id = uuid.uuid4().hex
+    rel_ref = f"asmae_rasters/raster_{cache_key}_{generation_id}.npz"
     full_path = _artifact_path(rel_ref)
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
-    temp_path = f"{full_path}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    temp_path = f"{full_path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         arrays_to_save: Dict[str, Any] = {}
         for key, grid in sorted(raster_dict.items(), key=lambda pair: str(pair[0])):
-            array = np.asarray(grid)
-            if array.dtype.hasobject:
-                array = np.asarray(grid, dtype=np.float64)
-            if array.ndim != 2:
-                raise ValueError(f"raster {key} is not 2D: {array.shape}")
-            if not (
-                np.issubdtype(array.dtype, np.bool_)
-                or np.issubdtype(array.dtype, np.integer)
-                or np.issubdtype(array.dtype, np.floating)
-            ):
-                raise TypeError(f"unsupported raster dtype {array.dtype}")
-            arrays_to_save[str(key)] = np.ascontiguousarray(array)
+            if np.ma.is_masked(grid) or isinstance(grid, np.ma.MaskedArray):
+                data_part = np.asarray(grid.data)
+                mask_part = np.asarray(grid.mask, dtype=bool)
+                if data_part.dtype.hasobject:
+                    data_part = np.asarray(data_part, dtype=np.float64)
+                if data_part.ndim != 2:
+                    raise ValueError(f"raster {key} is not 2D: {data_part.shape}")
+                arrays_to_save[str(key)] = np.ascontiguousarray(data_part)
+                arrays_to_save[f"__mask__{key}"] = np.ascontiguousarray(mask_part)
+            else:
+                array = np.asarray(grid)
+                if array.dtype.hasobject:
+                    array = np.asarray(grid, dtype=np.float64)
+                if array.ndim != 2:
+                    raise ValueError(f"raster {key} is not 2D: {array.shape}")
+                if not (
+                    np.issubdtype(array.dtype, np.bool_)
+                    or np.issubdtype(array.dtype, np.integer)
+                    or np.issubdtype(array.dtype, np.floating)
+                ):
+                    raise TypeError(f"unsupported raster dtype {array.dtype}")
+                arrays_to_save[str(key)] = np.ascontiguousarray(array)
         if not arrays_to_save:
             return ""
         with open(temp_path, "xb") as handle:
@@ -531,7 +542,7 @@ def save_rasters_artifact(cache_key: str, raster_dict: Dict[str, Any]) -> str:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, full_path)
-        logger.info("Saved rasters NPZ to %s", full_path)
+        logger.info("Saved generation-addressed rasters NPZ to %s", full_path)
         return rel_ref
     except Exception as exc:
         logger.error("Failed to save rasters NPZ: %s", exc)
@@ -548,24 +559,31 @@ def _raster_artifact_manifest(rel_ref: str, cache_key: str) -> Dict[str, Any]:
         raise RuntimeError("NumPy is required for raster validation")
     full_path = _artifact_path(rel_ref)
     arrays: Dict[str, Dict[str, Any]] = {}
+    masks: Dict[str, Dict[str, Any]] = {}
     with safe_np_load(full_path) as data:
         for key in sorted(data.files):
             array = data[key]
             if array.dtype.hasobject or array.ndim != 2:
                 raise ValueError(f"invalid cached raster {key}: {array.dtype} {array.shape}")
-            arrays[key] = {
+            entry = {
                 "shape": list(array.shape),
                 "dtype": str(array.dtype),
                 "content_hash": stable_value_hash(array),
             }
+            if key.startswith("__mask__"):
+                masks[key] = entry
+            else:
+                arrays[key] = entry
     if not arrays:
         raise ValueError("raster artifact contains no arrays")
     return {
+        "manifest_version": "v2_generation_addressed",
         "cache_key": cache_key,
         "ref": rel_ref,
         "size_bytes": os.path.getsize(full_path),
         "sha256": _file_sha256(full_path),
         "arrays": arrays,
+        "masks": masks,
     }
 
 
@@ -586,8 +604,14 @@ def _load_validated_rasters(
         if artifact.get("cache_key") != expected_cache_key:
             raise ValueError("raster manifest cache key mismatch")
         rel_ref = artifact.get("ref")
-        expected_ref = f"asmae_rasters/raster_{expected_cache_key}.npz"
-        if rel_ref != expected_ref:
+        if not isinstance(rel_ref, str) or ".." in rel_ref or rel_ref.startswith("/") or rel_ref.startswith("\\"):
+            raise ValueError("invalid raster manifest reference path")
+        is_fixed_ref = (rel_ref == f"asmae_rasters/raster_{expected_cache_key}.npz")
+        is_generation_ref = (
+            rel_ref.startswith(f"asmae_rasters/raster_{expected_cache_key}_")
+            and rel_ref.endswith(".npz")
+        )
+        if not (is_fixed_ref or is_generation_ref):
             raise ValueError("raster manifest reference mismatch")
         full_path = _artifact_path(rel_ref)
         if not os.path.isfile(full_path):
@@ -599,14 +623,22 @@ def _load_validated_rasters(
         expected_arrays = artifact.get("arrays")
         if not isinstance(expected_arrays, dict) or not expected_arrays:
             raise ValueError("raster member manifest missing")
+        expected_masks = artifact.get("masks") or {}
 
         result: Dict[str, List[List[Optional[float]]]] = {}
+        masks: Dict[str, np.ndarray] = {}
         with safe_np_load(full_path) as data:
-            if set(data.files) != set(expected_arrays):
+            expected_all_keys = set(expected_arrays.keys()) | set(expected_masks.keys())
+            if set(data.files) != expected_all_keys:
                 raise ValueError("raster artifact members differ from manifest")
             for key in sorted(data.files):
                 array = data[key]
-                metadata = expected_arrays[key]
+                if key.startswith("__mask__"):
+                    metadata = expected_masks.get(key) or expected_arrays.get(key)
+                else:
+                    metadata = expected_arrays.get(key)
+                if metadata is None:
+                    raise ValueError(f"unmanifested raster member {key}")
                 if array.dtype.hasobject or array.ndim != 2:
                     raise ValueError(f"unsafe/non-2D raster member {key}")
                 if list(array.shape) != metadata.get("shape"):
@@ -615,7 +647,23 @@ def _load_validated_rasters(
                     raise ValueError(f"raster dtype mismatch for {key}")
                 if stable_value_hash(array) != metadata.get("content_hash"):
                     raise ValueError(f"raster content mismatch for {key}")
-                result[key] = _grid_to_lists(array)
+                if key.startswith("__mask__"):
+                    target_var_key = key[len("__mask__"):]
+                    masks[target_var_key] = np.asarray(array, dtype=bool)
+                else:
+                    result[key] = _grid_to_lists(array)
+
+        # Apply any explicit masks to the reconstructed lists
+        for target_key, mask_arr in masks.items():
+            if target_key in result:
+                grid = result[target_key]
+                H = len(grid)
+                W = len(grid[0]) if H > 0 else 0
+                for r in range(min(H, mask_arr.shape[0])):
+                    for c in range(min(W, mask_arr.shape[1])):
+                        if mask_arr[r, c]:
+                            grid[r][c] = None
+
         return result
     except Exception as exc:
         logger.warning("Rejected ASMAE raster artifact: %s", exc)
@@ -628,12 +676,25 @@ def load_rasters_from_artifact(rel_ref: str) -> Dict[str, List[List[Optional[flo
         return {}
     try:
         result: Dict[str, List[List[Optional[float]]]] = {}
+        masks: Dict[str, np.ndarray] = {}
         with safe_np_load(_artifact_path(rel_ref)) as data:
             for key in data.files:
                 array = data[key]
                 if array.dtype.hasobject or array.ndim != 2:
                     raise ValueError(f"unsafe/non-2D raster member {key}")
-                result[key] = _grid_to_lists(array)
+                if key.startswith("__mask__"):
+                    masks[key[len("__mask__"):]] = np.asarray(array, dtype=bool)
+                else:
+                    result[key] = _grid_to_lists(array)
+        for target_key, mask_arr in masks.items():
+            if target_key in result:
+                grid = result[target_key]
+                H = len(grid)
+                W = len(grid[0]) if H > 0 else 0
+                for r in range(min(H, mask_arr.shape[0])):
+                    for c in range(min(W, mask_arr.shape[1])):
+                        if mask_arr[r, c]:
+                            grid[r][c] = None
         return result
     except Exception as exc:
         logger.warning("Failed to load ASMAE rasters from %s: %s", rel_ref, exc)
@@ -691,6 +752,7 @@ def serialize_and_cache_asmae(inp: ASMAEInput, output_dict: Dict[str, Any]) -> b
             cache_payload.pop("_asmae_cache_commit", None)
             cache_payload["rasters_artifact_ref"] = ""
             raster_manifest: Optional[Dict[str, Any]] = None
+            raster_ref: str = ""
             if rasters_to_extract:
                 raster_ref = save_rasters_artifact(artifact_key, rasters_to_extract)
                 if not raster_ref:
@@ -714,7 +776,15 @@ def serialize_and_cache_asmae(inp: ASMAEInput, output_dict: Dict[str, Any]) -> b
                 "rasters_required": bool(rasters_to_extract),
                 "raster_artifact": raster_manifest,
             }
-            _atomic_json_write(cache_path, persisted_payload)
+            try:
+                _atomic_json_write(cache_path, persisted_payload)
+            except Exception as write_exc:
+                if raster_ref:
+                    try:
+                        os.unlink(_artifact_path(raster_ref))
+                    except (FileNotFoundError, OSError):
+                        pass
+                raise write_exc
             logger.info("Committed ASMAE cache transaction to %s", cache_path)
             return True
     except Exception as exc:
@@ -790,6 +860,8 @@ def deserialize_cached_asmae(inp: ASMAEInput) -> Optional[Dict[str, Any]]:
                 if payload.get("rasters_artifact_ref") != raster_manifest.get("ref"):
                     raise ValueError("JSON raster reference differs from commit manifest")
                 for flattened_key, grid in rasters.items():
+                    if flattened_key.startswith("__mask__"):
+                        continue
                     if "__" not in flattened_key:
                         raise ValueError(f"invalid raster member name {flattened_key}")
                     field_name, variable = flattened_key.split("__", 1)

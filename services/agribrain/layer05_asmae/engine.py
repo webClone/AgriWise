@@ -1957,20 +1957,36 @@ class ASMAEEngine:
                     sample_grid = uncertainty_maps[valid_keys[0]]
                     H_grid = len(sample_grid)
                     W_grid = len(sample_grid[0]) if H_grid > 0 else 0
-                    overall_unc = [[0.0 for _ in range(W_grid)] for _ in range(H_grid)]
+                    overall_unc = [[None for _ in range(W_grid)] for _ in range(H_grid)]
                     for r in range(H_grid):
                         for c in range(W_grid):
-                            norm_uncs = [
-                                min(1.0, max(0.0, float(uncertainty_maps[k][r][c]) / STATE_SIGMA_SCALE.get(k, STATE_SIGMA_SCALE.get(k.lower(), 1.0))))
-                                for k in valid_keys
-                            ]
-                            overall_unc[r][c] = float(sum(norm_uncs) / len(norm_uncs))
+                            valid_norm_uncs = []
+                            for k in valid_keys:
+                                val = uncertainty_maps[k][r][c]
+                                if val is not None:
+                                    try:
+                                        fval = float(val)
+                                        if np.isfinite(fval):
+                                            scale = STATE_SIGMA_SCALE.get(k, STATE_SIGMA_SCALE.get(k.lower(), 1.0))
+                                            valid_norm_uncs.append(min(1.0, max(0.0, fval / scale)))
+                                    except (ValueError, TypeError):
+                                        pass
+                            if valid_norm_uncs:
+                                overall_unc[r][c] = float(sum(valid_norm_uncs) / len(valid_norm_uncs))
+                            else:
+                                overall_unc[r][c] = None
                     uncertainty_maps["ASMAE_UNCERTAINTY"] = overall_unc
 
             confidence_maps = dict(state_result.get("confidence_maps", {}))
-            # Compute and append overall_conf
+            # Compute and append overall_conf preserving missingness
             if "ASMAE_UNCERTAINTY" in uncertainty_maps:
-                overall_conf = [[max(0.0, min(1.0, 1.0 - float(val))) for val in row] for row in uncertainty_maps["ASMAE_UNCERTAINTY"]]
+                overall_conf = [
+                    [
+                        max(0.0, min(1.0, 1.0 - float(val))) if (val is not None and np.isfinite(float(val))) else None
+                        for val in row
+                    ]
+                    for row in uncertainty_maps["ASMAE_UNCERTAINTY"]
+                ]
                 confidence_maps["ASMAE_POSTERIOR_CONCENTRATION"] = overall_conf
 
             # Compile retrovalidation score map
@@ -3282,7 +3298,7 @@ class ASMAEEngine:
 
         result = {}
         for s_idx, name in enumerate(STATE_NAMES):
-            grid = [[0.0] * n_cols for _ in range(n_rows)]
+            grid = [[None] * n_cols for _ in range(n_rows)]
             for mz_id, state_vec in mz_data.items():
                 parts = str(mz_id).split("_")
                 if len(parts) >= 3:
@@ -3290,7 +3306,8 @@ class ASMAEEngine:
                         r = int(parts[1])
                         c = int(parts[2])
                         if isinstance(state_vec, list) and s_idx < len(state_vec):
-                            grid[r][c] = state_vec[s_idx]
+                            val = state_vec[s_idx]
+                            grid[r][c] = float(val) if (val is not None and np.isfinite(val)) else None
                     except (ValueError, IndexError):
                         pass
             result[name] = grid

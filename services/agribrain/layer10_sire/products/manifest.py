@@ -1,6 +1,4 @@
-"""
-Render Manifest Builder — Generate frontend-consumable map mode definitions
-"""
+import math
 from typing import List
 from services.agribrain.layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, RenderManifest,
@@ -126,7 +124,8 @@ DEFAULT_LEGENDS = {
     RenderMode.ASMAE_LAI: [
         LegendEntry("Sparse Canopy (<1.5)", "#E8F5E9", (0.0, 1.5)),
         LegendEntry("Moderate (1.5-3.5)", "#81C784", (1.5, 3.5)),
-        LegendEntry("Dense Canopy (>3.5)", "#1B5E20", (3.5, 6.0)),
+        LegendEntry("Dense Canopy (3.5-6.0)", "#2E7D32", (3.5, 6.0)),
+        LegendEntry("Very Dense Canopy (>6.0)", "#1B5E20", (6.0, 8.0)),
     ],
     RenderMode.ASMAE_CHLOROPHYLL: [
         LegendEntry("Low Chlorophyll", "#FFEBEE", (0.0, 30.0)),
@@ -269,10 +268,19 @@ def build_render_manifest(
     for s in surfaces:
         mode = SURFACE_TO_MODE.get(s.semantic_type)
         if mode is not None:
-            available_modes_set.add(mode)
-            if mode not in surface_ids_by_mode:
-                surface_ids_by_mode[mode] = []
-            surface_ids_by_mode[mode].append(s.surface_id)
+            vals = s.values or []
+            has_valid_pixels = any(
+                v is not None and not (isinstance(v, float) and (math.isnan(v) or math.isinf(v)))
+                for row in vals
+                for v in row
+            )
+            prov = s.provenance or {}
+            has_scalar = bool(prov.get("has_scalar_estimate") or prov.get("scalar_value") is not None)
+            if has_valid_pixels or has_scalar:
+                available_modes_set.add(mode)
+                if mode not in surface_ids_by_mode:
+                    surface_ids_by_mode[mode] = []
+                surface_ids_by_mode[mode].append(s.surface_id)
 
     # Build mode definitions
     mode_defs = []

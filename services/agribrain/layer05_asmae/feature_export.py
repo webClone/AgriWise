@@ -154,16 +154,34 @@ def build_state_support_ledger(update_reports: List[Dict[str, Any]]) -> Dict[str
             entry[count_key] += 1
 
     for entry in ledger.values():
+        state_name = entry.get("state")
+        from .state.descriptors import get_descriptor, AuthorityCeiling
+        desc = get_descriptor(state_name) if state_name else None
+        if desc:
+            entry["authority_ceiling"] = desc.authority_ceiling.value if hasattr(desc.authority_ceiling, "value") else str(desc.authority_ceiling)
+
         if entry["direct_observation_count"] > 0:
             entry["support_status"] = "assimilated"
             entry["observation_relationship"] = "direct"
-            entry["field_approval_eligible"] = True
+            if desc and desc.authority_ceiling in (
+                AuthorityCeiling.STATE_UPDATE,
+                AuthorityCeiling.PRESCRIPTION_ELIGIBLE,
+                AuthorityCeiling.PRESCRIPTION_DRIVER,
+            ):
+                entry["field_approval_eligible"] = True
+            else:
+                entry["field_approval_eligible"] = False
         elif entry["indirect_observation_count"] > 0:
             entry["support_status"] = "assimilated"
             entry["observation_relationship"] = "indirect"
+            entry["field_approval_eligible"] = False
         elif entry["proxy_observation_count"] > 0:
             entry["support_status"] = "assimilated"
             entry["observation_relationship"] = "proxy"
+            entry["field_approval_eligible"] = False
+        else:
+            entry["field_approval_eligible"] = False
+
         if entry["accepted_update_count"] > 0:
             entry["block_reasons"] = []
         entry["source_feature_ids"] = sorted({

@@ -83,10 +83,18 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
         SurfaceType.N_LEACHING_RISK: (0.0, 1.0),
         SurfaceType.N_VOLATILIZATION_RISK: (0.0, 1.0),
 
-        # ASMAE ranges (V82)
+        # ASMAE 13 Canonical State Surfaces (V82)
         SurfaceType.ASMAE_VIGOR: (0.0, 1.0),
         SurfaceType.ASMAE_LAI: (0.0, 8.0),
         SurfaceType.ASMAE_CHLOROPHYLL: (0.0, 80.0),
+        SurfaceType.ASMAE_CANOPY_WATER: (0.0, 1.0),
+        SurfaceType.ASMAE_ROOT_ZONE_WATER: (0.0, 1.0),
+        SurfaceType.ASMAE_SURFACE_WETNESS_EVENT: (0.0, 1.0),
+        SurfaceType.ASMAE_STRUCTURE: (0.0, 1.0),
+        SurfaceType.ASMAE_BARE_SOIL: (0.0, 1.0),
+        SurfaceType.ASMAE_SALINITY_STRESS: (0.0, 1.0),
+        SurfaceType.ASMAE_THERMAL_STRESS: (0.0, 1.0),
+        SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: (0.0, 1.0),
         SurfaceType.ASMAE_PHENOLOGY_PROGRESS: (0.0, 1.0),
         SurfaceType.ASMAE_STRESS_MEMORY: (0.0, 1.0),
         SurfaceType.ASMAE_ML_AGREEMENT: (0.0, 1.0),
