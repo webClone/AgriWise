@@ -148,6 +148,23 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
                 continue
             break  # break outer on first violation per surface
 
+        # Check scalar estimate in provenance if present
+        prov = s.provenance if isinstance(s.provenance, dict) else {}
+        sv = prov.get("scalar_value")
+        if sv is not None:
+            if isinstance(sv, bool) or not isinstance(sv, (int, float)) or not math.isfinite(sv):
+                violations.append(
+                    f"INV-2: Surface {s.surface_id} has invalid non-numeric or non-finite scalar_value {sv!r}"
+                )
+            elif lo is not None and sv < lo - 1e-6:
+                violations.append(
+                    f"INV-2: Surface {s.surface_id} scalar_value {sv} < min {lo}"
+                )
+            elif hi is not None and sv > hi + 1e-6:
+                violations.append(
+                    f"INV-2: Surface {s.surface_id} scalar_value {sv} > max {hi}"
+                )
+
     # INV-3: Source dominance weights sum to ~1.0
     for s in output.surface_pack:
         if s.source_weights is None:

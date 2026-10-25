@@ -277,10 +277,27 @@ def build_render_manifest(
             prov = s.provenance if isinstance(s.provenance, dict) else {}
             has_scalar = False
             flag = prov.get("has_scalar_estimate")
-            flag_denied = (isinstance(flag, str) and flag.strip().lower() in ("false", "0", "no")) or (flag is False)
+            flag_denied = False
+            if flag is not None:
+                if isinstance(flag, bool):
+                    flag_denied = not flag
+                elif isinstance(flag, (int, float)):
+                    if not math.isfinite(flag) or flag == 0 or flag == 0.0:
+                        flag_denied = True
+                elif isinstance(flag, str):
+                    s_flag = flag.strip().lower()
+                    if s_flag in ("false", "0", "0.0", "no", "f", "none", "null"):
+                        flag_denied = True
+                else:
+                    flag_denied = True
+
             if not flag_denied:
                 sv = prov.get("scalar_value")
-                has_scalar = isinstance(sv, (int, float)) and not isinstance(sv, bool) and math.isfinite(sv)
+                if isinstance(sv, (int, float)) and not isinstance(sv, bool) and math.isfinite(sv):
+                    rng = s.render_range if hasattr(s, "render_range") and s.render_range else (0.0, 1.0)
+                    lo, hi = rng
+                    if (lo is None or sv >= lo - 1e-6) and (hi is None or sv <= hi + 1e-6):
+                        has_scalar = True
             if has_valid_pixels or has_scalar:
                 available_modes_set.add(mode)
                 if mode not in surface_ids_by_mode:

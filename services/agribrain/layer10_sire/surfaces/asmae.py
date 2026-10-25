@@ -61,6 +61,26 @@ def _is_finite_real(val: Any) -> bool:
         return False
 
 
+def _parse_strict_bool(val: Any) -> bool:
+    """Strictly parse booleans and scalar flags without converting invalid non-binary values to True."""
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        return val == 1
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return False
+        return val == 1.0
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("false", "0", "0.0", "no", "f", "n", "none", "null"):
+            return False
+        return s in ("true", "1", "yes", "t")
+    return False
+
+
 def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
     """Validate covariance scalar, 1D diagonal vector, or 2D matrix.
 
@@ -994,36 +1014,62 @@ def compute_asmae_support_classification(
         and descriptor.authority_ceiling == AuthorityCeiling.PRESCRIPTION_ELIGIBLE
     )
 
-    # S12-02 / S673-01: Runtime ceiling and block reasons intersection
-    state_ceiling = None
-    state_block_reasons = ()
-    if state_entry:
-        state_ceiling = (
-            state_entry.get("authority_ceiling")
-            if isinstance(state_entry, dict)
-            else getattr(state_entry, "authority_ceiling", None)
-        )
-        state_block_reasons = (
-            state_entry.get("block_reasons")
-            if isinstance(state_entry, dict)
-            else getattr(state_entry, "block_reasons", ())
-        ) or ()
-    if not state_ceiling:
-        state_ceiling = meta.get("authority_ceiling") or meta.get("authority")
-    if not state_block_reasons:
-        state_block_reasons = meta.get("block_reasons") or ()
+    from services.agribrain.layer10_sire.surface_contract import _normalize_ceiling_token, resolve_surface_block_reasons
 
+    # AB-R03: Three-way authority ceiling intersection (descriptor x ledger x metadata)
+    CEILING_RANKS = {
+        "VISUALIZATION": 0,
+        "MONITORING_ONLY": 1,
+        "DIAGNOSTIC": 2,
+        "TRAINING_EXPORT": 3,
+        "STATE_UPDATE": 4,
+        "PRESCRIPTION_DRIVER": 5,
+        "PRESCRIPTION_ELIGIBLE": 5,
+        "MANAGED_PRESCRIPTION": 5,
+        "FIELD_PRESCRIPTION": 5,
+        "FULL_SYSTEM_AUTONOMOUS": 5,
+    }
+    RANK_TO_CANONICAL = {
+        0: "VISUALIZATION",
+        1: "MONITORING_ONLY",
+        2: "DIAGNOSTIC",
+        3: "TRAINING_EXPORT",
+        4: "STATE_UPDATE",
+        5: "PRESCRIPTION_DRIVER",
+    }
+
+    raw_ceilings = []
+    if descriptor and descriptor.authority_ceiling is not None:
+        raw_ceilings.append(descriptor.authority_ceiling)
+    if state_entry:
+        if isinstance(state_entry, dict):
+            c = state_entry.get("authority_ceiling") or state_entry.get("authorityCeiling") or state_entry.get("authority")
+        else:
+            c = getattr(state_entry, "authority_ceiling", None)
+        if c is not None:
+            raw_ceilings.append(c)
+    if meta:
+        c = meta.get("authority_ceiling") or meta.get("authorityCeiling") or meta.get("authority")
+        if c is not None:
+            raw_ceilings.append(c)
+
+    normalized_ceilings = [
+        _normalize_ceiling_token(c) for c in raw_ceilings if c is not None and str(c).strip()
+    ]
+    if normalized_ceilings:
+        # Unknown ceiling tokens fail closed to rank 0 (VISUALIZATION)
+        min_rank = min(CEILING_RANKS.get(tok, 0) for tok in normalized_ceilings)
+        state_ceiling = RANK_TO_CANONICAL.get(min_rank, "DIAGNOSTIC")
+    else:
+        min_rank = 2
+        state_ceiling = "DIAGNOSTIC"
+
+    state_block_reasons = resolve_surface_block_reasons(state_entry, meta)
     has_blocking_reasons = bool(state_block_reasons)
-    current_ceiling_restrictive = False
-    if state_ceiling:
-        c_str = str(state_ceiling.value if hasattr(state_ceiling, "value") else state_ceiling).lower()
-        # S673-01: Management eligibility strictly requires prescription-capable runtime authority
-        if c_str not in ("prescription_eligible", "prescription_driver"):
-            current_ceiling_restrictive = True
 
     is_management_eligible = (
         descriptor_is_prescription
-        and not current_ceiling_restrictive
+        and min_rank >= 5
         and not has_blocking_reasons
     )
 
@@ -1349,6 +1395,7 @@ def generate_asmae_surfaces(
             generated_from = "metadata_fallback"
             diagnostic_only = True
             state_update_allowed = False
+            presc_driver_allowed = False
             visual_only = True
         else:
             has_spatial_grid_flag = True
@@ -1359,17 +1406,87 @@ def generate_asmae_surfaces(
                 val = scalar_val if scalar_val is not None else (10.0 if stype == SurfaceType.ASMAE_EFFECTIVE_RESOLUTION else 0.0)
                 grid = [[val] * W for _ in range(H)]
             
-            diagnostic_only = meta.get("diagnostic_only", True)
-            state_update_allowed = meta.get("state_update_allowed", False)
+            # Multi-carrier inspection for meta permissions
+            meta_su = []
+            for k in ("state_update_allowed", "stateUpdateAllowed"):
+                if k in meta:
+                    meta_su.append(_parse_strict_bool(meta[k]))
+            if False in meta_su:
+                state_update_allowed = False
+            elif True in meta_su:
+                state_update_allowed = True
+            else:
+                state_update_allowed = False
+
+            meta_presc = []
+            for k in ("prescription_driver_allowed", "prescriptionDriverAllowed"):
+                if k in meta:
+                    meta_presc.append(_parse_strict_bool(meta[k]))
+            if False in meta_presc:
+                presc_driver_allowed = False
+            elif True in meta_presc:
+                presc_driver_allowed = True
+            else:
+                presc_driver_allowed = False
+
+            meta_diag = []
+            for k in ("diagnostic_only", "diagnosticOnly"):
+                if k in meta:
+                    meta_diag.append(_parse_strict_bool(meta[k]))
+            if True in meta_diag:
+                diagnostic_only = True
+            elif False in meta_diag:
+                diagnostic_only = False
+            else:
+                diagnostic_only = True
             visual_only = False
 
         # Extract parameters None-safely
         confidence_available = bool(meta.get("calibrated_confidence_available", meta.get("posterior_confidence_available", False)))
         uncertainty_available = bool(meta.get("posterior_uncertainty_available", meta.get("uncertainty") is not None))
-        raw_conf = meta.get("posterior_concentration", meta.get("confidence"))
-        confidence = float(raw_conf) if raw_conf is not None else 0.0
-        raw_unc = meta.get("uncertainty")
-        uncertainty = float(raw_unc) if raw_unc is not None else 1.0
+
+        # E-D01: State-specific uncertainty grid & confidence binding
+        state_key = var_name[len("asmae_"):] if var_name.startswith("asmae_") else var_name
+        own_unc_grid = None
+        own_conf_grid = None
+        if l1_data and hasattr(l1_data, "raster_maps"):
+            own_unc_grid = (
+                l1_data.raster_maps.get(f"asmae_{state_key}_uncertainty")
+                or l1_data.raster_maps.get(f"{state_key}_uncertainty")
+            )
+            own_conf_grid = (
+                l1_data.raster_maps.get(f"asmae_{state_key}_confidence")
+                or l1_data.raster_maps.get(f"{state_key}_confidence")
+            )
+
+        if own_unc_grid is not None:
+            unc_finite = [
+                float(v) for row in own_unc_grid for v in row
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            ]
+            if unc_finite:
+                uncertainty = sum(unc_finite) / len(unc_finite)
+            else:
+                raw_unc = meta.get("uncertainty")
+                uncertainty = float(raw_unc) if raw_unc is not None else 1.0
+        else:
+            raw_unc = meta.get("uncertainty")
+            uncertainty = float(raw_unc) if raw_unc is not None else 1.0
+
+        if own_conf_grid is not None:
+            conf_finite = [
+                float(v) for row in own_conf_grid for v in row
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            ]
+            if conf_finite:
+                confidence = sum(conf_finite) / len(conf_finite)
+            else:
+                raw_conf = meta.get("posterior_concentration", meta.get("confidence"))
+                confidence = float(raw_conf) if raw_conf is not None else 0.0
+        else:
+            raw_conf = meta.get("posterior_concentration", meta.get("confidence"))
+            confidence = float(raw_conf) if raw_conf is not None else 0.0
+
         resolution_m = float(meta.get("resolution_m", 10.0))
         asmae_channel = meta.get("asmae_channel", "diagnostic")
         source_basis = meta.get("source_basis", "asmae")
@@ -1645,7 +1762,9 @@ def generate_asmae_surfaces(
             "certified_basis_m": certified_basis_m,
             "source_basis": source_basis,
             "confidence": confidence,
-            "uncertainty": uncertainty,
+            "uncertainty": own_unc_grid if own_unc_grid is not None else uncertainty,
+            "uncertainty_grid": own_unc_grid,
+            "confidence_grid": own_conf_grid,
             "posterior_confidence_available": confidence_available,
             "posterior_uncertainty_available": uncertainty_available,
             "retro_status": retro_status,
@@ -1654,6 +1773,7 @@ def generate_asmae_surfaces(
             "bma_disagreement": bma_disagreement,
             "cross_layer_conflict": cross_layer_conflict,
             "state_update_allowed": state_update_allowed,
+            "prescription_driver_allowed": presc_driver_allowed,
             "enkf_mode": enkf_mode,
             "radiometric_mode": radiometric_mode,
             "operator_locked": operator_locked,
@@ -1809,23 +1929,6 @@ def generate_asmae_surfaces(
             provenance["scope"] = "plot_level"
             provenance["constant_allowed"] = True
 
-        def _parse_strict_bool(val: Any) -> bool:
-            if val is None:
-                return False
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, (int, float)):
-                if math.isnan(val) or math.isinf(val):
-                    return False
-                if val == 1.0 or val == 1:
-                    return True
-                if val == 0.0 or val == 0:
-                    return False
-                return False
-            if isinstance(val, str):
-                return val.strip().lower() in ("true", "1", "yes", "t")
-            return False
-
         has_blocks = len(surf_blocks) > 0
         state_update_req = _parse_strict_bool(provenance.get("state_update_allowed"))
         presc_req = _parse_strict_bool(provenance.get("prescription_driver_allowed"))
@@ -1847,8 +1950,27 @@ def generate_asmae_surfaces(
             state_update_req = False
             presc_req = False
 
+        # Static descriptor ceiling intersection
+        from services.agribrain.layer05_asmae.state.descriptors import STATE_DESCRIPTOR_BY_NAME
+        from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+        canon_name = canonical_state_key(feature_mapping.get(stype, var_name) or stype.value)
+        desc = STATE_DESCRIPTOR_BY_NAME.get(canon_name)
+        if desc and desc.authority_ceiling:
+            desc_ceil_tok = _normalize_ceiling_token(desc.authority_ceiling)
+            if desc_ceil_tok in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC", "TRAINING_EXPORT"):
+                state_update_req = False
+                presc_req = False
+            elif desc_ceil_tok == "STATE_UPDATE":
+                presc_req = False
+
+        if provenance.get("diagnostic_only") is True:
+            state_update_req = False
+            presc_req = False
+
         surf_state_update = state_update_req and not has_blocks
         surf_prescription = presc_req and not has_blocks
+        provenance["state_update_allowed"] = surf_state_update
+        provenance["prescription_driver_allowed"] = surf_prescription
         surfaces.append(SurfaceArtifact(
             surface_id=f"{stype.value}_{inp.plot_id}",
             semantic_type=stype,

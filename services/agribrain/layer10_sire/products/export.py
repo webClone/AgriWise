@@ -108,38 +108,15 @@ def export_raster_pack(output: Layer10Output) -> List[RasterEntry]:
             for row in s.values
         ]
 
-        g_spec = getattr(s, "grid_spec", None)
-        if hasattr(g_spec, "to_dict"):
-            g_spec_dict = g_spec.to_dict()
-        elif isinstance(g_spec, dict):
-            g_spec_dict = dict(g_spec)
-        else:
-            g_spec_dict = canon_doc.get("grid_spec")
-
-        # Resolve confidence fallback
-        conf_val = getattr(s, "confidence", None)
-        if conf_val is None:
-            conf_val = prov.get("confidence")
-
-        # Resolve scalar or grid uncertainty/sigma fallback
-        unc_val = getattr(s, "uncertainty", None)
-        if unc_val is None:
-            if "uncertainty" in prov:
-                raw_u = prov["uncertainty"]
-                if isinstance(raw_u, (int, float)) and not isinstance(raw_u, bool) and math.isfinite(raw_u):
-                    unc_val = float(raw_u)
-                elif isinstance(raw_u, (list, tuple)):
-                    unc_val = raw_u
-            elif "sigma" in prov:
-                raw_s = prov["sigma"]
-                if isinstance(raw_s, (int, float)) and not isinstance(raw_s, bool) and math.isfinite(raw_s):
-                    unc_val = float(raw_s)
-                elif isinstance(raw_s, (list, tuple)):
-                    unc_val = raw_s
-
-        # Resolve mask fallbacks
-        obs_mask = getattr(s, "observed_mask", None) or prov.get("observed_mask") or prov.get("observedMask")
-        inf_mask = getattr(s, "inferred_mask", None) or prov.get("inferred_mask") or prov.get("inferredMask")
+        g_spec_dict = canon_doc.get("grid_spec")
+        source_g_spec_dict = canon_doc.get("source_grid_spec")
+        display_g_spec_dict = canon_doc.get("display_grid_spec")
+        display_res = float(canon_doc.get("display_resolution_m") or 1.0)
+        eff_res = float(canon_doc.get("effective_resolution_m") or 10.0)
+        conf_val = canon_doc.get("confidence")
+        unc_val = canon_doc.get("uncertainty")
+        obs_mask = canon_doc.get("observed_mask")
+        inf_mask = canon_doc.get("inferred_mask")
 
         # Canonical permissions and block reasons take precedence
         state_update_allowed = canon_doc.get("state_update_allowed", False)
@@ -158,10 +135,10 @@ def export_raster_pack(output: Layer10Output) -> List[RasterEntry]:
             values=s.values,
             stats=stats,
             grid_spec=g_spec_dict,
-            source_grid_spec=getattr(s, "source_grid_spec", None) if isinstance(getattr(s, "source_grid_spec", None), dict) else None,
-            display_grid_spec=getattr(s, "display_grid_spec", None) if isinstance(getattr(s, "display_grid_spec", None), dict) else None,
-            display_resolution_m=getattr(s, "display_resolution_m", 1.0),
-            effective_resolution_m=getattr(s, "effective_resolution_m", 10.0),
+            source_grid_spec=source_g_spec_dict,
+            display_grid_spec=display_g_spec_dict,
+            display_resolution_m=display_res,
+            effective_resolution_m=eff_res,
             confidence=conf_val,
             uncertainty=unc_val,
             observed_mask=obs_mask,

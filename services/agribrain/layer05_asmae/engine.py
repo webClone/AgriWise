@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from datetime import datetime, timezone
 from datetime import timedelta
 from typing import Any, Dict, List, Literal, Optional, Tuple
@@ -42,6 +43,7 @@ except ImportError:
     np = None
 
 from .config import (
+    ASMAE_ML_EXPERTS_ENABLED,
     BMA_EXPERTS,
     DEFAULT_RESOLUTION_M,
     CANDIDATE_RESOLUTIONS_M,
@@ -2072,21 +2074,22 @@ class ASMAEEngine:
             # ── V92.4-BC.9: Construct support surfaces at microzone grid level ──
             if H_grid > 0 and W_grid > 0:
                 # Extract archive metrics
-                archive_metrics = inp.archive_metrics or {}
+                archive_metrics = getattr(inp, "archive_metrics", None) or {}
                 has_s1 = any(
                     getattr(scene, "sensor", "") == "S1"
                     for scene in production_scenes
                 )
                 
                 # Check for is_test_override
-                import os
+                plot_id = getattr(inp, "plot_id", "")
+                run_id = getattr(inp, "run_id", "")
                 is_test_override = (
                     getattr(inp, "is_test_override", False) or 
-                    inp.plot_id.startswith("test_") or 
-                    inp.plot_id.startswith("plot_test_") or 
-                    "unregistered" in inp.plot_id or 
-                    "test" in inp.run_id or 
-                    inp.run_id.startswith("run_001") or 
+                    plot_id.startswith("test_") or 
+                    plot_id.startswith("plot_test_") or 
+                    "unregistered" in plot_id or 
+                    "test" in run_id or 
+                    run_id.startswith("run_001") or 
                     os.environ.get("ASMAE_TEST_OVERRIDE") == "true"
                 )
 
@@ -2101,9 +2104,10 @@ class ASMAEEngine:
                     req_span = 0
                     req_sar = MIN_S1_SCENES_SAR_ASSISTED if has_s1 else 0
 
-                scene_count_val = archive_metrics.get("scene_count", len(inp.historical_scene_refs))
+                historical_refs = getattr(inp, "historical_scene_refs", []) or []
+                scene_count_val = archive_metrics.get("scene_count", len(historical_refs))
                 if scene_count_val is None:
-                    scene_count_val = len(inp.historical_scene_refs)
+                    scene_count_val = len(historical_refs)
                 optical_val = archive_metrics.get("optical_good_scene_count", archive_metrics.get("optical", 0))
                 if optical_val is None:
                     optical_val = 0
@@ -2361,8 +2365,6 @@ class ASMAEEngine:
                 effective_resolution_map = [[10.0] * target_w for _ in range(target_h)]
                 
                 # Check ML shadow experts status/agreement
-                import os
-                from .config import ASMAE_ML_EXPERTS_ENABLED
                 ml_agreement = bma_result.get("ml_agreement") or bma_result.get("shadow_ml_agreement")
                 ml_unavailable = (
                     bma_result.get("ml_status") == "unavailable" or 
@@ -2389,7 +2391,7 @@ class ASMAEEngine:
                     os.environ.get("AGRIBRAIN_ENV") == "test"
                 )
 
-                archive_metrics = inp.archive_metrics or {}
+                archive_metrics = getattr(inp, "archive_metrics", None) or {}
                 
                 # Check Sentinel-1 available (sentinel1 package exists)
                 has_s1 = any(
@@ -2408,9 +2410,10 @@ class ASMAEEngine:
                     req_span = 0
                     req_sar = MIN_S1_SCENES_SAR_ASSISTED if has_s1 else 0
 
-                scene_count_val = archive_metrics.get("scene_count", len(inp.historical_scene_refs))
+                historical_refs = getattr(inp, "historical_scene_refs", []) or []
+                scene_count_val = archive_metrics.get("scene_count", len(historical_refs))
                 if scene_count_val is None:
-                    scene_count_val = len(inp.historical_scene_refs)
+                    scene_count_val = len(historical_refs)
                 optical_val = archive_metrics.get("optical_good_scene_count", archive_metrics.get("optical", 0))
                 if optical_val is None:
                     optical_val = 0
@@ -2424,7 +2427,7 @@ class ASMAEEngine:
 
                 archive_ok = archive_status_ok(getattr(inp, "archive_metrics_status", None))
                 real_evidence_passed = (s2_c + s1_c > 0)
-                selected_res_m = resolution_decision.selected_effective_resolution_m
+                selected_res_m = getattr(resolution_decision, "selected_effective_resolution_m", DEFAULT_RESOLUTION_M) if resolution_decision else DEFAULT_RESOLUTION_M
 
                 valid_cells = 0
                 advisory_approved_cells = 0
@@ -2439,7 +2442,6 @@ class ASMAEEngine:
                     or getattr(scene_stack_status, "current_1m_approval_allowed", False)
                 )
 
-                import math
                 def is_valid_float(v):
                     if v is None:
                         return False
@@ -2619,7 +2621,7 @@ class ASMAEEngine:
         # ── V92.4-BC.8 Hard coverage gate and integrity checks ──────────────────────
         # S1 present check
         from .geometry.scene_stack_builder import _extract_packages
-        s1_pkgs = _extract_packages(inp.layer0_source_packages, "sentinel1")
+        s1_pkgs = _extract_packages(getattr(inp, "layer0_source_packages", {}) or {}, "sentinel1")
         if s1_pkgs:
             extracted_s1 = False
             for scene in production_scenes:

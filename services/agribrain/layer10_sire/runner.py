@@ -507,11 +507,14 @@ def sanitize_surface_values(surfaces: List[SurfaceArtifact]) -> List[SurfaceArti
                 for r in s.values:
                     sanitized_row = []
                     for val in r:
-                        if val is None:
+                        if val is None or isinstance(val, bool) or not isinstance(val, (int, float)):
                             sanitized_row.append(None)
                         else:
-                            converted = float(val)
-                            sanitized_row.append(converted if math.isfinite(converted) else None)
+                            try:
+                                converted = float(val)
+                                sanitized_row.append(converted if math.isfinite(converted) else None)
+                            except (ValueError, TypeError, OverflowError):
+                                sanitized_row.append(None)
                     sanitized_grid.append(sanitized_row)
                 s.values = sanitized_grid
             except Exception:
@@ -1128,6 +1131,7 @@ def deserialize_l10_output(d: dict) -> Layer10Output:
     # Reconstruct surfaces
     surfaces = []
     for s in d.get("surface_pack", []):
+        prov = s.get("provenance", {}) or {}
         surfaces.append(SurfaceArtifact(
             surface_id=s["surface_id"],
             semantic_type=SurfaceType(s["semantic_type"]),
@@ -1135,19 +1139,26 @@ def deserialize_l10_output(d: dict) -> Layer10Output:
             values=s["values"],
             units=s["units"],
             native_resolution_m=s["native_resolution_m"],
+            display_resolution_m=float(s.get("display_resolution_m") or prov.get("display_resolution_m") or prov.get("displayResolutionM") or 1.0),
+            effective_resolution_m=float(s.get("effective_resolution_m") or prov.get("effective_resolution_m") or prov.get("effectiveResolutionM") or 10.0),
             render_range=tuple(s["render_range"]) if s.get("render_range") else (0.0, 1.0),
             palette_id=PaletteId(s["palette_id"]) if s.get("palette_id") else PaletteId.RAW_GRAYSCALE,
-            confidence=s.get("confidence"),
+            confidence=s.get("confidence") if s.get("confidence") is not None else prov.get("confidence"),
+            observed_mask=s.get("observed_mask") if s.get("observed_mask") is not None else (prov.get("observed_mask") or prov.get("observedMask")),
+            inferred_mask=s.get("inferred_mask") if s.get("inferred_mask") is not None else (prov.get("inferred_mask") or prov.get("inferredMask")),
+            state_update_allowed=bool(s.get("state_update_allowed", prov.get("state_update_allowed", False))),
+            prescription_driver_allowed=bool(s.get("prescription_driver_allowed", prov.get("prescription_driver_allowed", False))),
+            block_reasons=list(s.get("block_reasons") or prov.get("block_reasons") or []) if (s.get("block_reasons") or prov.get("block_reasons")) else None,
             source_weights=s.get("source_weights"),
             time_window=s.get("time_window", {}),
             source_layers=s.get("source_layers", []),
-            provenance=s.get("provenance", {}),
+            provenance=prov,
             grounding_class=s.get("grounding_class"),
             raster_basis=s.get("raster_basis", []),
             observed_ratio=s.get("observed_ratio", 0.0),
             grid_spec=s.get("grid_spec"),
-            source_grid_spec=s.get("source_grid_spec"),
-            display_grid_spec=s.get("display_grid_spec"),
+            source_grid_spec=s.get("source_grid_spec") or prov.get("source_grid_spec") or prov.get("sourceGridSpec"),
+            display_grid_spec=s.get("display_grid_spec") or prov.get("display_grid_spec") or prov.get("displayGridSpec"),
         ))
         
     # Reconstruct zones
@@ -1444,10 +1455,10 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
 
     if output and output.surface_pack:
         sanitize_surface_values(output.surface_pack)
-    npz_path_tmp = None
-    json_path_tmp = None
-    npz_path = None
-    cache_path = None
+    npz_candidate_path = None
+    json_candidate_path = None
+    committed = False
+    detached = []
     try:
         from dataclasses import asdict
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -1455,7 +1466,6 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
         cache_dir = os.path.join(base_dir, "artifacts", cache_dir_name)
         os.makedirs(cache_dir, exist_ok=True)
         cache_path = os.path.join(cache_dir, f"{cache_key}.json")
-        npz_path = os.path.join(cache_dir, f"surfaces_{cache_key}.npz")
         
         # Extract numeric grids before dataclass serialization.  ``asdict``
         # recursively copied both surface_pack and raster_pack grids (more than
@@ -1464,35 +1474,34 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
         # detach those duplicate values, serialize metadata, then restore the
         # live output object in a finally block.
         npz_data = {}
-        detached = []
-        for surface in output.surface_pack:
-            s_id = getattr(surface, "surface_id", "")
-            if not s_id:
-                continue
-
-            vals = getattr(surface, "values", None)
-            if vals is not None:
-                npz_data[f"values::{s_id}"] = np.asarray(vals, dtype=np.float32)
-                detached.append((surface, "values", vals))
-                surface.values = []
-
-            conf = getattr(surface, "confidence", None)
-            if conf is not None:
-                npz_data[f"confidence::{s_id}"] = np.asarray(conf, dtype=np.float32)
-                detached.append((surface, "confidence", conf))
-                surface.confidence = None
-
-        for raster_entry in output.raster_pack or []:
-            if isinstance(raster_entry, dict) and "values" in raster_entry:
-                vals = raster_entry.get("values")
-                detached.append((raster_entry, "values", vals))
-                raster_entry["values"] = []
-            elif hasattr(raster_entry, "values"):
-                vals = raster_entry.values
-                detached.append((raster_entry, "values", vals))
-                raster_entry.values = []
-
         try:
+            for surface in output.surface_pack:
+                s_id = getattr(surface, "surface_id", "")
+                if not s_id:
+                    continue
+
+                vals = getattr(surface, "values", None)
+                if vals is not None:
+                    npz_data[f"values::{s_id}"] = np.asarray(vals, dtype=np.float32)
+                    detached.append((surface, "values", vals))
+                    surface.values = []
+
+                conf = getattr(surface, "confidence", None)
+                if conf is not None:
+                    npz_data[f"confidence::{s_id}"] = np.asarray(conf, dtype=np.float32)
+                    detached.append((surface, "confidence", conf))
+                    surface.confidence = None
+
+            for raster_entry in output.raster_pack or []:
+                if isinstance(raster_entry, dict) and "values" in raster_entry:
+                    vals = raster_entry.get("values")
+                    detached.append((raster_entry, "values", vals))
+                    raster_entry["values"] = []
+                elif hasattr(raster_entry, "values"):
+                    vals = raster_entry.values
+                    detached.append((raster_entry, "values", vals))
+                    raster_entry.values = []
+
             serialized = asdict(output)
         finally:
             for owner, field_name, value in detached:
@@ -1503,9 +1512,8 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
         
         # Atomic generation-addressed discipline for Layer 10
         import uuid
+        import hashlib
         gen_id = uuid.uuid4().hex[:12]
-        npz_candidate_path = None
-        json_candidate_path = None
 
         if npz_data:
             npz_filename = f"surfaces_{cache_key}_{gen_id}.npz"
@@ -1513,6 +1521,15 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
             np.savez_compressed(npz_candidate_path, **npz_data)
             serialized["surfaces_artifact_ref"] = f"{cache_dir_name}/{npz_filename}"
             serialized["generation_id"] = gen_id
+            with open(npz_candidate_path, "rb") as f:
+                serialized["surfaces_artifact_sha256"] = hashlib.sha256(f.read()).hexdigest()
+            serialized["surfaces_member_metadata"] = {
+                k: {"shape": list(arr.shape), "dtype": str(arr.dtype)}
+                for k, arr in npz_data.items()
+            }
+
+        # Policy semantic version
+        serialized["state_support_policy_version"] = "asmae_support_policy_v2"
 
         # Write candidate JSON
         json_candidate_path = os.path.join(cache_dir, f"{cache_key}_{gen_id}.tmp.json")
@@ -1523,6 +1540,7 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
 
         # Atomic commit: replace manifest JSON
         os.replace(json_candidate_path, cache_path)
+        committed = True
 
         # Compute total storage size in bytes
         total_bytes = os.path.getsize(cache_path)
@@ -1533,12 +1551,13 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
         import sys
         print(f"[L10] Failed to write surfaces cache: {e}", file=sys.stderr)
         # Cleanup ONLY uncommitted candidate files on failure; preserve existing committed cache!
-        if npz_candidate_path and os.path.exists(npz_candidate_path):
-            try: os.remove(npz_candidate_path)
-            except Exception: pass
-        if json_candidate_path and os.path.exists(json_candidate_path):
-            try: os.remove(json_candidate_path)
-            except Exception: pass
+        if not committed:
+            if npz_candidate_path and os.path.exists(npz_candidate_path):
+                try: os.remove(npz_candidate_path)
+                except Exception: pass
+            if json_candidate_path and os.path.exists(json_candidate_path):
+                try: os.remove(json_candidate_path)
+                except Exception: pass
         return 0
 
 
@@ -1555,6 +1574,11 @@ def load_layer10_from_cache(cache_key: str) -> Optional[Layer10Output]:
             with open(cache_path, "r", encoding="utf-8") as f:
                 d = json.load(f)
             
+            # Verify state support policy version
+            policy_ver = d.get("state_support_policy_version") or d.get("provenance", {}).get("state_support_policy_version")
+            if policy_ver != "asmae_support_policy_v2":
+                return None
+
             # Check rollout registry if ASMAE surfaces are cached
             has_asmae_cached = False
             for s_dict in d.get("surface_pack", []):
@@ -1585,6 +1609,14 @@ def load_layer10_from_cache(cache_key: str) -> Optional[Layer10Output]:
                     # Missing NPZ: safe cache miss
                     return None
                 
+                # Verify NPZ sha256 checksum if recorded
+                expected_sha = d.get("surfaces_artifact_sha256")
+                if expected_sha:
+                    import hashlib
+                    with open(npz_path, "rb") as f_npz:
+                        if hashlib.sha256(f_npz.read()).hexdigest() != expected_sha:
+                            return None
+
                 try:
                     with safe_np_load(npz_path) as data:
                         # 1. Surface count check
@@ -1645,6 +1677,12 @@ def load_layer10_from_cache(cache_key: str) -> Optional[Layer10Output]:
             restored = deserialize_l10_output(d)
             if not validate_layer10_publication(restored):
                 return None
+            try:
+                from .products.export import export_raster_pack
+                from dataclasses import asdict
+                restored.raster_pack = [asdict(r) for r in export_raster_pack(restored)]
+            except Exception:
+                pass
             return restored
     except Exception as e:
         import sys
@@ -3910,10 +3948,27 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 prov = s.provenance if isinstance(s.provenance, dict) else {}
                 has_scalar = False
                 flag = prov.get("has_scalar_estimate")
-                flag_denied = (isinstance(flag, str) and flag.strip().lower() in ("false", "0", "no")) or (flag is False)
+                flag_denied = False
+                if flag is not None:
+                    if isinstance(flag, bool):
+                        flag_denied = not flag
+                    elif isinstance(flag, (int, float)):
+                        if not math.isfinite(flag) or flag == 0 or flag == 0.0:
+                            flag_denied = True
+                    elif isinstance(flag, str):
+                        s_flag = flag.strip().lower()
+                        if s_flag in ("false", "0", "0.0", "no", "f", "none", "null"):
+                            flag_denied = True
+                    else:
+                        flag_denied = True
+
                 if not flag_denied:
                     sv = prov.get("scalar_value")
-                    has_scalar = isinstance(sv, (int, float)) and not isinstance(sv, bool) and math.isfinite(sv)
+                    if isinstance(sv, (int, float)) and not isinstance(sv, bool) and math.isfinite(sv):
+                        rng = s.render_range if hasattr(s, "render_range") and s.render_range else (0.0, 1.0)
+                        lo, hi = rng
+                        if (lo is None or sv >= lo - 1e-6) and (hi is None or sv <= hi + 1e-6):
+                            has_scalar = True
 
                 if not has_finite and not has_scalar:
                     surface_inventory[st] = {
@@ -3926,11 +3981,14 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                     continue
 
                 gc = s.grounding_class or "UNIFORM"
-                status = "available_raster"
-                if gc in ["UNIFORM", "BROADCAST"]:
-                    status = "plot_level_only"
-                elif gc == "PROXY_SPATIAL":
-                    status = "proxy_only"
+                if not has_finite and has_scalar:
+                    status = "available_scalar" if gc not in ["UNIFORM", "BROADCAST"] else "plot_level_only"
+                else:
+                    status = "available_raster"
+                    if gc in ["UNIFORM", "BROADCAST"]:
+                        status = "plot_level_only"
+                    elif gc == "PROXY_SPATIAL":
+                        status = "proxy_only"
                 sup_class = prov.get("support_class")
                 if sup_class == "unsupported":
                     status = "unsupported"

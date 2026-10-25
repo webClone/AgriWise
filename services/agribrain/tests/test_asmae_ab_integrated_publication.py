@@ -481,6 +481,11 @@ def test_measurement_receipt_directness_and_indirect_restriction():
             "source_reality": "real_raster",
             "evidence_kind": "indirect_observation",
             "target_states": ["vigor", "lai"],
+            "accepted_target_states": ["vigor", "lai"],
+            "per_state_influence": {
+                "vigor": {"state_influenced": True},
+                "lai": {"state_influenced": True},
+            },
             "innovation_mean": 0.05,
             "sigma_obs": 0.04,
             "n_pixels": 100,
@@ -503,6 +508,10 @@ def test_measurement_receipt_directness_and_indirect_restriction():
             "source_reality": "real_raster",
             "evidence_kind": "direct_observation",
             "target_states": ["root_zone_water"],
+            "accepted_target_states": ["root_zone_water"],
+            "per_state_influence": {
+                "root_zone_water": {"state_influenced": True},
+            },
             "innovation_mean": 0.02,
             "sigma_obs": 0.02,
             "n_pixels": 1,
@@ -1126,7 +1135,7 @@ def test_ab_r05_cache_mask_pairing_policy_versioning_and_l10_atomic_commit():
         SURFACES_SCHEMA_VERSION,
         PublicationStatus,
     )
-    from scientific_contracts import LAYER10_PUBLICATION_SCHEMA_VERSION
+    from services.agribrain.scientific_contracts import LAYER10_PUBLICATION_SCHEMA_VERSION
 
     l10_key = f"l10_test_{uuid.uuid4().hex[:8]}"
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

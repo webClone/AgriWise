@@ -360,8 +360,8 @@ def run_enkf(
             state
             for report in scene_reports
             if isinstance(report, dict) and report.get("update_applied") is True
-            for state in report.get("target_states", [])
-            if state in STATE_NAMES
+            for state in (report.get("accepted_target_states") if report.get("accepted_target_states") is not None else report.get("target_states", []))
+            if state in STATE_NAMES and state not in report.get("excluded_target_states", [])
         })
         if accepted_target_states:
             from ..graph.spatial_regularization import apply_ensemble_graph_regularization
@@ -1730,6 +1730,7 @@ def update_step_ht(
         local_observed = (
             weighted_observed[active_positions] / active_sums
         )
+        step_prior_cube = state_cube.copy()
         state_cube = _batch_scalar_etkf_target_update(
             state_cube,
             node_ids,
@@ -1755,20 +1756,24 @@ def update_step_ht(
             state_name = STATE_NAMES[state_index]
             desc = STATE_DESCRIPTORS[state_index]
             scale = (desc.bounds[1] - desc.bounds[0]) if (desc.bounds and desc.bounds[1] > desc.bounds[0]) else 1.0
-            p_mean = prior_mean.get(state_name, 0.0)
-            post_m = posterior_mean.get(state_name, p_mean)
-            p_var = prior_variance.get(state_name, 0.0)
-            post_v = posterior_variance.get(state_name, p_var)
-            delta_mean = abs(post_m - p_mean)
-            variance_reduction = max(0.0, p_var - post_v)
+
+            # Per-node spatial evaluation to prevent opposite local innovations cancelling in the global mean
+            step_prior_node_means = np.mean(step_prior_cube[:, :, state_index], axis=1)
+            post_node_means = np.mean(state_cube[:, :, state_index], axis=1)
+            max_node_delta_mean = float(np.max(np.abs(post_node_means - step_prior_node_means)))
+            
+            step_prior_node_vars = np.var(step_prior_cube[:, :, state_index], axis=1)
+            post_node_vars = np.var(state_cube[:, :, state_index], axis=1)
+            max_node_var_red = float(np.max(np.maximum(0.0, step_prior_node_vars - post_node_vars)))
+
             tol_mean = 1e-5 * scale
             tol_var = 1e-7 * (scale ** 2)
-            state_influenced = (delta_mean > tol_mean) or (variance_reduction > tol_var)
+            state_influenced = (max_node_delta_mean > tol_mean) or (max_node_var_red > tol_var)
             if state_influenced:
                 has_actual_influence = True
             per_state_influence[state_name] = {
-                'delta_mean': float(delta_mean),
-                'variance_reduction': float(variance_reduction),
+                'delta_mean': float(max_node_delta_mean),
+                'variance_reduction': float(max_node_var_red),
                 'state_influenced': state_influenced,
             }
 
@@ -1922,6 +1927,7 @@ def update_step_proxy(
 
         prior_mean = _state_mean_summary(ensemble, target_indices)
         prior_variance = _state_variance_summary(ensemble, target_indices)
+        step_prior_ensemble = {k: [row[:] for row in v] for k, v in ensemble.items()}
         _proxy_update_single_obs(ensemble, node_ids, obs_name, obs_value,
                                  mapping, sigma_obs, r_var, rng, target_indices=target_indices)
         posterior_mean = _state_mean_summary(ensemble, target_indices)
@@ -1934,20 +1940,24 @@ def update_step_proxy(
             state_name = STATE_NAMES[state_index]
             desc = STATE_DESCRIPTORS[state_index]
             scale = (desc.bounds[1] - desc.bounds[0]) if (desc.bounds and desc.bounds[1] > desc.bounds[0]) else 1.0
-            p_mean = prior_mean.get(state_name, 0.0)
-            post_m = posterior_mean.get(state_name, p_mean)
-            p_var = prior_variance.get(state_name, 0.0)
-            post_v = posterior_variance.get(state_name, p_var)
-            delta_mean = abs(post_m - p_mean)
-            variance_reduction = max(0.0, p_var - post_v)
+
+            # Per-node spatial evaluation for proxy update
+            node_prior_means = [sum(row[state_index] for row in step_prior_ensemble[nid]) / len(step_prior_ensemble[nid]) for nid in node_ids]
+            node_post_means = [sum(row[state_index] for row in ensemble[nid]) / len(ensemble[nid]) for nid in node_ids]
+            max_node_delta_mean = float(max(abs(post_m - pri_m) for post_m, pri_m in zip(node_post_means, node_prior_means)))
+            
+            node_prior_vars = [sum((row[state_index] - pri_m)**2 for row in step_prior_ensemble[nid]) / len(step_prior_ensemble[nid]) for nid, pri_m in zip(node_ids, node_prior_means)]
+            node_post_vars = [sum((row[state_index] - post_m)**2 for row in ensemble[nid]) / len(ensemble[nid]) for nid, post_m in zip(node_ids, node_post_means)]
+            max_node_var_red = float(max(max(0.0, pri_v - post_v) for pri_v, post_v in zip(node_prior_vars, node_post_vars)))
+
             tol_mean = 1e-5 * scale
             tol_var = 1e-7 * (scale ** 2)
-            state_influenced = (delta_mean > tol_mean) or (variance_reduction > tol_var)
+            state_influenced = (max_node_delta_mean > tol_mean) or (max_node_var_red > tol_var)
             if state_influenced:
                 has_actual_influence = True
             per_state_influence[state_name] = {
-                'delta_mean': float(delta_mean),
-                'variance_reduction': float(variance_reduction),
+                'delta_mean': float(max_node_delta_mean),
+                'variance_reduction': float(max_node_var_red),
                 'state_influenced': state_influenced,
             }
 

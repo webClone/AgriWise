@@ -947,6 +947,24 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
                 "diagnostic_only": bool(diagnostic_only_for_grid),
                 **stage_metadata,
             }
+
+            # Specialize per-state uncertainty and confidence when state-specific maps exist
+            var_clean = var_name[len("asmae_"):] if var_name.lower().startswith("asmae_") else var_name
+            state_unc = finite_grid_mean("uncertainty_maps", var_clean)
+            if state_unc is None:
+                state_unc = finite_grid_mean("uncertainty_maps", var_name)
+            if state_unc is not None:
+                metadata["uncertainty"] = state_unc
+                metadata["posterior_uncertainty_available"] = True
+
+            state_conf = finite_grid_mean("confidence_maps", var_clean)
+            if state_conf is None:
+                state_conf = finite_grid_mean("confidence_maps", var_name)
+            if state_conf is not None:
+                metadata["posterior_concentration"] = state_conf
+                metadata["confidence"] = state_conf
+                metadata["posterior_confidence_available"] = True
+
             if source_spec:
                 metadata.update({
                     key: source_spec[key]

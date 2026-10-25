@@ -73,13 +73,18 @@ def _strict_bool(val: Any) -> Optional[bool]:
         return None
     if isinstance(val, bool):
         return val
-    if isinstance(val, (int, float)):
-        # Strictly accept only binary 0 / 1 values; reject NaN, Inf, -1, 2, etc.
-        if math.isnan(val) or math.isinf(val):
-            return False
-        if val == 1.0 or val == 1:
+    if isinstance(val, int):
+        if val == 1:
             return True
-        if val == 0.0 or val == 0:
+        if val == 0:
+            return False
+        return False
+    if isinstance(val, float):
+        if not math.isfinite(val):
+            return False
+        if val == 1.0:
+            return True
+        if val == 0.0:
             return False
         return False
     if isinstance(val, str):
@@ -258,9 +263,10 @@ def serialize_surface_artifact(surface: Any) -> dict:
     has_restrictions = len(all_restrictions) > 0
 
     attr_state_update = _strict_bool(_field(surface, "state_update_allowed", None))
+    attr_camel_state = _strict_bool(_field(surface, "stateUpdateAllowed", None))
     prov_state_update = _strict_bool(provenance.get("state_update_allowed"))
     prov_camel_state = _strict_bool(provenance.get("stateUpdateAllowed"))
-    state_candidates = [c for c in (attr_state_update, prov_state_update, prov_camel_state) if c is not None]
+    state_candidates = [c for c in (attr_state_update, attr_camel_state, prov_state_update, prov_camel_state) if c is not None]
 
     if False in state_candidates or has_restrictions or grounding_class_val == "INTERPOLATED_PROXY":
         state_update_allowed = False
@@ -270,9 +276,10 @@ def serialize_surface_artifact(surface: Any) -> dict:
         state_update_allowed = False
 
     attr_prescription = _strict_bool(_field(surface, "prescription_driver_allowed", None))
+    attr_camel_presc = _strict_bool(_field(surface, "prescriptionDriverAllowed", None))
     prov_prescription = _strict_bool(provenance.get("prescription_driver_allowed"))
     prov_camel_presc = _strict_bool(provenance.get("prescriptionDriverAllowed"))
-    presc_candidates = [c for c in (attr_prescription, prov_prescription, prov_camel_presc) if c is not None]
+    presc_candidates = [c for c in (attr_prescription, attr_camel_presc, prov_prescription, prov_camel_presc) if c is not None]
 
     if False in presc_candidates or has_restrictions or grounding_class_val == "INTERPOLATED_PROXY":
         prescription_driver_allowed = False
@@ -281,9 +288,11 @@ def serialize_surface_artifact(surface: Any) -> dict:
     else:
         prescription_driver_allowed = False
 
-    # Bind per-state support class from provenance or attributes
-    support_class_val = str(provenance.get("support_class") or _field(surface, "support_class", None) or "").lower()
-    is_unsupported_or_diagnostic = support_class_val in ("unsupported", "derived_diagnostic", "blocked", "revoked")
+    # Bind per-state support class: intersect attribute and provenance support classes with whitespace handling
+    attr_sc = str(_field(surface, "support_class", None) or _field(surface, "supportClass", None) or "").strip().lower()
+    prov_sc = str(provenance.get("support_class") or provenance.get("supportClass") or "").strip().lower()
+    all_sc = {sc for sc in (attr_sc, prov_sc) if sc}
+    is_unsupported_or_diagnostic = any(sc in ("unsupported", "derived_diagnostic", "blocked", "revoked") for sc in all_sc)
     if is_unsupported_or_diagnostic:
         state_update_allowed = False
         prescription_driver_allowed = False
@@ -353,7 +362,7 @@ def serialize_surface_artifact(surface: Any) -> dict:
         "state_update_allowed": state_update_allowed,
         "prescription_driver_allowed": prescription_driver_allowed,
         "confidence": _surface_value(surface, provenance, "confidence"),
-        "uncertainty": _surface_value(surface, provenance, "uncertainty"),
+        "uncertainty": _surface_value(surface, provenance, "uncertainty", "sigma"),
         "authority_block_reason": authority_block_reason,
         "surface_role": surface_role,
         "grid_ref": _field(surface, "grid_ref", None),

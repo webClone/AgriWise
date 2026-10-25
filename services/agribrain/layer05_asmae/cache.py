@@ -652,6 +652,8 @@ def _load_validated_rasters(
                 if stable_value_hash(array) != metadata.get("content_hash"):
                     raise ValueError(f"raster content mismatch for {key}")
                 if key.startswith("__mask__"):
+                    if not (array.dtype == bool or np.issubdtype(array.dtype, np.bool_)):
+                        raise TypeError(f"mask {key} array must have boolean dtype, got {array.dtype}")
                     target_var_key = key[len("__mask__"):]
                     masks[target_var_key] = np.asarray(array, dtype=bool)
                 else:
