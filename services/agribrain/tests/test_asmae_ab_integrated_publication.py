@@ -832,3 +832,380 @@ def test_scientific_export_receipt_preservation():
     assert entry.valid_mask == [[True, True], [True, False]]
     assert "stats" in entry.canonical_metadata
     assert entry.stats["valid_pixels"] == 3
+
+
+def test_ab_r01_native_microzone_conversion_and_spatial_continuity():
+    """AB-R01: Native converter, scalar missingness, negative indices, and bilinear supported endpoints."""
+    from services.agribrain.layer05_asmae.engine import ASMAEEngine
+
+    engine = ASMAEEngine.__new__(ASMAEEngine)
+    # 1. Native _microzone_to_grid execution without NameError
+    res = engine._microzone_to_grid({'mz_000_000': [0.0] * 13}, None)
+    assert len(res) == 13
+    assert res['lai'] == [[0.0]]
+
+    # 2. _microzone_scalar_to_grid: holes are None, mz_-1_-1 ignored, explicit None preserved
+    scalar_res = engine._microzone_scalar_to_grid({
+        'mz_000_000': 0.0,
+        'mz_000_001': None,
+        'mz_-1_-1': 0.9,
+    })
+    assert scalar_res == [[0.0, None]]
+
+    # 3. _bilinear_resample preserves supported physical zero endpoints
+    # For [[0.0, None], [None, 0.8]] -> 3x3, top-left must stay 0.0, bottom-right 0.8
+    resampled = engine._bilinear_resample([[0.0, None], [None, 0.8]], 3, 3)
+    assert len(resampled) == 3
+    assert len(resampled[0]) == 3
+    assert resampled[0][0] == 0.0
+    assert resampled[2][2] == 0.8
+
+
+def test_ab_r02_per_state_influence_and_proxy_not_assimilated_protection():
+    """AB-R02: Unchanged sibling does not gain accepted count, proxy protects NOT_ASSIMILATED."""
+    import random
+    from services.agribrain.layer05_asmae.assimilation.filter import (
+        update_step_proxy,
+        _proxy_update_single_obs,
+    )
+    from services.agribrain.layer05_asmae.state.descriptors import STATE_NAMES
+
+    # 1. build_state_support_ledger excludes uninfluenced sibling state
+    mock_report = {
+        "obs_name": "ndvi",
+        "sensor": "S2",
+        "mode": "ht_per_pixel_ensrf",
+        "update_applied": True,
+        "real_provider_product": True,
+        "source_reality": "provider_observation",
+        "target_states": ["vigor", "lai"],
+        "accepted_target_states": ["vigor"],
+        "excluded_target_states": ["lai"],
+        "evidence_kind": "indirect_observation",
+        "per_state_influence": {
+            "vigor": {"state_influenced": True, "delta_mean": 0.05, "variance_reduction": 0.001},
+            "lai": {"state_influenced": False, "delta_mean": 0.0, "variance_reduction": 0.0},
+        },
+    }
+    ledger = build_state_support_ledger([mock_report])
+    assert ledger["vigor"]["accepted_update_count"] == 1
+    assert ledger["vigor"]["indirect_observation_count"] == 1
+    assert ledger["lai"]["accepted_update_count"] == 0
+    assert ledger["lai"]["indirect_observation_count"] == 0
+    assert len(ledger["lai"]["excluded_updates"]) == 1
+    assert ledger["lai"]["excluded_updates"][0]["exclusion_reason"] == "no_state_influence"
+
+    # 2. update_step_proxy never updates NOT_ASSIMILATED stress_memory
+    class DummyMapping:
+        sensor = "S2"
+        target_state_indices = [STATE_NAMES.index("stress_memory")]
+
+    class DummyScene:
+        crop_stage = "vegetative"
+        cloud_fraction = 0.0
+        valid_fraction = 1.0
+        registration_uncertainty_m = 0.0
+        temporal_aggregation_days = 1.0
+
+    mem_idx = STATE_NAMES.index("stress_memory")
+    initial_val = 0.123
+    ens = {"mz_000_000": [[initial_val if i == mem_idx else 0.5 for i in range(13)] for _ in range(5)]}
+    rng = random.Random(42)
+
+    # Calling _proxy_update_single_obs directly on stress_memory
+    _proxy_update_single_obs(ens, ["mz_000_000"], "ndvi", 0.8, DummyMapping(), 0.05, 0.0025, rng)
+    # Stress memory value must be completely untouched
+    for m in ens["mz_000_000"]:
+        assert m[mem_idx] == initial_val
+
+
+def test_ab_r03_strict_boolean_ceiling_intersection_and_restriction_union():
+    """AB-R03: Strict boolean denial on malformed numbers, ceiling normalization, union of restrictions."""
+    from services.agribrain.layer10_sire.surface_contract import (
+        _strict_bool,
+        _normalize_ceiling_token,
+        serialize_surface_artifact,
+    )
+    from services.agribrain.layer10_sire.schema import SurfaceArtifact, SurfaceType
+    from services.agribrain.layer05_asmae.state.descriptors import AuthorityCeiling
+
+    # 1. _strict_bool rejects NaN, Inf, -1, 2
+    assert _strict_bool(float("nan")) is False
+    assert _strict_bool(float("inf")) is False
+    assert _strict_bool(-1) is False
+    assert _strict_bool(2) is False
+    assert _strict_bool(1) is True
+    assert _strict_bool(1.0) is True
+    assert _strict_bool(0) is False
+    assert _strict_bool(0.0) is False
+    assert _strict_bool("true") is True
+    assert _strict_bool("false") is False
+    assert _strict_bool(None) is None
+
+    # 2. Ceiling normalization across Enum, Enum.value, string
+    assert _normalize_ceiling_token(AuthorityCeiling.VISUALIZATION) == "VISUALIZATION"
+    assert _normalize_ceiling_token(AuthorityCeiling.VISUALIZATION.value) == "VISUALIZATION"
+    assert _normalize_ceiling_token("AuthorityCeiling.VISUALIZATION") == "VISUALIZATION"
+    assert _normalize_ceiling_token("VISUALIZATION") == "VISUALIZATION"
+    assert _normalize_ceiling_token("monitoring_only") == "MONITORING_ONLY"
+
+    # 3. Permissive attribute masked by stricter provenance ceiling
+    s = SurfaceArtifact(
+        surface_id="TEST_CEIL",
+        semantic_type=SurfaceType.ASMAE_VIGOR,
+        grid_ref="1x1",
+        values=[[0.5]],
+        units="index",
+        native_resolution_m=10.0,
+        state_update_allowed=True,
+        prescription_driver_allowed=True,
+        provenance={"authority_ceiling": AuthorityCeiling.DIAGNOSTIC},
+    )
+    doc = serialize_surface_artifact(s)
+    assert doc["state_update_allowed"] is False
+    assert doc["prescription_driver_allowed"] is False
+
+    # 4. Unknown declared ceiling fail-closed
+    s_unknown = SurfaceArtifact(
+        surface_id="TEST_UNKNOWN",
+        semantic_type=SurfaceType.ASMAE_VIGOR,
+        grid_ref="1x1",
+        values=[[0.5]],
+        units="index",
+        native_resolution_m=10.0,
+        state_update_allowed=True,
+        prescription_driver_allowed=True,
+        provenance={"authority_ceiling": "UNKNOWN_CAPABILITY"},
+    )
+    doc_u = serialize_surface_artifact(s_unknown)
+    assert doc_u["state_update_allowed"] is False
+    assert doc_u["prescription_driver_allowed"] is False
+
+    # 5. Restriction union: empty attribute list does not mask provenance block reason
+    s_res = SurfaceArtifact(
+        surface_id="TEST_RES",
+        semantic_type=SurfaceType.ASMAE_VIGOR,
+        grid_ref="1x1",
+        values=[[0.5]],
+        units="index",
+        native_resolution_m=10.0,
+        state_update_allowed=True,
+        prescription_driver_allowed=True,
+        block_reasons=[],
+        provenance={"block_reasons": ["local_support_revoked"]},
+    )
+    doc_r = serialize_surface_artifact(s_res)
+    assert doc_r["state_update_allowed"] is False
+    assert doc_r["prescription_driver_allowed"] is False
+    assert doc_r["block_reasons"] == ["local_support_revoked"]
+
+
+def test_ab_r04_availability_and_domain_qualification():
+    """AB-R04: Malformed pixel and scalar values cannot acquire availability; INV-2 type safety."""
+    from services.agribrain.layer10_sire.products.manifest import build_render_manifest
+    from services.agribrain.layer10_sire.schema import (
+        SurfaceArtifact, SurfaceType, Layer10Output, RenderMode,
+    )
+    from services.agribrain.layer10_sire.invariants import enforce_layer10_invariants
+
+    dummy_input = Layer10Input(
+        plot_namespace=PlotNamespace(tenant_id="T1", farm_id="F1", plot_id="P1")
+    )
+
+    # 1. Surface with all-None raster and boolean/string/nan scalar cannot acquire availability
+    for bad_scalar in (False, float("nan"), float("inf"), "not-an-estimate"):
+        s_bad = SurfaceArtifact(
+            surface_id="TEST_BAD_SCALAR",
+            semantic_type=SurfaceType.ASMAE_VIGOR,
+            grid_ref="2x2",
+            values=[[None, None], [None, None]],
+            units="index",
+            native_resolution_m=10.0,
+            provenance={"scalar_value": bad_scalar},
+        )
+        manifest = build_render_manifest([s_bad], dummy_input)
+        mode = next((m for m in manifest.available_modes if m.mode == RenderMode.ASMAE_VIGOR), None)
+        assert mode is not None
+        assert mode.enabled is False
+
+    # 2. has_scalar_estimate="false" flag denies availability
+    s_false_flag = SurfaceArtifact(
+        surface_id="TEST_FALSE_FLAG",
+        semantic_type=SurfaceType.ASMAE_VIGOR,
+        grid_ref="2x2",
+        values=[[None, None], [None, None]],
+        units="index",
+        native_resolution_m=10.0,
+        provenance={"has_scalar_estimate": "false", "scalar_value": 0.5},
+    )
+    m_flag = build_render_manifest([s_false_flag], dummy_input)
+    mode_f = next((m for m in m_flag.available_modes if m.mode == RenderMode.ASMAE_VIGOR), None)
+    assert mode_f is not None
+    assert mode_f.enabled is False
+
+    # 3. Legitimate finite numeric scalar (0.0 or 0.5) DOES acquire availability
+    s_valid_scalar = SurfaceArtifact(
+        surface_id="TEST_VALID_SCALAR",
+        semantic_type=SurfaceType.ASMAE_VIGOR,
+        grid_ref="2x2",
+        values=[[None, None], [None, None]],
+        units="index",
+        native_resolution_m=10.0,
+        provenance={"scalar_value": 0.0},
+    )
+    m_valid = build_render_manifest([s_valid_scalar], dummy_input)
+    mode_v = next((m for m in m_valid.available_modes if m.mode == RenderMode.ASMAE_VIGOR), None)
+    assert mode_v is not None
+    assert mode_v.enabled is True
+
+    # 4. Invariants INV-2 type checks without raising TypeError
+    s_string_val = SurfaceArtifact(
+        surface_id="TEST_STR_VAL",
+        semantic_type=SurfaceType.ASMAE_VIGOR,
+        grid_ref="1x2",
+        values=[["invalid_string", 0.5]],
+        units="index",
+        native_resolution_m=10.0,
+    )
+    out_inv = Layer10Output(surface_pack=[s_string_val])
+    violations = enforce_layer10_invariants(out_inv, 1, 2)
+    assert any("INV-2" in v for v in violations)
+
+
+def test_ab_r05_cache_mask_pairing_policy_versioning_and_l10_atomic_commit():
+    """AB-R05: Scalar nomask support, exact mask shape pairing, policy versioning, and L10 atomic commit."""
+    from services.agribrain.layer05_asmae.cache import (
+        save_rasters_artifact,
+        _load_validated_rasters,
+        _raster_artifact_manifest,
+        get_asmae_cache_key,
+        STATE_SUPPORT_POLICY_VERSION,
+    )
+    from services.agribrain.layer10_sire.runner import save_layer10_to_cache, load_layer10_from_cache
+    from services.agribrain.layer10_sire.schema import Layer10Output, SurfaceArtifact, SurfaceType
+
+    # 1. Scalar nomask MaskedArray saves 2D mask successfully
+    masked_grid = np.ma.array([[0.1, 0.2], [0.3, 0.4]])
+    ref = save_rasters_artifact("test_nomask_artifact", {"test_layer__var": masked_grid})
+    assert ref != ""
+    manifest = _raster_artifact_manifest(ref, "test_nomask_artifact")
+    assert "__mask__test_layer__var" in manifest["masks"]
+    assert manifest["masks"]["__mask__test_layer__var"]["shape"] == [2, 2]
+
+    # 2. Undersized mask mismatch is rejected by _load_validated_rasters (no clipping)
+    bad_manifest = {
+        "manifest_version": "v2_generation_addressed",
+        "ref": ref,
+        "arrays": {
+            "test_layer__var": {
+                "shape": [2, 2],
+                "dtype": "float64",
+                "content_hash": manifest["arrays"]["test_layer__var"]["content_hash"],
+            }
+        },
+        "masks": {
+            "__mask__test_layer__var": {
+                "shape": [1, 1],
+                "dtype": "bool",
+                "content_hash": "dummy",
+            }
+        },
+    }
+    loaded = _load_validated_rasters(bad_manifest, "test_nomask_artifact")
+    assert loaded is None
+
+    # 3. Cache key incorporates STATE_SUPPORT_POLICY_VERSION
+    inp = _make_dummy_asmae_input("test_policy_plot")
+    key = get_asmae_cache_key(inp)
+    assert isinstance(key, str) and len(key) == 64
+
+    # 4. Layer 10 cache writer: atomic commit and failure preservation
+    from services.agribrain.layer10_sire.schema import QualityReport
+    from services.agribrain.layer10_sire.surface_contract import (
+        RENDER_AUTHORIZATION_VERSION,
+        SURFACES_SCHEMA_VERSION,
+        PublicationStatus,
+    )
+    from scientific_contracts import LAYER10_PUBLICATION_SCHEMA_VERSION
+
+    l10_key = f"l10_test_{uuid.uuid4().hex[:8]}"
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    cache_dir = os.path.join(base_dir, "artifacts", "surfaces_cache")
+    cache_path = os.path.join(cache_dir, f"{l10_key}.json")
+
+    def _make_pub_output(surfaces):
+        prov = {
+            "publication_run_id": "test_run_123",
+            "request_run_id": "test_run_123",
+            "publication_id": f"pub_{l10_key[:16]}",
+            "surface_schema_version": SURFACES_SCHEMA_VERSION,
+            "layer10_publication_schema_version": LAYER10_PUBLICATION_SCHEMA_VERSION,
+            "publication_status": PublicationStatus.VALID_NORMAL.value,
+        }
+        return Layer10Output(
+            run_id="test_run_123",
+            timestamp="2026-10-25T12:00:00Z",
+            surface_pack=surfaces,
+            render_authorizations={"satellite": {"canopy": {"base": {}}}},
+            render_authorization_version=RENDER_AUTHORIZATION_VERSION,
+            asmae_proof={"proof": "ok"},
+            mode_display_state={"canopy": {"display": "ok"}},
+            source_policy_display_state={"policy": "ok"},
+            core_asmae_evidence_state={"state": "ok"},
+            publication_surface_state={"state": "ok"},
+            publication_id=f"pub_{l10_key[:16]}",
+            publication_run_id="test_run_123",
+            surface_schema_version=SURFACES_SCHEMA_VERSION,
+            publication_status=PublicationStatus.VALID_NORMAL.value,
+            provenance=dict(prov),
+        )
+
+    try:
+        surface_initial = SurfaceArtifact(
+            surface_id="S_INIT",
+            semantic_type=SurfaceType.NDVI_CLEAN,
+            grid_ref="2x2",
+            values=[[0.2, 0.3], [0.4, 0.5]],
+            units="index",
+            native_resolution_m=10.0,
+        )
+        out1 = _make_pub_output([surface_initial])
+        bytes1 = save_layer10_to_cache(l10_key, out1)
+        assert bytes1 > 0
+
+        # Read back committed output
+        loaded1 = load_layer10_from_cache(l10_key)
+        assert loaded1 is not None
+        assert loaded1.surface_pack[0].values[0][0] == pytest.approx(0.2)
+
+        # Simulate failed subsequent commit by patching os.replace to fail
+        original_replace = os.replace
+        def failing_replace(src, dst):
+            if "tmp.json" in src:
+                raise OSError("Injected atomic replace failure")
+            return original_replace(src, dst)
+
+        surface_changed = SurfaceArtifact(
+            surface_id="S_CHANGED",
+            semantic_type=SurfaceType.NDVI_CLEAN,
+            grid_ref="2x2",
+            values=[[0.9, 0.9], [0.9, 0.9]],
+            units="index",
+            native_resolution_m=10.0,
+        )
+        out2 = _make_pub_output([surface_changed])
+        os.replace = failing_replace
+        try:
+            bytes2 = save_layer10_to_cache(l10_key, out2)
+            assert bytes2 == 0
+        finally:
+            os.replace = original_replace
+
+        # Prior committed cache MUST remain readable!
+        loaded_after_failure = load_layer10_from_cache(l10_key)
+        assert loaded_after_failure is not None
+        assert loaded_after_failure.surface_pack[0].values[0][0] == pytest.approx(0.2)
+    finally:
+        if os.path.exists(cache_path):
+            try: os.remove(cache_path)
+            except Exception: pass

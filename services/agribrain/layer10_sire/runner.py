@@ -1501,46 +1501,43 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
                 else:
                     setattr(owner, field_name, value)
         
-        # Define tmp paths for atomic rename
-        npz_path_tmp = npz_path.replace(".npz", ".tmp.npz")
-        json_path_tmp = cache_path.replace(".json", ".tmp.json")
-        
-        # 1. Save NPZ to tmp
+        # Atomic generation-addressed discipline for Layer 10
+        import uuid
+        gen_id = uuid.uuid4().hex[:12]
+        npz_candidate_path = None
+        json_candidate_path = None
+
         if npz_data:
-            np.savez_compressed(npz_path_tmp, **npz_data)
-            serialized["surfaces_artifact_ref"] = f"{cache_dir_name}/surfaces_{cache_key}.npz"
-            
-        # 2. Save JSON to tmp
-        with open(json_path_tmp, "w", encoding="utf-8") as f:
+            npz_filename = f"surfaces_{cache_key}_{gen_id}.npz"
+            npz_candidate_path = os.path.join(cache_dir, npz_filename)
+            np.savez_compressed(npz_candidate_path, **npz_data)
+            serialized["surfaces_artifact_ref"] = f"{cache_dir_name}/{npz_filename}"
+            serialized["generation_id"] = gen_id
+
+        # Write candidate JSON
+        json_candidate_path = os.path.join(cache_dir, f"{cache_key}_{gen_id}.tmp.json")
+        with open(json_candidate_path, "w", encoding="utf-8") as f:
             json.dump(serialized, f, separators=(",", ":"), default=str)
-            
-        # 3. Atomic replace NPZ
-        if npz_data:
-            os.replace(npz_path_tmp, npz_path)
-            
-        # 4. Atomic replace JSON
-        os.replace(json_path_tmp, cache_path)
-            
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic commit: replace manifest JSON
+        os.replace(json_candidate_path, cache_path)
+
         # Compute total storage size in bytes
         total_bytes = os.path.getsize(cache_path)
-        if os.path.exists(npz_path):
-            total_bytes += os.path.getsize(npz_path)
+        if npz_candidate_path and os.path.exists(npz_candidate_path):
+            total_bytes += os.path.getsize(npz_candidate_path)
         return total_bytes
     except Exception as e:
         import sys
         print(f"[L10] Failed to write surfaces cache: {e}", file=sys.stderr)
-        # Cleanup any temporary files on failure
-        if npz_path_tmp and os.path.exists(npz_path_tmp):
-            try: os.remove(npz_path_tmp)
+        # Cleanup ONLY uncommitted candidate files on failure; preserve existing committed cache!
+        if npz_candidate_path and os.path.exists(npz_candidate_path):
+            try: os.remove(npz_candidate_path)
             except Exception: pass
-        if json_path_tmp and os.path.exists(json_path_tmp):
-            try: os.remove(json_path_tmp)
-            except Exception: pass
-        if npz_path and os.path.exists(npz_path):
-            try: os.remove(npz_path)
-            except Exception: pass
-        if cache_path and os.path.exists(cache_path):
-            try: os.remove(cache_path)
+        if json_candidate_path and os.path.exists(json_candidate_path):
+            try: os.remove(json_candidate_path)
             except Exception: pass
         return 0
 
@@ -3906,14 +3903,17 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             if s:
                 vals = s.values or []
                 has_finite = any(
-                    v is not None and not (isinstance(v, float) and (math.isnan(v) or math.isinf(v)))
+                    isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
                     for row in vals
                     for v in row
                 )
-                prov = s.provenance or {}
-                if not isinstance(prov, dict):
-                    prov = {}
-                has_scalar = bool(prov.get("has_scalar_estimate") or prov.get("scalar_value") is not None)
+                prov = s.provenance if isinstance(s.provenance, dict) else {}
+                has_scalar = False
+                flag = prov.get("has_scalar_estimate")
+                flag_denied = (isinstance(flag, str) and flag.strip().lower() in ("false", "0", "no")) or (flag is False)
+                if not flag_denied:
+                    sv = prov.get("scalar_value")
+                    has_scalar = isinstance(sv, (int, float)) and not isinstance(sv, bool) and math.isfinite(sv)
 
                 if not has_finite and not has_scalar:
                     surface_inventory[st] = {

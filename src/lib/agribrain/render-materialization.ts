@@ -130,9 +130,32 @@ export function validateSurfaceGrid(
     return { valid: false, reason: "surface_values_non_rectangular", bounds: null, width: null, height };
   }
 
+  // Reject all-null support
+  let hasValidCell = false;
+  for (const row of surface.values) {
+    for (const v of row) {
+      if (finiteNumber(v)) {
+        hasValidCell = true;
+        break;
+      }
+    }
+    if (hasValidCell) break;
+  }
+  if (!hasValidCell) {
+    return { valid: false, reason: "surface_values_all_null", bounds: null, width, height };
+  }
+
   const spec = getGridSpec(surface);
   if (!spec || !spec.bounds || !Array.isArray(spec.bounds) || spec.bounds.length !== 4) {
     return { valid: false, reason: "grid_spec_bounds_invalid", bounds: null, width, height };
+  }
+
+  // Dimension parity check: reject metadata dimensions mismatching array dimensions
+  if (spec.width !== undefined && spec.width !== width) {
+    return { valid: false, reason: "grid_spec_dimensions_mismatch", bounds: null, width, height };
+  }
+  if (spec.height !== undefined && spec.height !== height) {
+    return { valid: false, reason: "grid_spec_dimensions_mismatch", bounds: null, width, height };
   }
 
   const [minLng, minLat, maxLng, maxLat] = spec.bounds.map(Number);
@@ -141,6 +164,13 @@ export function validateSurfaceGrid(
   }
   if (minLng >= maxLng || minLat >= maxLat) {
     return { valid: false, reason: "grid_spec_bounds_collapsed", bounds: null, width, height };
+  }
+
+  // Reject metric display bounds under geographic / unspecified CRS
+  const crsStr = String(spec.crs || "").toUpperCase();
+  const isGeographic = crsStr === "EPSG:4326" || crsStr === "WGS84" || crsStr === "OGC:CRS84" || !spec.crs;
+  if (isGeographic && (minLng < -180 || maxLng > 180 || minLat < -90 || maxLat > 90)) {
+    return { valid: false, reason: "grid_spec_bounds_metric_crs_mismatch", bounds: null, width, height };
   }
 
   return {
@@ -168,6 +198,18 @@ export function canMaterializeMask(
   const maskSpec = getGridSpec(mask);
   const targetSpec = getGridSpec(target);
   if (!maskSpec || !targetSpec || String(maskSpec.crs || "") !== String(targetSpec.crs || "")) return false;
+
+  // Check shifted affine transform if present
+  if (Array.isArray(maskSpec.transform) && Array.isArray(targetSpec.transform)) {
+    if (maskSpec.transform.length !== targetSpec.transform.length) return false;
+    const affineMatches = maskSpec.transform.every((val, idx) => {
+      const tVal = targetSpec.transform?.[idx];
+      if (typeof val !== "number" || typeof tVal !== "number") return false;
+      const scale = Math.max(1, Math.abs(val), Math.abs(tVal));
+      return Math.abs(val - tVal) <= scale * 1e-6;
+    });
+    if (!affineMatches) return false;
+  }
 
   const sharedBounds = maskGrid.bounds.every((value, index) => {
     const targetValue = targetGrid.bounds?.[index];

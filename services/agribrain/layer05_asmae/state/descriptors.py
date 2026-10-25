@@ -143,6 +143,7 @@ STATE_ORDER: Tuple[str, ...] = (
 """Frozen state ordering. Must match config.STATE_NAMES exactly."""
 
 assert len(STATE_ORDER) == 13, "STATE_ORDER must have exactly 13 entries"
+STATE_NAMES: Tuple[str, ...] = STATE_ORDER
 
 
 # ── Descriptors for all 13 states ────────────────────────────────────────────

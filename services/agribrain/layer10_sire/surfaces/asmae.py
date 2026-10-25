@@ -1075,6 +1075,7 @@ def compute_asmae_support_classification(
         "management_zone_eligible": mgmt,
         "zone_statistics_eligible": stats,
         "block_reasons": list(state_block_reasons) if state_block_reasons else [],
+        "authority_ceiling": state_ceiling,
     }
 
 
@@ -1619,6 +1620,7 @@ def generate_asmae_surfaces(
             "source_reality": src_real,
             "support_class": support_meta["support_class"],
             "evidence_class": support_meta["evidence_class"],
+            "authority_ceiling": support_meta.get("authority_ceiling"),
             "direct_observation": support_meta["direct_observation"],
             "scouting_zone_eligible": support_meta["scouting_zone_eligible"],
             "management_zone_eligible": support_meta["management_zone_eligible"],
@@ -1813,7 +1815,13 @@ def generate_asmae_surfaces(
             if isinstance(val, bool):
                 return val
             if isinstance(val, (int, float)):
-                return bool(val)
+                if math.isnan(val) or math.isinf(val):
+                    return False
+                if val == 1.0 or val == 1:
+                    return True
+                if val == 0.0 or val == 0:
+                    return False
+                return False
             if isinstance(val, str):
                 return val.strip().lower() in ("true", "1", "yes", "t")
             return False
@@ -1821,11 +1829,22 @@ def generate_asmae_surfaces(
         has_blocks = len(surf_blocks) > 0
         state_update_req = _parse_strict_bool(provenance.get("state_update_allowed"))
         presc_req = _parse_strict_bool(provenance.get("prescription_driver_allowed"))
-        auth_ceil = str(provenance.get("authority_ceiling") or "").upper()
-        if auth_ceil in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC"):
+
+        # Bind support class: unsupported or derived diagnostic cannot have active permissions
+        if support_meta.get("support_class") in ("unsupported", "derived_diagnostic"):
+            state_update_req = False
+            presc_req = False
+
+        from services.agribrain.layer10_sire.surface_contract import _normalize_ceiling_token
+        auth_ceil = _normalize_ceiling_token(provenance.get("authority_ceiling") or support_meta.get("authority_ceiling"))
+        if auth_ceil in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC", "TRAINING_EXPORT"):
             state_update_req = False
             presc_req = False
         elif auth_ceil == "STATE_UPDATE":
+            presc_req = False
+        elif auth_ceil and auth_ceil not in ("PRESCRIPTION_DRIVER", "PRESCRIPTION_ELIGIBLE", "MANAGED_PRESCRIPTION", "FIELD_PRESCRIPTION", "FULL_SYSTEM_AUTONOMOUS"):
+            # Unknown ceiling -> fail-closed
+            state_update_req = False
             presc_req = False
 
         surf_state_update = state_update_req and not has_blocks

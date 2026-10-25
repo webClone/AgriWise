@@ -270,12 +270,17 @@ def build_render_manifest(
         if mode is not None:
             vals = s.values or []
             has_valid_pixels = any(
-                v is not None and not (isinstance(v, float) and (math.isnan(v) or math.isinf(v)))
+                isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
                 for row in vals
                 for v in row
             )
-            prov = s.provenance or {}
-            has_scalar = bool(prov.get("has_scalar_estimate") or prov.get("scalar_value") is not None)
+            prov = s.provenance if isinstance(s.provenance, dict) else {}
+            has_scalar = False
+            flag = prov.get("has_scalar_estimate")
+            flag_denied = (isinstance(flag, str) and flag.strip().lower() in ("false", "0", "no")) or (flag is False)
+            if not flag_denied:
+                sv = prov.get("scalar_value")
+                has_scalar = isinstance(sv, (int, float)) and not isinstance(sv, bool) and math.isfinite(sv)
             if has_valid_pixels or has_scalar:
                 available_modes_set.add(mode)
                 if mode not in surface_ids_by_mode:

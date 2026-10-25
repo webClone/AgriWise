@@ -5,6 +5,7 @@ Layer 10 Invariants — Runtime Safety Checks
 Enforced after every L10 run. Violations → warning + quality degradation.
 """
 
+import math
 from typing import List
 from services.agribrain.layer10_sire.schema import (
     Layer10Output, SurfaceArtifact, ZoneArtifact, SurfaceType,
@@ -128,6 +129,11 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
             for v in row:
                 if v is None:
                     continue
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                    violations.append(
+                        f"INV-2: Surface {s.surface_id} has invalid non-numeric or non-finite value {v!r}"
+                    )
+                    break
                 if lo is not None and v < lo - 1e-6:
                     violations.append(
                         f"INV-2: Surface {s.surface_id} value {v} < min {lo}"

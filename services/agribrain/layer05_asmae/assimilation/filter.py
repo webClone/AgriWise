@@ -29,6 +29,7 @@ from ..config import (
     STATE_BOUNDS,
     STATE_NAMES,
 )
+from ..state.descriptors import STATE_DESCRIPTORS, AssimilationPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -1806,6 +1807,8 @@ def update_step_ht(
             'mode': 'ht_per_pixel_ensrf',
             'update_applied': True,
             'target_states': target_states,
+            'accepted_target_states': [s for s in target_states if per_state_influence.get(s, {}).get('state_influenced', False)],
+            'excluded_target_states': [s for s in target_states if not per_state_influence.get(s, {}).get('state_influenced', False)],
             'evidence_kind': evidence_kind,
             'prior_variance': prior_variance,
             'posterior_variance': posterior_variance,
@@ -1863,7 +1866,19 @@ def update_step_proxy(
             state_index for state_index in mapping.target_state_indices
             if 0 <= state_index < len(STATE_NAMES)
             and not validate_forbidden_state_update(obs_name, state_index)
+            and STATE_DESCRIPTORS[state_index].assimilation_policy != AssimilationPolicy.NOT_ASSIMILATED
         ]
+        if not target_indices:
+            reports.append({
+                "obs_name": obs_name,
+                "sensor": mapping.sensor,
+                "mode": "excluded_forbidden_state",
+                "update_applied": False,
+                "target_states": [STATE_NAMES[s] for s in mapping.target_state_indices if 0 <= s < len(STATE_NAMES)],
+                "failure_reason": "not_assimilated_policy",
+            })
+            continue
+
         target_states = [STATE_NAMES[state_index] for state_index in target_indices]
         sigma_obs = compute_observation_noise(
             obs_name,
@@ -1905,10 +1920,48 @@ def update_step_proxy(
         else:
             continue
 
+        prior_mean = _state_mean_summary(ensemble, target_indices)
         prior_variance = _state_variance_summary(ensemble, target_indices)
         _proxy_update_single_obs(ensemble, node_ids, obs_name, obs_value,
-                                 mapping, sigma_obs, r_var, rng)
+                                 mapping, sigma_obs, r_var, rng, target_indices=target_indices)
+        posterior_mean = _state_mean_summary(ensemble, target_indices)
         posterior_variance = _state_variance_summary(ensemble, target_indices)
+
+        # Qualify actual per-state influence
+        per_state_influence: Dict[str, Dict[str, Any]] = {}
+        has_actual_influence = False
+        for state_index in target_indices:
+            state_name = STATE_NAMES[state_index]
+            desc = STATE_DESCRIPTORS[state_index]
+            scale = (desc.bounds[1] - desc.bounds[0]) if (desc.bounds and desc.bounds[1] > desc.bounds[0]) else 1.0
+            p_mean = prior_mean.get(state_name, 0.0)
+            post_m = posterior_mean.get(state_name, p_mean)
+            p_var = prior_variance.get(state_name, 0.0)
+            post_v = posterior_variance.get(state_name, p_var)
+            delta_mean = abs(post_m - p_mean)
+            variance_reduction = max(0.0, p_var - post_v)
+            tol_mean = 1e-5 * scale
+            tol_var = 1e-7 * (scale ** 2)
+            state_influenced = (delta_mean > tol_mean) or (variance_reduction > tol_var)
+            if state_influenced:
+                has_actual_influence = True
+            per_state_influence[state_name] = {
+                'delta_mean': float(delta_mean),
+                'variance_reduction': float(variance_reduction),
+                'state_influenced': state_influenced,
+            }
+
+        if not has_actual_influence:
+            reports.append({
+                'obs_name': obs_name,
+                'sensor': mapping.sensor,
+                'mode': 'excluded_negligible_influence',
+                'update_applied': False,
+                'target_states': target_states,
+                'failure_reason': 'negligible_influence',
+                'per_state_influence': per_state_influence,
+            })
+            continue
 
         reports.append({
             "obs_name": obs_name,
@@ -1921,9 +1974,12 @@ def update_step_proxy(
             "mode": "proxy_mean_level",
             "update_applied": True,
             "target_states": target_states,
+            "accepted_target_states": [s for s in target_states if per_state_influence.get(s, {}).get('state_influenced', False)],
+            "excluded_target_states": [s for s in target_states if not per_state_influence.get(s, {}).get('state_influenced', False)],
             "evidence_kind": "proxy_observation",
             "prior_variance": prior_variance,
             "posterior_variance": posterior_variance,
+            "per_state_influence": per_state_influence,
             "information_gain": {
                 state: max(0.0, prior - posterior_variance.get(state, prior))
                 for state, prior in prior_variance.items()
@@ -1987,11 +2043,19 @@ def _legacy_stochastic_proxy_update_single_obs(
 
 def _proxy_update_single_obs(
     ensemble, node_ids, obs_name, obs_value,
-    mapping, sigma_obs, r_var, rng,
+    mapping, sigma_obs, r_var, rng, target_indices=None,
 ):
     from ..observation.index_state_mapping import validate_forbidden_state_update
     from ..observation.s1_sar_model import predict_sar_observation
     from ..observation.s2_forward_model import predict_observation
+
+    if target_indices is None:
+        target_indices = [
+            s for s in mapping.target_state_indices
+            if 0 <= s < len(STATE_NAMES)
+            and not validate_forbidden_state_update(obs_name, s)
+            and STATE_DESCRIPTORS[s].assimilation_policy != AssimilationPolicy.NOT_ASSIMILATED
+        ]
 
     for node_id in node_ids:
         members = ensemble[node_id]
@@ -2020,8 +2084,10 @@ def _proxy_update_single_obs(
         if prediction_variance < 1e-12 or total_variance <= 0.0:
             continue
         shrink = 1.0 / (1.0 + math.sqrt(max(r_var, 0.0) / total_variance))
-        for state_index in mapping.target_state_indices:
+        for state_index in target_indices:
             if validate_forbidden_state_update(obs_name, state_index):
+                continue
+            if STATE_DESCRIPTORS[state_index].assimilation_policy == AssimilationPolicy.NOT_ASSIMILATED:
                 continue
             state_values = [float(member[state_index]) for member in members]
             state_mean = sum(state_values) / n_ensemble

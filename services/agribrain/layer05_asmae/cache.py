@@ -69,6 +69,7 @@ ASMAE_WEATHER_FEATURE_VERSION = "v1_variable_completeness"
 ASMAE_HASH_SCHEMA_VERSION = "v2_exact_dtype_complete_authority"
 ASMAE_CACHE_SCHEMA_VERSION = "v10_atomic_manifest_authority"
 ASMAE_CACHE_COMMIT_SCHEMA_VERSION = "v1_atomic_npz_json"
+STATE_SUPPORT_POLICY_VERSION = "v2_receipt_bounded_20261025"
 ENSEMBLE_POLICY_CONTRACT_VERSION = "asmae_ensemble_policy_v1"
 
 HAS_NUMPY = np is not None
@@ -324,6 +325,7 @@ def get_asmae_cache_key(inp: ASMAEInput) -> str:
         "model_version": ASMAE_VERSION,
         "cache_schema_version": ASMAE_CACHE_SCHEMA_VERSION,
         "hash_schema_version": ASMAE_HASH_SCHEMA_VERSION,
+        "state_support_policy_version": STATE_SUPPORT_POLICY_VERSION,
         "ensemble_policy_contract_version": ENSEMBLE_POLICY_CONTRACT_VERSION,
         "ensemble_policy": {
             "shadow": ENSEMBLE_SIZE_SHADOW,
@@ -515,11 +517,13 @@ def save_rasters_artifact(cache_key: str, raster_dict: Dict[str, Any]) -> str:
         for key, grid in sorted(raster_dict.items(), key=lambda pair: str(pair[0])):
             if np.ma.is_masked(grid) or isinstance(grid, np.ma.MaskedArray):
                 data_part = np.asarray(grid.data)
-                mask_part = np.asarray(grid.mask, dtype=bool)
+                mask_part = np.asarray(np.ma.getmaskarray(grid), dtype=bool)
                 if data_part.dtype.hasobject:
                     data_part = np.asarray(data_part, dtype=np.float64)
                 if data_part.ndim != 2:
                     raise ValueError(f"raster {key} is not 2D: {data_part.shape}")
+                if mask_part.shape != data_part.shape:
+                    mask_part = np.broadcast_to(mask_part, data_part.shape).copy()
                 arrays_to_save[str(key)] = np.ascontiguousarray(data_part)
                 arrays_to_save[f"__mask__{key}"] = np.ascontiguousarray(mask_part)
             else:
@@ -653,16 +657,23 @@ def _load_validated_rasters(
                 else:
                     result[key] = _grid_to_lists(array)
 
-        # Apply any explicit masks to the reconstructed lists
+        # Apply explicit masks with exact shape pairing and boolean check
         for target_key, mask_arr in masks.items():
-            if target_key in result:
-                grid = result[target_key]
-                H = len(grid)
-                W = len(grid[0]) if H > 0 else 0
-                for r in range(min(H, mask_arr.shape[0])):
-                    for c in range(min(W, mask_arr.shape[1])):
-                        if mask_arr[r, c]:
-                            grid[r][c] = None
+            if target_key not in result:
+                raise ValueError(f"orphan mask member for unknown target {target_key}")
+            if not np.issubdtype(mask_arr.dtype, np.bool_):
+                raise TypeError(f"mask {target_key} is not boolean: {mask_arr.dtype}")
+            grid = result[target_key]
+            H = len(grid)
+            W = len(grid[0]) if H > 0 else 0
+            if mask_arr.shape != (H, W):
+                raise ValueError(
+                    f"mask shape {mask_arr.shape} does not strictly match data shape {(H, W)} for {target_key}"
+                )
+            for r in range(H):
+                for c in range(W):
+                    if mask_arr[r, c]:
+                        grid[r][c] = None
 
         return result
     except Exception as exc:
@@ -687,14 +698,21 @@ def load_rasters_from_artifact(rel_ref: str) -> Dict[str, List[List[Optional[flo
                 else:
                     result[key] = _grid_to_lists(array)
         for target_key, mask_arr in masks.items():
-            if target_key in result:
-                grid = result[target_key]
-                H = len(grid)
-                W = len(grid[0]) if H > 0 else 0
-                for r in range(min(H, mask_arr.shape[0])):
-                    for c in range(min(W, mask_arr.shape[1])):
-                        if mask_arr[r, c]:
-                            grid[r][c] = None
+            if target_key not in result:
+                raise ValueError(f"orphan mask member for unknown target {target_key}")
+            if not np.issubdtype(mask_arr.dtype, np.bool_):
+                raise TypeError(f"mask {target_key} is not boolean: {mask_arr.dtype}")
+            grid = result[target_key]
+            H = len(grid)
+            W = len(grid[0]) if H > 0 else 0
+            if mask_arr.shape != (H, W):
+                raise ValueError(
+                    f"mask shape {mask_arr.shape} does not strictly match data shape {(H, W)} for {target_key}"
+                )
+            for r in range(H):
+                for c in range(W):
+                    if mask_arr[r, c]:
+                        grid[r][c] = None
         return result
     except Exception as exc:
         logger.warning("Failed to load ASMAE rasters from %s: %s", rel_ref, exc)
@@ -768,6 +786,7 @@ def serialize_and_cache_asmae(inp: ASMAEInput, output_dict: Dict[str, Any]) -> b
                 "schema_version": ASMAE_CACHE_COMMIT_SCHEMA_VERSION,
                 "cache_schema_version": ASMAE_CACHE_SCHEMA_VERSION,
                 "hash_schema_version": ASMAE_HASH_SCHEMA_VERSION,
+                "state_support_policy_version": STATE_SUPPORT_POLICY_VERSION,
                 "committed": True,
                 "cache_key": cache_key,
                 "artifact_key": artifact_key,
@@ -841,6 +860,7 @@ def deserialize_cached_asmae(inp: ASMAEInput) -> Optional[Dict[str, Any]]:
                 or commit.get("schema_version") != ASMAE_CACHE_COMMIT_SCHEMA_VERSION
                 or commit.get("cache_schema_version") != ASMAE_CACHE_SCHEMA_VERSION
                 or commit.get("hash_schema_version") != ASMAE_HASH_SCHEMA_VERSION
+                or commit.get("state_support_policy_version") != STATE_SUPPORT_POLICY_VERSION
                 or commit.get("cache_key") != cache_key
                 or commit.get("artifact_key") != artifact_key
                 or commit.get("source_policy") != policy

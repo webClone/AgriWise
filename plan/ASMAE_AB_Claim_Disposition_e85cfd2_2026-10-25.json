@@ -1,0 +1,204 @@
+{
+  "candidate": "e85cfd224f8a731e2959648ce28450e27782188f",
+  "parent": "d59c9bdc85a64469a9424d4c7757a2d2c4da3041",
+  "review_date": "2026-10-25",
+  "verdict": "HOLD_PARTIAL_COMPLETE_EXISTING_AB_COHORT",
+  "completion_groups": [
+    {
+      "id": "AB-R01",
+      "priority": "P1",
+      "scope": "Native converter/assembly bindings plus spatial validity continuity",
+      "status": "introduced_runtime_regression_and_incomplete_planned_grid_contract",
+      "evidence": "spatial/results.json"
+    },
+    {
+      "id": "AB-R02",
+      "priority": "P1 scientific",
+      "scope": "Per-state support receipt consumption and H_t/proxy entrypoint parity",
+      "status": "partial_repair",
+      "evidence": "semantics/results.json"
+    },
+    {
+      "id": "AB-R03",
+      "priority": "P2",
+      "scope": "Typed capability/restriction union and ceiling intersection",
+      "status": "partial_repair",
+      "evidence": "authority/results.json"
+    },
+    {
+      "id": "AB-R04",
+      "priority": "P2",
+      "scope": "Finite availability/domain qualification and temporal/catalog convergence",
+      "status": "partial_repair",
+      "evidence": "catalog/results.json"
+    },
+    {
+      "id": "AB-R05",
+      "priority": "P1 scientific migration plus P2 integrity/parity",
+      "scope": "Scientific-policy cache migration, masks, canonical export and L10 transaction",
+      "status": "partial_repair_with_scalar_nomask_regression",
+      "evidence": [
+        "cache/results.json",
+        "export/results.json"
+      ]
+    }
+  ],
+  "original_workstream_disposition": {
+    "WB01": "partial",
+    "WB02": "partial",
+    "WB03": "original_bounds_legend_empty_cases_repaired_broader_contract_partial",
+    "WB04": "hold_introduced_runtime_errors",
+    "WB05": "normal_ASMAE_generations_and_explicit2Dmasks_repaired_broader_contract_partial",
+    "WB06": "BatchC_deferred_not_new_regression"
+  },
+  "verified_repairs": [
+    "Ht_indirect_labels",
+    "Ht_zero_local_support_exclusion",
+    "Ht_alltarget_negligible_exclusion",
+    "Ht_NOT_ASSIMILATED_guard",
+    "forecast_memory_evolution",
+    "direct_proxy_indirect_counter_roundtrip",
+    "schema_permission_defaultsFalse",
+    "string_false_permission_denial",
+    "permission_aliasFalse_intersection",
+    "native_restriction_ingress",
+    "13state_range_registration",
+    "LAI_legend8",
+    "empty_no_scalar_missing_disabled",
+    "native_identity_nodata_cleaning",
+    "ASMAE_generation_precommit_retention",
+    "explicit2Dmask_roundtrip",
+    "legacy_format_reads",
+    "rich_explicit_attribute_export"
+  ],
+  "coverage": {
+    "candidate": "e85cfd224f8a731e2959648ce28450e27782188f",
+    "parent": "d59c9bdc85a64469a9424d4c7757a2d2c4da3041",
+    "lane_observations": [
+      {
+        "lane": "semantics",
+        "file": "results.json",
+        "observation_assertions": 15,
+        "all_reproduced": true
+      },
+      {
+        "lane": "authority",
+        "file": "results.json",
+        "observation_assertions": 23,
+        "all_reproduced": true
+      },
+      {
+        "lane": "authority",
+        "file": "parent-results.json",
+        "observation_assertions": 13,
+        "all_reproduced": true
+      },
+      {
+        "lane": "catalog",
+        "file": "results.json",
+        "observation_assertions": 30,
+        "all_reproduced": true
+      },
+      {
+        "lane": "catalog",
+        "file": "parent-results.json",
+        "observation_assertions": 30,
+        "all_reproduced": true
+      },
+      {
+        "lane": "catalog",
+        "file": "temporal-results.json",
+        "observation_assertions": 2,
+        "all_reproduced": true
+      },
+      {
+        "lane": "catalog",
+        "file": "parent-temporal-results.json",
+        "observation_assertions": 2,
+        "all_reproduced": true
+      },
+      {
+        "lane": "spatial",
+        "file": "results.json",
+        "observation_assertions": 15,
+        "all_reproduced": true
+      },
+      {
+        "lane": "spatial",
+        "file": "frontend-results.json",
+        "observation_assertions": 6,
+        "all_reproduced": true
+      },
+      {
+        "lane": "cache",
+        "file": "results.json",
+        "observation_assertions": 16,
+        "all_reproduced": true
+      },
+      {
+        "lane": "export",
+        "file": "results.json",
+        "observation_assertions": 18,
+        "all_reproduced": true
+      },
+      {
+        "lane": "export",
+        "file": "parent-results.json",
+        "observation_assertions": 9,
+        "all_reproduced": true
+      }
+    ],
+    "source_receipts": [
+      {
+        "candidate": "e85cfd224f8a731e2959648ce28450e27782188f",
+        "verified_files": 1087,
+        "source_unchanged": true
+      },
+      {
+        "candidate": "d59c9bdc85a64469a9424d4c7757a2d2c4da3041",
+        "verified_files": 1087,
+        "source_unchanged": true
+      }
+    ],
+    "changed_production_modules_compiled": [
+      "services/agribrain/layer05_asmae/assimilation/filter.py",
+      "services/agribrain/layer05_asmae/cache.py",
+      "services/agribrain/layer05_asmae/engine.py",
+      "services/agribrain/layer05_asmae/feature_export.py",
+      "services/agribrain/layer05_asmae/state/descriptors.py",
+      "services/agribrain/layer10_sire/invariants.py",
+      "services/agribrain/layer10_sire/products/export.py",
+      "services/agribrain/layer10_sire/products/manifest.py",
+      "services/agribrain/layer10_sire/runner.py",
+      "services/agribrain/layer10_sire/schema.py",
+      "services/agribrain/layer10_sire/surface_contract.py",
+      "services/agribrain/layer10_sire/surfaces/asmae.py",
+      "services/agribrain/scientific_contracts/ledger_adapter.py",
+      "services/agribrain/scientific_contracts/state_support.py"
+    ],
+    "runtime_NameError_and_UnboundLocalError_reproduced": true,
+    "legacy_scientific_policy_bridge_reproduced": true,
+    "concurrent_cache_control_reproduced": true,
+    "all_documented_observations_reproduced": true,
+    "cohort_acceptance": "HOLD_PARTIAL",
+    "FA_open": 52,
+    "FA_checked": 0,
+    "counts_overlap": true,
+    "meaning": "Observation success records real repairs, remaining counterexamples and controls. It does not mean acceptance tests all pass or the full pipeline was run."
+  },
+  "governance": {
+    "FA_open": 52,
+    "FA_checked": 0,
+    "production_edits": false,
+    "merge_or_push": false
+  },
+  "next_action": "One integrated A/B completion revision and one connected acceptance gate; preserve verified fixes.",
+  "qualifications": [
+    "Native converter executes; assembly uses exact scoped prefix, not full pipeline",
+    "Some tests use authored malformed/sparse carriers, normal incidence not established",
+    "Scientific cache bridge uses native parent/current builders with authored source declarations",
+    "L10 transaction uses exact isolated writer with admitted-fixture validator stub",
+    "No full provider/API/browser/GDAL/hardware execution",
+    "Repository test count57 is user-reported and was not rerun"
+  ]
+}

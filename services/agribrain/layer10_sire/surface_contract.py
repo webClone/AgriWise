@@ -5,6 +5,7 @@ process and the scientific worker can therefore classify the same serialized
 envelope without import-mode dependent behaviour.
 """
 
+import math
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -73,14 +74,36 @@ def _strict_bool(val: Any) -> Optional[bool]:
     if isinstance(val, bool):
         return val
     if isinstance(val, (int, float)):
-        return bool(val)
+        # Strictly accept only binary 0 / 1 values; reject NaN, Inf, -1, 2, etc.
+        if math.isnan(val) or math.isinf(val):
+            return False
+        if val == 1.0 or val == 1:
+            return True
+        if val == 0.0 or val == 0:
+            return False
+        return False
     if isinstance(val, str):
         v = val.strip().lower()
         if v in ("true", "1", "t", "yes", "y"):
             return True
         if v in ("false", "0", "f", "no", "n", ""):
             return False
+        return False
     return False
+
+
+def _normalize_ceiling_token(c: Any) -> Optional[str]:
+    if c is None:
+        return None
+    if hasattr(c, "name"):
+        token = str(c.name).upper()
+    elif hasattr(c, "value"):
+        token = str(c.value).upper()
+    else:
+        token = str(c).strip().upper()
+    if token.startswith("AUTHORITYCEILING."):
+        token = token[len("AUTHORITYCEILING."):]
+    return token
 
 
 def _grid_spec_dict(value: Any) -> Any:
@@ -213,23 +236,25 @@ def serialize_surface_artifact(surface: Any) -> dict:
             else "agronomic_surface"
         )
     grounding_class_val = str(_enum_value(_field(surface, "grounding_class", None)) or "UNIFORM")
-    # Restrictive consistency: default permissions to False, intersect ceilings and restrictions
-    block_reasons_raw = _surface_value(surface, provenance, "block_reasons", "blockReasons") or []
-    restriction_reasons_raw = _surface_value(surface, provenance, "restriction_reasons", "restrictionReasons") or []
-    exclusion_reason_raw = _surface_value(surface, provenance, "exclusion_reason", "exclusionReason")
-    authority_block_reason = _surface_value(
-        surface, provenance, "authority_block_reason", "authorityBlockReason"
+    # Restrictive consistency: default permissions to False, intersect all ceilings and restrictions
+    all_restrictions = resolve_surface_block_reasons(
+        _field(surface, "block_reasons", None),
+        _field(surface, "blockReasons", None),
+        _field(surface, "restriction_reasons", None),
+        _field(surface, "restrictionReasons", None),
+        _field(surface, "exclusion_reason", None),
+        _field(surface, "exclusionReason", None),
+        _field(surface, "authority_block_reason", None),
+        _field(surface, "authorityBlockReason", None),
+        provenance.get("block_reasons"),
+        provenance.get("blockReasons"),
+        provenance.get("restriction_reasons"),
+        provenance.get("restrictionReasons"),
+        provenance.get("exclusion_reason"),
+        provenance.get("exclusionReason"),
+        provenance.get("authority_block_reason"),
+        provenance.get("authorityBlockReason"),
     )
-    all_restrictions = []
-    for r in (block_reasons_raw, restriction_reasons_raw):
-        if isinstance(r, (list, tuple, set)):
-            all_restrictions.extend(str(item) for item in r if item)
-        elif isinstance(r, str) and r:
-            all_restrictions.append(r)
-    if exclusion_reason_raw:
-        all_restrictions.append(str(exclusion_reason_raw))
-    if authority_block_reason:
-        all_restrictions.append(str(authority_block_reason))
     has_restrictions = len(all_restrictions) > 0
 
     attr_state_update = _strict_bool(_field(surface, "state_update_allowed", None))
@@ -256,15 +281,38 @@ def serialize_surface_artifact(surface: Any) -> dict:
     else:
         prescription_driver_allowed = False
 
-    authority_ceiling = str(
-        _surface_value(surface, provenance, "authority_ceiling", "authorityCeiling") or ""
-    ).upper()
-    if authority_ceiling in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC"):
+    # Bind per-state support class from provenance or attributes
+    support_class_val = str(provenance.get("support_class") or _field(surface, "support_class", None) or "").lower()
+    is_unsupported_or_diagnostic = support_class_val in ("unsupported", "derived_diagnostic", "blocked", "revoked")
+    if is_unsupported_or_diagnostic:
         state_update_allowed = False
         prescription_driver_allowed = False
-    elif authority_ceiling == "STATE_UPDATE":
-        prescription_driver_allowed = False
 
+    # Intersect all ceiling carriers across attributes and provenance
+    ceiling_carriers = [
+        _field(surface, "authority_ceiling", None),
+        _field(surface, "authorityCeiling", None),
+        provenance.get("authority_ceiling"),
+        provenance.get("authorityCeiling"),
+        provenance.get("authority"),
+    ]
+    normalized_ceilings = [
+        _normalize_ceiling_token(c) for c in ceiling_carriers if c is not None and str(c).strip()
+    ]
+    for ceil in normalized_ceilings:
+        if ceil in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC", "TRAINING_EXPORT"):
+            state_update_allowed = False
+            prescription_driver_allowed = False
+        elif ceil == "STATE_UPDATE":
+            prescription_driver_allowed = False
+        elif ceil in ("PRESCRIPTION_DRIVER", "PRESCRIPTION_ELIGIBLE", "MANAGED_PRESCRIPTION", "FIELD_PRESCRIPTION", "FULL_SYSTEM_AUTONOMOUS"):
+            pass
+        else:
+            # Declared unknown ceiling -> fail-closed policy
+            state_update_allowed = False
+            prescription_driver_allowed = False
+
+    authority_block_reason = _surface_value(surface, provenance, "authority_block_reason", "authorityBlockReason")
     if grounding_class_val == "INTERPOLATED_PROXY":
         state_update_allowed = False
         prescription_driver_allowed = False
@@ -314,13 +362,8 @@ def serialize_surface_artifact(surface: Any) -> dict:
         "stac_item_ref": _field(surface, "stac_item_ref", None),
     }
 
-    combined_blocks = resolve_surface_block_reasons(
-        _field(surface, "block_reasons", None),
-        _field(surface, "blockReasons", None),
-        provenance,
-    )
-    if combined_blocks:
-        doc["block_reasons"] = list(combined_blocks)
+    if all_restrictions:
+        doc["block_reasons"] = list(all_restrictions)
 
     return doc
 

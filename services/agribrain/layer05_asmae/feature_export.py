@@ -115,15 +115,27 @@ def build_state_support_ledger(update_reports: List[Dict[str, Any]]) -> Dict[str
         else:
             evidence_kind = "excluded"
 
+        accepted_targets = report.get("accepted_target_states")
+        per_state_inf = report.get("per_state_influence", {})
+
         for state in target_states:
             entry = ledger[state]
-            if not accepted:
+            state_inf_entry = per_state_inf.get(state)
+            is_state_influenced = True
+            if state_inf_entry is not None:
+                is_state_influenced = bool(state_inf_entry.get("state_influenced", False))
+            elif accepted_targets is not None:
+                is_state_influenced = (state in accepted_targets)
+
+            if not accepted or not is_state_influenced:
+                exclusion_reason = "no_state_influence" if (accepted and not is_state_influenced) else report.get("failure_reason", "update_not_applied")
                 entry["excluded_updates"].append({
                     "scene_id": report.get("scene_id"),
                     "timestamp": report.get("timestamp"),
                     "observation_feature": report.get("obs_name"),
                     "update_mode": report.get("mode"),
-                    "exclusion_reason": report.get("failure_reason", "update_not_applied"),
+                    "exclusion_reason": exclusion_reason,
+                    "per_state_influence": state_inf_entry,
                 })
                 continue
 

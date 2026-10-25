@@ -36,6 +36,11 @@ from datetime import datetime, timezone
 from datetime import timedelta
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 from .config import (
     BMA_EXPERTS,
     DEFAULT_RESOLUTION_M,
@@ -1765,44 +1770,57 @@ class ASMAEEngine:
         return (min(lngs), min(lats), max(lngs), max(lats))
 
     def _bilinear_resample(self, grid_list: List[List[float]], target_h: int, target_w: int) -> List[List[float]]:
-        import numpy as np
-        grid = np.array(grid_list, dtype=np.float32)
-        h, w = grid.shape
+        h = len(grid_list)
+        w = len(grid_list[0]) if h > 0 else 0
         if h == target_h and w == target_w:
             return grid_list
-        
-        # Bilinear interpolation
-        y = np.linspace(0, h - 1, target_h)
-        x = np.linspace(0, w - 1, target_w)
-        
-        y_indices = np.floor(y).astype(np.int32)
-        x_indices = np.floor(x).astype(np.int32)
-        
-        y_indices_next = np.minimum(y_indices + 1, h - 1)
-        x_indices_next = np.minimum(x_indices + 1, w - 1)
-        
-        dy = y - y_indices
-        dx = x - x_indices
-        
-        dy = dy[:, np.newaxis]
-        dx = dx[np.newaxis, :]
-        
-        val_00 = grid[y_indices[:, np.newaxis], x_indices[np.newaxis, :]]
-        val_10 = grid[y_indices_next[:, np.newaxis], x_indices[np.newaxis, :]]
-        val_01 = grid[y_indices[:, np.newaxis], x_indices_next[np.newaxis, :]]
-        val_11 = grid[y_indices_next[:, np.newaxis], x_indices_next[np.newaxis, :]]
-        
-        interpolated = (
-            val_00 * (1 - dy) * (1 - dx) +
-            val_10 * dy * (1 - dx) +
-            val_01 * (1 - dy) * dx +
-            val_11 * dy * dx
-        )
-        
-        return interpolated.tolist()
+        if h == 0 or w == 0 or target_h <= 0 or target_w <= 0:
+            return []
 
-    def _microzone_scalar_to_grid(self, mz_data: dict) -> List[List[float]]:
-        """Convert {mz_id: scalar} → [[2D grid]]."""
+        # Normalized weighted sum over valid finite corners to prevent NaN*0 from erasing supported endpoints
+        y_coords = [0.0] if target_h == 1 else [i * (h - 1) / (target_h - 1) for i in range(target_h)]
+        x_coords = [0.0] if target_w == 1 else [j * (w - 1) / (target_w - 1) for j in range(target_w)]
+
+        out_grid: List[List[Optional[float]]] = []
+        for y in y_coords:
+            row: List[Optional[float]] = []
+            y0 = int(math.floor(y))
+            y1 = min(y0 + 1, h - 1)
+            dy = y - y0
+            for x in x_coords:
+                x0 = int(math.floor(x))
+                x1 = min(x0 + 1, w - 1)
+                dx = x - x0
+
+                corners = (
+                    (y0, x0, (1.0 - dy) * (1.0 - dx)),
+                    (y1, x0, dy * (1.0 - dx)),
+                    (y0, x1, (1.0 - dy) * dx),
+                    (y1, x1, dy * dx),
+                )
+                valid_val_weight_sum = 0.0
+                valid_weight_total = 0.0
+                for r, c, weight in corners:
+                    val = grid_list[r][c]
+                    if val is not None:
+                        try:
+                            fval = float(val)
+                            if math.isfinite(fval):
+                                valid_val_weight_sum += fval * weight
+                                valid_weight_total += weight
+                        except (ValueError, TypeError):
+                            pass
+
+                if valid_weight_total > 1e-9:
+                    row.append(float(valid_val_weight_sum / valid_weight_total))
+                else:
+                    row.append(None)
+            out_grid.append(row)
+
+        return out_grid
+
+    def _microzone_scalar_to_grid(self, mz_data: dict) -> List[List[Optional[float]]]:
+        """Convert {mz_id: scalar} → [[2D grid]] preserving None for missing/unsupported cells."""
         if not mz_data:
             return []
 
@@ -1814,22 +1832,29 @@ class ASMAEEngine:
                 try:
                     r = int(parts[1])
                     c = int(parts[2])
-                    max_r = max(max_r, r)
-                    max_c = max(max_c, c)
+                    if r >= 0 and c >= 0:
+                        max_r = max(max_r, r)
+                        max_c = max(max_c, c)
                 except ValueError:
                     pass
 
         n_rows = max_r + 1
         n_cols = max_c + 1
 
-        grid = [[0.0] * n_cols for _ in range(n_rows)]
+        grid: List[List[Optional[float]]] = [[None] * n_cols for _ in range(n_rows)]
         for mz_id, val in mz_data.items():
             parts = str(mz_id).split("_")
             if len(parts) >= 3:
                 try:
                     r = int(parts[1])
                     c = int(parts[2])
-                    grid[r][c] = float(val) if val is not None else 0.0
+                    if r < 0 or c < 0 or r >= n_rows or c >= n_cols:
+                        continue
+                    if val is None:
+                        grid[r][c] = None
+                    else:
+                        fval = float(val)
+                        grid[r][c] = fval if math.isfinite(fval) else None
                 except (ValueError, TypeError):
                     pass
         return grid
@@ -1966,7 +1991,7 @@ class ASMAEEngine:
                                 if val is not None:
                                     try:
                                         fval = float(val)
-                                        if np.isfinite(fval):
+                                        if math.isfinite(fval):
                                             scale = STATE_SIGMA_SCALE.get(k, STATE_SIGMA_SCALE.get(k.lower(), 1.0))
                                             valid_norm_uncs.append(min(1.0, max(0.0, fval / scale)))
                                     except (ValueError, TypeError):
@@ -1982,7 +2007,7 @@ class ASMAEEngine:
             if "ASMAE_UNCERTAINTY" in uncertainty_maps:
                 overall_conf = [
                     [
-                        max(0.0, min(1.0, 1.0 - float(val))) if (val is not None and np.isfinite(float(val))) else None
+                        max(0.0, min(1.0, 1.0 - float(val))) if (val is not None and math.isfinite(float(val))) else None
                         for val in row
                     ]
                     for row in uncertainty_maps["ASMAE_UNCERTAINTY"]
@@ -2171,7 +2196,6 @@ class ASMAEEngine:
 
                 # Build resolution evidence (BC.10.17 P2.1)
                 from .history.resolution_evidence_builder import build_resolution_evidence
-                import numpy as np
 
                 local_retro_support = None
                 if isinstance(retro_result, dict):
@@ -3269,7 +3293,7 @@ class ASMAEEngine:
         return out_obj
 
     def _microzone_to_grid(
-        self, mz_data: dict, rd: ResolutionDecision,
+        self, mz_data: dict, rd: Optional[ResolutionDecision] = None,
     ) -> dict:
         """Convert {mz_id: [val_per_state]} → {state_name: [[2D grid]]}."""
         if not mz_data:
@@ -3288,8 +3312,9 @@ class ASMAEEngine:
                 try:
                     r = int(parts[1])
                     c = int(parts[2])
-                    max_r = max(max_r, r)
-                    max_c = max(max_c, c)
+                    if r >= 0 and c >= 0:
+                        max_r = max(max_r, r)
+                        max_c = max(max_c, c)
                 except ValueError:
                     pass
 
@@ -3305,10 +3330,16 @@ class ASMAEEngine:
                     try:
                         r = int(parts[1])
                         c = int(parts[2])
-                        if isinstance(state_vec, list) and s_idx < len(state_vec):
+                        if r < 0 or c < 0 or r >= n_rows or c >= n_cols:
+                            continue
+                        if isinstance(state_vec, (list, tuple)) and s_idx < len(state_vec):
                             val = state_vec[s_idx]
-                            grid[r][c] = float(val) if (val is not None and np.isfinite(val)) else None
-                    except (ValueError, IndexError):
+                            if val is not None:
+                                fval = float(val)
+                                grid[r][c] = fval if math.isfinite(fval) else None
+                            else:
+                                grid[r][c] = None
+                    except (ValueError, TypeError, IndexError):
                         pass
             result[name] = grid
 

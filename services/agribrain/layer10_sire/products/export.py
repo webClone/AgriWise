@@ -73,11 +73,20 @@ class TileManifest:
 
 
 def export_raster_pack(output: Layer10Output) -> List[RasterEntry]:
-    """Export all surfaces as serializable raster entries preserving scientific receipt."""
+    """Export all surfaces as serializable raster entries preserving scientific receipt and canonical parity."""
+    import math
+    from ..surface_contract import serialize_surface_artifact
+
     entries = []
     for s in output.surface_pack:
-        # Compute quick stats
-        vals = [v for row in s.values for v in row if v is not None]
+        canon_doc = serialize_surface_artifact(s)
+        prov = s.provenance if isinstance(s.provenance, dict) else {}
+
+        # Compute quick stats over strictly finite, numeric non-boolean values
+        vals = [
+            float(v) for row in s.values for v in row
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        ]
         stats = {}
         if vals:
             mean_val = sum(vals) / len(vals)
@@ -89,49 +98,62 @@ def export_raster_pack(output: Layer10Output) -> List[RasterEntry]:
                 "valid_pixels": len(vals),
                 "total_pixels": len(s.values) * (len(s.values[0]) if s.values else 0),
             }
+        canon_doc["stats"] = stats
 
-        valid_mask = [[(v is not None) for v in row] for row in s.values]
-        prov = s.provenance or {}
+        valid_mask = [
+            [
+                isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                for v in row
+            ]
+            for row in s.values
+        ]
+
         g_spec = getattr(s, "grid_spec", None)
         if hasattr(g_spec, "to_dict"):
             g_spec_dict = g_spec.to_dict()
         elif isinstance(g_spec, dict):
             g_spec_dict = dict(g_spec)
         else:
-            g_spec_dict = None
+            g_spec_dict = canon_doc.get("grid_spec")
 
-        unc_val = None
-        if "uncertainty" in prov:
-            try:
-                unc_val = float(prov["uncertainty"])
-            except (ValueError, TypeError):
-                pass
+        # Resolve confidence fallback
+        conf_val = getattr(s, "confidence", None)
+        if conf_val is None:
+            conf_val = prov.get("confidence")
 
-        canonical_meta = {
-            "surface_id": s.surface_id,
-            "semantic_type": s.semantic_type.value if hasattr(s.semantic_type, "value") else str(s.semantic_type),
-            "grid_ref": s.grid_ref,
-            "units": s.units,
-            "native_resolution_m": s.native_resolution_m,
-            "display_resolution_m": getattr(s, "display_resolution_m", 1.0),
-            "effective_resolution_m": getattr(s, "effective_resolution_m", 10.0),
-            "grounding_class": s.grounding_class,
-            "state_update_allowed": getattr(s, "state_update_allowed", False),
-            "prescription_driver_allowed": getattr(s, "prescription_driver_allowed", False),
-            "block_reasons": list(s.block_reasons) if s.block_reasons else [],
-            "grid_spec": g_spec_dict,
-            "provenance": prov,
-            "stats": stats,
-        }
+        # Resolve scalar or grid uncertainty/sigma fallback
+        unc_val = getattr(s, "uncertainty", None)
+        if unc_val is None:
+            if "uncertainty" in prov:
+                raw_u = prov["uncertainty"]
+                if isinstance(raw_u, (int, float)) and not isinstance(raw_u, bool) and math.isfinite(raw_u):
+                    unc_val = float(raw_u)
+                elif isinstance(raw_u, (list, tuple)):
+                    unc_val = raw_u
+            elif "sigma" in prov:
+                raw_s = prov["sigma"]
+                if isinstance(raw_s, (int, float)) and not isinstance(raw_s, bool) and math.isfinite(raw_s):
+                    unc_val = float(raw_s)
+                elif isinstance(raw_s, (list, tuple)):
+                    unc_val = raw_s
+
+        # Resolve mask fallbacks
+        obs_mask = getattr(s, "observed_mask", None) or prov.get("observed_mask") or prov.get("observedMask")
+        inf_mask = getattr(s, "inferred_mask", None) or prov.get("inferred_mask") or prov.get("inferredMask")
+
+        # Canonical permissions and block reasons take precedence
+        state_update_allowed = canon_doc.get("state_update_allowed", False)
+        prescription_driver_allowed = canon_doc.get("prescription_driver_allowed", False)
+        block_reasons = canon_doc.get("block_reasons")
 
         entries.append(RasterEntry(
             surface_id=s.surface_id,
-            surface_type=s.semantic_type.value,
+            surface_type=s.semantic_type.value if hasattr(s.semantic_type, "value") else str(s.semantic_type),
             grid_ref=s.grid_ref,
             units=s.units,
             resolution_m=s.native_resolution_m,
             render_range=s.render_range,
-            palette=s.palette_id.value,
+            palette=s.palette_id.value if hasattr(s.palette_id, "value") else str(s.palette_id),
             source_layers=s.source_layers,
             values=s.values,
             stats=stats,
@@ -140,17 +162,17 @@ def export_raster_pack(output: Layer10Output) -> List[RasterEntry]:
             display_grid_spec=getattr(s, "display_grid_spec", None) if isinstance(getattr(s, "display_grid_spec", None), dict) else None,
             display_resolution_m=getattr(s, "display_resolution_m", 1.0),
             effective_resolution_m=getattr(s, "effective_resolution_m", 10.0),
-            confidence=s.confidence,
+            confidence=conf_val,
             uncertainty=unc_val,
-            observed_mask=getattr(s, "observed_mask", None),
-            inferred_mask=getattr(s, "inferred_mask", None),
+            observed_mask=obs_mask,
+            inferred_mask=inf_mask,
             valid_mask=valid_mask,
             grounding_class=s.grounding_class,
-            state_update_allowed=getattr(s, "state_update_allowed", False),
-            prescription_driver_allowed=getattr(s, "prescription_driver_allowed", False),
-            block_reasons=list(s.block_reasons) if s.block_reasons else None,
+            state_update_allowed=state_update_allowed,
+            prescription_driver_allowed=prescription_driver_allowed,
+            block_reasons=list(block_reasons) if block_reasons else None,
             provenance=prov,
-            canonical_metadata=canonical_meta,
+            canonical_metadata=canon_doc,
         ))
 
     return entries
