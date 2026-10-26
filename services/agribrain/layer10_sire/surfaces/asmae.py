@@ -117,11 +117,18 @@ def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
                 for elem in row:
                     if isinstance(elem, bool) or not _is_finite_real(elem):
                         return False, True
+            max_diag = max(float(cov[i][i]) for i in range(n_rows))
+            max_elem = max(abs(float(cov[i][j])) for i in range(n_rows) for j in range(n_rows))
+            scale = max(max_diag, max_elem)
+            sym_tol = max(1e-14, 1e-4 * scale)
+
             for i in range(n_rows):
                 if float(cov[i][i]) < 0.0:
                     return False, True
                 for j in range(i + 1, n_rows):
-                    if abs(float(cov[i][j]) - float(cov[j][i])) > 1e-4:
+                    diff = abs(float(cov[i][j]) - float(cov[j][i]))
+                    pair_scale = max(abs(float(cov[i][j])), abs(float(cov[j][i])))
+                    if diff > sym_tol or diff > max(1e-14, 1e-4 * pair_scale):
                         return False, True
             try:
                 mat = np.array(cov, dtype=float)
@@ -130,12 +137,15 @@ def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
                 eigenvals = np.linalg.eigvalsh(mat)
                 if not np.all(np.isfinite(eigenvals)):
                     return False, True
-                max_diag = max(float(cov[i][i]) for i in range(n_rows))
                 max_eig = float(np.max(eigenvals)) if len(eigenvals) > 0 else 0.0
-                scale = max(max_diag, max_eig, 1e-12)
-                tol = max(1e-12, 1e-7 * scale)
-                if np.any(eigenvals < -tol):
-                    return False, True
+                mat_scale = max(max_diag, max_eig)
+                if mat_scale <= 0.0:
+                    if np.any(eigenvals < -1e-15):
+                        return False, True
+                else:
+                    tol = max(1e-15, 1e-6 * mat_scale)
+                    if np.any(eigenvals < -tol):
+                        return False, True
             except Exception:
                 return False, True
             return True, False
@@ -752,13 +762,18 @@ def get_standard_variable_name(stype: SurfaceType, meta_var: Optional[str] = Non
     v = (meta_var or "").strip().lower()
     s = getattr(stype, "value", str(stype))
 
-    # If meta_var is already an exact canonical state in STATE_ORDER, prefer it
     canon_v = canonical_state_key(v) if v else None
+    canon_s = canonical_state_key(s)
+
+    # Reject conflicting canonical declarations
+    if canon_v and canon_v in STATE_ORDER and canon_s and canon_s in STATE_ORDER and canon_v != canon_s:
+        return "conflict_rejected"
+
+    # If meta_var is already an exact canonical state in STATE_ORDER, prefer it
     if canon_v and canon_v in STATE_ORDER:
         return canon_v
 
     # Resolve from surface type
-    canon_s = canonical_state_key(s)
     if canon_s and canon_s in STATE_ORDER:
         return canon_s
 

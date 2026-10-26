@@ -1778,7 +1778,7 @@ def update_step_ht(
             }
 
         if not has_actual_influence:
-            state_cube = step_prior_cube
+            state_cube = step_prior_cube.copy()
             reports.append({
                 'obs_name': obs_name,
                 'sensor': mapping.sensor,
@@ -1789,6 +1789,12 @@ def update_step_ht(
                 'per_state_influence': per_state_influence,
             })
             continue
+
+        # Roll back uninfluenced target states in mixed accepted/excluded updates
+        for state_index in target_indices:
+            state_name = STATE_NAMES[state_index]
+            if not per_state_influence[state_name]['state_influenced']:
+                state_cube[:, :, state_index] = step_prior_cube[:, :, state_index]
 
         # Determine directness from measurement/operator receipt and descriptor policy
         is_receipt_direct = bool(
@@ -1963,6 +1969,8 @@ def update_step_proxy(
             }
 
         if not has_actual_influence:
+            for k in ensemble:
+                ensemble[k] = [row[:] for row in step_prior_ensemble[k]]
             reports.append({
                 'obs_name': obs_name,
                 'sensor': mapping.sensor,
@@ -1973,6 +1981,14 @@ def update_step_proxy(
                 'per_state_influence': per_state_influence,
             })
             continue
+
+        # Roll back uninfluenced target states in mixed accepted/excluded updates
+        for state_index in target_indices:
+            state_name = STATE_NAMES[state_index]
+            if not per_state_influence[state_name]['state_influenced']:
+                for nid in node_ids:
+                    for i_member in range(len(ensemble[nid])):
+                        ensemble[nid][i_member][state_index] = step_prior_ensemble[nid][i_member][state_index]
 
         reports.append({
             "obs_name": obs_name,
