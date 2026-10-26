@@ -252,7 +252,7 @@ class EOFoundationModel:
             return None  # Need at least 3 bands for meaningful embedding
 
         # Compute tile hash for provenance
-        tile_hash = self._compute_tile_hash(band_arrays, available_bands)
+        tile_hash = self._compute_tile_hash(band_arrays, available_bands, cloud_mask)
 
         # Normalize bands
         normalized = self._normalize_bands(band_arrays, available_bands, cloud_mask)
@@ -263,11 +263,18 @@ class EOFoundationModel:
         if valid_pixels < 4:
             return None  # Insufficient valid data
 
-        # Route to appropriate backend
+        # Route to appropriate backend while tracking actual execution provenance
+        actual_backend = "spectral_basis_v2"
         if self._mode == "onnx":
             embedding = self._infer_onnx(normalized, available_bands)
+            if embedding is not None:
+                actual_backend = "onnx_foundation"
+            else:
+                embedding = self._infer_fallback(normalized, available_bands)
+                actual_backend = "spectral_basis_v2"
         else:
             embedding = self._infer_fallback(normalized, available_bands)
+            actual_backend = "spectral_basis_v2"
 
         if embedding is None:
             return None
@@ -275,17 +282,17 @@ class EOFoundationModel:
         # Compute anomaly score (L2 distance from expected baseline)
         anomaly_score = self._compute_anomaly_score(embedding)
 
-        # ML-1: Mode-dependent confidence ceiling.
-        # ONNX model is a trained, validated ViT — higher confidence ceiling.
-        # Fallback spectral basis is a physics-informed proxy — lower ceiling.
-        conf_ceiling = 0.85 if self._mode == "onnx" else 0.75
+        # ML-1: Mode-dependent confidence ceiling based on actual executing backend.
+        # ONNX model is a trained, validated ViT — higher confidence ceiling (0.85).
+        # Fallback spectral basis is a physics-informed proxy — lower ceiling (0.75).
+        conf_ceiling = 0.85 if actual_backend == "onnx_foundation" else 0.75
 
         # Confidence based on input quality
         band_completeness = len(available_bands) / N_BANDS
         pixel_quality = min(1.0, valid_pixels / 100.0)
         confidence = round(min(conf_ceiling, band_completeness * 0.5 + pixel_quality * 0.25), 3)
 
-        model_id = "onnx_foundation" if self._mode == "onnx" else "spectral_basis_v2"
+        model_id = actual_backend
 
         return EmbeddingResult(
             embedding=[round(v, 6) for v in embedding],
@@ -422,8 +429,8 @@ class EOFoundationModel:
             return embedding
 
         except Exception:
-            # Fall back to Python encoder on any ONNX error
-            return self._infer_fallback(normalized, available_bands)
+            # Return None on ONNX error so caller explicitly routes to fallback and tracks true backend provenance
+            return None
 
     # ════════════════════════════════════════════════════════════════════
     # Fallback Spectral Encoder
@@ -612,16 +619,42 @@ class EOFoundationModel:
         self,
         band_arrays: Dict[str, List[List[float]]],
         available_bands: List[str],
+        cloud_mask: Optional[List[List[int]]] = None,
     ) -> str:
-        """Deterministic hash of input tile for provenance tracking."""
+        """Deterministic hash of input tile for provenance tracking.
+        
+        Includes spatial dimensions, canonical band identifiers, valid float representation,
+        and cloud-mask identity to prevent collisions across different scientific inputs.
+        """
         parts = []
+        h = 0
+        w = 0
         for band in sorted(available_bands):
+            pixels = band_arrays.get(band, [])
+            if pixels and len(pixels) > 0:
+                h = len(pixels)
+                w = len(pixels[0]) if pixels[0] else 0
+                break
+        parts.append(f"dim:{h}x{w}")
+
+        for band in sorted(available_bands):
+            parts.append(f"band:{band}")
             pixels = band_arrays[band]
             for row in pixels:
                 for v in row:
-                    if v is not None and v == v:
+                    if v is not None and v == v and math.isfinite(v):
                         parts.append(f"{v:.4f}")
                     else:
                         parts.append("NaN")
+
+        if cloud_mask is not None and len(cloud_mask) > 0:
+            cm_h = len(cloud_mask)
+            cm_w = len(cloud_mask[0]) if cloud_mask[0] else 0
+            cm_vals = "".join(str(int(bit)) for row in cloud_mask for bit in row)
+            cm_hash = hashlib.sha256(cm_vals.encode("utf-8")).hexdigest()[:16]
+            parts.append(f"cloud:{cm_h}x{cm_w}:{cm_hash}")
+        else:
+            parts.append("cloud:none")
+
         raw = ",".join(parts).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:16]

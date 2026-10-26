@@ -42,6 +42,8 @@ def test_scientific_tests_use_one_installed_namespace() -> None:
 
 
 def test_legacy_asmae_package_is_not_discoverable_or_loaded() -> None:
+    sys.modules.pop("layer05_asmae", None)
+    sys.modules.pop("layer05_asmae.cache", None)
     import services.agribrain.layer05_asmae.cache as canonical_cache
 
     assert canonical_cache.__name__.startswith(f"{CANONICAL_PREFIX}.")

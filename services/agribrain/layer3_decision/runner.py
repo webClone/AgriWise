@@ -1126,7 +1126,7 @@ def _execute_canonical_water_engine(
             if missing_vars:
                 return None
 
-            return {
+            parsed_w = {
                 "t_max_c": float(t_max_v),
                 "t_min_c": float(t_min_v),
                 "precipitation_mm": float(precip_v),
@@ -1135,6 +1135,25 @@ def _execute_canonical_water_engine(
                 "rh_max_pct": float(rh_max_v),
                 "net_radiation_mj_m2": float(rn_v),
             }
+            # Preserve source role, issuance time, and prior lineage
+            if "source_role" in r:
+                parsed_w["source_role"] = str(r["source_role"])
+            elif "role" in r:
+                parsed_w["source_role"] = str(r["role"])
+            elif r.get("is_prior"):
+                parsed_w["source_role"] = "prior"
+            else:
+                parsed_w["source_role"] = "observation"
+
+            if "issued_at" in r:
+                parsed_w["issued_at"] = str(r["issued_at"])
+            elif "timestamp" in r:
+                parsed_w["issued_at"] = str(r["timestamp"])
+
+            if "is_prior" in r:
+                parsed_w["is_prior"] = bool(r["is_prior"])
+
+            return parsed_w
 
         weather_obs = _parse_weather(rec)
         if weather_obs is None:
@@ -1924,24 +1943,33 @@ def _execute_canonical_water_engine(
             if d_str in retained_weather_map and isinstance(retained_weather_map[d_str], dict):
                 return retained_weather_map[d_str]
 
-            # DV10: Check if this date was previously recorded in canonical worldline checkpoints for this plot
+            # DV10: Check if this date was previously recorded in canonical committed worldline checkpoints
             try:
                 from world_model.canonical_worldline import CanonicalWorldlineService
                 _cw_tmp = CanonicalWorldlineService()
-                _cp_dir = _cw_tmp._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"
-                if _cp_dir.exists():
-                    for _cp_f in sorted(_cp_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-                        try:
-                            _cp_obj = _cw_tmp._read(_cp_f)
-                            _cp_hist = _cp_obj.get("payload", {}).get("history_summary", {})
-                            if isinstance(_cp_hist, dict) and d_str in _cp_hist:
-                                _w_candidate = _cp_hist[d_str].get("weather")
-                                if _w_candidate and isinstance(_w_candidate, dict):
-                                    _pw = _parse_weather(_w_candidate)
-                                    if _pw:
-                                        return _pw
-                        except Exception:
-                            continue
+                # Load committed latest hydraulic checkpoint for this plot/tenant/namespace
+                _cp_obj = _cw_tmp.load_latest_hydraulic_checkpoint(plot_id, tenant_id, namespace)
+                if _cp_obj:
+                    _cp_hist = _cp_obj.get("payload", {}).get("history_summary", {})
+                    if isinstance(_cp_hist, dict) and d_str in _cp_hist:
+                        _w_candidate = _cp_hist[d_str].get("weather")
+                        if _w_candidate and isinstance(_w_candidate, dict):
+                            # Knowledge-at-issuance eligibility check: checkpoint/issuance cannot be after step_ts
+                            _is_eligible = True
+                            _iss_str = _w_candidate.get("issued_at") or _cp_obj.get("committed_at") or _cp_obj.get("created_at")
+                            if _iss_str:
+                                try:
+                                    _iss_dt = datetime.datetime.fromisoformat(str(_iss_str))
+                                    if _iss_dt.tzinfo is None:
+                                        _iss_dt = _iss_dt.replace(tzinfo=timezone.utc)
+                                    if _iss_dt > ts:
+                                        _is_eligible = False
+                                except Exception:
+                                    pass
+                            if _is_eligible:
+                                _pw = _parse_weather(_w_candidate)
+                                if _pw:
+                                    return _pw
             except Exception:
                 pass
 
@@ -2010,11 +2038,14 @@ def _execute_canonical_water_engine(
             if s_obj is None:
                 return "none"
             if isinstance(s_obj, SoilWaterState) or hasattr(s_obj, "layer_depths_cm"):
-                evap_days = (
-                    s_obj.evaporation_state.days_since_wetting
-                    if getattr(s_obj, "evaporation_state", None) is not None
-                    else None
-                )
+                evap_st = getattr(s_obj, "evaporation_state", None)
+                evap_tuple = (
+                    evap_st.days_since_wetting if hasattr(evap_st, "days_since_wetting") else None,
+                    round(evap_st.few_exposed_wetted_fraction, 4) if getattr(evap_st, "few_exposed_wetted_fraction", None) is not None else None,
+                    round(evap_st.surface_storage_mm, 4) if getattr(evap_st, "surface_storage_mm", None) is not None else None,
+                    round(evap_st.max_surface_storage_mm, 4) if getattr(evap_st, "max_surface_storage_mm", None) is not None else None,
+                    round(evap_st.kr_reduction_factor, 4) if getattr(evap_st, "kr_reduction_factor", None) is not None else None,
+                ) if evap_st is not None else None
                 soil_payload = (
                     "SoilWaterState",
                     tuple(getattr(s_obj, "layer_depths_cm", None) or ()),
@@ -2023,11 +2054,11 @@ def _execute_canonical_water_engine(
                     tuple(round(v, 4) for v in (getattr(s_obj, "wilting_point_profile", None) or ())),
                     tuple(round(v, 4) for v in (getattr(s_obj, "saturation_profile", None) or ())),
                     tuple(round(v, 4) for v in (getattr(s_obj, "residual_profile", None) or ())),
-                    tuple(round(v, 4) for v in (getattr(s_obj, "hydraulic_conductivity_profile", None) or ())),
-                    tuple(round(v, 4) for v in (getattr(s_obj, "van_genuchten_alpha", None) or ())),
-                    tuple(round(v, 4) for v in (getattr(s_obj, "van_genuchten_n", None) or ())),
+                    tuple(round(v, 6) for v in (getattr(s_obj, "hydraulic_conductivity_profile", None) or ())),
+                    tuple(round(v, 6) for v in (getattr(s_obj, "van_genuchten_alpha", None) or ())),
+                    tuple(round(v, 6) for v in (getattr(s_obj, "van_genuchten_n", None) or ())),
                     str(getattr(s_obj, "parameter_provenance", "TEXTURE_PRIOR")),
-                    evap_days,
+                    evap_tuple,
                 )
                 return hashlib.sha256(repr(soil_payload).encode("utf-8")).hexdigest()[:24]
             vwc = getattr(s_obj, "volumetric_water_content", None) or getattr(s_obj, "layers_vwc", None)

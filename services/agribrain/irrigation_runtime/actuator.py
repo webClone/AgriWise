@@ -216,6 +216,14 @@ class IrrigationActuator(ABC):
                 and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
             errors.append(f"Actuator {self.device_id} is in MAINTENANCE mode")
 
+        # Reject physical START while stop confirmation is pending
+        if (self._status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+                and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
+            errors.append(
+                f"Actuator {self.device_id} is in STOP_PENDING_CONFIRMATION state: "
+                "physical stop unconfirmed. Cannot start new delivery until cessation is positively verified."
+            )
+
         # Check if already executing (unless stop or emergency stop)
         if (self._status == ActuatorStatus.EXECUTING
                 and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
@@ -256,10 +264,22 @@ class IrrigationActuator(ABC):
 
         return errors
 
-    def set_active_command(self, command: IrrigationCommand) -> None:
+    def set_active_command(self, command: IrrigationCommand, status: Optional[ActuatorStatus] = None) -> None:
         """Rehydrate active command and status (e.g. on process restart)."""
         self._active_command = command
-        self._status = ActuatorStatus.EXECUTING
+        if status is not None:
+            self._status = status
+        elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
+            self._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        else:
+            self._status = ActuatorStatus.EXECUTING
+
+    def confirm_stop(self) -> None:
+        """Positively confirm physical cessation of irrigation, releasing ownership to ONLINE."""
+        self._status = ActuatorStatus.ONLINE
+        self._active_command = None
+        self._pending_command = None
+        logger.info("Device %s physical stop positively confirmed; status transitioned to ONLINE.", self.device_id)
 
     async def _execute_stop_direct(self, command: IrrigationCommand) -> CommandResult:
         """Execute STOP or EMERGENCY_STOP directly without waiting behind a hung START lock (V06)."""
@@ -351,10 +371,17 @@ class IrrigationActuator(ABC):
             )
             if has_fault:
                 self._status = ActuatorStatus.ERROR
+            elif getattr(result, "transport_acknowledged_only", False) and not getattr(result, "confirmed_physical_stop", False):
+                self._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+                logger.warning(
+                    "Stop command %s transport-acknowledged on device %s, physical confirmation pending.",
+                    command.command_id, self.device_id
+                )
+                # Retain active command and operation ownership until physical stop confirmation
             else:
                 self._status = ActuatorStatus.ONLINE
-            self._active_command = None
-            self._pending_command = None
+                self._active_command = None
+                self._pending_command = None
         else:
             self._status = ActuatorStatus.ERROR
 

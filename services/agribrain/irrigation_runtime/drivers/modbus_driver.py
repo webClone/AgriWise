@@ -369,12 +369,27 @@ class ModbusActuator(IrrigationActuator):
             if len(regs) >= 2:
                 actual_volume = float((regs[0] << 16) | regs[1])
 
+        # Verify physical cessation by reading feedback and status
+        actual_flow, actual_pressure = await self._read_feedback()
+        status_info = await self._read_status()
+        is_running_bit = False
+        if status_info and "status_word" in status_info:
+            is_running_bit = bool(status_info["status_word"] & 0x01)
+
+        # Physical stop is positively confirmed if write succeeded, flow is 0.0, and status bit is cleared
+        confirmed = success and (actual_flow == 0.0) and (not is_running_bit)
+        transport_only = success and not confirmed
+
         return CommandResult(
             command_id=command.command_id,
             device_id=self.device_id,
             success=success,
             timestamp=now,
             actual_volume_l=actual_volume,
+            actual_flow_rate_lpm=actual_flow,
+            actual_pressure_bar=actual_pressure,
+            transport_acknowledged_only=transport_only,
+            confirmed_physical_stop=confirmed,
             error_code="" if success else "WRITE_FAILED",
             error_message="" if success else "Failed to write stop coil",
         )
@@ -568,11 +583,19 @@ class ModbusActuator(IrrigationActuator):
         else:
             logger.error("Modbus emergency stop partial or total failure on coils: %s", failed_outputs)
 
+        # Verify physical cessation by reading feedback
+        actual_flow, _ = await self._read_feedback()
+        confirmed = success and (actual_flow == 0.0)
+        transport_only = success and not confirmed
+
         return CommandResult(
             command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",
             device_id=self.device_id,
             success=success,
             timestamp=now,
+            actual_flow_rate_lpm=actual_flow,
+            transport_acknowledged_only=transport_only,
+            confirmed_physical_stop=confirmed,
             error_code="" if success else "WRITE_FAILED",
             error_message="" if success else f"Coil writes failed on: {', '.join(failed_outputs)}",
         )

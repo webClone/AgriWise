@@ -1,6 +1,18 @@
+import math
+import os
+import sys
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List
-import uuid
+
+# F37: Ensure namespace parity between sensor_runtime and services.agribrain.sensor_runtime
+for _sub in ("schemas", "device_identity", "security", "decoder", "registry", "calibration", "storage", "ingestion"):
+    _full = f"services.agribrain.sensor_runtime.{_sub}"
+    _short = f"sensor_runtime.{_sub}"
+    if _full in sys.modules and _short not in sys.modules:
+        sys.modules[_short] = sys.modules[_full]
+    elif _short in sys.modules and _full not in sys.modules:
+        sys.modules[_full] = sys.modules[_short]
 
 from sensor_runtime.schemas import RawSensorMessage, NormalizedSensorReading
 from sensor_runtime.device_identity import DeviceIdentity
@@ -63,7 +75,6 @@ def ingest_sensor_payload(
     """
     if is_production():
         # Enforce that env registry and calibration paths are configured
-        import os
         if not os.getenv("AGRIWISE_SENSOR_REGISTRY_PATH"):
             raise ValueError("sensor_registry_unavailable")
         if not os.getenv("AGRIWISE_SENSOR_CALIBRATION_PATH"):
@@ -166,7 +177,7 @@ def ingest_sensor_payload(
             q = cal.calibration_quality
             if q is None:
                 raise ValueError("calibration_quality_missing")
-            if not isinstance(q, (int, float)) or isinstance(q, bool):
+            if not isinstance(q, (int, float)) or isinstance(q, bool) or not math.isfinite(q):
                 raise ValueError("calibration_quality_invalid")
             if q < 0.5:
                 raise ValueError("calibration_quality_too_low")

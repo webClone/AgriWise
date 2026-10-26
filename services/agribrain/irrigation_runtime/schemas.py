@@ -117,6 +117,7 @@ class ActuatorStatus(str, Enum):
     ERROR = "ERROR"                   # Fault condition detected
     MAINTENANCE = "MAINTENANCE"       # Manually taken offline
     UNKNOWN = "UNKNOWN"               # Status not yet determined
+    STOP_PENDING_CONFIRMATION = "STOP_PENDING_CONFIRMATION"  # Transport ACK received, physical cessation unconfirmed
 
 
 class AutomationMode(str, Enum):
@@ -316,8 +317,10 @@ class CommandResult:
     retry_recommended: bool = False
     retries_remaining: int = 3
 
-    # Acknowledgment
+    # Acknowledgment & Physical Verification
     ack_latency_ms: int = 0                   # Time from send to ACK
+    transport_acknowledged_only: bool = False # True when command was queued/accepted by transport without verified cessation
+    confirmed_physical_stop: bool = False     # True when physical stoppage (zero flow / stopped state) is positively verified
 
 
 # ============================================================================

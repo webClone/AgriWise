@@ -296,11 +296,14 @@ class LoRaWANActuator(IrrigationActuator):
                     "LoRaWAN downlink queued for %s (cmd=%s, zone=%d, attempt=%d)",
                     self._dev_eui, command.command_type.value, zone_index, attempt + 1
                 )
+                is_stop = command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)
                 return CommandResult(
                     command_id=command.command_id,
                     device_id=self.device_id,
                     success=True,
                     timestamp=now,
+                    transport_acknowledged_only=is_stop,
+                    confirmed_physical_stop=False if is_stop else True,
                 )
 
             last_error = result.get("error", "Unknown")
@@ -356,4 +359,6 @@ class LoRaWANActuator(IrrigationActuator):
             success=result.get("success", False),
             timestamp=datetime.now(timezone.utc).isoformat(),
             error_message=result.get("error", ""),
+            transport_acknowledged_only=bool(result.get("success", False)),
+            confirmed_physical_stop=False,
         )

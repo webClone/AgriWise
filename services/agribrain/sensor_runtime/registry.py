@@ -97,7 +97,12 @@ def is_production() -> bool:
 
 def register_device(device: SensorDeviceRegistration) -> None:
     """Register a device in-memory (primarily for tests)."""
+    import sys
     _DEVICE_REGISTRY[device.device_id] = device
+    for mod_name in ("sensor_runtime.registry", "services.agribrain.sensor_runtime.registry"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_DEVICE_REGISTRY"):
+            mod._DEVICE_REGISTRY[device.device_id] = device
 
 
 def load_persistent_registry() -> dict:
