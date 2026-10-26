@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
 import logging
 import os
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,6 +34,7 @@ def _get_storage_dir() -> Path:
 _STORAGE_LOCK = threading.RLock()
 _RAW_STORAGE: Dict[str, RawSensorMessage] = {}
 _NORMALIZED_STORAGE: List[NormalizedSensorReading] = []
+_LAST_NORM_FILE_STAT: tuple[float, int] = (0.0, 0)
 _INITIALIZED = False
 
 _VALID_ID_RE = re.compile(r"^[a-zA-Z0-9_\-\.:]+$")
@@ -46,15 +49,19 @@ def _serialize_datetime(obj: Any) -> Any:
 
 
 def _validate_and_encode_id(identifier: str) -> str:
-    """Validate identifier characters and produce a 1-to-1 deterministic filesystem-safe filename key.
+    """Validate identifier characters and produce a strictly injective, collision-free filename key.
     
-    Rejects path traversal and unsupported characters to prevent filename collisions.
+    Rejects path traversal and unsupported characters.
+    Appends SHA-256 digest so two distinct identifiers (e.g. urn:dev:123 vs urn_COLON_dev_COLON_123)
+    can never map to the same filename key.
     """
     if not identifier or not isinstance(identifier, str):
         raise ValueError("message_id must be a non-empty string")
     if ".." in identifier or "/" in identifier or "\\" in identifier or not _VALID_ID_RE.match(identifier):
         raise ValueError(f"invalid_message_id: '{identifier}' contains invalid characters or path traversal")
-    return identifier.replace(":", "_COLON_")
+    digest = hashlib.sha256(identifier.encode("utf-8")).hexdigest()
+    clean_prefix = re.sub(r"[^a-zA-Z0-9_\-]", "_", identifier)[:48]
+    return f"{clean_prefix}_{digest}"
 
 
 def _sanitize_id(identifier: str) -> str:
@@ -130,6 +137,8 @@ def rehydrate_storage() -> None:
         norm_file = storage_dir / "normalized" / "normalized_readings.jsonl"
         if norm_file.exists():
             try:
+                st = norm_file.stat()
+                _LAST_NORM_FILE_STAT = (st.st_mtime, st.st_size)
                 with open(norm_file, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
@@ -201,33 +210,41 @@ def store_raw_message(msg: RawSensorMessage) -> None:
             "provenance": stored.provenance or {},
         }
 
-        # Cross-process exclusive create (O_CREAT | O_EXCL) prevents race conditions
+        # Crash-safe atomic publication:
+        # Write to temporary file with fsync first to prevent partial records
+        raw_dir = raw_file.parent
+        tmp_file = raw_dir / f"tmp_{uuid.uuid4().hex}_{os.getpid()}.json"
         try:
-            fd = os.open(str(raw_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            raise ValueError("Raw message is immutable and cannot be overwritten.")
-
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(payload_data, f, default=_serialize_datetime, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-        except Exception:
+
+            # Exclusively create/claim raw_file (fails with FileExistsError if already exists)
             try:
-                raw_file.unlink(missing_ok=True)
+                fd = os.open(str(raw_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                os.close(fd)
+            except FileExistsError:
+                raise ValueError("Raw message is immutable and cannot be overwritten.")
+
+            # Atomically publish content to claimed file
+            try:
+                os.replace(str(tmp_file), str(raw_file))
             except Exception:
-                pass
-            raise
+                raw_file.unlink(missing_ok=True)
+                raise
+        finally:
+            tmp_file.unlink(missing_ok=True)
 
         _RAW_STORAGE[stored.message_id] = stored
 
 
 def store_normalized_reading(reading: NormalizedSensorReading) -> None:
     """Store versioned normalized reading with cross-process append-only durability."""
+    global _LAST_NORM_FILE_STAT
     _ensure_initialized()
     with _STORAGE_LOCK:
         stored = copy.deepcopy(reading)
-        _NORMALIZED_STORAGE.append(stored)
 
         storage_dir = _get_storage_dir()
         norm_file = storage_dir / "normalized" / "normalized_readings.jsonl"
@@ -257,7 +274,63 @@ def store_normalized_reading(reading: NormalizedSensorReading) -> None:
             "rainfall_mode": stored.rainfall_mode,
         }
         data_bytes = (json.dumps(reading_dict, default=_serialize_datetime) + "\n").encode("utf-8")
+        # Persist to disk and fsync FIRST before in-memory append
         _acquire_and_append(norm_file, lock_file, data_bytes)
+        try:
+            st = norm_file.stat()
+            _LAST_NORM_FILE_STAT = (st.st_mtime, st.st_size)
+        except Exception:
+            pass
+        _NORMALIZED_STORAGE.append(stored)
+
+
+def _rehydrate_normalized_from_disk_if_changed() -> None:
+    global _NORMALIZED_STORAGE, _LAST_NORM_FILE_STAT
+    storage_dir = _get_storage_dir()
+    norm_file = storage_dir / "normalized" / "normalized_readings.jsonl"
+    if not norm_file.exists():
+        _NORMALIZED_STORAGE.clear()
+        _LAST_NORM_FILE_STAT = (0.0, 0)
+        return
+    try:
+        st = norm_file.stat()
+        curr_stat = (st.st_mtime, st.st_size)
+        if curr_stat != _LAST_NORM_FILE_STAT:
+            readings = []
+            with open(norm_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    r_data = json.loads(line)
+                    reading = NormalizedSensorReading(
+                        reading_id=r_data["reading_id"],
+                        device_id=r_data["device_id"],
+                        plot_id=r_data["plot_id"],
+                        zone_id=r_data.get("zone_id"),
+                        timestamp=datetime.fromisoformat(r_data["timestamp"]),
+                        received_at=datetime.fromisoformat(r_data["received_at"]),
+                        variable=r_data["variable"],
+                        value=r_data["value"],
+                        unit=r_data["unit"],
+                        vendor=r_data["vendor"],
+                        protocol=r_data["protocol"],
+                        depth_cm=r_data.get("depth_cm"),
+                        depth_interval_cm=tuple(r_data["depth_interval_cm"]) if r_data.get("depth_interval_cm") else None,
+                        latitude=r_data.get("latitude"),
+                        longitude=r_data.get("longitude"),
+                        model=r_data.get("model"),
+                        raw_payload_ref=r_data.get("raw_payload_ref", ""),
+                        normalization_version=r_data.get("normalization_version", "1.0"),
+                        original_unit=r_data.get("original_unit"),
+                        original_value=r_data.get("original_value"),
+                        rainfall_mode=r_data.get("rainfall_mode"),
+                    )
+                    readings.append(reading)
+            _NORMALIZED_STORAGE = readings
+            _LAST_NORM_FILE_STAT = curr_stat
+    except Exception as exc:
+        logger.warning("Error rehydrating normalized readings from %s: %s", norm_file, exc)
 
 
 def get_raw_message(message_id: str) -> RawSensorMessage | None:
@@ -301,6 +374,7 @@ def get_normalized_readings(device_id: Optional[str] = None) -> List[NormalizedS
     """Retrieve stored normalized readings, optionally filtered by device_id."""
     _ensure_initialized()
     with _STORAGE_LOCK:
+        _rehydrate_normalized_from_disk_if_changed()
         if device_id is None:
             return copy.deepcopy(_NORMALIZED_STORAGE)
         return [copy.deepcopy(r) for r in _NORMALIZED_STORAGE if r.device_id == device_id]
@@ -308,10 +382,11 @@ def get_normalized_readings(device_id: Optional[str] = None) -> List[NormalizedS
 
 def clear_storage() -> None:
     """Clear storage for testing and isolated fixture execution."""
-    global _RAW_STORAGE, _NORMALIZED_STORAGE, _INITIALIZED
+    global _RAW_STORAGE, _NORMALIZED_STORAGE, _LAST_NORM_FILE_STAT, _INITIALIZED
     with _STORAGE_LOCK:
         _RAW_STORAGE.clear()
         _NORMALIZED_STORAGE.clear()
+        _LAST_NORM_FILE_STAT = (0.0, 0)
         storage_dir = _get_storage_dir()
         import shutil
         raw_dir = storage_dir / "raw"

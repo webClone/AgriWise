@@ -377,14 +377,14 @@ class ModbusActuator(IrrigationActuator):
         has_status = bool(status_info and "status_word" in status_info)
         is_running_bit = bool(status_info["status_word"] & 0x01) if has_status else False
 
-        # Positive physical confirmation requires that at least one measurement is affirmatively
-        # acquired, no measurement detects running/flow, and all available measurements confirm stopped.
-        has_evidence = has_flow or has_status
-        flow_stopped = (actual_flow == 0.0) if has_flow else True
-        status_stopped = (not is_running_bit) if has_status else True
+        # Positive physical confirmation requires complete affirmative instrumentation
+        # (both flow == 0.0 and running bit cleared). Partial or missing instrumentation fails closed.
+        has_complete_instrumentation = has_flow and has_status
+        flow_stopped = (actual_flow == 0.0) if has_flow else False
+        status_stopped = (not is_running_bit) if has_status else False
 
-        confirmed = success and has_evidence and flow_stopped and status_stopped
-        transport_only = success and not confirmed
+        confirmed = bool(success and has_complete_instrumentation and flow_stopped and status_stopped)
+        transport_only = bool(success and not confirmed)
 
         return CommandResult(
             command_id=command.command_id,
@@ -599,12 +599,12 @@ class ModbusActuator(IrrigationActuator):
         has_status = bool(status_info and "status_word" in status_info)
         is_running_bit = bool(status_info["status_word"] & 0x01) if has_status else False
 
-        has_evidence = has_flow or has_status
-        flow_stopped = (actual_flow == 0.0) if has_flow else True
-        status_stopped = (not is_running_bit) if has_status else True
+        has_complete_instrumentation = has_flow and has_status
+        flow_stopped = (actual_flow == 0.0) if has_flow else False
+        status_stopped = (not is_running_bit) if has_status else False
 
-        confirmed = success and has_evidence and flow_stopped and status_stopped
-        transport_only = success and not confirmed
+        confirmed = bool(success and has_complete_instrumentation and flow_stopped and status_stopped)
+        transport_only = bool(success and not confirmed)
 
         return CommandResult(
             command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",

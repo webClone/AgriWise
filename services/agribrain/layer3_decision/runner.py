@@ -1981,45 +1981,46 @@ def _execute_canonical_water_engine(
                             r_entry = t_entry
                             break
             step_limit_ts = min(ts, datetime.datetime.combine(d_val, datetime.time(23, 59, 59, tzinfo=timezone.utc)))
+
+            def _is_weather_issuance_eligible(w_cand: Any) -> bool:
+                if not w_cand or not isinstance(w_cand, dict):
+                    return False
+                cand_iss = w_cand.get("issued_at") or w_cand.get("timestamp")
+                if cand_iss:
+                    try:
+                        cand_iss_dt = datetime.datetime.fromisoformat(str(cand_iss))
+                        if cand_iss_dt.tzinfo is None:
+                            cand_iss_dt = cand_iss_dt.replace(tzinfo=timezone.utc)
+                        return cand_iss_dt <= step_limit_ts
+                    except Exception:
+                        return False
+                if w_cand.get("is_prior") or w_cand.get("source_role") in ("historical_actual", "reanalyzed", "prior"):
+                    return True
+                entry_date = w_cand.get("date")
+                if entry_date:
+                    try:
+                        return datetime.date.fromisoformat(str(entry_date)[:10]) <= step_limit_ts.date()
+                    except Exception:
+                        return False
+                return True
+
             if r_entry and isinstance(r_entry, dict):
                 p = _parse_weather(r_entry)
-                if p:
-                    # Enforce knowledge-at-issuance: observation cannot have been issued after decision cutoff / step timestamp
-                    p_iss = p.get("issued_at") or r_entry.get("issued_at") or r_entry.get("timestamp")
-                    p_eligible = False
-                    if p_iss:
-                        try:
-                            p_iss_dt = datetime.datetime.fromisoformat(str(p_iss))
-                            if p_iss_dt.tzinfo is None:
-                                p_iss_dt = p_iss_dt.replace(tzinfo=timezone.utc)
-                            if p_iss_dt <= step_limit_ts:
-                                p_eligible = True
-                        except Exception:
-                            p_eligible = False
-                    elif p.get("is_prior") or p.get("source_role") in ("historical_actual", "reanalyzed", "prior"):
-                        p_eligible = True
-                    else:
-                        entry_d = r_entry.get("date")
-                        if entry_d:
-                            try:
-                                p_eligible = (datetime.date.fromisoformat(str(entry_d)[:10]) <= step_limit_ts.date())
-                            except Exception:
-                                p_eligible = False
-                        else:
-                            p_eligible = True
-
-                    if p_eligible:
-                        return p
+                if p and _is_weather_issuance_eligible(p):
+                    return p
 
             # If this date was previously integrated and stored in plot_hist, retain its observation
+            # only if issuance eligibility is satisfied
             if d_str in plot_hist and isinstance(plot_hist[d_str], dict) and "weather" in plot_hist[d_str]:
                 cached_w = plot_hist[d_str]["weather"]
-                if cached_w and isinstance(cached_w, dict):
+                if cached_w and isinstance(cached_w, dict) and _is_weather_issuance_eligible(cached_w):
                     return cached_w
 
             # Also check retained_weather_map if replaying an invalidated trajectory
             if d_str in retained_weather_map and isinstance(retained_weather_map[d_str], dict):
-                return retained_weather_map[d_str]
+                retained_w = retained_weather_map[d_str]
+                if _is_weather_issuance_eligible(retained_w):
+                    return retained_w
 
             # DV10: Check if this date was previously recorded in canonical committed worldline checkpoints
             try:

@@ -375,13 +375,28 @@ class HTTPActuator(IrrigationActuator):
 
         success = bool(result.get("success", False))
         data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
-        confirmed_stopped = bool(
-            data.get("confirmed_stopped") is True
-            or (data.get("flow_rate_lpm") == 0.0 and not data.get("is_running", False) and data.get("is_stopped", True))
-            or str(data.get("status", "")).upper() in ("STOPPED", "IDLE")
+
+        is_running = data.get("is_running")
+        is_stopped = data.get("is_stopped")
+        flow_rate = data.get("flow_rate_lpm")
+        has_flow = (flow_rate is not None)
+        status_str = str(data.get("status", "")).upper()
+
+        is_contradictory = (
+            is_running is True
+            or (has_flow and float(flow_rate) > 0.0)
+            or is_stopped is False
         )
-        confirmed = success and confirmed_stopped
-        transport_only = success and not confirmed
+
+        has_affirmative_evidence = (
+            data.get("confirmed_stopped") is True
+            or (has_flow and float(flow_rate) == 0.0 and (is_running is False or is_stopped is True))
+            or (status_str in ("STOPPED", "IDLE", "OFF") and is_running is not True and not (has_flow and float(flow_rate) > 0.0))
+        )
+
+        confirmed_stopped = bool(has_affirmative_evidence and not is_contradictory)
+        confirmed = bool(success and confirmed_stopped)
+        transport_only = bool(success and not confirmed)
 
         return CommandResult(
             command_id=command.command_id,
@@ -473,13 +488,28 @@ class HTTPActuator(IrrigationActuator):
 
         success = bool(result.get("success", False))
         data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
-        confirmed_stopped = bool(
-            data.get("confirmed_stopped") is True
-            or (data.get("flow_rate_lpm") == 0.0 and not data.get("is_running", False) and data.get("is_stopped", True))
-            or str(data.get("status", "")).upper() in ("STOPPED", "IDLE")
+
+        is_running = data.get("is_running")
+        is_stopped = data.get("is_stopped")
+        flow_rate = data.get("flow_rate_lpm")
+        has_flow = (flow_rate is not None)
+        status_str = str(data.get("status", "")).upper()
+
+        is_contradictory = (
+            is_running is True
+            or (has_flow and float(flow_rate) > 0.0)
+            or is_stopped is False
         )
-        confirmed = success and confirmed_stopped
-        transport_only = success and not confirmed
+
+        has_affirmative_evidence = (
+            data.get("confirmed_stopped") is True
+            or (has_flow and float(flow_rate) == 0.0 and (is_running is False or is_stopped is True))
+            or (status_str in ("STOPPED", "IDLE", "OFF") and is_running is not True and not (has_flow and float(flow_rate) > 0.0))
+        )
+
+        confirmed_stopped = bool(has_affirmative_evidence and not is_contradictory)
+        confirmed = bool(success and confirmed_stopped)
+        transport_only = bool(success and not confirmed)
 
         return CommandResult(
             command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",

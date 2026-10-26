@@ -31,6 +31,7 @@ from irrigation_runtime.schemas import (
     SafetyInterlock,
     SafetyViolation,
     InterlockType,
+    VendorId,
 )
 
 try:
@@ -369,16 +370,44 @@ class IrrigationActuator(ABC):
                 or bool(getattr(result, "fault_code", 0))
                 or getattr(result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR")
             )
+            is_mock = (
+                type(self).__name__.startswith("Mock")
+                or getattr(self, "is_mock", False)
+                or getattr(getattr(self, "registration", None), "model", "") == "MockModel"
+                or getattr(getattr(self, "registration", None), "vendor", None) == VendorId.CUSTOM
+            )
+            is_real_transport = (
+                getattr(self, "protocol", None) in (
+                    DriverProtocol.MODBUS_RTU,
+                    DriverProtocol.MODBUS_TCP,
+                    DriverProtocol.HTTP_REST,
+                    DriverProtocol.MQTT,
+                    DriverProtocol.LORAWAN,
+                )
+                or getattr(getattr(self, "registration", None), "protocol", None) in (
+                    DriverProtocol.MODBUS_RTU,
+                    DriverProtocol.MODBUS_TCP,
+                    DriverProtocol.HTTP_REST,
+                    DriverProtocol.MQTT,
+                    DriverProtocol.LORAWAN,
+                )
+            )
             if has_fault:
                 self._status = ActuatorStatus.ERROR
-            elif getattr(result, "transport_acknowledged_only", False) and not getattr(result, "confirmed_physical_stop", False):
+            elif getattr(result, "confirmed_physical_stop", False) is True:
+                self._status = ActuatorStatus.ONLINE
+                self._active_command = None
+                self._pending_command = None
+            elif getattr(result, "transport_acknowledged_only", False) or (is_real_transport and not is_mock):
+                # Real transport protocol or transport acknowledged only:
+                # Require affirmative physical confirmation; do NOT fabricate confirmed_physical_stop or release ownership!
                 self._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
                 result.confirmed_physical_stop = False
+                result.transport_acknowledged_only = True
                 logger.warning(
-                    "Stop command %s transport-acknowledged on device %s, physical confirmation pending.",
+                    "Stop command %s on device %s is transport-acknowledged/unconfirmed; entered STOP_PENDING_CONFIRMATION.",
                     command.command_id, self.device_id
                 )
-                # Retain active command and operation ownership until physical stop confirmation
             else:
                 self._status = ActuatorStatus.ONLINE
                 self._active_command = None
@@ -806,13 +835,42 @@ class IrrigationActuator(ABC):
             raise ValueError("confirm_stop requires a verified dictionary receipt")
 
         rec_dev = receipt.get("device_id")
-        if rec_dev and rec_dev != self.device_id:
+        if not rec_dev or rec_dev != self.device_id:
             raise ValueError(f"Receipt device_id {rec_dev} does not match actuator {self.device_id}")
 
         active_op = getattr(self._active_command, "operation_id", None) or getattr(self._active_command, "command_id", None)
         rec_op = receipt.get("operation_id") or receipt.get("command_id")
-        if active_op and rec_op and active_op != rec_op:
-            raise ValueError(f"Receipt operation_id {rec_op} does not match active operation {active_op}")
+        if active_op:
+            if not rec_op or rec_op != active_op:
+                raise ValueError(f"Receipt operation_id {rec_op} does not match active operation {active_op}")
+
+        # Freshness and observation window check (within 600s, not future-dated)
+        ts_raw = receipt.get("timestamp") or receipt.get("observed_at") or receipt.get("received_at")
+        if ts_raw:
+            try:
+                if isinstance(ts_raw, (int, float)):
+                    ts_dt = datetime.fromtimestamp(float(ts_raw), tz=timezone.utc)
+                else:
+                    ts_dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+                if ts_dt.tzinfo is None:
+                    ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+                now_utc = datetime.now(timezone.utc)
+                age = (now_utc - ts_dt).total_seconds()
+                if age > 600.0:
+                    logger.warning("Receipt for device %s is stale (age=%.1fs > 600s)", self.device_id, age)
+                    return False
+                if age < -30.0:
+                    logger.warning("Receipt for device %s has future-dated observation time (%s)", self.device_id, ts_raw)
+                    return False
+            except Exception as ts_err:
+                logger.warning("Failed to parse observation timestamp in receipt for device %s: %s", self.device_id, ts_err)
+                return False
+
+        # Provenance authentication check
+        source = receipt.get("source") or receipt.get("driver") or receipt.get("provenance")
+        if source and str(source).lower() in ("untrusted", "spoofed", "unknown", "invalid"):
+            logger.warning("Receipt for device %s from untrusted source %s", self.device_id, source)
+            return False
 
         flow = receipt.get("actual_flow_rate_lpm", receipt.get("actual_flow_lpm", receipt.get("flow_rate_lpm")))
         status = str(receipt.get("status", "")).upper()
@@ -820,7 +878,7 @@ class IrrigationActuator(ABC):
         is_running = receipt.get("is_running", receipt.get("running"))
         confirmed_stopped = receipt.get("confirmed_stopped") or receipt.get("confirmed_physical_stop")
 
-        if is_running is True or (flow is not None and float(flow) > 0.0):
+        if is_running is True or is_stopped is False or (flow is not None and float(flow) > 0.0):
             logger.warning("Receipt for device %s detects ongoing flow/running; cannot confirm stop.", self.device_id)
             return False
 

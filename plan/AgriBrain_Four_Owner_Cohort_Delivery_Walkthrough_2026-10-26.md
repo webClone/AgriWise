@@ -93,13 +93,57 @@ The cohort delivery model organizes 16 high-leverage packages under four paralle
 
 ---
 
-## 4. Test Verification & Receipts
+## 4. Track B: Post-Audit Integrations S, D, E Remediation Summary (Commit `3687d65` Findings)
+
+### Integration S: Physical Execution Authority (P1 — F16, F17, F18, F19)
+* **Files:**
+  - `services/agribrain/irrigation_runtime/dispatcher.py`
+  - `services/agribrain/irrigation_runtime/actuator.py`
+  - `services/agribrain/irrigation_runtime/drivers/modbus_driver.py`
+  - `services/agribrain/irrigation_runtime/drivers/http_driver.py`
+  - `services/agribrain/irrigation_runtime/drivers/mqtt_driver.py`
+* **Remediation:**
+  - **Restart Reconciliation & STOP Retry Authority:** Closed transport-success shortcuts across `reconcile_on_restart`, `check_execution_status`, `emergency_stop_all`, and `emergency_stop_event` via centralized `_is_stop_confirmed(actuator, stop_res)`. Stop commands require affirmative verified physical stop (`confirmed_stop`) and cannot advance to `CANCELLED` or release quota on transport ACK alone.
+  - **Stop-Pending State in Actuator Core:** In `actuator.py` `_execute_stop_direct`, real transport protocols (`MODBUS`, `HTTP`, `MQTT`, `LORAWAN`) with unconfirmed physical stop enter `ActuatorStatus.STOP_PENDING_CONFIRMATION`, retaining active command and operation ownership without fabricating `confirmed_physical_stop=True`.
+  - **Receipt Hardening in `confirm_stop()`:** Made `device_id` and active `operation_id` strictly mandatory; enforced 600s freshness window, rejected future-dated observations (> 30s), verified trusted provenance, and rejected contradictory telemetry (`is_stopped=False`, `is_running=True`, `flow_rate > 0.0`).
+  - **Modbus Driver Feedback:** Requires affirmative instrumentation on all mapped registers (both `flow == 0.0` and running bit cleared). Partial or missing instrumentation fails closed (`confirmed_physical_stop=False`, `transport_acknowledged_only=True`).
+  - **HTTP Driver Telemetry:** Rejects contradictory telemetry (e.g. `status="STOPPED"` with `is_running=True`, `flow_rate > 0.0`, or `is_stopped=False` fails closed) in `_stop_zone` and `emergency_stop`.
+  - **MQTT Driver ACK:** Explicitly returns `confirmed_physical_stop=True, transport_acknowledged_only=False` upon controller-level ACK.
+
+### Integration D: Durable Evidence and Replay (P2 — F39, F02, F06)
+* **Files:**
+  - `services/agribrain/sensor_runtime/storage.py`
+  - `services/agribrain/sensor_runtime/ingestion.py`
+  - `services/agribrain/layer3_decision/runner.py`
+* **Remediation:**
+  - **Injective Identity Encoding:** In `storage.py`, `_validate_and_encode_id()` uses a SHA-256 digest (`f"{clean_prefix}_{digest}"`), eliminating path-traversal and collision aliases between sanitized variants (e.g. `urn:dev:123` vs `urn_COLON_dev_COLON_123`).
+  - **Write Atomicity:** Raw sensor messages are written to unique temp files with `fsync`, exclusively claimed via `os.open(..., O_CREAT | O_EXCL)`, and published via atomic `os.replace`.
+  - **Normalized Evidence Integrity:** In `store_normalized_reading()`, writes and `fsync` occur to disk before in-memory cache publication. In `sensor_runtime/ingestion.py`, failures in normalized storage fail closed by raising `RuntimeError`.
+  - **Distributed Multi-Worker Rehydration:** In `get_normalized_readings()`, checking file metadata (`st_mtime`/`st_size`) against cached stat rehydrates in-memory records so multiple worker processes observe concurrent appends.
+  - **Replay Weather Eligibility:** In `layer3_decision/runner.py`, enforced `_is_weather_issuance_eligible(w, step_limit_ts)` on `plot_hist` and `retained_weather_map` entries, preventing prospective weather leak during historical replays.
+
+### Integration E: EO Qualification (P2 — F25, F26)
+* **Files:**
+  - `services/agribrain/layer1_fusion/eo_foundation_model.py`
+* **Remediation:**
+  - **Rectangular Grid Enforcement:** Rejects ragged row lengths across all multi-band grids, ensuring strictly rectangular `(H, W)` tensors.
+  - **Spatial Identity Qualification:** When raster CRS or affine transform is missing, marks spatial identity unqualified (`UNQUALIFIED_SPATIAL_CRS`, `UNQUALIFIED_SPATIAL_TRANSFORM`) and sets `is_spatial_qualified=False`.
+  - **Model Weights Provenance Binding:** Computes SHA-256 digest of loaded ONNX weights/bytes and binds it to `EmbeddingResult.model_provenance["weights_digest"]` alongside versioned preprocessing contracts.
+
+---
+
+## 5. Test Verification & Receipts
 
 1. **Focused Blocker Suite:** `services/agribrain/tests/test_audit_four_owner_cohort_verified_blockers.py`
-   - **Result:** **32 / 32 passed (100%)**
-   - Covers all 4 lanes: F25/F26 (Acquisition), F39 (Storage Durability), F17/F18 (Physical Stop Verification), F01/F37 (Namespace & Calibration), F04/F08 (Hydraulic Precision), and F02/F06 (Prospective Weather Cutoffs).
+   - **Result:** **45 / 45 passed (100%)**
+   - Covers:
+     - Lane 1 (Foundation & Temporal): F01, F02, F06, F37 (Namespace & Prospective Weather Cutoffs)
+     - Lane 2 (Trajectory & Persistence): F04, F08, F39 (Hydraulic Precision, Durability, Injective Storage)
+     - Lane 3 (Execution & Safety): F16, F17, F18, F19 (Physical Stop Verification, Receipt Hardening, Driver Affirmation)
+     - Lane 4 (Acquisition & EO): F25, F26 (Spatial Qualification, Ragged Grid Rejection, Weights Binding)
+     - Integrations S, D, E: `TestPostAuditIntegrationsSDE` (13/13 passed)
 2. **Full Repository Python Suite:** `services/agribrain/tests/`
-   - **Result:** **658 / 658 passed (100%), 129 subtests passed** (0 failures, 3 non-blocking deprecation warnings).
+   - **Result:** **671 / 671 passed (100%), 129 subtests passed** (0 failures, 3 non-blocking deprecation warnings).
 3. **Frontend Test Suite:** `npm run test:frontend`
    - **Result:** **32 / 32 passed (100%)**
 4. **TypeScript Typecheck:** `npx tsc --noEmit`

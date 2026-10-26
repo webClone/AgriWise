@@ -79,6 +79,8 @@ class EmbeddingResult:
     valid_pixels: int = 0
     model_version: str = "1.0.0"
     preprocessing_version: str = "2.0.0"
+    is_spatial_qualified: bool = False
+    model_weights_digest: str = ""
 
 
 # ============================================================================
@@ -113,6 +115,7 @@ class EOFoundationModel:
         self._session = None  # Lazy-loaded ONNX session
         self._mode: Optional[str] = None  # "onnx" | "fallback" | "disabled"
         self._fallback_weights: Optional[List[List[float]]] = None
+        self._weights_digest: str = ""
         self._model_version = "1.0.0"
         self._preprocessing_version = "2.0.0"
 
@@ -142,6 +145,11 @@ class EOFoundationModel:
                     providers=["CPUExecutionProvider"],
                 )
                 self._mode = "onnx"
+                try:
+                    with open(self._model_path, "rb") as mf:
+                        self._weights_digest = hashlib.sha256(mf.read()).hexdigest()
+                except Exception:
+                    self._weights_digest = hashlib.sha256(self._model_path.encode("utf-8")).hexdigest()
                 return
             except Exception:
                 pass  # Fall through to fallback
@@ -149,6 +157,13 @@ class EOFoundationModel:
         # Fallback: pure-Python spectral encoder
         self._mode = "fallback"
         self._init_fallback_weights()
+        if self._fallback_weights:
+            try:
+                import json
+                fb_bytes = json.dumps(self._fallback_weights, sort_keys=True).encode("utf-8")
+                self._weights_digest = hashlib.sha256(fb_bytes).hexdigest()
+            except Exception:
+                self._weights_digest = "fallback_spectral_basis_v2_digest"
 
     def _init_fallback_weights(self) -> None:
         """Initialize physically-informed spectral basis projection (F21).
@@ -260,19 +275,38 @@ class EOFoundationModel:
             return None  # Need at least 3 bands for meaningful embedding
 
         # Strict spatial alignment validation across all bands and cloud mask (F26)
+        # Enforces rectangular grids across all rows (rejecting ragged arrays)
         ref_shape = None
         for b in available_bands:
             arr = band_arrays[b]
-            if not isinstance(arr, list) or len(arr) == 0 or not isinstance(arr[0], list):
+            if not isinstance(arr, list) or len(arr) == 0:
                 raise ValueError(f"invalid_band_array_structure: {b}")
-            b_shape = (len(arr), len(arr[0]))
+            b_h = len(arr)
+            row_width = None
+            for row_idx, row in enumerate(arr):
+                if not isinstance(row, list) or len(row) == 0:
+                    raise ValueError(f"invalid_band_array_structure: {b} row {row_idx}")
+                if row_width is None:
+                    row_width = len(row)
+                elif len(row) != row_width:
+                    raise ValueError(f"ragged_grid_detected: {b} row {row_idx} width {len(row)} != expected {row_width}")
+            b_shape = (b_h, row_width)
             if ref_shape is None:
                 ref_shape = b_shape
             elif b_shape != ref_shape:
                 raise ValueError(f"band_dimension_mismatch: {b} shape {b_shape} != reference {ref_shape}")
 
         if cloud_mask is not None and len(cloud_mask) > 0:
-            cm_shape = (len(cloud_mask), len(cloud_mask[0]) if cloud_mask[0] else 0)
+            cm_h = len(cloud_mask)
+            cm_width = None
+            for cm_idx, cm_row in enumerate(cloud_mask):
+                if not isinstance(cm_row, list):
+                    raise ValueError(f"invalid_cloud_mask_structure: row {cm_idx}")
+                if cm_width is None:
+                    cm_width = len(cm_row)
+                elif len(cm_row) != cm_width:
+                    raise ValueError(f"ragged_grid_detected: cloud_mask row {cm_idx} width {len(cm_row)} != expected {cm_width}")
+            cm_shape = (cm_h, cm_width or 0)
             if ref_shape is not None and cm_shape != ref_shape:
                 raise ValueError(f"band_dimension_mismatch: cloud_mask shape {cm_shape} != reference {ref_shape}")
 
@@ -318,6 +352,7 @@ class EOFoundationModel:
         confidence = round(min(conf_ceiling, band_completeness * 0.5 + pixel_quality * 0.25), 3)
 
         model_id = actual_backend
+        is_spatial_qualified = bool(crs is not None and transform is not None)
 
         return EmbeddingResult(
             embedding=[round(v, 6) for v in embedding],
@@ -329,6 +364,8 @@ class EOFoundationModel:
             valid_pixels=valid_pixels,
             model_version=self._model_version,
             preprocessing_version=self._preprocessing_version,
+            is_spatial_qualified=is_spatial_qualified,
+            model_weights_digest=getattr(self, "_weights_digest", ""),
         )
 
     # ════════════════════════════════════════════════════════════════════
@@ -666,8 +703,10 @@ class EOFoundationModel:
                 w = len(pixels[0]) if pixels[0] else 0
                 break
         parts.append(f"dim:{h}x{w}")
-        parts.append(f"crs:{crs or 'EPSG:4326'}")
-        parts.append(f"transform:{transform or 'identity'}")
+        crs_repr = str(crs) if crs is not None else "UNQUALIFIED_SPATIAL_CRS"
+        transform_repr = str(transform) if transform is not None else "UNQUALIFIED_SPATIAL_TRANSFORM"
+        parts.append(f"crs:{crs_repr}")
+        parts.append(f"transform:{transform_repr}")
         parts.append(f"prep:{getattr(self, '_preprocessing_version', '2.0.0')}")
 
         for band in sorted(available_bands):

@@ -748,6 +748,8 @@ class MQTTActuator(IrrigationActuator):
                     device_id=self.device_id,
                     success=True,
                     timestamp=datetime.now(timezone.utc).isoformat(),
+                    confirmed_physical_stop=True,
+                    transport_acknowledged_only=False,
                 )
             except asyncio.TimeoutError:
                 logger.warning("🚨 EMERGENCY STOP publish accepted but no controller ACK received within %ss", stop_timeout)

@@ -138,6 +138,29 @@ class CommandDispatcher:
         elif hasattr(self._registry, "_actuators"):
             self._registry._actuators[actuator.device_id] = actuator
 
+    def _is_stop_confirmed(self, actuator: Any, stop_res: Optional[CommandResult]) -> bool:
+        """Evaluate if an actuator stop is positively verified by physical evidence."""
+        if not stop_res or not stop_res.success:
+            return False
+        confirmed_flag = bool(getattr(stop_res, "confirmed_physical_stop", False))
+        transport_only = bool(getattr(stop_res, "transport_acknowledged_only", False))
+        status_pending = (
+            getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION
+            or getattr(actuator, "_status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION
+        )
+        is_idle = (
+            getattr(actuator, "status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
+            or getattr(actuator, "_status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
+            or not getattr(actuator, "running", True)
+            or not getattr(actuator, "is_running", True)
+            or (hasattr(actuator, "hw") and not getattr(actuator.hw, "running", True))
+        )
+        return bool(
+            stop_res.success
+            and (confirmed_flag or (not transport_only and not status_pending and is_idle))
+            and not status_pending
+        )
+
     # ================================================================
     # Event Submission
     # ================================================================
@@ -1160,7 +1183,7 @@ class CommandDispatcher:
                         error_message=str(stop_err),
                     )
 
-                if stop_retry and stop_retry.success and not has_pending and not has_device_hazard:
+                if stop_retry and self._is_stop_confirmed(actuator, stop_retry) and not has_pending and not has_device_hazard:
                     term_status = EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED
                     event.transition(term_status, "Confirmed stopped on actuator after retry")
                     has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_retry, "fault_code", 0)) or getattr(stop_retry, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR")
@@ -1274,22 +1297,8 @@ class CommandDispatcher:
             )
             event.safety_violations.extend(v.violation_id for v in violations)
 
-            confirmed_flag = bool(getattr(stop_result, "confirmed_physical_stop", False))
-            transport_only = bool(getattr(stop_result, "transport_acknowledged_only", False))
-            status_pending = (getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION or getattr(actuator, "_status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION)
             transport_ok = bool(stop_result and stop_result.success)
-
-            is_idle = (
-                getattr(actuator, "status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
-                or getattr(actuator, "_status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
-                or not getattr(actuator, "running", True)
-                or not getattr(actuator, "is_running", True)
-            )
-            confirmed_stop = bool(
-                transport_ok
-                and (confirmed_flag or (not transport_only and not status_pending and is_idle))
-                and not status_pending
-            )
+            confirmed_stop = self._is_stop_confirmed(actuator, stop_result)
 
             if confirmed_stop:
                 has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_result, "fault_code", 0)) or getattr(stop_result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR") or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
@@ -1387,22 +1396,8 @@ class CommandDispatcher:
             if act_cmd_eid and act_cmd_eid != event.event_id:
                 return event
             stop_result = await actuator.emergency_stop()
-            confirmed_flag = bool(getattr(stop_result, "confirmed_physical_stop", False))
-            transport_only = bool(getattr(stop_result, "transport_acknowledged_only", False))
-            status_pending = (getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION or getattr(actuator, "_status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION)
             transport_ok = bool(stop_result and stop_result.success)
-
-            is_idle = (
-                getattr(actuator, "status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
-                or getattr(actuator, "_status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
-                or not getattr(actuator, "running", True)
-                or not getattr(actuator, "is_running", True)
-            )
-            confirmed_stop = bool(
-                transport_ok
-                and (confirmed_flag or (not transport_only and not status_pending and is_idle))
-                and not status_pending
-            )
+            confirmed_stop = self._is_stop_confirmed(actuator, stop_result)
 
             if confirmed_stop:
                 has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_result, "fault_code", 0)) or getattr(stop_result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR") or status == ActuatorStatus.ERROR or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
@@ -1739,21 +1734,9 @@ class CommandDispatcher:
                     stop_success = False
                     if actuator:
                         stop_res = await actuator.emergency_stop()
-                        confirmed_flag = bool(getattr(stop_res, "confirmed_physical_stop", False))
-                        transport_only = bool(getattr(stop_res, "transport_acknowledged_only", False))
-                        status_pending = (getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION or getattr(actuator, "_status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION)
                         transport_ok = bool(stop_res and stop_res.success)
-                        is_idle = (
-                            getattr(actuator, "status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
-                            or getattr(actuator, "_status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
-                            or not getattr(actuator, "running", True)
-                            or not getattr(actuator, "is_running", True)
-                        )
-                        confirmed_stop = bool(
-                            transport_ok
-                            and (confirmed_flag or (not transport_only and not status_pending and is_idle))
-                            and not status_pending
-                        )
+                        status_pending = (getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION or getattr(actuator, "_status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION)
+                        confirmed_stop = self._is_stop_confirmed(actuator, stop_res)
                         if confirmed_stop:
                             has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_res, "fault_code", 0)) or getattr(stop_res, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR") or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
                             if has_fault:
@@ -2081,7 +2064,7 @@ class CommandDispatcher:
                     continue
                 try:
                     stop_res = await actuator.emergency_stop()
-                    if stop_res.success:
+                    if self._is_stop_confirmed(actuator, stop_res):
                         event.transition(
                             EventStatus.EMERGENCY_STOPPED if event.emergency_stopped else EventStatus.CANCELLED,
                             "Confirmed stopped on restart"
@@ -2172,7 +2155,7 @@ class CommandDispatcher:
                     if remaining_duration <= 0.0:
                         # Runtime expired before or during restart; stop immediately
                         stop_res = await actuator.emergency_stop()
-                        if stop_res.success:
+                        if self._is_stop_confirmed(actuator, stop_res):
                             event.transition(EventStatus.EMERGENCY_STOPPED, "Duration expired prior to or during restart")
                             res = SharedQuotaStore.get_active_record(event.event_id) or {}
                             season_key = res.get("season")

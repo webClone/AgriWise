@@ -263,5 +263,6 @@ def ingest_sensor_payload(
                 store_normalized_reading(r)
             except Exception as store_err:
                 logger.error("Failed to store normalized reading %s: %s", r.reading_id, store_err)
+                raise RuntimeError(f"Storage persistence failed for reading {r.reading_id}: {store_err}") from store_err
 
     return readings
