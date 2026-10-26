@@ -348,7 +348,7 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
         if raw_unc is None:
             raw_unc = prov.get("normalized_uncertainty")
         if raw_unc is None:
-            raw_unc = prov.get("uncertainty", 0.0)
+            raw_unc = prov.get("uncertainty")
 
         if isinstance(raw_conf, (list, tuple)):
             conf_vals = [
@@ -366,9 +366,9 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
                 float(v) for row in raw_unc for v in (row if isinstance(row, (list, tuple)) else [row])
                 if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
             ]
-            unc = sum(unc_vals) / len(unc_vals) if unc_vals else 0.0
-        elif not isinstance(raw_unc, (int, float)) or isinstance(raw_unc, bool) or not math.isfinite(raw_unc):
-            unc = 0.0
+            unc = sum(unc_vals) / len(unc_vals) if unc_vals else 1.0
+        elif raw_unc is None or not isinstance(raw_unc, (int, float)) or isinstance(raw_unc, bool) or not math.isfinite(raw_unc):
+            unc = 1.0
         else:
             unc = float(raw_unc)
 

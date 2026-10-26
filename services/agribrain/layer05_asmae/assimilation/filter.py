@@ -1778,6 +1778,7 @@ def update_step_ht(
             }
 
         if not has_actual_influence:
+            state_cube = step_prior_cube
             reports.append({
                 'obs_name': obs_name,
                 'sensor': mapping.sensor,

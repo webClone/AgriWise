@@ -125,8 +125,16 @@ def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
                         return False, True
             try:
                 mat = np.array(cov, dtype=float)
+                if not np.all(np.isfinite(mat)):
+                    return False, True
                 eigenvals = np.linalg.eigvalsh(mat)
-                if np.any(eigenvals < -1e-5):
+                if not np.all(np.isfinite(eigenvals)):
+                    return False, True
+                max_diag = max(float(cov[i][i]) for i in range(n_rows))
+                max_eig = float(np.max(eigenvals)) if len(eigenvals) > 0 else 0.0
+                scale = max(max_diag, max_eig, 1e-12)
+                tol = max(1e-12, 1e-7 * scale)
+                if np.any(eigenvals < -tol):
                     return False, True
             except Exception:
                 return False, True
@@ -740,12 +748,33 @@ align_asmae_grid_to_target = _align_asmae_grid_to_target
 
 
 def get_standard_variable_name(stype: SurfaceType, meta_var: Optional[str] = None) -> str:
-    v = (meta_var or "").lower()
-    s = stype.value.lower()
+    from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key, STATE_ORDER
+    v = (meta_var or "").strip().lower()
+    s = getattr(stype, "value", str(stype))
+
+    # If meta_var is already an exact canonical state in STATE_ORDER, prefer it
+    canon_v = canonical_state_key(v) if v else None
+    if canon_v and canon_v in STATE_ORDER:
+        return canon_v
+
+    # Resolve from surface type
+    canon_s = canonical_state_key(s)
+    if canon_s and canon_s in STATE_ORDER:
+        return canon_s
+
+    # Specific water distinctions before generic water
+    s_low = s.lower()
+    if "root_zone_water" in v or "root_zone_water" in s_low or "rootzone" in v or "rootzone" in s_low:
+        return "root_zone_water"
+    if "surface_wetness" in v or "surface_wetness" in s_low or "wetness" in v or "wetness" in s_low:
+        return "surface_wetness_event"
+    if "canopy_water" in v or "canopy_water" in s_low:
+        return "canopy_water"
+    if "water" in v or "water" in s_low:
+        return "canopy_water"
+
     if "vigor" in v or "vigor" in s or "ndvi" in v or "ndvi" in s:
         return "vigor"
-    if "water" in v or "water" in s or "canopy_water" in v or "canopy_water" in s:
-        return "canopy_water"
     if "salinity" in v or "salinity" in s:
         return "salinity_stress"
     if "biotic" in v or "biotic" in s or "confounder" in v or "confounder" in s:
@@ -764,16 +793,20 @@ def get_surface_display_policy(
     """Determine UI display trust tier, desaturation level, alpha, and warning codes."""
     warning_codes = []
 
+    conf_valid = isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and math.isfinite(confidence)
+    unc_valid = isinstance(uncertainty, (int, float)) and not isinstance(uncertainty, bool) and math.isfinite(uncertainty)
+    clc_valid = isinstance(cross_layer_conflict, (int, float)) and not isinstance(cross_layer_conflict, bool) and math.isfinite(cross_layer_conflict)
+
     if resolution_m <= 1.0 and not is_certified_v90:
         warning_codes.append("resolution_1m_blocked")
 
-    if cross_layer_conflict > 0.45:
+    if not clc_valid or cross_layer_conflict > 0.45:
         warning_codes.append("cross_layer_conflict")
 
-    if confidence < 0.60:
+    if not conf_valid or confidence < 0.60:
         warning_codes.append("low_confidence")
 
-    if uncertainty > 0.40:
+    if not unc_valid or uncertainty > 0.40:
         warning_codes.append("high_uncertainty")
 
     if bma_status != "success":
@@ -781,7 +814,7 @@ def get_surface_display_policy(
 
     # If no major warnings, check for mild warnings for provisional tier
     if not warning_codes:
-        if (0.60 <= confidence <= 0.80) or (0.30 <= uncertainty <= 0.40):
+        if (conf_valid and 0.60 <= confidence <= 0.80) or (unc_valid and 0.30 <= uncertainty <= 0.40):
             warning_codes.append("mild_warning")
 
     # Determine display trust tier based on the highest severity warning
