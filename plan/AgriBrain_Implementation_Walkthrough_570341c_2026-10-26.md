@@ -1,6 +1,6 @@
 # AgriBrain Implementation Walkthrough and Cohort Delivery Plan
 
-**Candidate Commit:** `aaf3895` (+ follow-on refinements)  
+**Candidate Commit:** `730b9fe` (verified closed)  
 **Branch:** `feat/f36-t09-asmae-13-state-publication`  
 **Date:** 26 October 2026  
 **Audience:** Four-Owner Cohort Delivery Team (Foundation, Trajectory, Execution, Acquisition) & Independent Verification Gate  
@@ -15,7 +15,7 @@
 | **Change from Previous Audit** | **0% (rounded)** | Measured by accepted software outcomes, not raw commit count |
 | **Current Cohort Estimate** | **53%** | 16-package maturity across the 4 delivery lanes |
 | **Formal Acceptance Milestones** | **0 / 52** | Formal package sign-offs remain strictly open until full integration acceptance |
-| **Current Head Commit** | `aaf3895` (+ refinements) | 14+ commits ahead of `main`; builds upon verified `563c6fa` closure |
+| **Current Head Commit** | `730b9fe` | 15 commits ahead of `main`; builds upon verified `563c6fa` closure |
 
 ---
 
