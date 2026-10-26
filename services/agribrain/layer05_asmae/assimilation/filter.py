@@ -1796,6 +1796,14 @@ def update_step_ht(
             if not per_state_influence[state_name]['state_influenced']:
                 state_cube[:, :, state_index] = step_prior_cube[:, :, state_index]
 
+        # Recompute posterior summaries to reflect the committed states in state_cube
+        posterior_variance = _state_variance_summary(state_cube, target_indices)
+        posterior_mean = _state_mean_summary(state_cube, target_indices)
+        information_gain = {
+            state: max(0.0, prior - posterior_variance.get(state, prior))
+            for state, prior in prior_variance.items()
+        }
+
         # Determine directness from measurement/operator receipt and descriptor policy
         is_receipt_direct = bool(
             getattr(operator, 'is_direct_measurement', False)
@@ -1989,6 +1997,10 @@ def update_step_proxy(
                 for nid in node_ids:
                     for i_member in range(len(ensemble[nid])):
                         ensemble[nid][i_member][state_index] = step_prior_ensemble[nid][i_member][state_index]
+
+        # Recompute posterior summaries to reflect the committed states in ensemble
+        posterior_mean = _state_mean_summary(ensemble, target_indices)
+        posterior_variance = _state_variance_summary(ensemble, target_indices)
 
         reports.append({
             "obs_name": obs_name,

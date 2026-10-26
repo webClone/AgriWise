@@ -123,12 +123,25 @@ def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
             sym_tol = max(1e-14, 1e-4 * scale)
 
             for i in range(n_rows):
-                if float(cov[i][i]) < 0.0:
+                var_i = float(cov[i][i])
+                if var_i < 0.0:
                     return False, True
+                # Zero variance requires zero cross-covariances (Var(X)=0 implies Cov(X, Y)=0)
+                if var_i <= 1e-15:
+                    for j in range(n_rows):
+                        if abs(float(cov[i][j])) > 1e-15 or abs(float(cov[j][i])) > 1e-15:
+                            return False, True
                 for j in range(i + 1, n_rows):
                     diff = abs(float(cov[i][j]) - float(cov[j][i]))
                     pair_scale = max(abs(float(cov[i][j])), abs(float(cov[j][i])))
                     if diff > sym_tol or diff > max(1e-14, 1e-4 * pair_scale):
+                        return False, True
+                    # Cauchy-Schwarz consistency: Cov(i, j)^2 <= Var(i) * Var(j)
+                    var_j = float(cov[j][j])
+                    cov_ij = float(cov[i][j])
+                    cs_bound = var_i * var_j
+                    margin = max(1e-15, 1e-9 * (scale ** 2))
+                    if (cov_ij ** 2) > (cs_bound + margin):
                         return False, True
             try:
                 mat = np.array(cov, dtype=float)
@@ -143,7 +156,7 @@ def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
                     if np.any(eigenvals < -1e-15):
                         return False, True
                 else:
-                    tol = max(1e-15, 1e-6 * mat_scale)
+                    tol = max(1e-15, 1e-11 * mat_scale)
                     if np.any(eigenvals < -tol):
                         return False, True
             except Exception:
@@ -1618,17 +1631,25 @@ def generate_asmae_surfaces(
                 "report_verified_evidence_hash": meta.get("report_verified_evidence_hash", ""),
             }
 
-            # Call V90 resolver
-            from certification.v90_resolver import verify_v90_certification_record
-            resolved_result = verify_v90_certification_record(
-                certification_id=cert_id,
-                plot_id=inp.plot_id,
-                variable=v90_var,
-                time_window=(meta.get("time_window_start"), meta.get("time_window_end")),
-                geometry_hash=geom_hash,
-                crop_season_id=crop_season_id,
-                source_hashes=source_hashes
-            )
+            # Call V90 resolver, ensuring conflicting canonical variables are rejected unconditionally
+            if v90_var == "conflict_rejected":
+                from certification.v90_schema import V90ResolutionResult
+                resolved_result = V90ResolutionResult(
+                    approved=False,
+                    reason_codes=["canonical_variable_conflict", "variable_mismatch"],
+                    certification_id=cert_id,
+                )
+            else:
+                from certification.v90_resolver import verify_v90_certification_record
+                resolved_result = verify_v90_certification_record(
+                    certification_id=cert_id,
+                    plot_id=inp.plot_id,
+                    variable=v90_var,
+                    time_window=(meta.get("time_window_start"), meta.get("time_window_end")),
+                    geometry_hash=geom_hash,
+                    crop_season_id=crop_season_id,
+                    source_hashes=source_hashes
+                )
             
             if cert_src == "v90" and cert_status == "certified" and cert_id and resolved_result.approved:
                 is_certified_v90 = True

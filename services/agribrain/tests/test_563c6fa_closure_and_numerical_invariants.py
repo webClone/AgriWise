@@ -2,13 +2,14 @@
 
 Covers:
 1. Scale-relative PSD covariance validation and nonfinite eigenvalue rejection.
-2. Covariance symmetry and micro-scale negative eigenvalue rejection.
-3. Exact canonical root_zone_water V90 variable resolution and conflicting declaration rejection.
+2. Covariance symmetry, Cauchy-Schwarz consistency, zero-variance cross-covariance consistency, and micro-scale negative eigenvalue rejection.
+3. Exact canonical root_zone_water V90 variable resolution, conflicting declaration rejection, and unconditional resolver denial.
 4. State ensemble rollback on negligible-influence assimilation exclusion (Ht and proxy).
-5. Mixed target state updates: rollback of uninfluenced target slices while preserving influenced updates.
+5. Mixed target state updates: rollback of uninfluenced target slices while preserving influenced updates and recomputing posterior receipts.
 6. Fail-closed invariant uncertainty normalization (missing/NaN -> high uncertainty).
 7. Fail-closed display trust policy for NaN / nonfinite quality inputs.
 8. Layer 5 v3 and Layer 10 v2 cache policy coexistence with live Layer 10 execution.
+9. Layer 10 ASMAE-specific surface cache roundtrip and rollout gate enforcement.
 """
 import copy
 import math
@@ -34,6 +35,7 @@ from services.agribrain.layer10_sire.surface_contract import (
     SURFACES_SCHEMA_VERSION,
     PublicationStatus,
 )
+from services.agribrain.certification.v90_resolver import verify_v90_certification_record
 from services.agribrain.scientific_contracts import LAYER10_PUBLICATION_SCHEMA_VERSION
 from services.agribrain.layer05_asmae.cache import (
     STATE_SUPPORT_POLICY_VERSION,
@@ -75,6 +77,13 @@ def test_small_indefinite_covariance_rejected():
     assert is_valid is False
     assert is_malformed is True
 
+    # Counterexample 3: Zero-variance with non-zero cross-covariance & negative eigenvalue -9.99999e-7
+    # cov = [[1.0, 0.001], [0.001, 0.0]] (violates Cauchy-Schwarz and has negative eigenvalue)
+    zero_var_cross_cov = [[1.0, 0.001], [0.001, 0.0]]
+    is_valid, is_malformed = _validate_covariance(zero_var_cross_cov)
+    assert is_valid is False
+    assert is_malformed is True
+
 
 def test_nonfinite_covariance_rejected():
     """Covariance matrices containing NaN or Inf must be rejected."""
@@ -106,6 +115,15 @@ def test_root_zone_water_v90_variable_resolution():
         assert get_standard_variable_name(cw_type, "canopy_water") == "canopy_water"
         # Conflicting canonical declarations must be rejected
         assert get_standard_variable_name(cw_type, "root_zone_water") == "conflict_rejected"
+
+    # Resolver unconditionally fails closed on conflict sentinel
+    res = verify_v90_certification_record(
+        certification_id="CERT_MOCK",
+        plot_id="test_plot",
+        variable="conflict_rejected",
+    )
+    assert res.approved is False
+    assert "canonical_variable_conflict" in res.reason_codes
 
 
 def test_display_policy_nan_handling():
@@ -245,6 +263,88 @@ def test_layer5_v3_and_layer10_coexistence():
                         pass
 
 
+def test_layer10_asmae_surface_cache_roundtrip_with_rollout_gate(monkeypatch):
+    """Layer 10 ASMAE surfaces roundtrip through cache and enforce rollout gate on load."""
+    monkeypatch.setenv("ASMAE_ENABLED", "true")
+    monkeypatch.setenv("L10_ASMAE_SURFACES_ENABLED", "true")
+
+    l10_key = f"asmae_cache_test_{uuid.uuid4().hex[:12]}"
+    asmae_surface = SurfaceArtifact(
+        surface_id="ASMAE_VIGOR_TEST",
+        semantic_type=SurfaceType.ASMAE_VIGOR,
+        grid_ref="2x2",
+        values=[[0.32, 0.42], [0.52, 0.62]],
+        units="fraction",
+        native_resolution_m=10.0,
+        provenance={
+            "plot_id": "test_plot",
+            "resolution_m": 10.0,
+            "state_update_allowed": True,
+            "confidence": 0.88,
+            "uncertainty": 0.12,
+        },
+    )
+    prov = {
+        "plot_id": "test_plot",
+        "publication_run_id": "test_run_asmae",
+        "request_run_id": "test_run_asmae",
+        "publication_id": f"pub_{l10_key[:16]}",
+        "surface_schema_version": SURFACES_SCHEMA_VERSION,
+        "layer10_publication_schema_version": LAYER10_PUBLICATION_SCHEMA_VERSION,
+        "publication_status": PublicationStatus.VALID_NORMAL.value,
+    }
+    l10_out = Layer10Output(
+        run_id="test_run_asmae",
+        timestamp="2026-10-26T12:00:00Z",
+        surface_pack=[asmae_surface],
+        render_authorizations={"satellite": {"canopy": {"base": {}}}},
+        render_authorization_version=RENDER_AUTHORIZATION_VERSION,
+        asmae_proof={"policy_version": STATE_SUPPORT_POLICY_VERSION, "state_order": list(STATE_NAMES)},
+        mode_display_state={"canopy": {"display": "ok"}},
+        source_policy_display_state={"policy": "ok"},
+        core_asmae_evidence_state={"state": "ok"},
+        publication_surface_state={"state": "ok"},
+        publication_id=f"pub_{l10_key[:16]}",
+        publication_run_id="test_run_asmae",
+        surface_schema_version=SURFACES_SCHEMA_VERSION,
+        publication_status=PublicationStatus.VALID_NORMAL.value,
+        provenance=dict(prov),
+    )
+
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    cache_dir = os.path.join(base_dir, "artifacts", "surfaces_cache")
+    cache_json = os.path.join(cache_dir, f"{l10_key}.json")
+
+    try:
+        bytes_written = save_layer10_to_cache(l10_key, l10_out)
+        assert bytes_written > 0
+
+        # Case A: When rollout policy permits ASMAE visuals for test_plot, load succeeds with NPZ rehydration
+        loaded_authorized = load_layer10_from_cache(l10_key)
+        assert loaded_authorized is not None
+        assert loaded_authorized.surface_pack[0].semantic_type == SurfaceType.ASMAE_VIGOR
+        assert loaded_authorized.surface_pack[0].values[0][0] == pytest.approx(0.32)
+        assert loaded_authorized.asmae_proof["policy_version"] == STATE_SUPPORT_POLICY_VERSION
+
+        # Case B: When rollout policy is disabled for ASMAE surfaces, load_layer10_from_cache fails closed (None)
+        monkeypatch.setenv("L10_ASMAE_SURFACES_ENABLED", "false")
+        loaded_blocked = load_layer10_from_cache(l10_key)
+        assert loaded_blocked is None
+    finally:
+        if os.path.exists(cache_json):
+            try:
+                os.remove(cache_json)
+            except OSError:
+                pass
+        if os.path.exists(cache_dir):
+            for fname in os.listdir(cache_dir):
+                if l10_key in fname:
+                    try:
+                        os.remove(os.path.join(cache_dir, fname))
+                    except OSError:
+                        pass
+
+
 def test_negligible_influence_ensemble_rollback():
     """Rejected negligible-influence update must roll back state_cube without mutation in Ht."""
     idx = {s: i for i, s in enumerate(STATE_NAMES)}
@@ -360,6 +460,11 @@ def test_mixed_target_influence_rollback_ht():
     # Uninfluenced lai was rolled back to exact prior slice
     np.testing.assert_array_equal(final[:, :, idx["lai"]], prior_copy[:, :, idx["lai"]])
 
+    # Posterior summaries must be strictly consistent with returned state_cube
+    assert reports[0]["posterior_variance"]["lai"] == pytest.approx(reports[0]["prior_variance"]["lai"])
+    assert reports[0]["information_gain"]["lai"] == 0.0
+    assert reports[0]["posterior_variance"]["vigor"] < reports[0]["prior_variance"]["vigor"]
+
 
 def test_mixed_target_influence_rollback_proxy():
     """Mixed target proxy update must update influenced target states and roll back uninfluenced columns."""
@@ -392,3 +497,8 @@ def test_mixed_target_influence_rollback_proxy():
     assert any(final["mz1"][j][idx["vigor"]] != prior_copy["mz1"][j][idx["vigor"]] for j in range(8))
     # Uninfluenced lai was rolled back to exact prior column
     assert all(final["mz1"][j][idx["lai"]] == prior_copy["mz1"][j][idx["lai"]] for j in range(8))
+
+    # Posterior summaries must be strictly consistent with returned ensemble
+    assert reports[0]["posterior_variance"]["lai"] == pytest.approx(reports[0]["prior_variance"]["lai"])
+    assert reports[0]["information_gain"]["lai"] == 0.0
+    assert reports[0]["posterior_variance"]["vigor"] < reports[0]["prior_variance"]["vigor"]

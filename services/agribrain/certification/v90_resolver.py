@@ -28,12 +28,15 @@ def verify_v90_certification_record(
     """
     reasons: List[str] = []
 
-    # 1. Missing IDs checks
+    # 1. Missing IDs and variable validity checks
     if not certification_id:
         reasons.append("missing_certification_id")
     if not plot_id:
         reasons.append("plot_mismatch")
     if not variable:
+        reasons.append("variable_mismatch")
+    elif variable == "conflict_rejected":
+        reasons.append("canonical_variable_conflict")
         reasons.append("variable_mismatch")
 
     if reasons:
