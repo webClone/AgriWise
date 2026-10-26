@@ -1337,12 +1337,23 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: (0.03, 10.0),
     }
 
+    from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+
     for stype in all_asmae_types:
         var_name = stype.value.lower()
-        
+        canon_state = canonical_state_key(stype.value)
+        meta_candidates = [var_name, var_name.upper(), var_name.lower(), stype.value]
+        if canon_state and canon_state != "unmapped":
+            meta_candidates.extend([
+                canon_state, canon_state.upper(), canon_state.lower(),
+                f"asmae_{canon_state}", f"asmae_{canon_state}".upper(), f"asmae_{canon_state}".lower(),
+            ])
+        if stype == SurfaceType.ASMAE_BARE_SOIL:
+            meta_candidates.extend(["asmae_bare_soil_fraction", "bare_soil_fraction", "ASMAE_BARE_SOIL_FRACTION"])
+
         # Look up metadata case-insensitively
         meta = {}
-        for key in [var_name, var_name.upper(), var_name.lower(), stype.value]:
+        for key in meta_candidates:
             if key in l1_data.raster_metadata:
                 meta = l1_data.raster_metadata[key]
                 break
@@ -1352,7 +1363,7 @@ def generate_asmae_surfaces(
         has_real_grid = False
         
         # Map variables to their actual raster keys in L1 raster_maps
-        l1_grid_keys = [var_name, var_name.upper(), var_name.lower(), stype.value]
+        l1_grid_keys = list(dict.fromkeys([*meta_candidates, var_name, var_name.upper(), var_name.lower(), stype.value]))
         if stype in (SurfaceType.ASMAE_VIGOR, getattr(SurfaceType, "CANOPY_ASMAE_VIGOR", None)):
             l1_grid_keys.extend(["asmae_vigor", "canopy_asmae_vigor", "vigor"])
         if stype in (SurfaceType.ASMAE_CANOPY_WATER, getattr(SurfaceType, "WATER_ASMAE_CANOPY_WATER", None)):
@@ -1373,7 +1384,7 @@ def generate_asmae_surfaces(
 
         # Fallback to metadata / scalar last_values
         scalar_val = None
-        for key in [var_name, var_name.upper(), var_name.lower(), stype.value]:
+        for key in meta_candidates:
             if key in l1_data.last_values:
                 scalar_val = l1_data.last_values[key]
                 break
@@ -1447,17 +1458,30 @@ def generate_asmae_surfaces(
 
         # E-D01: State-specific uncertainty grid & confidence binding
         state_key = var_name[len("asmae_"):] if var_name.startswith("asmae_") else var_name
+        search_state_keys = [state_key]
+        if canon_state and canon_state != "unmapped" and canon_state not in search_state_keys:
+            search_state_keys.append(canon_state)
+        if state_key == "bare_soil" and "bare_soil_fraction" not in search_state_keys:
+            search_state_keys.append("bare_soil_fraction")
+        elif state_key == "bare_soil_fraction" and "bare_soil" not in search_state_keys:
+            search_state_keys.append("bare_soil")
+
         own_unc_grid = None
         own_conf_grid = None
         if l1_data and hasattr(l1_data, "raster_maps"):
-            own_unc_grid = (
-                l1_data.raster_maps.get(f"asmae_{state_key}_uncertainty")
-                or l1_data.raster_maps.get(f"{state_key}_uncertainty")
-            )
-            own_conf_grid = (
-                l1_data.raster_maps.get(f"asmae_{state_key}_confidence")
-                or l1_data.raster_maps.get(f"{state_key}_confidence")
-            )
+            for sk in search_state_keys:
+                if own_unc_grid is None:
+                    own_unc_grid = (
+                        l1_data.raster_maps.get(f"asmae_{sk}_uncertainty")
+                        or l1_data.raster_maps.get(f"{sk}_uncertainty")
+                    )
+                if own_conf_grid is None:
+                    own_conf_grid = (
+                        l1_data.raster_maps.get(f"asmae_{sk}_confidence")
+                        or l1_data.raster_maps.get(f"{sk}_confidence")
+                    )
+                if own_unc_grid is not None and own_conf_grid is not None:
+                    break
 
         if own_unc_grid is not None:
             unc_finite = [
@@ -1765,6 +1789,9 @@ def generate_asmae_surfaces(
             "uncertainty": own_unc_grid if own_unc_grid is not None else uncertainty,
             "uncertainty_grid": own_unc_grid,
             "confidence_grid": own_conf_grid,
+            "diagnostic_uncertainty": meta.get("diagnostic_uncertainty", meta.get("posterior_uncertainty")),
+            "normalized_uncertainty": meta.get("normalized_uncertainty", meta.get("posterior_uncertainty")),
+            "state_uncertainty_scalar": uncertainty,
             "posterior_confidence_available": confidence_available,
             "posterior_uncertainty_available": uncertainty_available,
             "retro_status": retro_status,

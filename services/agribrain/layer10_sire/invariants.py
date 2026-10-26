@@ -343,8 +343,35 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
         vis_only = prov.get("visual_only", False)
         warning_codes = prov.get("warning_codes", [])
         bma_status = prov.get("bma_status")
-        conf = prov.get("confidence", 0.0)
-        unc = prov.get("uncertainty", 0.0)
+        raw_conf = prov.get("confidence", 0.0)
+        raw_unc = prov.get("diagnostic_uncertainty")
+        if raw_unc is None:
+            raw_unc = prov.get("normalized_uncertainty")
+        if raw_unc is None:
+            raw_unc = prov.get("uncertainty", 0.0)
+
+        if isinstance(raw_conf, (list, tuple)):
+            conf_vals = [
+                float(v) for row in raw_conf for v in (row if isinstance(row, (list, tuple)) else [row])
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            ]
+            conf = sum(conf_vals) / len(conf_vals) if conf_vals else 0.0
+        elif not isinstance(raw_conf, (int, float)) or isinstance(raw_conf, bool) or not math.isfinite(raw_conf):
+            conf = 0.0
+        else:
+            conf = float(raw_conf)
+
+        if isinstance(raw_unc, (list, tuple)):
+            unc_vals = [
+                float(v) for row in raw_unc for v in (row if isinstance(row, (list, tuple)) else [row])
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            ]
+            unc = sum(unc_vals) / len(unc_vals) if unc_vals else 0.0
+        elif not isinstance(raw_unc, (int, float)) or isinstance(raw_unc, bool) or not math.isfinite(raw_unc):
+            unc = 0.0
+        else:
+            unc = float(raw_unc)
+
         warning_wording = prov.get("warning_wording", "")
         has_spatial_grid = prov.get("has_spatial_grid", True)
         

@@ -69,7 +69,7 @@ ASMAE_WEATHER_FEATURE_VERSION = "v1_variable_completeness"
 ASMAE_HASH_SCHEMA_VERSION = "v2_exact_dtype_complete_authority"
 ASMAE_CACHE_SCHEMA_VERSION = "v10_atomic_manifest_authority"
 ASMAE_CACHE_COMMIT_SCHEMA_VERSION = "v1_atomic_npz_json"
-STATE_SUPPORT_POLICY_VERSION = "v2_receipt_bounded_20261025"
+STATE_SUPPORT_POLICY_VERSION = "v3_receipt_bounded_20261026"
 ENSEMBLE_POLICY_CONTRACT_VERSION = "asmae_ensemble_policy_v1"
 
 HAS_NUMPY = np is not None
@@ -696,6 +696,8 @@ def load_rasters_from_artifact(rel_ref: str) -> Dict[str, List[List[Optional[flo
                 if array.dtype.hasobject or array.ndim != 2:
                     raise ValueError(f"unsafe/non-2D raster member {key}")
                 if key.startswith("__mask__"):
+                    if not (array.dtype == bool or np.issubdtype(array.dtype, np.bool_)):
+                        raise TypeError(f"mask {key} array must have boolean dtype, got {array.dtype}")
                     masks[key[len("__mask__"):]] = np.asarray(array, dtype=bool)
                 else:
                     result[key] = _grid_to_lists(array)

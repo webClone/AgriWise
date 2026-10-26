@@ -1,0 +1,109 @@
+{
+  "candidate": "70676a3069715941ccefb3c2140d169389105189",
+  "parent": "ded72528ce12a2f1cb4ca6a208ddcc2accc3802a",
+  "review_date": "2026-10-26",
+  "verdict": "HOLD_NEW_PUBLICATION_CONSUMER_REGRESSION_AND_RETAINED_ASMAE_POLICY",
+  "previous_group_disposition": {
+    "AB-R01": "demonstrated_shadow_and_nearest_regressions_closed_full_assembly_dependency_qualified",
+    "AB-R02": "demonstrated_SEM01_SEM02_SEM03_software_counterexamples_closed",
+    "AB-R03": "demonstrated_three_source_and_permission_repairs_closed_bounded_same_record_conflict_followup",
+    "AB-R04": "demonstrated_flags_scalar_INV2_status_and_sanitizer_repairs_closed_shared_qualifier_followups",
+    "AB-R05": "cold_decode_export_cleanup_checksum_and_L10_migration_controls_closed_new_consumer_regression_and_receipt_migration_incomplete"
+  },
+  "remaining_core_findings": [
+    {
+      "id": "R706-PUB-01",
+      "priority": "P1",
+      "kind": "introduced_native_producer_consumer_regression",
+      "summary": "Own-state sigma grid is compared with scalar0.40 in mandatory INV16, raising TypeError for confidence>=0.60",
+      "production": [
+        "services/agribrain/layer10_sire/surfaces/asmae.py:1765",
+        "services/agribrain/layer10_sire/invariants.py:347,373",
+        "services/agribrain/layer10_sire/runner.py:3712"
+      ],
+      "evidence": [
+        "root-consumer-results.json",
+        "export/results.json"
+      ],
+      "scope": "Native component chain; no full runner/provider execution"
+    },
+    {
+      "id": "R706-PUB-02",
+      "priority": "P2",
+      "kind": "canonical_state_receipt_binding_gap",
+      "summary": "Frozen bare_soil_fraction value materializes but its sigma/confidence metadata lookup misses;12of13 own receipts match, alias control13of13",
+      "evidence": [
+        "export/results.json"
+      ],
+      "scope": "Two native heterogeneous13-state fixtures and alias control; source/display/resolution associations separately qualified"
+    },
+    {
+      "id": "R706-CACHE-01",
+      "priority": "P2",
+      "kind": "retained_scientific_policy_migration",
+      "summary": "Actual parent native opposing-node report/ledger count0 remains current cache hit while current fresh computation givescount1 under unchangedkey andpolicy",
+      "evidence": [
+        "cache/results.json"
+      ],
+      "scope": "Native parent-write/current-read and native fresh controls; pre-assimilation hit return source traced, full runner not executed"
+    }
+  ],
+  "bounded_followups": [
+    "same_record_contradictory_ceiling_aliases",
+    "affine_dimension_scale_footprint_consistency",
+    "scalar_scientific_domain_vs_display_range",
+    "scalar_temporal_receipt_convergence",
+    "optional_L10_checksum_and_unconsumed_member_metadata"
+  ],
+  "validation": {
+    "candidate": "70676a3069715941ccefb3c2140d169389105189",
+    "parent": "ded72528ce12a2f1cb4ca6a208ddcc2accc3802a",
+    "checks": {
+      "source_snapshots_unchanged": true,
+      "all_changed_Python_syntax_valid": true,
+      "six_delivered_lane_reports_and_strict_results": true,
+      "ten_replay_commands_exit_zero": true,
+      "scientific_twenty_candidate_controls_pass": true,
+      "former_scientific_residuals_close": true,
+      "cold_positive_and_blocked_receipt_controls_close": true,
+      "native_consumer_new_TypeError_reproduced": true,
+      "all13_native_state_products_exist_but_only12_bind_own_receipt": true,
+      "52_FA_open_zero_checked": true
+    },
+    "source_receipts": [
+      {
+        "candidate": "70676a3069715941ccefb3c2140d169389105189",
+        "verified_files": 1087,
+        "unchanged": true
+      },
+      {
+        "candidate": "ded72528ce12a2f1cb4ca6a208ddcc2accc3802a",
+        "verified_files": 1087,
+        "unchanged": true
+      }
+    ],
+    "all_documented_observations_reproduced": true,
+    "merge_verdict": "HOLD_NEW_PUBLICATION_CONSUMER_REGRESSION_AND_RETAINED_ASMAE_POLICY",
+    "runtime": {
+      "Python": "3.12.14",
+      "Node": "v24.22.1"
+    },
+    "meaning": "Checks include reproduced remaining failures. Exit0 is evidence replay success, not cohort acceptance."
+  },
+  "governance": {
+    "FA_open": 52,
+    "FA_checked": 0,
+    "production_edits": false,
+    "merge_push": false
+  },
+  "limits": [
+    "Authored offline fixtures, no acquired field evidence",
+    "Nested predicates and pure frontend helpers isolated exactly",
+    "No full provider/API/browser/GDAL/hardware run",
+    "rasterio/pyproj absent: full valid native assembly return unverified; not a code defect",
+    "Reported repository suites not rerun",
+    "Capacity-interrupted attempts resumed; delivered probes independently replayed",
+    "Identity coverage is not exhaustive repository correctness"
+  ],
+  "next_action": "One focused typed-publication + canonical-state-receipt + ASMAE-policy correction; preserve verified closures and run one connected gate. Independent expert UI work remains separately eligible."
+}
