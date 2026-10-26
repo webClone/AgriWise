@@ -1030,6 +1030,11 @@ def _execute_canonical_water_engine(
         if not isinstance(op_ctx, dict):
             op_ctx = {}
 
+        tenant_id = kwargs.get("tenant_id") or getattr(inputs, "tenant_id", "default_tenant") or op_ctx.get("tenant_id", "default_tenant")
+        namespace = kwargs.get("namespace") or getattr(inputs, "namespace", "default") or op_ctx.get("namespace", "default")
+        cycle_id = kwargs.get("cycle_id") or getattr(inputs, "cycle_id", None) or op_ctx.get("cycle_id")
+        geometry_version = kwargs.get("geometry_version") or getattr(inputs, "geometry_version", None) or op_ctx.get("geometry_version")
+
         # 1. Weather observations from L1 or inputs
         timeseries = getattr(l1_output, "plot_timeseries", []) or []
         weather_daily = (
@@ -1041,8 +1046,34 @@ def _execute_canonical_water_engine(
             or op_ctx.get("weather")
         )
         rec = None
+        step_limit_ts = min(ts, datetime.datetime.combine(ts.date(), datetime.time(23, 59, 59, tzinfo=timezone.utc)))
+
+        def _is_weather_issuance_eligible(entry: dict, limit_ts: datetime.datetime) -> bool:
+            if not isinstance(entry, dict):
+                return False
+            iss = entry.get("issued_at") or entry.get("timestamp")
+            if iss:
+                try:
+                    iss_dt = datetime.datetime.fromisoformat(str(iss))
+                    if iss_dt.tzinfo is None:
+                        iss_dt = iss_dt.replace(tzinfo=timezone.utc)
+                    return iss_dt <= limit_ts
+                except Exception:
+                    return False
+            if entry.get("is_prior") or entry.get("source_role") in ("historical_actual", "reanalyzed", "prior"):
+                return True
+            entry_d = entry.get("date")
+            if entry_d:
+                try:
+                    return datetime.date.fromisoformat(str(entry_d)[:10]) <= limit_ts.date()
+                except Exception:
+                    return False
+            return True
+
         if isinstance(weather_daily, dict):
-            rec = weather_daily.get(day_key)
+            cand = weather_daily.get(day_key)
+            if cand and _is_weather_issuance_eligible(cand, step_limit_ts):
+                rec = cand
         elif isinstance(weather_daily, list):
             for t_entry in reversed(weather_daily):
                 if isinstance(t_entry, dict):
@@ -1053,7 +1084,7 @@ def _execute_canonical_water_engine(
                             t_date = raw_ts.astimezone(ts.tzinfo).strftime("%Y-%m-%d")
                         elif isinstance(raw_ts, str) and len(raw_ts) >= 10:
                             t_date = raw_ts[:10]
-                    if t_date == day_key:
+                    if t_date == day_key and _is_weather_issuance_eligible(t_entry, step_limit_ts):
                         rec = t_entry
                         break
         if not rec and timeseries:
@@ -1066,7 +1097,7 @@ def _execute_canonical_water_engine(
                             t_date = raw_ts.astimezone(ts.tzinfo).strftime("%Y-%m-%d")
                         elif isinstance(raw_ts, str) and len(raw_ts) >= 10:
                             t_date = raw_ts[:10]
-                    if t_date == day_key:
+                    if t_date == day_key and _is_weather_issuance_eligible(t_entry, step_limit_ts):
                         rec = t_entry
                         break
 
@@ -1076,6 +1107,27 @@ def _execute_canonical_water_engine(
             rec = dict(weather_prior)
             rec["date"] = day_key
             rec["is_prior"] = True
+
+        # Fallback to committed latest hydraulic checkpoint for this plot/cycle/geometry
+        if not rec:
+            try:
+                from world_model.canonical_worldline import CanonicalWorldlineService
+                _cw_init = CanonicalWorldlineService()
+                _cp_init = _cw_init.load_latest_hydraulic_checkpoint(
+                    plot_id=plot_id,
+                    tenant_id=tenant_id,
+                    namespace=namespace,
+                    cycle_id=cycle_id,
+                    geometry_version=geometry_version,
+                )
+                if _cp_init:
+                    _hist_init = _cp_init.get("payload", {}).get("history_summary", {})
+                    if isinstance(_hist_init, dict) and day_key in _hist_init:
+                        _cand_cp = _hist_init[day_key].get("weather")
+                        if _cand_cp and _is_weather_issuance_eligible(_cand_cp, step_limit_ts):
+                            rec = _cand_cp
+            except Exception as _cp_err:
+                pass
 
         if not rec or not isinstance(rec, dict):
             import logging
@@ -1928,10 +1980,36 @@ def _execute_canonical_water_engine(
                         if t_d == d_str:
                             r_entry = t_entry
                             break
+            step_limit_ts = min(ts, datetime.datetime.combine(d_val, datetime.time(23, 59, 59, tzinfo=timezone.utc)))
             if r_entry and isinstance(r_entry, dict):
                 p = _parse_weather(r_entry)
                 if p:
-                    return p
+                    # Enforce knowledge-at-issuance: observation cannot have been issued after decision cutoff / step timestamp
+                    p_iss = p.get("issued_at") or r_entry.get("issued_at") or r_entry.get("timestamp")
+                    p_eligible = False
+                    if p_iss:
+                        try:
+                            p_iss_dt = datetime.datetime.fromisoformat(str(p_iss))
+                            if p_iss_dt.tzinfo is None:
+                                p_iss_dt = p_iss_dt.replace(tzinfo=timezone.utc)
+                            if p_iss_dt <= step_limit_ts:
+                                p_eligible = True
+                        except Exception:
+                            p_eligible = False
+                    elif p.get("is_prior") or p.get("source_role") in ("historical_actual", "reanalyzed", "prior"):
+                        p_eligible = True
+                    else:
+                        entry_d = r_entry.get("date")
+                        if entry_d:
+                            try:
+                                p_eligible = (datetime.date.fromisoformat(str(entry_d)[:10]) <= step_limit_ts.date())
+                            except Exception:
+                                p_eligible = False
+                        else:
+                            p_eligible = True
+
+                    if p_eligible:
+                        return p
 
             # If this date was previously integrated and stored in plot_hist, retain its observation
             if d_str in plot_hist and isinstance(plot_hist[d_str], dict) and "weather" in plot_hist[d_str]:
@@ -1947,25 +2025,31 @@ def _execute_canonical_water_engine(
             try:
                 from world_model.canonical_worldline import CanonicalWorldlineService
                 _cw_tmp = CanonicalWorldlineService()
-                # Load committed latest hydraulic checkpoint for this plot/tenant/namespace
-                _cp_obj = _cw_tmp.load_latest_hydraulic_checkpoint(plot_id, tenant_id, namespace)
+                # Load committed latest hydraulic checkpoint for this plot/tenant/namespace/cycle/geometry
+                _cp_obj = _cw_tmp.load_latest_hydraulic_checkpoint(
+                    plot_id=plot_id,
+                    tenant_id=tenant_id,
+                    namespace=namespace,
+                    cycle_id=cycle_id,
+                    geometry_version=geometry_version,
+                )
                 if _cp_obj:
                     _cp_hist = _cp_obj.get("payload", {}).get("history_summary", {})
                     if isinstance(_cp_hist, dict) and d_str in _cp_hist:
                         _w_candidate = _cp_hist[d_str].get("weather")
                         if _w_candidate and isinstance(_w_candidate, dict):
-                            # Knowledge-at-issuance eligibility check: checkpoint/issuance cannot be after step_ts
-                            _is_eligible = True
+                            # Knowledge-at-issuance eligibility check: checkpoint/issuance cannot be after step_limit_ts
+                            _is_eligible = False
                             _iss_str = _w_candidate.get("issued_at") or _cp_obj.get("committed_at") or _cp_obj.get("created_at")
                             if _iss_str:
                                 try:
                                     _iss_dt = datetime.datetime.fromisoformat(str(_iss_str))
                                     if _iss_dt.tzinfo is None:
                                         _iss_dt = _iss_dt.replace(tzinfo=timezone.utc)
-                                    if _iss_dt > ts:
-                                        _is_eligible = False
+                                    if _iss_dt <= step_limit_ts:
+                                        _is_eligible = True
                                 except Exception:
-                                    pass
+                                    _is_eligible = False
                             if _is_eligible:
                                 _pw = _parse_weather(_w_candidate)
                                 if _pw:

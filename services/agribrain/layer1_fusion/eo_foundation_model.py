@@ -77,6 +77,8 @@ class EmbeddingResult:
     tile_hash: str = ""
     band_count: int = 0
     valid_pixels: int = 0
+    model_version: str = "1.0.0"
+    preprocessing_version: str = "2.0.0"
 
 
 # ============================================================================
@@ -111,6 +113,8 @@ class EOFoundationModel:
         self._session = None  # Lazy-loaded ONNX session
         self._mode: Optional[str] = None  # "onnx" | "fallback" | "disabled"
         self._fallback_weights: Optional[List[List[float]]] = None
+        self._model_version = "1.0.0"
+        self._preprocessing_version = "2.0.0"
 
     @property
     def mode(self) -> str:
@@ -230,6 +234,8 @@ class EOFoundationModel:
         self,
         band_arrays: Dict[str, List[List[float]]],
         cloud_mask: Optional[List[List[int]]] = None,
+        crs: Optional[str] = None,
+        transform: Optional[Any] = None,
     ) -> Optional[EmbeddingResult]:
         """Run Foundation Model inference on multi-spectral bands.
 
@@ -238,6 +244,8 @@ class EOFoundationModel:
                 Each array is H×W float values (surface reflectance).
             cloud_mask: Optional H×W binary mask (1 = cloudy, 0 = clear).
                 Cloudy pixels are excluded from statistics.
+            crs: Optional coordinate reference system string (e.g. 'EPSG:4326').
+            transform: Optional affine transform tuple/parameters.
 
         Returns:
             EmbeddingResult with 128-d embedding and anomaly score,
@@ -251,8 +259,25 @@ class EOFoundationModel:
         if len(available_bands) < 3:
             return None  # Need at least 3 bands for meaningful embedding
 
+        # Strict spatial alignment validation across all bands and cloud mask (F26)
+        ref_shape = None
+        for b in available_bands:
+            arr = band_arrays[b]
+            if not isinstance(arr, list) or len(arr) == 0 or not isinstance(arr[0], list):
+                raise ValueError(f"invalid_band_array_structure: {b}")
+            b_shape = (len(arr), len(arr[0]))
+            if ref_shape is None:
+                ref_shape = b_shape
+            elif b_shape != ref_shape:
+                raise ValueError(f"band_dimension_mismatch: {b} shape {b_shape} != reference {ref_shape}")
+
+        if cloud_mask is not None and len(cloud_mask) > 0:
+            cm_shape = (len(cloud_mask), len(cloud_mask[0]) if cloud_mask[0] else 0)
+            if ref_shape is not None and cm_shape != ref_shape:
+                raise ValueError(f"band_dimension_mismatch: cloud_mask shape {cm_shape} != reference {ref_shape}")
+
         # Compute tile hash for provenance
-        tile_hash = self._compute_tile_hash(band_arrays, available_bands, cloud_mask)
+        tile_hash = self._compute_tile_hash(band_arrays, available_bands, cloud_mask, crs=crs, transform=transform)
 
         # Normalize bands
         normalized = self._normalize_bands(band_arrays, available_bands, cloud_mask)
@@ -302,6 +327,8 @@ class EOFoundationModel:
             tile_hash=tile_hash,
             band_count=len(available_bands),
             valid_pixels=valid_pixels,
+            model_version=self._model_version,
+            preprocessing_version=self._preprocessing_version,
         )
 
     # ════════════════════════════════════════════════════════════════════
@@ -620,11 +647,14 @@ class EOFoundationModel:
         band_arrays: Dict[str, List[List[float]]],
         available_bands: List[str],
         cloud_mask: Optional[List[List[int]]] = None,
+        crs: Optional[str] = None,
+        transform: Optional[Any] = None,
     ) -> str:
         """Deterministic hash of input tile for provenance tracking.
         
-        Includes spatial dimensions, canonical band identifiers, valid float representation,
-        and cloud-mask identity to prevent collisions across different scientific inputs.
+        Includes spatial dimensions, canonical band identifiers, exact IEEE-754 float
+        hex representation (zero precision loss), CRS, affine transform, preprocessing version,
+        and cloud-mask identity to prevent collisions across different physical supports.
         """
         parts = []
         h = 0
@@ -636,6 +666,9 @@ class EOFoundationModel:
                 w = len(pixels[0]) if pixels[0] else 0
                 break
         parts.append(f"dim:{h}x{w}")
+        parts.append(f"crs:{crs or 'EPSG:4326'}")
+        parts.append(f"transform:{transform or 'identity'}")
+        parts.append(f"prep:{getattr(self, '_preprocessing_version', '2.0.0')}")
 
         for band in sorted(available_bands):
             parts.append(f"band:{band}")
@@ -643,7 +676,7 @@ class EOFoundationModel:
             for row in pixels:
                 for v in row:
                     if v is not None and v == v and math.isfinite(v):
-                        parts.append(f"{v:.4f}")
+                        parts.append(float(v).hex())
                     else:
                         parts.append("NaN")
 

@@ -373,6 +373,7 @@ class IrrigationActuator(ABC):
                 self._status = ActuatorStatus.ERROR
             elif getattr(result, "transport_acknowledged_only", False) and not getattr(result, "confirmed_physical_stop", False):
                 self._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+                result.confirmed_physical_stop = False
                 logger.warning(
                     "Stop command %s transport-acknowledged on device %s, physical confirmation pending.",
                     command.command_id, self.device_id
@@ -382,6 +383,7 @@ class IrrigationActuator(ABC):
                 self._status = ActuatorStatus.ONLINE
                 self._active_command = None
                 self._pending_command = None
+                result.confirmed_physical_stop = True
         else:
             self._status = ActuatorStatus.ERROR
 
@@ -786,6 +788,63 @@ class IrrigationActuator(ABC):
             "Registered interlock %s (%s) on device %s",
             interlock.interlock_id, interlock.interlock_type.value, self.device_id
         )
+
+    def confirm_stop(self, receipt: Optional[Dict[str, Any]] = None) -> bool:
+        """Confirm physical cessation using verified controller evidence.
+
+        Must be governed by an affirmative verified receipt from the controller or field sensor.
+        Unrestricted or unverified confirmation is strictly rejected.
+        Receipt must:
+          1. Match this device_id
+          2. Contain positive physical stop evidence:
+             - actual_flow_lpm == 0.0, OR
+             - status in ('STOPPED', 'IDLE', 'OFF'), OR
+             - confirmed_stopped is True
+          3. NOT detect running state (e.g. is_running is not True, flow > 0 is rejected)
+        """
+        if receipt is None or not isinstance(receipt, dict):
+            raise ValueError("confirm_stop requires a verified dictionary receipt")
+
+        rec_dev = receipt.get("device_id")
+        if rec_dev and rec_dev != self.device_id:
+            raise ValueError(f"Receipt device_id {rec_dev} does not match actuator {self.device_id}")
+
+        active_op = getattr(self._active_command, "operation_id", None) or getattr(self._active_command, "command_id", None)
+        rec_op = receipt.get("operation_id") or receipt.get("command_id")
+        if active_op and rec_op and active_op != rec_op:
+            raise ValueError(f"Receipt operation_id {rec_op} does not match active operation {active_op}")
+
+        flow = receipt.get("actual_flow_rate_lpm", receipt.get("actual_flow_lpm", receipt.get("flow_rate_lpm")))
+        status = str(receipt.get("status", "")).upper()
+        is_stopped = receipt.get("is_stopped", receipt.get("stopped"))
+        is_running = receipt.get("is_running", receipt.get("running"))
+        confirmed_stopped = receipt.get("confirmed_stopped") or receipt.get("confirmed_physical_stop")
+
+        if is_running is True or (flow is not None and float(flow) > 0.0):
+            logger.warning("Receipt for device %s detects ongoing flow/running; cannot confirm stop.", self.device_id)
+            return False
+
+        has_physical_evidence = (
+            confirmed_stopped is True
+            or (flow is not None and float(flow) == 0.0)
+            or (is_stopped is True)
+            or (status in ("STOPPED", "IDLE", "OFF", "STANDBY") and is_running is not True)
+        )
+
+        if not has_physical_evidence:
+            logger.warning("Receipt for device %s lacks affirmative physical stop evidence.", self.device_id)
+            return False
+
+        has_fault = getattr(self, "_fault_latched", False) or getattr(self, "_status", None) == ActuatorStatus.ERROR
+        if has_fault:
+            self._status = ActuatorStatus.ERROR
+        else:
+            self._status = ActuatorStatus.ONLINE
+
+        self._active_command = None
+        self._pending_command = None
+        logger.info("Physical STOP confirmed on device %s by verified receipt. Status=%s", self.device_id, self._status.value)
+        return True
 
     @property
     def is_connected(self) -> bool:

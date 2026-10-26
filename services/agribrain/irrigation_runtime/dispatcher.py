@@ -1274,7 +1274,24 @@ class CommandDispatcher:
             )
             event.safety_violations.extend(v.violation_id for v in violations)
 
-            if stop_result and stop_result.success:
+            confirmed_flag = bool(getattr(stop_result, "confirmed_physical_stop", False))
+            transport_only = bool(getattr(stop_result, "transport_acknowledged_only", False))
+            status_pending = (getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION or getattr(actuator, "_status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION)
+            transport_ok = bool(stop_result and stop_result.success)
+
+            is_idle = (
+                getattr(actuator, "status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
+                or getattr(actuator, "_status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
+                or not getattr(actuator, "running", True)
+                or not getattr(actuator, "is_running", True)
+            )
+            confirmed_stop = bool(
+                transport_ok
+                and (confirmed_flag or (not transport_only and not status_pending and is_idle))
+                and not status_pending
+            )
+
+            if confirmed_stop:
                 has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_result, "fault_code", 0)) or getattr(stop_result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR") or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
                 if has_fault:
                     actuator._status = ActuatorStatus.ERROR
@@ -1285,7 +1302,7 @@ class CommandDispatcher:
                 # RP02: If a different live operation owns the actuator, only finalize after STOP confirmed
                 if act_cmd_eid and act_cmd_eid != event.event_id:
                     try:
-                        SharedQuotaStore.update_status(act_cmd_eid, "EMERGENCY_STOPPED")
+                        SharedQuotaStore.update_status(act_cmd_eid, "CANCELLED")
                         res_act = SharedQuotaStore.get_active_record(act_cmd_eid) or {}
                         self._safety.record_stopped_delivery(
                             event_id=act_cmd_eid,
@@ -1305,7 +1322,7 @@ class CommandDispatcher:
                         other_ev = self._active_events[act_cmd_eid]
                         other_ev.emergency_stopped = True
                         other_ev.emergency_stop_reason = event.emergency_stop_reason
-                        other_ev.transition(EventStatus.EMERGENCY_STOPPED, f"Safety violation on device {event.device_id}: {event.emergency_stop_reason}")
+                        other_ev.transition(EventStatus.CANCELLED, f"Safety violation on device {event.device_id}: {event.emergency_stop_reason}")
                         self._safety.track_event_end(act_cmd_eid)
                         self._finalize_event(other_ev)
                         self._emit_failed(other_ev)
@@ -1332,18 +1349,20 @@ class CommandDispatcher:
                 self._finalize_event(event)
                 self._emit_failed(event)
             else:
-                actuator._status = ActuatorStatus.ERROR
+                actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION if transport_ok else ActuatorStatus.ERROR
                 event.transition(EventStatus.STOP_REQUESTED,
-                                 f"Emergency stop attempt failed: {stop_result.error_message if stop_result else 'STOP failed'}")
+                                 f"Emergency stop unconfirmed for safety violation: {event.emergency_stop_reason}")
                 SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
                 if act_cmd_eid and act_cmd_eid != event.event_id:
                     SharedQuotaStore.update_status(act_cmd_eid, "STOP_REQUESTED")
-                    if act_cmd_eid in self._active_events:
-                        other_ev = self._active_events[act_cmd_eid]
-                        other_ev.emergency_stopped = True
-                        other_ev.emergency_stop_reason = event.emergency_stop_reason
-                        other_ev.transition(EventStatus.STOP_REQUESTED, f"Safety violation on device {event.device_id}: emergency stop failed")
-                logger.error("Emergency stop failed on device %s for event %s. Retaining tracking and quota.",
+                logger.warning("Emergency stop unconfirmed for safety violation on device %s for event %s. Retaining active tracking.",
+                               event.device_id, event.event_id)
+                if act_cmd_eid and act_cmd_eid in self._active_events:
+                    other_ev = self._active_events[act_cmd_eid]
+                    other_ev.emergency_stopped = True
+                    other_ev.emergency_stop_reason = event.emergency_stop_reason
+                    other_ev.transition(EventStatus.STOP_REQUESTED, f"Safety violation on device {event.device_id}: emergency stop failed")
+                logger.error("Emergency stop unconfirmed on device %s for event %s. Retaining tracking and quota.",
                              event.device_id, event.event_id)
             return event
 
@@ -1368,7 +1387,24 @@ class CommandDispatcher:
             if act_cmd_eid and act_cmd_eid != event.event_id:
                 return event
             stop_result = await actuator.emergency_stop()
-            if stop_result.success:
+            confirmed_flag = bool(getattr(stop_result, "confirmed_physical_stop", False))
+            transport_only = bool(getattr(stop_result, "transport_acknowledged_only", False))
+            status_pending = (getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION or getattr(actuator, "_status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION)
+            transport_ok = bool(stop_result and stop_result.success)
+
+            is_idle = (
+                getattr(actuator, "status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
+                or getattr(actuator, "_status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
+                or not getattr(actuator, "running", True)
+                or not getattr(actuator, "is_running", True)
+            )
+            confirmed_stop = bool(
+                transport_ok
+                and (confirmed_flag or (not transport_only and not status_pending and is_idle))
+                and not status_pending
+            )
+
+            if confirmed_stop:
                 has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_result, "fault_code", 0)) or getattr(stop_result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR") or status == ActuatorStatus.ERROR or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
                 if has_fault:
                     actuator._status = ActuatorStatus.ERROR
@@ -1396,10 +1432,10 @@ class CommandDispatcher:
                 self._finalize_event(event)
                 self._emit_failed(event)
             else:
-                actuator._status = ActuatorStatus.ERROR
-                event.transition(EventStatus.STOP_REQUESTED, "Actuator entered ERROR state and stop failed")
+                actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION if transport_ok else ActuatorStatus.ERROR
+                event.transition(EventStatus.STOP_REQUESTED, "Actuator entered ERROR state and stop unconfirmed")
                 SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
-                logger.error("Stop attempt failed for device in ERROR state %s: %s", event.device_id, stop_result.error_message)
+                logger.error("Stop attempt unconfirmed for device in ERROR state %s: %s", event.device_id, stop_result.error_message if stop_result else "")
             return event
 
         # Check if execution is complete: actuator must be confirmed ONLINE and idle
@@ -1640,13 +1676,21 @@ class CommandDispatcher:
                 )
                 try:
                     stop_res = await actuator.execute_with_safety(stop_cmd)
-                    stop_success = bool(stop_res and stop_res.success)
+                    confirmed_stop = bool(getattr(stop_res, "confirmed_physical_stop", False))
+                    transport_only = bool(getattr(stop_res, "transport_acknowledged_only", False))
+                    status_pending = getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION
+                    stop_success = bool(
+                        stop_res
+                        and stop_res.success
+                        and (confirmed_stop or (not transport_only and not status_pending and getattr(actuator, "status", None) == ActuatorStatus.ONLINE))
+                        and not status_pending
+                    )
                 except Exception as stop_err:
                     logger.error("Exception sending STOP command for %s: %s", event.event_id, stop_err)
                     stop_success = False
 
             # ER03: 4. Unqualified / unknown identity while actuator is active, executing, or in unconfirmed status
-            elif is_running or status in (ActuatorStatus.OFFLINE, ActuatorStatus.UNKNOWN, ActuatorStatus.ERROR):
+            elif is_running or status in (ActuatorStatus.OFFLINE, ActuatorStatus.UNKNOWN, ActuatorStatus.ERROR, ActuatorStatus.STOP_PENDING_CONFIRMATION):
                 logger.warning(
                     "Event %s cancellation attempted on device %s in %s state with unresolved identity (act_eid=%r, pending_eid=%r); cannot confirm idle.",
                     event.event_id, event.device_id, status.value if hasattr(status, "value") else status, act_eid, pending_eid
@@ -1679,9 +1723,9 @@ class CommandDispatcher:
             self._safety.track_event_end(event.event_id)
             self._finalize_event(event)
         else:
-            event.transition(EventStatus.STOP_REQUESTED, f"Cancellation stop failed: {reason or 'stop unconfirmed'}")
+            event.transition(EventStatus.STOP_REQUESTED, f"Cancellation stop pending physical confirmation: {reason or 'stop unconfirmed'}")
             SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
-            logger.error("Cancel stop failed on device %s for event %s. Retaining active tracking and quota.",
+            logger.warning("Cancel stop unconfirmed on device %s for event %s. Retaining active tracking, ownership and quota.",
                          event.device_id, event.event_id)
         return event
 
@@ -1695,50 +1739,63 @@ class CommandDispatcher:
                     stop_success = False
                     if actuator:
                         stop_res = await actuator.emergency_stop()
-                        stop_success = bool(stop_res and stop_res.success)
-                        if stop_success:
+                        confirmed_flag = bool(getattr(stop_res, "confirmed_physical_stop", False))
+                        transport_only = bool(getattr(stop_res, "transport_acknowledged_only", False))
+                        status_pending = (getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION or getattr(actuator, "_status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION)
+                        transport_ok = bool(stop_res and stop_res.success)
+                        is_idle = (
+                            getattr(actuator, "status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
+                            or getattr(actuator, "_status", None) in (ActuatorStatus.ONLINE, ActuatorStatus.ERROR)
+                            or not getattr(actuator, "running", True)
+                            or not getattr(actuator, "is_running", True)
+                        )
+                        confirmed_stop = bool(
+                            transport_ok
+                            and (confirmed_flag or (not transport_only and not status_pending and is_idle))
+                            and not status_pending
+                        )
+                        if confirmed_stop:
                             has_fault = getattr(actuator, "_fault_latched", False) or bool(getattr(stop_res, "fault_code", 0)) or getattr(stop_res, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR") or getattr(actuator, "_status", None) == ActuatorStatus.ERROR
                             if has_fault:
                                 actuator._status = ActuatorStatus.ERROR
                             else:
                                 actuator._status = ActuatorStatus.ONLINE
                             actuator._active_command = None
+                        elif transport_ok or status_pending:
+                            actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
                         else:
                             actuator._status = ActuatorStatus.ERROR
-                    if stop_success:
+                    if confirmed_stop:
                         event.emergency_stopped = True
                         event.emergency_stop_reason = "Global emergency stop"
                         event.transition(EventStatus.EMERGENCY_STOPPED, "Global emergency stop")
-                        try:
-                            res = SharedQuotaStore.get_active_record(event.event_id) or {}
-                            season_key = res.get("season")
-                            del_mm = getattr(event, "delivered_volume_mm", None)
-                            self._safety.record_stopped_delivery(
-                                event_id=event.event_id,
-                                plot_id=event.plot_id,
-                                target_volume_mm=event.target_volume_mm,
-                                delivered_volume_mm=del_mm,
-                                season=season_key,
-                                device_id=event.device_id,
-                                zone_id=event.zone_id,
-                                duration_minutes=event.target_duration_minutes,
-                                flow_rate_lpm=event.target_flow_rate_lpm,
-                                effective_area_ha=getattr(event, "effective_area_ha", None),
-                            )
-                        except Exception as store_err:
-                            logger.error("Ledger update failed during emergency stop of %s: %s", event_id, store_err)
+                        res = SharedQuotaStore.get_active_record(event.event_id) or {}
+                        season_key = res.get("season")
+                        del_mm = getattr(event, "delivered_volume_mm", None)
+                        self._safety.record_stopped_delivery(
+                            event_id=event.event_id,
+                            plot_id=event.plot_id,
+                            target_volume_mm=event.target_volume_mm,
+                            delivered_volume_mm=del_mm,
+                            season=season_key,
+                            device_id=event.device_id,
+                            zone_id=event.zone_id,
+                            duration_minutes=event.target_duration_minutes,
+                            flow_rate_lpm=event.target_flow_rate_lpm,
+                            effective_area_ha=getattr(event, "effective_area_ha", None),
+                        )
                         self._safety.track_event_end(event.event_id)
                         self._finalize_event(event)
                         results[event_id] = "STOPPED"
                     else:
                         event.emergency_stopped = True
                         event.emergency_stop_reason = "Global emergency stop (stop unconfirmed)"
-                        event.transition(EventStatus.STOP_REQUESTED, "Global emergency stop failed on actuator")
-                        try:
-                            SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
-                        except Exception as store_err:
-                            logger.error("Ledger update failed during emergency stop of %s: %s", event_id, store_err)
-                        results[event_id] = "STOP_FAILED"
+                        event.transition(EventStatus.STOP_REQUESTED, "Global emergency stop unconfirmed on actuator")
+                        SharedQuotaStore.update_status(event.event_id, "STOP_REQUESTED")
+                        if transport_ok:
+                            results[event_id] = "STOP_PENDING"
+                        else:
+                            results[event_id] = "STOP_FAILED"
                 except Exception as exc:
                     logger.error("Error during emergency stop of event %s: %s", event_id, exc)
                     event.emergency_stopped = True
@@ -1758,6 +1815,45 @@ class CommandDispatcher:
                 logger.error("Registry emergency_stop_all failed: %s", exc)
 
         return results
+
+    def confirm_stopped_event(self, event_id: str, receipt: Dict[str, Any]) -> bool:
+        """Confirm a pending STOP on an event using verified physical evidence."""
+        if event_id not in self._active_events:
+            logger.warning("Cannot confirm stopped event %s: not in active events", event_id)
+            return False
+
+        event = self._active_events[event_id]
+        actuator = self._registry.get_actuator(event.device_id)
+        if not actuator:
+            logger.error("No actuator for device %s to confirm stop on event %s", event.device_id, event_id)
+            return False
+
+        confirmed = actuator.confirm_stop(receipt)
+        if not confirmed:
+            return False
+
+        # Transition event to terminal state (CANCELLED or EMERGENCY_STOPPED)
+        terminal_status = EventStatus.CANCELLED if "cancel" in (event.status_reason or "").lower() else EventStatus.EMERGENCY_STOPPED
+        event.transition(terminal_status, "Physical stop verified by controller receipt")
+        res = SharedQuotaStore.get_active_record(event.event_id) or {}
+        season_key = res.get("season")
+        del_mm = getattr(event, "delivered_volume_mm", None)
+        self._safety.record_stopped_delivery(
+            event_id=event.event_id,
+            plot_id=event.plot_id,
+            target_volume_mm=event.target_volume_mm,
+            delivered_volume_mm=del_mm,
+            season=season_key,
+            device_id=event.device_id,
+            zone_id=event.zone_id,
+            duration_minutes=event.target_duration_minutes,
+            flow_rate_lpm=event.target_flow_rate_lpm,
+            effective_area_ha=getattr(event, "effective_area_ha", None),
+        )
+        self._safety.track_event_end(event.event_id)
+        self._finalize_event(event)
+        logger.info("Event %s successfully confirmed STOP and finalized.", event_id)
+        return True
 
     async def reconcile_on_restart(
         self,

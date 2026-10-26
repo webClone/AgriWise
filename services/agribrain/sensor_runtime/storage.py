@@ -5,7 +5,9 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -32,6 +34,8 @@ _RAW_STORAGE: Dict[str, RawSensorMessage] = {}
 _NORMALIZED_STORAGE: List[NormalizedSensorReading] = []
 _INITIALIZED = False
 
+_VALID_ID_RE = re.compile(r"^[a-zA-Z0-9_\-\.:]+$")
+
 
 def _serialize_datetime(obj: Any) -> Any:
     if isinstance(obj, datetime):
@@ -41,14 +45,65 @@ def _serialize_datetime(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
+def _validate_and_encode_id(identifier: str) -> str:
+    """Validate identifier characters and produce a 1-to-1 deterministic filesystem-safe filename key.
+    
+    Rejects path traversal and unsupported characters to prevent filename collisions.
+    """
+    if not identifier or not isinstance(identifier, str):
+        raise ValueError("message_id must be a non-empty string")
+    if ".." in identifier or "/" in identifier or "\\" in identifier or not _VALID_ID_RE.match(identifier):
+        raise ValueError(f"invalid_message_id: '{identifier}' contains invalid characters or path traversal")
+    return identifier.replace(":", "_COLON_")
+
+
 def _sanitize_id(identifier: str) -> str:
-    return "".join(c for c in str(identifier) if c.isalnum() or c in ("-", "_", "."))
+    return _validate_and_encode_id(identifier)
+
+
+def _acquire_and_append(target_file: Path, lock_file: Path, data: bytes, timeout: float = 5.0) -> None:
+    start_time = time.monotonic()
+    acquired = False
+    lock_fd = None
+    while time.monotonic() - start_time < timeout:
+        try:
+            lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            acquired = True
+            break
+        except FileExistsError:
+            time.sleep(0.01)
+
+    if not acquired:
+        try:
+            if lock_file.exists() and (time.time() - lock_file.stat().st_mtime) > 10.0:
+                lock_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+
+    try:
+        with open(target_file, "ab") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+    finally:
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except Exception:
+                pass
+        try:
+            lock_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def rehydrate_storage() -> None:
     """Rehydrate in-memory lookup indices from durable disk storage."""
     global _RAW_STORAGE, _NORMALIZED_STORAGE, _INITIALIZED
     with _STORAGE_LOCK:
+        _RAW_STORAGE.clear()
+        _NORMALIZED_STORAGE.clear()
         storage_dir = _get_storage_dir()
         raw_dir = storage_dir / "raw"
         for raw_file in raw_dir.glob("raw_*.json"):
@@ -118,14 +173,14 @@ def _ensure_initialized() -> None:
 
 
 def store_raw_message(msg: RawSensorMessage) -> None:
-    """Store immutable raw payload with process durability and cold-restart recovery."""
+    """Store immutable raw payload with atomic cross-process durability and uniqueness."""
     _ensure_initialized()
     with _STORAGE_LOCK:
         if msg.message_id in _RAW_STORAGE:
             raise ValueError("Raw message is immutable and cannot be overwritten.")
 
+        clean_id = _validate_and_encode_id(msg.message_id)
         storage_dir = _get_storage_dir()
-        clean_id = _sanitize_id(msg.message_id)
         raw_file = storage_dir / "raw" / f"raw_{clean_id}.json"
 
         if raw_file.exists():
@@ -133,7 +188,6 @@ def store_raw_message(msg: RawSensorMessage) -> None:
 
         stored = copy.deepcopy(msg)
 
-        # Atomic file persistence
         payload_data = {
             "message_id": stored.message_id,
             "protocol": stored.protocol,
@@ -146,18 +200,30 @@ def store_raw_message(msg: RawSensorMessage) -> None:
             "raw_payload_ref": stored.raw_payload_ref,
             "provenance": stored.provenance or {},
         }
-        tmp_file = storage_dir / "raw" / f"tmp_{clean_id}_{os.getpid()}.json"
-        with open(tmp_file, "w", encoding="utf-8") as f:
-            json.dump(payload_data, f, default=_serialize_datetime, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
 
-        os.replace(tmp_file, raw_file)
+        # Cross-process exclusive create (O_CREAT | O_EXCL) prevents race conditions
+        try:
+            fd = os.open(str(raw_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            raise ValueError("Raw message is immutable and cannot be overwritten.")
+
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload_data, f, default=_serialize_datetime, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception:
+            try:
+                raw_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+
         _RAW_STORAGE[stored.message_id] = stored
 
 
 def store_normalized_reading(reading: NormalizedSensorReading) -> None:
-    """Store versioned normalized reading with append-only durability."""
+    """Store versioned normalized reading with cross-process append-only durability."""
     _ensure_initialized()
     with _STORAGE_LOCK:
         stored = copy.deepcopy(reading)
@@ -165,6 +231,7 @@ def store_normalized_reading(reading: NormalizedSensorReading) -> None:
 
         storage_dir = _get_storage_dir()
         norm_file = storage_dir / "normalized" / "normalized_readings.jsonl"
+        lock_file = storage_dir / "normalized" / "normalized_readings.lock"
 
         reading_dict = {
             "reading_id": stored.reading_id,
@@ -189,10 +256,8 @@ def store_normalized_reading(reading: NormalizedSensorReading) -> None:
             "original_value": stored.original_value,
             "rainfall_mode": stored.rainfall_mode,
         }
-        with open(norm_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(reading_dict, default=_serialize_datetime) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        data_bytes = (json.dumps(reading_dict, default=_serialize_datetime) + "\n").encode("utf-8")
+        _acquire_and_append(norm_file, lock_file, data_bytes)
 
 
 def get_raw_message(message_id: str) -> RawSensorMessage | None:

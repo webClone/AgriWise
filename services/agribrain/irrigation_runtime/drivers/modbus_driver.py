@@ -372,12 +372,18 @@ class ModbusActuator(IrrigationActuator):
         # Verify physical cessation by reading feedback and status
         actual_flow, actual_pressure = await self._read_feedback()
         status_info = await self._read_status()
-        is_running_bit = False
-        if status_info and "status_word" in status_info:
-            is_running_bit = bool(status_info["status_word"] & 0x01)
+        
+        has_flow = (actual_flow is not None)
+        has_status = bool(status_info and "status_word" in status_info)
+        is_running_bit = bool(status_info["status_word"] & 0x01) if has_status else False
 
-        # Physical stop is positively confirmed if write succeeded, flow is 0.0, and status bit is cleared
-        confirmed = success and (actual_flow == 0.0) and (not is_running_bit)
+        # Positive physical confirmation requires that at least one measurement is affirmatively
+        # acquired, no measurement detects running/flow, and all available measurements confirm stopped.
+        has_evidence = has_flow or has_status
+        flow_stopped = (actual_flow == 0.0) if has_flow else True
+        status_stopped = (not is_running_bit) if has_status else True
+
+        confirmed = success and has_evidence and flow_stopped and status_stopped
         transport_only = success and not confirmed
 
         return CommandResult(
@@ -386,8 +392,8 @@ class ModbusActuator(IrrigationActuator):
             success=success,
             timestamp=now,
             actual_volume_l=actual_volume,
-            actual_flow_rate_lpm=actual_flow,
-            actual_pressure_bar=actual_pressure,
+            actual_flow_rate_lpm=actual_flow if actual_flow is not None else 0.0,
+            actual_pressure_bar=actual_pressure if actual_pressure is not None else 0.0,
             transport_acknowledged_only=transport_only,
             confirmed_physical_stop=confirmed,
             error_code="" if success else "WRITE_FAILED",
@@ -438,10 +444,12 @@ class ModbusActuator(IrrigationActuator):
             timestamp=now,
         )
 
-    async def _read_feedback(self) -> Tuple[float, float]:
-        """Read actual flow and pressure from input registers."""
-        actual_flow = 0.0
-        actual_pressure = 0.0
+    async def _read_feedback(self) -> Tuple[Optional[float], Optional[float]]:
+        """Read actual flow and pressure from input registers.
+        Returns None for registers that are not mapped or could not be read.
+        """
+        actual_flow: Optional[float] = None
+        actual_pressure: Optional[float] = None
 
         flow_reg = self._input_map.get("actual_flow_x10")
         if flow_reg is not None:
@@ -583,9 +591,19 @@ class ModbusActuator(IrrigationActuator):
         else:
             logger.error("Modbus emergency stop partial or total failure on coils: %s", failed_outputs)
 
-        # Verify physical cessation by reading feedback
+        # Verify physical cessation by reading feedback and status
         actual_flow, _ = await self._read_feedback()
-        confirmed = success and (actual_flow == 0.0)
+        status_info = await self._read_status()
+
+        has_flow = (actual_flow is not None)
+        has_status = bool(status_info and "status_word" in status_info)
+        is_running_bit = bool(status_info["status_word"] & 0x01) if has_status else False
+
+        has_evidence = has_flow or has_status
+        flow_stopped = (actual_flow == 0.0) if has_flow else True
+        status_stopped = (not is_running_bit) if has_status else True
+
+        confirmed = success and has_evidence and flow_stopped and status_stopped
         transport_only = success and not confirmed
 
         return CommandResult(
@@ -593,7 +611,7 @@ class ModbusActuator(IrrigationActuator):
             device_id=self.device_id,
             success=success,
             timestamp=now,
-            actual_flow_rate_lpm=actual_flow,
+            actual_flow_rate_lpm=actual_flow if actual_flow is not None else 0.0,
             transport_acknowledged_only=transport_only,
             confirmed_physical_stop=confirmed,
             error_code="" if success else "WRITE_FAILED",

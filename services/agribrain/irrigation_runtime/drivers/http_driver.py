@@ -211,11 +211,9 @@ class HTTPActuator(IrrigationActuator):
     def _build_url(self, endpoint_key: str, **kwargs) -> str:
         """Build a full URL from endpoint template and parameters."""
         template = self._endpoints.get(endpoint_key, "")
-        path = template.format(
-            device_id=kwargs.get("device_id", self.device_id),
-            zone_id=kwargs.get("zone_id", ""),
-            **kwargs,
-        )
+        params = {"device_id": self.device_id, "zone_id": ""}
+        params.update(kwargs)
+        path = template.format(**params)
         return f"{self._base_url}{path}"
 
     async def _request(
@@ -375,12 +373,24 @@ class HTTPActuator(IrrigationActuator):
 
         result = await self._request("POST", url, {"request_id": command.request_id})
 
+        success = bool(result.get("success", False))
+        data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
+        confirmed_stopped = bool(
+            data.get("confirmed_stopped") is True
+            or (data.get("flow_rate_lpm") == 0.0 and not data.get("is_running", False) and data.get("is_stopped", True))
+            or str(data.get("status", "")).upper() in ("STOPPED", "IDLE")
+        )
+        confirmed = success and confirmed_stopped
+        transport_only = success and not confirmed
+
         return CommandResult(
             command_id=command.command_id,
             device_id=self.device_id,
-            success=result.get("success", False),
+            success=success,
             timestamp=now,
-            error_code="" if result.get("success") else "HTTP_ERROR",
+            transport_acknowledged_only=transport_only,
+            confirmed_physical_stop=confirmed,
+            error_code="" if success else "HTTP_ERROR",
             error_message=result.get("error", ""),
         )
 
@@ -461,10 +471,22 @@ class HTTPActuator(IrrigationActuator):
         logger.critical("🚨 EMERGENCY STOP sent via HTTP to %s (%s)",
                         self.device_id, self._vendor)
 
+        success = bool(result.get("success", False))
+        data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
+        confirmed_stopped = bool(
+            data.get("confirmed_stopped") is True
+            or (data.get("flow_rate_lpm") == 0.0 and not data.get("is_running", False) and data.get("is_stopped", True))
+            or str(data.get("status", "")).upper() in ("STOPPED", "IDLE")
+        )
+        confirmed = success and confirmed_stopped
+        transport_only = success and not confirmed
+
         return CommandResult(
             command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",
             device_id=self.device_id,
-            success=result.get("success", False),
+            success=success,
             timestamp=now,
+            transport_acknowledged_only=transport_only,
+            confirmed_physical_stop=confirmed,
             error_message=result.get("error", ""),
         )
