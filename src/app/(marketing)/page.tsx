@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Image from "next/image";
 import type { Metadata } from "next";
 import "./akaloris-home.css";
 
@@ -33,7 +34,7 @@ export default function Home() {
  return <div className="aka">
   <a className="aka-skip" href="#content">Skip to content</a>
   <header className="aka-header"><nav className="aka-shell aka-nav" aria-label="Main navigation">
-    <Link className="aka-brand" href="/" aria-label="Akaloris home"><span className="aka-monogram" aria-hidden="true">A</span>kaloris</Link>
+    <Link className="aka-brand" href="/" aria-label="Akaloris home"><Image src="/brand/akaloris/akaloris_selected_wordmark.png" alt="Akaloris" width={192} height={41} priority /></Link>
     <div className="aka-navlinks"><a href="#approach">Our approach</a><a href="#science">Science</a><a href="#people">Who it's for</a></div>
     <Link className="aka-nav-button" href="/farm/new">Explore the platform <span aria-hidden="true">↗</span></Link>
   </nav></header>
