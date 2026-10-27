@@ -1606,6 +1606,13 @@ class SharedQuotaStore:
             return None
 
     @classmethod
+    def get_status(cls, event_id: str) -> Optional[str]:
+        rec = cls.get_active_record(event_id)
+        if rec is not None:
+            return rec.get("status")
+        return None
+
+    @classmethod
     def get_active_record_for_resource(cls, device_id: str, zone_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with cls._lock():
             state = cls._read_state()

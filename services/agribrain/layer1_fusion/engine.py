@@ -747,7 +747,10 @@ class Layer1FusionEngine:
                     if b_tf and isinstance(b_tf, (list, tuple)) and len(b_tf) == 6:
                         try:
                             tf_tuple = tuple(float(x) for x in b_tf)
-                            if validated_transform is None:
+                            from .eo_foundation_model import validate_spatial_grid
+                            if not validate_spatial_grid(b_crs, tf_tuple, (h, w)):
+                                grid_mismatch = True
+                            elif validated_transform is None:
                                 validated_transform = tf_tuple
                             elif validated_transform != tf_tuple:
                                 grid_mismatch = True
@@ -790,6 +793,8 @@ class Layer1FusionEngine:
                 eo_flags.append("UNQUALIFIED_SPATIAL_IDENTITY")
 
             # Create anomaly_score evidence
+            # Spatial qualification verifies geometric bounds, but model output is an
+            # estimated_model feature, NOT observed ground truth. Deny state updates.
             self._admit_evidence_or_quarantine(
                 EvidenceItem(
                     evidence_id=f"eo_anomaly_score_{result.tile_hash[:8]}",
@@ -807,12 +812,12 @@ class Layer1FusionEngine:
                     freshness_score=1.0,
                     provenance_ref=f"eo_foundation_{result.tile_hash}",
                     flags=list(eo_flags),
-                    diagnostic_only=not is_spat_qual,
-                    state_update_allowed=is_spat_qual,
-                    truth_class="provider_observation" if is_spat_qual else "estimated_model",
-                    source_reality="provider_model_feed" if is_spat_qual else "estimated_model",
+                    diagnostic_only=True,
+                    state_update_allowed=False,
+                    truth_class="estimated_model",
+                    source_reality="provider_model_feed",
                     production_usable=is_spat_qual,
-                    real_provider_product=is_spat_qual,
+                    real_provider_product=False,
                 ),
                 ledger,
                 all_quarantined,

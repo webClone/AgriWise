@@ -446,24 +446,30 @@ class HTTPActuator(IrrigationActuator):
 
         data = result.get("data", {})
 
-        # Vendor-specific status parsing
-        if self._vendor in (VendorId.LINDSAY.value, VendorId.VALLEY.value):
-            if data.get("running") or data.get("is_running"):
-                self._status = ActuatorStatus.EXECUTING
-            elif data.get("error") or data.get("fault"):
-                self._status = ActuatorStatus.ERROR
-            else:
-                self._status = ActuatorStatus.ONLINE
+        is_running = bool(data.get("running") or data.get("is_running"))
+        is_stopped = data.get("is_stopped")
+        flow_rate = data.get("flow_rate_lpm")
+        has_flow = False
+        try:
+            if flow_rate is not None and float(flow_rate) > 0.0:
+                has_flow = True
+        except (ValueError, TypeError):
+            pass
+
+        status_str = str(data.get("status", "")).upper()
+
+        # Contradictory telemetry check: any positive flow, running state, or unstopped status
+        # must NEVER report ONLINE, regardless of vendor status string
+        if is_running or has_flow or is_stopped is False:
+            self._status = ActuatorStatus.EXECUTING
+        elif data.get("error") or data.get("fault") or "ERROR" in status_str or "FAULT" in status_str:
+            self._status = ActuatorStatus.ERROR
+        elif "OFFLINE" in status_str:
+            self._status = ActuatorStatus.OFFLINE
+        elif "RUN" in status_str or "ACTIVE" in status_str:
+            self._status = ActuatorStatus.EXECUTING
         else:
-            status_str = str(data.get("status", "")).upper()
-            if "RUN" in status_str or "ACTIVE" in status_str:
-                self._status = ActuatorStatus.EXECUTING
-            elif "ERROR" in status_str or "FAULT" in status_str:
-                self._status = ActuatorStatus.ERROR
-            elif "OFFLINE" in status_str:
-                self._status = ActuatorStatus.OFFLINE
-            else:
-                self._status = ActuatorStatus.ONLINE
+            self._status = ActuatorStatus.ONLINE
 
         self._last_heartbeat = datetime.now(timezone.utc)
         return self._status

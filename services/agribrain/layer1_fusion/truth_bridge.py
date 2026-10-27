@@ -456,13 +456,13 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
     # 6e. EO Foundation
     elif item.source_family == "eo_foundation":
         is_unqualified = "UNQUALIFIED_SPATIAL_IDENTITY" in (getattr(item, "flags", None) or []) or getattr(item, "is_spatial_qualified", True) is False
-        item.data_status = "estimated" if is_unqualified else "observed"
-        item.truth_class = "estimated_model" if is_unqualified else "provider_observation"
+        item.data_status = "estimated"
+        item.truth_class = "estimated_model"
         item.source_reality = "provider_model_feed"
         item.production_usable = not is_unqualified
-        item.real_provider_product = not is_unqualified
-        item.diagnostic_only = is_unqualified or prior_diagnostic_only
-        item.state_update_allowed = not is_unqualified and prior_state_update_allowed and not item.diagnostic_only
+        item.real_provider_product = False
+        item.diagnostic_only = True
+        item.state_update_allowed = False
         item.scientific_surface_allowed = False
         item.prescription_driver_allowed = False
         item.current_1m_approval_allowed = False

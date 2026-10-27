@@ -54,6 +54,54 @@ BAND_CONFIG = {
 N_BANDS = len(BAND_CONFIG)
 
 
+def validate_spatial_grid(
+    crs: Optional[str],
+    transform: Optional[Any],
+    shape: Optional[Tuple[int, int]] = None,
+) -> bool:
+    """Validate that CRS and affine transform define a nondegenerate, finite physical grid.
+
+    Requirements:
+      1. CRS must be a valid, recognized CRS identifier (e.g. EPSG:4326, WGS84, etc.)
+         and not an unqualified or degenerate string.
+      2. Transform must contain 6 finite real numbers (a, b, c, d, e, f).
+      3. Determinant (a*e - b*d) must be finite and non-zero (abs(det) > 1e-15).
+      4. Scale coefficients must be non-zero (cannot collapse physical dimension).
+      5. Dimensions (if provided) must be positive.
+    """
+    if crs is None or not isinstance(crs, str):
+        return False
+    c_clean = crs.strip().upper()
+    if not c_clean or c_clean in ("NONE", "NULL", "UNQUALIFIED", "INVALID", "UNKNOWN", "UNQUALIFIED_SPATIAL_CRS"):
+        return False
+    if not (c_clean.startswith("EPSG:") or c_clean in ("WGS84", "CRS84", "OGC:CRS84") or c_clean.startswith("UTM")):
+        return False
+
+    if transform is None or not isinstance(transform, (list, tuple)) or len(transform) != 6:
+        return False
+    try:
+        a, b, c, d, e, f = (float(x) for x in transform)
+    except (ValueError, TypeError):
+        return False
+
+    if not all(math.isfinite(x) for x in (a, b, c, d, e, f)):
+        return False
+
+    det = a * e - b * d
+    if not math.isfinite(det) or abs(det) <= 1e-15:
+        return False
+
+    if (abs(a) <= 1e-15 and abs(b) <= 1e-15) or (abs(d) <= 1e-15 and abs(e) <= 1e-15):
+        return False
+
+    if shape is not None:
+        h, w = shape
+        if h <= 0 or w <= 0:
+            return False
+
+    return True
+
+
 # ============================================================================
 # Output dataclass
 # ============================================================================
@@ -366,7 +414,7 @@ class EOFoundationModel:
         confidence = round(min(conf_ceiling, band_completeness * 0.5 + pixel_quality * 0.25), 3)
 
         model_id = actual_backend
-        is_spatial_qualified = bool(crs is not None and transform is not None)
+        is_spatial_qualified = validate_spatial_grid(crs, transform, ref_shape)
 
         return EmbeddingResult(
             embedding=[round(v, 6) for v in embedding],
@@ -411,7 +459,7 @@ class EOFoundationModel:
             valid = []
             for y, row in enumerate(pixels):
                 for x, v in enumerate(row):
-                    if v is None or v != v:  # None or NaN
+                    if v is None or not math.isfinite(v):  # Rejects None, NaN, +Inf, -Inf
                         continue
                     if cloud_mask and y < len(cloud_mask) and x < len(cloud_mask[y]):
                         if cloud_mask[y][x] == 1:
@@ -728,10 +776,16 @@ class EOFoundationModel:
             pixels = band_arrays[band]
             for row in pixels:
                 for v in row:
-                    if v is not None and v == v and math.isfinite(v):
-                        parts.append(float(v).hex())
+                    if v is None:
+                        parts.append("MISSING")
+                    elif not isinstance(v, (int, float)):
+                        parts.append("INVALID")
+                    elif math.isnan(v):
+                        parts.append("NAN")
+                    elif math.isinf(v):
+                        parts.append("+INF" if v > 0 else "-INF")
                     else:
-                        parts.append("NaN")
+                        parts.append(float(v).hex())
 
         if cloud_mask is not None and len(cloud_mask) > 0:
             cm_h = len(cloud_mask)

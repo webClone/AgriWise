@@ -344,17 +344,13 @@ def store_normalized_reading(reading: NormalizedSensorReading) -> None:
             "rainfall_mode": stored.rainfall_mode,
         }
         data_bytes = (json.dumps(reading_dict, default=_serialize_datetime) + "\n").encode("utf-8")
-        # Persist to disk and fsync FIRST before in-memory append
+        # Persist to disk and fsync FIRST before in-memory sync
         _acquire_and_append(norm_file, lock_file, data_bytes)
-        try:
-            st = norm_file.stat()
-            _LAST_NORM_FILE_STAT = (st.st_mtime, st.st_size)
-        except Exception:
-            pass
-        _NORMALIZED_STORAGE.append(stored)
+        # Cross-process visibility: reload all committed entries so warm workers see rows from other processes
+        _rehydrate_normalized_from_disk_if_changed(force=True)
 
 
-def _rehydrate_normalized_from_disk_if_changed() -> None:
+def _rehydrate_normalized_from_disk_if_changed(force: bool = False) -> None:
     global _NORMALIZED_STORAGE, _LAST_NORM_FILE_STAT
     storage_dir = _get_storage_dir()
     norm_file = storage_dir / "normalized" / "normalized_readings.jsonl"
@@ -365,7 +361,7 @@ def _rehydrate_normalized_from_disk_if_changed() -> None:
 
     st = norm_file.stat()
     curr_stat = (st.st_mtime, st.st_size)
-    if curr_stat != _LAST_NORM_FILE_STAT:
+    if force or curr_stat != _LAST_NORM_FILE_STAT:
             readings = []
             with open(norm_file, "r", encoding="utf-8") as f:
                 for line_no, line in enumerate(f, start=1):

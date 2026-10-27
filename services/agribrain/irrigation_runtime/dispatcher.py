@@ -676,17 +676,17 @@ class CommandDispatcher:
                 "Event %s was preempted/cancelled (status %s, code %s) while START was in flight; evaluating late START outcome.",
                 event.event_id, event.status.value, result.error_code
             )
-            fence_failed = (result.error_code == "STOP_FAILED")
-            if actuator and getattr(actuator, "_status", None) in (ActuatorStatus.EXECUTING, ActuatorStatus.ERROR):
+            fence_confirmed = False
+            if actuator:
                 try:
                     stop_res = await actuator.emergency_stop()
-                    if not self._is_stop_confirmed(actuator, stop_res):
-                        fence_failed = True
-                except Exception:
-                    fence_failed = True
+                    fence_confirmed = bool(self._is_stop_confirmed(actuator, stop_res))
+                except Exception as stop_exc:
+                    logger.error("Exception during late emergency stop for %s: %s", event.event_id, stop_exc)
+                    fence_confirmed = False
 
-            if fence_failed or (actuator and getattr(actuator, "_status", None) in (ActuatorStatus.EXECUTING, ActuatorStatus.ERROR)):
-                # D01: Failed late STOP fencing! Must NOT discard live ownership or monitoring.
+            if not fence_confirmed or (result.error_code == "STOP_FAILED"):
+                # D01: Failed late STOP fencing or stop is transport-only! Must NOT discard live ownership or monitoring.
                 # Fail-closed: retain STOP_REQUESTED ownership, monitoring, and conservative exposure!
                 event.status = EventStatus.STOP_REQUESTED
                 self._active_events[event.event_id] = event
@@ -1688,15 +1688,7 @@ class CommandDispatcher:
                 )
                 try:
                     stop_res = await actuator.execute_with_safety(stop_cmd)
-                    confirmed_stop = bool(getattr(stop_res, "confirmed_physical_stop", False))
-                    transport_only = bool(getattr(stop_res, "transport_acknowledged_only", False))
-                    status_pending = getattr(actuator, "status", None) == ActuatorStatus.STOP_PENDING_CONFIRMATION
-                    stop_success = bool(
-                        stop_res
-                        and stop_res.success
-                        and (confirmed_stop or (not transport_only and not status_pending and getattr(actuator, "status", None) == ActuatorStatus.ONLINE))
-                        and not status_pending
-                    )
+                    stop_success = bool(self._is_stop_confirmed(actuator, stop_res))
                 except Exception as stop_err:
                     logger.error("Exception sending STOP command for %s: %s", event.event_id, stop_err)
                     stop_success = False

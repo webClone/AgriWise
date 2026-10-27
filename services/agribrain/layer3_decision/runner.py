@@ -1102,11 +1102,16 @@ def _execute_canonical_water_engine(
                         break
 
         weather_prior = op_ctx.get("weather_prior") or getattr(inputs, "weather_prior", None)
+        weather_prior_eligible = (
+            isinstance(weather_prior, dict)
+            and _is_weather_issuance_eligible(weather_prior, step_limit_ts)
+        )
 
-        if not rec and isinstance(weather_prior, dict):
+        if not rec and weather_prior_eligible:
             rec = dict(weather_prior)
             rec["date"] = day_key
             rec["is_prior"] = True
+            rec["source_role"] = "prior"
 
         # Fallback to committed latest hydraulic checkpoint for this plot/cycle/geometry
         if not rec:
@@ -1156,13 +1161,38 @@ def _execute_canonical_water_engine(
             rh_max_v = _get_val(["rh_max_pct", "rh_max"])
             rn_v = _get_val(["net_radiation_mj_m2", "net_radiation", "radiation"])
 
-            if isinstance(weather_prior, dict):
-                if t_min_v is None and "temp_min" in weather_prior: t_min_v = finite_real(weather_prior["temp_min"])
-                if precip_v is None and "precipitation" in weather_prior: precip_v = finite_real(weather_prior["precipitation"])
-                if wind_v is None and "wind_speed" in weather_prior: wind_v = finite_real(weather_prior["wind_speed"])
-                if rh_min_v is None and "rh_min" in weather_prior: rh_min_v = finite_real(weather_prior["rh_min"])
-                if rh_max_v is None and "rh_max" in weather_prior: rh_max_v = finite_real(weather_prior["rh_max"])
-                if rn_v is None and "net_radiation" in weather_prior: rn_v = finite_real(weather_prior["net_radiation"])
+            backfilled_from_prior = False
+            if weather_prior_eligible and isinstance(weather_prior, dict):
+                if t_min_v is None and "temp_min" in weather_prior:
+                    val = finite_real(weather_prior["temp_min"])
+                    if val is not None:
+                        t_min_v = val
+                        backfilled_from_prior = True
+                if precip_v is None and "precipitation" in weather_prior:
+                    val = finite_real(weather_prior["precipitation"])
+                    if val is not None:
+                        precip_v = val
+                        backfilled_from_prior = True
+                if wind_v is None and "wind_speed" in weather_prior:
+                    val = finite_real(weather_prior["wind_speed"])
+                    if val is not None:
+                        wind_v = val
+                        backfilled_from_prior = True
+                if rh_min_v is None and "rh_min" in weather_prior:
+                    val = finite_real(weather_prior["rh_min"])
+                    if val is not None:
+                        rh_min_v = val
+                        backfilled_from_prior = True
+                if rh_max_v is None and "rh_max" in weather_prior:
+                    val = finite_real(weather_prior["rh_max"])
+                    if val is not None:
+                        rh_max_v = val
+                        backfilled_from_prior = True
+                if rn_v is None and "net_radiation" in weather_prior:
+                    val = finite_real(weather_prior["net_radiation"])
+                    if val is not None:
+                        rn_v = val
+                        backfilled_from_prior = True
 
             if rh_min_v is None and hum_v is not None:
                 rh_min_v = max(10.0, hum_v - 15.0)
@@ -1188,12 +1218,14 @@ def _execute_canonical_water_engine(
                 "net_radiation_mj_m2": float(rn_v),
             }
             # Preserve source role, issuance time, and prior lineage
-            if "source_role" in r:
+            if r.get("is_prior") or backfilled_from_prior:
+                parsed_w["source_role"] = "prior"
+                parsed_w["is_prior"] = True
+                parsed_w["has_prior_backfill"] = backfilled_from_prior
+            elif "source_role" in r:
                 parsed_w["source_role"] = str(r["source_role"])
             elif "role" in r:
                 parsed_w["source_role"] = str(r["role"])
-            elif r.get("is_prior"):
-                parsed_w["source_role"] = "prior"
             else:
                 parsed_w["source_role"] = "observation"
 
@@ -1202,7 +1234,9 @@ def _execute_canonical_water_engine(
             elif "timestamp" in r:
                 parsed_w["issued_at"] = str(r["timestamp"])
 
-            if "is_prior" in r:
+            if "is_prior" in parsed_w:
+                pass
+            elif "is_prior" in r:
                 parsed_w["is_prior"] = bool(r["is_prior"])
 
             return parsed_w
@@ -2121,12 +2155,16 @@ def _execute_canonical_water_engine(
                 imputed = dict(prior_obs)
                 imputation_method = "prior_weather_persistence_zero_rain"
             else:
-                base_tmax = float(weather_prior["temp_max"]) if isinstance(weather_prior, dict) and "temp_max" in weather_prior else 20.0
-                base_tmin = float(weather_prior["temp_min"]) if isinstance(weather_prior, dict) and "temp_min" in weather_prior else 10.0
-                base_wind = float(weather_prior["wind_speed"]) if isinstance(weather_prior, dict) and "wind_speed" in weather_prior else 2.0
-                base_rhmin = float(weather_prior["rh_min"]) if isinstance(weather_prior, dict) and "rh_min" in weather_prior else 40.0
-                base_rhmax = float(weather_prior["rh_max"]) if isinstance(weather_prior, dict) and "rh_max" in weather_prior else 80.0
-                base_rn = float(weather_prior["net_radiation"]) if isinstance(weather_prior, dict) and "net_radiation" in weather_prior else 15.0
+                wp_eligible_walk = (
+                    isinstance(weather_prior, dict)
+                    and _is_weather_issuance_eligible(weather_prior, step_limit_ts)
+                )
+                base_tmax = float(weather_prior["temp_max"]) if wp_eligible_walk and "temp_max" in weather_prior else 20.0
+                base_tmin = float(weather_prior["temp_min"]) if wp_eligible_walk and "temp_min" in weather_prior else 10.0
+                base_wind = float(weather_prior["wind_speed"]) if wp_eligible_walk and "wind_speed" in weather_prior else 2.0
+                base_rhmin = float(weather_prior["rh_min"]) if wp_eligible_walk and "rh_min" in weather_prior else 40.0
+                base_rhmax = float(weather_prior["rh_max"]) if wp_eligible_walk and "rh_max" in weather_prior else 80.0
+                base_rn = float(weather_prior["net_radiation"]) if wp_eligible_walk and "net_radiation" in weather_prior else 15.0
                 imputed = {
                     "t_max_c": base_tmax,
                     "t_min_c": base_tmin,

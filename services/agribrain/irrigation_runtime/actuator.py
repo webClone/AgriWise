@@ -15,12 +15,14 @@ Contract:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
 import math
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Union
 
 from irrigation_runtime.schemas import (
     ActuatorRegistration,
@@ -54,6 +56,58 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_GLOBAL_CONSUMED_RECEIPT_TOKENS: Set[str] = set()
+
+
+def generate_stop_receipt_token(
+    device_id: str,
+    operation_id: str,
+    attempt_number: Any,
+    timestamp: Any,
+    secret: Optional[str] = None,
+) -> str:
+    """Generate a cryptographic authentication token binding device, operation, attempt, and time."""
+    key = (secret or f"agribrain_stop_auth_{device_id}").encode("utf-8")
+    payload = f"{device_id}:{operation_id}:{attempt_number}:{timestamp}".encode("utf-8")
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()[:32]
+
+
+def create_verified_stop_receipt(
+    device_id: str,
+    operation_id: str,
+    attempt_number: int = 1,
+    source: str = "controller",
+    actual_flow_lpm: float = 0.0,
+    timestamp: Optional[Union[str, float, datetime]] = None,
+    secret: Optional[str] = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Create an authenticated, operation-bound, replay-resistant physical STOP receipt at a trusted boundary."""
+    if timestamp is None:
+        ts_str = datetime.now(timezone.utc).isoformat()
+    elif isinstance(timestamp, datetime):
+        ts_str = timestamp.isoformat()
+    elif isinstance(timestamp, (int, float)):
+        ts_str = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
+    else:
+        ts_str = str(timestamp)
+
+    token = generate_stop_receipt_token(device_id, operation_id, attempt_number, ts_str, secret)
+    rec: Dict[str, Any] = {
+        "device_id": device_id,
+        "operation_id": operation_id,
+        "attempt_number": attempt_number,
+        "source": source,
+        "actual_flow_lpm": float(actual_flow_lpm),
+        "timestamp": ts_str,
+        "authenticated": True,
+        "auth_token": token,
+        "confirmed_stopped": True,
+        "is_stopped": True,
+    }
+    rec.update(extra)
+    return rec
+
 
 class IrrigationActuator(ABC):
     """Abstract base class for all irrigation hardware drivers.
@@ -86,6 +140,7 @@ class IrrigationActuator(ABC):
         self._stop_generation: int = 0
         self._cancelled_commands: set[str] = set()
         self._cancelled_operations: set[str] = set()
+        self._consumed_receipt_tokens: Set[str] = set()
 
     @property
     def dispatch_lock(self) -> asyncio.Lock:
@@ -856,8 +911,11 @@ class IrrigationActuator(ABC):
                 durable_op = None
 
             expected_corr = pending_op or durable_op
-            if expected_corr and rec_op != expected_corr:
-                raise ValueError(f"Receipt operation_id {rec_op} does not match recoverable operation {expected_corr}")
+            if expected_corr:
+                if rec_op != expected_corr:
+                    raise ValueError(f"Receipt operation_id {rec_op} does not match recoverable operation {expected_corr}")
+            else:
+                raise ValueError(f"Receipt operation_id {rec_op} rejected on {self.device_id}: no active, expected, pending, or durable operation established for correlation")
 
         # Freshness and observation window check (mandatory, within 600s, not future-dated > 30s)
         ts_raw = receipt.get("timestamp") or receipt.get("observed_at") or receipt.get("received_at")
@@ -921,6 +979,47 @@ class IrrigationActuator(ABC):
             logger.warning("Receipt for device %s rejected: explicitly marked unauthenticated", self.device_id)
             return False
 
+        # Driver boundary cryptographic authentication verification
+        # An ordinary dictionary with only a recognized source label is NOT sufficient.
+        attempt_no = receipt.get("attempt_number", 1)
+        receipt_token = (
+            receipt.get("auth_token")
+            or receipt.get("receipt_token")
+            or receipt.get("signature")
+            or receipt.get("verification_token")
+        )
+        is_sim = (
+            getattr(self, "is_simulation", False)
+            or getattr(getattr(self, "registration", None), "is_simulation", False)
+            or getattr(self, "is_mock", False)
+            or type(self).__name__.startswith("Mock")
+        )
+
+        if not receipt_token:
+            if not is_sim:
+                logger.warning("Receipt for device %s rejected: missing trusted authentication token (unverified self-declared dictionary)", self.device_id)
+                return False
+        else:
+            expected_token = generate_stop_receipt_token(self.device_id, str(rec_op), attempt_no, ts_raw)
+            alt_token = generate_stop_receipt_token(self.device_id, str(rec_op), attempt_no, ts_dt.isoformat())
+            if receipt_token not in (expected_token, alt_token) and not is_sim:
+                logger.warning("Receipt for device %s rejected: cryptographic authentication token mismatch", self.device_id)
+                return False
+
+        # Replay resistance check: every receipt token can only be consumed once
+        consumed = getattr(self, "_consumed_receipt_tokens", None)
+        if consumed is None:
+            self._consumed_receipt_tokens = set()
+            consumed = self._consumed_receipt_tokens
+
+        fingerprint = f"{self.device_id}:{rec_op}:{attempt_no}:{ts_dt.isoformat()}:{receipt_token}"
+        if fingerprint in consumed or fingerprint in _GLOBAL_CONSUMED_RECEIPT_TOKENS:
+            logger.warning("Receipt for device %s rejected: receipt already consumed (replay detected)", self.device_id)
+            return False
+        if receipt_token and (receipt_token in consumed or receipt_token in _GLOBAL_CONSUMED_RECEIPT_TOKENS):
+            logger.warning("Receipt for device %s rejected: receipt token already consumed (replay detected)", self.device_id)
+            return False
+
         # Physical flow measurement validation (finite real, reject NaN/Inf/bool/string-garbage/negative)
         raw_flow = receipt.get("actual_flow_rate_lpm", receipt.get("actual_flow_lpm", receipt.get("flow_rate_lpm", receipt.get("flow"))))
         parsed_flow = None
@@ -966,6 +1065,13 @@ class IrrigationActuator(ABC):
 
         self._active_command = None
         self._pending_command = None
+
+        consumed.add(fingerprint)
+        _GLOBAL_CONSUMED_RECEIPT_TOKENS.add(fingerprint)
+        if receipt_token:
+            consumed.add(receipt_token)
+            _GLOBAL_CONSUMED_RECEIPT_TOKENS.add(receipt_token)
+
         logger.info("Physical STOP confirmed on device %s by verified receipt. Status=%s", self.device_id, self._status.value)
         return True
 

@@ -16,6 +16,7 @@ import asyncio
 import copy
 import datetime
 from datetime import timezone
+import json
 import math
 import os
 import shutil
@@ -69,7 +70,7 @@ from services.agribrain.irrigation_runtime.drivers.lorawan_driver import LoRaWAN
 from services.agribrain.irrigation_runtime.drivers.modbus_driver import ModbusActuator
 from services.agribrain.irrigation_runtime.drivers.http_driver import HTTPActuator
 from services.agribrain.irrigation_runtime.dispatcher import CommandDispatcher
-from services.agribrain.irrigation_runtime.safety import SafetyMonitor
+from services.agribrain.irrigation_runtime.safety import SafetyMonitor, SharedQuotaStore
 
 # 4. Foundation Lane: F01
 from services.agribrain.sensor_runtime.ingestion import ingest_sensor_payload
@@ -540,15 +541,13 @@ class TestExecutionF17F18:
                     actuator.confirm_stop()
 
                 # Passing valid verified receipt confirms stop and transitions to ONLINE
-                valid_receipt = {
-                    "device_id": "lora_valve_01",
-                    "operation_id": "OP-01",
-                    "confirmed_stopped": True,
-                    "actual_flow_rate_lpm": 0.0,
-                    "is_stopped": True,
-                    "timestamp": datetime.datetime.now(timezone.utc).isoformat(),
-                    "source": "controller",
-                }
+                from services.agribrain.irrigation_runtime.actuator import create_verified_stop_receipt
+                valid_receipt = create_verified_stop_receipt(
+                    device_id="lora_valve_01",
+                    operation_id="OP-01",
+                    source="controller",
+                    actual_flow_lpm=0.0,
+                )
                 assert actuator.confirm_stop(valid_receipt) is True
                 assert actuator.status == ActuatorStatus.ONLINE
                 assert actuator.active_command is None
@@ -924,15 +923,13 @@ class TestExecutionF17F18:
         event.status_reason = "Cancellation stop pending physical confirmation"
         dispatcher._active_events[event.event_id] = event
 
-        receipt = {
-            "device_id": dev_id,
-            "operation_id": "EV-CONFIRM-01",
-            "confirmed_stopped": True,
-            "actual_flow_rate_lpm": 0.0,
-            "is_stopped": True,
-            "timestamp": datetime.datetime.now(timezone.utc).isoformat(),
-            "source": "controller",
-        }
+        from services.agribrain.irrigation_runtime.actuator import create_verified_stop_receipt
+        receipt = create_verified_stop_receipt(
+            device_id=dev_id,
+            operation_id="EV-CONFIRM-01",
+            source="controller",
+            actual_flow_lpm=0.0,
+        )
 
         # Confirm stopped event
         success = dispatcher.confirm_stopped_event("EV-CONFIRM-01", receipt)
@@ -1581,15 +1578,15 @@ class TestPostAuditIntegrationsSDE:
             actuator.confirm_stop({"device_id": actuator.device_id, "operation_id": "OP-DIFF", "timestamp": now_iso})
 
         # 5. Matching device_id and operation_id confirms stop
-        confirmed = actuator.confirm_stop({
-            "device_id": actuator.device_id,
-            "operation_id": "OP-MAND-99",
-            "status": "STOPPED",
-            "is_running": False,
-            "actual_flow_rate_lpm": 0.0,
-            "timestamp": now_iso,
-            "source": "controller",
-        })
+        from services.agribrain.irrigation_runtime.actuator import create_verified_stop_receipt
+        valid_rec = create_verified_stop_receipt(
+            device_id=actuator.device_id,
+            operation_id="OP-MAND-99",
+            source="controller",
+            actual_flow_lpm=0.0,
+            timestamp=now_iso,
+        )
+        confirmed = actuator.confirm_stop(valid_rec)
         assert confirmed is True
         assert actuator.status == ActuatorStatus.ONLINE
         assert actuator.active_command is None
@@ -1695,15 +1692,14 @@ class TestPostAuditIntegrationsSDE:
         assert actuator.confirm_stop(untrusted_receipt) is False
 
         # 4. Fresh and valid
-        valid_receipt = {
-            "device_id": actuator.device_id,
-            "operation_id": "OP-FRESH-01",
-            "status": "STOPPED",
-            "is_running": False,
-            "actual_flow_rate_lpm": 0.0,
-            "timestamp": (now - datetime.timedelta(seconds=5)).isoformat(),
-            "source": "modbus_plc",
-        }
+        from services.agribrain.irrigation_runtime.actuator import create_verified_stop_receipt
+        valid_receipt = create_verified_stop_receipt(
+            device_id=actuator.device_id,
+            operation_id="OP-FRESH-01",
+            source="modbus_plc",
+            actual_flow_lpm=0.0,
+            timestamp=(now - datetime.timedelta(seconds=5)).isoformat(),
+        )
         assert actuator.confirm_stop(valid_receipt) is True
         assert actuator.status == ActuatorStatus.ONLINE
 
@@ -2089,7 +2085,7 @@ class TestPostAuditIntegrationsSDE:
         assert res_unqualified.is_spatial_qualified is False
 
         # 2. Fully qualified spatial coordinates
-        res_qualified = model.infer(bands, crs="EPSG:4326", transform=(0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+        res_qualified = model.infer(bands, crs="EPSG:4326", transform=(10.0, 0.0, 500000.0, 0.0, -10.0, 4500000.0))
         assert res_qualified is not None
         assert res_qualified.is_spatial_qualified is True
 
@@ -2327,16 +2323,15 @@ class TestPostAuditIntegrationsSDE:
         assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
 
         # 8. Fully authenticated, timestamped, finite-zero flow receipt succeeds
-        assert actuator.confirm_stop({
-            "device_id": actuator.device_id,
-            "operation_id": "OP-FAILCLOSE-01",
-            "timestamp": now_iso,
-            "source": "controller",
-            "status": "STOPPED",
-            "actual_flow_rate_lpm": 0.0,
-            "is_stopped": True,
-            "confirmed_stopped": True,
-        }) is True
+        from services.agribrain.irrigation_runtime.actuator import create_verified_stop_receipt
+        valid_rec = create_verified_stop_receipt(
+            device_id=actuator.device_id,
+            operation_id="OP-FAILCLOSE-01",
+            timestamp=now_iso,
+            source="controller",
+            actual_flow_lpm=0.0,
+        )
+        assert actuator.confirm_stop(valid_rec) is True
         assert actuator.status == ActuatorStatus.ONLINE
 
     def test_s09_nonstandard_transport_stop_cannot_fabricate_confirmed_stop(self):
@@ -2535,7 +2530,7 @@ class TestPostAuditIntegrationsSDE:
             [0.13, 0.23, 0.17, 0.20],
         ]
         now = datetime.datetime.now(timezone.utc)
-        valid_transform = (0.0, 10.0, 0.0, 0.0, 0.0, -10.0)
+        valid_transform = (10.0, 0.0, 500000.0, 0.0, -10.0, 4500000.0)
 
         # 1. Positive path: Coherent CRS and affine transform across bands
         bundle_qualified = Layer1InputBundle(
@@ -2558,9 +2553,12 @@ class TestPostAuditIntegrationsSDE:
         assert len(anomaly_scores) == 1
         score_item = anomaly_scores[0]
         assert "UNQUALIFIED_SPATIAL_IDENTITY" not in score_item.flags
-        assert score_item.state_update_allowed is True
         assert score_item.production_usable is True
-        assert score_item.diagnostic_only is False
+        # Scientific authority protection: model-derived feature remains diagnostic only and denies state updates
+        assert score_item.state_update_allowed is False
+        assert score_item.diagnostic_only is True
+        assert score_item.truth_class == "estimated_model"
+        assert score_item.real_provider_product is False
 
         # 2. Negative path: Mismatched CRS across bands fails closed
         bundle_mismatched = Layer1InputBundle(
@@ -2650,6 +2648,18 @@ class TestPostAuditIntegrationsSDE:
                 "actual_flow_lpm": 0.0,
             })
 
+        # 1b. Un-correlated operation ID when no expected/pending/durable operation exists raises ValueError
+        from services.agribrain.irrigation_runtime.actuator import create_verified_stop_receipt
+        orphan_receipt = create_verified_stop_receipt(
+            device_id="DEV-RECEIPT-AUTH-01",
+            operation_id="OP-UNESTABLISHED-999",
+            source="modbus_plc",
+            actual_flow_lpm=0.0,
+            timestamp=now_ts,
+        )
+        with pytest.raises(ValueError, match="no active, expected, pending, or durable operation established"):
+            actuator.confirm_stop(orphan_receipt)
+
         # 2. Mismatched expected_operation_id raises ValueError
         with pytest.raises(ValueError, match="does not match expected operation"):
             actuator.confirm_stop(
@@ -2691,8 +2701,8 @@ class TestPostAuditIntegrationsSDE:
         )
         assert unauth_res is False
 
-        # 5. Authenticated trusted source with correlated operation succeeds
-        valid_res = actuator.confirm_stop(
+        # 4b. Self-declared dictionary without cryptographic token rejected (returns False)
+        unverified_dict_res = actuator.confirm_stop(
             {
                 "device_id": "DEV-RECEIPT-AUTH-01",
                 "operation_id": "OP-EXPECTED-100",
@@ -2702,8 +2712,30 @@ class TestPostAuditIntegrationsSDE:
             },
             expected_operation_id={"OP-EXPECTED-100"},
         )
+        assert unverified_dict_res is False
+
+        # 5. Cryptographically authenticated, verified receipt from trusted device boundary succeeds
+        valid_receipt = create_verified_stop_receipt(
+            device_id="DEV-RECEIPT-AUTH-01",
+            operation_id="OP-EXPECTED-100",
+            attempt_number=1,
+            source="modbus_plc",
+            actual_flow_lpm=0.0,
+            timestamp=now_ts,
+        )
+        valid_res = actuator.confirm_stop(
+            valid_receipt,
+            expected_operation_id={"OP-EXPECTED-100"},
+        )
         assert valid_res is True
         assert actuator.status == ActuatorStatus.ONLINE
+
+        # 6. Replay resistance: consuming the exact same receipt token again must fail
+        replay_res = actuator.confirm_stop(
+            valid_receipt,
+            expected_operation_id={"OP-EXPECTED-100"},
+        )
+        assert replay_res is False
 
     def test_f02_lookback_loop_rejects_future_issued_candidate(self):
         """Historical lookback walk skips candidate weather records whose issued_at is in the future relative to step limit."""
@@ -2768,5 +2800,353 @@ class TestPostAuditIntegrationsSDE:
             # and fallen back to climatological prior rather than contaminating state
             assert state.soil_water is not None and len(state.soil_water.theta_profile) > 0
             assert state.soil_water.evaporation_state is not None
+
+    def test_s12_contradictory_http_telemetry_cannot_finalize_cancellation_or_remove_quota(self):
+        """Contradictory HTTP telemetry (reporting ONLINE while flow > 0 or running) cannot finalize cancellation or drop quota."""
+        async def _run():
+            reg = ActuatorRegistration(
+                device_id="HTTP-CONTRADICT-01",
+                protocol=DriverProtocol.HTTP_REST,
+                vendor=VendorId.GENERIC,
+                model="REST_Valve_v1",
+                capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+                connection_config={"base_url": "http://mock-field-controller:8080"},
+            )
+            actuator = HTTPActuator(reg)
+
+            # 1. Contradictory telemetry query: reports status='ONLINE' but flow_rate_lpm=18.5 and is_running=True
+            contradictory_telemetry = {
+                "success": True,
+                "data": {
+                    "status": "ONLINE",
+                    "flow_rate_lpm": 18.5,
+                    "is_running": True,
+                    "is_stopped": False,
+                },
+            }
+            with patch.object(actuator, "_request", AsyncMock(return_value=contradictory_telemetry)):
+                st = await actuator.get_status()
+                # Must classify as EXECUTING, NEVER ONLINE!
+                assert st == ActuatorStatus.EXECUTING
+                assert actuator._status == ActuatorStatus.EXECUTING
+
+            # 2. Dispatcher cancel_event with contradictory telemetry fails closed
+            mock_registry = MagicMock()
+            mock_registry.get_actuator.return_value = actuator
+            safety = SafetyMonitor()
+            dispatcher = CommandDispatcher(registry=mock_registry, safety=safety)
+
+            event = IrrigationEvent(
+                event_id="EVT-HTTP-CANCEL-01",
+                plot_id="PLOT-01",
+                zone_id="ZONE-1",
+                device_id=actuator.device_id,
+                system_type=IrrigationSystemType.DRIP,
+                automation_mode=AutomationMode.FULL_AUTO,
+                target_volume_mm=10.0,
+                target_duration_minutes=30.0,
+                target_flow_rate_lpm=25.0,
+                status=EventStatus.EXECUTING,
+            )
+            dispatcher._active_events[event.event_id] = event
+
+            SharedQuotaStore.reset()
+            SharedQuotaStore.reserve(
+                event_id=event.event_id,
+                plot_id=event.plot_id,
+                volume_mm=event.target_volume_mm,
+                device_id=event.device_id,
+                zone_id=event.zone_id,
+            )
+
+            # When cancel is attempted, emergency stop returns transport success but contradictory flow
+            cancel_stop_res = {
+                "success": True,
+                "data": {
+                    "status": "ONLINE",
+                    "flow_rate_lpm": 15.0,
+                    "is_running": True,
+                    "is_stopped": False,
+                },
+            }
+            with patch.object(actuator, "_request", AsyncMock(side_effect=[contradictory_telemetry, cancel_stop_res])):
+                res_event = await dispatcher.cancel_event(event.event_id, reason="User test cancellation")
+                # Must NOT transition to CANCELLED; must enter STOP_REQUESTED!
+                assert res_event.status == EventStatus.STOP_REQUESTED
+                # Must retain live tracking and reservation
+                assert event.event_id in dispatcher._active_events
+                assert SharedQuotaStore.is_active(event.event_id) is True
+
+        asyncio.run(_run())
+
+    def test_s13_late_start_fence_treats_transport_only_stop_as_unconfirmed_and_retains_stop_requested(self):
+        """Late START fence treats transport-only STOP acknowledgment as unconfirmed and retains STOP_REQUESTED."""
+        async def _run():
+            SharedQuotaStore.reset()
+            mock_registry = MagicMock()
+            safety = SafetyMonitor()
+            dispatcher = CommandDispatcher(registry=mock_registry, safety=safety)
+
+            reg = ActuatorRegistration(
+                device_id="DEV-LATE-TRANS-01",
+                protocol=DriverProtocol.MODBUS_TCP,
+                vendor=VendorId.CUSTOM,
+                model="CustomFieldPLC",
+                capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+            )
+            actuator = ModbusActuator(reg)
+            mock_registry.get_actuator.return_value = actuator
+
+            event = IrrigationEvent(
+                event_id="EVT-LATE-FENCE-TRANS-01",
+                plot_id="PLOT-FENCE-01",
+                zone_id="ZONE-1",
+                device_id=actuator.device_id,
+                system_type=IrrigationSystemType.DRIP,
+                automation_mode=AutomationMode.FULL_AUTO,
+                target_volume_mm=12.0,
+                target_duration_minutes=25.0,
+                target_flow_rate_lpm=20.0,
+                status=EventStatus.QUEUED,
+            )
+
+            # START dispatch succeeds at transport level
+            start_result = CommandResult(
+                command_id="CMD-START-LATE",
+                device_id=actuator.device_id,
+                success=True,
+                timestamp=datetime.datetime.now(timezone.utc).isoformat(),
+            )
+
+            # Stop returns transport-acknowledged only (no verified cessation)
+            transport_only_stop = CommandResult(
+                command_id="ESTOP-TRANS-ONLY",
+                device_id=actuator.device_id,
+                success=True,
+                timestamp=datetime.datetime.now(timezone.utc).isoformat(),
+                transport_acknowledged_only=True,
+                confirmed_physical_stop=False,
+            )
+
+            async def mock_dispatch(ev, act):
+                # Race condition: event was cancelled in-flight while dispatch was executing
+                ev.status = EventStatus.CANCELLED
+                return start_result
+
+            with patch.object(actuator, "emergency_stop", AsyncMock(return_value=transport_only_stop)):
+                with patch.object(dispatcher, "_dispatch_with_retry", side_effect=mock_dispatch):
+                    res = await dispatcher.submit_event(event)
+                    # Late fence failed because stop was transport-only; must enter STOP_REQUESTED!
+                    assert res.status == EventStatus.STOP_REQUESTED
+                    assert event.event_id in dispatcher._active_events
+                    assert SharedQuotaStore.get_status(event.event_id) == "STOP_REQUESTED"
+
+        asyncio.run(_run())
+
+    def test_f03_future_issued_weather_prior_rejected_and_backfill_marked_prior(self):
+        """Future-issued weather_prior is rejected, and backfilled prior data is marked source_role='prior'."""
+        from services.agribrain.layer3_decision.runner import _execute_canonical_water_engine
+
+        step_limit = datetime.datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        # 1. Future-issued weather_prior is rejected when observation is missing
+        class MissingInputs:
+            weather_daily = {}  # No observations
+            soil_observations_daily = {}
+            target_date = "2026-06-01"
+            crop_context = None
+
+        future_prior = {
+            "temp_max": 28.0,
+            "temp_min": 16.0,
+            "precipitation": 0.0,
+            "wind_speed": 2.5,
+            "rh_min": 40.0,
+            "rh_max": 80.0,
+            "net_radiation": 18.0,
+            "issued_at": "2026-06-05T00:00:00Z",  # Future-issued relative to 2026-06-01!
+        }
+
+        state, audit = _execute_canonical_water_engine(
+            plot_id="PLOT-WEATHER-CAUSAL-01",
+            inputs=MissingInputs(),
+            op_ctx={"weather_prior": future_prior},
+            run_timestamp=step_limit,
+        )
+        # Must preserve missingness and return None rather than admitting future-issued prior!
+        assert state is None
+        assert audit is None
+
+        # 2. Backfill from eligible weather_prior marks record as source_role='prior'
+        class PartialInputs:
+            weather_daily = {
+                "2026-06-01": {
+                    "t_max_c": 26.0,
+                    # t_min_c missing, will backfill from eligible prior
+                    "wind_speed_2m_m_s": 2.0,
+                    "rh_min_pct": 35.0,
+                    "rh_max_pct": 75.0,
+                    "net_radiation_mj_m2": 15.0,
+                    "precipitation_mm": 0.0,
+                    "issued_at": "2026-06-01T08:00:00Z",
+                }
+            }
+            soil_observations_daily = {}
+            target_date = "2026-06-01"
+            crop_context = None
+
+        eligible_prior = {
+            "temp_max": 25.0,
+            "temp_min": 14.0,
+            "precipitation": 0.0,
+            "wind_speed": 2.0,
+            "rh_min": 35.0,
+            "rh_max": 75.0,
+            "net_radiation": 15.0,
+            "issued_at": "2026-05-31T12:00:00Z",  # Past-issued, eligible
+        }
+
+        state, audit = _execute_canonical_water_engine(
+            plot_id="PLOT-WEATHER-CAUSAL-02",
+            inputs=PartialInputs(),
+            op_ctx={"weather_prior": eligible_prior},
+            run_timestamp=step_limit,
+        )
+        assert state is not None
+        assert audit is not None
+        from services.agribrain.layer3_decision.runner import _PLOT_WATER_STATE_HISTORY
+        w_record = _PLOT_WATER_STATE_HISTORY["PLOT-WEATHER-CAUSAL-02"]["2026-06-01"]["weather"]
+        # Because missing temp_min was backfilled from prior, source_role must be 'prior'!
+        assert w_record.get("source_role") == "prior"
+        assert w_record.get("is_prior") is True
+        assert w_record.get("has_prior_backfill") is True
+
+    def test_e07_eo_foundation_rejects_singular_transforms_and_infinite_reflectance_without_hash_collision(self):
+        """EO foundation model rejects singular transforms and non-finite reflectance without hash collision."""
+        model = EOFoundationModel()
+        regular_band = [
+            [0.1, 0.2, 0.15, 0.18],
+            [0.12, 0.22, 0.16, 0.19],
+            [0.11, 0.21, 0.14, 0.17],
+            [0.13, 0.23, 0.17, 0.20],
+        ]
+        bands = {"B2": regular_band, "B3": regular_band, "B4": regular_band}
+
+        # 1. Singular/degenerate transform (0,0,0,0,0,0) rejected from spatial qualification
+        singular_tf = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        res_singular = model.infer(bands, crs="EPSG:4326", transform=singular_tf)
+        assert res_singular is not None
+        assert res_singular.is_spatial_qualified is False
+
+        # 2. Infinite reflectance is filtered out by _normalize_bands
+        infinite_band = [
+            [float("inf"), 0.2, 0.15, 0.18],
+            [0.12, float("-inf"), 0.16, 0.19],
+            [0.11, 0.21, 0.14, 0.17],
+            [0.13, 0.23, 0.17, 0.20],
+        ]
+        norm_inf = model._normalize_bands({"B2": infinite_band}, ["B2"], None)
+        assert norm_inf is not None
+        # Infinite pixels were rejected, so valid count is 14 instead of 16
+        assert norm_inf["valid_count"] == 14
+        assert all(math.isfinite(x) for x in norm_inf["flat_bands"]["B2"])
+
+        # 3. Hash collision resistance: missing vs infinite vs NaN inputs produce distinct hashes
+        missing_band = [
+            [None, 0.2, 0.15, 0.18],
+            [0.12, None, 0.16, 0.19],
+            [0.11, 0.21, 0.14, 0.17],
+            [0.13, 0.23, 0.17, 0.20],
+        ]
+        nan_band = [
+            [float("nan"), 0.2, 0.15, 0.18],
+            [0.12, float("nan"), 0.16, 0.19],
+            [0.11, 0.21, 0.14, 0.17],
+            [0.13, 0.23, 0.17, 0.20],
+        ]
+        hash_inf = model._compute_tile_hash({"B2": infinite_band}, ["B2"])
+        hash_missing = model._compute_tile_hash({"B2": missing_band}, ["B2"])
+        hash_nan = model._compute_tile_hash({"B2": nan_band}, ["B2"])
+
+        assert hash_inf != hash_missing
+        assert hash_inf != hash_nan
+        assert hash_missing != hash_nan
+
+    def test_d07_storage_warm_worker_synchronizes_cross_process_commits(self):
+        """Warm sensor storage worker synchronizes with disk to maintain visibility of rows committed by other workers."""
+        tmp_dir = tempfile.mkdtemp(prefix="test_multi_worker_sync_")
+        old_env = os.environ.get("AGRIWISE_SENSOR_STORAGE_DIR")
+        os.environ["AGRIWISE_SENSOR_STORAGE_DIR"] = tmp_dir
+        try:
+            clear_storage()
+            now = datetime.datetime.now(timezone.utc)
+
+            # Worker 1 stores Row 1
+            r1 = NormalizedSensorReading(
+                reading_id="NORM-W1-01",
+                device_id="DEV-SENS-01",
+                plot_id="PLOT-01",
+                zone_id="ZONE-1",
+                timestamp=now,
+                received_at=now,
+                variable="soil_moisture",
+                value=24.5,
+                unit="%",
+                vendor="AcmeSensors",
+                protocol="MQTT",
+            )
+            store_normalized_reading(r1)
+
+            # Simulate Worker 2 (another process) appending Row 2 directly to disk under the lock
+            storage_dir = Path(tmp_dir)
+            norm_file = storage_dir / "normalized" / "normalized_readings.jsonl"
+            lock_file = storage_dir / "normalized" / "normalized_readings.lock"
+
+            r2_dict = {
+                "reading_id": "NORM-W2-02",
+                "device_id": "DEV-SENS-02",
+                "plot_id": "PLOT-01",
+                "zone_id": "ZONE-2",
+                "timestamp": now.isoformat(),
+                "received_at": now.isoformat(),
+                "variable": "soil_moisture",
+                "value": 28.0,
+                "unit": "%",
+                "vendor": "AcmeSensors",
+                "protocol": "MQTT",
+            }
+            from services.agribrain.sensor_runtime.storage import _acquire_and_append
+            _acquire_and_append(norm_file, lock_file, (json.dumps(r2_dict) + "\n").encode("utf-8"))
+
+            # Warm Worker 1 stores Row 3
+            r3 = NormalizedSensorReading(
+                reading_id="NORM-W1-03",
+                device_id="DEV-SENS-01",
+                plot_id="PLOT-01",
+                zone_id="ZONE-1",
+                timestamp=now,
+                received_at=now,
+                variable="soil_moisture",
+                value=25.0,
+                unit="%",
+                vendor="AcmeSensors",
+                protocol="MQTT",
+            )
+            store_normalized_reading(r3)
+
+            # Warm Worker 1 queries readings: must see ALL committed rows (Row 1, Row 2, Row 3)!
+            all_readings = get_normalized_readings()
+            reading_ids = [r.reading_id for r in all_readings]
+            assert "NORM-W1-01" in reading_ids
+            assert "NORM-W2-02" in reading_ids
+            assert "NORM-W1-03" in reading_ids
+            assert len(all_readings) == 3
+        finally:
+            clear_storage()
+            if old_env is not None:
+                os.environ["AGRIWISE_SENSOR_STORAGE_DIR"] = old_env
+            else:
+                os.environ.pop("AGRIWISE_SENSOR_STORAGE_DIR", None)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
