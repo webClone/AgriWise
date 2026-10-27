@@ -84,7 +84,7 @@ export default function SubsystemLayerDashboard({
   const currentSim = getSimulatedLayerStatus(activeLayerId, baseStatus);
 
   const handleApply = () => {
-    setAppliedNotice("Parameters active! Real-time pipeline recalculated.");
+    setAppliedNotice("What-if parameters saved locally. No scientific pipeline was executed or revalidated.");
     setTimeout(() => setAppliedNotice(null), 3000);
   };
 
@@ -123,6 +123,9 @@ export default function SubsystemLayerDashboard({
           color: "#f1f5f9",
         }}
       >
+        <div role="note" style={{ padding: "10px 20px", background: "#3d3020", borderBottom: "1px solid #b47b47", color: "#ffead1", fontSize: "12px", fontWeight: 700, lineHeight: 1.5 }}>
+          EXPERIMENTAL WHAT-IF · Changes stay in this browser. They do not verify a lab result, recalibrate AgriBrain, or change the canonical publication.
+        </div>
         {/* Top Header */}
         <div
           style={{
@@ -167,11 +170,11 @@ export default function SubsystemLayerDashboard({
                     border: `1px solid ${currentSim.status === "OK" ? "rgba(34, 197, 94, 0.25)" : "rgba(245, 158, 11, 0.25)"}`,
                   }}
                 >
-                  {currentSim.status === "OK" ? "● OPERATIONAL" : "▲ DEGRADED"} ({Math.round(currentSim.confidence * 100)}% Conf)
+                  WHAT-IF ONLY · {currentSim.status} ({Math.round(currentSim.confidence * 100)}% hypothetical)
                 </span>
               </div>
               <p style={{ fontSize: "0.75rem", color: "#94a3b8", margin: "2px 0 0 0" }}>
-                Source: <span style={{ color: currentSim.isOverridden ? "#38bdf8" : "#cbd5e1", fontWeight: 600 }}>{currentSim.sourceTag}</span>
+                Hypothetical source: <span style={{ color: currentSim.isOverridden ? "#38bdf8" : "#cbd5e1", fontWeight: 600 }}>{currentSim.sourceTag}</span>
               </p>
             </div>
           </div>
