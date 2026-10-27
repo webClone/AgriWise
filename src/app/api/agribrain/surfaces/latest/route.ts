@@ -78,9 +78,10 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
       return NextResponse.json({
         available: false,
         status: "unavailable",
-        reason: "requested_snapshot_unavailable",
+        reason: snapRes.status === 409
+          ? "requested_snapshot_superseded_or_invalid" : "requested_snapshot_unavailable",
         snapshotId,
-      }, { status: snapRes.status === 404 ? 404 : 502 });
+      }, { status: snapRes.status === 404 ? 404 : snapRes.status === 409 ? 409 : 502 });
     }
 
     if (snapRes.ok) {
