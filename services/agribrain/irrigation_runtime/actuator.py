@@ -802,18 +802,24 @@ class IrrigationActuator(ABC):
             interlock.interlock_id, interlock.interlock_type.value, self.device_id
         )
 
-    def confirm_stop(self, receipt: Optional[Dict[str, Any]] = None) -> bool:
+    def confirm_stop(
+        self,
+        receipt: Optional[Dict[str, Any]] = None,
+        expected_operation_id: Optional[Any] = None,
+    ) -> bool:
         """Confirm physical cessation using verified controller evidence.
 
         Must be governed by an affirmative verified receipt from the controller or field sensor.
         Unrestricted or unverified confirmation is strictly rejected.
         Receipt must:
           1. Match this device_id
-          2. Contain positive physical stop evidence:
+          2. Contain mandatory operation_id / command_id correlated to active or expected operation
+          3. Originate from an authenticated, authorized source (trusted controller/driver)
+          4. Contain positive physical stop evidence:
              - actual_flow_lpm == 0.0, OR
              - status in ('STOPPED', 'IDLE', 'OFF'), OR
              - confirmed_stopped is True
-          3. NOT detect running state (e.g. is_running is not True, flow > 0 is rejected)
+          5. NOT detect running state (e.g. is_running is not True, flow > 0 is rejected)
         """
         if receipt is None or not isinstance(receipt, dict):
             raise ValueError("confirm_stop requires a verified dictionary receipt")
@@ -822,11 +828,36 @@ class IrrigationActuator(ABC):
         if not rec_dev or rec_dev != self.device_id:
             raise ValueError(f"Receipt device_id {rec_dev} does not match actuator {self.device_id}")
 
-        active_op = getattr(self._active_command, "operation_id", None) or getattr(self._active_command, "command_id", None)
         rec_op = receipt.get("operation_id") or receipt.get("command_id")
+        active_op = getattr(self._active_command, "operation_id", None) or getattr(self._active_command, "command_id", None)
+
         if active_op:
             if not rec_op or rec_op != active_op:
                 raise ValueError(f"Receipt operation_id {rec_op} does not match active operation {active_op}")
+        elif not rec_op or not str(rec_op).strip():
+            raise ValueError(f"Receipt for device {self.device_id} missing mandatory operation_id / command_id")
+        elif expected_operation_id:
+            if isinstance(expected_operation_id, (list, tuple, set)):
+                if rec_op not in expected_operation_id:
+                    raise ValueError(f"Receipt operation_id {rec_op} does not match expected operation {expected_operation_id}")
+            else:
+                if rec_op != expected_operation_id:
+                    raise ValueError(f"Receipt operation_id {rec_op} does not match expected operation {expected_operation_id}")
+        else:
+            # Recovery / restart path: active_command is absent, correlate via pending stop context or durable claim
+            pending_op = getattr(self, "_pending_stop_operation_id", None) or (self._pending_command.command_id if self._pending_command else None)
+            durable_op = None
+            try:
+                from .safety import SharedQuotaStore
+                claim = SharedQuotaStore.get_resource_claim(self.device_id)
+                if claim:
+                    durable_op = claim.get("operation_id") or claim.get("command_id") or claim.get("event_id")
+            except Exception:
+                durable_op = None
+
+            expected_corr = pending_op or durable_op
+            if expected_corr and rec_op != expected_corr:
+                raise ValueError(f"Receipt operation_id {rec_op} does not match recoverable operation {expected_corr}")
 
         # Freshness and observation window check (mandatory, within 600s, not future-dated > 30s)
         ts_raw = receipt.get("timestamp") or receipt.get("observed_at") or receipt.get("received_at")
@@ -855,7 +886,7 @@ class IrrigationActuator(ABC):
             logger.warning("Failed to parse observation timestamp in receipt for device %s: %s", self.device_id, ts_err)
             return False
 
-        # Provenance authentication check (mandatory, non-empty, trusted)
+        # Provenance authentication check (mandatory, non-empty, trusted and authenticated authority)
         source = receipt.get("source") or receipt.get("driver") or receipt.get("provenance")
         if not source or not str(source).strip():
             logger.warning("Receipt for device %s rejected: missing mandatory source/provenance", self.device_id)
@@ -863,6 +894,31 @@ class IrrigationActuator(ABC):
         src_clean = str(source).strip().lower()
         if src_clean in ("untrusted", "spoofed", "unknown", "invalid", "anonymous"):
             logger.warning("Receipt for device %s from untrusted source %s", self.device_id, source)
+            return False
+
+        trusted_sources = {
+            "controller",
+            "modbus_plc",
+            "mqtt_broker",
+            "lorawan_gateway",
+            "http_rest",
+            "hardware_telemetry",
+            "safety_verifier",
+            "field_bus",
+            "driver",
+            "system_reconciliation",
+            "command_dispatcher",
+            self.device_id.lower(),
+            f"{self.device_id.lower()}_controller",
+            self.protocol.value.lower(),
+            f"{self.protocol.value.lower()}_driver",
+        }
+        if src_clean not in trusted_sources:
+            logger.warning("Receipt for device %s rejected: unauthenticated/untrusted provenance source '%s'", self.device_id, source)
+            return False
+
+        if receipt.get("authenticated") is False:
+            logger.warning("Receipt for device %s rejected: explicitly marked unauthenticated", self.device_id)
             return False
 
         # Physical flow measurement validation (finite real, reject NaN/Inf/bool/string-garbage/negative)

@@ -167,7 +167,6 @@ class CommandDispatcher:
             or getattr(actuator, "is_mock", False)
             or type(actuator).__name__.startswith("Mock")
             or getattr(getattr(actuator, "registration", None), "model", "") in ("MockModel", "offline")
-            or getattr(getattr(actuator, "registration", None), "vendor", None) == VendorId.CUSTOM
         )
         if is_sim:
             hw = getattr(actuator, "hw", None)
@@ -1829,7 +1828,8 @@ class CommandDispatcher:
             logger.error("No actuator for device %s to confirm stop on event %s", event.device_id, event_id)
             return False
 
-        confirmed = actuator.confirm_stop(receipt)
+        valid_ops = {event.event_id} | set(event.command_ids or [])
+        confirmed = actuator.confirm_stop(receipt, expected_operation_id=valid_ops)
         if not confirmed:
             return False
 

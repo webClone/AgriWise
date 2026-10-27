@@ -2198,6 +2198,7 @@ class TestPostAuditIntegrationsSDE:
                 return {"status": "CANCELLED", "claimed": False, "owner_token": "OWNER-OTHER"}
 
             with patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.atomic_check_and_reserve", return_value=None), \
+                 patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.is_active", return_value=False), \
                  patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.claim_resource", return_value=(True, None)), \
                  patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.transition_to_dispatching", return_value=True), \
                  patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.get_active_record", side_effect=_mock_get_active), \
@@ -2521,6 +2522,188 @@ class TestPostAuditIntegrationsSDE:
             assert "UNQUALIFIED_SPATIAL_IDENTITY" in it.flags
             assert it.state_update_allowed is False
             assert it.production_usable is False
+
+    def test_e06_spatially_qualified_eo_evidence_admitted_to_state_updates(self):
+        """End-to-end: Coherent per-band georeferencing yields spatially qualified EO evidence admitted to state updates."""
+        from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+        from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+        engine = Layer1FusionEngine()
+        regular_band = [
+            [0.1, 0.2, 0.15, 0.18],
+            [0.12, 0.22, 0.16, 0.19],
+            [0.11, 0.21, 0.14, 0.17],
+            [0.13, 0.23, 0.17, 0.20],
+        ]
+        now = datetime.datetime.now(timezone.utc)
+        valid_transform = (0.0, 10.0, 0.0, 0.0, 0.0, -10.0)
+
+        # 1. Positive path: Coherent CRS and affine transform across bands
+        bundle_qualified = Layer1InputBundle(
+            plot_id="PLOT-EO-QUALIFIED-01",
+            run_id="run-eo-qual-01",
+            run_timestamp=now,
+            window_start=now - datetime.timedelta(hours=1),
+            window_end=now,
+            raster_composites={
+                "B2": {"pixel_array": regular_band, "crs": "EPSG:4326", "transform": valid_transform},
+                "B3": {"pixel_array": regular_band, "crs": "EPSG:4326", "transform": valid_transform},
+                "B4": {"pixel_array": regular_band, "crs": "EPSG:4326", "transform": valid_transform},
+            },
+        )
+        ctx = engine.fuse(bundle_qualified)
+        anomaly_scores = [
+            it for it in ctx.evidence_items
+            if it.source_family == "eo_foundation" and it.variable == "anomaly_score"
+        ]
+        assert len(anomaly_scores) == 1
+        score_item = anomaly_scores[0]
+        assert "UNQUALIFIED_SPATIAL_IDENTITY" not in score_item.flags
+        assert score_item.state_update_allowed is True
+        assert score_item.production_usable is True
+        assert score_item.diagnostic_only is False
+
+        # 2. Negative path: Mismatched CRS across bands fails closed
+        bundle_mismatched = Layer1InputBundle(
+            plot_id="PLOT-EO-MISMATCH-01",
+            run_id="run-eo-mismatch-01",
+            run_timestamp=now,
+            window_start=now - datetime.timedelta(hours=1),
+            window_end=now,
+            raster_composites={
+                "B2": {"pixel_array": regular_band, "crs": "EPSG:4326", "transform": valid_transform},
+                "B3": {"pixel_array": regular_band, "crs": "EPSG:32633", "transform": valid_transform},
+                "B4": {"pixel_array": regular_band, "crs": "EPSG:4326", "transform": valid_transform},
+            },
+        )
+        ctx_mismatched = engine.fuse(bundle_mismatched)
+        mismatched_scores = [
+            it for it in ctx_mismatched.evidence_items
+            if it.source_family == "eo_foundation" and it.variable == "anomaly_score"
+        ]
+        assert len(mismatched_scores) == 1
+        assert "UNQUALIFIED_SPATIAL_IDENTITY" in mismatched_scores[0].flags
+        assert mismatched_scores[0].state_update_allowed is False
+        assert mismatched_scores[0].production_usable is False
+
+    def test_s10_custom_hardware_cannot_enter_simulation_exception(self):
+        """Custom hardware (VendorId.CUSTOM) without physical stop proof cannot enter the simulation exception."""
+        mock_registry = MagicMock()
+        mock_safety = MagicMock()
+        dispatcher = CommandDispatcher(registry=mock_registry, safety=mock_safety)
+
+        # Real custom-vendor actuator (is_simulation=False, not mock)
+        reg = ActuatorRegistration(
+            device_id="DEV-CUSTOM-HW-01",
+            protocol=DriverProtocol.MODBUS_TCP,
+            vendor=VendorId.CUSTOM,
+            model="CustomFieldControllerV2",
+            capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator._status = ActuatorStatus.ONLINE
+
+        now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+        # Transport-successful stop result, but no physical confirmation
+        unconfirmed_stop = CommandResult(
+            command_id="CMD-STOP-01",
+            device_id="DEV-CUSTOM-HW-01",
+            success=True,
+            timestamp=now_ts,
+            confirmed_physical_stop=False,
+            transport_acknowledged_only=False,
+        )
+
+        # Must NOT enter simulation exception -- returns False for real custom hardware
+        assert dispatcher._is_stop_confirmed(actuator, unconfirmed_stop) is False
+
+        # Positive proof: affirmative verified physical stop proof returns True
+        confirmed_stop = CommandResult(
+            command_id="CMD-STOP-01",
+            device_id="DEV-CUSTOM-HW-01",
+            success=True,
+            timestamp=now_ts,
+            confirmed_physical_stop=True,
+            transport_acknowledged_only=False,
+        )
+        assert dispatcher._is_stop_confirmed(actuator, confirmed_stop) is True
+
+    def test_s11_confirm_stop_requires_authenticated_provenance_and_correlated_operation(self):
+        """confirm_stop requires correlated operation ID in recovery and rejects unauthenticated caller provenance."""
+        reg = ActuatorRegistration(
+            device_id="DEV-RECEIPT-AUTH-01",
+            protocol=DriverProtocol.MODBUS_TCP,
+            vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+            capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+        # 1. Recovery path (active_command is absent): missing operation_id raises ValueError
+        with pytest.raises(ValueError, match="missing mandatory operation_id / command_id"):
+            actuator.confirm_stop({
+                "device_id": "DEV-RECEIPT-AUTH-01",
+                "timestamp": now_ts,
+                "source": "controller",
+                "actual_flow_lpm": 0.0,
+            })
+
+        # 2. Mismatched expected_operation_id raises ValueError
+        with pytest.raises(ValueError, match="does not match expected operation"):
+            actuator.confirm_stop(
+                {
+                    "device_id": "DEV-RECEIPT-AUTH-01",
+                    "operation_id": "OP-WRONG-999",
+                    "timestamp": now_ts,
+                    "source": "controller",
+                    "actual_flow_lpm": 0.0,
+                },
+                expected_operation_id={"OP-EXPECTED-100", "EVT-100"},
+            )
+
+        # 3. Unauthenticated/arbitrary caller dictionary rejected (returns False)
+        untrusted_res = actuator.confirm_stop(
+            {
+                "device_id": "DEV-RECEIPT-AUTH-01",
+                "operation_id": "OP-EXPECTED-100",
+                "timestamp": now_ts,
+                "source": "unauthorized_external_script",
+                "actual_flow_lpm": 0.0,
+            },
+            expected_operation_id={"OP-EXPECTED-100"},
+        )
+        assert untrusted_res is False
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+        # 4. Explicitly unauthenticated receipt rejected (returns False)
+        unauth_res = actuator.confirm_stop(
+            {
+                "device_id": "DEV-RECEIPT-AUTH-01",
+                "operation_id": "OP-EXPECTED-100",
+                "timestamp": now_ts,
+                "source": "controller",
+                "authenticated": False,
+                "actual_flow_lpm": 0.0,
+            },
+            expected_operation_id={"OP-EXPECTED-100"},
+        )
+        assert unauth_res is False
+
+        # 5. Authenticated trusted source with correlated operation succeeds
+        valid_res = actuator.confirm_stop(
+            {
+                "device_id": "DEV-RECEIPT-AUTH-01",
+                "operation_id": "OP-EXPECTED-100",
+                "timestamp": now_ts,
+                "source": "modbus_plc",
+                "actual_flow_lpm": 0.0,
+            },
+            expected_operation_id={"OP-EXPECTED-100"},
+        )
+        assert valid_res is True
+        assert actuator.status == ActuatorStatus.ONLINE
 
     def test_f02_lookback_loop_rejects_future_issued_candidate(self):
         """Historical lookback walk skips candidate weather records whose issued_at is in the future relative to step limit."""
