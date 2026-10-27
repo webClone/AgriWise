@@ -4597,7 +4597,7 @@ def get_model(model_name: str, version: str = None):
 
 class PlotRegistrationRequest(BaseModel):
     """Request to register a plot for data collection"""
-    farm_id: str
+    farm_id: Optional[str] = None
     plot_id: str
     coordinates: Dict[str, float]
     crop: str
@@ -4610,6 +4610,7 @@ def register_plot(
 ):
     """Register a new plot for automatic data collection.
     """
+    farm_id = namespace.farm_id
     if req.plot_id and req.plot_id.strip() != namespace.plot_id.strip():
         raise HTTPException(
             status_code=403,
@@ -4620,15 +4621,13 @@ def register_plot(
             status_code=403,
             detail="Payload farm_id does not match authenticated token namespace",
         )
-    """
 
-    Now also triggers the BootstrapEngine to pre-fetch ALL data sources
-    (weather, satellite, soil, etc.) so the first dashboard load is instant.
-    """
+    # Now also triggers the BootstrapEngine to pre-fetch ALL data sources
+    # (weather, satellite, soil, etc.) so the first dashboard load is instant.
     from core.data_collector import data_collector
     
     result = data_collector.register_plot(
-        farm_id=req.farm_id,
+        farm_id=farm_id,
         plot_id=req.plot_id,
         coordinates=req.coordinates,
         crop=req.crop,
