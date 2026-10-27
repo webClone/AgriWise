@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -223,11 +224,55 @@ def build_canonical_stop_assertion(
     return raw.encode("utf-8")
 
 
+def _lock_stop_receipt_fd(fd: int, timeout: float = 10.0) -> None:
+    """Acquire exclusive OS-backed advisory file lock without age-based lock theft."""
+    start_t = time.monotonic()
+    if sys.platform == "win32":
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except (BlockingIOError, OSError, PermissionError):
+                if time.monotonic() - start_t > timeout:
+                    raise TimeoutError(f"Timed out after {timeout}s waiting for cross-process stop receipt lock")
+                time.sleep(0.01)
+    else:
+        import fcntl
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except (BlockingIOError, OSError):
+                if time.monotonic() - start_t > timeout:
+                    raise TimeoutError(f"Timed out after {timeout}s waiting for cross-process stop receipt lock")
+                time.sleep(0.01)
+
+
+def _unlock_stop_receipt_fd(fd: int) -> None:
+    """Release OS-backed advisory file lock without deleting the lock file."""
+    if sys.platform == "win32":
+        import msvcrt
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
+    else:
+        import fcntl
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+
+
 class DurableStopReceiptStore:
     """Thread-safe and cross-process atomic consumed STOP receipt store.
 
     Prevents replay attacks across restarts, threads, and independent worker processes.
-    Backed by an append-only journal with atomic cross-process file locking.
+    Backed by an append-only journal with OS-backed advisory cross-process file locking.
+    Fails closed on any storage, lock, or persistence failure.
     """
     _thread_lock = threading.RLock()
     _memory_cache: Set[str] = set()
@@ -252,33 +297,26 @@ class DurableStopReceiptStore:
 
     @classmethod
     @contextmanager
-    def _cross_process_lock(cls):
+    def _cross_process_lock(cls, timeout: float = 10.0):
         with cls._thread_lock:
             lock_path = cls._lock_file()
-            descriptor = None
-            owner_token = f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
-            for _ in range(500):
-                try:
-                    descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                    break
-                except FileExistsError:
-                    try:
-                        if time.time() - lock_path.stat().st_mtime > 30.0:
-                            lock_path.unlink(missing_ok=True)
-                            continue
-                    except OSError:
-                        pass
-                    time.sleep(0.005)
-            if descriptor is None:
-                raise TimeoutError("Timeout acquiring cross-process stop receipt lock")
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o666)
             try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    handle.write(owner_token)
-                yield
+                if os.fstat(fd).st_size == 0:
+                    try:
+                        os.write(fd, b"\x00")
+                        os.fsync(fd)
+                    except Exception:
+                        pass
+                _lock_stop_receipt_fd(fd, timeout=timeout)
+                try:
+                    yield
+                finally:
+                    _unlock_stop_receipt_fd(fd)
             finally:
                 try:
-                    lock_path.unlink(missing_ok=True)
-                except OSError:
+                    os.close(fd)
+                except Exception:
                     pass
 
     @classmethod
@@ -294,33 +332,39 @@ class DurableStopReceiptStore:
         if not jfile.exists():
             return False
 
-        try:
-            with open(jfile, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                        fp = rec.get("fingerprint")
-                        tok = rec.get("token")
-                        if fp == fingerprint or (token and tok == token):
-                            with cls._thread_lock:
-                                if fp:
-                                    cls._memory_cache.add(fp)
-                                if tok:
-                                    cls._memory_cache.add(tok)
-                            return True
-                    except Exception:
-                        continue
-        except OSError:
-            pass
+        with open(jfile, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    fp = rec.get("fingerprint")
+                    tok = rec.get("token")
+                    if fp == fingerprint or (token and tok == token):
+                        with cls._thread_lock:
+                            if fp:
+                                cls._memory_cache.add(fp)
+                            if tok:
+                                cls._memory_cache.add(tok)
+                        return True
+                except Exception:
+                    continue
         return False
 
     @classmethod
-    def consume(cls, fingerprint: str, token: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Atomically mark fingerprint and token as consumed. Returns True if newly consumed, False if replay."""
-        with cls._cross_process_lock():
+    def consume(
+        cls,
+        fingerprint: str,
+        token: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        timeout: float = 10.0,
+    ) -> bool:
+        """Atomically mark fingerprint and token as consumed. Returns True if newly consumed, False if replay.
+        
+        Raises OSError / TimeoutError if durable persistence or locking fails (fails closed).
+        """
+        with cls._cross_process_lock(timeout=timeout):
             if cls.is_consumed(fingerprint, token):
                 return False
 
@@ -334,13 +378,10 @@ class DurableStopReceiptStore:
                 record.update(metadata)
 
             jfile = cls._journal_file()
-            try:
-                with open(jfile, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(record) + "\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-            except OSError as e:
-                logger.error("Failed to append to stop receipt journal: %s", e)
+            with open(jfile, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
 
             with cls._thread_lock:
                 cls._memory_cache.add(fingerprint)
@@ -353,12 +394,16 @@ class DurableStopReceiptStore:
         """Reset memory cache and journal (for testing isolation)."""
         with cls._thread_lock:
             cls._memory_cache.clear()
-            jfile = cls._journal_file()
-            if jfile.exists():
-                try:
-                    jfile.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            try:
+                with cls._cross_process_lock(timeout=5.0):
+                    jfile = cls._journal_file()
+                    if jfile.exists():
+                        try:
+                            jfile.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            except Exception:
+                pass
 
 
 def generate_stop_receipt_token(
@@ -1467,9 +1512,16 @@ class IrrigationActuator(ABC):
             fingerprint in consumed
             or fingerprint in _GLOBAL_CONSUMED_RECEIPT_TOKENS
             or (receipt_token and (receipt_token in consumed or receipt_token in _GLOBAL_CONSUMED_RECEIPT_TOKENS))
-            or DurableStopReceiptStore.is_consumed(fingerprint, receipt_token)
         ):
-            logger.warning("Receipt for device %s rejected: receipt already consumed (replay detected)", self.device_id)
+            logger.warning("Receipt for device %s rejected: receipt already consumed in memory (replay detected)", self.device_id)
+            return False
+
+        try:
+            if DurableStopReceiptStore.is_consumed(fingerprint, receipt_token):
+                logger.warning("Receipt for device %s rejected: receipt already consumed in durable store (replay detected)", self.device_id)
+                return False
+        except Exception as store_check_err:
+            logger.error("Failed checking durable receipt consumption on %s (%s); failing closed", self.device_id, store_check_err)
             return False
 
         # 4. Affirmative physical evidence and ongoing execution check
@@ -1488,7 +1540,29 @@ class IrrigationActuator(ABC):
             logger.warning("Receipt for device %s lacks affirmative physical stop evidence.", self.device_id)
             return False
 
-        # 5. Affirmative stop verified: update state and consume token durably
+        # 5. Authoritative atomic durable consumption BEFORE releasing ownership
+        try:
+            consumed_newly = DurableStopReceiptStore.consume(
+                fingerprint=fingerprint,
+                token=receipt_token,
+                metadata={"device_id": self.device_id, "operation_id": str(rec_op)},
+            )
+        except Exception as store_err:
+            logger.error(
+                "Receipt for device %s rejected: durable receipt persistence failed (%s); retaining pending stop state and active ownership",
+                self.device_id,
+                store_err,
+            )
+            return False
+
+        if not consumed_newly:
+            logger.warning(
+                "Receipt for device %s rejected: receipt already consumed in durable store (replay detected)",
+                self.device_id,
+            )
+            return False
+
+        # 6. Affirmative stop verified AND durably persisted: ONLY NOW release ownership
         has_fault = getattr(self, "_fault_latched", False) or getattr(self, "_status", None) == ActuatorStatus.ERROR
         if has_fault:
             self._status = ActuatorStatus.ERROR
@@ -1503,12 +1577,6 @@ class IrrigationActuator(ABC):
         if receipt_token:
             consumed.add(receipt_token)
             _GLOBAL_CONSUMED_RECEIPT_TOKENS.add(receipt_token)
-
-        DurableStopReceiptStore.consume(
-            fingerprint=fingerprint,
-            token=receipt_token,
-            metadata={"device_id": self.device_id, "operation_id": str(rec_op)},
-        )
 
         logger.info("Physical STOP confirmed on device %s by verified receipt. Status=%s", self.device_id, self._status.value)
         return True
@@ -1534,3 +1602,17 @@ class IrrigationActuator(ABC):
             f"<{self.__class__.__name__} device={self.device_id} "
             f"protocol={self.protocol.value} status={self._status.value}>"
         )
+
+
+# F37: Canonical module identity synchronization across both import paths
+for _short_mod, _full_mod in [
+    ("irrigation_runtime.actuator", "services.agribrain.irrigation_runtime.actuator"),
+]:
+    _sm = sys.modules.get(_short_mod)
+    _fm = sys.modules.get(_full_mod)
+    if _sm and not _fm:
+        sys.modules[_full_mod] = _sm
+    elif _fm and not _sm:
+        sys.modules[_short_mod] = _fm
+    elif _sm and _fm and _sm is not _fm:
+        sys.modules[_full_mod] = _sm

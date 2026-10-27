@@ -60,6 +60,17 @@ def test_f37_unified_namespace_sensor_runtime_import_orders():
     assert res2.returncode == 0, f"Order 2 failed: {res2.stderr}"
 
 
+def test_f37_unified_namespace_sensor_runtime_schemas_import_orders():
+    """Verify both import orders for sensor_runtime.schemas.NormalizedSensorReading produce identical class identity."""
+    code_order_1 = "import sys; sys.path.insert(0, 'services/agribrain'); import sensor_runtime.schemas as s1; import services.agribrain.sensor_runtime.schemas as s2; assert s1.NormalizedSensorReading is s2.NormalizedSensorReading; assert s1.RawSensorMessage is s2.RawSensorMessage"
+    res1 = subprocess.run([sys.executable, "-c", code_order_1], capture_output=True, text=True)
+    assert res1.returncode == 0, f"Order 1 failed: {res1.stderr}"
+
+    code_order_2 = "import sys; sys.path.insert(0, 'services/agribrain'); import services.agribrain.sensor_runtime.schemas as s2; import sensor_runtime.schemas as s1; assert s1.NormalizedSensorReading is s2.NormalizedSensorReading; assert s1.RawSensorMessage is s2.RawSensorMessage"
+    res2 = subprocess.run([sys.executable, "-c", code_order_2], capture_output=True, text=True)
+    assert res2.returncode == 0, f"Order 2 failed: {res2.stderr}"
+
+
 def test_f37_unified_namespace_irrigation_runtime_import_orders():
     """Verify both import orders for irrigation_runtime.schemas.ActuatorRegistration produce identical class identity."""
     code_order_1 = "import sys; sys.path.insert(0, 'services/agribrain'); import irrigation_runtime.schemas as s1; import services.agribrain.irrigation_runtime.schemas as s2; assert s1.ActuatorRegistration is s2.ActuatorRegistration"
@@ -71,34 +82,78 @@ def test_f37_unified_namespace_irrigation_runtime_import_orders():
     assert res2.returncode == 0, f"Order 2 failed: {res2.stderr}"
 
 
-def test_f37_cold_start_entrypoints_imports():
-    """Validate cold-start imports for API, worker, and CLI entrypoints."""
+def test_f37_unified_namespace_irrigation_runtime_actuator_import_orders():
+    """Verify both import orders for irrigation_runtime.actuator.IrrigationActuator and DurableStopReceiptStore."""
+    code_order_1 = "import sys; sys.path.insert(0, 'services/agribrain'); import irrigation_runtime.actuator as s1; import services.agribrain.irrigation_runtime.actuator as s2; assert s1.IrrigationActuator is s2.IrrigationActuator; assert s1.DurableStopReceiptStore is s2.DurableStopReceiptStore"
+    res1 = subprocess.run([sys.executable, "-c", code_order_1], capture_output=True, text=True)
+    assert res1.returncode == 0, f"Order 1 failed: {res1.stderr}"
+
+    code_order_2 = "import sys; sys.path.insert(0, 'services/agribrain'); import services.agribrain.irrigation_runtime.actuator as s2; import irrigation_runtime.actuator as s1; assert s1.IrrigationActuator is s2.IrrigationActuator; assert s1.DurableStopReceiptStore is s2.DurableStopReceiptStore"
+    res2 = subprocess.run([sys.executable, "-c", code_order_2], capture_output=True, text=True)
+    assert res2.returncode == 0, f"Order 2 failed: {res2.stderr}"
+
+
+def test_f37_cold_start_entrypoints_runtime_qualification():
+    """Validate cold-start runtime qualification for API (200), background worker, and CLI (--help)."""
     code = (
-        "from services.agribrain.app.main import app; "
-        "from services.agribrain.layer0.data_gateway.refresh_worker import DataRefreshWorker; "
-        "from services.agribrain.orchestrator_v2.run_entrypoint import main; "
-        "assert app is not None; "
-        "assert DataRefreshWorker is not None; "
-        "assert callable(main)"
+        "import sys\n"
+        "from starlette.testclient import TestClient\n"
+        "from services.agribrain.app.main import app\n"
+        "client = TestClient(app)\n"
+        "resp = client.get('/')\n"
+        "assert resp.status_code == 200, f'Status {resp.status_code}: {resp.text}'\n"
+        "data = resp.json()\n"
+        "assert data.get('status') == 'healthy'\n"
+        "from services.agribrain.layer0.data_gateway.refresh_worker import DataRefreshWorker\n"
+        "from services.agribrain.layer0.data_gateway import get_broker\n"
+        "worker = DataRefreshWorker(get_broker())\n"
+        "assert worker is not None\n"
+        "from services.agribrain.orchestrator_v2 import run_entrypoint\n"
+        "sys.argv = ['run_entrypoint.py', '--help']\n"
+        "try:\n"
+        "    run_entrypoint.main()\n"
+        "except SystemExit as e:\n"
+        "    assert e.code == 0\n"
     )
     res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
-    assert res.returncode == 0, f"Cold-start imports failed: {res.stderr}"
+    assert res.returncode == 0, f"Cold-start qualification failed: {res.stderr}\nStdout: {res.stdout}"
 
 
 def test_f37_optional_backend_isolation_eo_fallback():
-    """Validate optional-backend isolation for EOFoundationModel ONNX fallback mode."""
-    from services.agribrain.layer1_fusion.eo_foundation_model import EOFoundationModel
-    model = EOFoundationModel()
-    bands = {
-        "B2": [[0.1, 0.2], [0.3, 0.4]],
-        "B3": [[0.1, 0.2], [0.3, 0.4]],
-        "B4": [[0.1, 0.2], [0.3, 0.4]],
-        "B8": [[0.4, 0.5], [0.6, 0.7]],
-    }
-    result = model.infer(bands)
-    assert result is not None
-    assert result.model_id in ("spectral_basis_v2", "onnx_foundation")
-    assert result.confidence > 0.0
+    """Validate optional-backend isolation: with ONNX disabled, falls back to spectral_basis_v2 while other services work."""
+    code = (
+        "import sys\n"
+        "sys.modules['onnxruntime'] = None\n"
+        "from services.agribrain.layer1_fusion.eo_foundation_model import EOFoundationModel\n"
+        "model = EOFoundationModel()\n"
+        "bands = {\n"
+        "    'B2': [[0.1, 0.2], [0.3, 0.4]],\n"
+        "    'B3': [[0.1, 0.2], [0.3, 0.4]],\n"
+        "    'B4': [[0.1, 0.2], [0.3, 0.4]],\n"
+        "    'B8': [[0.4, 0.5], [0.6, 0.7]],\n"
+        "}\n"
+        "res = model.infer(bands)\n"
+        "assert res is not None\n"
+        "assert res.model_id == 'spectral_basis_v2', f'Expected spectral_basis_v2, got {res.model_id}'\n"
+        "assert res.confidence > 0.0\n"
+        "from services.agribrain.layer0.data_gateway import broker\n"
+        "from services.agribrain.layer1_fusion.segmentation import ZonalSegmentationEngine\n"
+        "from services.agribrain.drone_mission.planner import DroneMissionPlanner\n"
+        "from services.agribrain.irrigation_runtime.dispatcher import CommandDispatcher\n"
+        "from services.agribrain.irrigation_runtime.safety import SafetyMonitor, SharedQuotaStore\n"
+        "assert broker is not None\n"
+        "seg = ZonalSegmentationEngine(n_zones=2)\n"
+        "assert seg is not None\n"
+        "planner = DroneMissionPlanner()\n"
+        "assert planner is not None\n"
+        "dispatcher = CommandDispatcher()\n"
+        "assert dispatcher is not None\n"
+        "safety = SafetyMonitor()\n"
+        "assert safety is not None\n"
+        "assert SharedQuotaStore is not None\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert res.returncode == 0, f"Optional backend isolation failed: {res.stderr}\nStdout: {res.stdout}"
 
 
 # ============================================================================

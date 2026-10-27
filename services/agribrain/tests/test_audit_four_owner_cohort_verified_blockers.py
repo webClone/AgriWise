@@ -3524,4 +3524,282 @@ class TestStopReceiptSecurityClosure:
         assert actuator.active_command.command_id == "CMD-QUOTA-06"
         assert actuator.active_command.operation_id == "OP-QUOTA-06"
 
+    def test_07_forced_journal_write_failure_fails_closed_and_retains_ownership(self):
+        """7. Forced journal persistence failure fails closed: confirm_stop returns False, status stays STOP_PENDING_CONFIRMATION, active_command and quota survive."""
+        from services.agribrain.irrigation_runtime.actuator import (
+            DurableStopReceiptStore,
+            create_verified_stop_receipt,
+        )
+        dev_id = "DEV-FAIL-WRITE-07"
+        secret = "journal_write_fail_secret_2026"
+        reg = ActuatorRegistration(
+            device_id=dev_id,
+            vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+            protocol=DriverProtocol.MODBUS_TCP,
+            capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+            connection_config={"auth_secret": secret},
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        active_cmd = IrrigationCommand(
+            command_id="CMD-WRITE-FAIL-07",
+            command_type=CommandType.START_ZONE,
+            device_id=dev_id,
+            zone_id="ZONE-1",
+            plot_id="PLOT-01",
+            operation_id="OP-FAIL-07",
+        )
+        actuator._active_command = active_cmd
+        now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+        receipt = create_verified_stop_receipt(
+            device_id=dev_id,
+            operation_id="OP-FAIL-07",
+            attempt_number=1,
+            secret=secret,
+            source="modbus_plc",
+            actual_flow_lpm=0.0,
+            timestamp=now_ts,
+        )
+
+        # Force journal append failure (simulate disk I/O / fsync failure)
+        with patch.object(DurableStopReceiptStore, "consume", side_effect=IOError("Simulated disk write failure: disk full")):
+            res = actuator.confirm_stop(receipt)
+            # Must FAIL CLOSED (return False)
+            assert res is False
+
+        # Invariants: Must NOT release ownership or transition to ONLINE
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+        assert actuator.active_command is not None
+        assert actuator.active_command.command_id == "CMD-WRITE-FAIL-07"
+        assert actuator.active_command.operation_id == "OP-FAIL-07"
+
+    def test_08_multiprocess_duplicate_receipt_consumption_rejected(self):
+        """8. An already-consumed receipt from an independent external process is strictly rejected (durable cross-process anti-replay)."""
+        import subprocess
+        import sys
+        from services.agribrain.irrigation_runtime.actuator import (
+            DurableStopReceiptStore,
+            _GLOBAL_CONSUMED_RECEIPT_TOKENS,
+            create_verified_stop_receipt,
+        )
+        tmp_receipt_dir = tempfile.mkdtemp(prefix="test_mp_stop_receipts_")
+        old_receipt_env = os.environ.get("AGRIBRAIN_STOP_RECEIPT_DIR")
+        os.environ["AGRIBRAIN_STOP_RECEIPT_DIR"] = tmp_receipt_dir
+        try:
+            DurableStopReceiptStore.reset()
+            _GLOBAL_CONSUMED_RECEIPT_TOKENS.clear()
+
+            dev_id = "DEV-MP-REPLAY-08"
+            secret = "mp_durable_replay_secret_2026"
+            reg = ActuatorRegistration(
+                device_id=dev_id,
+                vendor=VendorId.CUSTOM,
+                model="FieldPLC",
+                protocol=DriverProtocol.MODBUS_TCP,
+                capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+                connection_config={"auth_secret": secret},
+            )
+            actuator = ModbusActuator(registration=reg)
+            actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+            actuator._active_command = IrrigationCommand(
+                command_id="CMD-MP-08",
+                command_type=CommandType.START_ZONE,
+                device_id=dev_id,
+                zone_id="ZONE-1",
+                plot_id="PLOT-01",
+                operation_id="OP-MP-08",
+            )
+            now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+            receipt = create_verified_stop_receipt(
+                device_id=dev_id,
+                operation_id="OP-MP-08",
+                attempt_number=1,
+                secret=secret,
+                source="modbus_plc",
+                actual_flow_lpm=0.0,
+                timestamp=now_ts,
+            )
+            tok = receipt["auth_token"]
+            fp = f"{dev_id}:OP-MP-08:1:{datetime.datetime.fromisoformat(now_ts).isoformat()}:{tok}"
+
+            # Run completely separate Python process to consume this receipt into the shared store
+            worker_code = (
+                "import os, sys\n"
+                f"os.environ['AGRIBRAIN_STOP_RECEIPT_DIR'] = {repr(tmp_receipt_dir)}\n"
+                "from services.agribrain.irrigation_runtime.actuator import DurableStopReceiptStore\n"
+                f"res = DurableStopReceiptStore.consume(fingerprint={repr(fp)}, token={repr(tok)})\n"
+                "assert res is True\n"
+            )
+            sub = subprocess.run([sys.executable, "-c", worker_code], capture_output=True, text=True)
+            assert sub.returncode == 0, f"Worker process failed: {sub.stderr}"
+
+            # Main process actuator has EMPTY in-memory consumed cache
+            actuator._consumed_receipt_tokens.clear()
+            _GLOBAL_CONSUMED_RECEIPT_TOKENS.clear()
+            with DurableStopReceiptStore._thread_lock:
+                DurableStopReceiptStore._memory_cache.clear()
+
+            # Attempting to confirm stop with the receipt already consumed by the other process fails
+            res = actuator.confirm_stop(receipt)
+            assert res is False
+            assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+            assert actuator.active_command is not None
+        finally:
+            DurableStopReceiptStore.reset()
+            if old_receipt_env is not None:
+                os.environ["AGRIBRAIN_STOP_RECEIPT_DIR"] = old_receipt_env
+            else:
+                os.environ.pop("AGRIBRAIN_STOP_RECEIPT_DIR", None)
+            shutil.rmtree(tmp_receipt_dir, ignore_errors=True)
+
+    def test_09_writer_holding_lock_longer_than_30s_prevents_lock_theft(self):
+        """9. A writer holding the OS lock longer than 30s is never preempted by age-based theft."""
+        import time
+        from services.agribrain.irrigation_runtime.actuator import (
+            DurableStopReceiptStore,
+            _lock_stop_receipt_fd,
+            _unlock_stop_receipt_fd,
+        )
+        tmp_dir = tempfile.mkdtemp(prefix="test_lock_no_theft_")
+        old_env = os.environ.get("AGRIBRAIN_STOP_RECEIPT_DIR")
+        os.environ["AGRIBRAIN_STOP_RECEIPT_DIR"] = tmp_dir
+        try:
+            DurableStopReceiptStore.reset()
+            lock_file = DurableStopReceiptStore._lock_file()
+
+            # Holder opens and acquires lock
+            holder_fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o666)
+            try:
+                if os.fstat(holder_fd).st_size == 0:
+                    os.write(holder_fd, b"\x00")
+                    os.fsync(holder_fd)
+                _lock_stop_receipt_fd(holder_fd, timeout=2.0)
+
+                # Artificially age the lock file mtime to 60 seconds ago (simulating > 30s hold)
+                past_time = time.time() - 60.0
+                try:
+                    os.utime(str(lock_file), (past_time, past_time))
+                except OSError:
+                    pass
+
+                # A second worker attempts to acquire the lock:
+                # Must NOT steal the lock or unlink the file; must cleanly time out
+                with pytest.raises(TimeoutError, match="waiting for.*stop receipt lock"):
+                    with DurableStopReceiptStore._cross_process_lock(timeout=0.2):
+                        pass
+
+                # Verify the lock file still exists and was not deleted/corrupted by the second worker
+                assert lock_file.exists()
+
+            finally:
+                _unlock_stop_receipt_fd(holder_fd)
+                os.close(holder_fd)
+        finally:
+            DurableStopReceiptStore.reset()
+            if old_env is not None:
+                os.environ["AGRIBRAIN_STOP_RECEIPT_DIR"] = old_env
+            else:
+                os.environ.pop("AGRIBRAIN_STOP_RECEIPT_DIR", None)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_10_unavailable_shared_storage_fails_closed(self):
+        """10. Unavailable shared storage fails closed: confirm_stop returns False and preserves pending ownership."""
+        from services.agribrain.irrigation_runtime.actuator import (
+            DurableStopReceiptStore,
+            create_verified_stop_receipt,
+        )
+        dev_id = "DEV-NOSTORE-10"
+        secret = "nostore_secret_2026"
+        reg = ActuatorRegistration(
+            device_id=dev_id,
+            vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+            protocol=DriverProtocol.MODBUS_TCP,
+            capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+            connection_config={"auth_secret": secret},
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        active_cmd = IrrigationCommand(
+            command_id="CMD-NOSTORE-10",
+            command_type=CommandType.START_ZONE,
+            device_id=dev_id,
+            zone_id="ZONE-1",
+            plot_id="PLOT-01",
+            operation_id="OP-NOSTORE-10",
+        )
+        actuator._active_command = active_cmd
+        now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+        receipt = create_verified_stop_receipt(
+            device_id=dev_id,
+            operation_id="OP-NOSTORE-10",
+            attempt_number=1,
+            secret=secret,
+            source="modbus_plc",
+            actual_flow_lpm=0.0,
+            timestamp=now_ts,
+        )
+
+        with patch.object(DurableStopReceiptStore, "_cross_process_lock", side_effect=OSError("Storage path unavailable / permission denied")):
+            res = actuator.confirm_stop(receipt)
+            assert res is False
+
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+        assert actuator.active_command is not None
+        assert actuator.active_command.command_id == "CMD-NOSTORE-10"
+
+    def test_11_genuine_driver_produced_physical_telemetry_receipt_succeeds(self):
+        """11. Genuine driver produces physical telemetry receipt via hardware registers and completes verified stop."""
+        secret = "driver_telemetry_secret_2026"
+        dev_id = "DEV-MODBUS-GENUINE-11"
+        reg = ActuatorRegistration(
+            device_id=dev_id,
+            vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+            protocol=DriverProtocol.MODBUS_TCP,
+            capabilities=ActuatorCapabilities(
+                system_type=IrrigationSystemType.DRIP,
+                max_flow_rate_lpm=100.0,
+                max_duration_minutes=60.0,
+            ),
+            connection_config={
+                "host": "127.0.0.1",
+                "port": 502,
+                "coil_map": {"valve_ZONE-1": 1},
+                "auth_secret": secret,
+            },
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator._connected = True
+        actuator._client = MagicMock()
+        actuator._status = ActuatorStatus.EXECUTING
+
+        stop_cmd = IrrigationCommand(
+            command_id="CMD-MB-STOP-11",
+            command_type=CommandType.STOP_ZONE,
+            device_id=dev_id,
+            zone_id="ZONE-1",
+            plot_id="plot-1",
+            operation_id="OP-MB-GENUINE-11",
+        )
+
+        async def _run():
+            # Driver writes coil to 0 (valve close) and reads input registers (flow == 0.0, status == 0x00)
+            with patch.object(actuator, "_write_coil", new_callable=AsyncMock, return_value=True), \
+                 patch.object(actuator, "_read_input_registers", new_callable=AsyncMock, return_value=[0, 0]), \
+                 patch.object(actuator, "_read_feedback", new_callable=AsyncMock, return_value=(0.0, 0.0)), \
+                 patch.object(actuator, "_read_status", new_callable=AsyncMock, return_value={"status_word": 0x00}):
+                result = await actuator.execute_with_safety(stop_cmd)
+                assert result.success is True
+                assert result.confirmed_physical_stop is True
+                assert result.transport_acknowledged_only is False
+                assert actuator.status == ActuatorStatus.ONLINE
+                assert actuator.active_command is None
+
+        asyncio.run(_run())
+
 

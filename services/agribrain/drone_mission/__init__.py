@@ -24,18 +24,39 @@ elif "services.agribrain.drone_mission" in sys.modules and "drone_mission" not i
 
 
 class _AliasLoader(Loader):
-    def __init__(self, target_module):
+    def __init__(self, target_module, fullname=None, aliasname=None):
         self.target_module = target_module
+        self.fullname = fullname
+        self.aliasname = aliasname
 
     def create_module(self, spec):
         return self.target_module
 
     def exec_module(self, module):
-        pass
+        if self.fullname:
+            sys.modules[self.fullname] = self.target_module
+        if self.aliasname:
+            sys.modules[self.aliasname] = self.target_module
 
     def load_module(self, fullname):
         sys.modules[fullname] = self.target_module
+        if self.aliasname:
+            sys.modules[self.aliasname] = self.target_module
         return self.target_module
+
+
+def _sync_drone_submodules():
+    for _sub in ("schemas", "capability_profiles", "command_agent", "planner", "mission_selector", "anomaly_bridge", "refly_planner", "coverage_patterns", "safety_rules", "mission_history"):
+        _full = f"services.agribrain.drone_mission.{_sub}"
+        _short = f"drone_mission.{_sub}"
+        _m_full = sys.modules.get(_full)
+        _m_short = sys.modules.get(_short)
+        if _m_full and not _m_short:
+            sys.modules[_short] = _m_full
+        elif _m_short and not _m_full:
+            sys.modules[_full] = _m_short
+        elif _m_full and _m_short and _m_full is not _m_short:
+            sys.modules[_full] = _m_short
 
 
 class _DroneMissionNamespaceBridge(MetaPathFinder):
@@ -56,7 +77,8 @@ class _DroneMissionNamespaceBridge(MetaPathFinder):
                 parent = sys.modules.get("services.agribrain.drone_mission")
                 if parent is not None:
                     setattr(parent, sub.split(".")[0], mod)
-                return ModuleSpec(fullname, _AliasLoader(mod))
+                _sync_drone_submodules()
+                return ModuleSpec(fullname, _AliasLoader(mod, fullname, short_name))
             self._in_progress = True
             try:
                 mod = importlib.import_module(short_name)
@@ -64,7 +86,8 @@ class _DroneMissionNamespaceBridge(MetaPathFinder):
                 parent = sys.modules.get("services.agribrain.drone_mission")
                 if parent is not None:
                     setattr(parent, sub.split(".")[0], mod)
-                return ModuleSpec(fullname, _AliasLoader(mod))
+                _sync_drone_submodules()
+                return ModuleSpec(fullname, _AliasLoader(mod, fullname, short_name))
             except Exception:
                 return None
             finally:
@@ -80,7 +103,8 @@ class _DroneMissionNamespaceBridge(MetaPathFinder):
                 parent = sys.modules.get("drone_mission")
                 if parent is not None:
                     setattr(parent, sub.split(".")[0], mod)
-                return ModuleSpec(fullname, _AliasLoader(mod))
+                _sync_drone_submodules()
+                return ModuleSpec(fullname, _AliasLoader(mod, fullname, full_name))
             self._in_progress = True
             try:
                 mod = importlib.import_module(full_name)
@@ -88,7 +112,8 @@ class _DroneMissionNamespaceBridge(MetaPathFinder):
                 parent = sys.modules.get("drone_mission")
                 if parent is not None:
                     setattr(parent, sub.split(".")[0], mod)
-                return ModuleSpec(fullname, _AliasLoader(mod))
+                _sync_drone_submodules()
+                return ModuleSpec(fullname, _AliasLoader(mod, fullname, full_name))
             except Exception:
                 return None
             finally:
@@ -102,13 +127,7 @@ if not any(isinstance(finder, _DroneMissionNamespaceBridge) for finder in sys.me
     sys.meta_path.insert(0, _DroneMissionNamespaceBridge())
 
 # Synchronize any already loaded submodules
-for _sub in ("schemas", "capability_profiles", "command_agent", "planner", "mission_selector", "anomaly_bridge", "refly_planner", "coverage_patterns", "safety_rules", "mission_history"):
-    _full = f"services.agribrain.drone_mission.{_sub}"
-    _short = f"drone_mission.{_sub}"
-    if _full in sys.modules and _short not in sys.modules:
-        sys.modules[_short] = sys.modules[_full]
-    elif _short in sys.modules and _full not in sys.modules:
-        sys.modules[_full] = sys.modules[_short]
+_sync_drone_submodules()
 
 from .schemas import MissionType, FlightMode, MissionIntent, FlightPlan, DroneCapabilityProfile
 from .capability_profiles import get_profile
