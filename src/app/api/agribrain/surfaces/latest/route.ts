@@ -19,7 +19,8 @@ function buildDefaultAsmaeProof() {
 
 async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string) {
   let plotId = plotIdParam || request.nextUrl.searchParams.get("plotId") || undefined;
-  let snapshotId = request.nextUrl.searchParams.get("snapshotId") || undefined;
+  let snapshotId = request.nextUrl.searchParams.has("snapshotId")
+    ? (request.nextUrl.searchParams.get("snapshotId") ?? "") : undefined;
   if (request.method === "POST") {
     try {
       const body = await request.json();
