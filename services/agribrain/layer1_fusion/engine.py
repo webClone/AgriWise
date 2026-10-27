@@ -729,6 +729,11 @@ class Layer1FusionEngine:
             if result is None:
                 return None
 
+            eo_flags = [f"MODEL_{result.model_id.upper()}"]
+            is_spat_qual = getattr(result, "is_spatial_qualified", True)
+            if not is_spat_qual:
+                eo_flags.append("UNQUALIFIED_SPATIAL_IDENTITY")
+
             # Create anomaly_score evidence
             self._admit_evidence_or_quarantine(
                 EvidenceItem(
@@ -746,7 +751,7 @@ class Layer1FusionEngine:
                     reliability=min(0.75, result.confidence),
                     freshness_score=1.0,
                     provenance_ref=f"eo_foundation_{result.tile_hash}",
-                    flags=[f"MODEL_{result.model_id.upper()}"],
+                    flags=list(eo_flags),
                     diagnostic_only=True,
                     state_update_allowed=False,
                     truth_class="estimated_model",
@@ -776,7 +781,7 @@ class Layer1FusionEngine:
                     reliability=min(0.75, result.confidence),
                     freshness_score=1.0,
                     provenance_ref=f"eo_foundation_{result.tile_hash}",
-                    flags=[f"MODEL_{result.model_id.upper()}", f"DIM_{len(result.embedding)}"],
+                    flags=list(eo_flags) + [f"DIM_{len(result.embedding)}"],
                     # Embedding is informational — downstream uses anomaly_score for decisions
                     diagnostic_only=True,
                     state_update_allowed=False,
@@ -814,7 +819,16 @@ class Layer1FusionEngine:
         from .evidence_validation import validate_evidence, quarantine_evidence
         from .truth_bridge import normalize_evidence_truth
         
+        if "UNQUALIFIED_SPATIAL_IDENTITY" in getattr(item, "flags", []):
+            item.state_update_allowed = False
+            item.production_usable = False
+            item.diagnostic_only = True
+
         normalized_item = normalize_evidence_truth(item, source_context=source_context)
+        if "UNQUALIFIED_SPATIAL_IDENTITY" in getattr(normalized_item, "flags", []):
+            normalized_item.state_update_allowed = False
+            normalized_item.production_usable = False
+            normalized_item.diagnostic_only = True
         violations = validate_evidence(normalized_item)
         if violations:
             all_quarantined.append(quarantine_evidence(normalized_item, violations))

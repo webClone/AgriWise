@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
@@ -370,49 +371,32 @@ class IrrigationActuator(ABC):
                 or bool(getattr(result, "fault_code", 0))
                 or getattr(result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR")
             )
-            is_mock = (
+            is_simulation = (
                 type(self).__name__.startswith("Mock")
                 or getattr(self, "is_mock", False)
-                or getattr(getattr(self, "registration", None), "model", "") == "MockModel"
-                or getattr(getattr(self, "registration", None), "vendor", None) == VendorId.CUSTOM
+                or getattr(self, "is_simulation", False)
+                or getattr(getattr(self, "registration", None), "is_simulation", False)
+                or getattr(getattr(self, "registration", None), "model", "") in ("MockModel", "offline")
             )
-            is_real_transport = (
-                getattr(self, "protocol", None) in (
-                    DriverProtocol.MODBUS_RTU,
-                    DriverProtocol.MODBUS_TCP,
-                    DriverProtocol.HTTP_REST,
-                    DriverProtocol.MQTT,
-                    DriverProtocol.LORAWAN,
-                )
-                or getattr(getattr(self, "registration", None), "protocol", None) in (
-                    DriverProtocol.MODBUS_RTU,
-                    DriverProtocol.MODBUS_TCP,
-                    DriverProtocol.HTTP_REST,
-                    DriverProtocol.MQTT,
-                    DriverProtocol.LORAWAN,
-                )
-            )
-            if has_fault:
+            if is_simulation:
+                self._status = ActuatorStatus.ERROR if has_fault else ActuatorStatus.ONLINE
+                self._active_command = None
+                self._pending_command = None
+                result.confirmed_physical_stop = True
+            elif has_fault:
                 self._status = ActuatorStatus.ERROR
             elif getattr(result, "confirmed_physical_stop", False) is True:
                 self._status = ActuatorStatus.ONLINE
                 self._active_command = None
                 self._pending_command = None
-            elif getattr(result, "transport_acknowledged_only", False) or (is_real_transport and not is_mock):
-                # Real transport protocol or transport acknowledged only:
-                # Require affirmative physical confirmation; do NOT fabricate confirmed_physical_stop or release ownership!
+            else:
                 self._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
                 result.confirmed_physical_stop = False
                 result.transport_acknowledged_only = True
                 logger.warning(
-                    "Stop command %s on device %s is transport-acknowledged/unconfirmed; entered STOP_PENDING_CONFIRMATION.",
+                    "Stop command %s on device %s lacks affirmative physical proof; entered STOP_PENDING_CONFIRMATION.",
                     command.command_id, self.device_id
                 )
-            else:
-                self._status = ActuatorStatus.ONLINE
-                self._active_command = None
-                self._pending_command = None
-                result.confirmed_physical_stop = True
         else:
             self._status = ActuatorStatus.ERROR
 
@@ -844,47 +828,72 @@ class IrrigationActuator(ABC):
             if not rec_op or rec_op != active_op:
                 raise ValueError(f"Receipt operation_id {rec_op} does not match active operation {active_op}")
 
-        # Freshness and observation window check (within 600s, not future-dated)
+        # Freshness and observation window check (mandatory, within 600s, not future-dated > 30s)
         ts_raw = receipt.get("timestamp") or receipt.get("observed_at") or receipt.get("received_at")
-        if ts_raw:
-            try:
-                if isinstance(ts_raw, (int, float)):
-                    ts_dt = datetime.fromtimestamp(float(ts_raw), tz=timezone.utc)
-                else:
-                    ts_dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-                if ts_dt.tzinfo is None:
-                    ts_dt = ts_dt.replace(tzinfo=timezone.utc)
-                now_utc = datetime.now(timezone.utc)
-                age = (now_utc - ts_dt).total_seconds()
-                if age > 600.0:
-                    logger.warning("Receipt for device %s is stale (age=%.1fs > 600s)", self.device_id, age)
+        if not ts_raw:
+            logger.warning("Receipt for device %s rejected: missing mandatory observation timestamp", self.device_id)
+            return False
+        try:
+            if isinstance(ts_raw, (int, float)):
+                if math.isnan(ts_raw) or math.isinf(ts_raw):
+                    logger.warning("Receipt for device %s rejected: non-finite numeric timestamp", self.device_id)
                     return False
-                if age < -30.0:
-                    logger.warning("Receipt for device %s has future-dated observation time (%s)", self.device_id, ts_raw)
-                    return False
-            except Exception as ts_err:
-                logger.warning("Failed to parse observation timestamp in receipt for device %s: %s", self.device_id, ts_err)
+                ts_dt = datetime.fromtimestamp(float(ts_raw), tz=timezone.utc)
+            else:
+                ts_dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            age = (now_utc - ts_dt).total_seconds()
+            if age > 600.0:
+                logger.warning("Receipt for device %s is stale (age=%.1fs > 600s)", self.device_id, age)
                 return False
+            if age < -30.0:
+                logger.warning("Receipt for device %s has future-dated observation time (%s)", self.device_id, ts_raw)
+                return False
+        except Exception as ts_err:
+            logger.warning("Failed to parse observation timestamp in receipt for device %s: %s", self.device_id, ts_err)
+            return False
 
-        # Provenance authentication check
+        # Provenance authentication check (mandatory, non-empty, trusted)
         source = receipt.get("source") or receipt.get("driver") or receipt.get("provenance")
-        if source and str(source).lower() in ("untrusted", "spoofed", "unknown", "invalid"):
+        if not source or not str(source).strip():
+            logger.warning("Receipt for device %s rejected: missing mandatory source/provenance", self.device_id)
+            return False
+        src_clean = str(source).strip().lower()
+        if src_clean in ("untrusted", "spoofed", "unknown", "invalid", "anonymous"):
             logger.warning("Receipt for device %s from untrusted source %s", self.device_id, source)
             return False
 
-        flow = receipt.get("actual_flow_rate_lpm", receipt.get("actual_flow_lpm", receipt.get("flow_rate_lpm")))
+        # Physical flow measurement validation (finite real, reject NaN/Inf/bool/string-garbage/negative)
+        raw_flow = receipt.get("actual_flow_rate_lpm", receipt.get("actual_flow_lpm", receipt.get("flow_rate_lpm", receipt.get("flow"))))
+        parsed_flow = None
+        if raw_flow is not None:
+            checked_flow = finite_real(raw_flow)
+            if checked_flow is None and isinstance(raw_flow, str):
+                try:
+                    f_s = float(raw_flow)
+                    if math.isfinite(f_s):
+                        checked_flow = f_s
+                except Exception:
+                    checked_flow = None
+            if checked_flow is None or checked_flow < 0.0:
+                logger.warning("Receipt for device %s contains invalid/non-finite flow measurement (%s); rejecting.", self.device_id, raw_flow)
+                return False
+            parsed_flow = checked_flow
+
         status = str(receipt.get("status", "")).upper()
         is_stopped = receipt.get("is_stopped", receipt.get("stopped"))
         is_running = receipt.get("is_running", receipt.get("running"))
         confirmed_stopped = receipt.get("confirmed_stopped") or receipt.get("confirmed_physical_stop")
 
-        if is_running is True or is_stopped is False or (flow is not None and float(flow) > 0.0):
+        if is_running is True or is_stopped is False or (parsed_flow is not None and parsed_flow > 0.0) or status in ("RUNNING", "EXECUTING", "STARTING", "ACTIVE"):
             logger.warning("Receipt for device %s detects ongoing flow/running; cannot confirm stop.", self.device_id)
             return False
 
         has_physical_evidence = (
             confirmed_stopped is True
-            or (flow is not None and float(flow) == 0.0)
+            or (parsed_flow is not None and parsed_flow == 0.0)
             or (is_stopped is True)
             or (status in ("STOPPED", "IDLE", "OFF", "STANDBY") and is_running is not True)
         )

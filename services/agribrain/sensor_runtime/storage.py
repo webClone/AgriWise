@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import uuid
@@ -17,6 +18,52 @@ from typing import Any, Dict, List, Optional
 from sensor_runtime.schemas import RawSensorMessage, NormalizedSensorReading
 
 logger = logging.getLogger(__name__)
+
+
+class StorageCorruptedError(RuntimeError):
+    """Raised when durable storage or normalized log contains corrupted or invalid data."""
+    pass
+
+
+def _lock_file_exclusive(fd: int, timeout: float = 10.0) -> None:
+    start_t = time.monotonic()
+    if sys.platform == "win32":
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except (BlockingIOError, OSError, PermissionError):
+                if time.monotonic() - start_t > timeout:
+                    raise TimeoutError(f"Timed out after {timeout}s waiting for file lock")
+                time.sleep(0.01)
+    else:
+        import fcntl
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except (BlockingIOError, OSError):
+                if time.monotonic() - start_t > timeout:
+                    raise TimeoutError(f"Timed out after {timeout}s waiting for file lock")
+                time.sleep(0.01)
+
+
+def _unlock_file(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
+    else:
+        import fcntl
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
 
 # Durable storage root configuration
 def _get_storage_dir() -> Path:
@@ -68,39 +115,34 @@ def _sanitize_id(identifier: str) -> str:
     return _validate_and_encode_id(identifier)
 
 
-def _acquire_and_append(target_file: Path, lock_file: Path, data: bytes, timeout: float = 5.0) -> None:
-    start_time = time.monotonic()
-    acquired = False
-    lock_fd = None
-    while time.monotonic() - start_time < timeout:
-        try:
-            lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            acquired = True
-            break
-        except FileExistsError:
-            time.sleep(0.01)
-
-    if not acquired:
-        try:
-            if lock_file.exists() and (time.time() - lock_file.stat().st_mtime) > 10.0:
-                lock_file.unlink(missing_ok=True)
-        except Exception:
-            pass
-        lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-
+def _acquire_and_append(target_file: Path, lock_file: Path, data: bytes, timeout: float = 10.0) -> None:
+    """Append data to target_file under OS-backed advisory lock.
+    
+    Uses msvcrt.locking on Windows and fcntl.flock on POSIX.
+    The OS automatically releases the lock upon process termination or crash,
+    preventing both lock-file leakage and stale-lock theft under stalled writers.
+    """
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o666)
     try:
-        with open(target_file, "ab") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-    finally:
-        if lock_fd is not None:
+        if os.fstat(lock_fd).st_size == 0:
             try:
-                os.close(lock_fd)
+                os.write(lock_fd, b"L")
+                os.fsync(lock_fd)
             except Exception:
                 pass
+        _lock_file_exclusive(lock_fd, timeout=timeout)
         try:
-            lock_file.unlink(missing_ok=True)
+            with open(target_file, "ab") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+        finally:
+            _unlock_file(lock_fd)
+    finally:
+        try:
+            os.close(lock_fd)
         except Exception:
             pass
 
@@ -115,6 +157,12 @@ def rehydrate_storage() -> None:
         raw_dir = storage_dir / "raw"
         for raw_file in raw_dir.glob("raw_*.json"):
             try:
+                if raw_file.stat().st_size == 0:
+                    try:
+                        raw_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    continue
                 with open(raw_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 r_at = datetime.fromisoformat(data["received_at"])
@@ -136,14 +184,14 @@ def rehydrate_storage() -> None:
 
         norm_file = storage_dir / "normalized" / "normalized_readings.jsonl"
         if norm_file.exists():
-            try:
-                st = norm_file.stat()
-                _LAST_NORM_FILE_STAT = (st.st_mtime, st.st_size)
-                with open(norm_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
+            st = norm_file.stat()
+            _LAST_NORM_FILE_STAT = (st.st_mtime, st.st_size)
+            with open(norm_file, "r", encoding="utf-8") as f:
+                for line_no, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
                         r_data = json.loads(line)
                         reading = NormalizedSensorReading(
                             reading_id=r_data["reading_id"],
@@ -169,8 +217,10 @@ def rehydrate_storage() -> None:
                             rainfall_mode=r_data.get("rainfall_mode"),
                         )
                         _NORMALIZED_STORAGE.append(reading)
-            except Exception as exc:
-                logger.warning("Failed to rehydrate normalized readings from %s: %s", norm_file, exc)
+                    except Exception as parse_err:
+                        raise StorageCorruptedError(
+                            f"Corrupted record in normalized storage log {norm_file} at line {line_no}: {parse_err}"
+                        ) from parse_err
 
         _INITIALIZED = True
 
@@ -210,29 +260,49 @@ def store_raw_message(msg: RawSensorMessage) -> None:
             "provenance": stored.provenance or {},
         }
 
-        # Crash-safe atomic publication:
-        # Write to temporary file with fsync first to prevent partial records
+        # Crash-safe atomic publication with transactional advisory locking:
+        # 1. Write full content to temporary file with fsync first
         raw_dir = raw_file.parent
+        raw_lock_file = raw_dir / ".raw_publication.lock"
         tmp_file = raw_dir / f"tmp_{uuid.uuid4().hex}_{os.getpid()}.json"
+
         try:
             with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(payload_data, f, default=_serialize_datetime, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
 
-            # Exclusively create/claim raw_file (fails with FileExistsError if already exists)
+            # 2. Acquire publication lock for raw messages
             try:
-                fd = os.open(str(raw_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-                os.close(fd)
+                lock_fd = os.open(str(raw_lock_file), os.O_CREAT | os.O_RDWR, 0o666)
             except FileExistsError:
                 raise ValueError("Raw message is immutable and cannot be overwritten.")
-
-            # Atomically publish content to claimed file
             try:
-                os.replace(str(tmp_file), str(raw_file))
-            except Exception:
-                raw_file.unlink(missing_ok=True)
-                raise
+                if os.fstat(lock_fd).st_size == 0:
+                    try:
+                        os.write(lock_fd, b"L")
+                        os.fsync(lock_fd)
+                    except Exception:
+                        pass
+                _lock_file_exclusive(lock_fd, timeout=10.0)
+                try:
+                    # Under exclusive publication lock:
+                    if raw_file.exists():
+                        if raw_file.stat().st_size > 0:
+                            raise ValueError("Raw message is immutable and cannot be overwritten.")
+                        else:
+                            # 0-byte orphan from a prior hard crash, remove it
+                            raw_file.unlink(missing_ok=True)
+
+                    # Atomically publish content to final destination file
+                    os.replace(str(tmp_file), str(raw_file))
+                finally:
+                    _unlock_file(lock_fd)
+            finally:
+                try:
+                    os.close(lock_fd)
+                except Exception:
+                    pass
         finally:
             tmp_file.unlink(missing_ok=True)
 
@@ -292,45 +362,48 @@ def _rehydrate_normalized_from_disk_if_changed() -> None:
         _NORMALIZED_STORAGE.clear()
         _LAST_NORM_FILE_STAT = (0.0, 0)
         return
-    try:
-        st = norm_file.stat()
-        curr_stat = (st.st_mtime, st.st_size)
-        if curr_stat != _LAST_NORM_FILE_STAT:
+
+    st = norm_file.stat()
+    curr_stat = (st.st_mtime, st.st_size)
+    if curr_stat != _LAST_NORM_FILE_STAT:
             readings = []
             with open(norm_file, "r", encoding="utf-8") as f:
-                for line in f:
+                for line_no, line in enumerate(f, start=1):
                     line = line.strip()
                     if not line:
                         continue
-                    r_data = json.loads(line)
-                    reading = NormalizedSensorReading(
-                        reading_id=r_data["reading_id"],
-                        device_id=r_data["device_id"],
-                        plot_id=r_data["plot_id"],
-                        zone_id=r_data.get("zone_id"),
-                        timestamp=datetime.fromisoformat(r_data["timestamp"]),
-                        received_at=datetime.fromisoformat(r_data["received_at"]),
-                        variable=r_data["variable"],
-                        value=r_data["value"],
-                        unit=r_data["unit"],
-                        vendor=r_data["vendor"],
-                        protocol=r_data["protocol"],
-                        depth_cm=r_data.get("depth_cm"),
-                        depth_interval_cm=tuple(r_data["depth_interval_cm"]) if r_data.get("depth_interval_cm") else None,
-                        latitude=r_data.get("latitude"),
-                        longitude=r_data.get("longitude"),
-                        model=r_data.get("model"),
-                        raw_payload_ref=r_data.get("raw_payload_ref", ""),
-                        normalization_version=r_data.get("normalization_version", "1.0"),
-                        original_unit=r_data.get("original_unit"),
-                        original_value=r_data.get("original_value"),
-                        rainfall_mode=r_data.get("rainfall_mode"),
-                    )
-                    readings.append(reading)
+                    try:
+                        r_data = json.loads(line)
+                        reading = NormalizedSensorReading(
+                            reading_id=r_data["reading_id"],
+                            device_id=r_data["device_id"],
+                            plot_id=r_data["plot_id"],
+                            zone_id=r_data.get("zone_id"),
+                            timestamp=datetime.fromisoformat(r_data["timestamp"]),
+                            received_at=datetime.fromisoformat(r_data["received_at"]),
+                            variable=r_data["variable"],
+                            value=r_data["value"],
+                            unit=r_data["unit"],
+                            vendor=r_data["vendor"],
+                            protocol=r_data["protocol"],
+                            depth_cm=r_data.get("depth_cm"),
+                            depth_interval_cm=tuple(r_data["depth_interval_cm"]) if r_data.get("depth_interval_cm") else None,
+                            latitude=r_data.get("latitude"),
+                            longitude=r_data.get("longitude"),
+                            model=r_data.get("model"),
+                            raw_payload_ref=r_data.get("raw_payload_ref", ""),
+                            normalization_version=r_data.get("normalization_version", "1.0"),
+                            original_unit=r_data.get("original_unit"),
+                            original_value=r_data.get("original_value"),
+                            rainfall_mode=r_data.get("rainfall_mode"),
+                        )
+                        readings.append(reading)
+                    except Exception as parse_err:
+                        raise StorageCorruptedError(
+                            f"Corrupted record in normalized storage log {norm_file} at line {line_no}: {parse_err}"
+                        ) from parse_err
             _NORMALIZED_STORAGE = readings
             _LAST_NORM_FILE_STAT = curr_stat
-    except Exception as exc:
-        logger.warning("Error rehydrating normalized readings from %s: %s", norm_file, exc)
 
 
 def get_raw_message(message_id: str) -> RawSensorMessage | None:

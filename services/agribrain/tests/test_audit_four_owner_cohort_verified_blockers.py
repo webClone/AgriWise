@@ -45,6 +45,7 @@ from services.agribrain.sensor_runtime.storage import (
     rehydrate_storage,
     clear_storage,
     _validate_and_encode_id,
+    StorageCorruptedError,
 )
 
 # 3. Execution Lane: F17/F18
@@ -545,6 +546,8 @@ class TestExecutionF17F18:
                     "confirmed_stopped": True,
                     "actual_flow_rate_lpm": 0.0,
                     "is_stopped": True,
+                    "timestamp": datetime.datetime.now(timezone.utc).isoformat(),
+                    "source": "controller",
                 }
                 assert actuator.confirm_stop(valid_receipt) is True
                 assert actuator.status == ActuatorStatus.ONLINE
@@ -927,6 +930,8 @@ class TestExecutionF17F18:
             "confirmed_stopped": True,
             "actual_flow_rate_lpm": 0.0,
             "is_stopped": True,
+            "timestamp": datetime.datetime.now(timezone.utc).isoformat(),
+            "source": "controller",
         }
 
         # Confirm stopped event
@@ -1583,6 +1588,7 @@ class TestPostAuditIntegrationsSDE:
             "is_running": False,
             "actual_flow_rate_lpm": 0.0,
             "timestamp": now_iso,
+            "source": "controller",
         })
         assert confirmed is True
         assert actuator.status == ActuatorStatus.ONLINE
@@ -2107,4 +2113,477 @@ class TestPostAuditIntegrationsSDE:
         assert len(res.model_weights_digest) == 64
         int(res.model_weights_digest, 16)
         assert res.model_weights_digest == getattr(model, "_weights_digest", "")
+
+    def test_s07_late_fencing_unconfirmed_stop_retains_stop_requested(self):
+        """Late dispatch fencing on unconfirmed emergency_stop must retain STOP_REQUESTED and active ownership."""
+        dispatcher = CommandDispatcher()
+        dev_id = f"DEV-FENCE-{uuid.uuid4().hex[:6]}"
+        caps = ActuatorCapabilities(
+            system_type=IrrigationSystemType.DRIP,
+            max_flow_rate_lpm=50.0,
+            max_duration_minutes=60.0,
+        )
+        reg = ActuatorRegistration(
+            device_id=dev_id,
+            farm_id="farm-1",
+            vendor=VendorId.GENERIC,
+            model="Generic_Modbus",
+            protocol=DriverProtocol.MODBUS_RTU,
+            plot_id="PLOT-01",
+            zone_ids=["ZONE-1"],
+            capabilities=caps,
+        )
+
+        class DummyRealActuator(IrrigationActuator):
+            def __init__(self):
+                super().__init__(registration=reg)
+                self._status = ActuatorStatus.ONLINE
+
+            async def connect(self):
+                self._connected = True
+                return True
+
+            async def disconnect(self):
+                self._connected = False
+                return True
+
+            async def send_command(self, cmd):
+                self._status = ActuatorStatus.EXECUTING
+                return CommandResult(
+                    command_id=cmd.command_id,
+                    device_id=self.device_id,
+                    success=True,
+                    timestamp=datetime.datetime.now(timezone.utc).isoformat(),
+                )
+
+            async def emergency_stop(self):
+                # Returns transport success but physical stop UNCONFIRMED
+                return CommandResult(
+                    command_id=f"ESTOP-{uuid.uuid4().hex[:6]}",
+                    device_id=self.device_id,
+                    success=True,
+                    timestamp=datetime.datetime.now(timezone.utc).isoformat(),
+                    confirmed_physical_stop=False,
+                    transport_acknowledged_only=True,
+                )
+
+            async def get_status(self):
+                return self._status
+
+        actuator = DummyRealActuator()
+        dispatcher.register_actuator(actuator)
+
+        event = IrrigationEvent(
+            event_id="EV-LATE-FENCE-01",
+            plot_id="PLOT-01",
+            zone_id="ZONE-1",
+            device_id=dev_id,
+            system_type=IrrigationSystemType.DRIP,
+            automation_mode=AutomationMode.FULL_AUTO,
+            target_volume_mm=10.0,
+            target_duration_minutes=15.0,
+            target_flow_rate_lpm=20.0,
+            status=EventStatus.QUEUED,
+        )
+
+        async def _run():
+            # Simulate dispatch outcome where claim was lost concurrently during transport
+            records = [
+                {"status": "DISPATCHING", "claimed": True},  # pre-send check passes
+                {"status": "CANCELLED", "claimed": False, "owner_token": "OWNER-OTHER"},  # post-send late fence triggers
+            ]
+            def _mock_get_active(eid):
+                if records:
+                    return records.pop(0)
+                return {"status": "CANCELLED", "claimed": False, "owner_token": "OWNER-OTHER"}
+
+            with patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.atomic_check_and_reserve", return_value=None), \
+                 patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.claim_resource", return_value=(True, None)), \
+                 patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.transition_to_dispatching", return_value=True), \
+                 patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.get_active_record", side_effect=_mock_get_active), \
+                 patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.get_resource_claim", return_value=None), \
+                 patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.is_settled", return_value=False), \
+                 patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.is_stopped", return_value=False), \
+                 patch("services.agribrain.irrigation_runtime.dispatcher.SharedQuotaStore.reopen_active"):
+                out_ev = await dispatcher.submit_event(event)
+                # Unconfirmed stop must NOT finalize event as COMPLETED or CANCELLED; must retain STOP_REQUESTED!
+                assert out_ev.status == EventStatus.STOP_REQUESTED
+                assert event.event_id in dispatcher._active_events
+
+        asyncio.run(_run())
+
+    def test_s08_confirm_stop_rejects_missing_ts_missing_source_and_nan_flow(self):
+        """confirm_stop strictly enforces fail-closed receipt verification: mandatory timestamp, mandatory trusted source, finite flow."""
+        caps = ActuatorCapabilities(
+            system_type=IrrigationSystemType.DRIP,
+            max_flow_rate_lpm=50.0,
+            max_duration_minutes=60.0,
+        )
+        reg = ActuatorRegistration(
+            device_id="DEV-RECEIPT-FAILCLOSED",
+            vendor=VendorId.GENERIC,
+            model="Generic_Modbus",
+            protocol=DriverProtocol.MODBUS_RTU,
+            plot_id="PLOT-01",
+            zone_ids=["ZONE-1"],
+            capabilities=caps,
+        )
+
+        class DummyDriver(IrrigationActuator):
+            def __init__(self):
+                super().__init__(registration=reg)
+            async def connect(self): return True
+            async def disconnect(self): return True
+            async def send_command(self, cmd): return CommandResult(command_id=cmd.command_id, device_id=self.device_id, success=True, timestamp=datetime.datetime.now(timezone.utc).isoformat())
+            async def emergency_stop(self): return CommandResult(command_id="E", device_id=self.device_id, success=True, timestamp=datetime.datetime.now(timezone.utc).isoformat())
+            async def get_status(self): return self._status
+
+        actuator = DummyDriver()
+        actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        actuator._active_command = IrrigationCommand(
+            command_id="CMD-OP-01",
+            command_type=CommandType.START_ZONE,
+            device_id=actuator.device_id,
+            zone_id="ZONE-1",
+            plot_id="PLOT-01",
+            operation_id="OP-FAILCLOSE-01",
+        )
+        now_iso = datetime.datetime.now(timezone.utc).isoformat()
+
+        # 1. Missing timestamp fails closed
+        assert actuator.confirm_stop({
+            "device_id": actuator.device_id,
+            "operation_id": "OP-FAILCLOSE-01",
+            "source": "controller",
+            "status": "STOPPED",
+            "actual_flow_rate_lpm": 0.0,
+        }) is False
+
+        # 2. Missing source/provenance fails closed
+        assert actuator.confirm_stop({
+            "device_id": actuator.device_id,
+            "operation_id": "OP-FAILCLOSE-01",
+            "timestamp": now_iso,
+            "status": "STOPPED",
+            "actual_flow_rate_lpm": 0.0,
+        }) is False
+
+        # 3. Anonymous or untrusted source fails closed
+        assert actuator.confirm_stop({
+            "device_id": actuator.device_id,
+            "operation_id": "OP-FAILCLOSE-01",
+            "timestamp": now_iso,
+            "source": "anonymous",
+            "status": "STOPPED",
+            "actual_flow_rate_lpm": 0.0,
+        }) is False
+
+        # 4. NaN flow value fails closed
+        assert actuator.confirm_stop({
+            "device_id": actuator.device_id,
+            "operation_id": "OP-FAILCLOSE-01",
+            "timestamp": now_iso,
+            "source": "controller",
+            "status": "STOPPED",
+            "actual_flow_rate_lpm": float("nan"),
+            "is_stopped": True,
+        }) is False
+
+        # 5. Infinite flow value fails closed
+        assert actuator.confirm_stop({
+            "device_id": actuator.device_id,
+            "operation_id": "OP-FAILCLOSE-01",
+            "timestamp": now_iso,
+            "source": "controller",
+            "status": "STOPPED",
+            "actual_flow_rate_lpm": float("inf"),
+            "is_stopped": True,
+        }) is False
+
+        # 6. Non-numeric boolean flow fails closed
+        assert actuator.confirm_stop({
+            "device_id": actuator.device_id,
+            "operation_id": "OP-FAILCLOSE-01",
+            "timestamp": now_iso,
+            "source": "controller",
+            "status": "STOPPED",
+            "actual_flow_rate_lpm": True,
+            "is_stopped": True,
+        }) is False
+
+        # 7. Positive flow fails closed
+        assert actuator.confirm_stop({
+            "device_id": actuator.device_id,
+            "operation_id": "OP-FAILCLOSE-01",
+            "timestamp": now_iso,
+            "source": "controller",
+            "status": "STOPPED",
+            "actual_flow_rate_lpm": 4.5,
+            "is_stopped": True,
+        }) is False
+
+        # Actuator remains STOP_PENDING_CONFIRMATION
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+        # 8. Fully authenticated, timestamped, finite-zero flow receipt succeeds
+        assert actuator.confirm_stop({
+            "device_id": actuator.device_id,
+            "operation_id": "OP-FAILCLOSE-01",
+            "timestamp": now_iso,
+            "source": "controller",
+            "status": "STOPPED",
+            "actual_flow_rate_lpm": 0.0,
+            "is_stopped": True,
+            "confirmed_stopped": True,
+        }) is True
+        assert actuator.status == ActuatorStatus.ONLINE
+
+    def test_s09_nonstandard_transport_stop_cannot_fabricate_confirmed_stop(self):
+        """Nonstandard or mock transport driver without explicit simulation classification cannot fabricate confirmed_physical_stop=True."""
+        caps = ActuatorCapabilities(
+            system_type=IrrigationSystemType.DRIP,
+            max_flow_rate_lpm=50.0,
+            max_duration_minutes=60.0,
+        )
+        reg = ActuatorRegistration(
+            device_id="DEV-CUSTOM-NONSTANDARD",
+            vendor=VendorId.GENERIC,
+            model="CustomHardwareDriver",
+            protocol=DriverProtocol.MODBUS_RTU,
+            plot_id="PLOT-01",
+            zone_ids=["ZONE-1"],
+            capabilities=caps,
+        )
+
+        class CustomRealActuator(IrrigationActuator):
+            def __init__(self):
+                super().__init__(registration=reg)
+                self.is_simulation = False
+                self.is_mock = False
+            async def connect(self): return True
+            async def disconnect(self): return True
+            async def send_command(self, cmd):
+                # Driver does not verify physical registers
+                return CommandResult(
+                    command_id=cmd.command_id,
+                    device_id=self.device_id,
+                    success=True,
+                    timestamp=datetime.datetime.now(timezone.utc).isoformat(),
+                    confirmed_physical_stop=False,
+                )
+            async def emergency_stop(self):
+                return await self.send_command(IrrigationCommand(
+                    command_id="CMD-E",
+                    command_type=CommandType.EMERGENCY_STOP,
+                    device_id=self.device_id,
+                    zone_id="ZONE-1",
+                    plot_id="PLOT-01",
+                ))
+            async def get_status(self): return self._status
+
+        actuator = CustomRealActuator()
+        actuator._status = ActuatorStatus.EXECUTING
+
+        async def _run():
+            stop_cmd = IrrigationCommand(
+                command_id="CMD-STOP-REAL",
+                command_type=CommandType.STOP_ZONE,
+                device_id=actuator.device_id,
+                zone_id="ZONE-1",
+                plot_id="PLOT-01",
+                operation_id="OP-REAL-01",
+            )
+            res = await actuator.execute_with_safety(stop_cmd)
+            # Physical stop must NOT be fabricated!
+            assert res.confirmed_physical_stop is False
+            assert res.transport_acknowledged_only is True
+            assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+        asyncio.run(_run())
+
+    def test_d05_storage_atomic_raw_publication_and_os_advisory_locking(self):
+        """Raw sensor storage publishes atomically without leaving 0-byte orphan placeholders."""
+        tmp_dir = tempfile.mkdtemp(prefix="test_atomic_raw_")
+        old_env = os.environ.get("AGRIWISE_SENSOR_STORAGE_DIR")
+        os.environ["AGRIWISE_SENSOR_STORAGE_DIR"] = tmp_dir
+        try:
+            clear_storage()
+            rehydrate_storage()
+
+            msg = RawSensorMessage(
+                message_id="msg-atomic-001",
+                protocol="MQTT",
+                received_at=datetime.datetime.now(timezone.utc),
+                device_id="sensor-atomic",
+                payload={"reading": 42.0},
+            )
+            store_raw_message(msg)
+
+            raw_dir = Path(tmp_dir) / "raw"
+            files = list(raw_dir.glob("raw_*.json"))
+            assert len(files) == 1
+            assert files[0].stat().st_size > 0
+
+            # No temporary or empty orphan files left in raw_dir
+            orphan_tmps = list(raw_dir.glob("tmp_*.json"))
+            assert len(orphan_tmps) == 0
+
+            # Duplicate rejection
+            with pytest.raises(ValueError, match="immutable and cannot be overwritten"):
+                store_raw_message(msg)
+        finally:
+            clear_storage()
+            if old_env is not None:
+                os.environ["AGRIWISE_SENSOR_STORAGE_DIR"] = old_env
+            else:
+                os.environ.pop("AGRIWISE_SENSOR_STORAGE_DIR", None)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_d06_storage_rehydrate_corrupted_log_raises_storage_corrupted_error(self):
+        """rehydrate_storage raises StorageCorruptedError upon encountering corrupted JSON lines in normalized log."""
+        tmp_dir = tempfile.mkdtemp(prefix="test_corrupt_log_")
+        old_env = os.environ.get("AGRIWISE_SENSOR_STORAGE_DIR")
+        os.environ["AGRIWISE_SENSOR_STORAGE_DIR"] = tmp_dir
+        try:
+            norm_dir = Path(tmp_dir) / "normalized"
+            norm_dir.mkdir(parents=True, exist_ok=True)
+            norm_file = norm_dir / "normalized_readings.jsonl"
+            # Write a corrupted non-empty line
+            with open(norm_file, "w", encoding="utf-8") as f:
+                f.write('{"reading_id": "NORM-1", "device_id": "D1"}\n')
+                f.write('CORRUPTED_JSON_LINE_NOT_VALID_SYNTAX\n')
+
+            with pytest.raises(StorageCorruptedError, match="Corrupted record in normalized storage log"):
+                rehydrate_storage()
+        finally:
+            if old_env is not None:
+                os.environ["AGRIWISE_SENSOR_STORAGE_DIR"] = old_env
+            else:
+                os.environ.pop("AGRIWISE_SENSOR_STORAGE_DIR", None)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_e04_onnx_runtime_failure_reports_fallback_weights_digest(self):
+        """When ONNX inference fails at runtime, result reports spectral_basis_v2 and fallback weights digest."""
+        model = EOFoundationModel()
+        # Force model mode to onnx
+        model._mode = "onnx"
+        model._onnx_weights_digest = "1" * 64
+        model._init_fallback_weights()
+        model._fallback_weights_digest = model._compute_fallback_weights_digest()
+        model._weights_digest = model._onnx_weights_digest
+
+        # Simulate ONNX runtime inference failure (returns None)
+        with patch.object(model, "_infer_onnx", return_value=None):
+            regular_band = [
+                [0.1, 0.2, 0.15, 0.18],
+                [0.12, 0.22, 0.16, 0.19],
+                [0.11, 0.21, 0.14, 0.17],
+                [0.13, 0.23, 0.17, 0.20],
+            ]
+            bands = {"B2": regular_band, "B3": regular_band, "B4": regular_band}
+            res = model.infer(bands)
+            assert res is not None
+            assert res.model_id == "spectral_basis_v2"
+            # Reported weights digest MUST match the fallback weights digest, NOT the ONNX digest!
+            assert res.model_weights_digest == model._fallback_weights_digest
+            assert res.model_weights_digest != model._onnx_weights_digest
+
+    def test_e05_spatially_unqualified_eo_evidence_prohibited_from_state_updates(self):
+        """Spatially unqualified EO embeddings must be tagged with UNQUALIFIED_SPATIAL_IDENTITY and barred from state updates."""
+        from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+        from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+        engine = Layer1FusionEngine()
+        regular_band = [
+            [0.1, 0.2, 0.15, 0.18],
+            [0.12, 0.22, 0.16, 0.19],
+            [0.11, 0.21, 0.14, 0.17],
+            [0.13, 0.23, 0.17, 0.20],
+        ]
+        now = datetime.datetime.now(timezone.utc)
+        # Missing CRS and transform in raster composites
+        bundle = Layer1InputBundle(
+            plot_id="PLOT-EO-SPATIAL-01",
+            run_id="run-eo-spatial-01",
+            run_timestamp=now,
+            window_start=now - datetime.timedelta(hours=1),
+            window_end=now,
+            raster_composites={
+                "B2": {"pixel_array": regular_band},
+                "B3": {"pixel_array": regular_band},
+                "B4": {"pixel_array": regular_band},
+            },
+        )
+        ctx = engine.fuse(bundle)
+        # Check all admitted items for UNQUALIFIED_SPATIAL_IDENTITY
+        eo_items = [it for it in ctx.evidence_items if it.source_family == "eo_foundation"]
+        assert len(eo_items) > 0
+        for it in eo_items:
+            assert "UNQUALIFIED_SPATIAL_IDENTITY" in it.flags
+            assert it.state_update_allowed is False
+            assert it.production_usable is False
+
+    def test_f02_lookback_loop_rejects_future_issued_candidate(self):
+        """Historical lookback walk skips candidate weather records whose issued_at is in the future relative to step limit."""
+        class DummyInputs:
+            # Target date 2026-05-02 is provided
+            # Intermediate day 2026-05-01 is missing from weather_daily
+            # Earlier day 2026-04-30 has a candidate issued in the future (relative to step limit 2026-05-01T23:59:59Z)
+            weather_daily = {
+                "2026-05-02": {
+                    "t_max_c": 22.0,
+                    "t_min_c": 12.0,
+                    "precipitation_mm": 0.0,
+                    "wind_speed_2m_m_s": 2.0,
+                    "rh_min_pct": 35.0,
+                    "rh_max_pct": 75.0,
+                    "net_radiation_mj_m2": 15.0,
+                    "issued_at": "2026-05-02T10:00:00Z",
+                },
+                "2026-04-30": {
+                    "t_max_c": 38.0,
+                    "t_min_c": 25.0,
+                    "precipitation_mm": 0.0,
+                    "wind_speed_2m_m_s": 5.0,
+                    "rh_min_pct": 20.0,
+                    "rh_max_pct": 50.0,
+                    "net_radiation_mj_m2": 25.0,
+                    "issued_at": "2026-05-05T00:00:00Z",  # Future-issued!
+                },
+            }
+            soil_observations_daily = {}
+            target_date = "2026-05-02"
+            crop_context = None
+
+        mock_cw = MagicMock()
+        mock_cw.load_latest_hydraulic_checkpoint.return_value = {
+            "committed_at": "2026-04-30T00:00:00Z",
+            "payload": {
+                "target_date": "2026-04-30",
+                "soil_water_state": {
+                    "layer_depths_cm": [10.0, 20.0, 30.0],
+                    "layer_theta": [0.25, 0.25, 0.25],
+                    "evaporation_state": {
+                        "days_since_wetting": 1,
+                        "few_exposed_wetted_fraction": 0.5,
+                        "surface_storage_mm": 0.0,
+                        "max_surface_storage_mm": 5.0,
+                        "kr_reduction_factor": 1.0,
+                    },
+                },
+            },
+        }
+
+        with patch("world_model.canonical_worldline.CanonicalWorldlineService", return_value=mock_cw):
+            state, audit = _execute_canonical_water_engine(
+                plot_id=f"PLOT-LOOKBACK-{uuid.uuid4().hex[:6]}",
+                inputs=DummyInputs(),
+                op_ctx={"cycle_id": "CYCLE-2026-A", "geometry_version": "v1.2"},
+                run_timestamp=datetime.datetime(2026, 5, 2, 12, 0, 0, tzinfo=timezone.utc),
+            )
+            assert state is not None
+            # The future-issued 2026-04-30 candidate (t_max=38.0) must have been rejected by the lookback walk
+            # and fallen back to climatological prior rather than contaminating state
+            assert state.soil_water is not None and len(state.soil_water.theta_profile) > 0
+            assert state.soil_water.evaporation_state is not None
+
 

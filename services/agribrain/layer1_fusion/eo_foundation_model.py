@@ -115,6 +115,8 @@ class EOFoundationModel:
         self._session = None  # Lazy-loaded ONNX session
         self._mode: Optional[str] = None  # "onnx" | "fallback" | "disabled"
         self._fallback_weights: Optional[List[List[float]]] = None
+        self._onnx_weights_digest: str = ""
+        self._fallback_weights_digest: str = ""
         self._weights_digest: str = ""
         self._model_version = "1.0.0"
         self._preprocessing_version = "2.0.0"
@@ -130,11 +132,25 @@ class EOFoundationModel:
     def embedding_dim(self) -> int:
         return self._embedding_dim
 
+    def _compute_fallback_weights_digest(self) -> str:
+        if self._fallback_weights:
+            try:
+                import json
+                fb_bytes = json.dumps(self._fallback_weights, sort_keys=True).encode("utf-8")
+                return hashlib.sha256(fb_bytes).hexdigest()
+            except Exception:
+                return "fallback_spectral_basis_v2_digest"
+        return ""
+
     def _resolve_mode(self) -> None:
         """Determine execution mode based on available resources."""
         if not self._enabled:
             self._mode = "disabled"
             return
+
+        # Precompute fallback weights so fallback digest is always available
+        self._init_fallback_weights()
+        self._fallback_weights_digest = self._compute_fallback_weights_digest()
 
         # Try ONNX Runtime
         if os.path.isfile(self._model_path):
@@ -147,23 +163,17 @@ class EOFoundationModel:
                 self._mode = "onnx"
                 try:
                     with open(self._model_path, "rb") as mf:
-                        self._weights_digest = hashlib.sha256(mf.read()).hexdigest()
+                        self._onnx_weights_digest = hashlib.sha256(mf.read()).hexdigest()
                 except Exception:
-                    self._weights_digest = hashlib.sha256(self._model_path.encode("utf-8")).hexdigest()
+                    self._onnx_weights_digest = hashlib.sha256(self._model_path.encode("utf-8")).hexdigest()
+                self._weights_digest = self._onnx_weights_digest
                 return
             except Exception:
                 pass  # Fall through to fallback
 
         # Fallback: pure-Python spectral encoder
         self._mode = "fallback"
-        self._init_fallback_weights()
-        if self._fallback_weights:
-            try:
-                import json
-                fb_bytes = json.dumps(self._fallback_weights, sort_keys=True).encode("utf-8")
-                self._weights_digest = hashlib.sha256(fb_bytes).hexdigest()
-            except Exception:
-                self._weights_digest = "fallback_spectral_basis_v2_digest"
+        self._weights_digest = self._fallback_weights_digest
 
     def _init_fallback_weights(self) -> None:
         """Initialize physically-informed spectral basis projection (F21).
@@ -324,16 +334,20 @@ class EOFoundationModel:
 
         # Route to appropriate backend while tracking actual execution provenance
         actual_backend = "spectral_basis_v2"
+        actual_weights_digest = getattr(self, "_fallback_weights_digest", getattr(self, "_weights_digest", ""))
         if self._mode == "onnx":
             embedding = self._infer_onnx(normalized, available_bands)
             if embedding is not None:
                 actual_backend = "onnx_foundation"
+                actual_weights_digest = getattr(self, "_onnx_weights_digest", getattr(self, "_weights_digest", ""))
             else:
                 embedding = self._infer_fallback(normalized, available_bands)
                 actual_backend = "spectral_basis_v2"
+                actual_weights_digest = getattr(self, "_fallback_weights_digest", getattr(self, "_weights_digest", ""))
         else:
             embedding = self._infer_fallback(normalized, available_bands)
             actual_backend = "spectral_basis_v2"
+            actual_weights_digest = getattr(self, "_fallback_weights_digest", getattr(self, "_weights_digest", ""))
 
         if embedding is None:
             return None
@@ -365,7 +379,7 @@ class EOFoundationModel:
             model_version=self._model_version,
             preprocessing_version=self._preprocessing_version,
             is_spatial_qualified=is_spatial_qualified,
-            model_weights_digest=getattr(self, "_weights_digest", ""),
+            model_weights_digest=actual_weights_digest,
         )
 
     # ════════════════════════════════════════════════════════════════════

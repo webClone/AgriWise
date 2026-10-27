@@ -2065,16 +2065,40 @@ def _execute_canonical_water_engine(
             d_prior_walk = d_val - datetime.timedelta(days=1)
             while (d_val - d_prior_walk).days <= 365:
                 dp_str = d_prior_walk.strftime("%Y-%m-%d")
+                walk_limit_ts = min(ts, datetime.datetime.combine(d_prior_walk, datetime.time(23, 59, 59, tzinfo=timezone.utc)))
+
+                def _is_walk_candidate_eligible(w_c: Any) -> bool:
+                    if not w_c or not isinstance(w_c, dict):
+                        return False
+                    cand_iss = w_c.get("issued_at") or w_c.get("timestamp")
+                    if cand_iss:
+                        try:
+                            cand_iss_dt = datetime.datetime.fromisoformat(str(cand_iss))
+                            if cand_iss_dt.tzinfo is None:
+                                cand_iss_dt = cand_iss_dt.replace(tzinfo=timezone.utc)
+                            return cand_iss_dt <= walk_limit_ts
+                        except Exception:
+                            return False
+                    if w_c.get("is_prior") or w_c.get("source_role") in ("historical_actual", "reanalyzed", "prior"):
+                        return True
+                    cand_date = w_c.get("date")
+                    if cand_date:
+                        try:
+                            return datetime.date.fromisoformat(str(cand_date)[:10]) <= walk_limit_ts.date()
+                        except Exception:
+                            return False
+                    return False
+
                 if isinstance(weather_daily, dict) and dp_str in weather_daily:
                     p_w = _parse_weather(weather_daily[dp_str])
-                    if p_w:
+                    if p_w and _is_walk_candidate_eligible(weather_daily[dp_str]):
                         prior_obs = p_w
                         break
                 if timeseries:
                     for t_entry in timeseries:
                         if isinstance(t_entry, dict):
                             t_d = t_entry.get("date") or str(t_entry.get("timestamp", ""))[:10]
-                            if t_d == dp_str:
+                            if t_d == dp_str and _is_walk_candidate_eligible(t_entry):
                                 p_w = _parse_weather(t_entry)
                                 if p_w:
                                     prior_obs = p_w
@@ -2082,11 +2106,15 @@ def _execute_canonical_water_engine(
                     if prior_obs:
                         break
                 if dp_str in plot_hist and isinstance(plot_hist[dp_str], dict) and "weather" in plot_hist[dp_str]:
-                    prior_obs = plot_hist[dp_str]["weather"]
-                    break
+                    cand_hist = plot_hist[dp_str]["weather"]
+                    if cand_hist and isinstance(cand_hist, dict) and _is_walk_candidate_eligible(cand_hist):
+                        prior_obs = cand_hist
+                        break
                 if dp_str in retained_weather_map:
-                    prior_obs = retained_weather_map[dp_str]
-                    break
+                    cand_ret = retained_weather_map[dp_str]
+                    if cand_ret and isinstance(cand_ret, dict) and _is_walk_candidate_eligible(cand_ret):
+                        prior_obs = cand_ret
+                        break
                 d_prior_walk -= datetime.timedelta(days=1)
 
             if prior_obs and isinstance(prior_obs, dict):
