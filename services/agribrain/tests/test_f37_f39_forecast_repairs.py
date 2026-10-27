@@ -6,6 +6,8 @@ import datetime
 from datetime import timezone
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import uuid
 import pytest
@@ -15,7 +17,7 @@ from services.agribrain.scientific_contracts.authority import AuthorityScope
 
 
 # ============================================================================
-# F37: Clean Imports and Capability Execution
+# F37: Clean Imports, Package Identity & Capability Execution
 # ============================================================================
 
 def test_f37_zonal_segmentation_clustering():
@@ -34,6 +36,69 @@ def test_f37_entrypoint_imports():
     assert l1_engine is not None
     assert dc_disp is not None
     assert dm is not None
+
+
+def test_f37_unified_namespace_drone_mission_import_orders():
+    """Verify both import orders for drone_mission.schemas.MissionType produce identical class identity."""
+    code_order_1 = "import sys; sys.path.insert(0, 'services/agribrain'); import drone_mission.schemas as s1; import services.agribrain.drone_mission.schemas as s2; assert s1.MissionType is s2.MissionType"
+    res1 = subprocess.run([sys.executable, "-c", code_order_1], capture_output=True, text=True)
+    assert res1.returncode == 0, f"Order 1 failed: {res1.stderr}"
+
+    code_order_2 = "import sys; sys.path.insert(0, 'services/agribrain'); import services.agribrain.drone_mission.schemas as s2; import drone_mission.schemas as s1; assert s1.MissionType is s2.MissionType"
+    res2 = subprocess.run([sys.executable, "-c", code_order_2], capture_output=True, text=True)
+    assert res2.returncode == 0, f"Order 2 failed: {res2.stderr}"
+
+
+def test_f37_unified_namespace_sensor_runtime_import_orders():
+    """Verify both import orders for sensor_runtime.registry.SensorDeviceRegistration produce identical class identity."""
+    code_order_1 = "import sys; sys.path.insert(0, 'services/agribrain'); import sensor_runtime.registry as s1; import services.agribrain.sensor_runtime.registry as s2; assert s1.SensorDeviceRegistration is s2.SensorDeviceRegistration"
+    res1 = subprocess.run([sys.executable, "-c", code_order_1], capture_output=True, text=True)
+    assert res1.returncode == 0, f"Order 1 failed: {res1.stderr}"
+
+    code_order_2 = "import sys; sys.path.insert(0, 'services/agribrain'); import services.agribrain.sensor_runtime.registry as s2; import sensor_runtime.registry as s1; assert s1.SensorDeviceRegistration is s2.SensorDeviceRegistration"
+    res2 = subprocess.run([sys.executable, "-c", code_order_2], capture_output=True, text=True)
+    assert res2.returncode == 0, f"Order 2 failed: {res2.stderr}"
+
+
+def test_f37_unified_namespace_irrigation_runtime_import_orders():
+    """Verify both import orders for irrigation_runtime.schemas.ActuatorRegistration produce identical class identity."""
+    code_order_1 = "import sys; sys.path.insert(0, 'services/agribrain'); import irrigation_runtime.schemas as s1; import services.agribrain.irrigation_runtime.schemas as s2; assert s1.ActuatorRegistration is s2.ActuatorRegistration"
+    res1 = subprocess.run([sys.executable, "-c", code_order_1], capture_output=True, text=True)
+    assert res1.returncode == 0, f"Order 1 failed: {res1.stderr}"
+
+    code_order_2 = "import sys; sys.path.insert(0, 'services/agribrain'); import services.agribrain.irrigation_runtime.schemas as s2; import irrigation_runtime.schemas as s1; assert s1.ActuatorRegistration is s2.ActuatorRegistration"
+    res2 = subprocess.run([sys.executable, "-c", code_order_2], capture_output=True, text=True)
+    assert res2.returncode == 0, f"Order 2 failed: {res2.stderr}"
+
+
+def test_f37_cold_start_entrypoints_imports():
+    """Validate cold-start imports for API, worker, and CLI entrypoints."""
+    code = (
+        "from services.agribrain.app.main import app; "
+        "from services.agribrain.layer0.data_gateway.refresh_worker import DataRefreshWorker; "
+        "from services.agribrain.orchestrator_v2.run_entrypoint import main; "
+        "assert app is not None; "
+        "assert DataRefreshWorker is not None; "
+        "assert callable(main)"
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert res.returncode == 0, f"Cold-start imports failed: {res.stderr}"
+
+
+def test_f37_optional_backend_isolation_eo_fallback():
+    """Validate optional-backend isolation for EOFoundationModel ONNX fallback mode."""
+    from services.agribrain.layer1_fusion.eo_foundation_model import EOFoundationModel
+    model = EOFoundationModel()
+    bands = {
+        "B2": [[0.1, 0.2], [0.3, 0.4]],
+        "B3": [[0.1, 0.2], [0.3, 0.4]],
+        "B4": [[0.1, 0.2], [0.3, 0.4]],
+        "B8": [[0.4, 0.5], [0.6, 0.7]],
+    }
+    result = model.infer(bands)
+    assert result is not None
+    assert result.model_id in ("spectral_basis_v2", "onnx_foundation")
+    assert result.confidence > 0.0
 
 
 # ============================================================================

@@ -6,13 +6,36 @@ Enforces single canonical package identity across all submodules in every import
 
 import sys
 import importlib
-from importlib.abc import MetaPathFinder
+from importlib.abc import Loader, MetaPathFinder
+from importlib.machinery import ModuleSpec
+
+try:
+    import services.agribrain
+except Exception:
+    pass
 
 # Ensure root package cross-aliasing
 if "sensor_runtime" in sys.modules and "services.agribrain.sensor_runtime" not in sys.modules:
     sys.modules["services.agribrain.sensor_runtime"] = sys.modules["sensor_runtime"]
+    if "services.agribrain" in sys.modules:
+        setattr(sys.modules["services.agribrain"], "sensor_runtime", sys.modules["sensor_runtime"])
 elif "services.agribrain.sensor_runtime" in sys.modules and "sensor_runtime" not in sys.modules:
     sys.modules["sensor_runtime"] = sys.modules["services.agribrain.sensor_runtime"]
+
+
+class _AliasLoader(Loader):
+    def __init__(self, target_module):
+        self.target_module = target_module
+
+    def create_module(self, spec):
+        return self.target_module
+
+    def exec_module(self, module):
+        pass
+
+    def load_module(self, fullname):
+        sys.modules[fullname] = self.target_module
+        return self.target_module
 
 
 class _SensorRuntimeNamespaceBridge(MetaPathFinder):
@@ -27,6 +50,13 @@ class _SensorRuntimeNamespaceBridge(MetaPathFinder):
         if fullname.startswith("services.agribrain.sensor_runtime."):
             sub = fullname[len("services.agribrain.sensor_runtime."):]
             short_name = f"sensor_runtime.{sub}"
+            if short_name in sys.modules:
+                mod = sys.modules[short_name]
+                sys.modules[fullname] = mod
+                parent = sys.modules.get("services.agribrain.sensor_runtime")
+                if parent is not None:
+                    setattr(parent, sub.split(".")[0], mod)
+                return ModuleSpec(fullname, _AliasLoader(mod))
             self._in_progress = True
             try:
                 mod = importlib.import_module(short_name)
@@ -34,11 +64,13 @@ class _SensorRuntimeNamespaceBridge(MetaPathFinder):
                 parent = sys.modules.get("services.agribrain.sensor_runtime")
                 if parent is not None:
                     setattr(parent, sub.split(".")[0], mod)
-                return getattr(mod, "__spec__", None)
+                return ModuleSpec(fullname, _AliasLoader(mod))
+            except Exception:
+                return None
             finally:
                 self._in_progress = False
 
-        # Route sensor_runtime.* to services.agribrain.sensor_runtime.* if already loaded there
+        # Route sensor_runtime.* to services.agribrain.sensor_runtime.*
         elif fullname.startswith("sensor_runtime."):
             sub = fullname[len("sensor_runtime."):]
             full_name = f"services.agribrain.sensor_runtime.{sub}"
@@ -48,7 +80,19 @@ class _SensorRuntimeNamespaceBridge(MetaPathFinder):
                 parent = sys.modules.get("sensor_runtime")
                 if parent is not None:
                     setattr(parent, sub.split(".")[0], mod)
-                return getattr(mod, "__spec__", None)
+                return ModuleSpec(fullname, _AliasLoader(mod))
+            self._in_progress = True
+            try:
+                mod = importlib.import_module(full_name)
+                sys.modules[fullname] = mod
+                parent = sys.modules.get("sensor_runtime")
+                if parent is not None:
+                    setattr(parent, sub.split(".")[0], mod)
+                return ModuleSpec(fullname, _AliasLoader(mod))
+            except Exception:
+                return None
+            finally:
+                self._in_progress = False
 
         return None
 

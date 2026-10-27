@@ -16,12 +16,17 @@ import asyncio
 import copy
 import datetime
 from datetime import timezone
+import hashlib
+import hmac
 import json
 import math
 import os
 import shutil
 import tempfile
 import uuid
+
+# Secure provisioned test key for STOP receipt authentication verification
+os.environ.setdefault("AGRIBRAIN_STOP_AUTH_KEY", "agribrain_cohort_test_auth_provisioned_key_2026")
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
 
@@ -3148,5 +3153,375 @@ class TestPostAuditIntegrationsSDE:
             else:
                 os.environ.pop("AGRIWISE_SENSOR_STORAGE_DIR", None)
             shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+# ============================================================================
+# 8. Physical STOP Confirmation & Authentication Security Closure
+# ============================================================================
+
+class TestStopReceiptSecurityClosure:
+    """Security exit criteria for Physical STOP Confirmation & Authentication:
+    1. Receipt signed using public/predictable key is strictly rejected.
+    2. Tampering with flow (0.0 -> 5.0), running/stopped status, source, or operation invalidates signature.
+    3. Missing signing key fails closed on real hardware (is_simulation=False).
+    4. Receipt replayed in another process or after restart is rejected (durable store).
+    5. Genuine driver-produced, fully bound receipt succeeds exactly once.
+    6. Pending physical operation retains ownership and quota exposure on verification failure.
+    """
+
+    def test_01_stop_receipt_signed_with_predictable_key_rejected(self):
+        """1. Receipt signed using public/predictable key is strictly rejected."""
+        from services.agribrain.irrigation_runtime.actuator import (
+            generate_stop_receipt_token,
+            build_canonical_stop_assertion,
+        )
+        dev_id = "DEV-SEC-STOP-01"
+        reg = ActuatorRegistration(
+            device_id=dev_id,
+            vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+            protocol=DriverProtocol.MODBUS_TCP,
+            capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        actuator._active_command = IrrigationCommand(
+            command_id="CMD-SEC-01",
+            command_type=CommandType.START_ZONE,
+            device_id=dev_id,
+            zone_id="ZONE-1",
+            plot_id="PLOT-01",
+            operation_id="OP-SEC-01",
+        )
+        now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+        # 1a. Generator strictly refuses to sign with predictable key derived from device_id
+        with pytest.raises(ValueError, match="Predictable or insecure signing key rejected"):
+            generate_stop_receipt_token(
+                device_id=dev_id,
+                operation_id="OP-SEC-01",
+                secret=f"agribrain_stop_auth_{dev_id}",
+            )
+
+        # 1b. Generator refuses blacklisted keys
+        with pytest.raises(ValueError, match="Predictable or insecure signing key rejected"):
+            generate_stop_receipt_token(
+                device_id=dev_id,
+                operation_id="OP-SEC-01",
+                secret="secret",
+            )
+
+        # 1c. Forged receipt signed using predictable default key is rejected by confirm_stop
+        bad_key = f"agribrain_stop_auth_{dev_id}".encode("utf-8")
+        bad_assertion = build_canonical_stop_assertion(
+            device_id=dev_id,
+            operation_id="OP-SEC-01",
+            attempt_number=1,
+            timestamp=now_ts,
+            source="modbus_plc",
+            actual_flow_lpm=0.0,
+            is_running=False,
+            is_stopped=True,
+            confirmed_stopped=True,
+        )
+        forged_token = hmac.new(bad_key, bad_assertion, hashlib.sha256).hexdigest()[:32]
+        forged_receipt = {
+            "device_id": dev_id,
+            "operation_id": "OP-SEC-01",
+            "attempt_number": 1,
+            "timestamp": now_ts,
+            "source": "modbus_plc",
+            "actual_flow_lpm": 0.0,
+            "is_stopped": True,
+            "is_running": False,
+            "confirmed_stopped": True,
+            "receipt_token": forged_token,
+        }
+        res = actuator.confirm_stop(forged_receipt)
+        assert res is False
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+    def test_02_stop_receipt_tampered_measurements_rejected(self):
+        """2. Tampering with flow (0.0 -> 5.0), running/stopped status, source, or operation invalidates signature."""
+        from services.agribrain.irrigation_runtime.actuator import create_verified_stop_receipt
+        dev_id = "DEV-SEC-STOP-02"
+        secret = "strong_test_secret_for_tampering_test_2026"
+        reg = ActuatorRegistration(
+            device_id=dev_id,
+            vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+            protocol=DriverProtocol.MODBUS_TCP,
+            capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+            connection_config={"auth_secret": secret},
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        actuator._active_command = IrrigationCommand(
+            command_id="CMD-SEC-02",
+            command_type=CommandType.START_ZONE,
+            device_id=dev_id,
+            zone_id="ZONE-1",
+            plot_id="PLOT-01",
+            operation_id="OP-SEC-02",
+        )
+        now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+        legit_receipt = create_verified_stop_receipt(
+            device_id=dev_id,
+            operation_id="OP-SEC-02",
+            attempt_number=1,
+            secret=secret,
+            source="modbus_plc",
+            actual_flow_lpm=0.0,
+            timestamp=now_ts,
+        )
+
+        # 2a. Tampering actual_flow_lpm (0.0 -> 5.0) invalidates HMAC assertion
+        tampered_flow = dict(legit_receipt)
+        tampered_flow["actual_flow_lpm"] = 5.0
+        assert actuator.confirm_stop(tampered_flow) is False
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+        # 2b. Tampering is_running (False -> True)
+        tampered_running = dict(legit_receipt)
+        tampered_running["is_running"] = True
+        assert actuator.confirm_stop(tampered_running) is False
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+        # 2c. Tampering is_stopped (True -> False)
+        tampered_stopped = dict(legit_receipt)
+        tampered_stopped["is_stopped"] = False
+        assert actuator.confirm_stop(tampered_stopped) is False
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+        # 2d. Tampering source ("modbus_plc" -> "controller")
+        tampered_source = dict(legit_receipt)
+        tampered_source["source"] = "controller"
+        assert actuator.confirm_stop(tampered_source) is False
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+        # 2e. Tampering operation_id mismatch
+        tampered_op = dict(legit_receipt)
+        tampered_op["operation_id"] = "OP-FORGED-999"
+        with pytest.raises(ValueError, match="does not match active operation"):
+            actuator.confirm_stop(tampered_op)
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+    def test_03_missing_signing_key_fails_closed_on_real_hardware(self):
+        """3. Missing signing key fails closed on real hardware (is_simulation=False)."""
+        dev_id = "DEV-REAL-HW-03"
+        reg = ActuatorRegistration(
+            device_id=dev_id,
+            vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+            protocol=DriverProtocol.MODBUS_TCP,
+            capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator.is_simulation = False
+        actuator.is_mock = False
+        actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        actuator._active_command = IrrigationCommand(
+            command_id="CMD-REAL-03",
+            command_type=CommandType.START_ZONE,
+            device_id=dev_id,
+            zone_id="ZONE-1",
+            plot_id="PLOT-01",
+            operation_id="OP-REAL-03",
+        )
+        now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+        # Isolate environment so no global or device keys exist
+        env_cleared = {k: v for k, v in os.environ.items() if not k.startswith("AGRIBRAIN_STOP_AUTH_KEY")}
+        with patch.dict(os.environ, env_cleared, clear=True):
+            # Any receipt (even with an ostensibly valid token) fails closed on real hardware without provisioned keys
+            receipt = {
+                "device_id": dev_id,
+                "operation_id": "OP-REAL-03",
+                "attempt_number": 1,
+                "timestamp": now_ts,
+                "source": "modbus_plc",
+                "actual_flow_lpm": 0.0,
+                "is_stopped": True,
+                "is_running": False,
+                "confirmed_stopped": True,
+                "receipt_token": "a" * 32,
+            }
+            res = actuator.confirm_stop(receipt)
+            assert res is False
+            assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+
+    def test_04_stop_receipt_durable_replay_rejected_across_processes_and_restarts(self):
+        """4. Receipt replayed in another process or after restart is rejected (durable store)."""
+        from services.agribrain.irrigation_runtime.actuator import (
+            DurableStopReceiptStore,
+            _GLOBAL_CONSUMED_RECEIPT_TOKENS,
+            create_verified_stop_receipt,
+        )
+        tmp_receipt_dir = tempfile.mkdtemp(prefix="test_stop_receipts_")
+        old_receipt_env = os.environ.get("AGRIBRAIN_STOP_RECEIPT_DIR")
+        os.environ["AGRIBRAIN_STOP_RECEIPT_DIR"] = tmp_receipt_dir
+        try:
+            DurableStopReceiptStore.reset()
+            _GLOBAL_CONSUMED_RECEIPT_TOKENS.clear()
+
+            secret = "durable_replay_auth_secret_2026_test"
+            dev_id = "DEV-DURABLE-04"
+            reg = ActuatorRegistration(
+                device_id=dev_id,
+                vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+                protocol=DriverProtocol.MODBUS_TCP,
+                capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+                connection_config={"auth_secret": secret},
+            )
+            actuator1 = ModbusActuator(registration=reg)
+            actuator1._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+            actuator1._active_command = IrrigationCommand(
+                command_id="CMD-DUR-01",
+                command_type=CommandType.START_ZONE,
+                device_id=dev_id,
+                zone_id="ZONE-1",
+                plot_id="PLOT-01",
+                operation_id="OP-DURABLE-04",
+            )
+            now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+            receipt = create_verified_stop_receipt(
+                device_id=dev_id,
+                operation_id="OP-DURABLE-04",
+                attempt_number=1,
+                secret=secret,
+                source="modbus_plc",
+                actual_flow_lpm=0.0,
+                timestamp=now_ts,
+            )
+
+            # Process 1 verifies receipt successfully
+            assert actuator1.confirm_stop(receipt) is True
+            assert actuator1.status == ActuatorStatus.ONLINE
+
+            # Simulate worker process crash / restart:
+            # Completely wipe in-memory state
+            actuator1._consumed_receipt_tokens.clear()
+            _GLOBAL_CONSUMED_RECEIPT_TOKENS.clear()
+            with DurableStopReceiptStore._thread_lock:
+                DurableStopReceiptStore._memory_cache.clear()
+
+            # Process 2 / Worker 2 starts up fresh with new actuator instance
+            actuator2 = ModbusActuator(registration=reg)
+            actuator2._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+            actuator2._active_command = IrrigationCommand(
+                command_id="CMD-DUR-02",
+                command_type=CommandType.START_ZONE,
+                device_id=dev_id,
+                zone_id="ZONE-1",
+                plot_id="PLOT-01",
+                operation_id="OP-DURABLE-04",
+            )
+
+            # Replaying the exact same receipt from another process must be rejected by durable store
+            replay_res = actuator2.confirm_stop(receipt)
+            assert replay_res is False
+            assert actuator2.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+        finally:
+            DurableStopReceiptStore.reset()
+            if old_receipt_env is not None:
+                os.environ["AGRIBRAIN_STOP_RECEIPT_DIR"] = old_receipt_env
+            else:
+                os.environ.pop("AGRIBRAIN_STOP_RECEIPT_DIR", None)
+            shutil.rmtree(tmp_receipt_dir, ignore_errors=True)
+
+    def test_05_genuine_driver_produced_receipt_succeeds_exactly_once(self):
+        """5. Genuine driver-produced, fully bound receipt succeeds exactly once."""
+        from services.agribrain.irrigation_runtime.actuator import create_verified_stop_receipt
+        secret = "genuine_driver_secret_key_2026_test"
+        dev_id = "DEV-GENUINE-05"
+        reg = ActuatorRegistration(
+            device_id=dev_id,
+            vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+            protocol=DriverProtocol.MODBUS_TCP,
+            capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+            connection_config={"auth_secret": secret},
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        actuator._active_command = IrrigationCommand(
+            command_id="CMD-GEN-05",
+            command_type=CommandType.START_ZONE,
+            device_id=dev_id,
+            zone_id="ZONE-1",
+            plot_id="PLOT-01",
+            operation_id="OP-GENUINE-05",
+        )
+        now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+        receipt = create_verified_stop_receipt(
+            device_id=dev_id,
+            operation_id="OP-GENUINE-05",
+            attempt_number=1,
+            secret=secret,
+            source="modbus_plc",
+            actual_flow_lpm=0.0,
+            timestamp=now_ts,
+        )
+
+        # Call 1: Succeeds and transitions to ONLINE
+        first_call = actuator.confirm_stop(receipt, expected_operation_id={"OP-GENUINE-05"})
+        assert first_call is True
+        assert actuator.status == ActuatorStatus.ONLINE
+        assert actuator.active_command is None
+
+        # Call 2: Immediate retry with identical receipt returns False
+        second_call = actuator.confirm_stop(receipt, expected_operation_id={"OP-GENUINE-05"})
+        assert second_call is False
+
+    def test_06_pending_operation_retains_ownership_and_quota_on_verification_failure(self):
+        """6. Pending physical operation retains ownership and quota exposure on verification failure."""
+        from services.agribrain.irrigation_runtime.actuator import create_verified_stop_receipt
+        secret = "quota_ownership_secret_2026_test"
+        dev_id = "DEV-QUOTA-06"
+        reg = ActuatorRegistration(
+            device_id=dev_id,
+            vendor=VendorId.CUSTOM,
+            model="FieldPLC",
+            protocol=DriverProtocol.MODBUS_TCP,
+            capabilities=ActuatorCapabilities(system_type=IrrigationSystemType.DRIP),
+            connection_config={"auth_secret": secret},
+        )
+        actuator = ModbusActuator(registration=reg)
+        actuator._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        active_cmd = IrrigationCommand(
+            command_id="CMD-QUOTA-06",
+            command_type=CommandType.START_ZONE,
+            device_id=dev_id,
+            zone_id="ZONE-1",
+            plot_id="PLOT-01",
+            operation_id="OP-QUOTA-06",
+        )
+        actuator._active_command = active_cmd
+        now_ts = datetime.datetime.now(timezone.utc).isoformat()
+
+        # Create tampered receipt that fails verification
+        tampered_receipt = create_verified_stop_receipt(
+            device_id=dev_id,
+            operation_id="OP-QUOTA-06",
+            attempt_number=1,
+            secret=secret,
+            source="modbus_plc",
+            actual_flow_lpm=0.0,
+            timestamp=now_ts,
+        )
+        tampered_receipt["actual_flow_lpm"] = 12.0  # Tampered!
+
+        # Verification failure
+        assert actuator.confirm_stop(tampered_receipt) is False
+
+        # Physical safety invariants: must retain pending confirmation and active command
+        assert actuator.status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+        assert actuator.active_command is not None
+        assert actuator.active_command.command_id == "CMD-QUOTA-06"
+        assert actuator.active_command.operation_id == "OP-QUOTA-06"
 
 

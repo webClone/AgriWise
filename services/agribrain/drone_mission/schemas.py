@@ -58,8 +58,6 @@ class DroneCapabilityProfile:
     
     def calculate_gsd(self, altitude_m: float) -> float:
         """Calculate Ground Sample Distance (cm/pixel) at given altitude."""
-        # Simple pinhole model: GSD = (altitude * sensor_width) / (focal_length * image_width)
-        # Convert altitude to mm, result in mm/pixel, then to cm/pixel
         gsd_mm = (altitude_m * 1000.0 * self.sensor_width_mm) / (self.focal_length_mm * self.image_width_px)
         return gsd_mm / 10.0
 
@@ -119,3 +117,11 @@ class FlightPlan:
     # Status
     is_feasible: bool = True
     infeasibility_reason: Optional[str] = None
+
+
+import sys
+# Unified namespace cross-aliasing (F37)
+if "services.agribrain.drone_mission.schemas" in sys.modules and "drone_mission.schemas" not in sys.modules:
+    sys.modules["drone_mission.schemas"] = sys.modules["services.agribrain.drone_mission.schemas"]
+elif "drone_mission.schemas" in sys.modules and "services.agribrain.drone_mission.schemas" not in sys.modules:
+    sys.modules["services.agribrain.drone_mission.schemas"] = sys.modules["drone_mission.schemas"]

@@ -805,3 +805,12 @@ class IrrigationZone:
     distance_from_pivot_m: float = 0.0
 
     enabled: bool = True
+
+
+import sys
+# Unified namespace cross-aliasing (F37)
+if "services.agribrain.irrigation_runtime.schemas" in sys.modules and "irrigation_runtime.schemas" not in sys.modules:
+    sys.modules["irrigation_runtime.schemas"] = sys.modules["services.agribrain.irrigation_runtime.schemas"]
+elif "irrigation_runtime.schemas" in sys.modules and "services.agribrain.irrigation_runtime.schemas" not in sys.modules:
+    sys.modules["services.agribrain.irrigation_runtime.schemas"] = sys.modules["irrigation_runtime.schemas"]
+
