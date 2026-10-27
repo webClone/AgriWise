@@ -39,12 +39,28 @@ def test_f37_entrypoint_imports():
 
 
 def test_f37_unified_namespace_drone_mission_import_orders():
-    """Verify both import orders for drone_mission.schemas.MissionType produce identical class identity."""
-    code_order_1 = "import sys; sys.path.insert(0, 'services/agribrain'); import drone_mission.schemas as s1; import services.agribrain.drone_mission.schemas as s2; assert s1.MissionType is s2.MissionType"
+    """Verify both import orders for drone_mission.schemas.MissionType produce identical class identity and cross-namespace isinstance passes."""
+    code_order_1 = (
+        "import sys; sys.path.insert(0, 'services/agribrain'); "
+        "import drone_mission.schemas as s1; import services.agribrain.drone_mission.schemas as s2; "
+        "assert s1.MissionType is s2.MissionType; "
+        "assert isinstance(s1.MissionType.FULL_PLOT_MAP, s2.MissionType); "
+        "from drone_mission import MissionType as m1; "
+        "assert m1 is s2.MissionType; "
+        "assert isinstance(m1.FULL_PLOT_MAP, s2.MissionType)"
+    )
     res1 = subprocess.run([sys.executable, "-c", code_order_1], capture_output=True, text=True)
     assert res1.returncode == 0, f"Order 1 failed: {res1.stderr}"
 
-    code_order_2 = "import sys; sys.path.insert(0, 'services/agribrain'); import services.agribrain.drone_mission.schemas as s2; import drone_mission.schemas as s1; assert s1.MissionType is s2.MissionType"
+    code_order_2 = (
+        "import sys; sys.path.insert(0, 'services/agribrain'); "
+        "import services.agribrain.drone_mission.schemas as s2; import drone_mission.schemas as s1; "
+        "assert s1.MissionType is s2.MissionType; "
+        "assert isinstance(s2.MissionType.FULL_PLOT_MAP, s1.MissionType); "
+        "from services.agribrain.drone_mission import MissionType as m2; "
+        "assert m2 is s1.MissionType; "
+        "assert isinstance(m2.FULL_PLOT_MAP, s1.MissionType)"
+    )
     res2 = subprocess.run([sys.executable, "-c", code_order_2], capture_output=True, text=True)
     assert res2.returncode == 0, f"Order 2 failed: {res2.stderr}"
 

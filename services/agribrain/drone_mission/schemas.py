@@ -120,8 +120,47 @@ class FlightPlan:
 
 
 import sys
-# Unified namespace cross-aliasing (F37)
-if "services.agribrain.drone_mission.schemas" in sys.modules and "drone_mission.schemas" not in sys.modules:
-    sys.modules["drone_mission.schemas"] = sys.modules["services.agribrain.drone_mission.schemas"]
-elif "drone_mission.schemas" in sys.modules and "services.agribrain.drone_mission.schemas" not in sys.modules:
-    sys.modules["services.agribrain.drone_mission.schemas"] = sys.modules["drone_mission.schemas"]
+
+# Unified namespace cross-aliasing and canonical identity enforcement (F37)
+_short_name = "drone_mission.schemas"
+_full_name = "services.agribrain.drone_mission.schemas"
+
+_canonical = None
+for _candidate in (_full_name, _short_name):
+    if _candidate in sys.modules and hasattr(sys.modules[_candidate], "MissionType") and sys.modules[_candidate] is not sys.modules.get(__name__):
+        _canonical = sys.modules[_candidate]
+        break
+
+if _canonical is not None:
+    # Ensure current module namespace re-uses the exact canonical class instances
+    MissionType = _canonical.MissionType
+    FlightMode = _canonical.FlightMode
+    CoveragePattern = _canonical.CoveragePattern
+    DroneCapabilityProfile = _canonical.DroneCapabilityProfile
+    MissionIntent = _canonical.MissionIntent
+    Waypoint = _canonical.Waypoint
+    FlightPlan = _canonical.FlightPlan
+    sys.modules[_short_name] = _canonical
+    sys.modules[_full_name] = _canonical
+    if __name__ in sys.modules:
+        sys.modules[__name__] = _canonical
+    _target_mod = _canonical
+else:
+    _target_mod = sys.modules.get(__name__)
+    if _target_mod is not None:
+        sys.modules[_short_name] = _target_mod
+        sys.modules[_full_name] = _target_mod
+
+if _target_mod is not None:
+    parent_short = sys.modules.get("drone_mission")
+    if parent_short is not None:
+        setattr(parent_short, "schemas", _target_mod)
+        for _attr in ("MissionType", "FlightMode", "CoveragePattern", "DroneCapabilityProfile", "MissionIntent", "Waypoint", "FlightPlan"):
+            if hasattr(_target_mod, _attr):
+                setattr(parent_short, _attr, getattr(_target_mod, _attr))
+    parent_full = sys.modules.get("services.agribrain.drone_mission")
+    if parent_full is not None:
+        setattr(parent_full, "schemas", _target_mod)
+        for _attr in ("MissionType", "FlightMode", "CoveragePattern", "DroneCapabilityProfile", "MissionIntent", "Waypoint", "FlightPlan"):
+            if hasattr(_target_mod, _attr):
+                setattr(parent_full, _attr, getattr(_target_mod, _attr))
