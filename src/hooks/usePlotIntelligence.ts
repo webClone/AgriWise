@@ -239,6 +239,7 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
   const refreshAbortRef = useRef<AbortController | null>(null);
   // P2-B: Protect canonical assessment engines & timeline from legacy overwrite
   const isCanonicalAssessmentBoundRef = useRef(false);
+  const boundPlotIdRef = useRef<string | null>(null);
 
   // Normalize Python engine card shape → EngineStatus interface
   const normalizeEngine = (e: any): EngineStatus => {
@@ -314,6 +315,11 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
 
   const fetchIntelligence = useCallback(
     async (plotId: string, farmId: string) => {
+      if (boundPlotIdRef.current && boundPlotIdRef.current !== plotId) {
+        // Switched to a different plot: unbind previous plot's canonical lock
+        isCanonicalAssessmentBoundRef.current = false;
+        boundPlotIdRef.current = null;
+      }
       const cacheKey = `${plotId}:${farmId}`;
       const cached = cacheRef.current[cacheKey];
       // In-memory cache still valid → skip API call entirely
@@ -462,9 +468,10 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
     [mapResponse]
   );
 
-  const injectData = useCallback((payload: any) => {
+  const injectData = useCallback((payload: any, targetPlotId?: string) => {
     if (!payload) return;
     isCanonicalAssessmentBoundRef.current = true;
+    boundPlotIdRef.current = targetPlotId || payload.plot_id || payload.plotId || null;
     const rawEngines = payload.engines && (Array.isArray(payload.engines) ? payload.engines.length > 0 : Object.keys(payload.engines).length > 0)
       ? payload.engines
       : payload.layer_results || payload.canonicalLayerResults || [];

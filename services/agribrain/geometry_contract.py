@@ -36,6 +36,8 @@ def canonical_number_to_str(val: Union[int, float]) -> str:
     if isinstance(val, bool):
         return "true" if val else "false"
     if isinstance(val, int):
+        if abs(val) >= 10**21:
+            return canonical_number_to_str(float(val))
         return str(val)
     if isinstance(val, float):
         if math.isnan(val) or math.isinf(val):
@@ -130,7 +132,7 @@ def canonicalize_geojson(value: Any) -> Any:
             raise ValueError(f"Non-finite number in canonical GeoJSON: {value}")
         if value == 0.0:
             return 0
-        if value.is_integer():
+        if value.is_integer() and abs(value) < 1e21:
             return int(value)
         return value
     if isinstance(value, int):

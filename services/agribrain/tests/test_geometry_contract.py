@@ -96,6 +96,18 @@ GOLDEN_VECTORS = [
         },
         "expected_hash": "sha256:52b7fb7f36a0fb2637bec96caca0653e0180b736209aa9438f3d7e889730c071",
     },
+    {
+        "name": "feature_with_exponent_property_1e21",
+        "geometry": {
+            "type": "Feature",
+            "properties": {"bigValue": 1e21},
+            "geometry": {
+                "type": "Point",
+                "coordinates": [0, 0],
+            },
+        },
+        "expected_hash": "sha256:0bcd8a13bda599ed50a0f7a8ee37be1427e5c5b9c18c0463dfd996c659ad2b83",
+    },
 ]
 
 

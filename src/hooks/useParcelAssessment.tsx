@@ -71,7 +71,8 @@ export type AssessmentStatus =
   | "ready"
   | "unavailable"
   | "invalid"
-  | "superseded";
+  | "superseded"
+  | "stale";
 
 export interface ParcelAssessmentFetchOptions {
   snapshotId?: string;
@@ -94,6 +95,9 @@ export interface ParcelAssessmentContextType {
   plotId: string | null;
   farmId: string | null;
   activeCropCycleId: string | null;
+  isApplicable: boolean;
+  isStale: boolean;
+  staleReason: string | null;
   fetchAssessment: (
     plotId: string,
     farmId?: string,
@@ -225,8 +229,20 @@ export function ParcelAssessmentProvider({
 
             if (!isLatest()) return null;
 
+            // Enforce parcel applicability boundary:
+            // An immutable assessment from an earlier geometry or crop-cycle remains available
+            // for historical analysis but is quarantined (stale) for current operations.
+            const isGeomStale = isAssessmentStaleForGeometry(assessment.identity, effectiveGeometry);
+            const isCropCycleStale = isAssessmentStaleForCropCycle(assessment.identity, effectiveCropCycleId);
+            const isApplicable = !isGeomStale && !isCropCycleStale;
+            const stalenessReason = isGeomStale ? "geometry_mismatch" : isCropCycleStale ? "crop_cycle_mismatch" : null;
+
             setRawPublication(json);
-            setState({ status: "ready", assessment });
+            if (!isApplicable) {
+              setState({ status: "stale", assessment, reason: stalenessReason });
+            } else {
+              setState({ status: "ready", assessment });
+            }
             return assessment;
           } catch (assessmentErr: any) {
             if (!isLatest()) return null;
@@ -301,8 +317,18 @@ export function ParcelAssessmentProvider({
                 });
 
                 if (!isLatest()) return null;
+
+                const isGeomStale = isAssessmentStaleForGeometry(assessment.identity, effectiveGeometry);
+                const isCropCycleStale = isAssessmentStaleForCropCycle(assessment.identity, effectiveCropCycleId);
+                const isApplicable = !isGeomStale && !isCropCycleStale;
+                const stalenessReason = isGeomStale ? "geometry_mismatch" : isCropCycleStale ? "crop_cycle_mismatch" : null;
+
                 setRawPublication(pubJson);
-                setState({ status: "ready", assessment });
+                if (!isApplicable) {
+                  setState({ status: "stale", assessment, reason: stalenessReason });
+                } else {
+                  setState({ status: "ready", assessment });
+                }
                 return assessment;
               } catch (assessmentErr: any) {
                 if (!isLatest()) return null;
@@ -340,7 +366,7 @@ export function ParcelAssessmentProvider({
 
   const isStaleForGeometryFn = useCallback(
     (currentGeometry: unknown) => {
-      if (state.status !== "ready") return false;
+      if (state.status !== "ready" && state.status !== "stale") return false;
       return isAssessmentStaleForGeometry(state.assessment.identity, currentGeometry);
     },
     [state]
@@ -348,7 +374,7 @@ export function ParcelAssessmentProvider({
 
   const isStaleForCropCycleFn = useCallback(
     (currentCropCycleId: string | null) => {
-      if (state.status !== "ready") return false;
+      if (state.status !== "ready" && state.status !== "stale") return false;
       return isAssessmentStaleForCropCycle(state.assessment.identity, currentCropCycleId);
     },
     [state]
@@ -362,20 +388,25 @@ export function ParcelAssessmentProvider({
       acceptedAt?: string | null;
       manifestMembership?: boolean;
     }) => {
-      if (state.status !== "ready") return false;
+      if (state.status !== "ready" && state.status !== "stale") return false;
       return isLateArrivingEvidence(state.assessment.identity, evidence);
     },
     [state]
   );
 
-  const assessment = state.status === "ready" ? state.assessment : null;
+  const assessment = state.status === "ready" || state.status === "stale" ? state.assessment : null;
   const status: AssessmentStatus =
     state.status === "ready" ? "ready"
+    : state.status === "stale" ? "stale"
     : state.status === "loading" ? "loading"
     : state.status === "unavailable" ? "unavailable"
     : state.status === "invalid" ? "invalid"
     : state.status === "superseded" ? "superseded"
     : "idle";
+
+  const isApplicable = state.status === "ready";
+  const isStale = state.status === "stale";
+  const staleReason = state.status === "stale" ? state.reason : null;
 
   const error =
     state.status === "invalid" || state.status === "unavailable"
@@ -395,6 +426,9 @@ export function ParcelAssessmentProvider({
         plotId: currentPlotId,
         farmId: currentFarmId,
         activeCropCycleId: cropCycleIdRef.current,
+        isApplicable,
+        isStale,
+        staleReason,
         fetchAssessment,
         isStaleForGeometry: isStaleForGeometryFn,
         isStaleForCropCycle: isStaleForCropCycleFn,

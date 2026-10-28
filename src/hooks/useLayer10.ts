@@ -417,6 +417,8 @@ export interface Layer10Result {
   top_findings?: any[];
   canonical_publication_receipt_hash?: string;
   assessment?: ParcelAssessment | null;
+  is_stale?: boolean;
+  staleness_reason?: string | null;
 }
 
 export interface FallbackGuidance {
@@ -1044,7 +1046,11 @@ export function Layer10Provider({
       return;
     }
 
-    if (assessmentCtx.status === "ready" && assessmentCtx.assessment && assessmentCtx.rawPublication) {
+    if (
+      (assessmentCtx.status === "ready" || assessmentCtx.status === "stale") &&
+      assessmentCtx.assessment &&
+      assessmentCtx.rawPublication
+    ) {
       try {
         const runData = canonicalPublicationToRunData(
           assessmentCtx.rawPublication,
@@ -1131,6 +1137,8 @@ export function Layer10Provider({
           assessment: assessmentCtx.assessment,
           top_findings: [...assessmentCtx.assessment.topFindings],
           canonical_publication_receipt_hash: assessmentCtx.assessment.identity.publicationReceiptHash,
+          is_stale: assessmentCtx.status === "stale",
+          staleness_reason: assessmentCtx.staleReason || null,
         };
 
         setPublication({ data: mapped, error: null });

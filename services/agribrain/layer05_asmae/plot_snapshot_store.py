@@ -300,11 +300,15 @@ def publish_canonical_plot_snapshot(
 
     if not evidence_cutoff_str and obs_win and obs_win.get("end"):
         evidence_cutoff_str = str(obs_win["end"])
+    # Scientific Provenance Guarantee:
+    # A missing scientific evidence cutoff must NEVER be silently replaced
+    # with publication time. If no validated manifest or processing boundary exists,
+    # it remains None/null (unknown).
     if not evidence_cutoff_str:
-        evidence_cutoff_str = published_at_str
+        evidence_cutoff_str = None
 
     if not obs_win:
-        obs_win = {"start": evidence_cutoff_str, "end": evidence_cutoff_str}
+        obs_win = None
 
     immutable_frontend_payload["published_at"] = published_at_str
     immutable_frontend_payload["evidence_cutoff_at"] = evidence_cutoff_str
@@ -816,11 +820,36 @@ def load_latest_plot_snapshot(
         or ""
     )
 
+    # Authoritative temporal fields derived strictly from hash-verified publication or node
+    authoritative_published_at = (
+        publication.get("published_at")
+        or node.get("published_at")
+        or node.get("recorded_at")
+    )
+    authoritative_evidence_cutoff = (
+        publication.get("evidence_cutoff_at")
+        or node.get("evidence_cutoff_at")
+    )
+    authoritative_observation_window = (
+        publication.get("observation_window")
+        or node.get("observation_window")
+    )
+
+    # Cryptographic temporal binding validation:
+    # Mutating any head temporal field (published_at, evidence_cutoff_at, observation_window)
+    # to contradict the hash-verified publication causes validation failure.
+    temporal_binding_valid = bool(
+        (not head.get("published_at") or head.get("published_at") == authoritative_published_at)
+        and (not head.get("evidence_cutoff_at") or head.get("evidence_cutoff_at") == authoritative_evidence_cutoff)
+        and (not head.get("observation_window") or head.get("observation_window") == authoritative_observation_window)
+    )
+
     validation_flags = {
         "nodeValid": bool(node.get("node_hash") and node.get("node_hash") == head.get("node_hash") and node.get("node_hash") == computed_node_hash),
         "publicationValid": bool(publication.get("publication_hash") and publication.get("publication_hash") == head.get("frontend_publication_hash") and publication.get("publication_hash") == computed_pub_hash),
         "receiptValid": bool(receipt.get("receipt_hash") and receipt.get("receipt_hash") == head.get("publication_receipt_hash") and receipt.get("receipt_hash") == computed_receipt_hash),
         "inventoryValid": bool(head.get("surface_inventory_hash") and computed_inv_hash and head.get("surface_inventory_hash") == computed_inv_hash),
+        "temporalBindingValid": temporal_binding_valid,
         "bindingValid": bool(
             head.get("snapshot_id") == snapshot_id
             and head.get("plot_id") == ns.plot_id
@@ -832,6 +861,7 @@ def load_latest_plot_snapshot(
             and receipt.get("node_hash") == node.get("node_hash")
             and receipt.get("frontend_publication_hash")
             == publication.get("publication_hash")
+            and temporal_binding_valid
         ),
         "lineageValid": bool(
             node.get("snapshot_kind") != "asmae"
@@ -876,6 +906,7 @@ def load_latest_plot_snapshot(
                 "publicationValid",
                 "receiptValid",
                 "inventoryValid",
+                "temporalBindingValid",
                 "bindingValid",
                 "lineageValid",
             )
@@ -889,28 +920,9 @@ def load_latest_plot_snapshot(
             )
         )
     )
-    published_at_val = (
-        head.get("published_at")
-        or node.get("published_at")
-        or publication.get("published_at")
-        or node.get("recorded_at")
-    )
-    evidence_cutoff_val = (
-        head.get("evidence_cutoff_at")
-        or node.get("evidence_cutoff_at")
-        or publication.get("evidence_cutoff_at")
-        or (publication_frontend.get("evidence_cutoff_at") if publication_frontend else None)
-    )
-    obs_win_val = (
-        head.get("observation_window")
-        or node.get("observation_window")
-        or publication.get("observation_window")
-        or (publication_frontend.get("observation_window") if publication_frontend else None)
-    )
-    if not obs_win_val and publication_frontend:
-        src_win = publication_frontend.get("source_window")
-        if isinstance(src_win, (list, tuple)) and len(src_win) >= 2 and src_win[0] and src_win[1]:
-            obs_win_val = {"start": str(src_win[0]), "end": str(src_win[1])}
+    published_at_val = authoritative_published_at
+    evidence_cutoff_val = authoritative_evidence_cutoff
+    obs_win_val = authoritative_observation_window
 
     node["published_at"] = published_at_val
     node["evidence_cutoff_at"] = evidence_cutoff_val

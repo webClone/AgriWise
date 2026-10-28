@@ -423,6 +423,18 @@ test("P0: geometry hash matches Python backend byte-for-byte across all golden v
       },
       expectedHash: "sha256:52b7fb7f36a0fb2637bec96caca0653e0180b736209aa9438f3d7e889730c071",
     },
+    {
+      name: "feature_with_exponent_property_1e21",
+      geometry: {
+        type: "Feature",
+        properties: { bigValue: 1e21 },
+        geometry: {
+          type: "Point",
+          coordinates: [0, 0],
+        },
+      },
+      expectedHash: "sha256:0bcd8a13bda599ed50a0f7a8ee37be1427e5c5b9c18c0463dfd996c659ad2b83",
+    },
   ];
 
   for (const vector of goldenVectors) {
@@ -605,3 +617,72 @@ test("Integration 3: Rapid parcel / crop-cycle switches with delayed responses â
   assert.equal(activeAssessment.identity.snapshotId, "snap-parcel-02");
   assert.equal(activeParcelId, "plot-parcel-02");
 });
+
+test("Observation window precedence and contradiction rejection", () => {
+  // Case A: Authoritative observation_window takes precedence
+  const pubWithMatching = buildMockPublication({
+    observation_window: { start: "2026-10-01T00:00:00Z", end: "2026-10-28T00:00:00Z" },
+    source_window: ["2026-10-01T00:00:00Z", "2026-10-28T00:00:00Z"],
+  });
+  const assessmentA = canonicalPublicationToAssessment(pubWithMatching, "plot-p01-olive");
+  assert.equal(assessmentA.identity.observationWindow.start, new Date("2026-10-01T00:00:00Z").toISOString());
+  assert.equal(assessmentA.identity.observationWindow.end, new Date("2026-10-28T00:00:00Z").toISOString());
+
+  // Case B: observation_window without source_window works cleanly
+  const pubEnvOnly = buildMockPublication({
+    observation_window: { start: "2026-10-05T00:00:00Z", end: "2026-10-28T00:00:00Z" },
+    source_window: null,
+  });
+  const assessmentB = canonicalPublicationToAssessment(pubEnvOnly, "plot-p01-olive");
+  assert.equal(assessmentB.identity.observationWindow.start, new Date("2026-10-05T00:00:00Z").toISOString());
+
+  // Case C: Contradiction between authoritative envelope and legacy source_window fails closed
+  const pubContradictory = buildMockPublication({
+    observation_window: { start: "2026-10-05T00:00:00Z", end: "2026-10-28T00:00:00Z" },
+    source_window: ["2026-09-01T00:00:00Z", "2026-09-30T00:00:00Z"],
+  });
+  assert.throws(
+    () => canonicalPublicationToAssessment(pubContradictory, "plot-p01-olive"),
+    /observation_window_conflict/,
+    "Contradicting observation_window must throw an error"
+  );
+});
+
+test("Parcel applicability boundary: geometry and crop-cycle mismatch transitions to stale state", () => {
+  const origGeom = {
+    type: "Polygon",
+    coordinates: [[[31.6, -7.9], [31.61, -7.9], [31.61, -7.91], [31.6, -7.9]]],
+  };
+  const modifiedGeom = {
+    type: "Polygon",
+    coordinates: [[[31.6, -7.9], [31.65, -7.9], [31.65, -7.95], [31.6, -7.9]]],
+  };
+
+  const pub = buildMockPublication({
+    crop_cycle_id: "cycle-2026-autumn",
+  });
+  const assessment = canonicalPublicationToAssessment(pub, "plot-p01-olive", {
+    geometry: origGeom,
+    cropCycleId: "cycle-2026-autumn",
+  });
+
+  // Verify match with matching context
+  assert.equal(isAssessmentStaleForGeometry(assessment.identity, origGeom), false);
+  assert.equal(isAssessmentStaleForCropCycle(assessment.identity, "cycle-2026-autumn"), false);
+
+  // Verify mismatch detects staleness
+  assert.equal(isAssessmentStaleForGeometry(assessment.identity, modifiedGeom), true);
+  assert.equal(isAssessmentStaleForCropCycle(assessment.identity, "cycle-2027-spring"), true);
+
+  // Applicability boundary simulation:
+  const isGeomStale = isAssessmentStaleForGeometry(assessment.identity, modifiedGeom);
+  const isCropCycleStale = isAssessmentStaleForCropCycle(assessment.identity, "cycle-2026-autumn");
+  const isApplicable = !isGeomStale && !isCropCycleStale;
+  const stalenessReason = isGeomStale ? "geometry_mismatch" : isCropCycleStale ? "crop_cycle_mismatch" : null;
+
+  assert.equal(isApplicable, false);
+  assert.equal(stalenessReason, "geometry_mismatch");
+  // Assessment remains intact and valid for historical reference
+  assert.ok(assessment.identity.publicationReceiptHash);
+});
+

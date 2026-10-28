@@ -314,14 +314,26 @@ export function canonicalPublicationToAssessment(cacheJson, plotId, options = {}
   const cutoffIso = rawCutoff ? new Date(rawCutoff).toISOString() : "";
   const publishedIso = rawPublished ? new Date(rawPublished).toISOString() : "";
 
-  const observationStart = cacheJson.source_window?.[0]
-    || cacheJson.observation_window?.start
-    || cacheJson.observationWindow?.start
-    || "";
-  const observationEnd = cacheJson.source_window?.[1]
-    || cacheJson.observation_window?.end
-    || cacheJson.observationWindow?.end
-    || "";
+  // Authoritative publication envelope observation_window takes strict precedence over legacy source_window
+  const envObsWindow = cacheJson.observation_window || cacheJson.observationWindow;
+  const legacySourceWindow = Array.isArray(cacheJson.source_window) && cacheJson.source_window.length >= 2
+    ? { start: String(cacheJson.source_window[0]), end: String(cacheJson.source_window[1]) }
+    : null;
+
+  let observationStart = "";
+  let observationEnd = "";
+
+  if (envObsWindow?.start && envObsWindow?.end) {
+    observationStart = String(envObsWindow.start);
+    observationEnd = String(envObsWindow.end);
+    // Conflict detection: if legacy source_window exists and contradicts authoritative envelope, fail closed
+    if (legacySourceWindow && (legacySourceWindow.start !== observationStart || legacySourceWindow.end !== observationEnd)) {
+      throw new Error("observation_window_conflict: authoritative observation_window contradicts legacy source_window");
+    }
+  } else if (legacySourceWindow) {
+    observationStart = legacySourceWindow.start;
+    observationEnd = legacySourceWindow.end;
+  }
 
   const receipt = cacheJson.canonical_publication_receipt_hash
     || cacheJson.publication_receipt_hash
