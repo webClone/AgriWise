@@ -422,12 +422,15 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
 
   const injectData = useCallback((payload: any) => {
     if (!payload) return;
+    const rawEngines = payload.engines && (Array.isArray(payload.engines) ? payload.engines.length > 0 : Object.keys(payload.engines).length > 0)
+      ? payload.engines
+      : payload.layer_results || payload.canonicalLayerResults || [];
     const mapped: PlotIntelligenceData = {
       timeline: payload.timeline || {
         weather: [], ndvi: [], sar: [], waterBalance: [], forecast: [],
         dateRange: { from: "", to: "", today: "" },
       },
-      engines: normalizeEngineCollection(payload.engines).map(normalizeEngine),
+      engines: normalizeEngineCollection(rawEngines).map(normalizeEngine),
       current: payload.current || { weather: null, indices: null, soil: null, waterBalance: null },
       rawData: payload.rawData,
       assimilation: payload.assimilation || {
@@ -440,7 +443,7 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
       dnaStatus: payload.dna_status ?? payload.dnaStatus ?? null,
     };
     setData(mapped);
-  }, []);
+  }, [normalizeEngine]);
 
   return createElement(
     PlotIntelligenceContext.Provider,

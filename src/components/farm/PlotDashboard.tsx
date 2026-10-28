@@ -131,13 +131,13 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plot?.id, farm?.id, cropName]);
 
-  // Fetch intelligence data (engines, timeline) — independent of L10 surfaces
+  // P2-B: Retire independent intelligence fetch — derive presentation state strictly from canonical assessment
+  const injectData = pi.injectData;
   useEffect(() => {
-    if (plot?.id && farm?.id) {
-      pi.fetchIntelligence(String(plot.id), String(farm.id));
+    if (l10.data) {
+      injectData(l10.data);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plot?.id, farm?.id]);
+  }, [l10.data, injectData]);
 
   // ── Screen state (from L10 — the working hook) ─────────────────────────
   // Simplified: no more "diagnose" state that hides everything

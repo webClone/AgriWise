@@ -17,12 +17,15 @@ import {
 import type { EngineStatus } from "@/hooks/usePlotIntelligence";
 import { isRenderedMaterialization } from "@/lib/agribrain/render-materialization";
 
+import type { Finding } from "@/lib/agribrain/parcel-assessment-contract";
+
 interface ExpertViewProps {
   data: Layer10Result;
   activeMode: string;
   surfaceType: string;
   explainPack: ExplainabilityPack | undefined;
   engines: EngineStatus[];
+  topFindings?: Finding[];
   assimilation: any;
   onAskBrain: (query: string) => void;
 }
@@ -263,7 +266,16 @@ function ZoneRow({ zone, onAsk }: { zone: ZoneData; onAsk: (q: string) => void }
 }
 
 // ── Main Expert View ────────────────────────────────────────────────────
-export default function SidebarExpertView({ data, activeMode, surfaceType, explainPack, engines, assimilation, onAskBrain }: ExpertViewProps) {
+export default function SidebarExpertView({
+  data,
+  activeMode,
+  surfaceType,
+  explainPack,
+  engines,
+  topFindings = [],
+  assimilation,
+  onAskBrain,
+}: ExpertViewProps) {
   const l10Context = useLayer10();
   const spatiallyMaterialized = isRenderedMaterialization(l10Context.renderPlan.baseMaterialization, surfaceType);
   const fieldHist = spatiallyMaterialized
@@ -644,6 +656,61 @@ export default function SidebarExpertView({ data, activeMode, surfaceType, expla
           </div>
         </div>
       )}
+
+      {/* ── Published Assessment Findings ──────────────────────── */}
+      <div>
+        <div style={S.sectionLabel}>Published Assessment Findings</div>
+        <div className="sev-card" style={S.card}>
+          {topFindings && topFindings.length > 0 ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              {topFindings.map((finding, idx) => (
+                <div
+                  key={finding.id || idx}
+                  style={{
+                    padding: "6px 8px",
+                    borderRadius: "4px",
+                    background: "rgba(0,0,0,0.25)",
+                    border: "1px solid rgba(71,85,105,0.15)",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "2px" }}>
+                    <span style={{ fontSize: "11px", fontWeight: 700, color: "#e2e8f0", fontFamily: "monospace" }}>
+                      {finding.id}: {finding.title}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "8px",
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                        padding: "1px 4px",
+                        borderRadius: "3px",
+                        background: finding.severity === "critical" ? "rgba(239,68,68,0.2)" : "rgba(148,163,184,0.15)",
+                        color: finding.severity === "critical" ? "#f87171" : "#94a3b8",
+                      }}
+                    >
+                      {finding.severity}
+                    </span>
+                  </div>
+                  {finding.description && finding.description !== finding.title && (
+                    <div style={{ fontSize: "10px", color: "#94a3b8", lineHeight: 1.3 }}>
+                      {finding.description}
+                    </div>
+                  )}
+                  {finding.layerId && (
+                    <div style={{ fontSize: "9px", color: "#64748b", marginTop: "2px" }}>
+                      Layer: {finding.layerId} {finding.actionable ? "· Actionable" : ""}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontSize: "10px", color: "#64748b", fontStyle: "italic" }}>
+              No headline findings published in this assessment envelope.
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* ── Quality Flags ──────────────────────────────────────── */}
       <div>

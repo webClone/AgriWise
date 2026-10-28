@@ -59,6 +59,10 @@ import {
   patchLayer10AsmaeFailure,
   patchLayer10AsmaeLiveState,
 } from "@/lib/agribrain/asmae-job-state.mjs";
+import {
+  type ParcelAssessment,
+  canonicalPublicationToAssessment,
+} from "@/hooks/useParcelAssessment";
 
 
 // ============================================================================
@@ -409,6 +413,9 @@ export interface Layer10Result {
   request_identity?: string;
   requested_source_policy?: SourcePolicy;
   requested_visual_intensity?: number;
+  top_findings?: any[];
+  canonical_publication_receipt_hash?: string;
+  assessment?: ParcelAssessment | null;
 }
 
 export interface FallbackGuidance {
@@ -889,9 +896,17 @@ export interface Layer10ContextType {
   browserRenderReceipt: BrowserRenderReceipt | null;
   commitBrowserRenderReceipt: (receipt: BrowserRenderReceipt) => void;
   clearBrowserRenderReceipt: (viewIdentity: string) => void;
+  assessment: ParcelAssessment | null;
 }
 
 function canonicalPublicationToRunData(cacheJson: any, plotId: string) {
+  let assessment: ParcelAssessment | null = null;
+  try {
+    assessment = canonicalPublicationToAssessment(cacheJson, plotId);
+  } catch (assessmentErr) {
+    // If validation fails or fields are missing in an unvalidated response, leave assessment null
+  }
+
   return {
     run_id: cacheJson.publication_run_id || cacheJson.agribrain_run_id || cacheJson.run_id || cacheJson.runId || "",
     publication_id: cacheJson.publication_id || cacheJson.publicationId || "",
@@ -928,6 +943,15 @@ function canonicalPublicationToRunData(cacheJson: any, plotId: string) {
     resolved_crop_stage: cacheJson.resolved_crop_stage || cacheJson.crop_phenology?.resolved_crop_stage || cacheJson.phenology_context?.resolved_crop_stage || null,
     phenology_context: cacheJson.phenology_context || cacheJson.crop_phenology || null,
     crop_phenology: cacheJson.crop_phenology || null,
+    layer_results: cacheJson.layer_results || cacheJson.layerResults || {},
+    top_findings: cacheJson.top_findings || cacheJson.topFindings || [],
+    timeline: cacheJson.timeline || [],
+    engines: cacheJson.engines || [],
+    current: cacheJson.current || null,
+    rawData: cacheJson.rawData || cacheJson.raw_data || {},
+    assimilation: cacheJson.assimilation || {},
+    canonical_publication_receipt_hash: cacheJson.canonical_publication_receipt_hash || cacheJson.publication_receipt_hash || "",
+    assessment,
   };
 }
 
@@ -2416,6 +2440,7 @@ export function Layer10Provider({
         browserRenderReceipt,
         commitBrowserRenderReceipt,
         clearBrowserRenderReceipt,
+        assessment: data?.assessment ?? null,
       }
     },
     children

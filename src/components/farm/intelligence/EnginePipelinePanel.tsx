@@ -354,7 +354,7 @@ export default function EnginePipelinePanel({
   // layer status, confidence and degradation. The local parametric sandbox
   // remains separate and never upgrades a scientific execution.
   const canonicalEngines = useMemo<EngineStatus[]>(() => {
-    const layerResults = l10.data?.layer_results;
+    const layerResults = l10.assessment?.canonicalLayerResults || l10.data?.layer_results;
     if (!layerResults || Object.keys(layerResults).length === 0) return [];
     return Object.entries(layerResults)
       .sort(([a], [b]) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")))
@@ -387,20 +387,20 @@ export default function EnginePipelinePanel({
             ? "Degraded" : status === "FAILED" ? "Failed"
             : status === "UNAVAILABLE" ? "Unavailable" : status === "OFFLINE"
             ? "Offline" : status === "LOADING" ? "Loading" : "Skipped",
-          summary: "",
+          summary: layer?.summary || "",
           summaryAr: "",
-          lastUpdate: l10.data?.timestamp || null,
+          lastUpdate: l10.assessment?.identity.publishedAt || l10.data?.timestamp || null,
           data: {
             canonical_confidence: confidence,
-            canonical_errors: layer?.errors || [],
-            canonical_degradation_flags: layer?.degradation_flags || [],
+            canonical_errors: (layer as any)?.errors || [],
+            canonical_degradation_flags: (layer as any)?.degradation_flags || (layer as any)?.flags || [],
             canonical_sources: layer?.sources || [],
             is_parameter_overridden: false,
             parameter_source_tag: "Canonical publication",
           },
         };
       });
-  }, [l10.data?.layer_results, l10.data?.timestamp]);
+  }, [l10.assessment, l10.data?.layer_results, l10.data?.timestamp]);
 
   const isLoading = piLoading || l10.loading;
   const isVisible = !isLoading && showEnginePanel;
@@ -413,8 +413,8 @@ export default function EnginePipelinePanel({
   const total = canonicalEngines.length;
   const okCount = canonicalEngines.filter(e => e.status === "OK").length;
   const operationalHealthPercent = total > 0 ? Math.round((okCount / total) * 100) : 0;
-  const scientificQuality = l10.data?.scientific_pipeline_quality;
-  const rawScientificReliability = scientificQuality?.reliability_score;
+  const scientificQuality = l10.assessment?.quality || l10.data?.scientific_pipeline_quality;
+  const rawScientificReliability = (scientificQuality as any)?.reliabilityScore ?? (scientificQuality as any)?.reliability_score;
   const scientificReliabilityPercent = typeof rawScientificReliability === "number"
     && Number.isFinite(rawScientificReliability)
     && rawScientificReliability >= 0 && rawScientificReliability <= 1
