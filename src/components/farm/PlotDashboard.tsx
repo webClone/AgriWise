@@ -130,7 +130,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
     if (plot?.id && farm?.id) {
       parcelAssessment.fetchAssessment(String(plot.id), String(farm.id), {
         geometry: plot.geoJson,
-        cropCycleId: (plot as any)?.cropCycleId || null,
+        cropCycleId: (plot as any)?.cropCycleId || undefined,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

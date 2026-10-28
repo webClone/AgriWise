@@ -201,6 +201,8 @@ export function canonicalizeGeoJson(value: unknown): unknown {
   return value;
 }
 
+export const GEOMETRY_CONTRACT_VERSION = "canonical_geojson_sha256_v1";
+
 /**
  * Compute deterministic geometry hash from GeoJSON geometry, Feature, or coordinates.
  * Recursively canonicalizes all nested properties (including coordinates) and matches
@@ -208,10 +210,18 @@ export function canonicalizeGeoJson(value: unknown): unknown {
  */
 export function computeGeometryHash(geometry: unknown): string {
   if (!geometry) return "empty_geometry";
+  if (typeof geometry === "object" && !Array.isArray(geometry) && Object.keys(geometry as object).length === 0) {
+    return "empty_geometry";
+  }
   let target = geometry;
   if (typeof geometry === "string") {
+    const trimmed = geometry.trim();
+    if (!trimmed) return "empty_geometry";
     try {
-      target = JSON.parse(geometry);
+      target = JSON.parse(trimmed);
+      if (typeof target === "object" && target !== null && !Array.isArray(target) && Object.keys(target).length === 0) {
+        return "empty_geometry";
+      }
     } catch {
       return `sha256:${computeDeterministicHash(geometry)}`;
     }

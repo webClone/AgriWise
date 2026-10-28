@@ -140,16 +140,68 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
           }, { status: snapshotId ? 409 : 200 });
         }
 
-        const payload = snapJson.frontend_payload;
+        const payload = snapJson.frontend_payload || {};
+
+        // 1. Authoritative identity from trusted backend publication snapshot envelope
+        const tenant_id = snapJson.tenant_id || tenantId;
+        const farm_id = snapJson.farm_id || authorizedPlot.farmId;
+        const plot_id = snapJson.plot_id || plotId;
+        const geometry_hash = snapJson.geometry_hash || "";
+        const intelligence_snapshot_id = snapJson.snapshot_id || payload.intelligence_snapshot_id || "";
+        const canonical_publication_receipt_hash = snapJson.publication_receipt_hash || payload.canonical_publication_receipt_hash || "";
+        const canonical_publication_job_id = snapJson.publication_job_id || payload.canonical_publication_job_id || snapJson.job_id || "";
+        const publication_id = payload.publication_id || snapJson.frontend_publication_hash || canonical_publication_receipt_hash;
+
+        // 2. Authoritative temporal identity resolved at publication time
+        const published_at = snapJson.recorded_at || payload.published_at || payload.publishedAt || new Date().toISOString();
+        const evidence_cutoff_at = payload.evidence_cutoff_at || payload.evidenceCutoffAt || snapJson.recorded_at || published_at;
+
+        let observation_window = payload.observation_window || payload.observationWindow;
+        if (!observation_window && Array.isArray(payload.source_window) && payload.source_window.length >= 2) {
+          observation_window = {
+            start: payload.source_window[0],
+            end: payload.source_window[1],
+          };
+        }
+        if (!observation_window) {
+          observation_window = {
+            start: evidence_cutoff_at,
+            end: published_at,
+          };
+        }
+
         return NextResponse.json({
           ...payload,
-          publication_id: payload.publication_id || snapJson.frontend_publication_hash || "",
-          intelligence_snapshot_id: payload.intelligence_snapshot_id || snapJson.snapshot_id,
+          tenant_id,
+          tenantId: tenant_id,
+          farm_id,
+          farmId: farm_id,
+          plot_id,
+          plotId: plot_id,
+          geometry_hash,
+          geometryHash: geometry_hash,
+          publication_id,
+          publicationId: publication_id,
+          publication_run_id: canonical_publication_job_id,
+          run_id: canonical_publication_job_id,
+          runId: canonical_publication_job_id,
+          intelligence_snapshot_id,
+          snapshot_id: intelligence_snapshot_id,
+          snapshotId: intelligence_snapshot_id,
           surface_inventory_hash: payload.surface_inventory_hash || snapJson.surface_inventory_hash || "",
-          canonical_publication_receipt_hash: snapJson.publication_receipt_hash || "",
-          canonical_publication_job_id: snapJson.publication_job_id || "",
+          canonical_publication_receipt_hash,
+          publication_receipt_hash: canonical_publication_receipt_hash,
+          receiptHash: canonical_publication_receipt_hash,
+          canonical_publication_job_id,
+          job_id: canonical_publication_job_id,
+          published_at,
+          publishedAt: published_at,
+          evidence_cutoff_at,
+          evidenceCutoffAt: evidence_cutoff_at,
+          observation_window,
+          observationWindow: observation_window,
           status: "fresh",
-          capturedAt: snapJson.recorded_at || snapJson.timestamp || null,
+          capturedAt: snapJson.recorded_at || snapJson.timestamp || published_at,
           surfaceDigest: snapJson.node_hash || snapJson.snapshot_id,
           surfaceGrids: payload.surfaces || payload.surface_pack || [],
           zones: payload.zones || [],

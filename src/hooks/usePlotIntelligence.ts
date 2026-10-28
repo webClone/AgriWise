@@ -318,7 +318,17 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
       const cached = cacheRef.current[cacheKey];
       // In-memory cache still valid → skip API call entirely
       if (cached && Date.now() - cached.timestamp < CACHE_TTL && cached.data.timeline.weather.length > 0) {
-        setData(cached.data);
+        if (isCanonicalAssessmentBoundRef.current) {
+          setData((prev) => prev ? {
+            ...prev,
+            rawData: cached.data.rawData || prev.rawData,
+            current: cached.data.current || prev.current,
+            sensorContext: cached.data.sensorContext || prev.sensorContext,
+            userInputs: cached.data.userInputs || prev.userInputs,
+          } : cached.data);
+        } else {
+          setData(cached.data);
+        }
         return;
       }
 

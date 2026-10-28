@@ -1010,6 +1010,10 @@ export function Layer10Provider({
       return null;
     }
   }, [rawPlotGeoJson]);
+  const plotGeoJsonRef = useRef(plotGeoJson);
+  useEffect(() => {
+    plotGeoJsonRef.current = plotGeoJson;
+  }, [plotGeoJson]);
 
   // Phase 2-B: Wire authoritative ParcelAssessmentProvider into Layer10 presentation adapter
   const assessmentCtx = useContext(ParcelAssessmentContext);
@@ -1251,8 +1255,44 @@ export function Layer10Provider({
       setLoading(!isExperimentalRequest);
       setPublication((previous) => ({ ...previous, error: null }));
 
+      // ── SINGLE SCIENTIFIC PUBLICATION OWNER DELEGATION ──
+      // All scientific publication adoption must occur through ParcelAssessmentProvider.
+      // Layer 10 acts strictly as a presentation and rendering adapter.
+      if (assessmentCtx) {
+        setLoading(true);
+        try {
+          const assessment = await assessmentCtx.fetchAssessment(
+            plotId,
+            _farmId,
+            {
+              snapshotId: options?.snapshotId,
+              forceRefresh: options?.forceRefresh,
+              sourcePolicy: requestedPolicy,
+              visualIntensity: requestedIntensity,
+              geometry: plotGeoJsonRef.current,
+            }
+          );
+          setLoading(false);
+          if (!assessment) {
+            setPublication((previous) => ({
+              ...previous,
+              data: null,
+              error: assessmentCtx.error || "Canonical assessment rejected or invalid",
+            }));
+          }
+        } catch (fetchErr: any) {
+          setLoading(false);
+          setPublication((previous) => ({
+            ...previous,
+            data: null,
+            error: fetchErr?.message || "Canonical assessment fetch failed",
+          }));
+        }
+        return;
+      }
+
       try {
-        // ── CACHE-FIRST: Try loading cached surfaces instantly ──────
+        // ── CACHE-FIRST: Fallback when running without provider ──────
         let runData: any = null;
         let usedCache = false;
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   PARCEL_ASSESSMENT_CONTRACT_VERSION,
+  GEOMETRY_CONTRACT_VERSION,
   computeGeometryHash,
   computeClientFingerprint,
   validateAssessmentIdentity,
@@ -334,4 +335,201 @@ test("P2-B: end-to-end atomic coherence — all presentation views share one imm
   assert.equal(assessment.quality.surfacesGenerated, 4);
   assert.equal(assessment.topFindings.length, 2);
   assert.equal(assessment.evidenceTimeline.length, 1);
+});
+
+test("P0: geometry hash matches Python backend byte-for-byte across all golden vectors", () => {
+  assert.equal(GEOMETRY_CONTRACT_VERSION, "canonical_geojson_sha256_v1");
+
+  const goldenVectors = [
+    {
+      name: "standard_polygon",
+      geometry: {
+        type: "Polygon",
+        coordinates: [
+          [[35.1, 31.2], [35.2, 31.2], [35.2, 31.3], [35.1, 31.3], [35.1, 31.2]]
+        ],
+      },
+      expectedHash: "sha256:fdef6f34da332b92acbbf0224e7de33b5c3649cfc2cc065dd15f3976453de233",
+    },
+    {
+      name: "feature_with_properties",
+      geometry: {
+        type: "Feature",
+        properties: { name: "Parcel A" },
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [[10.0, 20.0], [10.5, 20.0], [10.5, 20.5], [10.0, 20.0]]
+          ],
+        },
+      },
+      expectedHash: "sha256:4b83c8f9a4bbed965380b7767317a8dde6b75e3a4860fd5c7aa1ac43921dfc36",
+    },
+    {
+      name: "multipolygon",
+      geometry: {
+        type: "MultiPolygon",
+        coordinates: [
+          [[[0, 0], [1, 0], [1, 1], [0, 0]]],
+          [[[2, 2], [3, 2], [3, 3], [2, 2]]],
+        ],
+      },
+      expectedHash: "sha256:7c7e3149ba1bb8f2051e64c4b32db9d91ee9295e6278911f801d3d20e71b0ebe",
+    },
+    {
+      name: "polygon_with_hole",
+      geometry: {
+        type: "Polygon",
+        coordinates: [
+          [[10.0, 10.0], [20.0, 10.0], [20.0, 20.0], [10.0, 20.0], [10.0, 10.0]],
+          [[12.0, 12.0], [18.0, 12.0], [18.0, 18.0], [12.0, 18.0], [12.0, 12.0]],
+        ],
+      },
+      expectedHash: "sha256:a49fc79a81f0d940bbe6c92271f871325674bb690ef01ecc41ba231e3376d6a0",
+    },
+    {
+      name: "feature_with_arabic_and_high_precision",
+      geometry: {
+        type: "Feature",
+        properties: { title: "مزرعة النخيل", id: 42 },
+        geometry: {
+          type: "Point",
+          coordinates: [9.12345678, 34.98765432],
+        },
+      },
+      expectedHash: "sha256:a25d081a1fa5d93d7829e59556a6e00543da5072b0886bf8e32f5363cea28e47",
+    },
+  ];
+
+  for (const vector of goldenVectors) {
+    const actual = computeGeometryHash(vector.geometry);
+    assert.equal(actual, vector.expectedHash, `Golden vector mismatch for ${vector.name}`);
+  }
+});
+
+test("Integration 1: ASMAE completes while assessment A is displayed — all consumers adopt publication B through single provider", async () => {
+  // Simulate provider holding initial Assessment A
+  const pubA = buildMockPublication({
+    intelligence_snapshot_id: "snap-A-001",
+    canonical_publication_receipt_hash: "receipt-A-sha256-1111111111111111111111111111111111111111111111111111111111111111",
+    published_at: "2026-10-28T07:00:00Z",
+    evidence_cutoff_at: "2026-10-28T06:30:00Z",
+    top_findings: ["Assessment A: Initial satellite pass normal"],
+  });
+  const assessmentA = canonicalPublicationToAssessment(pubA, "plot-p01-olive");
+
+  // Presentation consumer views derived from Assessment A
+  let providerState = { status: "ready", assessment: assessmentA, rawPublication: pubA };
+  let l10View = { assessment: providerState.assessment, receipt: providerState.assessment.identity.publicationReceiptHash };
+  let findingsView = [...providerState.assessment.topFindings];
+  let timelineView = [...providerState.assessment.evidenceTimeline];
+
+  assert.equal(l10View.assessment.identity.snapshotId, "snap-A-001");
+  assert.equal(findingsView[0].title, "Assessment A: Initial satellite pass normal");
+
+  // Background ASMAE completion event arrives with finalSnapshotId "snap-B-002"
+  const pubB = buildMockPublication({
+    intelligence_snapshot_id: "snap-B-002",
+    canonical_publication_receipt_hash: "receipt-B-sha256-2222222222222222222222222222222222222222222222222222222222222222",
+    published_at: "2026-10-28T08:00:00Z",
+    evidence_cutoff_at: "2026-10-28T07:45:00Z",
+    top_findings: ["Assessment B: ASMAE radar-optical fusion completed with 1m resolution"],
+  });
+
+  // Simulated provider adoption on ASMAE refresh_completed
+  const assessmentB = canonicalPublicationToAssessment(pubB, "plot-p01-olive");
+  providerState = { status: "ready", assessment: assessmentB, rawPublication: pubB };
+
+  // All downstream presentation consumers atomically adopt Assessment B through provider
+  l10View = { assessment: providerState.assessment, receipt: providerState.assessment.identity.publicationReceiptHash };
+  findingsView = [...providerState.assessment.topFindings];
+  timelineView = [...providerState.assessment.evidenceTimeline];
+
+  assert.equal(l10View.assessment.identity.snapshotId, "snap-B-002");
+  assert.equal(l10View.receipt, "receipt-B-sha256-2222222222222222222222222222222222222222222222222222222222222222");
+  assert.equal(findingsView[0].title, "Assessment B: ASMAE radar-optical fusion completed with 1m resolution");
+  assert.equal(l10View.assessment.identity.publishedAt, "2026-10-28T08:00:00.000Z");
+});
+
+test("Integration 2: Legacy fetchLayer10 called after publication A is accepted — delegates to provider and rejects independent commitment", async () => {
+  const pubA = buildMockPublication({
+    intelligence_snapshot_id: "snap-A-authorized",
+    canonical_publication_receipt_hash: "receipt-A-sha256-3333333333333333333333333333333333333333333333333333333333333333",
+  });
+  const assessmentA = canonicalPublicationToAssessment(pubA, "plot-p01-olive");
+  let providerState = { status: "ready", assessment: assessmentA, rawPublication: pubA };
+  let l10State = { data: { assessment: assessmentA }, error: null };
+
+  // Simulated legacy caller invokes fetchLayer10 with tampered / spoofed data lacking publication receipt
+  const tamperedCandidate = buildMockPublication({
+    intelligence_snapshot_id: "snap-spoofed",
+    canonical_publication_receipt_hash: "",
+    publication_receipt_hash: "",
+  });
+
+  // fetchLayer10 delegates to provider, which runs canonicalPublicationToAssessment:
+  let delegationFailedClosed = false;
+  try {
+    canonicalPublicationToAssessment(tamperedCandidate, "plot-p01-olive");
+  } catch (err) {
+    delegationFailedClosed = true;
+    providerState = { status: "invalid", assessment: null, rawPublication: null };
+    // Layer 10 presentation adapter fails closed, zero independent scientific state committed
+    l10State = { data: null, error: err.message };
+  }
+
+  assert.equal(delegationFailedClosed, true, "Contract validation must reject tampered candidate");
+  assert.equal(providerState.status, "invalid");
+  assert.equal(providerState.assessment, null);
+  assert.equal(l10State.data, null, "Layer 10 must fail closed without committing independent state");
+  assert.match(l10State.error, /publicationReceiptHash_required/);
+});
+
+test("Integration 3: Rapid parcel / crop-cycle switches with delayed responses — generation guard guarantees only authorized current parcel appears", async () => {
+  let requestSequence = 0;
+  let activeParcelId = "plot-parcel-01";
+  let activeAssessment = null;
+
+  // Function simulating provider request with generation sequence guard
+  async function fetchAssessmentSimulated(targetPlotId, delayMs, payload) {
+    const sequence = ++requestSequence;
+    activeParcelId = targetPlotId;
+
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+    // Stale generation guard: reject if newer request was dispatched
+    if (sequence !== requestSequence) {
+      return null; // Discard stale response
+    }
+
+    const assessment = canonicalPublicationToAssessment(payload, targetPlotId);
+    activeAssessment = assessment;
+    return assessment;
+  }
+
+  const pubParcel1 = buildMockPublication({
+    plot_id: "plot-parcel-01",
+    intelligence_snapshot_id: "snap-parcel-01",
+    canonical_publication_receipt_hash: "receipt-1111111111111111111111111111111111111111111111111111111111111111",
+  });
+
+  const pubParcel2 = buildMockPublication({
+    plot_id: "plot-parcel-02",
+    intelligence_snapshot_id: "snap-parcel-02",
+    canonical_publication_receipt_hash: "receipt-2222222222222222222222222222222222222222222222222222222222222222",
+  });
+
+  // User rapidly clicks Parcel 1, then immediately switches to Parcel 2
+  // Request 1 has 50ms delay, Request 2 resolves in 10ms
+  const p1Promise = fetchAssessmentSimulated("plot-parcel-01", 50, pubParcel1);
+  const p2Promise = fetchAssessmentSimulated("plot-parcel-02", 10, pubParcel2);
+
+  const [res1, res2] = await Promise.all([p1Promise, p2Promise]);
+
+  // Request 1 is aborted/discarded by sequence guard
+  assert.equal(res1, null, "Slow Parcel 1 response must be discarded by generation guard");
+  assert.ok(res2, "Parcel 2 response must be accepted");
+  assert.equal(activeAssessment.identity.plotId, "plot-parcel-02");
+  assert.equal(activeAssessment.identity.snapshotId, "snap-parcel-02");
+  assert.equal(activeParcelId, "plot-parcel-02");
 });

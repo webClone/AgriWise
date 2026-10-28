@@ -180,8 +180,8 @@ def _build_inputs(ctx: dict, query: str = "", authenticated_namespace: Optional[
     geom_hash = ctx.get("geometry_hash")
     if not geom_hash:
         if poly:
-            geom_raw = json.dumps(poly, sort_keys=True).encode("utf-8")
-            geom_hash = hashlib.sha256(geom_raw).hexdigest()[:8]
+            from services.agribrain.geometry_contract import compute_geometry_hash
+            geom_hash = compute_geometry_hash(poly)
         else:
             geom_hash = "UNKNOWN_GEO"
 

@@ -26,6 +26,7 @@ import {
 
 import {
   PARCEL_ASSESSMENT_CONTRACT_VERSION,
+  GEOMETRY_CONTRACT_VERSION,
   type ParcelAssessment,
   type ParcelAssessmentIdentity,
   type LayerResult,
@@ -46,6 +47,7 @@ import { classifyCanonicalHeadValidation } from "@/lib/agribrain/layer10-request
 
 export {
   PARCEL_ASSESSMENT_CONTRACT_VERSION,
+  GEOMETRY_CONTRACT_VERSION,
   type ParcelAssessment,
   type ParcelAssessmentIdentity,
   type LayerResult,
@@ -91,6 +93,7 @@ export interface ParcelAssessmentContextType {
   error: string | null;
   plotId: string | null;
   farmId: string | null;
+  activeCropCycleId: string | null;
   fetchAssessment: (
     plotId: string,
     farmId?: string,
@@ -165,7 +168,9 @@ export function ParcelAssessmentProvider({
         }
 
         const effectiveGeometry = options?.geometry !== undefined ? options.geometry : plotGeoJsonRef.current;
-        const effectiveCropCycleId = options?.cropCycleId !== undefined ? options.cropCycleId : cropCycleIdRef.current;
+        const effectiveCropCycleId = (options?.cropCycleId !== undefined && options?.cropCycleId !== null)
+          ? options.cropCycleId
+          : (cropCycleIdRef.current ?? null);
 
         const res = await fetch("/api/agribrain/surfaces/latest", {
           method: "POST",
@@ -389,6 +394,7 @@ export function ParcelAssessmentProvider({
         error,
         plotId: currentPlotId,
         farmId: currentFarmId,
+        activeCropCycleId: cropCycleIdRef.current,
         fetchAssessment,
         isStaleForGeometry: isStaleForGeometryFn,
         isStaleForCropCycle: isStaleForCropCycleFn,
