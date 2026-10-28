@@ -190,6 +190,12 @@ export function computeDeterministicHash(input: string): string {
  */
 export function canonicalizeGeoJson(value: unknown): unknown {
   if (value === null || value === undefined) return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new Error(`Non-finite number in canonical GeoJSON: ${value}`);
+    }
+    return Object.is(value, -0) ? 0 : value;
+  }
   if (Array.isArray(value)) return value.map(canonicalizeGeoJson);
   if (typeof value === "object") {
     return Object.fromEntries(
@@ -534,10 +540,10 @@ export function canonicalPublicationToAssessment(
     || "";
 
   // The backend authoritative publication geometry hash must be respected.
-  // Current frontend geometry is context for staleness checking, not publication rewriting.
+  // Current frontend geometry is context for staleness checking, never substituted into published identity.
   const geometryHash = cacheJson.geometry_hash
     || cacheJson.geometryHash
-    || (options?.geometry ? computeGeometryHash(options.geometry) : "");
+    || "";
 
   const tenantId = cacheJson.tenant_id
     || cacheJson.tenantId
@@ -549,11 +555,15 @@ export function canonicalPublicationToAssessment(
     || options?.farmId
     || "";
 
+  // Published crop cycle: what AgriBrain actually assessed.
+  // Current workspace cropCycleId must never substitute for published identity.
+  const cropCycleId = cacheJson.crop_cycle_id ?? cacheJson.cropCycleId ?? null;
+
   const identity: ParcelAssessmentIdentity = {
     tenantId,
     farmId,
     plotId: String(plotId || cacheJson.plot_id || cacheJson.plotId || ""),
-    cropCycleId: options?.cropCycleId ?? cacheJson.crop_cycle_id ?? cacheJson.cropCycleId ?? null,
+    cropCycleId,
     publicationId: String(cacheJson.publication_id || cacheJson.publicationId || ""),
     runId: String(cacheJson.publication_run_id || cacheJson.agribrain_run_id || cacheJson.run_id || cacheJson.runId || ""),
     snapshotId: String(cacheJson.intelligence_snapshot_id || cacheJson.snapshot_id || cacheJson.snapshotId || ""),

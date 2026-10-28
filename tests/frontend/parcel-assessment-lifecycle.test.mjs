@@ -399,12 +399,84 @@ test("P0: geometry hash matches Python backend byte-for-byte across all golden v
       },
       expectedHash: "sha256:a25d081a1fa5d93d7829e59556a6e00543da5072b0886bf8e32f5363cea28e47",
     },
+    {
+      name: "numeric_point_micro_exponential",
+      geometry: {
+        type: "Point",
+        coordinates: [0.000001, 0.0000001],
+      },
+      expectedHash: "sha256:0805913dafb5db7672580072c0300be80a511b941c6ac397e276622a31d709f5",
+    },
+    {
+      name: "numeric_large_exponent_and_fraction",
+      geometry: {
+        type: "Point",
+        coordinates: [0.00001, 1e20],
+      },
+      expectedHash: "sha256:bb1092908aa2b4ac27dd2a8df53bb0f6e89f1eee0f6ae05120398a481398c3f5",
+    },
+    {
+      name: "numeric_negative_zero_normalization",
+      geometry: {
+        type: "Point",
+        coordinates: [-0.0, 0.0],
+      },
+      expectedHash: "sha256:52b7fb7f36a0fb2637bec96caca0653e0180b736209aa9438f3d7e889730c071",
+    },
   ];
 
   for (const vector of goldenVectors) {
     const actual = computeGeometryHash(vector.geometry);
     assert.equal(actual, vector.expectedHash, `Golden vector mismatch for ${vector.name}`);
   }
+});
+
+test("P0: non-finite coordinates in GeoJSON (NaN, Infinity) are rejected fail-closed", () => {
+  assert.throws(() => computeGeometryHash({ type: "Point", coordinates: [NaN, 0.0] }), /Non-finite number/);
+  assert.throws(() => computeGeometryHash({ type: "Point", coordinates: [Infinity, 0.0] }), /Non-finite number/);
+  assert.throws(() => computeGeometryHash({ type: "Point", coordinates: [-Infinity, 0.0] }), /Non-finite number/);
+});
+
+test("P1: workspace geometry and crop-cycle never substitute for published identity", () => {
+  const publishedGeom = {
+    type: "Polygon",
+    coordinates: [[[10.0, 20.0], [10.5, 20.0], [10.5, 20.5], [10.0, 20.0]]],
+  };
+  const publishedGeomHash = computeGeometryHash(publishedGeom);
+  const workspaceGeom = {
+    type: "Polygon",
+    coordinates: [[[99.0, 99.0], [99.5, 99.0], [99.5, 99.5], [99.0, 99.0]]],
+  };
+
+  // Publication with published crop cycle 'cycle-2026-autumn' and geometry
+  const raw = buildMockPublication({
+    crop_cycle_id: "cycle-2026-autumn",
+    geometry_hash: publishedGeomHash,
+  });
+
+  // Caller views 'cycle-2027-spring' and edited geometry in current workspace
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive", {
+    cropCycleId: "cycle-2027-spring",
+    geometry: workspaceGeom,
+  });
+
+  // The published identity MUST preserve what AgriBrain actually assessed, NOT the workspace context
+  assert.equal(assessment.identity.cropCycleId, "cycle-2026-autumn", "Published cropCycleId must not be overwritten by workspace crop cycle");
+  assert.equal(assessment.identity.geometryHash, publishedGeomHash, "Published geometryHash must not be overwritten by workspace geometry");
+
+  // The workspace context is used strictly to detect staleness
+  assert.equal(isAssessmentStaleForCropCycle(assessment.identity, "cycle-2027-spring"), true);
+  assert.equal(isAssessmentStaleForGeometry(assessment.identity, workspaceGeom), true);
+
+  // If published geometry_hash is missing, constructor must FAIL CLOSED, never silently substitute workspace geometry
+  const missingGeomPub = buildMockPublication({
+    geometry_hash: "",
+    geometryHash: "",
+  });
+  assert.throws(
+    () => canonicalPublicationToAssessment(missingGeomPub, "plot-p01-olive", { geometry: workspaceGeom }),
+    /geometryHash_required/
+  );
 });
 
 test("Integration 1: ASMAE completes while assessment A is displayed — all consumers adopt publication B through single provider", async () => {

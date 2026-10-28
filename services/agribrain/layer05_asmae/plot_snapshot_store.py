@@ -263,6 +263,53 @@ def publish_canonical_plot_snapshot(
         inv_hash = compute_surface_inventory_hash(surfaces)
         immutable_frontend_payload["surface_inventory_hash"] = inv_hash
 
+    publication_timestamp = datetime.now(timezone.utc).isoformat()
+    published_at_str = (
+        immutable_frontend_payload.get("published_at")
+        or immutable_frontend_payload.get("publishedAt")
+        or publication_timestamp
+    )
+    evidence_cutoff_str = (
+        scientific_result.get("evidence_cutoff_at")
+        or scientific_result.get("evidence_cutoff")
+        or scientific_result.get("spatial_evidence_cutoff")
+        or scientific_result.get("as_of")
+        or immutable_frontend_payload.get("evidence_cutoff_at")
+        or immutable_frontend_payload.get("evidenceCutoffAt")
+    )
+    if hasattr(evidence_cutoff_str, "isoformat"):
+        evidence_cutoff_str = evidence_cutoff_str.isoformat()
+    evidence_cutoff_str = str(evidence_cutoff_str or "").strip()
+
+    obs_win = (
+        immutable_frontend_payload.get("observation_window")
+        or immutable_frontend_payload.get("observationWindow")
+        or scientific_result.get("observation_window")
+    )
+    if not obs_win:
+        src_win = (
+            immutable_frontend_payload.get("source_window")
+            or scientific_result.get("source_window")
+        )
+        if isinstance(src_win, (list, tuple)) and len(src_win) >= 2 and src_win[0] and src_win[1]:
+            obs_win = {"start": str(src_win[0]), "end": str(src_win[1])}
+        elif isinstance(scientific_result.get("date_range"), dict):
+            dr = scientific_result["date_range"]
+            if dr.get("start") and dr.get("end"):
+                obs_win = {"start": str(dr["start"]), "end": str(dr["end"])}
+
+    if not evidence_cutoff_str and obs_win and obs_win.get("end"):
+        evidence_cutoff_str = str(obs_win["end"])
+    if not evidence_cutoff_str:
+        evidence_cutoff_str = published_at_str
+
+    if not obs_win:
+        obs_win = {"start": evidence_cutoff_str, "end": evidence_cutoff_str}
+
+    immutable_frontend_payload["published_at"] = published_at_str
+    immutable_frontend_payload["evidence_cutoff_at"] = evidence_cutoff_str
+    immutable_frontend_payload["observation_window"] = obs_win
+
     envelope: Dict[str, Any] = {
         "contract_version": PLOT_SNAPSHOT_CONTRACT_VERSION,
         "snapshot_kind": normalized_kind,
@@ -271,7 +318,10 @@ def publish_canonical_plot_snapshot(
         "farm_id": ns.farm_id,
         "plot_id": ns.plot_id,
         "geometry_hash": str(geometry_hash or ""),
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "recorded_at": publication_timestamp,
+        "published_at": published_at_str,
+        "evidence_cutoff_at": evidence_cutoff_str,
+        "observation_window": obs_win,
         "supersedes_snapshot_id": prior_head.get("snapshot_id"),
         "job_id": str(job_id),
         "manifest_hash": str(manifest_hash),
@@ -377,7 +427,10 @@ def publish_canonical_plot_snapshot(
         "node_ref": logical_node_ref,
         "node_hash": envelope.get("node_hash"),
         "frontend_payload": immutable_frontend_payload,
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "published_at": published_at_str,
+        "evidence_cutoff_at": evidence_cutoff_str,
+        "observation_window": obs_win,
+        "recorded_at": publication_timestamp,
     }
 
     hashable_pub = {k: v for k, v in publication.items() if not k.endswith("_ref")}
@@ -506,7 +559,10 @@ def publish_canonical_plot_snapshot(
         "frontend_publication_ref": logical_publication_ref,
         "frontend_publication_hash": publication.get("publication_hash"),
         "surface_inventory_hash": publication.get("frontend_payload", {}).get("surface_inventory_hash"),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "published_at": published_at_str,
+        "evidence_cutoff_at": evidence_cutoff_str,
+        "observation_window": obs_win,
+        "updated_at": publication_timestamp,
     }
     _atomic(_head_path(ns), head)
     with _SNAPSHOT_CACHE_LOCK:
@@ -833,10 +889,40 @@ def load_latest_plot_snapshot(
             )
         )
     )
+    published_at_val = (
+        head.get("published_at")
+        or node.get("published_at")
+        or publication.get("published_at")
+        or node.get("recorded_at")
+    )
+    evidence_cutoff_val = (
+        head.get("evidence_cutoff_at")
+        or node.get("evidence_cutoff_at")
+        or publication.get("evidence_cutoff_at")
+        or (publication_frontend.get("evidence_cutoff_at") if publication_frontend else None)
+    )
+    obs_win_val = (
+        head.get("observation_window")
+        or node.get("observation_window")
+        or publication.get("observation_window")
+        or (publication_frontend.get("observation_window") if publication_frontend else None)
+    )
+    if not obs_win_val and publication_frontend:
+        src_win = publication_frontend.get("source_window")
+        if isinstance(src_win, (list, tuple)) and len(src_win) >= 2 and src_win[0] and src_win[1]:
+            obs_win_val = {"start": str(src_win[0]), "end": str(src_win[1])}
+
+    node["published_at"] = published_at_val
+    node["evidence_cutoff_at"] = evidence_cutoff_val
+    node["observation_window"] = obs_win_val
+
     # Return the job-bound frontend publication only after the immutable node
     # hash has been recomputed.  It is a separate hashed artifact, not a
     # mutation of the node.
     if publication_frontend:
+        publication_frontend["published_at"] = published_at_val
+        publication_frontend["evidence_cutoff_at"] = evidence_cutoff_val
+        publication_frontend["observation_window"] = obs_win_val
         node["frontend_payload"] = publication_frontend
 
     with _SNAPSHOT_CACHE_LOCK:

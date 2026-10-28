@@ -72,6 +72,30 @@ GOLDEN_VECTORS = [
         },
         "expected_hash": "sha256:a25d081a1fa5d93d7829e59556a6e00543da5072b0886bf8e32f5363cea28e47",
     },
+    {
+        "name": "numeric_point_micro_exponential",
+        "geometry": {
+            "type": "Point",
+            "coordinates": [0.000001, 0.0000001],
+        },
+        "expected_hash": "sha256:0805913dafb5db7672580072c0300be80a511b941c6ac397e276622a31d709f5",
+    },
+    {
+        "name": "numeric_large_exponent_and_fraction",
+        "geometry": {
+            "type": "Point",
+            "coordinates": [0.00001, 1e20],
+        },
+        "expected_hash": "sha256:bb1092908aa2b4ac27dd2a8df53bb0f6e89f1eee0f6ae05120398a481398c3f5",
+    },
+    {
+        "name": "numeric_negative_zero_normalization",
+        "geometry": {
+            "type": "Point",
+            "coordinates": [-0.0, 0.0],
+        },
+        "expected_hash": "sha256:52b7fb7f36a0fb2637bec96caca0653e0180b736209aa9438f3d7e889730c071",
+    },
 ]
 
 
@@ -89,6 +113,16 @@ def test_golden_vectors_match():
     for vector in GOLDEN_VECTORS:
         actual = compute_geometry_hash(vector["geometry"])
         assert actual == vector["expected_hash"], f"Mismatch for vector {vector['name']}: got {actual}"
+
+
+def test_non_finite_coordinates_rejected():
+    import pytest
+    with pytest.raises(ValueError, match="Non-finite number"):
+        compute_geometry_hash({"type": "Point", "coordinates": [float("nan"), 0.0]})
+    with pytest.raises(ValueError, match="Non-finite number"):
+        compute_geometry_hash({"type": "Point", "coordinates": [float("inf"), 0.0]})
+    with pytest.raises(ValueError, match="Non-finite number"):
+        compute_geometry_hash({"type": "Point", "coordinates": [float("-inf"), 0.0]})
 
 
 def test_coordinate_collision_prevention():

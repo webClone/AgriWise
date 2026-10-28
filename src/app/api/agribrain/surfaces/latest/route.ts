@@ -152,22 +152,28 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
         const canonical_publication_job_id = snapJson.publication_job_id || payload.canonical_publication_job_id || snapJson.job_id || "";
         const publication_id = payload.publication_id || snapJson.frontend_publication_hash || canonical_publication_receipt_hash;
 
-        // 2. Authoritative temporal identity resolved at publication time
-        const published_at = snapJson.recorded_at || payload.published_at || payload.publishedAt || new Date().toISOString();
-        const evidence_cutoff_at = payload.evidence_cutoff_at || payload.evidenceCutoffAt || snapJson.recorded_at || published_at;
+        // 2. Authoritative temporal identity resolved at publication time without synthetic metadata
+        const published_at = snapJson.published_at || payload.published_at || payload.publishedAt || snapJson.recorded_at;
+        const evidence_cutoff_at = snapJson.evidence_cutoff_at || payload.evidence_cutoff_at || payload.evidenceCutoffAt;
 
-        let observation_window = payload.observation_window || payload.observationWindow;
-        if (!observation_window && Array.isArray(payload.source_window) && payload.source_window.length >= 2) {
+        let observation_window = snapJson.observation_window || payload.observation_window || payload.observationWindow;
+        if (!observation_window && Array.isArray(payload.source_window) && payload.source_window.length >= 2 && payload.source_window[0] && payload.source_window[1]) {
           observation_window = {
             start: payload.source_window[0],
             end: payload.source_window[1],
           };
         }
-        if (!observation_window) {
-          observation_window = {
-            start: evidence_cutoff_at,
-            end: published_at,
-          };
+
+        // Bridge validates and transfers authoritative publication envelope without synthesis
+        if (!published_at || !evidence_cutoff_at || !observation_window?.start || !observation_window?.end) {
+          return NextResponse.json(
+            {
+              available: false,
+              reason: "publication_identity_temporal_envelope_missing",
+              error: "Canonical publication envelope missing authoritative published_at, evidence_cutoff_at, or observation_window",
+            },
+            { status: 422 }
+          );
         }
 
         return NextResponse.json({

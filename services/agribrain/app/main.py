@@ -3949,13 +3949,8 @@ def api_v2_run(
             if not _publication_geometry_hash:
                 geometry_value = ctx.get("field_geometry") or ctx.get("polygon")
                 if geometry_value:
-                    import hashlib as _publication_hashlib
-                    import json as _publication_json
-                    _publication_geometry_hash = _publication_hashlib.sha256(
-                        _publication_json.dumps(
-                            geometry_value, sort_keys=True, default=str
-                        ).encode("utf-8")
-                    ).hexdigest()[:8]
+                    from services.agribrain.geometry_contract import compute_geometry_hash
+                    _publication_geometry_hash = compute_geometry_hash(geometry_value)
             
             # --- Surfaces Cache Check ---
             import os

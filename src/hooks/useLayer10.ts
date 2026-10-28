@@ -1291,8 +1291,24 @@ export function Layer10Provider({
         return;
       }
 
+      // Architectural enforcement: fail-closed outside ParcelAssessmentProvider unless explicitly in test environment
+      if (!assessmentCtx) {
+        if (process.env.NODE_ENV !== "test" && !(options as any)?.allowLegacyFallback) {
+          console.error(
+            "[useLayer10] Architectural violation: fetchLayer10 called outside ParcelAssessmentProvider. Scientific publication adoption must occur through ParcelAssessmentProvider."
+          );
+          setLoading(false);
+          setPublication((previous) => ({
+            ...previous,
+            data: null,
+            error: "Architectural violation: Layer 10 must be mounted within ParcelAssessmentProvider",
+          }));
+          return;
+        }
+      }
+
       try {
-        // ── CACHE-FIRST: Fallback when running without provider ──────
+        // ── CACHE-FIRST: Fallback when running in test / legacy harness ──────
         let runData: any = null;
         let usedCache = false;
 
