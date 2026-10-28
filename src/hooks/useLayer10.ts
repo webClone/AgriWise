@@ -893,7 +893,7 @@ export interface Layer10ContextType {
 
 function canonicalPublicationToRunData(cacheJson: any, plotId: string) {
   return {
-    run_id: cacheJson.publication_run_id || `canonical-${cacheJson.surfaceDigest || ""}`,
+    run_id: cacheJson.publication_run_id || cacheJson.agribrain_run_id || cacheJson.run_id || cacheJson.runId || "",
     publication_id: cacheJson.publication_id || cacheJson.publicationId || "",
     plot_id: plotId,
     timestamp: cacheJson.capturedAt,
@@ -1109,6 +1109,10 @@ export function Layer10Provider({
         let usedCache = false;
 
         try {
+          if (options?.snapshotId && options?.forceRefresh) {
+            throw new Error("Cannot force-refresh an immutable snapshot.");
+          }
+
           if (!options?.forceRefresh) {
             const cacheRes = await fetch("/api/agribrain/surfaces/latest", {
               method: "POST",
@@ -1170,6 +1174,9 @@ export function Layer10Provider({
 
         // ── LIVE RUN: Only if cache missed ─────────────────────────
         if (!runData) {
+          if (options?.snapshotId) {
+            throw new Error(`Exact snapshot ${options.snapshotId} was not found; execution fallback is denied.`);
+          }
           const res = await fetch("/api/agribrain/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1272,7 +1279,7 @@ export function Layer10Provider({
           run_id: runData.run_id || "",
           publication_id: runData.publication_id || "",
           plot_id: runData.plot_id || plotId,
-          timestamp: runData.timestamp || runData.audit?.timestamp_utc || new Date().toISOString(),
+          timestamp: runData.timestamp || runData.audit?.timestamp_utc || "",
 
           surfaces,
 

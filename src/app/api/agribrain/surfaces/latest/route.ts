@@ -149,7 +149,7 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
           canonical_publication_receipt_hash: snapJson.publication_receipt_hash || "",
           canonical_publication_job_id: snapJson.publication_job_id || "",
           status: "fresh",
-          capturedAt: snapJson.recorded_at || snapJson.timestamp || new Date().toISOString(),
+          capturedAt: snapJson.recorded_at || snapJson.timestamp || null,
           surfaceDigest: snapJson.node_hash || snapJson.snapshot_id,
           surfaceGrids: payload.surfaces || payload.surface_pack || [],
           zones: payload.zones || [],

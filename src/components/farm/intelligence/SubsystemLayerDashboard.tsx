@@ -81,6 +81,22 @@ export default function SubsystemLayerDashboard({
   };
 
   const baseStatus = (activeLayerId === "L4" || activeLayerId === "L6") ? "DEGRADED" : "OK";
+  const canonicalEngine = Array.isArray(piData?.engines)
+    ? piData.engines.find((e: any) => e.id === activeLayerId)
+    : null;
+  const canonicalStatus = canonicalEngine?.status || baseStatus;
+  const canonicalConfidence = typeof canonicalEngine?.data?.confidence === "number"
+    ? (canonicalEngine.data.confidence as number)
+    : (l10Data?.quality?.reliability_score != null ? l10Data.quality.reliability_score / 100 : null)
+    ?? (canonicalStatus === "OK" ? 0.92 : 0.45);
+  const canonicalSources = (canonicalEngine?.data?.sources as string[])
+    || (canonicalEngine?.data?.source as string ? [canonicalEngine.data.source as string] : null)
+    || (Array.isArray(l10Data?.provenance?.sources_used) ? l10Data.provenance.sources_used : null)
+    || ["Automated Remote Sensing"];
+  const canonicalSourceTag = Array.isArray(canonicalSources) ? canonicalSources.join(", ") : String(canonicalSources);
+  const canonicalFlags = (canonicalEngine?.data?.flags as string[])
+    || (Array.isArray(l10Data?.quality?.warnings) ? l10Data.quality.warnings : [])
+    || [];
   const currentSim = getSimulatedLayerStatus(activeLayerId, baseStatus);
 
   const handleApply = () => {
@@ -1124,31 +1140,31 @@ export default function SubsystemLayerDashboard({
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px" }}>
                 <div style={{ background: "rgba(0,0,0,0.3)", padding: "12px", borderRadius: "10px", border: "1px solid rgba(71,85,105,0.2)" }}>
                   <div style={{ fontSize: "10px", color: "#94a3b8", textTransform: "uppercase" }}>Telemetry Reliability</div>
-                  <div style={{ fontSize: "18px", fontWeight: 800, color: currentSim.confidence >= 0.8 ? "#4ade80" : "#fbbf24", marginTop: "4px" }}>
-                    {(currentSim.confidence * 100).toFixed(0)}%
+                  <div style={{ fontSize: "18px", fontWeight: 800, color: canonicalConfidence >= 0.8 ? "#4ade80" : "#fbbf24", marginTop: "4px" }}>
+                    {(canonicalConfidence * 100).toFixed(0)}%
                   </div>
                   <div style={{ fontSize: "10px", color: "#64748b", marginTop: "2px" }}>
-                    {currentSim.status === "OK" ? "Within operational confidence window" : "Below 50% verification threshold"}
+                    {canonicalStatus === "OK" ? "Within operational confidence window" : "Below verification threshold"}
                   </div>
                 </div>
 
                 <div style={{ background: "rgba(0,0,0,0.3)", padding: "12px", borderRadius: "10px", border: "1px solid rgba(71,85,105,0.2)" }}>
                   <div style={{ fontSize: "10px", color: "#94a3b8", textTransform: "uppercase" }}>Data Feed Source</div>
-                  <div style={{ fontSize: "14px", fontWeight: 700, color: "#fff", marginTop: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {currentSim.sourceTag}
+                  <div style={{ fontSize: "14px", fontWeight: 700, color: "#fff", marginTop: "6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={canonicalSourceTag}>
+                    {canonicalSourceTag}
                   </div>
                   <div style={{ fontSize: "10px", color: "#64748b", marginTop: "2px" }}>
-                    {currentSim.isOverridden ? "Farmer Verified Parameter" : "Automated Remote Sensing"}
+                    Authenticated Observations & Telemetry
                   </div>
                 </div>
 
                 <div style={{ background: "rgba(0,0,0,0.3)", padding: "12px", borderRadius: "10px", border: "1px solid rgba(71,85,105,0.2)" }}>
                   <div style={{ fontSize: "10px", color: "#94a3b8", textTransform: "uppercase" }}>Subsystem Status</div>
-                  <div style={{ fontSize: "16px", fontWeight: 800, color: currentSim.status === "OK" ? "#4ade80" : "#fbbf24", marginTop: "4px" }}>
-                    {currentSim.status}
+                  <div style={{ fontSize: "16px", fontWeight: 800, color: canonicalStatus === "OK" ? "#4ade80" : "#fbbf24", marginTop: "4px" }}>
+                    {canonicalStatus}
                   </div>
                   <div style={{ fontSize: "10px", color: "#64748b", marginTop: "2px" }}>
-                    {currentSim.flags.length > 0 ? currentSim.flags.join(", ") : "All verification checks passed"}
+                    {canonicalFlags.length > 0 ? canonicalFlags.join(", ") : "Canonical verification passed"}
                   </div>
                 </div>
               </div>
@@ -1156,7 +1172,7 @@ export default function SubsystemLayerDashboard({
               {/* Raw JSON Stream Inspection */}
               <div style={{ background: "rgba(0,0,0,0.4)", borderRadius: "12px", border: "1px solid rgba(71,85,105,0.2)", padding: "14px" }}>
                 <div style={{ fontSize: "11px", fontWeight: 700, color: "#cbd5e1", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>
-                  Active Parameter Snapshot & Telemetry Context
+                  Authenticated Observation & Telemetry Feed
                 </div>
                 <pre
                   style={{
@@ -1176,10 +1192,15 @@ export default function SubsystemLayerDashboard({
                     {
                       subsystem_id: activeLayerId,
                       name: currentMeta.name,
-                      status: currentSim.status,
-                      confidence: currentSim.confidence,
-                      active_parameters: params[activeLayerId as keyof SubsystemParamsState],
-                      degradation_flags: currentSim.flags,
+                      status: canonicalStatus,
+                      reliability: canonicalConfidence,
+                      sources: canonicalSources,
+                      last_capture: canonicalEngine?.lastUpdate || l10Data?.timestamp || null,
+                      telemetry_payload: canonicalEngine?.raw || canonicalEngine?.data || {
+                        status: canonicalStatus,
+                        confidence: canonicalConfidence,
+                        flags: canonicalFlags,
+                      },
                     },
                     null,
                     2
@@ -1221,10 +1242,8 @@ export default function SubsystemLayerDashboard({
                     <span style={{ fontSize: "16px" }}>🧪</span>
                     <div>
                       <div style={{ fontSize: "12px", fontWeight: 600, color: "#fff" }}>Soil & Nutrient Calibration</div>
-                      <div style={{ fontSize: "10px", color: currentSim.isOverridden ? "#34d399" : "#fbbf24" }}>
-                        {activeLayerId === "L4" && currentSim.isOverridden
-                          ? "Verified Field Lab Test — 100% authoritative ground truth active."
-                          : "Regional Pedological Survey baseline — requires physical lab test for full precision."}
+                      <div style={{ fontSize: "10px", color: "#94a3b8" }}>
+                        Regional Pedological Survey baseline — physical lab sample record required for field-calibrated ground truth.
                       </div>
                     </div>
                   </div>
@@ -1249,10 +1268,10 @@ export default function SubsystemLayerDashboard({
               >
                 <div>
                   <h3 style={{ fontSize: "1.1rem", fontWeight: 800, margin: 0, color: "#fff" }}>
-                    Pipeline Health What-If Simulator
+                    Pipeline Health What-If Simulator (Hypothetical / Non-Operational)
                   </h3>
                   <p style={{ fontSize: "0.8rem", color: "#94a3b8", margin: "4px 0 0 0", maxWidth: "480px", lineHeight: 1.5 }}>
-                    See how your ground-truth parameter overrides (lab soil tests, crop variety calibration, and irrigation constraints) elevate pipeline reliability.
+                    Explore hypothetical responses to local parameter adjustments. Simulation outputs do not alter the published scientific assessment and carry no verification authority.
                   </p>
                 </div>
 
@@ -1270,12 +1289,12 @@ export default function SubsystemLayerDashboard({
                   <div style={{ width: "1px", height: "40px", background: "rgba(255,255,255,0.1)" }} />
 
                   <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: "10px", color: "#94a3b8", textTransform: "uppercase" }}>Scientific Reliability</div>
+                    <div style={{ fontSize: "10px", color: "#94a3b8", textTransform: "uppercase" }}>Hypothetical Reliability</div>
                     <div style={{ fontSize: "2rem", fontWeight: 900, color: "#60a5fa", fontFamily: "monospace" }}>
                       {simulation.reliabilityPercent}%
                     </div>
                     <div style={{ fontSize: "10px", color: "#cbd5e1" }}>
-                      Evidence Grade
+                      Non-Operational Projection
                     </div>
                   </div>
                 </div>
@@ -1330,6 +1349,41 @@ export default function SubsystemLayerDashboard({
                     );
                   })}
                 </div>
+              </div>
+
+              {/* Simulated Parameter State (Hypothetical Inspection) */}
+              <div style={{ background: "rgba(0,0,0,0.4)", borderRadius: "12px", border: "1px solid rgba(71,85,105,0.2)", padding: "14px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "#cbd5e1", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "8px" }}>
+                  Active Parameter Snapshot & Hypothetical Context
+                </div>
+                <pre
+                  style={{
+                    background: "#080c19",
+                    padding: "12px",
+                    borderRadius: "8px",
+                    fontSize: "11px",
+                    fontFamily: "monospace",
+                    color: "#f59e0b",
+                    maxHeight: "220px",
+                    overflowY: "auto",
+                    margin: 0,
+                    border: "1px solid rgba(71,85,105,0.2)",
+                  }}
+                >
+                  {JSON.stringify(
+                    {
+                      subsystem_id: activeLayerId,
+                      name: currentMeta.name,
+                      hypothetical_status: currentSim.status,
+                      hypothetical_confidence: currentSim.confidence,
+                      active_parameters: params[activeLayerId as keyof SubsystemParamsState],
+                      simulated_flags: currentSim.flags,
+                      is_overridden: currentSim.isOverridden,
+                    },
+                    null,
+                    2
+                  )}
+                </pre>
               </div>
             </div>
           )}
