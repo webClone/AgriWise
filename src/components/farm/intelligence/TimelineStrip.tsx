@@ -69,7 +69,7 @@ interface DayCell {
   isToday: boolean;
   isPast: boolean;
   values: Record<MetricKey, number | null>;
-  source: "observed" | "forecast" | "gap";
+  source: "observed" | "forecast" | "estimated" | "unverified" | "gap";
   ndviSource?: string;        // "observed" | "kalman" from backend
   ndviConfidence?: number;    // 0-1 from Kalman engine
   tempRange: { min: number | null; max: number | null };
@@ -220,16 +220,29 @@ export default function TimelineStrip() {
         w.date?.startsWith(dateStr)
       ) as Record<string, unknown> | undefined;
 
-      // ndviSource: distinguish satellite-corrected days from Kalman-only days
-      const ndviSource = ndviObs?.source as string | undefined;
+      // Only explicit provider observation classes qualify as observed.
+      // A Kalman propagation is an estimate, not a satellite acquisition
+      // or a weather forecast. Unknown source identity remains unverified.
+      const ndviSource = typeof ndviObs?.source === "string"
+        ? ndviObs.source.toLowerCase().trim() : undefined;
+      const observedOptical = !!ndviObs && !!ndviSource
+        && ["observed", "sentinel2", "sentinel-2", "s2", "satellite_observed"].includes(ndviSource);
+      const sarObs = (timeline?.sar || []).find((s: any) =>
+        s.timestamp?.startsWith(dateStr) || s.date?.startsWith(dateStr)
+      ) as Record<string, unknown> | undefined;
+      const sarSource = typeof sarObs?.source === "string"
+        ? sarObs.source.toLowerCase().trim() : "";
+      const observedSar = !!sarObs
+        && ["observed", "sentinel1", "sentinel-1", "s1", "satellite_observed"].includes(sarSource);
+      const estimatedNdvi = !!ndviObs && ["kalman", "estimated", "model", "interpolated"].includes(ndviSource || "");
 
-      // Source priority: raw weather observation > forecast > ndvi-only (Kalman) > gap
-      const source: "observed" | "forecast" | "gap" = weatherObs
+      // This strip reports availability by day; individual variables have
+      // their own source types, and selecting a day does not load a historic map.
+      const source: DayCell["source"] = weatherObs || observedOptical || observedSar
         ? "observed"
-        : forecastObs
-        ? "forecast"
-        : ndviObs
-        ? "forecast"   // Kalman-filled NDVI still counts as data (use forecast colour)
+        : forecastObs ? "forecast"
+        : estimatedNdvi ? "estimated"
+        : ndviObs ? "unverified"
         : "gap";
 
       const ndviValue = (ndviObs?.ndvi_mean as number) ?? (ndviObs?.ndvi as number) ?? null;
@@ -267,6 +280,7 @@ export default function TimelineStrip() {
   const dataCount = sparklineValues.filter(v => v !== null).length;
   const observedCount = days.filter(d => d.source === "observed").length;
   const forecastCount = days.filter(d => d.source === "forecast").length;
+  const estimatedCount = days.filter(d => d.source === "estimated").length;
 
   const handleDayClick = useCallback((date: string) => {
     setSelectedDate(selectedDate === date ? null : date);
@@ -387,6 +401,10 @@ export default function TimelineStrip() {
                     <span style={{ width: "4px", height: "4px", borderRadius: "50%", background: "#60a5fa" }} />
                     {forecastCount}
                   </span>
+                  <span title="Model estimate, not an observation" style={{ display: "flex", alignItems: "center", gap: "2px" }}>
+                    <span style={{ width: "4px", height: "4px", borderRadius: "50%", background: "#a78bfa" }} />
+                    {estimatedCount}
+                  </span>
                 </>
               )}
             </div>
@@ -475,12 +493,13 @@ export default function TimelineStrip() {
                   <div style={{
                     width: "3px", height: "3px", borderRadius: "50%",
                     background: activeMetric === "ndvi"
-                      ? day.ndviSource === "observed" ? "#4ade80"   // satellite corrected
-                        : day.ndviSource === "kalman" ? "#a78bfa"   // Kalman estimated
-                        : hasData ? "#a78bfa" : "#334155"
+                      ? ["observed", "sentinel2", "sentinel-2", "s2", "satellite_observed"].includes(day.ndviSource || "") ? "#4ade80"
+                        : ["kalman", "estimated", "model", "interpolated"].includes(day.ndviSource || "") ? "#a78bfa"
+                        : "#64748b"
                       : day.source === "observed" ? "#4ade80"
                         : day.source === "forecast" ? "#60a5fa"
-                        : "#334155",
+                        : day.source === "estimated" ? "#a78bfa"
+                        : "#64748b",
                     marginTop: "1px",
                   }} />
                 </button>

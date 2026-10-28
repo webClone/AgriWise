@@ -1124,6 +1124,14 @@ export function Layer10Provider({
             const cacheJson = await cacheRes.json();
             if (!isLatestRequest()) return;
 
+            if (options?.snapshotId && (
+              !cacheRes.ok || cacheJson.available === false || cacheJson.status !== "fresh"
+            )) {
+              throw new Error(
+                `Exact snapshot ${options.snapshotId} unavailable or superseded: ${cacheJson.reason || cacheRes.status}`,
+              );
+            }
+
             if (cacheJson.reason === "canonical_head_validation_failed" || cacheRes.status === 409) {
               throw new Error(cacheJson.error || "Canonical publication head failed integrity validation");
             }
@@ -1148,6 +1156,9 @@ export function Layer10Provider({
           }
         } catch (cacheError) {
           if (!isLatestRequest()) return;
+          // An exact completion request must not silently start a new run or
+          // substitute a different publication when its snapshot is missing.
+          if (options?.snapshotId) throw cacheError;
           if (
             cacheError instanceof Error
             && cacheError.message.toLowerCase().includes("canonical publication head")
