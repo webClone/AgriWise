@@ -237,6 +237,8 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
   const CACHE_TTL = 5 * 60 * 1000; // 5 minutes in-memory
   // GAP 16: Abort controller for background refresh race prevention
   const refreshAbortRef = useRef<AbortController | null>(null);
+  // P2-B: Protect canonical assessment engines & timeline from legacy overwrite
+  const isCanonicalAssessmentBoundRef = useRef(false);
 
   // Normalize Python engine card shape → EngineStatus interface
   const normalizeEngine = (e: any): EngineStatus => {
@@ -344,7 +346,17 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
         }
 
         const mapped = mapResponse(json);
-        setData(mapped);
+        if (isCanonicalAssessmentBoundRef.current) {
+          setData((prev) => prev ? {
+            ...prev,
+            rawData: mapped.rawData || prev.rawData,
+            current: mapped.current || prev.current,
+            sensorContext: mapped.sensorContext || prev.sensorContext,
+            userInputs: mapped.userInputs || prev.userInputs,
+          } : mapped);
+        } else {
+          setData(mapped);
+        }
         setCacheStatus(serverCacheStatus || "MISS");
         setLastCaptured(capturedAt || json._cache?.capturedAt || null);
         cacheRef.current[cacheKey] = { data: mapped, timestamp: Date.now() };
@@ -368,7 +380,17 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
               // Only apply if this refresh wasn't aborted
               if (!abortCtrl.signal.aborted && (freshJson.engines || freshJson.success)) {
                 const freshMapped = mapResponse(freshJson);
-                setData(freshMapped);
+                if (isCanonicalAssessmentBoundRef.current) {
+                  setData((prev) => prev ? {
+                    ...prev,
+                    rawData: freshMapped.rawData || prev.rawData,
+                    current: freshMapped.current || prev.current,
+                    sensorContext: freshMapped.sensorContext || prev.sensorContext,
+                    userInputs: freshMapped.userInputs || prev.userInputs,
+                  } : freshMapped);
+                } else {
+                  setData(freshMapped);
+                }
                 setCacheStatus("REFRESHED");
                 setLastCaptured(freshJson._cache?.capturedAt || new Date().toISOString());
                 cacheRef.current[cacheKey] = { data: freshMapped, timestamp: Date.now() };
@@ -405,7 +427,17 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
         const json = await res.json();
         if (json.engines || json.success) {
           const mapped = mapResponse(json);
-          setData(mapped);
+          if (isCanonicalAssessmentBoundRef.current) {
+            setData((prev) => prev ? {
+              ...prev,
+              rawData: mapped.rawData || prev.rawData,
+              current: mapped.current || prev.current,
+              sensorContext: mapped.sensorContext || prev.sensorContext,
+              userInputs: mapped.userInputs || prev.userInputs,
+            } : mapped);
+          } else {
+            setData(mapped);
+          }
           setCacheStatus("REFRESHED");
           setLastCaptured(json._cache?.capturedAt || new Date().toISOString());
           const cacheKey = `${plotId}:${farmId}`;
@@ -422,6 +454,7 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
 
   const injectData = useCallback((payload: any) => {
     if (!payload) return;
+    isCanonicalAssessmentBoundRef.current = true;
     const rawEngines = payload.engines && (Array.isArray(payload.engines) ? payload.engines.length > 0 : Object.keys(payload.engines).length > 0)
       ? payload.engines
       : payload.layer_results || payload.canonicalLayerResults || [];

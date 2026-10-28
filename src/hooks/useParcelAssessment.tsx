@@ -40,6 +40,7 @@ import {
   isLateArrivingEvidence,
   isAssessmentStaleForGeometry,
   isAssessmentStaleForCropCycle,
+  canonicalPublicationToAssessment,
 } from "@/lib/agribrain/parcel-assessment-contract";
 import { classifyCanonicalHeadValidation } from "@/lib/agribrain/layer10-request-state.mjs";
 
@@ -59,6 +60,7 @@ export {
   isLateArrivingEvidence,
   isAssessmentStaleForGeometry,
   isAssessmentStaleForCropCycle,
+  canonicalPublicationToAssessment,
 };
 
 export type AssessmentStatus =
@@ -77,12 +79,13 @@ export interface ParcelAssessmentFetchOptions {
   tenantId?: string;
   farmId?: string;
   sourcePolicy?: string;
-  visualIntensity?: string;
+  visualIntensity?: string | number;
 }
 
 export interface ParcelAssessmentContextType {
   state: AssessmentState;
   assessment: ParcelAssessment | null;
+  rawPublication: any | null;
   status: AssessmentStatus;
   loading: boolean;
   error: string | null;
@@ -99,204 +102,12 @@ export interface ParcelAssessmentContextType {
     observedAt?: string;
     capturedAt?: string;
     ingestedAt?: string | null;
+    acceptedAt?: string | null;
     manifestMembership?: boolean;
   }) => boolean;
 }
 
-const ParcelAssessmentContext = createContext<ParcelAssessmentContextType | null>(null);
-
-/**
- * Normalizes raw cacheJson from /api/agribrain/surfaces/latest into an immutable ParcelAssessment.
- */
-export function canonicalPublicationToAssessment(
-  cacheJson: any,
-  plotId: string,
-  options?: ParcelAssessmentFetchOptions
-): ParcelAssessment {
-  if (!cacheJson || typeof cacheJson !== "object") {
-    throw new Error("Cannot construct ParcelAssessment from empty payload");
-  }
-
-  // 1. Identity normalization & verification
-  const rawCutoff = cacheJson.evidence_cutoff_at || cacheJson.capturedAt || cacheJson.timestamp;
-  const rawPublished = cacheJson.published_at || cacheJson.capturedAt || cacheJson.timestamp;
-  const cutoffIso = rawCutoff ? new Date(rawCutoff).toISOString() : new Date().toISOString();
-  // Ensure publishedAt is >= evidenceCutoffAt
-  let publishedIso = rawPublished ? new Date(rawPublished).toISOString() : cutoffIso;
-  if (new Date(publishedIso).getTime() < new Date(cutoffIso).getTime()) {
-    publishedIso = cutoffIso;
-  }
-
-  const observationStart = cacheJson.source_window?.[0]
-    || cacheJson.observation_window?.start
-    || cutoffIso;
-  const observationEnd = cacheJson.source_window?.[1]
-    || cacheJson.observation_window?.end
-    || cutoffIso;
-
-  const receipt = cacheJson.canonical_publication_receipt_hash
-    || cacheJson.publication_receipt_hash
-    || cacheJson.publicationReceiptHash
-    || cacheJson.receiptHash
-    || "";
-
-  const geometryHash = cacheJson.geometry_hash
-    || cacheJson.geometryHash
-    || (options?.geometry ? computeGeometryHash(options.geometry) : "empty_geometry");
-
-  const identity: ParcelAssessmentIdentity = {
-    tenantId: options?.tenantId || cacheJson.tenant_id || cacheJson.tenantId || "default",
-    farmId: options?.farmId || cacheJson.farm_id || cacheJson.farmId || "",
-    plotId: String(plotId || cacheJson.plot_id || cacheJson.plotId || ""),
-    cropCycleId: options?.cropCycleId ?? cacheJson.crop_cycle_id ?? cacheJson.cropCycleId ?? null,
-    publicationId: String(cacheJson.publication_id || cacheJson.publicationId || ""),
-    runId: String(cacheJson.publication_run_id || cacheJson.agribrain_run_id || cacheJson.run_id || cacheJson.runId || ""),
-    snapshotId: String(cacheJson.intelligence_snapshot_id || cacheJson.snapshot_id || cacheJson.snapshotId || ""),
-    geometryHash,
-    observationWindow: {
-      start: new Date(observationStart).toISOString(),
-      end: new Date(observationEnd).toISOString(),
-    },
-    evidenceCutoffAt: cutoffIso,
-    publishedAt: publishedIso,
-    publicationReceiptHash: receipt,
-    receiptHash: receipt,
-    contractVersion: PARCEL_ASSESSMENT_CONTRACT_VERSION,
-  };
-
-  const validation = validateAssessmentIdentity(identity);
-  if (!validation.valid) {
-    throw new Error(`Assessment identity validation failed: ${validation.errors.join("; ")}`);
-  }
-
-  // 2. Canonical Layer Results normalization (L0 - L10)
-  const rawLayerResults = cacheJson.layer_results || cacheJson.layerResults || {};
-  const canonicalLayerResults: Record<string, LayerResult> = {};
-  for (let i = 0; i <= 10; i++) {
-    const layerId = `L${i}`;
-    const rawLayer = rawLayerResults[layerId] || rawLayerResults[String(i)] || null;
-    if (rawLayer) {
-      const statusRaw = String(rawLayer.status || "UNAVAILABLE").toUpperCase();
-      const status: LayerResult["status"] =
-        statusRaw === "OK" || statusRaw === "COMPLETED" ? "OK"
-        : statusRaw === "DEGRADED" ? "DEGRADED"
-        : statusRaw === "FAILED" ? "FAILED"
-        : statusRaw === "SKIPPED" ? "SKIPPED"
-        : "UNAVAILABLE";
-      canonicalLayerResults[layerId] = {
-        layerId,
-        status,
-        confidence: typeof rawLayer.confidence === "number" && Number.isFinite(rawLayer.confidence)
-          ? Math.max(0, Math.min(1, rawLayer.confidence))
-          : (status === "OK" ? 1.0 : 0.0),
-        sources: Array.isArray(rawLayer.sources) ? rawLayer.sources : [],
-        summary: rawLayer.summary || undefined,
-        flags: Array.isArray(rawLayer.flags) ? rawLayer.flags : Array.isArray(rawLayer.degradation_flags) ? rawLayer.degradation_flags : undefined,
-        data: typeof rawLayer.data === "object" && rawLayer.data !== null ? rawLayer.data : undefined,
-      };
-    } else {
-      canonicalLayerResults[layerId] = {
-        layerId,
-        status: "UNAVAILABLE",
-        confidence: 0,
-        sources: [],
-      };
-    }
-  }
-
-  // 3. Authoritative Surfaces
-  const authoritativeSurfaces = Array.isArray(cacheJson.surfaceGrids)
-    ? cacheJson.surfaceGrids
-    : Array.isArray(cacheJson.surfaces)
-    ? cacheJson.surfaces
-    : [];
-
-  // 4. Top Findings normalization
-  const rawTopFindings = Array.isArray(cacheJson.top_findings)
-    ? cacheJson.top_findings
-    : Array.isArray(cacheJson.topFindings)
-    ? cacheJson.topFindings
-    : [];
-  const topFindings: Finding[] = rawTopFindings.map((item: any, idx: number) => {
-    if (typeof item === "string") {
-      const isCritical = /severe|critical|failure|emergency/i.test(item);
-      const isWarning = /risk|deficit|warning|attention|low/i.test(item);
-      return {
-        id: `finding-${idx + 1}`,
-        title: item,
-        severity: isCritical ? "critical" : isWarning ? "medium" : "info",
-        description: item,
-        actionable: isCritical || isWarning,
-      };
-    }
-    return {
-      id: String(item.id || `finding-${idx + 1}`),
-      title: String(item.title || item.headline || "Finding"),
-      severity: item.severity || "info",
-      description: String(item.description || item.detail || item.title || ""),
-      layerId: item.layerId || item.layer_id || undefined,
-      actionable: Boolean(item.actionable),
-      evidenceSources: Array.isArray(item.evidenceSources) ? item.evidenceSources : undefined,
-    };
-  });
-
-  // 5. Assessment Quality
-  const rawQuality = cacheJson.quality || {};
-  const rawGlobalQuality = cacheJson.global_quality || {};
-  const quality: AssessmentQuality = {
-    degradationMode: String(rawQuality.degradation_mode || rawGlobalQuality.degradation_mode || "NORMAL"),
-    reliabilityScore: typeof rawQuality.reliability_score === "number"
-      ? rawQuality.reliability_score
-      : typeof rawGlobalQuality.reliability_score === "number"
-      ? rawGlobalQuality.reliability_score
-      : null,
-    warnings: Array.isArray(rawQuality.warnings) ? rawQuality.warnings : [],
-    criticalErrors: Array.isArray(rawQuality.criticalErrors) ? rawQuality.criticalErrors : undefined,
-    surfacesGenerated: Number(rawQuality.surfaces_generated ?? authoritativeSurfaces.length),
-    zonesGenerated: Number(rawQuality.zones_generated ?? (Array.isArray(cacheJson.zones) ? cacheJson.zones.length : 0)),
-    gridAlignmentOk: typeof rawQuality.grid_alignment_ok === "boolean"
-      ? rawQuality.grid_alignment_ok
-      : null,
-    detailConservationOk: typeof rawQuality.detail_conservation_ok === "boolean"
-      ? rawQuality.detail_conservation_ok
-      : null,
-  };
-
-  // 6. Evidence Timeline
-  const rawTimeline = Array.isArray(cacheJson.timeline)
-    ? cacheJson.timeline
-    : Array.isArray(cacheJson.evidence_timeline)
-    ? cacheJson.evidence_timeline
-    : [];
-  const cutoffTime = new Date(identity.evidenceCutoffAt).getTime();
-  const evidenceTimeline: AssessmentEvidenceEvent[] = rawTimeline.map((item: any, idx: number) => {
-    const observedAt = String(item.observedAt || item.observed_at || item.capturedAt || item.timestamp || cutoffIso);
-    const observedTime = new Date(observedAt).getTime();
-    // Default manifestMembership is true if observed before cutoff
-    const isLate = !isNaN(observedTime) && observedTime > cutoffTime;
-    return {
-      id: String(item.id || `evidence-${idx + 1}`),
-      type: item.type || "observation",
-      source: String(item.source || "satellite"),
-      observedAt,
-      capturedAt: observedAt,
-      ingestedAt: item.ingestedAt || item.ingested_at || null,
-      acceptedAt: item.acceptedAt || item.accepted_at || null,
-      manifestMembership: item.manifestMembership !== undefined ? Boolean(item.manifestMembership) : !isLate,
-      summary: String(item.summary || item.description || "Evidence observation"),
-      verified: Boolean(item.verified !== false),
-    };
-  });
-
-  return createImmutableParcelAssessment({
-    identity,
-    canonicalLayerResults,
-    authoritativeSurfaces,
-    topFindings,
-    quality,
-    evidenceTimeline,
-  });
-}
+export const ParcelAssessmentContext = createContext<ParcelAssessmentContextType | null>(null);
 
 export function ParcelAssessmentProvider({
   children,
@@ -307,7 +118,8 @@ export function ParcelAssessmentProvider({
   plotGeoJson?: unknown;
   cropCycleId?: string | null;
 }) {
-  const [state, setState] = useState<AssessmentState>({ status: "loading" });
+  const [state, setState] = useState<AssessmentState>({ status: "idle" });
+  const [rawPublication, setRawPublication] = useState<any | null>(null);
   const [currentPlotId, setCurrentPlotId] = useState<string | null>(null);
   const [currentFarmId, setCurrentFarmId] = useState<string | null>(null);
 
@@ -374,12 +186,14 @@ export function ParcelAssessmentProvider({
 
         if (options?.snapshotId && (!res.ok || json.available === false || json.status !== "fresh")) {
           const reason = `Exact snapshot ${options.snapshotId} unavailable or superseded: ${json.reason || res.status}`;
+          setRawPublication(null);
           setState({ status: "unavailable", reason });
           return null;
         }
 
         if (res.status === 409 || json.reason === "canonical_head_validation_failed") {
           const reason = json.error || "Canonical publication head failed integrity validation";
+          setRawPublication(null);
           setState({ status: "invalid", reason });
           return null;
         }
@@ -391,21 +205,31 @@ export function ParcelAssessmentProvider({
             const reason = validationState === "corrupt"
               ? "Canonical publication head integrity validation failed"
               : "Canonical publication head contract is stale";
+            setRawPublication(null);
             setState({ status: "invalid", reason });
             return null;
           }
 
-          const assessment = canonicalPublicationToAssessment(json, plotId, {
-            ...options,
-            geometry: effectiveGeometry,
-            cropCycleId: effectiveCropCycleId,
-            farmId,
-          });
+          try {
+            const assessment = canonicalPublicationToAssessment(json, plotId, {
+              ...options,
+              geometry: effectiveGeometry,
+              cropCycleId: effectiveCropCycleId,
+              farmId,
+            });
 
-          if (!isLatest()) return null;
+            if (!isLatest()) return null;
 
-          setState({ status: "ready", assessment });
-          return assessment;
+            setRawPublication(json);
+            setState({ status: "ready", assessment });
+            return assessment;
+          } catch (assessmentErr: any) {
+            if (!isLatest()) return null;
+            const reason = assessmentErr?.message || "Assessment identity validation failed";
+            setRawPublication(null);
+            setState({ status: "invalid", reason });
+            return null;
+          }
         }
 
         // Cache miss and not exact snapshot -> execute live run
@@ -429,6 +253,7 @@ export function ParcelAssessmentProvider({
 
           if (!runRes.ok || runJson.error || runJson.success === false) {
             const reason = runJson.error || "AgriBrain surfaces pipeline execution failed";
+            setRawPublication(null);
             setState({ status: "unavailable", reason });
             return null;
           }
@@ -448,6 +273,7 @@ export function ParcelAssessmentProvider({
 
             if (pubRes.status === 409 || pubJson.reason === "canonical_head_validation_failed") {
               const reason = pubJson.error || "Canonical publication head failed integrity validation";
+              setRawPublication(null);
               setState({ status: "invalid", reason });
               return null;
             }
@@ -456,37 +282,50 @@ export function ParcelAssessmentProvider({
               const validation = pubJson.validation || {};
               if (classifyCanonicalHeadValidation(validation) !== "valid") {
                 const reason = "Canonical publication head validation is incomplete";
+                setRawPublication(null);
                 setState({ status: "invalid", reason });
                 return null;
               }
 
-              const assessment = canonicalPublicationToAssessment(pubJson, plotId, {
-                ...options,
-                geometry: effectiveGeometry,
-                cropCycleId: effectiveCropCycleId,
-                farmId,
-              });
+              try {
+                const assessment = canonicalPublicationToAssessment(pubJson, plotId, {
+                  ...options,
+                  geometry: effectiveGeometry,
+                  cropCycleId: effectiveCropCycleId,
+                  farmId,
+                });
 
-              if (!isLatest()) return null;
-              setState({ status: "ready", assessment });
-              return assessment;
+                if (!isLatest()) return null;
+                setRawPublication(pubJson);
+                setState({ status: "ready", assessment });
+                return assessment;
+              } catch (assessmentErr: any) {
+                if (!isLatest()) return null;
+                const reason = assessmentErr?.message || "Assessment identity validation failed";
+                setRawPublication(null);
+                setState({ status: "invalid", reason });
+                return null;
+              }
             }
 
             await new Promise<void>((resolve) => setTimeout(resolve, 500));
           }
 
           if (isLatest()) {
+            setRawPublication(null);
             setState({ status: "unavailable", reason: "Timed out waiting for canonical publication head" });
           }
           return null;
         }
 
+        setRawPublication(null);
         setState({ status: "unavailable", reason: json.reason || "Assessment unavailable" });
         return null;
       } catch (err: any) {
         if (!isLatest()) return null;
         if (err?.name === "AbortError") return null;
         const reason = err?.message || "Assessment retrieval failed";
+        setRawPublication(null);
         setState({ status: "unavailable", reason });
         return null;
       }
@@ -515,6 +354,7 @@ export function ParcelAssessmentProvider({
       observedAt?: string;
       capturedAt?: string;
       ingestedAt?: string | null;
+      acceptedAt?: string | null;
       manifestMembership?: boolean;
     }) => {
       if (state.status !== "ready") return false;
@@ -543,6 +383,7 @@ export function ParcelAssessmentProvider({
       value: {
         state,
         assessment,
+        rawPublication,
         status,
         loading: state.status === "loading",
         error,

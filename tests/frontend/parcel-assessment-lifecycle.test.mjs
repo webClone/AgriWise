@@ -9,6 +9,7 @@ import {
   isAssessmentStaleForGeometry,
   isAssessmentStaleForCropCycle,
   isLateArrivingEvidence,
+  canonicalPublicationToAssessment,
 } from "../../src/lib/agribrain/parcel-assessment-contract.mjs";
 
 function buildMockPublication(overrides = {}) {
@@ -67,120 +68,17 @@ function buildMockPublication(overrides = {}) {
   };
 }
 
-// Emulate canonicalPublicationToAssessment in JS test environment
-function normalizeToAssessment(raw, plotId, options = {}) {
-  const cutoffIso = raw.evidence_cutoff_at || raw.capturedAt;
-  const publishedIso = raw.published_at || cutoffIso;
-  const geomHash = raw.geometry_hash || (options.geometry ? computeGeometryHash(options.geometry) : "empty_geometry");
-  const receipt = raw.canonical_publication_receipt_hash || raw.publication_receipt_hash || "";
-
-  const identity = {
-    tenantId: options.tenantId || raw.tenant_id || "default",
-    farmId: options.farmId || raw.farm_id || "",
-    plotId: String(plotId || raw.plot_id || ""),
-    cropCycleId: options.cropCycleId ?? raw.crop_cycle_id ?? null,
-    publicationId: String(raw.publication_id || ""),
-    runId: String(raw.publication_run_id || raw.agribrain_run_id || ""),
-    snapshotId: String(raw.intelligence_snapshot_id || raw.snapshot_id || ""),
-    geometryHash: geomHash,
-    observationWindow: {
-      start: raw.source_window?.[0] || cutoffIso,
-      end: raw.source_window?.[1] || cutoffIso,
-    },
-    evidenceCutoffAt: cutoffIso,
-    publishedAt: publishedIso,
-    publicationReceiptHash: receipt,
-    receiptHash: receipt,
-    contractVersion: PARCEL_ASSESSMENT_CONTRACT_VERSION,
-  };
-
-  const validation = validateAssessmentIdentity(identity);
-  if (!validation.valid) {
-    throw new Error(`Assessment identity validation failed: ${validation.errors.join("; ")}`);
-  }
-
-  const rawLayerResults = raw.layer_results || {};
-  const canonicalLayerResults = {};
-  for (let i = 0; i <= 10; i++) {
-    const layerId = `L${i}`;
-    const rawLayer = rawLayerResults[layerId] || null;
-    if (rawLayer) {
-      canonicalLayerResults[layerId] = {
-        layerId,
-        status: rawLayer.status || "UNAVAILABLE",
-        confidence: typeof rawLayer.confidence === "number" ? rawLayer.confidence : 1.0,
-        sources: Array.isArray(rawLayer.sources) ? rawLayer.sources : [],
-        flags: rawLayer.degradation_flags || rawLayer.flags || undefined,
-      };
-    } else {
-      canonicalLayerResults[layerId] = {
-        layerId,
-        status: "UNAVAILABLE",
-        confidence: 0,
-        sources: [],
-      };
-    }
-  }
-
-  const topFindings = (raw.top_findings || []).map((item, idx) => {
-    if (typeof item === "string") {
-      return {
-        id: `finding-${idx + 1}`,
-        title: item,
-        severity: "info",
-        description: item,
-        actionable: false,
-      };
-    }
-    return {
-      id: String(item.id || `finding-${idx + 1}`),
-      title: item.title,
-      severity: item.severity || "info",
-      description: item.description || item.title,
-      actionable: Boolean(item.actionable),
-    };
-  });
-
-  const quality = {
-    degradationMode: raw.quality?.degradation_mode || "NORMAL",
-    reliabilityScore: raw.quality?.reliability_score ?? null,
-    warnings: raw.quality?.warnings || [],
-    surfacesGenerated: Number(raw.quality?.surfaces_generated || 0),
-    zonesGenerated: Number(raw.quality?.zones_generated || 0),
-    gridAlignmentOk: typeof raw.quality?.grid_alignment_ok === "boolean" ? raw.quality.grid_alignment_ok : null,
-    detailConservationOk: typeof raw.quality?.detail_conservation_ok === "boolean" ? raw.quality.detail_conservation_ok : null,
-  };
-
-  const evidenceTimeline = (raw.timeline || []).map((ev, idx) => ({
-    id: ev.id || `ev-${idx + 1}`,
-    type: ev.type || "observation",
-    source: ev.source || "unknown",
-    observedAt: ev.observedAt,
-    capturedAt: ev.observedAt,
-    manifestMembership: Boolean(ev.manifestMembership),
-    summary: ev.summary || "evidence",
-    verified: Boolean(ev.verified),
-  }));
-
-  return createImmutableParcelAssessment({
-    identity,
-    canonicalLayerResults,
-    authoritativeSurfaces: raw.surfaces || [],
-    topFindings,
-    quality,
-    evidenceTimeline,
-  });
-}
-
-test("P2-B: transforms canonical publication into verified immutable ParcelAssessment", () => {
+test("P2-B: transforms canonical publication into verified immutable ParcelAssessment using production contract", () => {
   const raw = buildMockPublication();
-  const assessment = normalizeToAssessment(raw, "plot-p01-olive");
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
 
   assert.equal(assessment.identity.plotId, "plot-p01-olive");
   assert.equal(assessment.identity.publicationReceiptHash, "c4601b07973059635ba026fb96b01b000216b2302bb617db851179c135678129");
   assert.equal(assessment.canonicalLayerResults.L0.status, "OK");
+  assert.equal(assessment.canonicalLayerResults.L0.confidence, 0.95);
   assert.equal(assessment.canonicalLayerResults.L3.status, "DEGRADED");
   assert.equal(assessment.canonicalLayerResults.L7.status, "UNAVAILABLE");
+  assert.equal(assessment.canonicalLayerResults.L7.confidence, null);
   assert.equal(assessment.topFindings.length, 2);
   assert.equal(assessment.quality.gridAlignmentOk, true);
   assert.equal(assessment.quality.detailConservationOk, null);
@@ -191,10 +89,50 @@ test("P2-B: transforms canonical publication into verified immutable ParcelAsses
 
 test("P2-B: missing findings are represented truthfully as empty array without synthetic fabrication", () => {
   const raw = buildMockPublication({ top_findings: [] });
-  const assessment = normalizeToAssessment(raw, "plot-p01-olive");
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
 
   assert.deepEqual(assessment.topFindings, []);
   assert.equal(assessment.topFindings.length, 0);
+});
+
+test("P2-B: missing confidence is preserved as null, not coerced to 1.0 or 0.0", () => {
+  const raw = buildMockPublication({
+    layer_results: {
+      L0: { status: "OK" }, // missing confidence
+      L1: { status: "FAILED" }, // missing confidence
+    },
+  });
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
+
+  assert.equal(assessment.canonicalLayerResults.L0.confidence, null);
+  assert.equal(assessment.canonicalLayerResults.L1.confidence, null);
+});
+
+test("P2-B: missing degradation_mode is UNKNOWN, not defaulted to NORMAL", () => {
+  const raw = buildMockPublication({
+    quality: {
+      // degradation_mode omitted
+      reliability_score: 0.82,
+    },
+  });
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
+
+  assert.equal(assessment.quality.degradationMode, "UNKNOWN");
+});
+
+test("P2-B: string findings are unclassified info with actionable=false (no regex heuristics)", () => {
+  const raw = buildMockPublication({
+    top_findings: [
+      "Severe critical emergency failure detected in irrigation pump",
+      "Minor crop vigor variation",
+    ],
+  });
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
+
+  assert.equal(assessment.topFindings[0].severity, "info");
+  assert.equal(assessment.topFindings[0].actionable, false);
+  assert.equal(assessment.topFindings[1].severity, "info");
+  assert.equal(assessment.topFindings[1].actionable, false);
 });
 
 test("P2-B: tri-state scientific flags preserve null when unverified", () => {
@@ -209,7 +147,7 @@ test("P2-B: tri-state scientific flags preserve null when unverified", () => {
       warnings: [],
     },
   });
-  const assessment = normalizeToAssessment(raw, "plot-p01-olive");
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
 
   assert.equal(assessment.quality.gridAlignmentOk, null);
   assert.equal(assessment.quality.detailConservationOk, null);
@@ -217,7 +155,7 @@ test("P2-B: tri-state scientific flags preserve null when unverified", () => {
 
 test("P2-B: mutation of immutable assessment fails in strict mode", () => {
   const raw = buildMockPublication();
-  const assessment = normalizeToAssessment(raw, "plot-p01-olive");
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
 
   assert.throws(() => {
     // @ts-expect-error test immutability
@@ -230,10 +168,34 @@ test("P2-B: mutation of immutable assessment fails in strict mode", () => {
   }, /Cannot add property/);
 });
 
-test("P2-B: detects geometry staleness when plot boundaries are edited", () => {
-  const raw = buildMockPublication();
-  const assessment = normalizeToAssessment(raw, "plot-p01-olive");
+test("P0: geometry hash does NOT collide for different GeoJSON Features with distinct polygon coordinates", () => {
+  const f1 = {
+    type: "Feature",
+    properties: {},
+    geometry: {
+      type: "Polygon",
+      coordinates: [[[35.1, 31.2], [35.2, 31.2], [35.2, 31.3], [35.1, 31.3], [35.1, 31.2]]],
+    },
+  };
 
+  const f2 = {
+    type: "Feature",
+    properties: {},
+    geometry: {
+      type: "Polygon",
+      coordinates: [[[36.1, 32.2], [36.2, 32.2], [36.2, 32.3], [36.1, 32.3], [36.1, 32.2]]],
+    },
+  };
+
+  const hash1 = computeGeometryHash(f1);
+  const hash2 = computeGeometryHash(f2);
+
+  assert.notEqual(hash1, hash2, "Distinct GeoJSON coordinates must yield distinct hashes without whitelist stripping");
+  assert.match(hash1, /^sha256:[a-f0-9]{64}$/);
+  assert.match(hash2, /^sha256:[a-f0-9]{64}$/);
+});
+
+test("P2-B: detects geometry staleness when plot boundaries are edited", () => {
   const originalGeom = {
     type: "Polygon",
     coordinates: [[[31.6, -7.9], [31.61, -7.9], [31.61, -7.91], [31.6, -7.9]]],
@@ -243,32 +205,133 @@ test("P2-B: detects geometry staleness when plot boundaries are edited", () => {
     coordinates: [[[31.6, -7.9], [31.65, -7.9], [31.65, -7.95], [31.6, -7.9]]],
   };
 
+  const raw = buildMockPublication({
+    geometry_hash: computeGeometryHash(originalGeom),
+  });
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
+
   assert.equal(isAssessmentStaleForGeometry(assessment.identity, originalGeom), false);
   assert.equal(isAssessmentStaleForGeometry(assessment.identity, modifiedGeom), true);
 });
 
 test("P2-B: detects crop cycle staleness when plot transitions to next season", () => {
-  const raw = buildMockPublication();
-  const assessment = normalizeToAssessment(raw, "plot-p01-olive", { cropCycleId: "cycle-2026-autumn" });
+  const raw = buildMockPublication({ crop_cycle_id: "cycle-2026-autumn" });
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive", { cropCycleId: "cycle-2026-autumn" });
 
   assert.equal(isAssessmentStaleForCropCycle(assessment.identity, "cycle-2026-autumn"), false);
   assert.equal(isAssessmentStaleForCropCycle(assessment.identity, "cycle-2027-spring"), true);
   assert.equal(isAssessmentStaleForCropCycle(assessment.identity, null), true);
 });
 
-test("P2-B: late arriving evidence after publication cutoff is isolated from manifest", () => {
+test("P0: evidence manifest participation is not promoted by default", () => {
+  const raw = buildMockPublication({
+    timeline: [
+      {
+        id: "ev-unspecified",
+        type: "observation",
+        source: "sentinel2",
+        observedAt: "2026-10-25T10:30:00Z",
+        // manifestMembership and verified are omitted
+        summary: "Observation with unknown participation",
+      },
+    ],
+  });
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
+
+  assert.equal(assessment.evidenceTimeline[0].manifestMembership, false);
+  assert.equal(assessment.evidenceTimeline[0].verified, false);
+});
+
+test("P0: late arriving evidence detection enforces strict temporal cutoff even if manifestMembership is claimed", () => {
   const raw = buildMockPublication();
-  const assessment = normalizeToAssessment(raw, "plot-p01-olive");
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
 
   const onTimeEvidence = {
     observedAt: "2026-10-26T12:00:00Z",
+    ingestedAt: "2026-10-27T00:00:00Z",
     manifestMembership: true,
   };
-  const lateEvidence = {
+  const lateObservedEvidence = {
     observedAt: "2026-10-28T09:00:00Z", // After cutoff 06:00:00Z
-    manifestMembership: false,
+    manifestMembership: true, // Claimed true, but timestamp exceeds cutoff
+  };
+  const lateIngestedEvidence = {
+    observedAt: "2026-10-25T10:00:00Z",
+    ingestedAt: "2026-10-28T11:00:00Z", // Ingested after cutoff 06:00:00Z
+    manifestMembership: true,
   };
 
   assert.equal(isLateArrivingEvidence(assessment.identity, onTimeEvidence), false);
-  assert.equal(isLateArrivingEvidence(assessment.identity, lateEvidence), true);
+  assert.equal(isLateArrivingEvidence(assessment.identity, lateObservedEvidence), true);
+  assert.equal(isLateArrivingEvidence(assessment.identity, lateIngestedEvidence), true);
+});
+
+test("P0: createImmutableParcelAssessment fails closed if late evidence is placed in publication manifest", () => {
+  const raw = buildMockPublication({
+    timeline: [
+      {
+        id: "ev-illegal-manifest-member",
+        type: "observation",
+        source: "sentinel2",
+        observedAt: "2026-10-28T09:00:00Z", // after cutoff 06:00:00Z
+        manifestMembership: true, // illegal!
+        verified: true,
+      },
+    ],
+  });
+
+  assert.throws(() => {
+    canonicalPublicationToAssessment(raw, "plot-p01-olive");
+  }, /exceeds evidenceCutoffAt/);
+});
+
+test("P0: fails closed when identity validation fails (no synthetic metadata repair)", () => {
+  // Chronology inversion: publishedAt earlier than evidenceCutoffAt
+  const invalidChronology = buildMockPublication({
+    evidence_cutoff_at: "2026-10-28T10:00:00Z",
+    published_at: "2026-10-28T08:00:00Z", // earlier than cutoff!
+  });
+  assert.throws(() => {
+    canonicalPublicationToAssessment(invalidChronology, "plot-p01-olive");
+  }, /publishedAt_before_evidenceCutoffAt/);
+
+  // Missing receipt
+  const missingReceipt = buildMockPublication({
+    canonical_publication_receipt_hash: "",
+    publication_receipt_hash: "",
+  });
+  assert.throws(() => {
+    canonicalPublicationToAssessment(missingReceipt, "plot-p01-olive");
+  }, /publicationReceiptHash_required/);
+
+  // Missing tenantId
+  const missingTenant = buildMockPublication({
+    tenant_id: "",
+  });
+  assert.throws(() => {
+    canonicalPublicationToAssessment(missingTenant, "plot-p01-olive");
+  }, /tenantId_required/);
+});
+
+test("P2-B: end-to-end atomic coherence — all presentation views share one immutable publication identity", () => {
+  const raw = buildMockPublication();
+  const assessment = canonicalPublicationToAssessment(raw, "plot-p01-olive");
+
+  const identity = assessment.identity;
+  assert.ok(identity.publicationId);
+  assert.ok(identity.runId);
+  assert.ok(identity.snapshotId);
+  assert.ok(identity.receiptHash);
+
+  // All 11 canonical layers exist and reflect atomic publication
+  for (let i = 0; i <= 10; i++) {
+    const layer = assessment.canonicalLayerResults[`L${i}`];
+    assert.ok(layer, `L${i} must be present in canonicalLayerResults`);
+    assert.equal(layer.layerId, `L${i}`);
+  }
+
+  // Quality, findings, and timeline bind to the same immutable snapshot
+  assert.equal(assessment.quality.surfacesGenerated, 4);
+  assert.equal(assessment.topFindings.length, 2);
+  assert.equal(assessment.evidenceTimeline.length, 1);
 });
