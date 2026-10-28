@@ -8,18 +8,19 @@ export function computeDeterministicHash(input) {
 
 export function computeGeometryHash(geometry) {
   if (!geometry) return "empty_geometry";
+  let target = geometry;
   if (typeof geometry === "string") {
     try {
-      geometry = JSON.parse(geometry);
+      target = JSON.parse(geometry);
     } catch {
       return computeDeterministicHash(geometry);
     }
   }
-  const canonicalString = JSON.stringify(geometry, Object.keys(geometry).sort());
+  const canonicalString = JSON.stringify(target, Object.keys(target).sort());
   return computeDeterministicHash(canonicalString);
 }
 
-export function computeReceiptHash(identity) {
+export function computeClientFingerprint(identity) {
   const canonicalPayload = [
     identity.contractVersion,
     identity.tenantId,
@@ -34,8 +35,13 @@ export function computeReceiptHash(identity) {
     identity.observationWindow?.end,
     identity.evidenceCutoffAt,
     identity.publishedAt,
+    identity.publicationReceiptHash || identity.receiptHash || "",
   ].join("|");
   return computeDeterministicHash(canonicalPayload);
+}
+
+export function computeReceiptHash(identity) {
+  return computeClientFingerprint(identity);
 }
 
 export function deepFreeze(obj) {
@@ -103,12 +109,17 @@ export function validateAssessmentIdentity(identity) {
     }
   }
 
-  if (!id.receiptHash || typeof id.receiptHash !== "string") {
-    errors.push("receiptHash_required");
-  } else if (errors.length === 0) {
-    const expectedReceipt = computeReceiptHash(id);
-    if (id.receiptHash !== expectedReceipt) {
-      errors.push("receiptHash_mismatch");
+  const receipt = id.publicationReceiptHash || id.receiptHash;
+  if (!receipt || typeof receipt !== "string") {
+    errors.push("publicationReceiptHash_required");
+  } else if (receipt.length < 8) {
+    errors.push("publicationReceiptHash_malformed");
+  }
+
+  if (id.clientFingerprint && errors.length === 0) {
+    const expectedFingerprint = computeClientFingerprint(id);
+    if (id.clientFingerprint !== expectedFingerprint) {
+      errors.push("clientFingerprint_mismatch");
     }
   }
 
@@ -129,17 +140,23 @@ export function createImmutableParcelAssessment(params) {
 
   for (const event of timeline) {
     if (event.verified && event.type === "observation") {
-      const eventTime = new Date(event.capturedAt).getTime();
-      if (!isNaN(eventTime) && eventTime > cutoffTime) {
+      const eventTime = new Date(event.observedAt || event.capturedAt).getTime();
+      if (!isNaN(eventTime) && eventTime > cutoffTime && event.manifestMembership === true) {
         throw new Error(
-          `Observation evidence event ${event.id} (${event.capturedAt}) exceeds evidenceCutoffAt (${params.identity.evidenceCutoffAt}). Late observations cannot be part of published assessment.`
+          `Observation evidence event ${event.id} (${event.observedAt || event.capturedAt}) exceeds evidenceCutoffAt (${params.identity.evidenceCutoffAt}). Late observations cannot be part of published assessment manifest.`
         );
       }
     }
   }
 
+  const normalizedIdentity = {
+    ...params.identity,
+    publicationReceiptHash: params.identity.publicationReceiptHash || params.identity.receiptHash,
+    receiptHash: params.identity.receiptHash || params.identity.publicationReceiptHash,
+  };
+
   const assessment = {
-    identity: params.identity,
+    identity: normalizedIdentity,
     canonicalLayerResults: params.canonicalLayerResults,
     authoritativeSurfaces: params.authoritativeSurfaces || [],
     topFindings: params.topFindings || [],
@@ -150,11 +167,15 @@ export function createImmutableParcelAssessment(params) {
   return deepFreeze(assessment);
 }
 
-export function isLateArrivingEvidence(identity, observationTimeIso) {
+export function isLateArrivingEvidence(identity, evidence) {
+  if (evidence.manifestMembership === true) return false;
   const cutoff = new Date(identity.evidenceCutoffAt).getTime();
-  const obs = new Date(observationTimeIso).getTime();
-  if (isNaN(cutoff) || isNaN(obs)) return false;
-  return obs > cutoff;
+  const ingested = evidence.ingestedAt ? new Date(evidence.ingestedAt).getTime() : NaN;
+  const observed = new Date(evidence.observedAt || evidence.capturedAt || "").getTime();
+
+  if (!isNaN(ingested) && ingested > cutoff) return true;
+  if (!isNaN(observed) && observed > cutoff) return true;
+  return evidence.manifestMembership === false;
 }
 
 export function isAssessmentStaleForGeometry(identity, currentGeometry) {

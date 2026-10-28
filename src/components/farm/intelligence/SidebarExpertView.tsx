@@ -653,8 +653,8 @@ export default function SidebarExpertView({ data, activeMode, surfaceType, expla
             <QualityRow label="Reliability" value={`${(quality.reliability_score * 100).toFixed(0)}%`} ok={quality.reliability_score > 0.6} />
             <QualityRow label="Surfaces" value={`${quality.surfaces_generated}`} ok={quality.surfaces_generated > 0} />
             <QualityRow label="Zones" value={`${quality.zones_generated}`} ok={true} />
-            <QualityRow label="Grid Aligned" value={quality.grid_alignment_ok ? "Yes" : "No"} ok={quality.grid_alignment_ok} />
-            <QualityRow label="Detail OK" value={quality.detail_conservation_ok ? "Yes" : "No"} ok={quality.detail_conservation_ok} />
+            <QualityRow label="Grid Aligned" value={quality.grid_alignment_ok === true ? "Yes" : quality.grid_alignment_ok === false ? "No" : "Not reported"} ok={quality.grid_alignment_ok === true} />
+            <QualityRow label="Detail OK" value={quality.detail_conservation_ok === true ? "Yes" : quality.detail_conservation_ok === false ? "No" : "Not reported"} ok={quality.detail_conservation_ok === true} />
             <QualityRow label="Degradation" value={quality.degradation_mode} ok={quality.degradation_mode === "NORMAL"} />
           </div>
           {quality.warnings.length > 0 && (

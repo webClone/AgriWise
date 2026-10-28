@@ -312,8 +312,8 @@ export interface Layer10Result {
     reliability_score: number;
     surfaces_generated: number;
     zones_generated: number;
-    grid_alignment_ok: boolean;
-    detail_conservation_ok: boolean;
+    grid_alignment_ok: boolean | null;
+    detail_conservation_ok: boolean | null;
     zone_state_by_surface: Record<string, string>;
     warnings: string[];
     coverage_ratio?: number;  // optional: fraction of field grid with valid pixel coverage
@@ -1314,8 +1314,12 @@ export function Layer10Provider({
               Number(runData.quality?.surfaces_generated ?? surfaces.length),
             zones_generated:
               Number(runData.quality?.zones_generated ?? runData.zones?.length ?? 0),
-            grid_alignment_ok: Boolean(runData.quality?.grid_alignment_ok ?? true),
-            detail_conservation_ok: Boolean(runData.quality?.detail_conservation_ok ?? true),
+            grid_alignment_ok: typeof runData.quality?.grid_alignment_ok === "boolean"
+              ? runData.quality.grid_alignment_ok
+              : null,
+            detail_conservation_ok: typeof runData.quality?.detail_conservation_ok === "boolean"
+              ? runData.quality.detail_conservation_ok
+              : null,
             zone_state_by_surface: runData.quality?.zone_state_by_surface || {},
             warnings: reconciledQuality.warnings,
           },

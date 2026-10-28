@@ -37,12 +37,12 @@ export default function AnalysisStrip({ data, activeMode }: AnalysisStripProps) 
   const trend = delta
     ? (delta.mean_change > 0.02 ? "↑ Improving" :
        delta.mean_change < -0.02 ? "↓ Degrading" : "→ Stable")
-    : "→ Stable";
+    : "Trend unavailable";
 
   const trendColor = delta
     ? (delta.mean_change > 0.02 ? "#22c55e" :
        delta.mean_change < -0.02 ? "#ef4444" : "#94a3b8")
-    : "#94a3b8";
+    : "#64748b";
 
   // Mini histogram sparkline (8 bins max)
   const maxCount = histogram ? Math.max(...histogram.bin_counts, 1) : 1;
@@ -143,7 +143,11 @@ export default function AnalysisStrip({ data, activeMode }: AnalysisStripProps) 
         <div className="flex flex-col items-end justify-center pr-2">
           <span className="text-[9px] text-slate-500 uppercase tracking-widest leading-none">Render Tier</span>
           <span className="text-[10px] font-bold text-slate-300">
-             {data.quality.grid_alignment_ok ? "Aligned" : "Degraded"}
+             {data.quality.grid_alignment_ok === true
+               ? "Aligned"
+               : data.quality.grid_alignment_ok === false
+                 ? "Degraded"
+                 : "Unverified"}
           </span>
         </div>
       </div>

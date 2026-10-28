@@ -156,8 +156,16 @@ export default function WorkspaceIntelPanel({ data, activeMode, activeSurfaceTyp
           <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
             <Chip label="Surfaces" value={String(quality?.surfaces_generated || 0)} />
             <Chip label="Zones" value={String(quality?.zones_generated || 0)} />
-            <Chip label="Grid" value={quality?.grid_alignment_ok ? "✓ Synced" : "⚠ Drift"} color={quality?.grid_alignment_ok ? "#4ade80" : "#fbbf24"} />
-            <Chip label="Detail" value={quality?.detail_conservation_ok ? "✓ Conserved" : "⚠ Smoothed"} color={quality?.detail_conservation_ok ? "#4ade80" : "#fbbf24"} />
+            <Chip
+              label="Grid"
+              value={quality?.grid_alignment_ok === true ? "✓ Synced" : quality?.grid_alignment_ok === false ? "⚠ Drift" : "— Unverified"}
+              color={quality?.grid_alignment_ok === true ? "#4ade80" : quality?.grid_alignment_ok === false ? "#fbbf24" : "#94a3b8"}
+            />
+            <Chip
+              label="Detail"
+              value={quality?.detail_conservation_ok === true ? "✓ Conserved" : quality?.detail_conservation_ok === false ? "⚠ Smoothed" : "— Unverified"}
+              color={quality?.detail_conservation_ok === true ? "#4ade80" : quality?.detail_conservation_ok === false ? "#fbbf24" : "#94a3b8"}
+            />
           </div>
         </div>
         {(quality?.warnings?.length ?? 0) > 0 && (

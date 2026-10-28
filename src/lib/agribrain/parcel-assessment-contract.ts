@@ -1,11 +1,14 @@
 /**
- * Akaloris / AgriBrain — Parcel Assessment Identity & Scientific Content Contract (Phase 2-A)
+ * Akaloris / AgriBrain — Parcel Assessment Identity & Scientific Content Contract (Phase 2-A / P2-B)
  *
  * Enforces the architectural boundary:
  *   "One parcel assessment, one verified scientific state, many presentation views."
  *
  * Separates immutable assessment identity from scientific content, simulations,
  * and live late-arriving telemetry.
+ *
+ * Aligns frontend identity with backend publication receipts produced by
+ * services/agribrain/layer05_asmae/plot_snapshot_store.py
  */
 
 export const PARCEL_ASSESSMENT_CONTRACT_VERSION = "2026.10-p2a.1";
@@ -25,7 +28,12 @@ export interface ParcelAssessmentIdentity {
   };
   evidenceCutoffAt: string;
   publishedAt: string;
+  /** Authoritative backend publication receipt hash from Python plot_snapshot_store */
+  publicationReceiptHash: string;
+  /** Canonical alias for publicationReceiptHash */
   receiptHash: string;
+  /** Optional client-side fingerprint for local tamper detection */
+  clientFingerprint?: string;
   contractVersion: string;
 }
 
@@ -51,19 +59,29 @@ export interface Finding {
 
 export interface AssessmentQuality {
   degradationMode: string;
-  reliabilityScore: number;
+  reliabilityScore: number | null;
   warnings: string[];
   criticalErrors?: string[];
   surfacesGenerated: number;
   zonesGenerated: number;
+  gridAlignmentOk?: boolean | null;
+  detailConservationOk?: boolean | null;
 }
 
 export interface AssessmentEvidenceEvent {
   id: string;
   type: "observation" | "assimilation" | "prediction" | "simulation";
   source: string;
+  /** When physical observation took place */
+  observedAt: string;
+  /** When evidence was received by AgriBrain ingestion pipeline */
+  ingestedAt?: string | null;
+  /** When evidence passed required scientific validation */
+  acceptedAt?: string | null;
+  /** Canonical alias for observedAt */
   capturedAt: string;
-  ingestedAt?: string;
+  /** Whether the evidence actually participated in the immutable assessment publication manifest */
+  manifestMembership: boolean;
   summary: string;
   verified: boolean;
 }
@@ -131,9 +149,26 @@ export function computeGeometryHash(geometry: unknown): string {
 }
 
 /**
- * Compute receipt hash for assessment identity.
+ * Compute client-side consistency fingerprint.
+ * Note: The authoritative receipt is the backend publication_receipt_hash from Python.
+ * This client fingerprint is used solely for local consistency and immutability checks.
  */
-export function computeReceiptHash(identity: Omit<ParcelAssessmentIdentity, "receiptHash">): string {
+export function computeClientFingerprint(identity: {
+  contractVersion: string;
+  tenantId: string;
+  farmId: string;
+  plotId: string;
+  cropCycleId: string | null;
+  publicationId: string;
+  runId: string;
+  snapshotId: string;
+  geometryHash: string;
+  observationWindow: { start: string; end: string };
+  evidenceCutoffAt: string;
+  publishedAt: string;
+  publicationReceiptHash?: string;
+  receiptHash?: string;
+}): string {
   const canonicalPayload = [
     identity.contractVersion,
     identity.tenantId,
@@ -148,8 +183,16 @@ export function computeReceiptHash(identity: Omit<ParcelAssessmentIdentity, "rec
     identity.observationWindow.end,
     identity.evidenceCutoffAt,
     identity.publishedAt,
+    identity.publicationReceiptHash || identity.receiptHash || "",
   ].join("|");
   return computeDeterministicHash(canonicalPayload);
+}
+
+/**
+ * Alias for computeClientFingerprint.
+ */
+export function computeReceiptHash(identity: Omit<ParcelAssessmentIdentity, "receiptHash" | "clientFingerprint">): string {
+  return computeClientFingerprint(identity);
 }
 
 /**
@@ -223,12 +266,17 @@ export function validateAssessmentIdentity(identity: unknown): { valid: boolean;
     }
   }
 
-  if (!id.receiptHash || typeof id.receiptHash !== "string") {
-    errors.push("receiptHash_required");
-  } else if (errors.length === 0) {
-    const expectedReceipt = computeReceiptHash(id as Omit<ParcelAssessmentIdentity, "receiptHash">);
-    if (id.receiptHash !== expectedReceipt) {
-      errors.push("receiptHash_mismatch");
+  const receipt = id.publicationReceiptHash || id.receiptHash;
+  if (!receipt || typeof receipt !== "string") {
+    errors.push("publicationReceiptHash_required");
+  } else if (receipt.length < 8) {
+    errors.push("publicationReceiptHash_malformed");
+  }
+
+  if (id.clientFingerprint && errors.length === 0) {
+    const expectedFingerprint = computeClientFingerprint(id as ParcelAssessmentIdentity);
+    if (id.clientFingerprint !== expectedFingerprint) {
+      errors.push("clientFingerprint_mismatch");
     }
   }
 
@@ -259,19 +307,26 @@ export function createImmutableParcelAssessment(params: {
   const timeline = params.evidenceTimeline || [];
 
   // Enforce boundary: verified observations cannot have timestamps past evidenceCutoffAt
+  // unless explicitly marked as late-arriving and NOT participating in the publication manifest
   for (const event of timeline) {
     if (event.verified && event.type === "observation") {
-      const eventTime = new Date(event.capturedAt).getTime();
-      if (!isNaN(eventTime) && eventTime > cutoffTime) {
+      const eventTime = new Date(event.observedAt || event.capturedAt).getTime();
+      if (!isNaN(eventTime) && eventTime > cutoffTime && event.manifestMembership === true) {
         throw new Error(
-          `Observation evidence event ${event.id} (${event.capturedAt}) exceeds evidenceCutoffAt (${params.identity.evidenceCutoffAt}). Late observations cannot be part of published assessment.`
+          `Observation evidence event ${event.id} (${event.observedAt || event.capturedAt}) exceeds evidenceCutoffAt (${params.identity.evidenceCutoffAt}). Late observations cannot be part of published assessment manifest.`
         );
       }
     }
   }
 
+  const normalizedIdentity: ParcelAssessmentIdentity = {
+    ...params.identity,
+    publicationReceiptHash: params.identity.publicationReceiptHash || params.identity.receiptHash,
+    receiptHash: params.identity.receiptHash || params.identity.publicationReceiptHash,
+  };
+
   const assessment: ParcelAssessment = {
-    identity: params.identity,
+    identity: normalizedIdentity,
     canonicalLayerResults: params.canonicalLayerResults,
     authoritativeSurfaces: params.authoritativeSurfaces || [],
     topFindings: params.topFindings || [],
@@ -283,16 +338,27 @@ export function createImmutableParcelAssessment(params: {
 }
 
 /**
- * Returns true if an observation was captured after the assessment's evidence cutoff.
+ * Distinguish between evidence validity and evidence participation.
+ * Returns true if an observation was ingested after the assessment cutoff OR
+ * was not part of the published assessment's evidence manifest.
  */
 export function isLateArrivingEvidence(
   identity: ParcelAssessmentIdentity,
-  observationTimeIso: string
+  evidence: {
+    observedAt?: string;
+    capturedAt?: string;
+    ingestedAt?: string | null;
+    manifestMembership?: boolean;
+  }
 ): boolean {
+  if (evidence.manifestMembership === true) return false;
   const cutoff = new Date(identity.evidenceCutoffAt).getTime();
-  const obs = new Date(observationTimeIso).getTime();
-  if (isNaN(cutoff) || isNaN(obs)) return false;
-  return obs > cutoff;
+  const ingested = evidence.ingestedAt ? new Date(evidence.ingestedAt).getTime() : NaN;
+  const observed = new Date(evidence.observedAt || evidence.capturedAt || "").getTime();
+
+  if (!isNaN(ingested) && ingested > cutoff) return true;
+  if (!isNaN(observed) && observed > cutoff) return true;
+  return evidence.manifestMembership === false;
 }
 
 /**

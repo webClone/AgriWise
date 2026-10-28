@@ -197,7 +197,7 @@ function SystemStatusDashboard({
           <QualityTag label="Epistemic Reliability" value={scientificReliabilityPercent === null ? "Not reported" : `${scientificReliabilityPercent}%`} ok={scientificReliabilityPercent !== null && scientificReliabilityPercent >= 60} />
           <QualityTag label="Surfaces" value={`${l10Quality.surfaces_generated}`} ok={l10Quality.surfaces_generated > 0} />
           <QualityTag label="Zones" value={`${l10Quality.zones_generated}`} ok={l10Quality.zones_generated > 0} />
-          <QualityTag label="Grid" value={l10Grid ? `${l10Grid.height}×${l10Grid.width}` : "—"} ok={l10Quality.grid_alignment_ok} />
+          <QualityTag label="Grid" value={l10Grid ? `${l10Grid.height}×${l10Grid.width}` : (l10Quality.grid_alignment_ok === null ? "Not reported" : "—")} ok={l10Quality.grid_alignment_ok} />
           <QualityTag label="Semantics" value={mapSemantics.replace(/_/g, " ").slice(0, 12)} ok={mapSemantics !== "no_data"} />
           {!isNormal && <QualityTag label="Degrade" value={sanitizePipelineText(degradationMode)} ok={false} />}
         </div>
@@ -300,13 +300,15 @@ function ContextPill({ icon, label, detail }: { icon: string; label: string; det
   );
 }
 
-function QualityTag({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+function QualityTag({ label, value, ok }: { label: string; value: string; ok: boolean | null }) {
+  const isOk = ok === true;
+  const isPending = ok === null;
   return (
     <span style={{
       fontSize: "8px", padding: "1px 5px", borderRadius: "3px",
-      background: ok ? "rgba(34,197,94,0.05)" : "rgba(251,191,36,0.05)",
-      color: ok ? "#4ade80" : "#fbbf24",
-      border: `1px solid ${ok ? "rgba(34,197,94,0.08)" : "rgba(251,191,36,0.08)"}`,
+      background: isOk ? "rgba(34,197,94,0.05)" : isPending ? "rgba(148,163,184,0.05)" : "rgba(251,191,36,0.05)",
+      color: isOk ? "#4ade80" : isPending ? "#94a3b8" : "#fbbf24",
+      border: `1px solid ${isOk ? "rgba(34,197,94,0.08)" : isPending ? "rgba(148,163,184,0.08)" : "rgba(251,191,36,0.08)"}`,
       fontWeight: 600,
     }}>
       {label}: {value}

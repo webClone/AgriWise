@@ -3,7 +3,7 @@ import { test } from "node:test";
 import {
   PARCEL_ASSESSMENT_CONTRACT_VERSION,
   computeGeometryHash,
-  computeReceiptHash,
+  computeClientFingerprint,
   validateAssessmentIdentity,
   createImmutableParcelAssessment,
   isAssessmentStaleForGeometry,
@@ -30,11 +30,13 @@ function buildValidIdentity(overrides = {}) {
     },
     evidenceCutoffAt: "2026-10-28T06:00:00Z",
     publishedAt: "2026-10-28T07:30:00Z",
+    publicationReceiptHash: "c4601b07973059635ba026fb96b01b000216b2302bb617db851179c135678129",
+    receiptHash: "c4601b07973059635ba026fb96b01b000216b2302bb617db851179c135678129",
     contractVersion: PARCEL_ASSESSMENT_CONTRACT_VERSION,
     ...overrides,
   };
-  const receiptHash = computeReceiptHash(base);
-  return { ...base, receiptHash, ...overrides };
+  const clientFingerprint = computeClientFingerprint(base);
+  return { ...base, clientFingerprint, ...overrides };
 }
 
 test("valid parcel assessment identity passes contract validation", () => {
@@ -44,11 +46,18 @@ test("valid parcel assessment identity passes contract validation", () => {
   assert.equal(result.errors.length, 0);
 });
 
-test("tampered receipt hash fails closed", () => {
-  const identity = buildValidIdentity({ receiptHash: "00000000000000000000000000000000" });
+test("tampered client fingerprint fails closed", () => {
+  const identity = buildValidIdentity({ clientFingerprint: "00000000000000000000000000000000" });
   const result = validateAssessmentIdentity(identity);
   assert.equal(result.valid, false);
-  assert.ok(result.errors.includes("receiptHash_mismatch"));
+  assert.ok(result.errors.includes("clientFingerprint_mismatch"));
+});
+
+test("missing publication receipt hash fails closed", () => {
+  const identity = buildValidIdentity({ publicationReceiptHash: "", receiptHash: "" });
+  const result = validateAssessmentIdentity(identity);
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.includes("publicationReceiptHash_required"));
 });
 
 test("inverted observation window fails validation", () => {
@@ -118,7 +127,7 @@ test("assessment object is deeply frozen and rejects mutations", () => {
   }, TypeError);
 });
 
-test("late-arriving observation past cutoff is rejected from published assessment", () => {
+test("late-arriving observation past cutoff cannot participate in published assessment manifest", () => {
   const identity = buildValidIdentity({
     evidenceCutoffAt: "2026-10-28T06:00:00Z",
     publishedAt: "2026-10-28T07:00:00Z",
@@ -140,21 +149,41 @@ test("late-arriving observation past cutoff is rejected from published assessmen
           id: "obs-late-1",
           type: "observation",
           source: "Sentinel-2",
-          capturedAt: "2026-10-28T06:30:00Z", // 30 mins after cutoff!
+          observedAt: "2026-10-28T06:30:00Z", // after cutoff!
+          capturedAt: "2026-10-28T06:30:00Z",
+          manifestMembership: true, // illegally claiming to be part of manifest
           verified: true,
           summary: "Late image",
         },
       ],
     });
-  }, /Late observations cannot be part of published assessment/);
+  }, /Late observations cannot be part of published assessment manifest/);
 });
 
-test("late arriving evidence detection correctly classifies new telemetry", () => {
+test("evidence arrival after cutoff is classified as late-arriving without invalidating observation", () => {
   const identity = buildValidIdentity({
     evidenceCutoffAt: "2026-10-28T06:00:00Z",
   });
-  assert.equal(isLateArrivingEvidence(identity, "2026-10-28T05:59:00Z"), false);
-  assert.equal(isLateArrivingEvidence(identity, "2026-10-28T06:01:00Z"), true);
+
+  // Case 1: Acquired at 05:00 UTC, ingested at 07:00 UTC (after cutoff), not in manifest
+  assert.equal(
+    isLateArrivingEvidence(identity, {
+      observedAt: "2026-10-28T05:00:00Z",
+      ingestedAt: "2026-10-28T07:00:00Z",
+      manifestMembership: false,
+    }),
+    true
+  );
+
+  // Case 2: Acquired at 04:00 UTC, ingested at 05:30 UTC, included in publication manifest
+  assert.equal(
+    isLateArrivingEvidence(identity, {
+      observedAt: "2026-10-28T04:00:00Z",
+      ingestedAt: "2026-10-28T05:30:00Z",
+      manifestMembership: true,
+    }),
+    false
+  );
 });
 
 test("geometry change invalidates assessment reuse", () => {
