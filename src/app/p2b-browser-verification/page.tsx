@@ -9,6 +9,9 @@ import { useLayer10, Layer10Provider } from "@/hooks/useLayer10";
 import {
   computeGeometryHash,
 } from "@/lib/agribrain/parcel-assessment-contract.mjs";
+import {
+  createCommittedRenderReceipt,
+} from "@/lib/agribrain/render-materialization";
 
 interface VerificationStep {
   id: string;
@@ -275,8 +278,8 @@ export default function P2BBrowserVerificationPage() {
 
       // Condition 1A: Fresh publication without materialized prescription surface
       const pubA_unmaterialized = buildMockPublication({
-        intelligence_snapshot_id: "snap-A-001",
-        canonical_publication_receipt_hash: "receipt-A-sha256-1111111111111111111111111111111111111111111111111111111111111111",
+        intelligence_snapshot_id: "snap-A-unmaterialized",
+        canonical_publication_receipt_hash: "receipt-A-unmaterialized-sha256-1111111111111111111111111111111111111111111111111111111111111111",
         surfaces: [],
       });
 
@@ -292,14 +295,14 @@ export default function P2BBrowserVerificationPage() {
       };
 
       // Call fetchLayer10 on the mounted hook
-      await harness.fetchLayer10("plot-p01-olive", "farm-haouz-central");
+      await harness.fetchLayer10("plot-p01-olive", "farm-haouz-central", undefined, undefined, undefined, { snapshotId: "snap-A-unmaterialized" });
       await new Promise((r) => setTimeout(r, 100));
 
       const sample1A = latestSampleRef.current;
-      if (sample1A?.providerStatus !== "ready" || sample1A?.providerAssessment?.identity.snapshotId !== "snap-A-001") {
+      if (sample1A?.providerStatus !== "ready" || sample1A?.providerAssessment?.identity.snapshotId !== "snap-A-unmaterialized") {
         throw new Error(`Provider failed to latch snapshot A: status=${sample1A?.providerStatus}`);
       }
-      if (sample1A?.l10Data?.assessment?.identity.snapshotId !== "snap-A-001") {
+      if (sample1A?.l10Data?.assessment?.identity.snapshotId !== "snap-A-unmaterialized") {
         throw new Error("Layer 10 did not adopt snapshot A from provider");
       }
       // Condition 1A Verification: Applicable, but unmaterialized surfaces block prescriptions fail-closed
@@ -313,11 +316,12 @@ export default function P2BBrowserVerificationPage() {
         throw new Error("Condition 1A failed: Unmaterialized surface must NOT allow prescription use");
       }
 
-      // Condition 1B: Genuinely authorized, materialized prescription surface
+      // Condition 1B: Genuinely authorized, materialized prescription surface with distinct immutable identity
       const pubA_materialized = buildMockPublication({
-        intelligence_snapshot_id: "snap-A-001",
-        canonical_publication_receipt_hash: "receipt-A-sha256-1111111111111111111111111111111111111111111111111111111111111111",
-        surface_inventory_hash: "inv-hash-materialized-01",
+        publication_id: "pub-r5-authorized-spatial",
+        intelligence_snapshot_id: "snap-A-authorized-spatial",
+        canonical_publication_receipt_hash: "receipt-spatial-sha256-4444444444444444444444444444444444444444444444444444444444444444",
+        surface_inventory_hash: "inv-hash-spatial-01",
         surfaces: [
           {
             surface_id: "surf-canopy-ndvi",
@@ -329,6 +333,12 @@ export default function P2BBrowserVerificationPage() {
             values: [[0.5, 0.6], [0.55, 0.65]],
             dimensions: { rows: 2, cols: 2 },
             grid_bounds: [35.1, 31.2, 35.2, 31.3],
+            grid_spec: {
+              crs: "EPSG:4326",
+              bounds: [35.1, 31.2, 35.2, 31.3],
+              width: 2,
+              height: 2,
+            },
           },
         ],
         render_authorization_version: "v1",
@@ -374,31 +384,38 @@ export default function P2BBrowserVerificationPage() {
         return originalFetch(input, init);
       };
 
-      await harness.fetchLayer10("plot-p01-olive", "farm-haouz-central", undefined, undefined, undefined, { forceRefresh: true });
-      await new Promise((r) => setTimeout(r, 100));
+      await harness.fetchLayer10("plot-p01-olive", "farm-haouz-central", undefined, undefined, undefined, { snapshotId: "snap-A-authorized-spatial" });
+      await new Promise((r) => setTimeout(r, 120));
 
       const l10Ctx1B = harness.getLayer10Ctx();
+      const baseCommitted = createCommittedRenderReceipt(
+        l10Ctx1B.renderPlan.baseMaterialization,
+        "l10-surface-semantic",
+        ["l10-surface-semantic"],
+        {
+          publicationId: pubA_materialized.publication_id,
+          snapshotId: "snap-A-authorized-spatial",
+          surfaceInventoryHash: "inv-hash-spatial-01",
+          renderAuthorizationVersion: "v1",
+          surfaceId: "surf-canopy-ndvi",
+        }
+      );
+      if (baseCommitted.status !== "rendered") {
+        throw new Error(`createCommittedRenderReceipt failed to commit: status=${baseCommitted.status}, reason=${baseCommitted.reason}`);
+      }
+
       harness.commitBrowserRenderReceipt({
         viewIdentity: l10Ctx1B.renderPlan.viewIdentity,
-        snapshotId: "snap-A-001",
-        baseMaterialization: {
-          status: "rendered",
-          surfaceType: "NDVI_CLEAN",
-          surfaceId: "surf-canopy-ndvi",
-          layerId: "l10-surface-semantic",
-          reason: "rendered",
-          receipt: {
-            publicationId: pubA_materialized.publication_id,
-            snapshotId: "snap-A-001",
-            surfaceInventoryHash: "inv-hash-materialized-01",
-            renderAuthorizationVersion: "v1",
-            surfaceId: "surf-canopy-ndvi",
-          },
-        },
-        overlayMaterialization: null,
+        snapshotId: "snap-A-authorized-spatial",
+        publicationId: pubA_materialized.publication_id,
+        surfaceInventoryHash: "inv-hash-spatial-01",
+        renderAuthorizationVersion: "v1",
+        committedAt: new Date().toISOString(),
+        baseMaterialization: baseCommitted,
+        overlayMaterialization: l10Ctx1B.renderPlan.overlayMaterialization,
         hybridOverlayMaterializations: [],
       });
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 120));
 
       const sample1B = latestSampleRef.current;
       if (!sample1B?.isApplicable) {
@@ -420,7 +437,7 @@ export default function P2BBrowserVerificationPage() {
             ? {
                 ...s,
                 status: "passed",
-                details: "Verified 2 separate conditions: publication is applicable without prescription when unmaterialized; authorized materialized surface unlocks canPrescribe=true",
+                details: "Verified 2 separate conditions: unmaterialized publication is applicable with canPrescribe=false; distinct genuinely authorized publication with committed render receipt unlocks canPrescribe=true",
               }
             : s
         )
@@ -434,6 +451,7 @@ export default function P2BBrowserVerificationPage() {
       const pubB = buildMockPublication({
         snapshot_kind: "asmae",
         intelligence_snapshot_id: "snap-B-002",
+        publication_id: "pub-r5-asmae-8812",
         canonical_publication_receipt_hash: "receipt-B-sha256-2222222222222222222222222222222222222222222222222222222222222222",
         top_findings: [{ id: "find-2", title: "ASMAE 1m radar-optical fusion complete", severity: "info" }],
       });
@@ -449,26 +467,31 @@ export default function P2BBrowserVerificationPage() {
         return originalFetch(input, init);
       };
 
-      // Trigger ASMAE completion event listener
+      // Trigger ASMAE completion event listener using the canonical window event name and detail
       if (typeof window !== "undefined") {
         window.dispatchEvent(
-          new CustomEvent("agribrain:asmae-job-complete", {
+          new CustomEvent("agribrain:refresh_completed", {
             detail: {
               jobId: "job-asmae-8812",
               plotId: "plot-p01-olive",
-              snapshotId: "snap-B-002",
+              finalSnapshotId: "snap-B-002",
               status: "completed",
             },
           })
         );
       }
 
-      // Execute canonical update triggered by ASMAE completion
-      await harness.fetchAssessment("plot-p01-olive", "farm-haouz-central", {
-        forceRefresh: true,
-        snapshotId: "snap-B-002",
-      });
-      await new Promise((r) => setTimeout(r, 120));
+      // Wait for convergence driven by the agribrain:refresh_completed event listener
+      for (let i = 0; i < 30; i++) {
+        const s = latestSampleRef.current;
+        if (
+          s?.providerAssessment?.identity.snapshotId === "snap-B-002" &&
+          s?.l10Data?.assessment?.identity.snapshotId === "snap-B-002"
+        ) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
 
       const renderHistory = harness.getRenderHistory();
       if (renderHistory.length === 0) {
@@ -504,7 +527,7 @@ export default function P2BBrowserVerificationPage() {
             ? {
                 ...s,
                 status: "passed",
-                details: `ASMAE completion event triggered: verified atomic switch across ${renderHistory.length} intermediate render frames with 0 torn states`,
+                details: `ASMAE completion event (agribrain:refresh_completed) verified: atomic switch across ${renderHistory.length} intermediate render frames with 0 torn states`,
               }
             : s
         )

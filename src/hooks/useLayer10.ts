@@ -967,11 +967,27 @@ export function Layer10Provider({
   children: ReactNode;
   plotGeoJson?: unknown;
 }) {
+  const assessmentCtx = useContext(ParcelAssessmentContext);
   const [publication, setPublication] = useState<{
     data: Layer10Result | null;
     error: string | null;
   }>({ data: null, error: null });
-  const data = publication.data;
+
+  // Withhold old Layer 10 projection whenever its receipt no longer matches the active provider assessment
+  const isPublicationReceiptCoherent = useMemo(() => {
+    if (!publication.data || !assessmentCtx) return true;
+    if (assessmentCtx.loading || assessmentCtx.status === "loading") return false;
+    if (assessmentCtx.assessment) {
+      const activeReceipt = assessmentCtx.assessment.identity.publicationReceiptHash;
+      const dataReceipt = publication.data.canonical_publication_receipt_hash;
+      if (activeReceipt && dataReceipt && activeReceipt !== dataReceipt) {
+        return false;
+      }
+    }
+    return true;
+  }, [publication.data, assessmentCtx]);
+
+  const data = isPublicationReceiptCoherent ? publication.data : null;
   const error = publication.error;
   const [loading, setLoading] = useState(false);
   const [detailMode, setDetailMode] = useState<"farmer" | "expert">("farmer");
@@ -1022,8 +1038,6 @@ export function Layer10Provider({
   }, [plotGeoJson]);
 
   // Phase 2-B: Wire authoritative ParcelAssessmentProvider into Layer10 presentation adapter
-  const assessmentCtx = useContext(ParcelAssessmentContext);
-
   useEffect(() => {
     if (!assessmentCtx) return;
 
@@ -1749,10 +1763,12 @@ export function Layer10Provider({
         ].join(":");
         if (canonicalCompletionFetchRef.current === completionIdentity) return;
         canonicalCompletionFetchRef.current = completionIdentity;
-        setPublication((previous) => ({
-          ...previous,
-          data: patchLayer10AsmaeCompletion(previous.data, customEvt.detail),
-        }));
+        if (!assessmentCtx) {
+          setPublication((previous) => ({
+            ...previous,
+            data: patchLayer10AsmaeCompletion(previous.data, customEvt.detail),
+          }));
+        }
         void fetchLayer10(targetPlotId, "", undefined, undefined, undefined, {
           forceRefresh: false,
           snapshotId: finalSnapshotId,
@@ -1847,10 +1863,12 @@ export function Layer10Provider({
           ].join(":");
           if (canonicalCompletionFetchRef.current === completionIdentity) return;
           canonicalCompletionFetchRef.current = completionIdentity;
-          setPublication((previous) => ({
-            ...previous,
-            data: patchLayer10AsmaeCompletion(previous.data, live),
-          }));
+          if (!assessmentCtx) {
+            setPublication((previous) => ({
+              ...previous,
+              data: patchLayer10AsmaeCompletion(previous.data, live),
+            }));
+          }
           await fetchLayer10(
             observedAsmaePlotId,
             "",
@@ -2556,7 +2574,7 @@ export function Layer10Provider({
     {
       value: {
         data,
-        loading,
+        loading: loading || (assessmentCtx ? assessmentCtx.loading || !isPublicationReceiptCoherent : false),
         error,
         activeMode,
         detailMode,
@@ -2646,8 +2664,8 @@ export function Layer10Provider({
         browserRenderReceipt,
         commitBrowserRenderReceipt,
         clearBrowserRenderReceipt,
-        assessment: data?.assessment ?? assessmentCtx?.assessment ?? null,
-        top_findings: data?.top_findings ?? (assessmentCtx?.assessment?.topFindings ? [...assessmentCtx.assessment.topFindings] : []),
+        assessment: data?.assessment ?? (isPublicationReceiptCoherent ? assessmentCtx?.assessment : null) ?? null,
+        top_findings: data?.top_findings ?? (isPublicationReceiptCoherent && assessmentCtx?.assessment?.topFindings ? [...assessmentCtx.assessment.topFindings] : []),
       }
     },
     children

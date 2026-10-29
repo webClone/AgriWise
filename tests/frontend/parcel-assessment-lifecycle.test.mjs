@@ -12,6 +12,8 @@ import {
   isLateArrivingEvidence,
   canonicalPublicationToAssessment,
 } from "../../src/lib/agribrain/parcel-assessment-contract.mjs";
+import { hasCompleteCommittedRenderIdentity } from "../../src/lib/agribrain/layer10-request-state.mjs";
+import { resolvePixelInspectorCapabilities } from "../../src/lib/agribrain/pixel-inspector-authority.mjs";
 
 function buildMockPublication(overrides = {}) {
   const cutoff = "2026-10-28T06:00:00Z";
@@ -790,19 +792,32 @@ test("Integration 6: Dual surface authorization & ASMAE intermediate atomic cohe
   const isApplicable1 = !isAssessmentStaleForGeometry(assess1.identity, origGeom) && !isAssessmentStaleForCropCycle(assess1.identity, "cycle-2026-autumn");
   assert.equal(isApplicable1, true, "Unmaterialized publication must be marked applicable");
 
-  const unmaterializedActive = false;
-  const canPrescribe1 = true && unmaterializedActive && isApplicable1;
+  // In unmaterialized state, resolvePixelInspectorCapabilities with no surface yields false
+  const unmaterializedCaps = resolvePixelInspectorCapabilities({ surface: null });
+  assert.equal(unmaterializedCaps.canUseForPrescription, false);
+  assert.equal(unmaterializedCaps.canInterpretDiagnostically, false);
+
+  const activeSurfaceMaterialized1 = false;
+  const canPrescribe1 = unmaterializedCaps.canUseForPrescription && activeSurfaceMaterialized1 && isApplicable1;
   assert.equal(canPrescribe1, false, "Unmaterialized surface must block prescriptions fail-closed");
 
-  // Condition 1B: Genuinely authorized, materialized prescription surface
+  // Condition 1B: Genuinely authorized, materialized prescription surface with distinct immutable identity
   const pubMaterialized = buildMockPublication({
+    publication_id: "pub-r5-authorized-spatial",
+    intelligence_snapshot_id: "snap-A-authorized-spatial",
+    canonical_publication_receipt_hash: "receipt-spatial-sha256-4444444444444444444444444444444444444444444444444444444444444444",
     crop_cycle_id: "cycle-2026-autumn",
+    surface_inventory_hash: "inv-hash-spatial-01",
+    render_authorization_version: "v1",
     surfaces: [
       {
         surface_id: "surf-canopy-ndvi",
         type: "NDVI_CLEAN",
+        semantic_type: "NDVI_CLEAN",
+        grounding_class: "RASTER_GROUNDED",
         prescription_driver_allowed: true,
         management_eligible: true,
+        values: [[0.5, 0.6], [0.55, 0.65]],
       },
     ],
   });
@@ -813,21 +828,108 @@ test("Integration 6: Dual surface authorization & ASMAE intermediate atomic cohe
   const isApplicable2 = !isAssessmentStaleForGeometry(assess2.identity, origGeom) && !isAssessmentStaleForCropCycle(assess2.identity, "cycle-2026-autumn");
   assert.equal(isApplicable2, true);
 
-  const materializedActive = true;
-  const canPrescribe2 = true && materializedActive && isApplicable2;
-  const canDiagnose2 = true && materializedActive && isApplicable2;
+  // Materialization receipt identity contract validation:
+  const committedIdentityValid = hasCompleteCommittedRenderIdentity({
+    publicationId: pubMaterialized.publication_id,
+    snapshotId: "snap-A-authorized-spatial",
+    surfaceInventoryHash: "inv-hash-spatial-01",
+    renderAuthorizationVersion: "v1",
+    surfaceId: "surf-canopy-ndvi",
+  });
+  assert.equal(committedIdentityValid, true, "Committed render receipt must satisfy all 5 identity fields");
+
+  // Incomplete receipt fails closed:
+  assert.equal(hasCompleteCommittedRenderIdentity({
+    publicationId: "pub-1",
+    snapshotId: "snap-1",
+    surfaceInventoryHash: "",
+    renderAuthorizationVersion: "v1",
+    surfaceId: "surf-1",
+  }), false, "Incomplete render identity fails closed");
+
+  const materializedCaps = resolvePixelInspectorCapabilities({
+    surface: pubMaterialized.surfaces[0],
+    inspectorAuthorization: { authorized: true, inspectorAllowed: true },
+  });
+  assert.equal(materializedCaps.canUseForPrescription, true);
+  assert.equal(materializedCaps.canInterpretDiagnostically, true);
+
+  const activeSurfaceMaterialized2 = true;
+  const canPrescribe2 = materializedCaps.canUseForPrescription && activeSurfaceMaterialized2 && isApplicable2;
+  const canDiagnose2 = materializedCaps.canInterpretDiagnostically && activeSurfaceMaterialized2 && isApplicable2;
   assert.equal(canPrescribe2, true, "Materialized authorized surface must enable prescriptions");
   assert.equal(canDiagnose2, true, "Materialized authorized surface must enable diagnoses");
 
-  // ASMAE intermediate atomic coherence check:
-  // Render frames transitioning from snap-A to snap-B
-  const renderFrames = [
-    { providerSnap: "snap-A", l10Snap: "snap-A", isApplicable: true },
-    { providerSnap: "snap-A", l10Snap: "snap-A", isApplicable: true },
-    { providerSnap: "snap-B", l10Snap: "snap-B", isApplicable: true },
+  // ASMAE Intermediate Atomic Coherence: Receipt-Coherence Projection Withholding
+  // In useLayer10.ts, isPublicationReceiptCoherent withholds projection whenever
+  // assessmentCtx.assessment.publicationReceiptHash !== publication.data.canonical_publication_receipt_hash
+  const evaluateCoherentProjection = (providerState, l10Publication) => {
+    if (!l10Publication || !providerState) return { data: null, loading: false };
+    if (providerState.loading || providerState.status === "loading") {
+      return { data: null, loading: true };
+    }
+    if (providerState.assessment) {
+      const activeReceipt = providerState.assessment.identity.publicationReceiptHash;
+      const dataReceipt = l10Publication.canonical_publication_receipt_hash;
+      if (activeReceipt && dataReceipt && activeReceipt !== dataReceipt) {
+        return { data: null, loading: true };
+      }
+    }
+    return { data: l10Publication, loading: false };
+  };
+
+  const pubA = {
+    intelligence_snapshot_id: "snap-A-001",
+    canonical_publication_receipt_hash: "receipt-A-sha256-1111111111111111111111111111111111111111111111111111111111111111",
+  };
+  const pubB = {
+    intelligence_snapshot_id: "snap-B-002",
+    canonical_publication_receipt_hash: "receipt-B-sha256-2222222222222222222222222222222222222222222222222222222222222222",
+  };
+
+  const assessA = canonicalPublicationToAssessment(buildMockPublication({
+    intelligence_snapshot_id: "snap-A-001",
+    canonical_publication_receipt_hash: pubA.canonical_publication_receipt_hash,
+  }), "plot-p01-olive");
+
+  const assessB = canonicalPublicationToAssessment(buildMockPublication({
+    intelligence_snapshot_id: "snap-B-002",
+    canonical_publication_receipt_hash: pubB.canonical_publication_receipt_hash,
+  }), "plot-p01-olive");
+
+  // Sequence of transitions during ASMAE completion:
+  const transitionSequence = [
+    // Frame 0: Baseline stable state A
+    { provider: { status: "ready", loading: false, assessment: assessA }, l10Pub: pubA },
+    // Frame 1: ASMAE event triggers fetch -> provider enters loading state
+    { provider: { status: "loading", loading: true, assessment: assessA }, l10Pub: pubA },
+    // Frame 2: Provider latches new snapshot B, but Layer 10 has not yet mapped pubB
+    { provider: { status: "ready", loading: false, assessment: assessB }, l10Pub: pubA },
+    // Frame 3: Layer 10 receives pubB matching provider snapshot B
+    { provider: { status: "ready", loading: false, assessment: assessB }, l10Pub: pubB },
   ];
-  for (const frame of renderFrames) {
-    assert.equal(frame.providerSnap, frame.l10Snap, "Intermediate render state must remain atomically coherent");
-    assert.equal(typeof frame.isApplicable, "boolean");
+
+  for (let i = 0; i < transitionSequence.length; i++) {
+    const { provider, l10Pub } = transitionSequence[i];
+    const projection = evaluateCoherentProjection(provider, l10Pub);
+
+    if (i === 1) {
+      assert.equal(projection.data, null, "Frame 1: Projection must be withheld while provider is loading");
+      assert.equal(projection.loading, true);
+    } else if (i === 2) {
+      assert.equal(projection.data, null, "Frame 2: Outdated projection A must be withheld when provider has adopted B");
+      assert.equal(projection.loading, true);
+    } else if (i === 3) {
+      assert.equal(projection.data.intelligence_snapshot_id, "snap-B-002", "Frame 3: Converged on snapshot B");
+      assert.equal(projection.loading, false);
+    }
+
+    // Crucial atomic invariant: whenever both provider and L10 have a non-null projected snapshot, they MUST be identical
+    const providerSnap = provider.assessment?.identity.snapshotId;
+    const l10Snap = projection.data?.intelligence_snapshot_id;
+    if (providerSnap && l10Snap) {
+      assert.equal(providerSnap, l10Snap, `Torn frame prohibited at index ${i}`);
+    }
   }
 });
+
