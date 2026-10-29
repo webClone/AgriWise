@@ -733,6 +733,7 @@ async function executeRun(
                   diagnostic_only: s.diagnostic_only ?? s.provenance?.diagnostic_only ?? null,
                   state_update_allowed: s.state_update_allowed ?? s.provenance?.state_update_allowed ?? null,
                   prescription_driver_allowed: s.prescription_driver_allowed ?? s.provenance?.prescription_driver_allowed ?? null,
+                  management_eligible: s.management_eligible ?? s.managementEligible ?? s.provenance?.management_eligible ?? s.provenance?.managementEligible ?? null,
                   confidence: s.confidence ?? s.provenance?.confidence ?? null,
                   uncertainty: s.uncertainty ?? s.provenance?.uncertainty ?? null,
                   authority_block_reason: s.authority_block_reason ?? s.provenance?.authority_block_reason ?? null,

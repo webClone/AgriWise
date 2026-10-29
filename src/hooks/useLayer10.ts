@@ -134,6 +134,7 @@ export interface SurfaceData {
   diagnostic_only?: boolean | null;
   state_update_allowed?: boolean | null;
   prescription_driver_allowed?: boolean | null;
+  management_eligible?: boolean | null;
   confidence?: number | null;
   uncertainty?: number | null;
   authority_block_reason?: string | null;
@@ -619,6 +620,8 @@ function normalizeSurface(raw: Record<string, any>): SurfaceData {
     state_update_allowed: raw.state_update_allowed ?? raw.provenance?.state_update_allowed ?? null,
     prescription_driver_allowed:
       raw.prescription_driver_allowed ?? raw.provenance?.prescription_driver_allowed ?? null,
+    management_eligible:
+      raw.management_eligible ?? raw.managementEligible ?? raw.provenance?.management_eligible ?? raw.provenance?.managementEligible ?? null,
     confidence: raw.confidence ?? raw.provenance?.confidence ?? null,
     uncertainty: raw.uncertainty ?? raw.provenance?.uncertainty ?? null,
     authority_block_reason: raw.authority_block_reason ?? raw.provenance?.authority_block_reason ?? null,

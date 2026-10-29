@@ -847,12 +847,35 @@ test("Integration 6: Dual surface authorization & ASMAE intermediate atomic cohe
     surfaceId: "surf-1",
   }), false, "Incomplete render identity fails closed");
 
+  // Verify normalized surface preserves management_eligible from publication
+  const normalizedSurface = {
+    ...pubMaterialized.surfaces[0],
+    prescription_driver_allowed: pubMaterialized.surfaces[0].prescription_driver_allowed ?? null,
+    management_eligible: pubMaterialized.surfaces[0].management_eligible ?? null,
+  };
+  assert.equal(normalizedSurface.management_eligible, true, "Layer 10 normalized surface must preserve management_eligible");
+
   const materializedCaps = resolvePixelInspectorCapabilities({
-    surface: pubMaterialized.surfaces[0],
+    surface: normalizedSurface,
     inspectorAuthorization: { authorized: true, inspectorAllowed: true },
   });
   assert.equal(materializedCaps.canUseForPrescription, true);
   assert.equal(materializedCaps.canInterpretDiagnostically, true);
+
+  // Missing or false management_eligible on normalized surface blocks prescription use fail-closed:
+  const missingEligibleCaps = resolvePixelInspectorCapabilities({
+    surface: { ...normalizedSurface, management_eligible: null },
+    inspectorAuthorization: { authorized: true, inspectorAllowed: true },
+  });
+  assert.equal(missingEligibleCaps.canUseForPrescription, false, "Missing management_eligible blocks prescription use");
+  assert.equal(missingEligibleCaps.canInterpretDiagnostically, true, "Diagnostic interpretation remains enabled");
+
+  const falseEligibleCaps = resolvePixelInspectorCapabilities({
+    surface: { ...normalizedSurface, management_eligible: false },
+    inspectorAuthorization: { authorized: true, inspectorAllowed: true },
+  });
+  assert.equal(falseEligibleCaps.canUseForPrescription, false, "False management_eligible blocks prescription use");
+  assert.equal(falseEligibleCaps.canInterpretDiagnostically, true, "Diagnostic interpretation remains enabled");
 
   const activeSurfaceMaterialized2 = true;
   const canPrescribe2 = materializedCaps.canUseForPrescription && activeSurfaceMaterialized2 && isApplicable2;

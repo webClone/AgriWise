@@ -12,6 +12,9 @@ import {
 import {
   createCommittedRenderReceipt,
 } from "@/lib/agribrain/render-materialization";
+import {
+  resolvePixelInspectorCapabilities,
+} from "@/lib/agribrain/pixel-inspector-authority.mjs";
 
 interface VerificationStep {
   id: string;
@@ -148,6 +151,7 @@ function AssessmentConsumerProbe({
       l10Data: l10.data,
       l10Loading: l10.loading,
       l10Error: l10.error,
+      activeSurface: l10.activeSurface,
       renderPlan: l10.renderPlan,
       activeSurfaceMaterialized: l10.activeSurfaceMaterialized,
       canUseForPrescription: l10.canUseForPrescription,
@@ -162,6 +166,7 @@ function AssessmentConsumerProbe({
     l10.data,
     l10.loading,
     l10.error,
+    l10.activeSurface,
     l10.renderPlan,
     l10.activeSurfaceMaterialized,
     l10.canUseForPrescription,
@@ -424,11 +429,30 @@ export default function P2BBrowserVerificationPage() {
       if (!sample1B?.activeSurfaceMaterialized) {
         throw new Error("Condition 1B failed: Committed render receipt must materialize surface");
       }
+      if (sample1B?.activeSurface?.management_eligible !== true) {
+        throw new Error("Condition 1B failed: Normalized Layer 10 surface must preserve management_eligible === true");
+      }
       if (!sample1B?.canUseForPrescription) {
         throw new Error("Condition 1B failed: Materialized authorized surface must enable canUseForPrescription");
       }
       if (!sample1B?.canInterpretDiagnostically) {
         throw new Error("Condition 1B failed: Materialized authorized surface must enable canInterpretDiagnostically");
+      }
+
+      // Verify fail-closed behavior: missing or false management_eligible on normalized surface blocks prescription use
+      const blockedMissingEligible = resolvePixelInspectorCapabilities({
+        surface: { ...sample1B.activeSurface, management_eligible: null },
+        inspectorAuthorization: { authorized: true, inspectorAllowed: true },
+      });
+      if (blockedMissingEligible.canUseForPrescription !== false) {
+        throw new Error("Missing management_eligible must fail closed and block prescription use");
+      }
+      const blockedFalseEligible = resolvePixelInspectorCapabilities({
+        surface: { ...sample1B.activeSurface, management_eligible: false },
+        inspectorAuthorization: { authorized: true, inspectorAllowed: true },
+      });
+      if (blockedFalseEligible.canUseForPrescription !== false) {
+        throw new Error("False management_eligible must block prescription use");
       }
 
       setSteps((prev) =>
@@ -437,7 +461,7 @@ export default function P2BBrowserVerificationPage() {
             ? {
                 ...s,
                 status: "passed",
-                details: "Verified 2 separate conditions: unmaterialized publication is applicable with canPrescribe=false; distinct genuinely authorized publication with committed render receipt unlocks canPrescribe=true",
+                details: "Verified 2 separate conditions: unmaterialized publication has canPrescribe=false; distinct authorized publication preserves management_eligible=true with committed receipt unlocking canPrescribe=true while missing/false management_eligible blocks prescriptions fail-closed",
               }
             : s
         )
