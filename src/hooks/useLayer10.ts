@@ -419,6 +419,7 @@ export interface Layer10Result {
   assessment?: ParcelAssessment | null;
   is_stale?: boolean;
   staleness_reason?: string | null;
+  operational_actions_allowed?: boolean;
 }
 
 export interface FallbackGuidance {
@@ -832,6 +833,9 @@ export interface Layer10ContextType {
   canInterpretForScouting: boolean;
   canInterpretDiagnostically: boolean;
   canUseForPrescription: boolean;
+  isApplicable: boolean;
+  isStale: boolean;
+  staleReason: string | null;
   canShowExperimentalDetail: boolean;
   shouldShowNoData: boolean;
   shouldShowPlotLevel: boolean;
@@ -1139,6 +1143,7 @@ export function Layer10Provider({
           canonical_publication_receipt_hash: assessmentCtx.assessment.identity.publicationReceiptHash,
           is_stale: assessmentCtx.status === "stale",
           staleness_reason: assessmentCtx.staleReason || null,
+          operational_actions_allowed: assessmentCtx.isApplicable,
         };
 
         setPublication({ data: mapped, error: null });
@@ -1280,6 +1285,7 @@ export function Layer10Provider({
               geometry: plotGeoJsonRef.current,
             }
           );
+          if (!isLatestRequest()) return;
           setLoading(false);
           if (!assessment) {
             setPublication((previous) => ({
@@ -1289,6 +1295,7 @@ export function Layer10Provider({
             }));
           }
         } catch (fetchErr: any) {
+          if (!isLatestRequest()) return;
           setLoading(false);
           setPublication((previous) => ({
             ...previous,
@@ -2578,12 +2585,15 @@ export function Layer10Provider({
         activeSourceLabel,
         activeAuthorityLabel,
         bannerState,
-        canShowPixelDiagnosis: canShowPixelDiagnosis && activeSurfaceMaterialized,
+        canShowPixelDiagnosis: canShowPixelDiagnosis && activeSurfaceMaterialized && (assessmentCtx?.isApplicable ?? true),
         canShowPixelHint: canShowPixelHint && activeSurfaceMaterialized,
         canSamplePixel: canSamplePixel && activeSurfaceMaterialized,
         canInterpretForScouting: canInterpretForScouting && activeSurfaceMaterialized,
-        canInterpretDiagnostically: canInterpretDiagnostically && activeSurfaceMaterialized,
-        canUseForPrescription: canUseForPrescription && activeSurfaceMaterialized,
+        canInterpretDiagnostically: canInterpretDiagnostically && activeSurfaceMaterialized && (assessmentCtx?.isApplicable ?? true),
+        canUseForPrescription: canUseForPrescription && activeSurfaceMaterialized && (assessmentCtx?.isApplicable ?? true),
+        isApplicable: assessmentCtx?.isApplicable ?? true,
+        isStale: assessmentCtx?.isStale ?? false,
+        staleReason: assessmentCtx?.staleReason ?? null,
         canShowExperimentalDetail,
         shouldShowNoData: shouldShowNoData || !activeSurfaceMaterialized,
         shouldShowPlotLevel,

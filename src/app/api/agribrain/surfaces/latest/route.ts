@@ -151,6 +151,7 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
         const canonical_publication_receipt_hash = snapJson.publication_receipt_hash || payload.canonical_publication_receipt_hash || "";
         const canonical_publication_job_id = snapJson.publication_job_id || payload.canonical_publication_job_id || snapJson.job_id || "";
         const publication_id = payload.publication_id || snapJson.frontend_publication_hash || canonical_publication_receipt_hash;
+        const crop_cycle_id = snapJson.crop_cycle_id || payload.crop_cycle_id || payload.cropCycleId || null;
 
         // 2. Authoritative temporal identity resolved at publication time without synthetic metadata
         const published_at = snapJson.published_at || payload.published_at || payload.publishedAt || snapJson.recorded_at;
@@ -206,6 +207,8 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
           evidenceCutoffAt: evidence_cutoff_at,
           observation_window,
           observationWindow: observation_window,
+          crop_cycle_id,
+          cropCycleId: crop_cycle_id,
           status: "fresh",
           capturedAt: snapJson.recorded_at || snapJson.timestamp || published_at,
           surfaceDigest: snapJson.node_hash || snapJson.snapshot_id,

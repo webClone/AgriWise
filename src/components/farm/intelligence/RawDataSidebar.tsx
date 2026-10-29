@@ -237,6 +237,30 @@ export default function RawDataSidebar() {
           >✕</button>
         </div>
 
+        {/* ── Operational Applicability Gate: Stale Warning Banner ── */}
+        {(!l10.isApplicable || l10.isStale) && (
+          <div style={{
+            margin: "4px 0 8px 0",
+            padding: "8px 10px",
+            borderRadius: "8px",
+            background: "rgba(245, 158, 11, 0.12)",
+            border: "1px solid rgba(245, 158, 11, 0.35)",
+            color: "#fbbf24",
+            fontSize: "0.72rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "2px",
+          }}>
+            <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: "6px" }}>
+              <span>⚠️</span>
+              <span>Historical Assessment ({l10.staleReason || "outdated context"})</span>
+            </div>
+            <div style={{ fontSize: "0.68rem", color: "#fcd34d" }}>
+              Findings are displayed for historical reference only. Current operational actions and prescriptions are disabled.
+            </div>
+          </div>
+        )}
+
         {/* Tabs */}
         <div style={{ display: "flex", gap: "4px" }} suppressHydrationWarning={true}>
           {(["analysis", "layers", ...(detailMode === "expert" ? ["raw"] : [])] as SidebarTab[]).map(tab => (

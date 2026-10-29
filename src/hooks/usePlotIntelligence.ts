@@ -41,6 +41,7 @@ export interface EngineStatus {
   lastUpdate: string | null;
   data: Record<string, unknown>;
   raw?: Record<string, unknown>;
+  isOperationalApplicable?: boolean;
 }
 
 export interface TimelineData {
@@ -174,10 +175,13 @@ interface PlotIntelligenceContextType {
   // DNA 4.0: Biophysical trait provenance
   dnaStatus: DnaStatus | null;
 
+  // Applicability Gate
+  isApplicable: boolean;
+
   // Fetch / Sync
   fetchIntelligence: (plotId: string, farmId: string) => Promise<void>;
   forceRefresh: (plotId: string, farmId: string) => Promise<void>;
-  injectData: (data: any) => void;
+  injectData: (data: any, targetPlotId?: string, isApplicable?: boolean) => void;
 }
 
 const PlotIntelligenceContext = createContext<PlotIntelligenceContextType | null>(null);
@@ -216,6 +220,9 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
   const [cacheStatus, setCacheStatus] = useState<CacheStatus>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastCaptured, setLastCaptured] = useState<string | null>(null);
+
+  // Applicability state
+  const [isAssessmentApplicable, setIsAssessmentApplicable] = useState(true);
 
   // Timeline
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -468,19 +475,37 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
     [mapResponse]
   );
 
-  const injectData = useCallback((payload: any, targetPlotId?: string) => {
+  const injectData = useCallback((payload: any, targetPlotId?: string, isApplicable: boolean = true) => {
     if (!payload) return;
+    const applicable = isApplicable && !payload.is_stale && !payload.isStale;
+    setIsAssessmentApplicable(applicable);
     isCanonicalAssessmentBoundRef.current = true;
     boundPlotIdRef.current = targetPlotId || payload.plot_id || payload.plotId || null;
     const rawEngines = payload.engines && (Array.isArray(payload.engines) ? payload.engines.length > 0 : Object.keys(payload.engines).length > 0)
       ? payload.engines
       : payload.layer_results || payload.canonicalLayerResults || [];
+    
+    const normalizedEngines = normalizeEngineCollection(rawEngines).map(normalizeEngine).map(e => {
+      if (!applicable) {
+        return {
+          ...e,
+          statusLabel: e.status === "LOADING" ? "Loading…" : `${e.statusLabel} (Outdated)`,
+          summary: e.summary ? `[Historical Audit] ${e.summary}` : "",
+          isOperationalApplicable: false,
+        };
+      }
+      return {
+        ...e,
+        isOperationalApplicable: true,
+      };
+    });
+
     const mapped: PlotIntelligenceData = {
       timeline: payload.timeline || {
         weather: [], ndvi: [], sar: [], waterBalance: [], forecast: [],
         dateRange: { from: "", to: "", today: "" },
       },
-      engines: normalizeEngineCollection(rawEngines).map(normalizeEngine),
+      engines: normalizedEngines,
       current: payload.current || { weather: null, indices: null, soil: null, waterBalance: null },
       rawData: payload.rawData,
       assimilation: payload.assimilation || {
@@ -527,6 +552,8 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
         setShowAnalysisSidebar,
         activeSidebarTab,
         setActiveSidebarTab,
+
+        isApplicable: isAssessmentApplicable,
 
         assimilation: data?.assimilation || null,
         rawData: data?.rawData || null,

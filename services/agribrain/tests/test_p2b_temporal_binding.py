@@ -191,3 +191,128 @@ def test_mutating_head_published_at_causes_validation_failure(tmp_path: Path):
         tampered_load = load_latest_plot_snapshot(namespace, "geometry-hash-03")
         assert tampered_load["validation"]["temporalBindingValid"] is False
         assert tampered_load["validation"]["bindingValid"] is False
+
+
+def test_missing_evidence_cutoff_with_observation_window_remains_none(tmp_path: Path):
+    """Scientific Provenance Guarantee:
+    An absent evidence cutoff must NEVER be inferred from an observation-window end.
+    A requested data window is not automatically a verified evidence-admission cutoff.
+    """
+    namespace = PlotNamespace("tenant-test", "farm-test", "plot-temporal-04")
+    snapshot_id = "ASMAE-SNAPSHOT-window-no-cutoff-04"
+    obs_truth = {"start": "2026-10-01T00:00:00Z", "end": "2026-10-28T00:00:00Z"}
+
+    asmae_result, frontend_payload = _make_asmae_test_payload(
+        snapshot_id, "plot-temporal-04", cutoff=None, window=obs_truth
+    )
+
+    with patch("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", tmp_path):
+        published = publish_canonical_plot_snapshot(
+            namespace=namespace,
+            geometry_hash="geometry-hash-04",
+            snapshot_id=snapshot_id,
+            asmae_result=asmae_result,
+            frontend_payload=frontend_payload,
+            job_id="job-window-no-cutoff-04",
+            manifest_hash="manifest-hash-04",
+            execution_identity={"worker": "test", "plan": "test"},
+        )
+
+        loaded = load_latest_plot_snapshot(namespace, "geometry-hash-04")
+
+    assert loaded is not None
+    assert loaded.get("observation_window") == obs_truth
+    # Even though observation_window exists with an 'end', evidence_cutoff_at MUST remain None
+    assert loaded.get("evidence_cutoff_at") is None, "Missing evidence cutoff must NOT be inferred from observation_window['end']"
+
+
+def test_deleting_head_temporal_fields_causes_validation_failure(tmp_path: Path):
+    """Integrity Guarantee:
+    Deleting head.json temporal fields (published_at, evidence_cutoff_at, observation_window)
+    causes temporalBindingValid == False and bindingValid == False.
+    """
+    namespace = PlotNamespace("tenant-test", "farm-test", "plot-temporal-05")
+    snapshot_id = "ASMAE-SNAPSHOT-tamper-deletion-05"
+
+    cutoff_truth = "2026-10-28T06:00:00Z"
+    obs_truth = {"start": "2026-10-20T00:00:00Z", "end": "2026-10-28T06:00:00Z"}
+
+    asmae_result, frontend_payload = _make_asmae_test_payload(
+        snapshot_id, "plot-temporal-05", cutoff=cutoff_truth, window=obs_truth
+    )
+
+    with patch("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", tmp_path):
+        published = publish_canonical_plot_snapshot(
+            namespace=namespace,
+            geometry_hash="geometry-hash-05",
+            snapshot_id=snapshot_id,
+            asmae_result=asmae_result,
+            frontend_payload=frontend_payload,
+            job_id="job-tamper-del-05",
+            manifest_hash="manifest-hash-05",
+            execution_identity={"worker": "test", "plan": "test"},
+        )
+
+        # Case A: Delete evidence_cutoff_at
+        with _SNAPSHOT_CACHE_LOCK:
+            _CANONICAL_SNAPSHOT_CACHE.clear()
+        head_path = _head_path(namespace)
+        orig_head_text = head_path.read_text(encoding="utf-8")
+        head_data = json.loads(orig_head_text)
+        del head_data["evidence_cutoff_at"]
+        head_path.write_text(json.dumps(head_data), encoding="utf-8")
+
+        load_del_cutoff = load_latest_plot_snapshot(namespace, "geometry-hash-05")
+        assert load_del_cutoff["validation"]["temporalBindingValid"] is False, "Deleted head cutoff must fail temporal binding"
+
+        # Case B: Delete observation_window
+        with _SNAPSHOT_CACHE_LOCK:
+            _CANONICAL_SNAPSHOT_CACHE.clear()
+        head_data = json.loads(orig_head_text)
+        del head_data["observation_window"]
+        head_path.write_text(json.dumps(head_data), encoding="utf-8")
+
+        load_del_window = load_latest_plot_snapshot(namespace, "geometry-hash-05")
+        assert load_del_window["validation"]["temporalBindingValid"] is False, "Deleted head observation_window must fail temporal binding"
+
+        # Case C: Mutate observation_window bounds
+        with _SNAPSHOT_CACHE_LOCK:
+            _CANONICAL_SNAPSHOT_CACHE.clear()
+        head_data = json.loads(orig_head_text)
+        head_data["observation_window"] = {"start": "2020-01-01T00:00:00Z", "end": "2020-01-02T00:00:00Z"}
+        head_path.write_text(json.dumps(head_data), encoding="utf-8")
+
+        load_mut_window = load_latest_plot_snapshot(namespace, "geometry-hash-05")
+        assert load_mut_window["validation"]["temporalBindingValid"] is False, "Mutated head observation_window must fail temporal binding"
+
+
+def test_crop_cycle_id_propagated_to_published_snapshot_and_head(tmp_path: Path):
+    """Scientific Context Guarantee:
+    When a crop_cycle_id is present in the publication context, it is explicitly published
+    into the immutable envelope, the frontend publication payload, and the plot head.
+    """
+    namespace = PlotNamespace("tenant-test", "farm-test", "plot-crop-cycle-01")
+    snapshot_id = "ASMAE-SNAPSHOT-cycle-prop-01"
+
+    asmae_result, frontend_payload = _make_asmae_test_payload(
+        snapshot_id, "plot-crop-cycle-01", cutoff="2026-10-28T06:00:00Z", window={"start": "2026-10-20T00:00:00Z", "end": "2026-10-28T06:00:00Z"}
+    )
+    frontend_payload["crop_cycle_id"] = "cycle-2026-autumn"
+
+    with patch("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", tmp_path):
+        published = publish_canonical_plot_snapshot(
+            namespace=namespace,
+            geometry_hash="geometry-hash-cycle",
+            snapshot_id=snapshot_id,
+            asmae_result=asmae_result,
+            frontend_payload=frontend_payload,
+            job_id="job-cycle-prop-01",
+            manifest_hash="manifest-hash-cycle",
+            execution_identity={"worker": "test", "plan": "test", "crop_cycle_id": "cycle-2026-autumn"},
+        )
+
+        loaded = load_latest_plot_snapshot(namespace, "geometry-hash-cycle")
+
+    assert loaded is not None
+    assert loaded.get("crop_cycle_id") == "cycle-2026-autumn"
+    assert loaded.get("frontend_payload", {}).get("crop_cycle_id") == "cycle-2026-autumn"

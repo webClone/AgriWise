@@ -589,6 +589,30 @@ export default function EnginePipelinePanel({
           </div>
         </div>
 
+        {/* ── Operational Applicability Gate: Stale Warning Banner ── */}
+        {(!l10.isApplicable || l10.isStale) && (
+          <div style={{
+            margin: "8px 10px 0 10px",
+            padding: "8px 10px",
+            borderRadius: "8px",
+            background: "rgba(245, 158, 11, 0.12)",
+            border: "1px solid rgba(245, 158, 11, 0.35)",
+            color: "#fbbf24",
+            fontSize: "0.72rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "2px",
+          }}>
+            <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: "6px" }}>
+              <span>⚠️</span>
+              <span>Outdated Assessment ({l10.staleReason || "context mismatch"})</span>
+            </div>
+            <div style={{ fontSize: "0.68rem", color: "#fcd34d" }}>
+              Historical audit view only. Operational prescriptions, diagnoses, and interventions are disabled.
+            </div>
+          </div>
+        )}
+
         {/* System Status Dashboard — collapsible */}
         <div style={{
           maxHeight: statusExpanded ? "600px" : "0px",

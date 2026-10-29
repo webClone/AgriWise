@@ -140,9 +140,9 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
   const injectData = pi.injectData;
   useEffect(() => {
     if (l10.data) {
-      injectData(l10.data);
+      injectData(l10.data, (plot as any)?.id, l10.isApplicable);
     }
-  }, [l10.data, injectData]);
+  }, [l10.data, l10.isApplicable, injectData, (plot as any)?.id]);
 
   // ── Screen state (from L10 — the working hook) ─────────────────────────
   // Simplified: no more "diagnose" state that hides everything

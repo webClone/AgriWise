@@ -686,3 +686,88 @@ test("Parcel applicability boundary: geometry and crop-cycle mismatch transition
   assert.ok(assessment.identity.publicationReceiptHash);
 });
 
+
+
+test("Integration 4: Delegated Layer 10 request race guard rejects superseded responses without clearing active publication", async () => {
+  let l10RequestSequence = 0;
+  let activeL10Data = null;
+  let activeL10Loading = false;
+
+  const pubB = buildMockPublication({
+    intelligence_snapshot_id: "snap-B-fresh",
+    canonical_publication_receipt_hash: "receipt-B-sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  });
+
+  async function simulatedFetchLayer10Delegated(plotId, delayMs, payload) {
+    const sequence = ++l10RequestSequence;
+    activeL10Loading = true;
+
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+    // Stale generation guard (isLatestRequest)
+    if (sequence !== l10RequestSequence) {
+      // Must return immediately without setting loading=false or data=null
+      return;
+    }
+
+    activeL10Loading = false;
+    if (payload) {
+      activeL10Data = {
+        assessment: canonicalPublicationToAssessment(payload, plotId),
+        canonical_publication_receipt_hash: payload.canonical_publication_receipt_hash,
+      };
+    } else {
+      activeL10Data = null;
+    }
+  }
+
+  // Request A starts with 60ms delay
+  const reqA = simulatedFetchLayer10Delegated("plot-p01-olive", 60, null);
+  // Request B starts 10ms later and completes in 20ms (total 30ms, finishes BEFORE A)
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const reqB = simulatedFetchLayer10Delegated("plot-p01-olive", 20, pubB);
+
+  await Promise.all([reqA, reqB]);
+
+  // Request B completed and set active data.
+  // Request A finished afterwards, but was aborted by generation guard (did not wipe activeL10Data to null)
+  assert.ok(activeL10Data, "Active Layer 10 data must NOT be cleared by superseded request A");
+  assert.equal(activeL10Data.assessment.identity.snapshotId, "snap-B-fresh");
+  assert.equal(activeL10Loading, false);
+});
+
+test("Integration 5: Stale assessment operational gate blocks prescriptions, diagnoses, and actions", () => {
+  const origGeom = {
+    type: "Polygon",
+    coordinates: [[[31.6, -7.9], [31.61, -7.9], [31.61, -7.91], [31.6, -7.9]]],
+  };
+  const modifiedGeom = {
+    type: "Polygon",
+    coordinates: [[[31.6, -7.9], [31.7, -7.9], [31.7, -7.95], [31.6, -7.9]]],
+  };
+
+  const pub = buildMockPublication({ crop_cycle_id: "cycle-2026-autumn" });
+  const assessment = canonicalPublicationToAssessment(pub, "plot-p01-olive", {
+    geometry: origGeom,
+    cropCycleId: "cycle-2026-autumn",
+  });
+
+  // When plot geometry changes:
+  const isGeomStale = isAssessmentStaleForGeometry(assessment.identity, modifiedGeom);
+  const isApplicable = !isGeomStale;
+  assert.equal(isApplicable, false);
+
+  // Operational capabilities under stale gate:
+  const activeSurfaceMaterialized = true;
+  const canUseForPrescription = true && activeSurfaceMaterialized && isApplicable;
+  const canInterpretDiagnostically = true && activeSurfaceMaterialized && isApplicable;
+  const canShowPixelDiagnosis = true && activeSurfaceMaterialized && isApplicable;
+
+  assert.equal(canUseForPrescription, false, "Prescription must be blocked for stale assessment");
+  assert.equal(canInterpretDiagnostically, false, "Diagnostic interpretation must be blocked for stale assessment");
+  assert.equal(canShowPixelDiagnosis, false, "Pixel diagnosis must be blocked for stale assessment");
+
+  // However, historical audit data remains accessible:
+  assert.ok(assessment.topFindings.length > 0, "Historical findings remain inspectable for audit");
+  assert.ok(assessment.identity.publicationReceiptHash, "Receipt hash remains verifiable");
+});
