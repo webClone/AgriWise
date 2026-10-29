@@ -283,6 +283,16 @@ def artifact_to_run(artifact: RunArtifact,
         # V92.4-BC: Thread mode_display_state
         res["mode_display_state"] = safe_layer10_detail.get("mode_display_state") or {}
 
+    cycle_id = None
+    if getattr(artifact, "inputs", None) and getattr(artifact.inputs, "crop_cycle_context", None):
+        cycle_id = getattr(artifact.inputs.crop_cycle_context, "crop_cycle_id", None)
+    if not cycle_id and getattr(artifact, "inputs", None) and hasattr(artifact.inputs, "crop_cycle_id"):
+        cycle_id = getattr(artifact.inputs, "crop_cycle_id", None)
+    if cycle_id:
+        cycle_id_str = str(cycle_id).strip()
+        res["crop_cycle_id"] = cycle_id_str
+        res["cropCycleId"] = cycle_id_str
+
     return res
 
 

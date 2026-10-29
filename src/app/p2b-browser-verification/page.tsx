@@ -39,6 +39,7 @@ function buildMockPublication(overrides: Record<string, any> = {}) {
     tenant_id: "tenant-akaloris-01",
     publication_id: "pub-r5-98124",
     publication_run_id: "run-agribrain-87214",
+    run_id: "run-agribrain-87214",
     intelligence_snapshot_id: "snap-A-001",
     geometry_hash: computeGeometryHash(MOCK_GEOMETRY),
     crop_cycle_id: "cycle-2026-autumn",
@@ -48,6 +49,9 @@ function buildMockPublication(overrides: Record<string, any> = {}) {
     published_at: published,
     observation_window: { start: "2026-10-20T00:00:00Z", end: "2026-10-27T23:59:59Z" },
     source_window: ["2026-10-20T00:00:00Z", "2026-10-27T23:59:59Z"],
+    surface_schema_version: "v1.0",
+    render_authorization_version: "v1",
+    surfaces: [],
     layer_results: {
       L0: { status: "OK", confidence: 0.95, sources: ["weather_station"] },
       L2: { status: "OK", confidence: 0.91, sources: ["sentinel2"] },
@@ -89,20 +93,45 @@ function AssessmentConsumerProbe({
   onRegisterHarness: (harness: {
     fetchAssessment: (plotId: string, farmId?: string, options?: any) => Promise<any>;
     fetchLayer10: (plotId: string, farmId: string, lat?: number, lng?: number, crop?: string, options?: any) => Promise<any>;
+    commitBrowserRenderReceipt: (receipt: any) => void;
     getAssessmentCtx: () => any;
     getLayer10Ctx: () => any;
+    getRenderHistory: () => any[];
+    clearRenderHistory: () => void;
   }) => void;
   onStateSample: (sample: any) => void;
 }) {
   const assessmentCtx = useParcelAssessment();
   const l10 = useLayer10();
+  const renderHistoryRef = useRef<any[]>([]);
+
+  // Capture every render frame to verify atomic intermediate transitions
+  renderHistoryRef.current.push({
+    timestamp: typeof performance !== "undefined" ? performance.now() : Date.now(),
+    providerStatus: assessmentCtx.status,
+    providerSnapshotId: assessmentCtx.assessment?.identity.snapshotId || null,
+    providerReceiptHash: assessmentCtx.assessment?.identity.publicationReceiptHash || null,
+    isApplicable: assessmentCtx.isApplicable,
+    isStale: assessmentCtx.isStale,
+    staleReason: assessmentCtx.staleReason,
+    l10SnapshotId: l10.data?.assessment?.identity.snapshotId || (l10.data as any)?.intelligence_snapshot_id || null,
+    l10Loading: l10.loading,
+    activeSurfaceMaterialized: l10.activeSurfaceMaterialized,
+    canUseForPrescription: l10.canUseForPrescription,
+    canInterpretDiagnostically: l10.canInterpretDiagnostically,
+  });
 
   useEffect(() => {
     onRegisterHarness({
       fetchAssessment: assessmentCtx.fetchAssessment,
       fetchLayer10: l10.fetchLayer10,
+      commitBrowserRenderReceipt: l10.commitBrowserRenderReceipt,
       getAssessmentCtx: () => assessmentCtx,
       getLayer10Ctx: () => l10,
+      getRenderHistory: () => [...renderHistoryRef.current],
+      clearRenderHistory: () => {
+        renderHistoryRef.current = [];
+      },
     });
   }, [assessmentCtx, l10, onRegisterHarness]);
 
@@ -116,6 +145,8 @@ function AssessmentConsumerProbe({
       l10Data: l10.data,
       l10Loading: l10.loading,
       l10Error: l10.error,
+      renderPlan: l10.renderPlan,
+      activeSurfaceMaterialized: l10.activeSurfaceMaterialized,
       canUseForPrescription: l10.canUseForPrescription,
       canInterpretDiagnostically: l10.canInterpretDiagnostically,
     });
@@ -128,6 +159,8 @@ function AssessmentConsumerProbe({
     l10.data,
     l10.loading,
     l10.error,
+    l10.renderPlan,
+    l10.activeSurfaceMaterialized,
     l10.canUseForPrescription,
     l10.canInterpretDiagnostically,
     onStateSample,
@@ -162,7 +195,7 @@ function AssessmentConsumerProbe({
       <div>
         <span className="text-slate-400">Applicability & Prescriptions: </span>
         <span id="operational-applicability-status" className={`font-semibold ${assessmentCtx.isApplicable ? "text-emerald-400" : "text-amber-400"}`}>
-          isApplicable={String(assessmentCtx.isApplicable)} · canPrescribe={String(l10.canUseForPrescription)}
+          isApplicable={String(assessmentCtx.isApplicable)} · materialized={String(l10.activeSurfaceMaterialized)} · canPrescribe={String(l10.canUseForPrescription)}
         </span>
       </div>
     </div>
@@ -173,14 +206,14 @@ export default function P2BBrowserVerificationPage() {
   const [steps, setSteps] = useState<VerificationStep[]>([
     {
       id: "step-1",
-      name: "Actual Mounted Provider Delegation & Latching",
-      description: "Mounted Layer 10 presentation view adopts publication strictly through mounted ParcelAssessmentProvider",
+      name: "Mounted Provider Delegation & Dual Surface Authorization",
+      description: "Verifies applicability without materialized prescription surface (canPrescribe=false) vs genuinely authorized materialized surface (canPrescribe=true)",
       status: "idle",
     },
     {
       id: "step-2",
       name: "Atomic Publication Switching (ASMAE Event)",
-      description: "When background ASMAE completes, both provider and Layer 10 simultaneously latch Publication B",
+      description: "When background ASMAE completes, both provider and Layer 10 simultaneously latch Publication B with zero torn intermediate states",
       status: "idle",
     },
     {
@@ -201,8 +234,11 @@ export default function P2BBrowserVerificationPage() {
   const harnessRef = useRef<{
     fetchAssessment: (plotId: string, farmId?: string, options?: any) => Promise<any>;
     fetchLayer10: (plotId: string, farmId: string, lat?: number, lng?: number, crop?: string, options?: any) => Promise<any>;
+    commitBrowserRenderReceipt: (receipt: any) => void;
     getAssessmentCtx: () => any;
     getLayer10Ctx: () => any;
+    getRenderHistory: () => any[];
+    clearRenderHistory: () => void;
   } | null>(null);
 
   const latestSampleRef = useRef<any>(null);
@@ -234,19 +270,20 @@ export default function P2BBrowserVerificationPage() {
     const originalFetch = window.fetch;
 
     try {
-      // ── STEP 1: ACTUAL MOUNTED PROVIDER DELEGATION & LATCHING ────────────
+      // ── STEP 1: DUAL SURFACE AUTHORIZATION & OPERATIONAL APPLICABILITY ────
       setSteps((prev) => prev.map((s) => (s.id === "step-1" ? { ...s, status: "running" } : s)));
 
-      const pubA = buildMockPublication({
+      // Condition 1A: Fresh publication without materialized prescription surface
+      const pubA_unmaterialized = buildMockPublication({
         intelligence_snapshot_id: "snap-A-001",
         canonical_publication_receipt_hash: "receipt-A-sha256-1111111111111111111111111111111111111111111111111111111111111111",
+        surfaces: [],
       });
 
-      // Intercept fetch for surfaces/latest to return pubA
       window.fetch = async (input, init) => {
         const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
         if (url.includes("/api/agribrain/surfaces/latest")) {
-          return new Response(JSON.stringify(pubA), {
+          return new Response(JSON.stringify(pubA_unmaterialized), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           });
@@ -258,21 +295,133 @@ export default function P2BBrowserVerificationPage() {
       await harness.fetchLayer10("plot-p01-olive", "farm-haouz-central");
       await new Promise((r) => setTimeout(r, 100));
 
-      const sample1 = latestSampleRef.current;
-      if (sample1?.providerStatus !== "ready" || sample1?.providerAssessment?.identity.snapshotId !== "snap-A-001") {
-        throw new Error(`Provider failed to latch snapshot A: status=${sample1?.providerStatus}`);
+      const sample1A = latestSampleRef.current;
+      if (sample1A?.providerStatus !== "ready" || sample1A?.providerAssessment?.identity.snapshotId !== "snap-A-001") {
+        throw new Error(`Provider failed to latch snapshot A: status=${sample1A?.providerStatus}`);
       }
-      if (sample1?.l10Data?.assessment?.identity.snapshotId !== "snap-A-001") {
+      if (sample1A?.l10Data?.assessment?.identity.snapshotId !== "snap-A-001") {
         throw new Error("Layer 10 did not adopt snapshot A from provider");
       }
-      if (!sample1?.isApplicable || !sample1?.canUseForPrescription) {
-        throw new Error("Fresh assessment must be applicable with prescription enabled");
+      // Condition 1A Verification: Applicable, but unmaterialized surfaces block prescriptions fail-closed
+      if (!sample1A?.isApplicable) {
+        throw new Error("Condition 1A failed: Fresh unmaterialized publication must be marked applicable");
+      }
+      if (sample1A?.activeSurfaceMaterialized) {
+        throw new Error("Condition 1A failed: Unmaterialized publication must not have activeSurfaceMaterialized=true");
+      }
+      if (sample1A?.canUseForPrescription) {
+        throw new Error("Condition 1A failed: Unmaterialized surface must NOT allow prescription use");
+      }
+
+      // Condition 1B: Genuinely authorized, materialized prescription surface
+      const pubA_materialized = buildMockPublication({
+        intelligence_snapshot_id: "snap-A-001",
+        canonical_publication_receipt_hash: "receipt-A-sha256-1111111111111111111111111111111111111111111111111111111111111111",
+        surface_inventory_hash: "inv-hash-materialized-01",
+        surfaces: [
+          {
+            surface_id: "surf-canopy-ndvi",
+            type: "NDVI_CLEAN",
+            semantic_type: "NDVI_CLEAN",
+            grounding_class: "RASTER_GROUNDED",
+            prescription_driver_allowed: true,
+            management_eligible: true,
+            values: [[0.5, 0.6], [0.55, 0.65]],
+            dimensions: { rows: 2, cols: 2 },
+            grid_bounds: [35.1, 31.2, 35.2, 31.3],
+          },
+        ],
+        render_authorization_version: "v1",
+        render_authorizations: {
+          satellite: {
+            canopy: {
+              base: {
+                NDVI_CLEAN: {
+                  surfaceType: "NDVI_CLEAN",
+                  policy: "satellite",
+                  mode: "canopy",
+                  role: "base",
+                  authorized: true,
+                  renderKind: "full_raster",
+                  reason: "authorized",
+                },
+              },
+              inspector: {
+                NDVI_CLEAN: {
+                  surfaceType: "NDVI_CLEAN",
+                  policy: "satellite",
+                  mode: "canopy",
+                  role: "inspector",
+                  authorized: true,
+                  inspectorAllowed: true,
+                  renderKind: "full_raster",
+                  reason: "authorized",
+                },
+              },
+            },
+          },
+        },
+      });
+
+      window.fetch = async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+        if (url.includes("/api/agribrain/surfaces/latest")) {
+          return new Response(JSON.stringify(pubA_materialized), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return originalFetch(input, init);
+      };
+
+      await harness.fetchLayer10("plot-p01-olive", "farm-haouz-central", undefined, undefined, undefined, { forceRefresh: true });
+      await new Promise((r) => setTimeout(r, 100));
+
+      const l10Ctx1B = harness.getLayer10Ctx();
+      harness.commitBrowserRenderReceipt({
+        viewIdentity: l10Ctx1B.renderPlan.viewIdentity,
+        snapshotId: "snap-A-001",
+        baseMaterialization: {
+          status: "rendered",
+          surfaceType: "NDVI_CLEAN",
+          surfaceId: "surf-canopy-ndvi",
+          layerId: "l10-surface-semantic",
+          reason: "rendered",
+          receipt: {
+            publicationId: pubA_materialized.publication_id,
+            snapshotId: "snap-A-001",
+            surfaceInventoryHash: "inv-hash-materialized-01",
+            renderAuthorizationVersion: "v1",
+            surfaceId: "surf-canopy-ndvi",
+          },
+        },
+        overlayMaterialization: null,
+        hybridOverlayMaterializations: [],
+      });
+      await new Promise((r) => setTimeout(r, 100));
+
+      const sample1B = latestSampleRef.current;
+      if (!sample1B?.isApplicable) {
+        throw new Error("Condition 1B failed: Materialized publication must remain applicable");
+      }
+      if (!sample1B?.activeSurfaceMaterialized) {
+        throw new Error("Condition 1B failed: Committed render receipt must materialize surface");
+      }
+      if (!sample1B?.canUseForPrescription) {
+        throw new Error("Condition 1B failed: Materialized authorized surface must enable canUseForPrescription");
+      }
+      if (!sample1B?.canInterpretDiagnostically) {
+        throw new Error("Condition 1B failed: Materialized authorized surface must enable canInterpretDiagnostically");
       }
 
       setSteps((prev) =>
         prev.map((s) =>
           s.id === "step-1"
-            ? { ...s, status: "passed", details: `Mounted Layer 10 adopted snap-A-001 through provider; isApplicable=true, canPrescribe=true` }
+            ? {
+                ...s,
+                status: "passed",
+                details: "Verified 2 separate conditions: publication is applicable without prescription when unmaterialized; authorized materialized surface unlocks canPrescribe=true",
+              }
             : s
         )
       );
@@ -280,7 +429,10 @@ export default function P2BBrowserVerificationPage() {
       // ── STEP 2: ATOMIC PUBLICATION SWITCHING (ASMAE EVENT) ───────────────
       setSteps((prev) => prev.map((s) => (s.id === "step-2" ? { ...s, status: "running" } : s)));
 
+      harness.clearRenderHistory();
+
       const pubB = buildMockPublication({
+        snapshot_kind: "asmae",
         intelligence_snapshot_id: "snap-B-002",
         canonical_publication_receipt_hash: "receipt-B-sha256-2222222222222222222222222222222222222222222222222222222222222222",
         top_findings: [{ id: "find-2", title: "ASMAE 1m radar-optical fusion complete", severity: "info" }],
@@ -297,9 +449,46 @@ export default function P2BBrowserVerificationPage() {
         return originalFetch(input, init);
       };
 
-      // Execute ASMAE completion switch via mounted hook
-      await harness.fetchLayer10("plot-p01-olive", "farm-haouz-central", undefined, undefined, undefined, { snapshotId: "snap-B-002" });
-      await new Promise((r) => setTimeout(r, 100));
+      // Trigger ASMAE completion event listener
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("agribrain:asmae-job-complete", {
+            detail: {
+              jobId: "job-asmae-8812",
+              plotId: "plot-p01-olive",
+              snapshotId: "snap-B-002",
+              status: "completed",
+            },
+          })
+        );
+      }
+
+      // Execute canonical update triggered by ASMAE completion
+      await harness.fetchAssessment("plot-p01-olive", "farm-haouz-central", {
+        forceRefresh: true,
+        snapshotId: "snap-B-002",
+      });
+      await new Promise((r) => setTimeout(r, 120));
+
+      const renderHistory = harness.getRenderHistory();
+      if (renderHistory.length === 0) {
+        throw new Error("No render frames captured during ASMAE completion switch");
+      }
+
+      // Assert intermediate atomic coherence across every single render frame:
+      for (let i = 0; i < renderHistory.length; i++) {
+        const frame = renderHistory[i];
+        if (frame.providerSnapshotId && frame.l10SnapshotId) {
+          if (frame.providerSnapshotId !== frame.l10SnapshotId) {
+            throw new Error(
+              `Torn render state detected at frame ${i}: provider=${frame.providerSnapshotId} vs l10=${frame.l10SnapshotId}`
+            );
+          }
+        }
+        if (typeof frame.isApplicable !== "boolean") {
+          throw new Error(`Corrupted isApplicable state detected at frame ${i}`);
+        }
+      }
 
       const sample2 = latestSampleRef.current;
       if (sample2?.providerAssessment?.identity.snapshotId !== "snap-B-002") {
@@ -312,7 +501,11 @@ export default function P2BBrowserVerificationPage() {
       setSteps((prev) =>
         prev.map((s) =>
           s.id === "step-2"
-            ? { ...s, status: "passed", details: `Atomic switch verified: provider and Layer 10 latched snap-B-002 synchronously` }
+            ? {
+                ...s,
+                status: "passed",
+                details: `ASMAE completion event triggered: verified atomic switch across ${renderHistory.length} intermediate render frames with 0 torn states`,
+              }
             : s
         )
       );
@@ -413,8 +606,8 @@ export default function P2BBrowserVerificationPage() {
           passed: true,
           timestamp: new Date().toISOString(),
           steps: [
-            { id: "step-1", name: "Mounted Provider Delegation", status: "passed" },
-            { id: "step-2", name: "Atomic Publication Switching", status: "passed" },
+            { id: "step-1", name: "Mounted Provider Delegation & Dual Surface Authorization", status: "passed" },
+            { id: "step-2", name: "Atomic Publication Switching (ASMAE Event)", status: "passed" },
             { id: "step-3", name: "Mounted Generation Guard", status: "passed" },
             { id: "step-4", name: "Stale Operational Gate", status: "passed" },
           ],
@@ -445,7 +638,7 @@ export default function P2BBrowserVerificationPage() {
               Package P2-B Mounted Browser Verification Gate
             </h1>
             <p className="text-xs text-slate-400 mt-1">
-              Live React provider mounting, publication switching, generation guarding, and stale isolation
+              Live React provider mounting, dual surface authorization, ASMAE completion event switching, generation guarding, and stale isolation
             </p>
           </div>
           <div className="flex items-center space-x-3">

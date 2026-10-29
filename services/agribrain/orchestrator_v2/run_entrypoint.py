@@ -19,6 +19,7 @@ import io
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Union, Tuple
+from services.agribrain.common.plot_namespace import PlotNamespace
 
 sys.path.insert(0, os.getcwd())
 
@@ -364,6 +365,15 @@ def _attach_snapshot_identity(run: dict, inputs, artifact) -> dict:
     ]
     run["surface_schema_version"] = SURFACES_SCHEMA_VERSION
     run["temporal_evidence_contract_version"] = "temporal_evidence_admission_v1"
+    authoritative_cycle_id = (
+        inputs.crop_cycle_context.crop_cycle_id
+        if getattr(inputs, "crop_cycle_context", None) is not None
+        else getattr(inputs, "crop_cycle_id", None)
+    )
+    if authoritative_cycle_id:
+        authoritative_cycle_id = str(authoritative_cycle_id).strip() or None
+        run["crop_cycle_id"] = authoritative_cycle_id
+        run["cropCycleId"] = authoritative_cycle_id
     run["render_authorization_version"] = (
         run.get("render_authorization_version") or RENDER_AUTHORIZATION_VERSION
     )
@@ -468,7 +478,7 @@ def run_full_mode(ctx: dict, query: str = "", authenticated_namespace: Optional[
         from orchestrator_v2.runner import run_for_chat
         f = io.StringIO()
         with redirect_stdout(f):
-            cp, artifact = run_for_chat(inputs, user_query=query, user_mode=getattr(args, "userMode", "farmer") if 'args' in locals() else "farmer")
+            cp, artifact = run_for_chat(inputs, user_query=query, user_mode="farmer")
         chat_payload = json.loads(json.dumps(cp, default=lambda o: o.__dict__))
     else:
         f = io.StringIO()
@@ -1012,6 +1022,15 @@ def run_surfaces_mode(ctx: dict, query: str = "", progress_cb=None, authenticate
         "surface_schema_version": SURFACES_SCHEMA_VERSION,
     })
     run["temporal_evidence_contract_version"] = "temporal_evidence_admission_v1"
+    authoritative_cycle_id = (
+        inputs.crop_cycle_context.crop_cycle_id
+        if inputs.crop_cycle_context is not None
+        else (ctx.get("crop_cycle_id") or (ctx.get("crop_cycle_context") or {}).get("crop_cycle_id"))
+    )
+    if authoritative_cycle_id:
+        authoritative_cycle_id = str(authoritative_cycle_id).strip() or None
+        run["crop_cycle_id"] = authoritative_cycle_id
+        run["cropCycleId"] = authoritative_cycle_id
 
     # ── Extract Kalman NDVI + SH indices from L1 output ──────────────
     # Avoids the need for a redundant fetch_all_sources() call (~15s).

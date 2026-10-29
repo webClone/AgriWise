@@ -598,6 +598,7 @@ def publish_canonical_layer10_snapshot(
     geometry_hash: str,
     frontend_payload: Dict[str, Any],
     request_run_id: str,
+    crop_cycle_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Publish a validated terminal L10 result when no ASMAE head exists yet.
 
@@ -650,9 +651,23 @@ def publish_canonical_layer10_snapshot(
     payload["surfaces"] = surfaces
     inventory_hash = compute_surface_inventory_hash(surfaces)
     payload["surface_inventory_hash"] = inventory_hash
+
+    resolved_crop_cycle_id = (
+        crop_cycle_id
+        or payload.get("crop_cycle_id")
+        or payload.get("cropCycleId")
+        or (payload.get("phenology_context") or {}).get("crop_cycle_id")
+        or (payload.get("crop_cycle_context") or {}).get("crop_cycle_id")
+    )
+    if resolved_crop_cycle_id:
+        resolved_crop_cycle_id = str(resolved_crop_cycle_id).strip() or None
+        payload["crop_cycle_id"] = resolved_crop_cycle_id
+        payload["cropCycleId"] = resolved_crop_cycle_id
+
     scientific_identity = {
         "snapshot_id": snapshot_id,
         "plot_id": ns.plot_id,
+        "crop_cycle_id": resolved_crop_cycle_id,
         "publication_id": str(payload.get("publication_id") or ""),
         "publication_status": str(payload.get("publication_status") or ""),
         "surface_inventory_hash": inventory_hash,
@@ -708,6 +723,7 @@ def publish_canonical_layer10_snapshot(
             "capability_contract_version": str(
                 payload.get("render_authorization_version") or ""
             ),
+            "crop_cycle_id": resolved_crop_cycle_id,
         },
         snapshot_kind="layer10_terminal",
     )

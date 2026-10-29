@@ -192,6 +192,7 @@ def _persist_run_result(
     namespace: PlotNamespace,
     payload: Dict[str, Any],
     geometry_hash: str = "",
+    crop_cycle_id: Optional[str] = None,
 ) -> Path:
     """Publish the durable result and canonical head before terminal progress."""
     import uuid
@@ -199,6 +200,19 @@ def _persist_run_result(
     path = _run_result_path(run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+
+    resolved_crop_cycle_id = (
+        crop_cycle_id
+        or payload.get("crop_cycle_id")
+        or payload.get("cropCycleId")
+        or (payload.get("phenology_context") or {}).get("crop_cycle_id")
+        or (payload.get("crop_cycle_context") or {}).get("crop_cycle_id")
+    )
+    if resolved_crop_cycle_id:
+        resolved_crop_cycle_id = str(resolved_crop_cycle_id).strip() or None
+        payload["crop_cycle_id"] = resolved_crop_cycle_id
+        payload["cropCycleId"] = resolved_crop_cycle_id
+
     envelope = {
         "run_id": run_id,
         "plot_id": ns.plot_id,
@@ -209,6 +223,7 @@ def _persist_run_result(
         },
         "published_at": datetime.utcnow().isoformat() + "Z",
         "result": payload,
+        "crop_cycle_id": resolved_crop_cycle_id,
     }
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(envelope, handle, separators=(",", ":"), default=str)
@@ -228,6 +243,7 @@ def _persist_run_result(
         geometry_hash=str(geometry_hash or ""),
         frontend_payload=payload,
         request_run_id=run_id,
+        crop_cycle_id=resolved_crop_cycle_id,
     )
     return path
 
@@ -525,6 +541,18 @@ def api_v2_canonical_plot_snapshot(
         media_type="application/json",
         headers={"Cache-Control": "no-cache"}
     )
+
+
+def _parse_timestamp(ts_str: Optional[str]) -> Optional[datetime]:
+    if not ts_str:
+        return None
+    try:
+        clean = str(ts_str).strip()
+        if clean.endswith("Z"):
+            clean = clean[:-1] + "+00:00"
+        return datetime.fromisoformat(clean)
+    except Exception:
+        return None
 
 
 @app.get("/v2/progress/{plot_id}")
@@ -3945,6 +3973,12 @@ def api_v2_run(
             # Extract plot_id & run_id for progress tracking
             _plot_id = namespace.plot_id
             _run_id = getattr(req, "run_id", None) or f"run-{_plot_id}"
+            _run_crop_cycle_id = (
+                ctx.get("crop_cycle_id")
+                or (ctx.get("crop_cycle_context") or {}).get("crop_cycle_id")
+            )
+            if _run_crop_cycle_id:
+                _run_crop_cycle_id = str(_run_crop_cycle_id).strip() or None
             _publication_geometry_hash = str(ctx.get("geometry_hash") or "")
             if not _publication_geometry_hash:
                 geometry_value = ctx.get("field_geometry") or ctx.get("polygon")
@@ -4259,6 +4293,7 @@ def api_v2_run(
                     namespace,
                     committed,
                     _publication_geometry_hash,
+                    crop_cycle_id=_run_crop_cycle_id,
                 )
                 _update_progress(
                     namespace, "Complete", "done",
@@ -4449,6 +4484,7 @@ def api_v2_run(
                         namespace,
                         result,
                         _publication_geometry_hash,
+                        crop_cycle_id=_run_crop_cycle_id,
                     )
                     _update_progress(
                         namespace, "Complete", "done",

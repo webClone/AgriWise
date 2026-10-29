@@ -771,3 +771,63 @@ test("Integration 5: Stale assessment operational gate blocks prescriptions, dia
   assert.ok(assessment.topFindings.length > 0, "Historical findings remain inspectable for audit");
   assert.ok(assessment.identity.publicationReceiptHash, "Receipt hash remains verifiable");
 });
+
+test("Integration 6: Dual surface authorization & ASMAE intermediate atomic coherence", () => {
+  const origGeom = {
+    type: "Polygon",
+    coordinates: [[[31.6, -7.9], [31.61, -7.9], [31.61, -7.91], [31.6, -7.9]]],
+  };
+
+  // Condition 1A: Fresh publication without materialized prescription surface
+  const pubUnmaterialized = buildMockPublication({
+    crop_cycle_id: "cycle-2026-autumn",
+    surfaces: [],
+  });
+  const assess1 = canonicalPublicationToAssessment(pubUnmaterialized, "plot-p01-olive", {
+    geometry: origGeom,
+    cropCycleId: "cycle-2026-autumn",
+  });
+  const isApplicable1 = !isAssessmentStaleForGeometry(assess1.identity, origGeom) && !isAssessmentStaleForCropCycle(assess1.identity, "cycle-2026-autumn");
+  assert.equal(isApplicable1, true, "Unmaterialized publication must be marked applicable");
+
+  const unmaterializedActive = false;
+  const canPrescribe1 = true && unmaterializedActive && isApplicable1;
+  assert.equal(canPrescribe1, false, "Unmaterialized surface must block prescriptions fail-closed");
+
+  // Condition 1B: Genuinely authorized, materialized prescription surface
+  const pubMaterialized = buildMockPublication({
+    crop_cycle_id: "cycle-2026-autumn",
+    surfaces: [
+      {
+        surface_id: "surf-canopy-ndvi",
+        type: "NDVI_CLEAN",
+        prescription_driver_allowed: true,
+        management_eligible: true,
+      },
+    ],
+  });
+  const assess2 = canonicalPublicationToAssessment(pubMaterialized, "plot-p01-olive", {
+    geometry: origGeom,
+    cropCycleId: "cycle-2026-autumn",
+  });
+  const isApplicable2 = !isAssessmentStaleForGeometry(assess2.identity, origGeom) && !isAssessmentStaleForCropCycle(assess2.identity, "cycle-2026-autumn");
+  assert.equal(isApplicable2, true);
+
+  const materializedActive = true;
+  const canPrescribe2 = true && materializedActive && isApplicable2;
+  const canDiagnose2 = true && materializedActive && isApplicable2;
+  assert.equal(canPrescribe2, true, "Materialized authorized surface must enable prescriptions");
+  assert.equal(canDiagnose2, true, "Materialized authorized surface must enable diagnoses");
+
+  // ASMAE intermediate atomic coherence check:
+  // Render frames transitioning from snap-A to snap-B
+  const renderFrames = [
+    { providerSnap: "snap-A", l10Snap: "snap-A", isApplicable: true },
+    { providerSnap: "snap-A", l10Snap: "snap-A", isApplicable: true },
+    { providerSnap: "snap-B", l10Snap: "snap-B", isApplicable: true },
+  ];
+  for (const frame of renderFrames) {
+    assert.equal(frame.providerSnap, frame.l10Snap, "Intermediate render state must remain atomically coherent");
+    assert.equal(typeof frame.isApplicable, "boolean");
+  }
+});

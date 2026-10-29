@@ -316,3 +316,80 @@ def test_crop_cycle_id_propagated_to_published_snapshot_and_head(tmp_path: Path)
     assert loaded is not None
     assert loaded.get("crop_cycle_id") == "cycle-2026-autumn"
     assert loaded.get("frontend_payload", {}).get("crop_cycle_id") == "cycle-2026-autumn"
+
+
+def test_terminal_layer10_publication_preserves_crop_cycle_binding(tmp_path: Path):
+    """Scientific Context Guarantee:
+    Terminal Layer 10 publications via publish_canonical_layer10_snapshot() must
+    explicitly bind the authoritative run's crop_cycle_id into the immutable envelope,
+    the frontend publication payload, and the plot head.
+    """
+    from services.agribrain.layer05_asmae.plot_snapshot_store import (
+        publish_canonical_layer10_snapshot,
+    )
+    from services.agribrain.layer10_sire.surface_contract import (
+        SURFACES_SCHEMA_VERSION,
+        RENDER_AUTHORIZATION_VERSION,
+    )
+
+    namespace = PlotNamespace("tenant-test", "farm-test", "plot-l10-cycle-01")
+    snapshot_id = "L10-snap-terminal-cycle-01"
+    crop_cycle_id = "cycle-autumn-2026-olive"
+
+    payload = {
+        "status": "fresh",
+        "available": True,
+        "plot_id": namespace.plot_id,
+        "farm_id": namespace.farm_id,
+        "tenant_id": namespace.tenant_id,
+        "publication_id": "pub-terminal-01",
+        "publication_run_id": "run-l10-01",
+        "intelligence_snapshot_id": snapshot_id,
+        "surface_schema_version": SURFACES_SCHEMA_VERSION,
+        "surfaces": [
+            {
+                "surface_id": "surf-canopy-ndvi",
+                "type": "NDVI_CLEAN",
+                "grounding_class": "RASTER_GROUNDED",
+                "prescription_driver_allowed": True,
+                "management_eligible": True,
+            }
+        ],
+        "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
+        "render_authorizations": {"satellite": {"canopy": {"base": {}}}},
+        "asmae_proof": {"sentinel_proof": {}},
+        "mode_display_state": {"canopy": {"canRenderPixels": True}},
+        "source_policy_display_state": {"requested_policy": "satellite"},
+        "core_asmae_evidence_state": {"state": "unavailable"},
+        "publication_surface_state": {"state": "provider_surface"},
+        "crop_cycle_id": crop_cycle_id,
+    }
+
+    with patch("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", tmp_path):
+        published = publish_canonical_layer10_snapshot(
+            namespace=namespace,
+            geometry_hash="geometry-hash-l10-cycle",
+            frontend_payload=payload,
+            request_run_id="run-l10-01",
+            crop_cycle_id=crop_cycle_id,
+        )
+
+        loaded = load_latest_plot_snapshot(namespace, "geometry-hash-l10-cycle")
+
+        head_path = _head_path(namespace)
+        head_data = json.loads(head_path.read_text(encoding="utf-8"))
+
+        import hashlib
+        safe_job = hashlib.sha256("run-l10-01".encode("utf-8")).hexdigest()[:32]
+        pub_path = head_path.parent / "publications" / f"{safe_job}.json"
+        pub_data = json.loads(pub_path.read_text(encoding="utf-8"))
+
+    assert loaded is not None
+    assert loaded["snapshot_kind"] == "layer10_terminal"
+    assert loaded["snapshot_id"] == snapshot_id
+    assert loaded.get("crop_cycle_id") == crop_cycle_id
+    assert loaded.get("frontend_payload", {}).get("crop_cycle_id") == crop_cycle_id
+    assert head_data.get("crop_cycle_id") == crop_cycle_id
+    assert pub_data.get("crop_cycle_id") == crop_cycle_id
+    assert loaded["validation"]["temporalBindingValid"] is True
+    assert loaded["validation"]["bindingValid"] is True
