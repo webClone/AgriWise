@@ -1,0 +1,64 @@
+{
+  "status": "Concept-level visual identity proposal; requires final vector master and release QA",
+  "name": "Akaloris",
+  "version": "2.0",
+  "colors": {
+    "canopy": {
+      "hex": "#102820",
+      "role": "primary text and dark backgrounds"
+    },
+    "pine": {
+      "hex": "#18392D",
+      "role": "supporting dark surfaces"
+    },
+    "field": {
+      "hex": "#657A54",
+      "role": "secondary identity and observational accents"
+    },
+    "copper": {
+      "hex": "#B47B47",
+      "role": "reserved signal/attention accent"
+    },
+    "porcelain": {
+      "hex": "#FAF9F5",
+      "role": "light canvas"
+    },
+    "surface": {
+      "hex": "#F0F3ED",
+      "role": "interface cards and quiet blocks"
+    },
+    "line": {
+      "hex": "#D6DED5",
+      "role": "dividers"
+    }
+  },
+  "typography": {
+    "preferred_family": "Inter / Inter Display",
+    "fallback": "system-ui, sans-serif",
+    "arabic_candidate": "Noto Sans Arabic",
+    "amazigh_reference": "Noto Sans Tifinagh",
+    "logo_rule": "Never reconstruct the logo by typesetting Akaloris"
+  },
+  "layout": {
+    "brandbook_canvas_px": [
+      1440,
+      810
+    ],
+    "grid": "12 columns recommended",
+    "base_spacing_px": 8,
+    "preferred_logo_clear_space": ">=0.5x, x = capital A height (provisional)"
+  },
+  "identity_principles": [
+    "precise",
+    "grounded",
+    "restrained",
+    "multilingual",
+    "evidence-first"
+  ],
+  "legal_notes": [
+    "Trademark and domain clearance pending",
+    "Typography/font licensing to be validated",
+    "Selected wordmark is currently an approved visual direction, not a certified vector master",
+    "Color specifications are proposed and require final calibration"
+  ]
+}

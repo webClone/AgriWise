@@ -18,14 +18,21 @@ function buildDefaultAsmaeProof() {
 }
 
 async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string) {
-  let plotId = plotIdParam;
-  if (!plotId) {
+  let plotId = plotIdParam || request.nextUrl.searchParams.get("plotId") || undefined;
+  let snapshotId = request.nextUrl.searchParams.has("snapshotId")
+    ? (request.nextUrl.searchParams.get("snapshotId") ?? "") : undefined;
+  if (request.method === "POST") {
     try {
       const body = await request.json();
-      plotId = body.plotId;
+      plotId = plotId || (typeof body?.plotId === "string" ? body.plotId : undefined);
+      snapshotId = snapshotId || (typeof body?.snapshotId === "string" ? body.snapshotId : undefined);
     } catch {
-      plotId = request.nextUrl.searchParams.get("plotId") || undefined;
+      // Retain query parameters if the request has no JSON body.
     }
+  }
+  // Exact reads must never silently fall back to a newer or different plot head.
+  if (snapshotId !== undefined && !snapshotId.trim()) {
+    return NextResponse.json({ available: false, error: "snapshotId cannot be blank" }, { status: 400 });
   }
 
   if (!plotId) {
@@ -47,7 +54,9 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
 
   // 1. Primary path: fetch validated canonical plot snapshot head from Python
   try {
-    const pathname = `/v2/plots/${encodeURIComponent(plotId)}/snapshot`;
+    const pathname = snapshotId
+      ? `/v2/snapshots/${encodeURIComponent(snapshotId)}`
+      : `/v2/plots/${encodeURIComponent(plotId)}/snapshot`;
     const signedHeaders = buildSignedInternalHeaders(
       "GET",
       pathname,
@@ -66,8 +75,30 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
       next: { revalidate: 0 },
     });
 
+    if (snapshotId && !snapRes.ok) {
+      return NextResponse.json({
+        available: false,
+        status: "unavailable",
+        reason: snapRes.status === 409
+          ? "requested_snapshot_superseded_or_invalid" : "requested_snapshot_unavailable",
+        snapshotId,
+      }, { status: snapRes.status === 404 ? 404 : snapRes.status === 409 ? 409 : 502 });
+    }
+
     if (snapRes.ok) {
       const snapJson = await snapRes.json();
+      if (snapshotId) {
+        const exactMatch = String(snapJson?.snapshot_id || "") === snapshotId;
+        const plotMatch = String(snapJson?.plot_id || "") === plotId;
+        if (!exactMatch || !plotMatch || snapJson?.available === false) {
+          return NextResponse.json({
+            available: false,
+            reason: "requested_snapshot_identity_mismatch",
+            status: "quarantined",
+            snapshotId,
+          }, { status: 409 });
+        }
+      }
       if (snapJson?.available === false && snapJson?.refreshRequired === true) {
         return NextResponse.json({
           ...snapJson,
@@ -76,7 +107,13 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
         });
       }
       if (snapJson && snapJson.available !== false && snapJson.frontend_payload) {
-        // Assert Python validation flags
+        // The exact snapshot must pass the same publication integrity gates
+        // as the current plot head; a namespace match alone is insufficient.
+        if (snapshotId && String(snapJson.frontend_payload?.plot_id || "") !== plotId) {
+          return NextResponse.json({
+            available: false, reason: "requested_snapshot_plot_mismatch", snapshotId,
+          }, { status: 409 });
+        }
         const validation = snapJson.validation || {};
         const validationState = classifyCanonicalHeadValidation(validation);
         if (validationState === "corrupt") {
@@ -90,16 +127,17 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
             { status: 409 }
           );
         }
-        if (validationState === "stale") {
+        if (validationState !== "valid") {
           return NextResponse.json({
             available: false,
-            reason: "canonical_head_schema_stale",
+            reason: snapshotId ? "requested_snapshot_contract_invalid" : "canonical_head_schema_stale",
             status: "stale",
-            refreshRequired: true,
+            refreshRequired: !snapshotId,
             validation,
             contract_validation: snapJson.contract_validation || {},
             plotId,
-          });
+            ...(snapshotId ? { snapshotId } : {}),
+          }, { status: snapshotId ? 409 : 200 });
         }
 
         const payload = snapJson.frontend_payload;
@@ -120,8 +158,18 @@ async function handleSurfacesRequest(request: NextRequest, plotIdParam?: string)
         });
       }
     }
+    if (snapshotId) {
+      return NextResponse.json({
+        available: false, reason: "requested_snapshot_missing_publication", snapshotId,
+      }, { status: 409 });
+    }
   } catch (err) {
-    console.warn("[Surfaces Latest] Failed to fetch canonical snapshot head:", err);
+    console.warn("[Surfaces Latest] Failed to fetch canonical snapshot:", err);
+    if (snapshotId) {
+      return NextResponse.json({
+        available: false, reason: "requested_snapshot_fetch_failed", snapshotId,
+      }, { status: 503 });
+    }
   }
 
   // 2. Secondary fallback: fetch operational workerState (NO Prisma scientific head fallback)
