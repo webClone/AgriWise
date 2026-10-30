@@ -62,9 +62,9 @@ function vigorLabel(ndvi: number | null): { text: string; color: string } {
 function waterLabel(deficit: number | null): { text: string; color: string } {
   if (deficit == null) return { text: "No water data", color: "#64748b" };
   const abs = Math.abs(deficit);
-  if (abs < 5) return { text: "Well watered", color: "#4ade80" };
+  if (abs < 5) return { text: "Low modelled deficit", color: "#4ade80" };
   if (abs < 15) return { text: "Getting dry", color: "#fbbf24" };
-  return { text: "Needs irrigation", color: "#f87171" };
+  return { text: "Water deficit indicated — verify", color: "#f87171" };
 }
 
 function consistencyLabel(std: number | null): { text: string; color: string } {
@@ -288,28 +288,28 @@ function ConditionCard({ icon, title, label, color, value, detail }: { icon: str
 const FARMER_ZONE_EXPLAINER: Record<string, { icon: string; why: string; todo: string }> = {
   LOW_VIGOR: {
     icon: "🟤",
-    why: "This part of your field has weaker plant growth. The crops here are not as green or tall as the rest. This usually means something underground is wrong — not enough water reaching the roots, poor soil nutrition, or possibly pest damage.",
+    why: "This area has a lower vegetation indicator than nearby areas. Water, nutrient, pest and soil explanations are possibilities, not confirmed causes.",
     todo: "Walk this area and check: Are leaves yellowing? (nutrient issue). Are they wilting? (water issue). Are there spots or holes? (pest issue). Then talk to AgriBrain for a targeted solution.",
   },
   WATER_STRESS: {
     icon: "💧",
-    why: "The soil in this area is drying out faster than your crop can handle. The plants can't get enough water from their roots to keep up with the heat. If this continues, it will directly reduce your yield.",
-    todo: "Check if your irrigation is reaching this zone properly. Look for blocked drip lines or dry spots. If rain-fed, this zone should be the first priority for any available water.",
+    why: "This zone shows an indicator associated with water stress. The map alone does not confirm root-zone moisture or the cause.",
+    todo: "Inspect soil moisture and irrigation distribution in this zone. Confirm the cause before choosing an irrigation amount or schedule.",
   },
   NUTRIENT_RISK: {
     icon: "🧪",
-    why: "Your crops in this zone aren't getting enough nutrients from the soil. This is most commonly nitrogen — the crop has used up what was available during its growth spurt. Without more nutrients, grain fill will be reduced.",
-    todo: "Get a soil or leaf tissue test for this zone. If nitrogen is low, apply a targeted dose (20-30 kg/ha) to just this area — don't waste fertilizer on the healthy parts of your field.",
+    why: "A nutrient-risk indicator is elevated in this zone. The cause and affected nutrient have not been established by the map alone.",
+    todo: "Take a representative soil or leaf tissue sample and review the result with an agronomist. A fertilizer dose requires a qualified canonical prescription.",
   },
   DISEASE_RISK: {
     icon: "🦠",
-    why: "Weather conditions (humidity + warmth) have created a risk of crop disease in this area. The satellite detected changes in leaf color/texture that could indicate early fungal or bacterial infection.",
-    todo: "Go scout this zone as soon as possible. Look for spots, lesions, or unusual discoloration on leaves. If you confirm disease, treat ONLY this zone with fungicide — don't spray the whole field.",
+    why: "This area has a disease-risk signal. A risk map does not identify a pathogen or establish that disease is present.",
+    todo: "Inspect leaves for lesions or unusual discoloration and obtain a diagnosis before selecting any treatment.",
   },
   SALINITY_RISK: {
     icon: "🧂",
-    why: "This part of your field has high salt levels in the soil. Salt makes it harder for plant roots to absorb water — even when the soil is moist, the crop can't drink. Over time this stunts growth, causes leaf tip burn, and reduces your harvest.",
-    todo: "Check the white crust on the soil surface in this zone. If irrigation is available, apply a deep leaching event (50–75mm) to flush salts below the root zone. Avoid fertilizers high in chloride. Consider salt-tolerant crop varieties for next season.",
+    why: "This area has a salinity-risk signal. Salt concentration and its cause require field measurements before being treated as established.",
+    todo: "Check for visible salt deposits and confirm soil or irrigation-water salinity with appropriate tests. Any leaching plan requires measured drainage and a qualified water-management prescription.",
   },
   BLOCKED_ZONE: {
     icon: "🚫",
@@ -328,7 +328,7 @@ function _getFarmerExplain(zone: ZoneData) {
     if (u.includes("DISEASE") || u.includes("BIOTIC")) return FARMER_ZONE_EXPLAINER.DISEASE_RISK;
     if (u.includes("NDVI") || u.includes("VIGOR") || u.includes("VEGETATION")) return FARMER_ZONE_EXPLAINER.LOW_VIGOR;
   }
-  return { icon: "📍", why: "This area has been flagged because it's different from the rest of your field. Something is causing the crop here to grow differently.", todo: "Walk this zone and compare with a healthy area nearby. Note any differences in soil, moisture, or plant appearance." };
+  return { icon: "📍", why: "This area differs in the available indicator. The underlying cause is not yet established.", todo: "Walk this zone and compare with a healthy area nearby. Note any differences in soil, moisture, or plant appearance." };
 }
 
 // ── Zone Alert Card (Farmer — rich intelligence) ────────────────────────
@@ -365,20 +365,13 @@ function ZoneAlertCard({ zone, onAsk }: { zone: ZoneData; onAsk: (q: string) => 
         {zone.evidence_age_days != null && <span>· 📅 {zone.evidence_age_days}d since last check</span>}
       </div>
 
-      {/* Linked actions from engine */}
-      {zone.linked_actions.length > 0 && (
-        <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "8px" }}>
-          {zone.linked_actions.map((a, i) => (
-            <span key={i} style={{ fontSize: "11px", padding: "3px 8px", borderRadius: "6px", background: "rgba(99,102,241,0.08)", color: "#a5b4fc", fontWeight: 600 }}>💡 {a}</span>
-          ))}
-        </div>
-      )}
+      {/* Unqualified free-text linked actions are intentionally withheld. */}
 
       {/* Solution buttons */}
       <div style={{ display: "flex", gap: "6px" }}>
-        <button onClick={() => onAsk(`My ${zone.label || zone.zone_id} zone shows ${zone.zone_type.replace(/_/g, ' ').toLowerCase()} with ${(zone.severity*100).toFixed(0)}% severity. Drivers are: ${zone.top_drivers.join(', ')}. What exactly should I do this week to fix it? Give me a step-by-step plan.`)}
+        <button onClick={() => onAsk(`My ${zone.label || zone.zone_id} zone shows ${zone.zone_type.replace(/_/g, ' ').toLowerCase()} with ${(zone.severity*100).toFixed(0)}% severity. Drivers are: ${zone.top_drivers.join(', ')}. What field checks would help verify this signal? Do not suggest a numerical treatment without an applicable canonical prescription.`)}
           style={{ flex: 1, padding: "8px 12px", borderRadius: "6px", border: "none", background: "rgba(99,102,241,0.12)", color: "#a5b4fc", fontSize: "12px", fontWeight: 700, cursor: "pointer" }}>
-          🧠 Get Solution Plan
+          🧠 Verify This Zone
         </button>
         <button onClick={() => onAsk(`Is the ${zone.zone_type.replace(/_/g, ' ').toLowerCase()} in zone ${zone.label || zone.zone_id} really a problem? What if it's a false alarm? What should I check in the field to confirm?`)}
           style={{ padding: "8px 10px", borderRadius: "6px", border: "1px solid rgba(251,191,36,0.2)", background: "rgba(251,191,36,0.04)", color: "#fbbf24", fontSize: "12px", fontWeight: 700, cursor: "pointer" }}>
@@ -468,7 +461,16 @@ export default function SidebarFarmerView({
   }, [evidenceState, ndviMean, vigorTxt]);
 
   const sanitizedAction = useMemo(() => {
-    return sanitizeRecommendedAction(explainPack?.recommended_action || null, evidenceState);
+    const message = sanitizeRecommendedAction(explainPack?.recommended_action || null, evidenceState);
+    // Free-text explainability is not a signed, unit-qualified prescription.
+    if (!message.text) return message;
+    return {
+      ...message,
+      text: "Review map evidence and verify field conditions. Treatment quantities require a qualified canonical prescription.",
+      actionLevel: "scout" as const,
+      suppressed: true,
+      reason: "Unqualified free-text treatment advice withheld",
+    };
   }, [explainPack?.recommended_action, evidenceState]);
 
   // ── BC.10.19 P0.6 — Render Authorization Gate ────────────────────────────
@@ -591,7 +593,7 @@ export default function SidebarFarmerView({
             ? `${pct}% salinity stress probability. ${prob > 0.6
                 ? "Severe salt accumulation — roots cannot extract water even when soil is moist. Only salt-tolerant crops survive. Immediate leaching irrigation required."
                 : prob > 0.3
-                ? "Moderate salt levels — sensitive crops are losing yield. Deep irrigation (50–75mm) can flush salts below the root zone."
+                ? "A salinity indicator warrants soil and irrigation-water testing. Do not select a leaching amount without drainage evidence and qualified guidance."
                 : "Mild salinity detected — monitor for progression. Most crops tolerate this level but it may worsen in hot, dry conditions."}`
             : null };
       }
