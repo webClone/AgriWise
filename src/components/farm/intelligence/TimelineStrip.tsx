@@ -15,6 +15,9 @@
 
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { usePlotIntelligence } from "@/hooks/usePlotIntelligence";
+import { useParcelAssessment } from "@/hooks/useParcelAssessment";
+import { usePlotTelemetry } from "@/hooks/usePlotTelemetry";
+import { classifyManifestEvidence, classifyTelemetryObservation, TELEMETRY_STATUS, type TelemetryObservation, type TelemetryStatus } from "@/lib/agribrain/telemetry-contract";
 
 type MetricKey = "temp" | "rain" | "ndvi" | "et0" | "humidity";
 
@@ -70,9 +73,46 @@ interface DayCell {
   isPast: boolean;
   values: Record<MetricKey, number | null>;
   source: "observed" | "forecast" | "estimated" | "unverified" | "gap";
+  metricStatuses: Record<MetricKey, TelemetryStatus>;
+  certifiedManifestEventCount: number;
+  cutoffDay: boolean;
+  assessmentSnapshotId: string | null;
   ndviSource?: string;        // "observed" | "kalman" from backend
   ndviConfidence?: number;    // 0-1 from Kalman engine
   tempRange: { min: number | null; max: number | null };
+}
+
+
+const STATUS_LABEL: Record<TelemetryStatus, string> = {
+  CERTIFIED_MANIFEST: "Certified in publication manifest",
+  LIVE_UNCERTIFIED: "Live observation · uncertified",
+  MODEL_FORECAST: "Model forecast · not observed",
+  LATE_ARRIVING_UNADMITTED: "Historical observation · not admitted to manifest",
+  UNVERIFIED: "Time, source or admission unverified",
+};
+
+// A PI timeline row cannot self-certify a scientific assessment.
+// Require an explicit provider/model identity and a full observation timestamp.
+function classifyTimelineDatum(
+  datum: Record<string, unknown> | undefined,
+  kind: "observation" | "forecast",
+  cutoff: string | null,
+  now: string
+): TelemetryStatus {
+  if (!datum) return TELEMETRY_STATUS.UNVERIFIED;
+  const observedAt = datum.observedAt ?? datum.observed_at ?? datum.timestamp ?? datum.date;
+  const validAt = datum.validAt ?? datum.valid_at ?? datum.date ?? datum.timestamp;
+  const candidate: TelemetryObservation = {
+    id: String(datum.id || datum.observation_id || "timeline-record"),
+    kind,
+    source: typeof datum.source === "string"
+      ? datum.source : typeof datum.provider === "string" ? datum.provider : "",
+    observedAt: typeof observedAt === "string" ? observedAt : undefined,
+    validAt: typeof validAt === "string" ? validAt : undefined,
+    modelId: typeof datum.modelId === "string"
+      ? datum.modelId : typeof datum.model_id === "string" ? datum.model_id : undefined,
+  };
+  return classifyTelemetryObservation(candidate, cutoff, now);
 }
 
 /* ─── Sparkline SVG ────────────────────────────────────────────────────── */
@@ -174,6 +214,10 @@ function DayTooltip({ day, metric, style }: {
 /* ─── Main Timeline Component ─────────────────────────────────────────── */
 export default function TimelineStrip() {
   const { timeline, loading, selectedDate, setSelectedDate } = usePlotIntelligence();
+  const parcel = useParcelAssessment();
+  const { stream: liveTelemetryStream } = usePlotTelemetry();
+  const assessment = parcel.assessment;
+  const evidenceCutoffAt = assessment?.identity.evidenceCutoffAt ?? null;
   const [activeMetric, setActiveMetric] = useState<MetricKey>("temp");
   const [hoveredDay, setHoveredDay] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -190,6 +234,7 @@ export default function TimelineStrip() {
 
   const days: DayCell[] = useMemo(() => {
     const result: DayCell[] = [];
+    const nowIso = new Date().toISOString();
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
