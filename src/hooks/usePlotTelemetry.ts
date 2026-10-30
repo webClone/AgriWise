@@ -11,13 +11,13 @@ import {
 } from "react";
 import {
   appendOperationalTelemetry, createLiveTelemetryStream,
-  type TelemetryObservation, type TelemetryScope,
+  type ScopedTelemetryObservation, type TelemetryScope,
   type LiveTelemetryStream,
 } from "@/lib/agribrain/telemetry-contract";
 
 interface PlotTelemetryContextValue {
   stream: LiveTelemetryStream;
-  ingestObservation: (observation: TelemetryObservation) => void;
+  ingestObservation: (observation: ScopedTelemetryObservation) => void;
   clearTelemetry: () => void;
 }
 const PlotTelemetryContext = createContext<PlotTelemetryContextValue | null>(null);
@@ -46,7 +46,7 @@ export function PlotTelemetryProvider({
   // Explicit primitive dependency: do not reset due to object identity.
   }, [scope.tenantId, scope.farmId, scope.plotId]);
 
-  const ingestObservation = useCallback((observation: TelemetryObservation) => {
+  const ingestObservation = useCallback((observation: ScopedTelemetryObservation) => {
     const requestedScope = scopeKey;
     if (currentScopeRef.current !== requestedScope) return;
     setStream(current => {
