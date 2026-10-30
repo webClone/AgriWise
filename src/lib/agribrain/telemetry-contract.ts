@@ -31,6 +31,8 @@ export interface TelemetryScope {
 }
 
 export interface TelemetryObservation {
+  /** Authenticated source scope; must match the active operational buffer. */
+  scope: TelemetryScope;
   id: string;
   source: string;
   kind: "observation" | "forecast";
