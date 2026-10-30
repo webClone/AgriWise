@@ -110,14 +110,3 @@ export function appendOperationalTelemetry(stream, observation, maxCount = 500) 
   });
 }
 
-/** New canonical publication, never a client mutation, changes certified truth. */
-export function canAdoptNewPublication(previous, next) {
-  const a = previous?.identity;
-  const b = next?.identity;
-  return !!a && !!b
-    && a.tenantId === b.tenantId && a.farmId === b.farmId && a.plotId === b.plotId
-    && !!b.snapshotId && b.snapshotId !== a.snapshotId
-    && !!b.publicationReceiptHash && b.publicationReceiptHash !== a.publicationReceiptHash
-    && validIso(b.evidenceCutoffAt) && validIso(a.evidenceCutoffAt)
-    && isoMillis(b.evidenceCutoffAt) >= isoMillis(a.evidenceCutoffAt);
-}
