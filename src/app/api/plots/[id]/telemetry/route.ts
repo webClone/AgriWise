@@ -60,7 +60,7 @@ export async function GET(
       }),
     ]);
 
-    const observations = serializeOperationalTelemetry({
+    const observations = (serializeOperationalTelemetry as any)({
       sensorReadings, plotObservations, scope,
     });
     return NextResponse.json(

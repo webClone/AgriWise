@@ -2,7 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { stripTypeScriptTypes } from "node:module";
+import * as nodeModule from "node:module";
+
+let stripTypeScriptTypes = nodeModule.stripTypeScriptTypes;
+if (!stripTypeScriptTypes) {
+  const ts = (await import("typescript")).default;
+  stripTypeScriptTypes = (code) => ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext } }).outputText;
+}
 import {
   appendOperationalTelemetry, createLiveTelemetryStream, TELEMETRY_CONTRACT_VERSION,
 } from "../../src/lib/agribrain/telemetry-contract.mjs";
@@ -21,6 +27,7 @@ const B = { tenantId: "T", farmId: "F", plotId: "B" };
 const record = (scope, id) => ({
   id, scope, source: "sensor:one", kind: "observation",
   observedAt: "2026-10-30T17:00:00Z", ingestedAt: "2026-10-30T17:00:00Z",
+  timeBasis: "server_received_at",
   metric: "temp", value: 20, unit: "°C",
 });
 
