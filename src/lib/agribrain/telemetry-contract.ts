@@ -31,8 +31,6 @@ export interface TelemetryScope {
 }
 
 export interface TelemetryObservation {
-  /** Authenticated source scope; must match the active operational buffer. */
-  scope: TelemetryScope;
   id: string;
   source: string;
   kind: "observation" | "forecast";
@@ -49,10 +47,12 @@ export interface TelemetryObservation {
   certificationStatus?: string;
 }
 
+export type ScopedTelemetryObservation = TelemetryObservation & { scope: TelemetryScope };
+
 export interface LiveTelemetryStream {
   readonly contractVersion: string;
   readonly scope: Readonly<TelemetryScope>;
-  readonly observations: ReadonlyArray<Readonly<TelemetryObservation>>;
+  readonly observations: ReadonlyArray<Readonly<ScopedTelemetryObservation>>;
 }
 
 export const classifyManifestEvidence = (
@@ -73,7 +73,7 @@ export const createLiveTelemetryStream = (scope: TelemetryScope): LiveTelemetryS
 
 export const appendOperationalTelemetry = (
   stream: LiveTelemetryStream,
-  observation: TelemetryObservation,
+  observation: ScopedTelemetryObservation,
   maxCount?: number
 ): LiveTelemetryStream => appendOperationalTelemetryCore(
   stream, observation, maxCount
