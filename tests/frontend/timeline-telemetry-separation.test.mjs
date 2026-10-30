@@ -11,6 +11,7 @@ import {
 const now = "2026-10-30T16:00:00Z";
 const cutoff = "2026-10-30T10:00:00Z";
 const observation = (id, observedAt, source = "weather_station") => ({
+  scope: { tenantId: "T", farmId: "F", plotId: "P" },
   id, source, kind: "observation", observedAt, value: 12, unit: "°C",
 });
 const manifestEvent = Object.freeze({
@@ -69,6 +70,7 @@ test("operational append is immutable and cannot assert manifest authority", () 
   assert.throws(() => appendOperationalTelemetry(next, { ...sample, value: 19 }), /collision/);
   assert.throws(() => appendOperationalTelemetry(next, { ...sample, manifestMembership: true }), /cannot_assert/);
   assert.throws(() => appendOperationalTelemetry(next, { ...sample, certified: true }), /cannot_assert/);
+  assert.throws(() => appendOperationalTelemetry(next, { ...sample, scope: { tenantId: "T", farmId: "F", plotId: "other" } }), /scope_mismatch/);
   assert.throws(() => appendOperationalTelemetry(next, { ...sample, certificationStatus: S.CERTIFIED_MANIFEST }), /cannot_assert/);
 });
 
