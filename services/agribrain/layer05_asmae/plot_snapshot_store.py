@@ -613,7 +613,12 @@ def publish_canonical_layer10_snapshot(
     snapshot_id = str(payload.get("intelligence_snapshot_id") or "")
     if snapshot_id.startswith("ASMAE-SNAPSHOT-"):
         existing = load_latest_plot_snapshot(ns, geometry_hash or None)
-        if existing and existing.get("snapshot_id") == snapshot_id:
+        incoming_cycle = crop_cycle_id or payload.get("crop_cycle_id") or payload.get("cropCycleId")
+        if (
+            existing
+            and existing.get("snapshot_id") == snapshot_id
+            and (existing.get("crop_cycle_id") or None) == (incoming_cycle or None)
+        ):
             return {
                 "snapshot_id": snapshot_id,
                 "node_hash": existing.get("node_hash"),
