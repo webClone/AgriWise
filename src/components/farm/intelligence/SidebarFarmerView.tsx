@@ -577,24 +577,24 @@ export default function SidebarFarmerView({
         const prob = activeSurfMean;
         if (prob == null) return { icon: "🧪", title: "Nutrient Stress Probability", label: "No data", color: "#64748b", value: undefined, why: null };
         const pct = (prob * 100).toFixed(0);
-        const label = prob > 0.5 ? "High deficiency risk" : prob > 0.25 ? "Moderate risk" : "Adequate nutrition";
+        const label = prob > 0.5 ? "High deficiency risk" : prob > 0.25 ? "Moderate risk" : "Low modelled nutrient risk";
         const color = prob > 0.5 ? "#f87171" : prob > 0.25 ? "#fbbf24" : "#4ade80";
         return { icon: "🧪", title: "Nutrient Stress Probability", label, color, value: `${pct}%`,
-          why: prob > 0.25 ? `${pct}% probability of nutrient limitation. Spectral signatures suggest ${prob > 0.5 ? "significant" : "mild"} nutrient depletion. Consider tissue sampling in flagged zones.` : null };
+          why: prob > 0.25 ? `${pct}% probability of nutrient limitation. The indicator warrants nutrient status verification before any diagnosis or treatment. Consider tissue sampling in flagged zones.` : null };
       }
       case "salinity": {
         const prob = activeSurfMean;
         if (prob == null) return { icon: "🧂", title: "Soil Salinity Stress", label: "No data", color: "#64748b", value: undefined, why: null };
         const pct = (prob * 100).toFixed(0);
-        const label = prob > 0.6 ? "Severe salinity" : prob > 0.3 ? "Moderate salinity" : prob > 0.15 ? "Mild salinity" : "Non-saline";
+        const label = prob > 0.6 ? "High salinity risk" : prob > 0.3 ? "Moderate salinity risk" : prob > 0.15 ? "Mild salinity risk" : "Low salinity risk";
         const color = prob > 0.6 ? "#ef4444" : prob > 0.3 ? "#f59e0b" : prob > 0.15 ? "#22d3ee" : "#14b8a6";
         return { icon: "🧂", title: "Soil Salinity Stress", label, color, value: `${pct}%`,
           why: prob > 0.15
             ? `${pct}% salinity stress probability. ${prob > 0.6
-                ? "Severe salt accumulation — roots cannot extract water even when soil is moist. Only salt-tolerant crops survive. Immediate leaching irrigation required."
+                ? "Elevated salinity risk should prompt soil and irrigation-water testing; leaching requires measured drainage and qualified guidance."
                 : prob > 0.3
                 ? "A salinity indicator warrants soil and irrigation-water testing. Do not select a leaching amount without drainage evidence and qualified guidance."
-                : "Mild salinity detected — monitor for progression. Most crops tolerate this level but it may worsen in hot, dry conditions."}`
+                : "A mild salinity-risk signal should be checked against measured soil and irrigation-water salinity."}`
             : null };
       }
       case "veg_attention": {
