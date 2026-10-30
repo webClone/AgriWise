@@ -7,7 +7,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { stripTypeScriptTypes } from "node:module";
+import * as nodeModule from "node:module";
+
+let stripTypeScriptTypes = nodeModule.stripTypeScriptTypes;
+if (!stripTypeScriptTypes) {
+  const ts = (await import("typescript")).default;
+  stripTypeScriptTypes = (code) => ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext } }).outputText;
+}
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
