@@ -19,9 +19,9 @@ if (!stripTypeScriptTypes) {
 
 const now = "2026-10-30T16:00:00Z";
 const cutoff = "2026-10-30T10:00:00Z";
-const observation = (id, observedAt, source = "weather_station") => ({
+const observation = (id, observedAt, source = "weather_station", ingestedAt = observedAt) => ({
   scope: { tenantId: "T", farmId: "F", plotId: "P" },
-  id, source, kind: "observation", observedAt, value: 12, unit: "°C",
+  id, source, kind: "observation", observedAt, ingestedAt, value: 12, unit: "°C",
 });
 const manifestEvent = Object.freeze({
   id: "manifest-001",
@@ -55,6 +55,18 @@ test("historical observations cannot be certified by timestamp or sender flag", 
   const old = { ...observation("late", "2026-10-29T09:00:00Z"), ingestedAt: "2026-10-30T12:00:00Z" };
   assert.equal(classifyTelemetryObservation(old, cutoff, now), S.LATE_ARRIVING_UNADMITTED);
   assert.equal(classifyTelemetryObservation({ ...old, manifestMembership: true }, cutoff, now), S.LATE_ARRIVING_UNADMITTED);
+});
+
+test("ingestion-aware classification distinguishes late-arriving from historical unadmitted and missing ingestion", () => {
+  // 1. Observed before cutoff, ingested after cutoff -> LATE_ARRIVING_UNADMITTED
+  assert.equal(classifyTelemetryObservation({ ...observation("late", "2026-10-29T09:00:00Z"), ingestedAt: "2026-10-30T12:00:00Z" }, cutoff, now), S.LATE_ARRIVING_UNADMITTED);
+  // 2. Observed before cutoff, ingested before cutoff -> UNVERIFIED (historical unadmitted cannot masquerade as late-arriving)
+  assert.equal(classifyTelemetryObservation({ ...observation("hist-unadmitted", "2026-10-29T09:00:00Z"), ingestedAt: "2026-10-29T09:30:00Z" }, cutoff, now), S.UNVERIFIED);
+  // 3. Observed after cutoff, ingested after cutoff -> LIVE_UNCERTIFIED
+  assert.equal(classifyTelemetryObservation({ ...observation("live", "2026-10-30T11:00:00Z"), ingestedAt: "2026-10-30T11:05:00Z" }, cutoff, now), S.LIVE_UNCERTIFIED);
+  // 4. Missing ingestedAt -> UNVERIFIED
+  assert.equal(classifyTelemetryObservation({ ...observation("missing-ingest", "2026-10-30T11:00:00Z"), ingestedAt: undefined }, cutoff, now), S.UNVERIFIED);
+  assert.equal(classifyTelemetryObservation({ ...observation("null-ingest", "2026-10-29T09:00:00Z"), ingestedAt: null }, cutoff, now), S.UNVERIFIED);
 });
 
 test("live, forecast and missing evidence stay distinct", () => {
@@ -230,5 +242,5 @@ test("Milestone 2: timeline renders individual operational telemetry with explic
   // Assert component template exposes operational telemetry tooltips and pills
   assert.match(timelineSource, /data-testid="timeline-operational-telemetry"/);
   assert.match(timelineSource, /data-testid="telemetry-pill"/);
-  assert.match(timelineSource, /Basis:\s*\{obs\.timeBasis === "server_received_at"\s*\?\s*"server receipt"\s*:\s*"device acquisition"\}/);
+  assert.match(timelineSource, /Basis:\s*\{obs\.timeBasis === "server_received_at"\s*\?\s*"server receipt"\s*:\s*"source observation time"\}/);
 });

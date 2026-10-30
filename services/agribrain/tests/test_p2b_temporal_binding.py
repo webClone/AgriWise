@@ -393,3 +393,117 @@ def test_terminal_layer10_publication_preserves_crop_cycle_binding(tmp_path: Pat
     assert pub_data.get("crop_cycle_id") == crop_cycle_id
     assert loaded["validation"]["temporalBindingValid"] is True
     assert loaded["validation"]["bindingValid"] is True
+
+
+def test_nested_plot_state_artifact_evidence_cutoff_fallback(tmp_path: Path):
+    """Temporal Provenance Fallback Guarantee:
+    When top-level evidence_cutoff_at is absent from asmae_result, publish_canonical_plot_snapshot
+    falls back cleanly to nested plot_state_artifact.spatial_evidence_cutoff or plot_state_artifact.as_of.
+    The resulting head.json and publications/<job>.json preserve the cutoff, and cryptographic
+    temporal validation passes. If neither is present, evidence_cutoff_at remains None/empty (fail-closed).
+    """
+    import hashlib
+
+    # Case A: Fallback to plot_state_artifact.spatial_evidence_cutoff
+    namespace_a = PlotNamespace("tenant-test", "farm-test", "plot-nested-cutoff-a")
+    snapshot_id_a = "ASMAE-SNAPSHOT-nested-spatial-01"
+    cutoff_a = "2026-10-30T14:00:00Z"
+
+    asmae_result_a, frontend_payload_a = _make_asmae_test_payload(
+        snapshot_id_a, "plot-nested-cutoff-a", cutoff=None, window=None
+    )
+    asmae_result_a["plot_state_artifact"] = {"spatial_evidence_cutoff": cutoff_a}
+
+    with patch("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", tmp_path / "a"):
+        published_a = publish_canonical_plot_snapshot(
+            namespace=namespace_a,
+            geometry_hash="geometry-hash-nested-a",
+            snapshot_id=snapshot_id_a,
+            asmae_result=asmae_result_a,
+            frontend_payload=frontend_payload_a,
+            job_id="job-nested-a",
+            manifest_hash="manifest-hash-nested-a",
+            execution_identity={"worker": "test", "plan": "test"},
+        )
+        loaded_a = load_latest_plot_snapshot(namespace_a, "geometry-hash-nested-a")
+
+        head_path_a = _head_path(namespace_a)
+        head_data_a = json.loads(head_path_a.read_text(encoding="utf-8"))
+
+        safe_job_a = hashlib.sha256("job-nested-a".encode("utf-8")).hexdigest()[:32]
+        pub_path_a = head_path_a.parent / "publications" / f"{safe_job_a}.json"
+        pub_data_a = json.loads(pub_path_a.read_text(encoding="utf-8"))
+
+    assert loaded_a is not None
+    assert loaded_a.get("evidence_cutoff_at") == cutoff_a
+    assert head_data_a.get("evidence_cutoff_at") == cutoff_a
+    assert pub_data_a.get("evidence_cutoff_at") == cutoff_a
+    assert loaded_a["validation"]["temporalBindingValid"] is True
+    assert loaded_a["validation"]["publicationValid"] is True
+    assert loaded_a["validation"]["bindingValid"] is True
+
+    # Case B: Fallback to plot_state_artifact.as_of
+    namespace_b = PlotNamespace("tenant-test", "farm-test", "plot-nested-cutoff-b")
+    snapshot_id_b = "ASMAE-SNAPSHOT-nested-as-of-02"
+    cutoff_b = "2026-10-30T12:00:00Z"
+
+    asmae_result_b, frontend_payload_b = _make_asmae_test_payload(
+        snapshot_id_b, "plot-nested-cutoff-b", cutoff=None, window=None
+    )
+    asmae_result_b["plot_state_artifact"] = {"as_of": cutoff_b}
+
+    with patch("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", tmp_path / "b"):
+        published_b = publish_canonical_plot_snapshot(
+            namespace=namespace_b,
+            geometry_hash="geometry-hash-nested-b",
+            snapshot_id=snapshot_id_b,
+            asmae_result=asmae_result_b,
+            frontend_payload=frontend_payload_b,
+            job_id="job-nested-b",
+            manifest_hash="manifest-hash-nested-b",
+            execution_identity={"worker": "test", "plan": "test"},
+        )
+        loaded_b = load_latest_plot_snapshot(namespace_b, "geometry-hash-nested-b")
+
+        head_path_b = _head_path(namespace_b)
+        head_data_b = json.loads(head_path_b.read_text(encoding="utf-8"))
+
+        safe_job_b = hashlib.sha256("job-nested-b".encode("utf-8")).hexdigest()[:32]
+        pub_path_b = head_path_b.parent / "publications" / f"{safe_job_b}.json"
+        pub_data_b = json.loads(pub_path_b.read_text(encoding="utf-8"))
+
+    assert loaded_b is not None
+    assert loaded_b.get("evidence_cutoff_at") == cutoff_b
+    assert head_data_b.get("evidence_cutoff_at") == cutoff_b
+    assert pub_data_b.get("evidence_cutoff_at") == cutoff_b
+    assert loaded_b["validation"]["temporalBindingValid"] is True
+    assert loaded_b["validation"]["publicationValid"] is True
+    assert loaded_b["validation"]["bindingValid"] is True
+
+    # Case C: Neither present -> fail closed, cutoff remains None/empty, no fabrication
+    namespace_c = PlotNamespace("tenant-test", "farm-test", "plot-nested-cutoff-c")
+    snapshot_id_c = "ASMAE-SNAPSHOT-nested-none-03"
+
+    asmae_result_c, frontend_payload_c = _make_asmae_test_payload(
+        snapshot_id_c, "plot-nested-cutoff-c", cutoff=None, window=None
+    )
+    asmae_result_c["plot_state_artifact"] = {"other_context": "unrelated"}
+
+    with patch("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", tmp_path / "c"):
+        published_c = publish_canonical_plot_snapshot(
+            namespace=namespace_c,
+            geometry_hash="geometry-hash-nested-c",
+            snapshot_id=snapshot_id_c,
+            asmae_result=asmae_result_c,
+            frontend_payload=frontend_payload_c,
+            job_id="job-nested-c",
+            manifest_hash="manifest-hash-nested-c",
+            execution_identity={"worker": "test", "plan": "test"},
+        )
+        loaded_c = load_latest_plot_snapshot(namespace_c, "geometry-hash-nested-c")
+
+    assert loaded_c is not None
+    assert loaded_c.get("evidence_cutoff_at") in (None, "")
+    assert loaded_c["validation"]["temporalBindingValid"] is True
+    assert loaded_c["validation"]["publicationValid"] is True
+    assert loaded_c["validation"]["bindingValid"] is True

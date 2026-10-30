@@ -54,9 +54,18 @@ export function classifyTelemetryObservation(observation, evidenceCutoffAt, now 
   if (!Number.isFinite(observed) || observed > current || !Number.isFinite(cutoff)) {
     return TELEMETRY_STATUS.UNVERIFIED;
   }
-  return observed <= cutoff
-    ? TELEMETRY_STATUS.LATE_ARRIVING_UNADMITTED
-    : TELEMETRY_STATUS.LIVE_UNCERTIFIED;
+  const ingested = isoMillis(observation?.ingestedAt);
+  if (!Number.isFinite(ingested)) {
+    return TELEMETRY_STATUS.UNVERIFIED;
+  }
+  if (observed <= cutoff) {
+    return ingested > cutoff
+      ? TELEMETRY_STATUS.LATE_ARRIVING_UNADMITTED
+      : TELEMETRY_STATUS.UNVERIFIED;
+  }
+  return ingested >= cutoff
+    ? TELEMETRY_STATUS.LIVE_UNCERTIFIED
+    : TELEMETRY_STATUS.UNVERIFIED;
 }
 
 export function createLiveTelemetryStream(scope) {

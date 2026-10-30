@@ -114,6 +114,7 @@ function classifyTimelineDatum(
 ): TelemetryStatus {
   if (!datum) return TELEMETRY_STATUS.UNVERIFIED;
   const observedAt = datum.observedAt ?? datum.observed_at ?? datum.timestamp ?? datum.date;
+  const ingestedAt = datum.ingestedAt ?? datum.ingested_at ?? datum.fetchedAt ?? datum.fetched_at ?? datum.timestamp ?? observedAt;
   const validAt = datum.validAt ?? datum.valid_at ?? datum.date ?? datum.timestamp;
   const candidate: TelemetryObservation = {
     id: String(datum.id || datum.observation_id || "timeline-record"),
@@ -121,6 +122,7 @@ function classifyTimelineDatum(
     source: typeof datum.source === "string"
       ? datum.source : typeof datum.provider === "string" ? datum.provider : "",
     observedAt: typeof observedAt === "string" ? observedAt : undefined,
+    ingestedAt: typeof ingestedAt === "string" ? ingestedAt : undefined,
     validAt: typeof validAt === "string" ? validAt : undefined,
     modelId: typeof datum.modelId === "string"
       ? datum.modelId : typeof datum.model_id === "string" ? datum.model_id : undefined,
@@ -344,7 +346,7 @@ function DayTooltip({ day, metric, style }: {
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.62rem", color: "#94a3b8" }}>
                 <span>Source: {obs.source}{obs.obsType ? ` · ${obs.obsType}` : ""}</span>
-                <span>Basis: {obs.timeBasis === "server_received_at" ? "server receipt" : "device acquisition"}</span>
+                <span>Basis: {obs.timeBasis === "server_received_at" ? "server receipt" : "source observation time"}</span>
               </div>
               <div style={{ fontSize: "0.6rem", color: "#64748b" }}>
                 Observed: {new Date(obs.observedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · Ingested: {new Date(obs.ingestedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
