@@ -52,12 +52,6 @@ function findStaleGatewayState(rawData: Record<string, unknown> | undefined): Ga
 
 // ── Helpers (derive from real data, no hardcoded thresholds fabrication) ─────
 
-function healthLabel(score: number): { text: string; color: string } {
-  if (score >= 0.75) return { text: "Your field is in good shape", color: "#4ade80" };
-  if (score >= 0.5) return { text: "Some areas need attention", color: "#fbbf24" };
-  return { text: "Field needs attention", color: "#f87171" };
-}
-
 function vigorLabel(ndvi: number | null): { text: string; color: string } {
   if (ndvi == null) return { text: "No vigor data", color: "#64748b" };
   if (ndvi >= 0.6) return { text: "Strong growth", color: "#4ade80" };
@@ -78,50 +72,6 @@ function consistencyLabel(std: number | null): { text: string; color: string } {
   if (std < 0.05) return { text: "Very even growth", color: "#4ade80" };
   if (std < 0.1) return { text: "Mostly even", color: "#fbbf24" };
   return { text: "Patchy — check zones", color: "#f87171" };
-}
-
-// ── SVG Health Gauge with Confidence Interval ───────────────────────────
-function HealthGauge({ score, ciLow, ciHigh }: { score: number; ciLow: number; ciHigh: number }) {
-  const pct = Math.round(score * 100);
-  const ciPctLow = Math.round(ciLow * 100);
-  const ciPctHigh = Math.round(ciHigh * 100);
-  const { text, color } = healthLabel(score);
-  const r = 44, cx = 50, cy = 50;
-  const circ = Math.PI * r; // half circle
-  const offset = circ - (score * circ);
-  // CI band arcs
-  const ciLowOffset = circ - (ciLow * circ);
-  const ciHighOffset = circ - (ciHigh * circ);
-  const ciLength = ciLowOffset - ciHighOffset; // arc length of the band
-  return (
-    <div style={{ textAlign: "center", padding: "8px 0" }}>
-      <svg width="100" height="60" viewBox="0 0 100 60">
-        {/* Background arc */}
-        <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
-          fill="none" stroke="rgba(71,85,105,0.3)" strokeWidth="7" strokeLinecap="round" />
-        {/* Confidence interval band (wider, translucent) */}
-        <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
-          fill="none" stroke={color} strokeWidth="12" strokeLinecap="round"
-          strokeDasharray={`${ciLength} ${circ - ciLength}`}
-          strokeDashoffset={ciHighOffset}
-          opacity={0.15}
-          style={{ transition: "all 0.6s ease" }} />
-        {/* Main score arc */}
-        <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
-          fill="none" stroke={color} strokeWidth="7" strokeLinecap="round"
-          strokeDasharray={circ} strokeDashoffset={offset}
-          style={{ transition: "stroke-dashoffset 0.6s ease" }} />
-        <text x={cx} y={cy - 8} textAnchor="middle" className="sfv-gauge-text" fill="#f1f5f9" fontSize="18" fontWeight="700" fontFamily="monospace">{pct}/100</text>
-      </svg>
-      <div style={{ fontSize: "13px", color, fontWeight: 600, marginTop: "2px" }}>{text}</div>
-      <div style={{ fontSize: "11px", color: "#64748b", marginTop: "2px" }}>
-        Field condition screening index
-        <span style={{ marginLeft: "4px", color: "#94a3b8" }}>
-          Indicative range {ciPctLow}–{ciPctHigh}
-        </span>
-      </div>
-    </div>
-  );
 }
 
 // ── Inline SVG Spark Line (7-day NDVI trend) ────────────────────────────
@@ -480,121 +430,13 @@ export default function SidebarFarmerView({
   const deficitMm = l3?.data?.deficit_mm != null ? Number(l3.data.deficit_mm) : null;
   const staleSourceState = findStaleGatewayState(data.rawData);
 
-  // Compute REAL agronomic health score (not data reliability!)
-  // Weighted composite: vigor (40%), water (25%), consistency (20%), zone severity (15%)
-  // Scientific fix: consistency is computed ONLY over the vegetated fraction (NDVI > 0.20).
-  // This prevents structural field heterogeneity (bare fallow zone + healthy crop zone) from
-  // being penalised as "stress". CV within vegetated pixels is the agronomically meaningful metric.
-  // Ref: Becker-Reshef et al. (2010) RSE — field-level NDVI consistency metrics.
-  const computeAgronomicHealth = (): number => {
-    // 1. Vigor component: NDVI vs crop-specific thresholds
-    //    0.7+ = 1.0, 0.5 = 0.7, 0.35 = 0.4, <0.2 = 0.1
-    let vigorScore = 0.5;
-    if (ndviMean != null) {
-      if (ndviMean >= 0.7) vigorScore = 1.0;
-      else if (ndviMean >= 0.5) vigorScore = 0.5 + (ndviMean - 0.5) * 2.5;
-      else if (ndviMean >= 0.35) vigorScore = 0.3 + (ndviMean - 0.35) * 1.33;
-      else vigorScore = Math.max(0.05, ndviMean / 0.35 * 0.3);
-    }
-
-    // 2. Water component: deficit penalty
-    let waterScore = 0.8;
-    if (deficitMm != null) {
-      const absDeficit = Math.abs(deficitMm);
-      if (absDeficit < 5) waterScore = 1.0;
-      else if (absDeficit < 20) waterScore = 1.0 - (absDeficit - 5) * 0.013;
-      else if (absDeficit < 40) waterScore = 0.8 - (absDeficit - 20) * 0.015;
-      else waterScore = Math.max(0.05, 0.5 - (absDeficit - 40) * 0.01);
-    }
-
-    // 3. Consistency component — VEGETATED FRACTION ONLY (scientific fix)
-    //
-    //    The field NDVI std (ndviStd) mixes vegetated and bare pixels.
-    //    A field with 40% bare fallow + 60% healthy canopy will show high std
-    //    not because of stress, but because of two structurally different management units.
-    //    Solution: infer the within-vegetated-zone consistency from the NDVI histogram.
-    //    We approximate it using the NDVI mean and std together:
-    //      If most of the std comes from the bare/vegetated boundary, the vegetated
-    //      sub-population has lower internal spread. We estimate this by:
-    //        - If mean NDVI > 0.35 (majority vegetated): use ndviStd directly, but
-    //          reduce penalty weight when phenology stage implies structural heterogeneity.
-    //        - If mean NDVI <= 0.35 (patchy/low-canopy): full penalty applies.
-    //
-    const phenoStage = data.phenology_context?.phenology_receipt_valid === true
-      && data.phenology_context?.phenology_source === "layer2_canonical_phenology"
-      ? data.resolved_crop_stage
-      : "UNKNOWN";
-    const isMixedField = (
-      ndviMean != null && ndviMean < 0.35 &&  // low mean = large bare fraction
-      ndviStd != null && ndviStd > 0.15       // high std = confirmed mix
-    );
-    // Phenology-aware consistency weight
-    // Bare/Mixed/Unknown fields are structurally heterogeneous by nature → halved weight
-    const consistencyWeight = (phenoStage === 'BARE_SOIL' || phenoStage === 'UNKNOWN' || isMixedField)
-      ? 0.08  // structural heterogeneity expected — don't over-penalise
-      : 0.20; // standard weight for single-crop vegetated fields
-
-    // Estimate within-vegetated-zone consistency:
-    // If mean is high, the vegetated fraction is the dominant contributor to std.
-    // Use a vegetation-fraction correction: effective_std ≈ ndviStd × (1 / veg_fraction)
-    // where veg_fraction ≈ clip(ndviMean / 0.5, 0, 1) as a rough canopy cover proxy.
-    let effectiveStd = ndviStd;
-    if (ndviStd != null && ndviMean != null && ndviMean > 0.05) {
-      const vegFraction = Math.min(1.0, Math.max(0.1, ndviMean / 0.5));
-      // Within-canopy std estimate: scale down for partial cover fields
-      effectiveStd = ndviStd * vegFraction;
-    }
-
-    let consistencyScore = 0.7;
-    if (effectiveStd != null) {
-      if (effectiveStd < 0.03) consistencyScore = 1.0;
-      else if (effectiveStd < 0.08) consistencyScore = 1.0 - (effectiveStd - 0.03) * 5.0;
-      else if (effectiveStd < 0.15) consistencyScore = 0.75 - (effectiveStd - 0.08) * 2.14;
-      else consistencyScore = Math.max(0.15, 0.60 - (effectiveStd - 0.15) * 1.5);
-    }
-
-    // 4. Zone severity penalty: worst zone drags health down
-    const worstSeverity = data.zones.reduce((max, z) => Math.max(max, z.severity), 0);
-    const zoneScore = 1.0 - Math.min(1.0, worstSeverity) * 0.8;
-
-    // Weighted composite — consistency weight is now phenology-aware
-    const vigorWeight = 0.40;
-    const waterWeight = 0.25;
-    const zoneWeight = 0.15;
-    const normalizedConsistencyWeight = consistencyWeight; // already scaled above
-    // Re-normalise remaining weights to always sum to 1.0 regardless of consistency weight
-    const remainingWeight = 1.0 - normalizedConsistencyWeight;
-    const scaleFactor = remainingWeight / (vigorWeight + waterWeight + zoneWeight);
-
-    return Math.max(0.05, Math.min(1.0,
-      vigorScore * vigorWeight * scaleFactor +
-      waterScore * waterWeight * scaleFactor +
-      consistencyScore * normalizedConsistencyWeight +
-      zoneScore * zoneWeight * scaleFactor
-    ));
-  };
-
-  const healthScore = computeAgronomicHealth();
-
-  // ── Confidence Interval ──
-  // Width depends on which data sources contributed real values.
-  // More missing data → wider interval → more uncertainty.
-  const computeHealthCI = (): { low: number; high: number } => {
-    let uncertaintyBudget = 0;
-    // Each missing data source adds epistemic uncertainty
-    if (ndviMean == null) uncertaintyBudget += 0.12;  // No satellite NDVI
-    else if (ndviStd != null && ndviStd > 0.15) uncertaintyBudget += 0.05;  // High heterogeneity
-    if (deficitMm == null) uncertaintyBudget += 0.10;  // No water balance data
-    else if (Math.abs(deficitMm) > 50) uncertaintyBudget += 0.04;  // Severe deficit is harder to score
-    if (data.zones.length === 0) uncertaintyBudget += 0.03;  // No zone validation
-    // Base minimum uncertainty: even with perfect data, ±3% is epistemic floor
-    uncertaintyBudget = Math.max(0.03, Math.min(0.20, uncertaintyBudget));
-    return {
-      low: Math.max(0.0, healthScore - uncertaintyBudget),
-      high: Math.min(1.0, healthScore + uncertaintyBudget),
-    };
-  };
-  const healthCI = computeHealthCI();
+  // A composite score requires a qualified canonical health metric. Do not
+  // invent water or vegetation defaults, whole-field scores, or confidence bands.
+  const missingHealthEvidence = [
+    ndviMean == null ? "field NDVI" : null,
+    ndviStd == null ? "NDVI variability" : null,
+    deficitMm == null ? "water balance" : null,
+  ].filter((name): name is string => !!name);
 
   // Zones relevant to current mode — filter by active surface type
   const l10Context = useLayer10();
@@ -856,7 +698,11 @@ export default function SidebarFarmerView({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
       {/* Health Gauge with Confidence Interval */}
-      <HealthGauge score={healthScore} ciLow={healthCI.low} ciHigh={healthCI.high} />
+      <div data-testid="field-health-unavailable" style={{ padding: "12px", borderRadius: "10px", border: "1px solid rgba(148,163,184,0.25)", background: "rgba(15,23,42,0.4)", color: "#cbd5e1" }}>
+          <div style={{ fontWeight: 700, fontSize: "13px" }}>Whole-field health score unavailable</div>
+          <div style={{ fontSize: "11px", marginTop: "4px" }}>No qualified canonical whole-field health metric or calibrated interval was published. Component measurements are shown below without inferring a percentage.</div>
+          {missingHealthEvidence.length > 0 && <div style={{ fontSize: "11px", color: "#fbbf24", marginTop: "4px" }}>Missing evidence: {missingHealthEvidence.join(", ")}</div>}
+        </div>
 
       {/* Phenology Phase Badge */}
       <PhenologyBadge />
