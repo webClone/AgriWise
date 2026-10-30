@@ -74,6 +74,7 @@ interface DayCell {
   values: Record<MetricKey, number | null>;
   source: "observed" | "forecast" | "estimated" | "unverified" | "gap";
   metricStatuses: Record<MetricKey, TelemetryStatus>;
+  metricDotColors: Record<MetricKey, string>;
   certifiedManifestEventCount: number;
   cutoffDay: boolean;
   assessmentSnapshotId: string | null;
@@ -169,6 +170,29 @@ function resolveEt0Metric(
     return { value: Number(forecastObs.et0), supplier: forecastObs, kind: "forecast" };
   }
   return { value: null, supplier: undefined, kind: "observation" };
+}
+
+function getMetricDotColor(
+  status: TelemetryStatus | undefined,
+  metricKey: MetricKey,
+  ndviSource?: string
+): string {
+  if (metricKey === "ndvi") {
+    if (["observed", "sentinel2", "sentinel-2", "s2", "satellite_observed"].includes(ndviSource || "")) {
+      return "#4ade80";
+    }
+    if (["kalman", "estimated", "model", "interpolated"].includes(ndviSource || "")) {
+      return "#a78bfa";
+    }
+    return "#64748b";
+  }
+  if (status === TELEMETRY_STATUS.CERTIFIED_MANIFEST || status === TELEMETRY_STATUS.LIVE_UNCERTIFIED) {
+    return "#4ade80";
+  }
+  if (status === TELEMETRY_STATUS.MODEL_FORECAST) {
+    return "#60a5fa";
+  }
+  return "#64748b";
 }
 
 /* ─── Sparkline SVG ────────────────────────────────────────────────────── */
@@ -392,6 +416,14 @@ export default function TimelineStrip() {
         ndvi: ndviStatus,
       };
 
+      const metricDotColors: Record<MetricKey, string> = {
+        temp: getMetricDotColor(metricStatuses.temp, "temp", ndviSource),
+        rain: getMetricDotColor(metricStatuses.rain, "rain", ndviSource),
+        humidity: getMetricDotColor(metricStatuses.humidity, "humidity", ndviSource),
+        et0: getMetricDotColor(metricStatuses.et0, "et0", ndviSource),
+        ndvi: getMetricDotColor(metricStatuses.ndvi, "ndvi", ndviSource),
+      };
+
       const certifiedManifestEventCount = assessment?.evidenceTimeline.filter(
         event => event.observedAt?.startsWith(dateStr)
           && classifyManifestEvidence(assessment, event) === TELEMETRY_STATUS.CERTIFIED_MANIFEST
@@ -417,6 +449,7 @@ export default function TimelineStrip() {
         isPast,
         source,
         metricStatuses,
+        metricDotColors,
         certifiedManifestEventCount,
         cutoffDay: !!evidenceCutoffAt && dateStr === evidenceCutoffAt.slice(0, 10),
         assessmentSnapshotId: assessment?.identity.snapshotId ?? null,
@@ -443,9 +476,17 @@ export default function TimelineStrip() {
 
   // Count how many days have data for this metric
   const dataCount = sparklineValues.filter(v => v !== null).length;
-  const observedCount = days.filter(d => d.source === "observed").length;
-  const forecastCount = days.filter(d => d.source === "forecast").length;
-  const estimatedCount = days.filter(d => d.source === "estimated").length;
+  const observedCount = days.filter(d => {
+    const s = d.metricStatuses[activeMetric];
+    return s === TELEMETRY_STATUS.CERTIFIED_MANIFEST || s === TELEMETRY_STATUS.LIVE_UNCERTIFIED;
+  }).length;
+  const forecastCount = days.filter(d => d.metricStatuses[activeMetric] === TELEMETRY_STATUS.MODEL_FORECAST).length;
+  const estimatedCount = days.filter(d => {
+    if (activeMetric === "ndvi") {
+      return ["kalman", "estimated", "model", "interpolated"].includes(d.ndviSource || "");
+    }
+    return false;
+  }).length;
 
   const handleDayClick = useCallback((date: string) => {
     setSelectedDate(selectedDate === date ? null : date);
@@ -675,17 +716,10 @@ export default function TimelineStrip() {
                     {hasData ? activeConfig.format(value!) : "—"}
                   </span>
 
-                  {/* Source dot — for NDVI metric show satellite vs Kalman fill */}
+                  {/* Source dot — derived from active metric status while preserving NDVI estimate semantics */}
                   <div style={{
                     width: "3px", height: "3px", borderRadius: "50%",
-                    background: activeMetric === "ndvi"
-                      ? ["observed", "sentinel2", "sentinel-2", "s2", "satellite_observed"].includes(day.ndviSource || "") ? "#4ade80"
-                        : ["kalman", "estimated", "model", "interpolated"].includes(day.ndviSource || "") ? "#a78bfa"
-                        : "#64748b"
-                      : day.source === "observed" ? "#4ade80"
-                        : day.source === "forecast" ? "#60a5fa"
-                        : day.source === "estimated" ? "#a78bfa"
-                        : "#64748b",
+                    background: day.metricDotColors[activeMetric],
                     marginTop: "1px",
                   }} />
                 </button>

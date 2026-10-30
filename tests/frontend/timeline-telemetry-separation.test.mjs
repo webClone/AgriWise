@@ -123,10 +123,16 @@ test("timeline mixed-row selects metric value and supplier together without misl
   assert.equal(mixed.values.humidity, 75);
   assert.equal(mixed.metricStatuses.humidity, S.MODEL_FORECAST);
 
+  // C3 visual provenance indicator matches active metric status rather than generic day source
+  assert.equal(mixed.metricDotColors.temp, "#4ade80"); // green, observed
+  assert.equal(mixed.metricDotColors.rain, "#60a5fa"); // blue, forecast
+  assert.equal(mixed.metricDotColors.humidity, "#60a5fa"); // blue, forecast
+
   // Forecast-only row
   const forecastOnly = select({ forecast: [forecast] });
   assert.equal(forecastOnly.values.rain, 6);
   assert.equal(forecastOnly.metricStatuses.rain, S.MODEL_FORECAST);
+  assert.equal(forecastOnly.metricDotColors.rain, "#60a5fa");
 
   // Complete observation row with valid zero rainfall
   const observedComplete = select({ weather: [{ ...weather, rain: 0, humidity: 60 }], forecast: [forecast] });
@@ -134,11 +140,13 @@ test("timeline mixed-row selects metric value and supplier together without misl
   assert.equal(observedComplete.metricStatuses.rain, S.LIVE_UNCERTIFIED);
   assert.equal(observedComplete.values.humidity, 60);
   assert.equal(observedComplete.metricStatuses.humidity, S.LIVE_UNCERTIFIED);
+  assert.equal(observedComplete.metricDotColors.rain, "#4ade80");
 
-  // Missing values yield null and UNVERIFIED
+  // Missing values yield null and UNVERIFIED with slate indicator
   const missing = select({ weather: [{ date: today, timestamp: today + "T00:00:00Z", source: "weather_station" }] });
   assert.equal(missing.values.rain, null);
   assert.equal(missing.metricStatuses.rain, S.UNVERIFIED);
   assert.equal(missing.values.temp, null);
   assert.equal(missing.metricStatuses.temp, S.UNVERIFIED);
+  assert.equal(missing.metricDotColors.rain, "#64748b");
 });
