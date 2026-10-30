@@ -88,8 +88,12 @@ export function validateOperationalTelemetryResponse(body, scope, version) {
     throw new Error("telemetry_response_scope_or_contract_invalid");
   }
   for (const row of body.observations) {
-    if (!row || row.kind !== "observation" || !row.id
-      || !row.source || !row.observedAt || !row.ingestedAt
+    if (!row || row.kind !== "observation" || typeof row.id !== "string" || !row.id
+      || typeof row.source !== "string" || !row.source
+      || !iso(row.observedAt) || !iso(row.ingestedAt)
+      || !["temp", "rain", "humidity", "soilMoisture", "et0"].includes(row.metric)
+      || !finite(row.value) || typeof row.unit !== "string"
+      || !["server_received_at", "source_observation_at"].includes(row.timeBasis)
       || !row.scope || row.scope.tenantId !== scope.tenantId
       || row.scope.farmId !== scope.farmId || row.scope.plotId !== scope.plotId
       || row.certified === true || row.manifestMembership === true
