@@ -201,6 +201,12 @@ def _persist_run_result(
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
 
+    # Never rebind an existing publication's scientific crop identity to a
+    # new request. A context mismatch requires recomputation, not relabelling.
+    original_cycle = payload.get("crop_cycle_id") or payload.get("cropCycleId")
+    if original_cycle and crop_cycle_id and str(original_cycle).strip() != str(crop_cycle_id).strip():
+        raise ValueError("Cached publication crop-cycle mismatch; recomputation required")
+
     resolved_crop_cycle_id = (
         crop_cycle_id
         or payload.get("crop_cycle_id")
@@ -3972,7 +3978,8 @@ def api_v2_run(
         elif req.mode == "surfaces":
             # Extract plot_id & run_id for progress tracking
             _plot_id = namespace.plot_id
-            _run_id = getattr(req, "run_id", None) or f"run-{_plot_id}"
+            import uuid as _run_uuid
+            _run_id = getattr(req, "run_id", None) or f"run-{_plot_id}-{_run_uuid.uuid4().hex[:12]}"
             _run_crop_cycle_id = (
                 ctx.get("crop_cycle_id")
                 or (ctx.get("crop_cycle_context") or {}).get("crop_cycle_id")
@@ -4142,6 +4149,9 @@ def api_v2_run(
                                         )
                         if (
                             candidate
+                            and bool(_publication_geometry_hash)
+                            and canonical.get("geometry_hash") == _publication_geometry_hash
+                            and (candidate.get("crop_cycle_id") or None) == _run_crop_cycle_id
                             and authority_ok
                             and bounds_enclosed
                             and isinstance(age_seconds, (int, float))
@@ -4211,6 +4221,15 @@ def api_v2_run(
                                             cached_result.get("mode_surface_plan_version") != policy_payload["mode_surface_plan_version"] or
                                             cached_result.get("display_grid_policy_version") != policy_payload["display_grid_policy_version"] or
                                             cached_result.get("source_policy") != "canonical"
+                                        ):
+                                            cache_valid = False
+
+                                    if cache_valid:
+                                        # A plot-keyed cache is not scientifically scoped to a crop or geometry.
+                                        if (
+                                            not _publication_geometry_hash
+                                            or cached_result.get("geometry_hash") != _publication_geometry_hash
+                                            or (cached_result.get("crop_cycle_id") or None) != _run_crop_cycle_id
                                         ):
                                             cache_valid = False
 
@@ -4422,6 +4441,8 @@ def api_v2_run(
                                 # Save a clean copy without internal large keys
                                 clean_res = result.copy()
                                 clean_res["version"] = SURFACES_SCHEMA_VERSION
+                                clean_res["geometry_hash"] = _publication_geometry_hash
+                                clean_res["crop_cycle_id"] = _run_crop_cycle_id
                                 clean_res["visual_intensity"] = float(clean_res.get("provenance", {}).get("visual_intensity", 0.40))
                                 clean_res["asmae_enabled"] = policy_payload["ASMAE_ENABLED"]
                                 clean_res["l10_asmae_surfaces_enabled"] = policy_payload["L10_ASMAE_SURFACES_ENABLED"]

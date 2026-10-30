@@ -625,17 +625,39 @@ def publish_canonical_layer10_snapshot(
     if not snapshot_id.startswith("L10-"):
         raise ValueError("terminal Layer 10 payload has no canonical snapshot identity")
 
+    requested_crop_cycle_id = (
+        crop_cycle_id
+        or payload.get("crop_cycle_id")
+        or payload.get("cropCycleId")
+        or (payload.get("phenology_context") or {}).get("crop_cycle_id")
+        or (payload.get("crop_cycle_context") or {}).get("crop_cycle_id")
+    )
+    requested_crop_cycle_id = str(requested_crop_cycle_id).strip() or None if requested_crop_cycle_id else None
+
     existing_head = _read(_head_path(ns))
-    if existing_head.get("snapshot_kind") == "asmae" or str(existing_head.get("snapshot_id", "")).startswith("ASMAE-SNAPSHOT-"):
-        # A validated canonical ASMAE snapshot head already exists.
-        # An L10 terminal publication must never overwrite an authoritative ASMAE head.
-        return {
-            "snapshot_id": existing_head.get("snapshot_id"),
-            "node_hash": existing_head.get("node_hash"),
-            "frontend_publication_hash": existing_head.get("frontend_publication_hash"),
-            "publication_receipt_hash": existing_head.get("publication_receipt_hash"),
-            "surface_inventory_hash": existing_head.get("surface_inventory_hash"),
-        }
+    old_asmae_head = (
+        existing_head.get("snapshot_kind") == "asmae"
+        or str(existing_head.get("snapshot_id", "")).startswith("ASMAE-SNAPSHOT-")
+    )
+    if old_asmae_head:
+        same_geometry = existing_head.get("geometry_hash") == str(geometry_hash or "")
+        same_cycle = (existing_head.get("crop_cycle_id") or None) == requested_crop_cycle_id
+        if same_geometry and same_cycle:
+            # Prefer a verified ASMAE head only for the very same scientific scope.
+            verified_head = load_latest_plot_snapshot(ns, geometry_hash or None)
+            if not verified_head or verified_head.get("snapshot_id") != existing_head.get("snapshot_id"):
+                raise ValueError("Existing ASMAE head failed canonical validation")
+            return {
+                "snapshot_id": existing_head.get("snapshot_id"),
+                "node_hash": existing_head.get("node_hash"),
+                "frontend_publication_hash": existing_head.get("frontend_publication_hash"),
+                "publication_receipt_hash": existing_head.get("publication_receipt_hash"),
+                "surface_inventory_hash": existing_head.get("surface_inventory_hash"),
+            }
+        if existing_head.get("crop_cycle_id") and not requested_crop_cycle_id:
+            raise ValueError("Cannot replace ASMAE head without a declared crop-cycle scope")
+        # Old-scope ASMAE nodes remain immutable in history; the new context
+        # may publish its own terminal head without inheriting old authority.
 
     surfaces = payload.get("surfaces") or payload.get("surface_pack") or []
     if not isinstance(surfaces, list):
@@ -652,13 +674,7 @@ def publish_canonical_layer10_snapshot(
     inventory_hash = compute_surface_inventory_hash(surfaces)
     payload["surface_inventory_hash"] = inventory_hash
 
-    resolved_crop_cycle_id = (
-        crop_cycle_id
-        or payload.get("crop_cycle_id")
-        or payload.get("cropCycleId")
-        or (payload.get("phenology_context") or {}).get("crop_cycle_id")
-        or (payload.get("crop_cycle_context") or {}).get("crop_cycle_id")
-    )
+    resolved_crop_cycle_id = requested_crop_cycle_id
     if resolved_crop_cycle_id:
         resolved_crop_cycle_id = str(resolved_crop_cycle_id).strip() or None
         payload["crop_cycle_id"] = resolved_crop_cycle_id
