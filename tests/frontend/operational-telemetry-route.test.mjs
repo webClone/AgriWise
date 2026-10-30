@@ -39,6 +39,7 @@ function routeHarness({ authenticated = owner, owns = true, plotFarmId = "farm-o
     plotObservation: { findMany: async ({ where, take }) => {
       calls.observation += 1;
       assert.equal(where.plotId, plotId);
+      assert.deepEqual(where.source.in, ["weather", "sensor"]);
       assert.ok(take <= 50);
       return [{
         id: "record-1", source: "weather",
