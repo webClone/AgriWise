@@ -56,7 +56,7 @@ export default async function PlotLayout({
     <FarmThemeWrapper>
     <ParcelAssessmentProvider plotGeoJson={plot.geoJson} cropCycleId={currentCrop?.id || null}>
     <Layer10Provider plotGeoJson={plot.geoJson}>
-      <PlotTelemetryProvider scope={{ tenantId: String(session?.userId || farm.userId || ""), farmId, plotId }}>
+      <PlotTelemetryProvider scope={{ tenantId: String(session?.userId || (farm as any)?.userId || (farm as any)?.ownerId || ""), farmId, plotId }}>
       <PlotIntelligenceProvider>
       <PlotLayoutClient 
         farmId={farmId}
