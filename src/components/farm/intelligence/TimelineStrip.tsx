@@ -195,6 +195,25 @@ function DayTooltip({ day, metric, style }: {
           );
         })}
       </div>
+      <div data-testid="timeline-metric-status" style={{
+        marginTop: "7px", paddingTop: "6px",
+        borderTop: "1px solid rgba(71,85,105,0.2)",
+        color: "#fbbf24", whiteSpace: "normal", maxWidth: "240px",
+      }}>
+        {STATUS_LABEL[day.metricStatuses[metric.key]]}
+        {metric.key === "ndvi" && ["kalman", "estimated", "model", "interpolated"].includes(day.ndviSource || "")
+          ? " · Model-estimated NDVI, not a satellite observation" : ""}
+      </div>
+      {day.certifiedManifestEventCount > 0 && (
+        <div style={{ color: "#86efac", marginTop: "4px", whiteSpace: "normal", maxWidth: "240px" }}>
+          {day.certifiedManifestEventCount} verified manifest event(s) on this day. That does not certify every displayed metric.
+        </div>
+      )}
+      {day.assessmentSnapshotId && (
+        <div style={{ fontSize: "0.63rem", color: "#94a3b8", marginTop: "3px" }}>
+          Assessment: {day.assessmentSnapshotId}
+        </div>
+      )}
       {day.tempRange.min !== null && day.tempRange.max !== null && (
         <div style={{ marginTop: "6px", paddingTop: "5px", borderTop: "1px solid rgba(71,85,105,0.2)",
           fontSize: "0.72rem", color: "#94a3b8" }}>
@@ -396,6 +415,24 @@ export default function TimelineStrip() {
         boxShadow: "0 -2px 20px rgba(0,0,0,0.35), 0 0 0 1px rgba(71,85,105,0.06) inset",
       }}>
 
+        {/* P2-C: precise cutoff is temporal, not blanket certification of prior dates. */}
+        <div data-testid="timeline-cutoff-boundary" style={{
+          padding: "6px 10px", borderBottom: "1px solid rgba(148,163,184,0.18)",
+          fontSize: "0.65rem", color: "#cbd5e1", lineHeight: 1.5,
+        }}>
+          {evidenceCutoffAt ? (
+            <span>
+              Published evidence cutoff: <strong>{new Date(evidenceCutoffAt).toUTCString()}</strong>
+              {" · "}snapshot {assessment?.identity.snapshotId}
+              {parcel.isApplicable ? "" : " · historical assessment, not current-use"}
+            </span>
+          ) : <span>No validated publication cutoff available</span>}
+          <span style={{ marginLeft: "8px", color: "#fbbf24" }}>
+            Historical dates are not proof of admission; post-cutoff readings are uncertified.
+            {" "}Operational buffer: {liveTelemetryStream.observations.length} unsealed item(s).
+          </span>
+        </div>
+
         {/* ── Top Row: Metric tabs + Sparkline ──────────────────────────── */}
         <div style={{
           display: "flex", alignItems: "center",
@@ -502,6 +539,7 @@ export default function TimelineStrip() {
                 <button
                   data-today={day.isToday ? "true" : undefined}
                   onClick={() => handleDayClick(day.date)}
+                  title={STATUS_LABEL[day.metricStatuses[activeMetric]] + (day.cutoffDay ? " · Publication cutoff day" : "")}
                   onMouseEnter={() => setHoveredDay(day.date)}
                   onMouseLeave={() => setHoveredDay(null)}
                   style={{
@@ -548,6 +586,8 @@ export default function TimelineStrip() {
                     {day.dayNum}
                   </span>
 
+                  {day.cutoffDay && <span title="Exact cutoff timestamp is shown above" style={{ fontSize: "0.53rem", color: "#fbbf24" }}>CUTOFF</span>}
+
                   {/* Value */}
                   <span style={{
                     fontSize: "0.7rem", fontWeight: 600,
@@ -574,7 +614,7 @@ export default function TimelineStrip() {
                 </button>
 
                 {/* Tooltip on hover */}
-                {isHovered && hasData && (
+                {isHovered && (
                   <DayTooltip day={day} metric={activeConfig} />
                 )}
               </div>
