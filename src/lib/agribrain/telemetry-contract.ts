@@ -9,7 +9,6 @@ import {
   classifyTelemetryObservation as classifyTelemetryObservationCore,
   createLiveTelemetryStream as createLiveTelemetryStreamCore,
   appendOperationalTelemetry as appendOperationalTelemetryCore,
-  canAdoptNewPublication as canAdoptNewPublicationCore,
 } from "./telemetry-contract.mjs";
 import type {
   ParcelAssessment,
@@ -78,7 +77,3 @@ export const appendOperationalTelemetry = (
   stream, observation, maxCount
 ) as LiveTelemetryStream;
 
-export const canAdoptNewPublication = (
-  previous: ParcelAssessment | null,
-  next: ParcelAssessment | null
-): boolean => canAdoptNewPublicationCore(previous, next);
