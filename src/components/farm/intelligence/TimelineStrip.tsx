@@ -115,6 +115,62 @@ function classifyTimelineDatum(
   return classifyTelemetryObservation(candidate, cutoff, now);
 }
 
+interface ResolvedMetricSupplier {
+  value: number | null;
+  supplier?: Record<string, unknown>;
+  kind: "observation" | "forecast";
+}
+
+function resolveTimelineMetric(
+  primaryRecord: Record<string, unknown> | undefined,
+  primaryFields: string | string[],
+  fallbackRecord: Record<string, unknown> | undefined,
+  fallbackFields: string | string[],
+  primaryKind: "observation" | "forecast" = "observation",
+  fallbackKind: "observation" | "forecast" = "forecast"
+): ResolvedMetricSupplier {
+  const getNum = (rec: Record<string, unknown> | undefined, fields: string | string[]): number | null => {
+    if (!rec) return null;
+    const list = Array.isArray(fields) ? fields : [fields];
+    for (const f of list) {
+      const v = rec[f];
+      if (v != null && Number.isFinite(Number(v))) {
+        return Number(v);
+      }
+    }
+    return null;
+  };
+
+  const primaryValue = getNum(primaryRecord, primaryFields);
+  if (primaryValue !== null) {
+    return { value: primaryValue, supplier: primaryRecord, kind: primaryKind };
+  }
+
+  const fallbackValue = getNum(fallbackRecord, fallbackFields);
+  if (fallbackValue !== null) {
+    return { value: fallbackValue, supplier: fallbackRecord, kind: fallbackKind };
+  }
+
+  return { value: null, supplier: undefined, kind: primaryKind };
+}
+
+function resolveEt0Metric(
+  weatherObs: Record<string, unknown> | undefined,
+  wbObs: Record<string, unknown> | undefined,
+  forecastObs: Record<string, unknown> | undefined
+): ResolvedMetricSupplier {
+  if (weatherObs?.et0 != null && Number.isFinite(Number(weatherObs.et0))) {
+    return { value: Number(weatherObs.et0), supplier: weatherObs, kind: "observation" };
+  }
+  if (wbObs?.et0 != null && Number.isFinite(Number(wbObs.et0))) {
+    return { value: Number(wbObs.et0), supplier: wbObs, kind: "observation" };
+  }
+  if (forecastObs?.et0 != null && Number.isFinite(Number(forecastObs.et0))) {
+    return { value: Number(forecastObs.et0), supplier: forecastObs, kind: "forecast" };
+  }
+  return { value: null, supplier: undefined, kind: "observation" };
+}
+
 /* ─── Sparkline SVG ────────────────────────────────────────────────────── */
 function Sparkline({ values, color, gradientId, width = 100, height = 28 }: {
   values: (number | null)[];
@@ -309,27 +365,48 @@ export default function TimelineStrip() {
         : ndviObs ? "unverified"
         : "gap";
 
-      const ndviValue = (ndviObs?.ndvi_mean as number) ?? (ndviObs?.ndvi as number) ?? null;
+      const ndviRaw = (ndviObs?.ndvi_mean != null ? ndviObs.ndvi_mean : ndviObs?.ndvi) as number | undefined;
+      const ndviValue = ndviRaw != null && Number.isFinite(Number(ndviRaw)) ? Number(ndviRaw) : null;
+      let ndviStatus: TelemetryStatus = TELEMETRY_STATUS.UNVERIFIED;
+      if (ndviValue !== null && ndviObs) {
+        if (estimatedNdvi) {
+          // Kalman interpolation is a model estimate, never an optical observation.
+          ndviStatus = TELEMETRY_STATUS.UNVERIFIED;
+        } else {
+          ndviStatus = classifyTimelineDatum(ndviObs, "observation", evidenceCutoffAt, nowIso);
+        }
+      }
 
-      const activeWeather = weatherObs || forecastObs;
-      const activeWeatherKind = weatherObs ? "observation" : "forecast";
-      const activeWater = weatherObs?.et0 != null ? weatherObs
-        : wbObs?.et0 != null ? wbObs : forecastObs;
-      const activeWaterKind = activeWater === forecastObs ? "forecast" : "observation";
-      const weatherStatus = classifyTimelineDatum(activeWeather, activeWeatherKind, evidenceCutoffAt, nowIso);
+      // C3 P7-01: Select each metric's value and supplier together so fallback
+      // forecast values are not mislabeled as observations.
+      const tempMetric = resolveTimelineMetric(weatherObs, "temp", forecastObs, "temp");
+      const rainMetric = resolveTimelineMetric(weatherObs, ["rain", "rain_mm"], forecastObs, ["rain_mm", "rain"]);
+      const humidityMetric = resolveTimelineMetric(weatherObs, "humidity", forecastObs, "humidity");
+      const et0Metric = resolveEt0Metric(weatherObs, wbObs, forecastObs);
+
       const metricStatuses: Record<MetricKey, TelemetryStatus> = {
-        temp: weatherStatus,
-        rain: weatherStatus,
-        humidity: weatherStatus,
-        et0: classifyTimelineDatum(activeWater, activeWaterKind, evidenceCutoffAt, nowIso),
-        // Kalman interpolation is a model estimate, never an optical observation.
-        ndvi: estimatedNdvi ? TELEMETRY_STATUS.UNVERIFIED
-          : classifyTimelineDatum(ndviObs, "observation", evidenceCutoffAt, nowIso),
+        temp: classifyTimelineDatum(tempMetric.supplier, tempMetric.kind, evidenceCutoffAt, nowIso),
+        rain: classifyTimelineDatum(rainMetric.supplier, rainMetric.kind, evidenceCutoffAt, nowIso),
+        humidity: classifyTimelineDatum(humidityMetric.supplier, humidityMetric.kind, evidenceCutoffAt, nowIso),
+        et0: classifyTimelineDatum(et0Metric.supplier, et0Metric.kind, evidenceCutoffAt, nowIso),
+        ndvi: ndviStatus,
       };
+
       const certifiedManifestEventCount = assessment?.evidenceTimeline.filter(
         event => event.observedAt?.startsWith(dateStr)
           && classifyManifestEvidence(assessment, event) === TELEMETRY_STATUS.CERTIFIED_MANIFEST
       ).length ?? 0;
+
+      const tempMin = (weatherObs?.temp_min != null && Number.isFinite(Number(weatherObs.temp_min)))
+        ? Number(weatherObs.temp_min)
+        : (forecastObs?.temp_min != null && Number.isFinite(Number(forecastObs.temp_min)))
+          ? Number(forecastObs.temp_min)
+          : null;
+      const tempMax = (weatherObs?.temp_max != null && Number.isFinite(Number(weatherObs.temp_max)))
+        ? Number(weatherObs.temp_max)
+        : (forecastObs?.temp_max != null && Number.isFinite(Number(forecastObs.temp_max)))
+          ? Number(forecastObs.temp_max)
+          : null;
 
       result.push({
         date: dateStr,
@@ -346,15 +423,15 @@ export default function TimelineStrip() {
         ndviSource,
         ndviConfidence: ndviObs?.confidence as number | undefined,
         values: {
-          temp: (weatherObs?.temp as number) ?? (forecastObs?.temp as number) ?? null,
-          rain: (weatherObs?.rain as number) ?? (forecastObs?.rain_mm as number) ?? null,
+          temp: tempMetric.value,
+          rain: rainMetric.value,
           ndvi: ndviValue,
-          et0: (weatherObs?.et0 as number) ?? (wbObs?.et0 as number) ?? (forecastObs?.et0 as number) ?? null,
-          humidity: (weatherObs?.humidity as number) ?? (forecastObs?.humidity as number) ?? null,
+          et0: et0Metric.value,
+          humidity: humidityMetric.value,
         },
         tempRange: {
-          min: (weatherObs?.temp_min as number) ?? (forecastObs?.temp_min as number) ?? null,
-          max: (weatherObs?.temp_max as number) ?? (forecastObs?.temp_max as number) ?? null,
+          min: tempMin,
+          max: tempMax,
         },
       });
     }

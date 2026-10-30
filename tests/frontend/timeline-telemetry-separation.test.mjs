@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import * as nodeModule from "node:module";
 import {
   TELEMETRY_STATUS as S,
   classifyManifestEvidence,
@@ -7,6 +10,12 @@ import {
   createLiveTelemetryStream,
   appendOperationalTelemetry,
 } from "../../src/lib/agribrain/telemetry-contract.mjs";
+
+let stripTypeScriptTypes = nodeModule.stripTypeScriptTypes;
+if (!stripTypeScriptTypes) {
+  const ts = (await import("typescript")).default;
+  stripTypeScriptTypes = (code) => ts.transpileModule(code, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ESNext } }).outputText;
+}
 
 const now = "2026-10-30T16:00:00Z";
 const cutoff = "2026-10-30T10:00:00Z";
@@ -82,4 +91,54 @@ test("stream is bounded without editing older immutable buffers", () => {
   }
   assert.equal(initial.observations.length, 0);
   assert.deepEqual(stream.observations.map(x => x.id), ["obs-2", "obs-3"]);
+});
+
+test("timeline mixed-row selects metric value and supplier together without mislabeling forecast", () => {
+  const root = process.cwd();
+  const timelineSource = fs.readFileSync(path.join(root, "src/components/farm/intelligence/TimelineStrip.tsx"), "utf8");
+
+  const helperStart = timelineSource.indexOf("function classifyTimelineDatum(");
+  const helperEnd = timelineSource.indexOf("/* ─── Sparkline", helperStart);
+  const helper = stripTypeScriptTypes(timelineSource.slice(helperStart, helperEnd), { mode: "strip" });
+
+  const memoStart = timelineSource.indexOf("const days: DayCell[] = useMemo(() => {") + "const days: DayCell[] = useMemo(() => {".length;
+  const memoEnd = timelineSource.indexOf("}, [timeline, assessment, evidenceCutoffAt]);", memoStart);
+  const build = stripTypeScriptTypes("function build(timeline:any,assessment:any,evidenceCutoffAt:any){" + timelineSource.slice(memoStart, memoEnd) + "}", { mode: "strip" });
+
+  const buildDays = new Function("classifyTelemetryObservation", "classifyManifestEvidence", "TELEMETRY_STATUS", helper + build + ";return build;")(classifyTelemetryObservation, classifyManifestEvidence, S);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const testCutoff = new Date(Date.now() - 86400000).toISOString();
+  const weather = { date: today, timestamp: today + "T00:00:00Z", source: "weather_station", temp: 22 };
+  const forecast = { date: today + "T12:00:00Z", source: "weather_model", modelId: "forecast-v1", temp: 19, rain_mm: 6, humidity: 75 };
+
+  const select = t => buildDays(t, null, testCutoff).find(x => x.date === today);
+
+  // Mixed row: observed temp (22), forecast rain (6) and humidity (75)
+  const mixed = select({ weather: [weather], forecast: [forecast] });
+  assert.equal(mixed.values.temp, 22);
+  assert.equal(mixed.metricStatuses.temp, S.LIVE_UNCERTIFIED);
+  assert.equal(mixed.values.rain, 6);
+  assert.equal(mixed.metricStatuses.rain, S.MODEL_FORECAST);
+  assert.equal(mixed.values.humidity, 75);
+  assert.equal(mixed.metricStatuses.humidity, S.MODEL_FORECAST);
+
+  // Forecast-only row
+  const forecastOnly = select({ forecast: [forecast] });
+  assert.equal(forecastOnly.values.rain, 6);
+  assert.equal(forecastOnly.metricStatuses.rain, S.MODEL_FORECAST);
+
+  // Complete observation row with valid zero rainfall
+  const observedComplete = select({ weather: [{ ...weather, rain: 0, humidity: 60 }], forecast: [forecast] });
+  assert.equal(observedComplete.values.rain, 0);
+  assert.equal(observedComplete.metricStatuses.rain, S.LIVE_UNCERTIFIED);
+  assert.equal(observedComplete.values.humidity, 60);
+  assert.equal(observedComplete.metricStatuses.humidity, S.LIVE_UNCERTIFIED);
+
+  // Missing values yield null and UNVERIFIED
+  const missing = select({ weather: [{ date: today, timestamp: today + "T00:00:00Z", source: "weather_station" }] });
+  assert.equal(missing.values.rain, null);
+  assert.equal(missing.metricStatuses.rain, S.UNVERIFIED);
+  assert.equal(missing.values.temp, null);
+  assert.equal(missing.metricStatuses.temp, S.UNVERIFIED);
 });
