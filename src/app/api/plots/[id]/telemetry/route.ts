@@ -45,7 +45,9 @@ export async function GET(
         },
       }),
       prisma.plotObservation.findMany({
-        where: { plotId },
+        // Forecasts must never masquerade as measured observations.
+        // Only persistently acquired weather/sensor observations enter M1.
+        where: { plotId, source: { in: ["weather", "sensor"] } },
         orderBy: { obsDate: "desc" },
         take: 50,
         select: {
