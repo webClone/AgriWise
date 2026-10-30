@@ -292,6 +292,26 @@ export default function TimelineStrip() {
 
       const ndviValue = (ndviObs?.ndvi_mean as number) ?? (ndviObs?.ndvi as number) ?? null;
 
+      const activeWeather = weatherObs || forecastObs;
+      const activeWeatherKind = weatherObs ? "observation" : "forecast";
+      const activeWater = weatherObs?.et0 != null ? weatherObs
+        : wbObs?.et0 != null ? wbObs : forecastObs;
+      const activeWaterKind = activeWater === forecastObs ? "forecast" : "observation";
+      const weatherStatus = classifyTimelineDatum(activeWeather, activeWeatherKind, evidenceCutoffAt, nowIso);
+      const metricStatuses: Record<MetricKey, TelemetryStatus> = {
+        temp: weatherStatus,
+        rain: weatherStatus,
+        humidity: weatherStatus,
+        et0: classifyTimelineDatum(activeWater, activeWaterKind, evidenceCutoffAt, nowIso),
+        // Kalman interpolation is a model estimate, never an optical observation.
+        ndvi: estimatedNdvi ? TELEMETRY_STATUS.UNVERIFIED
+          : classifyTimelineDatum(ndviObs, "observation", evidenceCutoffAt, nowIso),
+      };
+      const certifiedManifestEventCount = assessment?.evidenceTimeline.filter(
+        event => event.observedAt?.startsWith(dateStr)
+          && classifyManifestEvidence(assessment, event) === TELEMETRY_STATUS.CERTIFIED_MANIFEST
+      ).length ?? 0;
+
       result.push({
         date: dateStr,
         dayLabel: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
@@ -300,6 +320,10 @@ export default function TimelineStrip() {
         isToday,
         isPast,
         source,
+        metricStatuses,
+        certifiedManifestEventCount,
+        cutoffDay: !!evidenceCutoffAt && dateStr === evidenceCutoffAt.slice(0, 10),
+        assessmentSnapshotId: assessment?.identity.snapshotId ?? null,
         ndviSource,
         ndviConfidence: ndviObs?.confidence as number | undefined,
         values: {
@@ -316,7 +340,7 @@ export default function TimelineStrip() {
       });
     }
     return result;
-  }, [timeline]);
+  }, [timeline, assessment, evidenceCutoffAt]);
 
   const sparklineValues = days.map(d => d.values[activeMetric]);
   const activeConfig = METRICS.find(m => m.key === activeMetric)!;
