@@ -31,8 +31,8 @@ const matchesScope = (stream: LiveTelemetryStream, scope: TelemetryScope) =>
 export function PlotTelemetryProvider({
   scope, children,
 }: { scope: TelemetryScope; children: ReactNode }) {
-  const [stream, setStream] = useState<LiveTelemetryStream>(
-    () => createLiveTelemetryStream(scope)
+  const [buffer, setBuffer] = useState<{ stream: LiveTelemetryStream; epoch: number }>(
+    () => ({ stream: createLiveTelemetryStream(scope), epoch: 0 })
   );
   const scopeKey = scopeKeyOf(scope);
   const currentScopeRef = useRef(scopeKey);
@@ -44,32 +44,34 @@ export function PlotTelemetryProvider({
   const requestedEpoch = scopeEpochRef.current;
   const [transport, setTransport] = useState<{
     scopeKey: string;
+    epoch: number;
     status: "loading" | "ready" | "unavailable";
-  }>({ scopeKey, status: "loading" });
+  }>({ scopeKey, epoch: requestedEpoch, status: "loading" });
 
   // Fail closed during render, before the effect cleanup can run.
-  const visibleStream = matchesScope(stream, scope)
-    ? stream : createLiveTelemetryStream(scope);
+  const visibleStream = buffer.epoch === requestedEpoch && matchesScope(buffer.stream, scope)
+    ? buffer.stream : createLiveTelemetryStream(scope);
 
   useEffect(() => {
-    setStream(current => matchesScope(current, scope)
-      ? current : createLiveTelemetryStream(scope));
-  }, [scope.tenantId, scope.farmId, scope.plotId]);
+    setBuffer(current => current.epoch === requestedEpoch && matchesScope(current.stream, scope)
+      ? current : { stream: createLiveTelemetryStream(scope), epoch: requestedEpoch });
+  }, [requestedEpoch, scope.tenantId, scope.farmId, scope.plotId]);
 
   const ingestObservation = useCallback((observation: ScopedTelemetryObservation) => {
     if (currentScopeRef.current !== scopeKey || scopeEpochRef.current !== requestedEpoch) return;
-    setStream(current => {
+    setBuffer(current => {
       if (currentScopeRef.current !== scopeKey || scopeEpochRef.current !== requestedEpoch) return current;
-      const scoped = matchesScope(current, scope)
-        ? current : createLiveTelemetryStream(scope);
-      return appendOperationalTelemetry(scoped, observation);
+      const scoped = current.epoch === requestedEpoch && matchesScope(current.stream, scope)
+        ? current.stream : createLiveTelemetryStream(scope);
+      const next = appendOperationalTelemetry(scoped, observation);
+      return next === scoped ? current : { stream: next, epoch: requestedEpoch };
     });
   }, [scopeKey, requestedEpoch, scope.tenantId, scope.farmId, scope.plotId]);
 
   const clearTelemetry = useCallback(() => {
-    setStream(current =>
+    setBuffer(current =>
       currentScopeRef.current !== scopeKey || scopeEpochRef.current !== requestedEpoch
-        ? current : createLiveTelemetryStream(scope));
+        ? current : { stream: createLiveTelemetryStream(scope), epoch: requestedEpoch });
   }, [scopeKey, requestedEpoch, scope.tenantId, scope.farmId, scope.plotId]);
 
   useEffect(() => {
@@ -95,19 +97,20 @@ export function PlotTelemetryProvider({
         const observations = validateOperationalTelemetryResponse(
           body, scope, TELEMETRY_CONTRACT_VERSION,
         ) as ScopedTelemetryObservation[];
-        setStream(current => {
+        setBuffer(current => {
           if (!active || aborter.signal.aborted || currentScopeRef.current !== requestedScope
             || scopeEpochRef.current !== epoch) return current;
-          let updated = matchesScope(current, scope)
-            ? current : createLiveTelemetryStream(scope);
+          const previous = current.epoch === epoch && matchesScope(current.stream, scope)
+            ? current.stream : createLiveTelemetryStream(scope);
+          let updated = previous;
           for (const item of observations) updated = appendOperationalTelemetry(updated, item);
-          return updated;
+          return updated === previous ? current : { stream: updated, epoch };
         });
-        setTransport({ scopeKey: requestedScope, status: "ready" });
+        setTransport({ scopeKey: requestedScope, epoch, status: "ready" });
       } catch {
         if (active && !aborter.signal.aborted && currentScopeRef.current === requestedScope
           && scopeEpochRef.current === epoch) {
-          setTransport({ scopeKey: requestedScope, status: "unavailable" });
+          setTransport({ scopeKey: requestedScope, epoch, status: "unavailable" });
         }
       } finally {
         inFlight = false;
@@ -126,7 +129,8 @@ export function PlotTelemetryProvider({
   return createElement(PlotTelemetryContext.Provider, {
     value: {
       stream: visibleStream, ingestObservation, clearTelemetry,
-      transportStatus: transport.scopeKey === scopeKey ? transport.status : "loading",
+      transportStatus: transport.scopeKey === scopeKey && transport.epoch === requestedEpoch
+        ? transport.status : "loading",
     },
   }, children);
 }
