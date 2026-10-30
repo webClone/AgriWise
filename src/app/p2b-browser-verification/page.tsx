@@ -610,7 +610,8 @@ export default function P2BBrowserVerificationPage() {
       // ── STEP 4: STALE ASSESSMENT OPERATIONAL GATE & PRESCRIPTION DISABLING
       setSteps((prev) => prev.map((s) => (s.id === "step-4" ? { ...s, status: "running" } : s)));
 
-      // Fetch with modified geometry that causes geometry mismatch
+      // Inspect an exact immutable historical snapshot under modified geometry.
+      // Ordinary latest requests now execute a new run for an out-of-scope head.
       window.fetch = async (input, init) => {
         const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
         if (url.includes("/api/agribrain/surfaces/latest")) {
@@ -619,7 +620,7 @@ export default function P2BBrowserVerificationPage() {
         return originalFetch(input, init);
       };
 
-      await harness.fetchAssessment("plot-p01-olive", "farm-haouz-central", { geometry: MODIFIED_GEOMETRY });
+      await harness.fetchAssessment("plot-p01-olive", "farm-haouz-central", { geometry: MODIFIED_GEOMETRY, snapshotId: "snap-C-fast" });
       await new Promise((r) => setTimeout(r, 100));
 
       const sample4 = latestSampleRef.current;

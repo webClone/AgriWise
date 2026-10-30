@@ -137,6 +137,11 @@ export function ParcelAssessmentProvider({
   const cropCycleIdRef = useRef<string | null>(cropCycleId);
   cropCycleIdRef.current = cropCycleId;
 
+  // Same-provider parcel edits must invalidate the previous publication immediately.
+  const contextSignature = `${computeGeometryHash(plotGeoJson)}|${cropCycleId ?? ""}`;
+  const contextSignatureRef = useRef(contextSignature);
+  contextSignatureRef.current = contextSignature;
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -152,6 +157,7 @@ export function ParcelAssessmentProvider({
       farmId?: string,
       options?: ParcelAssessmentFetchOptions
     ): Promise<ParcelAssessment | null> => {
+      const requestedContextSignature = contextSignatureRef.current;
       const sequence = requestSequenceRef.current + 1;
       requestSequenceRef.current = sequence;
       activeAbortControllerRef.current?.abort();
@@ -162,7 +168,8 @@ export function ParcelAssessmentProvider({
       if (farmId) setCurrentFarmId(farmId);
 
       const isLatest = () =>
-        requestSequenceRef.current === sequence && !controller.signal.aborted;
+        requestSequenceRef.current === sequence && !controller.signal.aborted
+        && contextSignatureRef.current === requestedContextSignature;
 
       setState({ status: "loading" });
 
@@ -172,7 +179,7 @@ export function ParcelAssessmentProvider({
         }
 
         const effectiveGeometry = options?.geometry !== undefined ? options.geometry : plotGeoJsonRef.current;
-        const effectiveCropCycleId = (options?.cropCycleId !== undefined && options?.cropCycleId !== null)
+        const effectiveCropCycleId = options?.cropCycleId !== undefined
           ? options.cropCycleId
           : (cropCycleIdRef.current ?? null);
 
@@ -207,7 +214,11 @@ export function ParcelAssessmentProvider({
           return null;
         }
 
-        if (res.ok && json.available !== false && json.status === "fresh") {
+        const previousSnapshotId = res.ok && json.available !== false && json.status === "fresh"
+          ? String(json.intelligence_snapshot_id || json.snapshot_id || json.snapshotId || "")
+          : "";
+        // A forced run must not adopt the pre-run cache head as a fresh computation.
+        if (!options?.forceRefresh && res.ok && json.available !== false && json.status === "fresh") {
           const validation = json.validation || {};
           const validationState = classifyCanonicalHeadValidation(validation);
           if (validationState !== "valid") {
@@ -237,13 +248,17 @@ export function ParcelAssessmentProvider({
             const isApplicable = !isGeomStale && !isCropCycleStale;
             const stalenessReason = isGeomStale ? "geometry_mismatch" : isCropCycleStale ? "crop_cycle_mismatch" : null;
 
-            setRawPublication(json);
-            if (!isApplicable) {
-              setState({ status: "stale", assessment, reason: stalenessReason });
-            } else {
-              setState({ status: "ready", assessment });
+            // Exact immutable reads may be inspected historically. Ordinary
+            // latest requests must run when the cached head is out of scope.
+            if (isApplicable || options?.snapshotId) {
+              setRawPublication(json);
+              if (!isApplicable) {
+                setState({ status: "stale", assessment, reason: stalenessReason });
+              } else {
+                setState({ status: "ready", assessment });
+              }
+              return assessment;
             }
-            return assessment;
           } catch (assessmentErr: any) {
             if (!isLatest()) return null;
             const reason = assessmentErr?.message || "Assessment identity validation failed";
@@ -323,12 +338,15 @@ export function ParcelAssessmentProvider({
                 const isApplicable = !isGeomStale && !isCropCycleStale;
                 const stalenessReason = isGeomStale ? "geometry_mismatch" : isCropCycleStale ? "crop_cycle_mismatch" : null;
 
-                setRawPublication(pubJson);
-                if (!isApplicable) {
-                  setState({ status: "stale", assessment, reason: stalenessReason });
-                } else {
-                  setState({ status: "ready", assessment });
+                // A completed run must publish a head matching the requested
+                // parcel context. A force refresh must adopt a new snapshot.
+                if (!isApplicable || (options?.forceRefresh && previousSnapshotId
+                    && assessment.identity.snapshotId === previousSnapshotId)) {
+                  await new Promise<void>((resolve) => setTimeout(resolve, 500));
+                  continue;
                 }
+                setRawPublication(pubJson);
+                setState({ status: "ready", assessment });
                 return assessment;
               } catch (assessmentErr: any) {
                 if (!isLatest()) return null;
@@ -395,18 +413,27 @@ export function ParcelAssessmentProvider({
   );
 
   const assessment = state.status === "ready" || state.status === "stale" ? state.assessment : null;
+
+  // Derive operational applicability from current props, not the status
+  // captured during an earlier fetch. Keep the immutable old artifact for audit.
+  const contextGeometryStale = !!assessment && isAssessmentStaleForGeometry(assessment.identity, plotGeoJson);
+  const contextCycleStale = !!assessment && isAssessmentStaleForCropCycle(assessment.identity, cropCycleId);
+  const contextStaleReason = contextGeometryStale ? "geometry_mismatch" : contextCycleStale ? "crop_cycle_mismatch" : null;
+  const projectedState: AssessmentState = assessment && contextStaleReason
+    ? { status: "stale", assessment, reason: contextStaleReason }
+    : state;
   const status: AssessmentStatus =
-    state.status === "ready" ? "ready"
-    : state.status === "stale" ? "stale"
-    : state.status === "loading" ? "loading"
-    : state.status === "unavailable" ? "unavailable"
-    : state.status === "invalid" ? "invalid"
-    : state.status === "superseded" ? "superseded"
+    projectedState.status === "ready" ? "ready"
+    : projectedState.status === "stale" ? "stale"
+    : projectedState.status === "loading" ? "loading"
+    : projectedState.status === "unavailable" ? "unavailable"
+    : projectedState.status === "invalid" ? "invalid"
+    : projectedState.status === "superseded" ? "superseded"
     : "idle";
 
-  const isApplicable = state.status === "ready";
-  const isStale = state.status === "stale";
-  const staleReason = state.status === "stale" ? state.reason : null;
+  const isApplicable = projectedState.status === "ready";
+  const isStale = projectedState.status === "stale";
+  const staleReason = projectedState.status === "stale" ? projectedState.reason : null;
 
   const error =
     state.status === "invalid" || state.status === "unavailable"
@@ -417,7 +444,7 @@ export function ParcelAssessmentProvider({
     ParcelAssessmentContext.Provider,
     {
       value: {
-        state,
+        state: projectedState,
         assessment,
         rawPublication,
         status,

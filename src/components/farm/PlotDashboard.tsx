@@ -22,6 +22,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback } from "react";
+import { computeGeometryHash } from "@/hooks/useParcelAssessment";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
 import { useLayer10, MODE_CONFIG } from "@/hooks/useLayer10";
@@ -125,16 +126,19 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
 
   useEffect(() => { setMounted(true); }, []);
 
-  // Fetch authoritative canonical parcel assessment on mount / plot change
+  // Rebind after a geometry or active crop-cycle edit on the same plot.
+  // Hashing avoids firing a new run for an equivalent geometry object.
+  const geometrySignature = plot?.geoJson ? computeGeometryHash(plot.geoJson) : "";
+  const activeCropCycleId = parcelAssessment.activeCropCycleId;
   useEffect(() => {
     if (plot?.id && farm?.id) {
-      parcelAssessment.fetchAssessment(String(plot.id), String(farm.id), {
+      void parcelAssessment.fetchAssessment(String(plot.id), String(farm.id), {
         geometry: plot.geoJson,
-        cropCycleId: (plot as any)?.cropCycleId || undefined,
+        cropCycleId: activeCropCycleId,
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plot?.id, farm?.id]);
+  }, [plot?.id, farm?.id, geometrySignature, activeCropCycleId]);
 
   // P2-B: Retire independent intelligence fetch — derive presentation state strictly from canonical assessment
   const injectData = pi.injectData;

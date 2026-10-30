@@ -52,12 +52,6 @@ function findStaleGatewayState(rawData: Record<string, unknown> | undefined): Ga
 
 // ── Helpers (derive from real data, no hardcoded thresholds fabrication) ─────
 
-function healthLabel(score: number): { text: string; color: string } {
-  if (score >= 0.75) return { text: "Your field is in good shape", color: "#4ade80" };
-  if (score >= 0.5) return { text: "Some areas need attention", color: "#fbbf24" };
-  return { text: "Field needs attention", color: "#f87171" };
-}
-
 function vigorLabel(ndvi: number | null): { text: string; color: string } {
   if (ndvi == null) return { text: "No vigor data", color: "#64748b" };
   if (ndvi >= 0.6) return { text: "Strong growth", color: "#4ade80" };
@@ -68,9 +62,9 @@ function vigorLabel(ndvi: number | null): { text: string; color: string } {
 function waterLabel(deficit: number | null): { text: string; color: string } {
   if (deficit == null) return { text: "No water data", color: "#64748b" };
   const abs = Math.abs(deficit);
-  if (abs < 5) return { text: "Well watered", color: "#4ade80" };
+  if (abs < 5) return { text: "Low modelled deficit", color: "#4ade80" };
   if (abs < 15) return { text: "Getting dry", color: "#fbbf24" };
-  return { text: "Needs irrigation", color: "#f87171" };
+  return { text: "Water deficit indicated — verify", color: "#f87171" };
 }
 
 function consistencyLabel(std: number | null): { text: string; color: string } {
@@ -78,50 +72,6 @@ function consistencyLabel(std: number | null): { text: string; color: string } {
   if (std < 0.05) return { text: "Very even growth", color: "#4ade80" };
   if (std < 0.1) return { text: "Mostly even", color: "#fbbf24" };
   return { text: "Patchy — check zones", color: "#f87171" };
-}
-
-// ── SVG Health Gauge with Confidence Interval ───────────────────────────
-function HealthGauge({ score, ciLow, ciHigh }: { score: number; ciLow: number; ciHigh: number }) {
-  const pct = Math.round(score * 100);
-  const ciPctLow = Math.round(ciLow * 100);
-  const ciPctHigh = Math.round(ciHigh * 100);
-  const { text, color } = healthLabel(score);
-  const r = 44, cx = 50, cy = 50;
-  const circ = Math.PI * r; // half circle
-  const offset = circ - (score * circ);
-  // CI band arcs
-  const ciLowOffset = circ - (ciLow * circ);
-  const ciHighOffset = circ - (ciHigh * circ);
-  const ciLength = ciLowOffset - ciHighOffset; // arc length of the band
-  return (
-    <div style={{ textAlign: "center", padding: "8px 0" }}>
-      <svg width="100" height="60" viewBox="0 0 100 60">
-        {/* Background arc */}
-        <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
-          fill="none" stroke="rgba(71,85,105,0.3)" strokeWidth="7" strokeLinecap="round" />
-        {/* Confidence interval band (wider, translucent) */}
-        <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
-          fill="none" stroke={color} strokeWidth="12" strokeLinecap="round"
-          strokeDasharray={`${ciLength} ${circ - ciLength}`}
-          strokeDashoffset={ciHighOffset}
-          opacity={0.15}
-          style={{ transition: "all 0.6s ease" }} />
-        {/* Main score arc */}
-        <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`}
-          fill="none" stroke={color} strokeWidth="7" strokeLinecap="round"
-          strokeDasharray={circ} strokeDashoffset={offset}
-          style={{ transition: "stroke-dashoffset 0.6s ease" }} />
-        <text x={cx} y={cy - 8} textAnchor="middle" className="sfv-gauge-text" fill="#f1f5f9" fontSize="18" fontWeight="700" fontFamily="monospace">{pct}/100</text>
-      </svg>
-      <div style={{ fontSize: "13px", color, fontWeight: 600, marginTop: "2px" }}>{text}</div>
-      <div style={{ fontSize: "11px", color: "#64748b", marginTop: "2px" }}>
-        Field condition screening index
-        <span style={{ marginLeft: "4px", color: "#94a3b8" }}>
-          Indicative range {ciPctLow}–{ciPctHigh}
-        </span>
-      </div>
-    </div>
-  );
 }
 
 // ── Inline SVG Spark Line (7-day NDVI trend) ────────────────────────────
@@ -338,28 +288,28 @@ function ConditionCard({ icon, title, label, color, value, detail }: { icon: str
 const FARMER_ZONE_EXPLAINER: Record<string, { icon: string; why: string; todo: string }> = {
   LOW_VIGOR: {
     icon: "🟤",
-    why: "This part of your field has weaker plant growth. The crops here are not as green or tall as the rest. This usually means something underground is wrong — not enough water reaching the roots, poor soil nutrition, or possibly pest damage.",
+    why: "This area has a lower vegetation indicator than nearby areas. Water, nutrient, pest and soil explanations are possibilities, not confirmed causes.",
     todo: "Walk this area and check: Are leaves yellowing? (nutrient issue). Are they wilting? (water issue). Are there spots or holes? (pest issue). Then talk to AgriBrain for a targeted solution.",
   },
   WATER_STRESS: {
     icon: "💧",
-    why: "The soil in this area is drying out faster than your crop can handle. The plants can't get enough water from their roots to keep up with the heat. If this continues, it will directly reduce your yield.",
-    todo: "Check if your irrigation is reaching this zone properly. Look for blocked drip lines or dry spots. If rain-fed, this zone should be the first priority for any available water.",
+    why: "This zone shows an indicator associated with water stress. The map alone does not confirm root-zone moisture or the cause.",
+    todo: "Inspect soil moisture and irrigation distribution in this zone. Confirm the cause before choosing an irrigation amount or schedule.",
   },
   NUTRIENT_RISK: {
     icon: "🧪",
-    why: "Your crops in this zone aren't getting enough nutrients from the soil. This is most commonly nitrogen — the crop has used up what was available during its growth spurt. Without more nutrients, grain fill will be reduced.",
-    todo: "Get a soil or leaf tissue test for this zone. If nitrogen is low, apply a targeted dose (20-30 kg/ha) to just this area — don't waste fertilizer on the healthy parts of your field.",
+    why: "A nutrient-risk indicator is elevated in this zone. The cause and affected nutrient have not been established by the map alone.",
+    todo: "Take a representative soil or leaf tissue sample and review the result with an agronomist. A fertilizer dose requires a qualified canonical prescription.",
   },
   DISEASE_RISK: {
     icon: "🦠",
-    why: "Weather conditions (humidity + warmth) have created a risk of crop disease in this area. The satellite detected changes in leaf color/texture that could indicate early fungal or bacterial infection.",
-    todo: "Go scout this zone as soon as possible. Look for spots, lesions, or unusual discoloration on leaves. If you confirm disease, treat ONLY this zone with fungicide — don't spray the whole field.",
+    why: "This area has a disease-risk signal. A risk map does not identify a pathogen or establish that disease is present.",
+    todo: "Inspect leaves for lesions or unusual discoloration and obtain a diagnosis before selecting any treatment.",
   },
   SALINITY_RISK: {
     icon: "🧂",
-    why: "This part of your field has high salt levels in the soil. Salt makes it harder for plant roots to absorb water — even when the soil is moist, the crop can't drink. Over time this stunts growth, causes leaf tip burn, and reduces your harvest.",
-    todo: "Check the white crust on the soil surface in this zone. If irrigation is available, apply a deep leaching event (50–75mm) to flush salts below the root zone. Avoid fertilizers high in chloride. Consider salt-tolerant crop varieties for next season.",
+    why: "This area has a salinity-risk signal. Salt concentration and its cause require field measurements before being treated as established.",
+    todo: "Check for visible salt deposits and confirm soil or irrigation-water salinity with appropriate tests. Any leaching plan requires measured drainage and a qualified water-management prescription.",
   },
   BLOCKED_ZONE: {
     icon: "🚫",
@@ -378,7 +328,7 @@ function _getFarmerExplain(zone: ZoneData) {
     if (u.includes("DISEASE") || u.includes("BIOTIC")) return FARMER_ZONE_EXPLAINER.DISEASE_RISK;
     if (u.includes("NDVI") || u.includes("VIGOR") || u.includes("VEGETATION")) return FARMER_ZONE_EXPLAINER.LOW_VIGOR;
   }
-  return { icon: "📍", why: "This area has been flagged because it's different from the rest of your field. Something is causing the crop here to grow differently.", todo: "Walk this zone and compare with a healthy area nearby. Note any differences in soil, moisture, or plant appearance." };
+  return { icon: "📍", why: "This area differs in the available indicator. The underlying cause is not yet established.", todo: "Walk this zone and compare with a healthy area nearby. Note any differences in soil, moisture, or plant appearance." };
 }
 
 // ── Zone Alert Card (Farmer — rich intelligence) ────────────────────────
@@ -415,20 +365,13 @@ function ZoneAlertCard({ zone, onAsk }: { zone: ZoneData; onAsk: (q: string) => 
         {zone.evidence_age_days != null && <span>· 📅 {zone.evidence_age_days}d since last check</span>}
       </div>
 
-      {/* Linked actions from engine */}
-      {zone.linked_actions.length > 0 && (
-        <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "8px" }}>
-          {zone.linked_actions.map((a, i) => (
-            <span key={i} style={{ fontSize: "11px", padding: "3px 8px", borderRadius: "6px", background: "rgba(99,102,241,0.08)", color: "#a5b4fc", fontWeight: 600 }}>💡 {a}</span>
-          ))}
-        </div>
-      )}
+      {/* Unqualified free-text linked actions are intentionally withheld. */}
 
       {/* Solution buttons */}
       <div style={{ display: "flex", gap: "6px" }}>
-        <button onClick={() => onAsk(`My ${zone.label || zone.zone_id} zone shows ${zone.zone_type.replace(/_/g, ' ').toLowerCase()} with ${(zone.severity*100).toFixed(0)}% severity. Drivers are: ${zone.top_drivers.join(', ')}. What exactly should I do this week to fix it? Give me a step-by-step plan.`)}
+        <button onClick={() => onAsk(`My ${zone.label || zone.zone_id} zone shows ${zone.zone_type.replace(/_/g, ' ').toLowerCase()} with ${(zone.severity*100).toFixed(0)}% severity. Drivers are: ${zone.top_drivers.join(', ')}. What field checks would help verify this signal? Do not suggest a numerical treatment without an applicable canonical prescription.`)}
           style={{ flex: 1, padding: "8px 12px", borderRadius: "6px", border: "none", background: "rgba(99,102,241,0.12)", color: "#a5b4fc", fontSize: "12px", fontWeight: 700, cursor: "pointer" }}>
-          🧠 Get Solution Plan
+          🧠 Verify This Zone
         </button>
         <button onClick={() => onAsk(`Is the ${zone.zone_type.replace(/_/g, ' ').toLowerCase()} in zone ${zone.label || zone.zone_id} really a problem? What if it's a false alarm? What should I check in the field to confirm?`)}
           style={{ padding: "8px 10px", borderRadius: "6px", border: "1px solid rgba(251,191,36,0.2)", background: "rgba(251,191,36,0.04)", color: "#fbbf24", fontSize: "12px", fontWeight: 700, cursor: "pointer" }}>
@@ -480,121 +423,13 @@ export default function SidebarFarmerView({
   const deficitMm = l3?.data?.deficit_mm != null ? Number(l3.data.deficit_mm) : null;
   const staleSourceState = findStaleGatewayState(data.rawData);
 
-  // Compute REAL agronomic health score (not data reliability!)
-  // Weighted composite: vigor (40%), water (25%), consistency (20%), zone severity (15%)
-  // Scientific fix: consistency is computed ONLY over the vegetated fraction (NDVI > 0.20).
-  // This prevents structural field heterogeneity (bare fallow zone + healthy crop zone) from
-  // being penalised as "stress". CV within vegetated pixels is the agronomically meaningful metric.
-  // Ref: Becker-Reshef et al. (2010) RSE — field-level NDVI consistency metrics.
-  const computeAgronomicHealth = (): number => {
-    // 1. Vigor component: NDVI vs crop-specific thresholds
-    //    0.7+ = 1.0, 0.5 = 0.7, 0.35 = 0.4, <0.2 = 0.1
-    let vigorScore = 0.5;
-    if (ndviMean != null) {
-      if (ndviMean >= 0.7) vigorScore = 1.0;
-      else if (ndviMean >= 0.5) vigorScore = 0.5 + (ndviMean - 0.5) * 2.5;
-      else if (ndviMean >= 0.35) vigorScore = 0.3 + (ndviMean - 0.35) * 1.33;
-      else vigorScore = Math.max(0.05, ndviMean / 0.35 * 0.3);
-    }
-
-    // 2. Water component: deficit penalty
-    let waterScore = 0.8;
-    if (deficitMm != null) {
-      const absDeficit = Math.abs(deficitMm);
-      if (absDeficit < 5) waterScore = 1.0;
-      else if (absDeficit < 20) waterScore = 1.0 - (absDeficit - 5) * 0.013;
-      else if (absDeficit < 40) waterScore = 0.8 - (absDeficit - 20) * 0.015;
-      else waterScore = Math.max(0.05, 0.5 - (absDeficit - 40) * 0.01);
-    }
-
-    // 3. Consistency component — VEGETATED FRACTION ONLY (scientific fix)
-    //
-    //    The field NDVI std (ndviStd) mixes vegetated and bare pixels.
-    //    A field with 40% bare fallow + 60% healthy canopy will show high std
-    //    not because of stress, but because of two structurally different management units.
-    //    Solution: infer the within-vegetated-zone consistency from the NDVI histogram.
-    //    We approximate it using the NDVI mean and std together:
-    //      If most of the std comes from the bare/vegetated boundary, the vegetated
-    //      sub-population has lower internal spread. We estimate this by:
-    //        - If mean NDVI > 0.35 (majority vegetated): use ndviStd directly, but
-    //          reduce penalty weight when phenology stage implies structural heterogeneity.
-    //        - If mean NDVI <= 0.35 (patchy/low-canopy): full penalty applies.
-    //
-    const phenoStage = data.phenology_context?.phenology_receipt_valid === true
-      && data.phenology_context?.phenology_source === "layer2_canonical_phenology"
-      ? data.resolved_crop_stage
-      : "UNKNOWN";
-    const isMixedField = (
-      ndviMean != null && ndviMean < 0.35 &&  // low mean = large bare fraction
-      ndviStd != null && ndviStd > 0.15       // high std = confirmed mix
-    );
-    // Phenology-aware consistency weight
-    // Bare/Mixed/Unknown fields are structurally heterogeneous by nature → halved weight
-    const consistencyWeight = (phenoStage === 'BARE_SOIL' || phenoStage === 'UNKNOWN' || isMixedField)
-      ? 0.08  // structural heterogeneity expected — don't over-penalise
-      : 0.20; // standard weight for single-crop vegetated fields
-
-    // Estimate within-vegetated-zone consistency:
-    // If mean is high, the vegetated fraction is the dominant contributor to std.
-    // Use a vegetation-fraction correction: effective_std ≈ ndviStd × (1 / veg_fraction)
-    // where veg_fraction ≈ clip(ndviMean / 0.5, 0, 1) as a rough canopy cover proxy.
-    let effectiveStd = ndviStd;
-    if (ndviStd != null && ndviMean != null && ndviMean > 0.05) {
-      const vegFraction = Math.min(1.0, Math.max(0.1, ndviMean / 0.5));
-      // Within-canopy std estimate: scale down for partial cover fields
-      effectiveStd = ndviStd * vegFraction;
-    }
-
-    let consistencyScore = 0.7;
-    if (effectiveStd != null) {
-      if (effectiveStd < 0.03) consistencyScore = 1.0;
-      else if (effectiveStd < 0.08) consistencyScore = 1.0 - (effectiveStd - 0.03) * 5.0;
-      else if (effectiveStd < 0.15) consistencyScore = 0.75 - (effectiveStd - 0.08) * 2.14;
-      else consistencyScore = Math.max(0.15, 0.60 - (effectiveStd - 0.15) * 1.5);
-    }
-
-    // 4. Zone severity penalty: worst zone drags health down
-    const worstSeverity = data.zones.reduce((max, z) => Math.max(max, z.severity), 0);
-    const zoneScore = 1.0 - Math.min(1.0, worstSeverity) * 0.8;
-
-    // Weighted composite — consistency weight is now phenology-aware
-    const vigorWeight = 0.40;
-    const waterWeight = 0.25;
-    const zoneWeight = 0.15;
-    const normalizedConsistencyWeight = consistencyWeight; // already scaled above
-    // Re-normalise remaining weights to always sum to 1.0 regardless of consistency weight
-    const remainingWeight = 1.0 - normalizedConsistencyWeight;
-    const scaleFactor = remainingWeight / (vigorWeight + waterWeight + zoneWeight);
-
-    return Math.max(0.05, Math.min(1.0,
-      vigorScore * vigorWeight * scaleFactor +
-      waterScore * waterWeight * scaleFactor +
-      consistencyScore * normalizedConsistencyWeight +
-      zoneScore * zoneWeight * scaleFactor
-    ));
-  };
-
-  const healthScore = computeAgronomicHealth();
-
-  // ── Confidence Interval ──
-  // Width depends on which data sources contributed real values.
-  // More missing data → wider interval → more uncertainty.
-  const computeHealthCI = (): { low: number; high: number } => {
-    let uncertaintyBudget = 0;
-    // Each missing data source adds epistemic uncertainty
-    if (ndviMean == null) uncertaintyBudget += 0.12;  // No satellite NDVI
-    else if (ndviStd != null && ndviStd > 0.15) uncertaintyBudget += 0.05;  // High heterogeneity
-    if (deficitMm == null) uncertaintyBudget += 0.10;  // No water balance data
-    else if (Math.abs(deficitMm) > 50) uncertaintyBudget += 0.04;  // Severe deficit is harder to score
-    if (data.zones.length === 0) uncertaintyBudget += 0.03;  // No zone validation
-    // Base minimum uncertainty: even with perfect data, ±3% is epistemic floor
-    uncertaintyBudget = Math.max(0.03, Math.min(0.20, uncertaintyBudget));
-    return {
-      low: Math.max(0.0, healthScore - uncertaintyBudget),
-      high: Math.min(1.0, healthScore + uncertaintyBudget),
-    };
-  };
-  const healthCI = computeHealthCI();
+  // A composite score requires a qualified canonical health metric. Do not
+  // invent water or vegetation defaults, whole-field scores, or confidence bands.
+  const missingHealthEvidence = [
+    ndviMean == null ? "field NDVI" : null,
+    ndviStd == null ? "NDVI variability" : null,
+    deficitMm == null ? "water balance" : null,
+  ].filter((name): name is string => !!name);
 
   // Zones relevant to current mode — filter by active surface type
   const l10Context = useLayer10();
@@ -626,7 +461,16 @@ export default function SidebarFarmerView({
   }, [evidenceState, ndviMean, vigorTxt]);
 
   const sanitizedAction = useMemo(() => {
-    return sanitizeRecommendedAction(explainPack?.recommended_action || null, evidenceState);
+    const message = sanitizeRecommendedAction(explainPack?.recommended_action || null, evidenceState);
+    // Free-text explainability is not a signed, unit-qualified prescription.
+    if (!message.text) return message;
+    return {
+      ...message,
+      text: "Review map evidence and verify field conditions. Treatment quantities require a qualified canonical prescription.",
+      actionLevel: "scout" as const,
+      suppressed: true,
+      reason: "Unqualified free-text treatment advice withheld",
+    };
   }, [explainPack?.recommended_action, evidenceState]);
 
   // ── BC.10.19 P0.6 — Render Authorization Gate ────────────────────────────
@@ -733,24 +577,24 @@ export default function SidebarFarmerView({
         const prob = activeSurfMean;
         if (prob == null) return { icon: "🧪", title: "Nutrient Stress Probability", label: "No data", color: "#64748b", value: undefined, why: null };
         const pct = (prob * 100).toFixed(0);
-        const label = prob > 0.5 ? "High deficiency risk" : prob > 0.25 ? "Moderate risk" : "Adequate nutrition";
+        const label = prob > 0.5 ? "High deficiency risk" : prob > 0.25 ? "Moderate risk" : "Low modelled nutrient risk";
         const color = prob > 0.5 ? "#f87171" : prob > 0.25 ? "#fbbf24" : "#4ade80";
         return { icon: "🧪", title: "Nutrient Stress Probability", label, color, value: `${pct}%`,
-          why: prob > 0.25 ? `${pct}% probability of nutrient limitation. Spectral signatures suggest ${prob > 0.5 ? "significant" : "mild"} nutrient depletion. Consider tissue sampling in flagged zones.` : null };
+          why: prob > 0.25 ? `${pct}% probability of nutrient limitation. The indicator warrants nutrient status verification before any diagnosis or treatment. Consider tissue sampling in flagged zones.` : null };
       }
       case "salinity": {
         const prob = activeSurfMean;
         if (prob == null) return { icon: "🧂", title: "Soil Salinity Stress", label: "No data", color: "#64748b", value: undefined, why: null };
         const pct = (prob * 100).toFixed(0);
-        const label = prob > 0.6 ? "Severe salinity" : prob > 0.3 ? "Moderate salinity" : prob > 0.15 ? "Mild salinity" : "Non-saline";
+        const label = prob > 0.6 ? "High salinity risk" : prob > 0.3 ? "Moderate salinity risk" : prob > 0.15 ? "Mild salinity risk" : "Low salinity risk";
         const color = prob > 0.6 ? "#ef4444" : prob > 0.3 ? "#f59e0b" : prob > 0.15 ? "#22d3ee" : "#14b8a6";
         return { icon: "🧂", title: "Soil Salinity Stress", label, color, value: `${pct}%`,
           why: prob > 0.15
             ? `${pct}% salinity stress probability. ${prob > 0.6
-                ? "Severe salt accumulation — roots cannot extract water even when soil is moist. Only salt-tolerant crops survive. Immediate leaching irrigation required."
+                ? "Elevated salinity risk should prompt soil and irrigation-water testing; leaching requires measured drainage and qualified guidance."
                 : prob > 0.3
-                ? "Moderate salt levels — sensitive crops are losing yield. Deep irrigation (50–75mm) can flush salts below the root zone."
-                : "Mild salinity detected — monitor for progression. Most crops tolerate this level but it may worsen in hot, dry conditions."}`
+                ? "A salinity indicator warrants soil and irrigation-water testing. Do not select a leaching amount without drainage evidence and qualified guidance."
+                : "A mild salinity-risk signal should be checked against measured soil and irrigation-water salinity."}`
             : null };
       }
       case "veg_attention": {
@@ -856,7 +700,11 @@ export default function SidebarFarmerView({
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
       {/* Health Gauge with Confidence Interval */}
-      <HealthGauge score={healthScore} ciLow={healthCI.low} ciHigh={healthCI.high} />
+      <div data-testid="field-health-unavailable" style={{ padding: "12px", borderRadius: "10px", border: "1px solid rgba(148,163,184,0.25)", background: "rgba(15,23,42,0.4)", color: "#cbd5e1" }}>
+          <div style={{ fontWeight: 700, fontSize: "13px" }}>Whole-field health score unavailable</div>
+          <div style={{ fontSize: "11px", marginTop: "4px" }}>No qualified canonical whole-field health metric or calibrated interval was published. Component measurements are shown below without inferring a percentage.</div>
+          {missingHealthEvidence.length > 0 && <div style={{ fontSize: "11px", color: "#fbbf24", marginTop: "4px" }}>Missing evidence: {missingHealthEvidence.join(", ")}</div>}
+        </div>
 
       {/* Phenology Phase Badge */}
       <PhenologyBadge />
