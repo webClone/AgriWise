@@ -4,6 +4,8 @@ import { authenticatedUserId, userOwnsPlot } from "@/lib/tenant-authorization";
 import { TELEMETRY_CONTRACT_VERSION } from "@/lib/agribrain/telemetry-contract";
 import { serializeOperationalTelemetry } from "@/lib/agribrain/operational-telemetry-transport.mjs";
 
+export const dynamic = "force-dynamic";
+
 /**
  * GET /api/plots/[id]/telemetry — owner-scoped, read-only operational stream.
  * Persisted sensor readings and plot observations are not certified manifest
