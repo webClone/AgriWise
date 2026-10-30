@@ -413,14 +413,6 @@ export function ParcelAssessmentProvider({
   );
 
   const assessment = state.status === "ready" || state.status === "stale" ? state.assessment : null;
-  const status: AssessmentStatus =
-    projectedState.status === "ready" ? "ready"
-    : projectedState.status === "stale" ? "stale"
-    : projectedState.status === "loading" ? "loading"
-    : projectedState.status === "unavailable" ? "unavailable"
-    : projectedState.status === "invalid" ? "invalid"
-    : projectedState.status === "superseded" ? "superseded"
-    : "idle";
 
   // Derive operational applicability from current props, not the status
   // captured during an earlier fetch. Keep the immutable old artifact for audit.
@@ -430,6 +422,15 @@ export function ParcelAssessmentProvider({
   const projectedState: AssessmentState = assessment && contextStaleReason
     ? { status: "stale", assessment, reason: contextStaleReason }
     : state;
+  const status: AssessmentStatus =
+    projectedState.status === "ready" ? "ready"
+    : projectedState.status === "stale" ? "stale"
+    : projectedState.status === "loading" ? "loading"
+    : projectedState.status === "unavailable" ? "unavailable"
+    : projectedState.status === "invalid" ? "invalid"
+    : projectedState.status === "superseded" ? "superseded"
+    : "idle";
+
   const isApplicable = projectedState.status === "ready";
   const isStale = projectedState.status === "stale";
   const staleReason = projectedState.status === "stale" ? projectedState.reason : null;
