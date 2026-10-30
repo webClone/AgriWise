@@ -145,6 +145,7 @@ test("R5.0 Frontend Auth & Surface Integrity Contracts", async (t) => {
       "utf8",
     );
     assert.match(progressSource, /AgriBrain surface publication failed/);
+    assert.match(progressSource, /requestError\s*\?\s*\(requestIsPending\s*\?\s*"PENDING"\s*:\s*"FAILED"\)/);
   });
 
   await t.test("worker progress view uses the durable percentage and retains the canonical map", async () => {

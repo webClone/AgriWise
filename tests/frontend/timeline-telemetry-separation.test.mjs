@@ -102,8 +102,8 @@ test("timeline mixed-row selects metric value and supplier together without misl
   const helper = stripTypeScriptTypes(timelineSource.slice(helperStart, helperEnd), { mode: "strip" });
 
   const memoStart = timelineSource.indexOf("const days: DayCell[] = useMemo(() => {") + "const days: DayCell[] = useMemo(() => {".length;
-  const memoEnd = timelineSource.indexOf("}, [timeline, assessment, evidenceCutoffAt]);", memoStart);
-  const build = stripTypeScriptTypes("function build(timeline:any,assessment:any,evidenceCutoffAt:any){" + timelineSource.slice(memoStart, memoEnd) + "}", { mode: "strip" });
+  const memoEnd = timelineSource.indexOf("}, [timeline, assessment, evidenceCutoffAt", memoStart);
+  const build = stripTypeScriptTypes("function build(timeline:any,assessment:any,evidenceCutoffAt:any,liveTelemetryStream:any){" + timelineSource.slice(memoStart, memoEnd) + "}", { mode: "strip" });
 
   const buildDays = new Function("classifyTelemetryObservation", "classifyManifestEvidence", "TELEMETRY_STATUS", helper + build + ";return build;")(classifyTelemetryObservation, classifyManifestEvidence, S);
 
@@ -149,4 +149,86 @@ test("timeline mixed-row selects metric value and supplier together without misl
   assert.equal(missing.values.temp, null);
   assert.equal(missing.metricStatuses.temp, S.UNVERIFIED);
   assert.equal(missing.metricDotColors.rain, "#64748b");
+});
+
+test("Milestone 2: timeline renders individual operational telemetry with explicit provenance and no self-certification", () => {
+  const root = process.cwd();
+  const timelineSource = fs.readFileSync(path.join(root, "src/components/farm/intelligence/TimelineStrip.tsx"), "utf8");
+
+  const helperStart = timelineSource.indexOf("function classifyTimelineDatum(");
+  const helperEnd = timelineSource.indexOf("/* ─── Sparkline", helperStart);
+  const helper = stripTypeScriptTypes(timelineSource.slice(helperStart, helperEnd), { mode: "strip" });
+
+  const memoStart = timelineSource.indexOf("const days: DayCell[] = useMemo(() => {") + "const days: DayCell[] = useMemo(() => {".length;
+  const memoEnd = timelineSource.indexOf("}, [timeline, assessment, evidenceCutoffAt", memoStart);
+  const build = stripTypeScriptTypes("function build(timeline:any,assessment:any,evidenceCutoffAt:any,liveTelemetryStream:any){" + timelineSource.slice(memoStart, memoEnd) + "}", { mode: "strip" });
+
+  const buildDays = new Function("classifyTelemetryObservation", "classifyManifestEvidence", "TELEMETRY_STATUS", helper + build + ";return build;")(classifyTelemetryObservation, classifyManifestEvidence, S);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const testCutoff = yesterday + "T18:00:00Z";
+
+  // Telemetry stream containing 1 live uncertified and 1 late-arriving unadmitted observation
+  const mockStream = {
+    contractVersion: "live_telemetry_stream_v1",
+    scope: { tenantId: "T", farmId: "F", plotId: "P" },
+    observations: [
+      {
+        id: "sensor-live-temp",
+        source: "sensor:field_node_01",
+        kind: "observation",
+        observedAt: today + "T08:30:00Z",
+        ingestedAt: today + "T08:30:05Z",
+        timeBasis: "server_received_at",
+        obsType: "sensor_reading",
+        metric: "temp",
+        value: 24.2,
+        unit: "°C",
+      },
+      {
+        id: "obs-late-rain",
+        source: "plot-source:station_02",
+        kind: "observation",
+        observedAt: yesterday + "T12:00:00Z",
+        ingestedAt: today + "T06:00:00Z",
+        timeBasis: "source_observation_at",
+        obsType: "current_weather",
+        metric: "rain",
+        value: 4.5,
+        unit: "mm",
+      },
+    ],
+  };
+
+  const days = buildDays(null, null, testCutoff, mockStream);
+  const todayCell = days.find(x => x.date === today);
+  const yesterdayCell = days.find(x => x.date === yesterday);
+
+  assert.ok(todayCell, "today cell must exist");
+  assert.equal(todayCell.operationalObservations.length, 1);
+  const liveObs = todayCell.operationalObservations[0];
+  assert.equal(liveObs.id, "sensor-live-temp");
+  assert.equal(liveObs.metric, "temp");
+  assert.equal(liveObs.value, 24.2);
+  assert.equal(liveObs.timeBasis, "server_received_at");
+  assert.equal(liveObs.obsType, "sensor_reading");
+  assert.equal(liveObs.status, S.LIVE_UNCERTIFIED);
+  assert.notEqual(liveObs.status, S.CERTIFIED_MANIFEST);
+
+  assert.ok(yesterdayCell, "yesterday cell must exist");
+  assert.equal(yesterdayCell.operationalObservations.length, 1);
+  const lateObs = yesterdayCell.operationalObservations[0];
+  assert.equal(lateObs.id, "obs-late-rain");
+  assert.equal(lateObs.metric, "rain");
+  assert.equal(lateObs.value, 4.5);
+  assert.equal(lateObs.timeBasis, "source_observation_at");
+  assert.equal(lateObs.obsType, "current_weather");
+  assert.equal(lateObs.status, S.LATE_ARRIVING_UNADMITTED);
+  assert.notEqual(lateObs.status, S.CERTIFIED_MANIFEST);
+
+  // Assert component template exposes operational telemetry tooltips and pills
+  assert.match(timelineSource, /data-testid="timeline-operational-telemetry"/);
+  assert.match(timelineSource, /data-testid="telemetry-pill"/);
+  assert.match(timelineSource, /Basis:\s*\{obs\.timeBasis === "server_received_at"\s*\?\s*"server receipt"\s*:\s*"device acquisition"\}/);
 });

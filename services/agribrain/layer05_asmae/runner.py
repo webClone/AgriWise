@@ -1195,6 +1195,8 @@ class ASMAERunner:
             "approval_reasons_by_cell": diag.get("approval_reasons_by_cell"),
             "asmae_proof": getattr(output, "asmae_proof", {}),
             "plot_state_artifact": getattr(output, "plot_state_artifact", {}),
+            "as_of": getattr(output, "as_of", None) or (getattr(output, "plot_state_artifact", {}) or {}).get("as_of"),
+            "spatial_evidence_cutoff": getattr(output, "spatial_evidence_cutoff", None) or (getattr(output, "plot_state_artifact", {}) or {}).get("spatial_evidence_cutoff"),
         }
 
     def _apply_execution_authority(

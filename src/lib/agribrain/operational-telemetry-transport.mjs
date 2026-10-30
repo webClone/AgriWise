@@ -31,6 +31,8 @@ function emitRows(rows, scope, spec) {
     const observedAt = iso(row[spec.observed]);
     const ingestedAt = iso(row[spec.ingested]);
     if (!observedAt || !ingestedAt) continue;
+    const obsType = typeof row.obsType === "string" ? row.obsType : (spec.defaultObsType || undefined);
+    if (obsType && /forecast/i.test(obsType)) continue;
     for (const [field, metric, unit] of spec.fields) {
       if (!finite(row[field])) continue;
       out.push({
@@ -42,6 +44,7 @@ function emitRows(rows, scope, spec) {
         ingestedAt,
         timeBasis: spec.timeBasis,
         metric, value: row[field], unit,
+        ...(obsType ? { obsType } : {}),
       });
     }
   }
@@ -58,7 +61,7 @@ export function serializeOperationalTelemetry({ sensorReadings = [], plotObserva
   }
   const sensor = emitRows(sensorReadings, scope, {
     observed: "timestamp", ingested: "timestamp",
-    prefix: "sensor-reading", timeBasis: "server_received_at",
+    prefix: "sensor-reading", timeBasis: "server_received_at", defaultObsType: "sensor_reading",
     source: row => "sensor:" + String(row.sensor?.deviceId || row.sensorId || "unknown"),
     fields: [
       ["temperature", "temp", "°C"], ["humidity", "humidity", "%"],
@@ -67,7 +70,7 @@ export function serializeOperationalTelemetry({ sensorReadings = [], plotObserva
   });
   const persisted = emitRows(plotObservations, scope, {
     observed: "obsDate", ingested: "fetchedAt",
-    prefix: "plot-observation", timeBasis: "source_observation_at",
+    prefix: "plot-observation", timeBasis: "source_observation_at", defaultObsType: "plot_observation",
     source: row => "plot-source:" + String(row.source || "unknown"),
     fields: [
       ["tempC", "temp", "°C"], ["humidity", "humidity", "%"],
@@ -94,6 +97,7 @@ export function validateOperationalTelemetryResponse(body, scope, version) {
       || !["temp", "rain", "humidity", "soilMoisture", "et0"].includes(row.metric)
       || !finite(row.value) || typeof row.unit !== "string"
       || !["server_received_at", "source_observation_at"].includes(row.timeBasis)
+      || (row.obsType !== undefined && (typeof row.obsType !== "string" || !row.obsType || /forecast/i.test(row.obsType)))
       || !row.scope || row.scope.tenantId !== scope.tenantId
       || row.scope.farmId !== scope.farmId || row.scope.plotId !== scope.plotId
       || row.certified === true || row.manifestMembership === true

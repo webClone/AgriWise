@@ -38,6 +38,7 @@ export interface TelemetryObservation {
   ingestedAt?: string | null;
   /** Distinguish source acquisition time from server receipt fallback. */
   timeBasis?: "server_received_at" | "source_observation_at";
+  obsType?: string;
   validAt?: string;
   modelId?: string;
   metric?: string;
