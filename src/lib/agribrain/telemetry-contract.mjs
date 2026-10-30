@@ -11,7 +11,7 @@ export const TELEMETRY_STATUS = Object.freeze({
   UNVERIFIED: "UNVERIFIED",
 });
 const isoMillis = value => {
-  if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d/.test(value)) return NaN;
+  if (typeof value !== "string" || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value)) return NaN;
   return Date.parse(value);
 };
 const validIso = value => Number.isFinite(isoMillis(value));
@@ -29,7 +29,7 @@ export function classifyManifestEvidence(assessment, event) {
   const member = Array.isArray(manifest) && manifest.some(item => item === event);
   const identity = assessment?.identity;
   if (
-    !identity?.snapshotId || !identity?.publicationReceiptHash || !Number.isFinite(cutoff)
+    !identity?.snapshotId || !identity?.publicationReceiptHash || !event?.id || !event?.source || !Number.isFinite(cutoff)
     || !Number.isFinite(observed) || !member || event?.verified !== true
     || event?.manifestMembership !== true || observed > cutoff
     || (event.ingestedAt != null && (!Number.isFinite(ingested) || ingested > cutoff))
@@ -86,6 +86,12 @@ export function appendOperationalTelemetry(stream, observation, maxCount = 500) 
     || observation.certificationStatus === TELEMETRY_STATUS.CERTIFIED_MANIFEST) {
     throw new Error("telemetry_cannot_assert_manifest_membership");
   }
+  if (!observation.scope
+    || observation.scope.tenantId !== stream.scope.tenantId
+    || observation.scope.farmId !== stream.scope.farmId
+    || observation.scope.plotId !== stream.scope.plotId) {
+    throw new Error("telemetry_scope_mismatch");
+  }
   if (!observation.id || !observation.source
     || !["observation", "forecast"].includes(observation.kind)) {
     throw new Error("telemetry_observation_identity_missing");
@@ -102,7 +108,10 @@ export function appendOperationalTelemetry(stream, observation, maxCount = 500) 
     }
     return stream;
   }
-  const record = Object.freeze({ ...observation });
+  const record = Object.freeze({
+    ...observation,
+    scope: Object.freeze({ ...observation.scope }),
+  });
   const bound = Number.isInteger(maxCount) && maxCount > 0 ? maxCount : 500;
   return Object.freeze({
     ...stream,
