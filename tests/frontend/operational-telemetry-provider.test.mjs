@@ -138,3 +138,23 @@ test("authenticated response with foreign record fails entire batch", async () =
   assert.equal(a.transportStatus, "unavailable");
   h.unmount();
 });
+
+test("rapid A→B→A before effects never re-exposes first A buffer or ready status", async () => {
+  const h = makeHarness();
+  let a = h.render(A); h.flush();
+  await h.complete(0, A, [record(A, "original-A")]);
+  a = h.render(A);
+  assert.equal(a.stream.observations.length, 1);
+  assert.equal(a.transportStatus, "ready");
+  const staleCallback = a.ingestObservation;
+
+  let b = h.render(B); // No effect flush yet.
+  assert.equal(b.stream.observations.length, 0);
+  a = h.render(A);     // Return before B's reset has committed.
+  assert.equal(a.stream.observations.length, 0);
+  assert.equal(a.transportStatus, "loading");
+  staleCallback(record(A, "old-epoch"));
+  a = h.render(A);
+  assert.equal(a.stream.observations.length, 0);
+  h.unmount();
+});
