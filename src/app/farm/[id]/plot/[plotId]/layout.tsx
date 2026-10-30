@@ -4,6 +4,7 @@ import { getAuthorizedPlotRouteContext, getPlotCenter } from "@/lib/farm-service
 import { getFAOLandIntelligence } from "@/lib/agribrain/fao-data-service";
 import { Layer10Provider } from "@/hooks/useLayer10";
 import { PlotIntelligenceProvider } from "@/hooks/usePlotIntelligence";
+import { PlotTelemetryProvider } from "@/hooks/usePlotTelemetry";
 import { ParcelAssessmentProvider } from "@/hooks/useParcelAssessment";
 import PlotLayoutClient from "./PlotLayoutClient";
 import FarmThemeWrapper from "@/components/farm/FarmThemeWrapper";
@@ -55,6 +56,7 @@ export default async function PlotLayout({
     <FarmThemeWrapper>
     <ParcelAssessmentProvider plotGeoJson={plot.geoJson} cropCycleId={currentCrop?.id || null}>
     <Layer10Provider plotGeoJson={plot.geoJson}>
+      <PlotTelemetryProvider scope={{ tenantId: String(session?.userId || (farm as any)?.userId || (farm as any)?.ownerId || ""), farmId, plotId }}>
       <PlotIntelligenceProvider>
       <PlotLayoutClient 
         farmId={farmId}
@@ -86,6 +88,7 @@ export default async function PlotLayout({
         {children}
       </PlotLayoutClient>
       </PlotIntelligenceProvider>
+      </PlotTelemetryProvider>
     </Layer10Provider>
     </ParcelAssessmentProvider>
     </FarmThemeWrapper>

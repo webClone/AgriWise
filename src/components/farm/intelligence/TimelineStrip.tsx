@@ -15,6 +15,9 @@
 
 import { useState, useMemo, useRef, useCallback, useEffect } from "react";
 import { usePlotIntelligence } from "@/hooks/usePlotIntelligence";
+import { useParcelAssessment } from "@/hooks/useParcelAssessment";
+import { usePlotTelemetry } from "@/hooks/usePlotTelemetry";
+import { classifyManifestEvidence, classifyTelemetryObservation, TELEMETRY_STATUS, type TelemetryObservation, type TelemetryStatus } from "@/lib/agribrain/telemetry-contract";
 
 type MetricKey = "temp" | "rain" | "ndvi" | "et0" | "humidity";
 
@@ -70,9 +73,126 @@ interface DayCell {
   isPast: boolean;
   values: Record<MetricKey, number | null>;
   source: "observed" | "forecast" | "estimated" | "unverified" | "gap";
+  metricStatuses: Record<MetricKey, TelemetryStatus>;
+  metricDotColors: Record<MetricKey, string>;
+  certifiedManifestEventCount: number;
+  cutoffDay: boolean;
+  assessmentSnapshotId: string | null;
   ndviSource?: string;        // "observed" | "kalman" from backend
   ndviConfidence?: number;    // 0-1 from Kalman engine
   tempRange: { min: number | null; max: number | null };
+}
+
+
+const STATUS_LABEL: Record<TelemetryStatus, string> = {
+  CERTIFIED_MANIFEST: "Certified in publication manifest",
+  LIVE_UNCERTIFIED: "Live observation · uncertified",
+  MODEL_FORECAST: "Model forecast · not observed",
+  LATE_ARRIVING_UNADMITTED: "Historical observation · not admitted to manifest",
+  UNVERIFIED: "Time, source or admission unverified",
+};
+
+// A PI timeline row cannot self-certify a scientific assessment.
+// Require an explicit provider/model identity and a full observation timestamp.
+function classifyTimelineDatum(
+  datum: Record<string, unknown> | undefined,
+  kind: "observation" | "forecast",
+  cutoff: string | null,
+  now: string
+): TelemetryStatus {
+  if (!datum) return TELEMETRY_STATUS.UNVERIFIED;
+  const observedAt = datum.observedAt ?? datum.observed_at ?? datum.timestamp ?? datum.date;
+  const validAt = datum.validAt ?? datum.valid_at ?? datum.date ?? datum.timestamp;
+  const candidate: TelemetryObservation = {
+    id: String(datum.id || datum.observation_id || "timeline-record"),
+    kind,
+    source: typeof datum.source === "string"
+      ? datum.source : typeof datum.provider === "string" ? datum.provider : "",
+    observedAt: typeof observedAt === "string" ? observedAt : undefined,
+    validAt: typeof validAt === "string" ? validAt : undefined,
+    modelId: typeof datum.modelId === "string"
+      ? datum.modelId : typeof datum.model_id === "string" ? datum.model_id : undefined,
+  };
+  return classifyTelemetryObservation(candidate, cutoff, now);
+}
+
+interface ResolvedMetricSupplier {
+  value: number | null;
+  supplier?: Record<string, unknown>;
+  kind: "observation" | "forecast";
+}
+
+function resolveTimelineMetric(
+  primaryRecord: Record<string, unknown> | undefined,
+  primaryFields: string | string[],
+  fallbackRecord: Record<string, unknown> | undefined,
+  fallbackFields: string | string[],
+  primaryKind: "observation" | "forecast" = "observation",
+  fallbackKind: "observation" | "forecast" = "forecast"
+): ResolvedMetricSupplier {
+  const getNum = (rec: Record<string, unknown> | undefined, fields: string | string[]): number | null => {
+    if (!rec) return null;
+    const list = Array.isArray(fields) ? fields : [fields];
+    for (const f of list) {
+      const v = rec[f];
+      if (v != null && Number.isFinite(Number(v))) {
+        return Number(v);
+      }
+    }
+    return null;
+  };
+
+  const primaryValue = getNum(primaryRecord, primaryFields);
+  if (primaryValue !== null) {
+    return { value: primaryValue, supplier: primaryRecord, kind: primaryKind };
+  }
+
+  const fallbackValue = getNum(fallbackRecord, fallbackFields);
+  if (fallbackValue !== null) {
+    return { value: fallbackValue, supplier: fallbackRecord, kind: fallbackKind };
+  }
+
+  return { value: null, supplier: undefined, kind: primaryKind };
+}
+
+function resolveEt0Metric(
+  weatherObs: Record<string, unknown> | undefined,
+  wbObs: Record<string, unknown> | undefined,
+  forecastObs: Record<string, unknown> | undefined
+): ResolvedMetricSupplier {
+  if (weatherObs?.et0 != null && Number.isFinite(Number(weatherObs.et0))) {
+    return { value: Number(weatherObs.et0), supplier: weatherObs, kind: "observation" };
+  }
+  if (wbObs?.et0 != null && Number.isFinite(Number(wbObs.et0))) {
+    return { value: Number(wbObs.et0), supplier: wbObs, kind: "observation" };
+  }
+  if (forecastObs?.et0 != null && Number.isFinite(Number(forecastObs.et0))) {
+    return { value: Number(forecastObs.et0), supplier: forecastObs, kind: "forecast" };
+  }
+  return { value: null, supplier: undefined, kind: "observation" };
+}
+
+function getMetricDotColor(
+  status: TelemetryStatus | undefined,
+  metricKey: MetricKey,
+  ndviSource?: string
+): string {
+  if (metricKey === "ndvi") {
+    if (["observed", "sentinel2", "sentinel-2", "s2", "satellite_observed"].includes(ndviSource || "")) {
+      return "#4ade80";
+    }
+    if (["kalman", "estimated", "model", "interpolated"].includes(ndviSource || "")) {
+      return "#a78bfa";
+    }
+    return "#64748b";
+  }
+  if (status === TELEMETRY_STATUS.CERTIFIED_MANIFEST || status === TELEMETRY_STATUS.LIVE_UNCERTIFIED) {
+    return "#4ade80";
+  }
+  if (status === TELEMETRY_STATUS.MODEL_FORECAST) {
+    return "#60a5fa";
+  }
+  return "#64748b";
 }
 
 /* ─── Sparkline SVG ────────────────────────────────────────────────────── */
@@ -155,6 +275,25 @@ function DayTooltip({ day, metric, style }: {
           );
         })}
       </div>
+      <div data-testid="timeline-metric-status" style={{
+        marginTop: "7px", paddingTop: "6px",
+        borderTop: "1px solid rgba(71,85,105,0.2)",
+        color: "#fbbf24", whiteSpace: "normal", maxWidth: "240px",
+      }}>
+        {STATUS_LABEL[day.metricStatuses[metric.key]]}
+        {metric.key === "ndvi" && ["kalman", "estimated", "model", "interpolated"].includes(day.ndviSource || "")
+          ? " · Model-estimated NDVI, not a satellite observation" : ""}
+      </div>
+      {day.certifiedManifestEventCount > 0 && (
+        <div style={{ color: "#86efac", marginTop: "4px", whiteSpace: "normal", maxWidth: "240px" }}>
+          {day.certifiedManifestEventCount} verified manifest event(s) on this day. That does not certify every displayed metric.
+        </div>
+      )}
+      {day.assessmentSnapshotId && (
+        <div style={{ fontSize: "0.63rem", color: "#94a3b8", marginTop: "3px" }}>
+          Assessment: {day.assessmentSnapshotId}
+        </div>
+      )}
       {day.tempRange.min !== null && day.tempRange.max !== null && (
         <div style={{ marginTop: "6px", paddingTop: "5px", borderTop: "1px solid rgba(71,85,105,0.2)",
           fontSize: "0.72rem", color: "#94a3b8" }}>
@@ -174,6 +313,10 @@ function DayTooltip({ day, metric, style }: {
 /* ─── Main Timeline Component ─────────────────────────────────────────── */
 export default function TimelineStrip() {
   const { timeline, loading, selectedDate, setSelectedDate } = usePlotIntelligence();
+  const parcel = useParcelAssessment();
+  const { stream: liveTelemetryStream } = usePlotTelemetry();
+  const assessment = parcel.assessment;
+  const evidenceCutoffAt = assessment?.identity.evidenceCutoffAt ?? null;
   const [activeMetric, setActiveMetric] = useState<MetricKey>("temp");
   const [hoveredDay, setHoveredDay] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -190,6 +333,7 @@ export default function TimelineStrip() {
 
   const days: DayCell[] = useMemo(() => {
     const result: DayCell[] = [];
+    const nowIso = new Date().toISOString();
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
@@ -245,7 +389,56 @@ export default function TimelineStrip() {
         : ndviObs ? "unverified"
         : "gap";
 
-      const ndviValue = (ndviObs?.ndvi_mean as number) ?? (ndviObs?.ndvi as number) ?? null;
+      const ndviRaw = (ndviObs?.ndvi_mean != null ? ndviObs.ndvi_mean : ndviObs?.ndvi) as number | undefined;
+      const ndviValue = ndviRaw != null && Number.isFinite(Number(ndviRaw)) ? Number(ndviRaw) : null;
+      let ndviStatus: TelemetryStatus = TELEMETRY_STATUS.UNVERIFIED;
+      if (ndviValue !== null && ndviObs) {
+        if (estimatedNdvi) {
+          // Kalman interpolation is a model estimate, never an optical observation.
+          ndviStatus = TELEMETRY_STATUS.UNVERIFIED;
+        } else {
+          ndviStatus = classifyTimelineDatum(ndviObs, "observation", evidenceCutoffAt, nowIso);
+        }
+      }
+
+      // C3 P7-01: Select each metric's value and supplier together so fallback
+      // forecast values are not mislabeled as observations.
+      const tempMetric = resolveTimelineMetric(weatherObs, "temp", forecastObs, "temp");
+      const rainMetric = resolveTimelineMetric(weatherObs, ["rain", "rain_mm"], forecastObs, ["rain_mm", "rain"]);
+      const humidityMetric = resolveTimelineMetric(weatherObs, "humidity", forecastObs, "humidity");
+      const et0Metric = resolveEt0Metric(weatherObs, wbObs, forecastObs);
+
+      const metricStatuses: Record<MetricKey, TelemetryStatus> = {
+        temp: classifyTimelineDatum(tempMetric.supplier, tempMetric.kind, evidenceCutoffAt, nowIso),
+        rain: classifyTimelineDatum(rainMetric.supplier, rainMetric.kind, evidenceCutoffAt, nowIso),
+        humidity: classifyTimelineDatum(humidityMetric.supplier, humidityMetric.kind, evidenceCutoffAt, nowIso),
+        et0: classifyTimelineDatum(et0Metric.supplier, et0Metric.kind, evidenceCutoffAt, nowIso),
+        ndvi: ndviStatus,
+      };
+
+      const metricDotColors: Record<MetricKey, string> = {
+        temp: getMetricDotColor(metricStatuses.temp, "temp", ndviSource),
+        rain: getMetricDotColor(metricStatuses.rain, "rain", ndviSource),
+        humidity: getMetricDotColor(metricStatuses.humidity, "humidity", ndviSource),
+        et0: getMetricDotColor(metricStatuses.et0, "et0", ndviSource),
+        ndvi: getMetricDotColor(metricStatuses.ndvi, "ndvi", ndviSource),
+      };
+
+      const certifiedManifestEventCount = assessment?.evidenceTimeline.filter(
+        event => event.observedAt?.startsWith(dateStr)
+          && classifyManifestEvidence(assessment, event) === TELEMETRY_STATUS.CERTIFIED_MANIFEST
+      ).length ?? 0;
+
+      const tempMin = (weatherObs?.temp_min != null && Number.isFinite(Number(weatherObs.temp_min)))
+        ? Number(weatherObs.temp_min)
+        : (forecastObs?.temp_min != null && Number.isFinite(Number(forecastObs.temp_min)))
+          ? Number(forecastObs.temp_min)
+          : null;
+      const tempMax = (weatherObs?.temp_max != null && Number.isFinite(Number(weatherObs.temp_max)))
+        ? Number(weatherObs.temp_max)
+        : (forecastObs?.temp_max != null && Number.isFinite(Number(forecastObs.temp_max)))
+          ? Number(forecastObs.temp_max)
+          : null;
 
       result.push({
         date: dateStr,
@@ -255,32 +448,45 @@ export default function TimelineStrip() {
         isToday,
         isPast,
         source,
+        metricStatuses,
+        metricDotColors,
+        certifiedManifestEventCount,
+        cutoffDay: !!evidenceCutoffAt && dateStr === evidenceCutoffAt.slice(0, 10),
+        assessmentSnapshotId: assessment?.identity.snapshotId ?? null,
         ndviSource,
         ndviConfidence: ndviObs?.confidence as number | undefined,
         values: {
-          temp: (weatherObs?.temp as number) ?? (forecastObs?.temp as number) ?? null,
-          rain: (weatherObs?.rain as number) ?? (forecastObs?.rain_mm as number) ?? null,
+          temp: tempMetric.value,
+          rain: rainMetric.value,
           ndvi: ndviValue,
-          et0: (weatherObs?.et0 as number) ?? (wbObs?.et0 as number) ?? (forecastObs?.et0 as number) ?? null,
-          humidity: (weatherObs?.humidity as number) ?? (forecastObs?.humidity as number) ?? null,
+          et0: et0Metric.value,
+          humidity: humidityMetric.value,
         },
         tempRange: {
-          min: (weatherObs?.temp_min as number) ?? (forecastObs?.temp_min as number) ?? null,
-          max: (weatherObs?.temp_max as number) ?? (forecastObs?.temp_max as number) ?? null,
+          min: tempMin,
+          max: tempMax,
         },
       });
     }
     return result;
-  }, [timeline]);
+  }, [timeline, assessment, evidenceCutoffAt]);
 
   const sparklineValues = days.map(d => d.values[activeMetric]);
   const activeConfig = METRICS.find(m => m.key === activeMetric)!;
 
   // Count how many days have data for this metric
   const dataCount = sparklineValues.filter(v => v !== null).length;
-  const observedCount = days.filter(d => d.source === "observed").length;
-  const forecastCount = days.filter(d => d.source === "forecast").length;
-  const estimatedCount = days.filter(d => d.source === "estimated").length;
+  const observedCount = days.filter(d => {
+    const s = d.metricStatuses[activeMetric];
+    return s === TELEMETRY_STATUS.CERTIFIED_MANIFEST || s === TELEMETRY_STATUS.LIVE_UNCERTIFIED;
+  }).length;
+  const forecastCount = days.filter(d => d.metricStatuses[activeMetric] === TELEMETRY_STATUS.MODEL_FORECAST).length;
+  const estimatedCount = days.filter(d => {
+    if (activeMetric === "ndvi") {
+      return ["kalman", "estimated", "model", "interpolated"].includes(d.ndviSource || "");
+    }
+    return false;
+  }).length;
 
   const handleDayClick = useCallback((date: string) => {
     setSelectedDate(selectedDate === date ? null : date);
@@ -326,6 +532,24 @@ export default function TimelineStrip() {
         overflow: "hidden",
         boxShadow: "0 -2px 20px rgba(0,0,0,0.35), 0 0 0 1px rgba(71,85,105,0.06) inset",
       }}>
+
+        {/* P2-C: precise cutoff is temporal, not blanket certification of prior dates. */}
+        <div data-testid="timeline-cutoff-boundary" style={{
+          padding: "6px 10px", borderBottom: "1px solid rgba(148,163,184,0.18)",
+          fontSize: "0.65rem", color: "#cbd5e1", lineHeight: 1.5,
+        }}>
+          {evidenceCutoffAt ? (
+            <span>
+              Published evidence cutoff: <strong>{new Date(evidenceCutoffAt).toUTCString()}</strong>
+              {" · "}snapshot {assessment?.identity.snapshotId}
+              {parcel.isApplicable ? "" : " · historical assessment, not current-use"}
+            </span>
+          ) : <span>No validated publication cutoff available</span>}
+          <span style={{ marginLeft: "8px", color: "#fbbf24" }}>
+            Historical dates are not proof of admission; post-cutoff readings are uncertified.
+            {" "}Operational buffer: {liveTelemetryStream.observations.length} unsealed item(s).
+          </span>
+        </div>
 
         {/* ── Top Row: Metric tabs + Sparkline ──────────────────────────── */}
         <div style={{
@@ -433,6 +657,7 @@ export default function TimelineStrip() {
                 <button
                   data-today={day.isToday ? "true" : undefined}
                   onClick={() => handleDayClick(day.date)}
+                  title={STATUS_LABEL[day.metricStatuses[activeMetric]] + (day.cutoffDay ? " · Publication cutoff day" : "")}
                   onMouseEnter={() => setHoveredDay(day.date)}
                   onMouseLeave={() => setHoveredDay(null)}
                   style={{
@@ -479,6 +704,8 @@ export default function TimelineStrip() {
                     {day.dayNum}
                   </span>
 
+                  {day.cutoffDay && <span title="Exact cutoff timestamp is shown above" style={{ fontSize: "0.53rem", color: "#fbbf24" }}>CUTOFF</span>}
+
                   {/* Value */}
                   <span style={{
                     fontSize: "0.7rem", fontWeight: 600,
@@ -489,23 +716,16 @@ export default function TimelineStrip() {
                     {hasData ? activeConfig.format(value!) : "—"}
                   </span>
 
-                  {/* Source dot — for NDVI metric show satellite vs Kalman fill */}
+                  {/* Source dot — derived from active metric status while preserving NDVI estimate semantics */}
                   <div style={{
                     width: "3px", height: "3px", borderRadius: "50%",
-                    background: activeMetric === "ndvi"
-                      ? ["observed", "sentinel2", "sentinel-2", "s2", "satellite_observed"].includes(day.ndviSource || "") ? "#4ade80"
-                        : ["kalman", "estimated", "model", "interpolated"].includes(day.ndviSource || "") ? "#a78bfa"
-                        : "#64748b"
-                      : day.source === "observed" ? "#4ade80"
-                        : day.source === "forecast" ? "#60a5fa"
-                        : day.source === "estimated" ? "#a78bfa"
-                        : "#64748b",
+                    background: day.metricDotColors[activeMetric],
                     marginTop: "1px",
                   }} />
                 </button>
 
                 {/* Tooltip on hover */}
-                {isHovered && hasData && (
+                {isHovered && (
                   <DayTooltip day={day} metric={activeConfig} />
                 )}
               </div>
