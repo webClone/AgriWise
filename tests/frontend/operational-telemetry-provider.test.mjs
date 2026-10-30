@@ -95,12 +95,11 @@ test("polls owner endpoint, ignores old response and old A callback across A→B
   let b = h.render(B);
   assert.equal(b.stream.observations.length, 0);
   staleAIngest(record(A, "old-action"));
+  h.flush();
+  assert.equal(h.requests.length, 2);
   await h.complete(0, A, [record(A, "late-A")]);
   b = h.render(B);
   assert.equal(b.stream.observations.length, 0);
-
-  h.flush();
-  assert.equal(h.requests.length, 2);
   await h.complete(1, B, [record(B, "new-B")]);
   b = h.render(B);
   assert.deepEqual(b.stream.observations.map(o => o.id), ["new-B"]);
