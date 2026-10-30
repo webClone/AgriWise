@@ -5,11 +5,26 @@ Layer 10 Invariants — Runtime Safety Checks
 Enforced after every L10 run. Violations → warning + quality degradation.
 """
 
+import math
 from typing import List
 from services.agribrain.layer10_sire.schema import (
     Layer10Output, SurfaceArtifact, ZoneArtifact, SurfaceType,
     ZoneFamily, SIREDegradation,
 )
+
+
+ASMAE_SURFACE_INVARIANTS = {
+    SurfaceType.ASMAE_VIGOR: (0.0, 1.0),
+    SurfaceType.ASMAE_LAI: (0.0, 8.0),
+    SurfaceType.ASMAE_CHLOROPHYLL: (0.0, 80.0),
+    SurfaceType.ASMAE_PHENOLOGY_PROGRESS: (0.0, 1.0),
+    SurfaceType.ASMAE_STRESS_MEMORY: (0.0, 1.0),
+    SurfaceType.ASMAE_ML_AGREEMENT: (0.0, 1.0),
+    SurfaceType.ASMAE_ARCHIVE_SUPPORT: (0.0, 1.0),
+    SurfaceType.ASMAE_ENKF_SUPPORT: (0.0, 1.0),
+    SurfaceType.ASMAE_RADIOMETRIC_SUPPORT: (0.0, 1.0),
+    SurfaceType.ASMAE_VISUAL_FUSION_CANOPY: (0.0, 1.0),
+}
 
 
 def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) -> List[str]:
@@ -69,10 +84,20 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
         SurfaceType.N_LEACHING_RISK: (0.0, 1.0),
         SurfaceType.N_VOLATILIZATION_RISK: (0.0, 1.0),
 
-        # ASMAE ranges (V82)
+        # ASMAE 13 Canonical State Surfaces (V82)
         SurfaceType.ASMAE_VIGOR: (0.0, 1.0),
         SurfaceType.ASMAE_LAI: (0.0, 8.0),
         SurfaceType.ASMAE_CHLOROPHYLL: (0.0, 80.0),
+        SurfaceType.ASMAE_CANOPY_WATER: (0.0, 1.0),
+        SurfaceType.ASMAE_ROOT_ZONE_WATER: (0.0, 1.0),
+        SurfaceType.ASMAE_SURFACE_WETNESS_EVENT: (0.0, 1.0),
+        SurfaceType.ASMAE_STRUCTURE: (0.0, 1.0),
+        SurfaceType.ASMAE_BARE_SOIL: (0.0, 1.0),
+        SurfaceType.ASMAE_SALINITY_STRESS: (0.0, 1.0),
+        SurfaceType.ASMAE_THERMAL_STRESS: (0.0, 1.0),
+        SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: (0.0, 1.0),
+        SurfaceType.ASMAE_PHENOLOGY_PROGRESS: (0.0, 1.0),
+        SurfaceType.ASMAE_STRESS_MEMORY: (0.0, 1.0),
         SurfaceType.ASMAE_ML_AGREEMENT: (0.0, 1.0),
         SurfaceType.ASMAE_ARCHIVE_SUPPORT: (0.0, 1.0),
         SurfaceType.ASMAE_ENKF_SUPPORT: (0.0, 1.0),
@@ -104,6 +129,11 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
             for v in row:
                 if v is None:
                     continue
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                    violations.append(
+                        f"INV-2: Surface {s.surface_id} has invalid non-numeric or non-finite value {v!r}"
+                    )
+                    break
                 if lo is not None and v < lo - 1e-6:
                     violations.append(
                         f"INV-2: Surface {s.surface_id} value {v} < min {lo}"
@@ -117,6 +147,23 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
             else:
                 continue
             break  # break outer on first violation per surface
+
+        # Check scalar estimate in provenance if present
+        prov = s.provenance if isinstance(s.provenance, dict) else {}
+        sv = prov.get("scalar_value")
+        if sv is not None:
+            if isinstance(sv, bool) or not isinstance(sv, (int, float)) or not math.isfinite(sv):
+                violations.append(
+                    f"INV-2: Surface {s.surface_id} has invalid non-numeric or non-finite scalar_value {sv!r}"
+                )
+            elif lo is not None and sv < lo - 1e-6:
+                violations.append(
+                    f"INV-2: Surface {s.surface_id} scalar_value {sv} < min {lo}"
+                )
+            elif hi is not None and sv > hi + 1e-6:
+                violations.append(
+                    f"INV-2: Surface {s.surface_id} scalar_value {sv} > max {hi}"
+                )
 
     # INV-3: Source dominance weights sum to ~1.0
     for s in output.surface_pack:
@@ -296,8 +343,35 @@ def enforce_layer10_invariants(output: Layer10Output, grid_h: int, grid_w: int) 
         vis_only = prov.get("visual_only", False)
         warning_codes = prov.get("warning_codes", [])
         bma_status = prov.get("bma_status")
-        conf = prov.get("confidence", 0.0)
-        unc = prov.get("uncertainty", 0.0)
+        raw_conf = prov.get("confidence", 0.0)
+        raw_unc = prov.get("diagnostic_uncertainty")
+        if raw_unc is None:
+            raw_unc = prov.get("normalized_uncertainty")
+        if raw_unc is None:
+            raw_unc = prov.get("uncertainty")
+
+        if isinstance(raw_conf, (list, tuple)):
+            conf_vals = [
+                float(v) for row in raw_conf for v in (row if isinstance(row, (list, tuple)) else [row])
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            ]
+            conf = sum(conf_vals) / len(conf_vals) if conf_vals else 0.0
+        elif not isinstance(raw_conf, (int, float)) or isinstance(raw_conf, bool) or not math.isfinite(raw_conf):
+            conf = 0.0
+        else:
+            conf = float(raw_conf)
+
+        if isinstance(raw_unc, (list, tuple)):
+            unc_vals = [
+                float(v) for row in raw_unc for v in (row if isinstance(row, (list, tuple)) else [row])
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            ]
+            unc = sum(unc_vals) / len(unc_vals) if unc_vals else 1.0
+        elif raw_unc is None or not isinstance(raw_unc, (int, float)) or isinstance(raw_unc, bool) or not math.isfinite(raw_unc):
+            unc = 1.0
+        else:
+            unc = float(raw_unc)
+
         warning_wording = prov.get("warning_wording", "")
         has_spatial_grid = prov.get("has_spatial_grid", True)
         

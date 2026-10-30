@@ -156,6 +156,8 @@ class SurfaceType(str, Enum):
     ASMAE_SALINITY_STRESS = "ASMAE_SALINITY_STRESS"
     ASMAE_THERMAL_STRESS = "ASMAE_THERMAL_STRESS"
     ASMAE_BIOTIC_CONFOUNDER_RISK = "ASMAE_BIOTIC_CONFOUNDER_RISK"
+    ASMAE_PHENOLOGY_PROGRESS = "ASMAE_PHENOLOGY_PROGRESS"
+    ASMAE_STRESS_MEMORY = "ASMAE_STRESS_MEMORY"
 
     # ASMAE Diagnostic Surfaces (V82)
     ASMAE_EFFECTIVE_RESOLUTION = "ASMAE_EFFECTIVE_RESOLUTION"
@@ -229,6 +231,8 @@ ASMAE_STATE_SURFACES = {
     SurfaceType.ASMAE_SALINITY_STRESS,
     SurfaceType.ASMAE_THERMAL_STRESS,
     SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK,
+    SurfaceType.ASMAE_PHENOLOGY_PROGRESS,
+    SurfaceType.ASMAE_STRESS_MEMORY,
 }
 
 ASMAE_DIAGNOSTIC_SURFACES = {
@@ -367,6 +371,8 @@ class RenderMode(str, Enum):
     ASMAE_SALINITY_STRESS = "ASMAE_SALINITY_STRESS"
     ASMAE_THERMAL_STRESS = "ASMAE_THERMAL_STRESS"
     ASMAE_BIOTIC_CONFOUNDER_RISK = "ASMAE_BIOTIC_CONFOUNDER_RISK"
+    ASMAE_PHENOLOGY_PROGRESS = "ASMAE_PHENOLOGY_PROGRESS"
+    ASMAE_STRESS_MEMORY = "ASMAE_STRESS_MEMORY"
     ASMAE_EFFECTIVE_RESOLUTION = "ASMAE_EFFECTIVE_RESOLUTION"
     ASMAE_POSTERIOR_CONCENTRATION = "ASMAE_POSTERIOR_CONCENTRATION"
     ASMAE_CONFIDENCE = "ASMAE_CONFIDENCE"
@@ -491,8 +497,9 @@ class SurfaceArtifact:
     effective_resolution_m: float = 10.0    # True information resolution in meters (e.g. 10.0m Sentinel-2, 30.0m Landsat)
     observed_mask: Optional[List[List[bool]]] = None   # [H][W] True where real measurement was observed
     inferred_mask: Optional[List[List[bool]]] = None   # [H][W] True where value is interpolated or proxy-inferred
-    state_update_allowed: bool = True       # Whether surface can update physical state
-    prescription_driver_allowed: bool = True # Whether surface can drive variable-rate prescriptions
+    state_update_allowed: bool = False       # Whether surface can update physical state
+    prescription_driver_allowed: bool = False # Whether surface can drive variable-rate prescriptions
+    block_reasons: Optional[List[str]] = None # Active revocation or restriction reasons
 
     # V92.4 GIS specifications & STAC reference points
     grid_spec: Optional[Dict[str, Any]] = None

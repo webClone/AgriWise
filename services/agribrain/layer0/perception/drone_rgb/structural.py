@@ -17,7 +17,7 @@ import math
 from services.agribrain.layer0.perception.drone_rgb.schemas import DroneRGBInput, DroneStructuralMap, RowBreak
 from services.agribrain.layer0.perception.drone_rgb import row_analysis
 from services.agribrain.layer0.perception.drone_rgb import orchard_analysis
-from drone_mission.schemas import MissionType
+from services.agribrain.drone_mission.schemas import MissionType
 
 @dataclass
 class StructuralResult:

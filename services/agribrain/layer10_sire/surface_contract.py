@@ -5,8 +5,9 @@ process and the scientific worker can therefore classify the same serialized
 envelope without import-mode dependent behaviour.
 """
 
+import math
 from enum import Enum
-from typing import Any, Mapping, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
 # Old entries did not bind publication authority or scientific run identity.
@@ -67,6 +68,49 @@ def _enum_value(value: Any) -> Any:
     return value.value if hasattr(value, "value") else value
 
 
+def _strict_bool(val: Any) -> Optional[bool]:
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        if val == 1:
+            return True
+        if val == 0:
+            return False
+        return False
+    if isinstance(val, float):
+        if not math.isfinite(val):
+            return False
+        if val == 1.0:
+            return True
+        if val == 0.0:
+            return False
+        return False
+    if isinstance(val, str):
+        v = val.strip().lower()
+        if v in ("true", "1", "t", "yes", "y"):
+            return True
+        if v in ("false", "0", "f", "no", "n", ""):
+            return False
+        return False
+    return False
+
+
+def _normalize_ceiling_token(c: Any) -> Optional[str]:
+    if c is None:
+        return None
+    if hasattr(c, "name"):
+        token = str(c.name).upper()
+    elif hasattr(c, "value"):
+        token = str(c.value).upper()
+    else:
+        token = str(c).strip().upper()
+    if token.startswith("AUTHORITYCEILING."):
+        token = token[len("AUTHORITYCEILING."):]
+    return token
+
+
 def _grid_spec_dict(value: Any) -> Any:
     """Return a JSON-safe grid specification without importing schema types."""
     if value is None or isinstance(value, Mapping):
@@ -92,6 +136,81 @@ def _surface_value(surface: Any, provenance: Mapping[str, Any], *names: str) -> 
         if value is not None:
             return value
     return None
+
+
+def resolve_surface_block_reasons(*sources: Any) -> List[str]:
+    """Compute a canonical, deduplicated union of restriction/block reasons across all carriers.
+
+    Preserves insertion order, eliminates duplicates, filters out empty/None values,
+    and ensures that no active restriction in any carrier is masked or lost by another carrier.
+    """
+    seen: set = set()
+    result: List[str] = []
+
+    def _add(item: Any) -> None:
+        if item is None:
+            return
+        if isinstance(item, (list, tuple, set)):
+            for sub in item:
+                _add(sub)
+            return
+        s = str(item).strip()
+        if s and s not in seen:
+            seen.add(s)
+            result.append(s)
+
+    for src in sources:
+        if src is None:
+            continue
+        if isinstance(src, Mapping):
+            for key in (
+                "block_reasons",
+                "blockReasons",
+                "restriction_reasons",
+                "restrictionReasons",
+                "exclusion_reason",
+                "exclusionReason",
+            ):
+                val = src.get(key)
+                if val is not None:
+                    _add(val)
+            nested_prov = src.get("provenance")
+            if isinstance(nested_prov, Mapping):
+                for key in (
+                    "block_reasons",
+                    "blockReasons",
+                    "restriction_reasons",
+                    "restrictionReasons",
+                    "exclusion_reason",
+                    "exclusionReason",
+                ):
+                    val = nested_prov.get(key)
+                    if val is not None:
+                        _add(val)
+        elif isinstance(src, (list, tuple, set)):
+            for item in src:
+                _add(item)
+        elif hasattr(src, "block_reasons") or hasattr(src, "provenance"):
+            attr_blocks = getattr(src, "block_reasons", None)
+            if attr_blocks is not None:
+                _add(attr_blocks)
+            prov = getattr(src, "provenance", None)
+            if isinstance(prov, Mapping):
+                for key in (
+                    "block_reasons",
+                    "blockReasons",
+                    "restriction_reasons",
+                    "restrictionReasons",
+                    "exclusion_reason",
+                    "exclusionReason",
+                ):
+                    val = prov.get(key)
+                    if val is not None:
+                        _add(val)
+        else:
+            _add(src)
+
+    return result
 
 
 def serialize_surface_artifact(surface: Any) -> dict:
@@ -122,13 +241,87 @@ def serialize_surface_artifact(surface: Any) -> dict:
             else "agronomic_surface"
         )
     grounding_class_val = str(_enum_value(_field(surface, "grounding_class", None)) or "UNIFORM")
-    state_update_allowed = _surface_value(surface, provenance, "state_update_allowed", "stateUpdateAllowed")
-    prescription_driver_allowed = _surface_value(
-        surface, provenance, "prescription_driver_allowed", "prescriptionDriverAllowed"
+    # Restrictive consistency: default permissions to False, intersect all ceilings and restrictions
+    all_restrictions = resolve_surface_block_reasons(
+        _field(surface, "block_reasons", None),
+        _field(surface, "blockReasons", None),
+        _field(surface, "restriction_reasons", None),
+        _field(surface, "restrictionReasons", None),
+        _field(surface, "exclusion_reason", None),
+        _field(surface, "exclusionReason", None),
+        _field(surface, "authority_block_reason", None),
+        _field(surface, "authorityBlockReason", None),
+        provenance.get("block_reasons"),
+        provenance.get("blockReasons"),
+        provenance.get("restriction_reasons"),
+        provenance.get("restrictionReasons"),
+        provenance.get("exclusion_reason"),
+        provenance.get("exclusionReason"),
+        provenance.get("authority_block_reason"),
+        provenance.get("authorityBlockReason"),
     )
-    authority_block_reason = _surface_value(
-        surface, provenance, "authority_block_reason", "authorityBlockReason"
-    )
+    has_restrictions = len(all_restrictions) > 0
+
+    attr_state_update = _strict_bool(_field(surface, "state_update_allowed", None))
+    attr_camel_state = _strict_bool(_field(surface, "stateUpdateAllowed", None))
+    prov_state_update = _strict_bool(provenance.get("state_update_allowed"))
+    prov_camel_state = _strict_bool(provenance.get("stateUpdateAllowed"))
+    state_candidates = [c for c in (attr_state_update, attr_camel_state, prov_state_update, prov_camel_state) if c is not None]
+
+    if False in state_candidates or has_restrictions or grounding_class_val == "INTERPOLATED_PROXY":
+        state_update_allowed = False
+    elif True in state_candidates:
+        state_update_allowed = True
+    else:
+        state_update_allowed = False
+
+    attr_prescription = _strict_bool(_field(surface, "prescription_driver_allowed", None))
+    attr_camel_presc = _strict_bool(_field(surface, "prescriptionDriverAllowed", None))
+    prov_prescription = _strict_bool(provenance.get("prescription_driver_allowed"))
+    prov_camel_presc = _strict_bool(provenance.get("prescriptionDriverAllowed"))
+    presc_candidates = [c for c in (attr_prescription, attr_camel_presc, prov_prescription, prov_camel_presc) if c is not None]
+
+    if False in presc_candidates or has_restrictions or grounding_class_val == "INTERPOLATED_PROXY":
+        prescription_driver_allowed = False
+    elif True in presc_candidates:
+        prescription_driver_allowed = True
+    else:
+        prescription_driver_allowed = False
+
+    # Bind per-state support class: intersect attribute and provenance support classes with whitespace handling
+    attr_sc = str(_field(surface, "support_class", None) or _field(surface, "supportClass", None) or "").strip().lower()
+    prov_sc = str(provenance.get("support_class") or provenance.get("supportClass") or "").strip().lower()
+    all_sc = {sc for sc in (attr_sc, prov_sc) if sc}
+    is_unsupported_or_diagnostic = any(sc in ("unsupported", "derived_diagnostic", "blocked", "revoked") for sc in all_sc)
+    if is_unsupported_or_diagnostic:
+        state_update_allowed = False
+        prescription_driver_allowed = False
+
+    # Intersect all ceiling carriers across attributes and provenance
+    ceiling_carriers = [
+        _field(surface, "authority_ceiling", None),
+        _field(surface, "authorityCeiling", None),
+        provenance.get("authority_ceiling"),
+        provenance.get("authorityCeiling"),
+        provenance.get("authority"),
+    ]
+    normalized_ceilings = [
+        _normalize_ceiling_token(c) for c in ceiling_carriers if c is not None and str(c).strip()
+    ]
+    for ceil in normalized_ceilings:
+        if ceil in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC", "TRAINING_EXPORT"):
+            state_update_allowed = False
+            prescription_driver_allowed = False
+        elif ceil == "STATE_UPDATE":
+            prescription_driver_allowed = False
+        elif ceil in ("PRESCRIPTION_DRIVER", "PRESCRIPTION_ELIGIBLE", "MANAGED_PRESCRIPTION", "FIELD_PRESCRIPTION", "FULL_SYSTEM_AUTONOMOUS"):
+            pass
+        else:
+            # Declared unknown ceiling -> fail-closed policy
+            state_update_allowed = False
+            prescription_driver_allowed = False
+
+    authority_block_reason = _surface_value(surface, provenance, "authority_block_reason", "authorityBlockReason")
     if grounding_class_val == "INTERPOLATED_PROXY":
         state_update_allowed = False
         prescription_driver_allowed = False
@@ -137,7 +330,7 @@ def serialize_surface_artifact(surface: Any) -> dict:
                 "INTERPOLATED_PROXY surfaces have an authority ceiling and cannot drive state updates or variable-rate prescriptions"
             )
 
-    return {
+    doc = {
         "surface_id": surface_id,
         "type": semantic_type,
         "semantic_type": semantic_type,
@@ -169,7 +362,7 @@ def serialize_surface_artifact(surface: Any) -> dict:
         "state_update_allowed": state_update_allowed,
         "prescription_driver_allowed": prescription_driver_allowed,
         "confidence": _surface_value(surface, provenance, "confidence"),
-        "uncertainty": _surface_value(surface, provenance, "uncertainty"),
+        "uncertainty": _surface_value(surface, provenance, "uncertainty", "sigma"),
         "authority_block_reason": authority_block_reason,
         "surface_role": surface_role,
         "grid_ref": _field(surface, "grid_ref", None),
@@ -177,6 +370,20 @@ def serialize_surface_artifact(surface: Any) -> dict:
         "tile_ref": _field(surface, "tile_ref", None),
         "stac_item_ref": _field(surface, "stac_item_ref", None),
     }
+
+    if all_restrictions:
+        doc["block_reasons"] = list(all_restrictions)
+
+    return doc
+
+
+def serialize_surface_pack(surfaces: Any) -> List[dict]:
+    """Serialize a collection or sequence of surface artifacts."""
+    if surfaces is None:
+        return []
+    if isinstance(surfaces, Mapping):
+        surfaces = surfaces.values()
+    return [serialize_surface_artifact(s) for s in surfaces]
 
 
 def classify_surface_publication(payload: Any) -> Tuple[str, str]:
@@ -402,6 +609,61 @@ def build_no_data_source_policy_display_state(
         },
     }
 
+
+
+ALL_CANONICAL_SURFACES = (
+    "NDVI_CLEAN", "NDVI_DEVIATION", "BASELINE_ANOMALY",
+    "WATER_STRESS_PROB", "NUTRIENT_STRESS_PROB", "SALINITY_STRESS",
+    "COMPOSITE_RISK", "DATA_RELIABILITY", "DATA_CONFIDENCE", "UNCERTAINTY_SIGMA",
+    "RESOLUTION_COVERAGE", "GAP_FILL_MASK",
+    "CANOPY_ASMAE_VIGOR", "WATER_ASMAE_CANOPY_WATER", "WATER_ASMAE_ROOT_ZONE_WATER",
+    "NUTRIENT_ASMAE_CHLOROPHYLL_PROXY", "SALINITY_ASMAE_STRESS", "RISK_ASMAE_DIAGNOSTIC",
+    "ASMAE_POSTERIOR_CONCENTRATION", "RESOLUTION_ASMAE_EFFECTIVE", "ASMAE_VISUAL_FUSION_CANOPY",
+    "COMPOSITE_ADVISORY_CANOPY", "COMPOSITE_VEG_ATTENTION",
+    "COMPOSITE_WATER_SUPPORT", "COMPOSITE_NUTRIENT_SUPPORT",
+    "COMPOSITE_SALINITY_STRESS", "COMPOSITE_RISK_DIAGNOSTIC",
+    "COMPOSITE_CONFIDENCE", "COMPOSITE_EFFECTIVE_RESOLUTION",
+    "COMPOSITE_TEXTURE_DETAIL",
+    "NDVI_CLEAN_EXPERIMENTAL_FINE_DETAIL",
+    "EXPERIMENTAL_VISUAL_CANOPY",
+    "EXPERIMENTAL_VISUAL_CANOPY_HIGHRES",
+    "EXPERIMENTAL_TEXTURE_SUPPORT_MASK",
+    "EXPERIMENTAL_STRICT_FINE_DETAIL_CANDIDATE_MASK",
+    "EXPERIMENTAL_TEXTURE_CONFIDENCE",
+    "EXPERIMENTAL_GAPFILL_MASK",
+    "EXPERIMENTAL_PARENT_MEAN_ERROR",
+    "COMPOSITE_ARCHIVE_SUPPORT",
+    "COMPOSITE_RETRO_SCORE",
+    "COMPOSITE_ML_SUPPORT",
+    "COMPOSITE_BMA_DISAGREEMENT",
+    "COMPOSITE_UNCERTAINTY",
+    # ASMAE 13 Canonical State Surfaces
+    "ASMAE_VIGOR",
+    "ASMAE_LAI",
+    "ASMAE_CHLOROPHYLL",
+    "ASMAE_CANOPY_WATER",
+    "ASMAE_ROOT_ZONE_WATER",
+    "ASMAE_SURFACE_WETNESS_EVENT",
+    "ASMAE_STRUCTURE",
+    "ASMAE_BARE_SOIL",
+    "ASMAE_SALINITY_STRESS",
+    "ASMAE_THERMAL_STRESS",
+    "ASMAE_BIOTIC_CONFOUNDER_RISK",
+    "ASMAE_PHENOLOGY_PROGRESS",
+    "ASMAE_STRESS_MEMORY",
+)
+
+
+def build_no_data_surface_inventory(reason: str = "insufficient_evidence") -> dict:
+    """Return explicit missing status for all known surfaces in no-data/terminal envelopes."""
+    return {
+        st: {
+            "surfaceType": st,
+            "status": "missing",
+            "reason": reason,
+        }
+        for st in ALL_CANONICAL_SURFACES
+    }
 
 def build_default_asmae_proof() -> dict:
     """

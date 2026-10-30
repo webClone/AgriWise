@@ -54,6 +54,54 @@ BAND_CONFIG = {
 N_BANDS = len(BAND_CONFIG)
 
 
+def validate_spatial_grid(
+    crs: Optional[str],
+    transform: Optional[Any],
+    shape: Optional[Tuple[int, int]] = None,
+) -> bool:
+    """Validate that CRS and affine transform define a nondegenerate, finite physical grid.
+
+    Requirements:
+      1. CRS must be a valid, recognized CRS identifier (e.g. EPSG:4326, WGS84, etc.)
+         and not an unqualified or degenerate string.
+      2. Transform must contain 6 finite real numbers (a, b, c, d, e, f).
+      3. Determinant (a*e - b*d) must be finite and non-zero (abs(det) > 1e-15).
+      4. Scale coefficients must be non-zero (cannot collapse physical dimension).
+      5. Dimensions (if provided) must be positive.
+    """
+    if crs is None or not isinstance(crs, str):
+        return False
+    c_clean = crs.strip().upper()
+    if not c_clean or c_clean in ("NONE", "NULL", "UNQUALIFIED", "INVALID", "UNKNOWN", "UNQUALIFIED_SPATIAL_CRS"):
+        return False
+    if not (c_clean.startswith("EPSG:") or c_clean in ("WGS84", "CRS84", "OGC:CRS84") or c_clean.startswith("UTM")):
+        return False
+
+    if transform is None or not isinstance(transform, (list, tuple)) or len(transform) != 6:
+        return False
+    try:
+        a, b, c, d, e, f = (float(x) for x in transform)
+    except (ValueError, TypeError):
+        return False
+
+    if not all(math.isfinite(x) for x in (a, b, c, d, e, f)):
+        return False
+
+    det = a * e - b * d
+    if not math.isfinite(det) or abs(det) <= 1e-15:
+        return False
+
+    if (abs(a) <= 1e-15 and abs(b) <= 1e-15) or (abs(d) <= 1e-15 and abs(e) <= 1e-15):
+        return False
+
+    if shape is not None:
+        h, w = shape
+        if h <= 0 or w <= 0:
+            return False
+
+    return True
+
+
 # ============================================================================
 # Output dataclass
 # ============================================================================
@@ -77,6 +125,10 @@ class EmbeddingResult:
     tile_hash: str = ""
     band_count: int = 0
     valid_pixels: int = 0
+    model_version: str = "1.0.0"
+    preprocessing_version: str = "2.0.0"
+    is_spatial_qualified: bool = False
+    model_weights_digest: str = ""
 
 
 # ============================================================================
@@ -111,6 +163,11 @@ class EOFoundationModel:
         self._session = None  # Lazy-loaded ONNX session
         self._mode: Optional[str] = None  # "onnx" | "fallback" | "disabled"
         self._fallback_weights: Optional[List[List[float]]] = None
+        self._onnx_weights_digest: str = ""
+        self._fallback_weights_digest: str = ""
+        self._weights_digest: str = ""
+        self._model_version = "1.0.0"
+        self._preprocessing_version = "2.0.0"
 
     @property
     def mode(self) -> str:
@@ -123,11 +180,25 @@ class EOFoundationModel:
     def embedding_dim(self) -> int:
         return self._embedding_dim
 
+    def _compute_fallback_weights_digest(self) -> str:
+        if self._fallback_weights:
+            try:
+                import json
+                fb_bytes = json.dumps(self._fallback_weights, sort_keys=True).encode("utf-8")
+                return hashlib.sha256(fb_bytes).hexdigest()
+            except Exception:
+                return "fallback_spectral_basis_v2_digest"
+        return ""
+
     def _resolve_mode(self) -> None:
         """Determine execution mode based on available resources."""
         if not self._enabled:
             self._mode = "disabled"
             return
+
+        # Precompute fallback weights so fallback digest is always available
+        self._init_fallback_weights()
+        self._fallback_weights_digest = self._compute_fallback_weights_digest()
 
         # Try ONNX Runtime
         if os.path.isfile(self._model_path):
@@ -138,13 +209,19 @@ class EOFoundationModel:
                     providers=["CPUExecutionProvider"],
                 )
                 self._mode = "onnx"
+                try:
+                    with open(self._model_path, "rb") as mf:
+                        self._onnx_weights_digest = hashlib.sha256(mf.read()).hexdigest()
+                except Exception:
+                    self._onnx_weights_digest = hashlib.sha256(self._model_path.encode("utf-8")).hexdigest()
+                self._weights_digest = self._onnx_weights_digest
                 return
             except Exception:
                 pass  # Fall through to fallback
 
         # Fallback: pure-Python spectral encoder
         self._mode = "fallback"
-        self._init_fallback_weights()
+        self._weights_digest = self._fallback_weights_digest
 
     def _init_fallback_weights(self) -> None:
         """Initialize physically-informed spectral basis projection (F21).
@@ -230,6 +307,8 @@ class EOFoundationModel:
         self,
         band_arrays: Dict[str, List[List[float]]],
         cloud_mask: Optional[List[List[int]]] = None,
+        crs: Optional[str] = None,
+        transform: Optional[Any] = None,
     ) -> Optional[EmbeddingResult]:
         """Run Foundation Model inference on multi-spectral bands.
 
@@ -238,6 +317,8 @@ class EOFoundationModel:
                 Each array is H×W float values (surface reflectance).
             cloud_mask: Optional H×W binary mask (1 = cloudy, 0 = clear).
                 Cloudy pixels are excluded from statistics.
+            crs: Optional coordinate reference system string (e.g. 'EPSG:4326').
+            transform: Optional affine transform tuple/parameters.
 
         Returns:
             EmbeddingResult with 128-d embedding and anomaly score,
@@ -251,8 +332,44 @@ class EOFoundationModel:
         if len(available_bands) < 3:
             return None  # Need at least 3 bands for meaningful embedding
 
+        # Strict spatial alignment validation across all bands and cloud mask (F26)
+        # Enforces rectangular grids across all rows (rejecting ragged arrays)
+        ref_shape = None
+        for b in available_bands:
+            arr = band_arrays[b]
+            if not isinstance(arr, list) or len(arr) == 0:
+                raise ValueError(f"invalid_band_array_structure: {b}")
+            b_h = len(arr)
+            row_width = None
+            for row_idx, row in enumerate(arr):
+                if not isinstance(row, list) or len(row) == 0:
+                    raise ValueError(f"invalid_band_array_structure: {b} row {row_idx}")
+                if row_width is None:
+                    row_width = len(row)
+                elif len(row) != row_width:
+                    raise ValueError(f"ragged_grid_detected: {b} row {row_idx} width {len(row)} != expected {row_width}")
+            b_shape = (b_h, row_width)
+            if ref_shape is None:
+                ref_shape = b_shape
+            elif b_shape != ref_shape:
+                raise ValueError(f"band_dimension_mismatch: {b} shape {b_shape} != reference {ref_shape}")
+
+        if cloud_mask is not None and len(cloud_mask) > 0:
+            cm_h = len(cloud_mask)
+            cm_width = None
+            for cm_idx, cm_row in enumerate(cloud_mask):
+                if not isinstance(cm_row, list):
+                    raise ValueError(f"invalid_cloud_mask_structure: row {cm_idx}")
+                if cm_width is None:
+                    cm_width = len(cm_row)
+                elif len(cm_row) != cm_width:
+                    raise ValueError(f"ragged_grid_detected: cloud_mask row {cm_idx} width {len(cm_row)} != expected {cm_width}")
+            cm_shape = (cm_h, cm_width or 0)
+            if ref_shape is not None and cm_shape != ref_shape:
+                raise ValueError(f"band_dimension_mismatch: cloud_mask shape {cm_shape} != reference {ref_shape}")
+
         # Compute tile hash for provenance
-        tile_hash = self._compute_tile_hash(band_arrays, available_bands)
+        tile_hash = self._compute_tile_hash(band_arrays, available_bands, cloud_mask, crs=crs, transform=transform)
 
         # Normalize bands
         normalized = self._normalize_bands(band_arrays, available_bands, cloud_mask)
@@ -263,11 +380,22 @@ class EOFoundationModel:
         if valid_pixels < 4:
             return None  # Insufficient valid data
 
-        # Route to appropriate backend
+        # Route to appropriate backend while tracking actual execution provenance
+        actual_backend = "spectral_basis_v2"
+        actual_weights_digest = getattr(self, "_fallback_weights_digest", getattr(self, "_weights_digest", ""))
         if self._mode == "onnx":
             embedding = self._infer_onnx(normalized, available_bands)
+            if embedding is not None:
+                actual_backend = "onnx_foundation"
+                actual_weights_digest = getattr(self, "_onnx_weights_digest", getattr(self, "_weights_digest", ""))
+            else:
+                embedding = self._infer_fallback(normalized, available_bands)
+                actual_backend = "spectral_basis_v2"
+                actual_weights_digest = getattr(self, "_fallback_weights_digest", getattr(self, "_weights_digest", ""))
         else:
             embedding = self._infer_fallback(normalized, available_bands)
+            actual_backend = "spectral_basis_v2"
+            actual_weights_digest = getattr(self, "_fallback_weights_digest", getattr(self, "_weights_digest", ""))
 
         if embedding is None:
             return None
@@ -275,17 +403,18 @@ class EOFoundationModel:
         # Compute anomaly score (L2 distance from expected baseline)
         anomaly_score = self._compute_anomaly_score(embedding)
 
-        # ML-1: Mode-dependent confidence ceiling.
-        # ONNX model is a trained, validated ViT — higher confidence ceiling.
-        # Fallback spectral basis is a physics-informed proxy — lower ceiling.
-        conf_ceiling = 0.85 if self._mode == "onnx" else 0.75
+        # ML-1: Mode-dependent confidence ceiling based on actual executing backend.
+        # ONNX model is a trained, validated ViT — higher confidence ceiling (0.85).
+        # Fallback spectral basis is a physics-informed proxy — lower ceiling (0.75).
+        conf_ceiling = 0.85 if actual_backend == "onnx_foundation" else 0.75
 
         # Confidence based on input quality
         band_completeness = len(available_bands) / N_BANDS
         pixel_quality = min(1.0, valid_pixels / 100.0)
         confidence = round(min(conf_ceiling, band_completeness * 0.5 + pixel_quality * 0.25), 3)
 
-        model_id = "onnx_foundation" if self._mode == "onnx" else "spectral_basis_v2"
+        model_id = actual_backend
+        is_spatial_qualified = validate_spatial_grid(crs, transform, ref_shape)
 
         return EmbeddingResult(
             embedding=[round(v, 6) for v in embedding],
@@ -295,6 +424,10 @@ class EOFoundationModel:
             tile_hash=tile_hash,
             band_count=len(available_bands),
             valid_pixels=valid_pixels,
+            model_version=self._model_version,
+            preprocessing_version=self._preprocessing_version,
+            is_spatial_qualified=is_spatial_qualified,
+            model_weights_digest=actual_weights_digest,
         )
 
     # ════════════════════════════════════════════════════════════════════
@@ -326,7 +459,7 @@ class EOFoundationModel:
             valid = []
             for y, row in enumerate(pixels):
                 for x, v in enumerate(row):
-                    if v is None or v != v:  # None or NaN
+                    if v is None or not math.isfinite(v):  # Rejects None, NaN, +Inf, -Inf
                         continue
                     if cloud_mask and y < len(cloud_mask) and x < len(cloud_mask[y]):
                         if cloud_mask[y][x] == 1:
@@ -422,8 +555,8 @@ class EOFoundationModel:
             return embedding
 
         except Exception:
-            # Fall back to Python encoder on any ONNX error
-            return self._infer_fallback(normalized, available_bands)
+            # Return None on ONNX error so caller explicitly routes to fallback and tracks true backend provenance
+            return None
 
     # ════════════════════════════════════════════════════════════════════
     # Fallback Spectral Encoder
@@ -612,16 +745,56 @@ class EOFoundationModel:
         self,
         band_arrays: Dict[str, List[List[float]]],
         available_bands: List[str],
+        cloud_mask: Optional[List[List[int]]] = None,
+        crs: Optional[str] = None,
+        transform: Optional[Any] = None,
     ) -> str:
-        """Deterministic hash of input tile for provenance tracking."""
+        """Deterministic hash of input tile for provenance tracking.
+        
+        Includes spatial dimensions, canonical band identifiers, exact IEEE-754 float
+        hex representation (zero precision loss), CRS, affine transform, preprocessing version,
+        and cloud-mask identity to prevent collisions across different physical supports.
+        """
         parts = []
+        h = 0
+        w = 0
         for band in sorted(available_bands):
+            pixels = band_arrays.get(band, [])
+            if pixels and len(pixels) > 0:
+                h = len(pixels)
+                w = len(pixels[0]) if pixels[0] else 0
+                break
+        parts.append(f"dim:{h}x{w}")
+        crs_repr = str(crs) if crs is not None else "UNQUALIFIED_SPATIAL_CRS"
+        transform_repr = str(transform) if transform is not None else "UNQUALIFIED_SPATIAL_TRANSFORM"
+        parts.append(f"crs:{crs_repr}")
+        parts.append(f"transform:{transform_repr}")
+        parts.append(f"prep:{getattr(self, '_preprocessing_version', '2.0.0')}")
+
+        for band in sorted(available_bands):
+            parts.append(f"band:{band}")
             pixels = band_arrays[band]
             for row in pixels:
                 for v in row:
-                    if v is not None and v == v:
-                        parts.append(f"{v:.4f}")
+                    if v is None:
+                        parts.append("MISSING")
+                    elif not isinstance(v, (int, float)):
+                        parts.append("INVALID")
+                    elif math.isnan(v):
+                        parts.append("NAN")
+                    elif math.isinf(v):
+                        parts.append("+INF" if v > 0 else "-INF")
                     else:
-                        parts.append("NaN")
+                        parts.append(float(v).hex())
+
+        if cloud_mask is not None and len(cloud_mask) > 0:
+            cm_h = len(cloud_mask)
+            cm_w = len(cloud_mask[0]) if cloud_mask[0] else 0
+            cm_vals = "".join(str(int(bit)) for row in cloud_mask for bit in row)
+            cm_hash = hashlib.sha256(cm_vals.encode("utf-8")).hexdigest()[:16]
+            parts.append(f"cloud:{cm_h}x{cm_w}:{cm_hash}")
+        else:
+            parts.append("cloud:none")
+
         raw = ",".join(parts).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:16]

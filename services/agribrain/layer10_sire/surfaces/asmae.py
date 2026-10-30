@@ -10,6 +10,7 @@ and blocks fake full-field broadcasts for state layers.
 from typing import List, Optional, Dict, Any, Tuple
 import hashlib
 import json
+import math
 import numpy as np
 
 from services.agribrain.layer10_sire.schema import (
@@ -18,6 +19,388 @@ from services.agribrain.layer10_sire.schema import (
 )
 from services.agribrain.layer10_sire.adapters.l1_adapter import L1SpatialData
 from services.agribrain.scientific_contracts import index_state_support_ledger
+from services.agribrain.layer10_sire.surface_contract import resolve_surface_block_reasons
+
+
+def _is_valid_direct_observation_count(val: Any) -> bool:
+    """Validate that val is a finite, non-boolean, positive number representing count of direct observations."""
+    if val is None or isinstance(val, bool):
+        return False
+    if not isinstance(val, (int, float)):
+        return False
+    try:
+        fval = float(val)
+        return math.isfinite(fval) and fval > 0 and (isinstance(val, int) or fval.is_integer())
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_valid_finite_nonnegative(val: Any) -> bool:
+    """Validate that val is a finite, non-boolean, nonnegative real number (preserving valid 0.0)."""
+    if val is None or isinstance(val, bool):
+        return False
+    if not isinstance(val, (int, float)):
+        return False
+    try:
+        fval = float(val)
+        return math.isfinite(fval) and fval >= 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_finite_real(val: Any) -> bool:
+    """Return True if val is a finite real number (not None, bool, NaN, or Inf)."""
+    if val is None or isinstance(val, bool):
+        return False
+    if not isinstance(val, (int, float)):
+        return False
+    try:
+        fval = float(val)
+        return math.isfinite(fval)
+    except (TypeError, ValueError):
+        return False
+
+
+def _parse_strict_bool(val: Any) -> bool:
+    """Strictly parse booleans and scalar flags without converting invalid non-binary values to True."""
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        return val == 1
+    if isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return False
+        return val == 1.0
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("false", "0", "0.0", "no", "f", "n", "none", "null"):
+            return False
+        return s in ("true", "1", "yes", "t")
+    return False
+
+
+def _validate_covariance(cov: Any) -> Tuple[bool, bool]:
+    """Validate covariance scalar, 1D diagonal vector, or 2D matrix.
+
+    Returns:
+        (is_valid, is_malformed)
+        - If cov is None: (False, False)
+        - If cov is invalid/malformed: (False, True)
+        - If cov is valid: (True, False)
+    """
+    if cov is None:
+        return False, False
+    if isinstance(cov, bool):
+        return False, True
+    if isinstance(cov, (int, float)):
+        if _is_valid_finite_nonnegative(cov):
+            return True, False
+        return False, True
+    if isinstance(cov, (list, tuple)):
+        if len(cov) == 0:
+            return False, True
+        any_nested = any(isinstance(x, (list, tuple)) for x in cov)
+        all_nested = all(isinstance(x, (list, tuple)) for x in cov)
+        if any_nested and not all_nested:
+            return False, True
+        if all_nested:
+            n_rows = len(cov)
+            if n_rows == 0:
+                return False, True
+            for row in cov:
+                if not isinstance(row, (list, tuple)):
+                    return False, True
+                if len(row) == 0 or len(row) != n_rows:
+                    return False, True
+                for elem in row:
+                    if isinstance(elem, bool) or not _is_finite_real(elem):
+                        return False, True
+            max_diag = max(float(cov[i][i]) for i in range(n_rows))
+            max_elem = max(abs(float(cov[i][j])) for i in range(n_rows) for j in range(n_rows))
+            scale = max(max_diag, max_elem)
+            sym_tol = max(1e-14, 1e-4 * scale)
+
+            for i in range(n_rows):
+                var_i = float(cov[i][i])
+                if var_i < 0.0:
+                    return False, True
+                # Zero variance requires zero cross-covariances (Var(X)=0 implies Cov(X, Y)=0)
+                if var_i <= 1e-15:
+                    for j in range(n_rows):
+                        if abs(float(cov[i][j])) > 1e-15 or abs(float(cov[j][i])) > 1e-15:
+                            return False, True
+                for j in range(i + 1, n_rows):
+                    diff = abs(float(cov[i][j]) - float(cov[j][i]))
+                    pair_scale = max(abs(float(cov[i][j])), abs(float(cov[j][i])))
+                    if diff > sym_tol or diff > max(1e-14, 1e-4 * pair_scale):
+                        return False, True
+                    # Cauchy-Schwarz consistency: Cov(i, j)^2 <= Var(i) * Var(j)
+                    var_j = float(cov[j][j])
+                    cov_ij = float(cov[i][j])
+                    cs_bound = var_i * var_j
+                    margin = max(1e-15, 1e-9 * (scale ** 2))
+                    if (cov_ij ** 2) > (cs_bound + margin):
+                        return False, True
+            try:
+                mat = np.array(cov, dtype=float)
+                if not np.all(np.isfinite(mat)):
+                    return False, True
+                eigenvals = np.linalg.eigvalsh(mat)
+                if not np.all(np.isfinite(eigenvals)):
+                    return False, True
+                max_eig = float(np.max(eigenvals)) if len(eigenvals) > 0 else 0.0
+                mat_scale = max(max_diag, max_eig)
+                if mat_scale <= 0.0:
+                    if np.any(eigenvals < -1e-15):
+                        return False, True
+                else:
+                    tol = max(1e-15, 1e-11 * mat_scale)
+                    if np.any(eigenvals < -tol):
+                        return False, True
+            except Exception:
+                return False, True
+            return True, False
+        else:
+            if len(cov) == 0:
+                return False, True
+            for elem in cov:
+                if isinstance(elem, bool) or not _is_finite_real(elem):
+                    return False, True
+                if float(elem) < 0.0:
+                    return False, True
+            return True, False
+    return False, True
+
+
+def _are_covariances_equivalent(c1: Any, c2: Any) -> bool:
+    """Check if two valid covariance structures represent the same covariance within numerical tolerance."""
+    try:
+        arr1 = np.array(c1, dtype=float)
+        arr2 = np.array(c2, dtype=float)
+        if arr1.shape == arr2.shape:
+            return bool(np.all(np.abs(arr1 - arr2) <= 1e-4))
+        if arr1.size == 1 and arr2.size == 1:
+            return bool(abs(arr1.item() - arr2.item()) <= 1e-4)
+        return False
+    except Exception:
+        return False
+
+
+def _is_variance_compatible_with_covariance(resolved_var: float, cov: Any) -> bool:
+    """Check if a scalar variance is compatible with the supplied covariance structure."""
+    try:
+        arr = np.array(cov, dtype=float)
+        if arr.size == 1:
+            return bool(abs(arr.item() - resolved_var) <= 1e-4)
+        if arr.ndim == 1:
+            return bool(abs(arr[0] - resolved_var) <= 1e-4)
+        if arr.ndim == 2:
+            return bool(abs(arr[0, 0] - resolved_var) <= 1e-4)
+        return False
+    except Exception:
+        return False
+
+
+def _safe_square(val: float) -> Optional[float]:
+    """Square a float safely, returning finite float or None on overflow/nonfinite."""
+    try:
+        sq = val ** 2
+        if not math.isfinite(sq):
+            return None
+        return sq
+    except (OverflowError, ArithmeticError, ValueError):
+        return None
+
+
+def _validate_prior_distribution(dist: Any) -> Tuple[bool, bool]:
+    """Validate an alternate prior_distribution.
+
+    Returns:
+        (has_valid_distribution, is_malformed)
+        - If dist is None: (False, False)
+        - If dist is invalid/malformed or incomplete: (False, True)
+        - If dist is a valid distribution: (True, False)
+    """
+    if dist is None:
+        return False, False
+    if not isinstance(dist, dict):
+        return False, True
+    if not dist:
+        return False, True
+
+    # Validate family / distribution keys if present
+    if "family" in dist:
+        fam = dist["family"]
+        if not isinstance(fam, str) or not fam.strip():
+            return False, True
+    if "distribution" in dist:
+        dval = dist["distribution"]
+        if not isinstance(dval, str) or not dval.strip():
+            return False, True
+    if "family" in dist and "distribution" in dist:
+        if dist["family"].strip().lower() != dist["distribution"].strip().lower():
+            return False, True
+
+    # Validate mean / mu
+    has_mean = "mean" in dist
+    has_mu = "mu" in dist
+    if has_mean and not _is_finite_real(dist["mean"]):
+        return False, True
+    if has_mu and not _is_finite_real(dist["mu"]):
+        return False, True
+    if has_mean and has_mu:
+        if abs(float(dist["mean"]) - float(dist["mu"])) > 1e-4:
+            return False, True
+
+    # Validate variance / var
+    has_variance = "variance" in dist
+    has_var = "var" in dist
+    if has_variance and not _is_valid_finite_nonnegative(dist["variance"]):
+        return False, True
+    if has_var and not _is_valid_finite_nonnegative(dist["var"]):
+        return False, True
+    if has_variance and has_var:
+        if abs(float(dist["variance"]) - float(dist["var"])) > 1e-4:
+            return False, True
+
+    # Validate std / sigma
+    has_std = "std" in dist
+    has_sigma = "sigma" in dist
+    if has_std and not _is_valid_finite_nonnegative(dist["std"]):
+        return False, True
+    if has_sigma and not _is_valid_finite_nonnegative(dist["sigma"]):
+        return False, True
+    if has_std and has_sigma:
+        if abs(float(dist["std"]) - float(dist["sigma"])) > 1e-4:
+            return False, True
+
+    # Cross-validate variance and std if both supplied
+    resolved_var: Optional[float] = None
+    if has_variance:
+        resolved_var = float(dist["variance"])
+    elif has_var:
+        resolved_var = float(dist["var"])
+
+    resolved_std: Optional[float] = None
+    if has_std:
+        resolved_std = float(dist["std"])
+    elif has_sigma:
+        resolved_std = float(dist["sigma"])
+
+    if resolved_std is not None:
+        sq_std = _safe_square(resolved_std)
+        if sq_std is None:
+            return False, True
+        if resolved_var is not None:
+            if abs(sq_std - resolved_var) > 1e-4:
+                return False, True
+        else:
+            resolved_var = sq_std
+
+    # Validate covariance / cov
+    has_cov = "covariance" in dist
+    has_cov_alias = "cov" in dist
+    has_valid_cov = False
+
+    if has_cov:
+        c_valid, c_malformed = _validate_covariance(dist["covariance"])
+        if c_malformed or not c_valid:
+            return False, True
+        has_valid_cov = True
+
+    if has_cov_alias:
+        c_valid, c_malformed = _validate_covariance(dist["cov"])
+        if c_malformed or not c_valid:
+            return False, True
+        has_valid_cov = True
+
+    # Cross-validate covariance aliases if both declared
+    if has_cov and has_cov_alias:
+        if not _are_covariances_equivalent(dist["covariance"], dist["cov"]):
+            return False, True
+
+    # Cross-validate scalar variance against covariance if both declared
+    if resolved_var is not None:
+        if has_cov:
+            if not _is_variance_compatible_with_covariance(resolved_var, dist["covariance"]):
+                return False, True
+        if has_cov_alias:
+            if not _is_variance_compatible_with_covariance(resolved_var, dist["cov"]):
+                return False, True
+
+    # Prior evidence requires an explicit, valid dispersion parameter
+    has_dispersion = (resolved_var is not None) or (resolved_std is not None) or has_valid_cov
+    if not has_dispersion:
+        return False, True
+
+    return True, False
+
+
+RECOGNIZED_SPATIAL_SUPPORTS = {
+    "microzone_grid",
+    "raster",
+    "pixel_native",
+    "sub_grid",
+    "plot",
+    "zone",
+    "regional",
+    "plot_level_only",
+}
+
+
+def _validate_spatial_support(spatial: Any) -> Tuple[bool, bool]:
+    """Validate spatial_support token.
+
+    Returns:
+        (has_valid_spatial, is_malformed)
+        - If spatial is empty, None, 'none', 'unsupported': (False, False)
+        - If spatial is a recognized spatial support: (True, False)
+        - If spatial is an arbitrary/unknown string (e.g. 'not-a-raster'): (False, True)
+    """
+    if spatial is None:
+        return False, False
+    s_str = str(spatial).strip().lower()
+    if s_str in ("", "none", "unsupported"):
+        return False, False
+    if s_str in RECOGNIZED_SPATIAL_SUPPORTS:
+        return True, False
+    return False, True
+
+
+def _is_surface_revoked_or_unsupported(s: Any) -> Tuple[bool, Optional[str]]:
+    """Determine if an ingredient surface is unsupported or revoked by status or block reasons."""
+    if s is None:
+        return True, "surface_missing"
+    sprov = getattr(s, "provenance", {}) or {}
+    sup_class = sprov.get("support_class")
+    ev_class = sprov.get("evidence_class")
+    if sup_class == "unsupported" or ev_class == "Unsupported":
+        return True, "ingredient_unsupported"
+
+    raw_blocks = resolve_surface_block_reasons(
+        getattr(s, "block_reasons", None),
+        sprov,
+    )
+
+    REVOCATION_BLOCK_STRINGS = (
+        "local_support_revoked",
+        "support_revoked",
+        "evidence_revoked",
+        "blocked",
+        "revoked",
+    )
+    for r in raw_blocks:
+        r_str = str(r).lower()
+        if any(rev in r_str for rev in REVOCATION_BLOCK_STRINGS):
+            return True, "ingredient_blocked"
+
+    raw_status = str(sprov.get("support_status") or "").lower()
+    if raw_status in ("unsupported", "revoked", "blocked", "failed", "none"):
+        return True, "ingredient_unsupported"
+
+    return False, None
 
 
 _ASMAE_NEAREST_RESAMPLE_TYPES = {
@@ -214,13 +597,36 @@ def _align_asmae_grid_to_target(
     target = _validated_north_up_gdal_spec(
         target_raw, height=target_height, width=target_width, label="target"
     )
+    def _clean_row_values(grid_rows: List[List[Optional[float]]], nodata_val: Any) -> List[List[Optional[float]]]:
+        cleaned = []
+        for r in grid_rows:
+            cleaned_row = []
+            for v in r:
+                if v is None:
+                    cleaned_row.append(None)
+                else:
+                    try:
+                        fv = float(v)
+                        if not np.isfinite(fv):
+                            cleaned_row.append(None)
+                        elif nodata_val is not None and np.isclose(fv, float(nodata_val), rtol=0.0, atol=1e-6):
+                            cleaned_row.append(None)
+                        elif np.isclose(fv, -9999.0, rtol=0.0, atol=1e-6):
+                            cleaned_row.append(None)
+                        else:
+                            cleaned_row.append(fv)
+                    except (ValueError, TypeError, OverflowError):
+                        cleaned_row.append(None)
+            cleaned.append(cleaned_row)
+        return cleaned
+
     same_crs = source["crs"].upper() == target["crs"].upper()
     if (
         (source_height, source_width) == (target_height, target_width)
         and same_crs
         and np.allclose(source["transform"], target["transform"], rtol=0.0, atol=1e-12)
     ):
-        return rows, source, target, {
+        return _clean_row_values(rows, source.get("nodata")), source, target, {
             "display_resampled": False,
             "reprojection_applied": False,
             "resampling_method": "identity_grid",
@@ -360,13 +766,43 @@ def _align_asmae_grid_to_target(
         "display_crs": target["crs"],
     }
 
+
+align_asmae_grid_to_target = _align_asmae_grid_to_target
+
+
 def get_standard_variable_name(stype: SurfaceType, meta_var: Optional[str] = None) -> str:
-    v = (meta_var or "").lower()
-    s = stype.value.lower()
+    from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key, STATE_ORDER
+    v = (meta_var or "").strip().lower()
+    s = getattr(stype, "value", str(stype))
+
+    canon_v = canonical_state_key(v) if v else None
+    canon_s = canonical_state_key(s)
+
+    # Reject conflicting canonical declarations
+    if canon_v and canon_v in STATE_ORDER and canon_s and canon_s in STATE_ORDER and canon_v != canon_s:
+        return "conflict_rejected"
+
+    # If meta_var is already an exact canonical state in STATE_ORDER, prefer it
+    if canon_v and canon_v in STATE_ORDER:
+        return canon_v
+
+    # Resolve from surface type
+    if canon_s and canon_s in STATE_ORDER:
+        return canon_s
+
+    # Specific water distinctions before generic water
+    s_low = s.lower()
+    if "root_zone_water" in v or "root_zone_water" in s_low or "rootzone" in v or "rootzone" in s_low:
+        return "root_zone_water"
+    if "surface_wetness" in v or "surface_wetness" in s_low or "wetness" in v or "wetness" in s_low:
+        return "surface_wetness_event"
+    if "canopy_water" in v or "canopy_water" in s_low:
+        return "canopy_water"
+    if "water" in v or "water" in s_low:
+        return "canopy_water"
+
     if "vigor" in v or "vigor" in s or "ndvi" in v or "ndvi" in s:
         return "vigor"
-    if "water" in v or "water" in s or "canopy_water" in v or "canopy_water" in s:
-        return "canopy_water"
     if "salinity" in v or "salinity" in s:
         return "salinity_stress"
     if "biotic" in v or "biotic" in s or "confounder" in v or "confounder" in s:
@@ -385,16 +821,20 @@ def get_surface_display_policy(
     """Determine UI display trust tier, desaturation level, alpha, and warning codes."""
     warning_codes = []
 
+    conf_valid = isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and math.isfinite(confidence)
+    unc_valid = isinstance(uncertainty, (int, float)) and not isinstance(uncertainty, bool) and math.isfinite(uncertainty)
+    clc_valid = isinstance(cross_layer_conflict, (int, float)) and not isinstance(cross_layer_conflict, bool) and math.isfinite(cross_layer_conflict)
+
     if resolution_m <= 1.0 and not is_certified_v90:
         warning_codes.append("resolution_1m_blocked")
 
-    if cross_layer_conflict > 0.45:
+    if not clc_valid or cross_layer_conflict > 0.45:
         warning_codes.append("cross_layer_conflict")
 
-    if confidence < 0.60:
+    if not conf_valid or confidence < 0.60:
         warning_codes.append("low_confidence")
 
-    if uncertainty > 0.40:
+    if not unc_valid or uncertainty > 0.40:
         warning_codes.append("high_uncertainty")
 
     if bma_status != "success":
@@ -402,7 +842,7 @@ def get_surface_display_policy(
 
     # If no major warnings, check for mild warnings for provisional tier
     if not warning_codes:
-        if (0.60 <= confidence <= 0.80) or (0.30 <= uncertainty <= 0.40):
+        if (conf_valid and 0.60 <= confidence <= 0.80) or (unc_valid and 0.30 <= uncertainty <= 0.40):
             warning_codes.append("mild_warning")
 
     # Determine display trust tier based on the highest severity warning
@@ -479,6 +919,7 @@ def compute_asmae_support_classification(
         }
 
     support_class = None
+    state_entry = None
     if state_support_ledger and feature_name:
         from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
         canon_feature = canonical_state_key(feature_name)
@@ -487,9 +928,79 @@ def compute_asmae_support_classification(
             or state_support_ledger.get(feature_name)
             or state_support_ledger.get(f"asmae_{canon_feature}")
         )
-        if state_entry and isinstance(state_entry, dict):
-            if state_entry.get("support_status") in valid_classes:
-                support_class = state_entry["support_status"]
+        if state_entry:
+            raw_status = (
+                state_entry.get("support_status")
+                if isinstance(state_entry, dict)
+                else getattr(state_entry, "support_status", None)
+            )
+            if hasattr(raw_status, "value"):
+                raw_status = raw_status.value
+            raw_status_str = str(raw_status or "").lower()
+
+            raw_rel = (
+                state_entry.get("observation_relationship")
+                if isinstance(state_entry, dict)
+                else getattr(state_entry, "observation_relationship", None)
+            )
+            if hasattr(raw_rel, "value"):
+                raw_rel = raw_rel.value
+            rel_str = str(raw_rel or "").lower()
+
+            raw_blocks = (
+                state_entry.get("block_reasons")
+                if isinstance(state_entry, dict)
+                else getattr(state_entry, "block_reasons", ())
+            ) or ()
+            has_revocation_blocks = any(
+                r in ("local_support_revoked", "support_revoked", "evidence_revoked", "blocked")
+                for r in raw_blocks
+            )
+
+            # S12-02: Denial, revocation, and block reasons take strict precedence
+            if raw_status_str in ("unsupported", "blocked", "failed", "revoked", "none") or rel_str == "unsupported" or has_revocation_blocks:
+                support_class = "unsupported"
+            elif raw_status_str == "prior_constrained":
+                # S12-04 / S673-03: Strict actual-prior qualification
+                raw_var = (
+                    state_entry.get("prior_variance")
+                    if isinstance(state_entry, dict)
+                    else getattr(state_entry, "prior_variance", None)
+                )
+                has_valid_var = _is_valid_finite_nonnegative(raw_var)
+                has_actual_prior_flag = (
+                    (state_entry.get("has_actual_prior") is True or state_entry.get("has_prior_evidence") is True)
+                    if isinstance(state_entry, dict)
+                    else (getattr(state_entry, "has_actual_prior", None) is True or getattr(state_entry, "has_prior_evidence", None) is True)
+                )
+                raw_dist = (
+                    state_entry.get("prior_distribution")
+                    if isinstance(state_entry, dict)
+                    else getattr(state_entry, "prior_distribution", None)
+                )
+                has_valid_dist, is_dist_malformed = _validate_prior_distribution(raw_dist)
+
+                raw_spatial = (
+                    state_entry.get("spatial_support")
+                    if isinstance(state_entry, dict)
+                    else getattr(state_entry, "spatial_support", None)
+                )
+                has_valid_spatial, is_spatial_malformed = _validate_spatial_support(raw_spatial)
+
+                has_invalid_alternate_proof = is_dist_malformed or is_spatial_malformed
+
+                is_explicitly_denied = (
+                    (state_entry.get("has_actual_prior") is False or state_entry.get("has_prior_evidence") is False)
+                    if isinstance(state_entry, dict)
+                    else (getattr(state_entry, "has_actual_prior", None) is False or getattr(state_entry, "has_prior_evidence", None) is False)
+                ) or (raw_var is not None and not has_valid_var) or has_invalid_alternate_proof
+
+                if not is_explicitly_denied and (has_valid_var or has_actual_prior_flag or has_valid_dist or has_valid_spatial):
+                    support_class = "prior_constrained"
+                else:
+                    support_class = "unsupported"
+            elif raw_status_str in valid_classes:
+                support_class = raw_status_str
             else:
                 try:
                     from services.agribrain.scientific_contracts.state_support import resolve_state_evidence_class
@@ -498,26 +1009,136 @@ def compute_asmae_support_classification(
                 except Exception:
                     pass
 
+            # S12-05: Direct observation status strictly requires verified direct measurement proof
+            if support_class == "directly_assimilated":
+                raw_direct = (
+                    state_entry.get("direct_observation_count")
+                    if isinstance(state_entry, dict)
+                    else getattr(state_entry, "direct_observation_count", None)
+                )
+                has_valid_direct = _is_valid_direct_observation_count(raw_direct)
+                if not has_valid_direct and rel_str not in ("direct", "direct_observation"):
+                    support_class = "indirectly_constrained" if rel_str == "indirect" else "proxy_assimilated"
+
     if not support_class:
         raw_class = meta.get("support_class") or meta.get("evidence_support_class")
-        if raw_class in valid_classes:
+        raw_var = meta.get("prior_variance")
+        has_valid_var = _is_valid_finite_nonnegative(raw_var)
+        has_actual_prior_flag = (
+            meta.get("has_actual_prior") is True
+            or meta.get("has_prior_evidence") is True
+            or meta.get("has_enkf_prior") is True
+        )
+        raw_dist = meta.get("prior_distribution")
+        has_valid_dist, is_dist_malformed = _validate_prior_distribution(raw_dist)
+
+        raw_spatial = meta.get("spatial_support")
+        has_valid_spatial, is_spatial_malformed = _validate_spatial_support(raw_spatial)
+
+        is_prior_denied = (
+            meta.get("has_actual_prior") is False
+            or meta.get("has_prior_evidence") is False
+            or (raw_var is not None and not has_valid_var)
+            or is_dist_malformed
+            or is_spatial_malformed
+        )
+
+        if raw_class == "directly_assimilated":
+            raw_direct = meta.get("direct_observation_count")
+            has_valid_direct = _is_valid_direct_observation_count(raw_direct)
+            has_direct_flag = meta.get("direct_observation") is True
+            if has_valid_direct or has_direct_flag:
+                support_class = "directly_assimilated"
+            else:
+                support_class = "indirectly_constrained"
+        elif raw_class in ("proxy_assimilated", "indirectly_constrained"):
             support_class = raw_class
-        elif real_ev and source_reality == "real_raster":
-            support_class = "directly_assimilated"
-        elif real_ev or source_reality in ("raster_composite_proxy", "proxy"):
-            support_class = "proxy_assimilated"
-        elif meta.get("used_archive") or meta.get("used_ml"):
-            support_class = "indirectly_constrained"
-        elif meta.get("has_enkf_proxy_fallback") or meta.get("degraded_mean_only"):
+        elif raw_class == "prior_constrained":
+            if not is_prior_denied and (has_valid_var or has_actual_prior_flag or has_valid_dist or has_valid_spatial):
+                support_class = "prior_constrained"
+            else:
+                support_class = "unsupported"
+        elif not is_prior_denied and (has_valid_var or has_actual_prior_flag or has_valid_dist or has_valid_spatial or meta.get("has_enkf_proxy_fallback") is True):
             support_class = "prior_constrained"
         else:
             support_class = "unsupported"
+
+    from services.agribrain.layer05_asmae.state.descriptors import (
+        STATE_DESCRIPTOR_BY_NAME,
+        AuthorityCeiling,
+    )
+    from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+    canon_name = canonical_state_key(feature_name or stype.value)
+    descriptor = STATE_DESCRIPTOR_BY_NAME.get(canon_name)
+    descriptor_is_prescription = (
+        descriptor is not None
+        and descriptor.authority_ceiling == AuthorityCeiling.PRESCRIPTION_ELIGIBLE
+    )
+
+    from services.agribrain.layer10_sire.surface_contract import _normalize_ceiling_token, resolve_surface_block_reasons
+
+    # AB-R03: Three-way authority ceiling intersection (descriptor x ledger x metadata)
+    CEILING_RANKS = {
+        "VISUALIZATION": 0,
+        "MONITORING_ONLY": 1,
+        "DIAGNOSTIC": 2,
+        "TRAINING_EXPORT": 3,
+        "STATE_UPDATE": 4,
+        "PRESCRIPTION_DRIVER": 5,
+        "PRESCRIPTION_ELIGIBLE": 5,
+        "MANAGED_PRESCRIPTION": 5,
+        "FIELD_PRESCRIPTION": 5,
+        "FULL_SYSTEM_AUTONOMOUS": 5,
+    }
+    RANK_TO_CANONICAL = {
+        0: "VISUALIZATION",
+        1: "MONITORING_ONLY",
+        2: "DIAGNOSTIC",
+        3: "TRAINING_EXPORT",
+        4: "STATE_UPDATE",
+        5: "PRESCRIPTION_DRIVER",
+    }
+
+    raw_ceilings = []
+    if descriptor and descriptor.authority_ceiling is not None:
+        raw_ceilings.append(descriptor.authority_ceiling)
+    if state_entry:
+        if isinstance(state_entry, dict):
+            c = state_entry.get("authority_ceiling") or state_entry.get("authorityCeiling") or state_entry.get("authority")
+        else:
+            c = getattr(state_entry, "authority_ceiling", None)
+        if c is not None:
+            raw_ceilings.append(c)
+    if meta:
+        c = meta.get("authority_ceiling") or meta.get("authorityCeiling") or meta.get("authority")
+        if c is not None:
+            raw_ceilings.append(c)
+
+    normalized_ceilings = [
+        _normalize_ceiling_token(c) for c in raw_ceilings if c is not None and str(c).strip()
+    ]
+    if normalized_ceilings:
+        # Unknown ceiling tokens fail closed to rank 0 (VISUALIZATION)
+        min_rank = min(CEILING_RANKS.get(tok, 0) for tok in normalized_ceilings)
+        state_ceiling = RANK_TO_CANONICAL.get(min_rank, "DIAGNOSTIC")
+    else:
+        min_rank = 2
+        state_ceiling = "DIAGNOSTIC"
+
+    state_block_reasons = resolve_surface_block_reasons(state_entry, meta)
+    has_blocking_reasons = bool(state_block_reasons)
+
+    is_management_eligible = (
+        descriptor_is_prescription
+        and min_rank >= 5
+        and not has_blocking_reasons
+    )
 
     if support_class == "directly_assimilated":
         evidence_class = "Observed"
         direct_observation = True
         scouting = True
-        mgmt = True
+        mgmt = is_management_eligible
         stats = True
     elif support_class == "proxy_assimilated":
         evidence_class = "Proxy-Assimilated"
@@ -538,6 +1159,7 @@ def compute_asmae_support_classification(
         mgmt = False
         stats = False
     else:
+        support_class = "unsupported"
         evidence_class = "Unsupported"
         direct_observation = False
         scouting = False
@@ -559,6 +1181,8 @@ def compute_asmae_support_classification(
         "scouting_zone_eligible": scouting,
         "management_zone_eligible": mgmt,
         "zone_statistics_eligible": stats,
+        "block_reasons": list(state_block_reasons) if state_block_reasons else [],
+        "authority_ceiling": state_ceiling,
     }
 
 
@@ -664,6 +1288,8 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_SALINITY_STRESS: PaletteId.SALINITY_TEAL,
         SurfaceType.ASMAE_THERMAL_STRESS: PaletteId.THERMAL_ORANGE,
         SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: PaletteId.STRESS_RED,
+        SurfaceType.ASMAE_PHENOLOGY_PROGRESS: PaletteId.VIGOR_GREEN,
+        SurfaceType.ASMAE_STRESS_MEMORY: PaletteId.STRESS_RED,
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: PaletteId.RAW_GRAYSCALE,
         SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: PaletteId.UNCERTAINTY_GRAY,
         SurfaceType.ASMAE_UNCERTAINTY: PaletteId.UNCERTAINTY_GRAY,
@@ -724,6 +1350,8 @@ def generate_asmae_surfaces(
         SurfaceType.ASMAE_SALINITY_STRESS: "fraction",
         SurfaceType.ASMAE_THERMAL_STRESS: "fraction",
         SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: "fraction",
+        SurfaceType.ASMAE_PHENOLOGY_PROGRESS: "fraction",
+        SurfaceType.ASMAE_STRESS_MEMORY: "fraction",
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: "meters",
         SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: "fraction",
         SurfaceType.ASMAE_UNCERTAINTY: "fraction",
@@ -765,15 +1393,28 @@ def generate_asmae_surfaces(
     render_ranges = {
         SurfaceType.ASMAE_LAI: (0.0, 8.0),
         SurfaceType.ASMAE_CHLOROPHYLL: (0.0, 80.0),
+        SurfaceType.ASMAE_PHENOLOGY_PROGRESS: (0.0, 1.0),
+        SurfaceType.ASMAE_STRESS_MEMORY: (0.0, 1.0),
         SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: (0.03, 10.0),
     }
 
+    from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+
     for stype in all_asmae_types:
         var_name = stype.value.lower()
-        
+        canon_state = canonical_state_key(stype.value)
+        meta_candidates = [var_name, var_name.upper(), var_name.lower(), stype.value]
+        if canon_state and canon_state != "unmapped":
+            meta_candidates.extend([
+                canon_state, canon_state.upper(), canon_state.lower(),
+                f"asmae_{canon_state}", f"asmae_{canon_state}".upper(), f"asmae_{canon_state}".lower(),
+            ])
+        if stype == SurfaceType.ASMAE_BARE_SOIL:
+            meta_candidates.extend(["asmae_bare_soil_fraction", "bare_soil_fraction", "ASMAE_BARE_SOIL_FRACTION"])
+
         # Look up metadata case-insensitively
         meta = {}
-        for key in [var_name, var_name.upper(), var_name.lower(), stype.value]:
+        for key in meta_candidates:
             if key in l1_data.raster_metadata:
                 meta = l1_data.raster_metadata[key]
                 break
@@ -783,7 +1424,7 @@ def generate_asmae_surfaces(
         has_real_grid = False
         
         # Map variables to their actual raster keys in L1 raster_maps
-        l1_grid_keys = [var_name, var_name.upper(), var_name.lower(), stype.value]
+        l1_grid_keys = list(dict.fromkeys([*meta_candidates, var_name, var_name.upper(), var_name.lower(), stype.value]))
         if stype in (SurfaceType.ASMAE_VIGOR, getattr(SurfaceType, "CANOPY_ASMAE_VIGOR", None)):
             l1_grid_keys.extend(["asmae_vigor", "canopy_asmae_vigor", "vigor"])
         if stype in (SurfaceType.ASMAE_CANOPY_WATER, getattr(SurfaceType, "WATER_ASMAE_CANOPY_WATER", None)):
@@ -791,6 +1432,10 @@ def generate_asmae_surfaces(
         # Standardize state aliases
         if stype == SurfaceType.ASMAE_BARE_SOIL:
             l1_grid_keys.extend(["asmae_bare_soil_fraction", "asmae_bare_soil", "bare_soil_fraction"])
+        if stype == SurfaceType.ASMAE_PHENOLOGY_PROGRESS:
+            l1_grid_keys.extend(["asmae_phenology_progress", "phenology_progress", "phenology"])
+        if stype == SurfaceType.ASMAE_STRESS_MEMORY:
+            l1_grid_keys.extend(["asmae_stress_memory", "stress_memory", "memory"])
 
         for key in l1_grid_keys:
             if key in l1_data.raster_maps:
@@ -800,7 +1445,7 @@ def generate_asmae_surfaces(
 
         # Fallback to metadata / scalar last_values
         scalar_val = None
-        for key in [var_name, var_name.upper(), var_name.lower(), stype.value]:
+        for key in meta_candidates:
             if key in l1_data.last_values:
                 scalar_val = l1_data.last_values[key]
                 break
@@ -822,6 +1467,7 @@ def generate_asmae_surfaces(
             generated_from = "metadata_fallback"
             diagnostic_only = True
             state_update_allowed = False
+            presc_driver_allowed = False
             visual_only = True
         else:
             has_spatial_grid_flag = True
@@ -832,17 +1478,100 @@ def generate_asmae_surfaces(
                 val = scalar_val if scalar_val is not None else (10.0 if stype == SurfaceType.ASMAE_EFFECTIVE_RESOLUTION else 0.0)
                 grid = [[val] * W for _ in range(H)]
             
-            diagnostic_only = meta.get("diagnostic_only", True)
-            state_update_allowed = meta.get("state_update_allowed", False)
+            # Multi-carrier inspection for meta permissions
+            meta_su = []
+            for k in ("state_update_allowed", "stateUpdateAllowed"):
+                if k in meta:
+                    meta_su.append(_parse_strict_bool(meta[k]))
+            if False in meta_su:
+                state_update_allowed = False
+            elif True in meta_su:
+                state_update_allowed = True
+            else:
+                state_update_allowed = False
+
+            meta_presc = []
+            for k in ("prescription_driver_allowed", "prescriptionDriverAllowed"):
+                if k in meta:
+                    meta_presc.append(_parse_strict_bool(meta[k]))
+            if False in meta_presc:
+                presc_driver_allowed = False
+            elif True in meta_presc:
+                presc_driver_allowed = True
+            else:
+                presc_driver_allowed = False
+
+            meta_diag = []
+            for k in ("diagnostic_only", "diagnosticOnly"):
+                if k in meta:
+                    meta_diag.append(_parse_strict_bool(meta[k]))
+            if True in meta_diag:
+                diagnostic_only = True
+            elif False in meta_diag:
+                diagnostic_only = False
+            else:
+                diagnostic_only = True
             visual_only = False
 
         # Extract parameters None-safely
         confidence_available = bool(meta.get("calibrated_confidence_available", meta.get("posterior_confidence_available", False)))
         uncertainty_available = bool(meta.get("posterior_uncertainty_available", meta.get("uncertainty") is not None))
-        raw_conf = meta.get("posterior_concentration", meta.get("confidence"))
-        confidence = float(raw_conf) if raw_conf is not None else 0.0
-        raw_unc = meta.get("uncertainty")
-        uncertainty = float(raw_unc) if raw_unc is not None else 1.0
+
+        # E-D01: State-specific uncertainty grid & confidence binding
+        state_key = var_name[len("asmae_"):] if var_name.startswith("asmae_") else var_name
+        search_state_keys = [state_key]
+        if canon_state and canon_state != "unmapped" and canon_state not in search_state_keys:
+            search_state_keys.append(canon_state)
+        if state_key == "bare_soil" and "bare_soil_fraction" not in search_state_keys:
+            search_state_keys.append("bare_soil_fraction")
+        elif state_key == "bare_soil_fraction" and "bare_soil" not in search_state_keys:
+            search_state_keys.append("bare_soil")
+
+        own_unc_grid = None
+        own_conf_grid = None
+        if l1_data and hasattr(l1_data, "raster_maps"):
+            for sk in search_state_keys:
+                if own_unc_grid is None:
+                    own_unc_grid = (
+                        l1_data.raster_maps.get(f"asmae_{sk}_uncertainty")
+                        or l1_data.raster_maps.get(f"{sk}_uncertainty")
+                    )
+                if own_conf_grid is None:
+                    own_conf_grid = (
+                        l1_data.raster_maps.get(f"asmae_{sk}_confidence")
+                        or l1_data.raster_maps.get(f"{sk}_confidence")
+                    )
+                if own_unc_grid is not None and own_conf_grid is not None:
+                    break
+
+        if own_unc_grid is not None:
+            unc_finite = [
+                float(v) for row in own_unc_grid for v in row
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            ]
+            if unc_finite:
+                uncertainty = sum(unc_finite) / len(unc_finite)
+            else:
+                raw_unc = meta.get("uncertainty")
+                uncertainty = float(raw_unc) if raw_unc is not None else 1.0
+        else:
+            raw_unc = meta.get("uncertainty")
+            uncertainty = float(raw_unc) if raw_unc is not None else 1.0
+
+        if own_conf_grid is not None:
+            conf_finite = [
+                float(v) for row in own_conf_grid for v in row
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            ]
+            if conf_finite:
+                confidence = sum(conf_finite) / len(conf_finite)
+            else:
+                raw_conf = meta.get("posterior_concentration", meta.get("confidence"))
+                confidence = float(raw_conf) if raw_conf is not None else 0.0
+        else:
+            raw_conf = meta.get("posterior_concentration", meta.get("confidence"))
+            confidence = float(raw_conf) if raw_conf is not None else 0.0
+
         resolution_m = float(meta.get("resolution_m", 10.0))
         asmae_channel = meta.get("asmae_channel", "diagnostic")
         source_basis = meta.get("source_basis", "asmae")
@@ -902,17 +1631,25 @@ def generate_asmae_surfaces(
                 "report_verified_evidence_hash": meta.get("report_verified_evidence_hash", ""),
             }
 
-            # Call V90 resolver
-            from certification.v90_resolver import verify_v90_certification_record
-            resolved_result = verify_v90_certification_record(
-                certification_id=cert_id,
-                plot_id=inp.plot_id,
-                variable=v90_var,
-                time_window=(meta.get("time_window_start"), meta.get("time_window_end")),
-                geometry_hash=geom_hash,
-                crop_season_id=crop_season_id,
-                source_hashes=source_hashes
-            )
+            # Call V90 resolver, ensuring conflicting canonical variables are rejected unconditionally
+            if v90_var == "conflict_rejected":
+                from certification.v90_schema import V90ResolutionResult
+                resolved_result = V90ResolutionResult(
+                    approved=False,
+                    reason_codes=["canonical_variable_conflict", "variable_mismatch"],
+                    certification_id=cert_id,
+                )
+            else:
+                from certification.v90_resolver import verify_v90_certification_record
+                resolved_result = verify_v90_certification_record(
+                    certification_id=cert_id,
+                    plot_id=inp.plot_id,
+                    variable=v90_var,
+                    time_window=(meta.get("time_window_start"), meta.get("time_window_end")),
+                    geometry_hash=geom_hash,
+                    crop_season_id=crop_season_id,
+                    source_hashes=source_hashes
+                )
             
             if cert_src == "v90" and cert_status == "certified" and cert_id and resolved_result.approved:
                 is_certified_v90 = True
@@ -996,6 +1733,8 @@ def generate_asmae_surfaces(
             SurfaceType.ASMAE_SALINITY_STRESS: "ASMAE_ENKF",
             SurfaceType.ASMAE_THERMAL_STRESS: "ASMAE_ENKF",
             SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: "ASMAE_ENKF",
+            SurfaceType.ASMAE_PHENOLOGY_PROGRESS: "ASMAE_ENKF",
+            SurfaceType.ASMAE_STRESS_MEMORY: "ASMAE_ENKF",
             SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: "ASMAE_ENKF",
             SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: "ASMAE_BMA",
             SurfaceType.ASMAE_UNCERTAINTY: "ASMAE_BMA",
@@ -1031,6 +1770,8 @@ def generate_asmae_surfaces(
             SurfaceType.ASMAE_SALINITY_STRESS: "asmae_salinity_stress",
             SurfaceType.ASMAE_THERMAL_STRESS: "asmae_thermal_stress",
             SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: "asmae_biotic_confounder_risk",
+            SurfaceType.ASMAE_PHENOLOGY_PROGRESS: "asmae_phenology_progress",
+            SurfaceType.ASMAE_STRESS_MEMORY: "asmae_stress_memory",
             SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: "asmae_effective_resolution",
             SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: "asmae_posterior_concentration",
             SurfaceType.ASMAE_UNCERTAINTY: "asmae_uncertainty",
@@ -1063,11 +1804,33 @@ def generate_asmae_surfaces(
             feature_name=feature_mapping.get(stype, var_name),
         )
 
+        surf_blocks = []
+        for b_source in (
+            meta.get("block_reasons"),
+            meta.get("blockReasons"),
+            meta.get("restriction_reasons"),
+            meta.get("restrictionReasons"),
+            meta.get("exclusion_reason"),
+            meta.get("exclusionReason"),
+            meta.get("authority_block_reason"),
+            meta.get("authorityBlockReason"),
+            support_meta.get("block_reasons") if isinstance(support_meta, dict) else None,
+        ):
+            if b_source:
+                if isinstance(b_source, (list, tuple, set)):
+                    for b in b_source:
+                        if b and str(b) not in surf_blocks:
+                            surf_blocks.append(str(b))
+                elif isinstance(b_source, str) and b_source:
+                    if b_source not in surf_blocks:
+                        surf_blocks.append(b_source)
+
         provenance = {
             "real_asmae_evidence": real_ev,
             "source_reality": src_real,
             "support_class": support_meta["support_class"],
             "evidence_class": support_meta["evidence_class"],
+            "authority_ceiling": support_meta.get("authority_ceiling"),
             "direct_observation": support_meta["direct_observation"],
             "scouting_zone_eligible": support_meta["scouting_zone_eligible"],
             "management_zone_eligible": support_meta["management_zone_eligible"],
@@ -1092,7 +1855,12 @@ def generate_asmae_surfaces(
             "certified_basis_m": certified_basis_m,
             "source_basis": source_basis,
             "confidence": confidence,
-            "uncertainty": uncertainty,
+            "uncertainty": own_unc_grid if own_unc_grid is not None else uncertainty,
+            "uncertainty_grid": own_unc_grid,
+            "confidence_grid": own_conf_grid,
+            "diagnostic_uncertainty": meta.get("diagnostic_uncertainty", meta.get("posterior_uncertainty")),
+            "normalized_uncertainty": meta.get("normalized_uncertainty", meta.get("posterior_uncertainty")),
+            "state_uncertainty_scalar": uncertainty,
             "posterior_confidence_available": confidence_available,
             "posterior_uncertainty_available": uncertainty_available,
             "retro_status": retro_status,
@@ -1101,6 +1869,7 @@ def generate_asmae_surfaces(
             "bma_disagreement": bma_disagreement,
             "cross_layer_conflict": cross_layer_conflict,
             "state_update_allowed": state_update_allowed,
+            "prescription_driver_allowed": presc_driver_allowed,
             "enkf_mode": enkf_mode,
             "radiometric_mode": radiometric_mode,
             "operator_locked": operator_locked,
@@ -1124,6 +1893,8 @@ def generate_asmae_surfaces(
             "requires_user_warning": policy["requires_user_warning"],
             "warning_wording": warning_wording,
         }
+        if surf_blocks:
+            provenance["block_reasons"] = list(surf_blocks)
 
         surface_source_grid_spec = None
         surface_display_grid_spec = None
@@ -1254,6 +2025,48 @@ def generate_asmae_surfaces(
             provenance["scope"] = "plot_level"
             provenance["constant_allowed"] = True
 
+        has_blocks = len(surf_blocks) > 0
+        state_update_req = _parse_strict_bool(provenance.get("state_update_allowed"))
+        presc_req = _parse_strict_bool(provenance.get("prescription_driver_allowed"))
+
+        # Bind support class: unsupported or derived diagnostic cannot have active permissions
+        if support_meta.get("support_class") in ("unsupported", "derived_diagnostic"):
+            state_update_req = False
+            presc_req = False
+
+        from services.agribrain.layer10_sire.surface_contract import _normalize_ceiling_token
+        auth_ceil = _normalize_ceiling_token(provenance.get("authority_ceiling") or support_meta.get("authority_ceiling"))
+        if auth_ceil in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC", "TRAINING_EXPORT"):
+            state_update_req = False
+            presc_req = False
+        elif auth_ceil == "STATE_UPDATE":
+            presc_req = False
+        elif auth_ceil and auth_ceil not in ("PRESCRIPTION_DRIVER", "PRESCRIPTION_ELIGIBLE", "MANAGED_PRESCRIPTION", "FIELD_PRESCRIPTION", "FULL_SYSTEM_AUTONOMOUS"):
+            # Unknown ceiling -> fail-closed
+            state_update_req = False
+            presc_req = False
+
+        # Static descriptor ceiling intersection
+        from services.agribrain.layer05_asmae.state.descriptors import STATE_DESCRIPTOR_BY_NAME
+        from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+        canon_name = canonical_state_key(feature_mapping.get(stype, var_name) or stype.value)
+        desc = STATE_DESCRIPTOR_BY_NAME.get(canon_name)
+        if desc and desc.authority_ceiling:
+            desc_ceil_tok = _normalize_ceiling_token(desc.authority_ceiling)
+            if desc_ceil_tok in ("VISUALIZATION", "MONITORING_ONLY", "DIAGNOSTIC", "TRAINING_EXPORT"):
+                state_update_req = False
+                presc_req = False
+            elif desc_ceil_tok == "STATE_UPDATE":
+                presc_req = False
+
+        if provenance.get("diagnostic_only") is True:
+            state_update_req = False
+            presc_req = False
+
+        surf_state_update = state_update_req and not has_blocks
+        surf_prescription = presc_req and not has_blocks
+        provenance["state_update_allowed"] = surf_state_update
+        provenance["prescription_driver_allowed"] = surf_prescription
         surfaces.append(SurfaceArtifact(
             surface_id=f"{stype.value}_{inp.plot_id}",
             semantic_type=stype,
@@ -1265,10 +2078,13 @@ def generate_asmae_surfaces(
             palette_id=palettes[stype],
             source_layers=["L1"],
             provenance=provenance,
+            state_update_allowed=surf_state_update,
+            prescription_driver_allowed=surf_prescription,
             grounding_class=grounding,
             grid_spec=surface_display_grid_spec,
             source_grid_spec=surface_source_grid_spec,
             display_grid_spec=surface_display_grid_spec,
+            block_reasons=list(surf_blocks) if surf_blocks else None,
         ))
 
     return surfaces
@@ -1601,6 +2417,13 @@ def generate_asmae_aliases(
         if rules.get("confounder_warnings"):
             prov["confounder_warnings"] = rules["confounder_warnings"]
         
+        combined_blocks = resolve_surface_block_reasons(
+            getattr(src_surf, "block_reasons", None),
+            prov,
+        )
+        if combined_blocks:
+            prov["block_reasons"] = list(combined_blocks)
+
         aliases.append(SurfaceArtifact(
             surface_id=f"{rules['alias'].value}_{inp.plot_id}",
             semantic_type=rules["alias"],
@@ -1612,10 +2435,13 @@ def generate_asmae_aliases(
             palette_id=src_surf.palette_id,
             source_layers=src_surf.source_layers,
             provenance=prov,
+            state_update_allowed=bool(prov.get("state_update_allowed", False)),
+            prescription_driver_allowed=bool(prov.get("prescription_driver_allowed", False)),
             grounding_class=src_surf.grounding_class,
             grid_spec=grid_spec_dict,
             source_grid_spec=src_surf.source_grid_spec,
             display_grid_spec=grid_spec_dict,
+            block_reasons=list(combined_blocks) if combined_blocks else None,
         ))
 
     # ── V92.4-BC.2: VEG_ATTENTION_ASMAE_DIAGNOSTIC composite ──────────
@@ -1632,6 +2458,10 @@ def generate_asmae_aliases(
     for st, w in veg_attn_ingredients.items():
         s = find_surf(st)
         if s:
+            is_bad, bad_reason = _is_surface_revoked_or_unsupported(s)
+            if is_bad:
+                excluded_veg_ingredients.append({"surface": st.value, "reason": bad_reason})
+                continue
             pixel_ok, pixel_reason = asmae_surface_pixel_visual_eligible(s, output_grid_spec=grid_spec_dict)
             if pixel_ok:
                 active_veg_ingredients[st] = (s, w)
@@ -1669,6 +2499,8 @@ def generate_asmae_aliases(
                 render_range=(0.0, 1.0),
                 palette_id=PaletteId.RISK_HEAT,
                 source_layers=["L1"],
+                state_update_allowed=False,
+                prescription_driver_allowed=False,
                 provenance={
                     "alias_of": "ASMAE_VEG_ATTENTION_COMPOSITE",
                     "map_mode": "veg_attention",
@@ -1705,12 +2537,16 @@ def generate_asmae_aliases(
         SurfaceType.ASMAE_CROSS_LAYER_CONFLICT: 0.15,
     }
     
-    # V92.4-BC.2: Gate each risk ingredient on pixel_visual eligibility (not authority)
+    # S12-01 / S673-02: Filter risk ingredients on scientific support qualification and revocation
     active_ingredients = {}
     excluded_ingredients = []
     for st, w in risk_ingredients.items():
         s = find_surf(st)
         if s:
+            is_bad, bad_reason = _is_surface_revoked_or_unsupported(s)
+            if is_bad:
+                excluded_ingredients.append({"surface": st.value, "reason": bad_reason})
+                continue
             elig, elig_reason = asmae_surface_pixel_visual_eligible(s, output_grid_spec=grid_spec_dict)
             if elig:
                 active_ingredients[st] = (s, w)
@@ -1765,6 +2601,8 @@ def generate_asmae_aliases(
                 render_range=(0.0, 1.0),
                 palette_id=PaletteId.RISK_HEAT,
                 source_layers=["L1"],
+                state_update_allowed=False,
+                prescription_driver_allowed=False,
                 provenance={
                     "alias_of": "ASMAE_RISK_COMPOSITE",
                     "map_mode": "composite_risk",

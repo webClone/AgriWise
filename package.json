@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:frontend": "node --test tests/frontend/layer10-request-state.test.mjs tests/frontend/crop-cycle-context.test.mjs tests/frontend/crop-runtime-declaration.test.mjs",
+    "test:frontend": "node --test tests/frontend/layer10-request-state.test.mjs tests/frontend/crop-cycle-context.test.mjs tests/frontend/crop-runtime-declaration.test.mjs tests/frontend/parcel-assessment-identity.test.mjs tests/frontend/parcel-assessment-lifecycle.test.mjs",
     "validate:r2-world": "npx tsx src/components/experience/world/validation.ts",
     "api": "py -m uvicorn services.agribrain.app.main:app --port 8000 --reload"
   },

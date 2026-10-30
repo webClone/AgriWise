@@ -17,12 +17,15 @@ import {
 } from "@/lib/agribrain/render-materialization";
 import type { EngineStatus } from "@/hooks/usePlotIntelligence";
 
+import type { Finding } from "@/lib/agribrain/parcel-assessment-contract";
+
 interface FarmerViewProps {
   data: Layer10Result;
   activeMode: string;
   surfaceType: string;
   explainPack: ExplainabilityPack | undefined;
   engines: EngineStatus[];
+  topFindings?: Finding[];
   assimilation: any;
   onAskBrain: (query: string) => void;
 }
@@ -437,7 +440,16 @@ function ZoneAlertCard({ zone, onAsk }: { zone: ZoneData; onAsk: (q: string) => 
 }
 
 // ── Main Farmer View ────────────────────────────────────────────────────
-export default function SidebarFarmerView({ data, activeMode, surfaceType, explainPack, engines, assimilation, onAskBrain }: FarmerViewProps) {
+export default function SidebarFarmerView({
+  data,
+  activeMode,
+  surfaceType,
+  explainPack,
+  engines,
+  topFindings = [],
+  assimilation,
+  onAskBrain,
+}: FarmerViewProps) {
   // Extract real values from engine data
   const l0 = engines.find(e => e.id === "L0");
   const l2 = engines.find(e => e.id === "L2");
@@ -1003,6 +1015,76 @@ export default function SidebarFarmerView({ data, activeMode, surfaceType, expla
           <p style={{ fontSize: "12px", color: "#e2e8f0", lineHeight: 1.6, margin: 0 }}>{explainPack.summary}</p>
         </div>
       )}
+
+      {/* ── Headline Findings from Canonical Assessment ─────────── */}
+      <div>
+        <div style={{ fontSize: "11px", color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: "8px" }}>
+          Key Assessment Findings
+        </div>
+        {topFindings && topFindings.length > 0 ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            {topFindings.map((finding, idx) => (
+              <div
+                key={finding.id || idx}
+                style={{
+                  padding: "8px 10px",
+                  borderRadius: "8px",
+                  background: finding.severity === "critical"
+                    ? "rgba(239, 68, 68, 0.08)"
+                    : finding.severity === "medium"
+                    ? "rgba(245, 158, 11, 0.08)"
+                    : "rgba(99, 102, 241, 0.08)",
+                  border: `1px solid ${
+                    finding.severity === "critical"
+                      ? "rgba(239, 68, 68, 0.2)"
+                      : finding.severity === "medium"
+                      ? "rgba(245, 158, 11, 0.2)"
+                      : "rgba(99, 102, 241, 0.15)"
+                  }`,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "4px" }}>
+                  <span style={{ fontSize: "12px", fontWeight: 700, color: "#f1f5f9" }}>
+                    {finding.title}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: "9px",
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      padding: "1px 5px",
+                      borderRadius: "3px",
+                      background: finding.severity === "critical" ? "rgba(239,68,68,0.2)" : "rgba(148,163,184,0.15)",
+                      color: finding.severity === "critical" ? "#f87171" : "#94a3b8",
+                    }}
+                  >
+                    {finding.severity}
+                  </span>
+                </div>
+                {finding.description && finding.description !== finding.title && (
+                  <div style={{ fontSize: "11px", color: "#94a3b8", lineHeight: 1.4 }}>
+                    {finding.description}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div
+            style={{
+              padding: "8px 10px",
+              borderRadius: "8px",
+              background: "rgba(148, 163, 184, 0.05)",
+              border: "1px solid rgba(148, 163, 184, 0.1)",
+              fontSize: "11px",
+              color: "#94a3b8",
+              fontStyle: "italic",
+            }}
+          >
+            No headline findings reported for this parcel publication.
+          </div>
+        )}
+      </div>
 
       {/* Zone Alerts — gated behind mode authorization */}
       {isModeAuthorizedForDiagnosis && relevantZones.length > 0 && (

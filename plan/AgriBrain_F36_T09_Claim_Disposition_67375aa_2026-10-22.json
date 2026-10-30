@@ -1,0 +1,173 @@
+{
+  "schema": "agribrain.bounded_claim_disposition.v1",
+  "candidate": "67375aa9ca0dfdc41c36d32e4105794b07e6b770",
+  "exact_immediate_parent": "9d7529afb411ddabb5fc8f46931cf098e10d9240",
+  "branch": "feat/f36-t09-asmae-13-state-publication",
+  "review_date": "2026-10-22",
+  "timezone": "Africa/Algiers",
+  "verdict": "hold_unconditional_stage_1_2_closure_pending_three_bounded_residual_groups",
+  "read_only_production": true,
+  "remote_git_writes": false,
+  "repository_tests_used_as_correctness_proof": false,
+  "full_pipeline_or_browser_executed": false,
+  "hardware_executed": false,
+  "FA": {
+    "total": 52,
+    "open": 52,
+    "checked": 0
+  },
+  "original_claims": [
+    {
+      "id": "S12-01",
+      "bounded_original_counterexample": "verified_repaired",
+      "broad_claim": "partial",
+      "evidence": [
+        "gating/results.json:native_risk_composites",
+        "gating/frontend-risk-results.json:original"
+      ],
+      "remaining": [
+        "S673-02"
+      ]
+    },
+    {
+      "id": "S12-02",
+      "bounded_original_counterexample": "verified_repaired",
+      "broad_claim": "partial",
+      "evidence": [
+        "gating/results.json:restriction_cases",
+        "integration/results.json:cases.producer_diagnostic_ceiling"
+      ],
+      "remaining": [
+        "S673-01",
+        "S673-02"
+      ]
+    },
+    {
+      "id": "S12-03",
+      "bounded_original_counterexample": "verified_repaired",
+      "broad_claim": "verified_for_tested_native_boolean_permission_contracts",
+      "evidence": [
+        "integration/results.json:cases.all_registered_native_products_permission_parity",
+        "integration/results.json:cases.mapping_permission_matrix"
+      ],
+      "remaining": []
+    },
+    {
+      "id": "S12-04",
+      "bounded_original_counterexample": "verified_repaired",
+      "broad_claim": "partial",
+      "evidence": [
+        "classification/results.json:repair_checks"
+      ],
+      "remaining": [
+        "S673-03"
+      ]
+    },
+    {
+      "id": "S12-05",
+      "bounded_original_counterexample": "verified_repaired",
+      "broad_claim": "verified_for_reported_numerical_and_exception_boundaries",
+      "evidence": [
+        "classification/results.json:repair_checks"
+      ],
+      "remaining": []
+    }
+  ],
+  "residuals": [
+    {
+      "id": "S673-01",
+      "priority": "P2",
+      "title": "Current STATE_UPDATE and TRAINING_EXPORT ceilings grant raw management eligibility",
+      "status": "open",
+      "inherited_at_exact_parent": true,
+      "introduced_regression_demonstrated": false,
+      "production_paths": [
+        "services/agribrain/layer10_sire/surfaces/asmae.py",
+        "services/agribrain/layer05_asmae/state/descriptors.py"
+      ],
+      "evidence": [
+        "integration/results.json:cases.runtime_enum_ceiling_matrix"
+      ],
+      "actual_path": "native production ledger builder -> canonical ledger normalizer -> native generator -> canonical serializer",
+      "demonstrated_effect": "management_zone_eligible True for declared nonprescription runtime ceilings",
+      "limits": "No actual prescription; native and canonical action permissions remain False. Authored current ceiling fixture, not field occurrence.",
+      "requirements": [
+        "AB-ARC-005",
+        "AB-ASM-016",
+        "AB-L10-001"
+      ],
+      "bounded_repair": "Explicit typed prescription-capability predicate intersected with static descriptor maximum and current restrictions; unknown ceiling denies."
+    },
+    {
+      "id": "S673-02",
+      "priority": "P2",
+      "title": "Revocation continuity incomplete across native provenance and composite builders",
+      "status": "open",
+      "inherited_at_exact_parent": true,
+      "introduced_regression_demonstrated": false,
+      "production_paths": [
+        "services/agribrain/layer10_sire/surfaces/asmae.py"
+      ],
+      "evidence": [
+        "gating/results.json:consumer_boundary_cases.typed_surface",
+        "gating/results.json:consumer_boundary_cases.metadata",
+        "gating/frontend-risk-results.json:metadataRevocation"
+      ],
+      "actual_path": "Authored L1SpatialData metadata -> native generator -> native alias -> exact complete AST authorization -> actual pure TypeScript resolver; constructed-surface control exercises production dataclass constructor",
+      "demonstrated_effect": "Revoked metadata source changes authorized selected risk first pixel 0.0588 -> 0.068; explicit constructed-surface revocation changes vegetation attention first pixel 0.0595 -> 0.1",
+      "limits": "Normal producer incidence and browser pixels not established. Vegetation attention overlay is denied; risk is authorized diagnostic only. No action execution.",
+      "requirements": [
+        "AB-ARC-006",
+        "AB-ASM-011",
+        "AB-L10-001"
+      ],
+      "bounded_repair": "Carry current restrictions into canonical provenance; shared support/revocation ingredient predicate for both composites; scale-invariance counterfactuals with qualified controls."
+    },
+    {
+      "id": "S673-03",
+      "priority": "P2",
+      "title": "Alternate purported prior proof accepted without content qualification",
+      "status": "open",
+      "inherited_at_exact_parent": true,
+      "introduced_regression_demonstrated": false,
+      "production_paths": [
+        "services/agribrain/layer10_sire/surfaces/asmae.py",
+        "services/agribrain/scientific_contracts/ledger_adapter.py"
+      ],
+      "evidence": [
+        "classification/candidate-results.json:native_cases.native_ledger_prior_distribution_nan",
+        "classification/candidate-results.json:native_cases.native_ledger_prior_distribution_string",
+        "classification/candidate-results.json:native_cases.native_ledger_prior_spatial_nonraster"
+      ],
+      "actual_path": "Native ledger normalizer -> native surface generator",
+      "demonstrated_effect": "Malformed/nonfinite negative prior distribution or arbitrary spatial tag yields Prior-Constrained/scouting True",
+      "limits": "No management or state-update permission. Malformed carriers deliberately authored; no ordinary producer occurrence claimed; genuine model priors must remain supported.",
+      "requirements": [
+        "AB-ASM-003",
+        "AB-ARC-006",
+        "AB-L10-001"
+      ],
+      "bounded_repair": "Validate alternative distribution shape/numbers and spatial prior reference; malformed supplied proof denies without fallback; preserve finite zero variance and genuine prior controls."
+    }
+  ],
+  "deferred_stages": {
+    "3": "Dedicated phenology/stress-memory products and catalog",
+    "4": "Expert thirteen-state selector",
+    "5": "Nodata and physical-zero preservation",
+    "6": "Integrated GIS publication and real-plot/browser receipts"
+  },
+  "evidence_scope": {
+    "source_files_each": 1086,
+    "classification_helper_cases_each": 54,
+    "classification_native_cases_each": 29,
+    "classification_repair_checks": 13,
+    "classification_valid_controls": 9,
+    "gating_assertions_each": 19,
+    "frontend_checks_each": 4,
+    "integration_case_groups_each": 20,
+    "integration_assertions_each": 34,
+    "root_replay_commands": 7,
+    "root_observation_assertions": 35
+  },
+  "merge_recommendation": "Finish S673-01..03 and bounded replay before unconditional Stage1-2 merge approval; independently scoped Stage3 preparation is not universally blocked; no FA signoff."
+}

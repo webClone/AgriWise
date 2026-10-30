@@ -1,6 +1,4 @@
-"""
-Render Manifest Builder — Generate frontend-consumable map mode definitions
-"""
+import math
 from typing import List
 from services.agribrain.layer10_sire.schema import (
     Layer10Input, SurfaceArtifact, SurfaceType, RenderManifest,
@@ -42,6 +40,8 @@ SURFACE_TO_MODE = {
     SurfaceType.ASMAE_SALINITY_STRESS: RenderMode.ASMAE_SALINITY_STRESS,
     SurfaceType.ASMAE_THERMAL_STRESS: RenderMode.ASMAE_THERMAL_STRESS,
     SurfaceType.ASMAE_BIOTIC_CONFOUNDER_RISK: RenderMode.ASMAE_BIOTIC_CONFOUNDER_RISK,
+    SurfaceType.ASMAE_PHENOLOGY_PROGRESS: RenderMode.ASMAE_PHENOLOGY_PROGRESS,
+    SurfaceType.ASMAE_STRESS_MEMORY: RenderMode.ASMAE_STRESS_MEMORY,
     SurfaceType.ASMAE_EFFECTIVE_RESOLUTION: RenderMode.ASMAE_EFFECTIVE_RESOLUTION,
     SurfaceType.ASMAE_POSTERIOR_CONCENTRATION: RenderMode.ASMAE_POSTERIOR_CONCENTRATION,
     SurfaceType.ASMAE_CONFIDENCE: RenderMode.ASMAE_POSTERIOR_CONCENTRATION,
@@ -124,7 +124,8 @@ DEFAULT_LEGENDS = {
     RenderMode.ASMAE_LAI: [
         LegendEntry("Sparse Canopy (<1.5)", "#E8F5E9", (0.0, 1.5)),
         LegendEntry("Moderate (1.5-3.5)", "#81C784", (1.5, 3.5)),
-        LegendEntry("Dense Canopy (>3.5)", "#1B5E20", (3.5, 6.0)),
+        LegendEntry("Dense Canopy (3.5-6.0)", "#2E7D32", (3.5, 6.0)),
+        LegendEntry("Very Dense Canopy (>6.0)", "#1B5E20", (6.0, 8.0)),
     ],
     RenderMode.ASMAE_CHLOROPHYLL: [
         LegendEntry("Low Chlorophyll", "#FFEBEE", (0.0, 30.0)),
@@ -168,6 +169,16 @@ DEFAULT_LEGENDS = {
         LegendEntry("Low Confounder Risk", "#FFF3E0", (0.0, 0.3)),
         LegendEntry("Moderate Risk", "#FF8F00", (0.3, 0.7)),
         LegendEntry("High Biotic Risk", "#E65100", (0.7, 1.0)),
+    ],
+    RenderMode.ASMAE_PHENOLOGY_PROGRESS: [
+        LegendEntry("Early Vegetative", "#C8E6C9", (0.0, 0.3)),
+        LegendEntry("Mid-Season", "#4CAF50", (0.3, 0.7)),
+        LegendEntry("Late / Maturing", "#1B5E20", (0.7, 1.0)),
+    ],
+    RenderMode.ASMAE_STRESS_MEMORY: [
+        LegendEntry("Low Stress Memory", "#E8F5E9", (0.0, 0.3)),
+        LegendEntry("Moderate Memory", "#FFB74D", (0.3, 0.7)),
+        LegendEntry("Severe Memory", "#D32F2F", (0.7, 1.0)),
     ],
     RenderMode.ASMAE_EFFECTIVE_RESOLUTION: [
         LegendEntry("Fine Resolution (0.03m)", "#E8F5E9", (0.03, 0.5)),
@@ -234,6 +245,8 @@ MODE_PALETTE = {
     RenderMode.ASMAE_SALINITY_STRESS: PaletteId.SALINITY_TEAL,
     RenderMode.ASMAE_THERMAL_STRESS: PaletteId.THERMAL_ORANGE,
     RenderMode.ASMAE_BIOTIC_CONFOUNDER_RISK: PaletteId.STRESS_RED,
+    RenderMode.ASMAE_PHENOLOGY_PROGRESS: PaletteId.VIGOR_GREEN,
+    RenderMode.ASMAE_STRESS_MEMORY: PaletteId.STRESS_RED,
     RenderMode.ASMAE_EFFECTIVE_RESOLUTION: PaletteId.RAW_GRAYSCALE,
     RenderMode.ASMAE_POSTERIOR_CONCENTRATION: PaletteId.UNCERTAINTY_GRAY,
     RenderMode.ASMAE_UNCERTAINTY: PaletteId.UNCERTAINTY_GRAY,
@@ -255,10 +268,41 @@ def build_render_manifest(
     for s in surfaces:
         mode = SURFACE_TO_MODE.get(s.semantic_type)
         if mode is not None:
-            available_modes_set.add(mode)
-            if mode not in surface_ids_by_mode:
-                surface_ids_by_mode[mode] = []
-            surface_ids_by_mode[mode].append(s.surface_id)
+            vals = s.values or []
+            has_valid_pixels = any(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                for row in vals
+                for v in row
+            )
+            prov = s.provenance if isinstance(s.provenance, dict) else {}
+            has_scalar = False
+            flag = prov.get("has_scalar_estimate")
+            flag_denied = False
+            if flag is not None:
+                if isinstance(flag, bool):
+                    flag_denied = not flag
+                elif isinstance(flag, (int, float)):
+                    if not math.isfinite(flag) or flag == 0 or flag == 0.0:
+                        flag_denied = True
+                elif isinstance(flag, str):
+                    s_flag = flag.strip().lower()
+                    if s_flag in ("false", "0", "0.0", "no", "f", "none", "null"):
+                        flag_denied = True
+                else:
+                    flag_denied = True
+
+            if not flag_denied:
+                sv = prov.get("scalar_value")
+                if isinstance(sv, (int, float)) and not isinstance(sv, bool) and math.isfinite(sv):
+                    rng = s.render_range if hasattr(s, "render_range") and s.render_range else (0.0, 1.0)
+                    lo, hi = rng
+                    if (lo is None or sv >= lo - 1e-6) and (hi is None or sv <= hi + 1e-6):
+                        has_scalar = True
+            if has_valid_pixels or has_scalar:
+                available_modes_set.add(mode)
+                if mode not in surface_ids_by_mode:
+                    surface_ids_by_mode[mode] = []
+                surface_ids_by_mode[mode].append(s.surface_id)
 
     # Build mode definitions
     mode_defs = []

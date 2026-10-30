@@ -7,8 +7,8 @@
  * Uses useLayer10 for surface stats/zones + usePlotIntelligence for assimilation/engines.
  */
 
-import { useState } from "react";
-import { usePlotIntelligence } from "@/hooks/usePlotIntelligence";
+import { useState, useMemo } from "react";
+import { usePlotIntelligence, SUBSYSTEM_METADATA, type EngineStatus } from "@/hooks/usePlotIntelligence";
 import { useLayer10, MODE_CONFIG } from "@/hooks/useLayer10";
 import HistogramDrawer from "./HistogramDrawer";
 import SidebarFarmerView from "./SidebarFarmerView";
@@ -77,6 +77,57 @@ export default function RawDataSidebar() {
 
   const activeTab = activeSidebarTab;
   const setActiveTab = setActiveSidebarTab;
+
+  const canonicalEngines = useMemo<EngineStatus[]>(() => {
+    const layerResults = l10.assessment?.canonicalLayerResults || l10.data?.layer_results;
+    if (!layerResults || Object.keys(layerResults).length === 0) return engines;
+    return Object.entries(layerResults)
+      .sort(([a], [b]) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")))
+      .map(([key, layer]) => {
+        const id = `L${Number(key.replace(/\D/g, ""))}`;
+        const meta = SUBSYSTEM_METADATA[id] || {
+          name: "Agronomic Subsystem",
+          nameAr: "نظام زراعي",
+          icon: "🌱",
+          tag: "SUBSYSTEM",
+          farmerGroup: "conditions" as const,
+        };
+        const rawStatus = String(layer?.status || "SKIPPED").toUpperCase();
+        const status: EngineStatus["status"] =
+          rawStatus === "COMPLETED" || rawStatus === "OK" ? "OK"
+          : rawStatus === "DEGRADED" ? "DEGRADED"
+          : rawStatus === "FAILED" ? "FAILED"
+          : rawStatus === "UNAVAILABLE" ? "UNAVAILABLE"
+          : rawStatus === "OFFLINE" ? "OFFLINE"
+          : rawStatus === "LOADING" ? "LOADING" : "SKIPPED";
+        const confidence = typeof layer?.confidence === "number"
+          && Number.isFinite(layer.confidence) ? layer.confidence : null;
+        return {
+          id,
+          name: meta.name,
+          nameAr: meta.nameAr,
+          icon: meta.icon,
+          status,
+          statusLabel: status === "OK" ? "Good" : status === "DEGRADED"
+            ? "Degraded" : status === "FAILED" ? "Failed"
+            : status === "UNAVAILABLE" ? "Unavailable" : status === "OFFLINE"
+            ? "Offline" : status === "LOADING" ? "Loading" : "Skipped",
+          summary: layer?.summary || "",
+          summaryAr: "",
+          lastUpdate: l10.assessment?.identity.publishedAt || l10.data?.timestamp || null,
+          data: {
+            canonical_confidence: confidence,
+            canonical_errors: (layer as any)?.errors || [],
+            canonical_degradation_flags: (layer as any)?.degradation_flags || (layer as any)?.flags || [],
+            canonical_sources: layer?.sources || [],
+            is_parameter_overridden: false,
+            parameter_source_tag: "Canonical publication",
+          },
+        };
+      });
+  }, [l10.assessment, l10.data?.layer_results, l10.data?.timestamp, engines]);
+
+  const topFindings = l10.assessment?.topFindings || (l10.data as any)?.top_findings || [];
 
   // ── These MUST be above any early return (Rules of Hooks) ────────────────
   const activeMode = l10.activeMode;
@@ -185,6 +236,30 @@ export default function RawDataSidebar() {
             }}
           >✕</button>
         </div>
+
+        {/* ── Operational Applicability Gate: Stale Warning Banner ── */}
+        {(!l10.isApplicable || l10.isStale) && (
+          <div style={{
+            margin: "4px 0 8px 0",
+            padding: "8px 10px",
+            borderRadius: "8px",
+            background: "rgba(245, 158, 11, 0.12)",
+            border: "1px solid rgba(245, 158, 11, 0.35)",
+            color: "#fbbf24",
+            fontSize: "0.72rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "2px",
+          }}>
+            <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: "6px" }}>
+              <span>⚠️</span>
+              <span>Historical Assessment ({l10.staleReason || "outdated context"})</span>
+            </div>
+            <div style={{ fontSize: "0.68rem", color: "#fcd34d" }}>
+              Findings are displayed for historical reference only. Current operational actions and prescriptions are disabled.
+            </div>
+          </div>
+        )}
 
         {/* Tabs */}
         <div style={{ display: "flex", gap: "4px" }} suppressHydrationWarning={true}>
@@ -379,7 +454,8 @@ export default function RawDataSidebar() {
                   activeMode={activeMode}
                   surfaceType={surfaceType}
                   explainPack={explainPack}
-                  engines={engines}
+                  engines={canonicalEngines}
+                  topFindings={topFindings}
                   assimilation={assimilation}
                   onAskBrain={(q) => l10.openDecideMode(q)}
                 />
@@ -389,7 +465,8 @@ export default function RawDataSidebar() {
                   activeMode={activeMode}
                   surfaceType={surfaceType}
                   explainPack={explainPack}
-                  engines={engines}
+                  engines={canonicalEngines}
+                  topFindings={topFindings}
                   assimilation={assimilation}
                   onAskBrain={(q) => l10.openDecideMode(q)}
                 />

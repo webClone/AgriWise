@@ -132,7 +132,7 @@ class WaterStateFactory:
             if not (isinstance(n_val, (int, float)) and math.isfinite(n_val) and n_val > 1.0):
                 raise ValueError(f"Layer {i} van Genuchten n {n_val} must be a finite number strictly greater than 1.0 (> 1.0)")
 
-        vg_m = [round(1.0 - 1.0 / n_val, 4) for n_val in vg_n]
+        vg_m = [float(1.0 - 1.0 / n_val) for n_val in vg_n]
 
         valid_provenance = {"TEXTURE_PRIOR", "IN_SITU_CALIBRATED", "LAB_MEASURED", "PEDOTRANSFER"}
         prov = parameter_provenance.upper() if isinstance(parameter_provenance, str) else "TEXTURE_PRIOR"
@@ -162,7 +162,7 @@ class WaterStateFactory:
             
             # Mualem-Van Genuchten unsaturated hydraulic conductivity K(Se)
             k_u = ks * math.sqrt(se) * ((1.0 - (1.0 - se ** (1.0 / m_val)) ** m_val) ** 2)
-            k_unsat.append(round(max(0.0, k_u), 4))
+            k_unsat.append(round(max(0.0, k_u), 6))
 
         return SoilWaterState(
             layer_depths_cm=layer_depths_cm,
@@ -171,10 +171,10 @@ class WaterStateFactory:
             wilting_point_profile=[round(v, 4) for v in wilting_point_profile],
             saturation_profile=[round(v, 4) for v in saturation_profile],
             residual_profile=[round(v, 4) for v in residual_profile],
-            hydraulic_conductivity_profile=[round(v, 2) for v in ks_prof],
-            van_genuchten_alpha=[round(v, 4) for v in vg_alpha],
-            van_genuchten_n=[round(v, 4) for v in vg_n],
-            van_genuchten_m=vg_m,
+            hydraulic_conductivity_profile=[float(v) for v in ks_prof],
+            van_genuchten_alpha=[float(v) for v in vg_alpha],
+            van_genuchten_n=[float(v) for v in vg_n],
+            van_genuchten_m=[float(v) for v in vg_m],
             matric_potential_profile_mpa=matric_pot,
             unsaturated_conductivity_profile_cm_day=k_unsat,
             infiltration=infiltration,

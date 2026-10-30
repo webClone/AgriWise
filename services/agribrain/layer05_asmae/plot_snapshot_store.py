@@ -11,7 +11,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
 from services.agribrain.common.surface_hashing import compute_surface_inventory_hash
@@ -263,6 +263,70 @@ def publish_canonical_plot_snapshot(
         inv_hash = compute_surface_inventory_hash(surfaces)
         immutable_frontend_payload["surface_inventory_hash"] = inv_hash
 
+    publication_timestamp = datetime.now(timezone.utc).isoformat()
+    published_at_str = (
+        immutable_frontend_payload.get("published_at")
+        or immutable_frontend_payload.get("publishedAt")
+        or publication_timestamp
+    )
+    evidence_cutoff_str = (
+        scientific_result.get("evidence_cutoff_at")
+        or scientific_result.get("evidence_cutoff")
+        or scientific_result.get("spatial_evidence_cutoff")
+        or scientific_result.get("as_of")
+        or immutable_frontend_payload.get("evidence_cutoff_at")
+        or immutable_frontend_payload.get("evidenceCutoffAt")
+    )
+    if hasattr(evidence_cutoff_str, "isoformat"):
+        evidence_cutoff_str = evidence_cutoff_str.isoformat()
+    evidence_cutoff_str = str(evidence_cutoff_str or "").strip()
+
+    obs_win = (
+        immutable_frontend_payload.get("observation_window")
+        or immutable_frontend_payload.get("observationWindow")
+        or scientific_result.get("observation_window")
+    )
+    if not obs_win:
+        src_win = (
+            immutable_frontend_payload.get("source_window")
+            or scientific_result.get("source_window")
+        )
+        if isinstance(src_win, (list, tuple)) and len(src_win) >= 2 and src_win[0] and src_win[1]:
+            obs_win = {"start": str(src_win[0]), "end": str(src_win[1])}
+        elif isinstance(scientific_result.get("date_range"), dict):
+            dr = scientific_result["date_range"]
+            if dr.get("start") and dr.get("end"):
+                obs_win = {"start": str(dr["start"]), "end": str(dr["end"])}
+
+    # Scientific Provenance Guarantee:
+    # A missing scientific evidence cutoff must NEVER be silently replaced
+    # with publication time or inferred from observation window bounds.
+    # If no validated manifest or processing boundary exists, it remains None/null (unknown).
+    if not evidence_cutoff_str:
+        evidence_cutoff_str = None
+
+    if not obs_win:
+        obs_win = None
+
+    crop_cycle_id = (
+        immutable_frontend_payload.get("crop_cycle_id")
+        or immutable_frontend_payload.get("cropCycleId")
+        or scientific_result.get("crop_cycle_id")
+        or (scientific_result.get("operational_context") or {}).get("crop_cycle_id")
+        or (scientific_result.get("crop_config") or {}).get("crop_cycle_id")
+        or (execution_identity or {}).get("crop_cycle_id")
+    )
+    if crop_cycle_id:
+        crop_cycle_id = str(crop_cycle_id).strip() or None
+    else:
+        crop_cycle_id = None
+
+    immutable_frontend_payload["published_at"] = published_at_str
+    immutable_frontend_payload["evidence_cutoff_at"] = evidence_cutoff_str
+    immutable_frontend_payload["observation_window"] = obs_win
+    if crop_cycle_id:
+        immutable_frontend_payload["crop_cycle_id"] = crop_cycle_id
+
     envelope: Dict[str, Any] = {
         "contract_version": PLOT_SNAPSHOT_CONTRACT_VERSION,
         "snapshot_kind": normalized_kind,
@@ -271,7 +335,11 @@ def publish_canonical_plot_snapshot(
         "farm_id": ns.farm_id,
         "plot_id": ns.plot_id,
         "geometry_hash": str(geometry_hash or ""),
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "recorded_at": publication_timestamp,
+        "published_at": published_at_str,
+        "evidence_cutoff_at": evidence_cutoff_str,
+        "observation_window": obs_win,
+        "crop_cycle_id": crop_cycle_id,
         "supersedes_snapshot_id": prior_head.get("snapshot_id"),
         "job_id": str(job_id),
         "manifest_hash": str(manifest_hash),
@@ -377,7 +445,11 @@ def publish_canonical_plot_snapshot(
         "node_ref": logical_node_ref,
         "node_hash": envelope.get("node_hash"),
         "frontend_payload": immutable_frontend_payload,
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "published_at": published_at_str,
+        "evidence_cutoff_at": evidence_cutoff_str,
+        "observation_window": obs_win,
+        "crop_cycle_id": crop_cycle_id,
+        "recorded_at": publication_timestamp,
     }
 
     hashable_pub = {k: v for k, v in publication.items() if not k.endswith("_ref")}
@@ -506,7 +578,11 @@ def publish_canonical_plot_snapshot(
         "frontend_publication_ref": logical_publication_ref,
         "frontend_publication_hash": publication.get("publication_hash"),
         "surface_inventory_hash": publication.get("frontend_payload", {}).get("surface_inventory_hash"),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "published_at": published_at_str,
+        "evidence_cutoff_at": evidence_cutoff_str,
+        "observation_window": obs_win,
+        "crop_cycle_id": crop_cycle_id,
+        "updated_at": publication_timestamp,
     }
     _atomic(_head_path(ns), head)
     with _SNAPSHOT_CACHE_LOCK:
@@ -522,6 +598,7 @@ def publish_canonical_layer10_snapshot(
     geometry_hash: str,
     frontend_payload: Dict[str, Any],
     request_run_id: str,
+    crop_cycle_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Publish a validated terminal L10 result when no ASMAE head exists yet.
 
@@ -574,9 +651,23 @@ def publish_canonical_layer10_snapshot(
     payload["surfaces"] = surfaces
     inventory_hash = compute_surface_inventory_hash(surfaces)
     payload["surface_inventory_hash"] = inventory_hash
+
+    resolved_crop_cycle_id = (
+        crop_cycle_id
+        or payload.get("crop_cycle_id")
+        or payload.get("cropCycleId")
+        or (payload.get("phenology_context") or {}).get("crop_cycle_id")
+        or (payload.get("crop_cycle_context") or {}).get("crop_cycle_id")
+    )
+    if resolved_crop_cycle_id:
+        resolved_crop_cycle_id = str(resolved_crop_cycle_id).strip() or None
+        payload["crop_cycle_id"] = resolved_crop_cycle_id
+        payload["cropCycleId"] = resolved_crop_cycle_id
+
     scientific_identity = {
         "snapshot_id": snapshot_id,
         "plot_id": ns.plot_id,
+        "crop_cycle_id": resolved_crop_cycle_id,
         "publication_id": str(payload.get("publication_id") or ""),
         "publication_status": str(payload.get("publication_status") or ""),
         "surface_inventory_hash": inventory_hash,
@@ -632,6 +723,7 @@ def publish_canonical_layer10_snapshot(
             "capability_contract_version": str(
                 payload.get("render_authorization_version") or ""
             ),
+            "crop_cycle_id": resolved_crop_cycle_id,
         },
         snapshot_kind="layer10_terminal",
     )
@@ -760,11 +852,36 @@ def load_latest_plot_snapshot(
         or ""
     )
 
+    # Authoritative temporal fields derived strictly from hash-verified publication or node
+    authoritative_published_at = (
+        publication.get("published_at")
+        or node.get("published_at")
+        or node.get("recorded_at")
+    )
+    authoritative_evidence_cutoff = (
+        publication.get("evidence_cutoff_at")
+        or node.get("evidence_cutoff_at")
+    )
+    authoritative_observation_window = (
+        publication.get("observation_window")
+        or node.get("observation_window")
+    )
+
+    # Cryptographic temporal binding validation:
+    # Mutating any head temporal field (published_at, evidence_cutoff_at, observation_window)
+    # to contradict the hash-verified publication causes validation failure.
+    temporal_binding_valid = bool(
+        head.get("published_at") == authoritative_published_at
+        and head.get("evidence_cutoff_at") == authoritative_evidence_cutoff
+        and head.get("observation_window") == authoritative_observation_window
+    )
+
     validation_flags = {
         "nodeValid": bool(node.get("node_hash") and node.get("node_hash") == head.get("node_hash") and node.get("node_hash") == computed_node_hash),
         "publicationValid": bool(publication.get("publication_hash") and publication.get("publication_hash") == head.get("frontend_publication_hash") and publication.get("publication_hash") == computed_pub_hash),
         "receiptValid": bool(receipt.get("receipt_hash") and receipt.get("receipt_hash") == head.get("publication_receipt_hash") and receipt.get("receipt_hash") == computed_receipt_hash),
         "inventoryValid": bool(head.get("surface_inventory_hash") and computed_inv_hash and head.get("surface_inventory_hash") == computed_inv_hash),
+        "temporalBindingValid": temporal_binding_valid,
         "bindingValid": bool(
             head.get("snapshot_id") == snapshot_id
             and head.get("plot_id") == ns.plot_id
@@ -776,6 +893,7 @@ def load_latest_plot_snapshot(
             and receipt.get("node_hash") == node.get("node_hash")
             and receipt.get("frontend_publication_hash")
             == publication.get("publication_hash")
+            and temporal_binding_valid
         ),
         "lineageValid": bool(
             node.get("snapshot_kind") != "asmae"
@@ -820,6 +938,7 @@ def load_latest_plot_snapshot(
                 "publicationValid",
                 "receiptValid",
                 "inventoryValid",
+                "temporalBindingValid",
                 "bindingValid",
                 "lineageValid",
             )
@@ -833,10 +952,30 @@ def load_latest_plot_snapshot(
             )
         )
     )
+    published_at_val = authoritative_published_at
+    evidence_cutoff_val = authoritative_evidence_cutoff
+    obs_win_val = authoritative_observation_window
+    authoritative_crop_cycle = (
+        publication.get("crop_cycle_id")
+        or node.get("crop_cycle_id")
+        or (publication_frontend.get("crop_cycle_id") if publication_frontend else None)
+    )
+
+    node["published_at"] = published_at_val
+    node["evidence_cutoff_at"] = evidence_cutoff_val
+    node["observation_window"] = obs_win_val
+    if authoritative_crop_cycle:
+        node["crop_cycle_id"] = authoritative_crop_cycle
+        if publication_frontend:
+            publication_frontend["crop_cycle_id"] = authoritative_crop_cycle
+
     # Return the job-bound frontend publication only after the immutable node
     # hash has been recomputed.  It is a separate hashed artifact, not a
     # mutation of the node.
     if publication_frontend:
+        publication_frontend["published_at"] = published_at_val
+        publication_frontend["evidence_cutoff_at"] = evidence_cutoff_val
+        publication_frontend["observation_window"] = obs_win_val
         node["frontend_payload"] = publication_frontend
 
     with _SNAPSHOT_CACHE_LOCK:

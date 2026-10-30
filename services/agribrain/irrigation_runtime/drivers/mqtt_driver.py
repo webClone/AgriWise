@@ -461,6 +461,14 @@ class MQTTActuator(IrrigationActuator):
                 if has_fault:
                     self._status = ActuatorStatus.ERROR
 
+            is_stop = command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)
+            confirmed_stop = is_stop and success and (
+                is_stopped is True
+                or raw_status in ("STOPPED", "IDLE")
+                or (ack_payload.get("actual_flow_lpm") == 0.0 and is_running is False)
+            )
+            transport_only = is_stop and success and not confirmed_stop
+
             return CommandResult(
                 command_id=command.command_id,
                 device_id=self.device_id,
@@ -468,6 +476,8 @@ class MQTTActuator(IrrigationActuator):
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 actual_flow_rate_lpm=ack_payload.get("actual_flow_lpm", 0.0),
                 actual_pressure_bar=ack_payload.get("actual_pressure_bar", 0.0),
+                transport_acknowledged_only=transport_only,
+                confirmed_physical_stop=confirmed_stop,
                 error_code=err_code,
                 error_message=err_msg,
                 ack_latency_ms=ack_payload.get("ack_latency_ms", 0),
@@ -738,6 +748,8 @@ class MQTTActuator(IrrigationActuator):
                     device_id=self.device_id,
                     success=True,
                     timestamp=datetime.now(timezone.utc).isoformat(),
+                    confirmed_physical_stop=True,
+                    transport_acknowledged_only=False,
                 )
             except asyncio.TimeoutError:
                 logger.warning("🚨 EMERGENCY STOP publish accepted but no controller ACK received within %ss", stop_timeout)

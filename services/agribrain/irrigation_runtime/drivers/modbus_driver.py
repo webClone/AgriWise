@@ -369,12 +369,33 @@ class ModbusActuator(IrrigationActuator):
             if len(regs) >= 2:
                 actual_volume = float((regs[0] << 16) | regs[1])
 
+        # Verify physical cessation by reading feedback and status
+        actual_flow, actual_pressure = await self._read_feedback()
+        status_info = await self._read_status()
+        
+        has_flow = (actual_flow is not None)
+        has_status = bool(status_info and "status_word" in status_info)
+        is_running_bit = bool(status_info["status_word"] & 0x01) if has_status else False
+
+        # Positive physical confirmation requires complete affirmative instrumentation
+        # (both flow == 0.0 and running bit cleared). Partial or missing instrumentation fails closed.
+        has_complete_instrumentation = has_flow and has_status
+        flow_stopped = (actual_flow == 0.0) if has_flow else False
+        status_stopped = (not is_running_bit) if has_status else False
+
+        confirmed = bool(success and has_complete_instrumentation and flow_stopped and status_stopped)
+        transport_only = bool(success and not confirmed)
+
         return CommandResult(
             command_id=command.command_id,
             device_id=self.device_id,
             success=success,
             timestamp=now,
             actual_volume_l=actual_volume,
+            actual_flow_rate_lpm=actual_flow if actual_flow is not None else 0.0,
+            actual_pressure_bar=actual_pressure if actual_pressure is not None else 0.0,
+            transport_acknowledged_only=transport_only,
+            confirmed_physical_stop=confirmed,
             error_code="" if success else "WRITE_FAILED",
             error_message="" if success else "Failed to write stop coil",
         )
@@ -423,10 +444,12 @@ class ModbusActuator(IrrigationActuator):
             timestamp=now,
         )
 
-    async def _read_feedback(self) -> Tuple[float, float]:
-        """Read actual flow and pressure from input registers."""
-        actual_flow = 0.0
-        actual_pressure = 0.0
+    async def _read_feedback(self) -> Tuple[Optional[float], Optional[float]]:
+        """Read actual flow and pressure from input registers.
+        Returns None for registers that are not mapped or could not be read.
+        """
+        actual_flow: Optional[float] = None
+        actual_pressure: Optional[float] = None
 
         flow_reg = self._input_map.get("actual_flow_x10")
         if flow_reg is not None:
@@ -568,11 +591,29 @@ class ModbusActuator(IrrigationActuator):
         else:
             logger.error("Modbus emergency stop partial or total failure on coils: %s", failed_outputs)
 
+        # Verify physical cessation by reading feedback and status
+        actual_flow, _ = await self._read_feedback()
+        status_info = await self._read_status()
+
+        has_flow = (actual_flow is not None)
+        has_status = bool(status_info and "status_word" in status_info)
+        is_running_bit = bool(status_info["status_word"] & 0x01) if has_status else False
+
+        has_complete_instrumentation = has_flow and has_status
+        flow_stopped = (actual_flow == 0.0) if has_flow else False
+        status_stopped = (not is_running_bit) if has_status else False
+
+        confirmed = bool(success and has_complete_instrumentation and flow_stopped and status_stopped)
+        transport_only = bool(success and not confirmed)
+
         return CommandResult(
             command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",
             device_id=self.device_id,
             success=success,
             timestamp=now,
+            actual_flow_rate_lpm=actual_flow if actual_flow is not None else 0.0,
+            transport_acknowledged_only=transport_only,
+            confirmed_physical_stop=confirmed,
             error_code="" if success else "WRITE_FAILED",
             error_message="" if success else f"Coil writes failed on: {', '.join(failed_outputs)}",
         )

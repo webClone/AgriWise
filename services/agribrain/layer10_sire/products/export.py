@@ -17,7 +17,7 @@ from services.agribrain.layer10_sire.schema import (
 
 @dataclass
 class RasterEntry:
-    """Serializable surface entry."""
+    """Serializable surface entry preserving full scientific export receipt."""
     surface_id: str
     surface_type: str
     grid_ref: str
@@ -28,6 +28,23 @@ class RasterEntry:
     source_layers: List[str]
     values: List[List[Optional[float]]]
     stats: Dict[str, float] = field(default_factory=dict)
+    # Scientific export receipt fields
+    grid_spec: Optional[Dict[str, Any]] = None
+    source_grid_spec: Optional[Dict[str, Any]] = None
+    display_grid_spec: Optional[Dict[str, Any]] = None
+    display_resolution_m: float = 1.0
+    effective_resolution_m: float = 10.0
+    confidence: Optional[List[List[Optional[float]]]] = None
+    uncertainty: Optional[float] = None
+    observed_mask: Optional[List[List[bool]]] = None
+    inferred_mask: Optional[List[List[bool]]] = None
+    valid_mask: Optional[List[List[bool]]] = None
+    grounding_class: Optional[str] = None
+    state_update_allowed: bool = False
+    prescription_driver_allowed: bool = False
+    block_reasons: Optional[List[str]] = None
+    provenance: Dict[str, Any] = field(default_factory=dict)
+    canonical_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -56,18 +73,22 @@ class TileManifest:
 
 
 def export_raster_pack(output: Layer10Output) -> List[RasterEntry]:
-    """Export all surfaces as serializable raster entries."""
+    """Export all surfaces as serializable raster entries preserving scientific receipt and canonical parity."""
+    import math
+    from ..surface_contract import serialize_surface_artifact
+
     entries = []
     for s in output.surface_pack:
-        # Compute quick stats
-        vals = [v for row in s.values for v in row if v is not None]
+        canon_doc = serialize_surface_artifact(s)
+        prov = s.provenance if isinstance(s.provenance, dict) else {}
+
+        # Compute quick stats over strictly finite, numeric non-boolean values
+        vals = [
+            float(v) for row in s.values for v in row
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+        ]
         stats = {}
         if vals:
-            # Compute the mean once.  The previous expression recomputed
-            # ``sum(vals)`` for every pixel while evaluating the variance,
-            # turning export of visual-resolution rasters into O(n^2) work.
-            # This is the same population standard deviation formula with a
-            # cached mean, so the raster and authority contracts are unchanged.
             mean_val = sum(vals) / len(vals)
             stats = {
                 "mean": round(mean_val, 4),
@@ -77,18 +98,58 @@ def export_raster_pack(output: Layer10Output) -> List[RasterEntry]:
                 "valid_pixels": len(vals),
                 "total_pixels": len(s.values) * (len(s.values[0]) if s.values else 0),
             }
+        canon_doc["stats"] = stats
+
+        valid_mask = [
+            [
+                isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                for v in row
+            ]
+            for row in s.values
+        ]
+
+        g_spec_dict = canon_doc.get("grid_spec")
+        source_g_spec_dict = canon_doc.get("source_grid_spec")
+        display_g_spec_dict = canon_doc.get("display_grid_spec")
+        display_res = float(canon_doc.get("display_resolution_m") or 1.0)
+        eff_res = float(canon_doc.get("effective_resolution_m") or 10.0)
+        conf_val = canon_doc.get("confidence")
+        unc_val = canon_doc.get("uncertainty")
+        obs_mask = canon_doc.get("observed_mask")
+        inf_mask = canon_doc.get("inferred_mask")
+
+        # Canonical permissions and block reasons take precedence
+        state_update_allowed = canon_doc.get("state_update_allowed", False)
+        prescription_driver_allowed = canon_doc.get("prescription_driver_allowed", False)
+        block_reasons = canon_doc.get("block_reasons")
 
         entries.append(RasterEntry(
             surface_id=s.surface_id,
-            surface_type=s.semantic_type.value,
+            surface_type=s.semantic_type.value if hasattr(s.semantic_type, "value") else str(s.semantic_type),
             grid_ref=s.grid_ref,
             units=s.units,
             resolution_m=s.native_resolution_m,
             render_range=s.render_range,
-            palette=s.palette_id.value,
+            palette=s.palette_id.value if hasattr(s.palette_id, "value") else str(s.palette_id),
             source_layers=s.source_layers,
             values=s.values,
             stats=stats,
+            grid_spec=g_spec_dict,
+            source_grid_spec=source_g_spec_dict,
+            display_grid_spec=display_g_spec_dict,
+            display_resolution_m=display_res,
+            effective_resolution_m=eff_res,
+            confidence=conf_val,
+            uncertainty=unc_val,
+            observed_mask=obs_mask,
+            inferred_mask=inf_mask,
+            valid_mask=valid_mask,
+            grounding_class=s.grounding_class,
+            state_update_allowed=state_update_allowed,
+            prescription_driver_allowed=prescription_driver_allowed,
+            block_reasons=list(block_reasons) if block_reasons else None,
+            provenance=prov,
+            canonical_metadata=canon_doc,
         ))
 
     return entries

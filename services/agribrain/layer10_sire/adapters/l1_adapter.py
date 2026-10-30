@@ -863,6 +863,8 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
             "confidence": None,
             "posterior_concentration": posterior_concentration,
             "uncertainty": posterior_uncertainty if posterior_uncertainty is not None else 1.0,
+            "diagnostic_uncertainty": posterior_uncertainty if posterior_uncertainty is not None else 1.0,
+            "normalized_uncertainty": posterior_uncertainty if posterior_uncertainty is not None else 1.0,
         }
 
         def plain_grid_spec(value: Any) -> Dict[str, Any]:
@@ -900,7 +902,21 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
             native_h = len(native_grid)
             native_w = len(native_grid[0])
 
+            var_clean = var_name[len("asmae_"):] if var_name.lower().startswith("asmae_") else var_name
+            from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+            canon_k = canonical_state_key(var_clean)
+            keys_to_try = [var_clean, var_name]
+            if canon_k and canon_k != "unmapped" and canon_k not in keys_to_try:
+                keys_to_try.append(canon_k)
+            if var_clean == "bare_soil" and "bare_soil_fraction" not in keys_to_try:
+                keys_to_try.append("bare_soil_fraction")
+            elif var_clean == "bare_soil_fraction" and "bare_soil" not in keys_to_try:
+                keys_to_try.append("bare_soil")
+
             aliases = {var_name, var_name.upper(), var_name.lower()}
+            for k in keys_to_try:
+                aliases.update({k, k.upper(), k.lower(), f"asmae_{k}", f"asmae_{k}".upper(), f"asmae_{k}".lower()})
+
             existing_meta: Dict[str, Any] = {}
             for alias in aliases:
                 candidate = result.raster_metadata.get(alias)
@@ -947,6 +963,27 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
                 "diagnostic_only": bool(diagnostic_only_for_grid),
                 **stage_metadata,
             }
+
+            # Specialize per-state uncertainty and confidence when state-specific maps exist
+            state_unc = None
+            for k in keys_to_try:
+                state_unc = finite_grid_mean("uncertainty_maps", k)
+                if state_unc is not None:
+                    break
+            if state_unc is not None:
+                metadata["uncertainty"] = state_unc
+                metadata["posterior_uncertainty_available"] = True
+
+            state_conf = None
+            for k in keys_to_try:
+                state_conf = finite_grid_mean("confidence_maps", k)
+                if state_conf is not None:
+                    break
+            if state_conf is not None:
+                metadata["posterior_concentration"] = state_conf
+                metadata["confidence"] = state_conf
+                metadata["posterior_confidence_available"] = True
+
             if source_spec:
                 metadata.update({
                     key: source_spec[key]
@@ -991,14 +1028,44 @@ def adapt_l1(field_tensor: Any, target_h: int = 10, target_w: int = 10, skip_idw
                 if grid:
                     if var == f"ASMAE_{suffix.upper()}":
                         var_name = f"asmae_{suffix.lower()}"
+                        store_native_asmae_grid(
+                            var_name,
+                            grid,
+                            state_allowed_for_grid=False,
+                            diagnostic_only_for_grid=True,
+                        )
                     else:
                         var_name = var if var.lower().startswith("asmae_") else f"asmae_{var}_{suffix.lower()}"
-                    store_native_asmae_grid(
-                        var_name,
-                        grid,
-                        state_allowed_for_grid=False,
-                        diagnostic_only_for_grid=True,
-                    )
+                        store_native_asmae_grid(
+                            var_name,
+                            grid,
+                            state_allowed_for_grid=False,
+                            diagnostic_only_for_grid=True,
+                        )
+                        var_base = var[len("asmae_"):] if var.lower().startswith("asmae_") else var
+                        from services.agribrain.scientific_contracts.state_schema_ref import canonical_state_key
+                        c_base = canonical_state_key(var_base)
+                        if c_base and c_base != "unmapped" and c_base != var_base:
+                            store_native_asmae_grid(
+                                f"asmae_{c_base}_{suffix.lower()}",
+                                grid,
+                                state_allowed_for_grid=False,
+                                diagnostic_only_for_grid=True,
+                            )
+                        if var_base == "bare_soil_fraction":
+                            store_native_asmae_grid(
+                                f"asmae_bare_soil_{suffix.lower()}",
+                                grid,
+                                state_allowed_for_grid=False,
+                                diagnostic_only_for_grid=True,
+                            )
+                        elif var_base == "bare_soil":
+                            store_native_asmae_grid(
+                                f"asmae_bare_soil_fraction_{suffix.lower()}",
+                                grid,
+                                state_allowed_for_grid=False,
+                                diagnostic_only_for_grid=True,
+                            )
 
         # Ensure asmae_feature_pack is fully enriched with metadata
         if result.asmae_feature_pack is None:

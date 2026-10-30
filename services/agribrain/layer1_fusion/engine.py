@@ -708,15 +708,68 @@ class Layer1FusionEngine:
         }
 
         band_arrays: Dict[str, Any] = {}
+        ref_shape = None
+        validated_crs: Optional[str] = None
+        validated_transform: Optional[Tuple[float, ...]] = None
+        grid_mismatch = False
+
+        top_grid = bundle.raster_composites.get("grid_spec") if isinstance(bundle.raster_composites.get("grid_spec"), dict) else {}
+        default_crs = bundle.raster_composites.get("crs") or top_grid.get("crs")
+        default_tf = bundle.raster_composites.get("transform") or bundle.raster_composites.get("affine") or top_grid.get("transform") or top_grid.get("affine")
+
         for key, raster_data in bundle.raster_composites.items():
             mapped = band_mapping.get(key.upper())
             if mapped and isinstance(raster_data, dict):
                 pixel_array = raster_data.get("pixel_array")
-                if pixel_array and pixel_array[0]:
+                if pixel_array and isinstance(pixel_array, list) and len(pixel_array) > 0 and isinstance(pixel_array[0], list):
                     band_arrays[mapped] = pixel_array
+                    h = len(pixel_array)
+                    w = len(pixel_array[0])
+                    if any(not isinstance(r, list) or len(r) != w for r in pixel_array):
+                        grid_mismatch = True
+                    if ref_shape is None:
+                        ref_shape = (h, w)
+                    elif ref_shape != (h, w):
+                        grid_mismatch = True
+
+                    r_grid = raster_data.get("grid_spec") if isinstance(raster_data.get("grid_spec"), dict) else {}
+                    b_crs = raster_data.get("crs") or r_grid.get("crs") or default_crs
+                    if b_crs and isinstance(b_crs, str) and b_crs.strip():
+                        b_crs_clean = b_crs.strip()
+                        if validated_crs is None:
+                            validated_crs = b_crs_clean
+                        elif validated_crs.upper() != b_crs_clean.upper():
+                            grid_mismatch = True
+                    else:
+                        grid_mismatch = True
+
+                    b_tf = raster_data.get("transform") or raster_data.get("affine") or r_grid.get("transform") or r_grid.get("affine") or default_tf
+                    if b_tf and isinstance(b_tf, (list, tuple)) and len(b_tf) == 6:
+                        try:
+                            tf_tuple = tuple(float(x) for x in b_tf)
+                            from .eo_foundation_model import validate_spatial_grid
+                            if not validate_spatial_grid(b_crs, tf_tuple, (h, w)):
+                                grid_mismatch = True
+                            elif validated_transform is None:
+                                validated_transform = tf_tuple
+                            elif validated_transform != tf_tuple:
+                                grid_mismatch = True
+                        except (ValueError, TypeError):
+                            grid_mismatch = True
+                    else:
+                        grid_mismatch = True
 
         if len(band_arrays) < 3:
             return None  # Not enough spectral bands
+
+        if grid_mismatch:
+            validated_crs = None
+            validated_transform = None
+
+        cm_data = bundle.raster_composites.get("cloud_mask") or bundle.raster_composites.get("CLOUD_MASK") or bundle.raster_composites.get("QUALITY")
+        cloud_mask = cm_data.get("pixel_array") if isinstance(cm_data, dict) else None
+        if cloud_mask and (not isinstance(cloud_mask, list) or len(cloud_mask) == 0):
+            cloud_mask = None
 
         try:
             # Lazy-load the model
@@ -725,11 +778,23 @@ class Layer1FusionEngine:
                     model_path=bundle.eo_model_path,
                 )
 
-            result = self._eo_model.infer(band_arrays)
+            result = self._eo_model.infer(
+                band_arrays,
+                cloud_mask=cloud_mask,
+                crs=validated_crs,
+                transform=validated_transform,
+            )
             if result is None:
                 return None
 
+            eo_flags = [f"MODEL_{result.model_id.upper()}"]
+            is_spat_qual = getattr(result, "is_spatial_qualified", True)
+            if not is_spat_qual:
+                eo_flags.append("UNQUALIFIED_SPATIAL_IDENTITY")
+
             # Create anomaly_score evidence
+            # Spatial qualification verifies geometric bounds, but model output is an
+            # estimated_model feature, NOT observed ground truth. Deny state updates.
             self._admit_evidence_or_quarantine(
                 EvidenceItem(
                     evidence_id=f"eo_anomaly_score_{result.tile_hash[:8]}",
@@ -746,12 +811,12 @@ class Layer1FusionEngine:
                     reliability=min(0.75, result.confidence),
                     freshness_score=1.0,
                     provenance_ref=f"eo_foundation_{result.tile_hash}",
-                    flags=[f"MODEL_{result.model_id.upper()}"],
+                    flags=list(eo_flags),
                     diagnostic_only=True,
                     state_update_allowed=False,
                     truth_class="estimated_model",
-                    source_reality="estimated_model",
-                    production_usable=False,
+                    source_reality="provider_model_feed",
+                    production_usable=is_spat_qual,
                     real_provider_product=False,
                 ),
                 ledger,
@@ -776,7 +841,7 @@ class Layer1FusionEngine:
                     reliability=min(0.75, result.confidence),
                     freshness_score=1.0,
                     provenance_ref=f"eo_foundation_{result.tile_hash}",
-                    flags=[f"MODEL_{result.model_id.upper()}", f"DIM_{len(result.embedding)}"],
+                    flags=list(eo_flags) + [f"DIM_{len(result.embedding)}"],
                     # Embedding is informational — downstream uses anomaly_score for decisions
                     diagnostic_only=True,
                     state_update_allowed=False,
@@ -814,7 +879,16 @@ class Layer1FusionEngine:
         from .evidence_validation import validate_evidence, quarantine_evidence
         from .truth_bridge import normalize_evidence_truth
         
+        if "UNQUALIFIED_SPATIAL_IDENTITY" in getattr(item, "flags", []):
+            item.state_update_allowed = False
+            item.production_usable = False
+            item.diagnostic_only = True
+
         normalized_item = normalize_evidence_truth(item, source_context=source_context)
+        if "UNQUALIFIED_SPATIAL_IDENTITY" in getattr(normalized_item, "flags", []):
+            normalized_item.state_update_allowed = False
+            normalized_item.production_usable = False
+            normalized_item.diagnostic_only = True
         violations = validate_evidence(normalized_item)
         if violations:
             all_quarantined.append(quarantine_evidence(normalized_item, violations))

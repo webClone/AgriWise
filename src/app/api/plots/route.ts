@@ -126,17 +126,35 @@ export async function POST(request: NextRequest) {
           }
         }
       }
-      await fetch(`${pythonApiUrl}/collector/register-plot`, {
+      const payload = {
+        plot_id: plot.id,
+        coordinates,
+        crop: "unknown",
+        area: parsedArea,
+      };
+      const bodyText = JSON.stringify(payload);
+      const { buildSignedInternalHeaders } = await import("@/lib/agribrain/internal-service-auth");
+      const signedHeaders = buildSignedInternalHeaders(
+        "POST",
+        "/collector/register-plot",
+        {
+          tenantId: session.userId,
+          farmId,
+          plotId: plot.id,
+        },
+        bodyText
+      );
+      const regResponse = await fetch(`${pythonApiUrl}/collector/register-plot`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          farm_id: farmId,
-          plot_id: plot.id,
-          coordinates,
-          crop: "unknown",
-          area: parsedArea,
-        }),
+        headers: {
+          ...signedHeaders,
+          "Content-Type": "application/json",
+        },
+        body: bodyText,
       });
+      if (!regResponse.ok) {
+        console.warn(`Collector registration returned status ${regResponse.status}`);
+      }
     } catch (collectorError) {
       console.warn("Could not register plot for data collection:", collectorError);
     }

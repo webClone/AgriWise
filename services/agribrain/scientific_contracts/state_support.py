@@ -40,6 +40,7 @@ class StateSupportRecord:
     accepted_update_count: int = 0
     direct_observation_count: int = 0
     proxy_observation_count: int = 0
+    indirect_observation_count: int = 0
     prior_variance: Optional[float] = None
     posterior_variance: Optional[float] = None
     information_gain: Optional[float] = None
@@ -49,8 +50,14 @@ class StateSupportRecord:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        if not isinstance(self.accepted_update_count, int) or self.accepted_update_count < 0:
-            raise ContractViolation(f"nonnegative_integer:{self.state}")
+        for name, val in (
+            ("accepted_update_count", self.accepted_update_count),
+            ("direct_observation_count", self.direct_observation_count),
+            ("proxy_observation_count", self.proxy_observation_count),
+            ("indirect_observation_count", self.indirect_observation_count),
+        ):
+            if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                raise ContractViolation(f"nonnegative_integer:{name}:{self.state}")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -61,6 +68,7 @@ class StateSupportRecord:
             "accepted_update_count": self.accepted_update_count,
             "direct_observation_count": self.direct_observation_count,
             "proxy_observation_count": self.proxy_observation_count,
+            "indirect_observation_count": self.indirect_observation_count,
             "prior_variance": self.prior_variance,
             "posterior_variance": self.posterior_variance,
             "information_gain": self.information_gain,
@@ -72,25 +80,34 @@ class StateSupportRecord:
 
 def _attr(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+        val = obj.get(key, default)
+    else:
+        val = getattr(obj, key, default)
+    if hasattr(val, "value"):
+        return val.value
+    return val
 
 
 def resolve_state_evidence_class(ledger_entry: Any) -> StateEvidenceClass:
     """Resolve single state support record into standard StateEvidenceClass.
 
-    Checks direct_observation_count, proxy_observation_count, accepted_update_count,
-    and support_status.
+    Checks direct_observation_count, proxy_observation_count, indirect_observation_count,
+    accepted_update_count, and support_status.
     """
     if not ledger_entry:
         return StateEvidenceClass.UNSUPPORTED
 
     support_status = str(_attr(ledger_entry, "support_status", "") or "").lower()
-    if support_status in ("unsupported", "blocked", "failed", "none"):
+    if support_status in ("unsupported", "blocked", "failed", "revoked", "none"):
+        return StateEvidenceClass.UNSUPPORTED
+
+    block_reasons = _attr(ledger_entry, "block_reasons", ()) or ()
+    if any(r in ("local_support_revoked", "support_revoked", "evidence_revoked", "blocked") for r in block_reasons):
         return StateEvidenceClass.UNSUPPORTED
 
     direct_count = int(_attr(ledger_entry, "direct_observation_count", 0) or 0)
     proxy_count = int(_attr(ledger_entry, "proxy_observation_count", 0) or 0)
+    indirect_count = int(_attr(ledger_entry, "indirect_observation_count", 0) or 0)
     accepted_updates = int(_attr(ledger_entry, "accepted_update_count", 0) or 0)
     evidence_kind = str(_attr(ledger_entry, "evidence_kind", "") or "").lower()
     relationship = str(
@@ -100,21 +117,26 @@ def resolve_state_evidence_class(ledger_entry: Any) -> StateEvidenceClass:
     if accepted_updates > 0 or support_status in ("assimilated", "supported", "active"):
         if (
             relationship == ObservationRelationship.DIRECT.value
-            or direct_count > 0
             or evidence_kind == "direct_observation"
+            or (relationship == "none" and direct_count > 0)
         ):
             return StateEvidenceClass.DIRECTLY_ASSIMILATED
+        elif (
+            relationship == ObservationRelationship.INDIRECT.value
+            or evidence_kind in ("indirect_observation", "model_propagation")
+            or (relationship == "none" and indirect_count > 0 and proxy_count == 0)
+        ):
+            return StateEvidenceClass.INDIRECTLY_CONSTRAINED
         elif (
             relationship == ObservationRelationship.PROXY.value
             or proxy_count > 0
             or evidence_kind == "proxy_observation"
         ):
             return StateEvidenceClass.PROXY_ASSIMILATED
-        elif (
-            relationship == ObservationRelationship.INDIRECT.value
-            or evidence_kind in ("indirect_observation", "model_propagation")
-        ):
+        elif indirect_count > 0:
             return StateEvidenceClass.INDIRECTLY_CONSTRAINED
+        elif direct_count > 0:
+            return StateEvidenceClass.DIRECTLY_ASSIMILATED
         else:
             return StateEvidenceClass.PROXY_ASSIMILATED
 

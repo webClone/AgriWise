@@ -37,7 +37,7 @@ function SystemStatusDashboard({
   detailMode,
   engines,
   operationalHealthPercent = 100,
-  scientificReliabilityPercent = 100,
+  scientificReliabilityPercent = null,
   assimilation,
   cacheStatus,
   refreshing,
@@ -54,7 +54,7 @@ function SystemStatusDashboard({
   detailMode: "farmer" | "expert";
   engines: any[];
   operationalHealthPercent?: number;
-  scientificReliabilityPercent?: number;
+  scientificReliabilityPercent?: number | null;
   assimilation: any;
   cacheStatus: string | null;
   refreshing: boolean;
@@ -130,7 +130,7 @@ function SystemStatusDashboard({
         <StatusChip
           icon="⚡"
           label="Health"
-          value={`${operationalHealthPercent}%`}
+          value={engines.length > 0 ? `${operationalHealthPercent}%` : "—"}
           color={operationalHealthPercent >= 75 ? "#4ade80" : operationalHealthPercent >= 50 ? "#fbbf24" : "#f87171"}
           subtitle={`${statusCounts.OK}/${engines.length} OK`}
         />
@@ -153,9 +153,9 @@ function SystemStatusDashboard({
         {/* MESIA Synthesis Pipeline */}
         <StatusChip
           icon="🧠"
-          label="MESIA"
-          value={isNormal ? `${scientificReliabilityPercent}%` : degradationMode.slice(0, 6)}
-          color={scientificReliabilityPercent >= 60 ? "#4ade80" : "#fbbf24"}
+          label="Science"
+          value={scientificReliabilityPercent === null ? "—" : `${scientificReliabilityPercent}%`}
+          color={scientificReliabilityPercent === null ? "#94a3b8" : scientificReliabilityPercent >= 60 ? "#4ade80" : "#fbbf24"}
           subtitle={l10Ago || undefined}
         />
       </div>
@@ -194,10 +194,10 @@ function SystemStatusDashboard({
           display: "flex", gap: "3px", flexWrap: "wrap",
         }}>
           <QualityTag label="Operational Health" value={`${operationalHealthPercent}%`} ok={operationalHealthPercent >= 75} />
-          <QualityTag label="Epistemic Reliability" value={`${scientificReliabilityPercent}%`} ok={scientificReliabilityPercent >= 60} />
+          <QualityTag label="Epistemic Reliability" value={scientificReliabilityPercent === null ? "Not reported" : `${scientificReliabilityPercent}%`} ok={scientificReliabilityPercent !== null && scientificReliabilityPercent >= 60} />
           <QualityTag label="Surfaces" value={`${l10Quality.surfaces_generated}`} ok={l10Quality.surfaces_generated > 0} />
           <QualityTag label="Zones" value={`${l10Quality.zones_generated}`} ok={l10Quality.zones_generated > 0} />
-          <QualityTag label="Grid" value={l10Grid ? `${l10Grid.height}×${l10Grid.width}` : "—"} ok={l10Quality.grid_alignment_ok} />
+          <QualityTag label="Grid" value={l10Grid ? `${l10Grid.height}×${l10Grid.width}` : (l10Quality.grid_alignment_ok === null ? "Not reported" : "—")} ok={l10Quality.grid_alignment_ok} />
           <QualityTag label="Semantics" value={mapSemantics.replace(/_/g, " ").slice(0, 12)} ok={mapSemantics !== "no_data"} />
           {!isNormal && <QualityTag label="Degrade" value={sanitizePipelineText(degradationMode)} ok={false} />}
         </div>
@@ -300,13 +300,15 @@ function ContextPill({ icon, label, detail }: { icon: string; label: string; det
   );
 }
 
-function QualityTag({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+function QualityTag({ label, value, ok }: { label: string; value: string; ok: boolean | null }) {
+  const isOk = ok === true;
+  const isPending = ok === null;
   return (
     <span style={{
       fontSize: "8px", padding: "1px 5px", borderRadius: "3px",
-      background: ok ? "rgba(34,197,94,0.05)" : "rgba(251,191,36,0.05)",
-      color: ok ? "#4ade80" : "#fbbf24",
-      border: `1px solid ${ok ? "rgba(34,197,94,0.08)" : "rgba(251,191,36,0.08)"}`,
+      background: isOk ? "rgba(34,197,94,0.05)" : isPending ? "rgba(148,163,184,0.05)" : "rgba(251,191,36,0.05)",
+      color: isOk ? "#4ade80" : isPending ? "#94a3b8" : "#fbbf24",
+      border: `1px solid ${isOk ? "rgba(34,197,94,0.08)" : isPending ? "rgba(148,163,184,0.08)" : "rgba(251,191,36,0.08)"}`,
       fontWeight: 600,
     }}>
       {label}: {value}
@@ -348,14 +350,16 @@ export default function EnginePipelinePanel({
   const plotId = l10.data?.plot_id || (typeof window !== "undefined" ? window.location.pathname.split("/plot/")[1]?.split("/")[0] : "default") || "default";
   const subsystemParams = useSubsystemParameters(plotId);
 
+  // Only the accepted canonical publication is permitted to define operational
+  // layer status, confidence and degradation. The local parametric sandbox
+  // remains separate and never upgrades a scientific execution.
   const canonicalEngines = useMemo<EngineStatus[]>(() => {
-    const layerResults = l10.data?.layer_results;
-    if (!layerResults || Object.keys(layerResults).length === 0) return engines;
+    const layerResults = l10.assessment?.canonicalLayerResults || l10.data?.layer_results;
+    if (!layerResults || Object.keys(layerResults).length === 0) return [];
     return Object.entries(layerResults)
       .sort(([a], [b]) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")))
       .map(([key, layer]) => {
         const id = `L${Number(key.replace(/\D/g, ""))}`;
-        const supplementary = engines.find(engine => engine.id === id);
         const meta = SUBSYSTEM_METADATA[id] || {
           name: "Agronomic Subsystem",
           nameAr: "نظام زراعي",
@@ -364,52 +368,39 @@ export default function EnginePipelinePanel({
           farmerGroup: "conditions" as const,
         };
         const rawStatus = String(layer?.status || "SKIPPED").toUpperCase();
-        const baseStatus: EngineStatus["status"] = rawStatus === "COMPLETED" || rawStatus === "OK"
-          ? "OK"
-          : rawStatus === "DEGRADED"
-            ? "DEGRADED"
-            : rawStatus === "FAILED"
-              ? "FAILED"
-              : rawStatus === "UNAVAILABLE"
-                ? "UNAVAILABLE"
-                : "SKIPPED";
-
-        // Dynamic parametric tuning & ground-truth override
-        const sim = subsystemParams.getSimulatedLayerStatus(id, baseStatus);
-        const status = sim.status;
-        const name = (supplementary?.name && !/^L\d+$/i.test(supplementary.name)) ? supplementary.name : meta.name;
-        const nameAr = (supplementary?.nameAr && !/^L\d+$/i.test(supplementary.nameAr)) ? supplementary.nameAr : meta.nameAr;
-        const icon = supplementary?.icon && supplementary.icon !== "🔬" ? supplementary.icon : meta.icon;
-
+        const status: EngineStatus["status"] =
+          rawStatus === "COMPLETED" || rawStatus === "OK" ? "OK"
+          : rawStatus === "DEGRADED" ? "DEGRADED"
+          : rawStatus === "FAILED" ? "FAILED"
+          : rawStatus === "UNAVAILABLE" ? "UNAVAILABLE"
+          : rawStatus === "OFFLINE" ? "OFFLINE"
+          : rawStatus === "LOADING" ? "LOADING" : "SKIPPED";
+        const confidence = typeof layer?.confidence === "number"
+          && Number.isFinite(layer.confidence) ? layer.confidence : null;
         return {
-          ...(supplementary || {
-            id,
-            name,
-            nameAr,
-            icon,
-            summary: "",
-            summaryAr: "",
-            lastUpdate: null,
-            data: {},
-          }),
           id,
-          name,
-          nameAr,
-          icon,
+          name: meta.name,
+          nameAr: meta.nameAr,
+          icon: meta.icon,
           status,
-          statusLabel: status === "OK" ? "Good" : status === "DEGRADED" ? "Degraded" : status === "FAILED" ? "Failed" : status === "UNAVAILABLE" ? "Unavailable" : "Skipped",
+          statusLabel: status === "OK" ? "Good" : status === "DEGRADED"
+            ? "Degraded" : status === "FAILED" ? "Failed"
+            : status === "UNAVAILABLE" ? "Unavailable" : status === "OFFLINE"
+            ? "Offline" : status === "LOADING" ? "Loading" : "Skipped",
+          summary: layer?.summary || "",
+          summaryAr: "",
+          lastUpdate: l10.assessment?.identity.publishedAt || l10.data?.timestamp || null,
           data: {
-            ...(supplementary?.data || {}),
-            canonical_confidence: sim.confidence,
-            canonical_errors: layer?.errors || [],
-            canonical_degradation_flags: sim.flags.length > 0 ? sim.flags : layer?.degradation_flags || [],
+            canonical_confidence: confidence,
+            canonical_errors: (layer as any)?.errors || [],
+            canonical_degradation_flags: (layer as any)?.degradation_flags || (layer as any)?.flags || [],
             canonical_sources: layer?.sources || [],
-            is_parameter_overridden: sim.isOverridden,
-            parameter_source_tag: sim.sourceTag,
+            is_parameter_overridden: false,
+            parameter_source_tag: "Canonical publication",
           },
         };
       });
-  }, [engines, l10.data?.layer_results, subsystemParams]);
+  }, [l10.assessment, l10.data?.layer_results, l10.data?.timestamp]);
 
   const isLoading = piLoading || l10.loading;
   const isVisible = !isLoading && showEnginePanel;
@@ -418,21 +409,17 @@ export default function EnginePipelinePanel({
   const sensorContext = pi.data?.sensorContext || null;
   const userInputs = pi.data?.userInputs || null;
 
-  // Compute operational health vs epistemic scientific reliability (dynamically parameterized)
-  const { confidencePercent, okCount, total, operationalHealthPercent, scientificReliabilityPercent } = (() => {
-    const okCount = canonicalEngines.filter(e => e.status === "OK").length;
-    const total = canonicalEngines.length;
-    const opHealth = total > 0 ? Math.round((okCount / total) * 100) : 100;
-    const sciReliability = subsystemParams.simulation.reliabilityPercent;
-
-    return {
-      confidencePercent: detailMode === "farmer" ? opHealth : sciReliability,
-      operationalHealthPercent: opHealth,
-      scientificReliabilityPercent: sciReliability,
-      okCount,
-      total,
-    };
-  })();
+  // Operational completion rate is not an epistemic reliability score.
+  const total = canonicalEngines.length;
+  const okCount = canonicalEngines.filter(e => e.status === "OK").length;
+  const operationalHealthPercent = total > 0 ? Math.round((okCount / total) * 100) : 0;
+  const scientificQuality = l10.assessment?.quality || l10.data?.scientific_pipeline_quality;
+  const rawScientificReliability = (scientificQuality as any)?.reliabilityScore ?? (scientificQuality as any)?.reliability_score;
+  const scientificReliabilityPercent = typeof rawScientificReliability === "number"
+    && Number.isFinite(rawScientificReliability)
+    && rawScientificReliability >= 0 && rawScientificReliability <= 1
+    ? Math.round(rawScientificReliability * 100) : null;
+  const confidencePercent = operationalHealthPercent;
 
   const radius = 16;
   const circumference = 2 * Math.PI * radius;
@@ -514,12 +501,12 @@ export default function EnginePipelinePanel({
                 display: "flex", alignItems: "center", justifyContent: "center",
                 fontSize: "0.6rem", fontWeight: 700, color: "#f1f5f9",
               }} suppressHydrationWarning={true}>
-                {confidencePercent}%
+                {total > 0 ? `${confidencePercent}%` : "—"}
               </div>
             </div>
             <div suppressHydrationWarning={true}>
               <div style={{ fontSize: "0.85rem", fontWeight: 700, color: "#f1f5f9" }} suppressHydrationWarning={true}>
-                {detailMode === "farmer" ? "System Health" : "Pipeline Reliability"}
+                {detailMode === "farmer" ? "Canonical steps" : "Canonical execution status"}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "4px" }} suppressHydrationWarning={true}>
                 <span style={{ fontSize: "0.65rem", color: "#94a3b8" }}>
@@ -552,7 +539,7 @@ export default function EnginePipelinePanel({
                 setSelectedDashboardLayer("L4");
                 setIsDashboardOpen(true);
               }}
-              title="Open Subsystem Parametric Dashboards & Overrides"
+              title="Open non-operational what-if simulator (does not modify canonical status)"
               style={{
                 fontSize: "8px", padding: "2px 7px", borderRadius: "4px",
                 background: "rgba(99,102,241,0.15)", color: "#a5b4fc",
@@ -564,7 +551,7 @@ export default function EnginePipelinePanel({
               suppressHydrationWarning={true}
             >
               <span>⚙️</span>
-              <span>TUNE</span>
+              <span>WHAT-IF</span>
             </button>
             {/* Interactive Mode Toggle Button */}
             <button
@@ -601,6 +588,30 @@ export default function EnginePipelinePanel({
             </button>
           </div>
         </div>
+
+        {/* ── Operational Applicability Gate: Stale Warning Banner ── */}
+        {(!l10.isApplicable || l10.isStale) && (
+          <div style={{
+            margin: "8px 10px 0 10px",
+            padding: "8px 10px",
+            borderRadius: "8px",
+            background: "rgba(245, 158, 11, 0.12)",
+            border: "1px solid rgba(245, 158, 11, 0.35)",
+            color: "#fbbf24",
+            fontSize: "0.72rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "2px",
+          }}>
+            <div style={{ fontWeight: 700, display: "flex", alignItems: "center", gap: "6px" }}>
+              <span>⚠️</span>
+              <span>Outdated Assessment ({l10.staleReason || "context mismatch"})</span>
+            </div>
+            <div style={{ fontSize: "0.68rem", color: "#fcd34d" }}>
+              Historical audit view only. Operational prescriptions, diagnoses, and interventions are disabled.
+            </div>
+          </div>
+        )}
 
         {/* System Status Dashboard — collapsible */}
         <div style={{
@@ -682,9 +693,9 @@ export default function EnginePipelinePanel({
           textTransform: "uppercase", letterSpacing: "0.05em",
           flexShrink: 0,
         }} suppressHydrationWarning={true}>
-          <span>MESIA World Model · ASMAE</span>
+          <span>Canonical publication · Local simulation separate</span>
           <span style={{ color: refreshing ? "#818cf8" : "#4ade80" }}>
-            {refreshing ? "⟳ SYNCING" : "● LIVE"}
+            {l10.data ? "● PUBLISHED" : "● NO PUBLICATION"}
           </span>
         </div>
       </div>

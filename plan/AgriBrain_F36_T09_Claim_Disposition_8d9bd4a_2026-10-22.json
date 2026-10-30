@@ -1,0 +1,165 @@
+{
+  "schema": "agribrain.bounded_claim_disposition.v1",
+  "candidate": "8d9bd4a073e09a5081a85b8fd2f2b7654152e37a",
+  "exact_immediate_parent": "81cf8bb351a640964a03d7f63d64e79b93344449",
+  "branch": "feat/f36-t09-asmae-13-state-publication",
+  "review_date": "2026-10-22",
+  "timezone": "Africa/Algiers",
+  "verdict": "original_counterexamples_verified_repaired_one_required_P2_covariance_group_remains",
+  "read_only_production": true,
+  "remote_git_writes": false,
+  "repository_tests_used_as_correctness_proof": false,
+  "full_pipeline_API_browser_or_hardware_executed": false,
+  "FA": {
+    "total": 52,
+    "open": 52,
+    "checked": 0
+  },
+  "original_claims": [
+    {
+      "id": "S81-01",
+      "concrete_counterexamples": "verified_repaired",
+      "scope": "All5revokeddualcarrier cases deny raw/alias/frontend; benignwarningcontrol selects; all16serializer unions preserved.",
+      "evidence": [
+        "gating/results.json:dual_carrier_cases",
+        "gating/frontend-risk-results.json:dualCarrierSelection",
+        "integration/results.json:cases.constructor_serializer_block_carrier_matrix"
+      ],
+      "qualification": [
+        "Q8D-01"
+      ]
+    },
+    {
+      "id": "S81-02",
+      "concrete_counterexamples": "verified_repaired",
+      "scope": "All17reportedmalformeddistributions reject on both routes;four validcontrols retained.",
+      "evidence": [
+        "classification/results.json:checks.S81_original_17_invalid_ledger",
+        "classification/results.json:checks.S81_original_17_invalid_metadata",
+        "classification/results.json:checks.S81_four_valid_controls_ledger",
+        "classification/results.json:checks.S81_four_valid_controls_metadata"
+      ],
+      "broad_covariance_contract": "partial",
+      "remaining": [
+        "S8D-01"
+      ]
+    }
+  ],
+  "retained_earlier_closures": "Reported S12 and S673 concrete controls reproduced; explicit current authority matrix and boolean permission parity retain earlier repairs.",
+  "required_residuals": [
+    {
+      "id": "S8D-01",
+      "priority": "P2",
+      "status": "open",
+      "title": "Empty or mathematically invalid covariance qualifies as prior evidence",
+      "production_path": "services/agribrain/layer10_sire/surfaces/asmae.py",
+      "lineage": {
+        "introduced": "Covariance-only[[]]and[[],[]] now Prior-Constrained/scoutingTrue on native metadata and ledger routes where exactparent Unsupported.",
+        "inherited": "Malformed matrix shape/symmetry/PSD and covariance-alias conflicts with otherwise finite parameters accepted by both snapshots; same bounded covariance group."
+      },
+      "actual_path": "Authored inert L1SpatialData metadata and canonical support-ledger normalizer -> unmodified generate_asmae_surfaces",
+      "fixture": {
+        "metadata": {
+          "prior_distribution": {
+            "covariance": [
+              []
+            ]
+          }
+        },
+        "ledger": {
+          "vigor": {
+            "state": "vigor",
+            "support_status": "prior_constrained",
+            "prior_distribution": {
+              "covariance": [
+                []
+              ]
+            }
+          }
+        }
+      },
+      "observed": {
+        "candidate_support_class": "prior_constrained",
+        "parent_support_class": "unsupported",
+        "candidate_scouting": true,
+        "candidate_management": false,
+        "native_state_update_allowed": false,
+        "native_prescription_driver_allowed": false
+      },
+      "positive_controls": [
+        "finite scalarzero",
+        "covariance-only[[0.0]]",
+        "diagonalvector",
+        "symmetricPSDmatrix",
+        "singularzero matrix",
+        "originalfourvaliddistributions"
+      ],
+      "evidence": [
+        "classification/candidate-results.json:native_cases.covariance_*_only_empty_row",
+        "classification/parent-results.json:native_cases.covariance_*_only_empty_row",
+        "classification/candidate-results.json:native_cases.covariance_*_indefinite",
+        "covariance-math-verification.json"
+      ],
+      "requirements": [
+        "AB-ASM-003",
+        "AB-ARC-006",
+        "AB-L10-001"
+      ],
+      "limits": "No ordinary field occurrence established; publication classification only. No EnKF matrix use, prescription, browser materialization or physical execution demonstrated.",
+      "bounded_fix": "Reject empty nested rows and unsupported covariance structures; if matrices supported require square consistent shape, finite/symmetric/PSD covariance and alias consistency; preserve true zero/singular valid controls.",
+      "acceptance": "Both native routes reject empty/ragged/nonsquare/asymmetric/indefinite/conflicting forms; preserve supported valid forms and earlier originalclosures without aborting siblings."
+    }
+  ],
+  "qualifications": [
+    {
+      "id": "Q8D-01",
+      "classification": "inherited_caller_coverage_qualification_not_additional_blocking_group",
+      "title": "Shared helper vocabulary exceeds caller admission and raw authorization vocabulary",
+      "observation": "Native metadata exclusion_reason/camelrestriction keys can be dropped; raw camelprovenance authorization differs from canonicalized alias; serializer omits four rootmapping spellings.",
+      "evidence": [
+        "gating/results.json:carrier_parity_cases",
+        "gating/frontend-risk-results.json:carrierParitySelection",
+        "integration/results.json:cases.canonical_mapping_restriction_alias_matrix"
+      ],
+      "limits": "Authored recognized-key boundary inputs; no ordinary production emitter of camel restriction aliases found. Inherited, not newregression; original canonical dualcarrier closure remains closed.",
+      "suggested_followup": "Declare narrow admitted vocabulary or forward complete carriers through canonical resolver; qualify universal all-carriers claims."
+    },
+    {
+      "id": "Q8D-02",
+      "classification": "inherited_compatibility_policy",
+      "title": "Missing runtime ceiling on metadata-only direct-proof path",
+      "observation": "Descriptor-based management default retained in both snapshots; canonical normalized absent ledger authority defaultsDIAGNOSTICdenies; actionFalse.",
+      "evidence": "integration/results.json:cases.native_metadata_direct_without_runtime_ceiling",
+      "blocking": false
+    },
+    {
+      "id": "Q8D-03",
+      "classification": "prior_documentation_qualification_resolved",
+      "title": "Implementation receipt commit lineage",
+      "observation": "Attachment now explicitly distinguishes fix8d9bd4a, reviewedcandidate81cf8bb and ancestor67375aa."
+    }
+  ],
+  "coverage": {
+    "source_files_each": 1086,
+    "changed_modules_compiled": 3,
+    "classification_helper_cases_each": 89,
+    "classification_native_cases_each": 102,
+    "classification_grouped_observations": 37,
+    "gating_assertions_each": 27,
+    "frontend_checks_each": 9,
+    "integration_case_groups_each": 25,
+    "integration_assertions_candidate_parent": [
+      45,
+      44
+    ],
+    "root_commands": 7,
+    "root_observation_assertions": 41
+  },
+  "deferred_stages": {
+    "3": "Dedicatedphenology/memoryproducts andunifiedcatalog",
+    "4": "Expert13state selector",
+    "5": "Nodata versusphysicalzero",
+    "6": "IntegratedGIS andrealplot/browserreceipts"
+  },
+  "recommendation": "Finish S8D-01 and bounded replay before unconditionalStage1-2 merge; independentStage3registry preparation may proceed; keepFA52open. Do not reopen exactverifiedS81-01 cases due Q8D-01."
+}

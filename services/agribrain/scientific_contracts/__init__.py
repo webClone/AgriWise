@@ -145,6 +145,10 @@ from .state_schema_ref import (
     STATE_SCHEMA_VERSION,
     STATE_STATUS_CONTRACT_VERSION,
     STATE_SUPPORT_LEDGER_SCHEMA_VERSION,
+    CANONICAL_13_STATE_CATALOG,
+    CANONICAL_STATE_TO_SURFACE,
+    get_state_catalog_entry,
+    canonical_state_key,
 )
 from .state_status import StateSupportStatus, normalize_status
 from .transition_state import (
@@ -244,6 +248,10 @@ __all__ = [
     "SCIENTIFIC_CONTRACTS_VERSION",
     "LAYER10_PUBLICATION_SCHEMA_VERSION",
     "STATE_ORDER",
+    "CANONICAL_13_STATE_CATALOG",
+    "CANONICAL_STATE_TO_SURFACE",
+    "get_state_catalog_entry",
+    "canonical_state_key",
     "index_state_support_ledger",
     "validate_ledger_dict",
     "canonicalize_state_support_record",

@@ -329,6 +329,60 @@ def validate_spatial_grid_spec(grid_spec: Any, width: int, height: int) -> tuple
     return True, "ok"
 
 
+ALL_BACKEND_KNOWN_SURFACES = (
+    "NDVI_CLEAN", "NDVI_DEVIATION", "BASELINE_ANOMALY",
+    "WATER_STRESS_PROB", "NUTRIENT_STRESS_PROB", "SALINITY_STRESS",
+    "COMPOSITE_RISK", "DATA_RELIABILITY", "DATA_CONFIDENCE", "UNCERTAINTY_SIGMA",
+    "RESOLUTION_COVERAGE", "GAP_FILL_MASK",
+    "CANOPY_ASMAE_VIGOR", "WATER_ASMAE_CANOPY_WATER", "WATER_ASMAE_ROOT_ZONE_WATER",
+    "NUTRIENT_ASMAE_CHLOROPHYLL_PROXY", "SALINITY_ASMAE_STRESS", "RISK_ASMAE_DIAGNOSTIC",
+    "ASMAE_POSTERIOR_CONCENTRATION", "RESOLUTION_ASMAE_EFFECTIVE", "ASMAE_VISUAL_FUSION_CANOPY",
+    "COMPOSITE_ADVISORY_CANOPY", "COMPOSITE_VEG_ATTENTION",
+    "COMPOSITE_WATER_SUPPORT", "COMPOSITE_NUTRIENT_SUPPORT",
+    "COMPOSITE_SALINITY_STRESS", "COMPOSITE_RISK_DIAGNOSTIC",
+    "COMPOSITE_CONFIDENCE", "COMPOSITE_EFFECTIVE_RESOLUTION",
+    "COMPOSITE_TEXTURE_DETAIL",
+    "NDVI_CLEAN_EXPERIMENTAL_FINE_DETAIL",
+    "EXPERIMENTAL_VISUAL_CANOPY",
+    "EXPERIMENTAL_VISUAL_CANOPY_HIGHRES",
+    "EXPERIMENTAL_TEXTURE_SUPPORT_MASK",
+    "EXPERIMENTAL_STRICT_FINE_DETAIL_CANDIDATE_MASK",
+    "EXPERIMENTAL_TEXTURE_CONFIDENCE",
+    "EXPERIMENTAL_GAPFILL_MASK",
+    "EXPERIMENTAL_PARENT_MEAN_ERROR",
+    "COMPOSITE_ARCHIVE_SUPPORT",
+    "COMPOSITE_RETRO_SCORE",
+    "COMPOSITE_ML_SUPPORT",
+    "COMPOSITE_BMA_DISAGREEMENT",
+    "COMPOSITE_UNCERTAINTY",
+    # ASMAE 13 Canonical State Surfaces
+    "ASMAE_VIGOR",
+    "ASMAE_LAI",
+    "ASMAE_CHLOROPHYLL",
+    "ASMAE_CANOPY_WATER",
+    "ASMAE_ROOT_ZONE_WATER",
+    "ASMAE_SURFACE_WETNESS_EVENT",
+    "ASMAE_STRUCTURE",
+    "ASMAE_BARE_SOIL",
+    "ASMAE_SALINITY_STRESS",
+    "ASMAE_THERMAL_STRESS",
+    "ASMAE_BIOTIC_CONFOUNDER_RISK",
+    "ASMAE_PHENOLOGY_PROGRESS",
+    "ASMAE_STRESS_MEMORY",
+)
+
+
+def build_no_data_surface_inventory(reason: str = "insufficient_evidence") -> dict:
+    """Return explicit missing status for all known surfaces in no-data/terminal envelopes."""
+    return {
+        st: {
+            "surfaceType": st,
+            "status": "missing",
+            "reason": reason,
+        }
+        for st in ALL_BACKEND_KNOWN_SURFACES
+    }
+
 RENDER_DEPENDENCY_MASK_TYPES = frozenset({
     SurfaceType.OBSERVED_DATA_MASK_NDVI.value,
     SurfaceType.GAP_FILL_MASK_NDVI.value,
@@ -453,11 +507,14 @@ def sanitize_surface_values(surfaces: List[SurfaceArtifact]) -> List[SurfaceArti
                 for r in s.values:
                     sanitized_row = []
                     for val in r:
-                        if val is None:
+                        if val is None or isinstance(val, bool) or not isinstance(val, (int, float)):
                             sanitized_row.append(None)
                         else:
-                            converted = float(val)
-                            sanitized_row.append(converted if math.isfinite(converted) else None)
+                            try:
+                                converted = float(val)
+                                sanitized_row.append(converted if math.isfinite(converted) else None)
+                            except (ValueError, TypeError, OverflowError):
+                                sanitized_row.append(None)
                     sanitized_grid.append(sanitized_row)
                 s.values = sanitized_grid
             except Exception:
@@ -1074,6 +1131,7 @@ def deserialize_l10_output(d: dict) -> Layer10Output:
     # Reconstruct surfaces
     surfaces = []
     for s in d.get("surface_pack", []):
+        prov = s.get("provenance", {}) or {}
         surfaces.append(SurfaceArtifact(
             surface_id=s["surface_id"],
             semantic_type=SurfaceType(s["semantic_type"]),
@@ -1081,19 +1139,26 @@ def deserialize_l10_output(d: dict) -> Layer10Output:
             values=s["values"],
             units=s["units"],
             native_resolution_m=s["native_resolution_m"],
+            display_resolution_m=float(s.get("display_resolution_m") or prov.get("display_resolution_m") or prov.get("displayResolutionM") or 1.0),
+            effective_resolution_m=float(s.get("effective_resolution_m") or prov.get("effective_resolution_m") or prov.get("effectiveResolutionM") or 10.0),
             render_range=tuple(s["render_range"]) if s.get("render_range") else (0.0, 1.0),
             palette_id=PaletteId(s["palette_id"]) if s.get("palette_id") else PaletteId.RAW_GRAYSCALE,
-            confidence=s.get("confidence"),
+            confidence=s.get("confidence") if s.get("confidence") is not None else prov.get("confidence"),
+            observed_mask=s.get("observed_mask") if s.get("observed_mask") is not None else (prov.get("observed_mask") or prov.get("observedMask")),
+            inferred_mask=s.get("inferred_mask") if s.get("inferred_mask") is not None else (prov.get("inferred_mask") or prov.get("inferredMask")),
+            state_update_allowed=bool(s.get("state_update_allowed", prov.get("state_update_allowed", False))),
+            prescription_driver_allowed=bool(s.get("prescription_driver_allowed", prov.get("prescription_driver_allowed", False))),
+            block_reasons=list(s.get("block_reasons") or prov.get("block_reasons") or []) if (s.get("block_reasons") or prov.get("block_reasons")) else None,
             source_weights=s.get("source_weights"),
             time_window=s.get("time_window", {}),
             source_layers=s.get("source_layers", []),
-            provenance=s.get("provenance", {}),
+            provenance=prov,
             grounding_class=s.get("grounding_class"),
             raster_basis=s.get("raster_basis", []),
             observed_ratio=s.get("observed_ratio", 0.0),
             grid_spec=s.get("grid_spec"),
-            source_grid_spec=s.get("source_grid_spec"),
-            display_grid_spec=s.get("display_grid_spec"),
+            source_grid_spec=s.get("source_grid_spec") or prov.get("source_grid_spec") or prov.get("sourceGridSpec"),
+            display_grid_spec=s.get("display_grid_spec") or prov.get("display_grid_spec") or prov.get("displayGridSpec"),
         ))
         
     # Reconstruct zones
@@ -1390,10 +1455,10 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
 
     if output and output.surface_pack:
         sanitize_surface_values(output.surface_pack)
-    npz_path_tmp = None
-    json_path_tmp = None
-    npz_path = None
-    cache_path = None
+    npz_candidate_path = None
+    json_candidate_path = None
+    committed = False
+    detached = []
     try:
         from dataclasses import asdict
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -1401,7 +1466,6 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
         cache_dir = os.path.join(base_dir, "artifacts", cache_dir_name)
         os.makedirs(cache_dir, exist_ok=True)
         cache_path = os.path.join(cache_dir, f"{cache_key}.json")
-        npz_path = os.path.join(cache_dir, f"surfaces_{cache_key}.npz")
         
         # Extract numeric grids before dataclass serialization.  ``asdict``
         # recursively copied both surface_pack and raster_pack grids (more than
@@ -1410,35 +1474,34 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
         # detach those duplicate values, serialize metadata, then restore the
         # live output object in a finally block.
         npz_data = {}
-        detached = []
-        for surface in output.surface_pack:
-            s_id = getattr(surface, "surface_id", "")
-            if not s_id:
-                continue
-
-            vals = getattr(surface, "values", None)
-            if vals is not None:
-                npz_data[f"values::{s_id}"] = np.asarray(vals, dtype=np.float32)
-                detached.append((surface, "values", vals))
-                surface.values = []
-
-            conf = getattr(surface, "confidence", None)
-            if conf is not None:
-                npz_data[f"confidence::{s_id}"] = np.asarray(conf, dtype=np.float32)
-                detached.append((surface, "confidence", conf))
-                surface.confidence = None
-
-        for raster_entry in output.raster_pack or []:
-            if isinstance(raster_entry, dict) and "values" in raster_entry:
-                vals = raster_entry.get("values")
-                detached.append((raster_entry, "values", vals))
-                raster_entry["values"] = []
-            elif hasattr(raster_entry, "values"):
-                vals = raster_entry.values
-                detached.append((raster_entry, "values", vals))
-                raster_entry.values = []
-
         try:
+            for surface in output.surface_pack:
+                s_id = getattr(surface, "surface_id", "")
+                if not s_id:
+                    continue
+
+                vals = getattr(surface, "values", None)
+                if vals is not None:
+                    npz_data[f"values::{s_id}"] = np.asarray(vals, dtype=np.float32)
+                    detached.append((surface, "values", vals))
+                    surface.values = []
+
+                conf = getattr(surface, "confidence", None)
+                if conf is not None:
+                    npz_data[f"confidence::{s_id}"] = np.asarray(conf, dtype=np.float32)
+                    detached.append((surface, "confidence", conf))
+                    surface.confidence = None
+
+            for raster_entry in output.raster_pack or []:
+                if isinstance(raster_entry, dict) and "values" in raster_entry:
+                    vals = raster_entry.get("values")
+                    detached.append((raster_entry, "values", vals))
+                    raster_entry["values"] = []
+                elif hasattr(raster_entry, "values"):
+                    vals = raster_entry.values
+                    detached.append((raster_entry, "values", vals))
+                    raster_entry.values = []
+
             serialized = asdict(output)
         finally:
             for owner, field_name, value in detached:
@@ -1447,47 +1510,54 @@ def save_layer10_to_cache(cache_key: str, output: Layer10Output) -> int:
                 else:
                     setattr(owner, field_name, value)
         
-        # Define tmp paths for atomic rename
-        npz_path_tmp = npz_path.replace(".npz", ".tmp.npz")
-        json_path_tmp = cache_path.replace(".json", ".tmp.json")
-        
-        # 1. Save NPZ to tmp
+        # Atomic generation-addressed discipline for Layer 10
+        import uuid
+        import hashlib
+        gen_id = uuid.uuid4().hex[:12]
+
         if npz_data:
-            np.savez_compressed(npz_path_tmp, **npz_data)
-            serialized["surfaces_artifact_ref"] = f"{cache_dir_name}/surfaces_{cache_key}.npz"
-            
-        # 2. Save JSON to tmp
-        with open(json_path_tmp, "w", encoding="utf-8") as f:
+            npz_filename = f"surfaces_{cache_key}_{gen_id}.npz"
+            npz_candidate_path = os.path.join(cache_dir, npz_filename)
+            np.savez_compressed(npz_candidate_path, **npz_data)
+            serialized["surfaces_artifact_ref"] = f"{cache_dir_name}/{npz_filename}"
+            serialized["generation_id"] = gen_id
+            with open(npz_candidate_path, "rb") as f:
+                serialized["surfaces_artifact_sha256"] = hashlib.sha256(f.read()).hexdigest()
+            serialized["surfaces_member_metadata"] = {
+                k: {"shape": list(arr.shape), "dtype": str(arr.dtype)}
+                for k, arr in npz_data.items()
+            }
+
+        # Policy semantic version
+        serialized["state_support_policy_version"] = "asmae_support_policy_v2"
+
+        # Write candidate JSON
+        json_candidate_path = os.path.join(cache_dir, f"{cache_key}_{gen_id}.tmp.json")
+        with open(json_candidate_path, "w", encoding="utf-8") as f:
             json.dump(serialized, f, separators=(",", ":"), default=str)
-            
-        # 3. Atomic replace NPZ
-        if npz_data:
-            os.replace(npz_path_tmp, npz_path)
-            
-        # 4. Atomic replace JSON
-        os.replace(json_path_tmp, cache_path)
-            
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic commit: replace manifest JSON
+        os.replace(json_candidate_path, cache_path)
+        committed = True
+
         # Compute total storage size in bytes
         total_bytes = os.path.getsize(cache_path)
-        if os.path.exists(npz_path):
-            total_bytes += os.path.getsize(npz_path)
+        if npz_candidate_path and os.path.exists(npz_candidate_path):
+            total_bytes += os.path.getsize(npz_candidate_path)
         return total_bytes
     except Exception as e:
         import sys
         print(f"[L10] Failed to write surfaces cache: {e}", file=sys.stderr)
-        # Cleanup any temporary files on failure
-        if npz_path_tmp and os.path.exists(npz_path_tmp):
-            try: os.remove(npz_path_tmp)
-            except Exception: pass
-        if json_path_tmp and os.path.exists(json_path_tmp):
-            try: os.remove(json_path_tmp)
-            except Exception: pass
-        if npz_path and os.path.exists(npz_path):
-            try: os.remove(npz_path)
-            except Exception: pass
-        if cache_path and os.path.exists(cache_path):
-            try: os.remove(cache_path)
-            except Exception: pass
+        # Cleanup ONLY uncommitted candidate files on failure; preserve existing committed cache!
+        if not committed:
+            if npz_candidate_path and os.path.exists(npz_candidate_path):
+                try: os.remove(npz_candidate_path)
+                except Exception: pass
+            if json_candidate_path and os.path.exists(json_candidate_path):
+                try: os.remove(json_candidate_path)
+                except Exception: pass
         return 0
 
 
@@ -1504,6 +1574,11 @@ def load_layer10_from_cache(cache_key: str) -> Optional[Layer10Output]:
             with open(cache_path, "r", encoding="utf-8") as f:
                 d = json.load(f)
             
+            # Verify state support policy version
+            policy_ver = d.get("state_support_policy_version") or d.get("provenance", {}).get("state_support_policy_version")
+            if policy_ver != "asmae_support_policy_v2":
+                return None
+
             # Check rollout registry if ASMAE surfaces are cached
             has_asmae_cached = False
             for s_dict in d.get("surface_pack", []):
@@ -1534,6 +1609,14 @@ def load_layer10_from_cache(cache_key: str) -> Optional[Layer10Output]:
                     # Missing NPZ: safe cache miss
                     return None
                 
+                # Verify NPZ sha256 checksum if recorded
+                expected_sha = d.get("surfaces_artifact_sha256")
+                if expected_sha:
+                    import hashlib
+                    with open(npz_path, "rb") as f_npz:
+                        if hashlib.sha256(f_npz.read()).hexdigest() != expected_sha:
+                            return None
+
                 try:
                     with safe_np_load(npz_path) as data:
                         # 1. Surface count check
@@ -1594,6 +1677,12 @@ def load_layer10_from_cache(cache_key: str) -> Optional[Layer10Output]:
             restored = deserialize_l10_output(d)
             if not validate_layer10_publication(restored):
                 return None
+            try:
+                from .products.export import export_raster_pack
+                from dataclasses import asdict
+                restored.raster_pack = [asdict(r) for r in export_raster_pack(restored)]
+            except Exception:
+                pass
             return restored
     except Exception as e:
         import sys
@@ -1766,6 +1855,7 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
         asmae_state["spatial_materialization_block_reason"] = invalid_reason
         output = Layer10Output(
             run_id=run_id,
+            surface_inventory=build_no_data_surface_inventory(invalid_reason),
             publication_run_id=run_id,
             request_run_id=run_id,
             publication_id=f"pub_{cache_key[:16]}",
@@ -3822,31 +3912,105 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             "COMPOSITE_RETRO_SCORE",
             "COMPOSITE_ML_SUPPORT",
             "COMPOSITE_BMA_DISAGREEMENT",
-            "COMPOSITE_UNCERTAINTY"
+            "COMPOSITE_UNCERTAINTY",
+            # ASMAE 13 Canonical State Surfaces
+            "ASMAE_VIGOR",
+            "ASMAE_LAI",
+            "ASMAE_CHLOROPHYLL",
+            "ASMAE_CANOPY_WATER",
+            "ASMAE_ROOT_ZONE_WATER",
+            "ASMAE_SURFACE_WETNESS_EVENT",
+            "ASMAE_STRUCTURE",
+            "ASMAE_BARE_SOIL",
+            "ASMAE_SALINITY_STRESS",
+            "ASMAE_THERMAL_STRESS",
+            "ASMAE_BIOTIC_CONFOUNDER_RISK",
+            "ASMAE_PHENOLOGY_PROGRESS",
+            "ASMAE_STRESS_MEMORY",
         ]
         
         surface_by_type = {s.semantic_type.value if hasattr(s.semantic_type, "value") else str(s.semantic_type): s for s in output.surface_pack}
         
-        for st in ALL_BACKEND_KNOWN_SURFACES:
+        all_inventory_keys = list(ALL_BACKEND_KNOWN_SURFACES)
+        for st in surface_by_type:
+            if st not in all_inventory_keys:
+                all_inventory_keys.append(st)
+
+        for st in all_inventory_keys:
             s = surface_by_type.get(st)
             if s:
+                vals = s.values or []
+                has_finite = any(
+                    isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                    for row in vals
+                    for v in row
+                )
+                prov = s.provenance if isinstance(s.provenance, dict) else {}
+                has_scalar = False
+                flag = prov.get("has_scalar_estimate")
+                flag_denied = False
+                if flag is not None:
+                    if isinstance(flag, bool):
+                        flag_denied = not flag
+                    elif isinstance(flag, (int, float)):
+                        if not math.isfinite(flag) or flag == 0 or flag == 0.0:
+                            flag_denied = True
+                    elif isinstance(flag, str):
+                        s_flag = flag.strip().lower()
+                        if s_flag in ("false", "0", "0.0", "no", "f", "none", "null"):
+                            flag_denied = True
+                    else:
+                        flag_denied = True
+
+                if not flag_denied:
+                    sv = prov.get("scalar_value")
+                    if isinstance(sv, (int, float)) and not isinstance(sv, bool) and math.isfinite(sv):
+                        rng = s.render_range if hasattr(s, "render_range") and s.render_range else (0.0, 1.0)
+                        lo, hi = rng
+                        if (lo is None or sv >= lo - 1e-6) and (hi is None or sv <= hi + 1e-6):
+                            has_scalar = True
+
+                if not has_finite and not has_scalar:
+                    surface_inventory[st] = {
+                        "surfaceType": st,
+                        "status": "missing",
+                        "groundingClass": "NONE",
+                        "reason": f"No valid pixels or scalar estimate for {st}",
+                        "trust_badges": ["DATA_UNAVAILABLE"],
+                    }
+                    continue
+
                 gc = s.grounding_class or "UNIFORM"
-                status = "available_raster"
-                if gc in ["UNIFORM", "BROADCAST"]:
-                    status = "plot_level_only"
-                elif gc == "PROXY_SPATIAL":
-                    status = "proxy_only"
-                prov = s.provenance or {}
-                if not isinstance(prov, dict):
-                    prov = {}
+                if not has_finite and has_scalar:
+                    status = "available_scalar" if gc not in ["UNIFORM", "BROADCAST"] else "plot_level_only"
+                else:
+                    status = "available_raster"
+                    if gc in ["UNIFORM", "BROADCAST"]:
+                        status = "plot_level_only"
+                    elif gc == "PROXY_SPATIAL":
+                        status = "proxy_only"
+                sup_class = prov.get("support_class")
+                if sup_class == "unsupported":
+                    status = "unsupported"
                 from services.agribrain.layer10_sire.mode_surface_resolver import trust_badges_for_surface
                 trust_badges = trust_badges_for_surface(s, prov.get("trust_badges") if prov else None)
+                
+                reason = prov.get("warning_wording")
+                if not reason:
+                    if status == "unsupported":
+                        block_reasons = prov.get("block_reasons") or []
+                        if block_reasons:
+                            reason = f"{st} is unsupported: {', '.join(block_reasons)}"
+                        else:
+                            reason = f"{st} has no validated observation or prior support"
+                    else:
+                        reason = f"{st.replace('_', ' ').capitalize()} surface is available"
                         
                 surface_inventory[st] = {
                     "surfaceType": st,
                     "status": status,
                     "groundingClass": gc,
-                    "reason": prov.get("warning_wording", f"{st.replace('_', ' ').capitalize()} surface is available"),
+                    "reason": reason,
                     "trust_badges": trust_badges
                 }
             else:
@@ -5113,26 +5277,96 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             return t.upper().startswith("COMPOSITE_")
 
         def asmae_family_gate(t_upper: str):
-            if "WATER" in t_upper and not has_water_evidence:
+            if ("WATER" in t_upper or "WETNESS" in t_upper) and not has_water_evidence:
                 return False, "missing_water_evidence_family"
-            if "NUTRIENT" in t_upper and not has_nutrient_evidence:
+            if ("NUTRIENT" in t_upper or "CHLOROPHYLL" in t_upper) and not has_nutrient_evidence:
                 return False, "missing_nutrient_evidence_family"
             if "SALINITY" in t_upper and not has_salinity_evidence:
                 return False, "missing_salinity_evidence_family"
-            if "RISK" in t_upper and not has_risk_evidence:
+            if ("RISK" in t_upper or "BIOTIC" in t_upper) and not has_risk_evidence:
                 return False, "missing_risk_evidence_family"
             return True, ""
 
         def asmae_state_gate(t_upper: str):
-            requirements = []
-            if "CANOPY" in t_upper or "VIGOR" in t_upper:
-                requirements = ["vigor"]
-            elif "WATER" in t_upper:
-                requirements = ["canopy_water", "root_zone_water"]
-            elif "NUTRIENT" in t_upper or "CHLOROPHYLL" in t_upper:
-                requirements = ["chlorophyll"]
-            elif "SALINITY" in t_upper:
-                requirements = ["salinity_stress"]
+            from services.agribrain.scientific_contracts.state_schema_ref import (
+                SURFACE_TO_CANONICAL_STATE,
+                STATE_ORDER,
+                canonical_state_key,
+            )
+            state = SURFACE_TO_CANONICAL_STATE.get(t_upper)
+            if not state:
+                k = canonical_state_key(t_upper)
+                if k in STATE_ORDER:
+                    state = k
+
+            if state is not None:
+                entry = state_support_ledger.get(state) or {}
+                if not entry:
+                    return False, f"missing_state_support:{state}"
+
+                accepted_updates = int(entry.get("accepted_update_count", 0) or 0)
+                status = str(entry.get("support_status") or "").lower()
+                block_reasons = entry.get("block_reasons") or ()
+                rel = str(entry.get("observation_relationship", "") or "").lower()
+
+                # S12-02: Denial, revocation, and block reasons take strict precedence
+                # over historical accepted updates.
+                if (
+                    status in ("unsupported", "blocked", "failed", "revoked", "none")
+                    or rel == "unsupported"
+                    or any(r in ("local_support_revoked", "support_revoked", "evidence_revoked", "blocked") for r in block_reasons)
+                ):
+                    reason = f"current_state_support_denied:{state}"
+                    if block_reasons:
+                        reason = f"state_support_blocked:{block_reasons[0]}"
+                    elif status in ("unsupported", "blocked", "revoked"):
+                        reason = f"missing_state_support:{state}"
+                    return False, reason
+
+                # State-specific predicates per scientific role
+                if state == "biotic_confounder_risk":
+                    if not (
+                        output.asmae_proof.get("bma_proof", {}).get("production_bma_valid")
+                        and output.asmae_proof.get("retrovalidation_proof", {}).get("real_holdout_count", 0) > 0
+                    ):
+                        return False, "missing_risk_bma_retro_support"
+                    if accepted_updates <= 0 and status not in ("assimilated", "supported", "active", "hypothesis_active"):
+                        return False, "missing_state_support:biotic_confounder_risk"
+                    return True, ""
+
+                if state == "phenology_progress":
+                    if accepted_updates > 0 or status in (
+                        "model_propagated", "temporally_conditioned", "assimilated", "supported", "active"
+                    ):
+                        return True, ""
+                    return False, "missing_state_support:phenology_progress"
+
+                if state == "stress_memory":
+                    # Fix S12-02 / future helper caution: Do not accept relationship 'none' without active memory status
+                    if accepted_updates > 0 or status in (
+                        "model_propagated", "temporally_conditioned", "memory_accumulated", "assimilated", "supported", "active", "prior_constrained"
+                    ):
+                        return True, ""
+                    return False, "missing_state_support:stress_memory"
+
+                # Standard observation-constrained biophysical states require own-state accepted updates
+                if accepted_updates <= 0 and status not in ("assimilated", "supported", "active"):
+                    return False, f"missing_state_support:{state}"
+                return True, ""
+
+            # Diagnostic / Non-latent-state surfaces
+            if "RESOLUTION" in t_upper:
+                if not current_1m_allowed:
+                    return False, "missing_local_resolution_support"
+                return True, ""
+            elif "CONFIDENCE" in t_upper or "UNCERTAINTY" in t_upper:
+                return (current_spatial_asmae, "" if current_spatial_asmae else "missing_spatial_posterior")
+            elif "RETROVALIDATION" in t_upper:
+                has_retro = output.asmae_proof.get("retrovalidation_proof", {}).get("real_holdout_count", 0) > 0
+                return (has_retro, "" if has_retro else "missing_retrovalidation_support")
+            elif "BMA_DISAGREEMENT" in t_upper or "BMA" in t_upper:
+                has_bma = bool(output.asmae_proof.get("bma_proof", {}).get("production_bma_valid"))
+                return (has_bma, "" if has_bma else "missing_bma_proof")
             elif "RISK" in t_upper:
                 if not (
                     output.asmae_proof.get("bma_proof", {}).get("production_bma_valid")
@@ -5140,21 +5374,8 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
                 ):
                     return False, "missing_risk_bma_retro_support"
                 return True, ""
-            elif "RESOLUTION" in t_upper:
-                if not current_1m_allowed:
-                    return False, "missing_local_resolution_support"
-                return True, ""
-            elif "CONFIDENCE" in t_upper or "UNCERTAINTY" in t_upper:
-                return (current_spatial_asmae, "" if current_spatial_asmae else "missing_spatial_posterior")
-            if not requirements:
-                return False, "surface_state_requirement_unmapped"
-            supported = [
-                state for state in requirements
-                if (state_support_ledger.get(state) or {}).get("accepted_update_count", 0) > 0
-            ]
-            if not supported:
-                return False, "missing_state_support:" + ",".join(requirements)
-            return True, ""
+
+            return False, "surface_state_requirement_unmapped"
 
         def asmae_surface_gate(surface, t_upper: str):
             # Pixel visualization and scientific authority are deliberately
@@ -5177,6 +5398,37 @@ def run_layer10_sire(l10_input: Layer10Input) -> Layer10Output:
             family_ok, family_reason = asmae_family_gate(t_upper)
             if not family_ok:
                 return False, family_reason
+
+            # S673-02: Deny surfaces with active revocation or blocking reasons
+            prov = getattr(surface, "provenance", {}) or {}
+            surf_blocks = []
+            if prov.get("block_reasons"):
+                surf_blocks.extend(prov["block_reasons"])
+            if getattr(surface, "block_reasons", None):
+                surf_blocks.extend(getattr(surface, "block_reasons"))
+            if prov.get("restriction_reasons"):
+                surf_blocks.extend(prov["restriction_reasons"])
+            if prov.get("exclusion_reason"):
+                surf_blocks.append(prov["exclusion_reason"])
+            if surf_blocks:
+                REVOCATION_BLOCK_STRINGS = (
+                    "local_support_revoked",
+                    "support_revoked",
+                    "evidence_revoked",
+                    "blocked",
+                    "revoked",
+                )
+                for b in surf_blocks:
+                    b_str = str(b).lower()
+                    if any(rev in b_str for rev in REVOCATION_BLOCK_STRINGS):
+                        return False, f"surface_blocked:{b}"
+
+            # S12-01: Risk composite must have at least one active, qualified ingredient
+            if "RISK" in t_upper:
+                risk_ing = prov.get("risk_ingredients")
+                if risk_ing is not None and len(risk_ing) == 0:
+                    return False, "missing_qualified_risk_ingredients"
+
             return asmae_state_gate(t_upper)
 
         def _surface_provenance(surface):

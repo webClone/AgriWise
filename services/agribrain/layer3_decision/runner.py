@@ -1030,6 +1030,11 @@ def _execute_canonical_water_engine(
         if not isinstance(op_ctx, dict):
             op_ctx = {}
 
+        tenant_id = kwargs.get("tenant_id") or getattr(inputs, "tenant_id", "default_tenant") or op_ctx.get("tenant_id", "default_tenant")
+        namespace = kwargs.get("namespace") or getattr(inputs, "namespace", "default") or op_ctx.get("namespace", "default")
+        cycle_id = kwargs.get("cycle_id") or getattr(inputs, "cycle_id", None) or op_ctx.get("cycle_id")
+        geometry_version = kwargs.get("geometry_version") or getattr(inputs, "geometry_version", None) or op_ctx.get("geometry_version")
+
         # 1. Weather observations from L1 or inputs
         timeseries = getattr(l1_output, "plot_timeseries", []) or []
         weather_daily = (
@@ -1041,8 +1046,34 @@ def _execute_canonical_water_engine(
             or op_ctx.get("weather")
         )
         rec = None
+        step_limit_ts = min(ts, datetime.datetime.combine(ts.date(), datetime.time(23, 59, 59, tzinfo=timezone.utc)))
+
+        def _is_weather_issuance_eligible(entry: dict, limit_ts: datetime.datetime) -> bool:
+            if not isinstance(entry, dict):
+                return False
+            iss = entry.get("issued_at") or entry.get("timestamp")
+            if iss:
+                try:
+                    iss_dt = datetime.datetime.fromisoformat(str(iss))
+                    if iss_dt.tzinfo is None:
+                        iss_dt = iss_dt.replace(tzinfo=timezone.utc)
+                    return iss_dt <= limit_ts
+                except Exception:
+                    return False
+            if entry.get("is_prior") or entry.get("source_role") in ("historical_actual", "reanalyzed", "prior"):
+                return True
+            entry_d = entry.get("date")
+            if entry_d:
+                try:
+                    return datetime.date.fromisoformat(str(entry_d)[:10]) <= limit_ts.date()
+                except Exception:
+                    return False
+            return True
+
         if isinstance(weather_daily, dict):
-            rec = weather_daily.get(day_key)
+            cand = weather_daily.get(day_key)
+            if cand and _is_weather_issuance_eligible(cand, step_limit_ts):
+                rec = cand
         elif isinstance(weather_daily, list):
             for t_entry in reversed(weather_daily):
                 if isinstance(t_entry, dict):
@@ -1053,7 +1084,7 @@ def _execute_canonical_water_engine(
                             t_date = raw_ts.astimezone(ts.tzinfo).strftime("%Y-%m-%d")
                         elif isinstance(raw_ts, str) and len(raw_ts) >= 10:
                             t_date = raw_ts[:10]
-                    if t_date == day_key:
+                    if t_date == day_key and _is_weather_issuance_eligible(t_entry, step_limit_ts):
                         rec = t_entry
                         break
         if not rec and timeseries:
@@ -1066,16 +1097,42 @@ def _execute_canonical_water_engine(
                             t_date = raw_ts.astimezone(ts.tzinfo).strftime("%Y-%m-%d")
                         elif isinstance(raw_ts, str) and len(raw_ts) >= 10:
                             t_date = raw_ts[:10]
-                    if t_date == day_key:
+                    if t_date == day_key and _is_weather_issuance_eligible(t_entry, step_limit_ts):
                         rec = t_entry
                         break
 
         weather_prior = op_ctx.get("weather_prior") or getattr(inputs, "weather_prior", None)
+        weather_prior_eligible = (
+            isinstance(weather_prior, dict)
+            and _is_weather_issuance_eligible(weather_prior, step_limit_ts)
+        )
 
-        if not rec and isinstance(weather_prior, dict):
+        if not rec and weather_prior_eligible:
             rec = dict(weather_prior)
             rec["date"] = day_key
             rec["is_prior"] = True
+            rec["source_role"] = "prior"
+
+        # Fallback to committed latest hydraulic checkpoint for this plot/cycle/geometry
+        if not rec:
+            try:
+                from world_model.canonical_worldline import CanonicalWorldlineService
+                _cw_init = CanonicalWorldlineService()
+                _cp_init = _cw_init.load_latest_hydraulic_checkpoint(
+                    plot_id=plot_id,
+                    tenant_id=tenant_id,
+                    namespace=namespace,
+                    cycle_id=cycle_id,
+                    geometry_version=geometry_version,
+                )
+                if _cp_init:
+                    _hist_init = _cp_init.get("payload", {}).get("history_summary", {})
+                    if isinstance(_hist_init, dict) and day_key in _hist_init:
+                        _cand_cp = _hist_init[day_key].get("weather")
+                        if _cand_cp and _is_weather_issuance_eligible(_cand_cp, step_limit_ts):
+                            rec = _cand_cp
+            except Exception as _cp_err:
+                pass
 
         if not rec or not isinstance(rec, dict):
             import logging
@@ -1104,13 +1161,38 @@ def _execute_canonical_water_engine(
             rh_max_v = _get_val(["rh_max_pct", "rh_max"])
             rn_v = _get_val(["net_radiation_mj_m2", "net_radiation", "radiation"])
 
-            if isinstance(weather_prior, dict):
-                if t_min_v is None and "temp_min" in weather_prior: t_min_v = finite_real(weather_prior["temp_min"])
-                if precip_v is None and "precipitation" in weather_prior: precip_v = finite_real(weather_prior["precipitation"])
-                if wind_v is None and "wind_speed" in weather_prior: wind_v = finite_real(weather_prior["wind_speed"])
-                if rh_min_v is None and "rh_min" in weather_prior: rh_min_v = finite_real(weather_prior["rh_min"])
-                if rh_max_v is None and "rh_max" in weather_prior: rh_max_v = finite_real(weather_prior["rh_max"])
-                if rn_v is None and "net_radiation" in weather_prior: rn_v = finite_real(weather_prior["net_radiation"])
+            backfilled_from_prior = False
+            if weather_prior_eligible and isinstance(weather_prior, dict):
+                if t_min_v is None and "temp_min" in weather_prior:
+                    val = finite_real(weather_prior["temp_min"])
+                    if val is not None:
+                        t_min_v = val
+                        backfilled_from_prior = True
+                if precip_v is None and "precipitation" in weather_prior:
+                    val = finite_real(weather_prior["precipitation"])
+                    if val is not None:
+                        precip_v = val
+                        backfilled_from_prior = True
+                if wind_v is None and "wind_speed" in weather_prior:
+                    val = finite_real(weather_prior["wind_speed"])
+                    if val is not None:
+                        wind_v = val
+                        backfilled_from_prior = True
+                if rh_min_v is None and "rh_min" in weather_prior:
+                    val = finite_real(weather_prior["rh_min"])
+                    if val is not None:
+                        rh_min_v = val
+                        backfilled_from_prior = True
+                if rh_max_v is None and "rh_max" in weather_prior:
+                    val = finite_real(weather_prior["rh_max"])
+                    if val is not None:
+                        rh_max_v = val
+                        backfilled_from_prior = True
+                if rn_v is None and "net_radiation" in weather_prior:
+                    val = finite_real(weather_prior["net_radiation"])
+                    if val is not None:
+                        rn_v = val
+                        backfilled_from_prior = True
 
             if rh_min_v is None and hum_v is not None:
                 rh_min_v = max(10.0, hum_v - 15.0)
@@ -1126,7 +1208,7 @@ def _execute_canonical_water_engine(
             if missing_vars:
                 return None
 
-            return {
+            parsed_w = {
                 "t_max_c": float(t_max_v),
                 "t_min_c": float(t_min_v),
                 "precipitation_mm": float(precip_v),
@@ -1135,6 +1217,29 @@ def _execute_canonical_water_engine(
                 "rh_max_pct": float(rh_max_v),
                 "net_radiation_mj_m2": float(rn_v),
             }
+            # Preserve source role, issuance time, and prior lineage
+            if r.get("is_prior") or backfilled_from_prior:
+                parsed_w["source_role"] = "prior"
+                parsed_w["is_prior"] = True
+                parsed_w["has_prior_backfill"] = backfilled_from_prior
+            elif "source_role" in r:
+                parsed_w["source_role"] = str(r["source_role"])
+            elif "role" in r:
+                parsed_w["source_role"] = str(r["role"])
+            else:
+                parsed_w["source_role"] = "observation"
+
+            if "issued_at" in r:
+                parsed_w["issued_at"] = str(r["issued_at"])
+            elif "timestamp" in r:
+                parsed_w["issued_at"] = str(r["timestamp"])
+
+            if "is_prior" in parsed_w:
+                pass
+            elif "is_prior" in r:
+                parsed_w["is_prior"] = bool(r["is_prior"])
+
+            return parsed_w
 
         weather_obs = _parse_weather(rec)
         if weather_obs is None:
@@ -1909,39 +2014,81 @@ def _execute_canonical_water_engine(
                         if t_d == d_str:
                             r_entry = t_entry
                             break
+            step_limit_ts = min(ts, datetime.datetime.combine(d_val, datetime.time(23, 59, 59, tzinfo=timezone.utc)))
+
+            def _is_weather_issuance_eligible(w_cand: Any) -> bool:
+                if not w_cand or not isinstance(w_cand, dict):
+                    return False
+                cand_iss = w_cand.get("issued_at") or w_cand.get("timestamp")
+                if cand_iss:
+                    try:
+                        cand_iss_dt = datetime.datetime.fromisoformat(str(cand_iss))
+                        if cand_iss_dt.tzinfo is None:
+                            cand_iss_dt = cand_iss_dt.replace(tzinfo=timezone.utc)
+                        return cand_iss_dt <= step_limit_ts
+                    except Exception:
+                        return False
+                if w_cand.get("is_prior") or w_cand.get("source_role") in ("historical_actual", "reanalyzed", "prior"):
+                    return True
+                entry_date = w_cand.get("date")
+                if entry_date:
+                    try:
+                        return datetime.date.fromisoformat(str(entry_date)[:10]) <= step_limit_ts.date()
+                    except Exception:
+                        return False
+                return True
+
             if r_entry and isinstance(r_entry, dict):
                 p = _parse_weather(r_entry)
-                if p:
+                if p and _is_weather_issuance_eligible(p):
                     return p
 
             # If this date was previously integrated and stored in plot_hist, retain its observation
+            # only if issuance eligibility is satisfied
             if d_str in plot_hist and isinstance(plot_hist[d_str], dict) and "weather" in plot_hist[d_str]:
                 cached_w = plot_hist[d_str]["weather"]
-                if cached_w and isinstance(cached_w, dict):
+                if cached_w and isinstance(cached_w, dict) and _is_weather_issuance_eligible(cached_w):
                     return cached_w
 
             # Also check retained_weather_map if replaying an invalidated trajectory
             if d_str in retained_weather_map and isinstance(retained_weather_map[d_str], dict):
-                return retained_weather_map[d_str]
+                retained_w = retained_weather_map[d_str]
+                if _is_weather_issuance_eligible(retained_w):
+                    return retained_w
 
-            # DV10: Check if this date was previously recorded in canonical worldline checkpoints for this plot
+            # DV10: Check if this date was previously recorded in canonical committed worldline checkpoints
             try:
                 from world_model.canonical_worldline import CanonicalWorldlineService
                 _cw_tmp = CanonicalWorldlineService()
-                _cp_dir = _cw_tmp._plot_dir(plot_id, tenant_id, namespace) / "checkpoints"
-                if _cp_dir.exists():
-                    for _cp_f in sorted(_cp_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-                        try:
-                            _cp_obj = _cw_tmp._read(_cp_f)
-                            _cp_hist = _cp_obj.get("payload", {}).get("history_summary", {})
-                            if isinstance(_cp_hist, dict) and d_str in _cp_hist:
-                                _w_candidate = _cp_hist[d_str].get("weather")
-                                if _w_candidate and isinstance(_w_candidate, dict):
-                                    _pw = _parse_weather(_w_candidate)
-                                    if _pw:
-                                        return _pw
-                        except Exception:
-                            continue
+                # Load committed latest hydraulic checkpoint for this plot/tenant/namespace/cycle/geometry
+                _cp_obj = _cw_tmp.load_latest_hydraulic_checkpoint(
+                    plot_id=plot_id,
+                    tenant_id=tenant_id,
+                    namespace=namespace,
+                    cycle_id=cycle_id,
+                    geometry_version=geometry_version,
+                )
+                if _cp_obj:
+                    _cp_hist = _cp_obj.get("payload", {}).get("history_summary", {})
+                    if isinstance(_cp_hist, dict) and d_str in _cp_hist:
+                        _w_candidate = _cp_hist[d_str].get("weather")
+                        if _w_candidate and isinstance(_w_candidate, dict):
+                            # Knowledge-at-issuance eligibility check: checkpoint/issuance cannot be after step_limit_ts
+                            _is_eligible = False
+                            _iss_str = _w_candidate.get("issued_at") or _cp_obj.get("committed_at") or _cp_obj.get("created_at")
+                            if _iss_str:
+                                try:
+                                    _iss_dt = datetime.datetime.fromisoformat(str(_iss_str))
+                                    if _iss_dt.tzinfo is None:
+                                        _iss_dt = _iss_dt.replace(tzinfo=timezone.utc)
+                                    if _iss_dt <= step_limit_ts:
+                                        _is_eligible = True
+                                except Exception:
+                                    _is_eligible = False
+                            if _is_eligible:
+                                _pw = _parse_weather(_w_candidate)
+                                if _pw:
+                                    return _pw
             except Exception:
                 pass
 
@@ -1952,16 +2099,40 @@ def _execute_canonical_water_engine(
             d_prior_walk = d_val - datetime.timedelta(days=1)
             while (d_val - d_prior_walk).days <= 365:
                 dp_str = d_prior_walk.strftime("%Y-%m-%d")
+                walk_limit_ts = min(ts, datetime.datetime.combine(d_prior_walk, datetime.time(23, 59, 59, tzinfo=timezone.utc)))
+
+                def _is_walk_candidate_eligible(w_c: Any) -> bool:
+                    if not w_c or not isinstance(w_c, dict):
+                        return False
+                    cand_iss = w_c.get("issued_at") or w_c.get("timestamp")
+                    if cand_iss:
+                        try:
+                            cand_iss_dt = datetime.datetime.fromisoformat(str(cand_iss))
+                            if cand_iss_dt.tzinfo is None:
+                                cand_iss_dt = cand_iss_dt.replace(tzinfo=timezone.utc)
+                            return cand_iss_dt <= walk_limit_ts
+                        except Exception:
+                            return False
+                    if w_c.get("is_prior") or w_c.get("source_role") in ("historical_actual", "reanalyzed", "prior"):
+                        return True
+                    cand_date = w_c.get("date")
+                    if cand_date:
+                        try:
+                            return datetime.date.fromisoformat(str(cand_date)[:10]) <= walk_limit_ts.date()
+                        except Exception:
+                            return False
+                    return False
+
                 if isinstance(weather_daily, dict) and dp_str in weather_daily:
                     p_w = _parse_weather(weather_daily[dp_str])
-                    if p_w:
+                    if p_w and _is_walk_candidate_eligible(weather_daily[dp_str]):
                         prior_obs = p_w
                         break
                 if timeseries:
                     for t_entry in timeseries:
                         if isinstance(t_entry, dict):
                             t_d = t_entry.get("date") or str(t_entry.get("timestamp", ""))[:10]
-                            if t_d == dp_str:
+                            if t_d == dp_str and _is_walk_candidate_eligible(t_entry):
                                 p_w = _parse_weather(t_entry)
                                 if p_w:
                                     prior_obs = p_w
@@ -1969,23 +2140,31 @@ def _execute_canonical_water_engine(
                     if prior_obs:
                         break
                 if dp_str in plot_hist and isinstance(plot_hist[dp_str], dict) and "weather" in plot_hist[dp_str]:
-                    prior_obs = plot_hist[dp_str]["weather"]
-                    break
+                    cand_hist = plot_hist[dp_str]["weather"]
+                    if cand_hist and isinstance(cand_hist, dict) and _is_walk_candidate_eligible(cand_hist):
+                        prior_obs = cand_hist
+                        break
                 if dp_str in retained_weather_map:
-                    prior_obs = retained_weather_map[dp_str]
-                    break
+                    cand_ret = retained_weather_map[dp_str]
+                    if cand_ret and isinstance(cand_ret, dict) and _is_walk_candidate_eligible(cand_ret):
+                        prior_obs = cand_ret
+                        break
                 d_prior_walk -= datetime.timedelta(days=1)
 
             if prior_obs and isinstance(prior_obs, dict):
                 imputed = dict(prior_obs)
                 imputation_method = "prior_weather_persistence_zero_rain"
             else:
-                base_tmax = float(weather_prior["temp_max"]) if isinstance(weather_prior, dict) and "temp_max" in weather_prior else 20.0
-                base_tmin = float(weather_prior["temp_min"]) if isinstance(weather_prior, dict) and "temp_min" in weather_prior else 10.0
-                base_wind = float(weather_prior["wind_speed"]) if isinstance(weather_prior, dict) and "wind_speed" in weather_prior else 2.0
-                base_rhmin = float(weather_prior["rh_min"]) if isinstance(weather_prior, dict) and "rh_min" in weather_prior else 40.0
-                base_rhmax = float(weather_prior["rh_max"]) if isinstance(weather_prior, dict) and "rh_max" in weather_prior else 80.0
-                base_rn = float(weather_prior["net_radiation"]) if isinstance(weather_prior, dict) and "net_radiation" in weather_prior else 15.0
+                wp_eligible_walk = (
+                    isinstance(weather_prior, dict)
+                    and _is_weather_issuance_eligible(weather_prior, step_limit_ts)
+                )
+                base_tmax = float(weather_prior["temp_max"]) if wp_eligible_walk and "temp_max" in weather_prior else 20.0
+                base_tmin = float(weather_prior["temp_min"]) if wp_eligible_walk and "temp_min" in weather_prior else 10.0
+                base_wind = float(weather_prior["wind_speed"]) if wp_eligible_walk and "wind_speed" in weather_prior else 2.0
+                base_rhmin = float(weather_prior["rh_min"]) if wp_eligible_walk and "rh_min" in weather_prior else 40.0
+                base_rhmax = float(weather_prior["rh_max"]) if wp_eligible_walk and "rh_max" in weather_prior else 80.0
+                base_rn = float(weather_prior["net_radiation"]) if wp_eligible_walk and "net_radiation" in weather_prior else 15.0
                 imputed = {
                     "t_max_c": base_tmax,
                     "t_min_c": base_tmin,
@@ -2010,11 +2189,14 @@ def _execute_canonical_water_engine(
             if s_obj is None:
                 return "none"
             if isinstance(s_obj, SoilWaterState) or hasattr(s_obj, "layer_depths_cm"):
-                evap_days = (
-                    s_obj.evaporation_state.days_since_wetting
-                    if getattr(s_obj, "evaporation_state", None) is not None
-                    else None
-                )
+                evap_st = getattr(s_obj, "evaporation_state", None)
+                evap_tuple = (
+                    evap_st.days_since_wetting if hasattr(evap_st, "days_since_wetting") else None,
+                    round(evap_st.few_exposed_wetted_fraction, 4) if getattr(evap_st, "few_exposed_wetted_fraction", None) is not None else None,
+                    round(evap_st.surface_storage_mm, 4) if getattr(evap_st, "surface_storage_mm", None) is not None else None,
+                    round(evap_st.max_surface_storage_mm, 4) if getattr(evap_st, "max_surface_storage_mm", None) is not None else None,
+                    round(evap_st.kr_reduction_factor, 4) if getattr(evap_st, "kr_reduction_factor", None) is not None else None,
+                ) if evap_st is not None else None
                 soil_payload = (
                     "SoilWaterState",
                     tuple(getattr(s_obj, "layer_depths_cm", None) or ()),
@@ -2023,11 +2205,11 @@ def _execute_canonical_water_engine(
                     tuple(round(v, 4) for v in (getattr(s_obj, "wilting_point_profile", None) or ())),
                     tuple(round(v, 4) for v in (getattr(s_obj, "saturation_profile", None) or ())),
                     tuple(round(v, 4) for v in (getattr(s_obj, "residual_profile", None) or ())),
-                    tuple(round(v, 4) for v in (getattr(s_obj, "hydraulic_conductivity_profile", None) or ())),
-                    tuple(round(v, 4) for v in (getattr(s_obj, "van_genuchten_alpha", None) or ())),
-                    tuple(round(v, 4) for v in (getattr(s_obj, "van_genuchten_n", None) or ())),
+                    tuple(round(v, 6) for v in (getattr(s_obj, "hydraulic_conductivity_profile", None) or ())),
+                    tuple(round(v, 6) for v in (getattr(s_obj, "van_genuchten_alpha", None) or ())),
+                    tuple(round(v, 6) for v in (getattr(s_obj, "van_genuchten_n", None) or ())),
                     str(getattr(s_obj, "parameter_provenance", "TEXTURE_PRIOR")),
-                    evap_days,
+                    evap_tuple,
                 )
                 return hashlib.sha256(repr(soil_payload).encode("utf-8")).hexdigest()[:24]
             vwc = getattr(s_obj, "volumetric_water_content", None) or getattr(s_obj, "layers_vwc", None)

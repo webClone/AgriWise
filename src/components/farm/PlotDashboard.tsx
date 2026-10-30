@@ -25,6 +25,7 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
 import { useLayer10, MODE_CONFIG } from "@/hooks/useLayer10";
+import { useParcelAssessment } from "@/hooks/useParcelAssessment";
 import { usePlotIntelligence } from "@/hooks/usePlotIntelligence";
 import FieldInsightBar from "@/components/farm/intelligence/FieldInsightBar";
 import FieldSnapshotHUD from "@/components/farm/intelligence/FieldSnapshotHUD";
@@ -115,29 +116,33 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
   const [visionRefreshStatus, setVisionRefreshStatus] = useState<string | null>(null);
   const [mapVisualLens, setMapVisualLens] = useState<"standard" | "thermal" | "chlorophyll" | "chroma">("standard");
 
-  // ── PRIMARY: useLayer10 for map surfaces (proven, working) ──────────────
-  const l10 = useLayer10();
+  // ── AUTHORITATIVE PUBLICATION OWNER: useParcelAssessment ────────────────
+  const parcelAssessment = useParcelAssessment();
 
-  // ── SECONDARY: usePlotIntelligence for engines, timeline, raw data ──────
+  // ── PRESENTATION VIEW ADAPTERS ──────────────────────────────────────────
+  const l10 = useLayer10();
   const pi = usePlotIntelligence();
 
   useEffect(() => { setMounted(true); }, []);
 
-  // Fetch L10 data (map surfaces) on mount — this is the working pipeline
+  // Fetch authoritative canonical parcel assessment on mount / plot change
   useEffect(() => {
     if (plot?.id && farm?.id) {
-      l10.fetchLayer10(String(plot.id), String(farm.id), undefined, undefined, cropName);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plot?.id, farm?.id, cropName]);
-
-  // Fetch intelligence data (engines, timeline) — independent of L10 surfaces
-  useEffect(() => {
-    if (plot?.id && farm?.id) {
-      pi.fetchIntelligence(String(plot.id), String(farm.id));
+      parcelAssessment.fetchAssessment(String(plot.id), String(farm.id), {
+        geometry: plot.geoJson,
+        cropCycleId: (plot as any)?.cropCycleId || undefined,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plot?.id, farm?.id]);
+
+  // P2-B: Retire independent intelligence fetch — derive presentation state strictly from canonical assessment
+  const injectData = pi.injectData;
+  useEffect(() => {
+    if (l10.data) {
+      injectData(l10.data, (plot as any)?.id, l10.isApplicable);
+    }
+  }, [l10.data, l10.isApplicable, injectData, (plot as any)?.id]);
 
   // ── Screen state (from L10 — the working hook) ─────────────────────────
   // Simplified: no more "diagnose" state that hides everything

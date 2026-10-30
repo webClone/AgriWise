@@ -12,6 +12,7 @@ import { resolveSurfaceBounds } from "./layers/SemanticSurfaceLayer";
 import ZoneChip from "./layers/zones/ZoneChip";
 import { formatZoneGeoJson, computeZoneCentroid, DeckZoneFeature } from "./layers/zones/zoneUtils";
 import NdviDebugOverlay from "./layers/NdviDebugOverlay";
+import PlotScientificLegend from "./PlotScientificLegend";
 import { hasRenderedExperimentalOverlay, isAsmaeSurfaceType, isCompositeAdvisorySurface, isExperimentalSurfaceType } from "@/lib/agribrain/source-policy-display-resolver";
 import {
   resolveCropStageLabels,
@@ -922,6 +923,14 @@ export default function PlotMapShell(props: PlotMapShellProps) {
           )}
         </Map>
       </DeckGL>
+
+      <PlotScientificLegend
+        layerName={activeMode || "Satellite context"}
+        surface={surfaceData}
+        scene={visualSource}
+        degraded={isLowConfidence}
+        canInterpret={canInterpretDiagnostically}
+      />
 
       {/* --- PREMIUM CONTROL DOCK (Top-Right) --- */}
       <div 

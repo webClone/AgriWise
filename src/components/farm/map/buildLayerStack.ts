@@ -411,6 +411,20 @@ const OVERLAY_COLOR_RAMPS: Record<string, [string, string, string]> = {
   VEG_ATTENTION_ASMAE_DIAGNOSTIC:   ["#8B4513", "#FFDEAD", "#228B22"],
   VEG_ATTENTION_ASMAE_CONFLICT:     ["#8B4513", "#FFDEAD", "#228B22"],
   VEG_ATTENTION_ASMAE_DISAGREEMENT: ["#8B4513", "#FFDEAD", "#228B22"],
+  // Canonical ASMAE 13 states
+  ASMAE_VIGOR:                      ["#8B0000", "#FFD700", "#006400"],
+  ASMAE_LAI:                        ["#8B0000", "#FFD700", "#006400"],
+  ASMAE_CHLOROPHYLL:                ["#c0392b", "#f1c40f", "#27ae60"],
+  ASMAE_CANOPY_WATER:               ["#c0392b", "#f1c40f", "#1a5276"],
+  ASMAE_ROOT_ZONE_WATER:            ["#c0392b", "#f1c40f", "#1a5276"],
+  ASMAE_SURFACE_WETNESS_EVENT:      ["#c0392b", "#f1c40f", "#1a5276"],
+  ASMAE_STRUCTURE:                  ["#8B0000", "#FFD700", "#006400"],
+  ASMAE_BARE_SOIL:                  ["#fef3c7", "#a16207", "#451a03"],
+  ASMAE_SALINITY_STRESS:            ["#0d9488", "#22d3ee", "#ef4444"],
+  ASMAE_THERMAL_STRESS:             ["#fff7ed", "#fb923c", "#9a3412"],
+  ASMAE_BIOTIC_CONFOUNDER_RISK:     ["#fff7bc", "#fc8d59", "#b91c1c"],
+  ASMAE_PHENOLOGY_PROGRESS:         ["#8B0000", "#FFD700", "#006400"],
+  ASMAE_STRESS_MEMORY:              ["#fff7bc", "#fc8d59", "#b91c1c"],
 };
 
 // V92.3-C.1: Map surface type strings to SemanticSurfaceLayer-compatible mode names
@@ -437,6 +451,20 @@ const SURFACE_TYPE_TO_MODE: Record<string, string> = {
   VEG_ATTENTION_ASMAE_DIAGNOSTIC: "veg_attention",
   VEG_ATTENTION_ASMAE_CONFLICT: "veg_attention",
   VEG_ATTENTION_ASMAE_DISAGREEMENT: "veg_attention",
+  // Canonical ASMAE 13 states
+  ASMAE_VIGOR: "canopy",
+  ASMAE_LAI: "canopy",
+  ASMAE_CHLOROPHYLL: "nutrient_risk",
+  ASMAE_CANOPY_WATER: "water_stress",
+  ASMAE_ROOT_ZONE_WATER: "water_stress",
+  ASMAE_SURFACE_WETNESS_EVENT: "water_stress",
+  ASMAE_STRUCTURE: "canopy",
+  ASMAE_BARE_SOIL: "canopy",
+  ASMAE_SALINITY_STRESS: "salinity",
+  ASMAE_THERMAL_STRESS: "composite_risk",
+  ASMAE_BIOTIC_CONFOUNDER_RISK: "composite_risk",
+  ASMAE_PHENOLOGY_PROGRESS: "canopy",
+  ASMAE_STRESS_MEMORY: "composite_risk",
 };
 
 // V92.3-C.1: Resolve per-overlay render mode from the overlay surface's grounding class.

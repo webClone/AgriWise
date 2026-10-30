@@ -130,9 +130,32 @@ export function validateSurfaceGrid(
     return { valid: false, reason: "surface_values_non_rectangular", bounds: null, width: null, height };
   }
 
+  // Reject all-null support
+  let hasValidCell = false;
+  for (const row of surface.values) {
+    for (const v of row) {
+      if (finiteNumber(v)) {
+        hasValidCell = true;
+        break;
+      }
+    }
+    if (hasValidCell) break;
+  }
+  if (!hasValidCell) {
+    return { valid: false, reason: "surface_values_all_null", bounds: null, width, height };
+  }
+
   const spec = getGridSpec(surface);
   if (!spec || !spec.bounds || !Array.isArray(spec.bounds) || spec.bounds.length !== 4) {
     return { valid: false, reason: "grid_spec_bounds_invalid", bounds: null, width, height };
+  }
+
+  // Dimension parity check: reject metadata dimensions mismatching array dimensions
+  if (spec.width !== undefined && spec.width !== width) {
+    return { valid: false, reason: "grid_spec_dimensions_mismatch", bounds: null, width, height };
+  }
+  if (spec.height !== undefined && spec.height !== height) {
+    return { valid: false, reason: "grid_spec_dimensions_mismatch", bounds: null, width, height };
   }
 
   const [minLng, minLat, maxLng, maxLat] = spec.bounds.map(Number);
@@ -141,6 +164,36 @@ export function validateSurfaceGrid(
   }
   if (minLng >= maxLng || minLat >= maxLat) {
     return { valid: false, reason: "grid_spec_bounds_collapsed", bounds: null, width, height };
+  }
+
+  // Reject metric display bounds or non-geographic CRS for map layer rendering
+  const crsStr = String(spec.crs || "").toUpperCase();
+  const isGeographic = crsStr === "EPSG:4326" || crsStr === "WGS84" || crsStr === "OGC:CRS84" || !spec.crs;
+  if (!isGeographic) {
+    return { valid: false, reason: "display_bounds_non_geographic_crs", bounds: null, width, height };
+  }
+  if (minLng < -180 || maxLng > 180 || minLat < -90 || maxLat > 90) {
+    return { valid: false, reason: "grid_spec_bounds_metric_crs_mismatch", bounds: null, width, height };
+  }
+
+  // Cross-validate affine transform against dimensions and bounds if present
+  if (spec.transform !== undefined) {
+    if (!Array.isArray(spec.transform) || spec.transform.length !== 6 || !spec.transform.every((v) => typeof v === "number" && Number.isFinite(v))) {
+      return { valid: false, reason: "grid_spec_affine_invalid", bounds: null, width, height };
+    }
+    const [x0, dx, , y0, , dy] = spec.transform;
+    if (Math.abs(dx) <= 0 || Math.abs(dy) <= 0) {
+      return { valid: false, reason: "grid_spec_affine_degenerate", bounds: null, width, height };
+    }
+    const cellTolX = Math.abs(dx) * 0.5;
+    const cellTolY = Math.abs(dy) * 0.5;
+    if (Math.abs(x0 - minLng) > cellTolX) {
+      return { valid: false, reason: "grid_spec_affine_bounds_mismatch", bounds: null, width, height };
+    }
+    const expectedY0 = dy < 0 ? maxLat : minLat;
+    if (Math.abs(y0 - expectedY0) > cellTolY) {
+      return { valid: false, reason: "grid_spec_affine_bounds_mismatch", bounds: null, width, height };
+    }
   }
 
   return {
@@ -167,19 +220,75 @@ export function canMaterializeMask(
 
   const maskSpec = getGridSpec(mask);
   const targetSpec = getGridSpec(target);
-  if (!maskSpec || !targetSpec || String(maskSpec.crs || "") !== String(targetSpec.crs || "")) return false;
+  if (!maskSpec || !targetSpec || String(maskSpec.crs || "").toUpperCase() !== String(targetSpec.crs || "").toUpperCase()) return false;
 
+  // Both grids MUST declare a valid 6-element affine transform
+  if (
+    !Array.isArray(maskSpec.transform) ||
+    maskSpec.transform.length !== 6 ||
+    !Array.isArray(targetSpec.transform) ||
+    targetSpec.transform.length !== 6
+  ) {
+    return false;
+  }
+  const mTrans = maskSpec.transform;
+  const tTrans = targetSpec.transform;
+  if (
+    !mTrans.every((v) => typeof v === "number" && Number.isFinite(v)) ||
+    !tTrans.every((v) => typeof v === "number" && Number.isFinite(v))
+  ) {
+    return false;
+  }
+
+  // Shared geographic bounds check
   const sharedBounds = maskGrid.bounds.every((value, index) => {
     const targetValue = targetGrid.bounds?.[index];
     if (!Number.isFinite(targetValue)) return false;
     const scale = Math.max(1, Math.abs(value), Math.abs(targetValue as number));
-    return Math.abs(value - (targetValue as number)) <= scale * 1e-8;
+    return Math.abs(value - (targetValue as number)) <= scale * 1e-6;
   });
   if (!sharedBounds) return false;
-  if (maskGrid.width === targetGrid.width && maskGrid.height === targetGrid.height) {
+
+  const isSameDimensions = maskGrid.width === targetGrid.width && maskGrid.height === targetGrid.height;
+
+  if (isSameDimensions) {
+    // Exact grid: cell-resolution relative tolerance
+    const cellTolX = Math.abs(tTrans[1]) * 0.1;
+    const cellTolY = Math.abs(tTrans[5]) * 0.1;
+    if (Math.abs(mTrans[0] - tTrans[0]) > cellTolX || Math.abs(mTrans[3] - tTrans[3]) > cellTolY) {
+      return false;
+    }
+    if (Math.abs(mTrans[1] - tTrans[1]) > cellTolX || Math.abs(mTrans[5] - tTrans[5]) > cellTolY) {
+      return false;
+    }
+    if (Math.abs(mTrans[2] - tTrans[2]) > 1e-9 || Math.abs(mTrans[4] - tTrans[4]) > 1e-9) {
+      return false;
+    }
     return true;
   }
-  return allowNearestSharedBounds;
+
+  // Differing dimensions: only permitted under allowNearestSharedBounds
+  if (!allowNearestSharedBounds) return false;
+
+  // For nearest_shared_bounds: shear must be zero and orientation matching
+  if (
+    Math.abs(mTrans[2]) > 1e-9 ||
+    Math.abs(tTrans[2]) > 1e-9 ||
+    Math.abs(mTrans[4]) > 1e-9 ||
+    Math.abs(tTrans[4]) > 1e-9
+  ) {
+    return false;
+  }
+  if (Math.sign(mTrans[1]) !== Math.sign(tTrans[1]) || Math.sign(mTrans[5]) !== Math.sign(tTrans[5])) {
+    return false;
+  }
+  const originTolX = Math.max(Math.abs(mTrans[1]), Math.abs(tTrans[1])) * 0.5;
+  const originTolY = Math.max(Math.abs(mTrans[5]), Math.abs(tTrans[5])) * 0.5;
+  if (Math.abs(mTrans[0] - tTrans[0]) > originTolX || Math.abs(mTrans[3] - tTrans[3]) > originTolY) {
+    return false;
+  }
+
+  return true;
 }
 
 function blocked(

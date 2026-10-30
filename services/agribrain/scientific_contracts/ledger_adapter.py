@@ -65,12 +65,20 @@ def canonicalize_state_support_record(state: str, value: Dict[str, Any]) -> Dict
     if raw.get("exclusion_reason"):
         block_reasons = [*block_reasons, str(raw["exclusion_reason"])]
 
+    accepted_count = _counter(raw.get("accepted_update_count", 0), "accepted_update_count", state)
+    direct_count = _counter(raw.get("direct_observation_count", 0), "direct_observation_count", state)
+    proxy_count = _counter(raw.get("proxy_observation_count", 0), "proxy_observation_count", state)
+    indirect_count = _counter(raw.get("indirect_observation_count", 0), "indirect_observation_count", state)
+
     canonical = StateSupportRecord(
         state=state,
         support_status=support_status,
         observation_relationship=relationship,
         source_feature_ids=tuple(sorted({str(item) for item in source_ids if str(item).strip()})),
         accepted_update_count=accepted_count,
+        direct_observation_count=direct_count,
+        proxy_observation_count=proxy_count,
+        indirect_observation_count=indirect_count,
         prior_variance=raw.get("prior_variance"),
         posterior_variance=raw.get("posterior_variance"),
         information_gain=raw.get("information_gain"),
@@ -85,23 +93,23 @@ def canonicalize_state_support_record(state: str, value: Dict[str, Any]) -> Dict
     return canonical
 
 
-def _accepted_update_count(value: Any, state: str) -> int:
+def _counter(value: Any, name: str, state: str) -> int:
     if isinstance(value, bool):
-        raise ContractViolation(f"invalid_accepted_update_count:{state}")
+        raise ContractViolation(f"invalid_{name}:{state}")
     try:
         result = int(value or 0)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ContractViolation(
-            f"invalid_accepted_update_count:{state}"
-        ) from exc
+        raise ContractViolation(f"invalid_{name}:{state}") from exc
     try:
-        if float(value or 0) != float(result):
-            raise ContractViolation(f"invalid_accepted_update_count:{state}")
+        if float(value or 0) != float(result) or result < 0:
+            raise ContractViolation(f"invalid_{name}:{state}")
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ContractViolation(
-            f"invalid_accepted_update_count:{state}"
-        ) from exc
+        raise ContractViolation(f"invalid_{name}:{state}") from exc
     return result
+
+
+def _accepted_update_count(value: Any, state: str) -> int:
+    return _counter(value, "accepted_update_count", state)
 
 
 def validate_ledger_dict(value: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:

@@ -211,11 +211,9 @@ class HTTPActuator(IrrigationActuator):
     def _build_url(self, endpoint_key: str, **kwargs) -> str:
         """Build a full URL from endpoint template and parameters."""
         template = self._endpoints.get(endpoint_key, "")
-        path = template.format(
-            device_id=kwargs.get("device_id", self.device_id),
-            zone_id=kwargs.get("zone_id", ""),
-            **kwargs,
-        )
+        params = {"device_id": self.device_id, "zone_id": ""}
+        params.update(kwargs)
+        path = template.format(**params)
         return f"{self._base_url}{path}"
 
     async def _request(
@@ -375,12 +373,39 @@ class HTTPActuator(IrrigationActuator):
 
         result = await self._request("POST", url, {"request_id": command.request_id})
 
+        success = bool(result.get("success", False))
+        data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
+
+        is_running = data.get("is_running")
+        is_stopped = data.get("is_stopped")
+        flow_rate = data.get("flow_rate_lpm")
+        has_flow = (flow_rate is not None)
+        status_str = str(data.get("status", "")).upper()
+
+        is_contradictory = (
+            is_running is True
+            or (has_flow and float(flow_rate) > 0.0)
+            or is_stopped is False
+        )
+
+        has_affirmative_evidence = (
+            data.get("confirmed_stopped") is True
+            or (has_flow and float(flow_rate) == 0.0 and (is_running is False or is_stopped is True))
+            or (status_str in ("STOPPED", "IDLE", "OFF") and is_running is not True and not (has_flow and float(flow_rate) > 0.0))
+        )
+
+        confirmed_stopped = bool(has_affirmative_evidence and not is_contradictory)
+        confirmed = bool(success and confirmed_stopped)
+        transport_only = bool(success and not confirmed)
+
         return CommandResult(
             command_id=command.command_id,
             device_id=self.device_id,
-            success=result.get("success", False),
+            success=success,
             timestamp=now,
-            error_code="" if result.get("success") else "HTTP_ERROR",
+            transport_acknowledged_only=transport_only,
+            confirmed_physical_stop=confirmed,
+            error_code="" if success else "HTTP_ERROR",
             error_message=result.get("error", ""),
         )
 
@@ -421,24 +446,30 @@ class HTTPActuator(IrrigationActuator):
 
         data = result.get("data", {})
 
-        # Vendor-specific status parsing
-        if self._vendor in (VendorId.LINDSAY.value, VendorId.VALLEY.value):
-            if data.get("running") or data.get("is_running"):
-                self._status = ActuatorStatus.EXECUTING
-            elif data.get("error") or data.get("fault"):
-                self._status = ActuatorStatus.ERROR
-            else:
-                self._status = ActuatorStatus.ONLINE
+        is_running = bool(data.get("running") or data.get("is_running"))
+        is_stopped = data.get("is_stopped")
+        flow_rate = data.get("flow_rate_lpm")
+        has_flow = False
+        try:
+            if flow_rate is not None and float(flow_rate) > 0.0:
+                has_flow = True
+        except (ValueError, TypeError):
+            pass
+
+        status_str = str(data.get("status", "")).upper()
+
+        # Contradictory telemetry check: any positive flow, running state, or unstopped status
+        # must NEVER report ONLINE, regardless of vendor status string
+        if is_running or has_flow or is_stopped is False:
+            self._status = ActuatorStatus.EXECUTING
+        elif data.get("error") or data.get("fault") or "ERROR" in status_str or "FAULT" in status_str:
+            self._status = ActuatorStatus.ERROR
+        elif "OFFLINE" in status_str:
+            self._status = ActuatorStatus.OFFLINE
+        elif "RUN" in status_str or "ACTIVE" in status_str:
+            self._status = ActuatorStatus.EXECUTING
         else:
-            status_str = str(data.get("status", "")).upper()
-            if "RUN" in status_str or "ACTIVE" in status_str:
-                self._status = ActuatorStatus.EXECUTING
-            elif "ERROR" in status_str or "FAULT" in status_str:
-                self._status = ActuatorStatus.ERROR
-            elif "OFFLINE" in status_str:
-                self._status = ActuatorStatus.OFFLINE
-            else:
-                self._status = ActuatorStatus.ONLINE
+            self._status = ActuatorStatus.ONLINE
 
         self._last_heartbeat = datetime.now(timezone.utc)
         return self._status
@@ -461,10 +492,37 @@ class HTTPActuator(IrrigationActuator):
         logger.critical("🚨 EMERGENCY STOP sent via HTTP to %s (%s)",
                         self.device_id, self._vendor)
 
+        success = bool(result.get("success", False))
+        data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
+
+        is_running = data.get("is_running")
+        is_stopped = data.get("is_stopped")
+        flow_rate = data.get("flow_rate_lpm")
+        has_flow = (flow_rate is not None)
+        status_str = str(data.get("status", "")).upper()
+
+        is_contradictory = (
+            is_running is True
+            or (has_flow and float(flow_rate) > 0.0)
+            or is_stopped is False
+        )
+
+        has_affirmative_evidence = (
+            data.get("confirmed_stopped") is True
+            or (has_flow and float(flow_rate) == 0.0 and (is_running is False or is_stopped is True))
+            or (status_str in ("STOPPED", "IDLE", "OFF") and is_running is not True and not (has_flow and float(flow_rate) > 0.0))
+        )
+
+        confirmed_stopped = bool(has_affirmative_evidence and not is_contradictory)
+        confirmed = bool(success and confirmed_stopped)
+        transport_only = bool(success and not confirmed)
+
         return CommandResult(
             command_id=f"ESTOP-{uuid.uuid4().hex[:8]}",
             device_id=self.device_id,
-            success=result.get("success", False),
+            success=success,
             timestamp=now,
+            transport_acknowledged_only=transport_only,
+            confirmed_physical_stop=confirmed,
             error_message=result.get("error", ""),
         )

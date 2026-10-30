@@ -1,0 +1,169 @@
+{
+  "candidate": "220953f4a8436e394a091d375b4fe6388648448b",
+  "date": "2026-10-27",
+  "verdict": "current four-owner cohort named contracts not all accepted; preserve prior bounded ASMAE closures",
+  "current_contract_failures": [
+    {
+      "id": "CS-01",
+      "priority": "P1",
+      "owner": "execution",
+      "scope": "contradictory HTTP stop, transport-only late fence; missing-auth trust qualification P2",
+      "evidence": "safety/results.json"
+    },
+    {
+      "id": "CS-02",
+      "priority": "P1",
+      "owner": "temporal",
+      "scope": "future-issued weather_prior direct and mixed-component fallback",
+      "evidence": "temporal/real_solver_results.json"
+    },
+    {
+      "id": "CS-03",
+      "priority": "P1",
+      "owner": "EO",
+      "scope": "invalid spatial geometry gains observation/update authority",
+      "evidence": "eo/results.json"
+    },
+    {
+      "id": "CS-04",
+      "priority": "P1",
+      "owner": "EO",
+      "scope": "nonfinite pixel laundering and support hash/computation inconsistency",
+      "evidence": "eo/results.json"
+    },
+    {
+      "id": "CS-05",
+      "priority": "P2",
+      "owner": "durable evidence",
+      "scope": "warm own-append hides committed foreign rows",
+      "evidence": "durable/results.json"
+    }
+  ],
+  "nonblocking_or_inherited_followups": [
+    "finite-extreme covariance overflow, P2",
+    "HT caller ndarray alias caveat",
+    "inherited DecoderResult raw replay bug",
+    "remaining EO model adapters and downstream digest/version provenance"
+  ],
+  "retained_software_closures": [
+    "R706-PUB-01",
+    "R706-PUB-02",
+    "R706-CACHE-01"
+  ],
+  "milestones": {
+    "FA_open": 52,
+    "FA_checked": 0,
+    "numeric_open": 225,
+    "early_open": 8,
+    "all_tickets_open": 285
+  },
+  "overall_percentage": null,
+  "percentage_reason": "no evidence-backed weights and accepted numerator",
+  "published_lineage": [
+    {
+      "sha": "c6674e846209c50b9aeb6750ae8653d65641566d",
+      "message": "docs(agribrain): record ASMAE 13-state map deep review and claim register (F36-T09)"
+    },
+    {
+      "sha": "9d7529afb411ddabb5fc8f46931cf098e10d9240",
+      "message": "feat(agribrain): enforce fail-closed support classification and explicit 13-state publication gating (F36-T09 Stage 1-2)"
+    },
+    {
+      "sha": "67375aa9ca0dfdc41c36d32e4105794b07e6b770",
+      "message": "fix(agribrain): resolve S12-01 to S12-05 residual support qualification, permission parity, and composite gating (F36-T09)"
+    },
+    {
+      "sha": "81cf8bb351a640964a03d7f63d64e79b93344449",
+      "message": "fix(agribrain): resolve S673-01 authority ceilings, S673-02 revocation continuity, and S673-03 alternate prior validation (F36-T09)"
+    },
+    {
+      "sha": "8d9bd4a073e09a5081a85b8fd2f2b7654152e37a",
+      "message": "fix(agribrain): resolve S81-01 dual-carrier restriction union and S81-02 alternate prior distribution validation (F36-T09)"
+    },
+    {
+      "sha": "653da462360bf90a9ec0c05ce6d2c7fbea180520",
+      "message": "fix(agribrain): resolve S8D-01 covariance matrix shape, symmetry, PSD, and alias consistency validation (F36-T09)"
+    },
+    {
+      "sha": "a31a65e631daa7cdc1860861c9184cf05225cb82",
+      "message": "fix(agribrain): resolve S653-01 checked finite variance derivation and sibling surface resilience (F36-T09)"
+    },
+    {
+      "sha": "d59c9bdc85a64469a9424d4c7757a2d2c4da3041",
+      "message": "feat(agribrain): register dedicated phenology and stress memory products and align canonical 13-state catalog (F36-T09 Stage 3)"
+    },
+    {
+      "sha": "e85cfd224f8a731e2959648ce28450e27782188f",
+      "message": "feat(agribrain): complete Batch A and B repairs for ASMAE 13-state publication contract"
+    },
+    {
+      "sha": "ded72528ce12a2f1cb4ca6a208ddcc2accc3802a",
+      "message": "feat(agribrain): complete integrated A+B cohort repairs (AB-R01 to AB-R05)"
+    },
+    {
+      "sha": "70676a3069715941ccefb3c2140d169389105189",
+      "message": "fix(agribrain): complete integrated A+B contract repairs post-ded7252 review (AB-R01 to AB-R05)"
+    },
+    {
+      "sha": "563c6fa8a2fde2e350b4e800313d726ca5879893",
+      "message": "fix(agribrain): resolve publication consumer, canonical state binding, and cache policy issues (70676a3 review)"
+    },
+    {
+      "sha": "570341c0fd769c8aceb0babab65bdf5e443faf74",
+      "message": "fix(agribrain): resolve numerical tolerances, root-zone V90 resolution, ensemble rollback, and fail-closed quality checks"
+    },
+    {
+      "sha": "aaf38958d337baa44c512792428673585cd7d4f1",
+      "message": "fix(agribrain): refine covariance scale tolerance, assimilation rollback parity, and V90 conflict guard"
+    },
+    {
+      "sha": "730b9fe9d9180cc07019b199951f9f7e4bb7b541",
+      "message": "fix(agribrain): enforce Cauchy-Schwarz covariance validity, unconditional V90 conflict denial, and ASMAE rollout cache test"
+    },
+    {
+      "sha": "f041a8f9a3cef96ebd7d5986f71e4eda666be39f",
+      "message": "docs(plan): update candidate and head commit reference to 730b9fe in walkthrough"
+    },
+    {
+      "sha": "6f60a571908ea0b3dfb6c7163dbde8175f86f95e",
+      "message": "fix(cohort): resolve demonstrated Track A blockers for four-owner cohort (F25/F26, F39, F17/F18, F01, F04, F08, F02/F06)"
+    },
+    {
+      "sha": "3687d6548a3e646eda3c70aaba76b65dab36373e",
+      "message": "fix(cohort): complete physical STOP verification, multi-worker durability, prospective weather cutoffs, and EO tensor alignment"
+    },
+    {
+      "sha": "df3ead6a737ca243f35371f654e81db3ac842f2d",
+      "message": "feat(agribrain): remediate audit findings across Integrations S, D, E (F16-F19, F39, F02, F06, F25, F26)"
+    },
+    {
+      "sha": "87f33ff35a24a3d8237bded9634dc555608792c1",
+      "message": "fix(audit): close verified blockers across integrations S, D, E and lookback loop"
+    },
+    {
+      "sha": "220953f4a8436e394a091d375b4fe6388648448b",
+      "message": "fix(audit): close custom simulation bypass, authenticate stop receipts, and wire eo spatial qualification"
+    }
+  ],
+  "recent_range": [
+    "aaf38958d337baa44c512792428673585cd7d4f1",
+    "730b9fe9d9180cc07019b199951f9f7e4bb7b541",
+    "f041a8f9a3cef96ebd7d5986f71e4eda666be39f",
+    "6f60a571908ea0b3dfb6c7163dbde8175f86f95e",
+    "3687d6548a3e646eda3c70aaba76b65dab36373e",
+    "df3ead6a737ca243f35371f654e81db3ac842f2d",
+    "87f33ff35a24a3d8237bded9634dc555608792c1",
+    "220953f4a8436e394a091d375b4fe6388648448b"
+  ],
+  "reports_read": "current plan walkthroughs and two saved closure/delivery reports; inaccessible other chat transcripts not read",
+  "validation": {
+    "candidate": "220953f4a8436e394a091d375b4fe6388648448b",
+    "verified_files": 904,
+    "materialized_tracked_python_parse": true,
+    "all_six_probe_commands_exit_zero": true,
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "scope": "Connected current production contract review, not whole-repository or transcript completeness",
+    "source_changed": false
+  }
+}

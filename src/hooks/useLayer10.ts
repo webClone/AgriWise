@@ -59,6 +59,11 @@ import {
   patchLayer10AsmaeFailure,
   patchLayer10AsmaeLiveState,
 } from "@/lib/agribrain/asmae-job-state.mjs";
+import {
+  type ParcelAssessment,
+  canonicalPublicationToAssessment,
+  ParcelAssessmentContext,
+} from "@/hooks/useParcelAssessment";
 
 
 // ============================================================================
@@ -129,6 +134,7 @@ export interface SurfaceData {
   diagnostic_only?: boolean | null;
   state_update_allowed?: boolean | null;
   prescription_driver_allowed?: boolean | null;
+  management_eligible?: boolean | null;
   confidence?: number | null;
   uncertainty?: number | null;
   authority_block_reason?: string | null;
@@ -312,8 +318,8 @@ export interface Layer10Result {
     reliability_score: number;
     surfaces_generated: number;
     zones_generated: number;
-    grid_alignment_ok: boolean;
-    detail_conservation_ok: boolean;
+    grid_alignment_ok: boolean | null;
+    detail_conservation_ok: boolean | null;
     zone_state_by_surface: Record<string, string>;
     warnings: string[];
     coverage_ratio?: number;  // optional: fraction of field grid with valid pixel coverage
@@ -409,6 +415,12 @@ export interface Layer10Result {
   request_identity?: string;
   requested_source_policy?: SourcePolicy;
   requested_visual_intensity?: number;
+  top_findings?: any[];
+  canonical_publication_receipt_hash?: string;
+  assessment?: ParcelAssessment | null;
+  is_stale?: boolean;
+  staleness_reason?: string | null;
+  operational_actions_allowed?: boolean;
 }
 
 export interface FallbackGuidance {
@@ -608,6 +620,8 @@ function normalizeSurface(raw: Record<string, any>): SurfaceData {
     state_update_allowed: raw.state_update_allowed ?? raw.provenance?.state_update_allowed ?? null,
     prescription_driver_allowed:
       raw.prescription_driver_allowed ?? raw.provenance?.prescription_driver_allowed ?? null,
+    management_eligible:
+      raw.management_eligible ?? raw.managementEligible ?? raw.provenance?.management_eligible ?? raw.provenance?.managementEligible ?? null,
     confidence: raw.confidence ?? raw.provenance?.confidence ?? null,
     uncertainty: raw.uncertainty ?? raw.provenance?.uncertainty ?? null,
     authority_block_reason: raw.authority_block_reason ?? raw.provenance?.authority_block_reason ?? null,
@@ -822,6 +836,9 @@ export interface Layer10ContextType {
   canInterpretForScouting: boolean;
   canInterpretDiagnostically: boolean;
   canUseForPrescription: boolean;
+  isApplicable: boolean;
+  isStale: boolean;
+  staleReason: string | null;
   canShowExperimentalDetail: boolean;
   shouldShowNoData: boolean;
   shouldShowPlotLevel: boolean;
@@ -889,14 +906,19 @@ export interface Layer10ContextType {
   browserRenderReceipt: BrowserRenderReceipt | null;
   commitBrowserRenderReceipt: (receipt: BrowserRenderReceipt) => void;
   clearBrowserRenderReceipt: (viewIdentity: string) => void;
+  assessment: ParcelAssessment | null;
+  top_findings?: any[];
 }
 
-function canonicalPublicationToRunData(cacheJson: any, plotId: string) {
+function canonicalPublicationToRunData(cacheJson: any, plotId: string): Record<string, any> {
+  const assessment = canonicalPublicationToAssessment(cacheJson, plotId);
+
   return {
-    run_id: cacheJson.publication_run_id || `canonical-${cacheJson.surfaceDigest || ""}`,
+    run_id: cacheJson.publication_run_id || cacheJson.agribrain_run_id || cacheJson.run_id || cacheJson.runId || "",
     publication_id: cacheJson.publication_id || cacheJson.publicationId || "",
     plot_id: plotId,
     timestamp: cacheJson.capturedAt,
+    audit: cacheJson.audit || null,
     surfaces: cacheJson.surfaceGrids || [],
     zones: cacheJson.zones || [],
     histograms: cacheJson.histograms || {},
@@ -927,7 +949,15 @@ function canonicalPublicationToRunData(cacheJson: any, plotId: string) {
     display_trace: cacheJson.display_trace || {},
     resolved_crop_stage: cacheJson.resolved_crop_stage || cacheJson.crop_phenology?.resolved_crop_stage || cacheJson.phenology_context?.resolved_crop_stage || null,
     phenology_context: cacheJson.phenology_context || cacheJson.crop_phenology || null,
-    crop_phenology: cacheJson.crop_phenology || null,
+    layer_results: cacheJson.layer_results || cacheJson.layerResults || (assessment?.canonicalLayerResults ? { ...assessment.canonicalLayerResults } : {}),
+    top_findings: cacheJson.top_findings || cacheJson.topFindings || (assessment?.topFindings ? [...assessment.topFindings] : []),
+    timeline: cacheJson.timeline || [],
+    engines: cacheJson.engines || [],
+    current: cacheJson.current || null,
+    rawData: cacheJson.rawData || cacheJson.raw_data || {},
+    assimilation: cacheJson.assimilation || {},
+    canonical_publication_receipt_hash: cacheJson.canonical_publication_receipt_hash || cacheJson.publication_receipt_hash || assessment?.identity?.publicationReceiptHash || "",
+    assessment,
   };
 }
 
@@ -940,11 +970,27 @@ export function Layer10Provider({
   children: ReactNode;
   plotGeoJson?: unknown;
 }) {
+  const assessmentCtx = useContext(ParcelAssessmentContext);
   const [publication, setPublication] = useState<{
     data: Layer10Result | null;
     error: string | null;
   }>({ data: null, error: null });
-  const data = publication.data;
+
+  // Withhold old Layer 10 projection whenever its receipt no longer matches the active provider assessment
+  const isPublicationReceiptCoherent = useMemo(() => {
+    if (!publication.data || !assessmentCtx) return true;
+    if (assessmentCtx.loading || assessmentCtx.status === "loading") return false;
+    if (assessmentCtx.assessment) {
+      const activeReceipt = assessmentCtx.assessment.identity.publicationReceiptHash;
+      const dataReceipt = publication.data.canonical_publication_receipt_hash;
+      if (activeReceipt && dataReceipt && activeReceipt !== dataReceipt) {
+        return false;
+      }
+    }
+    return true;
+  }, [publication.data, assessmentCtx]);
+
+  const data = isPublicationReceiptCoherent ? publication.data : null;
   const error = publication.error;
   const [loading, setLoading] = useState(false);
   const [detailMode, setDetailMode] = useState<"farmer" | "expert">("farmer");
@@ -989,6 +1035,142 @@ export function Layer10Provider({
       return null;
     }
   }, [rawPlotGeoJson]);
+  const plotGeoJsonRef = useRef(plotGeoJson);
+  useEffect(() => {
+    plotGeoJsonRef.current = plotGeoJson;
+  }, [plotGeoJson]);
+
+  // Phase 2-B: Wire authoritative ParcelAssessmentProvider into Layer10 presentation adapter
+  useEffect(() => {
+    if (!assessmentCtx) return;
+
+    if (assessmentCtx.status === "invalid") {
+      setPublication({
+        data: null,
+        error: assessmentCtx.error || "Canonical assessment identity invalid",
+      });
+      setLoading(false);
+      return;
+    }
+
+    if (assessmentCtx.status === "unavailable") {
+      setPublication((prev) => ({
+        data: null,
+        error: assessmentCtx.error || "Assessment unavailable",
+      }));
+      setLoading(false);
+      return;
+    }
+
+    if (assessmentCtx.status === "loading") {
+      setLoading(true);
+      return;
+    }
+
+    if (
+      (assessmentCtx.status === "ready" || assessmentCtx.status === "stale") &&
+      assessmentCtx.assessment &&
+      assessmentCtx.rawPublication
+    ) {
+      try {
+        const runData = canonicalPublicationToRunData(
+          assessmentCtx.rawPublication,
+          assessmentCtx.plotId || (plotGeoJson as any)?.id || ""
+        );
+        runData.assessment = assessmentCtx.assessment;
+
+        const surfaces = Array.isArray(runData.surfaces)
+          ? runData.surfaces.map((surface: Record<string, any>) => normalizeSurface(surface))
+          : [];
+        const reconciledQuality = reconcileQualitySignals(
+          runData.quality,
+          runData.global_quality,
+        );
+        const normalizedPhenology = normalizeCanonicalPhenologyPublication({
+          resolvedCropStage: runData.resolved_crop_stage,
+          phenologyContext: runData.phenology_context,
+        });
+
+        const mapped: Layer10Result = {
+          run_id: runData.run_id || "",
+          publication_id: runData.publication_id || "",
+          plot_id: runData.plot_id || assessmentCtx.plotId || "",
+          timestamp: runData.timestamp || runData.audit?.timestamp_utc || "",
+          surfaces,
+          zones: Array.isArray(runData.zones) ? runData.zones.map(normalizeZone) : [],
+          histograms: {
+            field: Array.isArray(runData.histograms?.field) ? runData.histograms.field.map(normalizeHistogram) : [],
+            zone: Array.isArray(runData.histograms?.zone) ? runData.histograms.zone.map(normalizeHistogram) : [],
+            delta: Array.isArray(runData.histograms?.delta) ? runData.histograms.delta.map(normalizeDeltaHistogram) : [],
+            uncertainty: Array.isArray(runData.histograms?.uncertainty) ? runData.histograms.uncertainty.map(normalizeHistogram) : [],
+          },
+          quicklooks: runData.quicklooks ?? {},
+          raster_pack: Array.isArray(runData.raster_pack) ? runData.raster_pack : [],
+          vector_pack: Array.isArray(runData.vector_pack) ? runData.vector_pack : [],
+          tile_manifest: runData.tile_manifest ?? {},
+          quality: {
+            degradation_mode: reconciledQuality.degradationMode,
+            reliability_score: reconciledQuality.reliabilityScore,
+            surfaces_generated: Number(runData.quality?.surfaces_generated ?? surfaces.length),
+            zones_generated: Number(runData.quality?.zones_generated ?? runData.zones?.length ?? 0),
+            grid_alignment_ok: typeof runData.quality?.grid_alignment_ok === "boolean" ? runData.quality.grid_alignment_ok : null,
+            detail_conservation_ok: typeof runData.quality?.detail_conservation_ok === "boolean" ? runData.quality.detail_conservation_ok : null,
+            zone_state_by_surface: runData.quality?.zone_state_by_surface || {},
+            warnings: reconciledQuality.warnings,
+          },
+          rendering_quality: runData.rendering_quality ?? runData.quality ?? {},
+          scientific_pipeline_quality: runData.scientific_pipeline_quality ?? runData.global_quality ?? {},
+          global_quality: runData.global_quality ?? runData.scientific_pipeline_quality ?? {},
+          layer_results: runData.layer_results ?? {},
+          provenance: runData.provenance ?? runData.audit ?? {},
+          resolved_crop_stage: normalizedPhenology.resolvedCropStage,
+          phenology_context: normalizedPhenology.phenologyContext,
+          grid: deriveGrid(runData.grid, surfaces),
+          explainability_pack: runData.explainability_pack ?? {},
+          scenario_pack: runData.scenario_pack ?? [],
+          history_pack: runData.history_pack ?? [],
+          fallback_guidance: runData.fallback_guidance ?? {},
+          ground_truth_summary: runData.ground_truth_summary ?? undefined,
+          visual_source: runData.visual_source ?? undefined,
+          timeline: runData.timeline,
+          engines: runData.engines,
+          current: runData.current,
+          rawData: runData.rawData,
+          assimilation: runData.assimilation,
+          mode_surface_plan: runData.mode_surface_plan ?? {},
+          surface_inventory: runData.surface_inventory ?? {},
+          surface_inventory_hash: runData.surface_inventory_hash ?? "",
+          mode_display_state: runData.mode_display_state ?? {},
+          source_policy_display_state: runData.source_policy_display_state ?? {},
+          asmae_evidence_state: runData.asmae_evidence_state ?? runData.source_policy_display_state?.asmaeEvidenceState ?? null,
+          asmae_feature_pack: runData.asmae_feature_pack ?? {},
+          render_authorizations: runData.render_authorizations ?? {},
+          render_authorization_version: runData.render_authorization_version ?? "",
+          intelligence_snapshot_id: runData.intelligence_snapshot_id ?? "",
+          agribrain_run_id: runData.agribrain_run_id ?? runData.run_id ?? "",
+          generated_at: runData.generated_at ?? runData.timestamp,
+          source_window: runData.source_window,
+          surface_schema_version: runData.surface_schema_version ?? runData.schema_version,
+          temporal_evidence_contract_version: runData.temporal_evidence_contract_version ?? "",
+          asmae_proof: runData.asmae_proof ?? {},
+          surface_behavior_proof: runData.surface_behavior_proof ?? {},
+          display_trace: runData.display_trace ?? {},
+          assessment: assessmentCtx.assessment,
+          top_findings: [...assessmentCtx.assessment.topFindings],
+          canonical_publication_receipt_hash: assessmentCtx.assessment.identity.publicationReceiptHash,
+          is_stale: assessmentCtx.status === "stale",
+          staleness_reason: assessmentCtx.staleReason || null,
+          operational_actions_allowed: assessmentCtx.isApplicable,
+        };
+
+        setPublication({ data: mapped, error: null });
+        setLoading(false);
+      } catch (adaptErr: any) {
+        setPublication({ data: null, error: adaptErr?.message || "Failed to adapt assessment for Layer 10 presentation" });
+        setLoading(false);
+      }
+    }
+  }, [assessmentCtx?.status, assessmentCtx?.assessment, assessmentCtx?.rawPublication, assessmentCtx?.error, assessmentCtx?.plotId, plotGeoJson]);
 
   // V92.3-C: True overlay architecture state
   // baseSurfaceMode is the source of truth. activeMode is a derived backward-compat alias.
@@ -1103,12 +1285,70 @@ export function Layer10Provider({
       setLoading(!isExperimentalRequest);
       setPublication((previous) => ({ ...previous, error: null }));
 
+      // ── SINGLE SCIENTIFIC PUBLICATION OWNER DELEGATION ──
+      // All scientific publication adoption must occur through ParcelAssessmentProvider.
+      // Layer 10 acts strictly as a presentation and rendering adapter.
+      if (assessmentCtx) {
+        setLoading(true);
+        try {
+          const assessment = await assessmentCtx.fetchAssessment(
+            plotId,
+            _farmId,
+            {
+              snapshotId: options?.snapshotId,
+              forceRefresh: options?.forceRefresh,
+              sourcePolicy: requestedPolicy,
+              visualIntensity: requestedIntensity,
+              geometry: plotGeoJsonRef.current,
+            }
+          );
+          if (!isLatestRequest()) return;
+          setLoading(false);
+          if (!assessment) {
+            setPublication((previous) => ({
+              ...previous,
+              data: null,
+              error: assessmentCtx.error || "Canonical assessment rejected or invalid",
+            }));
+          }
+        } catch (fetchErr: any) {
+          if (!isLatestRequest()) return;
+          setLoading(false);
+          setPublication((previous) => ({
+            ...previous,
+            data: null,
+            error: fetchErr?.message || "Canonical assessment fetch failed",
+          }));
+        }
+        return;
+      }
+
+      // Architectural enforcement: fail-closed outside ParcelAssessmentProvider unless explicitly in test environment
+      if (!assessmentCtx) {
+        if (process.env.NODE_ENV !== "test" && !(options as any)?.allowLegacyFallback) {
+          console.error(
+            "[useLayer10] Architectural violation: fetchLayer10 called outside ParcelAssessmentProvider. Scientific publication adoption must occur through ParcelAssessmentProvider."
+          );
+          setLoading(false);
+          setPublication((previous) => ({
+            ...previous,
+            data: null,
+            error: "Architectural violation: Layer 10 must be mounted within ParcelAssessmentProvider",
+          }));
+          return;
+        }
+      }
+
       try {
-        // ── CACHE-FIRST: Try loading cached surfaces instantly ──────
+        // ── CACHE-FIRST: Fallback when running in test / legacy harness ──────
         let runData: any = null;
         let usedCache = false;
 
         try {
+          if (options?.snapshotId && options?.forceRefresh) {
+            throw new Error("Cannot force-refresh an immutable snapshot.");
+          }
+
           if (!options?.forceRefresh) {
             const cacheRes = await fetch("/api/agribrain/surfaces/latest", {
               method: "POST",
@@ -1123,6 +1363,14 @@ export function Layer10Provider({
             });
             const cacheJson = await cacheRes.json();
             if (!isLatestRequest()) return;
+
+            if (options?.snapshotId && (
+              !cacheRes.ok || cacheJson.available === false || cacheJson.status !== "fresh"
+            )) {
+              throw new Error(
+                `Exact snapshot ${options.snapshotId} unavailable or superseded: ${cacheJson.reason || cacheRes.status}`,
+              );
+            }
 
             if (cacheJson.reason === "canonical_head_validation_failed" || cacheRes.status === 409) {
               throw new Error(cacheJson.error || "Canonical publication head failed integrity validation");
@@ -1148,6 +1396,9 @@ export function Layer10Provider({
           }
         } catch (cacheError) {
           if (!isLatestRequest()) return;
+          // An exact completion request must not silently start a new run or
+          // substitute a different publication when its snapshot is missing.
+          if (options?.snapshotId) throw cacheError;
           if (
             cacheError instanceof Error
             && cacheError.message.toLowerCase().includes("canonical publication head")
@@ -1159,6 +1410,9 @@ export function Layer10Provider({
 
         // ── LIVE RUN: Only if cache missed ─────────────────────────
         if (!runData) {
+          if (options?.snapshotId) {
+            throw new Error(`Exact snapshot ${options.snapshotId} was not found; execution fallback is denied.`);
+          }
           const res = await fetch("/api/agribrain/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1261,7 +1515,7 @@ export function Layer10Provider({
           run_id: runData.run_id || "",
           publication_id: runData.publication_id || "",
           plot_id: runData.plot_id || plotId,
-          timestamp: runData.timestamp || runData.audit?.timestamp_utc || new Date().toISOString(),
+          timestamp: runData.timestamp || runData.audit?.timestamp_utc || "",
 
           surfaces,
 
@@ -1296,8 +1550,12 @@ export function Layer10Provider({
               Number(runData.quality?.surfaces_generated ?? surfaces.length),
             zones_generated:
               Number(runData.quality?.zones_generated ?? runData.zones?.length ?? 0),
-            grid_alignment_ok: Boolean(runData.quality?.grid_alignment_ok ?? true),
-            detail_conservation_ok: Boolean(runData.quality?.detail_conservation_ok ?? true),
+            grid_alignment_ok: typeof runData.quality?.grid_alignment_ok === "boolean"
+              ? runData.quality.grid_alignment_ok
+              : null,
+            detail_conservation_ok: typeof runData.quality?.detail_conservation_ok === "boolean"
+              ? runData.quality.detail_conservation_ok
+              : null,
             zone_state_by_surface: runData.quality?.zone_state_by_surface || {},
             warnings: reconciledQuality.warnings,
           },
@@ -1350,6 +1608,11 @@ export function Layer10Provider({
           request_identity: requestIdentity,
           requested_source_policy: requestedPolicy,
           requested_visual_intensity: requestedIntensity,
+
+          // Phase 2-B: Preserved Assessment & Canonical Top Findings
+          assessment: runData.assessment ?? null,
+          top_findings: runData.top_findings ?? (runData.assessment?.topFindings ? [...runData.assessment.topFindings] : []),
+          canonical_publication_receipt_hash: runData.canonical_publication_receipt_hash || runData.assessment?.identity?.publicationReceiptHash || "",
         };
 
         // Immutable LKG Promotion: If current run returns 0 surfaces (degraded result),
@@ -1382,16 +1645,19 @@ export function Layer10Provider({
         }
       } catch (e) {
         if (!isLatestRequest()) return;
+        const errMessage = e instanceof Error ? e.message : "Unknown error";
+        const isIdentityFailure = errMessage.includes("Assessment identity validation failed") ||
+                                  errMessage.includes("Invalid ParcelAssessmentIdentity") ||
+                                  errMessage.includes("integrity validation failed");
         setPublication((previous) =>
           isLatestLayer10Request(
             requestSequenceRef.current,
             sequence,
             controller.signal.aborted,
           )
-            ? {
-                ...previous,
-                error: e instanceof Error ? e.message : "Unknown error",
-              }
+            ? isIdentityFailure
+              ? { data: null, error: errMessage }
+              : { ...previous, error: errMessage }
             : previous,
         );
       } finally {
@@ -1500,10 +1766,12 @@ export function Layer10Provider({
         ].join(":");
         if (canonicalCompletionFetchRef.current === completionIdentity) return;
         canonicalCompletionFetchRef.current = completionIdentity;
-        setPublication((previous) => ({
-          ...previous,
-          data: patchLayer10AsmaeCompletion(previous.data, customEvt.detail),
-        }));
+        if (!assessmentCtx) {
+          setPublication((previous) => ({
+            ...previous,
+            data: patchLayer10AsmaeCompletion(previous.data, customEvt.detail),
+          }));
+        }
         void fetchLayer10(targetPlotId, "", undefined, undefined, undefined, {
           forceRefresh: false,
           snapshotId: finalSnapshotId,
@@ -1598,10 +1866,12 @@ export function Layer10Provider({
           ].join(":");
           if (canonicalCompletionFetchRef.current === completionIdentity) return;
           canonicalCompletionFetchRef.current = completionIdentity;
-          setPublication((previous) => ({
-            ...previous,
-            data: patchLayer10AsmaeCompletion(previous.data, live),
-          }));
+          if (!assessmentCtx) {
+            setPublication((previous) => ({
+              ...previous,
+              data: patchLayer10AsmaeCompletion(previous.data, live),
+            }));
+          }
           await fetchLayer10(
             observedAsmaePlotId,
             "",
@@ -2307,7 +2577,7 @@ export function Layer10Provider({
     {
       value: {
         data,
-        loading,
+        loading: loading || (assessmentCtx ? assessmentCtx.loading || !isPublicationReceiptCoherent : false),
         error,
         activeMode,
         detailMode,
@@ -2336,12 +2606,15 @@ export function Layer10Provider({
         activeSourceLabel,
         activeAuthorityLabel,
         bannerState,
-        canShowPixelDiagnosis: canShowPixelDiagnosis && activeSurfaceMaterialized,
+        canShowPixelDiagnosis: canShowPixelDiagnosis && activeSurfaceMaterialized && (assessmentCtx?.isApplicable ?? true),
         canShowPixelHint: canShowPixelHint && activeSurfaceMaterialized,
         canSamplePixel: canSamplePixel && activeSurfaceMaterialized,
         canInterpretForScouting: canInterpretForScouting && activeSurfaceMaterialized,
-        canInterpretDiagnostically: canInterpretDiagnostically && activeSurfaceMaterialized,
-        canUseForPrescription: canUseForPrescription && activeSurfaceMaterialized,
+        canInterpretDiagnostically: canInterpretDiagnostically && activeSurfaceMaterialized && (assessmentCtx?.isApplicable ?? true),
+        canUseForPrescription: canUseForPrescription && activeSurfaceMaterialized && (assessmentCtx?.isApplicable ?? true),
+        isApplicable: assessmentCtx?.isApplicable ?? true,
+        isStale: assessmentCtx?.isStale ?? false,
+        staleReason: assessmentCtx?.staleReason ?? null,
         canShowExperimentalDetail,
         shouldShowNoData: shouldShowNoData || !activeSurfaceMaterialized,
         shouldShowPlotLevel,
@@ -2394,6 +2667,8 @@ export function Layer10Provider({
         browserRenderReceipt,
         commitBrowserRenderReceipt,
         clearBrowserRenderReceipt,
+        assessment: data?.assessment ?? (isPublicationReceiptCoherent ? assessmentCtx?.assessment : null) ?? null,
+        top_findings: data?.top_findings ?? (isPublicationReceiptCoherent && assessmentCtx?.assessment?.topFindings ? [...assessmentCtx.assessment.topFindings] : []),
       }
     },
     children

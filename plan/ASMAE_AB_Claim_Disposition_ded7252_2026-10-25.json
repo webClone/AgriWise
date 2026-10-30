@@ -1,0 +1,184 @@
+{
+  "candidate": "ded72528ce12a2f1cb4ca6a208ddcc2accc3802a",
+  "parent": "e85cfd224f8a731e2959648ce28450e27782188f",
+  "review_date": "2026-10-25",
+  "verdict": "HOLD_PARTIAL_COMPLETE_EXISTING_AB_COHORT",
+  "completion_groups": [
+    {
+      "id": "AB-R01",
+      "priority": "P1",
+      "status": "hold_native_assembly_runtime_failure",
+      "verified": [
+        "ordinary_converter",
+        "sparse_state_sigma_scalar_missingness",
+        "negative_indices",
+        "bilinear_zero_endpoint",
+        "frontend_dimension_null_geographic_checks"
+      ],
+      "remaining": [
+        "native_math_local_shadow_UnboundLocalError",
+        "introduced_nearest_shared_bounds_rejection",
+        "exact_grid_affine_proof"
+      ],
+      "evidence": [
+        "spatial/results.json",
+        "spatial/frontend-results.json"
+      ]
+    },
+    {
+      "id": "AB-R02",
+      "priority": "P2",
+      "status": "ordinary_named_fixes_verified_broader_receipt_partial",
+      "verified": [
+        "HT_proxy_unchanged_sibling_count_zero",
+        "positive_siblings",
+        "NOT_ASSIMILATED_observation_guard",
+        "process_memory_evolution",
+        "counter_identity"
+      ],
+      "remaining": [
+        "finite_local_update_global_summary_cancellation",
+        "graph_prior_selector_receipt_consistency",
+        "malformed_or_absent_per_state_proof"
+      ],
+      "evidence": [
+        "semantics/results.json"
+      ]
+    },
+    {
+      "id": "AB-R03",
+      "priority": "P2",
+      "status": "typed_serializer_repaired_native_intersection_partial",
+      "verified": [
+        "ordinary_strict_binary_permission",
+        "enum_and_unknown_ceilings",
+        "serializer_restriction_union",
+        "raw_unsupported_runtime_diagnostic_denial",
+        "qualified_positive_controls"
+      ],
+      "remaining": [
+        "native_metadata_denial_lost_to_ledger_selection",
+        "static_descriptor_not_intersected_for_action",
+        "alternate_carrier_and_scalar_robustness"
+      ],
+      "evidence": [
+        "authority/results.json",
+        "authority/parent-results.json"
+      ]
+    },
+    {
+      "id": "AB-R04",
+      "priority": "P2",
+      "status": "raw_pixel_qualification_repaired_scalar_and_persistence_partial",
+      "verified": [
+        "finite_nonboolean_pixels",
+        "safe_INV2",
+        "all13_pixel_domains",
+        "LAI_legend8",
+        "physical_zero"
+      ],
+      "remaining": [
+        "numeric_scalar_flag_zero_denial",
+        "scalar_domain_and_plot_raster_availability",
+        "persistence_type_laundering",
+        "qualified_temporal_gate_convergence"
+      ],
+      "evidence": [
+        "catalog/results.json",
+        "catalog/parent-results.json"
+      ]
+    },
+    {
+      "id": "AB-R05",
+      "priority": "P2",
+      "status": "normal_generation_and_direct_export_repaired_connected_receipt_partial",
+      "verified": [
+        "ASMAE_policy_key_commit_guard",
+        "nomask_2D_masks",
+        "exact_mask_shape",
+        "ASMAE_precommit_retention",
+        "L10_precommit_retention",
+        "native13_confidence_export",
+        "canonical_permission_projection"
+      ],
+      "remaining": [
+        "own_state_sigma_not_bound_to_product",
+        "cold_schema_field_loss",
+        "early_cleanup_exception_and_live_detachment",
+        "postcommit_cleanup_dangling_manifest",
+        "L10_artifact_integrity",
+        "conditional_retained_L10_policy_migration",
+        "mask_dtype_before_coercion",
+        "canonical_compatibility_representation_parity"
+      ],
+      "evidence": [
+        "cache/results.json",
+        "cache/parent-results.json",
+        "cache/policy-results.json",
+        "export/results.json",
+        "root-integration-results.json",
+        "root-integration-parent-results.json"
+      ]
+    }
+  ],
+  "validation": {
+    "candidate": "ded72528ce12a2f1cb4ca6a208ddcc2accc3802a",
+    "parent": "e85cfd224f8a731e2959648ce28450e27782188f",
+    "source_receipts": [
+      {
+        "candidate": "ded72528ce12a2f1cb4ca6a208ddcc2accc3802a",
+        "verified_files": 1087,
+        "unchanged": true
+      },
+      {
+        "candidate": "e85cfd224f8a731e2959648ce28450e27782188f",
+        "verified_files": 1087,
+        "unchanged": true
+      }
+    ],
+    "compiled_modules": [
+      "services/agribrain/layer05_asmae/assimilation/filter.py",
+      "services/agribrain/layer05_asmae/cache.py",
+      "services/agribrain/layer05_asmae/engine.py",
+      "services/agribrain/layer05_asmae/feature_export.py",
+      "services/agribrain/layer05_asmae/state/descriptors.py",
+      "services/agribrain/layer10_sire/invariants.py",
+      "services/agribrain/layer10_sire/products/export.py",
+      "services/agribrain/layer10_sire/products/manifest.py",
+      "services/agribrain/layer10_sire/runner.py",
+      "services/agribrain/layer10_sire/surface_contract.py",
+      "services/agribrain/layer10_sire/surfaces/asmae.py"
+    ],
+    "checks": {
+      "both_source_snapshots_unchanged": true,
+      "all_changed_Python_syntax_valid": true,
+      "review_JSON_strict": true,
+      "native_assembly_failure_reproduced": true,
+      "native_cold_receipt_failure_reproduced": true,
+      "all_replays_exit_zero": true,
+      "52_FA_open": true,
+      "six_lane_deliverables_present": true
+    },
+    "all_documented_observations_reproduced": true,
+    "acceptance": "HOLD_PARTIAL",
+    "FA_open": 52,
+    "FA_checked": 0,
+    "qualification": "Exit-zero observation replay includes actual remaining counterexamples, not acceptance success."
+  },
+  "governance": {
+    "FA_open": 52,
+    "FA_checked": 0,
+    "production_edits": false,
+    "merge_push": false
+  },
+  "qualifications": [
+    "Native failing assembler, native component updates and actual native L10 validator/writer/reader executed",
+    "Nested runner predicates and pure frontend helpers isolated exactly; not full browser or full pipeline",
+    "Malformed carrier incidence and actual filesystem fault rates unestablished",
+    "No full provider/API/GDAL/hardware run or new multiprocess/power-loss experiment",
+    "Reported repository suites not rerun",
+    "Python3.12.14 and Node24.22.1 review environment",
+    "Source identity coverage is not exhaustive repository correctness"
+  ],
+  "next_action": "One integrated A+B completion revision, preserve verified repairs and replay one connected gate; independent expert/GIS work separately eligible."
+}

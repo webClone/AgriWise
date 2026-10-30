@@ -18,6 +18,7 @@ from .surface_contract import (
     build_no_data_mode_display_state,
     build_no_data_render_authorizations,
     build_no_data_source_policy_display_state,
+    build_no_data_surface_inventory,
     classify_surface_publication,
 )
 
@@ -66,6 +67,7 @@ def build_terminal_no_data_output(
         micro_objects=[],
         histogram_bundle=HistogramBundle(),
         render_manifest=RenderManifest(available_modes=[]),
+        surface_inventory=build_no_data_surface_inventory(reason),
         canonical_geometry_hash=geometry_hash,
         source_geometry_hash=geometry_hash,
         quality_report=QualityReport(

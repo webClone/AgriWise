@@ -56,7 +56,16 @@ def is_production() -> bool:
 
 def register_calibration_profile(profile: SensorCalibrationProfile) -> None:
     """Register a calibration profile dynamically (primarily for tests)."""
+    import sys
     _CALIBRATION_PROFILES[profile.device_id] = profile
+    if profile.variable:
+        _CALIBRATION_PROFILES[f"{profile.device_id}_{profile.variable}"] = profile
+    for mod_name in ("sensor_runtime.calibration", "services.agribrain.sensor_runtime.calibration"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_CALIBRATION_PROFILES"):
+            mod._CALIBRATION_PROFILES[profile.device_id] = profile
+            if profile.variable:
+                mod._CALIBRATION_PROFILES[f"{profile.device_id}_{profile.variable}"] = profile
 
 
 def load_persistent_calibration(device_id: str, variable: Optional[str] = None) -> Optional[SensorCalibrationProfile]:

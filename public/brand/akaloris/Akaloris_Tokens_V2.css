@@ -1,0 +1,12 @@
+:root {
+  --akaloris-canopy: #102820;
+  --akaloris-pine: #18392D;
+  --akaloris-field: #657A54;
+  --akaloris-copper: #B47B47;
+  --akaloris-porcelain: #FAF9F5;
+  --akaloris-surface: #F0F3ED;
+  --akaloris-line: #D6DED5;
+  --akaloris-radius-sm: 4px;
+  --akaloris-spacing-unit: 8px;
+  --akaloris-font-ui: Inter, system-ui, sans-serif;
+}

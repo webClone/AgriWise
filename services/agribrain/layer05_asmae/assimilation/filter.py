@@ -29,6 +29,7 @@ from ..config import (
     STATE_BOUNDS,
     STATE_NAMES,
 )
+from ..state.descriptors import STATE_DESCRIPTORS, AssimilationPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -359,8 +360,8 @@ def run_enkf(
             state
             for report in scene_reports
             if isinstance(report, dict) and report.get("update_applied") is True
-            for state in report.get("target_states", [])
-            if state in STATE_NAMES
+            for state in (report.get("accepted_target_states") if report.get("accepted_target_states") is not None else report.get("target_states", []))
+            if state in STATE_NAMES and state not in report.get("excluded_target_states", [])
         })
         if accepted_target_states:
             from ..graph.spatial_regularization import apply_ensemble_graph_regularization
@@ -1021,6 +1022,32 @@ def _state_variance_summary(
     return result
 
 
+def _state_mean_summary(
+    ensemble: Any,
+    state_indices: List[int],
+) -> Dict[str, float]:
+    """Return average within-node ensemble mean for named states."""
+    result: Dict[str, float] = {}
+    if ensemble is None or len(ensemble) == 0:
+        return result
+    import numpy as np
+
+    if isinstance(ensemble, np.ndarray):
+        values = ensemble
+    elif isinstance(ensemble, dict):
+        values = np.asarray(list(ensemble.values()), dtype=float)
+    else:
+        values = np.asarray(ensemble, dtype=float)
+    if values.ndim != 3 or values.shape[1] == 0:
+        return result
+    for state_index in state_indices:
+        if state_index < 0 or state_index >= values.shape[2]:
+            continue
+        state_name = STATE_NAMES[state_index] if state_index < len(STATE_NAMES) else f"state_{state_index}"
+        result[state_name] = float(np.mean(values[:, :, state_index]))
+    return result
+
+
 def _legacy_order_dependent_update_step_ht(
     ensemble: Dict[str, List[List[float]]],
     scene: Any,
@@ -1579,13 +1606,23 @@ def update_step_ht(
         mapping = INDEX_STATE_REGISTRY.get(obs_name)
         if mapping is None:
             continue
+        from ..state.descriptors import STATE_DESCRIPTORS, AssimilationPolicy
         target_indices = [
             index for index in mapping.target_state_indices
             if 0 <= index < len(STATE_NAMES)
             and not validate_forbidden_state_update(obs_name, index)
+            and STATE_DESCRIPTORS[index].assimilation_policy != AssimilationPolicy.NOT_ASSIMILATED
         ]
         target_states = [STATE_NAMES[index] for index in target_indices]
         if not target_indices:
+            reports.append({
+                'obs_name': obs_name,
+                'sensor': mapping.sensor,
+                'mode': 'excluded_forbidden_or_not_assimilated',
+                'update_applied': False,
+                'target_states': [STATE_NAMES[i] for i in mapping.target_state_indices if 0 <= i < len(STATE_NAMES)],
+                'failure_reason': 'forbidden_or_not_assimilated',
+            })
             continue
         if not pixel_observation.is_per_pixel or pixel_observation.n_pixels != h_matrix.shape[0]:
             reports.append({
@@ -1645,6 +1682,7 @@ def update_step_ht(
             ),
         )
         prior_variance = _state_variance_summary(state_cube, target_indices)
+        prior_mean = _state_mean_summary(state_cube, target_indices)
         valid_predictions = pixel_predictions[valid_indices, :]
         valid_observed = observed[valid_indices]
         prediction_mean = np.mean(valid_predictions, axis=1)
@@ -1666,38 +1704,118 @@ def update_step_ht(
             support_sums = np.sum(local_support, axis=0)
         active_positions = np.flatnonzero(support_sums > 1e-12)
         localized_updates = int(active_positions.size)
-        if localized_updates:
-            weighted_observed = np.asarray(
-                local_support.T @ valid_observed, dtype=float,
-            ).reshape(-1)
-            active_sums = support_sums[active_positions]
-            # Construct predictions in consistent observation space (H-weighted support matching local_observed)
-            # to guarantee that zero innovation produces zero mean adjustment.
-            weighted_predictions = np.asarray(
-                local_support.T @ valid_predictions, dtype=float,
-            )
-            local_predictions = (
-                weighted_predictions[active_positions, :] / active_sums[:, None]
-            )
-            local_observed = (
-                weighted_observed[active_positions] / active_sums
-            )
-            state_cube = _batch_scalar_etkf_target_update(
-                state_cube,
-                node_ids,
-                target_indices,
-                local_predictions,
-                local_observed,
-                sigma_observation * sigma_observation,
-                active_positions,
-            )
+        if localized_updates == 0:
+            reports.append({
+                'obs_name': obs_name,
+                'sensor': mapping.sensor,
+                'mode': 'excluded_zero_localized_support',
+                'update_applied': False,
+                'target_states': target_states,
+                'failure_reason': 'zero_localized_support',
+            })
+            continue
+
+        weighted_observed = np.asarray(
+            local_support.T @ valid_observed, dtype=float,
+        ).reshape(-1)
+        active_sums = support_sums[active_positions]
+        # Construct predictions in consistent observation space (H-weighted support matching local_observed)
+        # to guarantee that zero innovation produces zero mean adjustment.
+        weighted_predictions = np.asarray(
+            local_support.T @ valid_predictions, dtype=float,
+        )
+        local_predictions = (
+            weighted_predictions[active_positions, :] / active_sums[:, None]
+        )
+        local_observed = (
+            weighted_observed[active_positions] / active_sums
+        )
+        step_prior_cube = state_cube.copy()
+        state_cube = _batch_scalar_etkf_target_update(
+            state_cube,
+            node_ids,
+            target_indices,
+            local_predictions,
+            local_observed,
+            sigma_observation * sigma_observation,
+            active_positions,
+        )
         if deadline_check is not None:
             deadline_check()
         posterior_variance = _state_variance_summary(state_cube, target_indices)
+        posterior_mean = _state_mean_summary(state_cube, target_indices)
         information_gain = {
             state: max(0.0, prior - posterior_variance.get(state, prior))
             for state, prior in prior_variance.items()
         }
+
+        # Qualify actual per-state influence
+        per_state_influence: Dict[str, Dict[str, Any]] = {}
+        has_actual_influence = False
+        for state_index in target_indices:
+            state_name = STATE_NAMES[state_index]
+            desc = STATE_DESCRIPTORS[state_index]
+            scale = (desc.bounds[1] - desc.bounds[0]) if (desc.bounds and desc.bounds[1] > desc.bounds[0]) else 1.0
+
+            # Per-node spatial evaluation to prevent opposite local innovations cancelling in the global mean
+            step_prior_node_means = np.mean(step_prior_cube[:, :, state_index], axis=1)
+            post_node_means = np.mean(state_cube[:, :, state_index], axis=1)
+            max_node_delta_mean = float(np.max(np.abs(post_node_means - step_prior_node_means)))
+            
+            step_prior_node_vars = np.var(step_prior_cube[:, :, state_index], axis=1)
+            post_node_vars = np.var(state_cube[:, :, state_index], axis=1)
+            max_node_var_red = float(np.max(np.maximum(0.0, step_prior_node_vars - post_node_vars)))
+
+            tol_mean = 1e-5 * scale
+            tol_var = 1e-7 * (scale ** 2)
+            state_influenced = (max_node_delta_mean > tol_mean) or (max_node_var_red > tol_var)
+            if state_influenced:
+                has_actual_influence = True
+            per_state_influence[state_name] = {
+                'delta_mean': float(max_node_delta_mean),
+                'variance_reduction': float(max_node_var_red),
+                'state_influenced': state_influenced,
+            }
+
+        if not has_actual_influence:
+            state_cube = step_prior_cube.copy()
+            reports.append({
+                'obs_name': obs_name,
+                'sensor': mapping.sensor,
+                'mode': 'excluded_negligible_influence',
+                'update_applied': False,
+                'target_states': target_states,
+                'failure_reason': 'negligible_influence',
+                'per_state_influence': per_state_influence,
+            })
+            continue
+
+        # Roll back uninfluenced target states in mixed accepted/excluded updates
+        for state_index in target_indices:
+            state_name = STATE_NAMES[state_index]
+            if not per_state_influence[state_name]['state_influenced']:
+                state_cube[:, :, state_index] = step_prior_cube[:, :, state_index]
+
+        # Recompute posterior summaries to reflect the committed states in state_cube
+        posterior_variance = _state_variance_summary(state_cube, target_indices)
+        posterior_mean = _state_mean_summary(state_cube, target_indices)
+        information_gain = {
+            state: max(0.0, prior - posterior_variance.get(state, prior))
+            for state, prior in prior_variance.items()
+        }
+
+        # Determine directness from measurement/operator receipt and descriptor policy
+        is_receipt_direct = bool(
+            getattr(operator, 'is_direct_measurement', False)
+            or getattr(pixel_observation, 'is_direct_measurement', False)
+        )
+        target_descs = [STATE_DESCRIPTORS[idx] for idx in target_indices]
+        allows_direct = all(d.assimilation_policy == AssimilationPolicy.DIRECT_OBSERVATION for d in target_descs)
+        if is_receipt_direct and allows_direct:
+            evidence_kind = 'direct_observation'
+        else:
+            evidence_kind = 'indirect_observation'
+
         reports.append({
             'obs_name': obs_name,
             'sensor': mapping.sensor,
@@ -1709,7 +1827,9 @@ def update_step_ht(
             'mode': 'ht_per_pixel_ensrf',
             'update_applied': True,
             'target_states': target_states,
-            'evidence_kind': 'direct_observation',
+            'accepted_target_states': [s for s in target_states if per_state_influence.get(s, {}).get('state_influenced', False)],
+            'excluded_target_states': [s for s in target_states if not per_state_influence.get(s, {}).get('state_influenced', False)],
+            'evidence_kind': evidence_kind,
             'prior_variance': prior_variance,
             'posterior_variance': posterior_variance,
             'information_gain': information_gain,
@@ -1723,6 +1843,7 @@ def update_step_ht(
                 'localized_zone_updates': localized_updates,
                 'correlated_pixel_policy': 'one_weighted_observation_per_zone',
             },
+            'per_state_influence': per_state_influence,
         })
 
     if is_ndarray:
@@ -1765,7 +1886,19 @@ def update_step_proxy(
             state_index for state_index in mapping.target_state_indices
             if 0 <= state_index < len(STATE_NAMES)
             and not validate_forbidden_state_update(obs_name, state_index)
+            and STATE_DESCRIPTORS[state_index].assimilation_policy != AssimilationPolicy.NOT_ASSIMILATED
         ]
+        if not target_indices:
+            reports.append({
+                "obs_name": obs_name,
+                "sensor": mapping.sensor,
+                "mode": "excluded_forbidden_state",
+                "update_applied": False,
+                "target_states": [STATE_NAMES[s] for s in mapping.target_state_indices if 0 <= s < len(STATE_NAMES)],
+                "failure_reason": "not_assimilated_policy",
+            })
+            continue
+
         target_states = [STATE_NAMES[state_index] for state_index in target_indices]
         sigma_obs = compute_observation_noise(
             obs_name,
@@ -1807,9 +1940,66 @@ def update_step_proxy(
         else:
             continue
 
+        prior_mean = _state_mean_summary(ensemble, target_indices)
         prior_variance = _state_variance_summary(ensemble, target_indices)
+        step_prior_ensemble = {k: [row[:] for row in v] for k, v in ensemble.items()}
         _proxy_update_single_obs(ensemble, node_ids, obs_name, obs_value,
-                                 mapping, sigma_obs, r_var, rng)
+                                 mapping, sigma_obs, r_var, rng, target_indices=target_indices)
+        posterior_mean = _state_mean_summary(ensemble, target_indices)
+        posterior_variance = _state_variance_summary(ensemble, target_indices)
+
+        # Qualify actual per-state influence
+        per_state_influence: Dict[str, Dict[str, Any]] = {}
+        has_actual_influence = False
+        for state_index in target_indices:
+            state_name = STATE_NAMES[state_index]
+            desc = STATE_DESCRIPTORS[state_index]
+            scale = (desc.bounds[1] - desc.bounds[0]) if (desc.bounds and desc.bounds[1] > desc.bounds[0]) else 1.0
+
+            # Per-node spatial evaluation for proxy update
+            node_prior_means = [sum(row[state_index] for row in step_prior_ensemble[nid]) / len(step_prior_ensemble[nid]) for nid in node_ids]
+            node_post_means = [sum(row[state_index] for row in ensemble[nid]) / len(ensemble[nid]) for nid in node_ids]
+            max_node_delta_mean = float(max(abs(post_m - pri_m) for post_m, pri_m in zip(node_post_means, node_prior_means)))
+            
+            node_prior_vars = [sum((row[state_index] - pri_m)**2 for row in step_prior_ensemble[nid]) / len(step_prior_ensemble[nid]) for nid, pri_m in zip(node_ids, node_prior_means)]
+            node_post_vars = [sum((row[state_index] - post_m)**2 for row in ensemble[nid]) / len(ensemble[nid]) for nid, post_m in zip(node_ids, node_post_means)]
+            max_node_var_red = float(max(max(0.0, pri_v - post_v) for pri_v, post_v in zip(node_prior_vars, node_post_vars)))
+
+            tol_mean = 1e-5 * scale
+            tol_var = 1e-7 * (scale ** 2)
+            state_influenced = (max_node_delta_mean > tol_mean) or (max_node_var_red > tol_var)
+            if state_influenced:
+                has_actual_influence = True
+            per_state_influence[state_name] = {
+                'delta_mean': float(max_node_delta_mean),
+                'variance_reduction': float(max_node_var_red),
+                'state_influenced': state_influenced,
+            }
+
+        if not has_actual_influence:
+            for k in ensemble:
+                ensemble[k] = [row[:] for row in step_prior_ensemble[k]]
+            reports.append({
+                'obs_name': obs_name,
+                'sensor': mapping.sensor,
+                'mode': 'excluded_negligible_influence',
+                'update_applied': False,
+                'target_states': target_states,
+                'failure_reason': 'negligible_influence',
+                'per_state_influence': per_state_influence,
+            })
+            continue
+
+        # Roll back uninfluenced target states in mixed accepted/excluded updates
+        for state_index in target_indices:
+            state_name = STATE_NAMES[state_index]
+            if not per_state_influence[state_name]['state_influenced']:
+                for nid in node_ids:
+                    for i_member in range(len(ensemble[nid])):
+                        ensemble[nid][i_member][state_index] = step_prior_ensemble[nid][i_member][state_index]
+
+        # Recompute posterior summaries to reflect the committed states in ensemble
+        posterior_mean = _state_mean_summary(ensemble, target_indices)
         posterior_variance = _state_variance_summary(ensemble, target_indices)
 
         reports.append({
@@ -1823,9 +2013,12 @@ def update_step_proxy(
             "mode": "proxy_mean_level",
             "update_applied": True,
             "target_states": target_states,
+            "accepted_target_states": [s for s in target_states if per_state_influence.get(s, {}).get('state_influenced', False)],
+            "excluded_target_states": [s for s in target_states if not per_state_influence.get(s, {}).get('state_influenced', False)],
             "evidence_kind": "proxy_observation",
             "prior_variance": prior_variance,
             "posterior_variance": posterior_variance,
+            "per_state_influence": per_state_influence,
             "information_gain": {
                 state: max(0.0, prior - posterior_variance.get(state, prior))
                 for state, prior in prior_variance.items()
@@ -1889,11 +2082,19 @@ def _legacy_stochastic_proxy_update_single_obs(
 
 def _proxy_update_single_obs(
     ensemble, node_ids, obs_name, obs_value,
-    mapping, sigma_obs, r_var, rng,
+    mapping, sigma_obs, r_var, rng, target_indices=None,
 ):
     from ..observation.index_state_mapping import validate_forbidden_state_update
     from ..observation.s1_sar_model import predict_sar_observation
     from ..observation.s2_forward_model import predict_observation
+
+    if target_indices is None:
+        target_indices = [
+            s for s in mapping.target_state_indices
+            if 0 <= s < len(STATE_NAMES)
+            and not validate_forbidden_state_update(obs_name, s)
+            and STATE_DESCRIPTORS[s].assimilation_policy != AssimilationPolicy.NOT_ASSIMILATED
+        ]
 
     for node_id in node_ids:
         members = ensemble[node_id]
@@ -1922,8 +2123,10 @@ def _proxy_update_single_obs(
         if prediction_variance < 1e-12 or total_variance <= 0.0:
             continue
         shrink = 1.0 / (1.0 + math.sqrt(max(r_var, 0.0) / total_variance))
-        for state_index in mapping.target_state_indices:
+        for state_index in target_indices:
             if validate_forbidden_state_update(obs_name, state_index):
+                continue
+            if STATE_DESCRIPTORS[state_index].assimilation_policy == AssimilationPolicy.NOT_ASSIMILATED:
                 continue
             state_values = [float(member[state_index]) for member in members]
             state_mean = sum(state_values) / n_ensemble

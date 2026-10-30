@@ -1,0 +1,307 @@
+{
+  "repository": "webClone/AgriWise",
+  "review_date": "2026-10-22",
+  "candidate": "90ab701714554c7b786bba4ac6b19259e77279ce",
+  "baseline": "5344930dfc7fbab7f7277bf61f99fc252dd88bc6",
+  "verdict": "CENTRAL_DIAGNOSIS_CONFIRMED_WITH_MATERIAL_CORRECTIONS",
+  "core_result": "Thirteen-state generation, raster transport and NPZ capacity exist; dedicated publication, exact state gates, complete inventory and independent expert selection do not form a complete thirteen-state contract.",
+  "source_identity": {
+    "staged_files": 1086,
+    "all_match_current_Git_blobs": true,
+    "count_is_not_branch_coverage": true
+  },
+  "state_matrix": [
+    {
+      "state": "vigor",
+      "surface_type": "ASMAE_VIGOR",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_VIGOR",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        true,
+        ""
+      ]
+    },
+    {
+      "state": "lai",
+      "surface_type": "ASMAE_LAI",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_LAI",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        false,
+        "surface_state_requirement_unmapped"
+      ]
+    },
+    {
+      "state": "chlorophyll",
+      "surface_type": "ASMAE_CHLOROPHYLL",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_CHLOROPHYLL",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        true,
+        ""
+      ]
+    },
+    {
+      "state": "canopy_water",
+      "surface_type": "ASMAE_CANOPY_WATER",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_CANOPY_WATER",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        true,
+        ""
+      ]
+    },
+    {
+      "state": "root_zone_water",
+      "surface_type": "ASMAE_ROOT_ZONE_WATER",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_ROOT_ZONE_WATER",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        true,
+        ""
+      ]
+    },
+    {
+      "state": "surface_wetness_event",
+      "surface_type": "ASMAE_SURFACE_WETNESS_EVENT",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_SURFACE_WETNESS_EVENT",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        false,
+        "surface_state_requirement_unmapped"
+      ]
+    },
+    {
+      "state": "structure",
+      "surface_type": "ASMAE_STRUCTURE",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_STRUCTURE",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        false,
+        "surface_state_requirement_unmapped"
+      ]
+    },
+    {
+      "state": "bare_soil_fraction",
+      "surface_type": "ASMAE_BARE_SOIL",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_BARE_SOIL",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        false,
+        "surface_state_requirement_unmapped"
+      ]
+    },
+    {
+      "state": "salinity_stress",
+      "surface_type": "ASMAE_SALINITY_STRESS",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_SALINITY_STRESS",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        true,
+        ""
+      ]
+    },
+    {
+      "state": "thermal_stress",
+      "surface_type": "ASMAE_THERMAL_STRESS",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_THERMAL_STRESS",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        false,
+        "surface_state_requirement_unmapped"
+      ]
+    },
+    {
+      "state": "biotic_confounder_risk",
+      "surface_type": "ASMAE_BIOTIC_CONFOUNDER_RISK",
+      "surface_registered": true,
+      "render_mode_registered": true,
+      "manifest_mapping": "ASMAE_BIOTIC_CONFOUNDER_RISK",
+      "native_generated": true,
+      "all_supported_exact_state_gate": [
+        true,
+        ""
+      ]
+    },
+    {
+      "state": "phenology_progress",
+      "surface_type": "ASMAE_PHENOLOGY_PROGRESS",
+      "surface_registered": false,
+      "render_mode_registered": false,
+      "manifest_mapping": null,
+      "native_generated": false,
+      "all_supported_exact_state_gate": [
+        false,
+        "surface_state_requirement_unmapped"
+      ]
+    },
+    {
+      "state": "stress_memory",
+      "surface_type": "ASMAE_STRESS_MEMORY",
+      "surface_registered": false,
+      "render_mode_registered": false,
+      "manifest_mapping": null,
+      "native_generated": false,
+      "all_supported_exact_state_gate": [
+        false,
+        "surface_state_requirement_unmapped"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "MAP-01",
+      "classification": "STRUCTURAL_PRODUCT_GAP",
+      "title": "Two dedicated state products are absent",
+      "detail": "phenology_progress and stress_memory are absent from the dedicated SIRE state-surface/mode/manifest registry. Phenology still contributes to a composite diagnostic.",
+      "status": "OPEN_REVIEW_FINDING_OR_CAPABILITY_GAP",
+      "source_paths": [
+        "services/agribrain/layer10_sire/schema.py",
+        "services/agribrain/layer10_sire/products/manifest.py"
+      ]
+    },
+    {
+      "id": "MAP-02",
+      "classification": "CONFIRMED_AVAILABILITY_DEFECT",
+      "title": "Five registered state gates are unmapped",
+      "detail": "LAI, structure, bare soil, thermal stress and surface wetness fail the exact positive-support gate with surface_state_requirement_unmapped.",
+      "status": "OPEN_REVIEW_FINDING_OR_CAPABILITY_GAP",
+      "source_paths": [
+        "services/agribrain/layer10_sire/runner.py"
+      ]
+    },
+    {
+      "id": "MAP-03",
+      "classification": "CONFIRMED_SUPPORT_LINKAGE_DEFECT",
+      "title": "State gates consult different or aggregate support",
+      "detail": "Canopy water uses vigor; root-zone water accepts canopy-only support; biotic risk uses global BMA/retro proof without an own-state count check. Appropriate diagnostic hypothesis rules still need definition.",
+      "status": "OPEN_REVIEW_FINDING_OR_CAPABILITY_GAP",
+      "source_paths": [
+        "services/agribrain/layer10_sire/runner.py"
+      ]
+    },
+    {
+      "id": "MAP-04",
+      "classification": "CONFIRMED_METADATA_FALLBACK_DEFECT",
+      "title": "Missing state support can become Observed",
+      "detail": "Actual native generator calls with real-raster metadata but no per-state ledger label all eleven states directly_assimilated/Observed. Diagnostic/update denial remains in the fixture. Normal engine outputs ordinarily carry a ledger; no end-to-end action escalation was established.",
+      "status": "OPEN_REVIEW_FINDING_OR_CAPABILITY_GAP",
+      "source_paths": [
+        "services/agribrain/layer10_sire/surfaces/asmae.py"
+      ]
+    },
+    {
+      "id": "MAP-05",
+      "classification": "INDEPENDENT_INSPECTION_CAPABILITY_GAP",
+      "title": "Expected inventory and expert selector are incomplete",
+      "detail": "The mounted UI has six base lenses and nine overlays; fixed priorities and separate hardcoded inventories do not expose all thirteen latent coordinates independently. Existing expert views and mode-level reasons are retained.",
+      "status": "OPEN_REVIEW_FINDING_OR_CAPABILITY_GAP",
+      "source_paths": [
+        "services/agribrain/layer10_sire/runner.py",
+        "src/hooks/useLayer10.ts",
+        "src/components/farm/intelligence/MapLayerDock.tsx"
+      ]
+    },
+    {
+      "id": "MAP-06",
+      "classification": "CONFIRMED_CONDITIONAL_CONVERTER_WEAKNESS",
+      "title": "Incomplete microzone collections leave zero placeholders",
+      "detail": "A controlled omitted interior node leaves thirteen zero cells. Complete native fixture has all117 assignments and no holes. Validate completeness or mark unsupported cells nodata while preserving legitimate zero.",
+      "status": "OPEN_REVIEW_FINDING_OR_CAPABILITY_GAP",
+      "source_paths": [
+        "services/agribrain/layer05_asmae/engine.py"
+      ]
+    },
+    {
+      "id": "MAP-07",
+      "classification": "STATIC_SEMANTIC_CONTRACT_DRIFT",
+      "title": "Stress-memory descriptor and update target disagree",
+      "detail": "Descriptor declares NOT_ASSIMILATED/NOT_IDENTIFIED/visualization, while stress_memory_index is a registered update target. Reconcile policy; the registry alone does not establish identifiability.",
+      "status": "OPEN_REVIEW_FINDING_OR_CAPABILITY_GAP",
+      "source_paths": [
+        "services/agribrain/layer05_asmae/state/descriptors.py",
+        "services/agribrain/layer05_asmae/observation/index_state_mapping.py"
+      ]
+    },
+    {
+      "id": "CAP-01",
+      "classification": "SCIENTIFIC_ARTIFACT_DELIVERY_EXTENSION",
+      "title": "No complete thirteen-state GIS publisher in inspected route",
+      "detail": "Current NPZ retains all thirteen states and canonical surface serialization preserves geospatial/quality metadata. Generic L1 GTiff support exists. A complete ASMAE/SIRE per-state scientific artifact commit/download workflow remains to be defined and connected.",
+      "status": "OPEN_REVIEW_FINDING_OR_CAPABILITY_GAP",
+      "source_paths": [
+        "services/agribrain/layer10_sire/products/export.py",
+        "services/agribrain/layer10_sire/surface_contract.py",
+        "services/agribrain/layer1_fusion/raster_backend.py"
+      ]
+    }
+  ],
+  "confirmed_positive_controls": {
+    "native_mean_grids": 13,
+    "native_sigma_grids": 13,
+    "actual_assignments_each": 117,
+    "L1_raster_refs": 26,
+    "FieldTensor_underlying_maps": 26,
+    "L10_case_alias_keys": 52,
+    "cache_fields": 3,
+    "cache_arrays": 39,
+    "registered_SIRE_states": 11,
+    "unmapped_registered_state_gates": 5,
+    "six_command_replay_exit_zero": true,
+    "root_observation_assertions": 26
+  },
+  "frontend_model": {
+    "compatibility_mode_strings": 9,
+    "base_lenses": 6,
+    "overlay_kinds": 9,
+    "backend_inventory_types": 43,
+    "frontend_inventory_types": 22,
+    "generic_thirteen_state_selector_present": false,
+    "expert_interface_exists": true,
+    "frontend_thirteen_fixture_is": "eleven registered state products plus two diagnostics, not thirteen latent states"
+  },
+  "plan_ownership": {
+    "support_and_calibration": "F36",
+    "map_projection_and_expert_view": "T09",
+    "scoped_degraded_publication": "F38/T11",
+    "two_clock_issuance_and_replay": "F02"
+  },
+  "full_acceptance": {
+    "total": 52,
+    "open": 52,
+    "checked": 0,
+    "changed": false
+  },
+  "implementation_recommendation": "Begin a bounded F36/T09 support/publication slice using the ordered repair plan. Preserve existing F01 software closures and continue independent F02 work where its prerequisites exist. No production repair is implemented by this review.",
+  "limits": [
+    "No particular live plot or execution logs were inspected.",
+    "No live HTTP/browser/DeckGL materialization was run.",
+    "Native assembly routing is observed before an environment-blocked Rasterio grid gate; full output assembly is not certified.",
+    "Runner authorization is exact AST-isolated execution, not the full integrated runner.",
+    "Prior-only numerical fixtures do not establish spatial observation support or calibrated uncertainty.",
+    "Missing-ledger label behavior does not establish an end-to-end prescription-authority escalation.",
+    "The converter hole is controlled incomplete input; routine native EnKF holes were not established.",
+    "No repository test/audit or reported test total is used as correctness proof.",
+    "No field devices, providers, optimizer, prescription or full-acceptance milestone was operated or approved."
+  ]
+}

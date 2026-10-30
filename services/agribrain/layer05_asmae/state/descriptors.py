@@ -143,6 +143,7 @@ STATE_ORDER: Tuple[str, ...] = (
 """Frozen state ordering. Must match config.STATE_NAMES exactly."""
 
 assert len(STATE_ORDER) == 13, "STATE_ORDER must have exactly 13 entries"
+STATE_NAMES: Tuple[str, ...] = STATE_ORDER
 
 
 # ── Descriptors for all 13 states ────────────────────────────────────────────
@@ -353,3 +354,10 @@ def descriptor_for(name_or_index: str | int) -> StateDescriptor:
     if isinstance(name_or_index, int):
         return STATE_DESCRIPTOR_BY_INDEX[name_or_index]
     return STATE_DESCRIPTOR_BY_NAME[name_or_index]
+
+
+def get_descriptor(name_or_index: str | int) -> StateDescriptor | None:
+    """Safely look up a state descriptor by canonical name or index, returning None if not found."""
+    if isinstance(name_or_index, int):
+        return STATE_DESCRIPTOR_BY_INDEX.get(name_or_index)
+    return STATE_DESCRIPTOR_BY_NAME.get(str(name_or_index))

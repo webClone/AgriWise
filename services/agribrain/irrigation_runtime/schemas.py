@@ -117,6 +117,7 @@ class ActuatorStatus(str, Enum):
     ERROR = "ERROR"                   # Fault condition detected
     MAINTENANCE = "MAINTENANCE"       # Manually taken offline
     UNKNOWN = "UNKNOWN"               # Status not yet determined
+    STOP_PENDING_CONFIRMATION = "STOP_PENDING_CONFIRMATION"  # Transport ACK received, physical cessation unconfirmed
 
 
 class AutomationMode(str, Enum):
@@ -316,8 +317,10 @@ class CommandResult:
     retry_recommended: bool = False
     retries_remaining: int = 3
 
-    # Acknowledgment
+    # Acknowledgment & Physical Verification
     ack_latency_ms: int = 0                   # Time from send to ACK
+    transport_acknowledged_only: bool = False # True when command was queued/accepted by transport without verified cessation
+    confirmed_physical_stop: bool = False     # True when physical stoppage (zero flow / stopped state) is positively verified
 
 
 # ============================================================================
@@ -802,3 +805,12 @@ class IrrigationZone:
     distance_from_pivot_m: float = 0.0
 
     enabled: bool = True
+
+
+import sys
+# Unified namespace cross-aliasing (F37)
+if "services.agribrain.irrigation_runtime.schemas" in sys.modules and "irrigation_runtime.schemas" not in sys.modules:
+    sys.modules["irrigation_runtime.schemas"] = sys.modules["services.agribrain.irrigation_runtime.schemas"]
+elif "irrigation_runtime.schemas" in sys.modules and "services.agribrain.irrigation_runtime.schemas" not in sys.modules:
+    sys.modules["services.agribrain.irrigation_runtime.schemas"] = sys.modules["irrigation_runtime.schemas"]
+

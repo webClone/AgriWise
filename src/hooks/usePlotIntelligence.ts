@@ -41,6 +41,7 @@ export interface EngineStatus {
   lastUpdate: string | null;
   data: Record<string, unknown>;
   raw?: Record<string, unknown>;
+  isOperationalApplicable?: boolean;
 }
 
 export interface TimelineData {
@@ -174,10 +175,13 @@ interface PlotIntelligenceContextType {
   // DNA 4.0: Biophysical trait provenance
   dnaStatus: DnaStatus | null;
 
+  // Applicability Gate
+  isApplicable: boolean;
+
   // Fetch / Sync
   fetchIntelligence: (plotId: string, farmId: string) => Promise<void>;
   forceRefresh: (plotId: string, farmId: string) => Promise<void>;
-  injectData: (data: any) => void;
+  injectData: (data: any, targetPlotId?: string, isApplicable?: boolean) => void;
 }
 
 const PlotIntelligenceContext = createContext<PlotIntelligenceContextType | null>(null);
@@ -217,6 +221,9 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
   const [refreshing, setRefreshing] = useState(false);
   const [lastCaptured, setLastCaptured] = useState<string | null>(null);
 
+  // Applicability state
+  const [isAssessmentApplicable, setIsAssessmentApplicable] = useState(true);
+
   // Timeline
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
@@ -237,6 +244,9 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
   const CACHE_TTL = 5 * 60 * 1000; // 5 minutes in-memory
   // GAP 16: Abort controller for background refresh race prevention
   const refreshAbortRef = useRef<AbortController | null>(null);
+  // P2-B: Protect canonical assessment engines & timeline from legacy overwrite
+  const isCanonicalAssessmentBoundRef = useRef(false);
+  const boundPlotIdRef = useRef<string | null>(null);
 
   // Normalize Python engine card shape → EngineStatus interface
   const normalizeEngine = (e: any): EngineStatus => {
@@ -312,11 +322,26 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
 
   const fetchIntelligence = useCallback(
     async (plotId: string, farmId: string) => {
+      if (boundPlotIdRef.current && boundPlotIdRef.current !== plotId) {
+        // Switched to a different plot: unbind previous plot's canonical lock
+        isCanonicalAssessmentBoundRef.current = false;
+        boundPlotIdRef.current = null;
+      }
       const cacheKey = `${plotId}:${farmId}`;
       const cached = cacheRef.current[cacheKey];
       // In-memory cache still valid → skip API call entirely
       if (cached && Date.now() - cached.timestamp < CACHE_TTL && cached.data.timeline.weather.length > 0) {
-        setData(cached.data);
+        if (isCanonicalAssessmentBoundRef.current) {
+          setData((prev) => prev ? {
+            ...prev,
+            rawData: cached.data.rawData || prev.rawData,
+            current: cached.data.current || prev.current,
+            sensorContext: cached.data.sensorContext || prev.sensorContext,
+            userInputs: cached.data.userInputs || prev.userInputs,
+          } : cached.data);
+        } else {
+          setData(cached.data);
+        }
         return;
       }
 
@@ -344,7 +369,17 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
         }
 
         const mapped = mapResponse(json);
-        setData(mapped);
+        if (isCanonicalAssessmentBoundRef.current) {
+          setData((prev) => prev ? {
+            ...prev,
+            rawData: mapped.rawData || prev.rawData,
+            current: mapped.current || prev.current,
+            sensorContext: mapped.sensorContext || prev.sensorContext,
+            userInputs: mapped.userInputs || prev.userInputs,
+          } : mapped);
+        } else {
+          setData(mapped);
+        }
         setCacheStatus(serverCacheStatus || "MISS");
         setLastCaptured(capturedAt || json._cache?.capturedAt || null);
         cacheRef.current[cacheKey] = { data: mapped, timestamp: Date.now() };
@@ -368,7 +403,17 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
               // Only apply if this refresh wasn't aborted
               if (!abortCtrl.signal.aborted && (freshJson.engines || freshJson.success)) {
                 const freshMapped = mapResponse(freshJson);
-                setData(freshMapped);
+                if (isCanonicalAssessmentBoundRef.current) {
+                  setData((prev) => prev ? {
+                    ...prev,
+                    rawData: freshMapped.rawData || prev.rawData,
+                    current: freshMapped.current || prev.current,
+                    sensorContext: freshMapped.sensorContext || prev.sensorContext,
+                    userInputs: freshMapped.userInputs || prev.userInputs,
+                  } : freshMapped);
+                } else {
+                  setData(freshMapped);
+                }
                 setCacheStatus("REFRESHED");
                 setLastCaptured(freshJson._cache?.capturedAt || new Date().toISOString());
                 cacheRef.current[cacheKey] = { data: freshMapped, timestamp: Date.now() };
@@ -405,7 +450,17 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
         const json = await res.json();
         if (json.engines || json.success) {
           const mapped = mapResponse(json);
-          setData(mapped);
+          if (isCanonicalAssessmentBoundRef.current) {
+            setData((prev) => prev ? {
+              ...prev,
+              rawData: mapped.rawData || prev.rawData,
+              current: mapped.current || prev.current,
+              sensorContext: mapped.sensorContext || prev.sensorContext,
+              userInputs: mapped.userInputs || prev.userInputs,
+            } : mapped);
+          } else {
+            setData(mapped);
+          }
           setCacheStatus("REFRESHED");
           setLastCaptured(json._cache?.capturedAt || new Date().toISOString());
           const cacheKey = `${plotId}:${farmId}`;
@@ -420,14 +475,37 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
     [mapResponse]
   );
 
-  const injectData = useCallback((payload: any) => {
+  const injectData = useCallback((payload: any, targetPlotId?: string, isApplicable: boolean = true) => {
     if (!payload) return;
+    const applicable = isApplicable && !payload.is_stale && !payload.isStale;
+    setIsAssessmentApplicable(applicable);
+    isCanonicalAssessmentBoundRef.current = true;
+    boundPlotIdRef.current = targetPlotId || payload.plot_id || payload.plotId || null;
+    const rawEngines = payload.engines && (Array.isArray(payload.engines) ? payload.engines.length > 0 : Object.keys(payload.engines).length > 0)
+      ? payload.engines
+      : payload.layer_results || payload.canonicalLayerResults || [];
+    
+    const normalizedEngines = normalizeEngineCollection(rawEngines).map(normalizeEngine).map(e => {
+      if (!applicable) {
+        return {
+          ...e,
+          statusLabel: e.status === "LOADING" ? "Loading…" : `${e.statusLabel} (Outdated)`,
+          summary: e.summary ? `[Historical Audit] ${e.summary}` : "",
+          isOperationalApplicable: false,
+        };
+      }
+      return {
+        ...e,
+        isOperationalApplicable: true,
+      };
+    });
+
     const mapped: PlotIntelligenceData = {
       timeline: payload.timeline || {
         weather: [], ndvi: [], sar: [], waterBalance: [], forecast: [],
         dateRange: { from: "", to: "", today: "" },
       },
-      engines: normalizeEngineCollection(payload.engines).map(normalizeEngine),
+      engines: normalizedEngines,
       current: payload.current || { weather: null, indices: null, soil: null, waterBalance: null },
       rawData: payload.rawData,
       assimilation: payload.assimilation || {
@@ -440,7 +518,7 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
       dnaStatus: payload.dna_status ?? payload.dnaStatus ?? null,
     };
     setData(mapped);
-  }, []);
+  }, [normalizeEngine]);
 
   return createElement(
     PlotIntelligenceContext.Provider,
@@ -474,6 +552,8 @@ export function PlotIntelligenceProvider({ children }: { children: ReactNode }) 
         setShowAnalysisSidebar,
         activeSidebarTab,
         setActiveSidebarTab,
+
+        isApplicable: isAssessmentApplicable,
 
         assimilation: data?.assimilation || null,
         rawData: data?.rawData || null,

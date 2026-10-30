@@ -657,6 +657,11 @@ def rebuild_canonical_plot_snapshot(
                 context.get("evidence_capability_contract_version") or ""
             ),
             "capability_plan_hash": str(context.get("capability_plan_hash") or ""),
+            "crop_cycle_id": (
+                (orchestrator_input.crop_config.get("crop_cycle_id") if isinstance(getattr(orchestrator_input, "crop_config", None), dict) else None)
+                or (orchestrator_input.operational_context.get("crop_cycle_id") if isinstance(getattr(orchestrator_input, "operational_context", None), dict) else None)
+                or getattr(orchestrator_input, "crop_cycle_id", None)
+            ),
         },
         allow_overwrite=True,
     )

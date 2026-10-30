@@ -1,0 +1,169 @@
+{
+  "schema": "agribrain.bounded_claim_disposition.v1",
+  "candidate": "81cf8bb351a640964a03d7f63d64e79b93344449",
+  "exact_immediate_parent": "67375aa9ca0dfdc41c36d32e4105794b07e6b770",
+  "branch": "feat/f36-t09-asmae-13-state-publication",
+  "review_date": "2026-10-22",
+  "timezone": "Africa/Algiers",
+  "verdict": "original_S673_counterexamples_repaired_hold_unconditional_closure_pending_two_bounded_groups",
+  "read_only_production": true,
+  "remote_git_writes": false,
+  "repository_tests_used_as_correctness_proof": false,
+  "full_runner_API_browser_or_hardware_executed": false,
+  "FA": {
+    "total": 52,
+    "open": 52,
+    "checked": 0
+  },
+  "original_claims": [
+    {
+      "id": "S673-01",
+      "concrete_counterexamples": "verified_repaired",
+      "scope": "All14explicit_enum_spelling_cases_and_unknown_tokens",
+      "evidence": [
+        "integration/results.json:cases.runtime_enum_ceiling_matrix",
+        "integration/results.json:cases.runtime_unknown_and_absent_native_ledger"
+      ],
+      "qualification": "Inherited metadata-only direct-proof absent-runtime-ceiling policy remains permissive; not a third new blocker."
+    },
+    {
+      "id": "S673-02",
+      "concrete_counterexamples": "verified_repaired",
+      "broad_contract": "partial",
+      "evidence": [
+        "gating/results.json:consumer_boundary_cases",
+        "gating/frontend-risk-results.json:metadataRevocation"
+      ],
+      "remaining": [
+        "S81-01"
+      ]
+    },
+    {
+      "id": "S673-03",
+      "concrete_counterexamples": "verified_repaired",
+      "broad_contract": "partial",
+      "evidence": [
+        "classification/results.json:s673_repair_checks",
+        "classification/results.json:s673_positive_controls"
+      ],
+      "remaining": [
+        "S81-02"
+      ]
+    }
+  ],
+  "earlier_S12_status": "Reported concrete closures retained by fresh native controls; boolean permission parity remains intact.",
+  "residuals": [
+    {
+      "id": "S81-01",
+      "priority": "P2",
+      "title": "Restriction-list precedence erases revocation during standard alias projection",
+      "status": "open",
+      "lineage": "Newly declared SurfaceArtifact field introduces a supported competing-carrier route; parent declared constructor lacks field, so no fabricated equivalent parent ordinary-object execution claim.",
+      "production_paths": [
+        "services/agribrain/layer10_sire/surfaces/asmae.py",
+        "services/agribrain/layer10_sire/surface_contract.py",
+        "services/agribrain/layer10_sire/schema.py"
+      ],
+      "fixture": {
+        "attribute_block_reasons": [
+          "reference_warning"
+        ],
+        "provenance_block_reasons": [
+          "local_support_revoked"
+        ]
+      },
+      "actual_path": "native generated vigor surface -> production dataclass constructor with declared restriction carriers -> native ordinary alias -> unchanged complete AST authorization block -> actual pure TypeScript resolver",
+      "effect": "RawASMAE_VIGOR denied; CANOPY_ASMAE_VIGOR loses revocation and is authorized/selected available_overlay. Serializer separately masks top-level restriction carrier while nested provenance retains it.",
+      "limits": "Authored well-formed consumer carrier; ordinary producer incidence and browser pixels unestablished. Both action flags False. Alias and serializer share one finding.",
+      "evidence": [
+        "gating/results.json:dual_carrier_cases",
+        "gating/frontend-risk-results.json:dualCarrierSelection",
+        "integration/results.json:cases.constructor_serializer_block_carrier_matrix"
+      ],
+      "requirements": [
+        "AB-L10-001",
+        "AB-ARC-005",
+        "AB-ARC-006"
+      ],
+      "bounded_fix": "One canonical deduplicated restriction union for aliases/serializer/authorization; no or/attribute precedence can remove another carrier revocation.",
+      "acceptance": "All5aliascarriercases+16serializercases preserve revocation; revoked alias notselected; valid siblings selectable; earlier composite isolation and False permissions retained."
+    },
+    {
+      "id": "S81-02",
+      "priority": "P2",
+      "title": "Incomplete or numerically invalid alternate distribution becomes prior evidence",
+      "status": "open",
+      "lineage": "Metadata fallback newly promotes identical malformed inputs from exact-parent Unsupported to Prior-Constrained; corresponding ledger acceptance inherited.",
+      "production_paths": [
+        "services/agribrain/layer10_sire/surfaces/asmae.py",
+        "services/agribrain/scientific_contracts/ledger_adapter.py"
+      ],
+      "fixture_examples": [
+        "prior_distribution={family:None}",
+        "prior_distribution={distribution:None}",
+        "mean0.2+covariance[[NaN]]",
+        "mean0.2+covariance[[-1.0]]",
+        "finite variance with shadowed varNaN"
+      ],
+      "actual_path": "Authored L1SpatialData metadata or native canonical ledger -> native generate_asmae_surfaces",
+      "effect": "Candidate metadata yields Prior-Constrained/scoutingTrue where parent yieldsUnsupported; malformed ledger acceptance remains in both.",
+      "limits": "No ordinary field incidence, management or action grant established; native constructor actionsFalse, managementFalse. Genuine priors and validzeros preserved.",
+      "evidence": [
+        "classification/candidate-results.json:native_cases.alternate_metadata_*",
+        "classification/parent-results.json:native_cases.alternate_metadata_*",
+        "classification/results.json:residual_observations"
+      ],
+      "requirements": [
+        "AB-ASM-003",
+        "AB-ARC-006",
+        "AB-L10-001"
+      ],
+      "bounded_fix": "Define supported distribution forms; validate actual family/parameters, covariance contents and every supplied recognized alias; malformed proof cannot trigger fallback.",
+      "acceptance": "Bothmetadataandledger routes reject content-free and nonfinite/negative/conflictingproof; preserve zero/finitevariance, stdzero, genuineflags and native microzone support; valid other surfaces continue."
+    }
+  ],
+  "nonblocking_qualifications": [
+    {
+      "id": "Q81-01",
+      "subject": "Missing metadata runtime ceiling",
+      "status": "inherited_compatibility_qualification",
+      "observation": "Missing/None/empty metadata-only current ceiling retains descriptor eligibility in both snapshots, with actionFalse. Explicit normalizer ledger defaultsDIAGNOSTICdeny.",
+      "evidence": "integration/results.json:cases.native_metadata_direct_without_runtime_ceiling"
+    },
+    {
+      "id": "Q81-02",
+      "subject": "Attached implementation report header",
+      "status": "documentation_correction",
+      "observation": "Headerstillcandidate67375aa,parent9d7529a; newverifiedreceiptmustcandidate81cf8bb,parent67375aa."
+    }
+  ],
+  "coverage": {
+    "source_files_each": 1086,
+    "changed_modules_compiled": 4,
+    "classification_helper_cases_each": 75,
+    "classification_native_cases_each": 74,
+    "classification_grouped_observations": 35,
+    "gating_assertions_candidate_parent": [
+      22,
+      20
+    ],
+    "frontend_checks_candidate_parent": [
+      6,
+      4
+    ],
+    "integration_case_groups_each": 23,
+    "integration_assertions_candidate_parent": [
+      42,
+      39
+    ],
+    "root_commands": 7,
+    "root_observation_assertions": 47
+  },
+  "deferred_stages": {
+    "3": "Dedicated phenology/stressmemory products and unifiedcatalog",
+    "4": "Expert thirteenstate selector",
+    "5": "Nodata vs physicalzero",
+    "6": "IntegratedGIS and realplot/browserreceipts"
+  },
+  "recommendation": "Complete S81-01/02 and bounded review before unconditional Stage1-2 merge. Independent Stage3preparation mayproceed separately; FA52open."
+}

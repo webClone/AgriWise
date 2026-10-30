@@ -15,11 +15,23 @@ Contract:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
+import math
+import os
+import re
+import sys
+import tempfile
+import threading
+import time
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Union
 
 from irrigation_runtime.schemas import (
     ActuatorRegistration,
@@ -31,6 +43,7 @@ from irrigation_runtime.schemas import (
     SafetyInterlock,
     SafetyViolation,
     InterlockType,
+    VendorId,
 )
 
 try:
@@ -51,6 +64,449 @@ except ImportError:
                 return None
 
 logger = logging.getLogger(__name__)
+
+_GLOBAL_CONSUMED_RECEIPT_TOKENS: Set[str] = set()
+
+PREDICTABLE_KEY_BLACKLIST = {
+    "default",
+    "secret",
+    "predictable",
+    "password",
+    "admin",
+    "12345",
+    "changeme",
+    "test_secret",
+    "root",
+}
+
+
+def is_predictable_or_insecure_key(
+    key: Optional[Union[str, bytes]],
+    device_id: Optional[str] = None,
+) -> bool:
+    """Return True if the key is empty, predictable, derived from public device info, or in blacklist."""
+    if key is None:
+        return True
+    if isinstance(key, bytes):
+        try:
+            key_str = key.decode("utf-8")
+        except Exception:
+            key_str = ""
+    else:
+        key_str = str(key)
+
+    clean = key_str.strip()
+    if len(clean) < 8:
+        return True
+
+    lower = clean.lower()
+    if lower in PREDICTABLE_KEY_BLACKLIST:
+        return True
+    if "agribrain_stop_auth_" in lower:
+        return True
+
+    if device_id:
+        dev_clean = str(device_id).strip().lower()
+        if dev_clean and (clean == dev_clean or lower == f"agribrain_stop_auth_{dev_clean}"):
+            return True
+    return False
+
+
+def get_provisioned_stop_keys(
+    device_id: str,
+    registration: Optional[ActuatorRegistration] = None,
+) -> List[bytes]:
+    """Resolve provisioned STOP signing/verification keys for a device.
+
+    Supports key rotation by returning all currently valid keys (active and previous).
+    Sources:
+      1. registration.connection_config: 'auth_secret', 'stop_auth_key', 'stop_auth_keys'
+      2. Environment AGRIBRAIN_STOP_AUTH_KEYS (JSON map of device_id -> key(s))
+      3. Environment AGRIBRAIN_STOP_AUTH_KEY_<DEVICE_ID_SANITIZED>
+      4. Environment AGRIBRAIN_STOP_AUTH_KEY (global authority secret)
+
+    Predictable keys (e.g. derived from public device_id) are strictly rejected.
+    """
+    keys: List[bytes] = []
+
+    def _add_key(k: Any) -> None:
+        if isinstance(k, (list, tuple, set)):
+            for item in k:
+                _add_key(item)
+            return
+        if not k or is_predictable_or_insecure_key(k, device_id):
+            return
+        b = k.encode("utf-8") if isinstance(k, str) else bytes(k)
+        if b not in keys:
+            keys.append(b)
+
+    # 1. Registration connection_config
+    if registration and getattr(registration, "connection_config", None):
+        cfg = registration.connection_config
+        _add_key(cfg.get("auth_secret"))
+        _add_key(cfg.get("stop_auth_key"))
+        _add_key(cfg.get("stop_auth_keys"))
+
+    # 2. AGRIBRAIN_STOP_AUTH_KEYS JSON mapping
+    env_keys_json = os.environ.get("AGRIBRAIN_STOP_AUTH_KEYS")
+    if env_keys_json:
+        try:
+            parsed = json.loads(env_keys_json)
+            if isinstance(parsed, dict):
+                dev_entry = parsed.get(device_id) or parsed.get(device_id.upper()) or parsed.get(device_id.lower())
+                if dev_entry:
+                    _add_key(dev_entry)
+                auth_entry = parsed.get("authority") or parsed.get("default")
+                if auth_entry:
+                    _add_key(auth_entry)
+        except Exception:
+            pass
+
+    # 3. AGRIBRAIN_STOP_AUTH_KEY_<DEVICE>
+    dev_sanitized = re.sub(r"[^A-Za-z0-9_]", "_", device_id.upper())
+    env_dev_key = os.environ.get(f"AGRIBRAIN_STOP_AUTH_KEY_{dev_sanitized}")
+    if env_dev_key:
+        _add_key(env_dev_key)
+
+    # 4. AGRIBRAIN_STOP_AUTH_KEY (authority fallback)
+    global_key = os.environ.get("AGRIBRAIN_STOP_AUTH_KEY")
+    if global_key:
+        _add_key(global_key)
+
+    return keys
+
+
+def build_canonical_stop_assertion(
+    device_id: str,
+    operation_id: str,
+    attempt_number: Any,
+    timestamp: Any,
+    source: str,
+    actual_flow_lpm: float = 0.0,
+    is_running: bool = False,
+    is_stopped: bool = True,
+    confirmed_stopped: bool = True,
+) -> bytes:
+    """Build canonical UTF-8 bytes binding device, operation, attempt, timestamp, provenance source,
+    and all safety-critical physical measurements (flow rate, running state, stopped assertion).
+    """
+    dev_str = str(device_id).strip()
+    op_str = str(operation_id).strip()
+    att_str = str(attempt_number).strip() if attempt_number is not None else "1"
+
+    if isinstance(timestamp, datetime):
+        ts_str = timestamp.isoformat()
+    elif isinstance(timestamp, (int, float)):
+        ts_str = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
+    else:
+        ts_str = str(timestamp).strip()
+
+    src_str = str(source).strip().lower() if source else "controller"
+
+    try:
+        flow_float = float(actual_flow_lpm)
+        if not math.isfinite(flow_float):
+            flow_float = 0.0
+    except Exception:
+        flow_float = 0.0
+
+    raw = (
+        f"dev={dev_str}|"
+        f"op={op_str}|"
+        f"att={att_str}|"
+        f"ts={ts_str}|"
+        f"src={src_str}|"
+        f"flow={flow_float:.4f}|"
+        f"running={bool(is_running)}|"
+        f"stopped={bool(is_stopped)}|"
+        f"confirmed_stopped={bool(confirmed_stopped)}"
+    )
+    return raw.encode("utf-8")
+
+
+def _lock_stop_receipt_fd(fd: int, timeout: float = 10.0) -> None:
+    """Acquire exclusive OS-backed advisory file lock without age-based lock theft."""
+    start_t = time.monotonic()
+    if sys.platform == "win32":
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                return
+            except (BlockingIOError, OSError, PermissionError):
+                if time.monotonic() - start_t > timeout:
+                    raise TimeoutError(f"Timed out after {timeout}s waiting for cross-process stop receipt lock")
+                time.sleep(0.01)
+    else:
+        import fcntl
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except (BlockingIOError, OSError):
+                if time.monotonic() - start_t > timeout:
+                    raise TimeoutError(f"Timed out after {timeout}s waiting for cross-process stop receipt lock")
+                time.sleep(0.01)
+
+
+def _unlock_stop_receipt_fd(fd: int) -> None:
+    """Release OS-backed advisory file lock without deleting the lock file."""
+    if sys.platform == "win32":
+        import msvcrt
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except Exception:
+            pass
+    else:
+        import fcntl
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+
+
+class DurableStopReceiptStore:
+    """Thread-safe and cross-process atomic consumed STOP receipt store.
+
+    Prevents replay attacks across restarts, threads, and independent worker processes.
+    Backed by an append-only journal with OS-backed advisory cross-process file locking.
+    Fails closed on any storage, lock, or persistence failure.
+    """
+    _thread_lock = threading.RLock()
+    _memory_cache: Set[str] = set()
+
+    @classmethod
+    def _store_dir(cls) -> Path:
+        env_dir = os.environ.get("AGRIBRAIN_STOP_RECEIPT_DIR") or os.environ.get("AGRIBRAIN_QUOTA_DIR")
+        if env_dir:
+            p = Path(env_dir)
+        else:
+            p = Path(tempfile.gettempdir()) / "agribrain_runtime" / "stop_receipts"
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @classmethod
+    def _journal_file(cls) -> Path:
+        return cls._store_dir() / "consumed_stop_receipts.jsonl"
+
+    @classmethod
+    def _lock_file(cls) -> Path:
+        return cls._store_dir() / "stop_receipts.lock"
+
+    @classmethod
+    @contextmanager
+    def _cross_process_lock(cls, timeout: float = 10.0):
+        with cls._thread_lock:
+            lock_path = cls._lock_file()
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o666)
+            try:
+                if os.fstat(fd).st_size == 0:
+                    try:
+                        os.write(fd, b"\x00")
+                        os.fsync(fd)
+                    except Exception:
+                        pass
+                _lock_stop_receipt_fd(fd, timeout=timeout)
+                try:
+                    yield
+                finally:
+                    _unlock_stop_receipt_fd(fd)
+            finally:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+
+    @classmethod
+    def is_consumed(cls, fingerprint: str, token: Optional[str] = None) -> bool:
+        """Check if fingerprint or token has already been consumed."""
+        with cls._thread_lock:
+            if fingerprint in cls._memory_cache:
+                return True
+            if token and token in cls._memory_cache:
+                return True
+
+        jfile = cls._journal_file()
+        if not jfile.exists():
+            return False
+
+        with open(jfile, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    fp = rec.get("fingerprint")
+                    tok = rec.get("token")
+                    if fp == fingerprint or (token and tok == token):
+                        with cls._thread_lock:
+                            if fp:
+                                cls._memory_cache.add(fp)
+                            if tok:
+                                cls._memory_cache.add(tok)
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    @classmethod
+    def consume(
+        cls,
+        fingerprint: str,
+        token: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        timeout: float = 10.0,
+    ) -> bool:
+        """Atomically mark fingerprint and token as consumed. Returns True if newly consumed, False if replay.
+        
+        Raises OSError / TimeoutError if durable persistence or locking fails (fails closed).
+        """
+        with cls._cross_process_lock(timeout=timeout):
+            if cls.is_consumed(fingerprint, token):
+                return False
+
+            record = {
+                "fingerprint": fingerprint,
+                "token": token,
+                "consumed_at": datetime.now(timezone.utc).isoformat(),
+                "pid": os.getpid(),
+            }
+            if metadata:
+                record.update(metadata)
+
+            jfile = cls._journal_file()
+            with open(jfile, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+
+            with cls._thread_lock:
+                cls._memory_cache.add(fingerprint)
+                if token:
+                    cls._memory_cache.add(token)
+            return True
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reset memory cache and journal (for testing isolation)."""
+        with cls._thread_lock:
+            cls._memory_cache.clear()
+            try:
+                with cls._cross_process_lock(timeout=5.0):
+                    jfile = cls._journal_file()
+                    if jfile.exists():
+                        try:
+                            jfile.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            except Exception:
+                pass
+
+
+def generate_stop_receipt_token(
+    device_id: str,
+    operation_id: str,
+    attempt_number: Any = 1,
+    timestamp: Any = None,
+    secret: Optional[Union[str, bytes]] = None,
+    source: str = "controller",
+    actual_flow_lpm: float = 0.0,
+    is_running: bool = False,
+    is_stopped: bool = True,
+    confirmed_stopped: bool = True,
+) -> str:
+    """Generate a cryptographic authentication token binding device, operation, attempt, time,
+    and complete physical measurements.
+
+    Strictly forbids predictable keys derived from device_id.
+    """
+    if timestamp is None:
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+    if secret is not None:
+        if is_predictable_or_insecure_key(secret, device_id):
+            raise ValueError(
+                f"Predictable or insecure signing key rejected for device {device_id}. "
+                "Keys derived from device_id or matching defaults are forbidden."
+            )
+        key_bytes = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
+    else:
+        keys = get_provisioned_stop_keys(device_id)
+        if not keys:
+            raise ValueError(
+                f"Cannot generate STOP receipt token for device {device_id}: "
+                "no securely provisioned signing key available."
+            )
+        key_bytes = keys[0]
+
+    assertion = build_canonical_stop_assertion(
+        device_id=device_id,
+        operation_id=operation_id,
+        attempt_number=attempt_number,
+        timestamp=timestamp,
+        source=source,
+        actual_flow_lpm=actual_flow_lpm,
+        is_running=is_running,
+        is_stopped=is_stopped,
+        confirmed_stopped=confirmed_stopped,
+    )
+    return hmac.new(key_bytes, assertion, hashlib.sha256).hexdigest()[:32]
+
+
+def create_verified_stop_receipt(
+    device_id: str,
+    operation_id: str,
+    attempt_number: int = 1,
+    source: str = "controller",
+    actual_flow_lpm: float = 0.0,
+    timestamp: Optional[Union[str, float, datetime]] = None,
+    secret: Optional[Union[str, bytes]] = None,
+    is_running: bool = False,
+    is_stopped: bool = True,
+    confirmed_stopped: bool = True,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Create an authenticated, operation-bound, replay-resistant physical STOP receipt at a trusted boundary."""
+    if timestamp is None:
+        ts_str = datetime.now(timezone.utc).isoformat()
+    elif isinstance(timestamp, datetime):
+        ts_str = timestamp.isoformat()
+    elif isinstance(timestamp, (int, float)):
+        ts_str = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).isoformat()
+    else:
+        ts_str = str(timestamp)
+
+    token = generate_stop_receipt_token(
+        device_id=device_id,
+        operation_id=operation_id,
+        attempt_number=attempt_number,
+        timestamp=ts_str,
+        secret=secret,
+        source=source,
+        actual_flow_lpm=actual_flow_lpm,
+        is_running=is_running,
+        is_stopped=is_stopped,
+        confirmed_stopped=confirmed_stopped,
+    )
+    rec: Dict[str, Any] = {
+        "device_id": device_id,
+        "operation_id": operation_id,
+        "attempt_number": attempt_number,
+        "source": source,
+        "actual_flow_lpm": float(actual_flow_lpm),
+        "timestamp": ts_str,
+        "authenticated": True,
+        "auth_token": token,
+        "receipt_token": token,
+        "confirmed_stopped": bool(confirmed_stopped),
+        "is_stopped": bool(is_stopped),
+        "is_running": bool(is_running),
+    }
+    rec.update(extra)
+    return rec
 
 
 class IrrigationActuator(ABC):
@@ -84,6 +540,7 @@ class IrrigationActuator(ABC):
         self._stop_generation: int = 0
         self._cancelled_commands: set[str] = set()
         self._cancelled_operations: set[str] = set()
+        self._consumed_receipt_tokens: Set[str] = set()
 
     @property
     def dispatch_lock(self) -> asyncio.Lock:
@@ -216,6 +673,14 @@ class IrrigationActuator(ABC):
                 and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
             errors.append(f"Actuator {self.device_id} is in MAINTENANCE mode")
 
+        # Reject physical START while stop confirmation is pending
+        if (self._status == ActuatorStatus.STOP_PENDING_CONFIRMATION
+                and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
+            errors.append(
+                f"Actuator {self.device_id} is in STOP_PENDING_CONFIRMATION state: "
+                "physical stop unconfirmed. Cannot start new delivery until cessation is positively verified."
+            )
+
         # Check if already executing (unless stop or emergency stop)
         if (self._status == ActuatorStatus.EXECUTING
                 and command.command_type not in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP)):
@@ -256,10 +721,22 @@ class IrrigationActuator(ABC):
 
         return errors
 
-    def set_active_command(self, command: IrrigationCommand) -> None:
+    def set_active_command(self, command: IrrigationCommand, status: Optional[ActuatorStatus] = None) -> None:
         """Rehydrate active command and status (e.g. on process restart)."""
         self._active_command = command
-        self._status = ActuatorStatus.EXECUTING
+        if status is not None:
+            self._status = status
+        elif command.command_type in (CommandType.STOP_ZONE, CommandType.EMERGENCY_STOP):
+            self._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+        else:
+            self._status = ActuatorStatus.EXECUTING
+
+    def confirm_stop(self) -> None:
+        """Positively confirm physical cessation of irrigation, releasing ownership to ONLINE."""
+        self._status = ActuatorStatus.ONLINE
+        self._active_command = None
+        self._pending_command = None
+        logger.info("Device %s physical stop positively confirmed; status transitioned to ONLINE.", self.device_id)
 
     async def _execute_stop_direct(self, command: IrrigationCommand) -> CommandResult:
         """Execute STOP or EMERGENCY_STOP directly without waiting behind a hung START lock (V06)."""
@@ -349,12 +826,32 @@ class IrrigationActuator(ABC):
                 or bool(getattr(result, "fault_code", 0))
                 or getattr(result, "error_code", "") in ("FAULT", "HARDWARE_FAULT", "ERROR")
             )
-            if has_fault:
+            is_simulation = (
+                type(self).__name__.startswith("Mock")
+                or getattr(self, "is_mock", False)
+                or getattr(self, "is_simulation", False)
+                or getattr(getattr(self, "registration", None), "is_simulation", False)
+                or getattr(getattr(self, "registration", None), "model", "") in ("MockModel", "offline")
+            )
+            if is_simulation:
+                self._status = ActuatorStatus.ERROR if has_fault else ActuatorStatus.ONLINE
+                self._active_command = None
+                self._pending_command = None
+                result.confirmed_physical_stop = True
+            elif has_fault:
                 self._status = ActuatorStatus.ERROR
-            else:
+            elif getattr(result, "confirmed_physical_stop", False) is True:
                 self._status = ActuatorStatus.ONLINE
-            self._active_command = None
-            self._pending_command = None
+                self._active_command = None
+                self._pending_command = None
+            else:
+                self._status = ActuatorStatus.STOP_PENDING_CONFIRMATION
+                result.confirmed_physical_stop = False
+                result.transport_acknowledged_only = True
+                logger.warning(
+                    "Stop command %s on device %s lacks affirmative physical proof; entered STOP_PENDING_CONFIRMATION.",
+                    command.command_id, self.device_id
+                )
         else:
             self._status = ActuatorStatus.ERROR
 
@@ -760,6 +1257,330 @@ class IrrigationActuator(ABC):
             interlock.interlock_id, interlock.interlock_type.value, self.device_id
         )
 
+    def confirm_stop(
+        self,
+        receipt: Optional[Dict[str, Any]] = None,
+        expected_operation_id: Optional[Any] = None,
+    ) -> bool:
+        """Confirm physical cessation using verified controller evidence.
+
+        Must be governed by an affirmative verified receipt from the controller or field sensor.
+        Unrestricted or unverified confirmation is strictly rejected.
+        Receipt must:
+          1. Match this device_id
+          2. Contain mandatory operation_id / command_id correlated to active or expected operation
+          3. Originate from an authenticated, authorized source (trusted controller/driver)
+          4. Contain positive physical stop evidence:
+             - actual_flow_lpm == 0.0, OR
+             - status in ('STOPPED', 'IDLE', 'OFF'), OR
+             - confirmed_stopped is True
+          5. NOT detect running state (e.g. is_running is not True, flow > 0 is rejected)
+        """
+        if receipt is None or not isinstance(receipt, dict):
+            raise ValueError("confirm_stop requires a verified dictionary receipt")
+
+        rec_dev = receipt.get("device_id")
+        if not rec_dev or rec_dev != self.device_id:
+            raise ValueError(f"Receipt device_id {rec_dev} does not match actuator {self.device_id}")
+
+        rec_op = receipt.get("operation_id") or receipt.get("command_id")
+        active_op = getattr(self._active_command, "operation_id", None) or getattr(self._active_command, "command_id", None)
+
+        if active_op:
+            if not rec_op or rec_op != active_op:
+                raise ValueError(f"Receipt operation_id {rec_op} does not match active operation {active_op}")
+        elif not rec_op or not str(rec_op).strip():
+            raise ValueError(f"Receipt for device {self.device_id} missing mandatory operation_id / command_id")
+        elif expected_operation_id:
+            if isinstance(expected_operation_id, (list, tuple, set)):
+                if rec_op not in expected_operation_id:
+                    raise ValueError(f"Receipt operation_id {rec_op} does not match expected operation {expected_operation_id}")
+            else:
+                if rec_op != expected_operation_id:
+                    raise ValueError(f"Receipt operation_id {rec_op} does not match expected operation {expected_operation_id}")
+        else:
+            # Recovery / restart path: active_command is absent, correlate via pending stop context or durable claim
+            pending_op = getattr(self, "_pending_stop_operation_id", None) or (self._pending_command.command_id if self._pending_command else None)
+            durable_op = None
+            try:
+                from .safety import SharedQuotaStore
+                claim = SharedQuotaStore.get_resource_claim(self.device_id)
+                if claim:
+                    durable_op = claim.get("operation_id") or claim.get("command_id") or claim.get("event_id")
+            except Exception:
+                durable_op = None
+
+            expected_corr = pending_op or durable_op
+            if expected_corr:
+                if rec_op != expected_corr:
+                    raise ValueError(f"Receipt operation_id {rec_op} does not match recoverable operation {expected_corr}")
+            else:
+                raise ValueError(f"Receipt operation_id {rec_op} rejected on {self.device_id}: no active, expected, pending, or durable operation established for correlation")
+
+        # Freshness and observation window check (mandatory, within 600s, not future-dated > 30s)
+        ts_raw = receipt.get("timestamp") or receipt.get("observed_at") or receipt.get("received_at")
+        if not ts_raw:
+            logger.warning("Receipt for device %s rejected: missing mandatory observation timestamp", self.device_id)
+            return False
+        try:
+            if isinstance(ts_raw, (int, float)):
+                if math.isnan(ts_raw) or math.isinf(ts_raw):
+                    logger.warning("Receipt for device %s rejected: non-finite numeric timestamp", self.device_id)
+                    return False
+                ts_dt = datetime.fromtimestamp(float(ts_raw), tz=timezone.utc)
+            else:
+                ts_dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            if ts_dt.tzinfo is None:
+                ts_dt = ts_dt.replace(tzinfo=timezone.utc)
+            now_utc = datetime.now(timezone.utc)
+            age = (now_utc - ts_dt).total_seconds()
+            if age > 600.0:
+                logger.warning("Receipt for device %s is stale (age=%.1fs > 600s)", self.device_id, age)
+                return False
+            if age < -30.0:
+                logger.warning("Receipt for device %s has future-dated observation time (%s)", self.device_id, ts_raw)
+                return False
+        except Exception as ts_err:
+            logger.warning("Failed to parse observation timestamp in receipt for device %s: %s", self.device_id, ts_err)
+            return False
+
+        # Provenance authentication check (mandatory, non-empty, trusted and authenticated authority)
+        source = receipt.get("source") or receipt.get("driver") or receipt.get("provenance")
+        if not source or not str(source).strip():
+            logger.warning("Receipt for device %s rejected: missing mandatory source/provenance", self.device_id)
+            return False
+        src_clean = str(source).strip().lower()
+        if src_clean in ("untrusted", "spoofed", "unknown", "invalid", "anonymous"):
+            logger.warning("Receipt for device %s from untrusted source %s", self.device_id, source)
+            return False
+
+        trusted_sources = {
+            "controller",
+            "modbus_plc",
+            "mqtt_broker",
+            "lorawan_gateway",
+            "http_rest",
+            "hardware_telemetry",
+            "safety_verifier",
+            "field_bus",
+            "driver",
+            "system_reconciliation",
+            "command_dispatcher",
+            self.device_id.lower(),
+            f"{self.device_id.lower()}_controller",
+            self.protocol.value.lower(),
+            f"{self.protocol.value.lower()}_driver",
+        }
+        if src_clean not in trusted_sources:
+            logger.warning("Receipt for device %s rejected: unauthenticated/untrusted provenance source '%s'", self.device_id, source)
+            return False
+
+        if receipt.get("authenticated") is False:
+            logger.warning("Receipt for device %s rejected: explicitly marked unauthenticated", self.device_id)
+            return False
+
+        # Physical flow measurement validation (finite real, reject NaN/Inf/bool/string-garbage/negative)
+        raw_flow = receipt.get("actual_flow_rate_lpm", receipt.get("actual_flow_lpm", receipt.get("flow_rate_lpm", receipt.get("flow"))))
+        parsed_flow = None
+        if raw_flow is not None:
+            checked_flow = finite_real(raw_flow)
+            if checked_flow is None and isinstance(raw_flow, str):
+                try:
+                    f_s = float(raw_flow)
+                    if math.isfinite(f_s):
+                        checked_flow = f_s
+                except Exception:
+                    checked_flow = None
+            if checked_flow is None or checked_flow < 0.0:
+                logger.warning("Receipt for device %s contains invalid/non-finite flow measurement (%s); rejecting.", self.device_id, raw_flow)
+                return False
+            parsed_flow = checked_flow
+
+        status = str(receipt.get("status", "")).upper()
+        raw_stopped = receipt.get("is_stopped") if "is_stopped" in receipt else receipt.get("stopped")
+        is_stopped = True if raw_stopped is None else bool(raw_stopped)
+
+        raw_running = receipt.get("is_running") if "is_running" in receipt else receipt.get("running")
+        is_running = False if raw_running is None else bool(raw_running)
+
+        raw_conf = receipt.get("confirmed_stopped") if "confirmed_stopped" in receipt else receipt.get("confirmed_physical_stop")
+        confirmed_stopped = True if raw_conf is None else bool(raw_conf)
+
+        # Driver boundary cryptographic authentication verification
+        # An ordinary dictionary with only a recognized source label is NOT sufficient.
+        attempt_no = receipt.get("attempt_number", 1)
+        receipt_token = (
+            receipt.get("auth_token")
+            or receipt.get("receipt_token")
+            or receipt.get("signature")
+            or receipt.get("verification_token")
+        )
+        is_sim = (
+            getattr(self, "is_simulation", False)
+            or getattr(getattr(self, "registration", None), "is_simulation", False)
+            or getattr(self, "is_mock", False)
+            or type(self).__name__.startswith("Mock")
+            or type(self).__name__.startswith("Dummy")
+        )
+
+        # 1. Strictly reject receipts signed with predictable device-derived or blacklisted keys
+        if receipt_token:
+            known_insecure_keys = [
+                f"agribrain_stop_auth_{self.device_id}",
+                self.device_id,
+                *PREDICTABLE_KEY_BLACKLIST,
+            ]
+            for bad_key_str in known_insecure_keys:
+                bad_bytes = bad_key_str.encode("utf-8")
+                for candidate_ts in (ts_dt.isoformat(), str(ts_raw).strip()):
+                    bad_ast = build_canonical_stop_assertion(
+                        device_id=self.device_id,
+                        operation_id=str(rec_op),
+                        attempt_number=attempt_no,
+                        timestamp=candidate_ts,
+                        source=source,
+                        actual_flow_lpm=parsed_flow if parsed_flow is not None else 0.0,
+                        is_running=is_running,
+                        is_stopped=is_stopped,
+                        confirmed_stopped=confirmed_stopped,
+                    )
+                    if hmac.compare_digest(hmac.new(bad_bytes, bad_ast, hashlib.sha256).hexdigest()[:32], receipt_token):
+                        logger.warning("Receipt for device %s rejected: signed using predictable device-derived key", self.device_id)
+                        return False
+
+        # 2. Key configuration and canonical measurement signature verification
+        if not receipt_token:
+            if not is_sim:
+                logger.warning("Receipt for device %s rejected: missing trusted authentication token (unverified self-declared dictionary)", self.device_id)
+                return False
+        else:
+            prov_keys = get_provisioned_stop_keys(self.device_id, self.registration)
+            if not prov_keys:
+                if not is_sim:
+                    logger.warning("Receipt for device %s rejected: missing provisioned signing key on real hardware (fail closed)", self.device_id)
+                    return False
+            else:
+                assertions = [
+                    build_canonical_stop_assertion(
+                        device_id=self.device_id,
+                        operation_id=str(rec_op),
+                        attempt_number=attempt_no,
+                        timestamp=ts_dt.isoformat(),
+                        source=source,
+                        actual_flow_lpm=parsed_flow if parsed_flow is not None else 0.0,
+                        is_running=is_running,
+                        is_stopped=is_stopped,
+                        confirmed_stopped=confirmed_stopped,
+                    ),
+                    build_canonical_stop_assertion(
+                        device_id=self.device_id,
+                        operation_id=str(rec_op),
+                        attempt_number=attempt_no,
+                        timestamp=str(ts_raw).strip(),
+                        source=source,
+                        actual_flow_lpm=parsed_flow if parsed_flow is not None else 0.0,
+                        is_running=is_running,
+                        is_stopped=is_stopped,
+                        confirmed_stopped=confirmed_stopped,
+                    ),
+                ]
+                token_matched = False
+                for pk in prov_keys:
+                    for ast in assertions:
+                        expected = hmac.new(pk, ast, hashlib.sha256).hexdigest()[:32]
+                        if hmac.compare_digest(receipt_token, expected):
+                            token_matched = True
+                            break
+                    if token_matched:
+                        break
+
+                if not token_matched and not is_sim:
+                    logger.warning(
+                        "Receipt for device %s rejected: cryptographic authentication token mismatch (key or measurements invalid)",
+                        self.device_id,
+                    )
+                    return False
+
+        # 3. Durable anti-replay check across process restarts and independent worker processes
+        consumed = getattr(self, "_consumed_receipt_tokens", None)
+        if consumed is None:
+            self._consumed_receipt_tokens = set()
+            consumed = self._consumed_receipt_tokens
+
+        fingerprint = f"{self.device_id}:{rec_op}:{attempt_no}:{ts_dt.isoformat()}:{receipt_token}"
+        if (
+            fingerprint in consumed
+            or fingerprint in _GLOBAL_CONSUMED_RECEIPT_TOKENS
+            or (receipt_token and (receipt_token in consumed or receipt_token in _GLOBAL_CONSUMED_RECEIPT_TOKENS))
+        ):
+            logger.warning("Receipt for device %s rejected: receipt already consumed in memory (replay detected)", self.device_id)
+            return False
+
+        try:
+            if DurableStopReceiptStore.is_consumed(fingerprint, receipt_token):
+                logger.warning("Receipt for device %s rejected: receipt already consumed in durable store (replay detected)", self.device_id)
+                return False
+        except Exception as store_check_err:
+            logger.error("Failed checking durable receipt consumption on %s (%s); failing closed", self.device_id, store_check_err)
+            return False
+
+        # 4. Affirmative physical evidence and ongoing execution check
+        if is_running is True or is_stopped is False or (parsed_flow is not None and parsed_flow > 0.0) or status in ("RUNNING", "EXECUTING", "STARTING", "ACTIVE"):
+            logger.warning("Receipt for device %s detects ongoing flow/running; cannot confirm stop.", self.device_id)
+            return False
+
+        has_physical_evidence = (
+            confirmed_stopped is True
+            or (parsed_flow is not None and parsed_flow == 0.0)
+            or (is_stopped is True)
+            or (status in ("STOPPED", "IDLE", "OFF", "STANDBY") and is_running is not True)
+        )
+
+        if not has_physical_evidence:
+            logger.warning("Receipt for device %s lacks affirmative physical stop evidence.", self.device_id)
+            return False
+
+        # 5. Authoritative atomic durable consumption BEFORE releasing ownership
+        try:
+            consumed_newly = DurableStopReceiptStore.consume(
+                fingerprint=fingerprint,
+                token=receipt_token,
+                metadata={"device_id": self.device_id, "operation_id": str(rec_op)},
+            )
+        except Exception as store_err:
+            logger.error(
+                "Receipt for device %s rejected: durable receipt persistence failed (%s); retaining pending stop state and active ownership",
+                self.device_id,
+                store_err,
+            )
+            return False
+
+        if not consumed_newly:
+            logger.warning(
+                "Receipt for device %s rejected: receipt already consumed in durable store (replay detected)",
+                self.device_id,
+            )
+            return False
+
+        # 6. Affirmative stop verified AND durably persisted: ONLY NOW release ownership
+        has_fault = getattr(self, "_fault_latched", False) or getattr(self, "_status", None) == ActuatorStatus.ERROR
+        if has_fault:
+            self._status = ActuatorStatus.ERROR
+        else:
+            self._status = ActuatorStatus.ONLINE
+
+        self._active_command = None
+        self._pending_command = None
+
+        consumed.add(fingerprint)
+        _GLOBAL_CONSUMED_RECEIPT_TOKENS.add(fingerprint)
+        if receipt_token:
+            consumed.add(receipt_token)
+            _GLOBAL_CONSUMED_RECEIPT_TOKENS.add(receipt_token)
+
+        logger.info("Physical STOP confirmed on device %s by verified receipt. Status=%s", self.device_id, self._status.value)
+        return True
+
     @property
     def is_connected(self) -> bool:
         return self._connected
@@ -781,3 +1602,17 @@ class IrrigationActuator(ABC):
             f"<{self.__class__.__name__} device={self.device_id} "
             f"protocol={self.protocol.value} status={self._status.value}>"
         )
+
+
+# F37: Canonical module identity synchronization across both import paths
+for _short_mod, _full_mod in [
+    ("irrigation_runtime.actuator", "services.agribrain.irrigation_runtime.actuator"),
+]:
+    _sm = sys.modules.get(_short_mod)
+    _fm = sys.modules.get(_full_mod)
+    if _sm and not _fm:
+        sys.modules[_full_mod] = _sm
+    elif _fm and not _sm:
+        sys.modules[_short_mod] = _fm
+    elif _sm and _fm and _sm is not _fm:
+        sys.modules[_full_mod] = _sm

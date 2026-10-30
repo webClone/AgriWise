@@ -32,11 +32,18 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from datetime import datetime, timezone
 from datetime import timedelta
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 from .config import (
+    ASMAE_ML_EXPERTS_ENABLED,
     BMA_EXPERTS,
     DEFAULT_RESOLUTION_M,
     CANDIDATE_RESOLUTIONS_M,
@@ -1765,44 +1772,57 @@ class ASMAEEngine:
         return (min(lngs), min(lats), max(lngs), max(lats))
 
     def _bilinear_resample(self, grid_list: List[List[float]], target_h: int, target_w: int) -> List[List[float]]:
-        import numpy as np
-        grid = np.array(grid_list, dtype=np.float32)
-        h, w = grid.shape
+        h = len(grid_list)
+        w = len(grid_list[0]) if h > 0 else 0
         if h == target_h and w == target_w:
             return grid_list
-        
-        # Bilinear interpolation
-        y = np.linspace(0, h - 1, target_h)
-        x = np.linspace(0, w - 1, target_w)
-        
-        y_indices = np.floor(y).astype(np.int32)
-        x_indices = np.floor(x).astype(np.int32)
-        
-        y_indices_next = np.minimum(y_indices + 1, h - 1)
-        x_indices_next = np.minimum(x_indices + 1, w - 1)
-        
-        dy = y - y_indices
-        dx = x - x_indices
-        
-        dy = dy[:, np.newaxis]
-        dx = dx[np.newaxis, :]
-        
-        val_00 = grid[y_indices[:, np.newaxis], x_indices[np.newaxis, :]]
-        val_10 = grid[y_indices_next[:, np.newaxis], x_indices[np.newaxis, :]]
-        val_01 = grid[y_indices[:, np.newaxis], x_indices_next[np.newaxis, :]]
-        val_11 = grid[y_indices_next[:, np.newaxis], x_indices_next[np.newaxis, :]]
-        
-        interpolated = (
-            val_00 * (1 - dy) * (1 - dx) +
-            val_10 * dy * (1 - dx) +
-            val_01 * (1 - dy) * dx +
-            val_11 * dy * dx
-        )
-        
-        return interpolated.tolist()
+        if h == 0 or w == 0 or target_h <= 0 or target_w <= 0:
+            return []
 
-    def _microzone_scalar_to_grid(self, mz_data: dict) -> List[List[float]]:
-        """Convert {mz_id: scalar} → [[2D grid]]."""
+        # Normalized weighted sum over valid finite corners to prevent NaN*0 from erasing supported endpoints
+        y_coords = [0.0] if target_h == 1 else [i * (h - 1) / (target_h - 1) for i in range(target_h)]
+        x_coords = [0.0] if target_w == 1 else [j * (w - 1) / (target_w - 1) for j in range(target_w)]
+
+        out_grid: List[List[Optional[float]]] = []
+        for y in y_coords:
+            row: List[Optional[float]] = []
+            y0 = int(math.floor(y))
+            y1 = min(y0 + 1, h - 1)
+            dy = y - y0
+            for x in x_coords:
+                x0 = int(math.floor(x))
+                x1 = min(x0 + 1, w - 1)
+                dx = x - x0
+
+                corners = (
+                    (y0, x0, (1.0 - dy) * (1.0 - dx)),
+                    (y1, x0, dy * (1.0 - dx)),
+                    (y0, x1, (1.0 - dy) * dx),
+                    (y1, x1, dy * dx),
+                )
+                valid_val_weight_sum = 0.0
+                valid_weight_total = 0.0
+                for r, c, weight in corners:
+                    val = grid_list[r][c]
+                    if val is not None:
+                        try:
+                            fval = float(val)
+                            if math.isfinite(fval):
+                                valid_val_weight_sum += fval * weight
+                                valid_weight_total += weight
+                        except (ValueError, TypeError):
+                            pass
+
+                if valid_weight_total > 1e-9:
+                    row.append(float(valid_val_weight_sum / valid_weight_total))
+                else:
+                    row.append(None)
+            out_grid.append(row)
+
+        return out_grid
+
+    def _microzone_scalar_to_grid(self, mz_data: dict) -> List[List[Optional[float]]]:
+        """Convert {mz_id: scalar} → [[2D grid]] preserving None for missing/unsupported cells."""
         if not mz_data:
             return []
 
@@ -1814,22 +1834,29 @@ class ASMAEEngine:
                 try:
                     r = int(parts[1])
                     c = int(parts[2])
-                    max_r = max(max_r, r)
-                    max_c = max(max_c, c)
+                    if r >= 0 and c >= 0:
+                        max_r = max(max_r, r)
+                        max_c = max(max_c, c)
                 except ValueError:
                     pass
 
         n_rows = max_r + 1
         n_cols = max_c + 1
 
-        grid = [[0.0] * n_cols for _ in range(n_rows)]
+        grid: List[List[Optional[float]]] = [[None] * n_cols for _ in range(n_rows)]
         for mz_id, val in mz_data.items():
             parts = str(mz_id).split("_")
             if len(parts) >= 3:
                 try:
                     r = int(parts[1])
                     c = int(parts[2])
-                    grid[r][c] = float(val) if val is not None else 0.0
+                    if r < 0 or c < 0 or r >= n_rows or c >= n_cols:
+                        continue
+                    if val is None:
+                        grid[r][c] = None
+                    else:
+                        fval = float(val)
+                        grid[r][c] = fval if math.isfinite(fval) else None
                 except (ValueError, TypeError):
                     pass
         return grid
@@ -1957,20 +1984,36 @@ class ASMAEEngine:
                     sample_grid = uncertainty_maps[valid_keys[0]]
                     H_grid = len(sample_grid)
                     W_grid = len(sample_grid[0]) if H_grid > 0 else 0
-                    overall_unc = [[0.0 for _ in range(W_grid)] for _ in range(H_grid)]
+                    overall_unc = [[None for _ in range(W_grid)] for _ in range(H_grid)]
                     for r in range(H_grid):
                         for c in range(W_grid):
-                            norm_uncs = [
-                                min(1.0, max(0.0, float(uncertainty_maps[k][r][c]) / STATE_SIGMA_SCALE.get(k, STATE_SIGMA_SCALE.get(k.lower(), 1.0))))
-                                for k in valid_keys
-                            ]
-                            overall_unc[r][c] = float(sum(norm_uncs) / len(norm_uncs))
+                            valid_norm_uncs = []
+                            for k in valid_keys:
+                                val = uncertainty_maps[k][r][c]
+                                if val is not None:
+                                    try:
+                                        fval = float(val)
+                                        if math.isfinite(fval):
+                                            scale = STATE_SIGMA_SCALE.get(k, STATE_SIGMA_SCALE.get(k.lower(), 1.0))
+                                            valid_norm_uncs.append(min(1.0, max(0.0, fval / scale)))
+                                    except (ValueError, TypeError):
+                                        pass
+                            if valid_norm_uncs:
+                                overall_unc[r][c] = float(sum(valid_norm_uncs) / len(valid_norm_uncs))
+                            else:
+                                overall_unc[r][c] = None
                     uncertainty_maps["ASMAE_UNCERTAINTY"] = overall_unc
 
             confidence_maps = dict(state_result.get("confidence_maps", {}))
-            # Compute and append overall_conf
+            # Compute and append overall_conf preserving missingness
             if "ASMAE_UNCERTAINTY" in uncertainty_maps:
-                overall_conf = [[max(0.0, min(1.0, 1.0 - float(val))) for val in row] for row in uncertainty_maps["ASMAE_UNCERTAINTY"]]
+                overall_conf = [
+                    [
+                        max(0.0, min(1.0, 1.0 - float(val))) if (val is not None and math.isfinite(float(val))) else None
+                        for val in row
+                    ]
+                    for row in uncertainty_maps["ASMAE_UNCERTAINTY"]
+                ]
                 confidence_maps["ASMAE_POSTERIOR_CONCENTRATION"] = overall_conf
 
             # Compile retrovalidation score map
@@ -2031,21 +2074,22 @@ class ASMAEEngine:
             # ── V92.4-BC.9: Construct support surfaces at microzone grid level ──
             if H_grid > 0 and W_grid > 0:
                 # Extract archive metrics
-                archive_metrics = inp.archive_metrics or {}
+                archive_metrics = getattr(inp, "archive_metrics", None) or {}
                 has_s1 = any(
                     getattr(scene, "sensor", "") == "S1"
                     for scene in production_scenes
                 )
                 
                 # Check for is_test_override
-                import os
+                plot_id = getattr(inp, "plot_id", "")
+                run_id = getattr(inp, "run_id", "")
                 is_test_override = (
                     getattr(inp, "is_test_override", False) or 
-                    inp.plot_id.startswith("test_") or 
-                    inp.plot_id.startswith("plot_test_") or 
-                    "unregistered" in inp.plot_id or 
-                    "test" in inp.run_id or 
-                    inp.run_id.startswith("run_001") or 
+                    plot_id.startswith("test_") or 
+                    plot_id.startswith("plot_test_") or 
+                    "unregistered" in plot_id or 
+                    "test" in run_id or 
+                    run_id.startswith("run_001") or 
                     os.environ.get("ASMAE_TEST_OVERRIDE") == "true"
                 )
 
@@ -2060,9 +2104,10 @@ class ASMAEEngine:
                     req_span = 0
                     req_sar = MIN_S1_SCENES_SAR_ASSISTED if has_s1 else 0
 
-                scene_count_val = archive_metrics.get("scene_count", len(inp.historical_scene_refs))
+                historical_refs = getattr(inp, "historical_scene_refs", []) or []
+                scene_count_val = archive_metrics.get("scene_count", len(historical_refs))
                 if scene_count_val is None:
-                    scene_count_val = len(inp.historical_scene_refs)
+                    scene_count_val = len(historical_refs)
                 optical_val = archive_metrics.get("optical_good_scene_count", archive_metrics.get("optical", 0))
                 if optical_val is None:
                     optical_val = 0
@@ -2155,7 +2200,6 @@ class ASMAEEngine:
 
                 # Build resolution evidence (BC.10.17 P2.1)
                 from .history.resolution_evidence_builder import build_resolution_evidence
-                import numpy as np
 
                 local_retro_support = None
                 if isinstance(retro_result, dict):
@@ -2321,8 +2365,6 @@ class ASMAEEngine:
                 effective_resolution_map = [[10.0] * target_w for _ in range(target_h)]
                 
                 # Check ML shadow experts status/agreement
-                import os
-                from .config import ASMAE_ML_EXPERTS_ENABLED
                 ml_agreement = bma_result.get("ml_agreement") or bma_result.get("shadow_ml_agreement")
                 ml_unavailable = (
                     bma_result.get("ml_status") == "unavailable" or 
@@ -2349,7 +2391,7 @@ class ASMAEEngine:
                     os.environ.get("AGRIBRAIN_ENV") == "test"
                 )
 
-                archive_metrics = inp.archive_metrics or {}
+                archive_metrics = getattr(inp, "archive_metrics", None) or {}
                 
                 # Check Sentinel-1 available (sentinel1 package exists)
                 has_s1 = any(
@@ -2368,9 +2410,10 @@ class ASMAEEngine:
                     req_span = 0
                     req_sar = MIN_S1_SCENES_SAR_ASSISTED if has_s1 else 0
 
-                scene_count_val = archive_metrics.get("scene_count", len(inp.historical_scene_refs))
+                historical_refs = getattr(inp, "historical_scene_refs", []) or []
+                scene_count_val = archive_metrics.get("scene_count", len(historical_refs))
                 if scene_count_val is None:
-                    scene_count_val = len(inp.historical_scene_refs)
+                    scene_count_val = len(historical_refs)
                 optical_val = archive_metrics.get("optical_good_scene_count", archive_metrics.get("optical", 0))
                 if optical_val is None:
                     optical_val = 0
@@ -2384,7 +2427,7 @@ class ASMAEEngine:
 
                 archive_ok = archive_status_ok(getattr(inp, "archive_metrics_status", None))
                 real_evidence_passed = (s2_c + s1_c > 0)
-                selected_res_m = resolution_decision.selected_effective_resolution_m
+                selected_res_m = getattr(resolution_decision, "selected_effective_resolution_m", DEFAULT_RESOLUTION_M) if resolution_decision else DEFAULT_RESOLUTION_M
 
                 valid_cells = 0
                 advisory_approved_cells = 0
@@ -2399,7 +2442,6 @@ class ASMAEEngine:
                     or getattr(scene_stack_status, "current_1m_approval_allowed", False)
                 )
 
-                import math
                 def is_valid_float(v):
                     if v is None:
                         return False
@@ -2579,7 +2621,7 @@ class ASMAEEngine:
         # ── V92.4-BC.8 Hard coverage gate and integrity checks ──────────────────────
         # S1 present check
         from .geometry.scene_stack_builder import _extract_packages
-        s1_pkgs = _extract_packages(inp.layer0_source_packages, "sentinel1")
+        s1_pkgs = _extract_packages(getattr(inp, "layer0_source_packages", {}) or {}, "sentinel1")
         if s1_pkgs:
             extracted_s1 = False
             for scene in production_scenes:
@@ -3253,7 +3295,7 @@ class ASMAEEngine:
         return out_obj
 
     def _microzone_to_grid(
-        self, mz_data: dict, rd: ResolutionDecision,
+        self, mz_data: dict, rd: Optional[ResolutionDecision] = None,
     ) -> dict:
         """Convert {mz_id: [val_per_state]} → {state_name: [[2D grid]]}."""
         if not mz_data:
@@ -3272,8 +3314,9 @@ class ASMAEEngine:
                 try:
                     r = int(parts[1])
                     c = int(parts[2])
-                    max_r = max(max_r, r)
-                    max_c = max(max_c, c)
+                    if r >= 0 and c >= 0:
+                        max_r = max(max_r, r)
+                        max_c = max(max_c, c)
                 except ValueError:
                     pass
 
@@ -3282,16 +3325,23 @@ class ASMAEEngine:
 
         result = {}
         for s_idx, name in enumerate(STATE_NAMES):
-            grid = [[0.0] * n_cols for _ in range(n_rows)]
+            grid = [[None] * n_cols for _ in range(n_rows)]
             for mz_id, state_vec in mz_data.items():
                 parts = str(mz_id).split("_")
                 if len(parts) >= 3:
                     try:
                         r = int(parts[1])
                         c = int(parts[2])
-                        if isinstance(state_vec, list) and s_idx < len(state_vec):
-                            grid[r][c] = state_vec[s_idx]
-                    except (ValueError, IndexError):
+                        if r < 0 or c < 0 or r >= n_rows or c >= n_cols:
+                            continue
+                        if isinstance(state_vec, (list, tuple)) and s_idx < len(state_vec):
+                            val = state_vec[s_idx]
+                            if val is not None:
+                                fval = float(val)
+                                grid[r][c] = fval if math.isfinite(fval) else None
+                            else:
+                                grid[r][c] = None
+                    except (ValueError, TypeError, IndexError):
                         pass
             result[name] = grid
 

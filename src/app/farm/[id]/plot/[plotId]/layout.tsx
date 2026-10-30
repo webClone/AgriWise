@@ -4,6 +4,7 @@ import { getAuthorizedPlotRouteContext, getPlotCenter } from "@/lib/farm-service
 import { getFAOLandIntelligence } from "@/lib/agribrain/fao-data-service";
 import { Layer10Provider } from "@/hooks/useLayer10";
 import { PlotIntelligenceProvider } from "@/hooks/usePlotIntelligence";
+import { ParcelAssessmentProvider } from "@/hooks/useParcelAssessment";
 import PlotLayoutClient from "./PlotLayoutClient";
 import FarmThemeWrapper from "@/components/farm/FarmThemeWrapper";
 import { notFound } from "next/navigation";
@@ -52,6 +53,7 @@ export default async function PlotLayout({
   // as headers() is unreliable during client-side navigation.
   return (
     <FarmThemeWrapper>
+    <ParcelAssessmentProvider plotGeoJson={plot.geoJson} cropCycleId={currentCrop?.id || null}>
     <Layer10Provider plotGeoJson={plot.geoJson}>
       <PlotIntelligenceProvider>
       <PlotLayoutClient 
@@ -85,6 +87,7 @@ export default async function PlotLayout({
       </PlotLayoutClient>
       </PlotIntelligenceProvider>
     </Layer10Provider>
+    </ParcelAssessmentProvider>
     </FarmThemeWrapper>
   );
 }
