@@ -121,7 +121,8 @@ test("timeline mixed-row selects metric value and supplier together without misl
 
   const today = new Date().toISOString().slice(0, 10);
   const testCutoff = new Date(Date.now() - 86400000).toISOString();
-  const weather = { date: today, timestamp: today + "T00:00:00Z", source: "weather_station", temp: 22 };
+  // Weather observation with valid ingestion timestamp
+  const weather = { date: today, timestamp: today + "T00:00:00Z", fetchedAt: today + "T00:05:00Z", source: "weather_station", temp: 22 };
   const forecast = { date: today + "T12:00:00Z", source: "weather_model", modelId: "forecast-v1", temp: 19, rain_mm: 6, humidity: 75 };
 
   const select = t => buildDays(t, null, testCutoff).find(x => x.date === today);
@@ -161,6 +162,12 @@ test("timeline mixed-row selects metric value and supplier together without misl
   assert.equal(missing.values.temp, null);
   assert.equal(missing.metricStatuses.temp, S.UNVERIFIED);
   assert.equal(missing.metricDotColors.rain, "#64748b");
+
+  // Correction A regression: post-cutoff observation with NO ingestion timestamp must NOT manufacture one; yields UNVERIFIED
+  const postCutoffNoIngest = select({ weather: [{ date: today, timestamp: today + "T00:00:00Z", source: "weather_station", temp: 26 }] });
+  assert.equal(postCutoffNoIngest.values.temp, 26);
+  assert.equal(postCutoffNoIngest.metricStatuses.temp, S.UNVERIFIED);
+  assert.equal(postCutoffNoIngest.metricDotColors.temp, "#64748b");
 });
 
 test("Milestone 2: timeline renders individual operational telemetry with explicit provenance and no self-certification", () => {
@@ -199,6 +206,18 @@ test("Milestone 2: timeline renders individual operational telemetry with explic
         unit: "°C",
       },
       {
+        id: "sensor-unverified-wind",
+        source: "sensor:field_node_03",
+        kind: "observation",
+        observedAt: today + "T09:00:00Z",
+        ingestedAt: null,
+        timeBasis: "server_received_at",
+        obsType: "sensor_reading",
+        metric: "wind",
+        value: 12.5,
+        unit: "km/h",
+      },
+      {
         id: "obs-late-rain",
         source: "plot-source:station_02",
         kind: "observation",
@@ -218,7 +237,7 @@ test("Milestone 2: timeline renders individual operational telemetry with explic
   const yesterdayCell = days.find(x => x.date === yesterday);
 
   assert.ok(todayCell, "today cell must exist");
-  assert.equal(todayCell.operationalObservations.length, 1);
+  assert.equal(todayCell.operationalObservations.length, 2);
   const liveObs = todayCell.operationalObservations[0];
   assert.equal(liveObs.id, "sensor-live-temp");
   assert.equal(liveObs.metric, "temp");
@@ -227,6 +246,13 @@ test("Milestone 2: timeline renders individual operational telemetry with explic
   assert.equal(liveObs.obsType, "sensor_reading");
   assert.equal(liveObs.status, S.LIVE_UNCERTIFIED);
   assert.notEqual(liveObs.status, S.CERTIFIED_MANIFEST);
+
+  const unverifiedObs = todayCell.operationalObservations[1];
+  assert.equal(unverifiedObs.id, "sensor-unverified-wind");
+  assert.equal(unverifiedObs.metric, "wind");
+  assert.equal(unverifiedObs.value, 12.5);
+  assert.equal(unverifiedObs.status, S.UNVERIFIED);
+  assert.notEqual(unverifiedObs.status, S.LATE_ARRIVING_UNADMITTED);
 
   assert.ok(yesterdayCell, "yesterday cell must exist");
   assert.equal(yesterdayCell.operationalObservations.length, 1);
@@ -243,4 +269,9 @@ test("Milestone 2: timeline renders individual operational telemetry with explic
   assert.match(timelineSource, /data-testid="timeline-operational-telemetry"/);
   assert.match(timelineSource, /data-testid="telemetry-pill"/);
   assert.match(timelineSource, /Basis:\s*\{obs\.timeBasis === "server_received_at"\s*\?\s*"server receipt"\s*:\s*"source observation time"\}/);
+
+  // Correction B: verify explicit rendering for all three statuses (LIVE_UNCERTIFIED, LATE_ARRIVING_UNADMITTED, UNVERIFIED)
+  assert.match(timelineSource, /obs\.status === "LIVE_UNCERTIFIED"\s*\?\s*"rgba\(56, 189, 248, 0\.15\)"\s*:\s*obs\.status === "LATE_ARRIVING_UNADMITTED"\s*\?\s*"rgba\(251, 191, 36, 0\.15\)"\s*:\s*"rgba\(148, 163, 184, 0\.15\)"/);
+  assert.match(timelineSource, /obs\.status === "LIVE_UNCERTIFIED"\s*\?\s*"#38bdf8"\s*:\s*obs\.status === "LATE_ARRIVING_UNADMITTED"\s*\?\s*"#fbbf24"\s*:\s*"#94a3b8"/);
+  assert.match(timelineSource, /obs\.status === "LIVE_UNCERTIFIED"\s*\?\s*"LIVE UNCERTIFIED"\s*:\s*obs\.status === "LATE_ARRIVING_UNADMITTED"\s*\?\s*"LATE-ARRIVING UNADMITTED"\s*:\s*"UNVERIFIED"/);
 });

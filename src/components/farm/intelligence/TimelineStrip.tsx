@@ -114,7 +114,7 @@ function classifyTimelineDatum(
 ): TelemetryStatus {
   if (!datum) return TELEMETRY_STATUS.UNVERIFIED;
   const observedAt = datum.observedAt ?? datum.observed_at ?? datum.timestamp ?? datum.date;
-  const ingestedAt = datum.ingestedAt ?? datum.ingested_at ?? datum.fetchedAt ?? datum.fetched_at ?? datum.timestamp ?? observedAt;
+  const ingestedAt = datum.ingestedAt ?? datum.ingested_at ?? datum.fetchedAt ?? datum.fetched_at;
   const validAt = datum.validAt ?? datum.valid_at ?? datum.date ?? datum.timestamp;
   const candidate: TelemetryObservation = {
     id: String(datum.id || datum.observation_id || "timeline-record"),
@@ -337,11 +337,23 @@ function DayTooltip({ day, metric, style }: {
                 </span>
                 <span style={{
                   fontSize: "0.6rem", padding: "1px 4px", borderRadius: "3px",
-                  background: obs.status === "LIVE_UNCERTIFIED" ? "rgba(56, 189, 248, 0.15)" : "rgba(251, 191, 36, 0.15)",
-                  color: obs.status === "LIVE_UNCERTIFIED" ? "#38bdf8" : "#fbbf24",
+                  background: obs.status === "LIVE_UNCERTIFIED"
+                    ? "rgba(56, 189, 248, 0.15)"
+                    : obs.status === "LATE_ARRIVING_UNADMITTED"
+                    ? "rgba(251, 191, 36, 0.15)"
+                    : "rgba(148, 163, 184, 0.15)",
+                  color: obs.status === "LIVE_UNCERTIFIED"
+                    ? "#38bdf8"
+                    : obs.status === "LATE_ARRIVING_UNADMITTED"
+                    ? "#fbbf24"
+                    : "#94a3b8",
                   fontWeight: 600,
                 }}>
-                  {obs.status === "LIVE_UNCERTIFIED" ? "LIVE UNCERTIFIED" : "LATE-ARRIVING UNADMITTED"}
+                  {obs.status === "LIVE_UNCERTIFIED"
+                    ? "LIVE UNCERTIFIED"
+                    : obs.status === "LATE_ARRIVING_UNADMITTED"
+                    ? "LATE-ARRIVING UNADMITTED"
+                    : "UNVERIFIED"}
                 </span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.62rem", color: "#94a3b8" }}>
@@ -349,7 +361,7 @@ function DayTooltip({ day, metric, style }: {
                 <span>Basis: {obs.timeBasis === "server_received_at" ? "server receipt" : "source observation time"}</span>
               </div>
               <div style={{ fontSize: "0.6rem", color: "#64748b" }}>
-                Observed: {new Date(obs.observedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · Ingested: {new Date(obs.ingestedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                Observed: {obs.observedAt ? new Date(obs.observedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unknown"} · Ingested: {obs.ingestedAt ? new Date(obs.ingestedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unrecorded"}
               </div>
             </div>
           ))}
@@ -625,6 +637,9 @@ export default function TimelineStrip() {
             {" "}Operational buffer: {liveTelemetryStream.observations.length} unsealed item(s) (
               {(liveTelemetryStream.observations || []).filter(o => classifyTelemetryObservation(o, evidenceCutoffAt, new Date().toISOString()) === TELEMETRY_STATUS.LIVE_UNCERTIFIED).length} live uncertified,
               {" "}{(liveTelemetryStream.observations || []).filter(o => classifyTelemetryObservation(o, evidenceCutoffAt, new Date().toISOString()) === TELEMETRY_STATUS.LATE_ARRIVING_UNADMITTED).length} late-arriving unadmitted
+              {(liveTelemetryStream.observations || []).some(o => classifyTelemetryObservation(o, evidenceCutoffAt, new Date().toISOString()) === TELEMETRY_STATUS.UNVERIFIED)
+                ? `, ${(liveTelemetryStream.observations || []).filter(o => classifyTelemetryObservation(o, evidenceCutoffAt, new Date().toISOString()) === TELEMETRY_STATUS.UNVERIFIED).length} unverified`
+                : ""}
             ).
           </span>
         </div>
