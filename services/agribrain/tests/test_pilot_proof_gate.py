@@ -261,6 +261,22 @@ def test_uncertainty_adversarial_cases_fail_closed(changed):
         )
 
 
+def test_receipt_metadata_tamper_cannot_retain_published_membership_hash():
+    h, e, w, receipts, u = fixture()
+    original = receipts[CONTRIBUTION]
+    receipts[CONTRIBUTION] = replace(original, measurement_units="changed-unit")
+    with pytest.raises(ContractViolation, match="content is not publication-bound"):
+        membership(h, e, w, receipts)
+
+
+def test_forged_rehashed_witness_is_still_rejected_without_published_root_update():
+    h, e, w, receipts, u = fixture()
+    w["entries"][0]["evidence_content_hash"] = SHA("forged")
+    w["content_hash"] = canonical_hash({k: v for k, v in w.items() if k != "content_hash"})
+    with pytest.raises(ContractViolation):
+        membership(h, e, w, receipts)
+
+
 def test_fake_membership_result_cannot_substitute_for_current_publication_root():
     h, e, w, receipts, u = fixture()
     forged = PilotProofCheck(
