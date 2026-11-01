@@ -1,8 +1,9 @@
 /**
  * Operational telemetry transport adapter.
  * SensorReading.timestamp is currently server receipt/write time, not device
- * acquisition time. PlotObservation.obsDate is the source observation time and
- * fetchedAt is the fetch/ingestion time. Neither establishes certification.
+ * acquisition time. PlotObservation.obsDate may instead be a legacy daily
+ * grouping bucket; only matching data.observed_at qualifies its precise
+ * acquisition time. fetchedAt is the ingestion time. None certifies evidence.
  *
  * This module does not read or mutate ParcelAssessment or publish evidence.
  */
@@ -24,11 +25,32 @@ const iso = value => {
 };
 const finite = value => typeof value === "number" && Number.isFinite(value);
 
+// Existing daily aggregates and current-weather rows without a provider
+// acquisition clock must never be misrepresented as exact observations.
+// The full provider clock is stored inside PlotObservation.data.observed_at.
+function plotObservationClock(row) {
+  const bucketClock = iso(row.obsDate);
+  const providerClock = iso(row.data?.observed_at);
+  const qualified = (row.obsType === "current_weather" || row.obsType === "sensor_reading")
+    && !!bucketClock && !!providerClock
+    && Math.abs(Date.parse(bucketClock) - Date.parse(providerClock)) < 1000;
+  return {
+    observedAt: qualified ? providerClock : bucketClock,
+    timeBasis: qualified ? "source_observation_at" : "day_bucket_unverified",
+    dayBucketDate: bucketClock?.slice(0, 10),
+  };
+}
+
 function emitRows(rows, scope, spec) {
   const out = [];
   for (const row of rows || []) {
     if (!row?.id) continue;
-    const observedAt = iso(row[spec.observed]);
+    const provenance = spec.clockResolver ? spec.clockResolver(row) : {
+      observedAt: iso(row[spec.observed]),
+      timeBasis: spec.timeBasis,
+      dayBucketDate: iso(row[spec.observed])?.slice(0, 10),
+    };
+    const observedAt = provenance.observedAt;
     const ingestedAt = iso(row[spec.ingested]);
     if (!observedAt || !ingestedAt) continue;
     const obsType = typeof row.obsType === "string" ? row.obsType : (spec.defaultObsType || undefined);
@@ -42,7 +64,8 @@ function emitRows(rows, scope, spec) {
         kind: "observation",
         observedAt,
         ingestedAt,
-        timeBasis: spec.timeBasis,
+        timeBasis: provenance.timeBasis,
+        ...(provenance.dayBucketDate ? { dayBucketDate: provenance.dayBucketDate } : {}),
         metric, value: row[field], unit,
         ...(obsType ? { obsType } : {}),
       });
@@ -70,7 +93,8 @@ export function serializeOperationalTelemetry({ sensorReadings = [], plotObserva
   });
   const persisted = emitRows(plotObservations, scope, {
     observed: "obsDate", ingested: "fetchedAt",
-    prefix: "plot-observation", timeBasis: "source_observation_at", defaultObsType: "plot_observation",
+    prefix: "plot-observation", clockResolver: plotObservationClock,
+    defaultObsType: "plot_observation",
     source: row => "plot-source:" + String(row.source || "unknown"),
     fields: [
       ["tempC", "temp", "°C"], ["humidity", "humidity", "%"],
@@ -96,7 +120,8 @@ export function validateOperationalTelemetryResponse(body, scope, version) {
       || !iso(row.observedAt) || !iso(row.ingestedAt)
       || !["temp", "rain", "humidity", "soilMoisture", "et0"].includes(row.metric)
       || !finite(row.value) || typeof row.unit !== "string"
-      || !["server_received_at", "source_observation_at"].includes(row.timeBasis)
+      || !["server_received_at", "source_observation_at", "day_bucket_unverified"].includes(row.timeBasis)
+      || (row.dayBucketDate !== undefined && (typeof row.dayBucketDate !== "string" || !/^\d{4}-\d\d-\d\d$/.test(row.dayBucketDate)))
       || (row.obsType !== undefined && (typeof row.obsType !== "string" || !row.obsType || /forecast/i.test(row.obsType)))
       || !row.scope || row.scope.tenantId !== scope.tenantId
       || row.scope.farmId !== scope.farmId || row.scope.plotId !== scope.plotId
