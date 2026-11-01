@@ -205,7 +205,8 @@ class PilotCandidateLedger:
         candidate_id = _required_text(candidate_id, "candidate_id")
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT record_json FROM candidates WHERE candidate_id=?", (candidate_id,)
+                "SELECT record_json, envelope_hash, plot_id, snapshot_id FROM candidates WHERE candidate_id=?",
+                (candidate_id,),
             ).fetchone()
             revoked = conn.execute(
                 "SELECT 1 FROM revocations WHERE candidate_id=?", (candidate_id,)
@@ -222,6 +223,10 @@ class PilotCandidateLedger:
             raise ContractViolation("Candidate record identity mismatch")
         if record.get("schema_version") != SCHEMA_VERSION or record.get("state") != "QUARANTINED":
             raise ContractViolation("Pilot candidate is not in quarantined state")
+        if (row[1], row[2], row[3]) != (
+            record.get("envelope_hash"), record.get("plot_id"), record.get("snapshot_id")
+        ):
+            raise ContractViolation("Candidate registry index disagrees with immutable record")
         if record.get("key_id") != self.key_id:
             raise ContractViolation("Pilot candidate issuer key is unavailable or rotated")
         payload = {k: v for k, v in record.items() if k not in ("content_hash", "hmac")}
