@@ -162,6 +162,11 @@ def verify_published_evidence_membership(
         from services.agribrain.scientific_contracts.evidence_receipt import EvidenceReceipt
         if not isinstance(receipt, EvidenceReceipt) or receipt.contribution_id != contribution:
             raise ContractViolation("Missing typed physical evidence receipt for contribution")
+        receipt_content_hash = _strict_hash(
+            entry.get("receipt_content_hash"), "admitted evidence receipt content_hash"
+        )
+        if receipt_content_hash != canonical_hash(receipt.to_dict()):
+            raise ContractViolation("Physical evidence receipt content is not publication-bound")
         if (len(receipt.evidence_ids) != len(receipt.content_hashes)
                 or (evidence_id, content) not in zip(receipt.evidence_ids, receipt.content_hashes)):
             raise ContractViolation("Contribution evidence/receipt content mismatch")
