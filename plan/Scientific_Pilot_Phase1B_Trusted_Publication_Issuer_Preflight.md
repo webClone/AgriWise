@@ -62,3 +62,15 @@ py -3 -m pytest -q services/agribrain/tests/test_scientific_pilot_baseline_probe
 \`\`\`
 
 Any unexpected failure is a regression to resolve before proceeding. This phase has not been executed against the live Plot A runtime here; all positive Pilot-AUTH-04 and full publication-to-prescription gates remain **OPEN**. PR #8 telemetry and \`main\` remain unchanged.
+
+
+## P899-TIME-01 correction — versioned contract validity gate
+
+**Review basis:** Independent report pinned to scientific-pilot head \`8993a68\` reproduced a P2 ISO variable-precision string comparison error in \`validate_published_pilot_envelope()\`. The fix was applied to the **current** scientific-pilot branch, preserving subsequent Phase-1B work.
+
+- Comparison now parses \`issued_at\`, \`now\`, and \`expires_at\` into UTC-aware \`datetime\` values before enforcing \`issued <= now < expires\`.
+- V2's serialized canonical UTC strings, content hash, publication identity and snapshot cutoff checks remain unchanged.
+- The focused pytest matrix covers whole/fractional seconds; just before/at/after issuance and expiry; fractional endpoints; and equivalent offset-aware instant representations. Each case exercises an in-memory V2 object and a JSON-round-tripped mapping (36 decisions).
+- Existing V1 compatibility and V2 legacy public-run export quarantine remain unchanged. No production authorizer or signer was activated.
+
+**Execution evidence:** This correction was committed to GitHub and structurally reviewed. Its newly added pytest matrix and the full Python/TypeScript/build gates still require local execution at the current head. Historical passes at \`8993a68\` do not validate this new candidate. There is no claim of live issuance or a deployed physical-action bypass.
