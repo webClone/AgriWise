@@ -308,8 +308,10 @@ def _validate_v2_action_bounds(action: AuthorizedActionV1) -> None:
         raise ContractViolation("V2 pilot envelope does not authorize machine execution")
     rate = action.rate
     if not rate:
-        # Observation-only actions may lack a dose. This contract alone does not
-        # classify a proposed intervention as safe or eligible.
+        # A dose-free action is permitted only for genuinely observational
+        # types. Exact physical intervention candidates must carry safe bounds.
+        if action.action_type.upper() not in {"SCOUT", "MONITOR", "WAIT"}:
+            raise ContractViolation("V2 physical intervention requires explicit bounded rate")
         return
     if set(rate) != {"recommended", "min_safe", "max_safe", "unit"}:
         raise ContractViolation("V2 rate must specify recommended, min_safe, max_safe, unit")
