@@ -89,7 +89,8 @@ interface DayCell {
     unit: string;
     observedAt: string;
     ingestedAt: string;
-    timeBasis?: "server_received_at" | "source_observation_at";
+    timeBasis?: "server_received_at" | "source_observation_at" | "day_bucket_unverified";
+    dayBucketDate?: string;
     obsType?: string;
     status: TelemetryStatus;
   }>;
@@ -358,10 +359,10 @@ function DayTooltip({ day, metric, style }: {
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.62rem", color: "#94a3b8" }}>
                 <span>Source: {obs.source}{obs.obsType ? ` · ${obs.obsType}` : ""}</span>
-                <span>Basis: {obs.timeBasis === "server_received_at" ? "server receipt" : "source observation time"}</span>
+                <span>Basis: {obs.timeBasis === "server_received_at" ? "server receipt" : obs.timeBasis === "source_observation_at" ? "source observation time" : "daily bucket · time unknown"}</span>
               </div>
               <div style={{ fontSize: "0.6rem", color: "#64748b" }}>
-                Observed: {obs.observedAt ? new Date(obs.observedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unknown"} · Ingested: {obs.ingestedAt ? new Date(obs.ingestedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unrecorded"}
+                Observed: {obs.timeBasis === "day_bucket_unverified" ? "unknown (daily bucket)" : obs.observedAt ? new Date(obs.observedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unknown"} · Ingested: {obs.ingestedAt ? new Date(obs.ingestedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unrecorded"}
               </div>
             </div>
           ))}
@@ -512,7 +513,7 @@ export default function TimelineStrip() {
           ? liveTelemetryStream.observations
           : []
       )
-        .filter((obs: any) => typeof obs?.observedAt === "string" && obs.observedAt.startsWith(dateStr))
+        .filter((obs: any) => typeof obs?.observedAt === "string" && (obs.dayBucketDate || obs.observedAt.slice(0, 10)) === dateStr)
         .map((obs: any) => ({
           id: String(obs.id || "op-telemetry"),
           source: String(obs.source || "unknown"),
@@ -522,6 +523,7 @@ export default function TimelineStrip() {
           observedAt: String(obs.observedAt || ""),
           ingestedAt: String(obs.ingestedAt || ""),
           timeBasis: obs.timeBasis,
+          dayBucketDate: obs.dayBucketDate,
           obsType: obs.obsType,
           status: classifyTelemetryObservation(obs, evidenceCutoffAt, nowIso),
         }));
