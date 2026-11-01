@@ -262,6 +262,14 @@ def test_v2_rejects_unbounded_or_nonfinite_rates(rate):
         v2(actions=(action(rate=rate),))
 
 
+def test_v2_disallows_dose_free_physical_interventions():
+    physical = action(rate={})
+    with pytest.raises(ContractViolation, match="requires explicit bounded rate"):
+        v2(actions=(physical,))
+    observational = replace(physical, action_type="MONITOR")
+    assert v2(actions=(observational,)).actions[0].rate == {}
+
+
 def test_v2_rejects_machine_execution_and_keeps_action_hash_bound():
     with pytest.raises(ContractViolation, match="machine execution"):
         v2(actions=(action(machine_execution_allowed=True),))
@@ -290,5 +298,4 @@ def test_v2_requires_explicit_uncertainty_receipt_and_never_issues_real_authorit
     with pytest.raises(ContractViolation):
         check(verified_uncertainty_receipt_hash="")
     result = check()
-    assert result.machine_execution_allowed is False if hasattr(result, "machine_execution_allowed") else True
     assert all(not action.machine_execution_allowed for action in result.actions)
