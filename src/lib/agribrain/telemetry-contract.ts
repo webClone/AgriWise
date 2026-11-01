@@ -37,7 +37,9 @@ export interface TelemetryObservation {
   observedAt?: string;
   ingestedAt?: string | null;
   /** Distinguish source acquisition time from server receipt fallback. */
-  timeBasis?: "server_received_at" | "source_observation_at";
+  timeBasis?: "server_received_at" | "source_observation_at" | "day_bucket_unverified";
+  /** UTC date used only for day-cell grouping, not evidence timing. */
+  dayBucketDate?: string;
   obsType?: string;
   validAt?: string;
   modelId?: string;
