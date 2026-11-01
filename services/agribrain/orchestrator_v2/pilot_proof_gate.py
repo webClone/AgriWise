@@ -162,9 +162,8 @@ def verify_published_evidence_membership(
         from services.agribrain.scientific_contracts.evidence_receipt import EvidenceReceipt
         if not isinstance(receipt, EvidenceReceipt) or receipt.contribution_id != contribution:
             raise ContractViolation("Missing typed physical evidence receipt for contribution")
-        if (evidence_id not in receipt.evidence_ids
-                or content not in receipt.content_hashes
-                or len(receipt.evidence_ids) != len(receipt.content_hashes)):
+        if (len(receipt.evidence_ids) != len(receipt.content_hashes)
+                or (evidence_id, content) not in zip(receipt.evidence_ids, receipt.content_hashes)):
             raise ContractViolation("Contribution evidence/receipt content mismatch")
         if not all(type(getattr(receipt, key)) is bool and getattr(receipt, key)
                    for key in ("is_calibrated", "calibration_valid", "spatial_support_valid")):
@@ -210,8 +209,12 @@ def verify_published_uncertainty_bounds(
         raise ContractViolation("Published uncertainty requires V2")
     _verified_head(head, envelope)
     _witness_claims(uncertainty_witness, envelope)
-    if membership.kind != "ADMITTED_MEMBERSHIP" or membership.status != "STRUCTURAL_MATCH_ONLY":
+    if not isinstance(membership, PilotProofCheck) or membership.kind != "ADMITTED_MEMBERSHIP" or membership.status != "STRUCTURAL_MATCH_ONLY":
         raise ContractViolation("Published membership proof is missing")
+    if membership.claimed_root != _strict_hash(
+        head.get("admitted_evidence_root_hash"), "admitted_evidence_root_hash"
+    ):
+        raise ContractViolation("Uncertainty membership proof is not anchored to publication")
     if uncertainty_witness.get("schema_version") != "pilot_bounded_uncertainty_v1":
         raise ContractViolation("Unsupported published uncertainty witness schema")
     if uncertainty_witness.get("admitted_evidence_root_hash") != membership.claimed_root:
@@ -246,7 +249,9 @@ def verify_published_uncertainty_bounds(
             lower, upper = item.get("min_safe"), item.get("max_safe")
             if any(type(x) not in (int, float) or not math.isfinite(x) for x in (lower, upper)):
                 raise ContractViolation("Action uncertainty has invalid bounds")
-            if lower < 0 or lower > action.rate["min_safe"] or upper < action.rate["max_safe"]:
+            if (lower < 0 or lower > upper
+                    or lower > action.rate["min_safe"]
+                    or upper < action.rate["max_safe"]):
                 raise ContractViolation("Action rate exceeds published scientific uncertainty bounds")
         elif any(item.get(k) is not None for k in ("min_safe", "max_safe", "unit")):
             raise ContractViolation("Monitoring cannot inherit physical dose uncertainty")
