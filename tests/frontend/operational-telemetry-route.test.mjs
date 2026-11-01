@@ -48,7 +48,8 @@ function routeHarness({ authenticated = owner, owns = true, plotFarmId = "farm-o
       assert.deepEqual(where.source.in, ["weather", "sensor"]);
       assert.ok(take <= 50);
       return [{
-        id: "record-1", source: "weather",
+        id: "record-1", source: "weather", obsType: "current_weather",
+        data: { observed_at: "2026-10-30T15:00:00.000Z" },
         obsDate: new Date("2026-10-30T15:00:00Z"),
         fetchedAt: new Date("2026-10-30T16:01:00Z"),
         tempC: 19, precipMm: 1, et0: 3.2,
