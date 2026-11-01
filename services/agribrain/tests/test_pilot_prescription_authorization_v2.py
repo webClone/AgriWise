@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -231,6 +232,50 @@ def test_current_tenant_geometry_crop_cycle_and_uncertainty_scope_fails():
 def test_v2_temporal_validity_fails_closed(now):
     with pytest.raises(ContractViolation, match="not yet valid or expired"):
         check(now=now)
+
+
+
+# Regression for P899-TIME-01: real UTC instant ordering, not ISO string
+# lexicographic ordering. Parameterized against BOTH the in-memory candidate
+# and a JSON-round-tripped candidate, preserving V1 and public V2 quarantine.
+@pytest.mark.parametrize("input_form", ["object", "json_mapping"])
+@pytest.mark.parametrize("issued_at, expires_at, now, accepted", [
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:05Z", True),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:00Z", True),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T18:19:59.999999Z", False),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:00.000001Z", True),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:00.500000Z", True),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:10Z", False),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:10.000001Z", False),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:10.500000Z", False),
+    ("2026-10-30T18:20:00.500000Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:00Z", False),
+    ("2026-10-30T18:20:00.500000Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:00.500000Z", True),
+    ("2026-10-30T18:20:00.500000Z", "2026-10-30T18:20:10Z", "2026-10-30T18:20:00.500001Z", True),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10.500000Z", "2026-10-30T18:20:10Z", True),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10.500000Z", "2026-10-30T18:20:10.499999Z", True),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10.500000Z", "2026-10-30T18:20:10.500000Z", False),
+    # Canonical UTC equivalence of offset-aware input at each half-open bound.
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T19:20:00+01:00", True),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T19:20:00.500000+01:00", True),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T19:20:10+01:00", False),
+    ("2026-10-30T18:20:00Z", "2026-10-30T18:20:10Z", "2026-10-30T19:20:10.500000+01:00", False),
+])
+def test_v2_publication_time_validity_uses_real_utc_instants(
+    input_form, issued_at, expires_at, now, accepted
+):
+    candidate = v2(issued_at=issued_at, expires_at=expires_at)
+    supplied = (
+        candidate if input_form == "object"
+        else json.loads(json.dumps(candidate.to_dict()))
+    )
+    if accepted:
+        granted = check(supplied, now=now)
+        assert granted.content_hash == candidate.content_hash
+        assert granted.issued_at == candidate.issued_at
+        assert granted.expires_at == candidate.expires_at
+    else:
+        with pytest.raises(ContractViolation, match="not yet valid or expired"):
+            check(supplied, now=now)
 
 
 @pytest.mark.parametrize("field, invalid", [
