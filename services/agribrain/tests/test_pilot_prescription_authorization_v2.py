@@ -317,3 +317,25 @@ def test_legacy_farmer_export_quarantines_v2_until_published_gate_is_wired(as_ma
     granted, reason = _validated_authorization(artifact)
     assert granted is None
     assert "V2 publication binding gate is not yet wired" in reason
+
+
+def test_v2_requires_confirmation_even_without_machine_execution():
+    unsafe = replace(action(), requires_confirmation=False)
+    with pytest.raises(ContractViolation, match="require farmer confirmation"):
+        v2(actions=(unsafe,))
+
+
+def test_v2_rejects_mutable_nested_timing_and_nonnumeric_rate_scalars():
+    nested = replace(action(), timing={"earliest": {"from": "2026-10-31"}})
+    with pytest.raises(ContractViolation, match="immutable scalar"):
+        v2(actions=(nested,))
+    bad_unit = replace(action(), rate={
+        "recommended": 40.0, "min_safe": 35.0, "max_safe": 45.0, "unit": ["kg/ha"]
+    })
+    with pytest.raises(ContractViolation, match="plain string"):
+        v2(actions=(bad_unit,))
+    string_rate = replace(action(), rate={
+        "recommended": "40", "min_safe": 35.0, "max_safe": 45.0, "unit": "kg/ha"
+    })
+    with pytest.raises(ContractViolation, match="numeric scalars"):
+        v2(actions=(string_rate,))
