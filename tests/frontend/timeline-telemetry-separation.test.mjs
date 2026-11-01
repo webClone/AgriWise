@@ -69,6 +69,17 @@ test("ingestion-aware classification distinguishes late-arriving from historical
   assert.equal(classifyTelemetryObservation({ ...observation("null-ingest", "2026-10-29T09:00:00Z"), ingestedAt: null }, cutoff, now), S.UNVERIFIED);
 });
 
+test("daily bucket never receives live or late authority", () => {
+  const dayBucket = {
+    ...observation("legacy-weather", "2026-10-30T00:00:00Z"),
+    ingestedAt: "2026-10-30T14:01:00Z",
+    timeBasis: "day_bucket_unverified",
+    dayBucketDate: "2026-10-30",
+  };
+  assert.equal(classifyTelemetryObservation(dayBucket, cutoff, now), S.UNVERIFIED);
+  assert.notEqual(classifyTelemetryObservation(dayBucket, cutoff, now), S.CERTIFIED_MANIFEST);
+});
+
 test("live, forecast and missing evidence stay distinct", () => {
   assert.equal(classifyTelemetryObservation(observation("live", "2026-10-30T11:00:00Z"), cutoff, now), S.LIVE_UNCERTIFIED);
   assert.equal(classifyTelemetryObservation(observation("future-raw", "2026-10-31T11:00:00Z"), cutoff, now), S.UNVERIFIED);
