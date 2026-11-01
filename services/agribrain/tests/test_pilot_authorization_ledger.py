@@ -222,3 +222,15 @@ def test_emergency_plot_scope_block_is_durable_and_denies_future_records(tmp_pat
             (NS.tenant_id, NS.farm_id, NS.plot_id),
         ).fetchone()[0]
     assert reason == "unresolved calibration drift"
+
+
+def test_db_index_rewrite_cannot_detach_a_signed_candidate(tmp_path):
+    s = ledger(tmp_path)
+    record = register(s)
+    with sqlite3.connect(s.path) as conn:
+        conn.execute(
+            "UPDATE candidates SET snapshot_id=? WHERE candidate_id=?",
+            ("ASMAE-SNAPSHOT-swapped-index", record["candidate_id"]),
+        )
+    with pytest.raises(ContractViolation, match="index disagrees"):
+        inspect(s, record["candidate_id"])
