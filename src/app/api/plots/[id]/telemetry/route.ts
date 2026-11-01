@@ -53,7 +53,7 @@ export async function GET(
         orderBy: { obsDate: "desc" },
         take: 50,
         select: {
-          id: true, source: true, obsType: true, obsDate: true, fetchedAt: true,
+          id: true, source: true, obsType: true, obsDate: true, fetchedAt: true, data: true,
           tempC: true, humidity: true, precipMm: true,
           soilMoisture: true, et0: true,
         },
