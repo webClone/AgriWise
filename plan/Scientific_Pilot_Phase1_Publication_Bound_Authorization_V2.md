@@ -33,7 +33,7 @@ V2 adds **first-class content-addressed fields**, not detached metadata:
 
 Ordered temporal contract: \`observation_window_start <= observation_window_end <= evidence_cutoff_at <= published_at <= issued_at < expires_at\`. Compare parsed UTC instants, never string ordering.
 
-**Action constraints:** V2 forbids machine execution; dose-bearing actions need finite, nonnegative \`min_safe <= recommended <= max_safe\` and a nonempty unit. Only SCOUT, MONITOR, WAIT may omit a dose. This numeric check does **not** establish clinical/agronomic efficacy, policy approval, or uncertainty receipt authenticity.
+**Action constraints:** V2 forbids machine execution and requires farmer confirmation. Physical interventions cannot omit a rate; rates must use finite numeric scalar values, a plain-string unit and \`0 <= min_safe <= recommended <= max_safe\`. Only SCOUT, MONITOR, WAIT may omit a dose. Timing payload fields must remain immutable scalars. These structural checks do **not** establish agronomic efficacy, policy approval, or uncertainty receipt authenticity.
 
 ## Public pilot validator
 
