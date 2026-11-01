@@ -279,7 +279,9 @@ test("Milestone 2: timeline renders individual operational telemetry with explic
   // Assert component template exposes operational telemetry tooltips and pills
   assert.match(timelineSource, /data-testid="timeline-operational-telemetry"/);
   assert.match(timelineSource, /data-testid="telemetry-pill"/);
-  assert.match(timelineSource, /Basis:\s*\{obs\.timeBasis === "server_received_at"\s*\?\s*"server receipt"\s*:\s*"source observation time"\}/);
+  assert.match(timelineSource, /Basis:\s*\{obs\.timeBasis === "server_received_at"\s*\?\s*"server receipt"\s*:\s*obs\.timeBasis === "source_observation_at"\s*\?\s*"source observation time"\s*:\s*"daily bucket · time unknown"\}/);
+  assert.match(timelineSource, /unknown \(daily bucket\)/);
+  assert.match(timelineSource, /obs\.dayBucketDate \|\| obs\.observedAt\.slice\(0, 10\)/);
 
   // Correction B: verify explicit rendering for all three statuses (LIVE_UNCERTIFIED, LATE_ARRIVING_UNADMITTED, UNVERIFIED)
   assert.match(timelineSource, /obs\.status === "LIVE_UNCERTIFIED"\s*\?\s*"rgba\(56, 189, 248, 0\.15\)"\s*:\s*obs\.status === "LATE_ARRIVING_UNADMITTED"\s*\?\s*"rgba\(251, 191, 36, 0\.15\)"\s*:\s*"rgba\(148, 163, 184, 0\.15\)"/);
