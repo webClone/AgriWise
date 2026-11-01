@@ -306,6 +306,13 @@ def _validate_v2_action_bounds(action: AuthorizedActionV1) -> None:
     """An exact physical dose must have bounded finite rates in its signed payload."""
     if action.machine_execution_allowed:
         raise ContractViolation("V2 pilot envelope does not authorize machine execution")
+    if not action.requires_confirmation:
+        raise ContractViolation("V2 pilot actions require farmer confirmation")
+    for key, value in action.timing.items():
+        if not isinstance(key, str) or value is not None and not isinstance(value, (str, int, float, bool)):
+            raise ContractViolation("V2 timing must contain immutable scalar fields only")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ContractViolation("V2 timing contains non-finite numeric value")
     rate = action.rate
     if not rate:
         # A dose-free action is permitted only for genuinely observational
@@ -315,7 +322,12 @@ def _validate_v2_action_bounds(action: AuthorizedActionV1) -> None:
         return
     if set(rate) != {"recommended", "min_safe", "max_safe", "unit"}:
         raise ContractViolation("V2 rate must specify recommended, min_safe, max_safe, unit")
+    if not isinstance(rate["unit"], str):
+        raise ContractViolation("V2 rate unit must be a plain string")
     _required_text(rate["unit"], "rate unit")
+    if any(isinstance(rate[key], bool) or not isinstance(rate[key], (int, float))
+           for key in ("min_safe", "recommended", "max_safe")):
+        raise ContractViolation("V2 rate values must be finite numeric scalars")
     try:
         minimum = float(rate["min_safe"])
         chosen = float(rate["recommended"])
