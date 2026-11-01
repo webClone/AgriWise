@@ -37,6 +37,7 @@ def read_trusted_current_asmae_publication(
     expected_snapshot_id: str,
     expected_geometry_hash: str,
     expected_crop_cycle_id: str,
+    require_proof_attestation: bool = False,
 ) -> dict:
     """Fetch exactly the current locally revalidated head for one authenticated plot.
 
@@ -95,6 +96,9 @@ def read_trusted_current_asmae_publication(
     if not all(left <= right for left, right in zip(instants, instants[1:])):
         raise ContractViolation("Current ASMAE publication has invalid temporal order")
 
+    if require_proof_attestation and raw.get("proof_attestation_valid") is not True:
+        raise ContractViolation(f"Current ASMAE publication lacks an authenticated proof attestation: {raw.get('proof_attestation_reason')}")
+
     # Deliberately return a limited copy with no mutable scientific internals.
     return {
         "available": True,
@@ -111,6 +115,13 @@ def read_trusted_current_asmae_publication(
         "published_at": published,
         "observation_window": {"start": start, "end": end},
         "validation": {flag: True for flag in CANONICAL_PUBLICATION_VALIDATION_FLAGS},
+        "admitted_evidence_root_hash": raw.get("admitted_evidence_root_hash"),
+        "bounded_uncertainty_receipt_hash": raw.get("bounded_uncertainty_receipt_hash"),
+        "scientific_posterior_hash": raw.get("scientific_posterior_hash"),
+        "proof_attestation": raw.get("proof_attestation"),
+        "proof_attestation_hash": raw.get("proof_attestation_hash"),
+        "proof_attestation_valid": raw.get("proof_attestation_valid"),
+        "proof_attestation_reason": raw.get("proof_attestation_reason"),
     }
 
 

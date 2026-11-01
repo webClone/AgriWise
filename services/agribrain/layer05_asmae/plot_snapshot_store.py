@@ -187,6 +187,9 @@ def publish_canonical_plot_snapshot(
     execution_identity: Optional[Dict[str, Any]] = None,
     snapshot_kind: str = "asmae",
     allow_overwrite: bool = False,
+    admitted_evidence_root_hash: Optional[str] = None,
+    bounded_uncertainty_receipt_hash: Optional[str] = None,
+    scientific_posterior_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Write one immutable node, then atomically supersede the plot head."""
     ns = _coerce_namespace(namespace or plot_id, tenant_id=tenant_id, farm_id=farm_id)
@@ -313,6 +316,33 @@ def publish_canonical_plot_snapshot(
 
     if not obs_win:
         obs_win = None
+
+    ev_root = (
+        admitted_evidence_root_hash
+        or scientific_result.get("admitted_evidence_root_hash")
+        or immutable_frontend_payload.get("admitted_evidence_root_hash")
+        or (execution_identity or {}).get("admitted_evidence_root_hash")
+    )
+    if ev_root:
+        ev_root = str(ev_root).strip().lower()
+
+    unc_root = (
+        bounded_uncertainty_receipt_hash
+        or scientific_result.get("bounded_uncertainty_receipt_hash")
+        or immutable_frontend_payload.get("bounded_uncertainty_receipt_hash")
+        or (execution_identity or {}).get("bounded_uncertainty_receipt_hash")
+    )
+    if unc_root:
+        unc_root = str(unc_root).strip().lower()
+
+    post_root = (
+        scientific_posterior_hash
+        or scientific_result.get("scientific_posterior_hash")
+        or immutable_frontend_payload.get("scientific_posterior_hash")
+        or (execution_identity or {}).get("scientific_posterior_hash")
+    )
+    if post_root:
+        post_root = str(post_root).strip().lower()
 
     crop_cycle_id = (
         immutable_frontend_payload.get("crop_cycle_id")
@@ -588,6 +618,9 @@ def publish_canonical_plot_snapshot(
         "evidence_cutoff_at": evidence_cutoff_str,
         "observation_window": obs_win,
         "crop_cycle_id": crop_cycle_id,
+        "admitted_evidence_root_hash": ev_root,
+        "bounded_uncertainty_receipt_hash": unc_root,
+        "scientific_posterior_hash": post_root,
         "updated_at": publication_timestamp,
     }
     _atomic(_head_path(ns), head)
@@ -597,6 +630,98 @@ def publish_canonical_plot_snapshot(
             _CANONICAL_SNAPSHOT_CACHE.pop(k, None)
     return head
 
+
+def attach_canonical_proof_roots(
+    namespace: Union[PlotNamespace, str],
+    *,
+    admitted_evidence_root_hash: Optional[str] = None,
+    bounded_uncertainty_receipt_hash: Optional[str] = None,
+    scientific_posterior_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Atomically record verified tribunal/L8 proof roots to the active publication head."""
+    ns = _coerce_namespace(namespace)
+    head_file = _head_path(ns)
+    if not head_file.exists():
+        raise ValueError("Cannot attach proof roots: head publication does not exist")
+    head = _read(head_file)
+    if not head:
+        raise ValueError("Cannot attach proof roots: head publication is empty")
+    if admitted_evidence_root_hash:
+        head["admitted_evidence_root_hash"] = str(admitted_evidence_root_hash).strip().lower()
+    if bounded_uncertainty_receipt_hash:
+        head["bounded_uncertainty_receipt_hash"] = str(bounded_uncertainty_receipt_hash).strip().lower()
+    if scientific_posterior_hash:
+        head["scientific_posterior_hash"] = str(scientific_posterior_hash).strip().lower()
+    head["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _atomic(head_file, head)
+    with _SNAPSHOT_CACHE_LOCK:
+        keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
+        for k in keys_to_evict:
+            _CANONICAL_SNAPSHOT_CACHE.pop(k, None)
+    return head
+
+
+def attach_canonical_proof_attestation(
+    namespace: Union[PlotNamespace, str],
+    attestation: Union[Any, Mapping[str, Any]],
+    *,
+    secret: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Atomically commit an immutable child proof attestation for the current publication receipt."""
+    from services.agribrain.scientific_contracts.proof_attestation import (
+        verify_proof_attestation,
+        AsmaeProofAttestationV1,
+    )
+    from services.agribrain.scientific_contracts.exceptions import ContractViolation
+
+    verified = verify_proof_attestation(attestation, secret=secret)
+    ns = _coerce_namespace(namespace)
+    directory = _plot_dir(ns)
+    head_file = _head_path(ns)
+    if not head_file.exists():
+        raise ContractViolation("Cannot attach proof attestation: head publication does not exist")
+    head = _read(head_file)
+    if not head:
+        raise ContractViolation("Cannot attach proof attestation: head publication is empty")
+
+    # Strict publication receipt and scope binding
+    if verified.canonical_publication_receipt_hash != head.get("publication_receipt_hash"):
+        raise ContractViolation("Proof attestation publication receipt hash mismatch")
+    if verified.snapshot_id != head.get("snapshot_id"):
+        raise ContractViolation("Proof attestation snapshot identity mismatch")
+    if verified.tenant_id != head.get("tenant_id"):
+        raise ContractViolation("Proof attestation tenant mismatch")
+    if verified.farm_id != head.get("farm_id"):
+        raise ContractViolation("Proof attestation farm mismatch")
+    if verified.plot_id != head.get("plot_id"):
+        raise ContractViolation("Proof attestation plot mismatch")
+    if verified.geometry_hash != head.get("geometry_hash"):
+        raise ContractViolation("Proof attestation geometry mismatch")
+    if verified.crop_cycle_id != head.get("crop_cycle_id"):
+        raise ContractViolation("Proof attestation crop cycle mismatch")
+
+    att_dir = directory / "attestations"
+    att_dir.mkdir(parents=True, exist_ok=True)
+    safe_hash = verified.attestation_hash[:32]
+    att_path = att_dir / f"{safe_hash}.json"
+    att_dict = verified.to_dict()
+    _atomic(att_path, att_dict)
+
+    head["proof_attestation_ref"] = f"attestations/{safe_hash}.json"
+    head["proof_attestation_hash"] = verified.attestation_hash
+    head["proof_attestation_issuer_key_id"] = verified.issuer_key_id
+    head["admitted_evidence_root_hash"] = verified.admitted_evidence_root_hash
+    head["bounded_uncertainty_receipt_hash"] = verified.bounded_uncertainty_receipt_hash
+    head["scientific_posterior_hash"] = verified.scientific_posterior_hash
+    head["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _atomic(head_file, head)
+
+    with _SNAPSHOT_CACHE_LOCK:
+        keys_to_evict = [k for k in _CANONICAL_SNAPSHOT_CACHE if k[0] == ns.stable_key()]
+        for k in keys_to_evict:
+            _CANONICAL_SNAPSHOT_CACHE.pop(k, None)
+
+    return att_dict
 
 def publish_canonical_layer10_snapshot(
     *,
@@ -836,7 +961,7 @@ def load_latest_plot_snapshot(
     payload_surfaces = publication_frontend.get("surfaces") or publication_frontend.get("surface_pack") or []
 
     # SHA-256 cryptographic recomputation validation
-    hashable_node = {k: v for k, v in node.items() if not k.endswith("_ref") and k not in ("node_hash", "snapshot_age_seconds", "snapshot_ref", "publication_receipt_ref", "publication_receipt_hash", "publication_job_id", "frontend_publication_hash", "surface_inventory_hash", "validation")}
+    hashable_node = {k: v for k, v in node.items() if not k.endswith("_ref") and k not in ("node_hash", "snapshot_age_seconds", "snapshot_ref", "publication_receipt_ref", "publication_receipt_hash", "publication_job_id", "frontend_publication_hash", "surface_inventory_hash", "validation", "admitted_evidence_root_hash", "bounded_uncertainty_receipt_hash", "scientific_posterior_hash", "proof_attestation", "proof_attestation_ref", "proof_attestation_hash", "proof_attestation_valid", "proof_attestation_reason", "proof_attestation_issuer_key_id")}
     computed_node_hash = hashlib.sha256(_json_bytes(hashable_node)).hexdigest()
 
     computed_pub_hash = None
@@ -991,6 +1116,76 @@ def load_latest_plot_snapshot(
     node["published_at"] = published_at_val
     node["evidence_cutoff_at"] = evidence_cutoff_val
     node["observation_window"] = obs_win_val
+
+    # Authenticate proof attestation if present
+    attestation_ref = head.get("proof_attestation_ref")
+    attestation_hash = head.get("proof_attestation_hash")
+    proof_attestation_valid = None
+    proof_attestation_reason = None
+    verified_attestation_obj = None
+
+    if attestation_ref or attestation_hash:
+        att_path = None
+        if attestation_ref:
+            att_path = directory / attestation_ref
+        elif attestation_hash:
+            att_path = directory / "attestations" / f"{attestation_hash[:32]}.json"
+
+        att_data = _read(att_path) if att_path and att_path.exists() else None
+        if not att_data:
+            proof_attestation_valid = False
+            proof_attestation_reason = "missing_attestation_file"
+        else:
+            try:
+                from services.agribrain.scientific_contracts.proof_attestation import verify_proof_attestation
+                att_obj = verify_proof_attestation(att_data)
+                if attestation_hash and att_obj.attestation_hash != attestation_hash:
+                    proof_attestation_valid = False
+                    proof_attestation_reason = "attestation_hash_mismatch"
+                elif att_obj.canonical_publication_receipt_hash != head.get("publication_receipt_hash"):
+                    proof_attestation_valid = False
+                    proof_attestation_reason = "receipt_hash_mismatch"
+                elif att_obj.snapshot_id != head.get("snapshot_id"):
+                    proof_attestation_valid = False
+                    proof_attestation_reason = "snapshot_id_mismatch"
+                elif (
+                    head.get("admitted_evidence_root_hash") != att_obj.admitted_evidence_root_hash
+                    or head.get("bounded_uncertainty_receipt_hash") != att_obj.bounded_uncertainty_receipt_hash
+                    or head.get("scientific_posterior_hash") != att_obj.scientific_posterior_hash
+                ):
+                    # HEAD ROOTS TAMPERED: head claims roots that do NOT match the authenticated attestation!
+                    proof_attestation_valid = False
+                    proof_attestation_reason = "head_roots_tampered_relative_to_attestation"
+                else:
+                    proof_attestation_valid = True
+                    proof_attestation_reason = "verified"
+                    verified_attestation_obj = att_obj
+            except Exception as e:
+                proof_attestation_valid = False
+                proof_attestation_reason = f"attestation_verification_failed: {e}"
+
+    node["proof_attestation_ref"] = attestation_ref
+    node["proof_attestation_hash"] = attestation_hash
+    node["proof_attestation_valid"] = proof_attestation_valid
+    node["proof_attestation_reason"] = proof_attestation_reason
+    node["proof_attestation"] = verified_attestation_obj.to_dict() if verified_attestation_obj else None
+    if attestation_ref or attestation_hash:
+        validation_flags["proofAttestationValid"] = bool(proof_attestation_valid)
+
+    if proof_attestation_valid:
+        node["admitted_evidence_root_hash"] = verified_attestation_obj.admitted_evidence_root_hash
+        node["bounded_uncertainty_receipt_hash"] = verified_attestation_obj.bounded_uncertainty_receipt_hash
+        node["scientific_posterior_hash"] = verified_attestation_obj.scientific_posterior_hash
+    elif attestation_ref or attestation_hash:
+        # Fails closed on tampered or corrupted attestation
+        node["admitted_evidence_root_hash"] = None
+        node["bounded_uncertainty_receipt_hash"] = None
+        node["scientific_posterior_hash"] = None
+    else:
+        # Legacy snapshot without attestation
+        node["admitted_evidence_root_hash"] = head.get("admitted_evidence_root_hash")
+        node["bounded_uncertainty_receipt_hash"] = head.get("bounded_uncertainty_receipt_hash")
+        node["scientific_posterior_hash"] = head.get("scientific_posterior_hash")
     if authoritative_crop_cycle:
         node["crop_cycle_id"] = authoritative_crop_cycle
         if publication_frontend:

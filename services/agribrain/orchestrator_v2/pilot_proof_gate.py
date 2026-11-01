@@ -72,6 +72,22 @@ def _verified_head(head: Mapping[str, Any], envelope: PrescriptionAuthorizationE
             raise ContractViolation(f"Scientific proof {field} mismatch")
     if not _same_instant(head.get("evidence_cutoff_at"), envelope.evidence_cutoff_at, "evidence cutoff"):
         raise ContractViolation("Scientific proof cutoff mismatch")
+    if head.get("proof_attestation_valid") is False:
+        raise ContractViolation("Scientific proof requires an authentic, verified proof attestation")
+    attestation = head.get("proof_attestation")
+    if attestation is not None:
+        if head.get("proof_attestation_valid") is not True:
+            raise ContractViolation("Scientific proof requires an authentic, verified proof attestation")
+        if not isinstance(attestation, Mapping):
+            raise ContractViolation("Proof attestation must be a mapping")
+        if attestation.get("canonical_publication_receipt_hash") != envelope.canonical_publication_receipt_hash:
+            raise ContractViolation("Proof attestation publication receipt hash mismatch")
+        if attestation.get("snapshot_id") != envelope.snapshot_id:
+            raise ContractViolation("Proof attestation snapshot identity mismatch")
+        if head.get("admitted_evidence_root_hash") != attestation.get("admitted_evidence_root_hash"):
+            raise ContractViolation("Head admitted_evidence_root_hash does not match authenticated proof attestation")
+        if head.get("bounded_uncertainty_receipt_hash") != attestation.get("bounded_uncertainty_receipt_hash"):
+            raise ContractViolation("Head bounded_uncertainty_receipt_hash does not match authenticated proof attestation")
 
 
 def _witness_claims(witness: Mapping[str, Any], envelope: PrescriptionAuthorizationEnvelopeV2) -> None:
@@ -271,3 +287,77 @@ def verify_published_uncertainty_bounds(
         kind="BOUNDED_UNCERTAINTY", status="STRUCTURAL_MATCH_ONLY",
         claimed_root=root, checked_entries=len(actions),
     )
+
+def build_admitted_membership_witness(
+    *,
+    tenant_id: str,
+    farm_id: str,
+    plot_id: str,
+    geometry_hash: str,
+    crop_cycle_id: str,
+    snapshot_id: str,
+    publication_receipt_hash: str,
+    job_manifest_hash: str,
+    evidence_cutoff_at: str,
+    input_belief_id: str,
+    tribunal_content_hash: str,
+    prescription_manifest_hash: str,
+    accepted_contribution_ids: Sequence[str],
+    entries: Sequence[Mapping[str, Any]],
+) -> dict:
+    """Canonical constructor for pilot_admitted_membership_v1 witness document."""
+    witness: dict[str, Any] = {
+        "schema_version": "pilot_admitted_membership_v1",
+        "tenant_id": _required_text(tenant_id, "tenant_id"),
+        "farm_id": _required_text(farm_id, "farm_id"),
+        "plot_id": _required_text(plot_id, "plot_id"),
+        "geometry_hash": _required_hash(geometry_hash, "geometry_hash"),
+        "crop_cycle_id": _required_text(crop_cycle_id, "crop_cycle_id"),
+        "snapshot_id": _required_text(snapshot_id, "snapshot_id"),
+        "publication_receipt_hash": _required_hash(publication_receipt_hash, "publication_receipt_hash"),
+        "job_manifest_hash": _required_hash(job_manifest_hash, "job_manifest_hash"),
+        "evidence_cutoff_at": _utc_instant(evidence_cutoff_at, "evidence_cutoff_at"),
+        "input_belief_id": _required_text(input_belief_id, "input_belief_id"),
+        "tribunal_content_hash": _required_hash(tribunal_content_hash, "tribunal_content_hash"),
+        "prescription_manifest_hash": _required_hash(prescription_manifest_hash, "prescription_manifest_hash"),
+        "accepted_contribution_ids": list(accepted_contribution_ids),
+        "entries": [dict(e) for e in entries],
+    }
+    witness["content_hash"] = canonical_hash(witness)
+    return witness
+
+
+def build_bounded_uncertainty_witness(
+    *,
+    tenant_id: str,
+    farm_id: str,
+    plot_id: str,
+    geometry_hash: str,
+    crop_cycle_id: str,
+    snapshot_id: str,
+    publication_receipt_hash: str,
+    job_manifest_hash: str,
+    evidence_cutoff_at: str,
+    admitted_evidence_root_hash: str,
+    source_posterior_hash: str,
+    actions: Sequence[Mapping[str, Any]],
+) -> dict:
+    """Canonical constructor for pilot_bounded_uncertainty_v1 witness document."""
+    witness: dict[str, Any] = {
+        "schema_version": "pilot_bounded_uncertainty_v1",
+        "tenant_id": _required_text(tenant_id, "tenant_id"),
+        "farm_id": _required_text(farm_id, "farm_id"),
+        "plot_id": _required_text(plot_id, "plot_id"),
+        "geometry_hash": _required_hash(geometry_hash, "geometry_hash"),
+        "crop_cycle_id": _required_text(crop_cycle_id, "crop_cycle_id"),
+        "snapshot_id": _required_text(snapshot_id, "snapshot_id"),
+        "publication_receipt_hash": _required_hash(publication_receipt_hash, "publication_receipt_hash"),
+        "job_manifest_hash": _required_hash(job_manifest_hash, "job_manifest_hash"),
+        "evidence_cutoff_at": _utc_instant(evidence_cutoff_at, "evidence_cutoff_at"),
+        "admitted_evidence_root_hash": _required_hash(admitted_evidence_root_hash, "admitted_evidence_root_hash"),
+        "source_posterior_hash": _required_hash(source_posterior_hash, "source_posterior_hash"),
+        "actions": [dict(a) for a in actions],
+    }
+    witness["content_hash"] = canonical_hash(witness)
+    return witness
+
