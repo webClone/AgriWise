@@ -50,6 +50,8 @@ export function classifyTelemetryObservation(observation, evidenceCutoffAt, now 
       ? TELEMETRY_STATUS.MODEL_FORECAST : TELEMETRY_STATUS.UNVERIFIED;
   }
   if (kind !== "observation" || !observation?.source) return TELEMETRY_STATUS.UNVERIFIED;
+  // A daily bucket is a grouping date, never an acquisition instant.
+  if (observation.timeBasis === "day_bucket_unverified") return TELEMETRY_STATUS.UNVERIFIED;
   const observed = isoMillis(observation?.observedAt);
   if (!Number.isFinite(observed) || observed > current || !Number.isFinite(cutoff)) {
     return TELEMETRY_STATUS.UNVERIFIED;
