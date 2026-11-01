@@ -541,6 +541,13 @@ def validate_published_pilot_envelope(
     ):
         raise ContractViolation("V2 scientific uncertainty receipt mismatch")
     checked_at = _utc_instant(now, "validation time")
-    if not envelope.issued_at <= checked_at < envelope.expires_at:
+    # All three fields are canonical UTC strings for content-addressed identity,
+    # but ISO 8601 strings with mixed whole/fractional seconds are not sortable.
+    # Compare timezone-aware instants, retaining [issued_at, expires_at).
+    issued_instant, checked_instant, expiry_instant = (
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        for value in (envelope.issued_at, checked_at, envelope.expires_at)
+    )
+    if not issued_instant <= checked_instant < expiry_instant:
         raise ContractViolation("V2 prescription authorization not yet valid or expired")
     return envelope
