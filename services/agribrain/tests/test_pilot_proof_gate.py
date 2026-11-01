@@ -71,6 +71,23 @@ def fixture():
              "evidence_content_hash": CONTENT}
         ],
     }
+    receipt = create_evidence_receipt(
+        contribution_id=CONTRIBUTION,
+        evidence_ids=[EVIDENCE_ID],
+        content_hashes=[CONTENT],
+        calibration_certificate_id="calibration-1",
+        spatial_support={"geometry_hash": SCOPE["geometry_hash"]},
+        observation_timestamp=datetime(2026, 10, 30, 12, tzinfo=timezone.utc),
+        validity_interval=(
+            datetime(2026, 10, 30, 12, tzinfo=timezone.utc),
+            datetime(2026, 11, 2, 12, tzinfo=timezone.utc),
+        ),
+        freshness_expiry=datetime(2026, 11, 2, 12, tzinfo=timezone.utc),
+        truth_class="CALIBRATED_PHYSICAL_MEASUREMENT",
+        originating_stage_receipt_id="stage-certified-1",
+        action_classes_allowed=["EXACT_PRESCRIPTION"],
+    )
+    witness["entries"][0]["receipt_content_hash"] = canonical_hash(receipt.to_dict())
     witness["content_hash"] = canonical_hash(witness)
     bounded = {
         **SCOPE,
@@ -111,22 +128,6 @@ def fixture():
         "bounded_uncertainty_receipt_hash": bounded["content_hash"],
         "scientific_posterior_hash": POSTERIOR,
     }
-    receipt = create_evidence_receipt(
-        contribution_id=CONTRIBUTION,
-        evidence_ids=[EVIDENCE_ID],
-        content_hashes=[CONTENT],
-        calibration_certificate_id="calibration-1",
-        spatial_support={"geometry_hash": SCOPE["geometry_hash"]},
-        observation_timestamp=datetime(2026, 10, 30, 12, tzinfo=timezone.utc),
-        validity_interval=(
-            datetime(2026, 10, 30, 12, tzinfo=timezone.utc),
-            datetime(2026, 11, 2, 12, tzinfo=timezone.utc),
-        ),
-        freshness_expiry=datetime(2026, 11, 2, 12, tzinfo=timezone.utc),
-        truth_class="CALIBRATED_PHYSICAL_MEASUREMENT",
-        originating_stage_receipt_id="stage-certified-1",
-        action_classes_allowed=["EXACT_PRESCRIPTION"],
-    )
     receipts = {CONTRIBUTION: receipt}
     return head, envelope, witness, receipts, bounded
 
