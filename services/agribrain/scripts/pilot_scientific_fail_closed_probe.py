@@ -220,7 +220,9 @@ def run_probe(args):
         "run_boundary": {"status": "NOT_RUN"},
         "qualifications": {
             "published_snapshot_read_only": False,
-            "live_plot_run_fail_closed": False,
+            "recorded_plot_run_fail_closed": False,
+            "new_live_orchestrator_run_executed": False,
+            "published_snapshot_linked_to_run": False,
             "positive_prescription_pilot": False,
         },
     }
@@ -250,13 +252,13 @@ def run_probe(args):
     report["qualifications"]["published_snapshot_read_only"] = (
         report["snapshot"]["status"] == "PASS"
     )
-    report["qualifications"]["live_plot_run_fail_closed"] = (
+    report["qualifications"]["recorded_plot_run_fail_closed"] = (
         report["run_boundary"]["status"] == "PASS_FAIL_CLOSED"
         and report["snapshot"]["status"] == "PASS"
     )
     report["gate_status"] = (
         "PASS_READ_ONLY_EXISTING_RUN"
-        if report["qualifications"]["live_plot_run_fail_closed"]
+        if report["qualifications"]["recorded_plot_run_fail_closed"]
         else "FAIL"
         if any(x.get("status") in ("FAIL", "INVALID", "ERROR")
                for x in (report["snapshot"], report["run_boundary"], report["source_boundary"]))
