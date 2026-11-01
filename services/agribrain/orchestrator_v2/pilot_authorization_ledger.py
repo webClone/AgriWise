@@ -102,6 +102,15 @@ class PilotCandidateLedger:
                   revoked_at TEXT NOT NULL,
                   reason TEXT NOT NULL
                 )""")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS scope_blocks (
+                  tenant_id TEXT NOT NULL,
+                  farm_id TEXT NOT NULL,
+                  plot_id TEXT NOT NULL,
+                  blocked_at TEXT NOT NULL,
+                  reason TEXT NOT NULL,
+                  PRIMARY KEY(tenant_id, farm_id, plot_id)
+                )""")
 
     def register_quarantined_candidate(
         self,
@@ -179,6 +188,12 @@ class PilotCandidateLedger:
         serialized = json.dumps(record, sort_keys=True, separators=(",", ":"))
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            blocked = conn.execute(
+                "SELECT 1 FROM scope_blocks WHERE tenant_id=? AND farm_id=? AND plot_id=?",
+                (namespace.tenant_id, namespace.farm_id, namespace.plot_id),
+            ).fetchone()
+            if blocked:
+                raise ContractViolation("Pilot plot scope is administratively blocked")
             conn.execute(
                 "INSERT INTO candidates(candidate_id, envelope_hash, plot_id, snapshot_id, record_json) VALUES (?,?,?,?,?)",
                 (record["candidate_id"], envelope.content_hash, namespace.plot_id, envelope.snapshot_id, serialized),
@@ -233,6 +248,13 @@ class PilotCandidateLedger:
         for k in ("tenant_id", "farm_id", "plot_id"):
             if record[k] != getattr(namespace, k):
                 raise ContractViolation("Pilot candidate belongs to another namespace")
+        with self._connect() as conn:
+            blocked = conn.execute(
+                "SELECT 1 FROM scope_blocks WHERE tenant_id=? AND farm_id=? AND plot_id=?",
+                (namespace.tenant_id, namespace.farm_id, namespace.plot_id),
+            ).fetchone()
+        if blocked:
+            raise ContractViolation("Pilot plot scope is administratively blocked")
         head = read_trusted_current_asmae_publication(
             namespace,
             expected_snapshot_id=record["snapshot_id"],
@@ -273,6 +295,20 @@ class PilotCandidateLedger:
             conn.execute(
                 "INSERT OR IGNORE INTO revocations(candidate_id,revoked_at,reason) VALUES (?,?,?)",
                 (candidate_id, at, reason),
+            )
+            conn.commit()
+
+    def block_scope(self, namespace: PlotNamespace, *, reason: str, at: str) -> None:
+        """Emergency persistent plot block; this module provides no unblock."""
+        if not isinstance(namespace, PlotNamespace) or not namespace.is_valid():
+            raise ContractViolation("Scope block requires authenticated namespace")
+        reason = _required_text(reason, "scope block reason")
+        at = _utc_instant(at, "scope blocked_at")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT OR IGNORE INTO scope_blocks(tenant_id,farm_id,plot_id,blocked_at,reason) VALUES (?,?,?,?,?)",
+                (namespace.tenant_id, namespace.farm_id, namespace.plot_id, at, reason),
             )
             conn.commit()
 
