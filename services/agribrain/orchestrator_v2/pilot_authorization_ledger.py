@@ -241,6 +241,9 @@ class PilotCandidateLedger:
             require_proof_attestation=True,
         )
         for name, field in (
+            ("snapshot_id", "snapshot_id"),
+            ("geometry_hash", "geometry_hash"),
+            ("crop_cycle_id", "crop_cycle_id"),
             ("publication_receipt_hash", "publication_receipt_hash"),
             ("attestation_hash", "proof_attestation_hash"),
             ("admitted_evidence_root_hash", "admitted_evidence_root_hash"),
