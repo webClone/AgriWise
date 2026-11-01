@@ -13,6 +13,8 @@ from services.agribrain.orchestrator_v2.schema import RunArtifact, LayerStatus
 from services.agribrain.scientific_contracts.prescription_authorization import (
     AuthorizedActionV1,
     PrescriptionAuthorizationEnvelopeV1,
+    PrescriptionAuthorizationEnvelopeV2,
+    PRESCRIPTION_AUTHORIZATION_ENVELOPE_V2,
     canonical_hash,
     selected_entries_exist,
 )
@@ -424,6 +426,14 @@ def _validated_authorization(
         raw = getattr(l8_output, "authorization_envelope", None)
         if raw is None:
             raise ContractViolation("L8 authorization envelope is missing")
+        # V2 is NOT a subtype of legacy export authority. It is a candidate
+        # contract until the authenticated current-publication binding,
+        # validated uncertainty and receipt promotion are wired end-to-end.
+        if (isinstance(raw, PrescriptionAuthorizationEnvelopeV2)
+                or getattr(raw, "schema_version", None) == PRESCRIPTION_AUTHORIZATION_ENVELOPE_V2
+                or (isinstance(raw, dict) and
+                    raw.get("schema_version") == PRESCRIPTION_AUTHORIZATION_ENVELOPE_V2)):
+            raise ContractViolation("V2 publication binding gate is not yet wired for action export")
         envelope = (
             raw
             if isinstance(raw, PrescriptionAuthorizationEnvelopeV1)
