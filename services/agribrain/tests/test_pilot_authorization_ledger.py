@@ -204,3 +204,21 @@ def test_v1_cannot_be_registered_as_pilot_candidate(tmp_path):
             geometry_hash=v2().geometry_hash, crop_cycle_id=v2().crop_cycle_id,
             envelope=PrescriptionAuthorizationEnvelopeV1(**common()), now=NOW,
         )
+
+
+def test_emergency_plot_scope_block_is_durable_and_denies_future_records(tmp_path):
+    s = ledger(tmp_path)
+    candidate = register(s)
+    s.block_scope(NS, reason="unresolved calibration drift", at=NOW)
+    s.block_scope(NS, reason="attempt to unblock by duplicate", at=NOW)
+    reopened = ledger(tmp_path)
+    with pytest.raises(ContractViolation, match="administratively blocked"):
+        inspect(reopened, candidate["candidate_id"])
+    with pytest.raises(ContractViolation, match="administratively blocked"):
+        register(reopened)
+    with sqlite3.connect(reopened.path) as conn:
+        reason = conn.execute(
+            "SELECT reason FROM scope_blocks WHERE tenant_id=? AND farm_id=? AND plot_id=?",
+            (NS.tenant_id, NS.farm_id, NS.plot_id),
+        ).fetchone()[0]
+    assert reason == "unresolved calibration drift"
