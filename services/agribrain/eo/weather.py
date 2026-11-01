@@ -44,7 +44,7 @@ def _fetch_open_meteo_weather(lat: float, lng: float) -> Optional[Dict]:
             current_observed_at = None
             try:
                 clock = current.get("time")
-                if isinstance(clock, str) and data.get("utc_offset_seconds") == 0:
+                if isinstance(clock, str) and len(clock) >= 16 and clock[10:11] == "T" and data.get("utc_offset_seconds") == 0:
                     instant = datetime.fromisoformat(clock.replace("Z", "+00:00"))
                     if instant.tzinfo is None:
                         instant = instant.replace(tzinfo=timezone.utc)
