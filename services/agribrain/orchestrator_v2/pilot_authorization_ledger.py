@@ -11,6 +11,7 @@ one transactional shared store, never separate replica-local ledgers.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -73,12 +74,16 @@ class PilotCandidateLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
+    @contextmanager
     def _connect(self):
         conn = sqlite3.connect(str(self.path), timeout=10, isolation_level=None)
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.execute("PRAGMA synchronous=FULL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        return conn
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA synchronous=FULL")
+            conn.execute("PRAGMA foreign_keys=ON")
+            yield conn
+        finally:
+            conn.close()
 
     def _init(self):
         with self._connect() as conn:
