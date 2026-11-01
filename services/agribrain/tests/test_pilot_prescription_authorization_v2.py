@@ -8,10 +8,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from services.agribrain.scientific_contracts.exceptions import ContractViolation
+from services.agribrain.orchestrator_v2.run_schema import _validated_authorization
+from services.agribrain.orchestrator_v2.schema import LayerStatus
 from services.agribrain.scientific_contracts.prescription_authorization import (
     AuthorizedActionV1,
     CANONICAL_PUBLICATION_VALIDATION_FLAGS,
@@ -299,3 +302,18 @@ def test_v2_requires_explicit_uncertainty_receipt_and_never_issues_real_authorit
         check(verified_uncertainty_receipt_hash="")
     result = check()
     assert all(not action.machine_execution_allowed for action in result.actions)
+
+
+@pytest.mark.parametrize("as_mapping", [False, True])
+def test_legacy_farmer_export_quarantines_v2_until_published_gate_is_wired(as_mapping):
+    candidate = v2()
+    raw = candidate.to_dict() if as_mapping else candidate
+    artifact = SimpleNamespace(
+        layer_8=SimpleNamespace(
+            status=LayerStatus.OK,
+            output=SimpleNamespace(authorization_envelope=raw),
+        ),
+    )
+    granted, reason = _validated_authorization(artifact)
+    assert granted is None
+    assert "V2 publication binding gate is not yet wired" in reason
