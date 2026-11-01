@@ -19,9 +19,9 @@ if (!stripTypeScriptTypes) {
 
 const now = "2026-10-30T16:00:00Z";
 const cutoff = "2026-10-30T10:00:00Z";
-const observation = (id, observedAt, source = "weather_station") => ({
+const observation = (id, observedAt, source = "weather_station", ingestedAt = observedAt) => ({
   scope: { tenantId: "T", farmId: "F", plotId: "P" },
-  id, source, kind: "observation", observedAt, value: 12, unit: "°C",
+  id, source, kind: "observation", observedAt, ingestedAt, value: 12, unit: "°C",
 });
 const manifestEvent = Object.freeze({
   id: "manifest-001",
@@ -55,6 +55,29 @@ test("historical observations cannot be certified by timestamp or sender flag", 
   const old = { ...observation("late", "2026-10-29T09:00:00Z"), ingestedAt: "2026-10-30T12:00:00Z" };
   assert.equal(classifyTelemetryObservation(old, cutoff, now), S.LATE_ARRIVING_UNADMITTED);
   assert.equal(classifyTelemetryObservation({ ...old, manifestMembership: true }, cutoff, now), S.LATE_ARRIVING_UNADMITTED);
+});
+
+test("ingestion-aware classification distinguishes late-arriving from historical unadmitted and missing ingestion", () => {
+  // 1. Observed before cutoff, ingested after cutoff -> LATE_ARRIVING_UNADMITTED
+  assert.equal(classifyTelemetryObservation({ ...observation("late", "2026-10-29T09:00:00Z"), ingestedAt: "2026-10-30T12:00:00Z" }, cutoff, now), S.LATE_ARRIVING_UNADMITTED);
+  // 2. Observed before cutoff, ingested before cutoff -> UNVERIFIED (historical unadmitted cannot masquerade as late-arriving)
+  assert.equal(classifyTelemetryObservation({ ...observation("hist-unadmitted", "2026-10-29T09:00:00Z"), ingestedAt: "2026-10-29T09:30:00Z" }, cutoff, now), S.UNVERIFIED);
+  // 3. Observed after cutoff, ingested after cutoff -> LIVE_UNCERTIFIED
+  assert.equal(classifyTelemetryObservation({ ...observation("live", "2026-10-30T11:00:00Z"), ingestedAt: "2026-10-30T11:05:00Z" }, cutoff, now), S.LIVE_UNCERTIFIED);
+  // 4. Missing ingestedAt -> UNVERIFIED
+  assert.equal(classifyTelemetryObservation({ ...observation("missing-ingest", "2026-10-30T11:00:00Z"), ingestedAt: undefined }, cutoff, now), S.UNVERIFIED);
+  assert.equal(classifyTelemetryObservation({ ...observation("null-ingest", "2026-10-29T09:00:00Z"), ingestedAt: null }, cutoff, now), S.UNVERIFIED);
+});
+
+test("daily bucket never receives live or late authority", () => {
+  const dayBucket = {
+    ...observation("legacy-weather", "2026-10-30T00:00:00Z"),
+    ingestedAt: "2026-10-30T14:01:00Z",
+    timeBasis: "day_bucket_unverified",
+    dayBucketDate: "2026-10-30",
+  };
+  assert.equal(classifyTelemetryObservation(dayBucket, cutoff, now), S.UNVERIFIED);
+  assert.notEqual(classifyTelemetryObservation(dayBucket, cutoff, now), S.CERTIFIED_MANIFEST);
 });
 
 test("live, forecast and missing evidence stay distinct", () => {
@@ -102,14 +125,15 @@ test("timeline mixed-row selects metric value and supplier together without misl
   const helper = stripTypeScriptTypes(timelineSource.slice(helperStart, helperEnd), { mode: "strip" });
 
   const memoStart = timelineSource.indexOf("const days: DayCell[] = useMemo(() => {") + "const days: DayCell[] = useMemo(() => {".length;
-  const memoEnd = timelineSource.indexOf("}, [timeline, assessment, evidenceCutoffAt]);", memoStart);
-  const build = stripTypeScriptTypes("function build(timeline:any,assessment:any,evidenceCutoffAt:any){" + timelineSource.slice(memoStart, memoEnd) + "}", { mode: "strip" });
+  const memoEnd = timelineSource.indexOf("}, [timeline, assessment, evidenceCutoffAt", memoStart);
+  const build = stripTypeScriptTypes("function build(timeline:any,assessment:any,evidenceCutoffAt:any,liveTelemetryStream:any){" + timelineSource.slice(memoStart, memoEnd) + "}", { mode: "strip" });
 
   const buildDays = new Function("classifyTelemetryObservation", "classifyManifestEvidence", "TELEMETRY_STATUS", helper + build + ";return build;")(classifyTelemetryObservation, classifyManifestEvidence, S);
 
   const today = new Date().toISOString().slice(0, 10);
   const testCutoff = new Date(Date.now() - 86400000).toISOString();
-  const weather = { date: today, timestamp: today + "T00:00:00Z", source: "weather_station", temp: 22 };
+  // Weather observation with valid ingestion timestamp
+  const weather = { date: today, timestamp: today + "T00:00:00Z", fetchedAt: today + "T00:05:00Z", source: "weather_station", temp: 22 };
   const forecast = { date: today + "T12:00:00Z", source: "weather_model", modelId: "forecast-v1", temp: 19, rain_mm: 6, humidity: 75 };
 
   const select = t => buildDays(t, null, testCutoff).find(x => x.date === today);
@@ -149,4 +173,118 @@ test("timeline mixed-row selects metric value and supplier together without misl
   assert.equal(missing.values.temp, null);
   assert.equal(missing.metricStatuses.temp, S.UNVERIFIED);
   assert.equal(missing.metricDotColors.rain, "#64748b");
+
+  // Correction A regression: post-cutoff observation with NO ingestion timestamp must NOT manufacture one; yields UNVERIFIED
+  const postCutoffNoIngest = select({ weather: [{ date: today, timestamp: today + "T00:00:00Z", source: "weather_station", temp: 26 }] });
+  assert.equal(postCutoffNoIngest.values.temp, 26);
+  assert.equal(postCutoffNoIngest.metricStatuses.temp, S.UNVERIFIED);
+  assert.equal(postCutoffNoIngest.metricDotColors.temp, "#64748b");
+});
+
+test("Milestone 2: timeline renders individual operational telemetry with explicit provenance and no self-certification", () => {
+  const root = process.cwd();
+  const timelineSource = fs.readFileSync(path.join(root, "src/components/farm/intelligence/TimelineStrip.tsx"), "utf8");
+
+  const helperStart = timelineSource.indexOf("function classifyTimelineDatum(");
+  const helperEnd = timelineSource.indexOf("/* ─── Sparkline", helperStart);
+  const helper = stripTypeScriptTypes(timelineSource.slice(helperStart, helperEnd), { mode: "strip" });
+
+  const memoStart = timelineSource.indexOf("const days: DayCell[] = useMemo(() => {") + "const days: DayCell[] = useMemo(() => {".length;
+  const memoEnd = timelineSource.indexOf("}, [timeline, assessment, evidenceCutoffAt", memoStart);
+  const build = stripTypeScriptTypes("function build(timeline:any,assessment:any,evidenceCutoffAt:any,liveTelemetryStream:any){" + timelineSource.slice(memoStart, memoEnd) + "}", { mode: "strip" });
+
+  const buildDays = new Function("classifyTelemetryObservation", "classifyManifestEvidence", "TELEMETRY_STATUS", helper + build + ";return build;")(classifyTelemetryObservation, classifyManifestEvidence, S);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const testCutoff = yesterday + "T18:00:00Z";
+
+  // Telemetry stream containing 1 live uncertified and 1 late-arriving unadmitted observation
+  const mockStream = {
+    contractVersion: "live_telemetry_stream_v1",
+    scope: { tenantId: "T", farmId: "F", plotId: "P" },
+    observations: [
+      {
+        id: "sensor-live-temp",
+        source: "sensor:field_node_01",
+        kind: "observation",
+        observedAt: today + "T08:30:00Z",
+        ingestedAt: today + "T08:30:05Z",
+        timeBasis: "server_received_at",
+        obsType: "sensor_reading",
+        metric: "temp",
+        value: 24.2,
+        unit: "°C",
+      },
+      {
+        id: "sensor-unverified-wind",
+        source: "sensor:field_node_03",
+        kind: "observation",
+        observedAt: today + "T09:00:00Z",
+        ingestedAt: null,
+        timeBasis: "server_received_at",
+        obsType: "sensor_reading",
+        metric: "wind",
+        value: 12.5,
+        unit: "km/h",
+      },
+      {
+        id: "obs-late-rain",
+        source: "plot-source:station_02",
+        kind: "observation",
+        observedAt: yesterday + "T12:00:00Z",
+        ingestedAt: today + "T06:00:00Z",
+        timeBasis: "source_observation_at",
+        obsType: "current_weather",
+        metric: "rain",
+        value: 4.5,
+        unit: "mm",
+      },
+    ],
+  };
+
+  const days = buildDays(null, null, testCutoff, mockStream);
+  const todayCell = days.find(x => x.date === today);
+  const yesterdayCell = days.find(x => x.date === yesterday);
+
+  assert.ok(todayCell, "today cell must exist");
+  assert.equal(todayCell.operationalObservations.length, 2);
+  const liveObs = todayCell.operationalObservations[0];
+  assert.equal(liveObs.id, "sensor-live-temp");
+  assert.equal(liveObs.metric, "temp");
+  assert.equal(liveObs.value, 24.2);
+  assert.equal(liveObs.timeBasis, "server_received_at");
+  assert.equal(liveObs.obsType, "sensor_reading");
+  assert.equal(liveObs.status, S.LIVE_UNCERTIFIED);
+  assert.notEqual(liveObs.status, S.CERTIFIED_MANIFEST);
+
+  const unverifiedObs = todayCell.operationalObservations[1];
+  assert.equal(unverifiedObs.id, "sensor-unverified-wind");
+  assert.equal(unverifiedObs.metric, "wind");
+  assert.equal(unverifiedObs.value, 12.5);
+  assert.equal(unverifiedObs.status, S.UNVERIFIED);
+  assert.notEqual(unverifiedObs.status, S.LATE_ARRIVING_UNADMITTED);
+
+  assert.ok(yesterdayCell, "yesterday cell must exist");
+  assert.equal(yesterdayCell.operationalObservations.length, 1);
+  const lateObs = yesterdayCell.operationalObservations[0];
+  assert.equal(lateObs.id, "obs-late-rain");
+  assert.equal(lateObs.metric, "rain");
+  assert.equal(lateObs.value, 4.5);
+  assert.equal(lateObs.timeBasis, "source_observation_at");
+  assert.equal(lateObs.obsType, "current_weather");
+  assert.equal(lateObs.status, S.LATE_ARRIVING_UNADMITTED);
+  assert.notEqual(lateObs.status, S.CERTIFIED_MANIFEST);
+
+  // Assert component template exposes operational telemetry tooltips and pills
+  assert.match(timelineSource, /data-testid="timeline-operational-telemetry"/);
+  assert.match(timelineSource, /data-testid="telemetry-pill"/);
+  assert.match(timelineSource, /Basis:\s*\{obs\.timeBasis === "server_received_at"\s*\?\s*"server receipt"\s*:\s*obs\.timeBasis === "source_observation_at"\s*\?\s*"source observation time"\s*:\s*"daily bucket · time unknown"\}/);
+  assert.match(timelineSource, /unknown \(daily bucket\)/);
+  assert.match(timelineSource, /obs\.dayBucketDate \|\| obs\.observedAt\.slice\(0, 10\)/);
+
+  // Correction B: verify explicit rendering for all three statuses (LIVE_UNCERTIFIED, LATE_ARRIVING_UNADMITTED, UNVERIFIED)
+  assert.match(timelineSource, /obs\.status === "LIVE_UNCERTIFIED"\s*\?\s*"rgba\(56, 189, 248, 0\.15\)"\s*:\s*obs\.status === "LATE_ARRIVING_UNADMITTED"\s*\?\s*"rgba\(251, 191, 36, 0\.15\)"\s*:\s*"rgba\(148, 163, 184, 0\.15\)"/);
+  assert.match(timelineSource, /obs\.status === "LIVE_UNCERTIFIED"\s*\?\s*"#38bdf8"\s*:\s*obs\.status === "LATE_ARRIVING_UNADMITTED"\s*\?\s*"#fbbf24"\s*:\s*"#94a3b8"/);
+  assert.match(timelineSource, /obs\.status === "LIVE_UNCERTIFIED"\s*\?\s*"LIVE UNCERTIFIED"\s*:\s*obs\.status === "LATE_ARRIVING_UNADMITTED"\s*\?\s*"LATE-ARRIVING UNADMITTED"\s*:\s*"UNVERIFIED"/);
 });

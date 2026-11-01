@@ -204,14 +204,26 @@ def _extract_observations(source: str, data: Any, fetch_time: datetime) -> list:
             },
         }]
     
-    # ── OpenWeather Current ────────────────────────────────────────
+    # ── OpenWeather / Open-Meteo Current ──────────────────────────
     if source == "openweather_current":
+        # obsDate is an actual acquisition instant only when the adapter
+        # carried a UTC-qualified provider clock. Otherwise retain the
+        # daily bucket for legacy grouping; downstream MUST mark it unverified.
+        acquired_at = None
+        clock = data.get("observed_at")
+        if isinstance(clock, str):
+            try:
+                parsed = datetime.fromisoformat(clock.replace("Z", "+00:00"))
+                if parsed.tzinfo is not None and parsed.utcoffset() is not None:
+                    acquired_at = parsed.astimezone(timezone.utc)
+            except (ValueError, TypeError, OverflowError):
+                pass
         temp_data = data.get("temperature", {})
         temp_current = temp_data.get("current") if isinstance(temp_data, dict) else temp_data
         return [{
             "source": "weather",
             "obs_type": "current_weather",
-            "obs_date": today_dt,
+            "obs_date": acquired_at or today_dt,
             "features": {
                 "tempC": temp_current,
                 "tempMin": temp_data.get("min") if isinstance(temp_data, dict) else None,

@@ -81,6 +81,19 @@ interface DayCell {
   ndviSource?: string;        // "observed" | "kalman" from backend
   ndviConfidence?: number;    // 0-1 from Kalman engine
   tempRange: { min: number | null; max: number | null };
+  operationalObservations: Array<{
+    id: string;
+    source: string;
+    metric: string;
+    value: number;
+    unit: string;
+    observedAt: string;
+    ingestedAt: string;
+    timeBasis?: "server_received_at" | "source_observation_at" | "day_bucket_unverified";
+    dayBucketDate?: string;
+    obsType?: string;
+    status: TelemetryStatus;
+  }>;
 }
 
 
@@ -102,6 +115,7 @@ function classifyTimelineDatum(
 ): TelemetryStatus {
   if (!datum) return TELEMETRY_STATUS.UNVERIFIED;
   const observedAt = datum.observedAt ?? datum.observed_at ?? datum.timestamp ?? datum.date;
+  const ingestedAt = datum.ingestedAt ?? datum.ingested_at ?? datum.fetchedAt ?? datum.fetched_at;
   const validAt = datum.validAt ?? datum.valid_at ?? datum.date ?? datum.timestamp;
   const candidate: TelemetryObservation = {
     id: String(datum.id || datum.observation_id || "timeline-record"),
@@ -109,6 +123,7 @@ function classifyTimelineDatum(
     source: typeof datum.source === "string"
       ? datum.source : typeof datum.provider === "string" ? datum.provider : "",
     observedAt: typeof observedAt === "string" ? observedAt : undefined,
+    ingestedAt: typeof ingestedAt === "string" ? ingestedAt : undefined,
     validAt: typeof validAt === "string" ? validAt : undefined,
     modelId: typeof datum.modelId === "string"
       ? datum.modelId : typeof datum.model_id === "string" ? datum.model_id : undefined,
@@ -300,6 +315,59 @@ function DayTooltip({ day, metric, style }: {
           Range: {day.tempRange.min.toFixed(1)}° – {day.tempRange.max.toFixed(1)}°
         </div>
       )}
+      {day.operationalObservations.length > 0 && (
+        <div data-testid="timeline-operational-telemetry" style={{
+          marginTop: "8px", paddingTop: "6px",
+          borderTop: "1px solid rgba(71,85,105,0.3)",
+          display: "flex", flexDirection: "column", gap: "4px",
+        }}>
+          <div style={{ fontSize: "0.7rem", fontWeight: 600, color: "#38bdf8", display: "flex", justifyContent: "space-between" }}>
+            <span>Operational Stream ({day.operationalObservations.length})</span>
+            <span style={{ fontSize: "0.62rem", color: "#94a3b8" }}>Uncertified</span>
+          </div>
+          {day.operationalObservations.map((obs) => (
+            <div key={obs.id} style={{
+              display: "flex", flexDirection: "column", gap: "1px",
+              padding: "4px 6px", borderRadius: "5px",
+              background: "rgba(255, 255, 255, 0.04)",
+              fontSize: "0.68rem",
+            }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontWeight: 600, color: "#f8fafc" }}>
+                  {obs.metric}: {obs.value} {obs.unit}
+                </span>
+                <span style={{
+                  fontSize: "0.6rem", padding: "1px 4px", borderRadius: "3px",
+                  background: obs.status === "LIVE_UNCERTIFIED"
+                    ? "rgba(56, 189, 248, 0.15)"
+                    : obs.status === "LATE_ARRIVING_UNADMITTED"
+                    ? "rgba(251, 191, 36, 0.15)"
+                    : "rgba(148, 163, 184, 0.15)",
+                  color: obs.status === "LIVE_UNCERTIFIED"
+                    ? "#38bdf8"
+                    : obs.status === "LATE_ARRIVING_UNADMITTED"
+                    ? "#fbbf24"
+                    : "#94a3b8",
+                  fontWeight: 600,
+                }}>
+                  {obs.status === "LIVE_UNCERTIFIED"
+                    ? "LIVE UNCERTIFIED"
+                    : obs.status === "LATE_ARRIVING_UNADMITTED"
+                    ? "LATE-ARRIVING UNADMITTED"
+                    : "UNVERIFIED"}
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.62rem", color: "#94a3b8" }}>
+                <span>Source: {obs.source}{obs.obsType ? ` · ${obs.obsType}` : ""}</span>
+                <span>Basis: {obs.timeBasis === "server_received_at" ? "server receipt" : obs.timeBasis === "source_observation_at" ? "source observation time" : "daily bucket · time unknown"}</span>
+              </div>
+              <div style={{ fontSize: "0.6rem", color: "#64748b" }}>
+                Observed: {obs.timeBasis === "day_bucket_unverified" ? "unknown (daily bucket)" : obs.observedAt ? new Date(obs.observedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unknown"} · Ingested: {obs.ingestedAt ? new Date(obs.ingestedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unrecorded"}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <div style={{
         position: "absolute", bottom: "-5px", left: "50%", transform: "translateX(-50%) rotate(45deg)",
         width: "10px", height: "10px", background: "rgba(15,23,42,0.96)",
@@ -440,6 +508,26 @@ export default function TimelineStrip() {
           ? Number(forecastObs.temp_max)
           : null;
 
+      const operationalForDay = (
+        (typeof liveTelemetryStream !== "undefined" && Array.isArray(liveTelemetryStream?.observations))
+          ? liveTelemetryStream.observations
+          : []
+      )
+        .filter((obs: any) => typeof obs?.observedAt === "string" && (obs.dayBucketDate || obs.observedAt.slice(0, 10)) === dateStr)
+        .map((obs: any) => ({
+          id: String(obs.id || "op-telemetry"),
+          source: String(obs.source || "unknown"),
+          metric: String(obs.metric || "unknown"),
+          value: Number(obs.value ?? 0),
+          unit: String(obs.unit || ""),
+          observedAt: String(obs.observedAt || ""),
+          ingestedAt: String(obs.ingestedAt || ""),
+          timeBasis: obs.timeBasis,
+          dayBucketDate: obs.dayBucketDate,
+          obsType: obs.obsType,
+          status: classifyTelemetryObservation(obs, evidenceCutoffAt, nowIso),
+        }));
+
       result.push({
         date: dateStr,
         dayLabel: d.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
@@ -466,10 +554,11 @@ export default function TimelineStrip() {
           min: tempMin,
           max: tempMax,
         },
+        operationalObservations: operationalForDay,
       });
     }
     return result;
-  }, [timeline, assessment, evidenceCutoffAt]);
+  }, [timeline, assessment, evidenceCutoffAt, liveTelemetryStream]);
 
   const sparklineValues = days.map(d => d.values[activeMetric]);
   const activeConfig = METRICS.find(m => m.key === activeMetric)!;
@@ -547,7 +636,13 @@ export default function TimelineStrip() {
           ) : <span>No validated publication cutoff available</span>}
           <span style={{ marginLeft: "8px", color: "#fbbf24" }}>
             Historical dates are not proof of admission; post-cutoff readings are uncertified.
-            {" "}Operational buffer: {liveTelemetryStream.observations.length} unsealed item(s).
+            {" "}Operational buffer: {liveTelemetryStream.observations.length} unsealed item(s) (
+              {(liveTelemetryStream.observations || []).filter(o => classifyTelemetryObservation(o, evidenceCutoffAt, new Date().toISOString()) === TELEMETRY_STATUS.LIVE_UNCERTIFIED).length} live uncertified,
+              {" "}{(liveTelemetryStream.observations || []).filter(o => classifyTelemetryObservation(o, evidenceCutoffAt, new Date().toISOString()) === TELEMETRY_STATUS.LATE_ARRIVING_UNADMITTED).length} late-arriving unadmitted
+              {(liveTelemetryStream.observations || []).some(o => classifyTelemetryObservation(o, evidenceCutoffAt, new Date().toISOString()) === TELEMETRY_STATUS.UNVERIFIED)
+                ? `, ${(liveTelemetryStream.observations || []).filter(o => classifyTelemetryObservation(o, evidenceCutoffAt, new Date().toISOString()) === TELEMETRY_STATUS.UNVERIFIED).length} unverified`
+                : ""}
+            ).
           </span>
         </div>
 
@@ -722,6 +817,26 @@ export default function TimelineStrip() {
                     background: day.metricDotColors[activeMetric],
                     marginTop: "1px",
                   }} />
+
+                  {day.operationalObservations.length > 0 && (
+                    <span
+                      data-testid="telemetry-pill"
+                      title={`${day.operationalObservations.length} operational telemetry observation(s)`}
+                      style={{
+                        fontSize: "0.50rem",
+                        color: "#38bdf8",
+                        background: "rgba(56, 189, 248, 0.12)",
+                        border: "1px solid rgba(56, 189, 248, 0.25)",
+                        borderRadius: "3px",
+                        padding: "0 2px",
+                        lineHeight: "1.1",
+                        marginTop: "1px",
+                        fontWeight: 600,
+                      }}
+                    >
+                      📡 {day.operationalObservations.length}
+                    </span>
+                  )}
                 </button>
 
                 {/* Tooltip on hover */}

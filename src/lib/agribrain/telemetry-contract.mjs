@@ -50,13 +50,24 @@ export function classifyTelemetryObservation(observation, evidenceCutoffAt, now 
       ? TELEMETRY_STATUS.MODEL_FORECAST : TELEMETRY_STATUS.UNVERIFIED;
   }
   if (kind !== "observation" || !observation?.source) return TELEMETRY_STATUS.UNVERIFIED;
+  // A daily bucket is a grouping date, never an acquisition instant.
+  if (observation.timeBasis === "day_bucket_unverified") return TELEMETRY_STATUS.UNVERIFIED;
   const observed = isoMillis(observation?.observedAt);
   if (!Number.isFinite(observed) || observed > current || !Number.isFinite(cutoff)) {
     return TELEMETRY_STATUS.UNVERIFIED;
   }
-  return observed <= cutoff
-    ? TELEMETRY_STATUS.LATE_ARRIVING_UNADMITTED
-    : TELEMETRY_STATUS.LIVE_UNCERTIFIED;
+  const ingested = isoMillis(observation?.ingestedAt);
+  if (!Number.isFinite(ingested)) {
+    return TELEMETRY_STATUS.UNVERIFIED;
+  }
+  if (observed <= cutoff) {
+    return ingested > cutoff
+      ? TELEMETRY_STATUS.LATE_ARRIVING_UNADMITTED
+      : TELEMETRY_STATUS.UNVERIFIED;
+  }
+  return ingested >= cutoff
+    ? TELEMETRY_STATUS.LIVE_UNCERTIFIED
+    : TELEMETRY_STATUS.UNVERIFIED;
 }
 
 export function createLiveTelemetryStream(scope) {

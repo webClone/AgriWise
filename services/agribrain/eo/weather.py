@@ -6,7 +6,7 @@ Extracted from sentinel.py for separation of concerns.
 
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 from eo.auth import EO_REQUEST_TIMEOUT
@@ -33,13 +33,25 @@ def _fetch_open_meteo_weather(lat: float, lng: float) -> Optional[Dict]:
             "latitude": lat,
             "longitude": lng,
             "current": "temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m,surface_pressure,cloud_cover",
-            "timezone": "auto"
+            "timezone": "UTC"
         }
         response = requests.get(url, params=params, timeout=EO_REQUEST_TIMEOUT)
         if response.status_code == 200:
             data = response.json()
             current = data.get("current", {})
-            
+            # UTC is explicitly requested; only the provider's zero-offset
+            # timestamp qualifies as an acquisition instant.
+            current_observed_at = None
+            try:
+                clock = current.get("time")
+                if isinstance(clock, str) and len(clock) >= 16 and clock[10:11] == "T" and data.get("utc_offset_seconds") == 0:
+                    instant = datetime.fromisoformat(clock.replace("Z", "+00:00"))
+                    if instant.tzinfo is None:
+                        instant = instant.replace(tzinfo=timezone.utc)
+                    current_observed_at = instant.astimezone(timezone.utc).isoformat()
+            except (ValueError, TypeError, OverflowError):
+                pass
+
             # Map weather code to condition
             wmo_codes = {
                 0: ("Clear", "clear sky"),
@@ -86,7 +98,8 @@ def _fetch_open_meteo_weather(lat: float, lng: float) -> Optional[Dict]:
                     "gust_ms": None
                 },
                 "clouds_percent": current.get("cloud_cover"),
-                "source": "open-meteo"
+                "source": "open-meteo",
+                "observed_at": current_observed_at
             }
     except Exception as e:
         print(f"Open-Meteo weather fetch error: {e}")
@@ -139,7 +152,14 @@ def fetch_openweather_data(lat: float, lng: float) -> Optional[Dict]:
         wind = data.get("wind", {})
         weather = data.get("weather", [{}])[0]
         clouds = data.get("clouds", {})
-        
+        observed_at = None
+        try:
+            epoch = data.get("dt")
+            if isinstance(epoch, (int, float)) and not isinstance(epoch, bool) and epoch > 0:
+                observed_at = datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
+        except (ValueError, TypeError, OverflowError):
+            pass
+
         result = {
             "location": data.get("name"),
             "coordinates": {"lat": lat, "lng": lng},
@@ -163,7 +183,8 @@ def fetch_openweather_data(lat: float, lng: float) -> Optional[Dict]:
                 "gust_ms": wind.get("gust")
             },
             "clouds_percent": clouds.get("all"),
-            "source": "openweathermap"
+            "source": "openweathermap",
+            "observed_at": observed_at
         }
         
         # Try to get UV index (separate call)

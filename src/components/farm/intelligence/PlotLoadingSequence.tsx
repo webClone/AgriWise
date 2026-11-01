@@ -256,8 +256,9 @@ export default function PlotLoadingSequence({
   );
   const effectiveTone: WorkerProgressView["tone"] = awaitingReplacementJob
     ? "active"
-    : view?.tone
-    || (requestError && !requestIsPending ? "failure" : "active");
+    : requestError
+    ? (requestIsPending ? "active" : "failure")
+    : view?.tone || "active";
   const colors = toneClasses(effectiveTone);
   const exactPercent = awaitingReplacementJob ? null : view?.progressPct;
   const fallbackActive = hasCanonicalFallback || view?.hasCanonicalFallback === true;
@@ -275,6 +276,8 @@ export default function PlotLoadingSequence({
     : requestError || transportNote || "Reading the durable job record";
   const statusLabel = awaitingReplacementJob
     ? "STARTING"
+    : requestError
+    ? (requestIsPending ? "PENDING" : "FAILED")
     : showDurableView
     ? (view!.reintegrating ? "REINTEGRATION" : view!.status.toUpperCase())
     : "CONNECTING";
@@ -341,7 +344,7 @@ export default function PlotLoadingSequence({
         {transportNote && showDurableView && (
           <p className="mt-2 text-[10px] text-amber-200/80">{transportNote}</p>
         )}
-        {view?.failed && view.retryEligible && onRetry && (
+        {((view?.failed && view.retryEligible) || (requestError && !requestIsPending)) && onRetry && (
           <button
             type="button"
             onClick={onRetry}
