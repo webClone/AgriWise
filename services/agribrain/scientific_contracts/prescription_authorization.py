@@ -380,8 +380,10 @@ class PrescriptionAuthorizationEnvelopeV2(PrescriptionAuthorizationEnvelopeV1):
             "published_at", "issued_at", "expires_at",
         ):
             object.__setattr__(self, name, _utc_instant(getattr(self, name), name))
-        cutoff = self.evidence_cutoff_at
-        if not (self.observation_window_start <= self.observation_window_end <= cutoff <= self.published_at <= self.issued_at < self.expires_at):
+        instants = tuple(datetime.fromisoformat(getattr(self, name).replace("Z", "+00:00"))
+                         for name in ("observation_window_start", "observation_window_end",
+                                      "evidence_cutoff_at", "published_at", "issued_at", "expires_at"))
+        if not all(earlier <= later for earlier, later in zip(instants, instants[1:])) or instants[-2] >= instants[-1]:
             raise ContractViolation("V2 temporal window, publication or validity order is invalid")
         # V1 validates selected actions, their hash and the legacy lineage.
         # V2 then limits executable/dose-shaped payloads without changing V1.
@@ -419,6 +421,14 @@ class PrescriptionAuthorizationEnvelopeV2(PrescriptionAuthorizationEnvelopeV1):
             "evidence_cutoff_at", "observation_window_start", "observation_window_end",
             "published_at", "issued_at", "expires_at", "uncertainty_receipt_hash",
         )
+        allowed = set(required) | {
+            "input_belief_id", "tribunal_content_hash", "prescription_manifest_hash",
+            "prescription_manifest_entry_ids", "policy_snapshot_hash", "l8_run_id",
+            "l8_content_hash", "final_execution_plan_hash", "actions", "schema_version",
+            "content_hash",
+        }
+        if set(value) - allowed:
+            raise ContractViolation("V2 authorization contains unrecognized fields")
         return cls(
             input_belief_id=value.get("input_belief_id", ""),
             tribunal_content_hash=value.get("tribunal_content_hash", ""),
