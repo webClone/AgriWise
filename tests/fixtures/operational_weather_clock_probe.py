@@ -108,6 +108,9 @@ response_data["value"] = {
 }
 meteo = ns["_fetch_open_meteo_weather"](36.6, 3.0)
 assert meteo["observed_at"] == "2026-10-31T14:00:00+00:00", meteo
+response_data["value"]["current"]["time"] = "2026-10-31"  # date-only is not acquisition
+unqualified_meteo = ns["_fetch_open_meteo_weather"](36.6, 3.0)
+assert unqualified_meteo["observed_at"] is None
 
 print("__CLOCK_JSON__" + json.dumps({
     "rows": rows,
