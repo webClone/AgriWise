@@ -257,13 +257,21 @@ class PilotPrescriptionIssuer:
             verified_uncertainty_receipt_hash=head["bounded_uncertainty_receipt_hash"],
         )
 
-        # 11. Register in durable ledger as AUTHORIZED
+        # 11. Mint issuer verification token certifying complete scientific qualification
+        issuer_token = self.ledger.mint_issuer_verification_token(
+            envelope=envelope,
+            head=head,
+            issued_at=issued_instant,
+        )
+
+        # 12. Register in durable ledger as AUTHORIZED with issuer token
         record = self.ledger.register_authorized_prescription(
             namespace=namespace,
             geometry_hash=geometry_hash,
             crop_cycle_id=crop_cycle_id,
             envelope=envelope,
             now=issued_instant,
+            issuer_token=issuer_token,
         )
 
         return envelope, record

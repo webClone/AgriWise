@@ -234,3 +234,152 @@ def test_db_index_rewrite_cannot_detach_a_signed_candidate(tmp_path):
         )
     with pytest.raises(ContractViolation, match="index disagrees"):
         inspect(s, record["candidate_id"])
+
+
+def test_direct_register_authorized_prescription_without_issuer_token_rejected(tmp_path):
+    s = ledger(tmp_path)
+    candidate = v2()
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=trusted(),
+    ):
+        with pytest.raises(ContractViolation, match="requires trusted issuer scientific verification token"):
+            s.register_authorized_prescription(
+                namespace=NS,
+                geometry_hash=candidate.geometry_hash,
+                crop_cycle_id=candidate.crop_cycle_id,
+                envelope=candidate,
+                now=NOW,
+                issuer_token="",
+            )
+
+
+def test_direct_register_authorized_prescription_with_forged_issuer_token_rejected(tmp_path):
+    s = ledger(tmp_path)
+    candidate = v2()
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=trusted(),
+    ):
+        with pytest.raises(ContractViolation, match="invalid or forged issuer verification token"):
+            s.register_authorized_prescription(
+                namespace=NS,
+                geometry_hash=candidate.geometry_hash,
+                crop_cycle_id=candidate.crop_cycle_id,
+                envelope=candidate,
+                now=NOW,
+                issuer_token="00" * 32,
+            )
+
+
+def test_direct_register_authorized_prescription_with_mismatched_envelope_token_rejected(tmp_path):
+    s = ledger(tmp_path)
+    candidate_a = v2()
+    from dataclasses import replace
+    candidate_b = replace(candidate_a, snapshot_id="ASMAE-SNAPSHOT-other-b", content_hash="")
+    candidate_b.__post_init__()
+
+    head_pub = trusted()
+    token_for_b = s.mint_issuer_verification_token(
+        envelope=candidate_b,
+        head=head_pub,
+        issued_at=NOW,
+    )
+
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=head_pub,
+    ):
+        with pytest.raises(ContractViolation, match="invalid or forged issuer verification token"):
+            s.register_authorized_prescription(
+                namespace=NS,
+                geometry_hash=candidate_a.geometry_hash,
+                crop_cycle_id=candidate_a.crop_cycle_id,
+                envelope=candidate_a,
+                now=NOW,
+                issuer_token=token_for_b,
+            )
+
+
+def test_mint_issuer_verification_token_type_checks(tmp_path):
+    s = ledger(tmp_path)
+    with pytest.raises(ContractViolation, match="requires V2 envelope"):
+        s.mint_issuer_verification_token(
+            envelope="not-an-envelope",  # type: ignore
+            head=trusted(),
+            issued_at=NOW,
+        )
+    with pytest.raises(ContractViolation, match="requires publication head mapping"):
+        s.mint_issuer_verification_token(
+            envelope=v2(),
+            head="not-a-mapping",  # type: ignore
+            issued_at=NOW,
+        )
+
+
+def test_authorized_record_with_valid_issuer_token_survives_and_authorizes_export(tmp_path):
+    s = ledger(tmp_path)
+    candidate = v2()
+    head_pub = trusted()
+    token = s.mint_issuer_verification_token(
+        envelope=candidate,
+        head=head_pub,
+        issued_at=NOW,
+    )
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=head_pub,
+    ):
+        record = s.register_authorized_prescription(
+            namespace=NS,
+            geometry_hash=candidate.geometry_hash,
+            crop_cycle_id=candidate.crop_cycle_id,
+            envelope=candidate,
+            now=NOW,
+            issuer_token=token,
+        )
+        assert record["state"] == "AUTHORIZED"
+        assert record["issuer_token"] == token
+        assert record["policy_snapshot_hash"] == candidate.policy_snapshot_hash
+
+        export_res = s.authorize_export(
+            record["candidate_id"],
+            envelope=candidate,
+            namespace=NS,
+            now=NOW,
+        )
+        assert export_res["valid_export_authorization"] is True
+        assert export_res["state"] == "AUTHORIZED"
+
+
+def test_tampered_issuer_token_in_sqlite_fails_export(tmp_path):
+    s = ledger(tmp_path)
+    candidate = v2()
+    head_pub = trusted()
+    token = s.mint_issuer_verification_token(
+        envelope=candidate,
+        head=head_pub,
+        issued_at=NOW,
+    )
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=head_pub,
+    ):
+        record = s.register_authorized_prescription(
+            namespace=NS,
+            geometry_hash=candidate.geometry_hash,
+            crop_cycle_id=candidate.crop_cycle_id,
+            envelope=candidate,
+            now=NOW,
+            issuer_token=token,
+        )
+        cid = record["candidate_id"]
+
+        with sqlite3.connect(s.path) as conn:
+            raw_json = conn.execute("SELECT record_json FROM candidates WHERE candidate_id=?", (cid,)).fetchone()[0]
+            data = json.loads(raw_json)
+            data["issuer_token"] = "tampered" + token[8:]
+            conn.execute("UPDATE candidates SET record_json=? WHERE candidate_id=?", (json.dumps(data), cid))
+
+        with pytest.raises(ContractViolation, match="Candidate audit integrity or signature mismatch"):
+            s.authorize_export(cid, envelope=candidate, namespace=NS, now=NOW)

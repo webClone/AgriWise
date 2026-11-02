@@ -1112,3 +1112,161 @@ def test_quarantined_candidate_cannot_be_exported_or_promoted(tmp_path, monkeypa
     # Attempting to authorize export on quarantined record MUST fail closed
     with pytest.raises(ContractViolation, match="Pilot candidate is quarantined; cannot authorize export"):
         s["ledger"].authorize_export(cid, envelope=envelope, namespace=s["ns"], now=NOW)
+
+
+def test_direct_ledger_authorized_registration_without_issuer_fails(tmp_path):
+    """P343-LEDGER-01: Direct calls to ledger.register_authorized_prescription must not bypass issuer."""
+    s = create_pilot_setup(tmp_path)
+    ns = s["ns"]
+    geom_hash = SCOPE["geometry_hash"]
+    cycle_id = SCOPE["crop_cycle_id"]
+
+    envelope = PrescriptionAuthorizationEnvelopeV2(
+        tenant_id=ns.tenant_id,
+        farm_id=ns.farm_id,
+        plot_id=ns.plot_id,
+        geometry_hash=geom_hash,
+        crop_cycle_id=cycle_id,
+        snapshot_id=s["head"]["snapshot_id"],
+        canonical_publication_receipt_hash=s["head"]["publication_receipt_hash"],
+        evidence_manifest_hash=s["head"]["manifest_hash"],
+        evidence_cutoff_at=s["head"]["evidence_cutoff_at"],
+        observation_window_start=TIMES["observation_window_start"],
+        observation_window_end=TIMES["observation_window_end"],
+        published_at="2026-10-30T18:00:00Z",
+        issued_at=NOW,
+        expires_at=TIMES["expires_at"],
+        uncertainty_receipt_hash=s["bounded"]["content_hash"],
+        input_belief_id="belief-test-1",
+        tribunal_content_hash=SHA("tribunal-positive"),
+        prescription_manifest_hash=SHA("manifest-positive"),
+        prescription_manifest_entry_ids=(CONTRIBUTION,),
+        policy_snapshot_hash=canonical_hash({"pilot_policy": "strict", "require_evidence_receipts": True}),
+        l8_run_id="l8-run-1",
+        l8_content_hash=SHA("l8-positive-audit"),
+        final_execution_plan_hash=canonical_hash(_serialize_plan(s["artifact"].final_execution_plan)),
+        actions=(s["action"],),
+    )
+
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=s["head"],
+    ):
+        with pytest.raises(ContractViolation, match="requires trusted issuer scientific verification token"):
+            s["ledger"].register_authorized_prescription(
+                namespace=ns,
+                geometry_hash=geom_hash,
+                crop_cycle_id=cycle_id,
+                envelope=envelope,
+                now=NOW,
+                issuer_token="",
+            )
+
+
+def test_direct_ledger_authorized_registration_with_tampered_issuer_token_fails(tmp_path):
+    """P343-LEDGER-01: Forged issuer token is rejected by the ledger."""
+    s = create_pilot_setup(tmp_path)
+    ns = s["ns"]
+    geom_hash = SCOPE["geometry_hash"]
+    cycle_id = SCOPE["crop_cycle_id"]
+
+    envelope = PrescriptionAuthorizationEnvelopeV2(
+        tenant_id=ns.tenant_id,
+        farm_id=ns.farm_id,
+        plot_id=ns.plot_id,
+        geometry_hash=geom_hash,
+        crop_cycle_id=cycle_id,
+        snapshot_id=s["head"]["snapshot_id"],
+        canonical_publication_receipt_hash=s["head"]["publication_receipt_hash"],
+        evidence_manifest_hash=s["head"]["manifest_hash"],
+        evidence_cutoff_at=s["head"]["evidence_cutoff_at"],
+        observation_window_start=TIMES["observation_window_start"],
+        observation_window_end=TIMES["observation_window_end"],
+        published_at="2026-10-30T18:00:00Z",
+        issued_at=NOW,
+        expires_at=TIMES["expires_at"],
+        uncertainty_receipt_hash=s["bounded"]["content_hash"],
+        input_belief_id="belief-test-1",
+        tribunal_content_hash=SHA("tribunal-positive"),
+        prescription_manifest_hash=SHA("manifest-positive"),
+        prescription_manifest_entry_ids=(CONTRIBUTION,),
+        policy_snapshot_hash=canonical_hash({"pilot_policy": "strict", "require_evidence_receipts": True}),
+        l8_run_id="l8-run-1",
+        l8_content_hash=SHA("l8-positive-audit"),
+        final_execution_plan_hash=canonical_hash(_serialize_plan(s["artifact"].final_execution_plan)),
+        actions=(s["action"],),
+    )
+
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=s["head"],
+    ):
+        with pytest.raises(ContractViolation, match="invalid or forged issuer verification token"):
+            s["ledger"].register_authorized_prescription(
+                namespace=ns,
+                geometry_hash=geom_hash,
+                crop_cycle_id=cycle_id,
+                envelope=envelope,
+                now=NOW,
+                issuer_token="baadc0de" * 8,
+            )
+
+
+def test_direct_ledger_authorized_registration_with_wrong_envelope_token_fails(tmp_path):
+    """P343-LEDGER-01: Issuer token minted for another envelope cannot authorize a different envelope."""
+    s = create_pilot_setup(tmp_path)
+    ns = s["ns"]
+    geom_hash = SCOPE["geometry_hash"]
+    cycle_id = SCOPE["crop_cycle_id"]
+
+    envelope1 = PrescriptionAuthorizationEnvelopeV2(
+        tenant_id=ns.tenant_id,
+        farm_id=ns.farm_id,
+        plot_id=ns.plot_id,
+        geometry_hash=geom_hash,
+        crop_cycle_id=cycle_id,
+        snapshot_id=s["head"]["snapshot_id"],
+        canonical_publication_receipt_hash=s["head"]["publication_receipt_hash"],
+        evidence_manifest_hash=s["head"]["manifest_hash"],
+        evidence_cutoff_at=s["head"]["evidence_cutoff_at"],
+        observation_window_start=TIMES["observation_window_start"],
+        observation_window_end=TIMES["observation_window_end"],
+        published_at="2026-10-30T18:00:00Z",
+        issued_at=NOW,
+        expires_at=TIMES["expires_at"],
+        uncertainty_receipt_hash=s["bounded"]["content_hash"],
+        input_belief_id="belief-test-1",
+        tribunal_content_hash=SHA("tribunal-positive"),
+        prescription_manifest_hash=SHA("manifest-positive"),
+        prescription_manifest_entry_ids=(CONTRIBUTION,),
+        policy_snapshot_hash=canonical_hash({"pilot_policy": "strict", "require_evidence_receipts": True}),
+        l8_run_id="l8-run-1",
+        l8_content_hash=SHA("l8-positive-audit"),
+        final_execution_plan_hash=canonical_hash(_serialize_plan(s["artifact"].final_execution_plan)),
+        actions=(s["action"],),
+    )
+
+    from dataclasses import replace
+    envelope2 = replace(envelope1, l8_run_id="l8-run-2", content_hash="")
+    envelope2.__post_init__()
+
+    # Mint token for envelope2
+    token_for_envelope2 = s["ledger"].mint_issuer_verification_token(
+        envelope=envelope2,
+        head=s["head"],
+        issued_at=NOW,
+    )
+
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=s["head"],
+    ):
+        with pytest.raises(ContractViolation, match="invalid or forged issuer verification token"):
+            s["ledger"].register_authorized_prescription(
+                namespace=ns,
+                geometry_hash=geom_hash,
+                crop_cycle_id=cycle_id,
+                envelope=envelope1,
+                now=NOW,
+                issuer_token=token_for_envelope2,
+            )
