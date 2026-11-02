@@ -16,9 +16,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+import math
 
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
 from services.agribrain.layer0.observation_packet import DataStatus
+
+
+# Packet field -> (registered observation model, uncertainty sigma key).
+# Preserve units and do not infer type or noise from unrelated variables.
+_PACKET_KALMAN_FIELDS = {
+    "ndvi_mean": ("ndvi", "ndvi"),
+    "evi_mean": ("evi", "evi"),
+    "ndmi_mean": ("ndmi", "ndmi"),
+    "ndre_mean": ("ndre", "ndre"),
+    "bsi_mean": ("bare_soil_index", "bsi"),
+    "vv_db_mean": ("vv", "vv_db"),
+    "vh_db_mean": ("vh", "vh_db"),
+    "surface_wetness_proxy_mean": ("sar_moisture_proxy", "surface_wetness_proxy"),
+    "soil_moisture_vwc": ("soil_moisture", "soil_moisture_vwc"),
+    "vegetation_fraction": ("vegetation_fraction", "vegetation_fraction"),
+}
 
 
 @dataclass
@@ -258,6 +275,9 @@ class Layer0StateEngine:
             "skipped_diagnostic_only": 0,
             "skipped_non_production": 0,
             "skipped_non_provider": 0,
+            "skipped_state_update_prohibited": 0,
+            "skipped_observation_no_sigma": 0,
+            "skipped_observation_nonfinite": 0,
         }
         filtered_packets = []
         for pkt in packets:
@@ -359,29 +379,46 @@ class Layer0StateEngine:
                 if zone_id not in observations_by_day[day]:
                     observations_by_day[day][zone_id] = []
 
-                # Map common packet types to Kalman observations
-                for var_key in ("ndvi_mean", "evi_mean", "ndmi_mean",
-                                 "ndre_mean", "bsi_mean",
-                                 "vv_db_mean", "vh_db_mean",
-                                 "surface_wetness_proxy_mean",
-                                 "soil_moisture_vwc",
-                                 "vegetation_fraction"):
-                    if var_key in payload and payload[var_key] is not None:
-                        obs_type = var_key.replace("_mean", "")
-                        sigma = 0.05  # default
-                        if pkt.uncertainty and pkt.uncertainty.sigmas:
-                            sigma = next(iter(pkt.uncertainty.sigmas.values()), 0.05)
-                        try:
-                            obs = self._KalmanObservation(
-                                obs_type=obs_type,
-                                value=float(payload[var_key]),
-                                sigma=sigma,
-                                reliability=max(pkt.reliability_weight, 0.05),
-                                source=pkt.source.value,
-                            )
-                            observations_by_day[day][zone_id].append(obs)
-                        except (ValueError, TypeError):
-                            pass
+                # Only explicitly admitted finite values with their own positive
+                # measurement sigma can enter the filter; no synthetic 0.05 noise.
+                if payload.get("state_update_allowed") is False or payload.get("spatial_scope_blocked") is True:
+                    excluded_counts["skipped_state_update_prohibited"] += 1
+                    continue
+
+                sigmas = getattr(getattr(pkt, "uncertainty", None), "sigmas", None) or {}
+                for var_key, (obs_type, sigma_key) in _PACKET_KALMAN_FIELDS.items():
+                    value = payload.get(var_key)
+                    if value is None:
+                        continue
+                    sigma_raw = sigmas.get(sigma_key)
+                    if sigma_raw is None:
+                        excluded_counts["skipped_observation_no_sigma"] += 1
+                        continue
+
+                    try:
+                        if any(isinstance(x, bool) for x in (value, sigma_raw, pkt.reliability_weight)):
+                            raise ValueError("boolean is not numeric evidence")
+                        obs_value = float(value)
+                        obs_sigma = float(sigma_raw)
+                        reliability = float(pkt.reliability_weight)
+                        if not (
+                            math.isfinite(obs_value) and math.isfinite(obs_sigma)
+                            and math.isfinite(reliability)
+                            and obs_sigma > 0.0 and 0.0 < reliability <= 1.0
+                        ):
+                            raise ValueError("invalid observation, sigma, or reliability")
+                    except (ValueError, TypeError, OverflowError):
+                        excluded_counts["skipped_observation_nonfinite"] += 1
+                        continue
+
+                    obs = self._KalmanObservation(
+                        obs_type=obs_type,
+                        value=obs_value,
+                        sigma=obs_sigma,
+                        reliability=reliability,
+                        source=pkt.source.value,
+                    )
+                    observations_by_day[day][zone_id].append(obs)
 
         # Build the state package through the lower-level run()
         state_pkg = self.run(
