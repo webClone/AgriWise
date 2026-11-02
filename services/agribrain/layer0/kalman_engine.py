@@ -198,18 +198,32 @@ class ZoneKalmanFilter:
         
         source_weights: Dict[str, float] = {}
         total_innovation = 0.0
+        self.last_update_admitted_count = 0
         
         # ── Capture pre-update LAI for adaptive learning ──────────
         self._pre_update_lai = self.state.values[IDX_LAI]
         had_ndvi_obs = False
         
+        admitted_count = 0
         for obs in observations:
-            if obs.reliability < 0.05:
-                continue  # Skip unreliable observations
-            
-            if obs.obs_type in ("ndvi", "evi"):
-                had_ndvi_obs = True
-            
+            # These flags are authoritative admission controls, not mere
+            # diagnostics. Never update from point-only or blocked evidence.
+            if obs.diagnostic_only or not obs.state_update_allowed or obs.spatial_scope_blocked:
+                continue
+            if any(isinstance(v, bool) for v in (obs.value, obs.sigma, obs.reliability)):
+                continue
+            try:
+                if not (
+                    math.isfinite(float(obs.value))
+                    and math.isfinite(float(obs.sigma))
+                    and math.isfinite(float(obs.reliability))
+                    and float(obs.sigma) > 0.0
+                    and 0.05 <= float(obs.reliability) <= 1.0
+                ):
+                    continue
+            except (TypeError, ValueError, OverflowError):
+                continue
+
             try:
                 # Get observation model
                 model_fn = self.observation_model_provider(obs.obs_type)
@@ -235,6 +249,8 @@ class ZoneKalmanFilter:
                 # Kalman gain: K = P * H^T / S
                 K = _kalman_gain(self.covariance.P, H, S)
                 
+                if not all(math.isfinite(v) for v in K):
+                    continue
                 # State update: x = x + K * innovation
                 for i in range(N_STATES):
                     self.state.values[i] += K[i] * innovation
@@ -247,6 +263,9 @@ class ZoneKalmanFilter:
                 src = obs.source or obs.obs_type
                 source_weights[src] = source_weights.get(src, 0) + weight
                 total_innovation += abs(innovation)
+                admitted_count += 1
+                if obs.obs_type in ("ndvi", "evi"):
+                    had_ndvi_obs = True
                 
             except (ValueError, ZeroDivisionError, TypeError) as e:
                 # Skip problematic observations
@@ -266,7 +285,7 @@ class ZoneKalmanFilter:
         self.state.values[IDX_STRESS_THERMAL] = max(0.0, min(1.0, self.state.values[IDX_STRESS_THERMAL]))
         self.state.values[IDX_PHOTO_EFF] = max(0.0, min(1.0, self.state.values[IDX_PHOTO_EFF]))
         
-        if observations:
+        if admitted_count:
             self.last_obs_day = self.state.day
             self.days_since_obs = 0
         
@@ -312,6 +331,8 @@ class ZoneKalmanFilter:
                 self.process_model._adaptive_lai_rate = new_rate
                 self.process_model._last_model_error = abs(self._ema_error)
         
+        self.last_update_admitted_count = admitted_count
+
         # Normalize source weights
         total_w = sum(source_weights.values())
         if total_w > 0:
@@ -350,7 +371,7 @@ class ZoneKalmanFilter:
             "day": day,
             "zone": self.zone_id,
             "sources": source_weights,
-            "n_obs": len(observations) if observations else 0,
+            "n_obs": self.last_update_admitted_count if observations else 0,
             "days_since_obs": self.days_since_obs,
             "conflicts": conflicts,
             "uncertainty_mean": sum(self.state.variance) / N_STATES,
