@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import copy
+from contextlib import contextmanager
+from functools import wraps
+import errno
 import json
 import os
 import threading
@@ -57,6 +60,92 @@ _ASMAE_FROZEN_LINEAGE_FIELDS = (
 
 _CANONICAL_SNAPSHOT_CACHE: Dict[Tuple[str, int, str, str], Dict[str, Any]] = {}
 _SNAPSHOT_CACHE_LOCK = threading.Lock()
+# One lock key for all writers of a plot's current publication pointer.
+_HEAD_TRANSACTION_REGISTRY_LOCK = threading.Lock()
+_HEAD_TRANSACTION_MUTEXES: Dict[str, threading.RLock] = {}
+_HEAD_TRANSACTION_LOCAL = threading.local()
+_HEAD_TRANSACTION_TIMEOUT_SECONDS = 120.0
+
+
+def _head_mutex(key: str) -> threading.RLock:
+    with _HEAD_TRANSACTION_REGISTRY_LOCK:
+        return _HEAD_TRANSACTION_MUTEXES.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def _plot_head_transaction(namespace: PlotNamespace):
+    """Reentrant plot-scoped thread + cross-process head transaction.
+
+    The lock file is stable and NEVER unlinked/replaced; locking head.json's
+    replaceable inode would be incorrect. Every head writer must use this
+    boundary, including publisher, terminal L10 and both proof attachments.
+    """
+    key = namespace.stable_key()
+    mutex = _head_mutex(key)
+    with mutex:
+        active = getattr(_HEAD_TRANSACTION_LOCAL, "active", set())
+        if key in active:
+            # L10 publication delegates to the canonical publisher under the
+            # same thread's transaction. Do not reacquire an OS byte lock.
+            yield
+            return
+
+        directory = _plot_dir(namespace)
+        directory.mkdir(parents=True, exist_ok=True)
+        lock_file = directory / "head.transaction.lock"
+        deadline = time.monotonic() + _HEAD_TRANSACTION_TIMEOUT_SECONDS
+        with lock_file.open("a+b") as handle:
+            # Windows msvcrt.locking requires a real byte at offset zero.
+            if handle.seek(0, os.SEEK_END) == 0:
+                handle.write(b"\x00")
+                handle.flush()
+            acquired = False
+            while not acquired:
+                try:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                except OSError as exc:
+                    if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EDEADLK):
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("Canonical plot head transaction lock acquisition timed out") from exc
+                    time.sleep(0.02)
+            active.add(key)
+            _HEAD_TRANSACTION_LOCAL.active = active
+            try:
+                yield
+            finally:
+                active.remove(key)
+                try:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                finally:
+                    # The handle closes on exit; lock file inode is persistent.
+                    pass
+
+
+def _serialized_plot_head_writer(function):
+    """Wrap the full read/validate/replace interval, not only final _atomic."""
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        supplied = kwargs.get("namespace") or (args[0] if args else kwargs.get("plot_id"))
+        ns = _coerce_namespace(
+            supplied, tenant_id=kwargs.get("tenant_id", ""), farm_id=kwargs.get("farm_id", "")
+        )
+        with _plot_head_transaction(ns):
+            return function(*args, **kwargs)
+    return guarded
 
 
 def _plot_key(namespace: PlotNamespace) -> str:
@@ -172,6 +261,7 @@ def _immutable_asmae_payload(
     return immutable
 
 
+@_serialized_plot_head_writer
 def publish_canonical_plot_snapshot(
     *,
     namespace: Optional[Union[PlotNamespace, str]] = None,
@@ -631,6 +721,7 @@ def publish_canonical_plot_snapshot(
     return head
 
 
+@_serialized_plot_head_writer
 def attach_canonical_proof_roots(
     namespace: Union[PlotNamespace, str],
     *,
@@ -661,6 +752,7 @@ def attach_canonical_proof_roots(
     return head
 
 
+@_serialized_plot_head_writer
 def attach_canonical_proof_attestation(
     namespace: Union[PlotNamespace, str],
     attestation: Union[Any, Mapping[str, Any]],
@@ -723,6 +815,7 @@ def attach_canonical_proof_attestation(
 
     return att_dict
 
+@_serialized_plot_head_writer
 def publish_canonical_layer10_snapshot(
     *,
     namespace: PlotNamespace,
