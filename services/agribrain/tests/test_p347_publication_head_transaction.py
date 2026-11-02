@@ -10,9 +10,12 @@ publication and canonical receipt bytes MUST remain unchanged.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
-import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 import threading
+import time
 
 import pytest
 
@@ -216,3 +219,46 @@ def test_nested_layer10_publish_uses_same_reentrant_plot_transaction(native_stor
         head = publish("nested")
         assert head["snapshot_id"] == "ASMAE-SNAPSHOT-P347-nested"
     assert cold_latest()["snapshot_id"] == head["snapshot_id"]
+
+
+
+def test_plot_lock_serializes_real_separate_process(native_store, tmp_path):
+    """The OS lock, not only the Python RLock, must fence another process."""
+    started = tmp_path / "child-started"
+    acquired = tmp_path / "child-acquired"
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from services.agribrain.common.plot_namespace import PlotNamespace\n"
+        "from services.agribrain.layer05_asmae import plot_snapshot_store as store\n"
+        "store.PLOT_SNAPSHOT_ROOT=Path(sys.argv[1])\n"
+        "namespace=PlotNamespace('tenant-p347','farm-p347','plot-p347')\n"
+        "Path(sys.argv[2]).write_text('attempted')\n"
+        "with store._plot_head_transaction(namespace):\n"
+        "    Path(sys.argv[3]).write_text('acquired')\n"
+    )
+    with store._plot_head_transaction(SCOPE):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code, str(native_store), str(started), str(acquired)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while not started.exists() and proc.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert started.exists(), "Child process never reached the lock attempt"
+            # Child must not acquire while the parent holds the same plot lock.
+            # Give a short scheduling window after it explicitly signalled entry.
+            time.sleep(0.15)
+            assert not acquired.exists(), "Different process bypassed plot head file lock"
+        finally:
+            # The parent lock exits before waiting for the child below.
+            pass
+    try:
+        output, err = proc.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        raise
+    assert proc.returncode == 0, (output, err)
+    assert acquired.read_text() == "acquired"
