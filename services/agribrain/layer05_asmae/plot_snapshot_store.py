@@ -795,7 +795,7 @@ def attach_canonical_proof_attestation(
         verified_geo = verified_geo[7:]
     if verified_geo != head_geo:
         raise ContractViolation("Proof attestation geometry mismatch")
-    if verified.crop_cycle_id != head.get("crop_cycle_id"):
+    if head.get("crop_cycle_id") is not None and verified.crop_cycle_id != head.get("crop_cycle_id"):
         raise ContractViolation("Proof attestation crop cycle mismatch")
 
     att_dir = directory / "attestations"
@@ -811,6 +811,8 @@ def attach_canonical_proof_attestation(
     head["admitted_evidence_root_hash"] = verified.admitted_evidence_root_hash
     head["bounded_uncertainty_receipt_hash"] = verified.bounded_uncertainty_receipt_hash
     head["scientific_posterior_hash"] = verified.scientific_posterior_hash
+    if not head.get("crop_cycle_id") and verified.crop_cycle_id:
+        head["crop_cycle_id"] = verified.crop_cycle_id
     head["updated_at"] = datetime.now(timezone.utc).isoformat()
     _atomic(head_file, head)
 
@@ -1207,7 +1209,8 @@ def load_latest_plot_snapshot(
     evidence_cutoff_val = authoritative_evidence_cutoff
     obs_win_val = authoritative_observation_window
     authoritative_crop_cycle = (
-        publication.get("crop_cycle_id")
+        head.get("crop_cycle_id")
+        or publication.get("crop_cycle_id")
         or node.get("crop_cycle_id")
         or (publication_frontend.get("crop_cycle_id") if publication_frontend else None)
     )

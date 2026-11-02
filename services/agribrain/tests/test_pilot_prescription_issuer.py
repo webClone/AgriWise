@@ -29,6 +29,15 @@ from services.agribrain.scientific_contracts.prescription_authorization import (
     canonical_hash,
     CANONICAL_PUBLICATION_VALIDATION_FLAGS,
 )
+from services.agribrain.scientific_contracts.proof_attestation import create_proof_attestation
+from services.agribrain.layer05_asmae.plot_snapshot_store import (
+    publish_canonical_plot_snapshot,
+    attach_canonical_proof_attestation,
+    load_latest_plot_snapshot,
+)
+from services.agribrain.tests.test_pilot_producer_publication_roots import (
+    _make_valid_frontend_payload,
+)
 from services.agribrain.orchestrator_v2.schema import (
     LayerStatus, LayerResult, GlobalQuality, RunArtifact, RunMeta, OrchestratorInput,
 )
@@ -138,7 +147,7 @@ def create_mock_artifact(action: AuthorizedActionV1, l8_content_hash: str):
         geometry_hash=SCOPE["geometry_hash"],
         crop_config={"crop_cycle_id": SCOPE["crop_cycle_id"]},
         date_range={"start": "2026-10-29", "end": "2026-10-30"},
-        policy_snapshot={"pilot_policy": "strict"},
+        policy_snapshot={"pilot_policy": "strict", "require_evidence_receipts": True},
     )
 
     return RunArtifact(
@@ -677,9 +686,429 @@ def test_rate_exceeding_uncertainty_bounds_rejected(tmp_path):
                 namespace=s["ns"],
                 crop_cycle_id=SCOPE["crop_cycle_id"],
                 geometry_hash=SCOPE["geometry_hash"],
+                expected_snapshot_id=SCOPE["snapshot_id"],
                 artifact=bad_artifact,
                 membership_witness=s["witness"],
                 admitted_evidence_receipts=s["receipts"],
                 uncertainty_witness=s["bounded"],
                 now=NOW,
             )
+
+
+def test_policy_without_require_evidence_receipts_rejected(tmp_path):
+    """P75-POL-02: Issuer strictly requires require_evidence_receipts=True in policy snapshot."""
+    s = create_pilot_setup(tmp_path)
+
+    # 1. Missing require_evidence_receipts
+    artifact_missing = create_mock_artifact(s["action"], SHA("l8-hash"))
+    artifact_missing.inputs = replace(artifact_missing.inputs, policy_snapshot={"pilot_policy": "strict"})
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_prescription_issuer.read_trusted_current_asmae_publication",
+        return_value=s["head"],
+    ):
+        with pytest.raises(ContractViolation, match="require_evidence_receipts=True"):
+            s["issuer"].issue_prescription(
+                namespace=s["ns"],
+                crop_cycle_id=SCOPE["crop_cycle_id"],
+                geometry_hash=SCOPE["geometry_hash"],
+                expected_snapshot_id=SCOPE["snapshot_id"],
+                artifact=artifact_missing,
+                membership_witness=s["witness"],
+                admitted_evidence_receipts=s["receipts"],
+                uncertainty_witness=s["bounded"],
+                now=NOW,
+            )
+
+    # 2. Explicitly False
+    artifact_false = create_mock_artifact(s["action"], SHA("l8-hash"))
+    artifact_false.inputs = replace(artifact_false.inputs, policy_snapshot={"require_evidence_receipts": False})
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_prescription_issuer.read_trusted_current_asmae_publication",
+        return_value=s["head"],
+    ):
+        with pytest.raises(ContractViolation, match="require_evidence_receipts=True"):
+            s["issuer"].issue_prescription(
+                namespace=s["ns"],
+                crop_cycle_id=SCOPE["crop_cycle_id"],
+                geometry_hash=SCOPE["geometry_hash"],
+                expected_snapshot_id=SCOPE["snapshot_id"],
+                artifact=artifact_false,
+                membership_witness=s["witness"],
+                admitted_evidence_receipts=s["receipts"],
+                uncertainty_witness=s["bounded"],
+                now=NOW,
+            )
+
+    # 3. None or empty policy
+    artifact_empty = create_mock_artifact(s["action"], SHA("l8-hash"))
+    artifact_empty.inputs = replace(artifact_empty.inputs, policy_snapshot={})
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_prescription_issuer.read_trusted_current_asmae_publication",
+        return_value=s["head"],
+    ):
+        with pytest.raises(ContractViolation, match="require_evidence_receipts=True"):
+            s["issuer"].issue_prescription(
+                namespace=s["ns"],
+                crop_cycle_id=SCOPE["crop_cycle_id"],
+                geometry_hash=SCOPE["geometry_hash"],
+                expected_snapshot_id=SCOPE["snapshot_id"],
+                artifact=artifact_empty,
+                membership_witness=s["witness"],
+                admitted_evidence_receipts=s["receipts"],
+                uncertainty_witness=s["bounded"],
+                now=NOW,
+            )
+
+
+def test_unmocked_issuer_with_real_publication_store(tmp_path, monkeypatch):
+    """P75-ISS-01: Issuer executes against real unmocked publication store."""
+    store_dir = tmp_path / "plot_snapshots"
+    store_dir.mkdir(parents=True)
+    monkeypatch.setattr("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", store_dir)
+
+    ns = PlotNamespace("tenant-real", "farm-real", "6ab14f59ad442f274c3f2a62")
+    geom_hash = SHA("real-geom")
+    cycle_id = "wheat-2026-real"
+    snap_id = "ASMAE-SNAPSHOT-unmocked-001"
+    job_id = "job-unmocked-001"
+    manifest_hash = SHA("manifest-job-001")
+
+    window = {"start": "2026-10-16", "end": "2026-10-30"}
+    cutoff_str = "2026-10-30T17:44:46Z"
+    frontend_payload = _make_valid_frontend_payload(
+        snapshot_id=snap_id,
+        plot_id=ns.plot_id,
+        cycle_id=cycle_id,
+        cutoff_str=cutoff_str,
+        window=window,
+    )
+    asmae_result = {
+        "snapshot_id": snap_id,
+        "crop_posterior_lineage": f"crop-{snap_id}",
+        "crop_worldline_event_id": f"worldline-{snap_id}",
+        "phenology_worldline_event_id": f"pheno-{snap_id}",
+        "evidence_cutoff_at": cutoff_str,
+        "observation_window": window,
+    }
+
+    head = publish_canonical_plot_snapshot(
+        namespace=ns,
+        geometry_hash=geom_hash,
+        snapshot_id=snap_id,
+        asmae_result=asmae_result,
+        frontend_payload=frontend_payload,
+        job_id=job_id,
+        manifest_hash=manifest_hash,
+    )
+    receipt_hash = head["publication_receipt_hash"]
+
+    # Build action, artifact, receipts, and witnesses
+    action = AuthorizedActionV1(
+        action_id="REAL-IRRIG-01",
+        action_type="IRRIGATE",
+        priority_score=0.9,
+        urgency_score=0.8,
+        confidence="HIGH",
+        rationale="Unmocked real pilot action",
+        rate={"recommended": 5.0, "min_safe": 3.0, "max_safe": 8.0, "unit": "mm"},
+        timing={"earliest": "2026-11-01T06:00:00Z", "latest": "2026-11-01T18:00:00Z", "optimal": None},
+        zone_targets=("plot",),
+        requires_confirmation=True,
+        machine_execution_allowed=False,
+    )
+    l8_hash = SHA("l8-unmocked-content")
+    artifact = create_mock_artifact(action, l8_hash)
+    artifact.inputs = replace(
+        artifact.inputs,
+        plot_namespace=ns,
+        tenant_id=ns.tenant_id,
+        farm_id=ns.farm_id,
+        plot_id=ns.plot_id,
+        geometry_hash=geom_hash,
+        crop_config={"crop_cycle_id": cycle_id},
+        policy_snapshot={"require_evidence_receipts": True},
+    )
+
+    ev_receipt = create_evidence_receipt(
+        contribution_id="contrib-real-1",
+        evidence_ids=["ev-real-1"],
+        content_hashes=[SHA("ev-real-content")],
+        calibration_certificate_id="cert-iso-17025-real",
+        spatial_support={"geometry_hash": geom_hash},
+        observation_timestamp=datetime(2026, 10, 30, 10, 0, tzinfo=timezone.utc),
+        validity_interval=(
+            datetime(2026, 10, 30, 10, 0, tzinfo=timezone.utc),
+            datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc),
+        ),
+        freshness_expiry=datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc),
+        truth_class="CALIBRATED_PHYSICAL_MEASUREMENT",
+        originating_stage_receipt_id="stage-receipt-real-1",
+        action_classes_allowed=["EXACT_PRESCRIPTION"],
+    )
+
+    artifact.diagnostic_integration["prescription_gate"]["influence_manifest"]["entries"] = [
+        {"contribution_id": "contrib-real-1"}
+    ]
+    tribunal_hash = str(artifact.diagnostic_integration["prescription_gate"]["tribunal_verdict"]["content_hash"])
+    presc_manifest_hash = str(artifact.diagnostic_integration["prescription_gate"]["influence_manifest"]["content_hash"])
+
+    mem_witness = {
+        "tenant_id": ns.tenant_id,
+        "farm_id": ns.farm_id,
+        "plot_id": ns.plot_id,
+        "geometry_hash": geom_hash,
+        "crop_cycle_id": cycle_id,
+        "snapshot_id": snap_id,
+        "schema_version": "pilot_admitted_membership_v1",
+        "publication_receipt_hash": receipt_hash,
+        "job_manifest_hash": manifest_hash,
+        "evidence_cutoff_at": "2026-10-30T17:44:46Z",
+        "input_belief_id": "belief-test-1",
+        "tribunal_content_hash": tribunal_hash,
+        "prescription_manifest_hash": presc_manifest_hash,
+        "accepted_contribution_ids": ["contrib-real-1"],
+        "entries": [
+            {
+                "contribution_id": "contrib-real-1",
+                "evidence_id": "ev-real-1",
+                "evidence_content_hash": SHA("ev-real-content"),
+                "receipt_content_hash": canonical_hash(ev_receipt.to_dict()),
+            }
+        ],
+    }
+    mem_witness["content_hash"] = canonical_hash(mem_witness)
+
+    posterior_hash = SHA("real-posterior-hash")
+    unc_witness = {
+        "tenant_id": ns.tenant_id,
+        "farm_id": ns.farm_id,
+        "plot_id": ns.plot_id,
+        "geometry_hash": geom_hash,
+        "crop_cycle_id": cycle_id,
+        "snapshot_id": snap_id,
+        "schema_version": "pilot_bounded_uncertainty_v1",
+        "publication_receipt_hash": receipt_hash,
+        "job_manifest_hash": manifest_hash,
+        "evidence_cutoff_at": "2026-10-30T17:44:46Z",
+        "admitted_evidence_root_hash": mem_witness["content_hash"],
+        "source_posterior_hash": posterior_hash,
+        "actions": [
+            {
+                "action_id": action.action_id,
+                "zone_targets": list(action.zone_targets),
+                "timing": dict(action.timing),
+                "min_safe": 2.0,
+                "max_safe": 10.0,
+                "unit": "mm",
+            }
+        ],
+    }
+    unc_witness["content_hash"] = canonical_hash(unc_witness)
+
+    attestation = create_proof_attestation(
+        tenant_id=ns.tenant_id,
+        farm_id=ns.farm_id,
+        plot_id=ns.plot_id,
+        geometry_hash=geom_hash,
+        crop_cycle_id=cycle_id,
+        snapshot_id=snap_id,
+        canonical_publication_receipt_hash=receipt_hash,
+        admitted_evidence_root_hash=mem_witness["content_hash"],
+        bounded_uncertainty_receipt_hash=unc_witness["content_hash"],
+        scientific_posterior_hash=posterior_hash,
+        issuer_key_id=KEY_ID,
+    )
+    attach_canonical_proof_attestation(ns, attestation)
+
+    # Completely unmocked issuer and export!
+    db_path = tmp_path / "unmocked_ledger.sqlite"
+    ledger = PilotCandidateLedger(db_path, key_id=KEY_ID, signing_key=KEY)
+    issuer = PilotPrescriptionIssuer(ledger)
+
+    envelope, record = issuer.issue_prescription(
+        namespace=ns,
+        crop_cycle_id=cycle_id,
+        geometry_hash=geom_hash,
+        expected_snapshot_id=snap_id,
+        artifact=artifact,
+        membership_witness=mem_witness,
+        admitted_evidence_receipts={"contrib-real-1": ev_receipt},
+        uncertainty_witness=unc_witness,
+        now="2026-10-31T12:00:00Z",
+    )
+
+    assert envelope.snapshot_id == snap_id
+    assert record["state"] == "AUTHORIZED"
+
+    # Export completely unmocked!
+    artifact.layer_8.output.authorization_envelope = envelope
+    run = artifact_to_run(artifact, pilot_ledger=ledger, now="2026-10-31T12:00:00Z")
+    assert run["audit"]["prescription_authorization"]["status"] == "AUTHORIZED"
+    assert len(run["recommendations"]) == 1
+    assert run["recommendations"][0]["action_id"] == "REAL-IRRIG-01"
+    assert run["recommendations"][0]["machine_execution_allowed"] is False
+    assert run["recommendations"][0]["requires_confirmation"] is True
+
+
+def test_unmocked_issuer_rejects_mismatched_snapshot_id(tmp_path, monkeypatch):
+    """P75-ISS-01: Issuer unmocked call with mismatched expected_snapshot_id fails closed."""
+    store_dir = tmp_path / "plot_snapshots"
+    store_dir.mkdir(parents=True)
+    monkeypatch.setattr("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", store_dir)
+
+    ns = PlotNamespace("tenant-real", "farm-real", "6ab14f59ad442f274c3f2a62")
+    geom_hash = SHA("real-geom")
+    cycle_id = "wheat-2026-real"
+    snap_id = "ASMAE-SNAPSHOT-real-001"
+
+    window = {"start": "2026-10-16", "end": "2026-10-30"}
+    cutoff_str = "2026-10-30T17:44:46Z"
+    frontend_payload = _make_valid_frontend_payload(
+        snapshot_id=snap_id,
+        plot_id=ns.plot_id,
+        cycle_id=cycle_id,
+        cutoff_str=cutoff_str,
+        window=window,
+    )
+    asmae_result = {
+        "snapshot_id": snap_id,
+        "crop_posterior_lineage": f"crop-{snap_id}",
+        "crop_worldline_event_id": f"worldline-{snap_id}",
+        "phenology_worldline_event_id": f"pheno-{snap_id}",
+        "evidence_cutoff_at": cutoff_str,
+        "observation_window": window,
+    }
+    publish_canonical_plot_snapshot(
+        namespace=ns,
+        geometry_hash=geom_hash,
+        snapshot_id=snap_id,
+        asmae_result=asmae_result,
+        frontend_payload=frontend_payload,
+        job_id="job-001",
+        manifest_hash=SHA("manifest"),
+    )
+
+    action = create_fixture_action()
+    artifact = create_mock_artifact(action, SHA("l8-hash"))
+    artifact.inputs = replace(
+        artifact.inputs,
+        plot_namespace=ns,
+        crop_config={"crop_cycle_id": cycle_id},
+        policy_snapshot={"require_evidence_receipts": True},
+    )
+
+    db_path = tmp_path / "unmocked_ledger_mismatch.sqlite"
+    ledger = PilotCandidateLedger(db_path, key_id=KEY_ID, signing_key=KEY)
+    issuer = PilotPrescriptionIssuer(ledger)
+
+    with pytest.raises(ContractViolation, match="Current ASMAE snapshot differs from the requested exact snapshot"):
+        issuer.issue_prescription(
+            namespace=ns,
+            crop_cycle_id=cycle_id,
+            geometry_hash=geom_hash,
+            expected_snapshot_id="ASMAE-SNAPSHOT-wrong-snapshot-id",
+            artifact=artifact,
+            membership_witness={},
+            admitted_evidence_receipts={},
+            uncertainty_witness={},
+            now=NOW,
+        )
+
+
+def test_quarantined_candidate_cannot_be_exported_or_promoted(tmp_path, monkeypatch):
+    """P75-POL-02: Quarantined candidates cannot bypass the issuer to become exportable."""
+    store_dir = tmp_path / "plot_snapshots"
+    store_dir.mkdir(parents=True)
+    monkeypatch.setattr("services.agribrain.layer05_asmae.plot_snapshot_store.PLOT_SNAPSHOT_ROOT", store_dir)
+
+    s = create_pilot_setup(tmp_path)
+    ns = s["ns"]
+    snap_id = SCOPE["snapshot_id"]
+    geom_hash = SCOPE["geometry_hash"]
+    cycle_id = SCOPE["crop_cycle_id"]
+    manifest_hash = JOB
+
+    # Publish canonical snapshot so ledger register_quarantined_candidate has real head
+    window = {"start": "2026-10-16", "end": "2026-10-30"}
+    cutoff_str = "2026-10-30T17:44:46Z"
+    frontend_payload = _make_valid_frontend_payload(
+        snapshot_id=snap_id,
+        plot_id=ns.plot_id,
+        cycle_id=cycle_id,
+        cutoff_str=cutoff_str,
+        window=window,
+    )
+    asmae_result = {
+        "snapshot_id": snap_id,
+        "crop_posterior_lineage": f"crop-{snap_id}",
+        "crop_worldline_event_id": f"worldline-{snap_id}",
+        "phenology_worldline_event_id": f"pheno-{snap_id}",
+        "evidence_cutoff_at": cutoff_str,
+        "observation_window": window,
+    }
+    pub_head = publish_canonical_plot_snapshot(
+        namespace=ns,
+        geometry_hash=geom_hash,
+        snapshot_id=snap_id,
+        asmae_result=asmae_result,
+        frontend_payload=frontend_payload,
+        job_id="job-quarantine-001",
+        manifest_hash=manifest_hash,
+    )
+    receipt_hash = pub_head["publication_receipt_hash"]
+
+    attestation = create_proof_attestation(
+        tenant_id=ns.tenant_id,
+        farm_id=ns.farm_id,
+        plot_id=ns.plot_id,
+        geometry_hash=geom_hash,
+        crop_cycle_id=cycle_id,
+        snapshot_id=snap_id,
+        canonical_publication_receipt_hash=receipt_hash,
+        admitted_evidence_root_hash=s["witness"]["content_hash"],
+        bounded_uncertainty_receipt_hash=s["bounded"]["content_hash"],
+        scientific_posterior_hash=POSTERIOR,
+        issuer_key_id=KEY_ID,
+    )
+    attach_canonical_proof_attestation(ns, attestation)
+
+    envelope = PrescriptionAuthorizationEnvelopeV2(
+        tenant_id=s["ns"].tenant_id,
+        farm_id=s["ns"].farm_id,
+        plot_id=s["ns"].plot_id,
+        geometry_hash=geom_hash,
+        crop_cycle_id=cycle_id,
+        snapshot_id=snap_id,
+        canonical_publication_receipt_hash=receipt_hash,
+        evidence_manifest_hash=manifest_hash,
+        evidence_cutoff_at="2026-10-30T17:44:46Z",
+        observation_window_start="2026-10-16T00:00:00Z",
+        observation_window_end="2026-10-30T00:00:00Z",
+        published_at="2026-10-30T18:00:00Z",
+        issued_at=NOW,
+        expires_at=TIMES["expires_at"],
+        uncertainty_receipt_hash=s["bounded"]["content_hash"],
+        input_belief_id="belief-test-1",
+        tribunal_content_hash=SHA("tribunal-positive"),
+        prescription_manifest_hash=SHA("manifest-positive"),
+        prescription_manifest_entry_ids=(CONTRIBUTION,),
+        policy_snapshot_hash=canonical_hash({"pilot_policy": "strict", "require_evidence_receipts": True}),
+        l8_run_id="l8-run-1",
+        l8_content_hash=SHA("l8-positive-audit"),
+        final_execution_plan_hash=canonical_hash(_serialize_plan(s["artifact"].final_execution_plan)),
+        actions=(s["action"],),
+    )
+
+    # Directly register in quarantined candidate state
+    rec = s["ledger"].register_quarantined_candidate(
+        namespace=ns,
+        geometry_hash=geom_hash,
+        crop_cycle_id=cycle_id,
+        envelope=envelope,
+        now=NOW,
+    )
+    cid = rec["candidate_id"]
+
+    # Attempting to authorize export on quarantined record MUST fail closed
+    with pytest.raises(ContractViolation, match="Pilot candidate is quarantined; cannot authorize export"):
+        s["ledger"].authorize_export(cid, envelope=envelope, namespace=s["ns"], now=NOW)

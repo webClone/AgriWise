@@ -73,6 +73,8 @@ class PilotPrescriptionIssuer:
         namespace: PlotNamespace,
         crop_cycle_id: str,
         geometry_hash: str,
+        expected_snapshot_id: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
         artifact: Any,
         membership_witness: Mapping[str, Any],
         admitted_evidence_receipts: Mapping[str, Any],
@@ -87,6 +89,17 @@ class PilotPrescriptionIssuer:
         geometry_hash = _required_hash(geometry_hash, "geometry_hash")
         crop_cycle_id = _required_text(crop_cycle_id, "crop_cycle_id")
         issued_instant = _utc_instant(now, "issuance time")
+
+        snap_id = (
+            expected_snapshot_id
+            or snapshot_id
+            or getattr(artifact, "snapshot_id", None)
+            or getattr(getattr(artifact, "inputs", None), "snapshot_id", None)
+            or (membership_witness.get("snapshot_id") if isinstance(membership_witness, Mapping) else None)
+        )
+        if not snap_id:
+            raise ContractViolation("Prescription issuer requires expected_snapshot_id")
+        expected_snapshot_id = _required_text(snap_id, "expected_snapshot_id")
 
         # 1. Validate artifact structure and L8 result
         if not artifact or not getattr(artifact, "layer_8", None):
@@ -135,7 +148,10 @@ class PilotPrescriptionIssuer:
         inputs = getattr(artifact, "inputs", None)
         if inputs is None:
             raise ContractViolation("Run artifact inputs are missing")
-        policy_hash = canonical_hash(getattr(inputs, "policy_snapshot", {}))
+        policy = getattr(inputs, "policy_snapshot", None)
+        if not isinstance(policy, Mapping) or policy.get("require_evidence_receipts") is not True:
+            raise ContractViolation("Prescription policy must explicitly require require_evidence_receipts=True")
+        policy_hash = canonical_hash(policy)
         l8_run_id = _required_text(str(getattr(l8_output, "run_id", "") or ""), "l8_run_id")
 
         l8_content_hash = ""
@@ -153,6 +169,7 @@ class PilotPrescriptionIssuer:
         # 4. Fetch and verify current canonical publication
         head = read_trusted_current_asmae_publication(
             namespace,
+            expected_snapshot_id=expected_snapshot_id,
             expected_geometry_hash=geometry_hash,
             expected_crop_cycle_id=crop_cycle_id,
             require_proof_attestation=True,
