@@ -139,21 +139,29 @@ class ZoneKalmanFilter:
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
         
-        # Run process model
+        # Advance the physical state using the current process model.
+        # The matching Jacobian must be derived from the SAME inputs/model;
+        # do not independently assume F=I when physical couplings exist.
         predicted_state, Q = self.process_model.predict(
             self.state, weather, events
         )
+        F = self.process_model.transition_jacobian(
+            self.state, weather, events, predicted_state=predicted_state
+        )
+
+        # Stage a complete covariance update before committing anything.
+        # If transition differentiation or propagation fails, the previous
+        # state, covariance, day and age remain intact.
+        candidate_covariance = StateCovariance(
+            P=[row[:] for row in self.covariance.P]
+        )
+        candidate_covariance.propagate(F, Q)
         predicted_state.day = day
-        
-        # Propagate covariance: P_pred = F * P * F^T + Q
-        # For this simplified model, F ≈ I (identity), so:
-        # P_pred = P + Q
-        self.covariance.add_process_noise(Q)
-        
-        # Update state
+        predicted_state.variance = candidate_covariance.diagonal()
+
+        self.covariance = candidate_covariance
         self.state = predicted_state
         self.days_since_obs += 1
-        
         return predicted_state
 
     def predict_missing_weather(self, day: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -174,7 +182,8 @@ class ZoneKalmanFilter:
         
         Q_inflated = [q * 5.0 for q in Q]
         self.covariance.add_process_noise(Q_inflated)
-        
+        predicted_state.variance = self.covariance.diagonal()
+
         self.state = predicted_state
         self.days_since_obs += 1
         
