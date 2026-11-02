@@ -211,9 +211,75 @@ class StateCovariance:
         self.P[i][j] = val
     
     def add_process_noise(self, Q: List[float]) -> None:
-        """Add process noise (diagonal) to covariance."""
+        """Legacy identity-transition noise path (missing-weather mode only)."""
+        if len(Q) != N_STATES or any(
+            not isinstance(q, (int, float)) or isinstance(q, bool)
+            or not math.isfinite(q) or q < 0.0 for q in Q
+        ):
+            raise ValueError("process noise must be finite, nonnegative and complete")
         for i in range(N_STATES):
-            self.P[i][i] += Q[i] if i < len(Q) else 0.01
+            self.P[i][i] += Q[i]
+
+    def propagate(self, F: List[List[float]], Q: List[float]) -> None:
+        """Apply P_next = F P F^T + diag(Q), atomically.
+
+        The process model already supplies Q as *variance*, not standard
+        deviation. No covariance data is replaced by an identity assumption.
+        PSD of the original P remains an upstream invariant; this method
+        checks shape, finiteness, symmetry and nonnegative diagonal but is not
+        an eigenvalue-based PSD certification.
+        """
+        n = N_STATES
+        if len(F) != n or any(len(row) != n for row in F):
+            raise ValueError("transition Jacobian must be NxN")
+        if len(Q) != n:
+            raise ValueError("process noise vector must contain N variances")
+        if len(self.P) != n or any(len(row) != n for row in self.P):
+            raise ValueError("prior covariance must be NxN")
+        if any(
+            not isinstance(v, (int, float)) or isinstance(v, bool)
+            or not math.isfinite(v)
+            for row in F for v in row
+        ):
+            raise ValueError("nonfinite transition Jacobian")
+        if any(
+            not isinstance(v, (int, float)) or isinstance(v, bool)
+            or not math.isfinite(v) or v < 0.0 for v in Q
+        ):
+            raise ValueError("invalid process noise variance")
+        if any(not math.isfinite(v) for row in self.P for v in row):
+            raise ValueError("nonfinite prior covariance")
+        for i in range(n):
+            if self.P[i][i] < 0:
+                raise ValueError("negative prior variance")
+            for j in range(i + 1, n):
+                if not math.isclose(
+                    self.P[i][j], self.P[j][i], rel_tol=1e-10, abs_tol=1e-12
+                ):
+                    raise ValueError("asymmetric prior covariance")
+
+        fp = [
+            [math.fsum(F[i][k] * self.P[k][j] for k in range(n))
+             for j in range(n)] for i in range(n)
+        ]
+        candidate = [
+            [math.fsum(fp[i][k] * F[j][k] for k in range(n))
+             + (Q[i] if i == j else 0.0)
+             for j in range(n)] for i in range(n)
+        ]
+        if any(not math.isfinite(v) for row in candidate for v in row):
+            raise ValueError("nonfinite propagated covariance")
+
+        # Small roundoff asymmetry may be removed; reject material asymmetry.
+        for i in range(n):
+            if candidate[i][i] < 0:
+                raise ValueError("negative propagated variance")
+            for j in range(i + 1, n):
+                a, b = candidate[i][j], candidate[j][i]
+                if not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-11):
+                    raise ValueError("asymmetric propagated covariance")
+                candidate[i][j] = candidate[j][i] = (a + b) / 2.0
+        self.P = candidate
 
 
 # ============================================================================
@@ -487,6 +553,99 @@ class ProcessModel:
         
         return x, Q
     
+    def transition_jacobian(
+        self, state: StateVector, weather: Dict[str, float],
+        events: Optional[List[Dict]] = None, dt_days: float = 1.0,
+        predicted_state: Optional[StateVector] = None,
+    ) -> List[List[float]]:
+        """Local Jacobian of the *actual* piecewise transition f(x,u).
+
+        Central differences are used in the interior; one-sided differences
+        stay inside the physical state domain. Each probe uses the identical
+        weather, crop parameters and management events as the nominal step.
+        This is an algorithmic derivative, not a calibrated physical law.
+        Stage discontinuities cannot be represented by a local EKF Jacobian
+        and are reported rather than disguised as extreme covariance.
+        """
+        if len(state.values) != N_STATES:
+            raise ValueError("invalid prior state dimension")
+        if not math.isfinite(dt_days) or dt_days <= 0.0:
+            raise ValueError("invalid transition duration")
+
+        x0 = state.values
+        bounds = [
+            (0.0, float(self.params["lai_max"])),
+            (0.0, 10.0),
+            (0.0, 1.0), (0.0, 1.0), (0.0, 1.0),
+            (0.0, None), (0.0, 4.0), (0.0, 1.0), (0.0, 1.0),
+        ]
+        for i, (low, high) in enumerate(bounds):
+            value = x0[i]
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool) or not math.isfinite(value)
+                or value < low or (high is not None and value > high)
+            ):
+                raise ValueError(f"state {STATE_NAMES[i]} outside derivative domain")
+
+        nominal = (
+            predicted_state if predicted_state is not None
+            else self.predict(state, weather, events, dt_days=dt_days)[0]
+        )
+        y0 = nominal.values
+        if len(y0) != N_STATES or any(not math.isfinite(v) for v in y0):
+            raise ValueError("invalid nominal transition")
+
+        F = [[0.0] * N_STATES for _ in range(N_STATES)]
+        for j, (low, high) in enumerate(bounds):
+            value = x0[j]
+            step = 1e-5 * max(1.0, abs(value))
+            can_plus = high is None or value + step <= high
+            can_minus = value - step >= low
+            if not (can_plus or can_minus):
+                raise ValueError(f"no valid perturbation for {STATE_NAMES[j]}")
+
+            plus = minus = None
+            if can_plus:
+                x_plus = state.clone()
+                x_plus.values[j] += step
+                plus = self.predict(
+                    x_plus, weather, events, dt_days=dt_days
+                )[0].values
+            if can_minus:
+                x_minus = state.clone()
+                x_minus.values[j] -= step
+                minus = self.predict(
+                    x_minus, weather, events, dt_days=dt_days
+                )[0].values
+            if any(
+                not math.isfinite(v)
+                for values in (plus, minus) if values is not None
+                for v in values
+            ):
+                raise ValueError("nonfinite perturbed transition")
+
+            # Dormant -> vegetative is currently a discontinuous jump from
+            # stage 0 to 1. A local linear covariance approximation is
+            # invalid if a perturbation straddles that discrete boundary.
+            if (
+                plus is not None and minus is not None
+                and abs(plus[IDX_PHENO_STAGE] - minus[IDX_PHENO_STAGE]) >= 0.5
+            ):
+                raise ValueError("discontinuous phenology stage transition")
+
+            for i in range(N_STATES):
+                if plus is not None and minus is not None:
+                    derivative = (plus[i] - minus[i]) / (2.0 * step)
+                elif plus is not None:
+                    derivative = (plus[i] - y0[i]) / step
+                else:
+                    derivative = (y0[i] - minus[i]) / step
+                if not math.isfinite(derivative):
+                    raise ValueError("nonfinite transition derivative")
+                F[i][j] = derivative
+        return F
+
     def _crop_coefficient(self, stage: float) -> float:
         """Estimate crop coefficient Kc from phenology stage."""
         p = self.params
