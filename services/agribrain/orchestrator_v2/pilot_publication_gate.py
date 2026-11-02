@@ -71,7 +71,10 @@ def read_trusted_current_asmae_publication(
         ("geometry_hash", expected_geometry),
         ("crop_cycle_id", expected_cycle),
     ):
-        if raw.get(field) != expected:
+        actual = raw.get(field)
+        if field == "geometry_hash" and isinstance(actual, str) and actual.startswith("sha256:"):
+            actual = actual[7:]
+        if actual != expected:
             raise ContractViolation(f"Current ASMAE publication {field} mismatch")
     validation = raw.get("validation")
     if not isinstance(validation, Mapping) or not all(

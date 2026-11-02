@@ -38,6 +38,9 @@ from services.agribrain.common.plot_namespace import PlotNamespace
 SCHEMA_VERSION = "pilot_v2_quarantined_candidate_v1"
 HMAC_DOMAIN = b"akaloris/pilot-v2/quarantined-candidate/v1\x00"
 
+AUTHORIZED_SCHEMA_VERSION = "pilot_v2_authorized_prescription_v1"
+AUTHORIZED_HMAC_DOMAIN = b"akaloris/pilot-v2/authorized-prescription/v1\x00"
+
 
 def _parse_time(value: str, label: str) -> datetime:
     return datetime.fromisoformat(_utc_instant(value, label).replace("Z", "+00:00"))
@@ -49,8 +52,8 @@ def _required_key(secret: bytes) -> bytes:
     return secret
 
 
-def _sign(payload_hash: str, key: bytes) -> str:
-    return hmac.new(_required_key(key), HMAC_DOMAIN + payload_hash.encode("ascii"), hashlib.sha256).hexdigest()
+def _sign(payload_hash: str, key: bytes, domain: bytes = HMAC_DOMAIN) -> str:
+    return hmac.new(_required_key(key), domain + payload_hash.encode("ascii"), hashlib.sha256).hexdigest()
 
 
 def _payload_hash(payload: Mapping[str, Any]) -> str:
@@ -111,6 +114,10 @@ class PilotCandidateLedger:
                   reason TEXT NOT NULL,
                   PRIMARY KEY(tenant_id, farm_id, plot_id)
                 )""")
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_candidates_envelope
+                ON candidates(envelope_hash)
+            """)
 
     def register_quarantined_candidate(
         self,
@@ -185,6 +192,101 @@ class PilotCandidateLedger:
         }
         payload_hash = _payload_hash(fields)
         record = {**fields, "content_hash": payload_hash, "hmac": _sign(payload_hash, self.key)}
+        serialized = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            blocked = conn.execute(
+                "SELECT 1 FROM scope_blocks WHERE tenant_id=? AND farm_id=? AND plot_id=?",
+                (namespace.tenant_id, namespace.farm_id, namespace.plot_id),
+            ).fetchone()
+            if blocked:
+                raise ContractViolation("Pilot plot scope is administratively blocked")
+            conn.execute(
+                "INSERT INTO candidates(candidate_id, envelope_hash, plot_id, snapshot_id, record_json) VALUES (?,?,?,?,?)",
+                (record["candidate_id"], envelope.content_hash, namespace.plot_id, envelope.snapshot_id, serialized),
+            )
+            conn.commit()
+        return record
+
+    def register_authorized_prescription(
+        self,
+        *,
+        namespace: PlotNamespace,
+        geometry_hash: str,
+        crop_cycle_id: str,
+        envelope: PrescriptionAuthorizationEnvelopeV2,
+        now: str,
+    ) -> dict[str, Any]:
+        """Record an authentic, server-verified positive V2 prescription authorization.
+
+        Requires independently verified publication, valid proof attestation,
+        matching proof roots, and envelope validity.
+        """
+        if not isinstance(namespace, PlotNamespace) or not namespace.is_valid():
+            raise ContractViolation("Pilot authorization requires trusted PlotNamespace")
+        if not isinstance(envelope, PrescriptionAuthorizationEnvelopeV2):
+            raise ContractViolation("Pilot authorization requires V2")
+        if (envelope.tenant_id, envelope.farm_id, envelope.plot_id) != (
+            namespace.tenant_id, namespace.farm_id, namespace.plot_id
+        ):
+            raise ContractViolation("Pilot candidate namespace mismatch")
+        head = read_trusted_current_asmae_publication(
+            namespace,
+            expected_snapshot_id=envelope.snapshot_id,
+            expected_geometry_hash=geometry_hash,
+            expected_crop_cycle_id=crop_cycle_id,
+            require_proof_attestation=True,
+        )
+        if head.get("proof_attestation_valid") is not True:
+            raise ContractViolation("Pilot candidate has no authenticated proof attestation")
+        attestation = head.get("proof_attestation")
+        if not isinstance(attestation, Mapping):
+            raise ContractViolation("Pilot candidate attestation missing")
+        for attr, field in (
+            ("admitted_evidence_root_hash", "admitted_evidence_root_hash"),
+            ("bounded_uncertainty_receipt_hash", "bounded_uncertainty_receipt_hash"),
+            ("scientific_posterior_hash", "scientific_posterior_hash"),
+        ):
+            if head.get(field) != attestation.get(attr):
+                raise ContractViolation("Pilot candidate roots do not match authenticated attestation")
+        checked_at = _utc_instant(now, "candidate recorded_at")
+        validate_published_pilot_envelope(
+            envelope, canonical_head=head,
+            tenant_id=namespace.tenant_id, farm_id=namespace.farm_id,
+            plot_id=namespace.plot_id, geometry_hash=geometry_hash,
+            crop_cycle_id=crop_cycle_id, now=checked_at,
+            verified_uncertainty_receipt_hash=head["bounded_uncertainty_receipt_hash"],
+        )
+        _required_hash(head.get("proof_attestation_hash"), "proof attestation hash")
+
+        for action in envelope.actions:
+            if action.machine_execution_allowed:
+                raise ContractViolation("Machine execution is never allowed")
+            if not action.requires_confirmation:
+                raise ContractViolation("Farmer confirmation is strictly required")
+
+        fields = {
+            "schema_version": AUTHORIZED_SCHEMA_VERSION,
+            "candidate_id": secrets.token_hex(16),
+            "state": "AUTHORIZED",
+            "tenant_id": namespace.tenant_id,
+            "farm_id": namespace.farm_id,
+            "plot_id": namespace.plot_id,
+            "geometry_hash": envelope.geometry_hash,
+            "crop_cycle_id": envelope.crop_cycle_id,
+            "snapshot_id": envelope.snapshot_id,
+            "publication_receipt_hash": envelope.canonical_publication_receipt_hash,
+            "envelope_hash": envelope.content_hash,
+            "attestation_hash": head["proof_attestation_hash"],
+            "admitted_evidence_root_hash": head["admitted_evidence_root_hash"],
+            "bounded_uncertainty_receipt_hash": head["bounded_uncertainty_receipt_hash"],
+            "scientific_posterior_hash": head["scientific_posterior_hash"],
+            "recorded_at": checked_at,
+            "expires_at": envelope.expires_at,
+            "key_id": self.key_id,
+        }
+        payload_hash = _payload_hash(fields)
+        record = {**fields, "content_hash": payload_hash, "hmac": _sign(payload_hash, self.key, AUTHORIZED_HMAC_DOMAIN)}
         serialized = json.dumps(record, sort_keys=True, separators=(",", ":"))
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -317,6 +419,131 @@ class PilotCandidateLedger:
             )
             conn.commit()
 
-    def authorize_export(self, *_args: Any, **_kwargs: Any):
-        """Unconditional quarantine until authentic admission issuer is connected."""
-        raise ContractViolation("V2 action export remains quarantined; no positive issuer has been qualified")
+    def authorize_export(
+        self,
+        candidate_id: Optional[str] = None,
+        *,
+        envelope: Optional[PrescriptionAuthorizationEnvelopeV2] = None,
+        envelope_hash: Optional[str] = None,
+        namespace: Optional[PlotNamespace] = None,
+        now: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Authorize farmer-facing action export for a previously verified positive record.
+
+        Guarded export gate: checks ledger state == AUTHORIZED, HMAC signature,
+        non-revoked, scope unblocked, unexpired, and matching current publication.
+        Fails closed on quarantined candidates, unknown records, or tampering.
+        """
+        if candidate_id is None and envelope is None and envelope_hash is None:
+            raise ContractViolation("V2 action export remains quarantined; no positive record specified")
+
+        target_hash = envelope.content_hash if envelope is not None else envelope_hash
+        with self._connect() as conn:
+            if candidate_id:
+                row = conn.execute(
+                    "SELECT candidate_id, record_json, envelope_hash, plot_id, snapshot_id FROM candidates WHERE candidate_id=?",
+                    (candidate_id,),
+                ).fetchone()
+            elif target_hash:
+                row = conn.execute(
+                    "SELECT candidate_id, record_json, envelope_hash, plot_id, snapshot_id FROM candidates WHERE envelope_hash=?",
+                    (target_hash,),
+                ).fetchone()
+            else:
+                raise ContractViolation("Cannot authorize export without candidate identity")
+
+            if not row:
+                raise ContractViolation("Unknown or unavailable candidate record")
+            cid = row[0]
+            revoked = conn.execute(
+                "SELECT 1 FROM revocations WHERE candidate_id=?", (cid,)
+            ).fetchone()
+
+        if revoked:
+            raise ContractViolation("Pilot candidate has been revoked")
+
+        try:
+            record = json.loads(row[1])
+        except (ValueError, TypeError) as exc:
+            raise ContractViolation("Corrupt candidate registry record") from exc
+
+        if not isinstance(record, dict) or record.get("candidate_id") != cid:
+            raise ContractViolation("Candidate record identity mismatch")
+
+        if record.get("state") == "QUARANTINED":
+            raise ContractViolation("Pilot candidate is quarantined; cannot authorize export")
+
+        if record.get("schema_version") != AUTHORIZED_SCHEMA_VERSION or record.get("state") != "AUTHORIZED":
+            raise ContractViolation("Pilot candidate is not in authorized state")
+
+        if (row[2], row[3], row[4]) != (
+            record.get("envelope_hash"), record.get("plot_id"), record.get("snapshot_id")
+        ):
+            raise ContractViolation("Candidate registry index disagrees with immutable record")
+
+        if target_hash and target_hash != record.get("envelope_hash"):
+            raise ContractViolation("Envelope hash mismatch with authorization record")
+
+        if record.get("key_id") != self.key_id:
+            raise ContractViolation("Pilot candidate issuer key is unavailable or rotated")
+
+        payload = {k: v for k, v in record.items() if k not in ("content_hash", "hmac")}
+        actual_hash = _payload_hash(payload)
+        expected_sig = _sign(actual_hash, self.key, AUTHORIZED_HMAC_DOMAIN)
+        if (not isinstance(record.get("content_hash"), str)
+                or not hmac.compare_digest(record["content_hash"], actual_hash)
+                or not isinstance(record.get("hmac"), str)
+                or not hmac.compare_digest(record["hmac"], expected_sig)):
+            raise ContractViolation("Candidate audit integrity or signature mismatch")
+
+        ns = namespace or PlotNamespace(record["tenant_id"], record["farm_id"], record["plot_id"])
+        if not ns.is_valid():
+            raise ContractViolation("Export requires valid PlotNamespace")
+        for k in ("tenant_id", "farm_id", "plot_id"):
+            if record[k] != getattr(ns, k):
+                raise ContractViolation("Pilot candidate belongs to another namespace")
+
+        with self._connect() as conn:
+            blocked = conn.execute(
+                "SELECT 1 FROM scope_blocks WHERE tenant_id=? AND farm_id=? AND plot_id=?",
+                (ns.tenant_id, ns.farm_id, ns.plot_id),
+            ).fetchone()
+        if blocked:
+            raise ContractViolation("Pilot plot scope is administratively blocked")
+
+        effective_now = _utc_instant(now, "export authorization time") if now else datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        checked_time = _parse_time(effective_now, "export check time")
+        if not _parse_time(record["recorded_at"], "candidate recorded_at") <= checked_time < _parse_time(
+            record["expires_at"], "candidate expiry"
+        ):
+            raise ContractViolation("Pilot candidate not yet valid or expired")
+
+        head = read_trusted_current_asmae_publication(
+            ns,
+            expected_snapshot_id=record["snapshot_id"],
+            expected_geometry_hash=record["geometry_hash"],
+            expected_crop_cycle_id=record["crop_cycle_id"],
+            require_proof_attestation=True,
+        )
+        for name, field in (
+            ("snapshot_id", "snapshot_id"),
+            ("geometry_hash", "geometry_hash"),
+            ("crop_cycle_id", "crop_cycle_id"),
+            ("publication_receipt_hash", "publication_receipt_hash"),
+            ("attestation_hash", "proof_attestation_hash"),
+            ("admitted_evidence_root_hash", "admitted_evidence_root_hash"),
+            ("bounded_uncertainty_receipt_hash", "bounded_uncertainty_receipt_hash"),
+            ("scientific_posterior_hash", "scientific_posterior_hash"),
+        ):
+            if record[name] != head.get(field):
+                raise ContractViolation(f"Pilot candidate {name} no longer matches current publication")
+
+        return {
+            "candidate_id": cid,
+            "state": "AUTHORIZED",
+            "snapshot_id": record["snapshot_id"],
+            "envelope_hash": record["envelope_hash"],
+            "valid_export_authorization": True,
+            "authorized_at": effective_now,
+            "record": record,
+        }

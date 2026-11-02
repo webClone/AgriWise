@@ -787,7 +787,13 @@ def attach_canonical_proof_attestation(
         raise ContractViolation("Proof attestation farm mismatch")
     if verified.plot_id != head.get("plot_id"):
         raise ContractViolation("Proof attestation plot mismatch")
-    if verified.geometry_hash != head.get("geometry_hash"):
+    head_geo = head.get("geometry_hash")
+    if isinstance(head_geo, str) and head_geo.startswith("sha256:"):
+        head_geo = head_geo[7:]
+    verified_geo = verified.geometry_hash
+    if isinstance(verified_geo, str) and verified_geo.startswith("sha256:"):
+        verified_geo = verified_geo[7:]
+    if verified_geo != head_geo:
         raise ContractViolation("Proof attestation geometry mismatch")
     if verified.crop_cycle_id != head.get("crop_cycle_id"):
         raise ContractViolation("Proof attestation crop cycle mismatch")

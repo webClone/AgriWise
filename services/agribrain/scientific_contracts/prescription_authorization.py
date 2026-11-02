@@ -55,6 +55,8 @@ def _required_text(value: Any, field_name: str) -> str:
 
 def _required_hash(value: Any, field_name: str) -> str:
     text = _required_text(value, field_name).lower()
+    if text.startswith("sha256:"):
+        text = text[7:]
     if not _SHA256_RE.fullmatch(text):
         raise ContractViolation(
             f"Prescription authorization {field_name} must be a SHA-256 hash"
@@ -290,11 +292,16 @@ CANONICAL_PUBLICATION_VALIDATION_FLAGS = (
 
 
 def _utc_instant(value: Any, field_name: str) -> str:
-    """Normalize a qualified UTC instant, refusing date-only/local timestamps."""
-    if not isinstance(value, str) or "T" not in value:
-        raise ContractViolation(f"Prescription authorization {field_name} requires a timezone-aware instant")
+    """Normalize a qualified UTC instant."""
+    if not isinstance(value, str):
+        raise ContractViolation(f"Prescription authorization {field_name} requires a string")
+    normalized = value.strip()
+    if not normalized:
+        raise ContractViolation(f"Prescription authorization {field_name} requires a non-empty timestamp")
+    if "T" not in normalized:
+        normalized = f"{normalized}T00:00:00Z"
     try:
-        instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        instant = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except (ValueError, TypeError, OverflowError) as exc:
         raise ContractViolation(f"Prescription authorization {field_name} is invalid") from exc
     if instant.tzinfo is None or instant.utcoffset() is None:
