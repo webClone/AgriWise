@@ -231,9 +231,19 @@ class ZoneKalmanFilter:
                 # Forward model: predicted observation
                 y_pred, H, R_base = model_fn(self.state.values)
                 
-                # Use observation's own R (includes reliability weighting)
+                # Use observation's own R (includes reliability weighting).
+                # Validate the provider output before it can touch the state.
+                if (
+                    not isinstance(H, (list, tuple))
+                    or len(H) != N_STATES
+                    or not math.isfinite(float(y_pred))
+                    or any(not math.isfinite(float(h)) for h in H)
+                ):
+                    continue
                 R = obs.R
-                
+                if not math.isfinite(R) or R <= 0.0:
+                    continue
+
                 # Innovation (measurement residual)
                 # Cast to float: upstream sources may pass numeric strings
                 obs_val = float(obs.value)
@@ -242,8 +252,8 @@ class ZoneKalmanFilter:
                 # Innovation covariance: S = H * P * H^T + R
                 # For scalar observation, S is scalar
                 S = _dot_HPHt(H, self.covariance.P) + R
-                
-                if S <= 0:
+
+                if not math.isfinite(S) or S <= 0.0:
                     continue
                 
                 # Kalman gain: K = P * H^T / S
@@ -251,12 +261,24 @@ class ZoneKalmanFilter:
                 
                 if not all(math.isfinite(v) for v in K):
                     continue
-                # State update: x = x + K * innovation
-                for i in range(N_STATES):
-                    self.state.values[i] += K[i] * innovation
-                
-                # Covariance update: P = (I - K*H) * P * (I - K*H)^T + K*R*K^T
-                _update_covariance(self.covariance.P, K, H, obs_R=R)
+
+                # Prepare a complete candidate before committing either state or
+                # covariance. Invalid model Jacobians and overflow must not leave
+                # half-applied assimilation updates behind.
+                proposed_values = [
+                    self.state.values[i] + K[i] * innovation
+                    for i in range(N_STATES)
+                ]
+                proposed_covariance = [row[:] for row in self.covariance.P]
+                _update_covariance(proposed_covariance, K, H, obs_R=R)
+                if (
+                    not all(math.isfinite(v) for v in proposed_values)
+                    or not _covariance_entries_valid(proposed_covariance)
+                ):
+                    continue
+
+                self.state.values[:] = proposed_values
+                self.covariance.P[:] = proposed_covariance
                 
                 # Track source contribution
                 weight = abs(innovation) / max(abs(y_pred), 0.01)
@@ -267,7 +289,7 @@ class ZoneKalmanFilter:
                 if obs.obs_type in ("ndvi", "evi"):
                     had_ndvi_obs = True
                 
-            except (ValueError, ZeroDivisionError, TypeError) as e:
+            except (ValueError, ZeroDivisionError, TypeError, OverflowError):
                 # Skip problematic observations
                 continue
         
@@ -516,6 +538,26 @@ class DailyAssimilationEngine:
 # ============================================================================
 # Matrix operations (pure Python, no numpy)
 # ============================================================================
+
+def _covariance_entries_valid(P: List[List[float]]) -> bool:
+    """Check that a candidate covariance is finite, symmetric and nonnegative.
+
+    This is a fast admission guard, not an eigenvalue/PSD proof. PSD and
+    constrained-state uncertainty remain separate L0-02 qualification gates.
+    """
+    if len(P) != N_STATES or any(len(row) != N_STATES for row in P):
+        return False
+    for i in range(N_STATES):
+        if not math.isfinite(P[i][i]) or P[i][i] < 0.0:
+            return False
+        for j in range(i + 1, N_STATES):
+            a, b = P[i][j], P[j][i]
+            if not (math.isfinite(a) and math.isfinite(b)):
+                return False
+            if abs(a - b) > 1e-9 * max(1.0, abs(a), abs(b)):
+                return False
+    return True
+
 
 def _dot_HPHt(H: List[float], P: List[List[float]]) -> float:
     """Compute H * P * H^T for a 1×N observation vector H and N×N covariance P."""
