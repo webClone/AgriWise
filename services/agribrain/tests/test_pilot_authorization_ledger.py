@@ -126,8 +126,8 @@ def test_registry_detects_tampered_signed_json(tmp_path):
         data = json.loads(current)
         data["snapshot_id"] = "ASMAE-SNAPSHOT-foreign"
         conn.execute(
-            "UPDATE candidates SET record_json=? WHERE candidate_id=?",
-            (json.dumps(data), row["candidate_id"]),
+            "UPDATE candidates SET record_json=?, snapshot_id=? WHERE candidate_id=?",
+            (json.dumps(data), "ASMAE-SNAPSHOT-foreign", row["candidate_id"]),
         )
     with pytest.raises(ContractViolation, match="integrity or signature"):
         inspect(s, row["candidate_id"])

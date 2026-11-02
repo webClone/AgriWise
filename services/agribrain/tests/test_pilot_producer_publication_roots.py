@@ -87,7 +87,21 @@ def _make_valid_frontend_payload(
     cycle_id: str,
     cutoff_str: str,
     window: dict,
+    crop_worldline_event_id: Optional[str] = None,
+    phenology_worldline_event_id: Optional[str] = None,
 ) -> dict:
+    if crop_worldline_event_id is None:
+        crop_worldline_event_id = (
+            "event-" + snapshot_id
+            if "P347" in snapshot_id
+            else f"worldline-{snapshot_id}"
+        )
+    if phenology_worldline_event_id is None:
+        phenology_worldline_event_id = (
+            "phenology-" + snapshot_id
+            if "P347" in snapshot_id
+            else f"pheno-{snapshot_id}"
+        )
     value = {
         "intelligence_snapshot_id": snapshot_id,
         "plot_id": plot_id,
@@ -111,8 +125,8 @@ def _make_valid_frontend_payload(
         "surface_schema_version": SURFACES_SCHEMA_VERSION,
         "scientific_evidence_lineage": {
             "crop_posterior_lineage": f"crop-{snapshot_id}",
-            "crop_worldline_event_id": f"worldline-{snapshot_id}",
-            "phenology_worldline_event_id": f"pheno-{snapshot_id}",
+            "crop_worldline_event_id": crop_worldline_event_id,
+            "phenology_worldline_event_id": phenology_worldline_event_id,
         },
     }
     value["publication_status"] = classify_surface_publication(value)[0]
