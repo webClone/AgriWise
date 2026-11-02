@@ -8,22 +8,27 @@ This is the ONLY shape the frontend should ever see.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from services.agribrain.orchestrator_v2.schema import RunArtifact, LayerStatus
 from services.agribrain.scientific_contracts.prescription_authorization import (
     AuthorizedActionV1,
     PrescriptionAuthorizationEnvelopeV1,
+    PrescriptionAuthorizationEnvelopeV2,
+    PRESCRIPTION_AUTHORIZATION_ENVELOPE_V2,
     canonical_hash,
     selected_entries_exist,
 )
 from services.agribrain.scientific_contracts.exceptions import ContractViolation
+from services.agribrain.common.plot_namespace import PlotNamespace
 from layer9_interface.fallback_actions import build_fallback_guidance_map
 
 
 def artifact_to_run(artifact: RunArtifact,
                     surfaces: Optional[List[Dict]] = None,
                     chat_payload: Optional[Dict] = None,
-                    layer10_detail: Optional[Dict] = None) -> Dict[str, Any]:
+                    layer10_detail: Optional[Dict] = None,
+                    pilot_ledger: Optional[Any] = None,
+                    now: Optional[str] = None) -> Dict[str, Any]:
     """
     Convert a RunArtifact (+ optional L10 surfaces and chat payload)
     into the canonical AgriBrainRun JSON.
@@ -109,7 +114,9 @@ def artifact_to_run(artifact: RunArtifact,
     # Validate once, then use the same exact envelope for both recommendations
     # and execution-plan visibility.  L3--L5 action-shaped fields are shadow
     # evidence and must never be reconstructed here.
-    authorization, authorization_error = _validated_authorization(artifact)
+    authorization, authorization_error = _validated_authorization(
+        artifact, ledger=pilot_ledger, now=now
+    )
     safe_layer10_detail = (
         layer10_detail or {}
         if authorization is not None
@@ -374,7 +381,7 @@ def _serialize_plan(plan) -> Dict[str, Any]:
 
 def _extract_recommendations(
     artifact: RunArtifact,
-    authorization: Optional[PrescriptionAuthorizationEnvelopeV1] = None,
+    authorization: Optional[Union[PrescriptionAuthorizationEnvelopeV1, PrescriptionAuthorizationEnvelopeV2]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Serialize exact actions from a previously verified L8 authorization.
@@ -412,7 +419,9 @@ def _extract_recommendations(
 
 def _validated_authorization(
     artifact: RunArtifact,
-) -> tuple[Optional[PrescriptionAuthorizationEnvelopeV1], Optional[str]]:
+    ledger: Optional[Any] = None,
+    now: Optional[str] = None,
+) -> tuple[Optional[Union[PrescriptionAuthorizationEnvelopeV1, PrescriptionAuthorizationEnvelopeV2]], Optional[str]]:
     """Verify all lineage bindings required by the public action boundary."""
 
     try:
@@ -424,11 +433,33 @@ def _validated_authorization(
         raw = getattr(l8_output, "authorization_envelope", None)
         if raw is None:
             raise ContractViolation("L8 authorization envelope is missing")
-        envelope = (
-            raw
-            if isinstance(raw, PrescriptionAuthorizationEnvelopeV1)
-            else PrescriptionAuthorizationEnvelopeV1.from_mapping(raw)
+
+        is_v2 = (
+            isinstance(raw, PrescriptionAuthorizationEnvelopeV2)
+            or getattr(raw, "schema_version", None) == PRESCRIPTION_AUTHORIZATION_ENVELOPE_V2
+            or (isinstance(raw, dict) and
+                raw.get("schema_version") == PRESCRIPTION_AUTHORIZATION_ENVELOPE_V2)
         )
+        if is_v2:
+            envelope = (
+                raw
+                if isinstance(raw, PrescriptionAuthorizationEnvelopeV2)
+                else PrescriptionAuthorizationEnvelopeV2.from_mapping(raw)
+            )
+            active_ledger = ledger if ledger is not None else getattr(artifact, "pilot_ledger", None)
+            if active_ledger is None:
+                raise ContractViolation("V2 publication binding gate is not yet wired for action export")
+            active_ledger.authorize_export(
+                envelope=envelope,
+                now=now,
+                namespace=PlotNamespace(envelope.tenant_id, envelope.farm_id, envelope.plot_id),
+            )
+        else:
+            envelope = (
+                raw
+                if isinstance(raw, PrescriptionAuthorizationEnvelopeV1)
+                else PrescriptionAuthorizationEnvelopeV1.from_mapping(raw)
+            )
 
         gate = (artifact.diagnostic_integration or {}).get("prescription_gate") or {}
         manifest = gate.get("influence_manifest") or {}
@@ -460,6 +491,10 @@ def _validated_authorization(
             expected = AuthorizedActionV1.from_l8_action(source)
             if approved.to_dict() != expected.to_dict():
                 raise ContractViolation("Authorization action differs from exact L8 selection")
+            if approved.machine_execution_allowed:
+                raise ContractViolation("Machine execution is never allowed")
+            if not approved.requires_confirmation:
+                raise ContractViolation("Farmer confirmation is strictly required")
 
         l8_content_hash = ""
         audit = getattr(l8_output, "audit", None)
@@ -473,6 +508,27 @@ def _validated_authorization(
         plan_hash = canonical_hash(_serialize_plan(artifact.final_execution_plan))
         if envelope.final_execution_plan_hash != plan_hash:
             raise ContractViolation("Authorization final-plan hash mismatch")
+
+        if is_v2:
+            inputs = getattr(artifact, "inputs", None)
+            if inputs is not None:
+                if (envelope.tenant_id, envelope.farm_id, envelope.plot_id) != (
+                    getattr(inputs, "tenant_id", envelope.tenant_id),
+                    getattr(inputs, "farm_id", envelope.farm_id),
+                    getattr(inputs, "plot_id", envelope.plot_id),
+                ):
+                    raise ContractViolation("Authorization inputs namespace mismatch")
+                expected_geo = getattr(inputs, "geometry_hash", None)
+                if expected_geo and envelope.geometry_hash != expected_geo:
+                    raise ContractViolation("Authorization inputs geometry mismatch")
+                expected_crop = (
+                    getattr(inputs, "crop_cycle_id", None)
+                    or getattr(getattr(inputs, "crop_cycle_context", None), "crop_cycle_id", None)
+                    or getattr(inputs, "crop_config", {}).get("crop_cycle_id")
+                )
+                if expected_crop and envelope.crop_cycle_id != expected_crop:
+                    raise ContractViolation("Authorization inputs crop cycle mismatch")
+
         return envelope, None
     except (ContractViolation, TypeError, ValueError) as exc:
         return None, str(exc)
@@ -634,8 +690,9 @@ def _serialize_layer9_output(l9_output) -> Dict[str, Any]:
 
 def _extract_l1_health_status(artifact: RunArtifact) -> str:
     """Extract L1 data health status from data_health object or provenance."""
-    if artifact.layer_1 and artifact.layer_1.output:
-        out = artifact.layer_1.output
+    l1 = getattr(artifact, "layer_1", None)
+    if l1 and getattr(l1, "output", None):
+        out = l1.output
         dh = getattr(out, "data_health", None)
         if dh and getattr(dh, "status", None):
             return dh.status
@@ -651,8 +708,9 @@ def _extract_l1_health_status(artifact: RunArtifact) -> str:
 
 def _extract_l1_confidence_ceiling(artifact: RunArtifact) -> float:
     """Extract L1 confidence ceiling from data_health object or provenance."""
-    if artifact.layer_1 and artifact.layer_1.output:
-        out = artifact.layer_1.output
+    l1 = getattr(artifact, "layer_1", None)
+    if l1 and getattr(l1, "output", None):
+        out = l1.output
         dh = getattr(out, "data_health", None)
         if dh and getattr(dh, "confidence_ceiling", None) is not None:
             return float(dh.confidence_ceiling)

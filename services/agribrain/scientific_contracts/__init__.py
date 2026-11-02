@@ -160,6 +160,10 @@ from .transition_state import (
 from .prescription_authorization import (
     AuthorizedActionV1,
     PrescriptionAuthorizationEnvelopeV1,
+    PrescriptionAuthorizationEnvelopeV2,
+    PRESCRIPTION_AUTHORIZATION_ENVELOPE_V2,
+    parse_prescription_authorization_envelope,
+    validate_published_pilot_envelope,
 )
 
 __all__ = [
@@ -262,6 +266,10 @@ __all__ = [
     "ScientificStateEnvelopeV1",
     "AuthorizedActionV1",
     "PrescriptionAuthorizationEnvelopeV1",
+    "PrescriptionAuthorizationEnvelopeV2",
+    "PRESCRIPTION_AUTHORIZATION_ENVELOPE_V2",
+    "parse_prescription_authorization_envelope",
+    "validate_published_pilot_envelope",
     "MechanismExpertContributionV3",
     "StageReceipt",
     "create_stage_receipt",
