@@ -15,6 +15,9 @@ from services.agribrain.common.plot_namespace import PlotNamespace
 from services.agribrain.orchestrator_v2.pilot_authorization_ledger import (
     PilotCandidateLedger, SCHEMA_VERSION,
 )
+from services.agribrain.orchestrator_v2.pilot_prescription_issuer import (
+    PilotIssuerCapability,
+)
 from services.agribrain.scientific_contracts.exceptions import ContractViolation
 from services.agribrain.tests.test_pilot_prescription_authorization_v2 import (
     v2, head, digest,
@@ -272,15 +275,25 @@ def test_direct_register_authorized_prescription_with_forged_issuer_token_reject
             )
 
 
+def test_ledger_does_not_expose_token_minting_capability(tmp_path):
+    """P343: PilotCandidateLedger must never expose token minting methods."""
+    s = ledger(tmp_path)
+    assert not hasattr(s, "mint_issuer_verification_token")
+    assert not hasattr(s, "compute_issuer_verification_token")
+    with pytest.raises(AttributeError):
+        getattr(s, "mint_issuer_verification_token")()
+
+
 def test_direct_register_authorized_prescription_with_mismatched_envelope_token_rejected(tmp_path):
     s = ledger(tmp_path)
+    cap = PilotIssuerCapability(KEY)
     candidate_a = v2()
     from dataclasses import replace
     candidate_b = replace(candidate_a, snapshot_id="ASMAE-SNAPSHOT-other-b", content_hash="")
     candidate_b.__post_init__()
 
     head_pub = trusted()
-    token_for_b = s.mint_issuer_verification_token(
+    token_for_b = cap.mint_issuer_token(
         envelope=candidate_b,
         head=head_pub,
         issued_at=NOW,
@@ -302,15 +315,15 @@ def test_direct_register_authorized_prescription_with_mismatched_envelope_token_
 
 
 def test_mint_issuer_verification_token_type_checks(tmp_path):
-    s = ledger(tmp_path)
+    cap = PilotIssuerCapability(KEY)
     with pytest.raises(ContractViolation, match="requires V2 envelope"):
-        s.mint_issuer_verification_token(
+        cap.mint_issuer_token(
             envelope="not-an-envelope",  # type: ignore
             head=trusted(),
             issued_at=NOW,
         )
     with pytest.raises(ContractViolation, match="requires publication head mapping"):
-        s.mint_issuer_verification_token(
+        cap.mint_issuer_token(
             envelope=v2(),
             head="not-a-mapping",  # type: ignore
             issued_at=NOW,
@@ -319,9 +332,10 @@ def test_mint_issuer_verification_token_type_checks(tmp_path):
 
 def test_authorized_record_with_valid_issuer_token_survives_and_authorizes_export(tmp_path):
     s = ledger(tmp_path)
+    cap = PilotIssuerCapability(KEY)
     candidate = v2()
     head_pub = trusted()
-    token = s.mint_issuer_verification_token(
+    token = cap.mint_issuer_token(
         envelope=candidate,
         head=head_pub,
         issued_at=NOW,
@@ -354,9 +368,10 @@ def test_authorized_record_with_valid_issuer_token_survives_and_authorizes_expor
 
 def test_tampered_issuer_token_in_sqlite_fails_export(tmp_path):
     s = ledger(tmp_path)
+    cap = PilotIssuerCapability(KEY)
     candidate = v2()
     head_pub = trusted()
-    token = s.mint_issuer_verification_token(
+    token = cap.mint_issuer_token(
         envelope=candidate,
         head=head_pub,
         issued_at=NOW,

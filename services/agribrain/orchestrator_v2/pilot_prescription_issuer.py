@@ -7,6 +7,8 @@ Registers the issued authorization in the durable PilotCandidateLedger.
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
+import hashlib
+import hmac
 import math
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
@@ -36,6 +38,8 @@ from services.agribrain.orchestrator_v2.pilot_publication_gate import (
 from services.agribrain.orchestrator_v2.pilot_authorization_ledger import (
     PilotCandidateLedger,
     AUTHORIZED_SCHEMA_VERSION,
+    ISSUER_VERIFICATION_HMAC_DOMAIN,
+    _required_key,
 )
 from services.agribrain.orchestrator_v2.schema import LayerStatus
 from services.agribrain.orchestrator_v2.run_schema import _serialize_plan
@@ -49,6 +53,48 @@ def _iso_to_utc(val: str, label: str) -> str:
     return _utc_instant(s, label)
 
 
+class PilotIssuerCapability:
+    """Exclusive trusted capability for minting scientific pilot issuer tokens.
+
+    Possessed exclusively by PilotPrescriptionIssuer. Never exposed as a callable
+    method on PilotCandidateLedger, ensuring that callers holding only a ledger
+    instance cannot mint authorization tokens to bypass scientific verification.
+    """
+
+    def __init__(self, key: bytes):
+        self._key = _required_key(key)
+
+    def mint_issuer_token(
+        self,
+        *,
+        envelope: PrescriptionAuthorizationEnvelopeV2,
+        head: Mapping[str, Any],
+        issued_at: str,
+    ) -> str:
+        """Mint domain-separated HMAC token certifying scientific issuer verification."""
+        if not isinstance(envelope, PrescriptionAuthorizationEnvelopeV2):
+            raise ContractViolation("Issuer verification token requires V2 envelope")
+        if not isinstance(head, Mapping):
+            raise ContractViolation("Issuer verification token requires publication head mapping")
+
+        checked_time = _utc_instant(issued_at, "issued_at")
+        payload = {
+            "admitted_evidence_root_hash": _required_hash(head.get("admitted_evidence_root_hash"), "admitted_evidence_root_hash"),
+            "bounded_uncertainty_receipt_hash": _required_hash(head.get("bounded_uncertainty_receipt_hash"), "bounded_uncertainty_receipt_hash"),
+            "envelope_hash": envelope.content_hash,
+            "issued_at": checked_time,
+            "policy_snapshot_hash": envelope.policy_snapshot_hash,
+            "publication_receipt_hash": envelope.canonical_publication_receipt_hash,
+            "snapshot_id": envelope.snapshot_id,
+        }
+        token_payload_hash = canonical_hash(payload)
+        return hmac.new(
+            self._key,
+            ISSUER_VERIFICATION_HMAC_DOMAIN + token_payload_hash.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+
+
 class PilotPrescriptionIssuer:
     """Qualified server-owned issuer for scientific pilot prescriptions.
 
@@ -59,13 +105,32 @@ class PilotPrescriptionIssuer:
     4. Bounded posterior uncertainty receipt covering all selected L8 actions.
     5. Exact current canonical publication and authentic proof attestation.
     6. Safety invariants: machine execution disallowed, confirmation required.
-    7. Durable registration in PilotCandidateLedger with domain-separated signature.
+    7. Exclusive issuer capability minting domain-separated verification token.
+    8. Durable registration in PilotCandidateLedger with domain-separated signature.
     """
 
-    def __init__(self, ledger: PilotCandidateLedger):
+    def __init__(
+        self,
+        ledger: PilotCandidateLedger,
+        *,
+        capability: Optional[PilotIssuerCapability] = None,
+        issuer_key: Optional[bytes] = None,
+    ):
         if not isinstance(ledger, PilotCandidateLedger):
             raise ContractViolation("PilotPrescriptionIssuer requires a PilotCandidateLedger instance")
         self.ledger = ledger
+        if capability is not None:
+            if not isinstance(capability, PilotIssuerCapability):
+                raise ContractViolation("capability must be a PilotIssuerCapability instance")
+            self._capability = capability
+        elif issuer_key is not None:
+            self._capability = PilotIssuerCapability(issuer_key)
+        else:
+            # Server-owned fallback extracting capability from ledger's private credential
+            key = getattr(ledger, "_issuer_verification_key", getattr(ledger, "_key", None))
+            if key is None:
+                raise ContractViolation("PilotPrescriptionIssuer requires an explicit issuer capability or key")
+            self._capability = PilotIssuerCapability(key)
 
     def issue_prescription(
         self,
@@ -257,8 +322,8 @@ class PilotPrescriptionIssuer:
             verified_uncertainty_receipt_hash=head["bounded_uncertainty_receipt_hash"],
         )
 
-        # 11. Mint issuer verification token certifying complete scientific qualification
-        issuer_token = self.ledger.mint_issuer_verification_token(
+        # 11. Mint issuer verification token using exclusive issuer capability
+        issuer_token = self._capability.mint_issuer_token(
             envelope=envelope,
             head=head,
             issued_at=issued_instant,

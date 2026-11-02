@@ -47,6 +47,7 @@ from services.agribrain.orchestrator_v2.pilot_authorization_ledger import (
 )
 from services.agribrain.orchestrator_v2.pilot_prescription_issuer import (
     PilotPrescriptionIssuer,
+    PilotIssuerCapability,
 )
 from services.agribrain.orchestrator_v2.run_schema import (
     artifact_to_run,
@@ -1250,8 +1251,9 @@ def test_direct_ledger_authorized_registration_with_wrong_envelope_token_fails(t
     envelope2 = replace(envelope1, l8_run_id="l8-run-2", content_hash="")
     envelope2.__post_init__()
 
-    # Mint token for envelope2
-    token_for_envelope2 = s["ledger"].mint_issuer_verification_token(
+    # Mint token for envelope2 using dedicated issuer capability
+    cap = PilotIssuerCapability(KEY)
+    token_for_envelope2 = cap.mint_issuer_token(
         envelope=envelope2,
         head=s["head"],
         issued_at=NOW,
@@ -1269,4 +1271,94 @@ def test_direct_ledger_authorized_registration_with_wrong_envelope_token_fails(t
                 envelope=envelope1,
                 now=NOW,
                 issuer_token=token_for_envelope2,
+            )
+
+
+def test_direct_ledger_bypass_impossible_without_issuer_capability(tmp_path):
+    """P343: Direct ledger bypass is strictly impossible: ledger has no minting method and rejects unverified calls."""
+    s = create_pilot_setup(tmp_path)
+    ledger_instance = s["ledger"]
+
+    # 1. Verify ledger does not expose mint_issuer_verification_token or compute_issuer_verification_token
+    assert not hasattr(ledger_instance, "mint_issuer_verification_token")
+    assert not hasattr(ledger_instance, "compute_issuer_verification_token")
+    with pytest.raises(AttributeError):
+        getattr(ledger_instance, "mint_issuer_verification_token")
+
+    # 2. Verify direct registration without issuer token fails closed
+    envelope = PrescriptionAuthorizationEnvelopeV2(
+        tenant_id=s["ns"].tenant_id,
+        farm_id=s["ns"].farm_id,
+        plot_id=s["ns"].plot_id,
+        geometry_hash=SCOPE["geometry_hash"],
+        crop_cycle_id=SCOPE["crop_cycle_id"],
+        snapshot_id=s["head"]["snapshot_id"],
+        canonical_publication_receipt_hash=s["head"]["publication_receipt_hash"],
+        evidence_manifest_hash=s["head"]["manifest_hash"],
+        evidence_cutoff_at=s["head"]["evidence_cutoff_at"],
+        observation_window_start=TIMES["observation_window_start"],
+        observation_window_end=TIMES["observation_window_end"],
+        published_at="2026-10-30T18:00:00Z",
+        issued_at=NOW,
+        expires_at=TIMES["expires_at"],
+        uncertainty_receipt_hash=s["bounded"]["content_hash"],
+        input_belief_id="belief-test-1",
+        tribunal_content_hash=SHA("tribunal-positive"),
+        prescription_manifest_hash=SHA("manifest-positive"),
+        prescription_manifest_entry_ids=(CONTRIBUTION,),
+        policy_snapshot_hash=canonical_hash({"pilot_policy": "strict", "require_evidence_receipts": True}),
+        l8_run_id="l8-run-1",
+        l8_content_hash=SHA("l8-positive-audit"),
+        final_execution_plan_hash=canonical_hash(_serialize_plan(s["artifact"].final_execution_plan)),
+        actions=(s["action"],),
+    )
+
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=s["head"],
+    ):
+        with pytest.raises(ContractViolation, match="requires trusted issuer scientific verification token"):
+            ledger_instance.register_authorized_prescription(
+                namespace=s["ns"],
+                geometry_hash=SCOPE["geometry_hash"],
+                crop_cycle_id=SCOPE["crop_cycle_id"],
+                envelope=envelope,
+                now=NOW,
+                issuer_token="",
+            )
+
+    # 3. Verify forged token fails closed
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=s["head"],
+    ):
+        with pytest.raises(ContractViolation, match="invalid or forged issuer verification token"):
+            ledger_instance.register_authorized_prescription(
+                namespace=s["ns"],
+                geometry_hash=SCOPE["geometry_hash"],
+                crop_cycle_id=SCOPE["crop_cycle_id"],
+                envelope=envelope,
+                now=NOW,
+                issuer_token="forged-bad-token-value" * 4,
+            )
+
+    # 4. Verify token minted with foreign/unauthorized capability key fails closed
+    foreign_cap = PilotIssuerCapability(b"completely-different-foreign-issuer-key-32bytes!")
+    foreign_token = foreign_cap.mint_issuer_token(
+        envelope=envelope,
+        head=s["head"],
+        issued_at=NOW,
+    )
+    with patch(
+        "services.agribrain.orchestrator_v2.pilot_authorization_ledger.read_trusted_current_asmae_publication",
+        return_value=s["head"],
+    ):
+        with pytest.raises(ContractViolation, match="invalid or forged issuer verification token"):
+            ledger_instance.register_authorized_prescription(
+                namespace=s["ns"],
+                geometry_hash=SCOPE["geometry_hash"],
+                crop_cycle_id=SCOPE["crop_cycle_id"],
+                envelope=envelope,
+                now=NOW,
+                issuer_token=foreign_token,
             )

@@ -70,10 +70,22 @@ class PilotCandidateLedger:
     QUARANTINED even if all those checks pass.
     """
 
-    def __init__(self, database_path: Path, *, key_id: str, signing_key: bytes):
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        key_id: str,
+        signing_key: bytes,
+        issuer_verification_key: Optional[bytes] = None,
+    ):
         self.path = Path(database_path)
         self.key_id = _required_text(key_id, "pilot signing key_id")
-        self.key = _required_key(signing_key)
+        self._key = _required_key(signing_key)
+        self._issuer_verification_key = (
+            _required_key(issuer_verification_key)
+            if issuer_verification_key is not None
+            else self._key
+        )
         if self.path == Path(":memory:"):
             raise ContractViolation("Pilot revocation ledger must be durable")
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,7 +205,7 @@ class PilotCandidateLedger:
             "key_id": self.key_id,
         }
         payload_hash = _payload_hash(fields)
-        record = {**fields, "content_hash": payload_hash, "hmac": _sign(payload_hash, self.key)}
+        record = {**fields, "content_hash": payload_hash, "hmac": _sign(payload_hash, self._key)}
         serialized = json.dumps(record, sort_keys=True, separators=(",", ":"))
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -210,8 +222,9 @@ class PilotCandidateLedger:
             conn.commit()
         return record
 
-    def compute_issuer_verification_token(
+    def _verify_issuer_token(
         self,
+        token: str,
         *,
         envelope_hash: str,
         snapshot_id: str,
@@ -220,8 +233,10 @@ class PilotCandidateLedger:
         bounded_uncertainty_receipt_hash: str,
         policy_snapshot_hash: str,
         issued_at: str,
-    ) -> str:
-        """Compute domain-separated HMAC token certifying scientific issuer verification."""
+    ) -> bool:
+        """Internal fail-closed verification of scientific issuer token capability."""
+        if not isinstance(token, str) or not token.strip():
+            return False
         payload = {
             "admitted_evidence_root_hash": _required_hash(admitted_evidence_root_hash, "admitted_evidence_root_hash"),
             "bounded_uncertainty_receipt_hash": _required_hash(bounded_uncertainty_receipt_hash, "bounded_uncertainty_receipt_hash"),
@@ -232,30 +247,12 @@ class PilotCandidateLedger:
             "snapshot_id": _required_text(snapshot_id, "snapshot_id"),
         }
         token_payload_hash = _payload_hash(payload)
-        return _sign(token_payload_hash, self.key, ISSUER_VERIFICATION_HMAC_DOMAIN)
-
-    def mint_issuer_verification_token(
-        self,
-        *,
-        envelope: PrescriptionAuthorizationEnvelopeV2,
-        head: Mapping[str, Any],
-        issued_at: str,
-    ) -> str:
-        """Mint domain-separated HMAC token certifying scientific issuer verification."""
-        if not isinstance(envelope, PrescriptionAuthorizationEnvelopeV2):
-            raise ContractViolation("Issuer verification token requires V2 envelope")
-        if not isinstance(head, Mapping):
-            raise ContractViolation("Issuer verification token requires publication head mapping")
-
-        return self.compute_issuer_verification_token(
-            envelope_hash=envelope.content_hash,
-            snapshot_id=envelope.snapshot_id,
-            publication_receipt_hash=envelope.canonical_publication_receipt_hash,
-            admitted_evidence_root_hash=head.get("admitted_evidence_root_hash"),
-            bounded_uncertainty_receipt_hash=head.get("bounded_uncertainty_receipt_hash"),
-            policy_snapshot_hash=envelope.policy_snapshot_hash,
-            issued_at=issued_at,
-        )
+        expected = hmac.new(
+            self._issuer_verification_key,
+            ISSUER_VERIFICATION_HMAC_DOMAIN + token_payload_hash.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(token, expected)
 
     def register_authorized_prescription(
         self,
@@ -311,12 +308,16 @@ class PilotCandidateLedger:
         )
         _required_hash(head.get("proof_attestation_hash"), "proof attestation hash")
 
-        expected_token = self.mint_issuer_verification_token(
-            envelope=envelope,
-            head=head,
+        if not self._verify_issuer_token(
+            issuer_token,
+            envelope_hash=envelope.content_hash,
+            snapshot_id=envelope.snapshot_id,
+            publication_receipt_hash=envelope.canonical_publication_receipt_hash,
+            admitted_evidence_root_hash=head["admitted_evidence_root_hash"],
+            bounded_uncertainty_receipt_hash=head["bounded_uncertainty_receipt_hash"],
+            policy_snapshot_hash=envelope.policy_snapshot_hash,
             issued_at=checked_at,
-        )
-        if not hmac.compare_digest(issuer_token, expected_token):
+        ):
             raise ContractViolation("Direct authorized registration rejected: invalid or forged issuer verification token")
 
         for action in envelope.actions:
@@ -348,7 +349,7 @@ class PilotCandidateLedger:
             "key_id": self.key_id,
         }
         payload_hash = _payload_hash(fields)
-        record = {**fields, "content_hash": payload_hash, "hmac": _sign(payload_hash, self.key, AUTHORIZED_HMAC_DOMAIN)}
+        record = {**fields, "content_hash": payload_hash, "hmac": _sign(payload_hash, self._key, AUTHORIZED_HMAC_DOMAIN)}
         serialized = json.dumps(record, sort_keys=True, separators=(",", ":"))
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -398,7 +399,7 @@ class PilotCandidateLedger:
         if (not isinstance(record.get("content_hash"), str)
                 or not hmac.compare_digest(record["content_hash"], actual_hash)
                 or not isinstance(record.get("hmac"), str)
-                or not hmac.compare_digest(record["hmac"], _sign(actual_hash, self.key))):
+                or not hmac.compare_digest(record["hmac"], _sign(actual_hash, self._key))):
             raise ContractViolation("Candidate audit integrity or signature mismatch")
         checked_time = _parse_time(now, "candidate validation time")
         if not _parse_time(record["recorded_at"], "candidate recorded_at") <= checked_time < _parse_time(
@@ -557,7 +558,7 @@ class PilotCandidateLedger:
 
         payload = {k: v for k, v in record.items() if k not in ("content_hash", "hmac")}
         actual_hash = _payload_hash(payload)
-        expected_sig = _sign(actual_hash, self.key, AUTHORIZED_HMAC_DOMAIN)
+        expected_sig = _sign(actual_hash, self._key, AUTHORIZED_HMAC_DOMAIN)
         if (not isinstance(record.get("content_hash"), str)
                 or not hmac.compare_digest(record["content_hash"], actual_hash)
                 or not isinstance(record.get("hmac"), str)
@@ -606,7 +607,8 @@ class PilotCandidateLedger:
             if record[name] != head.get(field):
                 raise ContractViolation(f"Pilot candidate {name} no longer matches current publication")
 
-        expected_token = self.compute_issuer_verification_token(
+        if not self._verify_issuer_token(
+            record["issuer_token"],
             envelope_hash=record["envelope_hash"],
             snapshot_id=record["snapshot_id"],
             publication_receipt_hash=record["publication_receipt_hash"],
@@ -614,8 +616,7 @@ class PilotCandidateLedger:
             bounded_uncertainty_receipt_hash=head["bounded_uncertainty_receipt_hash"],
             policy_snapshot_hash=record.get("policy_snapshot_hash", ""),
             issued_at=record["recorded_at"],
-        )
-        if not hmac.compare_digest(record["issuer_token"], expected_token):
+        ):
             raise ContractViolation("Authorization record issuer verification token is invalid or tampered")
 
         return {
