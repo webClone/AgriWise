@@ -73,6 +73,10 @@ DEFAULT_CROP_PARAMS = {
     "root_depth_m": 0.4,      # Root zone depth (for sm_10_40 relevance)
     "kc_mid": 1.1,            # Crop coefficient at mid-season
     "whc_mm_per_m": 150.0,    # Water holding capacity (mm/m depth)
+    # Provisional smooth response interval for photosynthesis shutdown.
+    # These are numerical model assumptions, NOT field-calibrated thresholds.
+    "photo_shutdown_blend_start": 0.05,
+    "photo_shutdown_blend_end": 0.15,
 }
 
 
@@ -314,6 +318,20 @@ class ProcessModel:
             if "gdd_vegetative" in crop_params and "gdd_emergence" not in crop_params:
                 self.params["gdd_emergence"] = 0.5 * self.params["gdd_vegetative"]
         self._validate_phenology_params()
+        self._validate_photosynthesis_params()
+
+    def _validate_photosynthesis_params(self) -> None:
+        p = self.params
+        start = p["photo_shutdown_blend_start"]
+        end = p["photo_shutdown_blend_end"]
+        if (
+            isinstance(start, bool) or isinstance(end, bool)
+            or not isinstance(start, (int, float))
+            or not isinstance(end, (int, float))
+            or not math.isfinite(start) or not math.isfinite(end)
+            or not (0.0 <= start < end <= 1.0)
+        ):
+            raise ValueError("invalid photosynthesis shutdown transition interval")
 
     def _validate_phenology_params(self) -> None:
         p = self.params
@@ -517,14 +535,25 @@ class ProcessModel:
         water_shutdown = max(0.0, x.values[IDX_CANOPY_STRESS] - 0.4) / 0.6
         shutdown_pressure = min(1.0, thermal_shutdown + water_shutdown)
         
-        if shutdown_pressure > 0.1:
-            # Rapid decline when stress is active
-            target_eff = max(0.0, 1.0 - shutdown_pressure)
-            new_eff = 0.6 * current_eff + 0.4 * target_eff
-        else:
-            # Slow recovery when stress subsides (plants take time to reopen stomata)
-            recovery_target = min(1.0, 0.9 + 0.1 * (1.0 - x.values[IDX_CANOPY_STRESS]))
-            new_eff = 0.9 * current_eff + 0.1 * recovery_target
+        # The prior hard switch at pressure > 0.1 jumped for many valid
+        # prior-efficiency values, giving a nonconvergent finite-difference
+        # Jacobian and artificial full-P covariance amplification.
+        # Preserve both existing response laws away from a *provisional*
+        # finite transition interval, and blend them with a C1 smoothstep.
+        # Smoothness is mathematical; the response interval is NOT calibrated.
+        recovery_target = min(
+            1.0, 0.9 + 0.1 * (1.0 - x.values[IDX_CANOPY_STRESS])
+        )
+        recovery_eff = 0.9 * current_eff + 0.1 * recovery_target
+        shutdown_target = max(0.0, 1.0 - shutdown_pressure)
+        shutdown_eff = 0.6 * current_eff + 0.4 * shutdown_target
+        blend_start = p["photo_shutdown_blend_start"]
+        blend_end = p["photo_shutdown_blend_end"]
+        blend_position = max(
+            0.0, min(1.0, (shutdown_pressure - blend_start) / (blend_end - blend_start))
+        )
+        blend = blend_position * blend_position * (3.0 - 2.0 * blend_position)
+        new_eff = (1.0 - blend) * recovery_eff + blend * shutdown_eff
         
         # Gradual loss of efficiency avoids a discontinuity at stage=4.
         new_eff *= 1.0 - 0.05 * senescence_weight
