@@ -279,12 +279,13 @@ CI/testing:
 ## 9. Recommended sequence and decision checkpoints
 
 1. **Design/ADR first**: freeze NativeAcquisitionReceipt and QualifiedNativeEvidence typed schemas, select v1/v2 transitional versus v3 asymmetric issuance, approve immutable object store and trust/IAM model. Do not write a generic signing endpoint.
-2. **B2B-01 and B2B-02**: implement Sentinel-2 live acquisition attestation → QA → authenticated receipt using a dedicated trusted worker. Validate against authentic and adversarial products.
-3. **B2B-03**: Sentinel-1 source/orbit and polarization-specific issuer. Do not copy S2 masks or priors blindly.
-4. **B2B-04**: weather native provider fetch/qualification plus explicit forecast isolation.
-5. **B2B-05/06**: trusted geometry and issuer service once inputs carry proof; reject arbitrary packet signing.
-6. **B2B-07**: durable distributed revocation and key lifecycle, ideally before any production rollout.
-7. **B2B-08**: new pinned integration branch, requalify the state/pilot chain; retain pilot autonomy until reviewed.
+2. **B2B-01**: implement immutable origin capture, live-vs-cached distinctions, signed-acquisition context and evidence storage; no signing yet.
+3. **B2B-05 and B2B-06 (minimum trusted core)**: implement authoritative plot/zone registry adapter and policy-enforced, internal issuer interface with idempotent decisions, after the versioned schema/ADR is approved. Initially require DENY until a provider-specific qualifier is registered.
+4. **B2B-02**: integrate Sentinel-2 live acquisition → QA/support proof → eligible packet digest → issuer, and validate against authentic and adversarial products.
+5. **B2B-03**: Sentinel-1 product/orbit and polarization-specific qualification; do not copy S2 masks or priors blindly.
+6. **B2B-04**: weather native provider fetch/qualification, parent-source lineage and explicit forecast isolation.
+7. **B2B-07**: durable distributed revocation, issuer key lifecycle, and independent snapshot authenticity before production rollout.
+8. **B2B-08**: new pinned integration branch, requalify the state/pilot chain; retain pilot autonomy until reviewed.
 
 **Stop condition:** If native source evidence, authoritative plot geometry, key revocation or issuer provenance cannot be independently established, record diagnostics and keep state/publication unqualified; do not add a heuristic exception.
 
