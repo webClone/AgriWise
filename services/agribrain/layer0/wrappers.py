@@ -83,6 +83,7 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
                 date = str(daily.get("date") or daily.get("timestamp") or "")[:10]
                 variables = daily.get("variable_consensus") or daily.get("variables") or {}
                 data_kind = str(daily.get("data_kind") or ("forecast" if forecast else "unknown"))
+                source_role = str(daily.get("source_role") or "UNVERIFIED")
                 confidence = daily.get("overall_confidence")
                 if confidence is None:
                     confidence = daily.get("overall_forecast_confidence")
@@ -90,10 +91,16 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
                 date = str(getattr(daily, "date", "") or "")[:10]
                 variables = getattr(daily, "variable_consensus", {}) or {}
                 data_kind = str(getattr(daily, "data_kind", "") or ("forecast" if forecast else "unknown"))
+                source_role = str(getattr(daily, "source_role", "UNVERIFIED"))
                 confidence = getattr(daily, "overall_confidence", None)
                 if confidence is None:
                     confidence = getattr(daily, "overall_forecast_confidence", None)
-            if not date:
+            if (
+                not date or source_role == "REJECTED"
+                or data_kind in ("mixed", "unqualified")
+            ):
+                # Rejected historical/forecast mixtures must never create
+                # historical weather evidence records or state forcing.
                 continue
 
             declared_roles = [
@@ -119,7 +126,8 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
             ):
                 rec_status = "fallback"
             elif (
-                forecast
+                source_role in ("CURRENT_PROVIDER_CONTEXT", "REANALYSIS_MODEL")
+                or forecast
                 or "FORECAST" in data_kind.upper()
                 or declared_status in ("estimated", "reconstruction")
                 or any(r in ("FORECAST", "ESTIMATED", "DERIVED", "MODELLED", "PRIOR", "RECONSTRUCTION") for r in declared_roles)
@@ -131,6 +139,8 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
             record = {
                 "date": date,
                 "data_kind": data_kind,
+                "source_role": source_role,
+                "source_qualified": False,
                 "packet_type": packet_type,
                 "source": "environment_weather_consensus",
                 "evidence_id": packet_ids.get((packet_type, date)) or packet_ids.get(("WEATHER_CONSENSUS_DAILY", date)),
