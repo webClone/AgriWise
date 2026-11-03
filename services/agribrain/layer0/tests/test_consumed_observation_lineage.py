@@ -156,3 +156,17 @@ def test_exact_integer_geometry_version_still_admitted():
         _grant(p), p, plot_id="plot-A", geometry_hash="geometry-A",
         geometry_version=1, run_timestamp=RUN,
     )[0]
+
+
+def test_canonical_update_order_uses_utc_not_local_offset_strings(monkeypatch):
+    from datetime import timezone as tz
+    a = _packet(0.2)
+    b = _packet(0.8)
+    a.timestamp = datetime(2026, 11, 3, 9, tzinfo=tz(timedelta(hours=3)))
+    b.timestamp = datetime(2026, 11, 3, 7, tzinfo=tz(timedelta(hours=-2)))
+    result = _run(monkeypatch, [b, a])
+    ordered = result.provenance["positive_state_input_manifest"]["ordered_observation_updates"]
+    assert [entry["timestamp"] for entry in ordered] == [
+        "2026-11-03T06:00:00+00:00",
+        "2026-11-03T09:00:00+00:00",
+    ]
