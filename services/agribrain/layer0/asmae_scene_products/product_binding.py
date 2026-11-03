@@ -89,14 +89,13 @@ def verify_exact_product_binding(
         payload.get("expectedProductId")
         if isinstance(payload, dict) else None
     )
-    telemetry_valid = (
-        announced_unknown is None
-        or (type(announced_unknown) is int and announced_unknown == 0)
-    )
+    # A v2 proof requires pre-filter telemetry from the reviewed source
+    # operator. Missing means original anonymous tiles could have vanished
+    # during preProcessScenes without being counted.
+    telemetry_valid = type(announced_unknown) is int and announced_unknown == 0
     announced_product_consistent = (
-        announced_expected is None
-        or (isinstance(announced_expected, str)
-            and normalize_product_id(announced_expected) == expected)
+        isinstance(announced_expected, str)
+        and normalize_product_id(announced_expected) == expected
     )
     exact = bool(
         expected and sensor in ("S1", "S2")
@@ -125,6 +124,7 @@ def verify_exact_product_binding(
         "unidentified_tile_count": unidentified_count,
         "conflicting_tile_count": conflicting_count,
         "reported_unidentified_tile_count": announced_unknown,
+        "reported_expected_product_id": announced_expected,
         "all_returned_tiles_identified": bool(
             raw_tiles and len(identified_ids) == len(raw_tiles)
         ),
@@ -178,13 +178,11 @@ def exact_binding_proof_valid(
         or proof["unidentified_tile_count"] != 0
         or type(proof.get("conflicting_tile_count")) is not int
         or proof["conflicting_tile_count"] != 0
-        or (
-            proof.get("reported_unidentified_tile_count") is not None
-            and (
-                type(proof["reported_unidentified_tile_count"]) is not int
-                or proof["reported_unidentified_tile_count"] != 0
-            )
-        )
+        or type(proof.get("reported_unidentified_tile_count")) is not int
+        or proof["reported_unidentified_tile_count"] != 0
+        or not isinstance(proof.get("reported_expected_product_id"), str)
+        or normalize_product_id(proof["reported_expected_product_id"])
+            != normalize_product_id(expected_product_id)
     ):
         return False
     expected = normalize_product_id(expected_product_id)
