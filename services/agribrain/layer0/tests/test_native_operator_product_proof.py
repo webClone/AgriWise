@@ -128,6 +128,7 @@ def test_operator_exact_script_policy_requires_full_program_not_partial_tokens(s
     script=render_native_process_operator(sensor,IDS[sensor])
     assert "__EXPECTED_PRODUCT_ID__" not in script
     assert "unidentifiedTileCount" in script
+    assert "let unidentifiedTileCount = -1;" in script
     assert "function preProcessScenes(collections)" in script
     assert "function evaluatePixel(samples)" in script
     assert verify_native_process_operator(sensor,IDS[sensor],script) is True
@@ -150,3 +151,30 @@ def test_different_product_selection_changes_operator_hash(sensor):
     original=native_process_operator_sha256(sensor,IDS[sensor])
     alternative=native_process_operator_sha256(sensor,"DIFFERENT_NATIVE_PRODUCT")
     assert original != alternative
+
+
+@pytest.mark.parametrize("sensor",["S1","S2"])
+def test_missing_prefilter_count_cannot_claim_v2_exact(sensor):
+    userdata={"userData":{
+        "expectedProductId":IDS[sensor],
+        "tiles":[{FIELDS[sensor]:IDS[sensor]}],
+    }}
+    result=verify_exact_product_binding(IDS[sensor],userdata,sensor)
+    assert result["is_exact"] is False
+    assert result["proof"]["reported_unidentified_tile_count"] is None
+
+
+@pytest.mark.parametrize("sensor",["S1","S2"])
+def test_unexecuted_operator_prefilter_sentinel_value_denied(sensor):
+    result=_proof(sensor,[{FIELDS[sensor]:IDS[sensor]}],-1)
+    assert result["is_exact"] is False
+    assert result["proof"]["reported_unidentified_tile_count"] == -1
+
+
+@pytest.mark.parametrize("sensor",["S1","S2"])
+def test_missing_selected_product_claim_cannot_bind(sensor):
+    userdata={"userData":{
+        "unidentifiedTileCount":0,
+        "tiles":[{FIELDS[sensor]:IDS[sensor]}],
+    }}
+    assert verify_exact_product_binding(IDS[sensor],userdata,sensor)["is_exact"] is False
