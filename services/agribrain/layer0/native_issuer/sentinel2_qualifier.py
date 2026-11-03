@@ -461,6 +461,9 @@ def screen_sentinel2_native(
             np.isfinite(red) & np.isfinite(nir)
             & (red >= 0) & (red <= 1)
             & (nir >= 0) & (nir <= 1)
+            # NDVI is undefined when both reflectances vanish; do not
+            # manufacture a numerical zero using an arbitrary epsilon.
+            & ((red + nir) > 1e-6)
         )
         clear = ((dm == 1) & ~np.isin(scl,list(_INVALID_SCL))
                  & has_finite_reflectance)
@@ -473,7 +476,7 @@ def screen_sentinel2_native(
         ):
             return _deny("unqualified_reflectance_units")
         ndvi_values = (nir[clear & inside]-red[clear & inside]) / (
-            nir[clear & inside]+red[clear & inside]+1e-12
+            nir[clear & inside]+red[clear & inside]
         )
         if not np.all(np.isfinite(ndvi_values)):
             return _deny("invalid_native_ndvi")
@@ -483,6 +486,8 @@ def screen_sentinel2_native(
             "plot_pixel_centers": support_count,
             "valid_pixel_centers": valid_count,
             "ndvi_mean": mean_ndvi,
+            "screened_variables": ["ndvi"],
+            "sigma_calibrated": False,
             "support_method": "EPSG4326_PIXEL_CENTER_SAMPLE_ONLY",
             "raster_sha256": scene.content_hash,
         }
