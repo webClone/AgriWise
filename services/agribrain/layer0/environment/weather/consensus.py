@@ -15,6 +15,10 @@ from .schemas import (
     WeatherConsensusDaily,
     WeatherDailyRecord,
 )
+from .source_roles import (
+    HISTORICAL_CONTEXT_ROLES, WeatherSourceRole,
+    record_role_is_consistent, role_for_data_kind,
+)
 
 # Consensus thresholds
 TEMP_AGREE_THRESHOLD = 2.0      # °C
@@ -39,11 +43,42 @@ def build_daily_consensus(
         consensus.flags = ["NO_PROVIDERS"]
         return consensus
 
-    # Determine data_kind (should be homogeneous per the mixing rule)
-    kinds = set(r.data_kind for r in records_by_provider.values())
-    if "forecast" in kinds and any(k != "forecast" for k in kinds):
-        flags.append("FORECAST_MIXED_WITH_HISTORICAL")
-    consensus.data_kind = next(iter(kinds)) if len(kinds) == 1 else "mixed"
+    # Fail closed BEFORE computing values, confidence or process forcing.
+    # Source-role labels are declared dataset semantics, not evidence of an
+    # authenticated provider or a measured station.
+    records = list(records_by_provider.items())
+    kinds = {getattr(rec, "data_kind", None) for _, rec in records}
+    roles = {role_for_data_kind(getattr(rec, "data_kind", None))
+             for _, rec in records}
+    invalid = any(
+        not isinstance(rec, WeatherDailyRecord)
+        or key != rec.provider
+        or rec.date != date
+        or not record_role_is_consistent(rec)
+        for key, rec in records
+    )
+    mixed = len(roles) != 1 or len(kinds) != 1
+    unsupported = not roles.issubset(HISTORICAL_CONTEXT_ROLES)
+    if invalid or mixed or unsupported:
+        consensus.data_kind = "unqualified"
+        consensus.source_role = "REJECTED"
+        consensus.overall_confidence = 0.0
+        if "forecast" in kinds and len(kinds) > 1:
+            flags.append("FORECAST_MIXED_WITH_HISTORICAL")
+        if mixed:
+            flags.append("WEATHER_SOURCE_ROLE_MIXING_DENIED")
+        if unsupported:
+            flags.append("NON_HISTORICAL_WEATHER_ROLE_DENIED")
+        if invalid:
+            flags.append("INVALID_WEATHER_SOURCE_ROLE_OR_IDENTITY")
+        consensus.flags = flags
+        # No selected values: a flag-only warning with averaged precipitation
+        # would still let forecast rainfall enter physical process forcing.
+        return consensus
+    role = next(iter(roles))
+    consensus.source_role = role.value
+    consensus.source_qualified = False
+    consensus.data_kind = next(iter(kinds))
 
     # Temperature consensus
     consensus.variable_consensus["temp_mean"] = _consensus_temperature(
