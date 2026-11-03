@@ -109,17 +109,16 @@ def test_failed_covariance_prediction_is_atomic():
     assert filt.state.day == "2026-11-01"
 
 
-def test_discontinuous_phenology_switch_fails_closed():
+def test_vegetative_threshold_advances_without_exploding_covariance():
     filt = ZoneKalmanFilter("plot")
     filt.initialize("2026-11-01")
-    filt.state.values[IDX_PHENO_GDD] = 185.0  # 15 GDD => threshold 200
-    state_before = filt.state.values[:]
-    cov_before = [row[:] for row in filt.covariance.P]
+    filt.state.values[IDX_PHENO_GDD] = 185.0  # 15 GDD => stage 1 at 200
+    predicted = filt.predict("2026-11-02", WEATHER)
 
-    with pytest.raises(ValueError, match="discontinuous phenology"):
-        filt.predict("2026-11-02", WEATHER)
-
-    assert filt.state.values == state_before
-    assert filt.covariance.P == cov_before
-    assert filt.days_since_obs == 0
-    assert filt.state.day == "2026-11-01"
+    assert predicted.phenology_gdd == pytest.approx(200.0)
+    assert predicted.phenology_stage == pytest.approx(1.0)
+    assert filt.days_since_obs == 1
+    assert filt.state.day == "2026-11-02"
+    assert all(math.isfinite(x) for row in filt.covariance.P for x in row)
+    assert all(filt.covariance.P[i][i] >= 0.0 for i in range(N_STATES))
+    assert filt.covariance.P[IDX_PHENO_STAGE][IDX_PHENO_STAGE] < 100.0
