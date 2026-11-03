@@ -19,7 +19,13 @@ from services.agribrain.layer0.environment.weather.openweather import (
 from services.agribrain.layer0.environment.weather.open_meteo import (
     normalize_open_meteo_daily,
 )
-from services.agribrain.layer0.environment.weather.schemas import WeatherDailyRecord
+from services.agribrain.layer0.environment.weather.schemas import (
+    WeatherDailyRecord, WeatherConsensusDaily, VariableConsensus,
+)
+from services.agribrain.layer0.environment.state_adapter import (
+    create_weak_kalman_observations,
+)
+from services.agribrain.layer0.environment.weather.qa import evaluate_weather_qa
 from services.agribrain.layer0.environment.weather.source_roles import (
     WeatherSourceRole, record_role_is_consistent, role_for_data_kind,
 )
@@ -80,7 +86,7 @@ def test_openweather_current_payload_is_unverified_context_not_station_observati
     assert r.data_kind=="current"
     assert r.source_role==WeatherSourceRole.CURRENT_PROVIDER_CONTEXT.value
     assert r.source_qualified is False
-    assert r.precipitation_sum==0.0
+    assert r.precipitation_sum is None  # 1h/3h rain is not daily total
 
 
 def test_openweather_current_payload_cannot_claim_forecast_or_reanalysis():
@@ -152,12 +158,13 @@ def test_only_reanalysis_context_preserves_genuine_zero_rain_and_et0():
     assert result.variable_consensus["et0_mm"].selected_value==1.0
 
 
-def test_current_only_is_context_not_verified_station():
+def test_current_only_cannot_claim_historical_daily_consensus():
     r=_record(provider="openweather",kind="current",rain=0.0)
     result=build_daily_consensus({"openweather":r},DAY)
-    assert result.source_role=="CURRENT_PROVIDER_CONTEXT"
+    assert result.source_role=="REJECTED"
     assert result.source_qualified is False
-    assert result.variable_consensus["precipitation_sum"].selected_value==0.0
+    assert result.variable_consensus=={}
+    assert "NON_HISTORICAL_WEATHER_ROLE_DENIED" in result.flags
 
 
 @pytest.mark.parametrize("invalid",[
@@ -229,12 +236,24 @@ def test_historical_forecast_counts_as_forecast_lineage_not_history():
     assert ts.forecast_days==1
 
 
+def _manually_supplied_current_day():
+    # Defense in depth against a caller bypassing the engine's consensus gate.
+    return WeatherConsensusDaily(
+        date=DAY, data_kind="current", source_role="CURRENT_PROVIDER_CONTEXT",
+        variable_consensus={
+            "precipitation_sum": VariableConsensus(
+                variable="precipitation_sum",selected_value=0.0,confidence=0.5
+            ),
+        },
+    )
+
+
 def test_weather_wrapper_marks_provider_context_as_estimated_not_observed():
-    source=_record(provider="openweather",kind="current")
-    day=build_daily_consensus({"openweather":source},DAY)
     rows=_canonical_weather_records(
-        SimpleNamespace(weather_consensus=[day],forecast_consensus=[]),
-        packets=[],
+        SimpleNamespace(
+            weather_consensus=[_manually_supplied_current_day()],
+            forecast_consensus=[],
+        ), packets=[],
     )
     assert len(rows)==1
     assert rows[0]["source_role"]=="CURRENT_PROVIDER_CONTEXT"
@@ -244,11 +263,11 @@ def test_weather_wrapper_marks_provider_context_as_estimated_not_observed():
 
 
 def test_asmae_archive_does_not_mislabel_openweather_current_as_observed_archive():
-    source=_record(provider="openweather",kind="current")
-    day=build_daily_consensus({"openweather":source},DAY)
     rows=_canonical_weather_records(
-        SimpleNamespace(weather_consensus=[day],forecast_consensus=[]),
-        packets=[],
+        SimpleNamespace(
+            weather_consensus=[_manually_supplied_current_day()],
+            forecast_consensus=[],
+        ), packets=[],
     )
     result=normalize_weather_archive(rows)
     assert result["weather_daily_series"]=={}
@@ -275,3 +294,38 @@ def test_open_meteo_adapter_labels_reanalysis_as_model_not_station():
     assert r.data_kind=="historical_reanalysis"
     assert r.source_role=="REANALYSIS_MODEL"
     assert r.source_qualified is False
+
+
+def test_weak_modelled_soil_moisture_observation_excludes_current_context():
+    snapshot=_record(provider="open_meteo",kind="current")
+    snapshot.soil_moisture_0_1cm=0.30
+    assert create_weak_kalman_observations([snapshot])==[]
+
+
+def test_weak_modelled_soil_moisture_keeps_reanalysis_with_low_reliability():
+    archival=_record(provider="open_meteo",kind="historical_reanalysis")
+    archival.soil_moisture_0_1cm=0.30
+    items=create_weak_kalman_observations([archival])
+    assert len(items)==1
+    assert items[0].value==0.30
+    assert items[0].reliability<=0.35
+
+
+def test_engine_current_openweather_context_has_no_daily_historical_forcing():
+    engine=EnvironmentalEngine()
+    records=normalize_openweather_daily(_openweather_current())
+    assert engine._build_consensus(records)==[]
+
+
+def test_historical_weather_qa_refuses_forecast_only_or_current_only():
+    for kind in ("forecast","historical_forecast","current"):
+        record=_record(provider="openweather",kind=kind)
+        result=evaluate_weather_qa(build_weather_timeseries([record]))
+        assert result["quality"]=="unusable"
+        assert "NO_HISTORICAL_WEATHER_CONTEXT" in result["flags"]
+
+
+def test_weather_qa_reanalysis_context_is_modelled_not_measured():
+    result=evaluate_weather_qa(build_weather_timeseries([_record()]))
+    assert "REANALYSIS_OR_MODEL_DATA" in result["flags"]
+    assert result["quality"]!="unusable"
