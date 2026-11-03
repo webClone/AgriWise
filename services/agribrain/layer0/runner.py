@@ -299,7 +299,7 @@ class Layer0Runner:
                 for package in pkgs for packet in package.packets
             )
             authority_verified = False
-            if mode == "SIGNED_STATE_INPUTS":
+            if mode in ("SIGNED_STATE_INPUTS", "MANDATORY_SIGNED_STATE_INPUTS"):
                 # Only count proof-bound, actually admitted observations.
                 state_eligible = False
                 for package in pkgs:
