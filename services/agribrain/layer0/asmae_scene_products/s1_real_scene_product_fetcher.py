@@ -8,6 +8,9 @@ import numpy as np
 import requests
 from .scene_product_schema import SceneProduct
 from .scene_product_store import SceneProductStore
+from services.agribrain.layer0.native_issuer.process_operator_contract import (
+    render_native_process_operator,
+)
 from services.agribrain.layer0.native_issuer.acquisition_evidence import (
     capture_backend_provider_response, NativeEvidenceError,
     restore_cached_native_references,
@@ -632,65 +635,7 @@ def fetch_asmae_s1_scene_stack(
     # Select up to 4 scenes to fetch
     selected_features = features[:4]
     
-    evalscript_template = """
-    //VERSION=3
-    const EXPECTED_PRODUCT_ID = __EXPECTED_PRODUCT_ID__;
-    function normalizeProductId(value) {
-        return String(value || "").toUpperCase().replace(".SAFE", "").replace(".ZIP", "");
-    }
-    function tileProductId(tile) {
-        return tile.sentinel1ProductId || tile.productId || tile.id || "";
-    }
-    function setup() {
-        return {
-            input: [{bands: ["VV", "VH", "dataMask"]}],
-            output: [
-                {id: "VV", bands: 1, sampleType: "FLOAT32"},
-                {id: "VH", bands: 1, sampleType: "FLOAT32"},
-                {id: "dataMask", bands: 1, sampleType: "UINT8"}
-            ],
-            mosaicking: "TILE"
-        };
-    }
-    function preProcessScenes(collections) {
-        const tiles = (collections.scenes && collections.scenes.tiles) || [];
-        collections.scenes.tiles = tiles.filter(function(tile) {
-            return normalizeProductId(tileProductId(tile)) === normalizeProductId(EXPECTED_PRODUCT_ID);
-        });
-        return collections;
-    }
-    function updateOutputMetadata(scenes, inputMetadata, outputMetadata) {
-        const tiles = (scenes && scenes.tiles) || [];
-        outputMetadata.userData = {
-            expectedProductId: EXPECTED_PRODUCT_ID,
-            tiles: tiles.map(function(tile) {
-                return {
-                    sentinel1ProductId: tile.sentinel1ProductId,
-                    productId: tile.productId,
-                    id: tile.id,
-                    tileId: tile.tileId,
-                    shId: tile.shId,
-                    dataPath: tile.dataPath,
-                    date: tile.date,
-                    orbitId: tile.orbitId,
-                    relativeOrbitNumber: tile.relativeOrbitNumber,
-                    orbitDirection: tile.orbitDirection
-                };
-            })
-        };
-    }
-    function value(sample, name, fallback) {
-        return sample && sample[name] !== undefined ? sample[name] : fallback;
-    }
-    function evaluatePixel(samples) {
-        const sample = samples && samples.length ? samples[0] : null;
-        return {
-            VV: [value(sample, "VV", NaN)],
-            VH: [value(sample, "VH", NaN)],
-            dataMask: [value(sample, "dataMask", 0)]
-        };
-    }
-    """
+    # Approved source operator is shared with the independent source screen.
     
     fetched_scenes = []
     for idx, f in enumerate(selected_features, 1):
@@ -700,9 +645,7 @@ def fetch_asmae_s1_scene_stack(
         scene_date_str = acq_dt.strftime("%Y-%m-%d")
         provider_product_id = f.get("id", f"S1_{scene_date_str}")
         scene_id = f"s1_real_scene_{idx}_{plot_id}"
-        evalscript = evalscript_template.replace(
-            "__EXPECTED_PRODUCT_ID__", json.dumps(provider_product_id),
-        )
+        evalscript = render_native_process_operator("S1", provider_product_id)
         request_start = (acq_dt - timedelta(minutes=5)).astimezone(
             timezone.utc,
         ).isoformat().replace("+00:00", "Z")
