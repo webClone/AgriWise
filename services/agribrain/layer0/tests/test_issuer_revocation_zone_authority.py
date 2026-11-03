@@ -306,3 +306,79 @@ def test_live_revocation_during_packet_run_aborts_before_state_build(monkeypatch
                 observation_packet_digest(p): grant(p)
             },
         )
+
+
+def test_registered_signed_zone_packet_reaches_only_matching_zone(monkeypatch):
+    from services.agribrain.layer0.state_engine import Layer0StateEngine
+    p = packet(scope="zone")
+    digest = observation_packet_digest(p)
+    engine = Layer0StateEngine(positive_admission_verifier=verifier(zones=ZONE_REGISTRY))
+    capture = {}
+    class State:
+        all_packets = []
+        health_report = {}
+        provenance = {}
+        input_hash = ""
+        output_hash = ""
+        def _generate_output_hash(self):
+            return hashlib.sha256(_canonical_bytes({
+                "input_hash": self.input_hash,
+                "health_report": self.health_report,
+                "provenance": self.provenance,
+            })).hexdigest()
+    monkeypatch.setattr(engine, "run", lambda **kw: (capture.update(kw) or State()))
+    result = engine.run_from_packets(
+        plot_id="plot-A", packets=[p],
+        start_date="2026-11-03", end_date="2026-11-03",
+        geometry_hash="geom-A", geometry_version=2, zone_ids=["z-1"],
+        run_timestamp=RUN,
+        positive_admission_receipts={digest: grant(p, "zone")},
+    )
+    assert len(capture["observations_by_day"]["2026-11-03"]["z-1"]) == 1
+    assert result.health_report["signed_state_input_count"] == 1
+    assert result.health_report["zone_authority_configured"] is True
+    assert result.health_report["scientific_publication_authorized"] is False
+
+
+def test_explicit_live_revocation_policy_fails_without_config(monkeypatch):
+    from services.agribrain.layer0.production_admission import (
+        Layer0AdmissionRequiredError, require_trusted_verifier,
+    )
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_LIVE_REVOCATION", "true")
+    monkeypatch.delenv("AKALORIS_LAYER0_REVOCATION_SNAPSHOT_PATH", raising=False)
+    with pytest.raises(Layer0AdmissionRequiredError, match="revocation"):
+        require_trusted_verifier(verifier())
+    with pytest.raises(Layer0AdmissionRequiredError, match="revocation"):
+        load_server_issuer_verifier()
+
+
+def test_key_rotation_accepts_new_id_after_retiring_previous_id():
+    keys = {
+        "old-id": ("sentinel2", SECRET),
+        "new-id": ("sentinel2", b"N" * 32),
+    }
+    current = {"value": IssuerRevocationSnapshot(
+        revision=8,
+        issued_at=RUN - timedelta(seconds=20),
+        expires_at=RUN + timedelta(seconds=90),
+        key_statuses={"old-id": "active", "new-id": "active"},
+    )}
+    gate = TrustedRevocationGate(lambda: current["value"])
+    v = PositiveObservationAdmissionVerifier(keys, revocation_gate=gate)
+    p = packet()
+    old_receipt = grant(p, key_id="old-id")
+    new_grant = grant(p, key_id="new-id")
+    new_grant["mac"] = hmac.new(
+        b"N" * 32, _canonical_bytes(new_grant["grant"]), hashlib.sha256
+    ).hexdigest()
+    assert check(v, p, old_receipt)[0]
+    assert check(v, p, new_grant)[0]
+    current["value"] = IssuerRevocationSnapshot(
+        revision=9,
+        issued_at=RUN - timedelta(seconds=10),
+        expires_at=RUN + timedelta(seconds=90),
+        key_statuses={"old-id": "retired", "new-id": "active"},
+    )
+    assert not check(v, p, old_receipt)[0]
+    assert check(v, p, new_grant)[0]
