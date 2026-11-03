@@ -660,11 +660,20 @@ class Layer0StateEngine:
                                 "Conflicting signed qualification identity in Layer 0 observation input"
                             )
 
+                    # Normalize aware acquisition time before ordering;
+                    # lexical sorting of different local UTC offsets is not
+                    # a canonical temporal order.
+                    timestamp_utc = (
+                        pkt.timestamp.astimezone(timezone.utc).isoformat()
+                        if pkt.timestamp.tzinfo is not None
+                        and pkt.timestamp.utcoffset() is not None
+                        else pkt.timestamp.isoformat()
+                    )
                     update_record = {
                         "packet_digest": pkt_digest,
                         "day": day,
                         "zone_id": zone_id,
-                        "timestamp": pkt.timestamp.isoformat(),
+                        "timestamp": timestamp_utc,
                         "source": pkt.source.value,
                         "packet_field": var_key,
                         "model_type": obs_type,
@@ -675,7 +684,7 @@ class Layer0StateEngine:
                     # Same canonical order drives both numerical assimilation
                     # and the ordered manifest, independent of transport order.
                     order_key = (
-                        day, zone_id, pkt.timestamp.isoformat(),
+                        day, zone_id, timestamp_utc,
                         pkt.source.value, pkt_digest, var_key,
                     )
                     staged_observation_updates.append(
