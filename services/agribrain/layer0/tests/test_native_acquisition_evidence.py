@@ -161,7 +161,8 @@ def test_wrong_response_url_status_and_missing_service_authorization_are_denied(
 ])
 def test_noncanonical_or_secret_request_is_denied(tmp_path, invalid):
     with pytest.raises(NativeEvidenceError):
-        capture(NativeEvidenceStore(tmp_path), request_parameters=invalid)
+        capture(NativeEvidenceStore(tmp_path), response=response(),
+                request_parameters=invalid)
 
 
 def test_naive_retrieval_time_is_rejected(tmp_path):
@@ -242,7 +243,7 @@ def test_caller_cannot_claim_different_request_than_prepared_wire_post(tmp_path)
     with pytest.raises(NativeEvidenceError, match="prepared provider request"):
         capture(store, response=response(sent_parameters=REQUEST),
                 request_parameters=false_claim)
-    assert not list((tmp_path / "manifests").rglob("*")) if (tmp_path / "manifests").exists() else True
+    assert not (tmp_path / "objects").exists()
 
 
 def test_prepared_http_method_and_url_must_match_original_endpoint(tmp_path):
