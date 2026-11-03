@@ -320,7 +320,7 @@ def test_wrong_optical_band_units_reject_even_when_pixels_are_valid(tmp_path):
     assert _screen(scene,store).reason == "unqualified_reflectance_units"
 
 
-@pytest.mark.parametrize("bad", [0, -1, 1, "0.7", float("nan"), 1.2])
+@pytest.mark.parametrize("bad", [0, -1, 1, "0.7", float("nan"), 1.2, 0.2])
 def test_unvalidated_qa_policy_rejected(tmp_path,bad):
     scene,store,*_=_native_scene(tmp_path)
     assert _screen(scene,store).status is S2ScreenStatus.SCREENED_NATIVE_QA
