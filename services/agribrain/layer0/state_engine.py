@@ -348,6 +348,7 @@ class Layer0StateEngine:
         # Only signatures proven AND materially consumed in state estimation
         # contribute to the immutable input manifest.
         signed_receipts_used: Dict[str, Dict[str, Any]] = {}
+        weather_field_sources: Dict[str, Dict[str, str]] = {}
 
         def check_positive_grant(pkt: Any, purpose: str) -> tuple[bool, Optional[str]]:
             if self._positive_observation_admission_verifier is None:
@@ -436,7 +437,9 @@ class Layer0StateEngine:
 
         for pkt in filtered_packets:
             day = pkt.timestamp.strftime("%Y-%m-%d") if pkt.timestamp else ""
-            if not day:
+            if not day or not (start_date <= day <= end_date):
+                # Do not count or root out-of-window evidence that cannot
+                # affect the requested state trajectory.
                 continue
 
             payload = pkt.payload or {}
@@ -472,18 +475,15 @@ class Layer0StateEngine:
                 for src_key, dst_key in weather_aliases.items():
                     if src_key in payload:
                         daily_weather[day][dst_key] = payload[src_key]
-                # Merge weather fields directly
+                        if signed_weather_digest is not None:
+                            weather_field_sources.setdefault(day, {})[dst_key] = signed_weather_digest
+                # Merge weather fields directly, tracking only the final
+                # contributing receipt for each actually used variable.
                 for k in ("temp_max", "temp_min", "precipitation", "et0"):
                     if k in payload:
                         daily_weather[day][k] = payload[k]
-                if signed_weather_digest is not None and daily_weather[day]:
-                    signed_admitted_weather_digests.add(signed_weather_digest)
-                    signed_receipts_used[signed_weather_digest] = {
-                        "purpose": WEATHER_GRANT_PURPOSE,
-                        "receipt": deepcopy(
-                            (positive_admission_receipts or {})[signed_weather_digest]
-                        ),
-                    }
+                        if signed_weather_digest is not None:
+                            weather_field_sources.setdefault(day, {})[k] = signed_weather_digest
                 continue
 
             # Event packets → events_by_day
@@ -599,6 +599,30 @@ class Layer0StateEngine:
                             ),
                         }
 
+        # Only complete, physically admissible weather days reach the
+        # process model. Bind the final effective field provenance, not an
+        # overridden or incomplete signed packet. Missing weather may still
+        # lead to explicitly degraded state estimation.
+        if self._positive_observation_admission_verifier is not None:
+            from services.agribrain.layer0.kalman_engine import (
+                _qualified_weather_for_prediction,
+            )
+            for weather_day, effective_fields in daily_weather.items():
+                if _qualified_weather_for_prediction(effective_fields) is None:
+                    continue
+                owners = weather_field_sources.get(weather_day, {})
+                for variable in ("temp_max", "temp_min", "precipitation", "et0"):
+                    digest = owners.get(variable)
+                    if digest is None:
+                        continue
+                    signed_admitted_weather_digests.add(digest)
+                    signed_receipts_used[digest] = {
+                        "purpose": WEATHER_GRANT_PURPOSE,
+                        "receipt": deepcopy(
+                            (positive_admission_receipts or {})[digest]
+                        ),
+                    }
+
         # Build state using the private capability granted only by the
         # packet entrypoint; direct scalar state calls remain unavailable
         # under production policy.
@@ -674,6 +698,13 @@ class Layer0StateEngine:
                     {"packet_digest": digest, **signed_receipts_used[digest]}
                     for digest in sorted(signed_receipts_used)
                 ],
+                "effective_weather_field_sources": {
+                    day: {field: digest for field, digest in sorted(owners.items())}
+                    for day, owners in sorted(weather_field_sources.items())
+                    if _qualified_weather_for_prediction(
+                        daily_weather.get(day, {})
+                    ) is not None
+                },
             }
             if not isinstance(getattr(state_pkg, "provenance", None), dict):
                 state_pkg.provenance = {}
