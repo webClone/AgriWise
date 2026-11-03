@@ -278,6 +278,7 @@ class Layer0StateEngine:
             "skipped_state_update_prohibited": 0,
             "skipped_observation_no_sigma": 0,
             "skipped_observation_nonfinite": 0,
+            "skipped_observation_low_effective_quality": 0,
         }
         filtered_packets = []
         for pkt in packets:
@@ -385,6 +386,25 @@ class Layer0StateEngine:
                     excluded_counts["skipped_state_update_prohibited"] += 1
                     continue
 
+                # Carry the packet's *effective* QA × reliability influence,
+                # rather than dropping scene quality when building a scalar
+                # KalmanObservation. A zero-quality packet must not update
+                # state even if its declared reliability and grants are true.
+                if not any(payload.get(k) is not None for k in _PACKET_KALMAN_FIELDS):
+                    continue
+                try:
+                    effective_reliability = pkt.effective_weight()
+                    if (
+                        isinstance(effective_reliability, bool)
+                        or not math.isfinite(float(effective_reliability))
+                        or not (0.05 <= float(effective_reliability) <= 1.0)
+                    ):
+                        raise ValueError("no qualified effective influence")
+                    effective_reliability = float(effective_reliability)
+                except (AttributeError, ValueError, TypeError, OverflowError):
+                    excluded_counts["skipped_observation_low_effective_quality"] += 1
+                    continue
+
                 sigmas = getattr(getattr(pkt, "uncertainty", None), "sigmas", None) or {}
                 for var_key, (obs_type, sigma_key) in _PACKET_KALMAN_FIELDS.items():
                     value = payload.get(var_key)
@@ -396,17 +416,15 @@ class Layer0StateEngine:
                         continue
 
                     try:
-                        if any(isinstance(x, bool) for x in (value, sigma_raw, pkt.reliability_weight)):
+                        if any(isinstance(x, bool) for x in (value, sigma_raw)):
                             raise ValueError("boolean is not numeric evidence")
                         obs_value = float(value)
                         obs_sigma = float(sigma_raw)
-                        reliability = float(pkt.reliability_weight)
                         if not (
                             math.isfinite(obs_value) and math.isfinite(obs_sigma)
-                            and math.isfinite(reliability)
-                            and obs_sigma > 0.0 and 0.0 < reliability <= 1.0
+                            and obs_sigma > 0.0
                         ):
-                            raise ValueError("invalid observation, sigma, or reliability")
+                            raise ValueError("invalid observation or own-variable sigma")
                     except (ValueError, TypeError, OverflowError):
                         excluded_counts["skipped_observation_nonfinite"] += 1
                         continue
@@ -415,7 +433,7 @@ class Layer0StateEngine:
                         obs_type=obs_type,
                         value=obs_value,
                         sigma=obs_sigma,
-                        reliability=reliability,
+                        reliability=effective_reliability,
                         source=pkt.source.value,
                     )
                     observations_by_day[day][zone_id].append(obs)
