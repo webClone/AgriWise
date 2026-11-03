@@ -21,6 +21,42 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import math
 
+from services.agribrain.layer0.event_forcing_admission import (
+    classify_management_event_evidence,
+)
+
+
+def _qualified_weather_for_prediction(weather: Optional[Dict[str, float]]):
+    """Require complete finite forcing, keeping real zero measurements.
+
+    Partial weather is not a measured dry or 'typical temperature' day.
+    Accept only explicit historical API aliases; never interpolate inputs.
+    """
+    if not isinstance(weather, dict) or not weather:
+        return None
+    aliases = {
+        "temp_max": ("temp_max", "t_max", "temperature_2m_max"),
+        "temp_min": ("temp_min", "t_min", "temperature_2m_min"),
+        "precipitation": ("precipitation", "rain_mm", "precipitation_sum"),
+        "et0": ("et0", "et0_mm", "et0_fao_penman"),
+    }
+    normalized = dict(weather)
+    for name, candidates in aliases.items():
+        value = next((weather[k] for k in candidates if k in weather), None)
+        if (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            return None
+        normalized[name] = float(value)
+    if (
+        normalized["temp_min"] > normalized["temp_max"]
+        or normalized["precipitation"] < 0.0
+        or normalized["et0"] < 0.0
+    ):
+        return None
+    return normalized
+
 from services.agribrain.layer0.state_vector import (
     StateVector, StateCovariance, ProcessModel,
     N_STATES, STATE_NAMES, IDX_LAI, IDX_BIOMASS, IDX_SM_0_10, IDX_SM_10_40,
@@ -116,6 +152,12 @@ class ZoneKalmanFilter:
         self.last_obs_day: Optional[str] = None
 
         self.days_since_obs: int = 0
+        # Ephemeral per-filter evidence identity fence. Restart/replay durability
+        # is a separate L0-02C4 gate; do not describe this as exactly-once.
+        self._event_evidence_seen: set[str] = set()
+        self.parent_plot_id = ""
+        self.expected_geometry_hash = ""
+        self.evidence_cutoff = None
         
         # ── Adaptive ML Recalibration Engine ─────────────────────────
         # Learns optimal LAI growth rate from observation residuals.
@@ -145,7 +187,13 @@ class ZoneKalmanFilter:
         """
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
-        
+        if events:
+            # Direct raw event forcing bypasses the canonical evidence router.
+            # No trusted L3 infiltration operator is bound yet. Even an event
+            # with role='VERIFIED_DELIVERY' in an ordinary dict is not a
+            # verified execution receipt. Reject before any state mutation.
+            raise ValueError("physical management forcing requires trusted L3 admission")
+
         # Advance the physical state using the current process model.
         # The matching Jacobian must be derived from the SAME inputs/model;
         # do not independently assume F=I when physical couplings exist.
@@ -386,11 +434,32 @@ class ZoneKalmanFilter:
         
         Returns provenance record for this day.
         """
-        # Predict: if weather missing, use high-uncertainty unforced evolution
-        if not weather:
+        # C1/C2: classify and retain management evidence, but NEVER pass
+        # user-declared/planned/claimed-verified events into the proxy water
+        # balance. A separate trusted L3 net-infiltration operator/receipt is
+        # needed for physical forcing (L0-02C3). This rule applies equally
+        # to weather-present and missing-weather days.
+        event_dispositions = classify_management_event_evidence(
+            events,
+            day=day,
+            plot_id=self.parent_plot_id,
+            zone_id=self.zone_id,
+            geometry_hash=self.expected_geometry_hash,
+            cutoff=self.evidence_cutoff,
+            seen_ids=self._event_evidence_seen,
+        )
+        qualified_weather = _qualified_weather_for_prediction(weather)
+        weather_availability = (
+            "COMPLETE" if qualified_weather is not None
+            else ("PARTIAL" if weather else "MISSING")
+        )
+
+        # A truthy but incomplete weather dictionary is NOT a measured day.
+        # On degraded forcing, do not invent temperature or rainfall.
+        if qualified_weather is None:
             self.predict_missing_weather(day)
         else:
-            self.predict(day, weather, events)
+            self.predict(day, qualified_weather, None)
         
         # Update (if observations exist)
         source_weights = {}
@@ -413,7 +482,14 @@ class ZoneKalmanFilter:
             "days_since_obs": self.days_since_obs,
             "conflicts": conflicts,
             "uncertainty_mean": sum(self.state.variance) / N_STATES,
-            "weather_update_mode": "missing_weather_high_uncertainty" if not weather else "measured",
+            "weather_update_mode": (
+                "measured" if qualified_weather is not None
+                else "missing_weather_high_uncertainty"
+            ),
+            "weather_availability": weather_availability,
+            "management_event_evidence": event_dispositions,
+            "physical_management_events_applied": 0,
+            "event_forcing_status": "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT",
         }
         self.provenance_history.append(provenance)
         

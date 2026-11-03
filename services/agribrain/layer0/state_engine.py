@@ -125,10 +125,20 @@ class Layer0StateEngine:
         primary_zone = "plot"
         engine.add_zone(primary_zone, soil_props=soil_props, start_day=start_date)
 
+        # Stamp the caller-scoped run identity onto filters so the event
+        # evidence router can reject foreign/unsupported event envelopes.
+        for zone_filter in engine.filters.values():
+            zone_filter.parent_plot_id = plot_id
+            zone_filter.expected_geometry_hash = geometry_hash
+            zone_filter.evidence_cutoff = now
+
         # Add extra zones
         for zid in (zone_ids or []):
             if zid != primary_zone:
                 engine.add_zone(zid, soil_props=soil_props, start_day=start_date)
+                engine.filters[zid].parent_plot_id = plot_id
+                engine.filters[zid].expected_geometry_hash = geometry_hash
+                engine.filters[zid].evidence_cutoff = now
                 # Duplicate plot-level obs for extra zones (until per-zone α-weighting)
                 for d, zone_obs in observations_by_day.items():
                     if primary_zone in zone_obs and zid not in zone_obs:
@@ -362,7 +372,19 @@ class Layer0StateEngine:
             ) and payload.get("event_type"):
                 if day not in events_by_day:
                     events_by_day[day] = []
-                events_by_day[day].append(payload)
+                # Transport evidence identity, scope, and occurrence time,
+                # not just the untrusted inner payload. Never promote an
+                # asserted role into a verified physical delivery.
+                events_by_day[day].append({
+                    "payload": dict(payload),
+                    "packet_id": pkt.packet_id,
+                    "content_hash": pkt.content_hash,
+                    "source": pkt.source.value,
+                    "timestamp": pkt.timestamp,
+                    "plot_id": pkt.plot_id,
+                    "geometry_hash": pkt.geometry_hash,
+                    "geometry_version": pkt.geometry_version,
+                })
                 continue
 
             # Observation packets → convert to KalmanObservation
