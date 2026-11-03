@@ -23,6 +23,9 @@ import tarfile
 import numpy as np
 
 from services.agribrain.layer0.archive.raster_store import RasterStore
+from services.agribrain.layer0.native_issuer.process_operator_contract import (
+    verify_native_process_operator, native_process_operator_sha256, OPERATOR_POLICY,
+)
 from services.agribrain.layer0.asmae_scene_products.product_binding import (
     normalize_product_id, verify_exact_product_binding,
 )
@@ -213,7 +216,9 @@ def _check_request(
             }.issubset(names):
                 return False
             script = request.get("evalscript")
-            if not isinstance(script, str) or json.dumps(scene.provider_product_id) not in script:
+            if not verify_native_process_operator(
+                "S1", scene.provider_product_id, script,
+            ):
                 return False
         else:
             collections = request["collections"]
@@ -376,6 +381,13 @@ def screen_sentinel1_native(
         ):
             return _reject("sar_product_or_polarization_conflicts_with_required_dual_pol_grd")
         bands, userdata = _read_sar_process_tar(process_bytes)
+        native_userdata = userdata.get("userData", userdata)
+        if (
+            not isinstance(native_userdata, dict)
+            or type(native_userdata.get("unidentifiedTileCount")) is not int
+            or native_userdata["unidentifiedTileCount"] != 0
+        ):
+            return _reject("unidentified_s1_process_operator_tile_provenance")
         binding = verify_exact_product_binding(
             scene.provider_product_id, userdata, "S1",
         )
@@ -547,6 +559,10 @@ def screen_sentinel1_native(
             "process_acquisition_id":process.acquisition_id,
             "catalog_request_sha256":catalog.request_sha256,
             "process_request_sha256":process.request_sha256,
+            "process_operator_policy":OPERATOR_POLICY,
+            "process_operator_sha256":native_process_operator_sha256(
+                "S1", scene.provider_product_id
+            ),
             "product_id":scene.provider_product_id,
             "catalog_datetime":item_time.isoformat(),
             "binding_proof":binding["proof"],
