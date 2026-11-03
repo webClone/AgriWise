@@ -340,6 +340,56 @@ class NativeEvidenceStore:
             raise NativeEvidenceError("cached acquisition evidence is unavailable or invalid") from None
 
 
+
+def restore_cached_native_references(
+    metadata: Mapping[str, Any], *, sensor: str,
+) -> tuple[str | None, str | None, str]:
+    """Verify cold S1/S2 Catalog+Process evidence references.
+
+    A local metadata.json is never proof of acquisition. Persisted links
+    are returned only after both CAS manifests and raw objects validate,
+    with an explicit non-authorizing CACHE origin. Old cache files with no
+    native references remain UNATTESTED.
+    """
+    if sensor not in ("S1", "S2") or not isinstance(metadata, Mapping):
+        raise NativeEvidenceError("invalid cached scene evidence context")
+    catalog_id = metadata.get("native_catalog_acquisition_id")
+    process_id = metadata.get("native_process_acquisition_id")
+    if catalog_id is None and process_id is None:
+        return None, None, "UNATTESTED"
+    if not isinstance(catalog_id, str) or not isinstance(process_id, str):
+        raise NativeEvidenceError("incomplete native acquisition references")
+    _check_id(catalog_id)
+    _check_id(process_id)
+    root = os.getenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", "").strip()
+    if not root:
+        # The metadata is still allowed as a legacy scene, but must not
+        # regain an unverified provenance join. Required HTTP capture is
+        # distinct from an all-cache-return policy.
+        if os.getenv("AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE", "").strip().lower() in (
+            "1", "true", "yes"
+        ):
+            raise NativeEvidenceError("native cache evidence root unavailable")
+        return None, None, "UNATTESTED"
+
+    store = NativeEvidenceStore(root)
+    catalog = store.verified_cache_receipt(catalog_id)
+    process = store.verified_cache_receipt(process_id)
+    if (
+        catalog.sensor != sensor or process.sensor != sensor
+        or catalog.provider != "sentinel_hub"
+        or process.provider != "sentinel_hub"
+        or catalog.endpoint != "https://sh.dataspace.copernicus.eu/catalog/v1/search"
+        or process.endpoint != "https://sh.dataspace.copernicus.eu/process/v1"
+        or process.provider_product_id != metadata.get("provider_product_id")
+        or process.response_sha256 != metadata.get("provider_response_hash")
+        or process.request_sha256 != metadata.get("process_request_hash")
+        or metadata.get("native_evidence_status") != "CAPTURED_UNQUALIFIED"
+    ):
+        raise NativeEvidenceError("cached scene references mismatch captured provider evidence")
+    return catalog_id, process_id, "PROVENANCE_VERIFIED_CACHE"
+
+
 def capture_backend_provider_response(
     *, response: Any, endpoint: str, request_parameters: Mapping[str, Any],
     sensor: str, provider_product_id: str = "",
