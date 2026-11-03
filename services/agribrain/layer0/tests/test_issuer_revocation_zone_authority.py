@@ -251,3 +251,58 @@ def test_protected_backend_files_refresh_revocation_without_client_input(monkeyp
         receipt, p, plot_id="plot-A", geometry_hash="geom-A",
         geometry_version=2, run_timestamp=now,
     )[0] is False
+
+
+def test_zonal_packet_must_also_be_named_in_caller_run(monkeypatch):
+    from services.agribrain.layer0.state_engine import Layer0StateEngine
+    p = packet(scope="zone")
+    digest = observation_packet_digest(p)
+    engine = Layer0StateEngine(positive_admission_verifier=verifier(zones=ZONE_REGISTRY))
+    capture = {}
+    class State:
+        all_packets = []
+        health_report = {}
+        provenance = {}
+        input_hash = ""
+        output_hash = ""
+        def _generate_output_hash(self):
+            return hashlib.sha256(_canonical_bytes(self.health_report)).hexdigest()
+    monkeypatch.setattr(engine, "run", lambda **kw: (capture.update(kw) or State()))
+    result = engine.run_from_packets(
+        plot_id="plot-A", packets=[p],
+        start_date="2026-11-03", end_date="2026-11-03",
+        geometry_hash="geom-A", geometry_version=2,
+        positive_admission_receipts={digest: grant(p, "zone")},
+        run_timestamp=RUN, zone_ids=[],
+    )
+    assert capture["observations_by_day"] == {}
+    assert result.health_report["state_packets_excluded_by_status"][
+        "skipped_unsupported_zone_in_run"
+    ] == 1
+
+
+def test_live_revocation_during_packet_run_aborts_before_state_build(monkeypatch):
+    from services.agribrain.layer0.state_engine import Layer0StateEngine
+    from services.agribrain.layer0.production_admission import Layer0AdmissionRequiredError
+    p = packet()
+    invocations = {"count": 0}
+    def provider():
+        invocations["count"] += 1
+        if invocations["count"] == 1:
+            return snapshot(1, "active")
+        return snapshot(2, "revoked")
+    signed = verifier(policy=TrustedRevocationGate(provider))
+    engine = Layer0StateEngine(positive_admission_verifier=signed)
+    def must_not_run(**kw):
+        raise AssertionError("revoked source cannot reach state estimation")
+    monkeypatch.setattr(engine, "run", must_not_run)
+    with pytest.raises(Layer0AdmissionRequiredError, match="revocation"):
+        engine.run_from_packets(
+            plot_id="plot-A", packets=[p],
+            start_date="2026-11-03", end_date="2026-11-03",
+            geometry_hash="geom-A", geometry_version=2,
+            run_timestamp=RUN,
+            positive_admission_receipts={
+                observation_packet_digest(p): grant(p)
+            },
+        )
