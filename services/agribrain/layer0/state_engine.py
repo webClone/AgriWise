@@ -22,6 +22,7 @@ from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0S
 from services.agribrain.layer0.observation_packet import DataStatus
 from services.agribrain.layer0.positive_observation_admission import (
     observation_packet_digest, PositiveObservationAdmissionVerifier,
+    WEATHER_GRANT_PURPOSE,
 )
 
 
@@ -311,6 +312,31 @@ class Layer0StateEngine:
         }
         filtered_packets = []
         signed_admitted_observation_digests: set[str] = set()
+        signed_admitted_weather_digests: set[str] = set()
+
+        def check_positive_grant(pkt: Any, purpose: str) -> tuple[bool, Optional[str]]:
+            if self._positive_observation_admission_verifier is None:
+                return True, None  # Explicit LEGACY_UNVERIFIED mode
+            try:
+                digest = observation_packet_digest(pkt)
+                receipt = (positive_admission_receipts or {}).get(digest)
+            except (ValueError, TypeError, AttributeError, OverflowError):
+                excluded_counts["skipped_invalid_positive_source_grant"] += 1
+                return False, None
+            if receipt is None:
+                excluded_counts["skipped_missing_positive_source_grant"] += 1
+                return False, None
+            valid, _reason = self._positive_observation_admission_verifier.verify(
+                receipt, pkt, plot_id=plot_id, geometry_hash=geometry_hash,
+                geometry_version=geometry_version,
+                run_timestamp=run_timestamp or datetime.now(timezone.utc),
+                purpose=purpose,
+            )
+            if not valid:
+                excluded_counts["skipped_invalid_positive_source_grant"] += 1
+                return False, None
+            return True, digest
+
         for pkt in packets:
             # Explicitly contradictory identities must never enter weather,
             # event evidence or observation state. For legacy unbound
@@ -382,6 +408,16 @@ class Layer0StateEngine:
                 ObservationSource.WEATHER_STATION,
                 ObservationSource.NASA_POWER,
             ):
+                # State-changing environmental forcing needs its own
+                # positive WEATHER purpose. A signed NDVI/observation
+                # receipt cannot authorize temperature/rain/ET inputs.
+                authorized, signed_weather_digest = check_positive_grant(
+                    pkt, WEATHER_GRANT_PURPOSE
+                )
+                if not authorized:
+                    continue
+                if signed_weather_digest is not None:
+                    signed_admitted_weather_digests.add(signed_weather_digest)
                 if day not in daily_weather:
                     daily_weather[day] = {}
                 # Normalize weather aliases
@@ -450,32 +486,14 @@ class Layer0StateEngine:
                 if not any(payload.get(k) is not None for k in _PACKET_KALMAN_FIELDS):
                     continue
 
-                signed_packet_digest = None
-                # Explicit strict authority mode: detached HMAC receipt covers
-                # current packet bytes, source, positive caller geometry and
-                # issuance/replay time. Packet-provided flags are not proof.
-                # Legacy mode is flagged in package health, not misrepresented
-                # as authenticated positive admission.
-                if self._positive_observation_admission_verifier is not None:
-                    try:
-                        digest = observation_packet_digest(pkt)
-                        receipt = (positive_admission_receipts or {}).get(digest)
-                    except (ValueError, TypeError, AttributeError, OverflowError):
-                        excluded_counts["skipped_invalid_positive_source_grant"] += 1
-                        continue
-                    if receipt is None:
-                        excluded_counts["skipped_missing_positive_source_grant"] += 1
-                        continue
-                    valid, _reason = self._positive_observation_admission_verifier.verify(
-                        receipt, pkt, plot_id=plot_id,
-                        geometry_hash=geometry_hash,
-                        geometry_version=geometry_version,
-                        run_timestamp=run_timestamp or datetime.now(timezone.utc),
-                    )
-                    if not valid:
-                        excluded_counts["skipped_invalid_positive_source_grant"] += 1
-                        continue
-                    signed_packet_digest = digest
+                # Packet claims are not authoritative. In strict mode the
+                # trusted verifier requires an exact, detached, purpose-bound
+                # grant for this particular observation.
+                authorized, signed_packet_digest = check_positive_grant(
+                    pkt, "kalman_state_observation"
+                )
+                if not authorized:
+                    continue
 
                 try:
                     effective_reliability = pkt.effective_weight()
@@ -548,12 +566,15 @@ class Layer0StateEngine:
             state_pkg.health_report = {}
         state_pkg.health_report["state_packets_excluded_by_status"] = excluded_counts
         state_pkg.health_report["positive_source_admission_mode"] = (
-            "SIGNED_SCOPE_BOUND"
+            "SIGNED_STATE_INPUTS"
             if self._positive_observation_admission_verifier is not None
             else "LEGACY_UNVERIFIED"
         )
         state_pkg.health_report["positive_admitted_observation_digests"] = sorted(
             signed_admitted_observation_digests
+        )
+        state_pkg.health_report["positive_admitted_weather_digests"] = sorted(
+            signed_admitted_weather_digests
         )
         # Sealing MUST follow every mutation of the material health report.
         # The earlier order recomputed output_hash before appending these
