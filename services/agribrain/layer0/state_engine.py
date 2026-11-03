@@ -420,7 +420,11 @@ class Layer0StateEngine:
             if geometry_hash and packet_geometry != geometry_hash:
                 excluded_counts["skipped_foreign_geometry"] += 1
                 continue
-            if geometry_version is not None and packet_version != geometry_version:
+            if geometry_version is not None and (
+                type(packet_version) is not int
+                or type(geometry_version) is not int
+                or packet_version != geometry_version
+            ):
                 excluded_counts["skipped_foreign_geometry_version"] += 1
                 continue
             status = getattr(pkt, "data_status", None)
