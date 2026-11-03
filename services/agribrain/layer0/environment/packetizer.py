@@ -152,6 +152,8 @@ def emit_environment_packets(
                     "date_range": [provider_records[0].date, provider_records[-1].date]
                     if provider_records else [],
                     "data_kinds": sorted(set(r.data_kind for r in provider_records)),
+                    "source_roles": sorted(set(r.source_role for r in provider_records)),
+                    "source_qualified": False,
                 },
                 provenance,
             ))
@@ -183,6 +185,8 @@ def emit_environment_packets(
                 {
                     "date": daily_consensus.date,
                     "data_kind": daily_consensus.data_kind,
+                    "source_role": daily_consensus.source_role,
+                    "source_qualified": False,
                     "overall_confidence": daily_consensus.overall_confidence,
                     "flags": daily_consensus.flags,
                     "variables": {
