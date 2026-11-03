@@ -26,6 +26,11 @@ class WeatherDailyRecord:
     model_run_time: Optional[str] = None
     retrieval_time: Optional[str] = None
 
+    # Dataset-role labels are NOT independently authenticated provider
+    # receipts or evidence of physical station observation.
+    source_role: str = "UNVERIFIED"
+    source_qualified: bool = False
+
     # Temperature (°C)
     temp_min: Optional[float] = None
     temp_max: Optional[float] = None
@@ -101,6 +106,8 @@ class WeatherConsensusDaily:
     """Per-day, per-variable weather consensus."""
     date: str = ""
     data_kind: str = ""  # what kind of data was used (current/reanalysis)
+    source_role: str = "UNVERIFIED"
+    source_qualified: bool = False
 
     variable_consensus: Dict[str, VariableConsensus] = field(default_factory=dict)
 
