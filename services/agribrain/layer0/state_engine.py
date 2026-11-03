@@ -310,6 +310,7 @@ class Layer0StateEngine:
             "skipped_invalid_positive_source_grant": 0,
         }
         filtered_packets = []
+        signed_admitted_observation_digests: set[str] = set()
         for pkt in packets:
             # Explicitly contradictory identities must never enter weather,
             # event evidence or observation state. For legacy unbound
@@ -449,6 +450,7 @@ class Layer0StateEngine:
                 if not any(payload.get(k) is not None for k in _PACKET_KALMAN_FIELDS):
                     continue
 
+                signed_packet_digest = None
                 # Explicit strict authority mode: detached HMAC receipt covers
                 # current packet bytes, source, positive caller geometry and
                 # issuance/replay time. Packet-provided flags are not proof.
@@ -464,7 +466,7 @@ class Layer0StateEngine:
                     if receipt is None:
                         excluded_counts["skipped_missing_positive_source_grant"] += 1
                         continue
-                    valid, reason = self._positive_observation_admission_verifier.verify(
+                    valid, _reason = self._positive_observation_admission_verifier.verify(
                         receipt, pkt, plot_id=plot_id,
                         geometry_hash=geometry_hash,
                         geometry_version=geometry_version,
@@ -473,6 +475,7 @@ class Layer0StateEngine:
                     if not valid:
                         excluded_counts["skipped_invalid_positive_source_grant"] += 1
                         continue
+                    signed_packet_digest = digest
 
                 try:
                     effective_reliability = pkt.effective_weight()
@@ -519,6 +522,8 @@ class Layer0StateEngine:
                         source=pkt.source.value,
                     )
                     observations_by_day[day][zone_id].append(obs)
+                    if signed_packet_digest is not None:
+                        signed_admitted_observation_digests.add(signed_packet_digest)
 
         # Build the state package through the lower-level run()
         state_pkg = self.run(
@@ -546,6 +551,9 @@ class Layer0StateEngine:
             "SIGNED_SCOPE_BOUND"
             if self._positive_observation_admission_verifier is not None
             else "LEGACY_UNVERIFIED"
+        )
+        state_pkg.health_report["positive_admitted_observation_digests"] = sorted(
+            signed_admitted_observation_digests
         )
         # Sealing MUST follow every mutation of the material health report.
         # The earlier order recomputed output_hash before appending these
