@@ -16,6 +16,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from copy import deepcopy
+import hashlib
+import json
 import math
 
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
@@ -25,7 +28,7 @@ from services.agribrain.layer0.production_admission import (
 )
 from services.agribrain.layer0.positive_observation_admission import (
     observation_packet_digest, PositiveObservationAdmissionVerifier,
-    WEATHER_GRANT_PURPOSE,
+    WEATHER_GRANT_PURPOSE, GRANT_PURPOSE, _canonical_bytes,
 )
 
 
@@ -342,6 +345,9 @@ class Layer0StateEngine:
         filtered_packets = []
         signed_admitted_observation_digests: set[str] = set()
         signed_admitted_weather_digests: set[str] = set()
+        # Only signatures proven AND materially consumed in state estimation
+        # contribute to the immutable input manifest.
+        signed_receipts_used: Dict[str, Dict[str, Any]] = {}
 
         def check_positive_grant(pkt: Any, purpose: str) -> tuple[bool, Optional[str]]:
             if self._positive_observation_admission_verifier is None:
@@ -454,8 +460,6 @@ class Layer0StateEngine:
                 )
                 if not authorized:
                     continue
-                if signed_weather_digest is not None:
-                    signed_admitted_weather_digests.add(signed_weather_digest)
                 if day not in daily_weather:
                     daily_weather[day] = {}
                 # Normalize weather aliases
@@ -472,6 +476,14 @@ class Layer0StateEngine:
                 for k in ("temp_max", "temp_min", "precipitation", "et0"):
                     if k in payload:
                         daily_weather[day][k] = payload[k]
+                if signed_weather_digest is not None and daily_weather[day]:
+                    signed_admitted_weather_digests.add(signed_weather_digest)
+                    signed_receipts_used[signed_weather_digest] = {
+                        "purpose": WEATHER_GRANT_PURPOSE,
+                        "receipt": deepcopy(
+                            (positive_admission_receipts or {})[signed_weather_digest]
+                        ),
+                    }
                 continue
 
             # Event packets → events_by_day
@@ -580,6 +592,12 @@ class Layer0StateEngine:
                     observations_by_day[day][zone_id].append(obs)
                     if signed_packet_digest is not None:
                         signed_admitted_observation_digests.add(signed_packet_digest)
+                        signed_receipts_used[signed_packet_digest] = {
+                            "purpose": GRANT_PURPOSE,
+                            "receipt": deepcopy(
+                                (positive_admission_receipts or {})[signed_packet_digest]
+                            ),
+                        }
 
         # Build state using the private capability granted only by the
         # packet entrypoint; direct scalar state calls remain unavailable
@@ -639,6 +657,34 @@ class Layer0StateEngine:
         )
         state_pkg.health_report["state_output_role"] = "STATE_ESTIMATE"
         state_pkg.health_report["scientific_publication_authorized"] = False
+
+        # Bind the exact admitted proof statements, never unverified received
+        # packet claims. Do not include signing *secrets*; grant+MAC is a
+        # public verifiable statement whose integrity is checked upstream.
+        # This is not a signed pilot publication receipt and cannot by
+        # itself authorize downstream prescriptions.
+        if self._positive_observation_admission_verifier is not None:
+            input_manifest = {
+                "domain": "akaloris/layer0/verified-state-input-manifest/v1",
+                "plot_id": plot_id,
+                "geometry_hash": geometry_hash,
+                "geometry_version": geometry_version,
+                "window": [start_date, end_date],
+                "admitted_receipts": [
+                    {"packet_digest": digest, **signed_receipts_used[digest]}
+                    for digest in sorted(signed_receipts_used)
+                ],
+            }
+            if not isinstance(getattr(state_pkg, "provenance", None), dict):
+                state_pkg.provenance = {}
+            state_pkg.provenance["positive_state_input_manifest"] = input_manifest
+            state_pkg.input_hash = hashlib.sha256(
+                _canonical_bytes(input_manifest)
+            ).hexdigest()
+            state_pkg.health_report["signed_input_manifest_hash"] = (
+                state_pkg.input_hash
+            )
+
         # Sealing MUST follow every mutation of the material health report.
         # The earlier order recomputed output_hash before appending these
         # counts, so the published digest was stale even with no new data.
