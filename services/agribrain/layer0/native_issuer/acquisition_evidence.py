@@ -212,10 +212,31 @@ class NativeEvidenceStore:
         ):
             raise NativeEvidenceError("response was not retrieved from expected successful HTTPS endpoint")
         req = getattr(response, "request", None)
-        headers = getattr(req, "headers", {}) if req is not None else {}
+        if (
+            req is None
+            or getattr(req, "method", None) != "POST"
+            or getattr(req, "url", None) != endpoint
+        ):
+            raise NativeEvidenceError("response does not bind the expected backend POST")
+        headers = getattr(req, "headers", {})
         auth = headers.get("Authorization", "") if isinstance(headers, Mapping) else ""
         if not isinstance(auth, str) or not auth.startswith("Bearer ") or len(auth) < 12:
             raise NativeEvidenceError("response lacks backend credential-bound request context")
+
+        # The request digest must describe what was actually transmitted,
+        # not merely a second JSON object passed by the acquisition caller.
+        prepared_body = getattr(req, "body", None)
+        if isinstance(prepared_body, str):
+            prepared_body = prepared_body.encode("utf-8")
+        if not isinstance(prepared_body, bytes) or len(prepared_body) > 1024 * 1024:
+            raise NativeEvidenceError("missing or oversized prepared provider request")
+        try:
+            transmitted = _safe_request(json.loads(prepared_body))
+            if _json_bytes(transmitted) != _json_bytes(safe_parameters):
+                raise NativeEvidenceError("prepared provider request differs from acquisition claim")
+        except (ValueError, TypeError, UnicodeDecodeError):
+            raise NativeEvidenceError("invalid or mismatched prepared provider request") from None
+
         body = getattr(response, "content", None)
         if not isinstance(body, bytes) or not body or len(body) > MAX_RESPONSE_BYTES:
             raise NativeEvidenceError("invalid or oversized provider response")
