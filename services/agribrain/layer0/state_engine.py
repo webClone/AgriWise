@@ -139,10 +139,11 @@ class Layer0StateEngine:
                 engine.filters[zid].parent_plot_id = plot_id
                 engine.filters[zid].expected_geometry_hash = geometry_hash
                 engine.filters[zid].evidence_cutoff = now
-                # Duplicate plot-level obs for extra zones (until per-zone α-weighting)
-                for d, zone_obs in observations_by_day.items():
-                    if primary_zone in zone_obs and zid not in zone_obs:
-                        zone_obs[zid] = zone_obs[primary_zone]
+                # A plot-level statistical observation is NOT an independent
+                # zone-local measurement. Unobserved zones retain a prior
+                # prediction; only explicitly assigned zone evidence can
+                # update their own posterior. Spatial correlation/downscaling
+                # belongs to a support-aware fusion operator, not list cloning.
 
         # Run assimilation
         engine.run_period(
@@ -270,8 +271,10 @@ class Layer0StateEngine:
         """
         from services.agribrain.layer0.observation_packet import ObservationSource, ObservationType
 
-        geometry_hash = geometry_hash or next((p.geometry_hash for p in packets if getattr(p, "geometry_hash", None)), "")
-        geometry_version = geometry_version or next((p.geometry_version for p in packets if getattr(p, "geometry_version", None) is not None), None)
+        # Geometry scope must come from the *caller* rather than borrowing
+        # identity from an arbitrary packet. Missing caller scope remains
+        # explicitly unbound; positive scope/receipt enforcement is a
+        # separate L0-002/L0-004 producer-compatibility gate.
 
         daily_weather: Dict[str, Dict[str, Any]] = {}
         observations_by_day: Dict[str, Dict[str, List[Any]]] = {}
@@ -289,9 +292,27 @@ class Layer0StateEngine:
             "skipped_observation_no_sigma": 0,
             "skipped_observation_nonfinite": 0,
             "skipped_observation_low_effective_quality": 0,
+            "skipped_foreign_plot": 0,
+            "skipped_foreign_geometry": 0,
+            "skipped_foreign_geometry_version": 0,
         }
         filtered_packets = []
         for pkt in packets:
+            # Explicitly contradictory identities must never enter weather,
+            # event evidence or observation state. For legacy unbound
+            # identities, do NOT silently claim a positive geometry grant.
+            packet_plot = getattr(pkt, "plot_id", "") or ""
+            packet_geometry = getattr(pkt, "geometry_hash", "") or ""
+            packet_version = getattr(pkt, "geometry_version", None)
+            if packet_plot and packet_plot != plot_id:
+                excluded_counts["skipped_foreign_plot"] += 1
+                continue
+            if geometry_hash and packet_geometry != geometry_hash:
+                excluded_counts["skipped_foreign_geometry"] += 1
+                continue
+            if geometry_version is not None and packet_version != geometry_version:
+                excluded_counts["skipped_foreign_geometry_version"] += 1
+                continue
             status = getattr(pkt, "data_status", None)
             if status in (DataStatus.UNAVAILABLE, DataStatus.SIMULATED, DataStatus.FALLBACK):
                 if status == DataStatus.UNAVAILABLE:

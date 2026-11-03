@@ -93,3 +93,76 @@ L0-02C3 must bind the canonical trusted support-aware L3 water operator,
 receipt verification, actual net infiltrated depth and its covariance.
 L0-02C4 must supply durable exactly-once/restart and historical replay
 checks. The current missing-weather `Q×5` heuristic remains open.
+
+## Addendum — L0-001 / L0-003 / L0-002 negative-scope implementation
+
+**Basis:** user-reported local L0 **101/101**, Layer 1 **21/21**, ASMAE
+**83/83** at exact `e1f37707b8a59ce7249b7b57a965d23ca0873d79`.
+These reports qualify that **prior** head, not the following new commits.
+
+- **L0-001, content identity candidate:** `source_package.py` now hashes
+  all values in ordered `process_forcing` records, including typed
+  `ProcessForcing` and `IrrigationProcessForcing` dataclasses,
+  temporal/primitive/nested data. Unsupported objects or nonfinite numbers
+  fail closed rather than being converted to arbitrary `repr()`.
+  Counterexamples: equal count, different mm; typed amount/time; key-order
+  invariance; actual zero versus absent; invalid records.
+  **Status: PATCHED / UNTESTED**, not complete signed publication binding.
+  Package identity is currently computed at construction; mutation/rebuild
+  and downstream verification of identity before publication remain a
+  separate integration gate.
+
+- **L0-003, zonal support candidate:** `state_engine.run` no longer
+  duplicates `observations_by_day["plot"]` into added zones. Unmeasured
+  zones retain their own predictions and `n_obs=0`; explicitly supplied
+  zone evidence may still assimilate. This removes one known route
+  to invented independent zone observations but does not certify zone
+  geometry/local support or correlated evidence.
+  **Status: PATCHED / UNTESTED**.
+
+- **L0-002, negative identity candidate:** canonical
+  `run_from_packets` now rejects packets that **explicitly contradict**
+  caller plot, supplied geometry hash or supplied geometry version; it no
+  longer selects the canonical run geometry from the first packet.
+  This also rejects explicitly foreign weather packets before forcing
+  construction. **Status: PARTIALLY PATCHED / UNTESTED**.
+  Packets with missing plot identity and calls lacking caller geometry
+  still lack an affirmative receipt; matching caller-supplied strings are
+  not independently signed/authorized proof. Close L0-002 only when
+  trusted scope and geometry version are required at producer/caller
+  boundaries and historical-cutoff checks pass.
+
+- **L0-004, positive source admission:** **OPEN**. Explicitly false grants
+  are denied, but missing affirmative provider/admission receipts are not
+  yet universally blocked. Source-specific issuance and compatibility
+  need a separate integrator-led gate, not additional arbitrary flags.
+
+**New top-of-stack candidate:**
+`fix/layer0-observation-scope-20261103` (draft, unqualified);
+individual modules may be reviewed by commit, but integrate only one
+pinned tip after all tests and shared-contract checks.
+
+### Qualification commands at exact candidate HEAD
+
+```powershell
+git fetch origin
+git switch fix/layer0-observation-scope-20261103
+git pull --ff-only
+git rev-parse HEAD
+py -m pytest -q services/agribrain/layer0/tests/test_forcing_content_identity.py
+py -m pytest -q services/agribrain/layer0/tests/test_plot_zone_observation_support.py
+py -m pytest -q services/agribrain/layer0/tests/test_packet_scope_negative_admission.py
+py -m pytest -q services/agribrain/layer0/tests/
+py -m pytest -q services/agribrain/layer1_fusion/tests/
+py -m pytest -q services/agribrain/layer05_asmae/tests/
+```
+
+Record collection counts as well as passed counts. ASMAE **83/83**
+at `e1f3770` versus older **84/84** must be reconciled to exact
+collection/interpreter and revision before interpreting a changed count.
+
+Do not merge any Layer 0 draft PR into the scientific pilot or `main`
+on the strength of unit tests alone. Pilot PR #9 remains independent.
+Cross-track proof still needs full model/forcing source binding, qualified
+positive observation grants, plot/zone support and availability, and
+issuance/replay validation.
