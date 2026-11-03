@@ -493,3 +493,63 @@ def test_stored_absolute_orbit_cannot_contradict_captured_catalog(tmp_path):
     scene,store,*_=_case(tmp_path)
     scene.provider_absolute_orbit=12346
     assert _screen(scene,store).reason=="sar_scene_absolute_orbit_conflict"
+
+
+def test_s1_changed_source_operator_does_not_pass_structural_qa(tmp_path):
+    from services.agribrain.layer0.native_issuer.process_operator_contract import (
+        render_native_process_operator,
+    )
+    request=deepcopy(PROCESS_REQUEST)
+    script=render_native_process_operator("S1", ITEM)
+    assert 'VV: [value(sample, "VV", NaN)]' in script
+    request["evalscript"]=script.replace(
+        'VV: [value(sample, "VV", NaN)]', 'VV: [0.5]'
+    )
+    scene,store,*_=_case(tmp_path,process_request=request)
+    result=_screen(scene,store)
+    assert result.status is S1ScreenStatus.REJECTED
+    assert result.reason == "captured_sar_request_grid_time_or_product_mismatch"
+    assert result.eligible_for_state_grant is False
+
+
+def test_s1_forced_clear_mask_operator_rejected(tmp_path):
+    request=deepcopy(PROCESS_REQUEST)
+    assert 'dataMask: [value(sample, "dataMask", 0)]' in request["evalscript"]
+    request["evalscript"]=request["evalscript"].replace(
+        'dataMask: [value(sample, "dataMask", 0)]', 'dataMask: [1]'
+    )
+    scene,store,*_=_case(tmp_path,process_request=request)
+    result=_screen(scene,store)
+    assert result.status is S1ScreenStatus.REJECTED
+    assert result.reason == "captured_sar_request_grid_time_or_product_mismatch"
+
+
+def test_s1_extra_anonymous_process_tile_rejects_despite_valid_tile(tmp_path):
+    tiles=[deepcopy(TILE), {"relativeOrbitNumber":73, "orbitDirection":"ASCENDING"}]
+    scene,store,*_=_case(tmp_path,process_tiles=tiles)
+    assert scene.binding_proof["unidentified_tile_count"] == 1
+    result=_screen(scene,store)
+    assert result.status is S1ScreenStatus.REJECTED
+    assert result.reason in (
+        "sar_catalog_process_product_mismatch",
+        "unidentified_s1_process_operator_tile_provenance",
+    )
+
+
+def test_s1_generic_tile_id_is_not_product_proof(tmp_path):
+    tiles=[deepcopy(TILE), {"id":ITEM,"relativeOrbitNumber":73,"orbitDirection":"ASCENDING"}]
+    scene,store,*_=_case(tmp_path,process_tiles=tiles)
+    assert scene.binding_proof["all_returned_tiles_identified"] is False
+    assert _screen(scene,store).status is S1ScreenStatus.REJECTED
+
+
+def test_s1_operator_product_provenance_count_must_be_explicit(tmp_path):
+    # Legacy Process metadata without a pre-filter unknown-tile counter
+    # cannot satisfy the v2 trusted-source operator contract.
+    from services.agribrain.layer0.asmae_scene_products.product_binding import (
+        verify_exact_product_binding,
+    )
+    metadata={"userData": {"tiles": [deepcopy(TILE)]}}
+    assert verify_exact_product_binding(ITEM,metadata,"S1")["is_exact"] is True
+    # Such a result is NOT a native-screen authority grant: the complete
+    # operator demands an explicit counter that was absent in old captures.
