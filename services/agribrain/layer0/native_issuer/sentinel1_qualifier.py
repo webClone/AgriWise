@@ -391,6 +391,33 @@ def screen_sentinel1_native(
             if str(exc) == "captured_request_not_retained":
                 return _defer("historical_sar_request_not_retained")
             return _reject("invalid_original_sar_request_evidence")
+        # Product identity alone is insufficient: independently retained
+        # Catalog and Process requests must refer to the same native region.
+        try:
+            catalog_bbox = catalog_request["bbox"]
+            process_bbox = process_request["input"]["bounds"]["bbox"]
+            source_filter = process_request["input"]["data"][0]["dataFilter"]
+            if (
+                len(catalog_bbox) != 4 or len(process_bbox) != 4
+                or any(type(v) not in (int, float) or not math.isfinite(v)
+                       for v in catalog_bbox + process_bbox)
+                or any(not math.isclose(float(a),float(b),rel_tol=0,abs_tol=1e-12)
+                       for a,b in zip(catalog_bbox,process_bbox))
+            ):
+                return _reject("sar_catalog_process_request_extent_conflict")
+            orbit_filter = source_filter.get("orbitDirection")
+            if orbit_filter is not None and _orbit_pass(orbit_filter) != direction:
+                return _reject("sar_requested_orbit_conflicts_with_catalog")
+            polarization_filter = source_filter.get("polarization")
+            if polarization_filter is not None and polarization_filter != "DV":
+                return _reject("sar_requested_polarization_conflicts_with_catalog")
+            acquisition_mode = source_filter.get("acquisitionMode")
+            if acquisition_mode is not None and acquisition_mode != properties.get(
+                "sar:instrument_mode"
+            ):
+                return _reject("sar_requested_mode_conflicts_with_catalog")
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return _reject("invalid_sar_catalog_process_request_pair")
         if (
             not _check_request(
                 catalog_request, sensor="S1", scene=scene,
