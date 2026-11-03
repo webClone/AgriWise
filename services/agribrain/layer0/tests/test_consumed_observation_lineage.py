@@ -56,7 +56,7 @@ def _grant(packet, *, version=1):
     ).hexdigest()}
 
 
-def _run(monkeypatch, packets):
+def _run(monkeypatch, packets, covariance_capture=None):
     monkeypatch.setenv("NODE_ENV", "test")
     for name in ("ENV", "APP_ENV", "ENVIRONMENT", "AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS"):
         monkeypatch.delenv(name, raising=False)
@@ -65,6 +65,24 @@ def _run(monkeypatch, packets):
             "s2-key": ("sentinel2", KEY),
         })
     )
+    if covariance_capture is not None:
+        native_factory = engine._DailyAssimilationEngine
+
+        def traced_factory():
+            actual = native_factory()
+            native_run_period = actual.run_period
+
+            def traced_run_period(*args, **kwargs):
+                value = native_run_period(*args, **kwargs)
+                flt = actual.filters["plot"]
+                covariance_capture["P"] = [row[:] for row in flt.covariance.P]
+                covariance_capture["state"] = list(flt.state.values)
+                return value
+
+            actual.run_period = traced_run_period
+            return actual
+
+        engine._DailyAssimilationEngine = traced_factory
     receipts = {
         observation_packet_digest(packet): _grant(packet)
         for packet in packets
@@ -86,8 +104,11 @@ def _numerical(package):
 
 def test_identical_signed_retry_keeps_full_state_covariance_and_input_root(monkeypatch):
     p = _packet(0.8)
-    once = _run(monkeypatch, [p])
-    retried = _run(monkeypatch, [p, p])
+    once_matrix, retried_matrix = {}, {}
+    once = _run(monkeypatch, [p], once_matrix)
+    retried = _run(monkeypatch, [p, p], retried_matrix)
+    assert once_matrix == retried_matrix  # actual full 9x9 covariance
+    assert len(once_matrix["P"]) == 9 and all(len(r) == 9 for r in once_matrix["P"])
     assert _numerical(once) == _numerical(retried)
     assert once.input_hash == retried.input_hash
     one_manifest = once.provenance["positive_state_input_manifest"]
@@ -104,8 +125,10 @@ def test_signed_independent_packet_permutations_have_same_execution_and_root(mon
     a, b = _packet(0.2), _packet(0.8)
     assert a.packet_id == b.packet_id  # legacy ID is NOT independent evidence
     assert observation_packet_digest(a) != observation_packet_digest(b)
-    ab = _run(monkeypatch, [a, b])
-    ba = _run(monkeypatch, [b, a])
+    ab_matrix, ba_matrix = {}, {}
+    ab = _run(monkeypatch, [a, b], ab_matrix)
+    ba = _run(monkeypatch, [b, a], ba_matrix)
+    assert ab_matrix == ba_matrix
     assert _numerical(ab) == _numerical(ba)
     assert ab.input_hash == ba.input_hash
     entries = ab.provenance["positive_state_input_manifest"]["ordered_observation_updates"]
