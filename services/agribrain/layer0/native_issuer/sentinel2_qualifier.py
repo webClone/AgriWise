@@ -40,6 +40,8 @@ _HASH_BANDS = ("B04", "B08", "B11", "SCL", "DATAMASK")
 _MAX_ARCHIVE_MEMBERS = 40
 _MAX_TIFF_BYTES = 48 * 1024 * 1024
 _MAX_PIXELS = 8192 * 8192
+_MAX_DECODED_TIFF_PIXELS = 2_000_000
+_MAX_USERDATA_BYTES = 1024 * 1024
 _MAX_SAMPLED_SUPPORT_PIXELS = 1024 * 1024
 _MAX_SAMPLED_SUPPORT_VERTICES = 256
 # Existing S2 QA's >=70% good-pixel benchmark, used only as a
@@ -144,13 +146,27 @@ def _read_captured_process(raw: bytes) -> tuple[dict[str, np.ndarray], dict]:
                     if name not in ("B04", "B08", "B11", "SCL", "DATAMASK"):
                         continue
                     with tifffile.TiffFile(BytesIO(blob)) as tif:
-                        arr = np.asarray(tif.asarray())
+                        # Check declared TIFF dimensions *before* invoking
+                        # potentially expensive compressed raster decoding.
+                        if len(tif.series) != 1:
+                            raise NativeEvidenceError("ambiguous_process_tiff_series")
+                        series = tif.series[0]
+                        shape = series.shape
+                        if (
+                            len(shape) != 2
+                            or int(np.prod(shape)) == 0
+                            or int(np.prod(shape)) > _MAX_DECODED_TIFF_PIXELS
+                        ):
+                            raise NativeEvidenceError("oversized_or_invalid_tiff_dimensions")
+                        arr = np.asarray(series.asarray())
                     if arr.ndim != 2 or arr.size > _MAX_PIXELS or arr.size == 0:
                         raise NativeEvidenceError("invalid_process_band_shape")
                     bands[name] = arr
                 elif member.name.lower().endswith(".json"):
                     if userdata is not None:
                         raise NativeEvidenceError("ambiguous_process_userdata")
+                    if len(blob) > _MAX_USERDATA_BYTES:
+                        raise NativeEvidenceError("oversized_process_userdata")
                     userdata = json.loads(
                         blob.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys
                     )
