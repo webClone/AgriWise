@@ -232,6 +232,15 @@ class PositiveObservationAdmissionVerifier:
                 or grant["purpose"] != purpose
             ):
                 return False, "wrong_issuer_source_or_purpose"
+            # Reject bool/float equality aliases (True == 1 == 1.0).
+            packet_version = getattr(packet, "geometry_version", None)
+            grant_version = grant.get("geometry_version")
+            if (
+                type(packet_version) is not int
+                or type(grant_version) is not int
+                or packet_version < 0 or grant_version < 0
+            ):
+                return False, "invalid_signed_geometry_version_type"
             if (
                 getattr(packet, "plot_id", None) != plot_id
                 or getattr(packet, "geometry_hash", None) != geometry_hash
