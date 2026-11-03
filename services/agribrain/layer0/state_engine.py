@@ -624,6 +624,21 @@ class Layer0StateEngine:
         state_pkg.health_report["positive_admitted_weather_digests"] = sorted(
             signed_admitted_weather_digests
         )
+        # Input signatures authenticate a source statement; they do not
+        # authorize a prescription, physical execution or pilot publication.
+        # In particular, a prior-only estimate with zero signed inputs cannot
+        # masquerade as scientifically qualified by its mere existence.
+        signed_count = (
+            len(signed_admitted_observation_digests)
+            + len(signed_admitted_weather_digests)
+        )
+        state_pkg.health_report["signed_state_input_count"] = signed_count
+        state_pkg.health_report["signed_state_input_present"] = (
+            signed_count > 0
+            and self._positive_observation_admission_verifier is not None
+        )
+        state_pkg.health_report["state_output_role"] = "STATE_ESTIMATE"
+        state_pkg.health_report["scientific_publication_authorized"] = False
         # Sealing MUST follow every mutation of the material health report.
         # The earlier order recomputed output_hash before appending these
         # counts, so the published digest was stale even with no new data.
