@@ -9,7 +9,7 @@ import requests
 from .scene_product_schema import SceneProduct
 from .scene_product_store import SceneProductStore
 from services.agribrain.layer0.native_issuer.acquisition_evidence import (
-    capture_backend_provider_response,
+    capture_backend_provider_response, NativeEvidenceError,
 )
 from .product_binding import (
     exact_binding_proof_valid,
@@ -566,6 +566,8 @@ def fetch_asmae_s1_scene_stack(
             sensor="S1",
         )
         features = resp.json().get("features", [])
+    except NativeEvidenceError:
+        return _unavailable("acquisition_evidence", "untrusted_native_capture", date_range)
     except Exception:
         if local_scenes:
             return local_scenes
@@ -865,6 +867,9 @@ def fetch_asmae_s1_scene_stack(
                 product_binding=binding["product_binding"],
                 binding_proof=binding["proof"],
             ))
+        except NativeEvidenceError:
+            logger.error("Native S1 acquisition evidence capture failed closed")
+            return _unavailable("acquisition_evidence", "untrusted_native_capture", date_range)
         except Exception:
             if local_scenes:
                 continue
