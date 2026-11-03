@@ -23,6 +23,9 @@ from services.agribrain.layer0.wrappers import (
     wrap_perception,
 )
 from services.agribrain.layer0.state_engine import Layer0StateEngine
+from services.agribrain.layer0.positive_observation_admission import (
+    PositiveObservationAdmissionVerifier, observation_packet_digest,
+)
 
 
 @dataclass
@@ -42,6 +45,9 @@ class Layer0RunnerInput:
     sensor_package: Optional[Any] = None
     geo_context_packets: List[Any] = field(default_factory=list)
     perception_packets: List[Any] = field(default_factory=list)
+    # Detached receipts are untrusted data until the runtime's protected
+    # verifier validates the HMAC against its own server-side issuer keys.
+    positive_admission_receipts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -85,8 +91,15 @@ class Layer0Runner:
         "perception",
     ]
 
-    def __init__(self):
-        self.state_engine = Layer0StateEngine()
+    def __init__(
+        self,
+        positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
+    ):
+        # This must be provisioned from trusted server-side configuration.
+        # A missing verifier means LEGACY_UNVERIFIED, never signed authority.
+        self.state_engine = Layer0StateEngine(
+            positive_admission_verifier=positive_admission_verifier
+        )
 
     def run(
         self,
@@ -230,6 +243,7 @@ class Layer0Runner:
                 run_timestamp=run_timestamp,
                 geometry_hash=geometry_hash,
                 geometry_version=geometry_version,
+                positive_admission_receipts=run_input.positive_admission_receipts,
             )
 
         # 11. Build aggregated health report, diagnostics and provenance summaries
@@ -254,6 +268,25 @@ class Layer0Runner:
             st = pkt.data_status.value if hasattr(pkt.data_status, "value") else str(pkt.data_status)
             rejected_by_reason[st] = rejected_by_reason.get(st, 0) + 1
 
+        mode = (
+            (state_package.health_report or {}).get(
+                "positive_source_admission_mode", "LEGACY_UNVERIFIED"
+            )
+            if state_package else "NO_STATE_ESTIMATE"
+        )
+        signed_admitted = set(
+            (state_package.health_report or {}).get(
+                "positive_admitted_observation_digests", []
+            )
+            if state_package else []
+        )
+        signed_admitted.update(
+            (state_package.health_report or {}).get(
+                "positive_admitted_weather_digests", []
+            )
+            if state_package else []
+        )
+
         sources_report = {}
         for sf, pkgs in source_packages.items():
             transport_received = any(bool(package.packets) for package in pkgs)
@@ -261,7 +294,25 @@ class Layer0Runner:
                 bool((package.health or {}).get("quality_admitted", (package.health or {}).get("usable", False)))
                 for package in pkgs
             )
-            state_eligible = any(id(packet) in eligible_ids for package in pkgs for packet in package.packets)
+            state_eligible = any(
+                id(packet) in eligible_ids
+                for package in pkgs for packet in package.packets
+            )
+            authority_verified = False
+            if mode == "SIGNED_STATE_INPUTS":
+                # Only count proof-bound, actually admitted observations.
+                state_eligible = False
+                for package in pkgs:
+                    for packet in package.packets:
+                        try:
+                            if observation_packet_digest(packet) in signed_admitted:
+                                state_eligible = True
+                                authority_verified = True
+                                break
+                        except (ValueError, TypeError, AttributeError, OverflowError):
+                            continue
+                    if state_eligible:
+                        break
             scientifically_healthy = quality_admitted and state_eligible
             sources_report[sf] = {
                 "status": (
@@ -272,6 +323,7 @@ class Layer0Runner:
                 "transport_received": transport_received,
                 "quality_admitted": quality_admitted,
                 "state_eligible": state_eligible,
+                "positive_source_authority_verified": authority_verified,
                 "scientifically_healthy": scientifically_healthy,
                 "packet_count": sum(len(p.packets) for p in pkgs),
             }
@@ -287,6 +339,7 @@ class Layer0Runner:
             },
             "state_package_generated": state_package is not None,
             "kalman_available": state_package is not None and state_package.health_report.get("kalman_available", False),
+            "positive_source_admission_mode": mode,
         }
 
         diagnostics = {

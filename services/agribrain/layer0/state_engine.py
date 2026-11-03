@@ -20,6 +20,10 @@ import math
 
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
 from services.agribrain.layer0.observation_packet import DataStatus
+from services.agribrain.layer0.positive_observation_admission import (
+    observation_packet_digest, PositiveObservationAdmissionVerifier,
+    WEATHER_GRANT_PURPOSE,
+)
 
 
 # Packet field -> (registered observation model, uncertainty sigma key).
@@ -57,7 +61,14 @@ class Layer0StateEngine:
     Legacy ``data_fusion.py`` should delegate here.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
+    ):
+        # Trusted backend must supply the verifier and issuer keyring; no keys
+        # may be derived from packet claims or user-controlled JSON. Without
+        # it this remains an explicitly LEGACY_UNVERIFIED scientific pathway.
+        self._positive_observation_admission_verifier = positive_admission_verifier
         self._has_kalman = False
         try:
             from services.agribrain.layer0.kalman_engine import (
@@ -249,6 +260,7 @@ class Layer0StateEngine:
         run_timestamp: Optional[datetime] = None,
         geometry_hash: str = "",
         geometry_version: Optional[int] = None,
+        positive_admission_receipts: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Layer0StatePackage:
         """Run assimilation from ObservationPacket[] — the canonical entrypoint.
 
@@ -295,8 +307,36 @@ class Layer0StateEngine:
             "skipped_foreign_plot": 0,
             "skipped_foreign_geometry": 0,
             "skipped_foreign_geometry_version": 0,
+            "skipped_missing_positive_source_grant": 0,
+            "skipped_invalid_positive_source_grant": 0,
         }
         filtered_packets = []
+        signed_admitted_observation_digests: set[str] = set()
+        signed_admitted_weather_digests: set[str] = set()
+
+        def check_positive_grant(pkt: Any, purpose: str) -> tuple[bool, Optional[str]]:
+            if self._positive_observation_admission_verifier is None:
+                return True, None  # Explicit LEGACY_UNVERIFIED mode
+            try:
+                digest = observation_packet_digest(pkt)
+                receipt = (positive_admission_receipts or {}).get(digest)
+            except (ValueError, TypeError, AttributeError, OverflowError):
+                excluded_counts["skipped_invalid_positive_source_grant"] += 1
+                return False, None
+            if receipt is None:
+                excluded_counts["skipped_missing_positive_source_grant"] += 1
+                return False, None
+            valid, _reason = self._positive_observation_admission_verifier.verify(
+                receipt, pkt, plot_id=plot_id, geometry_hash=geometry_hash,
+                geometry_version=geometry_version,
+                run_timestamp=run_timestamp or datetime.now(timezone.utc),
+                purpose=purpose,
+            )
+            if not valid:
+                excluded_counts["skipped_invalid_positive_source_grant"] += 1
+                return False, None
+            return True, digest
+
         for pkt in packets:
             # Explicitly contradictory identities must never enter weather,
             # event evidence or observation state. For legacy unbound
@@ -368,6 +408,16 @@ class Layer0StateEngine:
                 ObservationSource.WEATHER_STATION,
                 ObservationSource.NASA_POWER,
             ):
+                # State-changing environmental forcing needs its own
+                # positive WEATHER purpose. A signed NDVI/observation
+                # receipt cannot authorize temperature/rain/ET inputs.
+                authorized, signed_weather_digest = check_positive_grant(
+                    pkt, WEATHER_GRANT_PURPOSE
+                )
+                if not authorized:
+                    continue
+                if signed_weather_digest is not None:
+                    signed_admitted_weather_digests.add(signed_weather_digest)
                 if day not in daily_weather:
                     daily_weather[day] = {}
                 # Normalize weather aliases
@@ -435,6 +485,16 @@ class Layer0StateEngine:
                 # state even if its declared reliability and grants are true.
                 if not any(payload.get(k) is not None for k in _PACKET_KALMAN_FIELDS):
                     continue
+
+                # Packet claims are not authoritative. In strict mode the
+                # trusted verifier requires an exact, detached, purpose-bound
+                # grant for this particular observation.
+                authorized, signed_packet_digest = check_positive_grant(
+                    pkt, "kalman_state_observation"
+                )
+                if not authorized:
+                    continue
+
                 try:
                     effective_reliability = pkt.effective_weight()
                     if (
@@ -480,6 +540,8 @@ class Layer0StateEngine:
                         source=pkt.source.value,
                     )
                     observations_by_day[day][zone_id].append(obs)
+                    if signed_packet_digest is not None:
+                        signed_admitted_observation_digests.add(signed_packet_digest)
 
         # Build the state package through the lower-level run()
         state_pkg = self.run(
@@ -498,11 +560,25 @@ class Layer0StateEngine:
 
         # Attach the source packets to the state package
         state_pkg.all_packets = list(packets)
-        state_pkg.output_hash = state_pkg._generate_output_hash()
 
         # Add diagnostic count for excluded packets
         if state_pkg.health_report is None:
             state_pkg.health_report = {}
         state_pkg.health_report["state_packets_excluded_by_status"] = excluded_counts
+        state_pkg.health_report["positive_source_admission_mode"] = (
+            "SIGNED_STATE_INPUTS"
+            if self._positive_observation_admission_verifier is not None
+            else "LEGACY_UNVERIFIED"
+        )
+        state_pkg.health_report["positive_admitted_observation_digests"] = sorted(
+            signed_admitted_observation_digests
+        )
+        state_pkg.health_report["positive_admitted_weather_digests"] = sorted(
+            signed_admitted_weather_digests
+        )
+        # Sealing MUST follow every mutation of the material health report.
+        # The earlier order recomputed output_hash before appending these
+        # counts, so the published digest was stale even with no new data.
+        state_pkg.output_hash = state_pkg._generate_output_hash()
 
         return state_pkg
