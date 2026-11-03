@@ -21,11 +21,13 @@ def signed_inputs_required() -> bool:
     `AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS=true` can also harden development
     tests and research deployments. `false` never disables production.
     """
-    environment = os.getenv(
-        "NODE_ENV",
-        os.getenv("ENVIRONMENT", os.getenv("ENV", os.getenv("APP_ENV", "development"))),
-    ).strip().lower()
-    return environment in ("production", "prod", "staging") or (
+    # Treat ANY deployment environment declaring production/staging as
+    # authoritative; a stray NODE_ENV=development cannot cancel ENV=prod.
+    environments = (
+        os.getenv(name, "").strip().lower()
+        for name in ("NODE_ENV", "ENVIRONMENT", "ENV", "APP_ENV")
+    )
+    return any(name in ("production", "prod", "staging") for name in environments) or (
         os.getenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "")
         .strip().lower() in ("true", "1", "yes")
     )
