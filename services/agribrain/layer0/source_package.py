@@ -329,6 +329,11 @@ class Layer0StatePackage:
             _stable_json(self.observation_registry_summary),
             _stable_json(self.validation_conflicts),
         ]
+        # Backward compatible for legacy input_hash="", but once verified
+        # receipt lineage is supplied it must be included in the output root.
+        # The input hash alone is not a publisher signature.
+        if self.input_hash:
+            parts.append("verified-input-root:" + self.input_hash)
         raw = "|".join(parts).encode()
         return hashlib.sha256(raw).hexdigest()[:20]
 

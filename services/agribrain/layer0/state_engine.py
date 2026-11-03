@@ -16,13 +16,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from copy import deepcopy
+import hashlib
+import json
 import math
 
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
 from services.agribrain.layer0.observation_packet import DataStatus
+from services.agribrain.layer0.production_admission import (
+    Layer0AdmissionRequiredError, require_trusted_verifier, signed_inputs_required,
+)
 from services.agribrain.layer0.positive_observation_admission import (
     observation_packet_digest, PositiveObservationAdmissionVerifier,
-    WEATHER_GRANT_PURPOSE,
+    WEATHER_GRANT_PURPOSE, GRANT_PURPOSE, _canonical_bytes,
 )
 
 
@@ -65,10 +71,20 @@ class Layer0StateEngine:
         self,
         positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
     ):
-        # Trusted backend must supply the verifier and issuer keyring; no keys
-        # may be derived from packet claims or user-controlled JSON. Without
-        # it this remains an explicitly LEGACY_UNVERIFIED scientific pathway.
+        # Production/staging cannot silently opt out of cryptographic
+        # input admission; explicit development mode remains legacy-compatible.
+        require_trusted_verifier(positive_admission_verifier)
+        if (
+            signed_inputs_required()
+            and not isinstance(
+                positive_admission_verifier, PositiveObservationAdmissionVerifier
+            )
+        ):
+            raise Layer0AdmissionRequiredError(
+                "Mandatory state admission requires a trusted verifier type"
+            )
         self._positive_observation_admission_verifier = positive_admission_verifier
+        self.__packet_run_capability = object()
         self._has_kalman = False
         try:
             from services.agribrain.layer0.kalman_engine import (
@@ -101,6 +117,7 @@ class Layer0StateEngine:
         run_timestamp: Optional[datetime] = None,
         geometry_hash: str = "",
         geometry_version: Optional[int] = None,
+        _packet_run_capability: Any = None,
     ) -> Layer0StatePackage:
         """Run daily state assimilation and return a Layer0StatePackage.
 
@@ -119,6 +136,14 @@ class Layer0StateEngine:
             Layer0StatePackage with daily_state, state_uncertainty, provenance,
             validation conflicts, and health report.
         """
+        # Direct prebuilt KalmanObservation/weather dictionaries do not
+        # carry independently verified packet receipts. For scientific
+        # production use, only run_from_packets may provide the private
+        # per-instance capability after it gates each input.
+        if signed_inputs_required() and _packet_run_capability is not self.__packet_run_capability:
+            raise Layer0AdmissionRequiredError(
+                "Direct Layer0StateEngine.run inputs bypass signed packet admission"
+            )
         if not self._has_kalman:
             return Layer0StatePackage(
                 plot_id=plot_id,
@@ -283,6 +308,28 @@ class Layer0StateEngine:
         """
         from services.agribrain.layer0.observation_packet import ObservationSource, ObservationType
 
+        # Reevaluate the server policy at the sensitive entrypoint, not only
+        # in __init__: long-lived workers can receive a hardened deployment
+        # configuration after an estimator instance was constructed.
+        require_trusted_verifier(self._positive_observation_admission_verifier)
+        if (
+            signed_inputs_required()
+            and not isinstance(
+                self._positive_observation_admission_verifier,
+                PositiveObservationAdmissionVerifier
+            )
+        ):
+            raise Layer0AdmissionRequiredError(
+                "Mandatory packet admission requires a trusted verifier"
+            )
+
+        # Mandatory live admission has its own trusted UTC run timestamp.
+        # Caller-controlled historical timestamps cannot backdate receipt
+        # validity or state publication history. Explicit trusted replay
+        # requires a future separately authorized pathway.
+        if signed_inputs_required():
+            run_timestamp = datetime.now(timezone.utc)
+
         # Geometry scope must come from the *caller* rather than borrowing
         # identity from an arbitrary packet. Missing caller scope remains
         # explicitly unbound; positive scope/receipt enforcement is a
@@ -313,6 +360,10 @@ class Layer0StateEngine:
         filtered_packets = []
         signed_admitted_observation_digests: set[str] = set()
         signed_admitted_weather_digests: set[str] = set()
+        # Only signatures proven AND materially consumed in state estimation
+        # contribute to the immutable input manifest.
+        signed_receipts_used: Dict[str, Dict[str, Any]] = {}
+        weather_field_sources: Dict[str, Dict[str, str]] = {}
 
         def check_positive_grant(pkt: Any, purpose: str) -> tuple[bool, Optional[str]]:
             if self._positive_observation_admission_verifier is None:
@@ -326,10 +377,19 @@ class Layer0StateEngine:
             if receipt is None:
                 excluded_counts["skipped_missing_positive_source_grant"] += 1
                 return False, None
+            # A caller-controlled or historical replay timestamp is NOT
+            # a live security clock. Mandatory mode always verifies receipt
+            # expiry and issuance against the backend's trusted UTC clock.
+            # Replay authorization must use a separate audited capability.
+            verification_now = (
+                datetime.now(timezone.utc)
+                if signed_inputs_required()
+                else (run_timestamp or datetime.now(timezone.utc))
+            )
             valid, _reason = self._positive_observation_admission_verifier.verify(
                 receipt, pkt, plot_id=plot_id, geometry_hash=geometry_hash,
                 geometry_version=geometry_version,
-                run_timestamp=run_timestamp or datetime.now(timezone.utc),
+                run_timestamp=verification_now,
                 purpose=purpose,
             )
             if not valid:
@@ -392,7 +452,9 @@ class Layer0StateEngine:
 
         for pkt in filtered_packets:
             day = pkt.timestamp.strftime("%Y-%m-%d") if pkt.timestamp else ""
-            if not day:
+            if not day or not (start_date <= day <= end_date):
+                # Do not count or root out-of-window evidence that cannot
+                # affect the requested state trajectory.
                 continue
 
             payload = pkt.payload or {}
@@ -416,8 +478,6 @@ class Layer0StateEngine:
                 )
                 if not authorized:
                     continue
-                if signed_weather_digest is not None:
-                    signed_admitted_weather_digests.add(signed_weather_digest)
                 if day not in daily_weather:
                     daily_weather[day] = {}
                 # Normalize weather aliases
@@ -430,10 +490,15 @@ class Layer0StateEngine:
                 for src_key, dst_key in weather_aliases.items():
                     if src_key in payload:
                         daily_weather[day][dst_key] = payload[src_key]
-                # Merge weather fields directly
+                        if signed_weather_digest is not None:
+                            weather_field_sources.setdefault(day, {})[dst_key] = signed_weather_digest
+                # Merge weather fields directly, tracking only the final
+                # contributing receipt for each actually used variable.
                 for k in ("temp_max", "temp_min", "precipitation", "et0"):
                     if k in payload:
                         daily_weather[day][k] = payload[k]
+                        if signed_weather_digest is not None:
+                            weather_field_sources.setdefault(day, {})[k] = signed_weather_digest
                 continue
 
             # Event packets → events_by_day
@@ -542,8 +607,40 @@ class Layer0StateEngine:
                     observations_by_day[day][zone_id].append(obs)
                     if signed_packet_digest is not None:
                         signed_admitted_observation_digests.add(signed_packet_digest)
+                        signed_receipts_used[signed_packet_digest] = {
+                            "purpose": GRANT_PURPOSE,
+                            "receipt": deepcopy(
+                                (positive_admission_receipts or {})[signed_packet_digest]
+                            ),
+                        }
 
-        # Build the state package through the lower-level run()
+        # Only complete, physically admissible weather days reach the
+        # process model. Bind the final effective field provenance, not an
+        # overridden or incomplete signed packet. Missing weather may still
+        # lead to explicitly degraded state estimation.
+        if self._positive_observation_admission_verifier is not None:
+            from services.agribrain.layer0.kalman_engine import (
+                _qualified_weather_for_prediction,
+            )
+            for weather_day, effective_fields in daily_weather.items():
+                if _qualified_weather_for_prediction(effective_fields) is None:
+                    continue
+                owners = weather_field_sources.get(weather_day, {})
+                for variable in ("temp_max", "temp_min", "precipitation", "et0"):
+                    digest = owners.get(variable)
+                    if digest is None:
+                        continue
+                    signed_admitted_weather_digests.add(digest)
+                    signed_receipts_used[digest] = {
+                        "purpose": WEATHER_GRANT_PURPOSE,
+                        "receipt": deepcopy(
+                            (positive_admission_receipts or {})[digest]
+                        ),
+                    }
+
+        # Build state using the private capability granted only by the
+        # packet entrypoint; direct scalar state calls remain unavailable
+        # under production policy.
         state_pkg = self.run(
             plot_id=plot_id,
             start_date=start_date,
@@ -556,6 +653,10 @@ class Layer0StateEngine:
             run_timestamp=run_timestamp,
             geometry_hash=geometry_hash,
             geometry_version=geometry_version,
+            **(
+                {"_packet_run_capability": self.__packet_run_capability}
+                if signed_inputs_required() else {}
+            ),
         )
 
         # Attach the source packets to the state package
@@ -566,9 +667,13 @@ class Layer0StateEngine:
             state_pkg.health_report = {}
         state_pkg.health_report["state_packets_excluded_by_status"] = excluded_counts
         state_pkg.health_report["positive_source_admission_mode"] = (
-            "SIGNED_STATE_INPUTS"
-            if self._positive_observation_admission_verifier is not None
-            else "LEGACY_UNVERIFIED"
+            "MANDATORY_SIGNED_STATE_INPUTS"
+            if signed_inputs_required()
+            else (
+                "SIGNED_STATE_INPUTS"
+                if self._positive_observation_admission_verifier is not None
+                else "LEGACY_UNVERIFIED"
+            )
         )
         state_pkg.health_report["positive_admitted_observation_digests"] = sorted(
             signed_admitted_observation_digests
@@ -576,6 +681,56 @@ class Layer0StateEngine:
         state_pkg.health_report["positive_admitted_weather_digests"] = sorted(
             signed_admitted_weather_digests
         )
+        # Input signatures authenticate a source statement; they do not
+        # authorize a prescription, physical execution or pilot publication.
+        # In particular, a prior-only estimate with zero signed inputs cannot
+        # masquerade as scientifically qualified by its mere existence.
+        signed_count = (
+            len(signed_admitted_observation_digests)
+            + len(signed_admitted_weather_digests)
+        )
+        state_pkg.health_report["signed_state_input_count"] = signed_count
+        state_pkg.health_report["signed_state_input_present"] = (
+            signed_count > 0
+            and self._positive_observation_admission_verifier is not None
+        )
+        state_pkg.health_report["state_output_role"] = "STATE_ESTIMATE"
+        state_pkg.health_report["scientific_publication_authorized"] = False
+
+        # Bind the exact admitted proof statements, never unverified received
+        # packet claims. Do not include signing *secrets*; grant+MAC is a
+        # public verifiable statement whose integrity is checked upstream.
+        # This is not a signed pilot publication receipt and cannot by
+        # itself authorize downstream prescriptions.
+        if self._positive_observation_admission_verifier is not None:
+            input_manifest = {
+                "domain": "akaloris/layer0/verified-state-input-manifest/v1",
+                "plot_id": plot_id,
+                "geometry_hash": geometry_hash,
+                "geometry_version": geometry_version,
+                "window": [start_date, end_date],
+                "admitted_receipts": [
+                    {"packet_digest": digest, **signed_receipts_used[digest]}
+                    for digest in sorted(signed_receipts_used)
+                ],
+                "effective_weather_field_sources": {
+                    day: {field: digest for field, digest in sorted(owners.items())}
+                    for day, owners in sorted(weather_field_sources.items())
+                    if _qualified_weather_for_prediction(
+                        daily_weather.get(day, {})
+                    ) is not None
+                },
+            }
+            if not isinstance(getattr(state_pkg, "provenance", None), dict):
+                state_pkg.provenance = {}
+            state_pkg.provenance["positive_state_input_manifest"] = input_manifest
+            state_pkg.input_hash = hashlib.sha256(
+                _canonical_bytes(input_manifest)
+            ).hexdigest()
+            state_pkg.health_report["signed_input_manifest_hash"] = (
+                state_pkg.input_hash
+            )
+
         # Sealing MUST follow every mutation of the material health report.
         # The earlier order recomputed output_hash before appending these
         # counts, so the published digest was stale even with no new data.

@@ -23,6 +23,9 @@ from services.agribrain.layer0.wrappers import (
     wrap_perception,
 )
 from services.agribrain.layer0.state_engine import Layer0StateEngine
+from services.agribrain.layer0.production_admission import (
+    signed_inputs_required, load_server_issuer_verifier,
+)
 from services.agribrain.layer0.positive_observation_admission import (
     PositiveObservationAdmissionVerifier, observation_packet_digest,
 )
@@ -95,8 +98,11 @@ class Layer0Runner:
         self,
         positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
     ):
-        # This must be provisioned from trusted server-side configuration.
-        # A missing verifier means LEGACY_UNVERIFIED, never signed authority.
+        # Secure deployments resolve issuer keys from a protected server
+        # secret registry if no verifier has been explicitly injected by
+        # trusted backend code. No packet/client input can configure this.
+        if positive_admission_verifier is None and signed_inputs_required():
+            positive_admission_verifier = load_server_issuer_verifier()
         self.state_engine = Layer0StateEngine(
             positive_admission_verifier=positive_admission_verifier
         )
@@ -115,6 +121,11 @@ class Layer0Runner:
         Returns:
             Layer0RunnerOutput holding all source packages, state, packets, and audits.
         """
+        # A live production/scientific run cannot substitute a client-
+        # supplied or historical replay timestamp for trusted receipt time.
+        # Historical replays need a separately authenticated replay contract.
+        if signed_inputs_required():
+            run_timestamp = datetime.now(timezone.utc)
         plot_id = run_input.plot_id
         geometry_hash = run_input.geometry_hash
         geometry_version = run_input.geometry_version
@@ -299,7 +310,7 @@ class Layer0Runner:
                 for package in pkgs for packet in package.packets
             )
             authority_verified = False
-            if mode == "SIGNED_STATE_INPUTS":
+            if mode in ("SIGNED_STATE_INPUTS", "MANDATORY_SIGNED_STATE_INPUTS"):
                 # Only count proof-bound, actually admitted observations.
                 state_eligible = False
                 for package in pkgs:
