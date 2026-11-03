@@ -106,14 +106,22 @@ def _unwrap_records(raw_weather: Any) -> List[Any]:
 
 def _record_reality(record: Mapping[str, Any]) -> str:
     kind = str(_first_non_none(record, "data_kind", "source_reality") or "").lower()
+    source_role = str(record.get("source_role") or "").upper()
     packet = str(record.get("packet_type") or "").lower()
     status = str(record.get("data_status") or "").lower()
     combined = " ".join((kind, packet, status))
+    if (
+        source_role == "CURRENT_PROVIDER_CONTEXT" or kind == "current"
+        or source_role == "REJECTED"
+    ):
+        # A current API/model context (and rejected mixed-role data)
+        # is not an observed station archive.
+        return "unknown"
     if "forecast" in combined:
         return "forecast"
     if "reanalysis" in combined or "historical_reanalysis" in combined:
         return "reanalysis_archive"
-    if "observed" in combined or kind == "current":
+    if "observed" in combined:
         return "observed_archive"
     return "unknown"
 
@@ -152,6 +160,10 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
     evidence_id = str(_first_non_none(record, "evidence_id", "content_hash", "packet_id") or "")
     authority = str(record.get("authority") or "")
     reality = _record_reality(record)
+    if reality == "unknown":
+        # Do not permit an unqualified provider 'current' context to
+        # enter historical ASMAE weather as observed truth.
+        return None
     normalized = {
         **values,
         "date": date,
