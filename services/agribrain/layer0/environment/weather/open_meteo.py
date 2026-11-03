@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from services.agribrain.layer0.environment.weather.schemas import WeatherDailyRecord, WeatherTimeSeries
+from services.agribrain.layer0.environment.weather.source_roles import role_for_data_kind
 
 
 # Open-Meteo field name mapping to common schema
