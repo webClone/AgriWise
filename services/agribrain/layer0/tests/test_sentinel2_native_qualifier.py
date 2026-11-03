@@ -161,10 +161,9 @@ def _native_scene(
     return scene,store,cr,pr,refs
 
 
-def _screen(scene, store, *, trusted_plot=POLYGON, process_request=PROCESS_REQUEST):
+def _screen(scene, store, *, trusted_plot=POLYGON):
     return screen_sentinel2_native(
         scene=scene,evidence_store=store,trusted_plot=trusted_plot,
-        captured_process_request=process_request,
     )
 
 
@@ -193,17 +192,21 @@ def test_missing_trusted_plot_defers_native_qa_not_authorized(tmp_path):
     assert result.proof_hash is None
 
 
-def test_missing_or_unverified_process_request_defers_grid_authority(tmp_path):
-    scene,store,*_= _native_scene(tmp_path)
-    assert _screen(scene,store,process_request=None).status is S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY
-
-
-def test_mutated_process_request_fails_captured_hash_gate(tmp_path):
-    scene,store,*_= _native_scene(tmp_path)
-    mutated=json.loads(json.dumps(PROCESS_REQUEST))
-    mutated["input"]["bounds"]["bbox"]=[0,0,2,2]
-    result=_screen(scene,store,process_request=mutated)
+def test_missing_original_process_request_defers_legacy_capture(tmp_path):
+    scene,store,_catalog,process,_refs=_native_scene(tmp_path)
+    store._path("request_replays",process.acquisition_id).unlink()
+    result=_screen(scene,store)
     assert result.status is S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY
+    assert result.reason == "historical_native_capture_missing_original_request"
+
+
+def test_tampered_captured_wire_request_fails_closed(tmp_path):
+    scene,store,_catalog,process,_refs=_native_scene(tmp_path)
+    record=json.loads(store._path("request_replays",process.acquisition_id).read_bytes())
+    store._path("request_wire",record["wire_request_sha256"]).write_bytes(b'{"forged":true}')
+    result=_screen(scene,store)
+    assert result.status is S2ScreenStatus.REJECTED
+    assert result.reason == "invalid_captured_process_request_evidence"
 
 
 def test_wrong_catalog_selected_product_rejects(tmp_path):
@@ -326,7 +329,7 @@ def test_unvalidated_qa_policy_rejected(tmp_path,bad):
     assert _screen(scene,store).status is S2ScreenStatus.SCREENED_NATIVE_QA
     result=screen_sentinel2_native(
         scene=scene,evidence_store=store,trusted_plot=POLYGON,
-        captured_process_request=PROCESS_REQUEST,min_valid_fraction=bad,
+        min_valid_fraction=bad,
     )
     assert result.status is S2ScreenStatus.REJECTED
 
@@ -362,3 +365,39 @@ def test_complex_plot_boundary_defers_to_mesia_instead_of_implicit_truncation(tm
     result=_screen(scene,store,trusted_plot=scope)
     assert result.status is S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY
     assert result.reason=="robust_mesia_geometry_support_required"
+
+
+def test_cold_reopened_evidence_store_independently_replays_post_request(tmp_path):
+    scene,store,_catalog,process,_refs=_native_scene(tmp_path)
+    reopened=NativeEvidenceStore(store.root)
+    assert reopened.verified_request_body(process.acquisition_id) == PROCESS_REQUEST
+    result=_screen(scene,reopened)
+    assert result.status is S2ScreenStatus.SCREENED_NATIVE_QA
+
+
+def test_wire_replay_record_sha_or_receipt_swap_rejects(tmp_path):
+    scene,store,_catalog,process,_refs=_native_scene(tmp_path)
+    path=store._path("request_replays",process.acquisition_id)
+    record=json.loads(path.read_bytes())
+    record["request_sha256"]="0"*64
+    path.write_text(json.dumps(record))
+    result=_screen(scene,store)
+    assert result.status is S2ScreenStatus.REJECTED
+    assert result.reason == "invalid_captured_process_request_evidence"
+
+
+def test_missing_replay_wire_object_rejects_instead_of_synthesizing_request(tmp_path):
+    scene,store,_catalog,process,_refs=_native_scene(tmp_path)
+    record=json.loads(store._path("request_replays",process.acquisition_id).read_bytes())
+    store._path("request_wire",record["wire_request_sha256"]).unlink()
+    result=_screen(scene,store)
+    assert result.status is S2ScreenStatus.REJECTED
+    assert result.reason == "invalid_captured_process_request_evidence"
+
+
+def test_native_qa_has_no_caller_supplied_request_override(tmp_path):
+    scene,store,*_=_native_scene(tmp_path)
+    import inspect
+    parameters=inspect.signature(screen_sentinel2_native).parameters
+    assert "captured_process_request" not in parameters
+    assert _screen(scene,store).status is S2ScreenStatus.SCREENED_NATIVE_QA
