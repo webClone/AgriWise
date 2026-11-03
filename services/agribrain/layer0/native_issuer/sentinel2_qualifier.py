@@ -42,6 +42,9 @@ _MAX_TIFF_BYTES = 48 * 1024 * 1024
 _MAX_PIXELS = 8192 * 8192
 _MAX_SAMPLED_SUPPORT_PIXELS = 1024 * 1024
 _MAX_SAMPLED_SUPPORT_VERTICES = 256
+# Existing S2 QA's >=70% good-pixel benchmark, used only as a
+# conservative preview floor, NOT a calibrated agronomic confidence claim.
+_MIN_SCIENTIFIC_SCREEN_FRACTION = 0.70
 
 
 class S2ScreenStatus(str, Enum):
@@ -311,7 +314,12 @@ def screen_sentinel2_native(
     MESIA full support and asymmetric issuer decisions are not here.
     """
     try:
-        if type(min_valid_fraction) is not float or not 0.0 < min_valid_fraction <= 1.0:
+        if (
+            type(min_valid_fraction) is not float
+            or not _MIN_SCIENTIFIC_SCREEN_FRACTION <= min_valid_fraction <= 1.0
+        ):
+            # A caller cannot lower this non-authorizing science screen
+            # below the fixed conservative source QA floor.
             return _deny("invalid_qa_policy")
         if (
             not isinstance(scene, SceneProduct) or scene.sensor != "S2"
