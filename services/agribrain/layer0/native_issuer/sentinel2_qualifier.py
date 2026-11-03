@@ -220,9 +220,82 @@ def _validate_scope(scope: TrustedPlotContext | None) -> tuple[tuple[float, floa
     return ring
 
 
+def _verify_process_request(
+    captured_process_request: Mapping[str, Any] | None,
+    *, scene: SceneProduct, expected_request_sha256: str,
+    item_time: datetime,
+) -> bool:
+    # A content digest of an actual sent HTTP request exists in the
+    # acquisition manifest, but B2B-01 intentionally did not store the
+    # request JSON. Only a caller supplying the original canonical request
+    # can prove grid/time/collection binding; cold cache remains deferred
+    # until that immutable request object is retained.
+    if not isinstance(captured_process_request, Mapping):
+        return False
+    try:
+        if hashlib.sha256(_canonical(captured_process_request)).hexdigest() != expected_request_sha256:
+            return False
+        request_input = captured_process_request["input"]
+        sources = request_input["data"]
+        if not isinstance(sources, list) or len(sources) != 1:
+            return False
+        source = sources[0]
+        if source.get("type") != "sentinel-2-l2a":
+            return False
+        if source.get("dataFilter", {}).get("mosaickingOrder") != "leastCC":
+            return False
+        window = source["timeRange"]
+        if not (_time(window["from"]) <= item_time <= _time(window["to"])):
+            return False
+        bounds = request_input["bounds"]
+        if bounds.get("properties", {}).get("crs") != (
+            "http://www.opengis.net/def/crs/EPSG/0/4326"
+        ):
+            return False
+        bbox = bounds["bbox"]
+        if not isinstance(bbox, list) or len(bbox) != 4:
+            return False
+        x0,y0,x1,y1 = bbox
+        if (
+            any(type(x) not in (int,float) or not math.isfinite(x) for x in bbox)
+            or not x0 < x1 or not y0 < y1
+        ):
+            return False
+        output = captured_process_request["output"]
+        if (
+            type(output.get("width")) is not int or output["width"] != scene.width
+            or type(output.get("height")) is not int or output["height"] != scene.height
+        ):
+            return False
+        identifiers = [
+            entry.get("identifier") for entry in output.get("responses", [])
+            if isinstance(entry, dict)
+        ]
+        if len(identifiers) != len(set(identifiers)) or not {
+            "B04", "B08", "SCL", "dataMask", "userdata"
+        }.issubset(identifiers):
+            return False
+        expected_transform = (
+            x0, (x1-x0)/scene.width, 0.0,
+            y1, 0.0, -(y1-y0)/scene.height,
+        )
+        if not all(
+            math.isclose(float(real), float(expected), rel_tol=0.0, abs_tol=1e-12)
+            for real, expected in zip(scene.transform,expected_transform)
+        ):
+            return False
+        evalscript = captured_process_request.get("evalscript")
+        if not isinstance(evalscript,str) or json.dumps(scene.provider_product_id) not in evalscript:
+            return False
+        return True
+    except (KeyError,TypeError,ValueError,AttributeError,ZeroDivisionError):
+        return False
+
+
 def screen_sentinel2_native(
     *, scene: SceneProduct, evidence_store: NativeEvidenceStore,
     trusted_plot: TrustedPlotContext | None = None,
+    captured_process_request: Mapping[str, Any] | None = None,
     min_valid_fraction: float = 0.70,
 ) -> S2NativeQAScreen:
     """Fail-closed, read-only structural and pixel QA; never issue a grant.
@@ -347,6 +420,15 @@ def screen_sentinel2_native(
         ):
             return _deny("invalid_scl_or_data_mask")
 
+        if not _verify_process_request(
+            captured_process_request, scene=scene,
+            expected_request_sha256=process.request_sha256,
+            item_time=item_time,
+        ):
+            return S2NativeQAScreen(
+                S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY,
+                "captured_process_request_required_for_grid_and_time_proof",
+            )
         if trusted_plot is None:
             return S2NativeQAScreen(
                 S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY,
@@ -399,6 +481,7 @@ def screen_sentinel2_native(
             "domain": QUALIFIER_DOMAIN,
             "catalog_acquisition_id": catalog.acquisition_id,
             "process_acquisition_id": process.acquisition_id,
+            "verified_process_request_sha256": process.request_sha256,
             "product_id": scene.provider_product_id,
             "catalog_datetime_utc": item_time.isoformat(),
             "binding_userdata_hash": binding["proof"]["process_userdata_hash"],
