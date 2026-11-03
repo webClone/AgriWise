@@ -321,7 +321,10 @@ def screen_sentinel2_native(
             if (
                 cache_pixels.shape != bands[name].shape
                 or cache_pixels.dtype != bands[name].dtype
-                or not np.array_equal(cache_pixels, bands[name], equal_nan=True)
+                or not np.array_equal(
+                    cache_pixels, bands[name],
+                    equal_nan=bool(np.issubdtype(cache_pixels.dtype, np.inexact))
+                )
             ):
                 return _deny("cached_raster_differs_from_captured_process")
 
