@@ -16,6 +16,8 @@ from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping, Tuple
+
+from services.agribrain.layer0.issuer_revocation import TrustedRevocationGate
 import hashlib
 import hmac
 import json
@@ -23,6 +25,7 @@ import math
 
 
 GRANT_DOMAIN = "akaloris/layer0/positive-state-observation/v1"
+ZONE_GRANT_DOMAIN = "akaloris/layer0/positive-zone-state-observation/v2"
 GRANT_PURPOSE = "kalman_state_observation"
 WEATHER_GRANT_PURPOSE = "weather_state_forcing"
 _ALLOWED_PURPOSES = frozenset((GRANT_PURPOSE, WEATHER_GRANT_PURPOSE))
@@ -31,6 +34,7 @@ _GRANT_FIELDS = frozenset((
     "geometry_hash", "geometry_version", "spatial_scope",
     "packet_digest", "issued_at", "expires_at",
 ))
+_ZONE_GRANT_FIELDS = _GRANT_FIELDS | {"zone_id", "zone_geometry_hash"}
 
 
 def _normalized(value: Any) -> Any:
@@ -107,7 +111,46 @@ class PositiveObservationAdmissionVerifier:
     All signature failures return (False, reason) and do not grant state.
     """
 
-    def __init__(self, issuer_keys: Mapping[str, Tuple[str, bytes]]):
+    def __init__(
+        self,
+        issuer_keys: Mapping[str, Tuple[str, bytes]],
+        *,
+        revocation_gate: TrustedRevocationGate | None = None,
+        trusted_zone_registry: Mapping[str, Mapping[str, Any]] | None = None,
+    ):
+        if revocation_gate is not None and not isinstance(revocation_gate, TrustedRevocationGate):
+            raise ValueError("invalid independent issuer revocation authority")
+        # Caller must provision this registry from trusted plot/zone metadata,
+        # not from incoming packets or the client. Its existence is still
+        # not a physical polygon-intersection proof.
+        zone_registry = {}
+        if trusted_zone_registry is not None:
+            if not isinstance(trusted_zone_registry, Mapping):
+                raise ValueError("invalid trusted zone registry")
+            for plot, scope in trusted_zone_registry.items():
+                if (
+                    not isinstance(plot, str) or not plot
+                    or not isinstance(scope, Mapping)
+                    or set(scope) != {"geometry_hash", "geometry_version", "zones"}
+                    or not isinstance(scope["geometry_hash"], str)
+                    or not scope["geometry_hash"]
+                    or isinstance(scope["geometry_version"], bool)
+                    or not isinstance(scope["geometry_version"], int)
+                    or not isinstance(scope["zones"], Mapping)
+                    or any(
+                        not isinstance(z, str) or not z or z == "plot"
+                        or not isinstance(h, str) or not h
+                        for z, h in scope["zones"].items()
+                    )
+                ):
+                    raise ValueError("invalid trusted zone scope")
+                zone_registry[plot] = {
+                    "geometry_hash": scope["geometry_hash"],
+                    "geometry_version": scope["geometry_version"],
+                    "zones": dict(scope["zones"]),
+                }
+        self._zone_registry = zone_registry
+        self._revocation_gate = revocation_gate
         keyring = {}
         for key_id, rule in issuer_keys.items():
             if (
@@ -119,6 +162,28 @@ class PositiveObservationAdmissionVerifier:
                 raise ValueError("invalid admission verifier trust root")
             keyring[key_id] = rule
         self._issuer_keys = keyring
+
+    @property
+    def revocation_enforced(self) -> bool:
+        return self._revocation_gate is not None
+
+    @property
+    def zone_authority_configured(self) -> bool:
+        return bool(self._zone_registry)
+
+    @property
+    def revocation_revision(self) -> int | None:
+        return (
+            self._revocation_gate.last_accepted_revision
+            if self._revocation_gate is not None else None
+        )
+
+    @property
+    def revocation_snapshot_digest(self) -> str | None:
+        return (
+            self._revocation_gate.last_snapshot_digest
+            if self._revocation_gate is not None else None
+        )
 
     def verify(
         self, receipt: Any, packet: Any, *,
@@ -143,7 +208,13 @@ class PositiveObservationAdmissionVerifier:
             if not isinstance(receipt, dict) or set(receipt) != {"grant", "mac"}:
                 return False, "missing_or_malformed_grant"
             grant, mac = receipt["grant"], receipt["mac"]
-            if not isinstance(grant, dict) or set(grant) != _GRANT_FIELDS:
+            if not isinstance(grant, dict):
+                return False, "malformed_grant_fields"
+            grant_scope = grant.get("spatial_scope")
+            required_fields = (
+                _ZONE_GRANT_FIELDS if grant_scope == "zone" else _GRANT_FIELDS
+            )
+            if set(grant) != required_fields:
                 return False, "malformed_grant_fields"
             if not isinstance(mac, str) or len(mac) != 64:
                 return False, "malformed_grant_signature"
@@ -155,7 +226,9 @@ class PositiveObservationAdmissionVerifier:
             scope = getattr(packet, "spatial_scope", None)
             if (
                 source != key_rule[0] or grant["source"] != source
-                or grant["domain"] != GRANT_DOMAIN
+                or grant["domain"] != (
+                    ZONE_GRANT_DOMAIN if grant_scope == "zone" else GRANT_DOMAIN
+                )
                 or grant["purpose"] != purpose
             ):
                 return False, "wrong_issuer_source_or_purpose"
@@ -170,6 +243,26 @@ class PositiveObservationAdmissionVerifier:
                 or scope not in ("plot", "zone")
             ):
                 return False, "wrong_or_unbound_spatial_scope"
+            if scope == "zone":
+                if purpose != GRANT_PURPOSE:
+                    return False, "zone_weather_forcing_not_authorized"
+                payload = getattr(packet, "payload", None)
+                if not isinstance(payload, dict):
+                    return False, "missing_zone_payload"
+                zone_id = payload.get("zone_id")
+                zone_hash = payload.get("zone_geometry_hash")
+                trusted = self._zone_registry.get(plot_id)
+                if (
+                    not isinstance(zone_id, str) or not zone_id
+                    or not isinstance(zone_hash, str) or not zone_hash
+                    or grant["zone_id"] != zone_id
+                    or grant["zone_geometry_hash"] != zone_hash
+                    or trusted is None
+                    or trusted["geometry_hash"] != geometry_hash
+                    or trusted["geometry_version"] != geometry_version
+                    or trusted["zones"].get(zone_id) != zone_hash
+                ):
+                    return False, "unregistered_or_foreign_zone_geometry"
             stamp = _utc_time(getattr(packet, "timestamp", None))
             issued = _utc_time(grant["issued_at"])
             expiry = _utc_time(grant["expires_at"])
@@ -179,12 +272,23 @@ class PositiveObservationAdmissionVerifier:
                 or expiry < run_time or expiry <= issued
             ):
                 return False, "invalid_or_future_grant_time"
+            end = getattr(packet, "timestamp_end", None)
+            if end is not None:
+                end_time = _utc_time(end)
+                if end_time is None or end_time < stamp or end_time > run_time:
+                    return False, "invalid_observation_time_window"
             if grant["packet_digest"] != observation_packet_digest(packet):
                 return False, "packet_content_mismatch"
             canonical = _canonical_bytes(grant)
             expected = hmac.new(key_rule[1], canonical, hashlib.sha256).hexdigest()
             if not hmac.compare_digest(expected, mac):
                 return False, "bad_grant_signature"
+            if self._revocation_gate is not None:
+                allowed, policy_reason = self._revocation_gate.check(
+                    grant["key_id"], run_time
+                )
+                if not allowed:
+                    return False, policy_reason
             return True, "verified_positive_source_grant"
         except (ValueError, TypeError, KeyError, OverflowError, AttributeError):
             return False, "invalid_grant_or_packet"
