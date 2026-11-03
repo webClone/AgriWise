@@ -337,7 +337,11 @@ def test_wrong_process_request_grid_rejects_from_retained_http_post(tmp_path):
     request=deepcopy(PROCESS_REQUEST)
     request["input"]["bounds"]["bbox"]=[0.,0.,2.,2.]
     scene,store,*_=_case(tmp_path,process_request=request)
-    assert _screen(scene,store).reason=="captured_sar_request_grid_time_or_product_mismatch"
+    # A mismatch between the two original provider requests is disproved
+    # before the cached scene-to-Process affine check is reached.
+    result=_screen(scene,store)
+    assert result.status == S1ScreenStatus.REJECTED
+    assert result.reason=="sar_catalog_process_request_extent_conflict"
 
 
 def test_wrong_process_request_acquisition_window_rejects(tmp_path):
