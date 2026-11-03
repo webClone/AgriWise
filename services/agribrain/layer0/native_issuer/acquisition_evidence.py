@@ -25,6 +25,8 @@ import tempfile
 
 
 EVIDENCE_DOMAIN = "akaloris/layer0/native-acquisition-evidence/v1"
+REQUEST_REPLAY_DOMAIN = "akaloris/layer0/native-request-replay/v1"
+MAX_PREPARED_REQUEST_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024 * 1024
 ALLOWED_PROVIDER_ENDPOINTS = frozenset({
     "https://sh.dataspace.copernicus.eu/catalog/v1/search",
@@ -70,7 +72,20 @@ def _safe_request(value: Any) -> Any:
         return result
     if isinstance(value, (list, tuple)):
         return [_safe_request(x) for x in value]
-    if value is None or isinstance(value, (str, int, bool)):
+    if isinstance(value, str):
+        # Request payloads must never become an accidental bearer-token
+        # archive. The Authorization header is intentionally not persisted.
+        # This detects common embedded credential forms; dedicated backend
+        # provider request allowlists remain a later production gate.
+        if re.search(
+            r"(?i)(?:\b(?:bearer|basic)\s+\S+|"
+            r"\b(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+            r"api[_-]?key|password)\s*[:=])",
+            value,
+        ):
+            raise NativeEvidenceError("embedded provider credential in acquisition request")
+        return value
+    if value is None or isinstance(value, (int, bool)):
         return value
     if isinstance(value, float):
         import math
@@ -167,7 +182,7 @@ class NativeEvidenceStore:
 
     def _path(self, kind: str, digest: str) -> Path:
         digest = _check_id(digest)
-        if kind not in ("objects", "manifests"):
+        if kind not in ("objects", "manifests", "request_wire", "request_replays"):
             raise NativeEvidenceError("invalid evidence object kind")
         return self.root / kind / digest[:2] / digest
 
@@ -237,7 +252,7 @@ class NativeEvidenceStore:
         prepared_body = getattr(req, "body", None)
         if isinstance(prepared_body, str):
             prepared_body = prepared_body.encode("utf-8")
-        if not isinstance(prepared_body, bytes) or len(prepared_body) > 1024 * 1024:
+        if not isinstance(prepared_body, bytes) or len(prepared_body) > MAX_PREPARED_REQUEST_BYTES:
             raise NativeEvidenceError("missing or oversized prepared provider request")
         try:
             transmitted = _safe_request(json.loads(
@@ -257,6 +272,7 @@ class NativeEvidenceStore:
             raise NativeEvidenceError("invalid provider response ID")
         response_sha = _sha(body)
         request_sha = _sha(_json_bytes(safe_parameters))
+        wire_sha = _sha(prepared_body)
         material = {
             "domain": EVIDENCE_DOMAIN,
             "origin_class": OriginClass.LIVE_PROVIDER_AUTHENTICATED.value,
@@ -271,8 +287,22 @@ class NativeEvidenceStore:
             "provider_signature_verified": False,
         }
         acquisition_id = _manifest_id(material)
-        # Raw bytes persist before manifest exposure; any write failure is an
-        # admission failure, never a reason to set production_usable=True.
+        # The raw PreparedRequest bytes are written before manifest exposure.
+        # Keep the original v1 acquisition ID stable: a separate append-only,
+        # acquisition-ID-keyed replay record links the exact wire digest to
+        # the already-rooted canonical request hash.
+        replay_record = {
+            "domain": REQUEST_REPLAY_DOMAIN,
+            "acquisition_id": acquisition_id,
+            "request_sha256": request_sha,
+            "wire_request_sha256": wire_sha,
+            "request_bytes": len(prepared_body),
+        }
+        # Failure of *any* immutable write is a failed capture. Retaining a
+        # response manifest without its request replay is forbidden for new
+        # acquisitions (existing historical v1 captures remain readable).
+        self._write_once(self._path("request_wire", wire_sha), prepared_body)
+        self._write_once(self._path("request_replays", acquisition_id), _json_bytes(replay_record))
         self._write_once(self._path("objects", response_sha), body)
         full = {"acquisition_id": acquisition_id, **material}
         self._write_once(self._path("manifests", acquisition_id), _json_bytes(full))
@@ -286,6 +316,61 @@ class NativeEvidenceStore:
             provider_request_id=response_id, credential_reference=credential_reference,
             http_status=200,
         )
+
+    def verified_request_body(self, acquisition_id: str) -> dict[str, Any]:
+        """Replay exact captured HTTP POST body after CAS and manifest checks.
+
+        This cannot sign a state-input grant. Legacy v1 captures without the
+        new request-replay record are *incomplete*, not retroactively verified.
+        """
+        receipt = self.verified_cache_receipt(acquisition_id)
+        replay_path = self._path("request_replays", acquisition_id)
+        if not replay_path.exists():
+            raise NativeEvidenceError("captured_request_not_retained")
+        try:
+            if replay_path.is_symlink() or not replay_path.is_file():
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            if replay_path.stat().st_size > 2048:
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            with replay_path.open("rb") as fd:
+                record_bytes = fd.read(2049)
+            if len(record_bytes) > 2048:
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            record = json.loads(record_bytes, object_pairs_hook=_reject_duplicate_keys)
+            if (
+                not isinstance(record, dict)
+                or set(record) != {
+                    "domain", "acquisition_id", "request_sha256",
+                    "wire_request_sha256", "request_bytes",
+                }
+                or record["domain"] != REQUEST_REPLAY_DOMAIN
+                or record["acquisition_id"] != receipt.acquisition_id
+                or record["request_sha256"] != receipt.request_sha256
+                or type(record["request_bytes"]) is not int
+                or not 0 < record["request_bytes"] <= MAX_PREPARED_REQUEST_BYTES
+            ):
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            wire_sha = _check_id(record["wire_request_sha256"])
+            wire_path = self._path("request_wire", wire_sha)
+            if wire_path.is_symlink() or not wire_path.is_file():
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            if wire_path.stat().st_size != record["request_bytes"]:
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            with wire_path.open("rb") as fd:
+                wire = fd.read(MAX_PREPARED_REQUEST_BYTES + 1)
+            if len(wire) != record["request_bytes"] or _sha(wire) != wire_sha:
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            canonical = _safe_request(
+                json.loads(wire, object_pairs_hook=_reject_duplicate_keys)
+            )
+            if not isinstance(canonical, dict):
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            if _sha(_json_bytes(canonical)) != receipt.request_sha256:
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            return canonical
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError, OverflowError):
+            raise NativeEvidenceError("invalid_captured_request_evidence") from None
+
 
     def verified_cache_receipt(self, acquisition_id: str) -> NativeAcquisitionReceipt:
         """Verify on-disk lineage, returning CACHE rather than LIVE authority."""

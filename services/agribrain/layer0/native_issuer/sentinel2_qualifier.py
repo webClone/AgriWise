@@ -250,11 +250,8 @@ def _verify_process_request(
     *, scene: SceneProduct, expected_request_sha256: str,
     item_time: datetime,
 ) -> bool:
-    # A content digest of an actual sent HTTP request exists in the
-    # acquisition manifest, but B2B-01 intentionally did not store the
-    # request JSON. Only a caller supplying the original canonical request
-    # can prove grid/time/collection binding; cold cache remains deferred
-    # until that immutable request object is retained.
+    # Replay input must come from the evidence store's original POST bytes;
+    # the caller cannot supply a replacement request at screen time.
     if not isinstance(captured_process_request, Mapping):
         return False
     try:
@@ -320,7 +317,6 @@ def _verify_process_request(
 def screen_sentinel2_native(
     *, scene: SceneProduct, evidence_store: NativeEvidenceStore,
     trusted_plot: TrustedPlotContext | None = None,
-    captured_process_request: Mapping[str, Any] | None = None,
     min_valid_fraction: float = 0.70,
 ) -> S2NativeQAScreen:
     """Fail-closed, read-only structural and pixel QA; never issue a grant.
@@ -457,15 +453,24 @@ def screen_sentinel2_native(
         ):
             return _deny("invalid_scl_or_data_mask")
 
+        try:
+            captured_request = evidence_store.verified_request_body(
+                process.acquisition_id
+            )
+        except NativeEvidenceError as exc:
+            if str(exc) == "captured_request_not_retained":
+                return S2NativeQAScreen(
+                    S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY,
+                    "historical_native_capture_missing_original_request",
+                )
+            return _deny("invalid_captured_process_request_evidence")
+
         if not _verify_process_request(
-            captured_process_request, scene=scene,
+            captured_request, scene=scene,
             expected_request_sha256=process.request_sha256,
             item_time=item_time,
         ):
-            return S2NativeQAScreen(
-                S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY,
-                "captured_process_request_required_for_grid_and_time_proof",
-            )
+            return _deny("captured_process_request_grid_or_time_mismatch")
         if trusted_plot is None:
             return S2NativeQAScreen(
                 S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY,
