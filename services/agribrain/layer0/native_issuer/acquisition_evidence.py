@@ -304,3 +304,28 @@ class NativeEvidenceStore:
             )
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             raise NativeEvidenceError("cached acquisition evidence is unavailable or invalid") from None
+
+
+def capture_backend_provider_response(
+    *, response: Any, endpoint: str, request_parameters: Mapping[str, Any],
+    sensor: str, provider_product_id: str = "",
+) -> NativeAcquisitionReceipt | None:
+    """Opt-in evidence recorder for *real internal* Sentinel fetch paths.
+
+    Does not change state-entry admission, grant issuance, or source QA.
+    A strict capture deployment requires an immutable-evidence destination;
+    without one, historical fetchers remain legacy/unattested.
+    """
+    root = os.getenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", "").strip()
+    required = os.getenv("AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    if not root:
+        if required:
+            raise NativeEvidenceError("native acquisition evidence required but no trusted root is configured")
+        return None
+    return NativeEvidenceStore(root).capture_http_response(
+        response=response, endpoint=endpoint, request_parameters=request_parameters,
+        sensor=sensor, provider_product_id=provider_product_id,
+        credential_reference="sentinel_hub_backend_oauth_client",
+    )
