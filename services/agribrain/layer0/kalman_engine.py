@@ -69,8 +69,15 @@ class KalmanObservation:
         When reliability w=0.5 -> R = 2σ² (observation down-weighted)
         When reliability w=0.1 -> R = 10σ² (nearly ignored)
         """
-        reliability_factor = max(0.1, self.reliability)
-        return (self.sigma ** 2) / reliability_factor
+        # Do not undo a qualified low QA weight with an implicit 0.1 floor.
+        # update() validates inputs before this property is evaluated.
+        if (
+            isinstance(self.reliability, bool)
+            or not math.isfinite(float(self.reliability))
+            or not 0.0 < float(self.reliability) <= 1.0
+        ):
+            raise ValueError("invalid effective observation reliability")
+        return (self.sigma ** 2) / float(self.reliability)
 
 
 # ============================================================================
