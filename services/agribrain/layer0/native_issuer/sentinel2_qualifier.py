@@ -40,6 +40,8 @@ _HASH_BANDS = ("B04", "B08", "B11", "SCL", "DATAMASK")
 _MAX_ARCHIVE_MEMBERS = 40
 _MAX_TIFF_BYTES = 48 * 1024 * 1024
 _MAX_PIXELS = 8192 * 8192
+_MAX_SAMPLED_SUPPORT_PIXELS = 1024 * 1024
+_MAX_SAMPLED_SUPPORT_VERTICES = 256
 
 
 class S2ScreenStatus(str, Enum):
@@ -168,20 +170,22 @@ def _polygon_mask(
 ) -> np.ndarray:
     # Pixel-center sampling only; this is explicitly NOT an area-accurate
     # MESIA support proof for partial pixels or fine boundary edges.
-    mask = np.zeros((height, width), dtype=bool)
-    for r in range(height):
-        for c in range(width):
-            x = transform[0] + (c + .5) * transform[1] + (r + .5) * transform[2]
-            y = transform[3] + (c + .5) * transform[4] + (r + .5) * transform[5]
-            inside = False
-            for idx, (x1, y1) in enumerate(ring):
-                x2, y2 = ring[(idx + 1) % len(ring)]
-                if ((y1 > y) != (y2 > y)) and x < (
-                    (x2 - x1) * (y - y1) / (y2 - y1) + x1
-                ):
-                    inside = not inside
-            mask[r, c] = inside
-    return mask
+    # NumPy-vectorized ray crossing avoids Python loops for every pixel.
+    # Large/complex footprints defer to MESIA instead of being truncated.
+    rows, cols = np.indices((height, width), dtype=np.float64)
+    xs = (transform[0] + (cols+.5)*transform[1]
+          + (rows+.5)*transform[2])
+    ys = (transform[3] + (cols+.5)*transform[4]
+          + (rows+.5)*transform[5])
+    inside = np.zeros((height, width), dtype=bool)
+    for (x1,y1),(x2,y2) in zip(ring,ring[1:]+ring[:1]):
+        if y2 == y1:
+            continue
+        crossing = ((y1 > ys) != (y2 > ys)) & (
+            xs < (x2-x1)*(ys-y1)/(y2-y1)+x1
+        )
+        inside ^= crossing
+    return inside
 
 
 def _validate_scope(scope: TrustedPlotContext | None) -> tuple[tuple[float, float], ...]:
@@ -444,6 +448,14 @@ def screen_sentinel2_native(
                 "trusted_plot_geometry_required",
             )
         ring = _validate_scope(trusted_plot)
+        if (
+            scene.height * scene.width > _MAX_SAMPLED_SUPPORT_PIXELS
+            or len(ring) > _MAX_SAMPLED_SUPPORT_VERTICES
+        ):
+            return S2NativeQAScreen(
+                S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY,
+                "robust_mesia_geometry_support_required",
+            )
         # The context is injected by a server adapter; its authenticity and
         # plot ownership must later be established by the trusted registry.
         x0,y0,x1,y1 = (
