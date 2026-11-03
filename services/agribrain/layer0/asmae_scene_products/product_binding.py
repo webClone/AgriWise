@@ -61,12 +61,11 @@ def verify_exact_product_binding(
         if not isinstance(tile, dict):
             unidentified_count += 1
             continue
-        # `id` is a fallback only when no explicit product ID exists.
-        # A tile ID need not be the source product ID.
+        # Only product-typed identifiers are authoritative. The generic
+        # `id` could identify a provider tile, orbit or internal row and
+        # must not turn an otherwise unidentified tile into a product proof.
         candidates = [tile.get(key) for key in id_keys
                       if tile.get(key) not in (None, "")]
-        if not candidates and tile.get("id") not in (None, ""):
-            candidates = [tile["id"]]
         if not candidates or any(
             not isinstance(value, str) or not normalize_product_id(value)
             for value in candidates
