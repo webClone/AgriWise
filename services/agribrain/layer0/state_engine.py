@@ -356,6 +356,7 @@ class Layer0StateEngine:
             "skipped_foreign_geometry_version": 0,
             "skipped_missing_positive_source_grant": 0,
             "skipped_invalid_positive_source_grant": 0,
+            "skipped_unsupported_zone_in_run": 0,
         }
         filtered_packets = []
         signed_admitted_observation_digests: set[str] = set()
@@ -363,6 +364,7 @@ class Layer0StateEngine:
         # Only signatures proven AND materially consumed in state estimation
         # contribute to the immutable input manifest.
         signed_receipts_used: Dict[str, Dict[str, Any]] = {}
+        signed_packet_by_digest: Dict[str, Any] = {}
         weather_field_sources: Dict[str, Dict[str, str]] = {}
 
         def check_positive_grant(pkt: Any, purpose: str) -> tuple[bool, Optional[str]]:
@@ -395,6 +397,7 @@ class Layer0StateEngine:
             if not valid:
                 excluded_counts["skipped_invalid_positive_source_grant"] += 1
                 return False, None
+            signed_packet_by_digest[digest] = pkt
             return True, digest
 
         for pkt in packets:
@@ -531,6 +534,14 @@ class Layer0StateEngine:
                 # Try to extract kalman-compatible values
                 if pkt.spatial_scope == "zone":
                     zone_id = payload.get("zone_id") or payload.get("zone") or "zone_unknown"
+                    if (
+                        self._positive_observation_admission_verifier is not None
+                        and (not isinstance(zone_id, str) or zone_id not in (zone_ids or []))
+                    ):
+                        # A zone must be explicitly part of this caller-scoped
+                        # estimation run even if it is registered elsewhere.
+                        excluded_counts["skipped_unsupported_zone_in_run"] += 1
+                        continue
                 else:
                     zone_id = "plot"
                 if day not in observations_by_day:
@@ -638,6 +649,37 @@ class Layer0StateEngine:
                         ),
                     }
 
+        # Revalidate effective signed inputs at the end of preparation.
+        # If a trusted revocation snapshot flips during this run, reject the
+        # entire state build rather than mixing two policy revisions.
+        verifier = self._positive_observation_admission_verifier
+        if verifier is not None and verifier.revocation_enforced and signed_receipts_used:
+            stable_revision = verifier.revocation_revision
+            stable_snapshot = verifier.revocation_snapshot_digest
+            for digest, entry in sorted(signed_receipts_used.items()):
+                valid, _reason = verifier.verify(
+                    entry["receipt"], signed_packet_by_digest[digest],
+                    plot_id=plot_id, geometry_hash=geometry_hash,
+                    geometry_version=geometry_version,
+                    run_timestamp=(
+                        datetime.now(timezone.utc)
+                        if signed_inputs_required()
+                        else (run_timestamp or datetime.now(timezone.utc))
+                    ),
+                    purpose=entry["purpose"],
+                )
+                if not valid:
+                    raise Layer0AdmissionRequiredError(
+                        "Issuer revocation changed or cannot be verified during state admission"
+                    )
+            if (
+                verifier.revocation_revision != stable_revision
+                or verifier.revocation_snapshot_digest != stable_snapshot
+            ):
+                raise Layer0AdmissionRequiredError(
+                    "Issuer revocation revision changed during state admission"
+                )
+
         # Build state using the private capability granted only by the
         # packet entrypoint; direct scalar state calls remain unavailable
         # under production policy.
@@ -696,6 +738,14 @@ class Layer0StateEngine:
         )
         state_pkg.health_report["state_output_role"] = "STATE_ESTIMATE"
         state_pkg.health_report["scientific_publication_authorized"] = False
+        state_pkg.health_report["issuer_revocation_mode"] = (
+            "TRUSTED_LIVE_SNAPSHOT"
+            if verifier is not None and verifier.revocation_enforced
+            else "UNMANAGED"
+        )
+        state_pkg.health_report["zone_authority_configured"] = bool(
+            verifier is not None and verifier.zone_authority_configured
+        )
 
         # Bind the exact admitted proof statements, never unverified received
         # packet claims. Do not include signing *secrets*; grant+MAC is a
@@ -709,6 +759,13 @@ class Layer0StateEngine:
                 "geometry_hash": geometry_hash,
                 "geometry_version": geometry_version,
                 "window": [start_date, end_date],
+                "issuer_revocation_anchor": (
+                    {
+                        "revision": verifier.revocation_revision,
+                        "snapshot_digest": verifier.revocation_snapshot_digest,
+                    }
+                    if verifier.revocation_enforced else None
+                ),
                 "admitted_receipts": [
                     {"packet_digest": digest, **signed_receipts_used[digest]}
                     for digest in sorted(signed_receipts_used)
