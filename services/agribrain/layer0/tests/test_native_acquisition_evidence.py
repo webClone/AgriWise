@@ -30,21 +30,24 @@ REQUEST = {
 
 
 def response(body=b"raw-sentinel-raster-bytes", *, url=ENDPOINT, status=200,
-             authorization="Bearer test-only-nonsecret-token"):
+             authorization="Bearer test-only-nonsecret-token",
+             sent_parameters=None):
     return SimpleNamespace(
         content=body, url=url, status_code=status,
         headers={"x-request-id": "req-123", "Content-Type": "application/tar"},
         request=SimpleNamespace(
-            method="POST", headers={"Authorization": authorization},
+            method="POST", url=url, headers={"Authorization": authorization},
+            body=json.dumps(REQUEST if sent_parameters is None else sent_parameters).encode(),
         ),
     )
 
 
 def capture(store, **kw):
+    request_parameters = kw.pop("request_parameters", REQUEST)
     return store.capture_http_response(
-        response=kw.pop("response", response()),
+        response=kw.pop("response", response(sent_parameters=request_parameters)),
         endpoint=kw.pop("endpoint", ENDPOINT),
-        request_parameters=kw.pop("request_parameters", REQUEST),
+        request_parameters=request_parameters,
         sensor=kw.pop("sensor", "S2"),
         provider_product_id=kw.pop("provider_product_id", "S2-EXACT-ID"),
         credential_reference=kw.pop("credential_reference", "backend_oauth_reference"),
@@ -231,3 +234,24 @@ def test_scene_product_fields_remain_evidence_links_not_state_authority():
     assert output["native_evidence_status"] == "CAPTURED_UNQUALIFIED"
     assert output["real_provider_product"] is False
     assert output["diagnostic_only"] is True
+
+
+def test_caller_cannot_claim_different_request_than_prepared_wire_post(tmp_path):
+    store = NativeEvidenceStore(tmp_path)
+    false_claim = {"input": {"data": [{"type": "sentinel-1-grd"}]}}
+    with pytest.raises(NativeEvidenceError, match="prepared provider request"):
+        capture(store, response=response(sent_parameters=REQUEST),
+                request_parameters=false_claim)
+    assert not list((tmp_path / "manifests").rglob("*")) if (tmp_path / "manifests").exists() else True
+
+
+def test_prepared_http_method_and_url_must_match_original_endpoint(tmp_path):
+    store = NativeEvidenceStore(tmp_path)
+    bad = response()
+    bad.request.method = "GET"
+    with pytest.raises(NativeEvidenceError, match="expected backend POST"):
+        capture(store, response=bad)
+    bad = response()
+    bad.request.url = CATALOG
+    with pytest.raises(NativeEvidenceError, match="expected backend POST"):
+        capture(store, response=bad)
