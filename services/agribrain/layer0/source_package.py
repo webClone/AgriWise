@@ -15,10 +15,67 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import date, datetime
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from .observation_packet import DataStatus, ObservationPacket
+
+
+def _canonical_process_forcing(value: Any) -> Any:
+    """Canonicalize material forcing values for deterministic package identity.
+
+    Dicts, sequences, dataclasses and temporal values cover both weather
+    ProcessForcing and sensor IrrigationProcessForcing. Unknown object types
+    fail closed rather than degrading to potentially unstable repr()/str().
+    This establishes *content identity*, not observation admission,
+    measurement authority, or a signed publication receipt.
+    """
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("nonfinite process-forcing value cannot be hashed")
+        return value
+    if isinstance(value, Enum):
+        return _canonical_process_forcing(value.value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "__dataclass_type__": f"{type(value).__module__}.{type(value).__qualname__}",
+            "fields": {
+                f.name: _canonical_process_forcing(getattr(value, f.name))
+                for f in fields(value)
+            },
+        }
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("process-forcing mapping keys must be strings")
+        return {
+            key: _canonical_process_forcing(item)
+            for key, item in sorted(value.items())
+        }
+    if isinstance(value, (list, tuple)):
+        return [_canonical_process_forcing(item) for item in value]
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        return _canonical_process_forcing(value.to_dict())
+    raise TypeError(f"unsupported process-forcing identity type: {type(value).__name__}")
+
+
+def _process_forcing_identity(records: List[Any]) -> str:
+    # Array order matters for process forcing; the input is a time sequence.
+    if not isinstance(records, (list, tuple)):
+        raise TypeError("process forcing must be an ordered sequence")
+    return json.dumps(
+        {
+            "domain": "akaloris/layer0/process-forcing-content/v1",
+            "records": _canonical_process_forcing(records),
+        },
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+    )
 
 
 # ============================================================================
@@ -121,8 +178,9 @@ class Layer0SourcePackage:
             "|".join(packet_hashes),
             # Kalman content
             "|".join(sorted(kalman_strs)),
-            # Process forcing count + content
-            str(len(self.process_forcing)),
+            # Full typed forcing content; count-only hashing had collisions
+            # (e.g. 1mm versus 9mm). Hash the ordered records fail-closed.
+            _process_forcing_identity(self.process_forcing),
             json.dumps(self.evidence_records, sort_keys=True, default=str),
             # Errors and warnings
             json.dumps(self.errors, sort_keys=True, default=str),
