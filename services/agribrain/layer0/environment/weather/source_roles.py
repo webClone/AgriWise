@@ -8,6 +8,7 @@ a physical station, or issue observation authority. In particular, a
 from __future__ import annotations
 
 from enum import Enum
+from datetime import date
 from typing import Any
 
 
@@ -54,6 +55,14 @@ def record_role_is_consistent(record: Any) -> bool:
     """
     role = role_for_data_kind(getattr(record, "data_kind", None))
     claimed = getattr(record, "source_role", "UNVERIFIED")
+    valid_day = getattr(record, "date", None)
+    if not isinstance(valid_day, str):
+        return False
+    try:
+        if date.fromisoformat(valid_day).isoformat() != valid_day:
+            return False
+    except ValueError:
+        return False
     return (
         role != WeatherSourceRole.UNVERIFIED
         and isinstance(claimed, str)
