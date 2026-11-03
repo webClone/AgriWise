@@ -23,6 +23,9 @@ from services.agribrain.layer0.wrappers import (
     wrap_perception,
 )
 from services.agribrain.layer0.state_engine import Layer0StateEngine
+from services.agribrain.layer0.positive_observation_admission import (
+    PositiveObservationAdmissionVerifier,
+)
 
 
 @dataclass
@@ -42,6 +45,9 @@ class Layer0RunnerInput:
     sensor_package: Optional[Any] = None
     geo_context_packets: List[Any] = field(default_factory=list)
     perception_packets: List[Any] = field(default_factory=list)
+    # Detached receipts are untrusted data until the runtime's protected
+    # verifier validates the HMAC against its own server-side issuer keys.
+    positive_admission_receipts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -85,8 +91,15 @@ class Layer0Runner:
         "perception",
     ]
 
-    def __init__(self):
-        self.state_engine = Layer0StateEngine()
+    def __init__(
+        self,
+        positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
+    ):
+        # This must be provisioned from trusted server-side configuration.
+        # A missing verifier means LEGACY_UNVERIFIED, never signed authority.
+        self.state_engine = Layer0StateEngine(
+            positive_admission_verifier=positive_admission_verifier
+        )
 
     def run(
         self,
@@ -230,6 +243,7 @@ class Layer0Runner:
                 run_timestamp=run_timestamp,
                 geometry_hash=geometry_hash,
                 geometry_version=geometry_version,
+                positive_admission_receipts=run_input.positive_admission_receipts,
             )
 
         # 11. Build aggregated health report, diagnostics and provenance summaries
