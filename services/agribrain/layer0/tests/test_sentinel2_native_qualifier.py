@@ -18,6 +18,9 @@ import pytest
 import tifffile
 
 from services.agribrain.layer0.archive.raster_store import RasterStore
+from services.agribrain.layer0.native_issuer.process_operator_contract import (
+    render_native_process_operator,
+)
 from services.agribrain.layer0.asmae_scene_products.product_binding import (
     verify_exact_product_binding,
 )
@@ -49,10 +52,12 @@ PROCESS_REQUEST = {
         },
         "data": [{
             "type": "sentinel-2-l2a",
-            "dataFilter": {"mosaickingOrder": "leastCC"},
-            "timeRange": {
-                "from": "2026-11-02T11:55:00Z",
-                "to": "2026-11-02T12:05:00Z",
+            "dataFilter": {
+                "mosaickingOrder": "leastCC",
+                "timeRange": {
+                    "from": "2026-11-02T11:55:00Z",
+                    "to": "2026-11-02T12:05:00Z",
+                },
             },
         }],
     },
@@ -63,7 +68,7 @@ PROCESS_REQUEST = {
             for name in ("B04","B08","SCL","dataMask")
         ] + [{"identifier": "userdata", "format": {"type":"application/json"}}],
     },
-    "evalscript": '//VERSION=3\nconst EXPECTED_PRODUCT_ID = ' + json.dumps(ITEM) + ';',
+    "evalscript": render_native_process_operator("S2", ITEM),
 }
 
 
@@ -112,7 +117,10 @@ def _native_scene(
     }
     if remove_band:
         del bands[remove_band]
-    userdata={"userData": {"tiles": [{"sentinel2ProductId":returned_product}]}}
+    userdata={"userData": {
+        "unidentifiedTileCount": 0,
+        "tiles": [{"sentinel2ProductId":returned_product}],
+    }}
     if catalog_features is None:
         catalog_features=[{
             "id":catalog_item,"collection":collection,
