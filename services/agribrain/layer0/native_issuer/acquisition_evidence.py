@@ -72,7 +72,20 @@ def _safe_request(value: Any) -> Any:
         return result
     if isinstance(value, (list, tuple)):
         return [_safe_request(x) for x in value]
-    if value is None or isinstance(value, (str, int, bool)):
+    if isinstance(value, str):
+        # Request payloads must never become an accidental bearer-token
+        # archive. The Authorization header is intentionally not persisted.
+        # This detects common embedded credential forms; dedicated backend
+        # provider request allowlists remain a later production gate.
+        if re.search(
+            r"(?i)(?:\\b(?:bearer|basic)\\s+[^\\s\"']+|"
+            r"\\b(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+            r"api[_-]?key|password)\\s*[:=])",
+            value,
+        ):
+            raise NativeEvidenceError("embedded provider credential in acquisition request")
+        return value
+    if value is None or isinstance(value, (int, bool)):
         return value
     if isinstance(value, float):
         import math
