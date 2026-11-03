@@ -653,9 +653,19 @@ class Layer0StateEngine:
         # If a trusted revocation snapshot flips during this run, reject the
         # entire state build rather than mixing two policy revisions.
         verifier = self._positive_observation_admission_verifier
-        if verifier is not None and verifier.revocation_enforced and signed_receipts_used:
-            stable_revision = verifier.revocation_revision
-            stable_snapshot = verifier.revocation_snapshot_digest
+        stable_revision = (
+            verifier.revocation_revision
+            if verifier is not None and verifier.revocation_enforced and signed_receipts_used
+            else None
+        )
+        stable_snapshot = (
+            verifier.revocation_snapshot_digest
+            if stable_revision is not None else None
+        )
+
+        def ensure_current_revocation_snapshot() -> None:
+            if stable_revision is None:
+                return
             for digest, entry in sorted(signed_receipts_used.items()):
                 valid, _reason = verifier.verify(
                     entry["receipt"], signed_packet_by_digest[digest],
@@ -680,6 +690,9 @@ class Layer0StateEngine:
                     "Issuer revocation revision changed during state admission"
                 )
 
+        # Fence both before and after the potentially long state run.
+        ensure_current_revocation_snapshot()
+
         # Build state using the private capability granted only by the
         # packet entrypoint; direct scalar state calls remain unavailable
         # under production policy.
@@ -700,6 +713,11 @@ class Layer0StateEngine:
                 if signed_inputs_required() else {}
             ),
         )
+
+        # A source could be revoked during a long Kalman trajectory; do not
+        # release a new state root after that revocation. Publishing still
+        # requires the separate pilot gate's transactional source check.
+        ensure_current_revocation_snapshot()
 
         # Attach the source packets to the state package
         state_pkg.all_packets = list(packets)
