@@ -284,6 +284,11 @@ def _verify_orbit(
         return None
     if scene_relative != relative or scene_direction != direction:
         raise NativeEvidenceError("sar_scene_orbit_conflicts_with_captured_provider")
+    if (
+        scene.provider_absolute_orbit is not None and absolute is not None
+        and _orbit_number(scene.provider_absolute_orbit, relative=False) != absolute
+    ):
+        raise NativeEvidenceError("sar_scene_absolute_orbit_conflict")
     return relative, direction, absolute
 
 
