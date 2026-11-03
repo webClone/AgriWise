@@ -10,6 +10,7 @@ from .scene_product_schema import SceneProduct
 from .scene_product_store import SceneProductStore
 from services.agribrain.layer0.native_issuer.acquisition_evidence import (
     capture_backend_provider_response, NativeEvidenceError,
+    restore_cached_native_references,
 )
 from .product_binding import (
     exact_binding_proof_valid,
@@ -495,6 +496,11 @@ def fetch_asmae_s2_scene_stack(
                 )
             )
             
+            # Restore only against independently retained raw HTTP captures.
+            # Old local scene metadata remains explicitly UNATTESTED.
+            native_catalog_id, native_process_id, native_cache_origin = (
+                restore_cached_native_references(meta, sensor="S2")
+            )
             seen_ids.add(prov_prod_id)
             sp = SceneProduct(
                 scene_id=scene_id,
@@ -523,11 +529,18 @@ def fetch_asmae_s2_scene_stack(
                 content_hash=content_hash,
                 process_request_hash=meta.get("process_request_hash"),
                 provider_response_hash=meta.get("provider_response_hash"),
+                native_catalog_acquisition_id=native_catalog_id,
+                native_process_acquisition_id=native_process_id,
+                native_evidence_status=native_cache_origin,
                 product_binding=meta.get("product_binding", "legacy_unproven"),
                 binding_proof=dict(meta.get("binding_proof") or {}),
             )
             local_scenes.append(sp)
             cached_by_provider_id[prov_prod_id] = sp
+        except NativeEvidenceError:
+            failed_closed = True
+            fail_reason = "invalid_native_cache_evidence"
+            break
         except Exception:
             logger.exception("Failed to validate cached S2 scene metadata: %s", mf)
             failed_closed = True

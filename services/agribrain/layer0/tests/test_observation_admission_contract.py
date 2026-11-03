@@ -65,8 +65,10 @@ def test_packet_dispatch_uses_registered_types_and_own_sigmas(monkeypatch):
     )
     result = engine.run_from_packets("plot", [p], "2026-11-01", "2026-11-01")
     obs = received["observations_by_day"]["2026-11-01"]["plot"]
+    # Canonical packet-field ordering is the execution order bound by the
+    # v2 scientific input manifest, not incoming payload insertion order.
     assert [(o.obs_type, o.sigma) for o in obs] == [
-        ("vv", 1.5), ("vh", 2.0), ("sar_moisture_proxy", 0.12)
+        ("sar_moisture_proxy", 0.12), ("vh", 2.0), ("vv", 1.5)
     ]
     assert result.health_report["state_packets_excluded_by_status"]["skipped_observation_no_sigma"] == 0
 
