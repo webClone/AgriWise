@@ -8,18 +8,21 @@ V1: accepts pre-fetched/mocked JSON. No live API calls.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 
 from services.agribrain.layer0.environment.weather.schemas import WeatherDailyRecord
+from services.agribrain.layer0.environment.weather.source_roles import role_for_data_kind
 
 
 def normalize_openweather_daily(
     raw_response: Dict[str, Any],
-    data_kind: str = "current",
+    data_kind: Optional[str] = None,
     retrieval_time: Optional[str] = None,
 ) -> List[WeatherDailyRecord]:
     """Convert OpenWeather response to list of WeatherDailyRecord.
 
-    Handles both current weather and daily forecast formats.
+    Distinguishes forecast-style One Call daily records from current API
+    payloads. Labels never establish an independently measured station.
 
     Expected format (daily):
     {
@@ -39,16 +42,38 @@ def normalize_openweather_daily(
         ]
     }
     """
-    daily_list = raw_response.get("daily", [])
+    if not isinstance(raw_response, dict):
+        raise ValueError("invalid_openweather_payload")
+    has_daily = "daily" in raw_response
+    has_current = "main" in raw_response
+    if has_daily == has_current:
+        raise ValueError("ambiguous_or_unknown_openweather_product")
 
-    # Handle single current weather as a list of one
-    if not daily_list and "main" in raw_response:
-        daily_list = [_current_to_daily(raw_response)]
+    inferred_kind = "forecast" if has_daily else "current"
+    if data_kind is not None and data_kind != inferred_kind:
+        raise ValueError("openweather_source_time_role_conflicts_with_payload")
+    data_kind = inferred_kind
+    daily_list = (
+        raw_response["daily"] if has_daily
+        else [_current_to_daily(raw_response)]
+    )
+    if not isinstance(daily_list, list) or any(
+        not isinstance(day, dict) for day in daily_list
+    ):
+        raise ValueError("invalid_openweather_daily_records")
 
     records: List[WeatherDailyRecord] = []
 
     for day_data in daily_list:
         date = day_data.get("date", "")
+        if not date:
+            epoch = day_data.get("dt")
+            if type(epoch) not in (int, float):
+                raise ValueError("missing_openweather_valid_time")
+            try:
+                date = datetime.fromtimestamp(epoch, tz=timezone.utc).date().isoformat()
+            except (ValueError, OverflowError, OSError):
+                raise ValueError("invalid_openweather_valid_time") from None
         temp = day_data.get("temp", {})
 
         # Temperature: OpenWeather sometimes uses Kelvin
@@ -68,6 +93,8 @@ def normalize_openweather_daily(
             date=date,
             provider="openweather",
             data_kind=data_kind,
+            source_role=role_for_data_kind(data_kind).value,
+            source_qualified=False,
             retrieval_time=retrieval_time,
             temp_min=round(temp_min, 2) if temp_min is not None else None,
             temp_max=round(temp_max, 2) if temp_max is not None else None,
@@ -93,6 +120,7 @@ def _current_to_daily(current: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "date": current.get("date", ""),
+        "dt": current.get("dt"),
         "temp": {
             "min": main.get("temp_min"),
             "max": main.get("temp_max"),
