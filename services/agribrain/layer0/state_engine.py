@@ -271,8 +271,10 @@ class Layer0StateEngine:
         """
         from services.agribrain.layer0.observation_packet import ObservationSource, ObservationType
 
-        geometry_hash = geometry_hash or next((p.geometry_hash for p in packets if getattr(p, "geometry_hash", None)), "")
-        geometry_version = geometry_version or next((p.geometry_version for p in packets if getattr(p, "geometry_version", None) is not None), None)
+        # Geometry scope must come from the *caller* rather than borrowing
+        # identity from an arbitrary packet. Missing caller scope remains
+        # explicitly unbound; positive scope/receipt enforcement is a
+        # separate L0-002/L0-004 producer-compatibility gate.
 
         daily_weather: Dict[str, Dict[str, Any]] = {}
         observations_by_day: Dict[str, Dict[str, List[Any]]] = {}
@@ -290,9 +292,27 @@ class Layer0StateEngine:
             "skipped_observation_no_sigma": 0,
             "skipped_observation_nonfinite": 0,
             "skipped_observation_low_effective_quality": 0,
+            "skipped_foreign_plot": 0,
+            "skipped_foreign_geometry": 0,
+            "skipped_foreign_geometry_version": 0,
         }
         filtered_packets = []
         for pkt in packets:
+            # Explicitly contradictory identities must never enter weather,
+            # event evidence or observation state. For legacy unbound
+            # identities, do NOT silently claim a positive geometry grant.
+            packet_plot = getattr(pkt, "plot_id", "") or ""
+            packet_geometry = getattr(pkt, "geometry_hash", "") or ""
+            packet_version = getattr(pkt, "geometry_version", None)
+            if packet_plot and packet_plot != plot_id:
+                excluded_counts["skipped_foreign_plot"] += 1
+                continue
+            if geometry_hash and packet_geometry != geometry_hash:
+                excluded_counts["skipped_foreign_geometry"] += 1
+                continue
+            if geometry_version is not None and packet_version != geometry_version:
+                excluded_counts["skipped_foreign_geometry_version"] += 1
+                continue
             status = getattr(pkt, "data_status", None)
             if status in (DataStatus.UNAVAILABLE, DataStatus.SIMULATED, DataStatus.FALLBACK):
                 if status == DataStatus.UNAVAILABLE:
