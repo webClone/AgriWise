@@ -26,6 +26,46 @@ def _request_hash(payload: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _build_native_s1_process_request(
+    *, bbox: list, width: int, height: int,
+    start_utc: str, end_utc: str, evalscript: str,
+) -> dict:
+    """Use documented S1 GRD Process API fields with explicit calibration.
+
+    The prior request placed timeRange outside dataFilter and omitted the
+    backscatter coefficient. Explicit GAMMA0_ELLIPSOID is the documented
+    provider default; it avoids ambiguous historical calibration lineage.
+    This remains acquisition-only, not SAR QA or state authority.
+    """
+    return {
+        "input": {
+            "bounds": {
+                "bbox": bbox,
+                "properties": {
+                    "crs": "http://www.opengis.net/def/crs/EPSG/0/4326"
+                },
+            },
+            "data": [{
+                "type": "sentinel-1-grd",
+                "dataFilter": {
+                    "mosaickingOrder": "mostRecent",
+                    "timeRange": {"from": start_utc, "to": end_utc},
+                },
+                "processing": {"backCoeff": "GAMMA0_ELLIPSOID"},
+            }],
+        },
+        "output": {
+            "width": width,
+            "height": height,
+            "responses": [
+                {"identifier": band, "format": {"type": "image/tiff"}}
+                for band in ("VV", "VH", "dataMask")
+            ] + [{"identifier": "userdata", "format": {"type": "application/json"}}],
+        },
+        "evalscript": evalscript,
+    }
+
+
 def _retry_class(reason: str) -> str:
     if reason in {"credentials_missing", "authentication_failed"}:
         return "credentials"
@@ -677,31 +717,11 @@ def fetch_asmae_s1_scene_stack(
             continue
             
         # Call Process API
-        bounds_payload = {
-            "bbox": bbox,
-            "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
-        }
-        process_payload = {
-            "input": {
-                "bounds": bounds_payload,
-                "data": [{
-                    "type": "sentinel-1-grd",
-                    "dataFilter": {"mosaickingOrder": "mostRecent"},
-                    "timeRange": {"from": request_start, "to": request_end}
-                }]
-            },
-            "output": {
-                "width": W,
-                "height": H,
-                "responses": [
-                    {"identifier": b, "format": {"type": "image/tiff"}}
-                    for b in ["VV", "VH", "dataMask"]
-                ] + [
-                    {"identifier": "userdata", "format": {"type": "application/json"}}
-                ]
-            },
-            "evalscript": evalscript,
-        }
+        process_payload = _build_native_s1_process_request(
+            bbox=bbox, width=W, height=H,
+            start_utc=request_start, end_utc=request_end,
+            evalscript=evalscript,
+        )
         process_request_hash = _request_hash(process_payload)
         
         try:
