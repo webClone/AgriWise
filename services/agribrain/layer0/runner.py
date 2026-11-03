@@ -24,7 +24,7 @@ from services.agribrain.layer0.wrappers import (
 )
 from services.agribrain.layer0.state_engine import Layer0StateEngine
 from services.agribrain.layer0.positive_observation_admission import (
-    PositiveObservationAdmissionVerifier,
+    PositiveObservationAdmissionVerifier, observation_packet_digest,
 )
 
 
@@ -268,6 +268,19 @@ class Layer0Runner:
             st = pkt.data_status.value if hasattr(pkt.data_status, "value") else str(pkt.data_status)
             rejected_by_reason[st] = rejected_by_reason.get(st, 0) + 1
 
+        mode = (
+            (state_package.health_report or {}).get(
+                "positive_source_admission_mode", "LEGACY_UNVERIFIED"
+            )
+            if state_package else "NO_STATE_ESTIMATE"
+        )
+        signed_admitted = set(
+            (state_package.health_report or {}).get(
+                "positive_admitted_observation_digests", []
+            )
+            if state_package else []
+        )
+
         sources_report = {}
         for sf, pkgs in source_packages.items():
             transport_received = any(bool(package.packets) for package in pkgs)
@@ -275,7 +288,25 @@ class Layer0Runner:
                 bool((package.health or {}).get("quality_admitted", (package.health or {}).get("usable", False)))
                 for package in pkgs
             )
-            state_eligible = any(id(packet) in eligible_ids for package in pkgs for packet in package.packets)
+            state_eligible = any(
+                id(packet) in eligible_ids
+                for package in pkgs for packet in package.packets
+            )
+            authority_verified = False
+            if mode == "SIGNED_SCOPE_BOUND":
+                # Only count proof-bound, actually admitted observations.
+                state_eligible = False
+                for package in pkgs:
+                    for packet in package.packets:
+                        try:
+                            if observation_packet_digest(packet) in signed_admitted:
+                                state_eligible = True
+                                authority_verified = True
+                                break
+                        except (ValueError, TypeError, AttributeError, OverflowError):
+                            continue
+                    if state_eligible:
+                        break
             scientifically_healthy = quality_admitted and state_eligible
             sources_report[sf] = {
                 "status": (
@@ -286,6 +317,7 @@ class Layer0Runner:
                 "transport_received": transport_received,
                 "quality_admitted": quality_admitted,
                 "state_eligible": state_eligible,
+                "positive_source_authority_verified": authority_verified,
                 "scientifically_healthy": scientifically_healthy,
                 "packet_count": sum(len(p.packets) for p in pkgs),
             }
@@ -301,6 +333,7 @@ class Layer0Runner:
             },
             "state_package_generated": state_package is not None,
             "kalman_available": state_package is not None and state_package.health_report.get("kalman_available", False),
+            "positive_source_admission_mode": mode,
         }
 
         diagnostics = {
