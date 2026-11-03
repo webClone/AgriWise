@@ -346,6 +346,12 @@ def test_explicit_live_revocation_policy_fails_without_config(monkeypatch):
     )
     monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
     monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_LIVE_REVOCATION", "true")
+    monkeypatch.setenv("AKALORIS_LAYER0_ISSUER_KEYS_JSON", json.dumps({
+        "s2-key": {
+            "source": "sentinel2",
+            "secret_b64": base64.b64encode(SECRET).decode("ascii"),
+        },
+    }))
     monkeypatch.delenv("AKALORIS_LAYER0_REVOCATION_SNAPSHOT_PATH", raising=False)
     with pytest.raises(Layer0AdmissionRequiredError, match="revocation"):
         require_trusted_verifier(verifier())
