@@ -322,7 +322,11 @@ class EnvironmentalEngine:
         for date in sorted(by_date.keys()):
             providers = by_date[date]
             daily = build_daily_consensus(providers, date)
-            consensus_list.append(daily)
+            # The consensus helper may return an explicit zero-authority
+            # rejection with no variables. Never construct zero-rain or
+            # fallback-ET0 process forcing from that rejected role.
+            if daily.variable_consensus:
+                consensus_list.append(daily)
 
         return consensus_list
 
