@@ -256,3 +256,35 @@ def test_prepared_http_method_and_url_must_match_original_endpoint(tmp_path):
     bad.request.url = CATALOG
     with pytest.raises(NativeEvidenceError, match="expected backend POST"):
         capture(store, response=bad)
+
+
+def test_legacy_scene_serialization_has_no_synthetic_evidence_fields():
+    scene = SceneProduct(
+        scene_id="s1", sensor="S1", acquisition_datetime=TIME,
+        crs="EPSG:4326", transform=(0, 1, 0, 0, 0, -1),
+        width=2, height=2,
+    )
+    payload = scene.to_dict()
+    assert "native_catalog_acquisition_id" not in payload
+    assert "native_process_acquisition_id" not in payload
+    assert "native_evidence_status" not in payload
+
+
+def test_backend_io_failure_is_hard_capture_error_not_cache_promotion(monkeypatch, tmp_path):
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", str(tmp_path))
+    def disk_unavailable(*args, **kwargs):
+        raise OSError("fixture simulated read-only volume")
+    monkeypatch.setattr(NativeEvidenceStore, "capture_http_response", disk_unavailable)
+    with pytest.raises(NativeEvidenceError, match="storage unavailable"):
+        capture_backend_provider_response(
+            response=response(), endpoint=ENDPOINT, request_parameters=REQUEST,
+            sensor="S2",
+        )
+
+
+def test_prepared_request_duplicate_json_keys_are_rejected(tmp_path):
+    bad = response()
+    bad.request.body = b'{"a":1,"a":2}'
+    with pytest.raises(NativeEvidenceError, match="prepared provider request"):
+        capture(NativeEvidenceStore(tmp_path), response=bad,
+                request_parameters={"a": 2})
