@@ -189,3 +189,36 @@ def test_invalid_missing_prepared_body_does_not_write_replay(tmp_path):
     with pytest.raises(NativeEvidenceError,match="prepared provider request"):
         _capture(store,response=bad)
     assert not (tmp_path/"request_replays").exists()
+
+
+@pytest.mark.parametrize("secret", [
+    "Bearer abcdef123456789", "Basic YWRtaW46cGFzcw==",
+    "access_token=super_sensitive", "client_secret:super_sensitive",
+    "api_key=super_sensitive",
+])
+def test_embedded_credential_values_never_persist(tmp_path,secret):
+    store=NativeEvidenceStore(tmp_path)
+    payload={**REQUEST,"evalscript": "//VERSION=3\\n// "+secret}
+    with pytest.raises(NativeEvidenceError,match="credential"):
+        _capture(store,request=payload)
+    assert not (tmp_path/"request_wire").exists()
+    assert not (tmp_path/"manifests").exists()
+
+
+def test_replay_rejects_noncanonical_or_nonfinite_transmitted_json(tmp_path):
+    store=NativeEvidenceStore(tmp_path)
+    wire=b'{"input":{"data":[]}, "bad": NaN}'
+    with pytest.raises(NativeEvidenceError):
+        _capture(store,response=_response(raw_request=wire))
+
+
+def test_request_replay_cannot_read_a_second_acquisition_sidecar(tmp_path):
+    store=NativeEvidenceStore(tmp_path)
+    first=_capture(store)
+    different={**REQUEST, "output":{"width":3,"height":2}}
+    second=_capture(store,request=different)
+    first_path,_=_sidecar(store,first)
+    second_path,_=_sidecar(store,second)
+    first_path.write_bytes(second_path.read_bytes())
+    with pytest.raises(NativeEvidenceError,match="invalid_captured_request_evidence"):
+        store.verified_request_body(first.acquisition_id)
