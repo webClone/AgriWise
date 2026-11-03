@@ -139,10 +139,11 @@ class Layer0StateEngine:
                 engine.filters[zid].parent_plot_id = plot_id
                 engine.filters[zid].expected_geometry_hash = geometry_hash
                 engine.filters[zid].evidence_cutoff = now
-                # Duplicate plot-level obs for extra zones (until per-zone α-weighting)
-                for d, zone_obs in observations_by_day.items():
-                    if primary_zone in zone_obs and zid not in zone_obs:
-                        zone_obs[zid] = zone_obs[primary_zone]
+                # A plot-level statistical observation is NOT an independent
+                # zone-local measurement. Unobserved zones retain a prior
+                # prediction; only explicitly assigned zone evidence can
+                # update their own posterior. Spatial correlation/downscaling
+                # belongs to a support-aware fusion operator, not list cloning.
 
         # Run assimilation
         engine.run_period(
