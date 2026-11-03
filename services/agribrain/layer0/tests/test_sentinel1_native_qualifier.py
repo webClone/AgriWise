@@ -17,6 +17,9 @@ import pytest
 import tifffile
 
 from services.agribrain.layer0.archive.raster_store import RasterStore
+from services.agribrain.layer0.native_issuer.process_operator_contract import (
+    render_native_process_operator,
+)
 from services.agribrain.layer0.asmae_scene_products.product_binding import (
     verify_exact_product_binding,
 )
@@ -69,7 +72,7 @@ PROCESS_REQUEST={
             for v in ("VV","VH","dataMask")
         ] + [{"identifier":"userdata","format":{"type":"application/json"}}],
     },
-    "evalscript":'//VERSION=3\nconst EXPECTED_PRODUCT_ID = '+json.dumps(ITEM)+';',
+    "evalscript":render_native_process_operator("S1",ITEM),
 }
 PROPS={
     "datetime":"2026-11-02T12:00:00Z",
@@ -132,7 +135,11 @@ def _case(
     )
     catalog_response=json.dumps({"features":features}).encode()
     records=deepcopy([TILE] if process_tiles is None else process_tiles)
-    userdata={"userData":{"expectedProductId":ITEM,"tiles":records}}
+    userdata={"userData":{
+        "expectedProductId":ITEM,
+        "unidentifiedTileCount":0,
+        "tiles":records,
+    }}
     bands={
         "VV":np.full((4,4),vv,dtype=np.float32),
         "VH":np.full((4,4),vh,dtype=np.float32),
