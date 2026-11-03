@@ -52,10 +52,12 @@ PROCESS_REQUEST={
         },
         "data":[{
             "type":"sentinel-1-grd",
-            "dataFilter":{"mosaickingOrder":"mostRecent"},
-            "timeRange":{
-                "from":"2026-11-02T11:55:00Z",
-                "to":"2026-11-02T12:05:00Z",
+            "dataFilter":{
+                "mosaickingOrder":"mostRecent",
+                "timeRange":{
+                    "from":"2026-11-02T11:55:00Z",
+                    "to":"2026-11-02T12:05:00Z",
+                },
             },
             "processing":{"backCoeff":"SIGMA0_ELLIPSOID"},
         }],
@@ -339,7 +341,7 @@ def test_wrong_process_request_grid_rejects_from_retained_http_post(tmp_path):
 
 def test_wrong_process_request_acquisition_window_rejects(tmp_path):
     request=deepcopy(PROCESS_REQUEST)
-    request["input"]["data"][0]["timeRange"]={
+    request["input"]["data"][0]["dataFilter"]["timeRange"]={
         "from":"2026-11-01T00:00:00Z",
         "to":"2026-11-01T01:00:00Z",
     }
@@ -405,3 +407,32 @@ def test_sar_proof_never_claims_independent_multitemporal_evidence(tmp_path):
     assert result.status==S1ScreenStatus.SCREENED_NATIVE_SAR_STRUCTURE
     assert result.diagnostic_metrics["independent_multitemporal_eligibility"] is False
     assert result.eligible_for_state_grant is False
+
+
+def test_legacy_sar_time_window_outside_data_filter_cannot_gain_source_qa(tmp_path):
+    request=deepcopy(PROCESS_REQUEST)
+    window=request["input"]["data"][0]["dataFilter"].pop("timeRange")
+    request["input"]["data"][0]["timeRange"]=window
+    scene,store,*_=_case(tmp_path,process_request=request)
+    result=_screen(scene,store)
+    assert result.status == S1ScreenStatus.REJECTED
+    assert result.reason == "captured_sar_request_grid_time_or_product_mismatch"
+
+
+def test_terrain_gamma_without_orthorectification_rejects(tmp_path):
+    request=deepcopy(PROCESS_REQUEST)
+    request["input"]["data"][0]["processing"]["backCoeff"]="GAMMA0_TERRAIN"
+    request["input"]["data"][0]["processing"]["orthorectify"]=False
+    scene,store,*_=_case(tmp_path,process_request=request)
+    assert _screen(scene,store).reason == "sar_terrain_gamma_requires_orthorectification"
+
+
+def test_terrain_gamma_with_orthorectification_remains_non_authorizing(tmp_path):
+    request=deepcopy(PROCESS_REQUEST)
+    request["input"]["data"][0]["processing"]["backCoeff"]="GAMMA0_TERRAIN"
+    request["input"]["data"][0]["processing"]["orthorectify"]=True
+    scene,store,*_=_case(tmp_path,process_request=request)
+    outcome=_screen(scene,store)
+    assert outcome.status == S1ScreenStatus.SCREENED_NATIVE_SAR_STRUCTURE
+    assert outcome.eligible_for_state_grant is False
+    assert outcome.diagnostic_metrics["incidence_angle_proven"] is False
