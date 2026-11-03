@@ -280,6 +280,12 @@ class Layer0Runner:
             )
             if state_package else []
         )
+        signed_admitted.update(
+            (state_package.health_report or {}).get(
+                "positive_admitted_weather_digests", []
+            )
+            if state_package else []
+        )
 
         sources_report = {}
         for sf, pkgs in source_packages.items():
@@ -293,7 +299,7 @@ class Layer0Runner:
                 for package in pkgs for packet in package.packets
             )
             authority_verified = False
-            if mode == "SIGNED_SCOPE_BOUND":
+            if mode == "SIGNED_STATE_INPUTS":
                 # Only count proof-bound, actually admitted observations.
                 state_eligible = False
                 for package in pkgs:
