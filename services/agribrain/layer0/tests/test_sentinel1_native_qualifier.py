@@ -550,6 +550,8 @@ def test_s1_operator_product_provenance_count_must_be_explicit(tmp_path):
         verify_exact_product_binding,
     )
     metadata={"userData": {"tiles": [deepcopy(TILE)]}}
-    assert verify_exact_product_binding(ITEM,metadata,"S1")["is_exact"] is True
-    # Such a result is NOT a native-screen authority grant: the complete
-    # operator demands an explicit counter that was absent in old captures.
+    result=verify_exact_product_binding(ITEM,metadata,"S1")
+    assert result["is_exact"] is False
+    assert result["proof"]["reported_unidentified_tile_count"] is None
+    # A historical operator without pre-filter unknown-tile telemetry
+    # cannot claim v2 exact product proof, even with one named tile.
