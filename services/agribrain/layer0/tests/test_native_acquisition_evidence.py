@@ -44,8 +44,14 @@ def response(body=b"raw-sentinel-raster-bytes", *, url=ENDPOINT, status=200,
 
 def capture(store, **kw):
     request_parameters = kw.pop("request_parameters", REQUEST)
+    # Do not eagerly construct a default response: invalid request fixtures
+    # must reach NativeEvidenceStore._safe_request() for fail-closed validation.
+    captured_response = (
+        kw.pop("response") if "response" in kw
+        else response(sent_parameters=request_parameters)
+    )
     return store.capture_http_response(
-        response=kw.pop("response", response(sent_parameters=request_parameters)),
+        response=captured_response,
         endpoint=kw.pop("endpoint", ENDPOINT),
         request_parameters=request_parameters,
         sensor=kw.pop("sensor", "S2"),
