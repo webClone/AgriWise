@@ -8,6 +8,9 @@ import numpy as np
 import requests
 from .scene_product_schema import SceneProduct
 from .scene_product_store import SceneProductStore
+from services.agribrain.layer0.native_issuer.process_operator_contract import (
+    render_native_process_operator,
+)
 from services.agribrain.layer0.native_issuer.acquisition_evidence import (
     capture_backend_provider_response, NativeEvidenceError,
     restore_cached_native_references,
@@ -22,6 +25,44 @@ from .geometry_utils import extract_polygon_ring, _build_affine_transform
 logger = logging.getLogger(__name__)
 
 _SCL_INVALID_CLASSES = {0, 1, 2, 3, 6, 7, 8, 9, 10, 11}
+
+
+def _build_native_s2_process_request(
+    *, bbox: list, width: int, height: int,
+    start_utc: str, end_utc: str, evalscript: str,
+) -> dict:
+    """Documented S2L2A Process request: timeRange belongs to dataFilter."""
+    return {
+        "input": {
+            "bounds": {
+                "bbox": bbox,
+                "properties": {
+                    "crs": "http://www.opengis.net/def/crs/EPSG/0/4326"
+                },
+            },
+            "data": [{
+                "type": "sentinel-2-l2a",
+                "dataFilter": {
+                    "mosaickingOrder": "leastCC",
+                    "timeRange": {"from": start_utc, "to": end_utc},
+                },
+            }],
+        },
+        "output": {
+            "width": width,
+            "height": height,
+            "responses": [
+                {"identifier": band, "format": {"type": "image/tiff"}}
+                for band in (
+                    "B02", "B03", "B04", "B05", "B06", "B07",
+                    "B08", "B8A", "B11", "B12", "SCL", "dataMask",
+                )
+            ] + [
+                {"identifier": "userdata", "format": {"type": "application/json"}}
+            ],
+        },
+        "evalscript": evalscript,
+    }
 
 
 def _retry_class(reason: str) -> str:
@@ -678,82 +719,7 @@ def fetch_asmae_s2_scene_stack(
     valid_features.sort(key=lambda x: x[1])
     selected_features = valid_features[:4]
     
-    evalscript_template = """
-    //VERSION=3
-    const EXPECTED_PRODUCT_ID = __EXPECTED_PRODUCT_ID__;
-    function normalizeProductId(value) {
-        return String(value || "").toUpperCase().replace(".SAFE", "").replace(".ZIP", "");
-    }
-    function tileProductId(tile) {
-        return tile.sentinel2ProductId || tile.productId || tile.id || "";
-    }
-    function setup() {
-        return {
-            input: [{bands: ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12", "SCL", "dataMask"]}],
-            output: [
-                {id: "B02", bands: 1, sampleType: "FLOAT32"},
-                {id: "B03", bands: 1, sampleType: "FLOAT32"},
-                {id: "B04", bands: 1, sampleType: "FLOAT32"},
-                {id: "B05", bands: 1, sampleType: "FLOAT32"},
-                {id: "B06", bands: 1, sampleType: "FLOAT32"},
-                {id: "B07", bands: 1, sampleType: "FLOAT32"},
-                {id: "B08", bands: 1, sampleType: "FLOAT32"},
-                {id: "B8A", bands: 1, sampleType: "FLOAT32"},
-                {id: "B11", bands: 1, sampleType: "FLOAT32"},
-                {id: "B12", bands: 1, sampleType: "FLOAT32"},
-                {id: "SCL", bands: 1, sampleType: "UINT8"},
-                {id: "dataMask", bands: 1, sampleType: "UINT8"}
-            ],
-            mosaicking: "TILE"
-        };
-    }
-    function preProcessScenes(collections) {
-        const tiles = (collections.scenes && collections.scenes.tiles) || [];
-        collections.scenes.tiles = tiles.filter(function(tile) {
-            return normalizeProductId(tileProductId(tile)) === normalizeProductId(EXPECTED_PRODUCT_ID);
-        });
-        return collections;
-    }
-    function updateOutputMetadata(scenes, inputMetadata, outputMetadata) {
-        const tiles = (scenes && scenes.tiles) || [];
-        outputMetadata.userData = {
-            expectedProductId: EXPECTED_PRODUCT_ID,
-            tiles: tiles.map(function(tile) {
-                return {
-                    sentinel2ProductId: tile.sentinel2ProductId,
-                    productId: tile.productId,
-                    id: tile.id,
-                    tileId: tile.tileId,
-                    shId: tile.shId,
-                    dataPath: tile.dataPath,
-                    date: tile.date,
-                    orbitId: tile.orbitId,
-                    orbitDirection: tile.orbitDirection
-                };
-            })
-        };
-    }
-    function value(sample, name, fallback) {
-        return sample && sample[name] !== undefined ? sample[name] : fallback;
-    }
-    function evaluatePixel(samples) {
-        const sample = samples && samples.length ? samples[0] : null;
-        return {
-            B02: [value(sample, "B02", NaN)],
-            B03: [value(sample, "B03", NaN)],
-            B04: [value(sample, "B04", NaN)],
-            B05: [value(sample, "B05", NaN)],
-            B06: [value(sample, "B06", NaN)],
-            B07: [value(sample, "B07", NaN)],
-            B08: [value(sample, "B08", NaN)],
-            B8A: [value(sample, "B8A", NaN)],
-            B11: [value(sample, "B11", NaN)],
-            B12: [value(sample, "B12", NaN)],
-            SCL: [value(sample, "SCL", 0)],
-            dataMask: [value(sample, "dataMask", 0)]
-        };
-    }
-    """
+    # Approved source operator is shared with the independent source screen.
     
     fetched_scenes = []
     for idx, (f, cloud_cover) in enumerate(selected_features, 1):
@@ -763,9 +729,7 @@ def fetch_asmae_s2_scene_stack(
         scene_date_str = acq_dt.strftime("%Y-%m-%d")
         provider_product_id = f.get("id", f"S2_{scene_date_str}")
         scene_id = f"s2_real_scene_{idx}_{plot_id}"
-        evalscript = evalscript_template.replace(
-            "__EXPECTED_PRODUCT_ID__", json.dumps(provider_product_id),
-        )
+        evalscript = render_native_process_operator("S2", provider_product_id)
         request_start = (acq_dt - timedelta(minutes=5)).astimezone(
             timezone.utc,
         ).isoformat().replace("+00:00", "Z")
@@ -780,31 +744,11 @@ def fetch_asmae_s2_scene_stack(
             continue
             
         # Call Process API
-        bounds_payload = {
-            "bbox": bbox,
-            "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
-        }
-        process_payload = {
-            "input": {
-                "bounds": bounds_payload,
-                "data": [{
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {"mosaickingOrder": "leastCC"},
-                    "timeRange": {"from": request_start, "to": request_end}
-                }]
-            },
-            "output": {
-                "width": W,
-                "height": H,
-                "responses": [
-                    {"identifier": b, "format": {"type": "image/tiff"}}
-                    for b in ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12", "SCL", "dataMask"]
-                ] + [
-                    {"identifier": "userdata", "format": {"type": "application/json"}}
-                ]
-            },
-            "evalscript": evalscript,
-        }
+        process_payload = _build_native_s2_process_request(
+            bbox=bbox, width=W, height=H,
+            start_utc=request_start, end_utc=request_end,
+            evalscript=evalscript,
+        )
         process_request_hash = _request_hash(process_payload)
         
         try:
