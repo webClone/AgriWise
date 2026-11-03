@@ -308,6 +308,21 @@ class Layer0StateEngine:
         """
         from services.agribrain.layer0.observation_packet import ObservationSource, ObservationType
 
+        # Reevaluate the server policy at the sensitive entrypoint, not only
+        # in __init__: long-lived workers can receive a hardened deployment
+        # configuration after an estimator instance was constructed.
+        require_trusted_verifier(self._positive_observation_admission_verifier)
+        if (
+            signed_inputs_required()
+            and not isinstance(
+                self._positive_observation_admission_verifier,
+                PositiveObservationAdmissionVerifier
+            )
+        ):
+            raise Layer0AdmissionRequiredError(
+                "Mandatory packet admission requires a trusted verifier"
+            )
+
         # Mandatory live admission has its own trusted UTC run timestamp.
         # Caller-controlled historical timestamps cannot backdate receipt
         # validity or state publication history. Explicit trusted replay
