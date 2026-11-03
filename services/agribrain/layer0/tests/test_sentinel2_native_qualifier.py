@@ -345,3 +345,20 @@ def test_accepted_screen_does_not_claim_calibrated_sigma_or_mesia(tmp_path):
     assert result.diagnostic_metrics["sigma_calibrated"] is False
     assert result.diagnostic_metrics["support_method"] == "EPSG4326_PIXEL_CENTER_SAMPLE_ONLY"
     assert result.eligible_for_state_grant is False
+
+
+def test_complex_plot_boundary_defers_to_mesia_instead_of_implicit_truncation(tmp_path):
+    import math
+    scene,store,*_=_native_scene(tmp_path)
+    ring=tuple(
+        (.5+.3*math.cos(i*2*math.pi/270),
+         .5+.3*math.sin(i*2*math.pi/270))
+        for i in range(270)
+    )
+    scope=TrustedPlotContext(
+        plot_id="plot-from-backend-registry", geometry_hash="fine-boundary-hash",
+        geometry_version=9, polygon_wgs84=ring,
+    )
+    result=_screen(scene,store,trusted_plot=scope)
+    assert result.status is S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY
+    assert result.reason=="robust_mesia_geometry_support_required"
