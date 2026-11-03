@@ -38,3 +38,58 @@ def require_trusted_verifier(verifier: object) -> None:
             "Layer 0 signed state-input policy is mandatory but no trusted "
             "source-admission verifier is provisioned"
         )
+
+
+def load_server_issuer_verifier():
+    """Read a backend-only issuer registry provisioned via deployment secrets.
+
+    Deployment injects AKALORIS_LAYER0_ISSUER_KEYS_JSON from its secrets
+    manager; it is NEVER accepted from an HTTP request, plot data, or packet.
+    Format: {"key-id":{"source":"sentinel2","secret_b64":"..."}}.
+    Missing/malformed configuration fails closed in mandatory mode. A secret
+    manager deployment remains an external operational requirement.
+    """
+    import base64
+    import binascii
+    import json
+    from services.agribrain.layer0.positive_observation_admission import (
+        PositiveObservationAdmissionVerifier,
+    )
+
+    raw = os.getenv("AKALORIS_LAYER0_ISSUER_KEYS_JSON", "")
+    if not raw:
+        if signed_inputs_required():
+            raise Layer0AdmissionRequiredError(
+                "Mandatory Layer 0 admission requires deployment-provisioned issuer keys"
+            )
+        return None
+
+    def reject_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate issuer configuration key")
+            result[key] = value
+        return result
+
+    try:
+        configured = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+        if not isinstance(configured, dict) or not configured:
+            raise ValueError("empty issuer registry")
+        issuer_keys = {}
+        for key_id, config in configured.items():
+            if not isinstance(config, dict) or set(config) != {"source", "secret_b64"}:
+                raise ValueError("malformed issuer rule")
+            encoded = config["secret_b64"]
+            if not isinstance(encoded, str):
+                raise ValueError("malformed issuer secret encoding")
+            key_bytes = base64.b64decode(encoded, validate=True)
+            if len(key_bytes) < 32:
+                raise ValueError("issuer secret is too short")
+            issuer_keys[key_id] = (config["source"], key_bytes)
+        return PositiveObservationAdmissionVerifier(issuer_keys)
+    except (ValueError, TypeError, binascii.Error, UnicodeError) as exc:
+        # Do not propagate or log any raw configuration or secret bytes.
+        raise Layer0AdmissionRequiredError(
+            "Invalid deployment-provisioned Layer 0 issuer registry"
+        ) from None
