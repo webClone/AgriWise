@@ -68,6 +68,8 @@ def normalize_open_meteo_daily(
             date=date,
             provider="open_meteo",
             data_kind=data_kind,
+            source_role=role_for_data_kind(data_kind).value,
+            source_qualified=False,
             retrieval_time=retrieval_time,
         )
 
