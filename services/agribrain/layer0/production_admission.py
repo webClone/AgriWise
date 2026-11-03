@@ -33,12 +33,28 @@ def signed_inputs_required() -> bool:
     )
 
 
+def live_revocation_required() -> bool:
+    """Opt-in deployment migration gate for a continuously checked registry."""
+    return (
+        signed_inputs_required()
+        and os.getenv("AKALORIS_LAYER0_REQUIRE_LIVE_REVOCATION", "")
+        .strip().lower() in ("true", "1", "yes")
+    )
+
+
 def require_trusted_verifier(verifier: object) -> None:
-    """Reject construction of mandatory production estimator without keyring."""
+    """Reject missing keyring or required live revocation authority."""
     if signed_inputs_required() and verifier is None:
         raise Layer0AdmissionRequiredError(
             "Layer 0 signed state-input policy is mandatory but no trusted "
             "source-admission verifier is provisioned"
+        )
+    if (
+        live_revocation_required()
+        and not getattr(verifier, "revocation_enforced", False)
+    ):
+        raise Layer0AdmissionRequiredError(
+            "Live issuer revocation policy required but no trusted authority is provisioned"
         )
 
 
@@ -99,6 +115,10 @@ def load_server_issuer_verifier():
         # trusted backend to rotate/revoke without restarting the worker.
         revocation_path = os.getenv("AKALORIS_LAYER0_REVOCATION_SNAPSHOT_PATH", "").strip()
         gate = None
+        if live_revocation_required() and not revocation_path:
+            raise Layer0AdmissionRequiredError(
+                "Live issuer revocation is mandatory but no trusted policy path is provisioned"
+            )
         if revocation_path:
             def live_revocation_snapshot():
                 raw_snapshot = Path(revocation_path).read_text(encoding="utf-8")
