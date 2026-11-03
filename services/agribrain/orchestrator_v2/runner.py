@@ -1424,6 +1424,13 @@ def run_orchestrator(
             stage_timings_ms["pre_layer1_total"] = round((time.perf_counter() - request_started) * 1000.0, 3)
             l0_output.metadata["stage_timings_ms"] = stage_timings_ms
     except Exception as e:
+        # A missing/invalid signed admission root is a hard production
+        # security error, not a reason to execute unverified legacy fusion.
+        # This only applies to deployments enforcing positive state inputs;
+        # development/research retains the historical fallback behavior.
+        from layer0.production_admission import signed_inputs_required
+        if signed_inputs_required():
+            raise
         primary_acquisition = "legacy_fallback"
         fallback_used = True
         fallback_reason = f"Layer0Runner failed: {str(e)}"
