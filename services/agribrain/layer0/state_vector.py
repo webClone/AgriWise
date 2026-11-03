@@ -62,6 +62,7 @@ DEFAULT_CROP_PARAMS = {
     "t_base": 5.0,           # °C — base temperature for GDD
     "t_opt": 25.0,            # °C — optimal temperature
     "t_max": 35.0,            # °C — maximum temperature (stress)
+    "gdd_emergence": 100.0,   # PROVISIONAL onset; calibrate per crop and site
     "gdd_vegetative": 200,    # GDD to enter vegetative stage
     "gdd_flowering": 800,     # GDD to enter flowering
     "gdd_ripening": 1200,     # GDD to enter ripening
@@ -307,6 +308,31 @@ class ProcessModel:
         self.params = {**DEFAULT_CROP_PARAMS}
         if crop_params:
             self.params.update(crop_params)
+            # Older crop profiles specify vegetative GDD without an explicit
+            # emergence threshold. Preserve their proportional schedule as a
+            # *provisional model assumption*, never a measured crop property.
+            if "gdd_vegetative" in crop_params and "gdd_emergence" not in crop_params:
+                self.params["gdd_emergence"] = 0.5 * self.params["gdd_vegetative"]
+        self._validate_phenology_params()
+
+    def _validate_phenology_params(self) -> None:
+        p = self.params
+        names = ("gdd_emergence", "gdd_vegetative", "gdd_flowering",
+                 "gdd_ripening", "gdd_senescence")
+        for name in names:
+            value = p[name]
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0):
+                raise ValueError(f"invalid {name}: finite nonnegative GDD required")
+        emergence, vegetative, flowering, ripening, senescence = (
+            p[name] for name in names
+        )
+        if not (emergence < vegetative < flowering < ripening < senescence):
+            raise ValueError("phenology GDD thresholds must be strictly ordered")
+        # A C1 cubic Hermite emergence segment uses the slope of the next
+        # stage. Guard against a pathologically short flowering interval.
+        if (vegetative - emergence) / (flowering - vegetative) > 3.0:
+            raise ValueError("emergence interval incompatible with flowering slope")
     
     def predict(self, state: StateVector, 
                 weather: Dict[str, float],
@@ -362,8 +388,20 @@ class ProcessModel:
         x.values[IDX_PHENO_GDD] = new_gdd
         
         # ---- 2. Phenology stage update ----
-        if new_gdd < p["gdd_vegetative"]:
+        if new_gdd < p["gdd_emergence"]:
             x.values[IDX_PHENO_STAGE] = STAGE_DORMANT
+        elif new_gdd < p["gdd_vegetative"]:
+            # C1 continuous emergence. A cubic Hermite ramp matches stage=0
+            # and zero slope at emergence, and stage=1 plus the following
+            # vegetative-stage slope at its endpoint. The onset is a declared
+            # provisional parameter, not an independently calibrated truth.
+            width = p["gdd_vegetative"] - p["gdd_emergence"]
+            u = (new_gdd - p["gdd_emergence"]) / width
+            outgoing_slope = width / (p["gdd_flowering"] - p["gdd_vegetative"])
+            x.values[IDX_PHENO_STAGE] = (
+                (3.0 * u * u - 2.0 * u * u * u)
+                + outgoing_slope * (u * u * u - u * u)
+            )
         elif new_gdd < p["gdd_flowering"]:
             # Smooth transition: interpolate within vegetative
             frac = (new_gdd - p["gdd_vegetative"]) / max(1, p["gdd_flowering"] - p["gdd_vegetative"])
@@ -384,32 +422,25 @@ class ProcessModel:
         # Use adaptive growth rate if calibrated, else default
         effective_growth_rate = getattr(self, '_adaptive_lai_rate', p["lai_growth_rate"])
         
-        if stage < STAGE_SENESCENCE:
-            # Growth: LAI increases with GDD, limited by stress, stage, and max LAI
-            stress_factor = 1.0 - x.values[IDX_CANOPY_STRESS] * 0.5
-            
-            # Stage-dependent growth modulation:
-            #   Dormant/early: slow establishment
-            #   Vegetative: peak growth
-            #   Flowering+: growth decelerates (assimilates → grain)
-            if stage < STAGE_VEGETATIVE:
-                stage_mod = 0.3  # Establishment — slow
-            elif stage < STAGE_FLOWERING:
-                stage_mod = 1.0  # Peak vegetative growth
-            elif stage < STAGE_RIPENING:
-                stage_mod = 0.4  # Flowering — growth slows
-            else:
-                stage_mod = 0.1  # Ripening — minimal new leaf area
-            
-            # Logistic ceiling: growth decelerates as LAI approaches max
-            ceiling_factor = max(0.0, 1.0 - (current_lai / p["lai_max"]) ** 2)
-            
-            growth = effective_growth_rate * gdd_today * stress_factor * stage_mod * ceiling_factor * dt_days
-            new_lai = min(p["lai_max"], current_lai + growth)
+        # Continuous stage response replaces abrupt modulation switches at
+        # stages 1, 2, 3 and 4. These coefficients remain empirical priors;
+        # smoothness is a numerical contract, not agronomic calibration.
+        if stage < STAGE_VEGETATIVE:
+            stage_mod = 0.3 + 0.7 * stage
+        elif stage < STAGE_FLOWERING:
+            stage_mod = 1.0 - 0.6 * (stage - STAGE_VEGETATIVE)
+        elif stage < STAGE_RIPENING:
+            stage_mod = 0.4 - 0.3 * (stage - STAGE_FLOWERING)
         else:
-            # Senescence: LAI decays
-            decay = p["lai_decay_rate"] * gdd_today * dt_days
-            new_lai = max(0.0, current_lai - decay)
+            stage_mod = max(0.0, 0.1 * (STAGE_SENESCENCE - stage))
+
+        stress_factor = 1.0 - x.values[IDX_CANOPY_STRESS] * 0.5
+        ceiling_factor = max(0.0, 1.0 - (current_lai / p["lai_max"]) ** 2)
+        growth = effective_growth_rate * gdd_today * stress_factor * stage_mod * ceiling_factor * dt_days
+        # Gradual senescence replaces the on/off decay switch at stage=4.
+        senescence_weight = max(0.0, min(1.0, stage - STAGE_RIPENING))
+        decay = p["lai_decay_rate"] * gdd_today * dt_days * senescence_weight
+        new_lai = max(0.0, min(p["lai_max"], current_lai + growth - decay))
         
         x.values[IDX_LAI] = max(0.0, new_lai)
         
@@ -495,9 +526,8 @@ class ProcessModel:
             recovery_target = min(1.0, 0.9 + 0.1 * (1.0 - x.values[IDX_CANOPY_STRESS]))
             new_eff = 0.9 * current_eff + 0.1 * recovery_target
         
-        # Senescence naturally reduces efficiency
-        if stage >= STAGE_SENESCENCE:
-            new_eff *= 0.95
+        # Gradual loss of efficiency avoids a discontinuity at stage=4.
+        new_eff *= 1.0 - 0.05 * senescence_weight
         
         x.values[IDX_PHOTO_EFF] = new_eff
         
