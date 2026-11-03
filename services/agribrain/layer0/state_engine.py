@@ -20,6 +20,9 @@ import math
 
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
 from services.agribrain.layer0.observation_packet import DataStatus
+from services.agribrain.layer0.positive_observation_admission import (
+    observation_packet_digest, PositiveObservationAdmissionVerifier,
+)
 
 
 # Packet field -> (registered observation model, uncertainty sigma key).
@@ -57,7 +60,14 @@ class Layer0StateEngine:
     Legacy ``data_fusion.py`` should delegate here.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
+    ):
+        # Trusted backend must supply the verifier and issuer keyring; no keys
+        # may be derived from packet claims or user-controlled JSON. Without
+        # it this remains an explicitly LEGACY_UNVERIFIED scientific pathway.
+        self._positive_observation_admission_verifier = positive_admission_verifier
         self._has_kalman = False
         try:
             from services.agribrain.layer0.kalman_engine import (
@@ -249,6 +259,7 @@ class Layer0StateEngine:
         run_timestamp: Optional[datetime] = None,
         geometry_hash: str = "",
         geometry_version: Optional[int] = None,
+        positive_admission_receipts: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> Layer0StatePackage:
         """Run assimilation from ObservationPacket[] — the canonical entrypoint.
 
@@ -295,6 +306,8 @@ class Layer0StateEngine:
             "skipped_foreign_plot": 0,
             "skipped_foreign_geometry": 0,
             "skipped_foreign_geometry_version": 0,
+            "skipped_missing_positive_source_grant": 0,
+            "skipped_invalid_positive_source_grant": 0,
         }
         filtered_packets = []
         for pkt in packets:
@@ -435,6 +448,32 @@ class Layer0StateEngine:
                 # state even if its declared reliability and grants are true.
                 if not any(payload.get(k) is not None for k in _PACKET_KALMAN_FIELDS):
                     continue
+
+                # Explicit strict authority mode: detached HMAC receipt covers
+                # current packet bytes, source, positive caller geometry and
+                # issuance/replay time. Packet-provided flags are not proof.
+                # Legacy mode is flagged in package health, not misrepresented
+                # as authenticated positive admission.
+                if self._positive_observation_admission_verifier is not None:
+                    try:
+                        digest = observation_packet_digest(pkt)
+                        receipt = (positive_admission_receipts or {}).get(digest)
+                    except (ValueError, TypeError, AttributeError, OverflowError):
+                        excluded_counts["skipped_invalid_positive_source_grant"] += 1
+                        continue
+                    if receipt is None:
+                        excluded_counts["skipped_missing_positive_source_grant"] += 1
+                        continue
+                    valid, reason = self._positive_observation_admission_verifier.verify(
+                        receipt, pkt, plot_id=plot_id,
+                        geometry_hash=geometry_hash,
+                        geometry_version=geometry_version,
+                        run_timestamp=run_timestamp or datetime.now(timezone.utc),
+                    )
+                    if not valid:
+                        excluded_counts["skipped_invalid_positive_source_grant"] += 1
+                        continue
+
                 try:
                     effective_reliability = pkt.effective_weight()
                     if (
@@ -498,11 +537,19 @@ class Layer0StateEngine:
 
         # Attach the source packets to the state package
         state_pkg.all_packets = list(packets)
-        state_pkg.output_hash = state_pkg._generate_output_hash()
 
         # Add diagnostic count for excluded packets
         if state_pkg.health_report is None:
             state_pkg.health_report = {}
         state_pkg.health_report["state_packets_excluded_by_status"] = excluded_counts
+        state_pkg.health_report["positive_source_admission_mode"] = (
+            "SIGNED_SCOPE_BOUND"
+            if self._positive_observation_admission_verifier is not None
+            else "LEGACY_UNVERIFIED"
+        )
+        # Sealing MUST follow every mutation of the material health report.
+        # The earlier order recomputed output_hash before appending these
+        # counts, so the published digest was stale even with no new data.
+        state_pkg.output_hash = state_pkg._generate_output_hash()
 
         return state_pkg
