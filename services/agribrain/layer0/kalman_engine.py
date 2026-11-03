@@ -187,7 +187,13 @@ class ZoneKalmanFilter:
         """
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
-        
+        if events:
+            # Direct raw event forcing bypasses the canonical evidence router.
+            # No trusted L3 infiltration operator is bound yet. Even an event
+            # with role='VERIFIED_DELIVERY' in an ordinary dict is not a
+            # verified execution receipt. Reject before any state mutation.
+            raise ValueError("physical management forcing requires trusted L3 admission")
+
         # Advance the physical state using the current process model.
         # The matching Jacobian must be derived from the SAME inputs/model;
         # do not independently assume F=I when physical couplings exist.
