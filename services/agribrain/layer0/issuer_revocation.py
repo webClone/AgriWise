@@ -44,6 +44,14 @@ class TrustedRevocationGate:
         self._highest_revision = -1
         self._revision_digest = ""
 
+    @property
+    def last_accepted_revision(self) -> int:
+        return self._highest_revision
+
+    @property
+    def last_snapshot_digest(self) -> str:
+        return self._revision_digest
+
     def check(self, key_id: str, now: datetime) -> tuple[bool, str]:
         try:
             snapshot = self._provider()
