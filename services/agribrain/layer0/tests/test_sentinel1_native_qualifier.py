@@ -122,7 +122,7 @@ def _case(
     process_tiles=None, process_request=None,
     vv=0.2, vh=0.1, data_mask=1, omit_band=None, source="real_raster",
     scene_orbit=73, scene_orbit_pass="ASCENDING",
-    scene_product=ITEM,
+    scene_product=ITEM, catalog_request=None,
 ):
     store=NativeEvidenceStore(tmp_path/"native")
     attrs=deepcopy(PROPS if properties is None else properties)
@@ -145,9 +145,10 @@ def _case(
         sensor="S1",credential_reference="test-backend-oauth",
         retrieved_at=FETCHED,
     )
+    native_catalog_request = CATALOG_REQUEST if catalog_request is None else catalog_request
     catalog=store.capture_http_response(
-        response=_resp(CATALOG,CATALOG_REQUEST,catalog_response),
-        endpoint=CATALOG,request_parameters=CATALOG_REQUEST,**capture_params,
+        response=_resp(CATALOG,native_catalog_request,catalog_response),
+        endpoint=CATALOG,request_parameters=native_catalog_request,**capture_params,
     )
     process=store.capture_http_response(
         response=_resp(PROCESS,request,_tar(bands,userdata)),
@@ -439,16 +440,13 @@ def test_terrain_gamma_with_orthorectification_remains_non_authorizing(tmp_path)
 
 
 def test_catalog_and_process_footprints_must_refer_to_same_region(tmp_path):
-    catalog=deepcopy(CATALOG_REQUEST)
-    # The scene's pixels can match the Process response yet derive from an
-    # unrelated Catalog region unless both original requests are compared.
-    scene,store,catalog_record,process,*_=_case(tmp_path)
-    # Replacing the stored Catalog wire body after capture must never work.
-    record=json.loads(store._path("request_replays",catalog_record.acquisition_id).read_bytes())
-    store._path("request_wire",record["wire_request_sha256"]).write_bytes(
-        json.dumps({**catalog,"bbox":[2.,2.,3.,3.]}).encode()
-    )
-    assert _screen(scene,store).status == S1ScreenStatus.REJECTED
+    catalog_request=deepcopy(CATALOG_REQUEST)
+    catalog_request["bbox"]=[2.,2.,3.,3.]
+    # Individually valid original POST records must still be cross-bound.
+    scene,store,*_=_case(tmp_path,catalog_request=catalog_request)
+    result=_screen(scene,store)
+    assert result.status == S1ScreenStatus.REJECTED
+    assert result.reason == "sar_catalog_process_request_extent_conflict"
 
 
 @pytest.mark.parametrize("field,value,reason",[
