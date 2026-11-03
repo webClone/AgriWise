@@ -30,7 +30,7 @@ from services.agribrain.layer0.asmae_scene_products.product_binding import (
 from services.agribrain.layer0.asmae_scene_products.scene_product_schema import SceneProduct
 from services.agribrain.layer0.archive.raster_store import RasterStore
 from services.agribrain.layer0.native_issuer.acquisition_evidence import (
-    NativeEvidenceError, NativeEvidenceStore, OriginClass,
+    NativeEvidenceError, NativeEvidenceStore, OriginClass, _reject_duplicate_keys,
 )
 
 QUALIFIER_DOMAIN = "akaloris/layer0/sentinel2-native-qa-screen/v1"
@@ -146,7 +146,9 @@ def _read_captured_process(raw: bytes) -> tuple[dict[str, np.ndarray], dict]:
                 elif member.name.lower().endswith(".json"):
                     if userdata is not None:
                         raise NativeEvidenceError("ambiguous_process_userdata")
-                    userdata = json.loads(blob.decode("utf-8"))
+                    userdata = json.loads(
+                        blob.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys
+                    )
                     if not isinstance(userdata, dict):
                         raise NativeEvidenceError("invalid_process_userdata")
     except (tarfile.TarError, OSError, UnicodeError, ValueError, TypeError) as exc:
@@ -336,7 +338,9 @@ def screen_sentinel2_native(
 
         raw_catalog = evidence_store._path("objects", catalog.object_id).read_bytes()
         raw_process = evidence_store._path("objects", process.object_id).read_bytes()
-        catalog_data = json.loads(raw_catalog)
+        catalog_data = json.loads(
+            raw_catalog, object_pairs_hook=_reject_duplicate_keys
+        )
         features = catalog_data.get("features") if isinstance(catalog_data, dict) else None
         if not isinstance(features, list):
             return _deny("invalid_catalog_features")
@@ -353,6 +357,11 @@ def screen_sentinel2_native(
         if not isinstance(props, dict):
             return _deny("missing_catalog_properties")
         item_time = _time(props.get("datetime"))
+        if (
+            _time(catalog.retrieved_at) < item_time
+            or _time(process.retrieved_at) < item_time
+        ):
+            return _deny("scene_acquired_after_captured_provider_response")
         scene_time = scene.acquisition_datetime
         if (
             not isinstance(scene_time, datetime)
