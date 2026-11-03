@@ -1,0 +1,102 @@
+# Layer 0 — B2B-04A: Weather Dataset-Role Classification & Forecast Isolation
+
+**Date:** 2026-11-03  
+**Qualified parent SHA:** `c4f5bb75b66be42e6bac5ca12730fb5d2b2a7163` (PR #23, owner-reported **531/531** exact-head test suite)  
+**Branch:** `fix/layer0-weather-role-isolation-20261103`  
+**Status:** IMPLEMENTED SOURCE-LEVEL CANDIDATE; **NEW-HEAD TESTS NOT RUN BY AUTHORING SESSION**  
+**Tracks unchanged:** Scientific Pilot PR #9, `main`, governing master monograph, frozen `findings/layer0.md`, plan PR #17.
+
+## 1. Parent software receipt, not provider trust
+
+At PR #23 `c4f5bb7`, the repository owner supplied Windows Python 3.13.13 results:
+- Layer 0: **426/426**.
+- Layer 1 Fusion: **21/21**.
+- ASMAE: **84/84** (83 fast + comprehensive raster EnKF task-1285, 1/1 in 634.02 seconds).
+- Total: **531/531**, zero failures, 685.15 seconds.
+
+The three prior shared S1/S2 request/operator/tile-proof P2 findings remain software-qualified at this parent SHA. No future B2B-04A commit inherits that test run. The ignored `services/agribrain/artifacts/real_scenes/` folder is **test-only offline data**, not newly issued native source proof.
+
+## 2. Source-time scientific model
+
+`source_roles.py` defines a closed set of *declared dataset categories*:
+
+| WeatherDailyRecord.data_kind | Source role | Daily historical forcing admission |
+| --- | --- | --- |
+| `historical_reanalysis` | `REANALYSIS_MODEL` | Context permitted (modelled, not station observation) |
+| `current` | `CURRENT_PROVIDER_CONTEXT` | **Denied**: current API snapshot is not a daily aggregate |
+| `forecast` | `FORECAST_MODEL` | **Denied**: dedicated forecast pipeline only |
+| `historical_forecast` | `HISTORICAL_FORECAST_MODEL` | **Denied**: past forecast is not historical truth |
+| `statistical_climatology` | `CLIMATOLOGY_MODEL` | **Denied**: climate baseline is not actual daily weather |
+| Any unknown, malformed or inconsistent kind | `UNVERIFIED` | **Denied** |
+
+All roles are **descriptive only** and each `WeatherDailyRecord` and `WeatherConsensusDaily` exposes `source_qualified=False`. A caller cannot promote `source_qualified=True` or self-declare `MEASURED_STATION` via `data_kind`. No separate station or provider capture/identity credential is authenticated by B2B-04A. This is *role isolation*, not full native provider provenance.
+
+A complete weather provider grant will require an independently retained provider request/response, authoritative dataset product endpoint, valid interval, model run, forecast horizon, retrieval time and source-native authentication. Until then the resulting reanalysis is model-derived **process context only**, not directly observed field truth, never a source-authorized Kalman correction.
+
+## 3. Three fail-closed path corrections
+
+### A. `openweather.py`: payload-based source-time role
+
+- One Call `{"daily":[...]}` now defaults to `forecast`, never `current`. A caller attempting to label it `current`, `historical_reanalysis`, `historical_forecast` or `statistical_climatology` receives a `ValueError`, not a nominally current record.
+- A true OpenWeather `{"main": {...}}` response becomes `current` **provider context** only. It cannot be labeled forecast or reanalysis. Ambiguous `daily+main`, malformed records or missing valid time are rejected.
+- If the provider returns `dt` Unix seconds without a date, derive its UTC calendar date for the diagnostic record. This does not validate plot-local timing or source authenticity.
+- **Do not treat `rain.1h`/`rain.3h` as `precipitation_sum` for a full day.** It remains `None` in an unqualified current snapshot; no synthetic `0.0` dry-day inference.
+- The existing separate `normalize_openweather_forecast_daily()` remains the operational forecast normalizer. B2B-04A does not rewire that subsystem or issue a scientific forecast authority.
+
+### B. `consensus.py` + `environment/engine.py`: prevent mixed source roles from producing values
+
+- Verify provider-key identity, matching canonical `YYYY-MM-DD` valid date, recognized `data_kind`, consistent declared source role and no self-asserted provider qualification.
+- `build_daily_consensus()` refuses forecast/reanalysis mixing, **current/reanalysis mixing**, standalone forecast/current/hindcast/climatology and mismatched declared identity **before** calculating mean/rain/ET0. Return `source_role="REJECTED"`, `overall_confidence=0`, explicit flags and an **empty** `variable_consensus` rather than a warning attached to contaminated values.
+- `EnvironmentalEngine._build_consensus()` excludes rejected days from historical process-forcing construction; no default zero precipitation or ET0 fallback can arise from a rejected weather source role. Forecast data remains in its separate forecast pipeline.
+- `build_weather_timeseries()` counts archived forecasts with forecast lineage, not historical-reanalysis days. A current API snapshot does not count as complete historical daily coverage.
+- Weather QA reports forecast-only/current-only historical context as `unusable`, with flags; invalid source claims fail closed. This is a historical forcing assessment, not an overall meteorological provider service-health claim.
+
+### C. Transport, ASMAE archives and weak observations
+
+- `WeatherDailyRecord`, `WeatherConsensusDaily`, weather packets and Layer 0 wrapper evidence records carry explicit **non-authorizing** `source_role` and `source_qualified=False`. The historic packet type `WEATHER_PROVIDER_OBSERVATION` retains its name for compatibility, but its role metadata must not be interpreted as signed/physical observation authority.
+- Layer 0 wrapper marks current and reanalysis model inputs as **estimated**, not station observed; skips rejected/mixed consensus evidence.
+- `weather_archive_adapter.py` does not classify `current` API/model context as `observed_archive`; unqualified current rows and rejected rows are dropped from historical ASMAE archives rather than acquiring apparent observational authority.
+- `create_weak_kalman_observations()` excludes `current` model contexts. Only `historical_reanalysis` may produce the existing bounded **modelled** weak soil moisture observations under the legacy low-reliability contract; this is not an issuer grant or a verified physical moisture measurement. Reanalysis source attestation itself is still missing.
+
+## 4. Counterexample regression suite
+
+`services/agribrain/layer0/tests/test_weather_source_role_isolation.py` exercises:
+- OpenWeather One Call daily → forecast; explicit attempts to relabel forecast daily as current or reanalysis are rejected.
+- OpenWeather current → context only; hourly rain must not become daily `0` or daily forcing.
+- A model forecast with **99–200 mm** rain must not change an otherwise valid historical-reanalysis **0.0 mm** rainfall consensus on the same day; true zero is preserved.
+- Mixed current + historical reanalysis, hindcast, climatology, unknown/invalid kind, forged declared role, invalid date or provider identity are rejected **before** consensus values are calculated.
+- Engine forecast data never enters historical process forcing; rejected mixed-role consensus produces no forcing.
+- Historical-forecast dates count under forecast lineage, not historical truth.
+- A current provider context manually inserted downstream stays **estimated** in Layer 0 wrapper and is **not an observed weather archive** in ASMAE.
+- Open-Meteo labelled historical reanalysis is modelled, never a verified station; current Open-Meteo soil moisture cannot become a weak Kalman observation.
+- Weather QA marks current-only/forecast-only historical weather unusable.
+
+Exact new-head commands:
+
+```powershell
+git fetch origin
+git switch fix/layer0-weather-role-isolation-20261103
+git pull --ff-only
+git rev-parse HEAD
+
+py -m pytest -q services/agribrain/layer0/tests/test_weather_source_role_isolation.py
+py -m pytest -q services/agribrain/layer0/tests/test_weather_evidence_transport.py
+py -m pytest -q services/agribrain/layer0/tests/
+py -m pytest -q services/agribrain/layer1_fusion/tests/
+py -m pytest -q services/agribrain/layer05_asmae/tests/
+```
+
+The comprehensive ASMAE real-raster test **must** be included in full acceptance. New-head counts cannot be predicted or inferred from the qualified parent; use actual collected and passed test counts.
+
+## 5. What B2B-04A explicitly does NOT qualify
+
+- **Source-native weather identity:** The Open-Meteo `normalize_open_meteo_daily()` historical-reanalysis default is **not tied to an independently verified historical API endpoint**. A raw payload of identical shape from an Open-Meteo live forecast endpoint could still be misclassified if wrongly supplied as historical. The next B2B-04B requires trusted endpoint/product identity with fail-closed request/response retention, model-run and valid-time binding, and transport-origin attestation.
+- **Station observations:** No independent WMO station identity, station sensor calibration, station spatial representativeness or verified precipitation instrumentation. An OpenWeather `main` response is explicitly **not** proof of a station sample.
+- **Temporal role attestation:** No signed provider valid-time/forecast-run provenance or independent geolocation evidence. `source_role` is a software classification, **not** a source-of-truth credential. Timezone and calendar-day alignment must be separately proven for operational deployment.
+- **Physical numerical validation:** No empirical weather forecast skill/CRPS bias calibration, rain spatial uncertainty, ET0 measurement verification, or realistic catchment-scale weather assimilation. The existing weak model-soil correction is not upgraded to a physically measured sensor observation.
+- **Downstream source authority:** No B2B-05 tenant-owned plot/MESIA containment, B2B-06 v3 isolated asymmetric KMS issuer, independent durable revocation authority, or Scientific Pilot PR #9 publication authorization. `source_qualified` stays **False**.
+- **Historical governance:** No edits to the master R3 monograph, historical 469-finding audit, Pilot PR #9, or main.
+
+## Disposition
+
+**B2B-04A declared weather source-role and historical/forecast isolation: IMPLEMENTED CANDIDATE; exact-head tests PENDING.** B2B-04 native provider provenance remains **PARTIAL / OPEN**. No new state/publication grant authorization is introduced; previously accepted Layer 0 scientific closures remain closed within their own pinned software scope.
