@@ -54,7 +54,7 @@ WEAK_SM_MAP = {
 DEEP_LAYER_CONTEXT_ONLY = ["soil_moisture_27_81cm"]
 
 # Data kinds allowed for weak Kalman observations
-ALLOWED_DATA_KINDS = {"current", "historical_reanalysis"}
+ALLOWED_DATA_KINDS = {"historical_reanalysis"}
 
 
 def create_weak_kalman_observations(
