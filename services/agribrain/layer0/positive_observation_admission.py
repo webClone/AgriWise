@@ -24,6 +24,8 @@ import math
 
 GRANT_DOMAIN = "akaloris/layer0/positive-state-observation/v1"
 GRANT_PURPOSE = "kalman_state_observation"
+WEATHER_GRANT_PURPOSE = "weather_state_forcing"
+_ALLOWED_PURPOSES = frozenset((GRANT_PURPOSE, WEATHER_GRANT_PURPOSE))
 _GRANT_FIELDS = frozenset((
     "domain", "purpose", "key_id", "source", "plot_id",
     "geometry_hash", "geometry_version", "spatial_scope",
@@ -122,8 +124,11 @@ class PositiveObservationAdmissionVerifier:
         self, receipt: Any, packet: Any, *,
         plot_id: str, geometry_hash: str, geometry_version: int | None,
         run_timestamp: datetime,
+        purpose: str = GRANT_PURPOSE,
     ) -> tuple[bool, str]:
         try:
+            if purpose not in _ALLOWED_PURPOSES:
+                return False, "unsupported_grant_purpose"
             if (
                 not isinstance(plot_id, str) or not plot_id
                 or not isinstance(geometry_hash, str) or not geometry_hash
@@ -151,7 +156,7 @@ class PositiveObservationAdmissionVerifier:
             if (
                 source != key_rule[0] or grant["source"] != source
                 or grant["domain"] != GRANT_DOMAIN
-                or grant["purpose"] != GRANT_PURPOSE
+                or grant["purpose"] != purpose
             ):
                 return False, "wrong_issuer_source_or_purpose"
             if (
