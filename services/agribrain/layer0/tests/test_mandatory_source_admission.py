@@ -236,3 +236,28 @@ def test_historical_acquisition_can_precede_trusted_grant_issuance(monkeypatch):
         packet, receipt, monkeypatch
     )
     assert len(observations) == 1
+
+
+def test_one_development_env_cannot_override_another_production_env(monkeypatch):
+    monkeypatch.setenv("NODE_ENV", "development")
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "false")
+    assert signed_inputs_required() is True
+
+
+def test_long_lived_legacy_engine_rechecks_hardened_runtime_policy(monkeypatch):
+    monkeypatch.setenv("NODE_ENV", "test")
+    for key in ("ENVIRONMENT", "ENV", "APP_ENV"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", raising=False)
+    engine = Layer0StateEngine()
+    assert engine._has_kalman
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
+    packet = _packet()
+    with pytest.raises(Layer0AdmissionRequiredError):
+        engine.run_from_packets(
+            plot_id="plot-a", packets=[packet],
+            start_date=packet.timestamp.date().isoformat(),
+            end_date=packet.timestamp.date().isoformat(),
+            geometry_hash="geometry-a", geometry_version=7,
+        )
