@@ -83,12 +83,13 @@ def classify_management_event_evidence(
             or envelope.get("packet_id")
         )
         event_id = event_id if isinstance(event_id, str) and event_id else ""
-        role = payload.get("event_role") or payload.get("role") or "UNKNOWN"
-        if not isinstance(role, str):
-            role = "UNKNOWN"
+        raw_role = payload.get("event_role") or payload.get("role")
+        role = raw_role if isinstance(raw_role, str) and raw_role else "UNKNOWN"
         role = role.upper()
         source = str(envelope.get("source") or "")
-        if role == "UNKNOWN" and source == "user_event":
+        if raw_role is None and source == "user_event":
+            # Only absent role on a user event implies reported evidence.
+            # Explicit UNKNOWN never becomes an asserted report or delivery.
             role = "USER_REPORTED_EXPOSURE"
 
         decision = {
