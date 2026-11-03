@@ -24,6 +24,9 @@ import tarfile
 
 import numpy as np
 
+from services.agribrain.layer0.native_issuer.process_operator_contract import (
+    verify_native_process_operator, native_process_operator_sha256, OPERATOR_POLICY,
+)
 from services.agribrain.layer0.asmae_scene_products.product_binding import (
     normalize_product_id, verify_exact_product_binding,
 )
@@ -266,7 +269,10 @@ def _verify_process_request(
             return False
         if source.get("dataFilter", {}).get("mosaickingOrder") != "leastCC":
             return False
-        window = source["timeRange"]
+        if "timeRange" in source:
+            # The old producer's sibling-level timeRange is invalid.
+            return False
+        window = source["dataFilter"]["timeRange"]
         if not (_time(window["from"]) <= item_time <= _time(window["to"])):
             return False
         bounds = request_input["bounds"]
@@ -307,7 +313,9 @@ def _verify_process_request(
         ):
             return False
         evalscript = captured_process_request.get("evalscript")
-        if not isinstance(evalscript,str) or json.dumps(scene.provider_product_id) not in evalscript:
+        if not verify_native_process_operator(
+            "S2", scene.provider_product_id, evalscript,
+        ):
             return False
         return True
     except (KeyError,TypeError,ValueError,AttributeError,ZeroDivisionError):
@@ -395,6 +403,13 @@ def screen_sentinel2_native(
             return _deny("catalog_scene_timestamp_mismatch")
 
         bands, userdata = _read_captured_process(raw_process)
+        native_userdata = userdata.get("userData", userdata)
+        if (
+            not isinstance(native_userdata, dict)
+            or type(native_userdata.get("unidentifiedTileCount")) is not int
+            or native_userdata["unidentifiedTileCount"] != 0
+        ):
+            return _deny("unidentified_s2_process_operator_tile_provenance")
         binding = verify_exact_product_binding(scene.provider_product_id, userdata, "S2")
         if not binding["is_exact"] or scene.product_binding != "exact_catalog_item":
             return _deny("catalog_process_product_mismatch")
@@ -537,6 +552,10 @@ def screen_sentinel2_native(
             "catalog_acquisition_id": catalog.acquisition_id,
             "process_acquisition_id": process.acquisition_id,
             "verified_process_request_sha256": process.request_sha256,
+            "process_operator_policy": OPERATOR_POLICY,
+            "process_operator_sha256": native_process_operator_sha256(
+                "S2", scene.provider_product_id
+            ),
             "product_id": scene.provider_product_id,
             "catalog_datetime_utc": item_time.isoformat(),
             "binding_userdata_hash": binding["proof"]["process_userdata_hash"],

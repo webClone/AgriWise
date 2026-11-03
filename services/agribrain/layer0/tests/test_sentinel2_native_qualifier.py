@@ -6,6 +6,7 @@ grant issuance or publication authority.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -18,6 +19,9 @@ import pytest
 import tifffile
 
 from services.agribrain.layer0.archive.raster_store import RasterStore
+from services.agribrain.layer0.native_issuer.process_operator_contract import (
+    render_native_process_operator,
+)
 from services.agribrain.layer0.asmae_scene_products.product_binding import (
     verify_exact_product_binding,
 )
@@ -49,10 +53,12 @@ PROCESS_REQUEST = {
         },
         "data": [{
             "type": "sentinel-2-l2a",
-            "dataFilter": {"mosaickingOrder": "leastCC"},
-            "timeRange": {
-                "from": "2026-11-02T11:55:00Z",
-                "to": "2026-11-02T12:05:00Z",
+            "dataFilter": {
+                "mosaickingOrder": "leastCC",
+                "timeRange": {
+                    "from": "2026-11-02T11:55:00Z",
+                    "to": "2026-11-02T12:05:00Z",
+                },
             },
         }],
     },
@@ -60,10 +66,13 @@ PROCESS_REQUEST = {
         "width":4, "height":4,
         "responses": [
             {"identifier": name, "format": {"type":"image/tiff"}}
-            for name in ("B04","B08","SCL","dataMask")
+            for name in (
+                "B02", "B03", "B04", "B05", "B06", "B07",
+                "B08", "B8A", "B11", "B12", "SCL", "dataMask",
+            )
         ] + [{"identifier": "userdata", "format": {"type":"application/json"}}],
     },
-    "evalscript": '//VERSION=3\nconst EXPECTED_PRODUCT_ID = ' + json.dumps(ITEM) + ';',
+    "evalscript": render_native_process_operator("S2", ITEM),
 }
 
 
@@ -101,6 +110,7 @@ def _native_scene(
     catalog_item=ITEM, collection="sentinel-2-l2a",
     catalog_features=None, b04_value=0.2, b08_value=0.6,
     remove_band=None, process_request=None,
+    process_tiles=None, unidentified_tile_count=0,
 ):
     store=NativeEvidenceStore(tmp_path/"evidence")
     rstore=RasterStore()
@@ -112,7 +122,14 @@ def _native_scene(
     }
     if remove_band:
         del bands[remove_band]
-    userdata={"userData": {"tiles": [{"sentinel2ProductId":returned_product}]}}
+    userdata={"userData": {
+        "expectedProductId": ITEM,
+        "unidentifiedTileCount": unidentified_tile_count,
+        "tiles": (
+            [{"sentinel2ProductId":returned_product}]
+            if process_tiles is None else process_tiles
+        ),
+    }}
     if catalog_features is None:
         catalog_features=[{
             "id":catalog_item,"collection":collection,
@@ -423,3 +440,81 @@ def test_original_post_request_is_independently_rejected_when_wrong(tmp_path,mut
     result=_screen(scene,store)
     assert result.status is S2ScreenStatus.REJECTED
     assert result.reason == "captured_process_request_grid_or_time_mismatch"
+
+
+def test_documented_s2_datafilter_time_range_builder():
+    from services.agribrain.layer0.asmae_scene_products.s2_real_scene_product_fetcher import (
+        _build_native_s2_process_request,
+    )
+    expected=_build_native_s2_process_request(
+        bbox=[0.,0.,1.,1.],width=4,height=4,
+        start_utc="2026-11-02T11:55:00Z",
+        end_utc="2026-11-02T12:05:00Z",
+        evalscript=render_native_process_operator("S2",ITEM),
+    )
+    assert expected == PROCESS_REQUEST
+    assert "timeRange" not in expected["input"]["data"][0]
+    assert expected["input"]["data"][0]["dataFilter"]["timeRange"]["to"].endswith("Z")
+
+
+def test_s2_legacy_root_time_range_now_rejects(tmp_path):
+    request=deepcopy(PROCESS_REQUEST)
+    data=request["input"]["data"][0]
+    data["timeRange"]=data["dataFilter"].pop("timeRange")
+    scene,store,*_=_native_scene(tmp_path,process_request=request)
+    result=_screen(scene,store)
+    assert result.status is S2ScreenStatus.REJECTED
+    assert result.reason == "captured_process_request_grid_or_time_mismatch"
+
+
+@pytest.mark.parametrize("change", ["constant_red", "force_clear_mask", "disable_preprocessing"])
+def test_s2_changed_source_operator_denied_even_if_returned_pixels_look_usable(tmp_path,change):
+    request=deepcopy(PROCESS_REQUEST)
+    script=request["evalscript"]
+    if change == "constant_red":
+        assert 'B04: [value(sample, "B04", NaN)]' in script
+        script=script.replace('B04: [value(sample, "B04", NaN)]','B04: [0.33]')
+    elif change == "force_clear_mask":
+        assert 'dataMask: [value(sample, "dataMask", 0)]' in script
+        script=script.replace('dataMask: [value(sample, "dataMask", 0)]','dataMask: [1]')
+    else:
+        assert 'function preProcessScenes(collections)' in script
+        script=script.replace('function preProcessScenes(collections)',
+                              'function preProcessScenesDisabled(collections)')
+    request["evalscript"]=script
+    scene,store,*_=_native_scene(tmp_path,process_request=request)
+    result=_screen(scene,store)
+    assert result.status is S2ScreenStatus.REJECTED
+    assert result.reason == "captured_process_request_grid_or_time_mismatch"
+    assert result.eligible_for_state_grant is False
+    assert result.scientific_publication_authorized is False
+
+
+def test_s2_unidentified_extra_process_tile_rejects_even_with_one_exact_id(tmp_path):
+    scene,store,*_=_native_scene(tmp_path,process_tiles=[
+        {"sentinel2ProductId": ITEM},
+        {"tileId": "TILE_B_NO_PRODUCT_ID"},
+    ],unidentified_tile_count=1)
+    assert scene.binding_proof["unidentified_tile_count"] == 1
+    result=_screen(scene,store)
+    assert result.status is S2ScreenStatus.REJECTED
+    assert result.reason == "unidentified_s2_process_operator_tile_provenance"
+
+
+def test_s2_forged_zero_unknown_count_cannot_hide_unidentified_tile(tmp_path):
+    scene,store,*_=_native_scene(tmp_path,process_tiles=[
+        {"sentinel2ProductId": ITEM},
+        {"id": ITEM},  # generic tile id must never substitute for product id
+    ],unidentified_tile_count=0)
+    assert scene.binding_proof["all_returned_tiles_identified"] is False
+    result=_screen(scene,store)
+    assert result.status is S2ScreenStatus.REJECTED
+    assert result.reason == "catalog_process_product_mismatch"
+
+
+def test_s2_conflicting_product_fields_in_one_tile_are_not_exact(tmp_path):
+    scene,store,*_=_native_scene(tmp_path,process_tiles=[
+        {"sentinel2ProductId": ITEM,"productId":"UNRELATED_PRODUCT"}
+    ],unidentified_tile_count=0)
+    assert scene.binding_proof["conflicting_tile_count"] == 1
+    assert _screen(scene,store).status is S2ScreenStatus.REJECTED
