@@ -78,9 +78,9 @@ def _safe_request(value: Any) -> Any:
         # This detects common embedded credential forms; dedicated backend
         # provider request allowlists remain a later production gate.
         if re.search(
-            r"(?i)(?:\\b(?:bearer|basic)\\s+[^\\s\"']+|"
-            r"\\b(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|"
-            r"api[_-]?key|password)\\s*[:=])",
+            r"(?i)(?:\b(?:bearer|basic)\s+\S+|"
+            r"\b(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+            r"api[_-]?key|password)\s*[:=])",
             value,
         ):
             raise NativeEvidenceError("embedded provider credential in acquisition request")
