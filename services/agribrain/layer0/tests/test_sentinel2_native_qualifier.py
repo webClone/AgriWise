@@ -100,7 +100,7 @@ def _native_scene(
     tmp_path, *, scl_value=4, dm_value=1, returned_product=ITEM,
     catalog_item=ITEM, collection="sentinel-2-l2a",
     catalog_features=None, b04_value=0.2, b08_value=0.6,
-    remove_band=None,
+    remove_band=None, process_request=None,
 ):
     store=NativeEvidenceStore(tmp_path/"evidence")
     rstore=RasterStore()
@@ -125,9 +125,10 @@ def _native_scene(
         endpoint=CATALOG,request_parameters=CATALOG_REQUEST,sensor="S2",
         credential_reference="test-backend-provider",retrieved_at=RETRIEVAL,
     )
+    native_process_request = PROCESS_REQUEST if process_request is None else process_request
     pr=store.capture_http_response(
-        response=_resp(PROCESS,PROCESS_REQUEST,process_bytes),
-        endpoint=PROCESS,request_parameters=PROCESS_REQUEST,
+        response=_resp(PROCESS,native_process_request,process_bytes),
+        endpoint=PROCESS,request_parameters=native_process_request,
         sensor="S2",provider_product_id=ITEM,
         credential_reference="test-backend-provider",retrieved_at=RETRIEVAL,
     )
@@ -401,3 +402,21 @@ def test_native_qa_has_no_caller_supplied_request_override(tmp_path):
     parameters=inspect.signature(screen_sentinel2_native).parameters
     assert "captured_process_request" not in parameters
     assert _screen(scene,store).status is S2ScreenStatus.SCREENED_NATIVE_QA
+
+
+@pytest.mark.parametrize("mutation", ["bbox", "time_window", "product"])
+def test_original_post_request_is_independently_rejected_when_wrong(tmp_path,mutation):
+    changed=json.loads(json.dumps(PROCESS_REQUEST))
+    if mutation == "bbox":
+        changed["input"]["bounds"]["bbox"]=[0,0,2,2]
+    elif mutation == "time_window":
+        changed["input"]["data"][0]["timeRange"]={
+            "from":"2026-11-01T00:00:00Z",
+            "to":"2026-11-01T01:00:00Z",
+        }
+    else:
+        changed["evalscript"]='//VERSION=3\\nconst EXPECTED_PRODUCT_ID = "WRONG_ITEM";'
+    scene,store,*_=_native_scene(tmp_path,process_request=changed)
+    result=_screen(scene,store)
+    assert result.status is S2ScreenStatus.REJECTED
+    assert result.reason == "captured_process_request_grid_or_time_mismatch"
