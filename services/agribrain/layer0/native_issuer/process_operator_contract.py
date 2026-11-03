@@ -32,7 +32,8 @@ S1_PROCESS_OPERATOR_TEMPLATE = """
             mosaicking: "TILE"
         };
     }
-    let unidentifiedTileCount = 0;
+    // -1 means the mandatory pre-filter callback did not run.
+    let unidentifiedTileCount = -1;
     function preProcessScenes(collections) {
         const tiles = (collections.scenes && collections.scenes.tiles) || [];
         unidentifiedTileCount = tiles.filter(function(tile) {
@@ -105,7 +106,8 @@ S2_PROCESS_OPERATOR_TEMPLATE = """
             mosaicking: "TILE"
         };
     }
-    let unidentifiedTileCount = 0;
+    // -1 means the mandatory pre-filter callback did not run.
+    let unidentifiedTileCount = -1;
     function preProcessScenes(collections) {
         const tiles = (collections.scenes && collections.scenes.tiles) || [];
         unidentifiedTileCount = tiles.filter(function(tile) {
