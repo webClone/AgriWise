@@ -171,6 +171,20 @@ class PositiveObservationAdmissionVerifier:
     def zone_authority_configured(self) -> bool:
         return bool(self._zone_registry)
 
+    @property
+    def revocation_revision(self) -> int | None:
+        return (
+            self._revocation_gate.last_accepted_revision
+            if self._revocation_gate is not None else None
+        )
+
+    @property
+    def revocation_snapshot_digest(self) -> str | None:
+        return (
+            self._revocation_gate.last_snapshot_digest
+            if self._revocation_gate is not None else None
+        )
+
     def verify(
         self, receipt: Any, packet: Any, *,
         plot_id: str, geometry_hash: str, geometry_version: int | None,
