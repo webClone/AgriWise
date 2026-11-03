@@ -330,7 +330,10 @@ class NativeEvidenceStore:
         try:
             if replay_path.is_symlink() or not replay_path.is_file():
                 raise NativeEvidenceError("invalid_captured_request_evidence")
-            record_bytes = replay_path.read_bytes()
+            if replay_path.stat().st_size > 2048:
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            with replay_path.open("rb") as fd:
+                record_bytes = fd.read(2049)
             if len(record_bytes) > 2048:
                 raise NativeEvidenceError("invalid_captured_request_evidence")
             record = json.loads(record_bytes, object_pairs_hook=_reject_duplicate_keys)
@@ -351,7 +354,10 @@ class NativeEvidenceStore:
             wire_path = self._path("request_wire", wire_sha)
             if wire_path.is_symlink() or not wire_path.is_file():
                 raise NativeEvidenceError("invalid_captured_request_evidence")
-            wire = wire_path.read_bytes()
+            if wire_path.stat().st_size != record["request_bytes"]:
+                raise NativeEvidenceError("invalid_captured_request_evidence")
+            with wire_path.open("rb") as fd:
+                wire = fd.read(MAX_PREPARED_REQUEST_BYTES + 1)
             if len(wire) != record["request_bytes"] or _sha(wire) != wire_sha:
                 raise NativeEvidenceError("invalid_captured_request_evidence")
             canonical = _safe_request(
