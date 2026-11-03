@@ -357,6 +357,7 @@ class Layer0StateEngine:
             "skipped_missing_positive_source_grant": 0,
             "skipped_invalid_positive_source_grant": 0,
             "skipped_unsupported_zone_in_run": 0,
+            "skipped_duplicate_observation": 0,
         }
         filtered_packets = []
         signed_admitted_observation_digests: set[str] = set()
@@ -366,6 +367,12 @@ class Layer0StateEngine:
         signed_receipts_used: Dict[str, Dict[str, Any]] = {}
         signed_packet_by_digest: Dict[str, Any] = {}
         weather_field_sources: Dict[str, Dict[str, str]] = {}
+        # Do not let the Kalman filter consume a multiset while the signed
+        # manifest claims a unique receipt set. Staging and hashing share a
+        # single canonical, versioned observation execution plan.
+        staged_observation_updates: list[tuple[tuple[str, ...], str, str, Any, Dict[str, Any]]] = []
+        seen_observation_updates: set[tuple[str, str, str, str]] = set()
+        signed_evidence_decisions: dict[tuple[str, str, str], str] = {}
 
         def check_positive_grant(pkt: Any, purpose: str) -> tuple[bool, Optional[str]]:
             if self._positive_observation_admission_verifier is None:
@@ -615,7 +622,61 @@ class Layer0StateEngine:
                         reliability=effective_reliability,
                         source=pkt.source.value,
                     )
-                    observations_by_day[day][zone_id].append(obs)
+                    # Digest is the exact signed packet bytes; neither a
+                    # source name nor packet_id alone denotes independent
+                    # physical evidence (packet_id is partly time-derived).
+                    pkt_digest = signed_packet_digest
+                    if pkt_digest is None:
+                        try:
+                            pkt_digest = observation_packet_digest(pkt)
+                        except (ValueError, TypeError, AttributeError, OverflowError):
+                            excluded_counts["skipped_observation_nonfinite"] += 1
+                            continue
+                    update_identity = (pkt_digest, day, zone_id, var_key)
+                    if update_identity in seen_observation_updates:
+                        excluded_counts["skipped_duplicate_observation"] += 1
+                        continue
+                    seen_observation_updates.add(update_identity)
+
+                    # Once a provider has an independently minted immutable
+                    # decision ID, reusing it with different signed content
+                    # for the same observation slot is a hard conflict.
+                    decision_id = payload.get("qualification_decision_id")
+                    if signed_packet_digest is not None and decision_id is not None:
+                        if not isinstance(decision_id, str) or not decision_id:
+                            raise Layer0AdmissionRequiredError(
+                                "Malformed signed qualification decision identity"
+                            )
+                        decision_key = (pkt.source.value, decision_id, var_key)
+                        previous = signed_evidence_decisions.setdefault(
+                            decision_key, pkt_digest
+                        )
+                        if previous != pkt_digest:
+                            raise Layer0AdmissionRequiredError(
+                                "Conflicting signed qualification identity in Layer 0 observation input"
+                            )
+
+                    update_record = {
+                        "packet_digest": pkt_digest,
+                        "day": day,
+                        "zone_id": zone_id,
+                        "timestamp": pkt.timestamp.isoformat(),
+                        "source": pkt.source.value,
+                        "packet_field": var_key,
+                        "model_type": obs_type,
+                        "value": obs_value,
+                        "sigma": obs_sigma,
+                        "effective_reliability": effective_reliability,
+                    }
+                    # Same canonical order drives both numerical assimilation
+                    # and the ordered manifest, independent of transport order.
+                    order_key = (
+                        day, zone_id, pkt.timestamp.isoformat(),
+                        pkt.source.value, pkt_digest, var_key,
+                    )
+                    staged_observation_updates.append(
+                        (order_key, day, zone_id, obs, update_record)
+                    )
                     if signed_packet_digest is not None:
                         signed_admitted_observation_digests.add(signed_packet_digest)
                         signed_receipts_used[signed_packet_digest] = {
@@ -624,6 +685,13 @@ class Layer0StateEngine:
                                 (positive_admission_receipts or {})[signed_packet_digest]
                             ),
                         }
+
+        staged_observation_updates.sort(key=lambda item: item[0])
+        consumed_observation_updates: list[Dict[str, Any]] = []
+        for _order, day, zone_id, obs, record in staged_observation_updates:
+            observations_by_day.setdefault(day, {}).setdefault(zone_id, []).append(obs)
+            if self._positive_observation_admission_verifier is not None:
+                consumed_observation_updates.append(record)
 
         # Only complete, physically admissible weather days reach the
         # process model. Bind the final effective field provenance, not an
@@ -772,7 +840,9 @@ class Layer0StateEngine:
         # itself authorize downstream prescriptions.
         if self._positive_observation_admission_verifier is not None:
             input_manifest = {
-                "domain": "akaloris/layer0/verified-state-input-manifest/v1",
+                "domain": "akaloris/layer0/verified-state-input-manifest/v2",
+                "observation_execution_policy": "canonical-utc-source-digest-field/v1",
+                "ordered_observation_updates": consumed_observation_updates,
                 "plot_id": plot_id,
                 "geometry_hash": geometry_hash,
                 "geometry_version": geometry_version,
