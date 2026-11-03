@@ -71,6 +71,15 @@ class Layer0StateEngine:
         # Production/staging cannot silently opt out of cryptographic
         # input admission; explicit development mode remains legacy-compatible.
         require_trusted_verifier(positive_admission_verifier)
+        if (
+            signed_inputs_required()
+            and not isinstance(
+                positive_admission_verifier, PositiveObservationAdmissionVerifier
+            )
+        ):
+            raise Layer0AdmissionRequiredError(
+                "Mandatory state admission requires a trusted verifier type"
+            )
         self._positive_observation_admission_verifier = positive_admission_verifier
         self.__packet_run_capability = object()
         self._has_kalman = False
