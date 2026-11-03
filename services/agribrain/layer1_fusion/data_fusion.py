@@ -226,6 +226,11 @@ class DataFusionEngine:
                 print(f"[OK] [Layer 0] Daily state assimilation complete: "
                       f"{len(tensor.daily_state)} zones")
             except Exception as e:
+                from layer0.production_admission import signed_inputs_required
+                if signed_inputs_required():
+                    # Do not reinterpret an admission failure as permission
+                    # to emit a legacy interpolated scientific state.
+                    raise
                 print(f"[WARN] [Layer 0] Assimilation failed, falling back to interpolation: {e}")
         # =====================================================================
 
@@ -1279,6 +1284,14 @@ class DataFusionEngine:
         If `self.use_modern_layer0_state_engine` is True, uses the modern `Layer0StateEngine`.
         Otherwise, or upon failure, falls back to the legacy Kalman-based DailyAssimilationEngine.
         """
+        from layer0.production_admission import (
+            signed_inputs_required, Layer0AdmissionRequiredError,
+        )
+        if signed_inputs_required():
+            raise Layer0AdmissionRequiredError(
+                "Legacy Layer 1 scalar assimilation is not a signed Layer 0 "
+                "packet path; production requires verified upstream state packages"
+            )
         if self.use_modern_layer0_state_engine:
             try:
                 print("[Layer 0] Delegating daily state assimilation to Layer0StateEngine (Modern)")
