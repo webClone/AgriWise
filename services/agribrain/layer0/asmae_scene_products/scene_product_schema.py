@@ -43,6 +43,11 @@ class SceneProduct:
     content_hash: Optional[str] = None
     process_request_hash: Optional[str] = None
     provider_response_hash: Optional[str] = None
+    # B2B-01 acquisition TRACE ONLY. The underlying native response is
+    # unqualified and cannot mint a state-input receipt from this metadata.
+    native_catalog_acquisition_id: Optional[str] = None
+    native_process_acquisition_id: Optional[str] = None
+    native_evidence_status: str = "UNATTESTED"
     product_binding: str = "unknown"
     binding_proof: Dict[str, Any] = field(default_factory=dict)
     duplicate_of_content_hash: Optional[str] = None
@@ -50,7 +55,7 @@ class SceneProduct:
     independent_observation_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "scene_id": self.scene_id,
             "sensor": self.sensor,
             "acquisition_datetime": self.acquisition_datetime.isoformat(),
@@ -90,3 +95,12 @@ class SceneProduct:
             "temporal_basis": self.temporal_basis,
             "independent_observation_count": self.independent_observation_count,
         }
+        # Preserve exact legacy scene serialization when no native HTTP
+        # acquisition record exists. No null evidence fields are emitted.
+        if self.native_catalog_acquisition_id or self.native_process_acquisition_id:
+            result.update({
+                "native_catalog_acquisition_id": self.native_catalog_acquisition_id,
+                "native_process_acquisition_id": self.native_process_acquisition_id,
+                "native_evidence_status": self.native_evidence_status,
+            })
+        return result

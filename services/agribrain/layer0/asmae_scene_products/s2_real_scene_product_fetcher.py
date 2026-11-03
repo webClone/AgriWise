@@ -8,6 +8,9 @@ import numpy as np
 import requests
 from .scene_product_schema import SceneProduct
 from .scene_product_store import SceneProductStore
+from services.agribrain.layer0.native_issuer.acquisition_evidence import (
+    capture_backend_provider_response, NativeEvidenceError,
+)
 from .product_binding import (
     exact_binding_proof_valid,
     verify_exact_product_binding,
@@ -632,7 +635,13 @@ def fetch_asmae_s2_scene_stack(
                 return local_scenes
             reason = "rate_limited" if resp.status_code == 429 else "provider_error"
             return _unavailable("catalog_query", reason, date_range, accepted_count=len(local_scenes), http_status=resp.status_code, request_id=resp.headers.get("x-request-id", ""))
+        catalog_acquisition = capture_backend_provider_response(
+            response=resp, endpoint=stac_url, request_parameters=stac_payload,
+            sensor="S2",
+        )
         features = resp.json().get("features", [])
+    except NativeEvidenceError:
+        return _unavailable("acquisition_evidence", "untrusted_native_capture", date_range)
     except Exception:
         if local_scenes:
             return local_scenes
@@ -794,6 +803,14 @@ def fetch_asmae_s2_scene_stack(
                 reason = "rate_limited" if p_resp.status_code == 429 else "provider_error"
                 return _unavailable("process_api", reason, date_range, accepted_count=len(fetched_scenes), candidate_count=len(selected_features), http_status=p_resp.status_code, request_id=p_resp.headers.get("x-request-id", ""))
             
+            # B2B-01: record the exact successful backend Process response
+            # before decoding bands. This is NOT QA or issuer authorization.
+            process_acquisition = capture_backend_provider_response(
+                response=p_resp, endpoint=SENTINEL_PROCESS_URL,
+                request_parameters=process_payload, sensor="S2",
+                provider_product_id=provider_product_id,
+            )
+
             # Parse tar
             import io
             import tarfile
@@ -886,6 +903,13 @@ def fetch_asmae_s2_scene_stack(
                 "content_hash": content_hash,
                 "process_request_hash": process_request_hash,
                 "provider_response_hash": provider_response_hash,
+                "native_catalog_acquisition_id": (
+                    catalog_acquisition.acquisition_id if catalog_acquisition else None
+                ),
+                "native_process_acquisition_id": (
+                    process_acquisition.acquisition_id if process_acquisition else None
+                ),
+                "native_evidence_status": "CAPTURED_UNQUALIFIED" if process_acquisition else "UNATTESTED",
                 "duplicate_content_status": "unique",
                 "quality": {
                     "cloud_cover": cloud_cover / 100.0 if cloud_cover > 1.0 else cloud_cover,
@@ -938,10 +962,20 @@ def fetch_asmae_s2_scene_stack(
                 provider_orbit_pass=binding.get("provider_orbit_pass"),
                 content_hash=content_hash,
                 process_request_hash=process_request_hash,
+                native_catalog_acquisition_id=(
+                    catalog_acquisition.acquisition_id if catalog_acquisition else None
+                ),
+                native_process_acquisition_id=(
+                    process_acquisition.acquisition_id if process_acquisition else None
+                ),
+                native_evidence_status="CAPTURED_UNQUALIFIED" if process_acquisition else "UNATTESTED",
                 provider_response_hash=provider_response_hash,
                 product_binding=binding["product_binding"],
                 binding_proof=binding["proof"],
             ))
+        except NativeEvidenceError:
+            logger.error("Native S2 acquisition evidence capture failed closed")
+            return _unavailable("acquisition_evidence", "untrusted_native_capture", date_range)
         except Exception:
             logger.exception("Failed to fetch/process S2 catalog selection %s", provider_product_id)
             if local_scenes:
