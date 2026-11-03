@@ -183,3 +183,26 @@ def test_partial_native_cache_references_fail_closed():
         restore_cached_native_references(
             {"native_catalog_acquisition_id": "a" * 64}, sensor="S2",
         )
+
+
+@pytest.mark.parametrize("sensor", ["S1", "S2"])
+def test_missing_native_manifest_blocks_cold_scene(monkeypatch, tmp_path, sensor):
+    evidence_root = tmp_path / "evidence"
+    product = sensor + "-EXACT-CACHE-ITEM"
+    catalog, process, store = _capture_pair(evidence_root, sensor, product)
+    store._path("manifests", process.acquisition_id).unlink()
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", str(evidence_root))
+    result = _fetch_cold(monkeypatch, tmp_path, sensor,
+                         _metadata(sensor, product, catalog, process))
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "invalid_native_cache_evidence"
+
+
+def test_verified_cold_serialization_can_be_revalidated_again(monkeypatch, tmp_path):
+    catalog, process, _ = _capture_pair(tmp_path, "S2", "S2-REAL")
+    meta = _metadata("S2", "S2-REAL", catalog, process)
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", str(tmp_path))
+    ids = restore_cached_native_references(meta, sensor="S2")
+    assert ids[2] == "PROVENANCE_VERIFIED_CACHE"
+    meta["native_evidence_status"] = ids[2]
+    assert restore_cached_native_references(meta, sensor="S2") == ids
