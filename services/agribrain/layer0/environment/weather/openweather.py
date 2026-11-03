@@ -131,7 +131,8 @@ def _current_to_daily(current: Dict[str, Any]) -> Dict[str, Any]:
         "wind_speed": wind.get("speed"),
         "wind_gust": wind.get("gust"),
         "clouds": clouds.get("all"),
-        "rain": rain.get("1h", rain.get("3h", 0)),
+        # Hourly current rain is NOT a valid daily precipitation total.
+        "rain": None,
     }
 
 
