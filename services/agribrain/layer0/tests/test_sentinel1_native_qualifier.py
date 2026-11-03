@@ -436,3 +436,28 @@ def test_terrain_gamma_with_orthorectification_remains_non_authorizing(tmp_path)
     assert outcome.status == S1ScreenStatus.SCREENED_NATIVE_SAR_STRUCTURE
     assert outcome.eligible_for_state_grant is False
     assert outcome.diagnostic_metrics["incidence_angle_proven"] is False
+
+
+def test_catalog_and_process_footprints_must_refer_to_same_region(tmp_path):
+    catalog=deepcopy(CATALOG_REQUEST)
+    # The scene's pixels can match the Process response yet derive from an
+    # unrelated Catalog region unless both original requests are compared.
+    scene,store,catalog_record,process,*_=_case(tmp_path)
+    # Replacing the stored Catalog wire body after capture must never work.
+    record=json.loads(store._path("request_replays",catalog_record.acquisition_id).read_bytes())
+    store._path("request_wire",record["wire_request_sha256"]).write_bytes(
+        json.dumps({**catalog,"bbox":[2.,2.,3.,3.]}).encode()
+    )
+    assert _screen(scene,store).status == S1ScreenStatus.REJECTED
+
+
+@pytest.mark.parametrize("field,value,reason",[
+    ("orbitDirection","DESCENDING","sar_requested_orbit_conflicts_with_catalog"),
+    ("polarization","SH","sar_requested_polarization_conflicts_with_catalog"),
+    ("acquisitionMode","EW","sar_requested_mode_conflicts_with_catalog"),
+])
+def test_original_process_filter_cannot_override_catalog_track(tmp_path,field,value,reason):
+    request=deepcopy(PROCESS_REQUEST)
+    request["input"]["data"][0]["dataFilter"][field]=value
+    scene,store,*_=_case(tmp_path,process_request=request)
+    assert _screen(scene,store).reason==reason
