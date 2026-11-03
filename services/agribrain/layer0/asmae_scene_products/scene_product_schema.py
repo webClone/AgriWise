@@ -55,7 +55,7 @@ class SceneProduct:
     independent_observation_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "scene_id": self.scene_id,
             "sensor": self.sensor,
             "acquisition_datetime": self.acquisition_datetime.isoformat(),
@@ -89,12 +89,18 @@ class SceneProduct:
             "content_hash": self.content_hash,
             "process_request_hash": self.process_request_hash,
             "provider_response_hash": self.provider_response_hash,
-            "native_catalog_acquisition_id": self.native_catalog_acquisition_id,
-            "native_process_acquisition_id": self.native_process_acquisition_id,
-            "native_evidence_status": self.native_evidence_status,
             "product_binding": self.product_binding,
             "binding_proof": self.binding_proof,
             "duplicate_of_content_hash": self.duplicate_of_content_hash,
             "temporal_basis": self.temporal_basis,
             "independent_observation_count": self.independent_observation_count,
         }
+        # Preserve exact legacy scene serialization when no native HTTP
+        # acquisition record exists. No null evidence fields are emitted.
+        if self.native_catalog_acquisition_id or self.native_process_acquisition_id:
+            result.update({
+                "native_catalog_acquisition_id": self.native_catalog_acquisition_id,
+                "native_process_acquisition_id": self.native_process_acquisition_id,
+                "native_evidence_status": self.native_evidence_status,
+            })
+        return result
