@@ -43,6 +43,11 @@ class SceneProduct:
     content_hash: Optional[str] = None
     process_request_hash: Optional[str] = None
     provider_response_hash: Optional[str] = None
+    # B2B-01 acquisition TRACE ONLY. The underlying native response is
+    # unqualified and cannot mint a state-input receipt from this metadata.
+    native_catalog_acquisition_id: Optional[str] = None
+    native_process_acquisition_id: Optional[str] = None
+    native_evidence_status: str = "UNATTESTED"
     product_binding: str = "unknown"
     binding_proof: Dict[str, Any] = field(default_factory=dict)
     duplicate_of_content_hash: Optional[str] = None
@@ -84,6 +89,9 @@ class SceneProduct:
             "content_hash": self.content_hash,
             "process_request_hash": self.process_request_hash,
             "provider_response_hash": self.provider_response_hash,
+            "native_catalog_acquisition_id": self.native_catalog_acquisition_id,
+            "native_process_acquisition_id": self.native_process_acquisition_id,
+            "native_evidence_status": self.native_evidence_status,
             "product_binding": self.product_binding,
             "binding_proof": self.binding_proof,
             "duplicate_of_content_hash": self.duplicate_of_content_hash,
