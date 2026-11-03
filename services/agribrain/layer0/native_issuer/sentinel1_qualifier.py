@@ -10,6 +10,7 @@ non-authorizing diagnostic pixel-center support, pending MESIA B2B-05.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from io import BytesIO
 from pathlib import Path
@@ -261,20 +262,22 @@ def _verify_orbit(
     for tile in tiles:
         if not isinstance(tile, dict):
             return None
-        if (
-            _orbit_number(tile.get("relativeOrbitNumber"), relative=True) != relative
-            or _orbit_pass(tile.get("orbitDirection")) != direction
-        ):
+        tile_relative = _orbit_number(tile.get("relativeOrbitNumber"), relative=True)
+        tile_direction = _orbit_pass(tile.get("orbitDirection"))
+        if tile_relative is None or tile_direction is None:
             return None
+        if tile_relative != relative or tile_direction != direction:
+            raise NativeEvidenceError("sar_catalog_process_orbit_conflict")
         reported_absolute = tile.get("orbitId")
         if reported_absolute is not None and absolute is not None:
             if _orbit_number(reported_absolute, relative=False) != absolute:
-                return None
-    if (
-        _orbit_number(scene.provider_relative_orbit, relative=True) != relative
-        or _orbit_pass(scene.provider_orbit_pass) != direction
-    ):
+                raise NativeEvidenceError("sar_catalog_process_absolute_orbit_conflict")
+    scene_relative = _orbit_number(scene.provider_relative_orbit, relative=True)
+    scene_direction = _orbit_pass(scene.provider_orbit_pass)
+    if scene_relative is None or scene_direction is None:
         return None
+    if scene_relative != relative or scene_direction != direction:
+        raise NativeEvidenceError("sar_scene_orbit_conflicts_with_captured_provider")
     return relative, direction, absolute
 
 
@@ -344,9 +347,7 @@ def screen_sentinel1_native(
         if (
             scene.acquisition_datetime.tzinfo is None
             or scene.acquisition_datetime.utcoffset() is None
-            or scene.acquisition_datetime.astimezone(
-                __import__("datetime").timezone.utc
-            ) != item_time
+            or scene.acquisition_datetime.astimezone(timezone.utc) != item_time
         ):
             return _reject("sar_acquisition_timestamp_mismatch")
         if _time(catalog.retrieved_at) < item_time or _time(process.retrieved_at) < item_time:
@@ -354,14 +355,15 @@ def screen_sentinel1_native(
         # Only truly documented dual-pol products are eligible even for
         # a structural screen; absent/ambiguous STAC SAR metadata defers.
         polarizations = properties.get("sar:polarizations")
+        if polarizations is None or properties.get("sar:product_type") is None:
+            return _defer("native_sar_polarization_product_proof_missing")
         if (
             not isinstance(polarizations, list)
             or len(polarizations) != 2
             or set(polarizations) != {"VV","VH"}
             or properties.get("sar:product_type") != "GRD"
         ):
-            return _defer("native_sar_polarization_product_proof_missing")
-        orbit = _verify_orbit(properties, {}, scene)  # verified after TAR parse
+            return _reject("sar_product_or_polarization_conflicts_with_required_dual_pol_grd")
         bands, userdata = _read_sar_process_tar(process_bytes)
         binding = verify_exact_product_binding(
             scene.provider_product_id, userdata, "S1",
