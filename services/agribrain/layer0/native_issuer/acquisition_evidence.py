@@ -384,7 +384,9 @@ def restore_cached_native_references(
         or process.provider_product_id != metadata.get("provider_product_id")
         or process.response_sha256 != metadata.get("provider_response_hash")
         or process.request_sha256 != metadata.get("process_request_hash")
-        or metadata.get("native_evidence_status") != "CAPTURED_UNQUALIFIED"
+        or metadata.get("native_evidence_status") not in (
+            "CAPTURED_UNQUALIFIED", "PROVENANCE_VERIFIED_CACHE",
+        )
     ):
         raise NativeEvidenceError("cached scene references mismatch captured provider evidence")
     return catalog_id, process_id, "PROVENANCE_VERIFIED_CACHE"
