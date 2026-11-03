@@ -280,7 +280,10 @@ def test_scene_geometry_grid_fabrication_rejects(tmp_path):
     scene,store,*_=_native_scene(tmp_path)
     scene.transform=(0.,0.3,0.,1.,0.,-0.25)
     result=_screen(scene,store)
-    assert result.status is S2ScreenStatus.DEFERRED_SPATIAL_AUTHORITY
+    # The preserved original HTTP Process request disproves this affine
+    # immediately. A demonstrated contradiction must REJECT, not DEFER.
+    assert result.status is S2ScreenStatus.REJECTED
+    assert result.reason == "captured_process_request_grid_or_time_mismatch"
 
 
 def test_foreign_plot_footprint_outside_scene_rejects(tmp_path):
