@@ -298,3 +298,50 @@ def test_test_override_cannot_be_screened_as_native(tmp_path):
     scene,store,*_=_native_scene(tmp_path)
     scene.test_override=True
     assert _screen(scene,store).reason=="missing_native_scene_evidence"
+
+
+def test_zero_red_and_zero_nir_is_undefined_ndvi_not_genuine_zero(tmp_path):
+    scene,store,*_=_native_scene(tmp_path,b04_value=0.0,b08_value=0.0)
+    assert _screen(scene,store).reason == "insufficient_masked_plot_pixel_quality"
+
+
+def test_unsigned_claims_and_production_usable_flags_cannot_bypass_qa(tmp_path):
+    scene,store,*_=_native_scene(tmp_path,scl_value=9)
+    scene.production_usable = True
+    scene.real_provider_product = True
+    scene.diagnostic_only = False
+    scene.usable_for_advisory = True
+    assert _screen(scene,store).status is S2ScreenStatus.REJECTED
+
+
+def test_wrong_optical_band_units_reject_even_when_pixels_are_valid(tmp_path):
+    scene,store,*_=_native_scene(tmp_path)
+    scene.band_units["B08"]="derived_feature"
+    assert _screen(scene,store).reason == "unqualified_reflectance_units"
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1, "0.7", float("nan"), 1.2])
+def test_unvalidated_qa_policy_rejected(tmp_path,bad):
+    scene,store,*_=_native_scene(tmp_path)
+    assert _screen(scene,store).status is S2ScreenStatus.SCREENED_NATIVE_QA
+    result=screen_sentinel2_native(
+        scene=scene,evidence_store=store,trusted_plot=POLYGON,
+        captured_process_request=PROCESS_REQUEST,min_valid_fraction=bad,
+    )
+    assert result.status is S2ScreenStatus.REJECTED
+
+
+def test_scene_acquisition_in_the_future_relative_to_capture_denies(tmp_path):
+    scene,store,*_=_native_scene(tmp_path)
+    scene.acquisition_datetime=datetime(2026,11,4,12,tzinfo=timezone.utc)
+    assert _screen(scene,store).status is S2ScreenStatus.REJECTED
+
+
+def test_accepted_screen_does_not_claim_calibrated_sigma_or_mesia(tmp_path):
+    scene,store,*_=_native_scene(tmp_path)
+    result=_screen(scene,store)
+    assert result.status is S2ScreenStatus.SCREENED_NATIVE_QA
+    assert result.diagnostic_metrics["screened_variables"] == ["ndvi"]
+    assert result.diagnostic_metrics["sigma_calibrated"] is False
+    assert result.diagnostic_metrics["support_method"] == "EPSG4326_PIXEL_CENTER_SAMPLE_ONLY"
+    assert result.eligible_for_state_grant is False
