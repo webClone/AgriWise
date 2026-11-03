@@ -121,6 +121,11 @@ class Layer0Runner:
         Returns:
             Layer0RunnerOutput holding all source packages, state, packets, and audits.
         """
+        # A live production/scientific run cannot substitute a client-
+        # supplied or historical replay timestamp for trusted receipt time.
+        # Historical replays need a separately authenticated replay contract.
+        if signed_inputs_required():
+            run_timestamp = datetime.now(timezone.utc)
         plot_id = run_input.plot_id
         geometry_hash = run_input.geometry_hash
         geometry_version = run_input.geometry_version
