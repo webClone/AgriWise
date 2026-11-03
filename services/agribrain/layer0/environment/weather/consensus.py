@@ -47,7 +47,11 @@ def build_daily_consensus(
     # Source-role labels are declared dataset semantics, not evidence of an
     # authenticated provider or a measured station.
     records = list(records_by_provider.items())
-    kinds = {getattr(rec, "data_kind", None) for _, rec in records}
+    kinds = {
+        kind if isinstance(kind, str) else "<invalid>"
+        for _, rec in records
+        for kind in (getattr(rec, "data_kind", None),)
+    }
     roles = {role_for_data_kind(getattr(rec, "data_kind", None))
              for _, rec in records}
     invalid = any(
