@@ -29,7 +29,7 @@ def build_weather_timeseries(
     # Count historical vs forecast
     historical_dates = {
         r.date for r in records
-        if r.data_kind in ("current", "historical_reanalysis")
+        if r.data_kind == "historical_reanalysis"
     }
     forecast_dates = {
         r.date for r in records
