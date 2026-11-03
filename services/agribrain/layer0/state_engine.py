@@ -305,6 +305,13 @@ class Layer0StateEngine:
         """
         from services.agribrain.layer0.observation_packet import ObservationSource, ObservationType
 
+        # Mandatory live admission has its own trusted UTC run timestamp.
+        # Caller-controlled historical timestamps cannot backdate receipt
+        # validity or state publication history. Explicit trusted replay
+        # requires a future separately authorized pathway.
+        if signed_inputs_required():
+            run_timestamp = datetime.now(timezone.utc)
+
         # Geometry scope must come from the *caller* rather than borrowing
         # identity from an arbitrary packet. Missing caller scope remains
         # explicitly unbound; positive scope/receipt enforcement is a
