@@ -38,7 +38,7 @@ Do not substitute older status summaries' variant symbol names for these actual 
 - `AKALORIS_LAYER0_REVOCATION_SNAPSHOT_PATH`: trusted server-managed JSON file re-read on each check. Exact schema `revision`, `issued_at`, `expires_at`, `key_statuses`. The deployment must restrict who can write/replace this file.
 - `AKALORIS_LAYER0_REQUIRE_LIVE_REVOCATION=true`: opt-in mandatory enforcement. In a signed-input deployment this causes startup/packet rejection when no trusted live revocation gate is provisioned. False/missing keeps backwards-compatible, explicitly **UNMANAGED**, issuance status and is **not** proof of revocation qualification.
 
-The per-run state entrypoint revalidates every materially admitted signed observation/complete weather receipt against the latest revocation snapshot before prediction. Any invalidation or snapshot revision change aborts the state build. This reduces, but cannot eliminate, the time-of-check/use gap until state and publication are transacted with the authoritative revocation ledger.
+The per-run state entrypoint revalidates every materially admitted signed observation/complete weather receipt against the latest revocation snapshot **both before and after** state computation, before releasing its output package. Any invalidation or snapshot revision change aborts output release. This reduces, but cannot eliminate, the time-of-check/use gap until state and publication are transacted with the authoritative revocation ledger.
 
 The state input manifest includes the accepted revocation revision/digest when configured, and the output hash binds the resulting input root. The health audit labels `issuer_revocation_mode=TRUSTED_LIVE_SNAPSHOT` or `UNMANAGED`. **Neither label grants publication authority.**
 
@@ -68,7 +68,7 @@ A new key ID may be provisioned alongside an old active key. After the new key i
 - forged zone ID/hash, tampered payload, cross-purpose weather denial
 - wrong/unlisted zone at canonical state run and correctly admitted selected zone
 - live file-backed policy change without packet/client control
-- mid-run revocation abort before any state estimation
+- revocation before state estimation AND revocation during computation blocking output release
 - mandatory live revocation with no trusted configuration.
 
 Required exact new-head execution:
