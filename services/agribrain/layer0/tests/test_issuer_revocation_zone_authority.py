@@ -388,3 +388,47 @@ def test_key_rotation_accepts_new_id_after_retiring_previous_id():
     )
     assert not check(v, p, old_receipt)[0]
     assert check(v, p, new_grant)[0]
+
+
+def test_revocation_during_state_computation_prevents_output_release(monkeypatch):
+    from services.agribrain.layer0.state_engine import Layer0StateEngine
+    from services.agribrain.layer0.production_admission import Layer0AdmissionRequiredError
+    p = packet()
+    calls = {"policy": 0, "state_computed": False}
+    def provider():
+        calls["policy"] += 1
+        return snapshot(
+            1 if calls["policy"] <= 2 else 2,
+            "active" if calls["policy"] <= 2 else "revoked",
+        )
+    engine = Layer0StateEngine(
+        positive_admission_verifier=verifier(
+            policy=TrustedRevocationGate(provider)
+        )
+    )
+    class Result:
+        all_packets = []
+        health_report = {}
+        provenance = {}
+        input_hash = ""
+        output_hash = ""
+        def _generate_output_hash(self):
+            return "unpublished"
+
+    def compute_state(**kwargs):
+        calls["state_computed"] = True
+        return Result()
+
+    monkeypatch.setattr(engine, "run", compute_state)
+    with pytest.raises(Layer0AdmissionRequiredError, match="revocation"):
+        engine.run_from_packets(
+            plot_id="plot-A", packets=[p],
+            start_date="2026-11-03", end_date="2026-11-03",
+            geometry_hash="geom-A", geometry_version=2,
+            run_timestamp=RUN,
+            positive_admission_receipts={
+                observation_packet_digest(p): grant(p)
+            },
+        )
+    assert calls["state_computed"]
+    assert calls["policy"] >= 3
