@@ -358,8 +358,13 @@ def capture_backend_provider_response(
         if required:
             raise NativeEvidenceError("native acquisition evidence required but no trusted root is configured")
         return None
-    return NativeEvidenceStore(root).capture_http_response(
-        response=response, endpoint=endpoint, request_parameters=request_parameters,
-        sensor=sensor, provider_product_id=provider_product_id,
-        credential_reference="sentinel_hub_backend_oauth_client",
-    )
+    try:
+        return NativeEvidenceStore(root).capture_http_response(
+            response=response, endpoint=endpoint, request_parameters=request_parameters,
+            sensor=sensor, provider_product_id=provider_product_id,
+            credential_reference="sentinel_hub_backend_oauth_client",
+        )
+    except OSError:
+        # Backend permissions, disk-full or fsync failures are source
+        # integrity failures, not permission to use unverified cached data.
+        raise NativeEvidenceError("trusted native evidence storage unavailable") from None
