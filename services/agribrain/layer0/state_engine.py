@@ -20,6 +20,9 @@ import math
 
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
 from services.agribrain.layer0.observation_packet import DataStatus
+from services.agribrain.layer0.production_admission import (
+    Layer0AdmissionRequiredError, require_trusted_verifier, signed_inputs_required,
+)
 from services.agribrain.layer0.positive_observation_admission import (
     observation_packet_digest, PositiveObservationAdmissionVerifier,
     WEATHER_GRANT_PURPOSE,
@@ -65,10 +68,11 @@ class Layer0StateEngine:
         self,
         positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
     ):
-        # Trusted backend must supply the verifier and issuer keyring; no keys
-        # may be derived from packet claims or user-controlled JSON. Without
-        # it this remains an explicitly LEGACY_UNVERIFIED scientific pathway.
+        # Production/staging cannot silently opt out of cryptographic
+        # input admission; explicit development mode remains legacy-compatible.
+        require_trusted_verifier(positive_admission_verifier)
         self._positive_observation_admission_verifier = positive_admission_verifier
+        self.__packet_run_capability = object()
         self._has_kalman = False
         try:
             from services.agribrain.layer0.kalman_engine import (
@@ -101,6 +105,7 @@ class Layer0StateEngine:
         run_timestamp: Optional[datetime] = None,
         geometry_hash: str = "",
         geometry_version: Optional[int] = None,
+        _packet_run_capability: Any = None,
     ) -> Layer0StatePackage:
         """Run daily state assimilation and return a Layer0StatePackage.
 
@@ -119,6 +124,14 @@ class Layer0StateEngine:
             Layer0StatePackage with daily_state, state_uncertainty, provenance,
             validation conflicts, and health report.
         """
+        # Direct prebuilt KalmanObservation/weather dictionaries do not
+        # carry independently verified packet receipts. For scientific
+        # production use, only run_from_packets may provide the private
+        # per-instance capability after it gates each input.
+        if signed_inputs_required() and _packet_run_capability is not self.__packet_run_capability:
+            raise Layer0AdmissionRequiredError(
+                "Direct Layer0StateEngine.run inputs bypass signed packet admission"
+            )
         if not self._has_kalman:
             return Layer0StatePackage(
                 plot_id=plot_id,
@@ -326,10 +339,19 @@ class Layer0StateEngine:
             if receipt is None:
                 excluded_counts["skipped_missing_positive_source_grant"] += 1
                 return False, None
+            # A caller-controlled or historical replay timestamp is NOT
+            # a live security clock. Mandatory mode always verifies receipt
+            # expiry and issuance against the backend's trusted UTC clock.
+            # Replay authorization must use a separate audited capability.
+            verification_now = (
+                datetime.now(timezone.utc)
+                if signed_inputs_required()
+                else (run_timestamp or datetime.now(timezone.utc))
+            )
             valid, _reason = self._positive_observation_admission_verifier.verify(
                 receipt, pkt, plot_id=plot_id, geometry_hash=geometry_hash,
                 geometry_version=geometry_version,
-                run_timestamp=run_timestamp or datetime.now(timezone.utc),
+                run_timestamp=verification_now,
                 purpose=purpose,
             )
             if not valid:
@@ -543,7 +565,9 @@ class Layer0StateEngine:
                     if signed_packet_digest is not None:
                         signed_admitted_observation_digests.add(signed_packet_digest)
 
-        # Build the state package through the lower-level run()
+        # Build state using the private capability granted only by the
+        # packet entrypoint; direct scalar state calls remain unavailable
+        # under production policy.
         state_pkg = self.run(
             plot_id=plot_id,
             start_date=start_date,
@@ -556,6 +580,10 @@ class Layer0StateEngine:
             run_timestamp=run_timestamp,
             geometry_hash=geometry_hash,
             geometry_version=geometry_version,
+            **(
+                {"_packet_run_capability": self.__packet_run_capability}
+                if signed_inputs_required() else {}
+            ),
         )
 
         # Attach the source packets to the state package
@@ -566,9 +594,13 @@ class Layer0StateEngine:
             state_pkg.health_report = {}
         state_pkg.health_report["state_packets_excluded_by_status"] = excluded_counts
         state_pkg.health_report["positive_source_admission_mode"] = (
-            "SIGNED_STATE_INPUTS"
-            if self._positive_observation_admission_verifier is not None
-            else "LEGACY_UNVERIFIED"
+            "MANDATORY_SIGNED_STATE_INPUTS"
+            if signed_inputs_required()
+            else (
+                "SIGNED_STATE_INPUTS"
+                if self._positive_observation_admission_verifier is not None
+                else "LEGACY_UNVERIFIED"
+            )
         )
         state_pkg.health_report["positive_admitted_observation_digests"] = sorted(
             signed_admitted_observation_digests
