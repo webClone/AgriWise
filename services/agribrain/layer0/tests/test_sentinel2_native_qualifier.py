@@ -66,7 +66,10 @@ PROCESS_REQUEST = {
         "width":4, "height":4,
         "responses": [
             {"identifier": name, "format": {"type":"image/tiff"}}
-            for name in ("B04","B08","SCL","dataMask")
+            for name in (
+                "B02", "B03", "B04", "B05", "B06", "B07",
+                "B08", "B8A", "B11", "B12", "SCL", "dataMask",
+            )
         ] + [{"identifier": "userdata", "format": {"type":"application/json"}}],
     },
     "evalscript": render_native_process_operator("S2", ITEM),
