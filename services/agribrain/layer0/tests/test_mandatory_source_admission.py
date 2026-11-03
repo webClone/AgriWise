@@ -114,6 +114,8 @@ def test_production_and_staging_cannot_disable_signed_policy(monkeypatch):
 
 def test_research_policy_can_opt_in_without_promoting_default(monkeypatch):
     monkeypatch.setenv("NODE_ENV", "test")
+    for key in ("ENVIRONMENT", "ENV", "APP_ENV"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", raising=False)
     assert signed_inputs_required() is False
     monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
