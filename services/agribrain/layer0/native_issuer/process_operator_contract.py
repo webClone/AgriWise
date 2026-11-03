@@ -19,7 +19,7 @@ S1_PROCESS_OPERATOR_TEMPLATE = """
         return String(value || "").toUpperCase().replace(".SAFE", "").replace(".ZIP", "");
     }
     function tileProductId(tile) {
-        return tile.sentinel1ProductId || tile.productId || tile.id || "";
+        return tile.sentinel1ProductId || tile.productId || "";
     }
     function setup() {
         return {
@@ -83,7 +83,7 @@ S2_PROCESS_OPERATOR_TEMPLATE = """
         return String(value || "").toUpperCase().replace(".SAFE", "").replace(".ZIP", "");
     }
     function tileProductId(tile) {
-        return tile.sentinel2ProductId || tile.productId || tile.id || "";
+        return tile.sentinel2ProductId || tile.productId || "";
     }
     function setup() {
         return {
