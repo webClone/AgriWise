@@ -59,7 +59,7 @@ PROCESS_REQUEST={
                     "to":"2026-11-02T12:05:00Z",
                 },
             },
-            "processing":{"backCoeff":"SIGMA0_ELLIPSOID"},
+            "processing":{"backCoeff":"GAMMA0_ELLIPSOID"},
         }],
     },
     "output":{
@@ -459,3 +459,20 @@ def test_original_process_filter_cannot_override_catalog_track(tmp_path,field,va
     request["input"]["data"][0]["dataFilter"][field]=value
     scene,store,*_=_case(tmp_path,process_request=request)
     assert _screen(scene,store).reason==reason
+
+
+def test_s1_live_request_builder_matches_documented_capture_contract():
+    from services.agribrain.layer0.asmae_scene_products.s1_real_scene_product_fetcher import (
+        _build_native_s1_process_request,
+    )
+    actual=_build_native_s1_process_request(
+        bbox=[0.,0.,1.,1.],width=4,height=4,
+        start_utc="2026-11-02T11:55:00Z",
+        end_utc="2026-11-02T12:05:00Z",
+        evalscript=PROCESS_REQUEST["evalscript"],
+    )
+    assert actual == PROCESS_REQUEST
+    data=actual["input"]["data"][0]
+    assert "timeRange" not in data
+    assert data["dataFilter"]["timeRange"]["from"].endswith("Z")
+    assert data["processing"]["backCoeff"]=="GAMMA0_ELLIPSOID"
