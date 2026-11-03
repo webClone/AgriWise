@@ -33,7 +33,7 @@ def build_weather_timeseries(
     }
     forecast_dates = {
         r.date for r in records
-        if r.data_kind == "forecast"
+        if r.data_kind in ("forecast", "historical_forecast")
     }
 
     historical = len(historical_dates)
