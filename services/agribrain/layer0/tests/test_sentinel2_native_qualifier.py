@@ -120,6 +120,7 @@ def _native_scene(
     if remove_band:
         del bands[remove_band]
     userdata={"userData": {
+        "expectedProductId": ITEM,
         "unidentifiedTileCount": unidentified_tile_count,
         "tiles": (
             [{"sentinel2ProductId":returned_product}]
