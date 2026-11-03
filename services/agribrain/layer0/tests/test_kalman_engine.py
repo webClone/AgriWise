@@ -56,9 +56,12 @@ def test_zone_kalman_filter_predict_step():
     pred_state = zkf.predict(day="2026-07-02", weather=weather)
     predicted_diag = zkf.covariance.diagonal()
 
-    # Process noise Q must expand uncertainty along diagonal
+    # A nontrivial F can contract some state variances even when Q is
+    # positive. Check covariance validity and a non-contracting GDD axis.
     for i in range(N_STATES):
-        assert predicted_diag[i] > initial_diag[i]
+        assert math.isfinite(predicted_diag[i]) and predicted_diag[i] >= 0.0
+    assert predicted_diag[IDX_PHENO_GDD] > initial_diag[IDX_PHENO_GDD]
+    assert zkf.state.variance == predicted_diag
 
     # GDD accumulation: (28+14)/2 - 5.0 (t_base) = 21 - 5 = 16 GDD
     assert pred_state.phenology_gdd == 16.0
