@@ -31,9 +31,10 @@ KIND_TO_ROLE = {
 
 # A retrospective model forecast, future model forecast and climatological
 # baseline must not be represented as past/reanalysis weather forcing.
+# A current provider snapshot is NOT an independently verified daily
+# measurement or a daily precipitation/radiation aggregate.
 HISTORICAL_CONTEXT_ROLES = frozenset({
     WeatherSourceRole.REANALYSIS_MODEL,
-    WeatherSourceRole.CURRENT_PROVIDER_CONTEXT,
 })
 FORECAST_ROLES = frozenset({
     WeatherSourceRole.FORECAST_MODEL,
