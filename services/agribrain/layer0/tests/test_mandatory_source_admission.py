@@ -192,8 +192,11 @@ def test_strict_packet_entry_accepts_only_signed_current_input(monkeypatch):
 
 def test_historical_run_timestamp_cannot_resurrect_expired_signature(monkeypatch):
     _strict(monkeypatch)
-    packet = _packet()
+    # Construct an otherwise valid historical receipt: acquisition predates
+    # issuance, the replay timestamp falls inside its signed lifetime, and
+    # only the trusted current wall clock determines that it has expired.
     now = datetime.now(timezone.utc)
+    packet = _packet(now - timedelta(days=5))
     issued = now - timedelta(days=4)
     expiry = now - timedelta(days=3)
     old_replay_time = issued + timedelta(hours=1)
