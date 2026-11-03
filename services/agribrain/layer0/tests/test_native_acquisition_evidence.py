@@ -166,13 +166,16 @@ def test_naive_retrieval_time_is_rejected(tmp_path):
         capture(NativeEvidenceStore(tmp_path), retrieved_at=datetime(2026, 11, 3))
 
 
-def test_empty_or_oversized_response_fails_closed(tmp_path):
+def test_empty_or_oversized_response_fails_closed(tmp_path, monkeypatch):
+    import services.agribrain.layer0.native_issuer.acquisition_evidence as evidence
     store = NativeEvidenceStore(tmp_path)
     with pytest.raises(NativeEvidenceError):
         capture(store, response=response(body=b""))
-    # No need to allocate hundreds of MiB for the boundary test; use the
-    # allowed-size constant only as a precise contract assertion.
     assert MAX_RESPONSE_BYTES == 256 * 1024 * 1024
+    # Exercise the very same size guard without allocating a 256 MiB fixture.
+    monkeypatch.setattr(evidence, "MAX_RESPONSE_BYTES", 4)
+    with pytest.raises(NativeEvidenceError, match="oversized"):
+        capture(store, response=response(body=b"012345"))
 
 
 def test_backend_adapter_absent_root_is_unattested_not_live(monkeypatch):
