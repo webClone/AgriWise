@@ -84,6 +84,15 @@ def _json_bytes(value: Any) -> bytes:
                       allow_nan=False, ensure_ascii=False).encode("utf-8")
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise NativeEvidenceError("duplicate JSON request or manifest field")
+        result[key] = value
+    return result
+
+
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -231,7 +240,9 @@ class NativeEvidenceStore:
         if not isinstance(prepared_body, bytes) or len(prepared_body) > 1024 * 1024:
             raise NativeEvidenceError("missing or oversized prepared provider request")
         try:
-            transmitted = _safe_request(json.loads(prepared_body))
+            transmitted = _safe_request(json.loads(
+                prepared_body, object_pairs_hook=_reject_duplicate_keys
+            ))
             if _json_bytes(transmitted) != _json_bytes(safe_parameters):
                 raise NativeEvidenceError("prepared provider request differs from acquisition claim")
         except (ValueError, TypeError, UnicodeDecodeError):
@@ -282,7 +293,9 @@ class NativeEvidenceStore:
         try:
             if manifest_path.is_symlink():
                 raise NativeEvidenceError("symlink evidence is not admissible")
-            material = json.loads(manifest_path.read_bytes())
+            material = json.loads(
+                manifest_path.read_bytes(), object_pairs_hook=_reject_duplicate_keys
+            )
             if not isinstance(material, dict) or material.get("domain") != EVIDENCE_DOMAIN:
                 raise NativeEvidenceError("invalid native evidence manifest")
             if set(material) != set(NativeAcquisitionReceipt(
