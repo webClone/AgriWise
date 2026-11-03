@@ -45,7 +45,9 @@ _MAX_TIFF_PIXELS = 2_000_000
 _MAX_PIXEL_CENTER_SUPPORT = 1024 * 1024
 _MAX_POLYGON_VERTICES = 256
 _MIN_VALID_FRACTION = 0.70
-_ACCEPTED_CALIBRATIONS = frozenset(("SIGMA0_ELLIPSOID", "SIGMA0_TERRAIN"))
+_ACCEPTED_CALIBRATIONS = frozenset((
+    "SIGMA0_ELLIPSOID", "GAMMA0_ELLIPSOID", "GAMMA0_TERRAIN",
+))
 
 
 class S1ScreenStatus(str, Enum):
@@ -191,7 +193,11 @@ def _check_request(
             filters = src.get("dataFilter", {})
             if filters.get("mosaickingOrder") != "mostRecent":
                 return False
-            start, end = src["timeRange"]["from"], src["timeRange"]["to"]
+            if "timeRange" in src:
+                # Existing legacy fetcher currently puts timeRange here;
+                # Sentinel Hub's documented Process API requires dataFilter.
+                return False
+            start, end = filters["timeRange"]["from"], filters["timeRange"]["to"]
             bbox = request["input"]["bounds"]["bbox"]
             crs = request["input"]["bounds"]["properties"]["crs"]
             out = request["output"]
@@ -406,6 +412,10 @@ def screen_sentinel1_native(
         coefficient = processing.get("backCoeff")
         if coefficient not in _ACCEPTED_CALIBRATIONS:
             return _defer("sar_backscatter_calibration_not_proven")
+        if coefficient == "GAMMA0_TERRAIN" and processing.get("orthorectify") not in (
+            True, "true",
+        ):
+            return _reject("sar_terrain_gamma_requires_orthorectification")
         if (
             any(a.shape != (scene.height,scene.width) for a in bands.values())
             or type(scene.height) is not int or type(scene.width) is not int
