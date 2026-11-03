@@ -476,3 +476,9 @@ def test_s1_live_request_builder_matches_documented_capture_contract():
     assert "timeRange" not in data
     assert data["dataFilter"]["timeRange"]["from"].endswith("Z")
     assert data["processing"]["backCoeff"]=="GAMMA0_ELLIPSOID"
+
+
+def test_stored_absolute_orbit_cannot_contradict_captured_catalog(tmp_path):
+    scene,store,*_=_case(tmp_path)
+    scene.provider_absolute_orbit=12346
+    assert _screen(scene,store).reason=="sar_scene_absolute_orbit_conflict"
