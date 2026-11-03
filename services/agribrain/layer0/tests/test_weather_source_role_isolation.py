@@ -161,7 +161,7 @@ def test_current_only_is_context_not_verified_station():
 
 
 @pytest.mark.parametrize("invalid",[
-    "MEASURED_STATION","REANALYSIS_MODEL", "FORECAST_MODEL",
+    "MEASURED_STATION","REANALYSIS_MODEL",
 ])
 def test_forged_source_role_cannot_override_declared_forecast_data_kind(invalid):
     forecast=_record(provider="openweather",kind="forecast")
