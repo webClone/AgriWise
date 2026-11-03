@@ -193,7 +193,7 @@ def test_strict_no_receipt_never_grants_kalman_state(monkeypatch):
     assert result.health_report["state_packets_excluded_by_status"][
         "skipped_missing_positive_source_grant"
     ] == 1
-    assert result.health_report["positive_source_admission_mode"] == "SIGNED_SCOPE_BOUND"
+    assert result.health_report["positive_source_admission_mode"] == "SIGNED_STATE_INPUTS"
 
 
 def test_strict_valid_detached_receipt_grants_once(monkeypatch):
@@ -234,3 +234,75 @@ def test_legacy_mode_is_visibly_unverified_and_health_is_in_output_hash(monkeypa
         "skipped_missing_positive_source_grant"
     ] += 1
     assert result.output_hash != result._generate_output_hash()
+
+
+def _weather_packet():
+    return ObservationPacket(
+        source=ObservationSource.WEATHER_STATION,
+        obs_type=ObservationType.TABULAR,
+        timestamp=STAMP, plot_id="plot-A", geometry_hash="geom-A",
+        geometry_version=2, spatial_scope="plot",
+        payload={"temp_min": 11.0, "temp_max": 21.0,
+                 "precipitation": 0.0, "et0": 3.0},
+    )
+
+
+def _weather_run(monkeypatch, receipt):
+    p = _weather_packet()
+    verifier = PositiveObservationAdmissionVerifier({
+        "s2-current": (p.source.value, KEY),
+    })
+    engine = Layer0StateEngine(positive_admission_verifier=verifier)
+    inputs = {}
+
+    def capture_run(**kwargs):
+        inputs.update(kwargs)
+        return _StubState()
+
+    monkeypatch.setattr(engine, "run", capture_run)
+    out = engine.run_from_packets(
+        plot_id="plot-A", packets=[p], start_date=DAY, end_date=DAY,
+        geometry_hash="geom-A", geometry_version=2,
+        run_timestamp=RUN,
+        positive_admission_receipts=(
+            {} if receipt is None else {observation_packet_digest(p): receipt}
+        ),
+    )
+    return out, inputs
+
+
+def test_weather_cannot_change_state_forcing_without_signed_grant(monkeypatch):
+    out, inputs = _weather_run(monkeypatch, None)
+    assert inputs["daily_weather"] == {}
+    assert out.health_report["state_packets_excluded_by_status"][
+        "skipped_missing_positive_source_grant"
+    ] == 1
+
+
+def test_observation_purpose_grant_cannot_authorize_weather(monkeypatch):
+    packet = _weather_packet()
+    out, inputs = _weather_run(monkeypatch, _grant(packet))
+    assert inputs["daily_weather"] == {}
+    assert out.health_report["state_packets_excluded_by_status"][
+        "skipped_invalid_positive_source_grant"
+    ] == 1
+
+
+def test_distinct_signed_weather_purpose_authorizes_exact_forcing(monkeypatch):
+    from services.agribrain.layer0.positive_observation_admission import (
+        WEATHER_GRANT_PURPOSE,
+    )
+    packet = _weather_packet()
+    out, inputs = _weather_run(
+        monkeypatch, _grant(packet, purpose=WEATHER_GRANT_PURPOSE)
+    )
+    assert inputs["daily_weather"][DAY] == {
+        "temp_min": 11.0,
+        "temp_max": 21.0,
+        "precipitation": 0.0,
+        "et0": 3.0,
+    }
+    assert out.health_report["positive_source_admission_mode"] == "SIGNED_STATE_INPUTS"
+    assert out.health_report["positive_admitted_weather_digests"] == [
+        observation_packet_digest(packet)
+    ]
