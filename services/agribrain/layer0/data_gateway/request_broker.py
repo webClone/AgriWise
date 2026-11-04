@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -55,6 +56,12 @@ from services.agribrain.layer0.data_gateway.network_circuit_breaker import (
     ExternalProviderCircuitOpen,
     external_provider_circuit,
 )
+
+from services.agribrain.layer0.spatial_tenant_contract import (
+    AuthenticatedPrincipal, ScopedPlotRequest, SpatialTenantDenied,
+    authorize_plot_scope,
+)
+from services.agribrain.layer0.plot_ownership_store import PlotOwnershipStore
 
 logger = logging.getLogger("agribrain.gateway.broker")
 
@@ -201,7 +208,53 @@ class DataRequestBroker:
         self._storage = StorageManager()
         self._consolidator = RequestConsolidator()
         self._user_engine = UserDataEngine(self._storage)
+        self._plot_ownership_store: Optional[PlotOwnershipStore] = None
+        self._principal_provider: Optional[Callable[[], AuthenticatedPrincipal]] = None
         logger.info("[BROKER] DataRequestBroker initialized")
+
+    def configure_plot_authority(
+        self,
+        store: PlotOwnershipStore,
+        principal_provider: Callable[[], AuthenticatedPrincipal],
+    ) -> None:
+        """Install a trusted datastore and middleware-authenticated identity."""
+        if not callable(getattr(store, "get_active_plot", None)) or not callable(principal_provider):
+            raise TypeError("trusted_plot_authority_provider_required")
+        self._plot_ownership_store = store
+        self._principal_provider = principal_provider
+
+    def _admit_scoped_plot(
+        self, plot_id: str, lat: float, lng: float,
+        plot_scope: Optional[ScopedPlotRequest],
+    ):
+        """Enforce positive plot authorization BEFORE any cache or provider call."""
+        strict = os.getenv("AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE", "").lower() in ("1", "true", "yes")
+        if not strict and plot_scope is None:
+            return None  # Legacy compatibility. NEVER a scoped grant.
+        store = getattr(self, "_plot_ownership_store", None)
+        provider = getattr(self, "_principal_provider", None)
+        if (
+            not isinstance(plot_scope, ScopedPlotRequest)
+            or plot_scope.plot_id != plot_id
+            or not callable(getattr(store, "get_active_plot", None))
+            or not callable(provider)
+        ):
+            raise SpatialTenantDenied("plot_scope_required")
+        try:
+            scope = authorize_plot_scope(provider(), plot_scope, store.get_active_plot)
+            from shapely.geometry import Point, shape
+            import math
+            if (
+                isinstance(lat, bool) or isinstance(lng, bool)
+                or not math.isfinite(float(lat)) or not math.isfinite(float(lng))
+                or not shape(json.loads(scope.geometry_json)).covers(Point(float(lng), float(lat)))
+            ):
+                raise SpatialTenantDenied("request_coordinate_outside_plot")
+            return scope
+        except SpatialTenantDenied:
+            raise
+        except Exception:
+            raise SpatialTenantDenied("plot_scope_denied") from None
 
     # ── Primary API ────────────────────────────────────────────────
 
@@ -213,6 +266,8 @@ class DataRequestBroker:
         lng: float,
         force_refresh: bool = False,
         context: Optional[Dict] = None,
+        *,
+        plot_scope: Optional[ScopedPlotRequest] = None,
         **kwargs,
     ) -> Optional[Any]:
         """Get data for a single source.
@@ -231,6 +286,13 @@ class DataRequestBroker:
         Returns:
             Data dict or None on failure.
         """
+        try:
+            verified_scope = self._admit_scoped_plot(plot_id, lat, lng, plot_scope)
+        except SpatialTenantDenied:
+            logger.warning("[BROKER] Scoped plot admission denied")
+            return None
+        storage_plot_id = "b2b05_" + verified_scope.scope_hash if verified_scope else plot_id
+
         # Get the fetch function from the registry
         fetch_fn = get_fetch_fn(source)
         if fetch_fn is None:
@@ -267,11 +329,18 @@ class DataRequestBroker:
                 except Exception:
                     pass
 
+        if verified_scope is not None:
+            # Tenant, plot and exact geometry epoch isolate both cache tiers
+            # and spatial request consolidation, even at identical coordinates.
+            param_hash = hashlib.sha256(
+                (param_hash + "|" + verified_scope.scope_hash).encode("utf-8")
+            ).hexdigest()
+
         # Build a fetch wrapper that handles consolidation
         call_kwargs = {"plot_id": plot_id, **kwargs}
         if self._consolidator.should_consolidate(source) and not force_refresh:
             consolidated_fn = self._make_consolidated_fetch(
-                source, fetch_fn, lat, lng, plot_id, param_hash=param_hash, **kwargs
+                source, fetch_fn, lat, lng, storage_plot_id, param_hash=param_hash, **kwargs
             )
         else:
             # Direct fetch (fine-resolution or force refresh)
@@ -300,7 +369,7 @@ class DataRequestBroker:
             # prevents a failed provider refresh from erasing the rollback
             # source on disk or making it unreachable in MongoDB.
             retained_evidence = self._storage.get_cached_evidence(
-                source, plot_id, lat, lng, param_hash,
+                source, storage_plot_id, lat, lng, param_hash,
             )
             if retained_evidence is not None:
                 external_provider_circuit.record_cache_available()
@@ -325,7 +394,7 @@ class DataRequestBroker:
         # Use StorageManager for cache-through
         result = self._storage.get_or_fetch(
             source=source,
-            plot_id=plot_id,
+            plot_id=storage_plot_id,
             lat=lat,
             lng=lng,
             fetch_fn=guarded_fetch,
@@ -378,7 +447,7 @@ class DataRequestBroker:
                 if not native_candidate_valid(result):
                     if result is not None and not force_refresh:
                         result = self._storage.get_or_fetch(
-                            source=source, plot_id=plot_id, lat=lat, lng=lng,
+                            source=source, plot_id=storage_plot_id, lat=lat, lng=lng,
                             fetch_fn=guarded_fetch, force_refresh=True,
                             context=context, param_hash=param_hash,
                             candidate_validator=native_candidate_valid,
@@ -497,6 +566,8 @@ class DataRequestBroker:
         force_refresh: bool = False,
         context: Optional[Dict] = None,
         extra_args: Optional[Dict[str, Dict]] = None,
+        *,
+        plot_scope: Optional[ScopedPlotRequest] = None,
     ) -> Dict[str, Any]:
         """Get data for multiple sources in parallel.
 
@@ -527,6 +598,7 @@ class DataRequestBroker:
                     lng=lng,
                     force_refresh=force_refresh,
                     context=context,
+                    plot_scope=plot_scope,
                     **kw,
                 )
                 return src, data
@@ -536,7 +608,7 @@ class DataRequestBroker:
 
         # Run in parallel
         pool = ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(sources)))
-        futures = {pool.submit(_fetch_one, s): s for s in sources}
+        futures = {pool.submit(copy_context().run, _fetch_one, s): s for s in sources}
 
         try:
             for fut in as_completed(futures, timeout=_POOL_TIMEOUT):
