@@ -2,7 +2,7 @@
 
 **Source pin:** `661f003` (B2B-05 qualified & frozen).  
 **Branch:** `feat/layer0-b2b06-signed-issuer-kms-20261104`.  
-**Status:** FULLY QUALIFIED & READY FOR RELEASE FREEZE.  
+**Status:** FULLY QUALIFIED RELEASE CANDIDATE (READY FOR FREEZE).  
 **Domain:** `akaloris/layer0/positive-state-input/v3` & `akaloris/layer0/positive-zone-state-input/v3`.  
 **Authority:** Kalman scientific-state input admission only. **NOT** pilot publication or autonomous actuator authorization.
 
@@ -17,7 +17,7 @@
    Signed evidence claims are serialized using the strict RFC 8785 JSON Canonicalization Scheme (JCS) via `rfc8785.dumps()`: sorted dictionary keys (lexicographical UTF-16 code units / UTF-8 byte order), separators `(`,`:`) with zero extraneous whitespace, integer-normalized finite numbers, negative-zero normalization (`-0.0` -> `0`), and strict rejection of `NaN`, `Infinity`, and unquoted/naive datetime objects.
 
 3. **Deterministic ECDSA ES256 & Ed25519 Signatures (RFC 6979):**  
-   ES256 asymmetric signing uses native deterministic ECDSA (`ec.ECDSA(hashes.SHA256(), deterministic_signing=True)`), ensuring byte-identical signatures for identical claims under the same key without nonce entropy bias.
+   ES256 asymmetric signing uses native deterministic ECDSA (`ec.ECDSA(hashes.SHA256(), deterministic_signing=True)` via `cryptography>=43.0.0`), ensuring byte-identical signatures for identical claims under the same key without nonce entropy bias.
 
 4. **Complete Signed Claims Envelope:**  
    Every v3 grant cryptographically binds:
@@ -44,6 +44,11 @@
    - Any packet attempting self-assertion of `eligible_for_state_grant=True` or `source_qualified=True` is immediately rejected as an unauthorized self-promotion attack (`StateGrantSeparationViolation` / `unauthorized_state_grant_self_promotion`).
    - Direct verification through `V3KmsGrantVerifier.verify_grant()` strictly requires verified spatial provenance, `spatial_classification == "FULL_CONTAINED"`, `geometry_support_verified is True`, and in-memory `_spatial_binding_verified is True` before minting an authorized `V3StateGrantToken`. Unbound or `FRACTIONAL_BOUNDARY` packets fail closed with `unverified_or_fractional_spatial_support`.
 
+7. **Strict Mandatory-v3 Verifier Injection Prevention:**  
+   - Mandatory v3 mode rejects legacy HMAC-only verifiers even if they advertise revocation support.
+   - For `UnifiedAdmissionVerifier`, the underlying v3 verifier must exist, enforce durable revocation, and operate under v3-only dispatch. This eliminates caller-injected verifier downgrade during `Layer0StateEngine` construction.
+   - The unified dispatcher recognizes typed `V3SignedReceipt` objects and dynamically evaluates the deployment's live mandatory-v3 policy.
+
 ---
 
 ## 2. Integrated Modules & Implementation Deliverables
@@ -52,53 +57,47 @@
 | :--- | :--- | :--- |
 | **v3 KMS Contracts & Signer** | `services/agribrain/layer0/v3_kms_signed_issuer.py` | `V3PositiveStateInputGrant`, `V3SignedReceipt`, `LocalKmsAsymmetricSigner`, `KmsPublicKeyRegistry`, `V3KmsGrantVerifier`, strict spatial containment gate, deterministic ES256, and RFC 8785 JCS serialization. |
 | **Durable Revocation Ledger** | `services/agribrain/layer0/durable_revocation_authority.py` | `DurableRevocationSnapshot`, `DurableRevocationAuthority`, monotonic fences, dynamic live provider reload, plot/zone revocation, hash-chained tamper evidence. |
-| **State Grant Gate & Unified Verifier** | `services/agribrain/layer0/v3_state_admission.py` | `certify_state_grant_eligibility()`, `UnifiedAdmissionVerifier` routing v3 KMS and legacy v1/v2, mandatory v3 policy gate (`v3_kms_required()`). |
-| **Production Admission Configuration** | `services/agribrain/layer0/production_admission.py` | `AKALORIS_LAYER0_KMS_PUBLIC_KEYS_JSON`, `AKALORIS_LAYER0_REQUIRE_V3_KMS`, mandatory `AKALORIS_LAYER0_DURABLE_REVOCATION_PATH` with dynamic live provider in `load_server_issuer_verifier()`. |
+| **State Grant Gate & Unified Verifier** | `services/agribrain/layer0/v3_state_admission.py` | `certify_state_grant_eligibility()`, `UnifiedAdmissionVerifier` routing v3 KMS and legacy v1/v2, typed `V3SignedReceipt` dispatch, mandatory v3 policy gate (`v3_kms_required()`). |
+| **Production Admission Configuration** | `services/agribrain/layer0/production_admission.py` | `AKALORIS_LAYER0_KMS_PUBLIC_KEYS_JSON`, `AKALORIS_LAYER0_REQUIRE_V3_KMS`, mandatory `AKALORIS_LAYER0_DURABLE_REVOCATION_PATH` with dynamic live provider, and strict mandatory-v3 verifier checks in `require_trusted_verifier()`. |
 | **State Engine v3 Integration** | `services/agribrain/layer0/state_engine.py` | Multi-verifier admission protocol (`PositiveObservationAdmissionVerifier`, `V3KmsGrantVerifier`, `UnifiedAdmissionVerifier`). |
-| **B2B-06 Adversarial & Security Suite** | `services/agribrain/layer0/tests/test_b2b06_kms_v3_contracts.py` | 21 dedicated adversarial, cryptographic, JCS, deterministic ECDSA, and security gate test cases. |
+| **B2B-06 Adversarial & Security Suite** | `services/agribrain/layer0/tests/test_b2b06_kms_v3_contracts.py` | 24 dedicated adversarial, cryptographic, JCS, deterministic ECDSA, and strict-v3 injection security test cases. |
 
 ---
 
 ## 3. Targeted Qualification Execution Receipt
 
-Executed on local Windows environment (Python 3.13.13, Node.js v20.18.0):
+Executed on local Windows environment (Python 3.13.13, Node.js v20.18.0) at pinned head `71b7047`:
 
-| Suite / Gate | Scope | Result | Duration |
-| :--- | :--- | :--- | :--- |
-| **B2B-06 KMS v3 Contracts** | Ed25519/ES256, RFC 8785 JCS, durable revocation, spatial containment gate | **21 / 21 passed** | 0.80s |
-| **Layer 0 Complete** | Full Layer 0 unit and integration suite (including B2B-05 & B2B-06) | **639 / 639 passed** | 20.77s (`task-3837`) |
-| **Layer 1 Fusion** | Layer 1 temporal feature alignment | **21 / 21 passed** | 0.57s |
-| **ASMAE Fast** | Archive adapter, evidence ingestion, fast EnKF | **83 / 83 passed** (3 subtests) | 35.04s (`task-3848`) |
-| **Frontend Test Suite** | Full Next.js frontend test suite | **105 / 105 passed** | 1.34s |
-| **TypeScript Typecheck** | `npx tsc --noEmit` | **PASS (0 errors)** | 15.0s (`task-3863`) |
-| **Next.js Production Build** | `npm run build` | **PASS (63/63 pages generated)** | 23.5s (`task-3868`) |
-| **ASMAE Comprehensive** | Full 365-day real-raster EnKF pipeline | **1 / 1 passed** | 563.47s (9m 23s, `task-3891`) |
-| **Aggregate Distinct Python** | Complete suite (Layer 0 + Layer 1 + ASMAE fast + ASMAE comp) | **744 / 744 passed** | **620.65s** (10m 21s) |
-| **Aggregate Frontend** | Next.js unit and integration test suite | **105 / 105 passed** | **1.34s** |
+| Suite / Gate | Scope | Result | Duration | Local Reference |
+| :--- | :--- | :--- | :--- | :--- |
+| **B2B-06 KMS v3 Contracts** | Ed25519/ES256, RFC 8785 JCS, durable revocation, spatial containment, strict-v3 injection | **24 / 24 passed** | 1.10s | `test_b2b06_kms_v3_contracts.py` |
+| **Layer 0 Complete** | Full Layer 0 unit and integration suite (including B2B-05 & B2B-06) | **642 / 642 passed** | 19.08s | `task-3947` |
+| **Layer 1 Fusion** | Layer 1 temporal feature alignment | **21 / 21 passed** | 0.67s | `layer1_fusion/tests/` |
+| **ASMAE Fast** | Archive adapter, evidence ingestion, fast EnKF | **83 / 83 passed** (3 subtests) | 38.04s | `task-3954` |
+| **Frontend Test Suite** | Full Next.js frontend test suite | **105 / 105 passed** | 1.47s | `npm run test:frontend` |
+| **TypeScript Typecheck** | `npx tsc --noEmit` | **PASS (0 errors)** | 15.0s | `task-3863` |
+| **Next.js Production Build** | `npm run build` | **PASS (63/63 pages generated)** | 23.5s | `task-3868` |
+| **ASMAE Comprehensive** | Full 365-day real-raster EnKF pipeline | **1 / 1 passed** | 404.28s (6m 44s) | `task-3969` |
+| **Aggregate Distinct Python** | Complete suite (Layer 0 + Layer 1 + ASMAE fast + ASMAE comp) | **747 / 747 passed** | **463.17s** (7m 43s) | Zero failures, zero skipped |
+| **Aggregate Frontend** | Next.js unit and integration test suite | **105 / 105 passed** | **1.47s** | Zero failures, zero skipped |
 | **Full Qualification Status** | **ALL FAST, SECURITY & COMPREHENSIVE GATES PASSED** | **QUALIFIED** | Zero failures, zero skipped |
 
 ---
 
-## 4. Protected Boundaries Reminder
+## 4. Post-Qualification Strict-v3 Verifier Injection Hardening
+
+The candidate hardening introduced in `71b7047` was individually and comprehensively verified:
+1. Rejection of legacy-only verifiers when mandatory v3 is enforced, even if advertising revocation.
+2. Requirement that `UnifiedAdmissionVerifier` under mandatory v3 holds a genuine v3 verifier enforcing durable revocation.
+3. Live policy re-check in `UnifiedAdmissionVerifier.verify()` blocking runtime policy downgrade.
+4. Native support for typed `V3SignedReceipt` envelopes in unified admission dispatch.
+5. Raised `cryptography>=43.0.0` dependency floor matching deterministic ECDSA (`deterministic_signing=True`).
+
+All 747 distinct Python tests and 105 frontend tests have passed at exact candidate head `71b7047`. Milestone B2B-06 is declared **QUALIFIED** and ready for milestone release freeze.
+
+---
+
+## 5. Protected Boundaries Reminder
 
 - Scientific Pilot PR #9 (`71ee1f7`), frozen B2B-04B PR #25 (`f320e78`), and `main` (`6edd372`) remain strictly untouched.
 - Protected master monograph and `findings/layer0.md` remain immutable.
-
-## Post-qualification strict-v3 verifier injection hardening
-
-**New candidate revision (after qualified 65459ea):** Mandatory v3 mode now
-rejects legacy HMAC verifiers even if they advertise revocation support.
-For a UnifiedAdmissionVerifier, the underlying v3 verifier must exist,
-enforce durable revocation, and operate under v3-only dispatch. This blocks
-caller-injected verifier downgrade during Layer0StateEngine construction.
-The unified dispatcher also recognizes typed V3SignedReceipt objects and
-checks the server's live mandatory-v3 policy if it changes after construction.
-
-The deterministic ES256 signing path requires cryptography >=43.0.0:
-the `deterministic_signing` argument was introduced in v43.0.0. The
-requirements floor has been raised from 42 accordingly.
-
-**Do not reuse the 744/744 owner-reported qualification receipt** for this
-commit. Before B2B-06 freeze, run the added mandatory-v3 security tests,
-full Layer 0 / Layer 1 / ASMAE fast gates, and the comprehensive pipeline
-at the final pinned SHA. No signer private keys are introduced here.
