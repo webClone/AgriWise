@@ -2,8 +2,10 @@
 import type { Prisma } from "@prisma/client";
 
 export class PlotMutationValidationError extends Error {
-  constructor(message: string, readonly status: 400 | 403 = 403) {
+  readonly status: 400 | 403;
+  constructor(message: string, status: 400 | 403 = 403) {
     super(message);
+    this.status = status;
     this.name = "PlotMutationValidationError";
   }
 }
