@@ -38,7 +38,11 @@ import threading as _threading
 import time as _progress_time
 
 from services.agribrain.common.plot_namespace import PlotNamespace, _coerce_namespace
-from services.agribrain.app.internal_service_auth import require_internal_service_request, init_mongo_nonce_indexes
+from services.agribrain.app.internal_service_auth import init_mongo_nonce_indexes
+from services.agribrain.app.plot_scope_context import (
+    current_authenticated_plot_principal,
+    require_b2b05_internal_request as require_internal_service_request,
+)
 
 # Import specialized AIs
 import sys
@@ -57,16 +61,44 @@ orchestrator.register_ai("spray_window", spray_window_ai)
 orchestrator.register_ai("water_stress", water_stress_ai)
 
 _refresh_worker = None
+_b2b05_broker = None
 _asmae_recovery_stop = None
 _asmae_recovery_thread = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _refresh_worker, _asmae_recovery_stop, _asmae_recovery_thread
+    global _refresh_worker, _b2b05_broker, _asmae_recovery_stop, _asmae_recovery_thread
+    # Establish an actual live DB-backed authority BEFORE refresh threads or
+    # any scoped broker calls. A lazy Mongo client handle alone is not proof
+    # that MongoDB is reachable.
+    strict_plot_scope = os.getenv(
+        "AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE", ""
+    ).lower() in ("1", "true", "yes")
+    try:
+        from app.mongo_client import get_db
+        from layer0.data_gateway import get_broker
+        from services.agribrain.layer0.plot_ownership_store import PrismaPlotOwnershipStore
+        db_for_authority = get_db()
+        if db_for_authority is None:
+            raise RuntimeError("plot_authority_mongodb_unavailable")
+        db_for_authority.command("ping")
+        _b2b05_broker = get_broker()
+        _b2b05_broker.configure_plot_authority(
+            PrismaPlotOwnershipStore(db_for_authority),
+            current_authenticated_plot_principal,
+        )
+        logger.info("[STARTUP] B2B-05 trusted plot authority configured")
+    except Exception:
+        _b2b05_broker = None
+        logger.exception("[STARTUP] B2B-05 plot authority unavailable")
+        if strict_plot_scope:
+            raise RuntimeError("mandatory_b2b05_plot_authority_unavailable") from None
     logger.info("[STARTUP] Starting background data refresh worker...")
     try:
         from layer0.data_gateway.refresh_worker import DataRefreshWorker
-        _refresh_worker = DataRefreshWorker()
+        _refresh_worker = DataRefreshWorker(_b2b05_broker)
+        # In scoped mode the worker has no request principal. It must not
+        # perform unscoped plot refreshes; those are rejected by the broker.
         _refresh_worker.start()
     except Exception as _e:
         logger.error(f"[STARTUP] Refresh worker failed to start: {_e}")
