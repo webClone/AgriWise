@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { prisma } from "@/lib/prisma";
 import { getSession } from "@/lib/session";
+import { initializePlotGeometry, updatePlotGeometry } from "@/lib/agribrain/plot-geometry-epoch";
 
 function unauthorized() {
   return NextResponse.json(
@@ -21,7 +22,10 @@ async function findOwnedFarm(farmId: string, userId: string) {
 async function findOwnedPlot(plotId: string, userId: string) {
   return prisma.plot.findFirst({
     where: { id: plotId, farm: { userId } },
-    select: { id: true },
+    select: {
+      id: true, farmId: true, geoJson: true,
+      geometryHash: true, geometryVersion: true,
+    },
   });
 }
 
@@ -94,6 +98,23 @@ export async function POST(request: NextRequest) {
         physicalConstraints: [],
       } as any,
     });
+
+    // A newly created geometry is not usable in strict Layer 0 until
+    // its exact canonical hash and version are initialized by the
+    // signed internal authority service.
+    if (geoJson != null) {
+      try {
+        await initializePlotGeometry(plot.id, farmId, session.userId, geoJson);
+      } catch (error) {
+        console.error("Plot geometry initialization rejected:", error);
+        return NextResponse.json({
+          success: false,
+          error: "Plot created but spatial authority initialization failed",
+          plotId: plot.id,
+          spatialAuthorityReady: false,
+        }, { status: 503 });
+      }
+    }
 
     const pythonApiUrl = (
       process.env.PYTHON_API_URL || "http://127.0.0.1:8000"
@@ -176,7 +197,18 @@ export async function PUT(request: NextRequest) {
     const session = await getSession();
     if (!session?.userId) return unauthorized();
     const body = await request.json();
-    const { id, farmId: _farmId, createdAt: _createdAt, ...mutable } = body;
+    const {
+      id, farmId: _farmId, createdAt: _createdAt,
+      geometryVersion: _version, geometryHash: _hash,
+      isActive: _active, isRevoked: _revoked, deletedAt: _deleted,
+      geoJson, ...mutable
+    } = body;
+    if (
+      ["geometryHash", "geometryVersion", "isActive", "isRevoked", "deletedAt"]
+        .some((key) => Object.prototype.hasOwnProperty.call(body, key))
+    ) {
+      return NextResponse.json({ success: false, error: "Plot authority fields are read-only" }, { status: 403 });
+    }
     if (typeof id !== "string" || !ObjectId.isValid(id)) {
       return NextResponse.json(
         { success: false, error: "A valid plot ID is required" },
@@ -200,10 +232,20 @@ export async function PUT(request: NextRequest) {
       }
       mutable.area = parsedArea;
     }
-    const plot = await prisma.plot.update({
-      where: { id: owned.id },
-      data: mutable,
-    });
+    if (geoJson !== undefined) {
+      if (!geoJson || typeof geoJson !== "object" || Array.isArray(geoJson)) {
+        return NextResponse.json({ success: false, error: "Invalid geometry" }, { status: 400 });
+      }
+      try {
+        await updatePlotGeometry(owned, session.userId, geoJson);
+      } catch (error) {
+        console.warn("Bulk plot geometry epoch update rejected:", error);
+        return NextResponse.json({ success: false, error: "Geometry authority conflict" }, { status: 409 });
+      }
+    }
+    const plot = Object.keys(mutable).length
+      ? await prisma.plot.update({ where: { id: owned.id }, data: mutable })
+      : await prisma.plot.findUniqueOrThrow({ where: { id: owned.id } });
     return NextResponse.json({ success: true, data: plot });
   } catch (error) {
     console.error("Plots PUT error:", error);
