@@ -32,3 +32,37 @@ Must also test: cross-tenant cache collision, direct broker cache bypass, adjace
 **Evidence disclaimer:** Initial contract tests and source code are committed candidates; they have not been executed by the GitHub connector. Full Layer 0/Layer 1/ASMAE real-raster qualification is deferred to the B2B-05 milestone gate under the accelerated policy. Do not inherit the 651/651 B2B-04B execution receipt for these edits.
 
 **Protected records:** Historical 469-finding audit and master monograph remain immutable; PR #25, Scientific Pilot PR #9 and `main` are not modified.
+
+## B2B-05 integrated Python broker and packet wiring candidate
+
+- Trusted registry: `plot_ownership_store.py` implements `PlotOwnershipStore` and a
+  read-only `CollectionPlotOwnershipStore`. Its normalized Mongo-like records
+  MUST represent current authoritative app ownership. A replicated collection
+  is not itself proof of consistency with the frontend Prisma ownership table.
+- Trusted identity: `DataRequestBroker.configure_plot_authority(store, provider)`
+  must be called by application startup; `provider()` reads verified
+  middleware identity, never user JSON. Background bulk workers inherit
+  `ContextVar` context.
+- Enforced scope when `AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE=1` or
+  `plot_scope` is supplied. Authorization occurs before source registry,
+  consolidation, storage, hot/warm cache or network. Every scoped cache
+  identity incorporates authenticated tenant, plot and geometry epoch.
+- No production configuration is automatically enabled. Legacy unscoped
+  calls remain compatible when strict scope mode is disabled.
+- Scoped user data ingestion, freshness, invalidation and archive query are
+  also positively gated; user data stored under the scoped namespace.
+  Existing legacy archives require migration/tenant-safe replay before
+  they can be returned in strict mode.
+- ObservationPacket binds tenant ID, geometry epoch and fractional pixel
+  support; a caller-populated dict cannot mint a verified in-memory binding.
+  Partial/exterior pixel footprints receive zero effective spatial weight.
+  This does NOT independently attest provider or Kalman state authority.
+- Runtime gaps: actual Prisma-authoritative registry wiring and middleware
+  connection, state engine/ASMAE independent packet re-verification,
+  plot-epoch invalidation during concurrent requests, and admin-only raw
+  StorageManager access. These remain cohort release gates.
+
+Targeted test: `py -m pytest -q services/agribrain/layer0/tests/test_b2b05_production_wiring.py`.
+
+This candidate has NOT been executed by the connected GitHub assistant;
+the prior 562/562 receipt belongs to an older B2B-05 head.
