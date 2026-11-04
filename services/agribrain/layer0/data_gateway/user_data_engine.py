@@ -105,11 +105,12 @@ class UserDataEngine:
 
         # Enrich data with metadata
         enriched = {
+            **data,
+            # Metadata is not overwritable by untrusted user-supplied fields.
             "source_type": source_type,
             "plot_id": plot_id,
             "timestamp": ts.isoformat(),
             "user_contributed": True,
-            **data,
         }
 
         # Store through the gateway

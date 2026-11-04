@@ -258,6 +258,7 @@ class ObservationPacket:
     tenant_id: str = ""
     scope_hash: str = ""
     spatial_provenance: Dict[str, Any] = field(default_factory=dict)
+    _spatial_binding_verified: bool = field(default=False, init=False, repr=False)
     
     # Data
     payload: Dict[str, Any] = field(default_factory=dict)
@@ -376,6 +377,7 @@ class ObservationPacket:
         self.geometry_version = scope.geometry_version
         self.scope_hash = scope.scope_hash
         self.spatial_provenance = package
+        self._spatial_binding_verified = True  # Non-serializable in-memory diagnostic gate.
         if support.classification != "FULL_CONTAINED" and self.qa:
             if QAFlag.PARTIAL_COVERAGE not in self.qa.flags:
                 self.qa.flags.append(QAFlag.PARTIAL_COVERAGE)
@@ -386,6 +388,8 @@ class ObservationPacket:
     def effective_weight(self) -> float:
         """Combined quality × reliability, with negative spatial support gates."""
         if self.data_status == DataStatus.UNAVAILABLE:
+            return 0.0
+        if self.tenant_id and not self._spatial_binding_verified:
             return 0.0
         if self.tenant_id and not self.spatial_provenance:
             return 0.0

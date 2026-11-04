@@ -244,7 +244,9 @@ class DataRequestBroker:
             scope = authorize_plot_scope(provider(), plot_scope, store.get_active_plot)
             from shapely.geometry import Point, shape
             import math
-            if (
+            if (lat is None) != (lng is None):
+                raise SpatialTenantDenied("partial_request_coordinate")
+            if lat is not None and (
                 isinstance(lat, bool) or isinstance(lng, bool)
                 or not math.isfinite(float(lat)) or not math.isfinite(float(lng))
                 or not shape(json.loads(scope.geometry_json)).covers(Point(float(lng), float(lat)))
@@ -654,10 +656,20 @@ class DataRequestBroker:
         Dispatches to the appropriate UserDataEngine method.
         """
         try:
-            self._admit_scoped_plot(plot_id, lat, lng, plot_scope)
+            verified_scope = self._admit_scoped_plot(plot_id, lat, lng, plot_scope)
         except SpatialTenantDenied:
             logger.warning("[BROKER] Scoped user-data ingestion denied")
             return False
+        if verified_scope is not None:
+            # Never leave a scoped write under the historical plot-only key.
+            # This distinguishes tenant and geometry epochs across ownership changes.
+            data = {
+                **data, "_b2b05_original_plot_id": plot_id,
+                "_b2b05_tenant_id": verified_scope.tenant_id,
+                "_b2b05_geometry_hash": verified_scope.geometry_hash,
+                "_b2b05_scope_hash": verified_scope.scope_hash,
+            }
+            plot_id = "b2b05_" + verified_scope.scope_hash
         method_map = {
             "user_soil_analysis": self._user_engine.ingest_soil_analysis,
             "user_irrigation_event": self._user_engine.ingest_irrigation,
@@ -685,20 +697,35 @@ class DataRequestBroker:
 
     def freshness(
         self, plot_id: str, sources: Optional[List[str]] = None,
+        *, plot_scope: Optional[ScopedPlotRequest] = None,
     ) -> Dict:
         """Get per-source freshness report for a plot.
 
         Returns cache age, TTL remaining, and freshness % for each source.
         No fetching is triggered.
         """
-        report = self._storage.get_freshness_report(plot_id, sources)
+        try:
+            scope = self._admit_scoped_plot(plot_id, None, None, plot_scope)
+        except SpatialTenantDenied:
+            return {}
+        storage_id = "b2b05_" + scope.scope_hash if scope else plot_id
+        report = self._storage.get_freshness_report(storage_id, sources)
         return {name: entry.to_dict() for name, entry in report.items()}
 
     # ── Cache Management ───────────────────────────────────────────
 
-    def invalidate(self, plot_id: str, source: Optional[str] = None) -> int:
-        """Force-invalidate cache entries for a plot."""
-        return self._storage.invalidate(plot_id, source)
+    def invalidate(
+        self, plot_id: str, source: Optional[str] = None,
+        *, plot_scope: Optional[ScopedPlotRequest] = None,
+    ) -> int:
+        """Invalidate only a currently authorized plot and geometry epoch."""
+        try:
+            scope = self._admit_scoped_plot(plot_id, None, None, plot_scope)
+        except SpatialTenantDenied:
+            return 0
+        return self._storage.invalidate(
+            "b2b05_" + scope.scope_hash if scope else plot_id, source
+        )
 
     def invalidate_all_plots(self, source: str) -> int:
         """Invalidate all cache entries for a specific source across all plots."""
@@ -714,13 +741,19 @@ class DataRequestBroker:
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
         limit: int = 1000,
+        *,
+        plot_scope: Optional[ScopedPlotRequest] = None,
     ) -> List[Dict]:
         """Query the warm-tier observation archive.
 
         Used by ML patterns, DNA recalibration, and yield analysis.
         """
+        try:
+            scope = self._admit_scoped_plot(plot_id, None, None, plot_scope)
+        except SpatialTenantDenied:
+            return []
         return self._storage.query_archive(
-            plot_id, source=source,
+            "b2b05_" + scope.scope_hash if scope else plot_id, source=source,
             start_date=start_date, end_date=end_date,
             limit=limit,
         )
