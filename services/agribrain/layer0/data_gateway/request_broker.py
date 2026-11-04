@@ -646,11 +646,18 @@ class DataRequestBroker:
         lat: float,
         lng: float,
         data: Dict,
+        *,
+        plot_scope: Optional[ScopedPlotRequest] = None,
     ) -> bool:
         """Ingest user-contributed data through the gateway.
 
         Dispatches to the appropriate UserDataEngine method.
         """
+        try:
+            self._admit_scoped_plot(plot_id, lat, lng, plot_scope)
+        except SpatialTenantDenied:
+            logger.warning("[BROKER] Scoped user-data ingestion denied")
+            return False
         method_map = {
             "user_soil_analysis": self._user_engine.ingest_soil_analysis,
             "user_irrigation_event": self._user_engine.ingest_irrigation,

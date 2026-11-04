@@ -254,6 +254,10 @@ class ObservationPacket:
     geometry_version: Optional[int] = None
     crs: str = "EPSG:4326"
     spatial_scope: str = "plot"  # "plot", "zone", "pixel", "point"
+    # B2B-05: descriptive scope; neither this nor its hash is IAM authority.
+    tenant_id: str = ""
+    scope_hash: str = ""
+    spatial_provenance: Dict[str, Any] = field(default_factory=dict)
     
     # Data
     payload: Dict[str, Any] = field(default_factory=dict)
@@ -303,8 +307,10 @@ class ObservationPacket:
             self.content_hash = self._generate_content_hash()
     
     def _generate_id(self) -> str:
-        """Deterministic hash from source + timestamp + geometry."""
+        """Deterministic identity with optional authenticated plot scope."""
         key = f"{self.source.value}:{self.timestamp.isoformat()}:{self.bbox or self.point}"
+        if self.tenant_id or self.scope_hash:
+            key += f":{self.tenant_id}:{self.plot_id}:{self.scope_hash}"
         return hashlib.sha256(key.encode()).hexdigest()[:16]
     
     def _generate_content_hash(self) -> str:
@@ -334,15 +340,63 @@ class ObservationPacket:
         ]
         if self.unrecognized_data_status is not None:
             parts.append(self.unrecognized_data_status)
+        if self.tenant_id or self.scope_hash or self.spatial_provenance:
+            parts.extend((
+                self.tenant_id, self.scope_hash,
+                json.dumps(self.spatial_provenance, sort_keys=True, default=str),
+            ))
         if self.provenance and self.provenance.native_evidence_id:
             parts.append(str(self.provenance.native_evidence_id))
         raw = "|".join(parts).encode()
         return hashlib.sha256(raw).hexdigest()[:20]
     
+    def bind_spatial_context(self, scope: Any, support: Any) -> None:
+        """Bind geometric evidence only; this is NOT a provider/state grant.
+
+        Receiving state engines must independently verify persisted packets.
+        The in-memory binding is not a signature or a tenant credential.
+        """
+        from services.agribrain.layer0.spatial_tenant_contract import (
+            VerifiedPlotScope, FractionalPixelSupport, SpatialTenantDenied,
+            package_spatial_provenance,
+        )
+        if not isinstance(scope, VerifiedPlotScope) or not isinstance(support, FractionalPixelSupport):
+            raise SpatialTenantDenied("untrusted_packet_spatial_context")
+        if (
+            self.plot_id not in ("", scope.plot_id)
+            or self.tenant_id not in ("", scope.tenant_id)
+            or self.geometry_hash not in ("", scope.geometry_hash)
+            or self.geometry_version not in (None, scope.geometry_version)
+        ):
+            raise SpatialTenantDenied("packet_spatial_identity_mismatch")
+        package = package_spatial_provenance(scope, support)
+        generated_id = self.packet_id == self._generate_id()
+        self.plot_id, self.tenant_id = scope.plot_id, scope.tenant_id
+        self.geometry_hash = scope.geometry_hash
+        self.geometry_version = scope.geometry_version
+        self.scope_hash = scope.scope_hash
+        self.spatial_provenance = package
+        if support.classification != "FULL_CONTAINED" and self.qa:
+            if QAFlag.PARTIAL_COVERAGE not in self.qa.flags:
+                self.qa.flags.append(QAFlag.PARTIAL_COVERAGE)
+        if generated_id:
+            self.packet_id = self._generate_id()
+        self.content_hash = self._generate_content_hash()
+
     def effective_weight(self) -> float:
-        """Combined quality × reliability weight for assimilation."""
+        """Combined quality × reliability, with negative spatial support gates."""
         if self.data_status == DataStatus.UNAVAILABLE:
             return 0.0
+        if self.tenant_id and not self.spatial_provenance:
+            return 0.0
+        if self.spatial_provenance:
+            p = self.spatial_provenance
+            if p.get("scope_hash") != self.scope_hash or p.get("tenant_id") != self.tenant_id:
+                return 0.0
+            if p.get("source_qualified") is not False or p.get("eligible_for_state_grant") is not False:
+                return 0.0
+            if p.get("spatial_classification") != "FULL_CONTAINED":
+                return 0.0
         return self.qa.scene_score * self.reliability_weight
     
     def to_dict(self) -> Dict[str, Any]:
@@ -363,6 +417,9 @@ class ObservationPacket:
             "geometry_version": self.geometry_version,
             "crs": self.crs,
             "spatial_scope": self.spatial_scope,
+            "tenant_id": self.tenant_id,
+            "scope_hash": self.scope_hash,
+            "spatial_provenance": dict(self.spatial_provenance),
             "qa_score": self.qa.scene_score,
             "qa_flags": [f.value for f in self.qa.flags],
             "reliability": self.reliability_weight,
