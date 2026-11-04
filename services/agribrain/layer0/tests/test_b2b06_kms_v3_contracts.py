@@ -965,7 +965,7 @@ def test_durable_revocation_snapshot_freshness():
 # 11. Mandatory v3 KMS Production Configuration
 # ============================================================================
 
-def test_mandatory_v3_kms_production_admission_config(monkeypatch):
+def test_mandatory_v3_kms_production_admission_config(tmp_path, monkeypatch):
     from services.agribrain.layer0.production_admission import (
         load_server_issuer_verifier,
         Layer0AdmissionRequiredError,
@@ -988,8 +988,19 @@ def test_mandatory_v3_kms_production_admission_config(monkeypatch):
         }
     }
 
-    # 1. Configured KMS keys successfully return V3KmsGrantVerifier
+    t_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    rev_file = tmp_path / "prod_revocation.json"
+    snap = DurableRevocationSnapshot(
+        revision=1,
+        issued_at=t_now - timedelta(seconds=10),
+        expires_at=t_now + timedelta(hours=1),
+        key_statuses={key_id: "active"},
+    )
+    rev_file.write_text(json.dumps(snap.to_dict()), encoding="utf-8")
+
+    # 1. Configured KMS keys and durable revocation successfully return V3KmsGrantVerifier
     monkeypatch.setenv("AKALORIS_LAYER0_KMS_PUBLIC_KEYS_JSON", json.dumps(kms_config))
+    monkeypatch.setenv("AKALORIS_LAYER0_DURABLE_REVOCATION_PATH", str(rev_file))
     monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_V3_KMS", "true")
     monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
 
@@ -1000,3 +1011,310 @@ def test_mandatory_v3_kms_production_admission_config(monkeypatch):
     monkeypatch.setenv("AKALORIS_LAYER0_KMS_PUBLIC_KEYS_JSON", "")
     with pytest.raises(Layer0AdmissionRequiredError, match="Mandatory v3 KMS policy requires"):
         load_server_issuer_verifier()
+
+
+# ============================================================================
+# 12. Corrective Batch Verification Tests (RFC 8785 JCS, Deterministic ES256,
+#     Direct Spatial Containment Gate, Dynamic Durable Revocation & Key Isolation)
+# ============================================================================
+
+def test_rfc8785_official_test_vectors():
+    import rfc8785
+    # Numbers formatting
+    assert rfc8785.dumps({"x": 1e-7}) == b'{"x":1e-7}'
+    assert rfc8785.dumps({"x": 1e-6}) == b'{"x":0.000001}'
+    assert rfc8785.dumps({"x": 1e21}) == b'{"x":1e+21}'
+    assert rfc8785.dumps({"x": -0.0}) == b'{"x":0}'
+    assert rfc8785.dumps({"x": 0.0}) == b'{"x":0}'
+    assert rfc8785.dumps({"x": 100.0}) == b'{"x":100}'
+
+    # Key sorting UTF-16 code units: emoji surrogate pairs vs BMP characters
+    # \U0001F600 has UTF-16 code units (0xD83D, 0xDE00).
+    # \uFFFF has UTF-16 code unit 0xFFFF.
+    # In UTF-16 code units, 0xD83D < 0xFFFF, so \U0001F600 must sort before \uFFFF
+    data = {"\uffff": 1, "\U0001F600": 2}
+    encoded = rfc8785.dumps(data)
+    assert encoded.startswith(b'{"\xf0\x9f\x98\x80":2,"\xef\xbf\xbf":1}')
+
+    # Canonical grant bytes determinism
+    claims = {
+        "domain": V3_GRANT_DOMAIN,
+        "version": "v3",
+        "algorithm": "Ed25519",
+        "key_id": "k1",
+        "nested": {"z": 1e-7, "a": -0.0},
+    }
+    b1 = canonical_grant_bytes(claims)
+    b2 = canonical_grant_bytes(claims)
+    assert b1 == b2
+    assert b'"nested":{"a":0,"z":1e-7}' in b1
+
+
+def test_es256_rfc6979_deterministic_signatures():
+    signer = LocalKmsAsymmetricSigner(KmsAlgorithm.ES256)
+    key_id = "kms-es256-det"
+    signer.provision_key(key_id)
+
+    packet = _make_sample_packet()
+    _bind_test_scope(packet)
+    claims = _make_v3_grant_claims(packet, key_id, algorithm="ES256")
+
+    receipt1 = signer.sign_grant(claims, key_id)
+    receipt2 = signer.sign_grant(claims, key_id)
+
+    # Deterministic ECDSA (RFC 6979) guarantees byte-identical signatures for identical claims
+    assert receipt1.signature == receipt2.signature
+    assert isinstance(receipt1.signature, str)
+    assert len(receipt1.signature) > 60
+
+
+def test_direct_verify_grant_spatial_containment_gate():
+    signer = LocalKmsAsymmetricSigner(KmsAlgorithm.ED25519)
+    key_id = "kms-spatial-01"
+    signer.provision_key(key_id)
+    registry = KmsPublicKeyRegistry()
+    registry.register_public_key(
+        key_id=key_id,
+        issuer_id="copernicus-sentinel2",
+        source="sentinel2",
+        algorithm="Ed25519",
+        public_key_pem_or_bytes=signer.get_public_key_pem(key_id),
+        valid_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        valid_until=datetime(2027, 1, 1, tzinfo=timezone.utc),
+    )
+    verifier = V3KmsGrantVerifier(registry)
+
+    # 1. Direct call on unbound packet fails closed with unverified_or_fractional_spatial_support
+    packet_raw = _make_sample_packet()
+    claims_raw = _make_v3_grant_claims(packet_raw, key_id)
+    receipt_raw = signer.sign_grant(claims_raw, key_id)
+
+    valid, reason, token = verifier.verify_grant(
+        receipt_raw,
+        packet_raw,
+        plot_id=packet_raw.plot_id,
+        geometry_hash=packet_raw.geometry_hash,
+        geometry_version=packet_raw.geometry_version,
+        run_timestamp=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert valid is False
+    assert reason == "unverified_or_fractional_spatial_support"
+    assert token is None
+
+    # 2. Direct call on FRACTIONAL_BOUNDARY packet fails closed
+    packet_frac = _make_sample_packet()
+    _bind_test_scope(packet_frac, classification="FRACTIONAL_BOUNDARY")
+    claims_frac = _make_v3_grant_claims(packet_frac, key_id)
+    receipt_frac = signer.sign_grant(claims_frac, key_id)
+
+    valid, reason, token = verifier.verify_grant(
+        receipt_frac,
+        packet_frac,
+        plot_id=packet_frac.plot_id,
+        geometry_hash=packet_frac.geometry_hash,
+        geometry_version=packet_frac.geometry_version,
+        run_timestamp=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert valid is False
+    assert reason == "unverified_or_fractional_spatial_support"
+    assert token is None
+
+    # 3. Direct call on self-asserted packet fails closed with unauthorized_state_grant_self_promotion
+    packet_self = _make_sample_packet()
+    _bind_test_scope(packet_self, classification="FULL_CONTAINED")
+    # Mutate to self-assert state grant
+    packet_self.spatial_provenance["eligible_for_state_grant"] = True
+    claims_self = _make_v3_grant_claims(packet_self, key_id)
+    receipt_self = signer.sign_grant(claims_self, key_id)
+
+    valid, reason, token = verifier.verify_grant(
+        receipt_self,
+        packet_self,
+        plot_id=packet_self.plot_id,
+        geometry_hash=packet_self.geometry_hash,
+        geometry_version=packet_self.geometry_version,
+        run_timestamp=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert valid is False
+    assert reason == "unauthorized_state_grant_self_promotion"
+    assert token is None
+
+    # 4. Valid FULL_CONTAINED packet succeeds and mints valid token
+    packet_ok = _make_sample_packet()
+    _bind_test_scope(packet_ok, classification="FULL_CONTAINED")
+    claims_ok = _make_v3_grant_claims(packet_ok, key_id)
+    receipt_ok = signer.sign_grant(claims_ok, key_id)
+
+    valid, reason, token = verifier.verify_grant(
+        receipt_ok,
+        packet_ok,
+        plot_id=packet_ok.plot_id,
+        geometry_hash=packet_ok.geometry_hash,
+        geometry_version=packet_ok.geometry_version,
+        run_timestamp=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert valid is True
+    assert reason == "verified_v3_kms_grant"
+    assert token is not None
+    assert token.spatial_classification == "FULL_CONTAINED"
+    assert token.eligible_for_state_grant is True
+
+
+def test_mandatory_v3_durable_revocation_missing_or_stale(tmp_path, monkeypatch):
+    from services.agribrain.layer0.production_admission import (
+        load_server_issuer_verifier,
+        require_trusted_verifier,
+        Layer0AdmissionRequiredError,
+    )
+
+    signer = LocalKmsAsymmetricSigner(KmsAlgorithm.ED25519)
+    key_id = "kms-dyn-01"
+    signer.provision_key(key_id)
+    pub_pem = signer.get_public_key_pem(key_id)
+
+    kms_config = {
+        key_id: {
+            "issuer_id": "copernicus-sentinel2",
+            "source": "sentinel2",
+            "algorithm": "Ed25519",
+            "public_key_pem": pub_pem,
+            "valid_from": "2026-01-01T00:00:00Z",
+            "valid_until": "2027-01-01T00:00:00Z",
+            "permitted_purposes": ["kalman_state_observation"],
+        }
+    }
+
+    monkeypatch.setenv("AKALORIS_LAYER0_KMS_PUBLIC_KEYS_JSON", json.dumps(kms_config))
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_V3_KMS", "true")
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
+
+    # 1. Missing durable revocation path fails closed
+    monkeypatch.delenv("AKALORIS_LAYER0_DURABLE_REVOCATION_PATH", raising=False)
+    with pytest.raises(Layer0AdmissionRequiredError, match="requires a trusted durable revocation path"):
+        load_server_issuer_verifier()
+
+    # 2. Non-existent file path fails closed
+    missing_file = str(tmp_path / "non_existent_revocation.json")
+    monkeypatch.setenv("AKALORIS_LAYER0_DURABLE_REVOCATION_PATH", missing_file)
+    with pytest.raises(Layer0AdmissionRequiredError, match="snapshot file not found"):
+        load_server_issuer_verifier()
+
+    # 3. Create valid initial snapshot file
+    t_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    rev_file = tmp_path / "durable_revocation.json"
+    snap1 = DurableRevocationSnapshot(
+        revision=1,
+        issued_at=t_now - timedelta(seconds=10),
+        expires_at=t_now + timedelta(hours=1),
+        key_statuses={key_id: "active"},
+    )
+    rev_file.write_text(json.dumps(snap1.to_dict()), encoding="utf-8")
+    monkeypatch.setenv("AKALORIS_LAYER0_DURABLE_REVOCATION_PATH", str(rev_file))
+
+    verifier = load_server_issuer_verifier()
+    assert isinstance(verifier, V3KmsGrantVerifier)
+    require_trusted_verifier(verifier)
+
+    packet = _make_sample_packet()
+    _bind_test_scope(packet)
+    claims = _make_v3_grant_claims(packet, key_id, revocation_anchor=1)
+    receipt = signer.sign_grant(claims, key_id)
+
+    valid, reason = verifier.verify(
+        receipt, packet,
+        plot_id=packet.plot_id,
+        geometry_hash=packet.geometry_hash,
+        geometry_version=packet.geometry_version,
+        run_timestamp=t_now,
+    )
+    assert valid is True
+
+    # 4. Modify snapshot on disk to revoke the key -> dynamic reload detects revoked key
+    snap2 = DurableRevocationSnapshot(
+        revision=2,
+        issued_at=t_now - timedelta(seconds=5),
+        expires_at=t_now + timedelta(hours=1),
+        key_statuses={key_id: "revoked"},
+        previous_digest=snap1.snapshot_digest,
+    )
+    rev_file.write_text(json.dumps(snap2.to_dict()), encoding="utf-8")
+
+    valid, reason = verifier.verify(
+        receipt, packet,
+        plot_id=packet.plot_id,
+        geometry_hash=packet.geometry_hash,
+        geometry_version=packet.geometry_version,
+        run_timestamp=t_now,
+    )
+    assert valid is False
+    assert reason == "issuer_key_revoked"
+
+    # 5. Rollback attack on disk (lower revision) -> dynamic reload detects rollback error
+    snap_rollback = DurableRevocationSnapshot(
+        revision=1,
+        issued_at=t_now - timedelta(seconds=5),
+        expires_at=t_now + timedelta(hours=1),
+        key_statuses={key_id: "active"},
+    )
+    rev_file.write_text(json.dumps(snap_rollback.to_dict()), encoding="utf-8")
+
+    valid, reason = verifier.verify(
+        receipt, packet,
+        plot_id=packet.plot_id,
+        geometry_hash=packet.geometry_hash,
+        geometry_version=packet.geometry_version,
+        run_timestamp=t_now,
+    )
+    assert valid is False
+    assert reason == "revocation_ledger_violation:RevocationRollbackError"
+
+
+def test_production_configuration_no_private_keys(tmp_path, monkeypatch):
+    from services.agribrain.layer0.production_admission import (
+        load_server_issuer_verifier,
+        require_trusted_verifier,
+    )
+
+    signer = LocalKmsAsymmetricSigner(KmsAlgorithm.ED25519)
+    key_id = "kms-prod-key-no-priv"
+    signer.provision_key(key_id)
+    pub_pem = signer.get_public_key_pem(key_id)
+
+    kms_config = {
+        key_id: {
+            "issuer_id": "copernicus-sentinel2",
+            "source": "sentinel2",
+            "algorithm": "Ed25519",
+            "public_key_pem": pub_pem,
+            "valid_from": "2026-01-01T00:00:00Z",
+            "valid_until": "2027-01-01T00:00:00Z",
+            "permitted_purposes": ["kalman_state_observation"],
+        }
+    }
+
+    t_now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    rev_file = tmp_path / "prod_revocation.json"
+    snap = DurableRevocationSnapshot(
+        revision=1,
+        issued_at=t_now - timedelta(seconds=10),
+        expires_at=t_now + timedelta(hours=1),
+        key_statuses={key_id: "active"},
+    )
+    rev_file.write_text(json.dumps(snap.to_dict()), encoding="utf-8")
+
+    monkeypatch.setenv("AKALORIS_LAYER0_KMS_PUBLIC_KEYS_JSON", json.dumps(kms_config))
+    monkeypatch.setenv("AKALORIS_LAYER0_DURABLE_REVOCATION_PATH", str(rev_file))
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_V3_KMS", "true")
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
+
+    verifier = load_server_issuer_verifier()
+    assert isinstance(verifier, V3KmsGrantVerifier)
+    require_trusted_verifier(verifier)
+
+    # Verify no private key attributes exist in verifier or registry
+    entry = verifier.registry.get_entry(key_id)
+    assert entry is not None
+    assert not hasattr(entry.public_key, "private_bytes")
+    assert not hasattr(entry.public_key, "sign")
+    assert not hasattr(verifier, "_private_keys")
+    assert not hasattr(verifier.registry, "_private_keys")

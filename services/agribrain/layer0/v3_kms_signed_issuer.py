@@ -25,6 +25,7 @@ from enum import Enum
 import hashlib
 import json
 import math
+import rfc8785
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from cryptography.exceptions import InvalidSignature
@@ -121,13 +122,7 @@ def _canonical_normalize(value: Any) -> Any:
 def canonical_grant_bytes(grant_claims: Mapping[str, Any]) -> bytes:
     """Return deterministic canonical RFC 8785 bytes for grant claims."""
     normalized = _canonical_normalize(grant_claims)
-    return json.dumps(
-        normalized,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
+    return rfc8785.dumps(normalized)
 
 
 @dataclass(frozen=True)
@@ -425,8 +420,8 @@ class LocalKmsAsymmetricSigner(KmsAsymmetricSigner):
         if self._algo == KmsAlgorithm.ED25519:
             raw_sig = priv.sign(canonical_bytes)
         elif self._algo == KmsAlgorithm.ES256:
-            # Deterministic ECDSA signature over SHA-256
-            raw_sig = priv.sign(canonical_bytes, ec.ECDSA(hashes.SHA256()))
+            # Deterministic ECDSA signature over SHA-256 (RFC 6979)
+            raw_sig = priv.sign(canonical_bytes, ec.ECDSA(hashes.SHA256(), deterministic_signing=True))
         else:
             raise ValueError(f"unsupported algorithm: {self._algo}")
 
@@ -545,6 +540,10 @@ class V3KmsGrantVerifier:
         self._registry = key_registry
         self._revocation = revocation_authority
         self._zone_registry = dict(trusted_zone_registry or {})
+
+    @property
+    def registry(self) -> KmsPublicKeyRegistry:
+        return self._registry
 
     @property
     def revocation_enforced(self) -> bool:
@@ -724,7 +723,29 @@ class V3KmsGrantVerifier:
                 if not rev_ok:
                     return False, rev_reason, None
 
-            # 13. Mint V3StateGrantToken
+            # 13. Strict spatial containment gate for state grant minting
+            spatial_prov = getattr(packet, "spatial_provenance", None)
+            if not isinstance(spatial_prov, dict):
+                return False, "unverified_or_fractional_spatial_support", None
+
+            # Reject packets with self-asserted state-grant eligibility or qualification
+            if (
+                spatial_prov.get("eligible_for_state_grant") is True
+                or spatial_prov.get("source_qualified") is True
+            ):
+                return False, "unauthorized_state_grant_self_promotion", None
+
+            # Require verified full containment and in-process diagnostic binding
+            if (
+                spatial_prov.get("spatial_classification") != "FULL_CONTAINED"
+                or spatial_prov.get("geometry_support_verified") is not True
+                or getattr(packet, "_spatial_binding_verified", False) is not True
+            ):
+                return False, "unverified_or_fractional_spatial_support", None
+
+            spatial_classification = spatial_prov["spatial_classification"]
+
+            # 14. Mint V3StateGrantToken
             grant_digest = hashlib.sha256(canonical_bytes).hexdigest()
             token = V3StateGrantToken(
                 admitted=True,
@@ -739,11 +760,7 @@ class V3KmsGrantVerifier:
                 ),
                 admitted_at=run_time.isoformat(),
                 admitted_variables=grant.permitted_variables,
-                spatial_classification=(
-                    getattr(getattr(packet, "spatial_provenance", {}), "get", lambda *_: "FULL_CONTAINED")(
-                        "spatial_classification", "FULL_CONTAINED"
-                    )
-                ),
+                spatial_classification=spatial_classification,
             )
 
             return True, "verified_v3_kms_grant", token

@@ -59,7 +59,7 @@ def require_trusted_verifier(verifier: object) -> None:
             "source-admission verifier is provisioned"
         )
     if (
-        live_revocation_required()
+        (live_revocation_required() or v3_kms_required())
         and not getattr(verifier, "revocation_enforced", False)
     ):
         raise Layer0AdmissionRequiredError(
@@ -199,11 +199,26 @@ def load_server_issuer_verifier():
                 )
             durable_auth = None
             durable_rev_path = os.getenv("AKALORIS_LAYER0_DURABLE_REVOCATION_PATH", "").strip()
+            if (v3_kms_required() or live_revocation_required()) and not durable_rev_path:
+                raise Layer0AdmissionRequiredError(
+                    "Mandatory v3 KMS policy requires a trusted durable revocation path"
+                )
             if durable_rev_path:
-                d_snap_raw = Path(durable_rev_path).read_text(encoding="utf-8")
-                d_snap_data = json.loads(d_snap_raw, object_pairs_hook=reject_duplicate_keys)
+                rev_file = Path(durable_rev_path)
+                if not rev_file.is_file():
+                    raise Layer0AdmissionRequiredError(
+                        f"Durable revocation snapshot file not found: {durable_rev_path}"
+                    )
+
+                def live_durable_snapshot() -> DurableRevocationSnapshot:
+                    d_snap_raw = Path(durable_rev_path).read_text(encoding="utf-8")
+                    d_snap_data = json.loads(d_snap_raw, object_pairs_hook=reject_duplicate_keys)
+                    return DurableRevocationSnapshot.from_dict(d_snap_data)
+
+                initial_snap = live_durable_snapshot()
                 durable_auth = DurableRevocationAuthority(
-                    DurableRevocationSnapshot.from_dict(d_snap_data)
+                    initial_snapshot=initial_snap,
+                    snapshot_provider=live_durable_snapshot,
                 )
             v3_verifier = V3KmsGrantVerifier(
                 registry,

@@ -11,6 +11,7 @@ Defends against:
 - Future-dated revocation snapshots (clock skew tolerance bounded)
 - Unregistered/absent issuer keys (fail-closed)
 - Unauthorized plot/zone state admission after scope revocation
+- Dynamic/live snapshot refresh via trusted provider callback
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 import hashlib
-import json
+import rfc8785
 from typing import Any, Callable, Mapping, Sequence
 
 
@@ -72,10 +73,7 @@ def _canonical_json(obj: Any) -> bytes:
             return [normalize(x) for x in sorted(val, key=lambda i: str(i))]
         raise TypeError(f"unsupported canonical type: {type(val).__name__}")
 
-    return json.dumps(
-        normalize(obj), sort_keys=True, separators=(",", ":"),
-        allow_nan=False, ensure_ascii=False,
-    ).encode("utf-8")
+    return rfc8785.dumps(normalize(obj))
 
 
 @dataclass(frozen=True)
@@ -177,13 +175,14 @@ class DurableRevocationAuthority:
     """Fenced revocation engine enforcing monotonic ledger progression.
     
     Can be used in-process, loaded from trusted disk snapshot, or connected
-    to an authoritative durable storage adapter.
+    to an authoritative durable storage adapter with live refresh provider.
     """
 
     def __init__(
         self,
         initial_snapshot: DurableRevocationSnapshot | None = None,
         *,
+        snapshot_provider: Callable[[], DurableRevocationSnapshot] | None = None,
         max_snapshot_age_seconds: int = 300,
         clock_skew_tolerance_seconds: int = 5,
     ) -> None:
@@ -199,7 +198,10 @@ class DurableRevocationAuthority:
             or not 0 <= clock_skew_tolerance_seconds <= 60
         ):
             raise ValueError("invalid clock_skew_tolerance_seconds")
+        if snapshot_provider is not None and not callable(snapshot_provider):
+            raise ValueError("snapshot_provider must be callable")
 
+        self._provider = snapshot_provider
         self._max_age = timedelta(seconds=max_snapshot_age_seconds)
         self._skew_tolerance = timedelta(seconds=clock_skew_tolerance_seconds)
         self._current_snapshot: DurableRevocationSnapshot | None = None
@@ -258,6 +260,16 @@ class DurableRevocationAuthority:
     ) -> tuple[bool, str]:
         """Verify key status, freshness, revision anchor, plot and zone authority."""
         try:
+            # Live refresh from provider if configured
+            if self._provider is not None:
+                try:
+                    fresh_snap = self._provider()
+                    self.load_snapshot(fresh_snap)
+                except RevocationError as r_err:
+                    return False, f"revocation_ledger_violation:{type(r_err).__name__}"
+                except Exception as p_err:
+                    return False, f"revocation_provider_error:{type(p_err).__name__}"
+
             snapshot = self._current_snapshot
             if snapshot is None:
                 return False, "revocation_authority_uninitialized"
@@ -312,5 +324,5 @@ class DurableRevocationAuthority:
                     return False, "grant_explicitly_revoked"
 
             return True, "revocation_authority_active_and_verified"
-        except Exception:
-            return False, "revocation_check_internal_error"
+        except Exception as exc:
+            return False, f"revocation_check_internal_error:{type(exc).__name__}"

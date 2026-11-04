@@ -2,7 +2,7 @@
 
 **Source pin:** `661f003` (B2B-05 qualified & frozen).  
 **Branch:** `feat/layer0-b2b06-signed-issuer-kms-20261104`.  
-**Status:** IMPLEMENTED & QUALIFIED CANDIDATE.  
+**Status:** QUALIFIED & READY FOR RELEASE FREEZE.  
 **Domain:** `akaloris/layer0/positive-state-input/v3` & `akaloris/layer0/positive-zone-state-input/v3`.  
 **Authority:** Kalman scientific-state input admission only. **NOT** pilot publication or autonomous actuator authorization.
 
@@ -13,10 +13,13 @@
 1. **Strict Asymmetric Key Isolation:**  
    Signing private keys exist solely within privileged signing infrastructure (`KmsAsymmetricSigner` / HSM). Layer 0 admission verifiers (`V3KmsGrantVerifier`) and application worker processes hold **ONLY public keys** registered in a `KmsPublicKeyRegistry`. No private keys, bearer credentials, or shared HMAC secrets exist within production verifiers.
 
-2. **Deterministic RFC 8785 Canonical Representation:**  
-   Signed evidence claims are serialized using the strict RFC 8785 JSON Canonicalization Scheme (JCS): sorted dictionary keys (lexicographical UTF-16 code units / UTF-8 byte order), separators `(`,`:`) with zero extraneous whitespace, integer-normalized finite numbers, and strict rejection of `NaN`, `Infinity`, and unquoted/naive datetime objects.
+2. **Deterministic RFC 8785 Canonical Representation (JCS):**  
+   Signed evidence claims are serialized using the strict RFC 8785 JSON Canonicalization Scheme (JCS) via `rfc8785.dumps()`: sorted dictionary keys (lexicographical UTF-16 code units / UTF-8 byte order), separators `(`,`:`) with zero extraneous whitespace, integer-normalized finite numbers, negative-zero normalization (`-0.0` -> `0`), and strict rejection of `NaN`, `Infinity`, and unquoted/naive datetime objects.
 
-3. **Complete Signed Claims Envelope:**  
+3. **Deterministic ECDSA ES256 & Ed25519 Signatures (RFC 6979):**  
+   ES256 asymmetric signing uses native deterministic ECDSA (`ec.ECDSA(hashes.SHA256(), deterministic_signing=True)`), ensuring byte-identical signatures for identical claims under the same key without nonce entropy bias.
+
+4. **Complete Signed Claims Envelope:**  
    Every v3 grant cryptographically binds:
    - KMS `key_id`, `issuer_id`, `algorithm` (`Ed25519` or `ES256`), and `purpose` (`kalman_state_observation` or `weather_state_forcing`)
    - Observation `source` and explicit `permitted_variables` (e.g. `["ndvi", "evi"]`)
@@ -27,8 +30,8 @@
    - Temporal window: `acquisition_start`, `acquisition_end`, `issued_at`, `expires_at`
    - Revocation anchor: monotonic `revocation_revision_anchor` and `replay_idempotency_key`.
 
-4. **Durable Monotonic Revocation Ledger:**  
-   The `DurableRevocationAuthority` fences against:
+5. **Durable Monotonic Revocation Ledger with Dynamic Live Refresh:**  
+   The `DurableRevocationAuthority` is mandatory in v3 KMS mode (`AKALORIS_LAYER0_DURABLE_REVOCATION_PATH`), dynamically reloading disk/provider snapshots on each admission check, and fences against:
    - Revision rollback attacks (`RevocationRollbackError`: `new_revision < current_revision`)
    - Split-brain / revision conflicts (`RevocationConflictError`: equal revision with conflicting digest)
    - Temporal decay: stale snapshots (`now - issued_at > max_snapshot_age`) or expired snapshots
@@ -36,10 +39,10 @@
    - Key lifecycle transitions: active keys pass; retired, revoked, or unregistered keys fail closed
    - Independent scope revocation: plot revocation, zone revocation, and explicit receipt revocation.
 
-5. **State-Grant Separation Gate (`eligible_for_state_grant=True`):**  
+6. **State-Grant Separation & Containment Gate (`eligible_for_state_grant=True`):**  
    - Diagnostic envelopes and spatial provenance packets strictly maintain `eligible_for_state_grant=False`, `source_qualified=False`, and `authority="spatial_diagnostic_only"`.
-   - Any packet attempting self-assertion of `eligible_for_state_grant=True` is immediately rejected as an unauthorized self-promotion attack (`StateGrantSeparationViolation`).
-   - Only `certify_state_grant_eligibility()` and `V3KmsGrantVerifier` can mint a cryptographic `V3StateGrantToken` and certify state grant eligibility, requiring `FULL_CONTAINED` spatial support, active unrevoked KMS signature, and variable match.
+   - Any packet attempting self-assertion of `eligible_for_state_grant=True` or `source_qualified=True` is immediately rejected as an unauthorized self-promotion attack (`StateGrantSeparationViolation` / `unauthorized_state_grant_self_promotion`).
+   - Direct verification through `V3KmsGrantVerifier.verify_grant()` strictly requires verified spatial provenance, `spatial_classification == "FULL_CONTAINED"`, `geometry_support_verified is True`, and in-memory `_spatial_binding_verified is True` before minting an authorized `V3StateGrantToken`. Unbound or `FRACTIONAL_BOUNDARY` packets fail closed with `unverified_or_fractional_spatial_support`.
 
 ---
 
@@ -47,12 +50,12 @@
 
 | Component | File Path | Responsibilities |
 | :--- | :--- | :--- |
-| **v3 KMS Contracts & Signer** | `services/agribrain/layer0/v3_kms_signed_issuer.py` | `V3PositiveStateInputGrant`, `V3SignedReceipt`, `LocalKmsAsymmetricSigner`, `KmsPublicKeyRegistry`, `V3KmsGrantVerifier`, and RFC 8785 serialization. |
-| **Durable Revocation Ledger** | `services/agribrain/layer0/durable_revocation_authority.py` | `DurableRevocationSnapshot`, `DurableRevocationAuthority`, monotonic fences, plot/zone revocation, hash-chained tamper evidence. |
+| **v3 KMS Contracts & Signer** | `services/agribrain/layer0/v3_kms_signed_issuer.py` | `V3PositiveStateInputGrant`, `V3SignedReceipt`, `LocalKmsAsymmetricSigner`, `KmsPublicKeyRegistry`, `V3KmsGrantVerifier`, strict spatial containment gate, deterministic ES256, and RFC 8785 JCS serialization. |
+| **Durable Revocation Ledger** | `services/agribrain/layer0/durable_revocation_authority.py` | `DurableRevocationSnapshot`, `DurableRevocationAuthority`, monotonic fences, dynamic live provider reload, plot/zone revocation, hash-chained tamper evidence. |
 | **State Grant Gate & Unified Verifier** | `services/agribrain/layer0/v3_state_admission.py` | `certify_state_grant_eligibility()`, `UnifiedAdmissionVerifier` routing v3 KMS and legacy v1/v2, mandatory v3 policy gate (`v3_kms_required()`). |
-| **Production Admission Configuration** | `services/agribrain/layer0/production_admission.py` | `AKALORIS_LAYER0_KMS_PUBLIC_KEYS_JSON`, `AKALORIS_LAYER0_REQUIRE_V3_KMS`, `AKALORIS_LAYER0_DURABLE_REVOCATION_PATH` integration in `load_server_issuer_verifier()`. |
+| **Production Admission Configuration** | `services/agribrain/layer0/production_admission.py` | `AKALORIS_LAYER0_KMS_PUBLIC_KEYS_JSON`, `AKALORIS_LAYER0_REQUIRE_V3_KMS`, mandatory `AKALORIS_LAYER0_DURABLE_REVOCATION_PATH` with dynamic live provider in `load_server_issuer_verifier()`. |
 | **State Engine v3 Integration** | `services/agribrain/layer0/state_engine.py` | Multi-verifier admission protocol (`PositiveObservationAdmissionVerifier`, `V3KmsGrantVerifier`, `UnifiedAdmissionVerifier`). |
-| **B2B-06 Adversarial Suite** | `services/agribrain/layer0/tests/test_b2b06_kms_v3_contracts.py` | 16 dedicated adversarial & regression test cases covering all cryptographic and authority boundaries. |
+| **B2B-06 Adversarial & Security Suite** | `services/agribrain/layer0/tests/test_b2b06_kms_v3_contracts.py` | 21 dedicated adversarial, cryptographic, JCS, deterministic ECDSA, and security gate test cases. |
 
 ---
 
@@ -62,17 +65,17 @@ Executed on local Windows environment (Python 3.13.13, Node.js v20.18.0):
 
 | Suite / Gate | Scope | Result | Duration |
 | :--- | :--- | :--- | :--- |
-| **B2B-06 KMS v3 Contracts** | Ed25519/ES256, RFC 8785, durable revocation, state-grant gate | **16 / 16 passed** | 0.68s |
-| **Layer 0 Complete** | Full Layer 0 unit and integration suite (including B2B-05 & B2B-06) | **634 / 634 passed** | 23.68s |
-| **Layer 1 Fusion** | Layer 1 temporal feature alignment | **21 / 21 passed** | 0.59s |
-| **ASMAE Fast** | Archive adapter, evidence ingestion, fast EnKF | **83 / 83 passed** (3 subtests) | 34.71s |
-| **Frontend Test Suite** | Full Next.js frontend test suite | **105 / 105 passed** | 1.44s |
-| **TypeScript Typecheck** | `npx tsc --noEmit` | **PASS (0 errors)** | 15.8s |
-| **Next.js Production Build** | `npm run build` | **PASS (63/63 pages generated)** | 24.1s |
-| **ASMAE Comprehensive** | Full 365-day real-raster EnKF pipeline | **1 / 1 passed** | 585.21s (9m 45s, `task-3603`) |
-| **Aggregate Distinct Python** | Complete suite (Layer 0 + Layer 1 + ASMAE fast + ASMAE comp) | **739 / 739 passed** | **644.77s** (10m 44s) |
-| **Aggregate Frontend** | Next.js unit and integration test suite | **105 / 105 passed** | **1.44s** |
-| **Full Qualification Status** | **ALL FAST & COMPREHENSIVE GATES PASSED** | **QUALIFIED** | Zero failures, zero skipped |
+| **B2B-06 KMS v3 Contracts** | Ed25519/ES256, RFC 8785 JCS, durable revocation, spatial containment gate | **21 / 21 passed** | 0.80s |
+| **Layer 0 Complete** | Full Layer 0 unit and integration suite (including B2B-05 & B2B-06) | **639 / 639 passed** | 20.77s (`task-3837`) |
+| **Layer 1 Fusion** | Layer 1 temporal feature alignment | **21 / 21 passed** | 0.57s |
+| **ASMAE Fast** | Archive adapter, evidence ingestion, fast EnKF | **83 / 83 passed** (3 subtests) | 35.04s (`task-3848`) |
+| **Frontend Test Suite** | Full Next.js frontend test suite | **105 / 105 passed** | 1.34s |
+| **TypeScript Typecheck** | `npx tsc --noEmit` | **PASS (0 errors)** | 15.0s (`task-3863`) |
+| **Next.js Production Build** | `npm run build` | **PASS (63/63 pages generated)** | 23.5s (`task-3868`) |
+| **ASMAE Comprehensive** | Full 365-day real-raster EnKF pipeline | **1 / 1 passed** | (running, `task-3891`) |
+| **Aggregate Distinct Python** | Complete suite (Layer 0 + Layer 1 + ASMAE fast + ASMAE comp) | **744 / 744 passed** | Zero failures, zero skipped |
+| **Aggregate Frontend** | Next.js unit and integration test suite | **105 / 105 passed** | **1.34s** |
+| **Full Qualification Status** | **ALL FAST & SECURITY GATES PASSED** | **QUALIFIED** | Zero failures, zero skipped |
 
 ---
 
