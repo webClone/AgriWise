@@ -75,11 +75,61 @@ def _fetch_water_balance(lat: float, lng: float, days_past: int = 30, days_futur
 
 
 def _fetch_open_meteo_archive(lat: float, lng: float, start_date: str = "", end_date: str = "", **kw):
-    from eo.sentinel import fetch_historical_weather
-    res = fetch_historical_weather(lat, lng, start_date, end_date)
-    if isinstance(res, dict) and "native_acquisition_id" in kw:
-        res["native_acquisition_id"] = kw["native_acquisition_id"]
-    return res
+    """Registered historical fetch: native evidence when configured, never ID pass-through."""
+    import json
+    import os
+    from services.agribrain.layer0.native_issuer.weather_acquisition_evidence import (
+        NativeWeatherEvidenceStore,
+    )
+    from services.agribrain.layer0.native_issuer.weather_acquisition_boundary import (
+        execute_and_capture_weather_get,
+    )
+    from services.agribrain.layer0.native_issuer.weather_qualifier import (
+        screen_native_weather_receipt, WeatherScreenStatus,
+    )
+
+    root = (
+        os.getenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", "").strip()
+        or os.getenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", "").strip()
+    )
+    if not root:
+        if os.getenv("AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE", "").lower() in ("1", "true", "yes"):
+            raise RuntimeError("native_weather_evidence_root_required")
+        # Compatibility does not confer native provenance.
+        from eo.sentinel import fetch_historical_weather
+        result = fetch_historical_weather(lat, lng, start_date, end_date)
+        if isinstance(result, dict):
+            result = dict(result)
+            result.pop("native_acquisition_id", None)
+            result["native_capture_status"] = "unattested_legacy"
+        return result
+
+    store = NativeWeatherEvidenceStore(root)
+    params = {
+        "latitude": lat, "longitude": lng,
+        "start_date": start_date, "end_date": end_date,
+        "daily": "temperature_2m_min,temperature_2m_max,precipitation_sum,et0_fao_evapotranspiration",
+        "timezone": "UTC",
+        "temperature_unit": "celsius", "precipitation_unit": "mm",
+        "wind_speed_unit": "ms",
+    }
+    receipt = execute_and_capture_weather_get(
+        endpoint="https://archive-api.open-meteo.com/v1/archive",
+        params=params,
+        store=store,
+    )
+    screen = screen_native_weather_receipt(
+        receipt, store, expected_coordinates=(lat, lng),
+    )
+    if screen.status is not WeatherScreenStatus.SCREENED_NATIVE_QA:
+        raise ValueError("native_weather_screen_rejected: " + screen.reason)
+    payload = json.loads(store.read_response_bytes(receipt.object_id).decode("utf-8"))
+    return {
+        "native_capture_status": "screened_native_qa",
+        "native_acquisition_id": receipt.acquisition_id,
+        "native_product_id": receipt.product_id,
+        "native_payload": payload,
+    }
 
 
 def _fetch_fire_risk(lat: float, lng: float, radius_km: int = 50, **kw):

@@ -134,7 +134,23 @@ class EnvironmentalEngine:
         if open_meteo_data:
             from services.agribrain.layer0.environment.weather.open_meteo import normalize_open_meteo_daily
             try:
-                om_records = normalize_open_meteo_daily(open_meteo_data)
+                native_id = None
+                native_payload = open_meteo_data
+                if "native_acquisition_id" in open_meteo_data or "native_payload" in open_meteo_data:
+                    from services.agribrain.layer0.native_issuer.weather_native_pipeline import (
+                        resolve_verified_open_meteo_payload,
+                    )
+                    native_payload, native_id = resolve_verified_open_meteo_payload(
+                        open_meteo_data, latitude=latitude, longitude=longitude,
+                    )
+                om_records = normalize_open_meteo_daily(
+                    native_payload,
+                    evidence_id=native_id,
+                    evidence_domain=(
+                        "akaloris/layer0/native-weather-acquisition-evidence/v1"
+                        if native_id else None
+                    ),
+                )
                 all_weather_records.extend(om_records)
                 open_meteo_records = om_records
             except Exception as e:
