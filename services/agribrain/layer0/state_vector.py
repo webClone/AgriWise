@@ -477,7 +477,13 @@ class ProcessModel:
         x.values[IDX_LAI] = max(0.0, new_lai)
         
         # ---- 4. Biomass proxy (tracks LAI * duration) ----
-        x.values[IDX_BIOMASS] = max(0.0, x.values[IDX_LAI] * 0.3 + x.values[IDX_BIOMASS] * 0.7)
+        # A daily retention rho becomes rho**dt for irregular intervals.
+        biomass_retention = 0.7 ** dt_days
+        x.values[IDX_BIOMASS] = max(
+            0.0,
+            x.values[IDX_LAI] * (1.0 - biomass_retention)
+            + x.values[IDX_BIOMASS] * biomass_retention,
+        )
         
         # ---- 5. Soil moisture water balance ----
         # Simple bucket model per layer
@@ -530,7 +536,11 @@ class ProcessModel:
             stress_water = min(1.0, stress_water + (vpd - 2.0) * 0.2)
         
         # Smooth update (don't jump instantly)
-        x.values[IDX_CANOPY_STRESS] = 0.7 * x.values[IDX_CANOPY_STRESS] + 0.3 * stress_water
+        stress_retention = 0.7 ** dt_days
+        x.values[IDX_CANOPY_STRESS] = (
+            stress_retention * x.values[IDX_CANOPY_STRESS]
+            + (1.0 - stress_retention) * stress_water
+        )
         
         # ---- 7. Thermal stress ----
         stress_t = 0.0
@@ -538,7 +548,11 @@ class ProcessModel:
             stress_t = min(1.0, (t_max - p["t_max"]) / 10.0)
         elif t_min < 0:
             stress_t = min(1.0, abs(t_min) / 10.0)
-        x.values[IDX_STRESS_THERMAL] = 0.8 * x.values[IDX_STRESS_THERMAL] + 0.2 * stress_t
+        thermal_retention = 0.8 ** dt_days
+        x.values[IDX_STRESS_THERMAL] = (
+            thermal_retention * x.values[IDX_STRESS_THERMAL]
+            + (1.0 - thermal_retention) * stress_t
+        )
         
         # ---- 8. Photosynthetic efficiency ----
         # Efficiency decays when stomata close (heat/water stress).
@@ -558,9 +572,17 @@ class ProcessModel:
         recovery_target = min(
             1.0, 0.9 + 0.1 * (1.0 - x.values[IDX_CANOPY_STRESS])
         )
-        recovery_eff = 0.9 * current_eff + 0.1 * recovery_target
+        recovery_retention = 0.9 ** dt_days
+        recovery_eff = (
+            recovery_retention * current_eff
+            + (1.0 - recovery_retention) * recovery_target
+        )
         shutdown_target = max(0.0, 1.0 - shutdown_pressure)
-        shutdown_eff = 0.6 * current_eff + 0.4 * shutdown_target
+        shutdown_retention = 0.6 ** dt_days
+        shutdown_eff = (
+            shutdown_retention * current_eff
+            + (1.0 - shutdown_retention) * shutdown_target
+        )
         blend_start = p["photo_shutdown_blend_start"]
         blend_end = p["photo_shutdown_blend_end"]
         blend_position = max(
@@ -570,7 +592,7 @@ class ProcessModel:
         new_eff = (1.0 - blend) * recovery_eff + blend * shutdown_eff
         
         # Gradual loss of efficiency avoids a discontinuity at stage=4.
-        new_eff *= 1.0 - 0.05 * senescence_weight
+        new_eff *= 1.0 - (1.0 - 0.95 ** dt_days) * senescence_weight
         
         x.values[IDX_PHOTO_EFF] = new_eff
         

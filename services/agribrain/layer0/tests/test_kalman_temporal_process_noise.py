@@ -193,3 +193,29 @@ def test_unverified_raw_irrigation_is_still_forbidden():
         f.predict("2026-11-02", WEATHER, [{"event_type": "irrigation", "amount_mm": 20}])
     assert f.covariance.P == before
     assert f.state.day == "2026-11-01"
+
+
+
+def test_subday_biomass_relaxation_composes_into_a_day():
+    """Two independent half-day relaxation steps equal a daily step for a
+    constant target, rather than applying a full daily EMA twice.
+    """
+    model = ProcessModel()
+    prior = StateVector.initial("2026-11-01")
+    weather = {"temp_min": 5.0, "temp_max": 5.0,
+               "precipitation": 0.0, "et0": 0.0}
+    half, _ = model.predict(prior, weather, dt_days=0.5)
+    second, _ = model.predict(half, weather, dt_days=0.5)
+    full, _ = model.predict(prior, weather, dt_days=1.0)
+    assert second.biomass == pytest.approx(full.biomass, abs=1e-10)
+
+
+def test_two_day_retention_matches_elapsed_time_not_twice_daily_mixing():
+    model = ProcessModel()
+    prior = StateVector.initial("2026-11-01")
+    weather = {"temp_min": 5.0, "temp_max": 5.0,
+               "precipitation": 0.0, "et0": 0.0}
+    one, _ = model.predict(prior, weather, dt_days=1)
+    two, _ = model.predict(prior, weather, dt_days=2)
+    twice, _ = model.predict(one, weather, dt_days=1)
+    assert two.biomass == pytest.approx(twice.biomass, abs=1e-10)

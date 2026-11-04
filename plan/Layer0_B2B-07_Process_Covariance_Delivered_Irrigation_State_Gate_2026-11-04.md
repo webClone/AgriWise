@@ -95,3 +95,5 @@ py -m pytest -q services/agribrain/layer0/tests/test_kalman_temporal_process_noi
 
 Then run full Layer0, Layer1 Fusion, and ASMAE fast tests. Reserve 365-day real-raster comprehensive EnKF for the integrated B07-A+B+C milestone.
 All B2B-04B, B2B-05, B2B-06, Pilot, frozen findings and master monograph remain untouched.
+
+- Temporal refinement: biomass, canopy-stress, thermal-stress and photosynthesis relaxation use retention**dt rather than full daily EMA updates at every irregular substep; one-day coefficients are unchanged. Added half-day composition checks.
