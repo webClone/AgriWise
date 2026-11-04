@@ -26,6 +26,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 import math
 
+from services.agribrain.layer0.temporal_process_noise import (
+    NOMINAL_VARIANCE_RATE_PER_DAY, UNFORCED_DRIFT_VARIANCE_RATE_PER_DAY,
+    scale_diagonal_variance_rates, validate_dt_days,
+)
+
 
 # ============================================================================
 # Constants
@@ -216,14 +221,9 @@ class StateCovariance:
         self.P[i][j] = val
     
     def add_process_noise(self, Q: List[float]) -> None:
-        """Legacy identity-transition noise path (missing-weather mode only)."""
-        if len(Q) != N_STATES or any(
-            not isinstance(q, (int, float)) or isinstance(q, bool)
-            or not math.isfinite(q) or q < 0.0 for q in Q
-        ):
-            raise ValueError("process noise must be finite, nonnegative and complete")
-        for i in range(N_STATES):
-            self.P[i][i] += Q[i]
+        """Identity-transition update through the same atomic PSD gate."""
+        F = [[float(i == j) for j in range(N_STATES)] for i in range(N_STATES)]
+        self.propagate(F, Q)
 
     def propagate(self, F: List[List[float]], Q: List[float]) -> None:
         """Apply P_next = F P F^T + diag(Q), atomically.
@@ -263,6 +263,18 @@ class StateCovariance:
                 ):
                     raise ValueError("asymmetric prior covariance")
 
+        # Symmetric, nonnegative diagonal is necessary but NOT sufficient
+        # for positive semidefiniteness. Reject an indefinite prior before
+        # making a new candidate. NumPy is already a scientific stack
+        # dependency; eigvalsh is Hermitian-specific.
+        import numpy as np
+        try:
+            prior_eigen = np.linalg.eigvalsh(np.asarray(self.P, dtype=float))
+        except (ValueError, np.linalg.LinAlgError, OverflowError):
+            raise ValueError("invalid prior covariance eigenspectrum") from None
+        if not np.isfinite(prior_eigen).all() or prior_eigen[0] < -1e-10:
+            raise ValueError("non-PSD prior covariance")
+
         fp = [
             [math.fsum(F[i][k] * self.P[k][j] for k in range(n))
              for j in range(n)] for i in range(n)
@@ -284,6 +296,12 @@ class StateCovariance:
                 if not math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-11):
                     raise ValueError("asymmetric propagated covariance")
                 candidate[i][j] = candidate[j][i] = (a + b) / 2.0
+        try:
+            candidate_eigen = np.linalg.eigvalsh(np.asarray(candidate, dtype=float))
+        except (ValueError, np.linalg.LinAlgError, OverflowError):
+            raise ValueError("invalid propagated covariance eigenspectrum") from None
+        if not np.isfinite(candidate_eigen).all() or candidate_eigen[0] < -1e-10:
+            raise ValueError("non-PSD propagated covariance")
         self.P = candidate
 
 
@@ -375,20 +393,14 @@ class ProcessModel:
         Returns:
             (predicted_state, process_noise_Q)
         """
+        dt_days = validate_dt_days(dt_days)
         if skip_weather_forcing:
-            x = state.clone()
-            Q = [
-                0.04,   # LAI
-                0.02,   # Biomass
-                0.03,   # SM top
-                0.02,   # SM root
-                0.03,   # Stress
-                1.0,    # GDD
-                0.02,   # Stage
-                0.02,   # Thermal stress
-                0.03,   # Photosynthetic efficiency
-            ]
-            return x, Q
+            # No synthetic weather or physical state motion. Only a declared
+            # diagonal, uncalibrated drift variance accumulates with elapsed
+            # time. The caller applies F=I to this process covariance.
+            return state.clone(), scale_diagonal_variance_rates(
+                UNFORCED_DRIFT_VARIANCE_RATE_PER_DAY, dt_days,
+            )
 
         x = state.clone()
         p = self.params
@@ -454,10 +466,12 @@ class ProcessModel:
 
         stress_factor = 1.0 - x.values[IDX_CANOPY_STRESS] * 0.5
         ceiling_factor = max(0.0, 1.0 - (current_lai / p["lai_max"]) ** 2)
-        growth = effective_growth_rate * gdd_today * stress_factor * stage_mod * ceiling_factor * dt_days
+        # gdd_today already integrates over dt; a second multiplication by
+        # dt incorrectly yields dt^2 growth for non-daily prediction steps.
+        growth = effective_growth_rate * gdd_today * stress_factor * stage_mod * ceiling_factor
         # Gradual senescence replaces the on/off decay switch at stage=4.
         senescence_weight = max(0.0, min(1.0, stage - STAGE_RIPENING))
-        decay = p["lai_decay_rate"] * gdd_today * dt_days * senescence_weight
+        decay = p["lai_decay_rate"] * gdd_today * senescence_weight
         new_lai = max(0.0, min(p["lai_max"], current_lai + growth - decay))
         
         x.values[IDX_LAI] = max(0.0, new_lai)
@@ -573,34 +587,26 @@ class ProcessModel:
         # ---- Process noise Q ----
         # Model uncertainty: how much we don't trust the prediction
         # Higher Q = less trust in model = more weight to observations
-        Q = [
-            0.04,   # LAI: meaningful noise — model growth is approximate
-            0.02,   # Biomass
-            0.03,   # SM top: rain spatial variability adds noise
-            0.02,   # SM root
-            0.03,   # Stress
-            1.0,    # GDD: temperature measurement uncertainty
-            0.02,   # Stage
-            0.02,   # Thermal stress
-            0.03,   # Photosynthetic efficiency
-        ]
+        # Per-day *variance rates*, not sigmas or immutable daily Q.
+        # These provisional priors preserve the baseline for dt=1 day.
+        q_rate = list(NOMINAL_VARIANCE_RATE_PER_DAY)
         
         # Stage-dependent LAI noise: growth model is less reliable
         # during rapid transitions
         if stage >= STAGE_VEGETATIVE and stage < STAGE_FLOWERING:
-            Q[IDX_LAI] = 0.06   # Peak growth — highest model uncertainty
+            q_rate[IDX_LAI] = 0.06   # Uncalibrated peak-growth rate
         elif stage >= STAGE_SENESCENCE:
-            Q[IDX_LAI] = 0.05   # Senescence dynamics are unpredictable
+            q_rate[IDX_LAI] = 0.05   # Uncalibrated senescence rate
         
         # Higher process noise when weather uncertainty is high
         if rain_mm > 10:
-            Q[IDX_SM_0_10] *= 2  # heavy rain -> uncertain infiltration
-            Q[IDX_SM_10_40] *= 1.5
+            q_rate[IDX_SM_0_10] *= 2  # Provisional weather-response rate
+            q_rate[IDX_SM_10_40] *= 1.5
         
         # If using adaptive rate and model error was high, inflate Q
         model_error = getattr(self, '_last_model_error', 0.0)
         if model_error > 0.3:
-            Q[IDX_LAI] *= (1.0 + model_error)  # Scale noise with recent error
+            q_rate[IDX_LAI] *= (1.0 + model_error)  # Provisional response
         
         # DNA data quality noise inflation:
         # When the DNA sequencing was based on degraded input data (null-filled
@@ -608,9 +614,9 @@ class ProcessModel:
         # confidence in the DNA-derived crop parameters.
         dna_noise = getattr(self, '_dna_noise_factor', 1.0)
         if dna_noise > 1.0:
-            Q = [q * dna_noise for q in Q]
-        
-        return x, Q
+            q_rate = [q * dna_noise for q in q_rate]
+
+        return x, scale_diagonal_variance_rates(q_rate, dt_days)
     
     def transition_jacobian(
         self, state: StateVector, weather: Dict[str, float],
@@ -628,8 +634,7 @@ class ProcessModel:
         """
         if len(state.values) != N_STATES:
             raise ValueError("invalid prior state dimension")
-        if not math.isfinite(dt_days) or dt_days <= 0.0:
-            raise ValueError("invalid transition duration")
+        dt_days = validate_dt_days(dt_days)
 
         x0 = state.values
         bounds = [
