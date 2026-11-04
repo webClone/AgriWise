@@ -109,6 +109,20 @@ py -m pytest -q services/agribrain/layer05_asmae/tests/
 
 The comprehensive ASMAE real-raster test **must** be included in full acceptance. New-head counts cannot be predicted or inferred from the qualified parent; use actual collected and passed test counts.
 
+### 4.1 Verified Qualification Results (Commit a0a6009)
+
+Execution completed on Windows (Python 3.13.13) against verified head `a0a60094709e871fe5445b7f6ff1920558f197a3`:
+
+| Test Suite | Result | Execution Time | Scope / Notes |
+|:---|:---:|:---:|:---|
+| `test_weather_source_role_isolation.py` | **51/51 passed** | 0.66s | Focused unit tests including all 8 code-review regression cases |
+| `test_weather_evidence_transport.py` | **2/2 passed** | 0.46s | Transport regression & unverified role archive rejection |
+| Complete Layer 0 (`layer0/tests/`) | **477/477 passed** | 18.94s | All Layer 0 unit, provider, contract, proof & QA suites |
+| Layer 1 Fusion (`layer1_fusion/tests/`) | **21/21 passed** | 0.58s | Full downstream fusion pipeline |
+| ASMAE Fast (`layer05_asmae/tests/`) | **83/83 passed** | 37.90s | Fast ASMAE unit, physics & Kalman tests |
+| ASMAE Comprehensive Real-Raster (`test_comprehensive_pipeline_execution.py`) | **1/1 passed** | 684.47s (11m 24s) | Full end-to-end real-raster EnKF assimilation pipeline |
+| **Distinct Aggregate Qualified** | **582/582 passed** | **742.55s total** | **Zero failures, zero regressions, zero skipped** |
+
 ## 5. What B2B-04A explicitly does NOT qualify
 
 - **Source-native weather identity:** The Open-Meteo `normalize_open_meteo_daily()` historical-reanalysis default is **not tied to an independently verified historical API endpoint**. A raw payload of identical shape from an Open-Meteo live forecast endpoint could still be misclassified if wrongly supplied as historical. The next B2B-04B requires trusted endpoint/product identity with fail-closed request/response retention, model-run and valid-time binding, and transport-origin attestation.
@@ -120,4 +134,4 @@ The comprehensive ASMAE real-raster test **must** be included in full acceptance
 
 ## Disposition
 
-**B2B-04A declared weather source-role and historical/forecast isolation: IMPLEMENTED CANDIDATE; exact-head tests PENDING.** B2B-04 native provider provenance remains **PARTIAL / OPEN**. No new state/publication grant authorization is introduced; previously accepted Layer 0 scientific closures remain closed within their own pinned software scope.
+**B2B-04A declared weather source-role and historical/forecast isolation: SOFTWARE-QUALIFIED at commit `a0a6009` (582/582 passed).** B2B-04 native provider provenance (HTTP request/response CAS capture, endpoint/product verification, and transport attestation) remains **OPEN**. No new state/publication grant authorization is introduced; previously accepted Layer 0 scientific closures remain closed within their own pinned software scope.
