@@ -77,3 +77,16 @@ the prior 562/562 receipt belongs to an older B2B-05 head.
 - Targeted test: py -m pytest -q services/agribrain/layer0/tests/test_b2b05_prisma_state_ingestion.py
 - Also run all Layer 0 tests and affected Layer 1/ASMAE fast tests at the exact new head. Existing 684/684 receipt is not transferable.
 - Deployment gates remain: live DB authorization tests, Prisma schema/index rollout and backfill, atomic geometry epoch writes, middleware principal wiring, operational entry-point strict configuration and publication scoped receipt integration.
+
+## B2B-05 startup and atomic geometry epoch lifecycle
+
+- FastAPI lifespan configures the *existing singleton* Layer0 broker from a live MongoDB ping and PrismaPlotOwnershipStore before its refresh worker starts. Strict plot scope fails startup on missing authoritative DB.
+- Signed internal-service dependency creates and resets a ContextVar authenticated principal; unsigned development requests never inherit ownership authority. Request signing authenticates the server caller, not evidence from user JSON.
+- Python PlotGeometryEpochService compares expected owner, active plot, farm ID, canonical GeoJSON and geometry version, and atomically increments the version while replacing geoJson and geometryHash in one Mongo document update.
+- New plot initialization is a separate CAS restricted to genuinely uninitialized epochs. An old plot with a different unversioned geometry cannot be silently reinitialized; backfill requires trusted administrative migration.
+- Signed POST initialize and PUT geometry endpoints use authenticated internal namespace and broker authority. Frontend plot creation and both plot PUT endpoints delegate geometry writes to this API, excluding direct Prisma geometry/hash/version mutations.
+- Old scoped hot/filesystem cache invalidation is attempted after commit; even if storage cleanup errors occur, a stale scope cannot pass the next live-ownership validation. Best-effort cleanup is not transactional with Mongo mutation.
+- New test: py -m pytest -q services/agribrain/layer0/tests/test_b2b05_geometry_epoch_lifecycle.py
+- Must also run: full Layer 0 suite, affected Layer 1 and ASMAE fast, Next.js typecheck/build and route tests before milestone acceptance.
+- Open deployment/architecture gates: actual Mongo replica ownership race validation, live FastAPI signed endpoints, frontend session signer integration, trusted backfill and atomic plot ownership transfer protocol, scoped background refresh and direct raw storage access.
+- This candidate does not inherit any prior passing test count. Do not merge without exact-head verification.
