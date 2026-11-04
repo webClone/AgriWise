@@ -285,6 +285,10 @@ class Layer0StatePackage:
     health_report: Dict[str, Any] = field(default_factory=dict)
     provenance: Dict[str, Any] = field(default_factory=dict)
 
+    # B2B-07C: Scientific-state and actuator control separation
+    scientific_publication_authorized: bool = False
+    actuator_control_authorized: bool = False
+
     def __post_init__(self):
         if not self.output_hash:
             self.output_hash = self._generate_output_hash()
@@ -370,4 +374,6 @@ class Layer0StatePackage:
             "validation_conflict_count": len(self.validation_conflicts),
             "health_report": self.health_report,
             "provenance": self.provenance,
+            "scientific_publication_authorized": self.scientific_publication_authorized,
+            "actuator_control_authorized": self.actuator_control_authorized,
         }

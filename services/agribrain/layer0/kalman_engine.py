@@ -164,6 +164,9 @@ class ZoneKalmanFilter:
         self.parent_plot_id = ""
         self.expected_geometry_hash = ""
         self.evidence_cutoff = None
+        self.tenant_id = ""
+        self.geometry_version = None
+        self.delivery_verifier = None
         
         # ── Adaptive ML Recalibration Engine ─────────────────────────
         # Learns optimal LAI growth rate from observation residuals.
@@ -193,22 +196,40 @@ class ZoneKalmanFilter:
         """
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
+        admitted_deliveries = []
         if events:
-            # Direct raw event forcing bypasses the canonical evidence router.
-            # No trusted L3 infiltration operator is bound yet. Even an event
-            # with role='VERIFIED_DELIVERY' in an ordinary dict is not a
-            # verified execution receipt. Reject before any state mutation.
-            raise ValueError("physical management forcing requires trusted L3 admission")
+            for evt in events:
+                if hasattr(evt, "net_infiltrated_depth_mm") and hasattr(evt, "depth_uncertainty_sigma_mm"):
+                    admitted_deliveries.append(evt)
+                elif isinstance(evt, dict) and evt.get("physical_delivery_verified") is True and evt.get("state_update_allowed") is True:
+                    admitted_deliveries.append(evt)
+                else:
+                    # Direct raw event forcing bypasses the canonical evidence router.
+                    # No trusted L3 infiltration operator is bound yet. Even an event
+                    # with role='VERIFIED_DELIVERY' in an ordinary dict is not a
+                    # verified execution receipt. Reject before any state mutation.
+                    raise ValueError("physical management forcing requires trusted L3 admission")
 
-        # The stored state timestamp, not wall clock or guessed cadence,
-        # defines the unique physical duration for f, F and Q.
         gap = TemporalGapContract.between(self.state.day, day)
+        net_irrigation_mm = 0.0
+        irrigation_variance = 0.0
+        if admitted_deliveries:
+            whc_top = self.process_model.params["whc_mm_per_m"] * 0.1
+            for d in admitted_deliveries:
+                depth = getattr(d, "net_infiltrated_depth_mm", None) or d.get("net_infiltrated_depth_mm", 0.0)
+                sigma = getattr(d, "depth_uncertainty_sigma_mm", None) or d.get("depth_uncertainty_sigma_mm", 0.0)
+                net_irrigation_mm += depth
+                irrigation_variance += (sigma / max(whc_top, 0.01)) ** 2
+
         predicted_state, Q = self.process_model.predict(
             self.state, weather, events, dt_days=gap.dt_days,
+            net_irrigation_mm=net_irrigation_mm,
+            irrigation_variance=irrigation_variance,
         )
         F = self.process_model.transition_jacobian(
             self.state, weather, events,
             dt_days=gap.dt_days, predicted_state=predicted_state,
+            net_irrigation_mm=net_irrigation_mm,
         )
 
         # Stage a complete covariance update before committing anything.
@@ -229,7 +250,7 @@ class ZoneKalmanFilter:
         self._last_q_regime = "NOMINAL_RATE_DISCRETIZATION"
         return predicted_state
 
-    def predict_missing_weather(self, day: str) -> Tuple[np.ndarray, np.ndarray]:
+    def predict_missing_weather(self, day: str, events: Optional[List[Dict]] = None) -> Tuple[np.ndarray, np.ndarray]:
         """No physical weather evolution; accumulate declared drift covariance.
 
         There is no synthetic rainfall/temperature. Q is a variance rate
@@ -240,10 +261,32 @@ class ZoneKalmanFilter:
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
 
+        admitted_deliveries = []
+        if events:
+            for evt in events:
+                if hasattr(evt, "net_infiltrated_depth_mm") and hasattr(evt, "depth_uncertainty_sigma_mm"):
+                    admitted_deliveries.append(evt)
+                elif isinstance(evt, dict) and evt.get("physical_delivery_verified") is True and evt.get("state_update_allowed") is True:
+                    admitted_deliveries.append(evt)
+                else:
+                    raise ValueError("physical management forcing requires trusted L3 admission")
+
         gap = TemporalGapContract.between(self.state.day, day)
+        net_irrigation_mm = 0.0
+        irrigation_variance = 0.0
+        if admitted_deliveries:
+            whc_top = self.process_model.params["whc_mm_per_m"] * 0.1
+            for d in admitted_deliveries:
+                depth = getattr(d, "net_infiltrated_depth_mm", None) or d.get("net_infiltrated_depth_mm", 0.0)
+                sigma = getattr(d, "depth_uncertainty_sigma_mm", None) or d.get("depth_uncertainty_sigma_mm", 0.0)
+                net_irrigation_mm += depth
+                irrigation_variance += (sigma / max(whc_top, 0.01)) ** 2
+
         predicted_state, Q = self.process_model.predict(
             self.state, {}, None,
             dt_days=gap.dt_days, skip_weather_forcing=True,
+            net_irrigation_mm=net_irrigation_mm,
+            irrigation_variance=irrigation_variance,
         )
         candidate_covariance = StateCovariance(
             P=[row[:] for row in self.covariance.P]
@@ -466,9 +509,16 @@ class ZoneKalmanFilter:
             plot_id=self.parent_plot_id,
             zone_id=self.zone_id,
             geometry_hash=self.expected_geometry_hash,
+            geometry_version=self.geometry_version,
+            tenant_id=self.tenant_id,
             cutoff=self.evidence_cutoff,
             seen_ids=self._event_evidence_seen,
+            delivery_verifier=self.delivery_verifier,
         )
+        admitted_deliveries = [
+            d for d in event_dispositions
+            if d.get("physical_delivery_verified") is True and d.get("state_update_allowed") is True
+        ]
         gap = TemporalGapContract.between(self.state.day, day)
         qualified_weather = _qualified_weather_for_prediction(weather)
         # A self-declared interval_coverage_days field cannot attest
@@ -488,9 +538,9 @@ class ZoneKalmanFilter:
         # A truthy but incomplete weather dictionary is NOT a measured day.
         # On degraded forcing, do not invent temperature or rainfall.
         if qualified_weather is None:
-            self.predict_missing_weather(day)
+            self.predict_missing_weather(day, admitted_deliveries)
         else:
-            self.predict(day, qualified_weather, None)
+            self.predict(day, qualified_weather, admitted_deliveries)
         
         # Update (if observations exist)
         source_weights = {}
@@ -523,8 +573,16 @@ class ZoneKalmanFilter:
                 self._last_q_regime, self._last_process_q,
             ),
             "management_event_evidence": event_dispositions,
-            "physical_management_events_applied": 0,
-            "event_forcing_status": "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT",
+            "physical_management_events_applied": len(admitted_deliveries),
+            "event_forcing_status": (
+                "APPLIED" if admitted_deliveries else "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT"
+            ),
+            "verified_delivery_receipts": [
+                (getattr(d, "receipt_id", None) or d.get("receipt_id", ""))
+                for d in admitted_deliveries
+            ],
+            "scientific_publication_authorized": False,
+            "actuator_control_authorized": False,
         }
         self.provenance_history.append(provenance)
         

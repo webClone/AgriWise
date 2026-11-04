@@ -48,8 +48,11 @@ def classify_management_event_evidence(
     plot_id: str,
     zone_id: str,
     geometry_hash: str = "",
+    geometry_version: Optional[int] = None,
+    tenant_id: str = "",
     cutoff: Optional[datetime] = None,
     seen_ids: Optional[Set[str]] = None,
+    delivery_verifier: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Classify an event once per scoped run without granting physical force.
 
@@ -133,21 +136,60 @@ def classify_management_event_evidence(
             decision.update(status="REJECTED", reason="future_or_unavailable_event")
         elif event_id in seen:
             decision.update(status="REJECTED", reason="duplicate_event_identity")
-        elif event_type == "irrigation" and not _finite_nonnegative(magnitude):
-            decision.update(status="REJECTED", reason="invalid_irrigation_amount")
         elif event_type != "irrigation":
             decision.update(status="RETAINED", reason="non_water_management_event")
-        elif role in ("PLANNED_SCENARIO", "PLANNED", "RECOMMENDED"):
-            decision.update(status="DEFERRED", reason="planned_not_delivered")
-        elif role in ("USER_REPORTED_EXPOSURE", "REPORTED"):
-            decision.update(status="DEFERRED", reason="reported_not_verified")
-        elif role == "VERIFIED_DELIVERY":
-            decision.update(
-                status="DEFERRED",
-                reason="claimed_verification_requires_trusted_L3_receipt",
-            )
         else:
-            decision.update(status="DEFERRED", reason="unknown_delivery_role")
+            # Check for authentic L3 verified receipt
+            receipt_data = payload.get("verified_receipt") or envelope.get("verified_receipt")
+            if receipt_data is not None:
+                if delivery_verifier is None:
+                    decision.update(
+                        status="DEFERRED",
+                        reason="claimed_verification_requires_trusted_L3_receipt",
+                    )
+                else:
+                    try:
+                        admitted = delivery_verifier.verify_and_admit(
+                            receipt_data,
+                            expected_day=day,
+                            expected_plot_id=plot_id,
+                            expected_zone_id=zone_id,
+                            expected_geometry_hash=geometry_hash,
+                            expected_geometry_version=geometry_version,
+                            expected_tenant_id=tenant_id,
+                            cutoff=cutoff,
+                        )
+                        decision.update(
+                            status="ADMITTED",
+                            reason="verified_l3_physical_delivery",
+                            physical_delivery_verified=True,
+                            state_update_allowed=True,
+                            net_infiltrated_depth_mm=admitted.net_infiltrated_depth_mm,
+                            depth_uncertainty_sigma_mm=admitted.depth_uncertainty_sigma_mm,
+                            receipt_id=admitted.receipt_id,
+                            replay_idempotency_key=admitted.replay_idempotency_key,
+                            scientific_publication_authorized=False,
+                            actuator_control_authorized=False,
+                        )
+                    except Exception as exc:
+                        decision.update(
+                            status="REJECTED",
+                            reason=str(exc),
+                        )
+            else:
+                if not _finite_nonnegative(magnitude):
+                    decision.update(status="REJECTED", reason="invalid_irrigation_amount")
+                elif role in ("PLANNED_SCENARIO", "PLANNED", "RECOMMENDED"):
+                    decision.update(status="DEFERRED", reason="planned_not_delivered")
+                elif role in ("USER_REPORTED_EXPOSURE", "REPORTED"):
+                    decision.update(status="DEFERRED", reason="reported_not_verified")
+                elif role == "VERIFIED_DELIVERY":
+                    decision.update(
+                        status="DEFERRED",
+                        reason="claimed_verification_requires_trusted_L3_receipt",
+                    )
+                else:
+                    decision.update(status="DEFERRED", reason="unknown_delivery_role")
 
         # Track identity for accepted-scope evidence even when it is deferred:
         # duplicate reports should not silently masquerade as new delivery.

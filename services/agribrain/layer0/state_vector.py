@@ -374,7 +374,9 @@ class ProcessModel:
                 weather: Dict[str, float],
                 events: Optional[List[Dict]] = None,
                 dt_days: float = 1.0,
-                skip_weather_forcing: bool = False) -> Tuple[StateVector, List[float]]:
+                skip_weather_forcing: bool = False,
+                net_irrigation_mm: float = 0.0,
+                irrigation_variance: float = 0.0) -> Tuple[StateVector, List[float]]:
         """
         Predict next-day state from current state + weather drivers.
         
@@ -398,9 +400,17 @@ class ProcessModel:
             # No synthetic weather or physical state motion. Only a declared
             # diagonal, uncalibrated drift variance accumulates with elapsed
             # time. The caller applies F=I to this process covariance.
-            return state.clone(), scale_diagonal_variance_rates(
+            q_drift = scale_diagonal_variance_rates(
                 UNFORCED_DRIFT_VARIANCE_RATE_PER_DAY, dt_days,
             )
+            if irrigation_variance > 0.0:
+                q_drift[IDX_SM_0_10] += irrigation_variance
+            x_drift = state.clone()
+            if net_irrigation_mm > 0.0:
+                whc_top = self.params["whc_mm_per_m"] * 0.1
+                sm_top_mm = min(whc_top, x_drift.values[IDX_SM_0_10] * whc_top + net_irrigation_mm)
+                x_drift.values[IDX_SM_0_10] = sm_top_mm / max(whc_top, 0.01)
+            return x_drift, q_drift
 
         x = state.clone()
         p = self.params
@@ -501,7 +511,7 @@ class ProcessModel:
                 if evt.get("event_type") == "irrigation":
                     irrigation_mm += evt.get("amount_mm", 0.0)
         
-        water_in = rain_mm + irrigation_mm
+        water_in = rain_mm + irrigation_mm + net_irrigation_mm
         sm_top_mm = sm_top * whc_top + water_in
         
         # ET extraction (weighted by layer)
@@ -638,12 +648,16 @@ class ProcessModel:
         if dna_noise > 1.0:
             q_rate = [q * dna_noise for q in q_rate]
 
-        return x, scale_diagonal_variance_rates(q_rate, dt_days)
+        q_diag = scale_diagonal_variance_rates(q_rate, dt_days)
+        if irrigation_variance > 0.0:
+            q_diag[IDX_SM_0_10] += irrigation_variance
+        return x, q_diag
     
     def transition_jacobian(
         self, state: StateVector, weather: Dict[str, float],
         events: Optional[List[Dict]] = None, dt_days: float = 1.0,
         predicted_state: Optional[StateVector] = None,
+        net_irrigation_mm: float = 0.0,
     ) -> List[List[float]]:
         """Local Jacobian of the *actual* piecewise transition f(x,u).
 
@@ -676,7 +690,7 @@ class ProcessModel:
 
         nominal = (
             predicted_state if predicted_state is not None
-            else self.predict(state, weather, events, dt_days=dt_days)[0]
+            else self.predict(state, weather, events, dt_days=dt_days, net_irrigation_mm=net_irrigation_mm)[0]
         )
         y0 = nominal.values
         if len(y0) != N_STATES or any(not math.isfinite(v) for v in y0):
@@ -696,13 +710,13 @@ class ProcessModel:
                 x_plus = state.clone()
                 x_plus.values[j] += step
                 plus = self.predict(
-                    x_plus, weather, events, dt_days=dt_days
+                    x_plus, weather, events, dt_days=dt_days, net_irrigation_mm=net_irrigation_mm
                 )[0].values
             if can_minus:
                 x_minus = state.clone()
                 x_minus.values[j] -= step
                 minus = self.predict(
-                    x_minus, weather, events, dt_days=dt_days
+                    x_minus, weather, events, dt_days=dt_days, net_irrigation_mm=net_irrigation_mm
                 )[0].values
             if any(
                 not math.isfinite(v)

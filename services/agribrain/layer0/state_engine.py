@@ -73,6 +73,7 @@ class Layer0StateEngine:
         positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
         plot_ownership_store: Any = None,
         principal_provider: Any = None,
+        verified_delivery_verifier: Any = None,
     ):
         # Production/staging cannot silently opt out of cryptographic
         # input admission; explicit development mode remains legacy-compatible.
@@ -100,6 +101,8 @@ class Layer0StateEngine:
         # Trusted backend infrastructure only; never supplied by packet JSON.
         self._plot_ownership_store = plot_ownership_store
         self._principal_provider = principal_provider
+        self._verified_delivery_verifier = verified_delivery_verifier
+        self._tenant_id = ""
         self.__packet_run_capability = object()
         self._has_kalman = False
         try:
@@ -169,8 +172,18 @@ class Layer0StateEngine:
                 geometry_hash=geometry_hash,
                 geometry_version=geometry_version,
                 run_id=f"layer0_{plot_id}_{start_date}_{end_date}",
-                health_report={"kalman_available": False},
-                provenance={"error": "Kalman engine not available"},
+                scientific_publication_authorized=False,
+                actuator_control_authorized=False,
+                health_report={
+                    "kalman_available": False,
+                    "scientific_publication_authorized": False,
+                    "actuator_control_authorized": False,
+                },
+                provenance={
+                    "error": "Kalman engine not available",
+                    "scientific_publication_authorized": False,
+                    "actuator_control_authorized": False,
+                },
             )
 
         now = run_timestamp or datetime.now(timezone.utc)
@@ -192,6 +205,9 @@ class Layer0StateEngine:
             zone_filter.parent_plot_id = plot_id
             zone_filter.expected_geometry_hash = geometry_hash
             zone_filter.evidence_cutoff = now
+            zone_filter.tenant_id = getattr(self, "_tenant_id", "") or ""
+            zone_filter.geometry_version = geometry_version
+            zone_filter.delivery_verifier = getattr(self, "_verified_delivery_verifier", None)
 
         # Add extra zones
         for zid in (zone_ids or []):
@@ -200,6 +216,9 @@ class Layer0StateEngine:
                 engine.filters[zid].parent_plot_id = plot_id
                 engine.filters[zid].expected_geometry_hash = geometry_hash
                 engine.filters[zid].evidence_cutoff = now
+                engine.filters[zid].tenant_id = getattr(self, "_tenant_id", "") or ""
+                engine.filters[zid].geometry_version = geometry_version
+                engine.filters[zid].delivery_verifier = getattr(self, "_verified_delivery_verifier", None)
                 # A plot-level statistical observation is NOT an independent
                 # zone-local measurement. Unobserved zones retain a prior
                 # prediction; only explicitly assigned zone evidence can
@@ -273,6 +292,8 @@ class Layer0StateEngine:
             daily_state=daily_state,
             state_uncertainty=state_uncertainty,
             validation_conflicts=validation_conflicts,
+            scientific_publication_authorized=False,
+            actuator_control_authorized=False,
             health_report={
                 "kalman_available": True,
                 "zones": list(daily_state.keys()),
@@ -284,6 +305,8 @@ class Layer0StateEngine:
                 ),
                 "source_reliability": source_reliability,
                 "audit": audit_report,
+                "scientific_publication_authorized": False,
+                "actuator_control_authorized": False,
             },
             provenance={
                 "run_id": run_id,
@@ -292,6 +315,8 @@ class Layer0StateEngine:
                 "run_timestamp": now.isoformat(),
                 "engine": "Layer0StateEngine",
                 "provenance_log": provenance_log,
+                "scientific_publication_authorized": False,
+                "actuator_control_authorized": False,
             },
         )
 
@@ -359,6 +384,7 @@ class Layer0StateEngine:
 
         # B2B-05: Resolve tenant + exact geometry epoch independently from
         # the current plot authority store, not from a packet or caller digest.
+        self._tenant_id = tenant_id
         strict_scope = (
             os.getenv("AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE", "").lower()
             in ("1", "true", "yes")

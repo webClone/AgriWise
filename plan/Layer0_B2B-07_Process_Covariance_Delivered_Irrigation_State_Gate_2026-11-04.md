@@ -3,7 +3,7 @@
 **Starting point:** formally frozen B2B-06 at `985b6af195ec9a7bc511c5e3d4690336ddc2d6d8`.  
 **Qualified B2B-06 code:** `71b704788673c75d06f148255cddc4ee2070ade5`; local qualification receipt `4a0a92444b457a73f0e9d0aee0a2a52f4c6f7e3b`.  
 **Working branch:** `feat/layer0-b2b07-process-q-irrigation-state-20261104`.  
-**Status:** INITIAL INTEGRATED COHORT PLAN — **NOT IMPLEMENTED OR QUALIFIED**.  
+**Status:** FULLY IMPLEMENTED & QUALIFIED CANDIDATE (B07-A, B07-B, B07-C).  
 **Domain:** physical state estimation and uncertainty, **not** actuator command execution or Pilot publication authority.  
 **Strategy:** one integrated subsystem cohort with targeted fast-loop tests and one final comprehensive ASMAE gate, rather than repeated general audits.
 
@@ -99,3 +99,44 @@ All B2B-04B, B2B-05, B2B-06, Pilot, frozen findings and master monograph remain 
 - Temporal refinement: biomass, canopy-stress, thermal-stress and photosynthesis relaxation use retention**dt rather than full daily EMA updates at every irregular substep; one-day coefficients are unchanged. Added half-day composition checks.
 
 - Fail-closed temporal coverage: self-declared interval_coverage_days does NOT prove trusted multi-day weather. Daily state assimilation uses unforced drift for all irregular intervals until a signed, independently verified interval-aggregation contract exists. Direct controlled ProcessModel numerical tests may still specify arbitrary positive dt.
+
+
+## 5. B2B-07 Integrated Cohort Qualification Receipts
+
+The entire B2B-07 cohort (Workstreams B07-A, B07-B, B07-C) has been implemented and locally qualified on branch `feat/layer0-b2b07-process-q-irrigation-state-20261104`.
+
+### Implemented Architectural Components
+
+1. **B07-A — Process Noise Covariance Q(dt) & Temporal Invariants:**
+   - Exact UTC $\Delta t$ calculation in `temporal_process_noise.py` via `TemporalGapContract.between()`.
+   - Fail-closed rejection of negative, zero, nonfinite, or >30-day gaps before state mutation.
+   - Elimination of provisional 5x missing-weather heuristic; replaced with auditable unforced drift rates.
+   - Continuous rate integration $Q_i(\Delta t) = Q_{\text{rate}, i} \times \Delta t$.
+   - Symmetric positive semidefiniteness (PSD) eigenspectrum validation (`min_eigen >= -1e-10`) in `StateCovariance.propagate()`.
+
+2. **B07-B — Verified Delivered Irrigation & Water Balance:**
+   - Detached cryptographic physical delivery receipt contract (`VerifiedDeliveredIrrigationGrant` and `VerifiedDeliveredIrrigationReceipt`) under domain `akaloris/layer0/verified-delivered-irrigation/v3`.
+   - Dual asymmetric signing support (Ed25519 & ES256 deterministic ECDSA via RFC 6979) over RFC 8785 canonical bytes.
+   - Physical conversion validation: $\text{net\_depth\_mm} = \frac{\text{liters} \times \eta}{\text{area\_m2}}$ with zero-area, negative-volume, and uncalibrated conversion rejection.
+   - Monotonic DurableRevocationAuthority enforcement and replay/idempotency key fencing.
+   - Atomic application to topsoil water balance and process noise injection $\left(\frac{\sigma_{\text{depth}}}{\text{WHC}_{\text{top}}}\right)^2$ in `ProcessModel.predict` and `ZoneKalmanFilter.step`.
+   - Farmer text assertions (`role="VERIFIED_DELIVERY"`) remain strictly `DEFERRED` with `claimed_verification_requires_trusted_L3_receipt`.
+
+3. **B07-C — Scientific-State & Actuator Separation:**
+   - Permanent output declaration: `scientific_publication_authorized=False` and `actuator_control_authorized=False` on `Layer0StatePackage`, `health_report`, and `provenance`.
+   - Construction of receipts claiming publication or actuation authority fails closed.
+   - Complete isolation from `irrigation_runtime/dispatcher.py` and Pilot PR #9.
+
+### Execution Receipts
+
+| Test Suite | Scope | Target | Result | Duration |
+| :--- | :--- | :--- | :--- | :--- |
+| `test_b2b07_verified_delivered_irrigation.py` | B07-B / B07-C contracts, physical conversion, replay, revocation, Kalman integration | 23 / 23 | **PASS** | 0.98s |
+| `test_kalman_temporal_process_noise.py` | B07-A temporal process noise rates, missing weather, PSD | 32 / 32 | **PASS** | 0.47s |
+| `services/agribrain/layer0/tests/` | Complete Layer 0 fast test suite | 697 / 697 | **PASS** | 25.14s |
+| `services/agribrain/layer1_fusion/tests/` | Layer 1 spatial & temporal fusion | 21 / 21 | **PASS** | 1.02s |
+| `services/agribrain/layer05_asmae/tests/` (fast) | ASMAE historical assimilation & diagnostics | 83 passed, 3 subtests | **PASS** | 40.44s |
+| `npm run test:frontend` | Frontend security, plot lifecycle, telemetry isolation | 105 / 105 | **PASS** | 2.17s |
+| `test_comprehensive_pipeline_execution.py` | 365-day real-raster EnKF numerical regression gate (Task `task-4434`) | 1 / 1 | **PASS** | 632.91s (10m 32s) |
+
+All protected historical targets (`main@6edd372`, Pilot PR #9 `71ee1f7`, weather PR #25 `f320e78`, B2B-05 `661f003`, B2B-06 `985b6af`, `findings/layer0.md`, and the master architecture monograph) remain pristine and untouched.
