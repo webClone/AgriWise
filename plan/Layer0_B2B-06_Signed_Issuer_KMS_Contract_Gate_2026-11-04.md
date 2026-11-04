@@ -69,7 +69,10 @@ Executed on local Windows environment (Python 3.13.13, Node.js v20.18.0):
 | **Frontend Test Suite** | Full Next.js frontend test suite | **105 / 105 passed** | 1.44s |
 | **TypeScript Typecheck** | `npx tsc --noEmit` | **PASS (0 errors)** | 15.8s |
 | **Next.js Production Build** | `npm run build` | **PASS (63/63 pages generated)** | 24.1s |
-| **ASMAE Comprehensive** | Full 365-day real-raster EnKF pipeline | Running in background | `task-3603` |
+| **ASMAE Comprehensive** | Full 365-day real-raster EnKF pipeline | **1 / 1 passed** | 585.21s (9m 45s, `task-3603`) |
+| **Aggregate Distinct Python** | Complete suite (Layer 0 + Layer 1 + ASMAE fast + ASMAE comp) | **739 / 739 passed** | **644.77s** (10m 44s) |
+| **Aggregate Frontend** | Next.js unit and integration test suite | **105 / 105 passed** | **1.44s** |
+| **Full Qualification Status** | **ALL FAST & COMPREHENSIVE GATES PASSED** | **QUALIFIED** | Zero failures, zero skipped |
 
 ---
 
