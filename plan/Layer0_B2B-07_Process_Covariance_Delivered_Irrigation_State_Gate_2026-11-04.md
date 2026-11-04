@@ -97,3 +97,5 @@ Then run full Layer0, Layer1 Fusion, and ASMAE fast tests. Reserve 365-day real-
 All B2B-04B, B2B-05, B2B-06, Pilot, frozen findings and master monograph remain untouched.
 
 - Temporal refinement: biomass, canopy-stress, thermal-stress and photosynthesis relaxation use retention**dt rather than full daily EMA updates at every irregular substep; one-day coefficients are unchanged. Added half-day composition checks.
+
+- Fail-closed temporal coverage: self-declared interval_coverage_days does NOT prove trusted multi-day weather. Daily state assimilation uses unforced drift for all irregular intervals until a signed, independently verified interval-aggregation contract exists. Direct controlled ProcessModel numerical tests may still specify arbitrary positive dt.

@@ -471,20 +471,15 @@ class ZoneKalmanFilter:
         )
         gap = TemporalGapContract.between(self.state.day, day)
         qualified_weather = _qualified_weather_for_prediction(weather)
-        # An isolated target-day weather row does not prove a whole 2-day
-        # interval. Require explicit interval coverage for irregular gaps;
-        # otherwise use unforced drift rather than inventing prior weather.
-        temporal_forcing_covered = True
-        if qualified_weather is not None and abs(gap.dt_days - 1.0) > 1e-12:
-            coverage = weather.get("interval_coverage_days") if isinstance(weather, dict) else None
-            temporal_forcing_covered = (
-                not isinstance(coverage, bool)
-                and isinstance(coverage, (int, float))
-                and math.isfinite(coverage)
-                and math.isclose(float(coverage), gap.dt_days, abs_tol=1e-10)
-            )
-            if not temporal_forcing_covered:
-                qualified_weather = None
+        # A self-declared interval_coverage_days field cannot attest
+        # provider coverage. Until independently verified multi-day forcing
+        # exists, use unforced drift for every irregular step.
+        temporal_forcing_covered = (
+            qualified_weather is not None
+            and math.isclose(gap.dt_days, 1.0, abs_tol=1e-12)
+        )
+        if not temporal_forcing_covered:
+            qualified_weather = None
         weather_availability = (
             "COMPLETE" if qualified_weather is not None
             else ("PARTIAL" if weather else "MISSING")

@@ -121,13 +121,16 @@ def test_multi_day_single_daily_weather_is_unqualified():
     assert provenance["q_temporal_contract"]["dt_days"] == pytest.approx(2)
 
 
-def test_explicit_interval_weather_coverage_admitted():
+def test_untrusted_interval_coverage_flag_does_not_promote_multi_day_weather():
     f = make_filter()
+    before = f.state.values[:]
     weather = dict(WEATHER, interval_coverage_days=2.0)
     provenance = f.step("2026-11-03", weather)
-    assert provenance["interval_forcing_coverage_verified"] is True
-    assert provenance["weather_update_mode"] == "measured"
-    assert provenance["q_temporal_contract"]["q_regime"] == "NOMINAL_RATE_DISCRETIZATION"
+    assert provenance["interval_forcing_coverage_verified"] is False
+    assert provenance["weather_update_mode"] == "missing_weather_high_uncertainty"
+    assert provenance["q_temporal_contract"]["q_regime"] == "UNFORCED_DRIFT_VARIANCE_RATE"
+    assert f.state.values == before
+
 
 
 def test_psd_eigen_gate_rejects_indefinite_positive_diagonal():
