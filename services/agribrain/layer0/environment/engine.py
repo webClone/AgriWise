@@ -172,6 +172,14 @@ class EnvironmentalEngine:
         # 6. Process forcing
         process_forcing: List[ProcessForcing] = []
         for daily_consensus in weather_consensus:
+            rain = daily_consensus.variable_consensus.get("precipitation_sum")
+            if rain is None or rain.selected_value is None:
+                provider_failures.append({
+                    "provider": "weather_consensus",
+                    "stage": "process_forcing",
+                    "error": "weather_precipitation_unavailable_for_process_forcing",
+                })
+                continue
             forcing = compute_daily_forcing(
                 daily_consensus, latitude_deg=latitude, t_base=t_base
             )

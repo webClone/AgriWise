@@ -13,7 +13,7 @@ WMO surface weather station.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Mapping, Optional, Sequence
 import hashlib
@@ -187,14 +187,22 @@ def screen_native_weather_receipt(
         resp_lat = payload["coord"].get("lat")
         resp_lon = payload["coord"].get("lon")
 
-    if resp_lat is not None and resp_lon is not None:
-        try:
-            resp_lat = float(resp_lat)
-            resp_lon = float(resp_lon)
-            if abs(resp_lat - req_lat) > tol or abs(resp_lon - req_lon) > tol:
-                return _deny("weather_spatial_coordinate_mismatch", receipt.product_id, receipt.authoritative_role)
-        except (ValueError, TypeError):
-            return _deny("non_numeric_response_coordinates", receipt.product_id, receipt.authoritative_role)
+    # Every supported product must attest a finite numeric response location.
+    # float("nan") must never bypass the mismatch predicate.
+    if resp_lat is None or resp_lon is None:
+        return _deny("missing_response_coordinates", receipt.product_id, receipt.authoritative_role)
+    try:
+        if isinstance(resp_lat, bool) or isinstance(resp_lon, bool):
+            raise ValueError("boolean coordinate")
+        resp_lat, resp_lon = float(resp_lat), float(resp_lon)
+        if not all(map(math.isfinite, (resp_lat, resp_lon))):
+            return _deny("non_finite_response_coordinates", receipt.product_id, receipt.authoritative_role)
+        if not (-90 <= resp_lat <= 90 and -180 <= resp_lon <= 180):
+            return _deny("invalid_response_coordinate_range", receipt.product_id, receipt.authoritative_role)
+        if abs(resp_lat - req_lat) > tol or abs(resp_lon - req_lon) > tol:
+            return _deny("weather_spatial_coordinate_mismatch", receipt.product_id, receipt.authoritative_role)
+    except (ValueError, TypeError, OverflowError):
+        return _deny("non_numeric_response_coordinates", receipt.product_id, receipt.authoritative_role)
 
     # 8. Mandatory Product-Specific Structural & Temporal Validation
     dates_found: list[str] = []
@@ -218,50 +226,96 @@ def screen_native_weather_receipt(
             return _deny("missing_daily_time_series", receipt.product_id, receipt.authoritative_role)
 
         dates_found = [str(t) for t in times]
-        # Validate date string formats
-        for d_str in dates_found:
-            if len(d_str) != 10 or d_str[4] != '-' or d_str[7] != '-':
-                return _deny("invalid_daily_date_format", receipt.product_id, receipt.authoritative_role)
+        try:
+            day_values = [date.fromisoformat(d) for d in dates_found]
+            if any(d.isoformat() != original for d, original in zip(day_values, dates_found)):
+                raise ValueError("noncanonical daily date")
+        except (TypeError, ValueError):
+            return _deny("invalid_daily_calendar_date", receipt.product_id, receipt.authoritative_role)
+        if len(set(day_values)) != len(day_values) or day_values != sorted(day_values):
+            return _deny("weather_daily_dates_not_sorted_unique", receipt.product_id, receipt.authoritative_role)
+        if any(day_values[i + 1] - day_values[i] != timedelta(days=1) for i in range(len(day_values) - 1)):
+            return _deny("weather_daily_interior_date_gap", receipt.product_id, receipt.authoritative_role)
 
-        # Check that requested start/end dates are covered
         req_start, req_end = receipt.valid_interval
         if req_start and req_end:
-            min_date = min(dates_found)
-            max_date = max(dates_found)
-            if min_date > req_start or max_date < req_end or req_start not in dates_found or req_end not in dates_found:
+            try:
+                requested_start = date.fromisoformat(req_start)
+                requested_end = date.fromisoformat(req_end)
+                if requested_end < requested_start:
+                    raise ValueError("reversed interval")
+            except (TypeError, ValueError):
+                return _deny("invalid_requested_weather_date_interval", receipt.product_id, receipt.authoritative_role)
+            if day_values[0] != requested_start or day_values[-1] != requested_end:
                 return _deny("weather_temporal_range_mismatch", receipt.product_id, receipt.authoritative_role)
 
-        if expected_dates is not None:
-            for exp_d in expected_dates:
-                if exp_d not in dates_found:
-                    return _deny("weather_temporal_range_mismatch", receipt.product_id, receipt.authoritative_role)
+        if expected_dates is not None and set(expected_dates) != set(dates_found):
+            return _deny("weather_temporal_range_mismatch", receipt.product_id, receipt.authoritative_role)
 
-        # Validate variables exist in daily
-        has_daily_var = any(
-            k in daily for k in (
-                "precipitation_sum", "rain_sum", "temperature_2m_max",
-                "temperature_2m_min", "temperature_2m_mean",
-            )
-        )
-        if not has_daily_var:
-            return _deny("missing_daily_variable_series", receipt.product_id, receipt.authoritative_role)
+        # A requested series is admissible only with aligned values and known
+        # physical units. Do not reinterpret inches as millimeters or null as zero.
+        requested = [k.strip() for k in str(replayed_params.get("daily", "")).split(",") if k.strip()]
+        canonical_units = {
+            "precipitation_sum": "mm", "rain_sum": "mm",
+            "temperature_2m_min": "°C", "temperature_2m_max": "°C",
+            "temperature_2m_mean": "°C", "et0_fao_evapotranspiration": "mm",
+            "relative_humidity_2m_mean": "%",
+            "wind_speed_10m_max": "m/s",
+        }
+        daily_units = payload.get("daily_units")
+        if not isinstance(daily_units, dict):
+            return _deny("missing_weather_unit_metadata", receipt.product_id, receipt.authoritative_role)
+        if not requested:
+            return _deny("missing_requested_daily_variables", receipt.product_id, receipt.authoritative_role)
+        for variable in requested:
+            if variable not in canonical_units:
+                return _deny("unsupported_requested_daily_variable", receipt.product_id, receipt.authoritative_role)
+            if daily_units.get(variable) != canonical_units[variable]:
+                return _deny("unsupported_or_mismatched_weather_unit", receipt.product_id, receipt.authoritative_role)
+            series = daily.get(variable)
+            if not isinstance(series, list) or len(series) != len(dates_found):
+                return _deny("weather_daily_variable_support_mismatch", receipt.product_id, receipt.authoritative_role)
+            for val in series:
+                if val is None:
+                    return _deny("weather_requested_variable_unavailable", receipt.product_id, receipt.authoritative_role)
+                if isinstance(val, bool):
+                    return _deny("boolean_weather_measurement", receipt.product_id, receipt.authoritative_role)
+                try:
+                    f_val = float(val)
+                except (ValueError, TypeError, OverflowError):
+                    return _deny("non_numeric_weather_measurement", receipt.product_id, receipt.authoritative_role)
+                if not math.isfinite(f_val):
+                    return _deny("non_finite_weather_measurement", receipt.product_id, receipt.authoritative_role)
+                if variable in ("precipitation_sum", "rain_sum", "et0_fao_evapotranspiration") and f_val < 0:
+                    return _deny("invalid_precipitation_value", receipt.product_id, receipt.authoritative_role)
 
-        # Validate precipitation sum
-        p_sums = daily.get("precipitation_sum", [])
-        if isinstance(p_sums, list):
-            for val in p_sums:
-                if val is not None:
-                    try:
-                        f_val = float(val)
-                        if not math.isfinite(f_val):
-                            return _deny("non_finite_precipitation_value", receipt.product_id, receipt.authoritative_role)
-                        if f_val < 0.0:
-                            return _deny("invalid_precipitation_value", receipt.product_id, receipt.authoritative_role)
-                        precip_values.append(f_val)
-                        if f_val == 0.0:
-                            zero_precip_count += 1
-                    except (ValueError, TypeError):
-                        return _deny("non_numeric_precipitation_value", receipt.product_id, receipt.authoritative_role)
+        # Validate every present series that has recognized physical semantics,
+        # even when an additional unrequested value is supplied by the provider.
+        for variable, values in daily.items():
+            if variable == "time":
+                continue
+            if not isinstance(values, list) or len(values) != len(dates_found):
+                return _deny("weather_daily_variable_support_mismatch", receipt.product_id, receipt.authoritative_role)
+            if variable in canonical_units and daily_units.get(variable) != canonical_units[variable]:
+                return _deny("unsupported_or_mismatched_weather_unit", receipt.product_id, receipt.authoritative_role)
+            for val in values:
+                if val is None:
+                    continue  # Optional nonrequested variable remains explicitly missing.
+                if isinstance(val, bool):
+                    return _deny("boolean_weather_measurement", receipt.product_id, receipt.authoritative_role)
+                try:
+                    number = float(val)
+                except (TypeError, ValueError, OverflowError):
+                    return _deny("non_numeric_weather_measurement", receipt.product_id, receipt.authoritative_role)
+                if not math.isfinite(number):
+                    return _deny("non_finite_weather_measurement", receipt.product_id, receipt.authoritative_role)
+                if variable in ("precipitation_sum", "rain_sum", "et0_fao_evapotranspiration") and number < 0:
+                    return _deny("invalid_precipitation_value", receipt.product_id, receipt.authoritative_role)
+
+        p_sums = daily.get("precipitation_sum")
+        if isinstance(p_sums, list) and all(v is not None for v in p_sums):
+            precip_values = [float(v) for v in p_sums]
+            zero_precip_count = sum(v == 0.0 for v in precip_values)
 
     elif receipt.product_id == WeatherProductId.OPEN_METEO_LIVE_FORECAST.value:
         # Live forecast must contain hourly or daily with non-empty time
@@ -312,7 +366,8 @@ def screen_native_weather_receipt(
         "start_date": dates_found[0] if dates_found else receipt.valid_interval[0],
         "end_date": dates_found[-1] if dates_found else receipt.valid_interval[1],
         "zero_precipitation_days": zero_precip_count,
-        "total_precipitation_mm": round(sum(precip_values), 4) if precip_values else 0.0,
+        "total_precipitation_mm": round(sum(precip_values), 4) if precip_values else None,
+        "precipitation_available": bool(precip_values),
         "coordinate_reconciled": (resp_lat is not None and resp_lon is not None),
     }
 

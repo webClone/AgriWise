@@ -51,7 +51,9 @@ def compute_daily_forcing(
     temp_min = _get_consensus_value(consensus, "temp_min")
     temp_max = _get_consensus_value(consensus, "temp_max")
     temp_mean = _get_consensus_value(consensus, "temp_mean")
-    precip = _get_consensus_value(consensus, "precipitation_sum") or 0.0
+    precip = _get_consensus_value(consensus, "precipitation_sum")
+    if precip is None or isinstance(precip, bool):
+        raise ValueError("weather_precipitation_unavailable_for_process_forcing")
     vpd = _get_consensus_value(consensus, "vpd_mean")
     radiation = _get_consensus_value(consensus, "shortwave_radiation_sum")
     provider_et0 = _get_consensus_value(consensus, "et0_mm")
