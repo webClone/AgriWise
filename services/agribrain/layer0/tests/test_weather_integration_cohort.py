@@ -496,3 +496,156 @@ def test_asmae_normalization_rejects_wrong_product_role_with_valid_receipt(monke
     archive = normalize_weather_archive([wrong_role_record])
     assert receipt.acquisition_id not in archive.get("weather_native_evidence_ids", [])
     assert archive.get("native_evidence_verified") is False
+
+
+
+def test_w4_09c_partial_receipt_merged_with_fabricated_fields(monkeypatch, tmp_path):
+    """W4-09C counterexample 1: A partial native record (only precipitation) merged
+    with fabricated temperature values must NOT claim full native verification.
+
+    Record A: precipitation_mm=0.0 with valid CAS receipt (no temp values).
+    Record B: fabricated temp_min_c=25.0, temp_max_c=35.0 (no receipt).
+    After merge, the combined record has both precip and temp, but the temps
+    have no CAS backing -> native_evidence_verified must be False.
+    """
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+    store = NativeWeatherEvidenceStore(tmp_path)
+    receipt = capture(store)  # CAS has precip=0.0, tmin=5.0, tmax=15.0, et0=2.0
+
+    # Record A: only precipitation, matching CAS
+    record_a = {
+        "date": "2026-11-01",
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "native_acquisition_ids": [receipt.acquisition_id],
+        "precipitation_mm": 0.0,
+        "et0_mm": 2.0,
+        # temp_min_c and temp_max_c deliberately omitted
+    }
+
+    # Record B: fabricated temperatures, no receipt
+    record_b = {
+        "date": "2026-11-01",
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "temp_min_c": 25.0,  # fabricated (CAS has 5.0)
+        "temp_max_c": 35.0,  # fabricated (CAS has 15.0)
+    }
+
+    archive = normalize_weather_archive([record_a, record_b])
+    day = archive["weather_daily_series"].get("2026-11-01")
+    assert day is not None, "merged day must exist"
+    # Merged record has all four variables
+    assert day["precipitation_mm"] == 0.0
+    assert day["et0_mm"] == 2.0
+    assert day["temp_min_c"] == 25.0
+    assert day["temp_max_c"] == 35.0
+    # But the fabricated temps have no CAS backing
+    var_ev = day.get("variable_evidence", {})
+    assert receipt.acquisition_id in var_ev.get("precipitation_mm", [])
+    assert receipt.acquisition_id in var_ev.get("et0_mm", [])
+    assert receipt.acquisition_id not in var_ev.get("temp_min_c", [])
+    assert receipt.acquisition_id not in var_ev.get("temp_max_c", [])
+    # Therefore full native verification must be False
+    assert archive["native_evidence_verified"] is False
+    assert day.get("all_variables_verified") is False
+
+
+def test_w4_09c_same_day_merge_unsupported_precipitation(monkeypatch, tmp_path):
+    """W4-09C counterexample 2: Record A has native CAS for temp_min and temp_max,
+    but Record B provides unsupported precipitation. The merged record must NOT
+    claim full native verification because precipitation has no CAS backing.
+    """
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+    store = NativeWeatherEvidenceStore(tmp_path)
+    receipt = capture(store)  # CAS has precip=0.0, tmin=5.0, tmax=15.0, et0=2.0
+
+    # Record A: matching temps from CAS
+    record_a = {
+        "date": "2026-11-01",
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "native_acquisition_ids": [receipt.acquisition_id],
+        "temp_min_c": 5.0,
+        "temp_max_c": 15.0,
+        "et0_mm": 2.0,
+        # precipitation deliberately omitted
+    }
+
+    # Record B: fabricated precipitation, no receipt
+    record_b = {
+        "date": "2026-11-01",
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "precipitation_mm": 999.0,  # fabricated value
+    }
+
+    archive = normalize_weather_archive([record_a, record_b])
+    day = archive["weather_daily_series"].get("2026-11-01")
+    assert day is not None
+    # Merged record has all four core variables
+    assert day["temp_min_c"] == 5.0
+    assert day["temp_max_c"] == 15.0
+    assert day["et0_mm"] == 2.0
+    assert day["precipitation_mm"] == 999.0  # from record B
+    # Precipitation has no CAS backing
+    var_ev = day.get("variable_evidence", {})
+    assert not var_ev.get("precipitation_mm", [])
+    # Full native verification must be False
+    assert archive["native_evidence_verified"] is False
+    assert day.get("all_variables_verified") is False
+    # But temps should still have per-variable evidence
+    assert receipt.acquisition_id in var_ev.get("temp_min_c", [])
+    assert receipt.acquisition_id in var_ev.get("temp_max_c", [])
+
+
+def test_w4_09c_consensus_averaged_values_do_not_claim_exact_native(monkeypatch, tmp_path):
+    """W4-09C counterexample 3: Multi-provider consensus averaging produces derived
+    values (e.g., 5.5 from 5.0 + 6.0) that should NOT pass exact CAS reconciliation.
+
+    A record whose temp_min_c = 5.5 (averaged from two providers) will not match
+    any single CAS payload that stores 5.0 or 6.0. The evidence IDs from both
+    providers may be present as contributors, but native_evidence_verified must be
+    False because the derived value differs from the raw CAS value.
+    """
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+    store = NativeWeatherEvidenceStore(tmp_path)
+
+    # Provider A CAS: tmin=5.0
+    p_a = payload()
+    p_a["daily"]["temperature_2m_min"] = [5.0, 5.0, 6.0]
+    receipt_a = capture(store, data=p_a)
+
+    # Provider B CAS: tmin=6.0 (different query params to get a different receipt)
+    q_b = params()
+    q_b["latitude"] = 35.001  # slightly different to produce different acquisition
+    p_b = payload()
+    p_b["daily"]["temperature_2m_min"] = [6.0, 6.0, 7.0]
+    receipt_b = capture(store, data=p_b, query=q_b)
+
+    # The consensus record has averaged temp_min = (5.0 + 6.0) / 2 = 5.5
+    consensus_record = {
+        "date": "2026-11-01",
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "native_acquisition_ids": [receipt_a.acquisition_id, receipt_b.acquisition_id],
+        "temp_min_c": 5.5,   # averaged: does not match 5.0 or 6.0
+        "temp_max_c": 15.0,  # matches both
+        "precipitation_mm": 0.0,  # matches both
+        "et0_mm": 2.0,       # matches both
+    }
+
+    archive = normalize_weather_archive([consensus_record])
+    day = archive["weather_daily_series"].get("2026-11-01")
+    assert day is not None
+    # temp_min_c = 5.5 does not match any CAS source exactly
+    var_ev = day.get("variable_evidence", {})
+    assert not var_ev.get("temp_min_c", []), (
+        "consensus-averaged temp_min must not have exact CAS backing"
+    )
+    # But precipitation and et0 match both providers
+    assert var_ev.get("precipitation_mm", [])
+    assert var_ev.get("et0_mm", [])
+    # Full native verification must be False because temp_min has no backing
+    assert archive["native_evidence_verified"] is False
+    assert day.get("all_variables_verified") is False

@@ -24,16 +24,51 @@ def _reconcile_record_with_native_acquisition(
     record_role: str = "",
 ) -> bool:
     """Independently verify receipt screening and reconcile date, role, and physical values with stored CAS payload."""
+    result = _reconcile_variable_evidence(
+        acq_id, record_date, record_values, record_reality, record_role,
+    )
+    if result is None:
+        return False
+    # Legacy boolean: True only when every non-None core variable is verified.
+    for var in CORE_VARIABLES:
+        if record_values.get(var) is not None and not result.get(var, False):
+            return False
+    return True
+
+
+# Mapping from normalized variable name to CAS daily payload key.
+_CAS_VARIABLE_MAP: Dict[str, str] = {
+    "precipitation_mm": "precipitation_sum",
+    "temp_min_c": "temperature_2m_min",
+    "temp_max_c": "temperature_2m_max",
+    "et0_mm": "et0_fao_evapotranspiration",
+}
+
+
+def _reconcile_variable_evidence(
+    acq_id: str,
+    record_date: str,
+    record_values: Mapping[str, Any],
+    record_reality: str,
+    record_role: str = "",
+) -> Optional[Dict[str, bool]]:
+    """Per-variable CAS reconciliation.
+
+    Returns a dict mapping each core variable name to ``True`` if the record
+    value matches the CAS payload within tolerance, ``False`` if it diverges,
+    or ``None`` if the acquisition cannot be structurally verified at all
+    (screening failure, wrong product, wrong date, etc.).
+    """
     if not acq_id or not isinstance(acq_id, str):
-        return False
+        return None
     if acq_id.startswith("weather:"):
-        return False
+        return None
     root = (
         os.getenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", "").strip()
         or os.getenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", "").strip()
     )
     if not root:
-        return False
+        return None
 
     try:
         from services.agribrain.layer0.native_issuer.weather_acquisition_evidence import (
@@ -50,82 +85,75 @@ def _reconcile_record_with_native_acquisition(
         store = NativeWeatherEvidenceStore(root)
         receipt = store.verified_cache_receipt(acq_id)
         if not receipt or not receipt.response_sha256:
-            return False
+            return None
 
         # 1. Scientific Screening Verification
         screen = screen_native_weather_receipt(receipt, store)
         if screen.status is not WeatherScreenStatus.SCREENED_NATIVE_QA:
-            return False
+            return None
 
         # 2. Product & Role Consistency
         if record_reality == "reanalysis_archive":
             if receipt.product_id != WeatherProductId.OPEN_METEO_HISTORICAL_REANALYSIS.value:
-                return False
+                return None
             if record_role and record_role not in ("REANALYSIS_MODEL", "HISTORICAL_REANALYSIS"):
-                return False
+                return None
         elif record_reality == "forecast":
             if receipt.product_id not in (
                 WeatherProductId.OPEN_METEO_LIVE_FORECAST.value,
                 WeatherProductId.OPENWEATHER_ONECALL_3_0.value,
             ):
-                return False
+                return None
             if record_role and record_role != "FORECAST_MODEL":
-                return False
+                return None
 
         # 3. Date Reconciliation
         req_start, req_end = receipt.valid_interval
         if req_start and req_end:
             if not (req_start <= record_date <= req_end):
-                return False
+                return None
 
         # 4. Load raw CAS payload and reconcile physical values for record_date
         raw_bytes = store.read_response_bytes(receipt.object_id)
-        payload = json.loads(raw_bytes.decode("utf-8"))
-        if not isinstance(payload, dict):
-            return False
+        cas_payload = json.loads(raw_bytes.decode("utf-8"))
+        if not isinstance(cas_payload, dict):
+            return None
 
-        daily = payload.get("daily")
+        daily = cas_payload.get("daily")
         if not isinstance(daily, dict):
-            return False
+            return None
 
         times = daily.get("time")
         if not isinstance(times, list) or record_date not in times:
-            return False
+            return None
 
         idx = times.index(record_date)
 
-        # 5. Value Reconciliation: record's physical measurements must match CAS payload
-        p_sums = daily.get("precipitation_sum")
-        rec_precip = record_values.get("precipitation_mm")
-        if rec_precip is not None and isinstance(p_sums, list) and idx < len(p_sums):
-            if p_sums[idx] is not None:
-                if abs(float(rec_precip) - float(p_sums[idx])) > 1e-3:
-                    return False
+        # 5. Per-variable reconciliation
+        var_result: Dict[str, bool] = {}
+        for var_name, cas_key in _CAS_VARIABLE_MAP.items():
+            rec_val = record_values.get(var_name)
+            if rec_val is None:
+                # Variable not present in record -- nothing to verify or deny.
+                var_result[var_name] = False
+                continue
+            cas_series = daily.get(cas_key)
+            if not isinstance(cas_series, list) or idx >= len(cas_series):
+                var_result[var_name] = False
+                continue
+            cas_val = cas_series[idx]
+            if cas_val is None:
+                var_result[var_name] = False
+                continue
+            if abs(float(rec_val) - float(cas_val)) > 1e-3:
+                var_result[var_name] = False
+            else:
+                var_result[var_name] = True
 
-        t_mins = daily.get("temperature_2m_min")
-        rec_tmin = record_values.get("temp_min_c")
-        if rec_tmin is not None and isinstance(t_mins, list) and idx < len(t_mins):
-            if t_mins[idx] is not None:
-                if abs(float(rec_tmin) - float(t_mins[idx])) > 1e-3:
-                    return False
-
-        t_maxs = daily.get("temperature_2m_max")
-        rec_tmax = record_values.get("temp_max_c")
-        if rec_tmax is not None and isinstance(t_maxs, list) and idx < len(t_maxs):
-            if t_maxs[idx] is not None:
-                if abs(float(rec_tmax) - float(t_maxs[idx])) > 1e-3:
-                    return False
-
-        et0s = daily.get("et0_fao_evapotranspiration")
-        rec_et0 = record_values.get("et0_mm")
-        if rec_et0 is not None and isinstance(et0s, list) and idx < len(et0s):
-            if et0s[idx] is not None:
-                if abs(float(rec_et0) - float(et0s[idx])) > 1e-3:
-                    return False
-
-        return True
+        return var_result
     except Exception:
-        return False
+        return None
+
 
 
 VARIABLES = (
@@ -271,12 +299,23 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
     native_ids = record.get("native_acquisition_ids") or []
     if isinstance(native_ids, str):
         native_ids = [native_ids]
-    verified_native_ids = [
-        str(x) for x in native_ids
-        if _reconcile_record_with_native_acquisition(
-            str(x), date, values, reality, source_role
-        )
-    ]
+
+    # Per-variable evidence: maps variable name -> list of acquisition IDs that verified it
+    variable_evidence: Dict[str, List[str]] = {var: [] for var in CORE_VARIABLES}
+    verified_native_ids: List[str] = []
+
+    for raw_id in native_ids:
+        aid = str(raw_id)
+        var_ev = _reconcile_variable_evidence(aid, date, values, reality, source_role)
+        if var_ev is None:
+            continue
+        any_verified = False
+        for var_name, verified in var_ev.items():
+            if verified:
+                variable_evidence[var_name].append(aid)
+                any_verified = True
+        if any_verified:
+            verified_native_ids.append(aid)
 
     raw_ev_ids = record.get("evidence_ids")
     if isinstance(raw_ev_ids, str):
@@ -288,10 +327,17 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
     final_evidence_ids = list(verified_native_ids)
     if not final_evidence_ids:
         for eid in raw_ev_ids:
-            if _reconcile_record_with_native_acquisition(
-                str(eid), date, values, reality, source_role
-            ):
-                final_evidence_ids.append(str(eid))
+            aid = str(eid)
+            var_ev = _reconcile_variable_evidence(aid, date, values, reality, source_role)
+            if var_ev is None:
+                continue
+            any_verified = False
+            for var_name, verified in var_ev.items():
+                if verified:
+                    variable_evidence[var_name].append(aid)
+                    any_verified = True
+            if any_verified:
+                final_evidence_ids.append(aid)
 
     authority = str(record.get("authority") or "")
 
@@ -310,12 +356,22 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
         )
     ]
 
+    # All-variables-verified: True only when every present core variable has
+    # at least one verified acquisition backing it.
+    all_vars_verified = all(
+        bool(variable_evidence.get(var))
+        for var in CORE_VARIABLES
+        if values.get(var) is not None
+    ) and any(values.get(var) is not None for var in CORE_VARIABLES)
+
     normalized = {
         **values,
         "date": date,
         "source_reality": reality,
         "evidence_ids": final_evidence_ids,
         "native_evidence_ids": reconciled_native,
+        "variable_evidence": variable_evidence,
+        "all_variables_verified": all_vars_verified,
         "authority_refs": [authority] if authority else [],
         "overall_confidence": _finite_float(record.get("overall_confidence")),
     }
@@ -333,11 +389,45 @@ def _merge_day(existing: Optional[Dict[str, Any]], incoming: Dict[str, Any]) -> 
             f"and {incoming.get('source_reality')} for date {incoming.get('date')}"
         )
     merged = dict(existing)
+
+    # Per-variable evidence: when filling a None field from incoming, use
+    # incoming's variable evidence for that field, NOT existing's evidence.
+    existing_var_ev = existing.get("variable_evidence") or {}
+    incoming_var_ev = incoming.get("variable_evidence") or {}
+    merged_var_ev: Dict[str, List[str]] = {}
+    for var in CORE_VARIABLES:
+        merged_var_ev[var] = list(existing_var_ev.get(var) or [])
+
     for key in VARIABLES:
         if merged.get(key) is None:
-            merged[key] = incoming.get(key)
+            incoming_val = incoming.get(key)
+            merged[key] = incoming_val
+            # Variable came from incoming record: use incoming's evidence for this var.
+            if incoming_val is not None and key in merged_var_ev:
+                merged_var_ev[key] = list(incoming_var_ev.get(key) or [])
+
     merged["evidence_ids"] = sorted(set(existing.get("evidence_ids", [])) | set(incoming.get("evidence_ids", [])))
     merged["authority_refs"] = sorted(set(existing.get("authority_refs", [])) | set(incoming.get("authority_refs", [])))
+    merged["variable_evidence"] = merged_var_ev
+
+    # Recompute native_evidence_ids: only IDs that back ALL present core variables.
+    all_acq_ids = sorted(set(existing.get("native_evidence_ids", [])) | set(incoming.get("native_evidence_ids", [])))
+    merged["native_evidence_ids"] = [
+        aid for aid in all_acq_ids
+        if all(
+            aid in merged_var_ev.get(var, [])
+            for var in CORE_VARIABLES
+            if merged.get(var) is not None
+        )
+    ]
+
+    # Recompute all_variables_verified from merged variable evidence.
+    merged["all_variables_verified"] = all(
+        bool(merged_var_ev.get(var))
+        for var in CORE_VARIABLES
+        if merged.get(var) is not None
+    ) and any(merged.get(var) is not None for var in CORE_VARIABLES)
+
     return merged
 
 
@@ -388,9 +478,17 @@ def normalize_weather_archive(raw_weather: Any) -> Dict[str, Any]:
         reality = "forecast_only" if forecast else "missing"
 
     evidence_ids = sorted({evidence_id for row in normalized for evidence_id in row.get("evidence_ids", [])})
+    # After merging, collect native evidence from merged daily rows, not raw normalized.
+    all_rows = list(historical.values()) + list(forecast.values())
     verified_native_ids = sorted({
-        acq_id for row in normalized for acq_id in row.get("native_evidence_ids", [])
+        acq_id for row in all_rows for acq_id in row.get("native_evidence_ids", [])
     })
+    # native_evidence_verified requires every merged row to have all its
+    # present core variables backed by at least one verified acquisition.
+    all_rows_verified = (
+        bool(all_rows)
+        and all(row.get("all_variables_verified", False) for row in all_rows)
+    )
     hash_payload = {"historical": historical, "forecast": forecast, "evidence_ids": evidence_ids}
     return {
         "weather_archive_status": status,
@@ -402,5 +500,5 @@ def normalize_weather_archive(raw_weather: Any) -> Dict[str, Any]:
         "variable_completeness": completeness,
         "weather_evidence_ids": evidence_ids,
         "weather_native_evidence_ids": verified_native_ids,
-        "native_evidence_verified": bool(verified_native_ids),
+        "native_evidence_verified": all_rows_verified,
     }
