@@ -172,4 +172,4 @@ Execution completed on Windows (Python 3.13.13) including all A1–A4 audit reme
 
 ## Disposition
 
-**B2B-04A declared weather source-role and historical/forecast isolation: SOFTWARE-QUALIFIED at commit `a0a6009` (582/582 passed).** B2B-04 native provider provenance (HTTP request/response CAS capture, endpoint/product verification, and transport attestation) remains **OPEN**. No new state/publication grant authorization is introduced; previously accepted Layer 0 scientific closures remain closed within their own pinned software scope.
+**B2B-04A declared weather source-role and historical/forecast isolation: SOFTWARE-QUALIFIED at commit `8463788` (589/589 passed).** All A1–A4 audit findings and classifier boundary counterexamples are closed with regression proofs. B2B-04B native provider provenance (HTTP request/response CAS capture, endpoint/product registry, and transport attestation) remains **OPEN** for independent branch development. No new state/publication grant authorization is introduced; previously accepted Layer 0 scientific closures remain closed within their own pinned software scope.
