@@ -9,6 +9,10 @@ from __future__ import annotations
 from typing import Dict, List
 
 from services.agribrain.layer0.environment.weather.schemas import WeatherDailyRecord, WeatherTimeSeries
+from services.agribrain.layer0.environment.weather.source_roles import (
+    HISTORICAL_CONTEXT_ROLES, FORECAST_ROLES,
+    role_for_data_kind, record_role_is_consistent,
+)
 
 
 def evaluate_weather_qa(
@@ -21,6 +25,7 @@ def evaluate_weather_qa(
         return {
             "provider_count": 0,
             "temporal_completeness": 0.0,
+            "historical_completeness": 0.0,
             "has_et0": False,
             "has_soil_moisture": False,
             "flags": ["NO_WEATHER_DATA"],
@@ -30,11 +35,68 @@ def evaluate_weather_qa(
     # Provider availability
     providers = set(r.provider for r in timeseries.daily_records)
 
-    # Temporal completeness
-    dates = sorted(set(r.date for r in timeseries.daily_records if r.date))
-    temporal_completeness = len(dates) / max(
-        timeseries.historical_days + timeseries.forecast_days, 1
+    # Temporal and historical completeness
+    eligible_historical_dates = sorted(set(
+        r.date for r in timeseries.daily_records
+        if r.date
+        and role_for_data_kind(getattr(r, "data_kind", None)) in HISTORICAL_CONTEXT_ROLES
+        and record_role_is_consistent(r)
+    ))
+    eligible_forecast_dates = sorted(set(
+        r.date for r in timeseries.daily_records
+        if r.date
+        and role_for_data_kind(getattr(r, "data_kind", None)) in FORECAST_ROLES
+        and record_role_is_consistent(r)
+    ))
+
+    # Independent expected window
+    has_expected_dates = getattr(timeseries, "expected_dates", None) is not None
+    if has_expected_dates:
+        expected_date_set = set(timeseries.expected_dates)
+        expected_historical = len(expected_date_set)
+        # Only dates matching the requested expected dates count toward historical completeness
+        covered_historical_dates = [d for d in eligible_historical_dates if d in expected_date_set]
+        unexpected_dates = set(eligible_historical_dates) - expected_date_set
+        if unexpected_dates:
+            flags.append("WEATHER_DATES_OUTSIDE_EXPECTED_WINDOW")
+    else:
+        expected_historical = (
+            timeseries.expected_historical_days
+            if getattr(timeseries, "expected_historical_days", None) is not None
+            else timeseries.historical_days
+        )
+        covered_historical_dates = eligible_historical_dates
+
+    expected_forecast = timeseries.forecast_days
+    expected_total = expected_historical + expected_forecast
+
+    received_dates = sorted(set(r.date for r in timeseries.daily_records if r.date))
+    received_historical_coverage = (
+        round(len(eligible_historical_dates) / len(received_dates), 4)
+        if received_dates else 0.0
     )
+
+    if expected_historical > 0:
+        historical_completeness = round(min(1.0, len(covered_historical_dates) / expected_historical), 4)
+    elif eligible_historical_dates:
+        historical_completeness = 1.0
+    else:
+        historical_completeness = 0.0
+
+    if has_expected_dates:
+        covered_all = [d for d in (set(eligible_historical_dates) | set(eligible_forecast_dates)) if d in expected_date_set]
+        temporal_completeness = round(min(1.0, len(covered_all) / max(expected_total, 1)), 4)
+    else:
+        eligible_dates = set(eligible_historical_dates) | set(eligible_forecast_dates)
+        if expected_total > 0:
+            temporal_completeness = round(min(1.0, len(eligible_dates) / expected_total), 4)
+        elif eligible_dates:
+            temporal_completeness = round(min(1.0, len(eligible_dates) / max(len(eligible_dates), 1)), 4)
+        else:
+            temporal_completeness = 0.0
+
+    if expected_historical > 0 and len(covered_historical_dates) < expected_historical:
+        flags.append("INCOMPLETE_HISTORICAL_WINDOW")
 
     # Check for ET₀
     has_et0 = any(
@@ -46,19 +108,34 @@ def evaluate_weather_qa(
         r.soil_moisture_0_1cm is not None for r in timeseries.daily_records
     )
 
-    # Data-kind validation: ensure forecast not mixed with historical
-    data_kinds = set(r.data_kind for r in timeseries.daily_records)
-    if "forecast" in data_kinds and "historical_reanalysis" in data_kinds:
+    # Explicit dataset-role diagnostics. A response labelled 'current'
+    # does not prove an independently measured weather station.
+    data_kinds = {
+        r.data_kind if isinstance(r.data_kind, str) else "<invalid>"
+        for r in timeseries.daily_records
+    }
+    roles = {role_for_data_kind(r.data_kind) for r in timeseries.daily_records}
+    historical_roles_present = bool(roles & HISTORICAL_CONTEXT_ROLES)
+    forecast_roles_present = bool(roles & FORECAST_ROLES)
+    if historical_roles_present and forecast_roles_present:
         flags.append("MIXED_DATA_KINDS")
-
-    # Model/reanalysis flag
-    if any(r.data_kind in ("historical_reanalysis", "historical_forecast")
-           for r in timeseries.daily_records):
+    if forecast_roles_present:
+        flags.append("FORECAST_MODEL_DATA")
+    if any(role.value in ("REANALYSIS_MODEL","CLIMATOLOGY_MODEL") for role in roles):
         flags.append("REANALYSIS_OR_MODEL_DATA")
+    if any(not record_role_is_consistent(r) for r in timeseries.daily_records):
+        flags.append("INVALID_WEATHER_SOURCE_ROLE")
+    if not historical_roles_present:
+        flags.append("NO_HISTORICAL_WEATHER_CONTEXT")
 
     quality = "good"
-    if temporal_completeness < 0.5:
+    if "INVALID_WEATHER_SOURCE_ROLE" in flags or "NO_HISTORICAL_WEATHER_CONTEXT" in flags:
+        quality = "unusable"
+    elif "MIXED_DATA_KINDS" in flags:
         quality = "degraded"
+    if historical_completeness < 0.5 or temporal_completeness < 0.5:
+        if quality != "unusable":
+            quality = "degraded"
         flags.append("LOW_TEMPORAL_COMPLETENESS")
     if len(providers) == 0:
         quality = "unusable"
@@ -67,6 +144,9 @@ def evaluate_weather_qa(
         "provider_count": len(providers),
         "providers": sorted(providers),
         "temporal_completeness": round(temporal_completeness, 4),
+        "historical_completeness": round(historical_completeness, 4),
+        "received_historical_coverage": received_historical_coverage,
+        "expected_historical_days": expected_historical,
         "has_et0": has_et0,
         "has_soil_moisture": has_soil_moisture,
         "data_kinds": sorted(data_kinds),

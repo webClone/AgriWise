@@ -67,6 +67,8 @@ class EnvironmentalEngine:
         timezone: str = "UTC",
         t_base: float = 5.0,
         forecast_retrieval_time: Optional[str] = None,
+        expected_historical_days: Optional[int] = None,
+        expected_dates: Optional[List[str]] = None,
     ) -> EnvironmentalContextPackage:
         """Process all environmental data sources into a context package.
 
@@ -154,7 +156,12 @@ class EnvironmentalEngine:
                     "error": str(e),
                 })
 
-        weather_timeseries = build_weather_timeseries(all_weather_records, timezone)
+        weather_timeseries = build_weather_timeseries(
+            all_weather_records,
+            timezone,
+            expected_historical_days=expected_historical_days,
+            expected_dates=expected_dates,
+        )
         weather_qa_result = evaluate_weather_qa(weather_timeseries)
 
         # 5. Weather consensus (per-day, per-variable)
@@ -312,17 +319,45 @@ class EnvironmentalEngine:
         """Group records by date, separate forecast from historical, build consensus."""
         from collections import defaultdict
 
-        # Group by date
+        # Group by date with duplicate provider detection
         by_date: Dict[str, Dict[str, WeatherDailyRecord]] = defaultdict(dict)
+        conflicted_days: set[str] = set()
+
         for rec in records:
-            if rec.date and rec.data_kind != "forecast":
-                by_date[rec.date][rec.provider] = rec
+            if not rec.date or rec.data_kind == "forecast":
+                continue
+            day_providers = by_date[rec.date]
+            if rec.provider in day_providers:
+                existing = day_providers[rec.provider]
+                if (
+                    existing.data_kind != rec.data_kind
+                    or existing.source_role != rec.source_role
+                    or existing != rec
+                ):
+                    conflicted_days.add(rec.date)
+            else:
+                day_providers[rec.provider] = rec
+
+        # Fail closed on any date where incompatible duplicate records occurred
+        for d in conflicted_days:
+            by_date[d] = {
+                "__conflict__": WeatherDailyRecord(
+                    date=d,
+                    provider="__conflict__",
+                    data_kind="unqualified",
+                    source_role="REJECTED",
+                )
+            }
 
         consensus_list: List[WeatherConsensusDaily] = []
         for date in sorted(by_date.keys()):
             providers = by_date[date]
             daily = build_daily_consensus(providers, date)
-            consensus_list.append(daily)
+            # The consensus helper may return an explicit zero-authority
+            # rejection with no variables. Never construct zero-rain or
+            # fallback-ET0 process forcing from that rejected role.
+            if daily.variable_consensus:
+                consensus_list.append(daily)
 
         return consensus_list
 

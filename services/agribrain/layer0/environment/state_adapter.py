@@ -54,7 +54,7 @@ WEAK_SM_MAP = {
 DEEP_LAYER_CONTEXT_ONLY = ["soil_moisture_27_81cm"]
 
 # Data kinds allowed for weak Kalman observations
-ALLOWED_DATA_KINDS = {"current", "historical_reanalysis"}
+ALLOWED_DATA_KINDS = {"historical_reanalysis"}
 
 
 def create_weak_kalman_observations(
@@ -64,7 +64,7 @@ def create_weak_kalman_observations(
     """Create weak Kalman observations from Open-Meteo modelled soil moisture.
 
     Conditions for emission (from CONTRACT.md):
-    - data_kind must be current/historical_reanalysis (NOT forecast)
+    - data_kind must be historical_reanalysis (NOT current/forecast) unless source authority is added
     - weather consensus does not flag provider-wide failure
     - labeled as modelled_soil_moisture, never soil_moisture_observation
     - reliability ≤ 0.35 always

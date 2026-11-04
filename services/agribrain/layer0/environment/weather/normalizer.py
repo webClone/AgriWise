@@ -15,38 +15,60 @@ from services.agribrain.layer0.environment.weather.schemas import WeatherDailyRe
 def build_weather_timeseries(
     records: List[WeatherDailyRecord],
     timezone: str = "UTC",
+    expected_historical_days: Optional[int] = None,
+    expected_forecast_days: Optional[int] = None,
+    expected_dates: Optional[List[str]] = None,
 ) -> WeatherTimeSeries:
     """Build a WeatherTimeSeries from normalized daily records.
 
-    Groups by provider, computes window metadata.
+    Groups by provider, computes window metadata. An independent requested
+    window can be supplied via expected_historical_days or expected_dates.
     """
     if not records:
-        return WeatherTimeSeries(timezone=timezone)
+        eff_hist = (
+            len(expected_dates) if expected_dates is not None
+            else (expected_historical_days or 0)
+        )
+        return WeatherTimeSeries(
+            timezone=timezone,
+            historical_days=eff_hist,
+            forecast_days=expected_forecast_days or 0,
+            expected_historical_days=expected_historical_days,
+            expected_dates=expected_dates,
+        )
 
     dates = sorted(set(r.date for r in records if r.date))
     providers = sorted(set(r.provider for r in records if r.provider))
 
-    # Count historical vs forecast
+    # Count historical vs forecast from received records
     historical_dates = {
         r.date for r in records
-        if r.data_kind in ("current", "historical_reanalysis", "historical_forecast")
+        if r.data_kind == "historical_reanalysis"
     }
     forecast_dates = {
         r.date for r in records
-        if r.data_kind == "forecast"
+        if r.data_kind in ("forecast", "historical_forecast")
     }
 
-    historical = len(historical_dates)
-    forecast = len(forecast_dates)
+    if expected_dates is not None:
+        eff_historical = len(expected_dates)
+    elif expected_historical_days is not None:
+        eff_historical = expected_historical_days
+    else:
+        eff_historical = len(historical_dates)
+
+    forecast = expected_forecast_days if expected_forecast_days is not None else len(forecast_dates)
 
     return WeatherTimeSeries(
         daily_records=records,
         window_start=dates[0] if dates else "",
         window_end=dates[-1] if dates else "",
-        historical_days=historical,
+        historical_days=eff_historical,
         forecast_days=forecast,
         timezone=timezone,
         providers=providers,
+        expected_historical_days=expected_historical_days,
+        expected_dates=expected_dates,
     )
 
 
