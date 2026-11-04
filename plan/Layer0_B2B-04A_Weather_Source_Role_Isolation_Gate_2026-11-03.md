@@ -158,8 +158,8 @@ Execution completed on Windows (Python 3.13.13) including all A1–A4 audit reme
 | Complete Layer 0 (`layer0/tests/`) | **484/484 passed** | 18.80s | All Layer 0 unit, provider, contract, proof & QA suites (`task-1912`) |
 | Layer 1 Fusion (`layer1_fusion/tests/`) | **21/21 passed** | 0.66s | Full downstream fusion pipeline |
 | ASMAE Fast (`layer05_asmae/tests/`) | **83/83 passed** | 36.56s | Fast ASMAE unit, physics & Kalman tests (`task-1918`) |
-| ASMAE Comprehensive Real-Raster (`test_comprehensive_pipeline_execution.py`) | **1/1 passed** | 670.67s (11m 10s) | Full end-to-end real-raster EnKF assimilation pipeline (`task-1864`/`task-1922`) |
-| **Distinct Aggregate Qualified** | **589/589 passed** | **727.21s total** | **Zero failures, zero regressions, zero skipped** |
+| ASMAE Comprehensive Real-Raster (`test_comprehensive_pipeline_execution.py`) | **1/1 passed** | 659.39s (10m 59s) | Full end-to-end real-raster EnKF assimilation pipeline (`task-1922`) |
+| **Distinct Aggregate Qualified** | **589/589 passed** | **715.41s total** | **Zero failures, zero regressions, zero skipped** |
 
 ## 5. What B2B-04A explicitly does NOT qualify
 
