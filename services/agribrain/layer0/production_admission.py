@@ -58,10 +58,30 @@ def require_trusted_verifier(verifier: object) -> None:
             "Layer 0 signed state-input policy is mandatory but no trusted "
             "source-admission verifier is provisioned"
         )
-    if (
-        (live_revocation_required() or v3_kms_required())
-        and not getattr(verifier, "revocation_enforced", False)
-    ):
+    # A legacy HMAC verifier can legitimately advertise revocation_enforced,
+    # but MUST NOT satisfy a mandatory asymmetric-v3 policy. Check the exact
+    # underlying v3 verifier; an aggregate property is insufficient.
+    if v3_kms_required():
+        from services.agribrain.layer0.v3_kms_signed_issuer import V3KmsGrantVerifier
+        from services.agribrain.layer0.v3_state_admission import UnifiedAdmissionVerifier
+
+        if isinstance(verifier, V3KmsGrantVerifier):
+            trusted_v3 = verifier
+        elif (
+            isinstance(verifier, UnifiedAdmissionVerifier)
+            and verifier.enforces_v3_only
+            and isinstance(verifier.v3_verifier, V3KmsGrantVerifier)
+        ):
+            trusted_v3 = verifier.v3_verifier
+        else:
+            raise Layer0AdmissionRequiredError(
+                "Mandatory v3 KMS policy requires a trusted asymmetric v3 verifier"
+            )
+        if not trusted_v3.revocation_enforced:
+            raise Layer0AdmissionRequiredError(
+                "Mandatory v3 KMS verifier requires durable revocation authority"
+            )
+    elif live_revocation_required() and not getattr(verifier, "revocation_enforced", False):
         raise Layer0AdmissionRequiredError(
             "Live issuer revocation policy required but no trusted authority is provisioned"
         )

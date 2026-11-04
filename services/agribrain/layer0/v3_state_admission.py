@@ -118,6 +118,11 @@ class UnifiedAdmissionVerifier:
         self._enforce_v3_only = enforce_v3_only or v3_kms_required()
 
     @property
+    def enforces_v3_only(self) -> bool:
+        """Live server policy can become mandatory after verifier creation."""
+        return self._enforce_v3_only or v3_kms_required()
+
+    @property
     def v3_verifier(self) -> Optional[V3KmsGrantVerifier]:
         return self._v3
 
@@ -163,7 +168,7 @@ class UnifiedAdmissionVerifier:
         tenant_id: str | None = None,
     ) -> tuple[bool, str]:
         """Dispatch receipt to v3 KMS verifier or legacy HMAC verifier."""
-        if not isinstance(receipt, Mapping):
+        if not isinstance(receipt, (Mapping, V3SignedReceipt)):
             return False, "missing_or_malformed_grant"
 
         # Detect v3 receipt
@@ -196,7 +201,7 @@ class UnifiedAdmissionVerifier:
             return valid, reason
 
         # Legacy v1/v2 HMAC receipt
-        if self._enforce_v3_only:
+        if self.enforces_v3_only:
             return False, "legacy_v1_v2_grant_prohibited_under_v3_kms_policy"
 
         if self._legacy is None:

@@ -83,3 +83,22 @@ Executed on local Windows environment (Python 3.13.13, Node.js v20.18.0):
 
 - Scientific Pilot PR #9 (`71ee1f7`), frozen B2B-04B PR #25 (`f320e78`), and `main` (`6edd372`) remain strictly untouched.
 - Protected master monograph and `findings/layer0.md` remain immutable.
+
+## Post-qualification strict-v3 verifier injection hardening
+
+**New candidate revision (after qualified 65459ea):** Mandatory v3 mode now
+rejects legacy HMAC verifiers even if they advertise revocation support.
+For a UnifiedAdmissionVerifier, the underlying v3 verifier must exist,
+enforce durable revocation, and operate under v3-only dispatch. This blocks
+caller-injected verifier downgrade during Layer0StateEngine construction.
+The unified dispatcher also recognizes typed V3SignedReceipt objects and
+checks the server's live mandatory-v3 policy if it changes after construction.
+
+The deterministic ES256 signing path requires cryptography >=43.0.0:
+the `deterministic_signing` argument was introduced in v43.0.0. The
+requirements floor has been raised from 42 accordingly.
+
+**Do not reuse the 744/744 owner-reported qualification receipt** for this
+commit. Before B2B-06 freeze, run the added mandatory-v3 security tests,
+full Layer 0 / Layer 1 / ASMAE fast gates, and the comprehensive pipeline
+at the final pinned SHA. No signer private keys are introduced here.

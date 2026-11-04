@@ -32,5 +32,5 @@ pymongo>=4.7.0,<5.0.0
 torch>=2.0.0
 
 # Cryptography / KMS v3 Signing
-cryptography>=42.0.0,<51.0.0
+cryptography>=43.0.0,<51.0.0
 rfc8785>=0.1.4

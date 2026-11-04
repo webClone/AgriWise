@@ -1318,3 +1318,104 @@ def test_production_configuration_no_private_keys(tmp_path, monkeypatch):
     assert not hasattr(entry.public_key, "sign")
     assert not hasattr(verifier, "_private_keys")
     assert not hasattr(verifier.registry, "_private_keys")
+
+# ============================================================================
+# 18. Mandatory v3 cannot be bypassed by caller-injected legacy verifier
+# ============================================================================
+
+def test_mandatory_v3_rejects_legacy_verifier_even_if_revocation_enforced(monkeypatch):
+    from services.agribrain.layer0.production_admission import (
+        Layer0AdmissionRequiredError, require_trusted_verifier,
+    )
+    from services.agribrain.layer0.state_engine import Layer0StateEngine
+
+    class RevocationEnabledLegacyVerifier:
+        revocation_enforced = True
+
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_V3_KMS", "true")
+    fake_legacy = RevocationEnabledLegacyVerifier()
+    with pytest.raises(Layer0AdmissionRequiredError, match="requires a trusted asymmetric v3 verifier"):
+        require_trusted_verifier(fake_legacy)
+    with pytest.raises(Layer0AdmissionRequiredError, match="requires a trusted asymmetric v3 verifier"):
+        Layer0StateEngine(positive_admission_verifier=fake_legacy)
+
+    # A UnifiedVerifier with only a legacy revocation provider is also denied.
+    unified_legacy = UnifiedAdmissionVerifier(
+        legacy_verifier=fake_legacy, enforce_v3_only=True,
+    )
+    with pytest.raises(Layer0AdmissionRequiredError, match="requires a trusted asymmetric v3 verifier"):
+        require_trusted_verifier(unified_legacy)
+
+
+def test_mandatory_v3_requires_its_own_revocation_not_legacy_revocation(monkeypatch):
+    from services.agribrain.layer0.production_admission import (
+        Layer0AdmissionRequiredError, require_trusted_verifier,
+    )
+
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_V3_KMS", "true")
+    registry = KmsPublicKeyRegistry()
+    v3_without_revocation = V3KmsGrantVerifier(registry)
+
+    with pytest.raises(Layer0AdmissionRequiredError, match="requires durable revocation authority"):
+        require_trusted_verifier(v3_without_revocation)
+
+    # The aggregate UnifiedVerifier must not use a legacy revocation flag
+    # as a stand-in for the v3 verifier's missing revocation protection.
+    class RevocationEnabledLegacyVerifier:
+        revocation_enforced = True
+
+    unified = UnifiedAdmissionVerifier(
+        v3_verifier=v3_without_revocation,
+        legacy_verifier=RevocationEnabledLegacyVerifier(),
+        enforce_v3_only=True,
+    )
+    assert unified.revocation_enforced is True
+    with pytest.raises(Layer0AdmissionRequiredError, match="requires durable revocation authority"):
+        require_trusted_verifier(unified)
+
+
+def test_unified_v3_only_policy_is_live_and_handles_typed_receipt(monkeypatch):
+    monkeypatch.delenv("AKALORIS_LAYER0_REQUIRE_V3_KMS", raising=False)
+    signer = LocalKmsAsymmetricSigner(KmsAlgorithm.ED25519)
+    key_id = "kms-typed-receipt-v3"
+    signer.provision_key(key_id)
+    registry = KmsPublicKeyRegistry()
+    registry.register_public_key(
+        key_id=key_id,
+        issuer_id="copernicus-sentinel2",
+        source="sentinel2",
+        algorithm="Ed25519",
+        public_key_pem_or_bytes=signer.get_public_key_pem(key_id),
+        valid_from=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        valid_until=datetime(2027, 1, 1, tzinfo=timezone.utc),
+    )
+    verifier = UnifiedAdmissionVerifier(
+        v3_verifier=V3KmsGrantVerifier(registry),
+        enforce_v3_only=False,
+    )
+    p = _make_sample_packet()
+    _bind_test_scope(p)
+    receipt = signer.sign_grant(_make_v3_grant_claims(p, key_id), key_id)
+    valid, reason = verifier.verify(
+        receipt, p,
+        plot_id=p.plot_id,
+        geometry_hash=p.geometry_hash,
+        geometry_version=p.geometry_version,
+        run_timestamp=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert valid and reason == "verified_v3_kms_grant"
+
+    # Policy flips after verifier construction: legacy is still prohibited.
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_V3_KMS", "true")
+    assert verifier.enforces_v3_only
+    valid, reason = verifier.verify(
+        {"grant": {"domain": "akaloris/layer0/positive-state-observation/v1"}, "mac": "0" * 64},
+        p,
+        plot_id=p.plot_id,
+        geometry_hash=p.geometry_hash,
+        geometry_version=p.geometry_version,
+        run_timestamp=datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    assert not valid and reason == "legacy_v1_v2_grant_prohibited_under_v3_kms_policy"
