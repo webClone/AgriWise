@@ -30,7 +30,7 @@ const rootRoute = fs.readFileSync(
   path.join(root, "src/app/api/plots/route.ts"), "utf8",
 ).replace(
   'await import("@/lib/agribrain/internal-service-auth")',
-  "Promise.resolve({buildSignedInternalHeaders: () => ({})})",
+  "({buildSignedInternalHeaders: () => ({})})",
 );
 const detailRoute = fs.readFileSync(
   path.join(root, "src/app/api/plots/[id]/route.ts"), "utf8",
@@ -128,15 +128,21 @@ test("both PUT routes reject foreign farm.connect before Prisma mutation", async
 
 test("unlisted nested writes and metadata authority are rejected in both routes", async () => {
   for (const [src, call] of [[rootRoute, bulkPut],[detailRoute, detailPut]]) {
-    for (const payload of [
-      {photos:{create:[{url:"forged"}]}}, {sensors:{set:[]}},
-      {farmId: foreignId}, {geometryVersion: 999}, {physicalConstraints:{set:[]}},
-      {unexpectedField: "value"},
+    for (const [payload, status] of [
+      [{photos:{create:[{url:"forged"}]}}, 403],
+      [{sensors:{set:[]}}, 403],
+      [{farm:{connect:{id:foreignId}}}, 403],
+      [{farm:{connectOrCreate:{where:{id:foreignId},create:{}}}}, 403],
+      [{farmId: foreignId}, 403],
+      [{geometryVersion: 999}, 403],
+      [{physicalConstraints:{set:[]}}, 400],
+      [{unexpectedField: "value"}, 403],
     ]) {
       const h = harness(src);
       const response = await call(h, payload);
-      assert.equal(response.status, 403);
+      assert.equal(response.status, status);
       assert.equal(h.calls.updates.length, 0);
+      assert.equal(h.calls.epochs.length, 0);
     }
   }
 });
