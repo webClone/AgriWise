@@ -9,6 +9,8 @@ permission to update Kalman filter state. No signing key or state-input grant is
 exists here.
 
 Security invariants:
+- Rejects endpoint URLs with embedded query parameters, credentials, or fragments.
+- Validates the actual transmitted GET URL on the wire against declared parameters.
 - Strips sensitive credentials (API keys, tokens, secrets) before hashing or persisting.
 - Enforces HTTPS only and prohibits HTTP redirects.
 - Content-addressed append-only filesystem store with atomic writes.
@@ -22,7 +24,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Optional
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 import hashlib
 import json
 import math
@@ -36,6 +38,7 @@ from services.agribrain.layer0.native_issuer.weather_product_registry import (
     WeatherRegistryError,
     get_weather_product_spec,
     identify_weather_product,
+    normalize_and_validate_endpoint,
     validate_weather_product_request,
 )
 
@@ -125,7 +128,7 @@ def _clean_query_params(params: Mapping[str, Any]) -> dict[str, Any]:
             raise NativeWeatherEvidenceError("query parameter keys must be non-empty strings")
         
         normalized_key = key.lower().strip().replace("-", "_")
-        # Strip forbidden credential keys completely from the canonical parameters
+        # Strip forbidden credential keys completely from canonical parameters
         if normalized_key in _FORBIDDEN_QUERY_KEYS:
             continue
 
@@ -165,6 +168,68 @@ def _clean_param_value(val: Any) -> Any:
             raise NativeWeatherEvidenceError(f"non-finite float in query parameters: {val}")
         return val
     raise NativeWeatherEvidenceError(f"unsupported parameter value type: {type(val)}")
+
+
+def _parse_query_val(v: str) -> Any:
+    """Convert raw query string value to canonical type if numeric/boolean."""
+    if v.lower() == "true":
+        return True
+    if v.lower() == "false":
+        return False
+    try:
+        val_int = int(v)
+        return val_int
+    except ValueError:
+        pass
+    try:
+        val_float = float(v)
+        if math.isfinite(val_float):
+            return val_float
+    except ValueError:
+        pass
+    return v
+
+
+def _canonical_params_equal(claimed: Mapping[str, Any], transmitted: Mapping[str, Any]) -> bool:
+    """Compare declared sanitized parameters with transmitted wire parameters.
+    
+    Handles equivalent representations such as comma-separated lists vs lists,
+    and integer vs float equivalence.
+    """
+    claimed_clean = dict(claimed)
+    trans_clean = dict(transmitted)
+
+    if set(claimed_clean.keys()) != set(trans_clean.keys()):
+        return False
+
+    for k, val_c in claimed_clean.items():
+        val_t = trans_clean[k]
+
+        # Normalize lists vs comma-separated strings
+        if isinstance(val_c, (list, tuple)) and isinstance(val_t, str):
+            val_t_list = [x.strip() for x in val_t.split(",") if x.strip()]
+            val_c_list = [str(x).strip() for x in val_c]
+            if val_t_list != val_c_list:
+                return False
+            continue
+        elif isinstance(val_t, (list, tuple)) and isinstance(val_c, str):
+            val_c_list = [x.strip() for x in val_c.split(",") if x.strip()]
+            val_t_list = [str(x).strip() for x in val_t]
+            if val_c_list != val_t_list:
+                return False
+            continue
+
+        # Float comparison
+        if isinstance(val_c, (int, float)) and isinstance(val_t, (int, float)):
+            if abs(float(val_c) - float(val_t)) > 1e-7:
+                return False
+            continue
+
+        # General equality
+        if val_c != val_t:
+            return False
+
+    return True
 
 
 def _manifest_id(value: Mapping[str, Any]) -> str:
@@ -318,12 +383,13 @@ class NativeWeatherEvidenceStore:
     ) -> NativeWeatherAcquisitionReceipt:
         """Record real backend HTTP GET response into CAS store.
         
-        Validates endpoint, method, status, redirect prohibition, credential scrubbing,
-        and content integrity before creating append-only manifests.
+        Validates endpoint, transmitted URL, method, status, redirect prohibition,
+        credential scrubbing, and content integrity before creating append-only manifests.
         """
-        # 1. Product Registry Identification & Validation
+        # 1. Endpoint Validation & Product Registry Identification
         try:
-            spec = identify_weather_product(endpoint, query_params)
+            normalized_endpoint = normalize_and_validate_endpoint(endpoint)
+            spec = identify_weather_product(normalized_endpoint, query_params)
             validate_weather_product_request(spec, "GET", query_params)
         except WeatherRegistryError as exc:
             raise NativeWeatherEvidenceError(f"registry validation failed: {exc}") from exc
@@ -344,22 +410,54 @@ class NativeWeatherEvidenceStore:
         if not resp_url:
             raise NativeWeatherEvidenceError("response missing valid URL")
         
-        # Check that base URL of response matches target endpoint
+        # Check that base URL of response matches target normalized endpoint
         parts_resp = urlsplit(resp_url)
-        parts_endp = urlsplit(endpoint)
-        if (
-            parts_resp.scheme.lower() != parts_endp.scheme.lower()
-            or parts_resp.netloc.lower() != parts_endp.netloc.lower()
-            or parts_resp.path.rstrip("/") != parts_endp.path.rstrip("/")
-        ):
+        normalized_resp_base = f"https://{parts_resp.netloc.lower()}{parts_resp.path.rstrip('/')}"
+        if normalized_resp_base != normalized_endpoint:
             raise NativeWeatherEvidenceError(
-                f"response URL mismatch: {resp_url} vs expected endpoint {endpoint}"
+                f"response URL mismatch: {normalized_resp_base} vs expected endpoint {normalized_endpoint}"
             )
 
-        # 3. Request Inspection
+        # 3. Transmitted Request Wire Inspection
         req = getattr(response, "request", None)
         if req is None or getattr(req, "method", "").upper() != "GET":
             raise NativeWeatherEvidenceError("response does not bind expected backend GET request")
+
+        req_url = getattr(req, "url", None)
+        if not req_url or not isinstance(req_url, str):
+            raise NativeWeatherEvidenceError("prepared request missing valid URL")
+
+        parts_req = urlsplit(req_url)
+        normalized_req_base = f"https://{parts_req.netloc.lower()}{parts_req.path.rstrip('/')}"
+        if normalized_req_base != normalized_endpoint:
+            raise NativeWeatherEvidenceError(
+                f"prepared request endpoint mismatch: {normalized_req_base} vs {normalized_endpoint}"
+            )
+
+        # Extract and sanitize query parameters actually transmitted on the wire
+        raw_transmitted_qsl = parse_qsl(parts_req.query, keep_blank_values=True)
+        transmitted_dict: dict[str, Any] = {}
+        for k, v in raw_transmitted_qsl:
+            clean_k = k.lower().strip().replace("-", "_")
+            if clean_k in _FORBIDDEN_QUERY_KEYS:
+                # Strip secret keys (e.g. appid, api_key) present in wire query string
+                continue
+            parsed_v = _parse_query_val(v)
+            if clean_k in transmitted_dict:
+                existing = transmitted_dict[clean_k]
+                if isinstance(existing, list):
+                    existing.append(parsed_v)
+                else:
+                    transmitted_dict[clean_k] = [existing, parsed_v]
+            else:
+                transmitted_dict[clean_k] = parsed_v
+
+        # Clean caller query_params and verify exact equivalence with transmitted parameters
+        clean_params = _clean_query_params(query_params)
+        if not _canonical_params_equal(clean_params, transmitted_dict):
+            raise NativeWeatherEvidenceError("prepared provider request query differs from acquisition claim")
+
+        wire_query_sha = _sha(parts_req.query.encode("utf-8"))
 
         # 4. Credential Reference Validation
         if not isinstance(credential_reference, str) or not credential_reference:
@@ -370,25 +468,25 @@ class NativeWeatherEvidenceStore:
             raise NativeWeatherEvidenceError("credential reference exceeds maximum length")
 
         # 5. Coordinate and Interval Extraction
-        lat_key = "latitude" if "latitude" in query_params else ("lat" if "lat" in query_params else None)
-        lon_key = "longitude" if "longitude" in query_params else ("lon" if "lon" in query_params else None)
+        lat_key = "latitude" if "latitude" in clean_params else ("lat" if "lat" in clean_params else None)
+        lon_key = "longitude" if "longitude" in clean_params else ("lon" if "lon" in clean_params else None)
         if lat_key is None or lon_key is None:
             raise NativeWeatherEvidenceError("missing latitude or longitude in query parameters")
         
         try:
-            req_lat = float(query_params[lat_key])
-            req_lon = float(query_params[lon_key])
+            req_lat = float(clean_params[lat_key])
+            req_lon = float(clean_params[lon_key])
         except (ValueError, TypeError):
             raise NativeWeatherEvidenceError("non-numeric coordinates in query parameters")
 
         if not (-90.0 <= req_lat <= 90.0) or not (-180.0 <= req_lon <= 180.0):
             raise NativeWeatherEvidenceError("coordinate outside valid geographic range")
 
-        start_date = str(query_params["start_date"]) if "start_date" in query_params else None
-        end_date = str(query_params["end_date"]) if "end_date" in query_params else None
-        if start_date is None and "dt" in query_params:
-            start_date = str(query_params["dt"])
-            end_date = str(query_params["dt"])
+        start_date = str(clean_params["start_date"]) if "start_date" in clean_params else None
+        end_date = str(clean_params["end_date"]) if "end_date" in clean_params else None
+        if start_date is None and "dt" in clean_params:
+            start_date = str(clean_params["dt"])
+            end_date = str(clean_params["dt"])
         valid_interval = (start_date, end_date)
 
         # 6. Response Payload Verification
@@ -408,8 +506,7 @@ class NativeWeatherEvidenceStore:
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise NativeWeatherEvidenceError(f"malformed weather JSON response: {exc}") from exc
 
-        # 7. Canonical Query Parameter Sanitization and Replay Retention
-        clean_params = _clean_query_params(query_params)
+        # 7. Canonical Query Parameter Digest and Replay Retention
         canonical_query_bytes = _json_bytes(clean_params)
         if len(canonical_query_bytes) > MAX_PREPARED_REQUEST_BYTES:
             raise NativeWeatherEvidenceError("oversized query parameter metadata")
@@ -421,13 +518,13 @@ class NativeWeatherEvidenceStore:
         if not isinstance(provider_req_id, str) or len(provider_req_id) > 256:
             provider_req_id = ""
 
-        # 8. Manifest and Identity Assembly
+        # 8. Manifest and Identity Assembly (using normalized endpoint without query strings)
         material = {
             "domain": WEATHER_EVIDENCE_DOMAIN,
             "origin_class": OriginClass.LIVE_PROVIDER_AUTHENTICATED.value,
             "provider": spec.provider.value,
             "product_id": spec.product_id.value,
-            "endpoint": endpoint,
+            "endpoint": normalized_endpoint,
             "request_sha256": request_sha,
             "response_sha256": response_sha,
             "response_bytes": len(body),
@@ -445,11 +542,12 @@ class NativeWeatherEvidenceStore:
         }
         acquisition_id = _manifest_id(material)
 
-        # 9. Request Replay Sidecar
+        # 9. Request Replay Sidecar binding wire query digest
         replay_record = {
             "domain": WEATHER_REQUEST_REPLAY_DOMAIN,
             "acquisition_id": acquisition_id,
             "request_sha256": request_sha,
+            "wire_query_sha256": wire_query_sha,
             "canonical_query_params": clean_params,
         }
 
@@ -464,7 +562,7 @@ class NativeWeatherEvidenceStore:
             origin_class=OriginClass.LIVE_PROVIDER_AUTHENTICATED,
             provider=spec.provider.value,
             product_id=spec.product_id.value,
-            endpoint=endpoint,
+            endpoint=normalized_endpoint,
             request_sha256=request_sha,
             response_sha256=response_sha,
             response_bytes=len(body),
@@ -548,6 +646,8 @@ class NativeWeatherEvidenceStore:
             or record.get("domain") != WEATHER_REQUEST_REPLAY_DOMAIN
             or record.get("acquisition_id") != receipt.acquisition_id
             or record.get("request_sha256") != receipt.request_sha256
+            or not record.get("wire_query_sha256")
+            or not _SHA256_PATTERN.fullmatch(str(record.get("wire_query_sha256")))
         ):
             raise NativeWeatherEvidenceError("invalid or mismatched request replay record")
 

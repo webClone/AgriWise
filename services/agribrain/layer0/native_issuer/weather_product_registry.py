@@ -56,8 +56,14 @@ _OPEN_METEO_REANALYSIS_ENDPOINTS = frozenset({
     "https://archive-api.open-meteo.com/v1/archive",
 })
 
-_OPEN_METEO_FORECAST_ENDPOINTS = frozenset({
+_OPEN_METEO_LIVE_FORECAST_ENDPOINTS = frozenset({
     "https://api.open-meteo.com/v1/forecast",
+})
+
+# Open-Meteo explicitly documents historical-forecast-api.open-meteo.com as its
+# separate host for historical forecasts from past model runs.
+_OPEN_METEO_HISTORICAL_FORECAST_ENDPOINTS = frozenset({
+    "https://historical-forecast-api.open-meteo.com/v1/forecast",
 })
 
 _OPENWEATHER_ONECALL_3_ENDPOINTS = frozenset({
@@ -72,7 +78,7 @@ _OPENWEATHER_TIMEMACHINE_3_ENDPOINTS = frozenset({
     "https://api.openweathermap.org/data/3.0/onecall/timemachine",
 })
 
-# Forbidden legacy/deprecated endpoints (One Call 2.5 was sunset in June 2024)
+# Forbidden legacy/deprecated endpoints (One Call 2.5 was sunset in June 2024; insecure HTTP prohibited)
 DISCONTINUED_ENDPOINTS = frozenset({
     "https://api.openweathermap.org/data/2.5/onecall",
     "http://api.openweathermap.org/data/2.5/onecall",
@@ -80,6 +86,7 @@ DISCONTINUED_ENDPOINTS = frozenset({
     "http://api.openweathermap.org/data/2.5/weather",
     "http://archive-api.open-meteo.com/v1/archive",
     "http://api.open-meteo.com/v1/forecast",
+    "http://historical-forecast-api.open-meteo.com/v1/forecast",
 })
 
 WEATHER_PRODUCT_REGISTRY: Mapping[WeatherProductId, WeatherProductSpec] = {
@@ -97,7 +104,7 @@ WEATHER_PRODUCT_REGISTRY: Mapping[WeatherProductId, WeatherProductSpec] = {
     WeatherProductId.OPEN_METEO_LIVE_FORECAST: WeatherProductSpec(
         product_id=WeatherProductId.OPEN_METEO_LIVE_FORECAST,
         provider=WeatherProvider.OPEN_METEO,
-        allowed_endpoints=_OPEN_METEO_FORECAST_ENDPOINTS,
+        allowed_endpoints=_OPEN_METEO_LIVE_FORECAST_ENDPOINTS,
         allowed_methods=frozenset({"GET"}),
         authoritative_role=WeatherSourceRole.FORECAST_MODEL,
         required_params=frozenset({"latitude", "longitude"}),
@@ -108,13 +115,13 @@ WEATHER_PRODUCT_REGISTRY: Mapping[WeatherProductId, WeatherProductSpec] = {
     WeatherProductId.OPEN_METEO_HISTORICAL_FORECAST: WeatherProductSpec(
         product_id=WeatherProductId.OPEN_METEO_HISTORICAL_FORECAST,
         provider=WeatherProvider.OPEN_METEO,
-        allowed_endpoints=_OPEN_METEO_FORECAST_ENDPOINTS,
+        allowed_endpoints=_OPEN_METEO_HISTORICAL_FORECAST_ENDPOINTS,
         allowed_methods=frozenset({"GET"}),
         authoritative_role=WeatherSourceRole.HISTORICAL_FORECAST_MODEL,
         required_params=frozenset({"latitude", "longitude", "start_date", "end_date"}),
         supports_date_range=True,
         spatial_tolerance_deg=0.05,
-        description="Open-Meteo previous runs / historical forecast archive (stitched runs cannot claim single initialization)",
+        description="Open-Meteo previous runs historical forecast archive (stitched runs cannot claim single initialization)",
     ),
     WeatherProductId.OPENWEATHER_ONECALL_3_0: WeatherProductSpec(
         product_id=WeatherProductId.OPENWEATHER_ONECALL_3_0,
@@ -147,7 +154,7 @@ WEATHER_PRODUCT_REGISTRY: Mapping[WeatherProductId, WeatherProductSpec] = {
         required_params=frozenset({"lat", "lon", "dt"}),
         supports_date_range=False,
         spatial_tolerance_deg=0.05,
-        description="OpenWeather One Call 3.0 Timemachine historical weather data",
+        description="OpenWeather One Call 3.0 Timemachine historical weather data (epoch-timestamp oriented)",
     ),
 }
 
@@ -168,18 +175,26 @@ def get_weather_product_spec(product_id: WeatherProductId | str) -> WeatherProdu
     return WEATHER_PRODUCT_REGISTRY[product_id]
 
 
-def _normalize_endpoint(url: str) -> str:
-    """Normalize URL by stripping query strings and trailing slashes."""
-    parts = urlsplit(url)
+def normalize_and_validate_endpoint(url: str) -> str:
+    """Validate endpoint URL: HTTPS only, no embedded query parameters, credentials, or fragments."""
+    if not isinstance(url, str) or not url.strip():
+        raise WeatherRegistryError("empty_weather_endpoint")
+    parts = urlsplit(url.strip())
     if parts.scheme.lower() != "https":
         raise WeatherRegistryError(f"insecure_weather_endpoint_scheme: {parts.scheme} (HTTPS required)")
-    normalized = f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path.rstrip('/')}"
+    if parts.username or parts.password:
+        raise WeatherRegistryError("endpoint_contains_embedded_userinfo_or_credentials")
+    if parts.query:
+        raise WeatherRegistryError("endpoint_contains_embedded_query_string (query parameters must be passed in parameter dictionary)")
+    if parts.fragment:
+        raise WeatherRegistryError("endpoint_contains_embedded_fragment")
+    normalized = f"https://{parts.netloc.lower()}{parts.path.rstrip('/')}"
     return normalized
 
 
 def identify_weather_product(endpoint: str, params: Mapping[str, Any]) -> WeatherProductSpec:
     """Identify product specification from endpoint and query parameters."""
-    normalized_url = _normalize_endpoint(endpoint)
+    normalized_url = normalize_and_validate_endpoint(endpoint)
 
     if normalized_url in DISCONTINUED_ENDPOINTS:
         raise WeatherRegistryError(
@@ -191,14 +206,20 @@ def identify_weather_product(endpoint: str, params: Mapping[str, Any]) -> Weathe
     if normalized_url in _OPEN_METEO_REANALYSIS_ENDPOINTS:
         return WEATHER_PRODUCT_REGISTRY[WeatherProductId.OPEN_METEO_HISTORICAL_REANALYSIS]
 
-    # 2. Open-Meteo Forecast vs Historical Forecast
-    if normalized_url in _OPEN_METEO_FORECAST_ENDPOINTS:
-        # If explicit historical start_date/end_date or past_days requested, it's historical forecast archive
-        if "start_date" in params or "past_days" in params or "historical" in params:
-            return WEATHER_PRODUCT_REGISTRY[WeatherProductId.OPEN_METEO_HISTORICAL_FORECAST]
+    # 2. Open-Meteo Dedicated Historical Forecast API host
+    if normalized_url in _OPEN_METEO_HISTORICAL_FORECAST_ENDPOINTS:
+        return WEATHER_PRODUCT_REGISTRY[WeatherProductId.OPEN_METEO_HISTORICAL_FORECAST]
+
+    # 3. Open-Meteo Live Forecast API host
+    if normalized_url in _OPEN_METEO_LIVE_FORECAST_ENDPOINTS:
+        # If explicit historical start_date/end_date or past_days requested, it must use historical-forecast host
+        if "start_date" in params or "past_days" in params or "historical" in params or "end_date" in params:
+            raise WeatherRegistryError(
+                "live_forecast_endpoint_cannot_serve_historical_forecast: use https://historical-forecast-api.open-meteo.com/v1/forecast"
+            )
         return WEATHER_PRODUCT_REGISTRY[WeatherProductId.OPEN_METEO_LIVE_FORECAST]
 
-    # 3. OpenWeather Products
+    # 4. OpenWeather Products
     if normalized_url in _OPENWEATHER_ONECALL_3_ENDPOINTS:
         return WEATHER_PRODUCT_REGISTRY[WeatherProductId.OPENWEATHER_ONECALL_3_0]
 

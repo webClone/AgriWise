@@ -144,6 +144,11 @@ def emit_environment_packets(
             provider_records = [
                 r for r in weather_timeseries.daily_records if r.provider == provider
             ]
+            provider_ev_ids = [
+                getattr(r, "evidence_id")
+                for r in provider_records
+                if getattr(r, "evidence_id", None)
+            ]
             packets.append(_make_packet(
                 WEATHER_PROVIDER_OBSERVATION,
                 {
@@ -154,6 +159,7 @@ def emit_environment_packets(
                     "data_kinds": sorted(set(r.data_kind for r in provider_records)),
                     "source_roles": sorted(set(r.source_role for r in provider_records)),
                     "source_qualified": False,
+                    "evidence_ids": sorted(set(provider_ev_ids)),
                 },
                 provenance,
             ))
@@ -180,6 +186,11 @@ def emit_environment_packets(
 
     if weather_consensus:
         for daily_consensus in weather_consensus:
+            consensus_prov = dict(provenance or {})
+            if daily_consensus.evidence_ids:
+                consensus_prov["acquisition_ids"] = list(daily_consensus.evidence_ids)
+                consensus_prov["native_evidence_id"] = daily_consensus.evidence_ids[0]
+
             packets.append(_make_packet(
                 WEATHER_CONSENSUS_DAILY,
                 {
@@ -187,6 +198,8 @@ def emit_environment_packets(
                     "data_kind": daily_consensus.data_kind,
                     "source_role": daily_consensus.source_role,
                     "source_qualified": False,
+                    "evidence_ids": list(daily_consensus.evidence_ids),
+                    "native_evidence_id": daily_consensus.evidence_ids[0] if daily_consensus.evidence_ids else None,
                     "overall_confidence": daily_consensus.overall_confidence,
                     "flags": daily_consensus.flags,
                     "variables": {
@@ -199,7 +212,7 @@ def emit_environment_packets(
                         for var, vc in daily_consensus.variable_consensus.items()
                     },
                 },
-                provenance,
+                consensus_prov,
             ))
 
     if process_forcing:

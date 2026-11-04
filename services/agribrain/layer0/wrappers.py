@@ -151,6 +151,12 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
             else:
                 rec_status = "unverified"
 
+            daily_ev_ids = (
+                getattr(daily, "evidence_ids", None)
+                or (daily.get("evidence_ids") if isinstance(daily, dict) else None)
+                or []
+            )
+            raw_ev_id = packet_ids.get((packet_type, date)) or packet_ids.get(("WEATHER_CONSENSUS_DAILY", date))
             record = {
                 "date": date,
                 "data_kind": data_kind,
@@ -158,7 +164,9 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
                 "source_qualified": False,
                 "packet_type": packet_type,
                 "source": "environment_weather_consensus",
-                "evidence_id": packet_ids.get((packet_type, date)) or packet_ids.get(("WEATHER_CONSENSUS_DAILY", date)),
+                "evidence_id": raw_ev_id,
+                "native_acquisition_ids": list(daily_ev_ids),
+                "evidence_ids": list(daily_ev_ids) if daily_ev_ids else ([raw_ev_id] if raw_ev_id else []),
                 "data_status": rec_status,
                 "authority": "process_forcing_only",
                 "state_update_allowed": False,
@@ -408,10 +416,20 @@ def ensure_observation_packet(
 
     raw_unc = finite_real(payload.get("uncertainty"))
     prov = Provenance()
-    ev_id = payload.get("evidence_id") or payload.get("native_evidence_id")
+    pkt_prov = pkt.get("provenance") if isinstance(pkt, dict) and isinstance(pkt.get("provenance"), dict) else {}
+    raw_ev_ids = payload.get("evidence_ids") or pkt_prov.get("acquisition_ids") or []
+    ev_id = payload.get("evidence_id") or payload.get("native_evidence_id") or pkt_prov.get("native_evidence_id")
+    if isinstance(raw_ev_ids, list) and raw_ev_ids:
+        prov.acquisition_ids = [str(x) for x in raw_ev_ids if x]
+        if not ev_id and prov.acquisition_ids:
+            ev_id = prov.acquisition_ids[0]
     if ev_id:
         prov.native_evidence_id = str(ev_id)
-        prov.native_evidence_domain = str(payload.get("evidence_domain") or "akaloris/layer0/native-weather-acquisition-evidence/v1")
+        prov.native_evidence_domain = str(
+            payload.get("evidence_domain") or pkt_prov.get("evidence_domain") or "akaloris/layer0/native-weather-acquisition-evidence/v1"
+        )
+        if not prov.acquisition_ids:
+            prov.acquisition_ids = [str(ev_id)]
 
     return ObservationPacket(
         source=refined_source,

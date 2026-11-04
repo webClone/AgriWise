@@ -30,12 +30,18 @@ logger = logging.getLogger("agribrain.gateway.fetch_registry")
 
 def _fetch_openweather_current(lat: float, lng: float, **kw):
     from eo.sentinel import fetch_openweather_data
-    return fetch_openweather_data(lat, lng)
+    res = fetch_openweather_data(lat, lng)
+    if isinstance(res, dict) and "native_acquisition_id" in kw:
+        res["native_acquisition_id"] = kw["native_acquisition_id"]
+    return res
 
 
 def _fetch_openweather_forecast(lat: float, lng: float, **kw):
     from eo.sentinel import fetch_openweather_forecast
-    return fetch_openweather_forecast(lat, lng)
+    res = fetch_openweather_forecast(lat, lng)
+    if isinstance(res, dict) and "native_acquisition_id" in kw:
+        res["native_acquisition_id"] = kw["native_acquisition_id"]
+    return res
 
 
 def _fetch_sentinel2_indices(lat: float, lng: float, **kw):
@@ -70,7 +76,10 @@ def _fetch_water_balance(lat: float, lng: float, days_past: int = 30, days_futur
 
 def _fetch_open_meteo_archive(lat: float, lng: float, start_date: str = "", end_date: str = "", **kw):
     from eo.sentinel import fetch_historical_weather
-    return fetch_historical_weather(lat, lng, start_date, end_date)
+    res = fetch_historical_weather(lat, lng, start_date, end_date)
+    if isinstance(res, dict) and "native_acquisition_id" in kw:
+        res["native_acquisition_id"] = kw["native_acquisition_id"]
+    return res
 
 
 def _fetch_fire_risk(lat: float, lng: float, radius_km: int = 50, **kw):

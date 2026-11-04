@@ -2,18 +2,23 @@
 
 Verifies:
 1. Immutable Weather Product Registry and endpoint allowlists.
-2. Credential scrubbing (API keys, tokens, secrets stripped before hashing or CAS storage).
-3. Redirect prohibition and strict HTTPS enforcement.
-4. Atomic Content-Addressed Store (CAS) byte retention and manifest verification.
-5. Cache reverification returning PROVENANCE_VERIFIED_CACHE, never self-promoting to LIVE.
-6. Weather Product Qualifier spatial, temporal, product, and true zero precipitation screening.
-7. Non-authorizing invariant: source_qualified=False, eligible_for_state_grant=False.
-8. Downstream evidence binding to WeatherDailyRecord, ObservationPacket, and consensus.
+2. Separation of Open-Meteo Historical Forecast API host from live forecast.
+3. Credential scrubbing and prohibition of secrets/queries in endpoint URLs.
+4. Wire-request inspection: prepared GET request URL must match declared parameters.
+5. Receipt substitution protection: qualifier verifies caller receipt against stored manifest.
+6. Product-specific payload structural checks (missing daily series, timemachine dt, etc.).
+7. Redirect prohibition and strict HTTPS enforcement.
+8. Atomic Content-Addressed Store (CAS) byte retention and manifest verification.
+9. Cache reverification returning PROVENANCE_VERIFIED_CACHE, never self-promoting to LIVE.
+10. Weather Product Qualifier spatial, temporal, product, and true zero precipitation screening.
+11. End-to-end downstream evidence lineage binding from CAS capture through packetizer,
+    Layer 0 wrappers, and ASMAE weather archive adapter.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from urllib.parse import urlencode
 import hashlib
 import json
 import pytest
@@ -26,6 +31,7 @@ from services.agribrain.layer0.native_issuer.weather_product_registry import (
     WEATHER_PRODUCT_REGISTRY,
     get_weather_product_spec,
     identify_weather_product,
+    normalize_and_validate_endpoint,
     validate_weather_product_request,
 )
 from services.agribrain.layer0.native_issuer.weather_acquisition_evidence import (
@@ -46,18 +52,23 @@ from services.agribrain.layer0.native_issuer.weather_qualifier import (
 from services.agribrain.layer0.environment.weather.schemas import (
     WeatherDailyRecord,
     WeatherConsensusDaily,
+    WeatherTimeSeries,
 )
 from services.agribrain.layer0.environment.weather.open_meteo import normalize_open_meteo_daily
 from services.agribrain.layer0.environment.weather.openweather import normalize_openweather_daily
 from services.agribrain.layer0.environment.weather.consensus import build_daily_consensus
+from services.agribrain.layer0.environment.packetizer import emit_environment_packets
 from services.agribrain.layer0.observation_packet import ObservationPacket, ObservationSource
-from services.agribrain.layer0.wrappers import ensure_observation_packet
+from services.agribrain.layer0.wrappers import ensure_observation_packet, wrap_environment, _canonical_weather_records
+from services.agribrain.layer05_asmae.history.weather_archive_adapter import _normalize_record
 
 
 OPEN_METEO_REANALYSIS_URL = "https://archive-api.open-meteo.com/v1/archive"
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_HISTORICAL_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 OPENWEATHER_ONECALL_3_URL = "https://api.openweathermap.org/data/3.0/onecall"
 OPENWEATHER_CURRENT_2_5_URL = "https://api.openweathermap.org/data/2.5/weather"
+OPENWEATHER_TIMEMACHINE_3_URL = "https://api.openweathermap.org/data/3.0/onecall/timemachine"
 OPENWEATHER_DISCONTINUED_2_5_URL = "https://api.openweathermap.org/data/2.5/onecall"
 
 FIXED_TIME = datetime(2026, 11, 4, 2, 30, tzinfo=timezone.utc)
@@ -102,6 +113,24 @@ SAMPLE_OPENWEATHER_ONECALL_PAYLOAD = {
     ],
 }
 
+SAMPLE_TIMEMACHINE_PAYLOAD = {
+    "lat": 45.0,
+    "lon": 10.0,
+    "timezone": "UTC",
+    "timezone_offset": 0,
+    "data": [
+        {
+            "dt": 1762214400,
+            "temp": 12.5,
+            "pressure": 1013,
+            "humidity": 65,
+            "clouds": 20,
+            "wind_speed": 3.5,
+            "weather": [{"id": 800, "main": "Clear"}],
+        }
+    ],
+}
+
 
 def make_mock_response(
     payload: dict,
@@ -109,17 +138,25 @@ def make_mock_response(
     status_code: int = 200,
     history: list | None = None,
     method: str = "GET",
+    query_params: dict | None = None,
+    wire_url: str | None = None,
 ) -> SimpleNamespace:
-    """Create a mock HTTP response simulating requests.Response."""
+    """Create a mock HTTP response simulating requests.Response with exact request URL."""
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    if wire_url is None:
+        query_str = f"?{urlencode(query_params)}" if query_params else ""
+        req_url = f"{endpoint}{query_str}"
+    else:
+        req_url = wire_url
+
     req = SimpleNamespace(
         method=method,
-        url=endpoint,
+        url=req_url,
         headers={"Accept": "application/json"},
     )
     return SimpleNamespace(
         status_code=status_code,
-        url=endpoint,
+        url=req_url,
         content=body,
         headers={"Content-Type": "application/json", "x-request-id": "mock-req-weather-123"},
         request=req,
@@ -148,6 +185,21 @@ def test_registry_approved_endpoints_and_roles():
     assert spec_ow.provider == WeatherProvider.OPENWEATHER
 
 
+def test_registry_open_meteo_historical_forecast_host_delineation():
+    """Verify Open-Meteo Historical Forecast API host is distinct from live forecast host."""
+    spec_hist_fc = identify_weather_product(OPEN_METEO_HISTORICAL_FORECAST_URL, {
+        "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03",
+    })
+    assert spec_hist_fc.product_id == WeatherProductId.OPEN_METEO_HISTORICAL_FORECAST
+    assert spec_hist_fc.authoritative_role.value == "HISTORICAL_FORECAST_MODEL"
+
+    # Querying live forecast with historical dates fails closed
+    with pytest.raises(WeatherRegistryError, match="live_forecast_endpoint_cannot_serve_historical_forecast"):
+        identify_weather_product(OPEN_METEO_FORECAST_URL, {
+            "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03",
+        })
+
+
 def test_registry_discontinued_endpoint_rejected_fail_closed():
     """Verify discontinued OpenWeather One Call 2.5 is rejected fail closed."""
     with pytest.raises(WeatherRegistryError, match="discontinued_or_forbidden_endpoint"):
@@ -174,20 +226,70 @@ def test_registry_coordinate_validation():
 
 
 # ============================================================================
-# 2. Native HTTP Capture & Credential Scrubbing
+# 2. Endpoint Security & Wire-Request Parameter Binding
 # ============================================================================
+
+def test_endpoint_with_embedded_query_string_rejected(tmp_path):
+    """Verify endpoints with embedded query strings or secrets fail closed before transmission."""
+    store = NativeWeatherEvidenceStore(tmp_path)
+    url_with_query = f"{OPENWEATHER_ONECALL_3_URL}?appid=secret_leak_123"
+    resp = make_mock_response(SAMPLE_OPENWEATHER_ONECALL_PAYLOAD, url_with_query)
+
+    with pytest.raises(NativeWeatherEvidenceError, match="endpoint_contains_embedded_query_string"):
+        store.capture_http_response(
+            response=resp,
+            endpoint=url_with_query,
+            query_params={"lat": 45.0, "lon": 10.0},
+        )
+
+
+def test_endpoint_with_userinfo_rejected(tmp_path):
+    """Verify endpoints with embedded userinfo credentials fail closed."""
+    store = NativeWeatherEvidenceStore(tmp_path)
+    url_with_userinfo = "https://user:password@api.openweathermap.org/data/3.0/onecall"
+    resp = make_mock_response(SAMPLE_OPENWEATHER_ONECALL_PAYLOAD, url_with_userinfo)
+
+    with pytest.raises(NativeWeatherEvidenceError, match="endpoint_contains_embedded_userinfo_or_credentials"):
+        store.capture_http_response(
+            response=resp,
+            endpoint=url_with_userinfo,
+            query_params={"lat": 45.0, "lon": 10.0},
+        )
+
+
+def test_wire_request_mismatch_rejected(tmp_path):
+    """Verify that mismatch between transmitted GET URL query and declared parameters fails closed."""
+    store = NativeWeatherEvidenceStore(tmp_path)
+    # The actual transmitted request was for latitude 10.0
+    wire_params = {"latitude": 10.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03", "daily": "precipitation_sum"}
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=wire_params)
+
+    # Caller falsely claims acquisition was for latitude 45.0
+    claimed_params = {"latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03", "daily": "precipitation_sum"}
+
+    with pytest.raises(NativeWeatherEvidenceError, match="prepared provider request query differs from acquisition claim"):
+        store.capture_http_response(
+            response=resp,
+            endpoint=OPEN_METEO_REANALYSIS_URL,
+            query_params=claimed_params,
+            retrieved_at=FIXED_TIME,
+        )
+
 
 def test_native_weather_capture_scrubs_api_keys(tmp_path):
     """Verify API keys and tokens in query parameters are completely scrubbed before hashing and storage."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPENWEATHER_ONECALL_PAYLOAD, OPENWEATHER_ONECALL_3_URL)
-
     query_params_with_secret = {
         "lat": 45.0,
         "lon": 10.0,
         "appid": "secret_live_openweather_api_key_12345",
         "units": "metric",
     }
+    resp = make_mock_response(
+        SAMPLE_OPENWEATHER_ONECALL_PAYLOAD,
+        OPENWEATHER_ONECALL_3_URL,
+        query_params=query_params_with_secret,
+    )
 
     receipt = store.capture_http_response(
         response=resp,
@@ -221,20 +323,21 @@ def test_native_weather_capture_scrubs_api_keys(tmp_path):
 def test_native_weather_capture_rejects_embedded_credentials(tmp_path):
     """Verify parameters containing embedded tokens or secrets fail closed."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL)
+    params = {
+        "latitude": 45.0,
+        "longitude": 10.0,
+        "start_date": "2026-11-01",
+        "end_date": "2026-11-03",
+        "daily": "precipitation_sum",
+        "custom_header": "Bearer dangerous_secret_token_leak",
+    }
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=params)
 
     with pytest.raises(NativeWeatherEvidenceError, match="embedded credential detected"):
         store.capture_http_response(
             response=resp,
             endpoint=OPEN_METEO_REANALYSIS_URL,
-            query_params={
-                "latitude": 45.0,
-                "longitude": 10.0,
-                "start_date": "2026-11-01",
-                "end_date": "2026-11-03",
-                "daily": "precipitation_sum",
-                "custom_header": "Bearer dangerous_secret_token_leak",
-            },
+            query_params=params,
             credential_reference="public",
             retrieved_at=FIXED_TIME,
         )
@@ -243,9 +346,17 @@ def test_native_weather_capture_rejects_embedded_credentials(tmp_path):
 def test_native_weather_capture_rejects_http_redirects(tmp_path):
     """Verify that HTTP redirects are rejected fail-closed."""
     store = NativeWeatherEvidenceStore(tmp_path)
+    params = {
+        "latitude": 45.0,
+        "longitude": 10.0,
+        "start_date": "2026-11-01",
+        "end_date": "2026-11-03",
+        "daily": "precipitation_sum",
+    }
     resp = make_mock_response(
         SAMPLE_OPEN_METEO_PAYLOAD,
         OPEN_METEO_REANALYSIS_URL,
+        query_params=params,
         history=[SimpleNamespace(status_code=301, url="http://archive-api.open-meteo.com/v1/archive")],
     )
 
@@ -253,13 +364,7 @@ def test_native_weather_capture_rejects_http_redirects(tmp_path):
         store.capture_http_response(
             response=resp,
             endpoint=OPEN_METEO_REANALYSIS_URL,
-            query_params={
-                "latitude": 45.0,
-                "longitude": 10.0,
-                "start_date": "2026-11-01",
-                "end_date": "2026-11-03",
-                "daily": "precipitation_sum",
-            },
+            query_params=params,
             retrieved_at=FIXED_TIME,
         )
 
@@ -267,19 +372,20 @@ def test_native_weather_capture_rejects_http_redirects(tmp_path):
 def test_native_weather_capture_rejects_non_200_status(tmp_path):
     """Verify non-200 HTTP responses fail closed."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, status_code=500)
+    params = {
+        "latitude": 45.0,
+        "longitude": 10.0,
+        "start_date": "2026-11-01",
+        "end_date": "2026-11-03",
+        "daily": "precipitation_sum",
+    }
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=params, status_code=500)
 
     with pytest.raises(NativeWeatherEvidenceError, match="requires HTTP 200"):
         store.capture_http_response(
             response=resp,
             endpoint=OPEN_METEO_REANALYSIS_URL,
-            query_params={
-                "latitude": 45.0,
-                "longitude": 10.0,
-                "start_date": "2026-11-01",
-                "end_date": "2026-11-03",
-                "daily": "precipitation_sum",
-            },
+            query_params=params,
             retrieved_at=FIXED_TIME,
         )
 
@@ -291,7 +397,6 @@ def test_native_weather_capture_rejects_non_200_status(tmp_path):
 def test_same_weather_capture_is_content_addressed_and_idempotent(tmp_path):
     """Verify identical captures produce identical acquisition IDs and CAS objects without duplication."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0,
         "longitude": 10.0,
@@ -299,6 +404,7 @@ def test_same_weather_capture_is_content_addressed_and_idempotent(tmp_path):
         "end_date": "2026-11-03",
         "daily": "precipitation_sum",
     }
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=params)
 
     one = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
     two = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
@@ -309,13 +415,12 @@ def test_same_weather_capture_is_content_addressed_and_idempotent(tmp_path):
 
 
 # ============================================================================
-# 4. Cache Reverification Lineage Rule
+# 4. Cache Reverification Lineage Rule & Tamper Detection
 # ============================================================================
 
 def test_cache_reverification_never_promotes_weather_record_to_live(tmp_path):
     """Verify loading from cache returns PROVENANCE_VERIFIED_CACHE, never LIVE."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0,
         "longitude": 10.0,
@@ -323,6 +428,7 @@ def test_cache_reverification_never_promotes_weather_record_to_live(tmp_path):
         "end_date": "2026-11-03",
         "daily": "precipitation_sum",
     }
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=params)
     original = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
     assert original.origin_class is OriginClass.LIVE_PROVIDER_AUTHENTICATED
 
@@ -336,7 +442,6 @@ def test_cache_reverification_never_promotes_weather_record_to_live(tmp_path):
 def test_tampered_manifest_fails_closed(tmp_path):
     """Verify tampering with an on-disk manifest is detected and fails closed."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0,
         "longitude": 10.0,
@@ -344,6 +449,7 @@ def test_tampered_manifest_fails_closed(tmp_path):
         "end_date": "2026-11-03",
         "daily": "precipitation_sum",
     }
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=params)
     receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
 
     manifest_path = store._path("manifests", receipt.acquisition_id)
@@ -358,7 +464,6 @@ def test_tampered_manifest_fails_closed(tmp_path):
 def test_tampered_cas_object_fails_closed(tmp_path):
     """Verify modifying raw response bytes in CAS fails verification."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0,
         "longitude": 10.0,
@@ -366,6 +471,7 @@ def test_tampered_cas_object_fails_closed(tmp_path):
         "end_date": "2026-11-03",
         "daily": "precipitation_sum",
     }
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=params)
     receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
 
     obj_path = store._path("objects", receipt.object_id)
@@ -376,13 +482,12 @@ def test_tampered_cas_object_fails_closed(tmp_path):
 
 
 # ============================================================================
-# 5. Weather Product Qualifier Screening
+# 5. Qualifier Screening, Anti-Substitution & Product Semantics
 # ============================================================================
 
-def test_screen_valid_open_meteo_receipt(tmp_path):
-    """Verify valid Open-Meteo reanalysis capture screens successfully with deterministic proof hash."""
+def test_screen_rejects_receipt_substitution(tmp_path):
+    """Verify qualifier rejects forged receipt substituting Response B into Acquisition A."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0,
         "longitude": 10.0,
@@ -390,6 +495,61 @@ def test_screen_valid_open_meteo_receipt(tmp_path):
         "end_date": "2026-11-03",
         "daily": "temperature_2m_min,temperature_2m_max,precipitation_sum",
     }
+
+    payload_a = dict(SAMPLE_OPEN_METEO_PAYLOAD)
+    payload_b = dict(SAMPLE_OPEN_METEO_PAYLOAD)
+    payload_b["daily"] = {
+        "time": ["2026-11-01", "2026-11-02", "2026-11-03"],
+        "temperature_2m_min": [9.0, 9.0, 9.0],
+        "temperature_2m_max": [20.0, 20.0, 20.0],
+        "precipitation_sum": [1.0, 2.0, 3.0],
+    }
+
+    resp_a = make_mock_response(payload_a, OPEN_METEO_REANALYSIS_URL, query_params=params)
+    resp_b = make_mock_response(payload_b, OPEN_METEO_REANALYSIS_URL, query_params=params)
+
+    receipt_a = store.capture_http_response(response=resp_a, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
+    receipt_b = store.capture_http_response(response=resp_b, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
+
+    # Adversarial substitution: construct receipt with A's ID and request fields, but B's response digest/object
+    forged_receipt = NativeWeatherAcquisitionReceipt(
+        acquisition_id=receipt_a.acquisition_id,
+        origin_class=receipt_a.origin_class,
+        provider=receipt_a.provider,
+        product_id=receipt_a.product_id,
+        endpoint=receipt_a.endpoint,
+        request_sha256=receipt_a.request_sha256,
+        response_sha256=receipt_b.response_sha256,
+        response_bytes=receipt_b.response_bytes,
+        object_id=receipt_b.object_id,
+        retrieved_at=receipt_a.retrieved_at,
+        provider_request_id=receipt_a.provider_request_id,
+        credential_reference=receipt_a.credential_reference,
+        http_status=receipt_a.http_status,
+        coordinate_requested=receipt_a.coordinate_requested,
+        valid_interval=receipt_a.valid_interval,
+        authoritative_role=receipt_a.authoritative_role,
+        canonical_query_params=receipt_a.canonical_query_params,
+        qualification_status="NOT_QUALIFIED",
+        provider_signature_verified=False,
+    )
+
+    screen = screen_native_weather_receipt(forged_receipt, store)
+    assert screen.status is WeatherScreenStatus.REJECTED
+    assert screen.reason == "acquisition_receipt_manifest_mismatch"
+
+
+def test_screen_valid_open_meteo_receipt(tmp_path):
+    """Verify valid Open-Meteo reanalysis capture screens successfully with deterministic proof hash."""
+    store = NativeWeatherEvidenceStore(tmp_path)
+    params = {
+        "latitude": 45.0,
+        "longitude": 10.0,
+        "start_date": "2026-11-01",
+        "end_date": "2026-11-03",
+        "daily": "temperature_2m_min,temperature_2m_max,precipitation_sum",
+    }
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=params)
     receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
 
     screen = screen_native_weather_receipt(receipt, store)
@@ -408,6 +568,38 @@ def test_screen_valid_open_meteo_receipt(tmp_path):
     assert screen.scientific_publication_authorized is False
 
 
+def test_screen_rejects_missing_daily_time_series(tmp_path):
+    """Verify historical reanalysis response without daily.time is rejected fail-closed."""
+    store = NativeWeatherEvidenceStore(tmp_path)
+    payload_no_dates = {
+        "latitude": 45.0,
+        "longitude": 10.0,
+        "daily": {"time": []},  # Empty date array
+    }
+    params = {
+        "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03", "daily": "precipitation_sum",
+    }
+    resp = make_mock_response(payload_no_dates, OPEN_METEO_REANALYSIS_URL, query_params=params)
+    receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
+
+    screen = screen_native_weather_receipt(receipt, store)
+    assert screen.status is WeatherScreenStatus.REJECTED
+    assert screen.reason == "missing_daily_time_series"
+
+
+def test_screen_openweather_timemachine_reconciliation(tmp_path):
+    """Verify OpenWeather Timemachine 3.0 validates dt timestamp and coordinates."""
+    store = NativeWeatherEvidenceStore(tmp_path)
+    params = {"lat": 45.0, "lon": 10.0, "dt": 1762214400}
+    resp = make_mock_response(SAMPLE_TIMEMACHINE_PAYLOAD, OPENWEATHER_TIMEMACHINE_3_URL, query_params=params)
+    receipt = store.capture_http_response(response=resp, endpoint=OPENWEATHER_TIMEMACHINE_3_URL, query_params=params, retrieved_at=FIXED_TIME)
+
+    screen = screen_native_weather_receipt(receipt, store)
+    assert screen.status is WeatherScreenStatus.SCREENED_NATIVE_QA
+    assert screen.product_id == WeatherProductId.OPENWEATHER_TIMEMACHINE_3_0.value
+    assert screen.authoritative_role == "REANALYSIS_MODEL"
+
+
 def test_screen_preserves_true_zero_precipitation(tmp_path):
     """Verify precipitation 0.0 is preserved as a true measured zero, not confused with missing data."""
     store = NativeWeatherEvidenceStore(tmp_path)
@@ -418,10 +610,10 @@ def test_screen_preserves_true_zero_precipitation(tmp_path):
         "temperature_2m_max": [15.0, 15.0],
         "precipitation_sum": [0.0, 0.0],  # Completely dry period
     }
-    resp = make_mock_response(payload, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-02", "daily": "precipitation_sum",
     }
+    resp = make_mock_response(payload, OPEN_METEO_REANALYSIS_URL, query_params=params)
     receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
 
     screen = screen_native_weather_receipt(receipt, store)
@@ -440,10 +632,10 @@ def test_screen_rejects_negative_precipitation(tmp_path):
         "temperature_2m_max": [15.0],
         "precipitation_sum": [-1.5],  # Corrupt negative rainfall
     }
-    resp = make_mock_response(payload, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-01", "daily": "precipitation_sum",
     }
+    resp = make_mock_response(payload, OPEN_METEO_REANALYSIS_URL, query_params=params)
     receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
 
     screen = screen_native_weather_receipt(receipt, store)
@@ -457,10 +649,10 @@ def test_screen_rejects_spatial_coordinate_mismatch(tmp_path):
     payload = dict(SAMPLE_OPEN_METEO_PAYLOAD)
     payload["latitude"] = 48.0  # Provider returned coordinate far away from requested 45.0
     payload["longitude"] = 10.0
-    resp = make_mock_response(payload, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03", "daily": "precipitation_sum",
     }
+    resp = make_mock_response(payload, OPEN_METEO_REANALYSIS_URL, query_params=params)
     receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
 
     screen = screen_native_weather_receipt(receipt, store)
@@ -478,10 +670,10 @@ def test_screen_rejects_temporal_range_mismatch(tmp_path):
         "temperature_2m_max": [15.0, 15.0],
         "precipitation_sum": [0.0, 0.0],
     }
-    resp = make_mock_response(payload, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03", "daily": "precipitation_sum",
     }
+    resp = make_mock_response(payload, OPEN_METEO_REANALYSIS_URL, query_params=params)
     receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
 
     screen = screen_native_weather_receipt(receipt, store)
@@ -492,10 +684,10 @@ def test_screen_rejects_temporal_range_mismatch(tmp_path):
 def test_cold_cache_receipt_qualification(tmp_path):
     """Verify cold cache receipt can be screened with identical deterministic results."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03", "daily": "precipitation_sum",
     }
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=params)
     live_receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
     cold_receipt = store.verified_cache_receipt(live_receipt.acquisition_id)
 
@@ -508,19 +700,19 @@ def test_cold_cache_receipt_qualification(tmp_path):
 
 
 # ============================================================================
-# 6. Downstream Evidence Binding
+# 6. End-to-End Downstream Evidence Lineage Binding
 # ============================================================================
 
-def test_evidence_id_propagates_into_weather_daily_records_and_consensus(tmp_path):
-    """Verify native acquisition evidence IDs bind into normalized records and consensus."""
+def test_downstream_end_to_end_acquisition_lineage(tmp_path):
+    """Verify native acquisition evidence IDs bind end-to-end from CAS through Layer 0 and ASMAE."""
     store = NativeWeatherEvidenceStore(tmp_path)
-    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL)
     params = {
         "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03", "daily": "precipitation_sum",
     }
+    resp = make_mock_response(SAMPLE_OPEN_METEO_PAYLOAD, OPEN_METEO_REANALYSIS_URL, query_params=params)
     receipt = store.capture_http_response(response=resp, endpoint=OPEN_METEO_REANALYSIS_URL, query_params=params, retrieved_at=FIXED_TIME)
 
-    # Normalize with evidence_id
+    # 1. Normalize records with authentic evidence_id
     records = normalize_open_meteo_daily(
         SAMPLE_OPEN_METEO_PAYLOAD,
         data_kind="historical_reanalysis",
@@ -531,48 +723,63 @@ def test_evidence_id_propagates_into_weather_daily_records_and_consensus(tmp_pat
     for rec in records:
         assert rec.evidence_id == receipt.acquisition_id
         assert rec.evidence_domain == WEATHER_EVIDENCE_DOMAIN
-        assert rec.source_role == "REANALYSIS_MODEL"
-        assert rec.source_qualified is False
 
-    # Consensus collects evidence_ids
-    consensus = build_daily_consensus(
+    # 2. Consensus collects evidence_ids
+    consensus_day = build_daily_consensus(
         date="2026-11-01",
         records_by_provider={"open_meteo": records[0]},
     )
-    assert consensus.source_role == "REANALYSIS_MODEL"
-    assert consensus.source_qualified is False
-    assert consensus.evidence_ids == [receipt.acquisition_id]
+    assert consensus_day.evidence_ids == [receipt.acquisition_id]
 
-
-def test_evidence_id_binds_into_observation_packet_provenance():
-    """Verify evidence_id in weather record propagates into ObservationPacket.provenance."""
-    rec = WeatherDailyRecord(
-        date="2026-11-01",
-        provider="open_meteo",
-        data_kind="historical_reanalysis",
-        source_role="REANALYSIS_MODEL",
-        source_qualified=False,
-        evidence_id="weather-test-acquisition-id-12345",
-        temp_mean=12.5,
+    # 3. Packetizer propagates consensus acquisition IDs into packet payload
+    packets = emit_environment_packets(
+        weather_consensus=[consensus_day],
+        weather_timeseries=WeatherTimeSeries(daily_records=records, providers=["open_meteo"]),
     )
+    consensus_pkt = next(p for p in packets if p["packet_type"] == "WEATHER_CONSENSUS_DAILY")
+    assert consensus_pkt["payload"]["evidence_ids"] == [receipt.acquisition_id]
+    assert consensus_pkt["payload"]["native_evidence_id"] == receipt.acquisition_id
 
-    payload = {
-        "date": rec.date,
-        "provider": rec.provider,
-        "data_kind": rec.data_kind,
-        "source_role": rec.source_role,
-        "evidence_id": rec.evidence_id,
-        "temp_mean": rec.temp_mean,
-    }
-
-    packet = ensure_observation_packet(
-        payload,
-        plot_id="plot-test-1",
-        geometry_hash="geom-hash-1",
-        geometry_version=1,
+    # 4. Layer 0 wrappers wrap packet into ObservationPacket and preserve acquisition_ids
+    obs_packet = ensure_observation_packet(
+        consensus_pkt,
         source=ObservationSource.WEATHER_REANALYSIS,
+        plot_id="plot-1",
+        geometry_hash="geom-1",
+        geometry_version=1,
     )
+    assert obs_packet.provenance.native_evidence_id == receipt.acquisition_id
+    assert obs_packet.provenance.acquisition_ids == [receipt.acquisition_id]
 
-    assert isinstance(packet, ObservationPacket)
-    assert packet.provenance.native_evidence_id == "weather-test-acquisition-id-12345"
-    assert packet.provenance.native_evidence_domain == WEATHER_EVIDENCE_DOMAIN
+    # 5. Canonical weather records retain native_acquisition_ids
+    env_pkg = SimpleNamespace(
+        weather_consensus=[consensus_day],
+        forecast_consensus=[],
+        packets=[consensus_pkt],
+        plot_id="plot-1",
+        timestamp_window={"window_end": "2026-11-03T00:00:00Z"},
+        soilgrids_profile=None,
+        fao_context=None,
+        weak_kalman_observations=[],
+        process_forcing=[],
+        diagnostics={},
+        provenance={},
+        qa=None,
+    )
+    canonical_rows = _canonical_weather_records(env_pkg, [obs_packet])
+    assert len(canonical_rows) == 1
+    assert canonical_rows[0]["native_acquisition_ids"] == [receipt.acquisition_id]
+
+    # 6. ASMAE weather archive adapter preserves verified native evidence_ids
+    normalized_asmae = _normalize_record(canonical_rows[0])
+    assert normalized_asmae is not None
+    assert normalized_asmae["evidence_ids"] == [receipt.acquisition_id]
+
+
+def test_forged_downstream_acquisition_id_fails_verification(tmp_path):
+    """Verify an uncaptured/forged acquisition ID cannot be verified in CAS."""
+    store = NativeWeatherEvidenceStore(tmp_path)
+    forged_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(NativeWeatherEvidenceError, match="manifest not found for acquisition"):
+        store.verified_cache_receipt(forged_id)

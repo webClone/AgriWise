@@ -84,18 +84,44 @@ def screen_native_weather_receipt(
 ) -> WeatherNativeQAScreen:
     """Verify CAS response bytes, registry alignment, spatial coordinates, and temporal ranges.
     
-    Ensures that raw response bytes match receipt SHA-256, coordinates match requested
-    location within spatial tolerance, dates match requested interval, and true measured
-    zeros in precipitation are preserved.
+    Ensures that:
+    1. Caller receipt strictly matches the stored immutable CAS manifest (no receipt substitution).
+    2. Raw CAS response bytes match receipt SHA-256 and byte count.
+    3. Stored request replay matches receipt request_sha256 and registry spec.
+    4. Coordinates match requested location within provider grid tolerance (<= 0.05 deg).
+    5. Dates match requested interval, with mandatory product-specific payload structures.
+    6. True measured zeros in precipitation are preserved and distinguish dry days from missing data.
     """
-    # 1. Basic Receipt Integrity
+    # 1. Basic Receipt Type and Non-Authorizing Invariants
     if not isinstance(receipt, NativeWeatherAcquisitionReceipt):
         return _deny("invalid_receipt_type")
 
     if receipt.qualification_status != "NOT_QUALIFIED" or receipt.provider_signature_verified is not False:
         return _deny("unauthorized_authority_self_promotion", receipt.product_id, receipt.authoritative_role)
 
-    # 2. Product Registry Specification Verification
+    # 2. Strict Stored Manifest Verification (Anti-Substitution Rule)
+    # The caller-supplied receipt MUST be identical to the immutable manifest on disk for receipt.acquisition_id.
+    try:
+        stored_receipt = store.verified_cache_receipt(receipt.acquisition_id)
+    except NativeWeatherEvidenceError as exc:
+        return _deny(f"stored_acquisition_manifest_invalid: {exc}", receipt.product_id, receipt.authoritative_role)
+
+    if (
+        receipt.acquisition_id != stored_receipt.acquisition_id
+        or receipt.request_sha256 != stored_receipt.request_sha256
+        or receipt.response_sha256 != stored_receipt.response_sha256
+        or receipt.response_bytes != stored_receipt.response_bytes
+        or receipt.object_id != stored_receipt.object_id
+        or receipt.endpoint != stored_receipt.endpoint
+        or receipt.product_id != stored_receipt.product_id
+        or receipt.authoritative_role != stored_receipt.authoritative_role
+        or receipt.coordinate_requested != stored_receipt.coordinate_requested
+        or receipt.valid_interval != stored_receipt.valid_interval
+        or receipt.canonical_query_params != stored_receipt.canonical_query_params
+    ):
+        return _deny("acquisition_receipt_manifest_mismatch", receipt.product_id, receipt.authoritative_role)
+
+    # 3. Product Registry Specification Verification
     try:
         spec = get_weather_product_spec(receipt.product_id)
     except (WeatherRegistryError, ValueError):
@@ -107,7 +133,7 @@ def screen_native_weather_receipt(
     if receipt.authoritative_role != spec.authoritative_role.value:
         return _deny("contradictory_authoritative_role", receipt.product_id, receipt.authoritative_role)
 
-    # 3. Read and Verify Raw CAS Response Bytes
+    # 4. Read and Verify Raw CAS Response Bytes
     try:
         raw_bytes = store.read_response_bytes(receipt.object_id)
     except NativeWeatherEvidenceError as exc:
@@ -119,7 +145,7 @@ def screen_native_weather_receipt(
     if len(raw_bytes) != receipt.response_bytes:
         return _deny("response_bytes_count_mismatch", receipt.product_id, receipt.authoritative_role)
 
-    # 4. Request Replay Verification
+    # 5. Request Replay Verification
     try:
         replayed_params = store.verified_request_params(receipt.acquisition_id)
         validate_weather_product_request(spec, "GET", replayed_params)
@@ -129,7 +155,7 @@ def screen_native_weather_receipt(
     if _sha(_json_bytes(replayed_params)) != receipt.request_sha256:
         return _deny("request_replay_hash_mismatch", receipt.product_id, receipt.authoritative_role)
 
-    # 5. Parse Response JSON
+    # 6. Parse Response JSON
     try:
         payload = json.loads(raw_bytes.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys)
         if not isinstance(payload, dict):
@@ -137,7 +163,7 @@ def screen_native_weather_receipt(
     except (json.JSONDecodeError, UnicodeDecodeError, NativeWeatherEvidenceError) as exc:
         return _deny(f"malformed_response_json: {exc}", receipt.product_id, receipt.authoritative_role)
 
-    # 6. Spatial Reconciliation
+    # 7. Spatial Reconciliation
     req_lat, req_lon = receipt.coordinate_requested
     tol = spec.spatial_tolerance_deg
 
@@ -170,35 +196,57 @@ def screen_native_weather_receipt(
         except (ValueError, TypeError):
             return _deny("non_numeric_response_coordinates", receipt.product_id, receipt.authoritative_role)
 
-    # 7. Temporal Reconciliation
+    # 8. Mandatory Product-Specific Structural & Temporal Validation
     dates_found: list[str] = []
-    if "daily" in payload and isinstance(payload["daily"], dict):
-        times = payload["daily"].get("time", [])
-        if isinstance(times, list):
-            dates_found = [str(t) for t in times]
-
-    # Verify requested start/end dates
-    req_start, req_end = receipt.valid_interval
-    if req_start and req_end and dates_found:
-        if req_start not in dates_found or req_end not in dates_found:
-            # Check range coverage
-            min_date = min(dates_found)
-            max_date = max(dates_found)
-            if min_date > req_start or max_date < req_end:
-                return _deny("weather_temporal_range_mismatch", receipt.product_id, receipt.authoritative_role)
-
-    # Verify expected dates if caller provided them
-    if expected_dates is not None and dates_found:
-        for exp_d in expected_dates:
-            if exp_d not in dates_found:
-                return _deny("weather_temporal_range_mismatch", receipt.product_id, receipt.authoritative_role)
-
-    # 8. True Zero Precipitation and Range Validation
     precip_values: list[float] = []
     zero_precip_count = 0
 
-    if "daily" in payload and isinstance(payload["daily"], dict):
+    if receipt.product_id in (
+        WeatherProductId.OPEN_METEO_HISTORICAL_REANALYSIS.value,
+        WeatherProductId.OPEN_METEO_HISTORICAL_FORECAST.value,
+    ):
+        # Open-Meteo Historical products REQUIRE top-level latitude, longitude, and non-empty daily.time
+        if "latitude" not in payload or "longitude" not in payload:
+            return _deny("missing_required_coordinates_in_payload", receipt.product_id, receipt.authoritative_role)
+
+        if "daily" not in payload or not isinstance(payload["daily"], dict):
+            return _deny("missing_daily_payload_block", receipt.product_id, receipt.authoritative_role)
+
         daily = payload["daily"]
+        times = daily.get("time")
+        if not isinstance(times, list) or len(times) == 0:
+            return _deny("missing_daily_time_series", receipt.product_id, receipt.authoritative_role)
+
+        dates_found = [str(t) for t in times]
+        # Validate date string formats
+        for d_str in dates_found:
+            if len(d_str) != 10 or d_str[4] != '-' or d_str[7] != '-':
+                return _deny("invalid_daily_date_format", receipt.product_id, receipt.authoritative_role)
+
+        # Check that requested start/end dates are covered
+        req_start, req_end = receipt.valid_interval
+        if req_start and req_end:
+            min_date = min(dates_found)
+            max_date = max(dates_found)
+            if min_date > req_start or max_date < req_end or req_start not in dates_found or req_end not in dates_found:
+                return _deny("weather_temporal_range_mismatch", receipt.product_id, receipt.authoritative_role)
+
+        if expected_dates is not None:
+            for exp_d in expected_dates:
+                if exp_d not in dates_found:
+                    return _deny("weather_temporal_range_mismatch", receipt.product_id, receipt.authoritative_role)
+
+        # Validate variables exist in daily
+        has_daily_var = any(
+            k in daily for k in (
+                "precipitation_sum", "rain_sum", "temperature_2m_max",
+                "temperature_2m_min", "temperature_2m_mean",
+            )
+        )
+        if not has_daily_var:
+            return _deny("missing_daily_variable_series", receipt.product_id, receipt.authoritative_role)
+
+        # Validate precipitation sum
         p_sums = daily.get("precipitation_sum", [])
         if isinstance(p_sums, list):
             for val in p_sums:
@@ -215,11 +263,54 @@ def screen_native_weather_receipt(
                     except (ValueError, TypeError):
                         return _deny("non_numeric_precipitation_value", receipt.product_id, receipt.authoritative_role)
 
+    elif receipt.product_id == WeatherProductId.OPEN_METEO_LIVE_FORECAST.value:
+        # Live forecast must contain hourly or daily with non-empty time
+        has_hourly = isinstance(payload.get("hourly"), dict) and bool(payload["hourly"].get("time"))
+        has_daily = isinstance(payload.get("daily"), dict) and bool(payload["daily"].get("time"))
+        if not has_hourly and not has_daily:
+            return _deny("missing_forecast_time_series", receipt.product_id, receipt.authoritative_role)
+
+    elif receipt.product_id == WeatherProductId.OPENWEATHER_ONECALL_3_0.value:
+        if "lat" not in payload or "lon" not in payload:
+            return _deny("missing_required_coordinates_in_payload", receipt.product_id, receipt.authoritative_role)
+        has_daily = isinstance(payload.get("daily"), list) and len(payload["daily"]) > 0
+        has_hourly = isinstance(payload.get("hourly"), list) and len(payload["hourly"]) > 0
+        has_current = isinstance(payload.get("current"), dict)
+        if not has_daily and not has_hourly and not has_current:
+            return _deny("missing_openweather_forecast_data", receipt.product_id, receipt.authoritative_role)
+
+    elif receipt.product_id == WeatherProductId.OPENWEATHER_CURRENT_2_5.value:
+        if "coord" not in payload or not isinstance(payload["coord"], dict):
+            return _deny("missing_current_coordinates_block", receipt.product_id, receipt.authoritative_role)
+        if "main" not in payload or not isinstance(payload["main"], dict):
+            return _deny("missing_current_main_block", receipt.product_id, receipt.authoritative_role)
+        if "dt" not in payload:
+            return _deny("missing_current_timestamp", receipt.product_id, receipt.authoritative_role)
+
+    elif receipt.product_id == WeatherProductId.OPENWEATHER_TIMEMACHINE_3_0.value:
+        if "lat" not in payload or "lon" not in payload:
+            return _deny("missing_required_coordinates_in_payload", receipt.product_id, receipt.authoritative_role)
+        data_records = payload.get("data")
+        if not isinstance(data_records, list) or len(data_records) == 0:
+            return _deny("missing_timemachine_data_records", receipt.product_id, receipt.authoritative_role)
+        first_rec = data_records[0]
+        if not isinstance(first_rec, dict) or "dt" not in first_rec:
+            return _deny("missing_timemachine_timestamp", receipt.product_id, receipt.authoritative_role)
+        # Reconcile dt against requested dt from replay params
+        if "dt" in replayed_params:
+            try:
+                req_dt = int(replayed_params["dt"])
+                resp_dt = int(first_rec["dt"])
+                if abs(resp_dt - req_dt) > 3600:
+                    return _deny("weather_temporal_range_mismatch", receipt.product_id, receipt.authoritative_role)
+            except (ValueError, TypeError):
+                return _deny("non_numeric_timemachine_timestamp", receipt.product_id, receipt.authoritative_role)
+
     # 9. Diagnostic Metrics and Deterministic Proof Hash
     metrics: dict[str, Any] = {
         "dates_count": len(dates_found),
-        "start_date": dates_found[0] if dates_found else req_start,
-        "end_date": dates_found[-1] if dates_found else req_end,
+        "start_date": dates_found[0] if dates_found else receipt.valid_interval[0],
+        "end_date": dates_found[-1] if dates_found else receipt.valid_interval[1],
         "zero_precipitation_days": zero_precip_count,
         "total_precipitation_mm": round(sum(precip_values), 4) if precip_values else 0.0,
         "coordinate_reconciled": (resp_lat is not None and resp_lon is not None),

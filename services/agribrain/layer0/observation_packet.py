@@ -155,6 +155,7 @@ class Provenance:
     cache_hit: bool = False
     native_evidence_id: Optional[str] = None
     native_evidence_domain: Optional[str] = None
+    acquisition_ids: List[str] = field(default_factory=list)
 
 
 @dataclass

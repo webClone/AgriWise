@@ -7,7 +7,6 @@ guardrails, secret scrubbing, and content-addressed retention in CAS.
 from __future__ import annotations
 
 from typing import Any, Mapping, Optional
-from urllib.parse import urlsplit
 import os
 
 from services.agribrain.layer0.native_issuer.weather_acquisition_evidence import (
@@ -19,6 +18,7 @@ from services.agribrain.layer0.native_issuer.weather_acquisition_evidence import
 from services.agribrain.layer0.native_issuer.weather_product_registry import (
     WeatherRegistryError,
     identify_weather_product,
+    normalize_and_validate_endpoint,
     validate_weather_product_request,
 )
 
@@ -38,13 +38,9 @@ def execute_and_capture_weather_get(
     """
     import requests
 
-    parsed = urlsplit(endpoint)
-    if parsed.scheme.lower() != "https":
-        raise NativeWeatherEvidenceError(f"HTTPS required for weather acquisition: {endpoint}")
-
-    # Validate against registry before network transmission
     try:
-        spec = identify_weather_product(endpoint, params)
+        normalized_endpoint = normalize_and_validate_endpoint(endpoint)
+        spec = identify_weather_product(normalized_endpoint, params)
         validate_weather_product_request(spec, "GET", params)
     except WeatherRegistryError as exc:
         raise NativeWeatherEvidenceError(f"unapproved weather request: {exc}") from exc
@@ -56,7 +52,7 @@ def execute_and_capture_weather_get(
 
     try:
         resp = requests.get(
-            endpoint,
+            normalized_endpoint,
             params=dict(params),
             headers=headers,
             timeout=timeout,
@@ -67,7 +63,7 @@ def execute_and_capture_weather_get(
 
     return store.capture_http_response(
         response=resp,
-        endpoint=endpoint,
+        endpoint=normalized_endpoint,
         query_params=params,
         credential_reference=credential_reference,
     )

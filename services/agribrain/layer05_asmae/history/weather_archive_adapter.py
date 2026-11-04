@@ -145,7 +145,13 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
         if values[key] is None:
             values[key] = _finite_float(_consensus_value(variables, *aliases))
 
-    evidence_id = str(_first_non_none(record, "evidence_id", "content_hash", "packet_id") or "")
+    native_ids = record.get("native_acquisition_ids") or record.get("evidence_ids")
+    if isinstance(native_ids, list) and native_ids:
+        verified_evidence_ids = [str(x) for x in native_ids if x]
+    else:
+        evidence_id = str(_first_non_none(record, "evidence_id", "content_hash", "packet_id") or "")
+        verified_evidence_ids = [evidence_id] if evidence_id else []
+
     authority = str(record.get("authority") or "")
     reality = _record_reality(record)
     if reality == "unknown":
@@ -156,12 +162,10 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
         **values,
         "date": date,
         "source_reality": reality,
-        "evidence_ids": [evidence_id] if evidence_id else [],
+        "evidence_ids": verified_evidence_ids if verified_evidence_ids else ["weather:" + stable_value_hash({"date": date, "reality": reality, **values})],
         "authority_refs": [authority] if authority else [],
         "overall_confidence": _finite_float(record.get("overall_confidence")),
     }
-    if not evidence_id:
-        normalized["evidence_ids"] = ["weather:" + stable_value_hash({"date": date, "reality": reality, **values})]
     return normalized
 
 
