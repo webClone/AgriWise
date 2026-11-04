@@ -86,6 +86,8 @@ class WeatherTimeSeries:
     timezone: str = "UTC"
 
     providers: List[str] = field(default_factory=list)
+    expected_historical_days: Optional[int] = None
+    expected_dates: Optional[List[str]] = None
 
 
 @dataclass

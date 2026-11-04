@@ -465,3 +465,135 @@ def test_historical_weather_qa_completeness_current_day_cannot_mask_missing_hist
     assert qa["temporal_completeness"] == round(1 / 3, 4)
     assert "LOW_TEMPORAL_COMPLETENESS" in qa["flags"]
     assert qa["quality"] == "degraded"
+
+
+def test_unverified_reanalysis_rejected_by_asmae_archive_adapter():
+    # A1: In weather_archive_adapter, unverified reanalysis must NOT enter reanalysis_archive
+    unverified_reanalysis = {
+        "date": DAY,
+        "data_kind": "historical_reanalysis",
+        "source_role": "UNVERIFIED",
+        "data_status": "unverified",
+        "temp_mean_c": 15.0,
+        "precipitation_mm": 2.0,
+    }
+    archive1 = normalize_weather_archive([unverified_reanalysis])
+    assert archive1["weather_daily_series"] == {}
+    assert archive1["weather_archive_status"] == "unavailable"
+    assert archive1["weather_source_reality"] == "missing"
+
+    # Explicit UNVERIFIED role with implicit status
+    archive2 = normalize_weather_archive([{
+        "date": DAY,
+        "data_kind": "historical_reanalysis",
+        "source_role": "UNVERIFIED",
+        "temp_mean_c": 15.0,
+    }])
+    assert archive2["weather_daily_series"] == {}
+    assert archive2["weather_archive_status"] == "unavailable"
+
+    # Inconsistent role (FORECAST_MODEL claimed on historical_reanalysis payload)
+    archive3 = normalize_weather_archive([{
+        "date": DAY,
+        "data_kind": "historical_reanalysis",
+        "source_role": "FORECAST_MODEL",
+        "temp_mean_c": 15.0,
+    }])
+    assert archive3["weather_daily_series"] == {}
+    assert archive3["weather_archive_status"] == "unavailable"
+
+
+def test_observation_string_label_promotion_prohibited_in_wrapper_and_asmae():
+    # A2: In B2B-04A, no authenticated station authority exists.
+    # String-only promotion to observed_archive or rec_status='observed' is prohibited.
+    obs_day = SimpleNamespace(
+        date=DAY,
+        variable_consensus={"temp_mean": VariableConsensus(variable="temp_mean", selected_value=20.0)},
+        data_kind="historical_observation",
+        source_role="OBSERVED_STATION",
+        data_status="observed",
+        overall_confidence=0.9,
+    )
+    rows = _canonical_weather_records(
+        SimpleNamespace(weather_consensus=[obs_day], forecast_consensus=[]),
+        packets=[],
+    )
+    assert len(rows) == 1
+    # Wrapper fails closed to unverified
+    assert rows[0]["data_status"] == "unverified"
+    assert rows[0]["source_qualified"] is False
+
+    # Direct ASMAE adapter bypass with OBSERVED_STATION and data_status='observed' fails closed
+    archive = normalize_weather_archive([{
+        "date": DAY,
+        "data_kind": "historical_observation",
+        "source_role": "OBSERVED_STATION",
+        "data_status": "observed",
+        "temp_mean_c": 20.0,
+    }])
+    assert archive["weather_daily_series"] == {}
+    assert archive["weather_archive_status"] == "unavailable"
+    assert archive["weather_source_reality"] == "missing"
+
+
+def test_cross_provenance_daily_merge_prohibited_in_asmae_archive():
+    # A3: _merge_day must NOT allow cross-reality merges where modelled variables
+    # inherit observational status or cross-role provenance contamination.
+    from services.agribrain.layer05_asmae.history.weather_archive_adapter import _merge_day
+
+    day_observed = {
+        "date": DAY,
+        "source_reality": "observed_archive",
+        "temp_mean_c": 22.0,
+        "precipitation_mm": None,
+    }
+    day_reanalysis = {
+        "date": DAY,
+        "source_reality": "reanalysis_archive",
+        "temp_mean_c": 20.0,
+        "precipitation_mm": 5.0,
+        "et0_mm": 4.0,
+    }
+    with pytest.raises(ValueError, match="cross_provenance_daily_merge_prohibited"):
+        _merge_day(day_observed, day_reanalysis)
+
+    with pytest.raises(ValueError, match="cross_provenance_daily_merge_prohibited"):
+        _merge_day(day_reanalysis, day_observed)
+
+
+def test_historical_weather_qa_independent_expected_window():
+    # A4: Supply an independent requested date window for historical completeness,
+    # distinguishing received-record coverage from true temporal completeness.
+    rec_hist = _record(provider="open_meteo", kind="historical_reanalysis")
+    rec_hist.date = "2026-11-01"
+
+    # Requested 30 days, but only 1 day received
+    ts = build_weather_timeseries([rec_hist], expected_historical_days=30)
+    qa = evaluate_weather_qa(ts)
+
+    # Historical completeness against expected window = 1/30
+    assert qa["historical_completeness"] == round(1 / 30, 4)
+    # Received historical coverage = 1.0 (1 eligible historical record / 1 received record)
+    assert qa["received_historical_coverage"] == 1.0
+    assert qa["expected_historical_days"] == 30
+    assert "INCOMPLETE_HISTORICAL_WINDOW" in qa["flags"]
+    assert "LOW_TEMPORAL_COMPLETENESS" in qa["flags"]
+    assert qa["quality"] == "degraded"
+
+    # Also verify expected_dates list
+    expected_dates = ["2026-11-01", "2026-11-02", "2026-11-03", "2026-11-04", "2026-11-05"]
+    ts_dates = build_weather_timeseries([rec_hist], expected_dates=expected_dates)
+    qa_dates = evaluate_weather_qa(ts_dates)
+    assert qa_dates["historical_completeness"] == 0.2  # 1/5
+    assert qa_dates["expected_historical_days"] == 5
+    assert "INCOMPLETE_HISTORICAL_WINDOW" in qa_dates["flags"]
+
+
+def test_datastatus_from_value_unverified_maps_to_unavailable():
+    # A4 contract check: 'unverified' is intentionally mapped to UNAVAILABLE
+    from services.agribrain.layer0.observation_packet import DataStatus
+
+    assert DataStatus.from_value("unverified") == DataStatus.UNAVAILABLE
+    assert DataStatus.from_value("UNVERIFIED") == DataStatus.UNAVAILABLE
+    assert DataStatus.from_value("observed") == DataStatus.OBSERVED
+    assert DataStatus.from_value("estimated") == DataStatus.ESTIMATED

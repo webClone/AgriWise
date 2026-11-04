@@ -103,6 +103,13 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
                 # historical weather evidence records or state forcing.
                 continue
 
+            from services.agribrain.layer0.environment.weather.source_roles import (
+                classify_weather_record_admission,
+            )
+            admission = classify_weather_record_admission(daily)
+            if admission == "rejected" or source_role == "REJECTED":
+                continue
+
             declared_roles = [
                 str(daily[k]).upper()
                 for k in ("role", "source_role", "data_role", "status_role", "truth_class")
@@ -126,7 +133,8 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
             ):
                 rec_status = "fallback"
             elif (
-                source_role in ("CURRENT_PROVIDER_CONTEXT", "REANALYSIS_MODEL")
+                admission in ("reanalysis_archive", "forecast")
+                or source_role in ("CURRENT_PROVIDER_CONTEXT", "REANALYSIS_MODEL")
                 or forecast
                 or "FORECAST" in data_kind.upper()
                 or declared_status in ("estimated", "reconstruction")
@@ -137,10 +145,9 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
                 declared_status == "observed"
                 or any(r in ("OBSERVED", "STATION_MEASURED") for r in declared_roles)
             ):
-                if source_role not in ("HISTORICAL_OBSERVATION", "OBSERVED_STATION", "STATION_OBSERVATION"):
-                    rec_status = "unverified"
-                else:
-                    rec_status = "observed"
+                # B2B-04A: No station authority verification is implemented.
+                # String-only promotion to observed is strictly prohibited.
+                rec_status = "unverified"
             else:
                 rec_status = "unverified"
 

@@ -67,6 +67,8 @@ class EnvironmentalEngine:
         timezone: str = "UTC",
         t_base: float = 5.0,
         forecast_retrieval_time: Optional[str] = None,
+        expected_historical_days: Optional[int] = None,
+        expected_dates: Optional[List[str]] = None,
     ) -> EnvironmentalContextPackage:
         """Process all environmental data sources into a context package.
 
@@ -154,7 +156,12 @@ class EnvironmentalEngine:
                     "error": str(e),
                 })
 
-        weather_timeseries = build_weather_timeseries(all_weather_records, timezone)
+        weather_timeseries = build_weather_timeseries(
+            all_weather_records,
+            timezone,
+            expected_historical_days=expected_historical_days,
+            expected_dates=expected_dates,
+        )
         weather_qa_result = evaluate_weather_qa(weather_timeseries)
 
         # 5. Weather consensus (per-day, per-variable)

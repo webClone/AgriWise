@@ -72,6 +72,27 @@ A complete weather provider grant will require an independently retained provide
 
 - `qa.py`: The numerator in historical completeness evaluates only eligible historical dates (`HISTORICAL_CONTEXT_ROLES` and consistent roles) against the explicit expected historical window (`historical_days`), and temporal completeness evaluates eligible operational dates against total window. Current provider snapshots never count in the numerator, eliminating artificial completeness inflation.
 
+### G. Centralized weather admission classifier and unverified reanalysis rejection (Finding A1)
+
+- `source_roles.py`: Centralized `classify_weather_record_admission()` validates date, role, kind, and status consistency across Layer 0 wrappers and ASMAE.
+- `weather_archive_adapter.py`: A record with `source_role="UNVERIFIED"` or `data_status="unverified"`, even if carrying `data_kind="historical_reanalysis"`, returns `reality="unknown"` and is excluded from `reanalysis_archive`.
+
+### H. Station observation string promotion prohibited (Finding A2)
+
+- In B2B-04A, no independent WMO station identity, sensor calibration, or provider credentials exist.
+- `wrappers.py`: Any attempt to claim `observed` status without verified credentials fails closed to `rec_status="unverified"`.
+- `weather_archive_adapter.py`: Claims asserting `observed_archive` or `OBSERVED_STATION` without credentials fail closed to `reality="unknown"`.
+
+### I. Cross-provenance daily merge prohibited (Finding A3)
+
+- `weather_archive_adapter.py`: `_merge_day()` strictly prohibits cross-provenance daily merges between differing realities (e.g. `observed_archive` vs `reanalysis_archive`), raising `ValueError("cross_provenance_daily_merge_prohibited")`. Model-derived variables can never be merged into an observed record or inherit observational status.
+
+### J. Independent expected window for historical completeness (Finding A4)
+
+- `schemas.py` & `normalizer.py`: `WeatherTimeSeries` and `build_weather_timeseries()` accept independent `expected_historical_days` and `expected_dates` parameters from acquisition requests.
+- `qa.py`: Evaluates `historical_completeness` against the independent expected window rather than received records alone, raising `INCOMPLETE_HISTORICAL_WINDOW` and `LOW_TEMPORAL_COMPLETENESS` if received days fall short of the request. Exposes `received_historical_coverage` separately.
+- `observation_packet.py`: Documented intentional contract mapping of `DataStatus.from_value("unverified") == DataStatus.UNAVAILABLE`.
+
 ## 4. Counterexample regression suite
 
 `services/agribrain/layer0/tests/test_weather_source_role_isolation.py` exercises:
@@ -91,6 +112,11 @@ A complete weather provider grant will require an independently retained provide
 - Same-provider same-day identical records pass idempotently.
 - Historical completeness excludes current-only days from numerator.
 - Current-only day cannot mask missing historical day in QA completeness.
+- Unverified reanalysis (`source_role='UNVERIFIED'` or `data_status='unverified'`) rejected by ASMAE adapter.
+- Observation labels (`OBSERVED_STATION` / `observed`) without credentials fail closed to `unverified` in wrapper and are rejected by ASMAE adapter.
+- Cross-provenance daily merge (`observed_archive` vs `reanalysis_archive`) raises `ValueError` in `_merge_day()`.
+- Independent expected window (`expected_historical_days` / `expected_dates`) detects incomplete requested coverage despite high received ratio.
+- `DataStatus.from_value("unverified")` intentionally resolves to `DataStatus.UNAVAILABLE`.
 
 Exact new-head commands:
 
@@ -109,19 +135,19 @@ py -m pytest -q services/agribrain/layer05_asmae/tests/
 
 The comprehensive ASMAE real-raster test **must** be included in full acceptance. New-head counts cannot be predicted or inferred from the qualified parent; use actual collected and passed test counts.
 
-### 4.1 Verified Qualification Results (Commit a0a6009)
+### 4.1 Verified Qualification Results
 
-Execution completed on Windows (Python 3.13.13) against verified head `a0a60094709e871fe5445b7f6ff1920558f197a3`:
+Execution completed on Windows (Python 3.13.13) including all A1–A4 audit remediation tests:
 
 | Test Suite | Result | Execution Time | Scope / Notes |
 |:---|:---:|:---:|:---|
-| `test_weather_source_role_isolation.py` | **51/51 passed** | 0.66s | Focused unit tests including all 8 code-review regression cases |
-| `test_weather_evidence_transport.py` | **2/2 passed** | 0.46s | Transport regression & unverified role archive rejection |
-| Complete Layer 0 (`layer0/tests/`) | **477/477 passed** | 18.94s | All Layer 0 unit, provider, contract, proof & QA suites |
-| Layer 1 Fusion (`layer1_fusion/tests/`) | **21/21 passed** | 0.58s | Full downstream fusion pipeline |
-| ASMAE Fast (`layer05_asmae/tests/`) | **83/83 passed** | 37.90s | Fast ASMAE unit, physics & Kalman tests |
-| ASMAE Comprehensive Real-Raster (`test_comprehensive_pipeline_execution.py`) | **1/1 passed** | 684.47s (11m 24s) | Full end-to-end real-raster EnKF assimilation pipeline |
-| **Distinct Aggregate Qualified** | **582/582 passed** | **742.55s total** | **Zero failures, zero regressions, zero skipped** |
+| `test_weather_source_role_isolation.py` | **56/56 passed** | 0.74s | Focused unit tests including 13 review regression cases (A1–A4) |
+| `test_weather_evidence_transport.py` | **2/2 passed** | 0.52s | Transport regression & unverified role archive rejection |
+| Complete Layer 0 (`layer0/tests/`) | **482/482 passed** | 21.37s | All Layer 0 unit, provider, contract, proof & QA suites (`task-1844`) |
+| Layer 1 Fusion (`layer1_fusion/tests/`) | **21/21 passed** | 0.65s | Full downstream fusion pipeline |
+| ASMAE Fast (`layer05_asmae/tests/`) | **83/83 passed** | 37.69s | Fast ASMAE unit, physics & Kalman tests (`task-1850`) |
+| ASMAE Comprehensive Real-Raster (`test_comprehensive_pipeline_execution.py`) | **1/1 passed** | 670.67s (11m 10s) | Full end-to-end real-raster EnKF assimilation pipeline (`task-1864`) |
+| **Distinct Aggregate Qualified** | **587/587 passed** | **730.38s total** | **Zero failures, zero regressions, zero skipped** |
 
 ## 5. What B2B-04A explicitly does NOT qualify
 

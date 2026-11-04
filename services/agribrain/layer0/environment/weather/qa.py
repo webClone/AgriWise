@@ -49,9 +49,24 @@ def evaluate_weather_qa(
         and record_role_is_consistent(r)
     ))
 
-    expected_historical = timeseries.historical_days
+    # Independent expected window
+    expected_historical = (
+        len(timeseries.expected_dates)
+        if getattr(timeseries, "expected_dates", None) is not None
+        else (
+            timeseries.expected_historical_days
+            if getattr(timeseries, "expected_historical_days", None) is not None
+            else timeseries.historical_days
+        )
+    )
     expected_forecast = timeseries.forecast_days
     expected_total = expected_historical + expected_forecast
+
+    received_dates = sorted(set(r.date for r in timeseries.daily_records if r.date))
+    received_historical_coverage = (
+        round(len(eligible_historical_dates) / len(received_dates), 4)
+        if received_dates else 0.0
+    )
 
     if expected_historical > 0:
         historical_completeness = min(1.0, len(eligible_historical_dates) / expected_historical)
@@ -67,6 +82,9 @@ def evaluate_weather_qa(
         temporal_completeness = min(1.0, len(eligible_dates) / max(len(eligible_dates), 1))
     else:
         temporal_completeness = 0.0
+
+    if expected_historical > 0 and len(eligible_historical_dates) < expected_historical:
+        flags.append("INCOMPLETE_HISTORICAL_WINDOW")
 
     # Check for ET₀
     has_et0 = any(
@@ -115,6 +133,8 @@ def evaluate_weather_qa(
         "providers": sorted(providers),
         "temporal_completeness": round(temporal_completeness, 4),
         "historical_completeness": round(historical_completeness, 4),
+        "received_historical_coverage": received_historical_coverage,
+        "expected_historical_days": expected_historical,
         "has_et0": has_et0,
         "has_soil_moisture": has_soil_moisture,
         "data_kinds": sorted(data_kinds),

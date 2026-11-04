@@ -105,29 +105,12 @@ def _unwrap_records(raw_weather: Any) -> List[Any]:
 
 
 def _record_reality(record: Mapping[str, Any]) -> str:
-    kind = str(_first_non_none(record, "data_kind", "source_reality") or "").lower()
-    source_role = str(record.get("source_role") or "").upper()
-    packet = str(record.get("packet_type") or "").lower()
-    status = str(record.get("data_status") or "").lower()
-    combined = " ".join((kind, packet, status))
-    if (
-        source_role in ("CURRENT_PROVIDER_CONTEXT", "REJECTED")
-        or kind in ("current", "mixed", "unqualified")
-        or status in ("unavailable", "rejected")
-    ):
-        # A current API/model context or rejected mixed data
-        # is not an observed station archive.
-        return "unknown"
-    if "forecast" in combined:
-        return "forecast"
-    if "reanalysis" in combined or "historical_reanalysis" in combined or source_role == "REANALYSIS_MODEL":
-        return "reanalysis_archive"
-    if "observed" in combined or status == "observed":
-        # Fail-closed: only an explicit authenticated observation source role
-        # may enter as observed_archive. Unverified or unknown roles are rejected.
-        if source_role not in ("HISTORICAL_OBSERVATION", "OBSERVED_STATION", "STATION_OBSERVATION"):
-            return "unknown"
-        return "observed_archive"
+    from services.agribrain.layer0.environment.weather.source_roles import (
+        classify_weather_record_admission,
+    )
+    admission = classify_weather_record_admission(record)
+    if admission in ("reanalysis_archive", "forecast"):
+        return admission
     return "unknown"
 
 
@@ -185,12 +168,17 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
 def _merge_day(existing: Optional[Dict[str, Any]], incoming: Dict[str, Any]) -> Dict[str, Any]:
     if existing is None:
         return incoming
-    rank = {"unknown": 0, "forecast": 1, "reanalysis_archive": 2, "observed_archive": 3}
-    primary, secondary = (incoming, existing) if rank.get(incoming["source_reality"], 0) > rank.get(existing["source_reality"], 0) else (existing, incoming)
-    merged = dict(primary)
+    # Cross-provenance daily merge is strictly prohibited to prevent model-derived
+    # variables from inheriting observational reality or cross-role contamination.
+    if existing.get("source_reality") != incoming.get("source_reality"):
+        raise ValueError(
+            f"cross_provenance_daily_merge_prohibited: cannot merge {existing.get('source_reality')} "
+            f"and {incoming.get('source_reality')} for date {incoming.get('date')}"
+        )
+    merged = dict(existing)
     for key in VARIABLES:
         if merged.get(key) is None:
-            merged[key] = secondary.get(key)
+            merged[key] = incoming.get(key)
     merged["evidence_ids"] = sorted(set(existing.get("evidence_ids", [])) | set(incoming.get("evidence_ids", [])))
     merged["authority_refs"] = sorted(set(existing.get("authority_refs", [])) | set(incoming.get("authority_refs", [])))
     return merged

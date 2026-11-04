@@ -96,7 +96,13 @@ class DataStatus(str, Enum):
 
     @classmethod
     def from_value(cls, value: str) -> "DataStatus":
-        """Parse known provenance; unknown or malformed status is unavailable."""
+        """Parse known provenance; unknown, unverified, or malformed status is unavailable.
+
+        Note on 'unverified': In Layer 0 transport records, 'unverified' represents
+        records that arrived without verifiable source-role credentials. It intentionally
+        maps to UNAVAILABLE here so that downstream Kalman assimilation and state update
+        gates treat unverified data as unavailable by default.
+        """
         try:
             return cls(value)
         except (ValueError, TypeError):
