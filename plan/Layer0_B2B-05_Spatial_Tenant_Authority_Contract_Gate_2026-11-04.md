@@ -152,6 +152,36 @@ A passing 365-day numerical pipeline alone does NOT close a frontend
 authorization P1. Conversely, the bounded frontend fix does not reopen
 already-closed weather/numerical/source-lineage work.
 
-**No merge, freeze or B2B-06 release handoff before those exact-head
-checks and connected workflow are recorded.** Protected master monograph,
+## Exact-Head Software Qualification Receipt (`1bc9685`)
+
+Executed locally on Windows environment (Python 3.13.13, pytest 9.0.3, Node.js v20.18.0):
+
+| Test Suite / Build Gate | Scope | Result | Duration | Task / Execution Receipt |
+| :--- | :--- | :--- | :--- | :--- |
+| **Plot Write Security** | B05-API-01 P1 scalar parser & B05-API-02 P2 committed identity | **8 / 8 passed** | 0.84s | `plot-write-lifecycle-security.test.mjs` |
+| **Frontend Test Suite** | Full Next.js frontend unit & integration suite | **105 / 105 passed** | 1.58s | `npm run test:frontend` |
+| **Prisma Generation** | `npx prisma generate` | **SUCCESS** | 0.35s | Generated Client v6.19.2 |
+| **TypeScript Typecheck** | `npx tsc --noEmit` | **PASS (0 errors)** | 16.2s | `task-3166` |
+| **Next.js Production Build** | `npm run build` | **PASS (63/63 pages)** | 20.4s | `task-3171` |
+| **Layer 0 Complete** | Full Layer 0 unit and integration suite | **618 / 618 passed** | 22.50s | `task-3190` |
+| *B2B-05 Contracts* | Geometry epoch, WGS84 polygon, fractional support | *16 / 16 passed* | 0.63s | `test_b2b05_spatial_tenant_contract.py` |
+| *B2B-05 Production Wiring* | Scoped broker, cache isolation, packet weight | *18 / 18 passed* | 0.74s | `test_b2b05_production_wiring.py` |
+| *B2B-05 Prisma Ingestion* | Prisma owner joins, state-engine rejection counters | *26 / 26 passed* | 0.80s | `test_b2b05_prisma_state_ingestion.py` |
+| *B2B-05 Epoch Lifecycle* | Atomic CAS version advance, scoped cache purge | *12 / 12 passed* | 0.87s | `test_b2b05_geometry_epoch_lifecycle.py` |
+| **Layer 1 Fusion** | Layer 1 feature fusion & temporal alignment | **21 / 21 passed** | 0.63s | Synchronous |
+| **ASMAE Fast** | Archive adapter, evidence ingestion, EnKF fast | **83 / 83 passed** (3 subtests) | 34.57s | `task-3199` |
+| **ASMAE Comprehensive** | Full 365-day real-raster Sentinel-1/2, ERA5, EnKF | **1 / 1 passed** | 533.94s (8m 54s) | `task-3218` |
+| **Aggregate Distinct Python** | **Zero failures, zero skipped** | **723 / 723 passed** | **591.57s** (9m 52s) | Complete Exact-Head Suite |
+| **Aggregate Frontend** | **Zero failures, zero skipped** | **105 / 105 passed** | **2.42s** | Complete Exact-Head Suite |
+
+### Connected Workflow & Lifecycle Verification
+
+1. **Relation Write Denial (B05-API-01 P1):**
+   `parseOwnedPlotMutation()` strictly enforces scalar-only updates against an explicit whitelist (`name`, `nameAr`, `area`, `perimeter`, `ownership`, `irrigationDistrict`, `soilType`, `irrigation`, `physicalConstraints`). Relational mutations (`farm: { connect: ... }`, `farmId`) hit the default branch and throw `PlotMutationValidationError("Unapproved plot update field: ...", 403)` before reaching Prisma, preserving foreign-farm isolation.
+2. **Committed Identity Verification (B05-API-02 P2):**
+   `POST /api/plots` re-reads the owned plot record under the authenticated tenant's relationship after geometry initialization and requires matching committed `geometryVersion` and `geometryHash` before returning HTTP 201.
+3. **Geometry CAS & Stale Scope Invalidation:**
+   `updatePlotGeometry()` delegates mutations to the signed Python geometry epoch service which increments `geometryVersion`, updates `geometryHash`, and purges prior scoped cache keys. Subsequent requests with stale geometry scopes are rejected at broker admission (`SpatialTenantDenied`).
+
+**Status: QUALIFIED at commit `1bc9685`. Ready for B2B-05 milestone freeze.** Protected master monograph,
 frozen findings/layer0.md, Pilot PR #9, PR #25 and main are unchanged.
