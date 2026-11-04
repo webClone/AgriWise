@@ -205,6 +205,76 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
+# B2B-05 geometry epoch management. The only accepted writer is a server
+# authenticated internal-service caller. No client-supplied tenant/farm claims.
+class B2B05InitializeGeometryRequest(BaseModel):
+    geo_json: Dict[str, Any]
+
+
+class B2B05UpdateGeometryRequest(BaseModel):
+    geo_json: Dict[str, Any]
+    expected_geometry_version: int
+    expected_geometry_hash: str
+
+
+def _b2b05_epoch_service():
+    if _b2b05_broker is None:
+        raise HTTPException(status_code=503, detail="plot_authority_not_initialized")
+    from app.mongo_client import get_db
+    from services.agribrain.layer0.plot_geometry_epoch import PlotGeometryEpochService
+    try:
+        db = get_db()
+        if db is None:
+            raise RuntimeError("missing database")
+        return PlotGeometryEpochService(db, _b2b05_broker)
+    except Exception:
+        raise HTTPException(status_code=503, detail="plot_authority_unavailable") from None
+
+
+@app.post("/v2/b2b05/plots/{plot_id}/geometry/initialize")
+def b2b05_initialize_plot_geometry(
+    plot_id: str,
+    body: B2B05InitializeGeometryRequest,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    if namespace.plot_id != plot_id:
+        raise HTTPException(status_code=403, detail="plot_namespace_mismatch")
+    try:
+        receipt = _b2b05_epoch_service().initialize_geometry(
+            principal=current_authenticated_plot_principal(),
+            plot_id=plot_id, farm_id=namespace.farm_id,
+            geojson=body.geo_json,
+        )
+        return receipt.__dict__
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=409, detail="plot_geometry_initialization_denied") from None
+
+
+@app.put("/v2/b2b05/plots/{plot_id}/geometry")
+def b2b05_update_plot_geometry(
+    plot_id: str,
+    body: B2B05UpdateGeometryRequest,
+    namespace: PlotNamespace = Depends(require_internal_service_request),
+):
+    if namespace.plot_id != plot_id:
+        raise HTTPException(status_code=403, detail="plot_namespace_mismatch")
+    try:
+        receipt = _b2b05_epoch_service().update_geometry(
+            principal=current_authenticated_plot_principal(),
+            plot_id=plot_id, farm_id=namespace.farm_id,
+            expected_version=body.expected_geometry_version,
+            expected_hash=body.expected_geometry_hash,
+            geojson=body.geo_json,
+        )
+        return receipt.__dict__
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=409, detail="plot_geometry_update_denied") from None
+
+
 # Pipeline Progress Store (in-memory, thread-safe, PlotNamespace-keyed)
 _progress_lock = _threading.Lock()
 _progress_store: Dict[str, Dict[str, Any]] = {}  # run_id -> progress state
