@@ -2,7 +2,9 @@
 
 **Source pin:** `661f003` (B2B-05 qualified & frozen).  
 **Branch:** `feat/layer0-b2b06-signed-issuer-kms-20261104`.  
-**Status:** FULLY QUALIFIED RELEASE CANDIDATE (READY FOR FREEZE).  
+**Status:** FROZEN — B2B-06 milestone release gate accepted; no subsystem reopening without a demonstrated material regression.  
+**Frozen implementation SHA:** `71b704788673c75d06f148255cddc4ee2070ade5` (exact-head software qualification).  
+**Qualification receipt SHA:** `4a0a92444b457a73f0e9d0aee0a2a52f4c6f7e3b` (documentation-only child).  
 **Domain:** `akaloris/layer0/positive-state-input/v3` & `akaloris/layer0/positive-zone-state-input/v3`.  
 **Authority:** Kalman scientific-state input admission only. **NOT** pilot publication or autonomous actuator authorization.
 
@@ -101,3 +103,24 @@ All 747 distinct Python tests and 105 frontend tests have passed at exact candid
 
 - Scientific Pilot PR #9 (`71ee1f7`), frozen B2B-04B PR #25 (`f320e78`), and `main` (`6edd372`) remain strictly untouched.
 - Protected master monograph and `findings/layer0.md` remain immutable.
+
+## 6. Milestone freeze and B2B-07 handoff
+
+**Freeze decision:** B2B-06 is formally frozen on the qualified implementation
+`71b7047`, with a documentation-only receipt at `4a0a924`.
+No production code changed between those commits. The incoming B2B-07 branch
+must start at this documented freeze revision, not at an older or speculative
+implementation head.
+
+**Evidence limits:** 747/747 Python and 105/105 frontend tests are owner-reported
+exact-head local execution receipts. GitHub-hosted checks are absent. This is
+software qualification, not proof of deployed HSM/KMS, real-world sensor
+calibration, field-trial accuracy, or independent closure of all 469 findings.
+
+**Preserved invariants:** v3/KMS issuer and revocation contracts, all frozen
+B2B-04B weather behavior, frozen B2B-05 spatial/tenant authorization, and the
+independent Scientific Pilot PR #9 must not be edited as part of B2B-07.
+The master monograph remains the intended architecture and is immutable.
+B2B-07 begins with process covariance Q(Δt), independently verified delivered
+irrigation, and separation of scientific-state updates from publication or
+actuator authorization.
