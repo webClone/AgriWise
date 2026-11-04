@@ -98,7 +98,7 @@ def test_later_than_available_cutoff_is_rejected():
 
 def _filter():
     f = ZoneKalmanFilter("plot")
-    f.initialize(DAY)
+    f.initialize("2026-10-31")
     f.parent_plot_id = "plot-A"
     f.expected_geometry_hash = "geom-A"
     f.evidence_cutoff = CUTOFF

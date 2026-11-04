@@ -85,7 +85,9 @@ def test_one_year_covariance_remains_psd_numerically():
     filt.initialize("2026-11-01")
 
     for day in range(1, 366):
-        filt.predict(f"day-{day}", WEATHER)
+        from datetime import date, timedelta
+        target = (date(2026, 11, 1) + timedelta(days=day)).isoformat()
+        filt.predict(target, WEATHER)
         P = np.asarray(filt.covariance.P, dtype=float)
         assert np.isfinite(P).all()
         assert np.allclose(P, P.T, rtol=1e-10, atol=1e-10)
