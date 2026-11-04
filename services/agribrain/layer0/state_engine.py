@@ -146,7 +146,10 @@ class Layer0StateEngine:
         # carry independently verified packet receipts. For scientific
         # production use, only run_from_packets may provide the private
         # per-instance capability after it gates each input.
-        if signed_inputs_required() and _packet_run_capability is not self.__packet_run_capability:
+        if (
+            signed_inputs_required()
+            or os.getenv("AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE", "").lower() in ("1", "true", "yes")
+        ) and _packet_run_capability is not self.__packet_run_capability:
             raise Layer0AdmissionRequiredError(
                 "Direct Layer0StateEngine.run inputs bypass signed packet admission"
             )
@@ -880,7 +883,7 @@ class Layer0StateEngine:
             geometry_version=geometry_version,
             **(
                 {"_packet_run_capability": self.__packet_run_capability}
-                if signed_inputs_required() else {}
+                if (signed_inputs_required() or scoped_run) else {}
             ),
         )
 
