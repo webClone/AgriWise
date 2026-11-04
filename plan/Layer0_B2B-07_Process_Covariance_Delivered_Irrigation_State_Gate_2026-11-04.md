@@ -74,3 +74,24 @@
 - `main@6edd372`; independent Scientific Pilot PR #9 head `71ee1f7`.
 - Master monograph and the frozen 469-finding audit remain **untouched**.
 - This plan introduces **no operational authority** and does not claim a numerical calibration until measured reference evidence and uncertainty model are supplied.
+
+## B07-A Phase 1 candidate — test qualification pending
+
+- Implements UTC elapsed time in temporal_process_noise.py; zero, backward, nonfinite, naive, and >30-day gaps fail closed.
+- ProcessModel emits process variance Q(dt) from declared per-day rate assumptions rather than fixed daily Q; noise parameters are uncalibrated structural priors, not measured variances.
+- Missing-weather uses independent unforced-drift rates and no synthetic rain, temperature or irrigation; previous global five-times heuristic removed.
+- StateCovariance.propagate validates prior and candidate Hermitian eigenspectra for PSD >= -1e-10; atomic F P F^T + Q preserved.
+- ZoneKalmanFilter sends the same dt to process physics and transition Jacobian, propagates Q(dt) and records uncalibrated provenance.
+- Without interval_coverage_days matching dt, an irregular-step weather row cannot be treated as verified multi-day forcing.
+- Layer0StateEngine.run initializes the prior one day before start_date to avoid its historical same-day zero-duration prediction.
+- Corrects LAI growth/decay second dt multiplication (dt-squared bug); daily dt=1 behavior maintained.
+- Important: the interval-coverage field is a consumer-side guard and must be provenance-qualified by trusted provider before operational multi-day use.
+- New focused test file: services/agribrain/layer0/tests/test_kalman_temporal_process_noise.py.
+- No production numerical, field-calibration, L3 physical irrigation, or publication qualification claimed yet.
+
+### Exact-head fast-loop qualification
+
+py -m pytest -q services/agribrain/layer0/tests/test_kalman_temporal_process_noise.py services/agribrain/layer0/tests/test_kalman_transition_jacobian.py services/agribrain/layer0/tests/test_kalman_engine.py services/agribrain/layer0/tests/test_event_forcing_admission.py
+
+Then run full Layer0, Layer1 Fusion, and ASMAE fast tests. Reserve 365-day real-raster comprehensive EnKF for the integrated B07-A+B+C milestone.
+All B2B-04B, B2B-05, B2B-06, Pilot, frozen findings and master monograph remain untouched.
