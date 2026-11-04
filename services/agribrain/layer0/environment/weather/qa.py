@@ -50,15 +50,23 @@ def evaluate_weather_qa(
     ))
 
     # Independent expected window
-    expected_historical = (
-        len(timeseries.expected_dates)
-        if getattr(timeseries, "expected_dates", None) is not None
-        else (
+    has_expected_dates = getattr(timeseries, "expected_dates", None) is not None
+    if has_expected_dates:
+        expected_date_set = set(timeseries.expected_dates)
+        expected_historical = len(expected_date_set)
+        # Only dates matching the requested expected dates count toward historical completeness
+        covered_historical_dates = [d for d in eligible_historical_dates if d in expected_date_set]
+        unexpected_dates = set(eligible_historical_dates) - expected_date_set
+        if unexpected_dates:
+            flags.append("WEATHER_DATES_OUTSIDE_EXPECTED_WINDOW")
+    else:
+        expected_historical = (
             timeseries.expected_historical_days
             if getattr(timeseries, "expected_historical_days", None) is not None
             else timeseries.historical_days
         )
-    )
+        covered_historical_dates = eligible_historical_dates
+
     expected_forecast = timeseries.forecast_days
     expected_total = expected_historical + expected_forecast
 
@@ -69,21 +77,25 @@ def evaluate_weather_qa(
     )
 
     if expected_historical > 0:
-        historical_completeness = min(1.0, len(eligible_historical_dates) / expected_historical)
+        historical_completeness = round(min(1.0, len(covered_historical_dates) / expected_historical), 4)
     elif eligible_historical_dates:
         historical_completeness = 1.0
     else:
         historical_completeness = 0.0
 
-    eligible_dates = set(eligible_historical_dates) | set(eligible_forecast_dates)
-    if expected_total > 0:
-        temporal_completeness = min(1.0, len(eligible_dates) / expected_total)
-    elif eligible_dates:
-        temporal_completeness = min(1.0, len(eligible_dates) / max(len(eligible_dates), 1))
+    if has_expected_dates:
+        covered_all = [d for d in (set(eligible_historical_dates) | set(eligible_forecast_dates)) if d in expected_date_set]
+        temporal_completeness = round(min(1.0, len(covered_all) / max(expected_total, 1)), 4)
     else:
-        temporal_completeness = 0.0
+        eligible_dates = set(eligible_historical_dates) | set(eligible_forecast_dates)
+        if expected_total > 0:
+            temporal_completeness = round(min(1.0, len(eligible_dates) / expected_total), 4)
+        elif eligible_dates:
+            temporal_completeness = round(min(1.0, len(eligible_dates) / max(len(eligible_dates), 1)), 4)
+        else:
+            temporal_completeness = 0.0
 
-    if expected_historical > 0 and len(eligible_historical_dates) < expected_historical:
+    if expected_historical > 0 and len(covered_historical_dates) < expected_historical:
         flags.append("INCOMPLETE_HISTORICAL_WINDOW")
 
     # Check for ET₀

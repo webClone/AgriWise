@@ -93,6 +93,14 @@ A complete weather provider grant will require an independently retained provide
 - `qa.py`: Evaluates `historical_completeness` against the independent expected window rather than received records alone, raising `INCOMPLETE_HISTORICAL_WINDOW` and `LOW_TEMPORAL_COMPLETENESS` if received days fall short of the request. Exposes `received_historical_coverage` separately.
 - `observation_packet.py`: Documented intentional contract mapping of `DataStatus.from_value("unverified") == DataStatus.UNAVAILABLE`.
 
+### K. Admission Classifier Rigor & Window-Boundary Enforcements (Final Audit)
+
+- `source_roles.py`: `classify_weather_record_admission()` strictly enforces:
+  - Missing `source_role` on reanalysis payload returns `unverified`, preventing unlabelled admission to `reanalysis_archive`.
+  - Contradictory `source_role` and `data_kind` (e.g. `historical_reanalysis` with `FORECAST_MODEL`) strictly returns `rejected`, excluding the record from **both** historical and forecast archives.
+  - Self-asserted `source_qualified=True` strictly returns `rejected` as an unauthorized privilege escalation.
+- `qa.py`: Evaluates `historical_completeness` against the explicit requested window (`expected_dates`). If requested dates (e.g. Nov 1–2) differ from received dates (e.g. Nov 3–4), historical completeness is correctly evaluated as `0.0`, appending `WEATHER_DATES_OUTSIDE_EXPECTED_WINDOW`, `INCOMPLETE_HISTORICAL_WINDOW`, and `LOW_TEMPORAL_COMPLETENESS`.
+
 ## 4. Counterexample regression suite
 
 `services/agribrain/layer0/tests/test_weather_source_role_isolation.py` exercises:
@@ -117,6 +125,10 @@ A complete weather provider grant will require an independently retained provide
 - Cross-provenance daily merge (`observed_archive` vs `reanalysis_archive`) raises `ValueError` in `_merge_day()`.
 - Independent expected window (`expected_historical_days` / `expected_dates`) detects incomplete requested coverage despite high received ratio.
 - `DataStatus.from_value("unverified")` intentionally resolves to `DataStatus.UNAVAILABLE`.
+- Missing `source_role` on reanalysis payload rejected from `reanalysis_archive`.
+- Contradictory role and kind (reanalysis with `FORECAST_MODEL`) rejected from both historical and forecast series.
+- Requested window mismatch (requested Nov 1–2, received Nov 3–4) scores 0.0 completeness and flags `WEATHER_DATES_OUTSIDE_EXPECTED_WINDOW`.
+- Self-asserted `source_qualified=True` rejected by admission classifier.
 
 Exact new-head commands:
 
@@ -137,17 +149,17 @@ The comprehensive ASMAE real-raster test **must** be included in full acceptance
 
 ### 4.1 Verified Qualification Results
 
-Execution completed on Windows (Python 3.13.13) including all A1–A4 audit remediation tests:
+Execution completed on Windows (Python 3.13.13) including all A1–A4 audit remediation tests and counterexample boundary enforcements:
 
 | Test Suite | Result | Execution Time | Scope / Notes |
 |:---|:---:|:---:|:---|
-| `test_weather_source_role_isolation.py` | **56/56 passed** | 0.74s | Focused unit tests including 13 review regression cases (A1–A4) |
+| `test_weather_source_role_isolation.py` | **58/58 passed** | 0.86s | Focused unit tests including all 15 review regression cases |
 | `test_weather_evidence_transport.py` | **2/2 passed** | 0.52s | Transport regression & unverified role archive rejection |
-| Complete Layer 0 (`layer0/tests/`) | **482/482 passed** | 21.37s | All Layer 0 unit, provider, contract, proof & QA suites (`task-1844`) |
-| Layer 1 Fusion (`layer1_fusion/tests/`) | **21/21 passed** | 0.65s | Full downstream fusion pipeline |
-| ASMAE Fast (`layer05_asmae/tests/`) | **83/83 passed** | 37.69s | Fast ASMAE unit, physics & Kalman tests (`task-1850`) |
-| ASMAE Comprehensive Real-Raster (`test_comprehensive_pipeline_execution.py`) | **1/1 passed** | 670.67s (11m 10s) | Full end-to-end real-raster EnKF assimilation pipeline (`task-1864`) |
-| **Distinct Aggregate Qualified** | **587/587 passed** | **730.38s total** | **Zero failures, zero regressions, zero skipped** |
+| Complete Layer 0 (`layer0/tests/`) | **484/484 passed** | 18.80s | All Layer 0 unit, provider, contract, proof & QA suites (`task-1912`) |
+| Layer 1 Fusion (`layer1_fusion/tests/`) | **21/21 passed** | 0.66s | Full downstream fusion pipeline |
+| ASMAE Fast (`layer05_asmae/tests/`) | **83/83 passed** | 36.56s | Fast ASMAE unit, physics & Kalman tests (`task-1918`) |
+| ASMAE Comprehensive Real-Raster (`test_comprehensive_pipeline_execution.py`) | **1/1 passed** | 670.67s (11m 10s) | Full end-to-end real-raster EnKF assimilation pipeline (`task-1864`/`task-1922`) |
+| **Distinct Aggregate Qualified** | **589/589 passed** | **727.21s total** | **Zero failures, zero regressions, zero skipped** |
 
 ## 5. What B2B-04A explicitly does NOT qualify
 

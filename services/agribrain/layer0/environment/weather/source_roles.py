@@ -120,7 +120,12 @@ def classify_weather_record_admission(record: Any) -> str:
     ):
         return "rejected"
 
-    # 3. Observation claims: B2B-04A strictly prohibits string-only or self-asserted
+    # 3. Source qualification: B2B-04A does not grant provider qualification credentials.
+    # Self-asserted source_qualified=True is an unauthorized authority escalation.
+    if source_qualified:
+        return "rejected"
+
+    # 4. Observation claims: B2B-04A strictly prohibits string-only or self-asserted
     # station promotion. No authenticated station credentials or WMO calibration exist.
     if (
         data_status == "observed"
@@ -129,7 +134,7 @@ def classify_weather_record_admission(record: Any) -> str:
     ):
         return "unverified"
 
-    # 4. Current provider context is not a daily aggregate or reanalysis archive
+    # 5. Current provider context is not a daily aggregate or reanalysis archive
     if (
         source_role in ("CURRENT_PROVIDER_CONTEXT", "UNVERIFIED")
         or data_kind in ("current", "unknown", "")
@@ -137,27 +142,28 @@ def classify_weather_record_admission(record: Any) -> str:
     ):
         return "unverified"
 
-    # 5. Check for Forecast Model Context
-    if (
-        data_kind in ("forecast", "historical_forecast")
-        or "forecast" in data_kind
-        or source_role in ("FORECAST_MODEL", "HISTORICAL_FORECAST_MODEL")
-    ):
-        if source_role not in ("", "FORECAST_MODEL", "HISTORICAL_FORECAST_MODEL"):
-            return "unverified"
+    # 6. Explicit role and kind must be present and mutually consistent
+    expected_role = KIND_TO_ROLE.get(data_kind)
+    if expected_role is None or expected_role == WeatherSourceRole.UNVERIFIED:
+        return "unverified"
+
+    if not source_role:
+        # A record lacking an explicit source_role cannot be admitted as an archive
+        return "unverified"
+
+    if source_role != expected_role.value:
+        # Contradictory role and kind (e.g. historical_reanalysis with FORECAST_MODEL)
+        # must fail closed and be rejected from ALL archives (historical AND forecast)
+        return "rejected"
+
+    # 7. Check for Forecast Model Context
+    if expected_role in FORECAST_ROLES:
         if data_status in ("unverified", "unavailable", "rejected"):
             return "unverified"
         return "forecast"
 
-    # 6. Check for Historical Reanalysis Context
-    if (
-        data_kind in ("historical_reanalysis", "reanalysis")
-        or "reanalysis" in data_kind
-        or source_role == "REANALYSIS_MODEL"
-    ):
-        # Must have consistent role
-        if source_role not in ("", "REANALYSIS_MODEL"):
-            return "unverified"
+    # 8. Check for Historical Reanalysis Context
+    if expected_role in HISTORICAL_CONTEXT_ROLES:
         if data_status in ("unverified", "unavailable", "rejected"):
             return "unverified"
         return "reanalysis_archive"

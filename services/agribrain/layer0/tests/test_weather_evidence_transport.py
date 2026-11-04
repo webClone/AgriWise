@@ -76,6 +76,7 @@ def test_forecast_is_not_mixed_into_historical_weather_truth():
         {
             "date": "2026-07-02",
             "data_kind": "historical_reanalysis",
+            "source_role": "REANALYSIS_MODEL",
             "evidence_id": "history-1",
             "temp_min_c": 11.0,
             "temp_max_c": 20.0,
@@ -85,6 +86,7 @@ def test_forecast_is_not_mixed_into_historical_weather_truth():
         {
             "date": "2026-07-02",
             "data_kind": "forecast",
+            "source_role": "FORECAST_MODEL",
             "evidence_id": "forecast-1",
             "temp_min_c": 15.0,
             "temp_max_c": 31.0,

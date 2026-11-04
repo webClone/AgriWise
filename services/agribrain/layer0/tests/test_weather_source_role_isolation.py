@@ -493,6 +493,7 @@ def test_unverified_reanalysis_rejected_by_asmae_archive_adapter():
     assert archive2["weather_archive_status"] == "unavailable"
 
     # Inconsistent role (FORECAST_MODEL claimed on historical_reanalysis payload)
+    # Must be rejected from BOTH historical series AND forecast series
     archive3 = normalize_weather_archive([{
         "date": DAY,
         "data_kind": "historical_reanalysis",
@@ -500,7 +501,19 @@ def test_unverified_reanalysis_rejected_by_asmae_archive_adapter():
         "temp_mean_c": 15.0,
     }])
     assert archive3["weather_daily_series"] == {}
+    assert archive3["weather_forecast_series"] == {}
     assert archive3["weather_archive_status"] == "unavailable"
+    assert archive3["weather_source_reality"] == "missing"
+
+    # Missing source_role on historical_reanalysis payload is rejected
+    archive4 = normalize_weather_archive([{
+        "date": DAY,
+        "data_kind": "historical_reanalysis",
+        "temp_mean_c": 15.0,
+    }])
+    assert archive4["weather_daily_series"] == {}
+    assert archive4["weather_forecast_series"] == {}
+    assert archive4["weather_archive_status"] == "unavailable"
 
 
 def test_observation_string_label_promotion_prohibited_in_wrapper_and_asmae():
@@ -597,3 +610,47 @@ def test_datastatus_from_value_unverified_maps_to_unavailable():
     assert DataStatus.from_value("UNVERIFIED") == DataStatus.UNAVAILABLE
     assert DataStatus.from_value("observed") == DataStatus.OBSERVED
     assert DataStatus.from_value("estimated") == DataStatus.ESTIMATED
+
+
+def test_historical_weather_qa_dates_outside_requested_window_fails_completeness():
+    # Requested Nov 1-2, but received Nov 3-4 -> completeness must be 0.0, not 1.0!
+    rec1 = _record(provider="open_meteo", kind="historical_reanalysis")
+    rec1.date = "2026-11-03"
+    rec2 = _record(provider="open_meteo", kind="historical_reanalysis")
+    rec2.date = "2026-11-04"
+
+    expected_dates = ["2026-11-01", "2026-11-02"]
+    ts = build_weather_timeseries([rec1, rec2], expected_dates=expected_dates)
+    qa = evaluate_weather_qa(ts)
+
+    # 0 of the requested dates were covered
+    assert qa["historical_completeness"] == 0.0
+    assert qa["temporal_completeness"] == 0.0
+    assert qa["expected_historical_days"] == 2
+    # Received historical coverage is 1.0 (2 valid historical records / 2 received records)
+    assert qa["received_historical_coverage"] == 1.0
+    assert "WEATHER_DATES_OUTSIDE_EXPECTED_WINDOW" in qa["flags"]
+    assert "INCOMPLETE_HISTORICAL_WINDOW" in qa["flags"]
+    assert "LOW_TEMPORAL_COMPLETENESS" in qa["flags"]
+    assert qa["quality"] == "degraded"
+
+
+def test_source_qualified_true_rejected_by_classifier():
+    # B2B-04A: No provider authority credentials exist.
+    # Self-asserted source_qualified=True is an unauthorized privilege escalation and must be rejected.
+    from services.agribrain.layer0.environment.weather.source_roles import (
+        classify_weather_record_admission,
+    )
+
+    spoofed = {
+        "date": DAY,
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "source_qualified": True,
+    }
+    assert classify_weather_record_admission(spoofed) == "rejected"
+
+    archive = normalize_weather_archive([spoofed])
+    assert archive["weather_daily_series"] == {}
+    assert archive["weather_forecast_series"] == {}
+    assert archive["weather_archive_status"] == "unavailable"
