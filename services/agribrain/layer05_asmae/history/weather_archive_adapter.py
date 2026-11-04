@@ -13,6 +13,29 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, List, Optional
+import os
+
+
+def _is_verified_native_acquisition(acq_id: str) -> bool:
+    if not acq_id or not isinstance(acq_id, str):
+        return False
+    if acq_id.startswith("weather:"):
+        return False
+    root = (
+        os.getenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", "").strip()
+        or os.getenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", "").strip()
+    )
+    if not root:
+        return False
+    try:
+        from services.agribrain.layer0.native_issuer.weather_acquisition_evidence import (
+            NativeWeatherEvidenceStore,
+        )
+        store = NativeWeatherEvidenceStore(root)
+        receipt = store.verified_cache_receipt(acq_id)
+        return bool(receipt and receipt.response_sha256)
+    except Exception:
+        return False
 
 
 VARIABLES = (
@@ -148,12 +171,23 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
         if values[key] is None:
             values[key] = _finite_float(_consensus_value(variables, *aliases))
 
-    native_ids = record.get("native_acquisition_ids") or record.get("evidence_ids")
-    if isinstance(native_ids, list) and native_ids:
-        verified_evidence_ids = [str(x) for x in native_ids if x]
-    else:
-        evidence_id = str(_first_non_none(record, "evidence_id", "content_hash", "packet_id") or "")
-        verified_evidence_ids = [evidence_id] if evidence_id else []
+    native_ids = record.get("native_acquisition_ids") or []
+    if isinstance(native_ids, str):
+        native_ids = [native_ids]
+    verified_native_ids = [str(x) for x in native_ids if _is_verified_native_acquisition(str(x))]
+
+    raw_ev_ids = record.get("evidence_ids")
+    if isinstance(raw_ev_ids, str):
+        raw_ev_ids = [raw_ev_ids]
+    elif not isinstance(raw_ev_ids, list):
+        single = _first_non_none(record, "evidence_id", "content_hash", "packet_id")
+        raw_ev_ids = [str(single)] if single else []
+
+    final_evidence_ids = list(verified_native_ids)
+    if not final_evidence_ids:
+        for eid in raw_ev_ids:
+            if _is_verified_native_acquisition(str(eid)):
+                final_evidence_ids.append(str(eid))
 
     authority = str(record.get("authority") or "")
     reality = _record_reality(record)
@@ -161,11 +195,20 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
         # Do not permit an unqualified provider 'current' context to
         # enter historical ASMAE weather as observed truth.
         return None
+
+    synthetic_fallback = "weather:" + stable_value_hash({"date": date, "reality": reality, **values})
+    if not final_evidence_ids:
+        if native_ids:
+            final_evidence_ids = [synthetic_fallback]
+        else:
+            clean_raw = [str(eid) for eid in raw_ev_ids if not str(eid).startswith("native_")]
+            final_evidence_ids = clean_raw if clean_raw else [synthetic_fallback]
+
     normalized = {
         **values,
         "date": date,
         "source_reality": reality,
-        "evidence_ids": verified_evidence_ids if verified_evidence_ids else ["weather:" + stable_value_hash({"date": date, "reality": reality, **values})],
+        "evidence_ids": final_evidence_ids,
         "authority_refs": [authority] if authority else [],
         "overall_confidence": _finite_float(record.get("overall_confidence")),
     }
@@ -238,6 +281,9 @@ def normalize_weather_archive(raw_weather: Any) -> Dict[str, Any]:
         reality = "forecast_only" if forecast else "missing"
 
     evidence_ids = sorted({evidence_id for row in normalized for evidence_id in row.get("evidence_ids", [])})
+    verified_native_ids = sorted({
+        evidence_id for evidence_id in evidence_ids if _is_verified_native_acquisition(evidence_id)
+    })
     hash_payload = {"historical": historical, "forecast": forecast, "evidence_ids": evidence_ids}
     return {
         "weather_archive_status": status,
@@ -248,4 +294,6 @@ def normalize_weather_archive(raw_weather: Any) -> Dict[str, Any]:
         "missing_variables": missing,
         "variable_completeness": completeness,
         "weather_evidence_ids": evidence_ids,
+        "weather_native_evidence_ids": verified_native_ids,
+        "native_evidence_verified": bool(verified_native_ids),
     }

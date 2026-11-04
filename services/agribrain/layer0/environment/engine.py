@@ -16,6 +16,7 @@ Top-level orchestrator. Pipeline:
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+import os
 
 from services.agribrain.layer0.environment.schemas import (
     EnvironmentalContextPackage,
@@ -136,6 +137,7 @@ class EnvironmentalEngine:
             try:
                 native_id = None
                 native_payload = open_meteo_data
+                strict_native = os.getenv("AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE", "").lower() in ("1", "true", "yes")
                 if "native_acquisition_id" in open_meteo_data or "native_payload" in open_meteo_data:
                     from services.agribrain.layer0.native_issuer.weather_native_pipeline import (
                         resolve_verified_open_meteo_payload,
@@ -143,6 +145,8 @@ class EnvironmentalEngine:
                     native_payload, native_id = resolve_verified_open_meteo_payload(
                         open_meteo_data, latitude=latitude, longitude=longitude,
                     )
+                elif strict_native:
+                    raise ValueError("unattested_weather_input_rejected_in_strict_native_mode")
                 om_records = normalize_open_meteo_daily(
                     native_payload,
                     evidence_id=native_id,

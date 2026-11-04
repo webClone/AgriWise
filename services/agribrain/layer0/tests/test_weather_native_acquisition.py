@@ -705,8 +705,9 @@ def test_cold_cache_receipt_qualification(tmp_path):
 # 6. End-to-End Downstream Evidence Lineage Binding
 # ============================================================================
 
-def test_downstream_end_to_end_acquisition_lineage(tmp_path):
+def test_downstream_end_to_end_acquisition_lineage(tmp_path, monkeypatch):
     """Verify native acquisition evidence IDs bind end-to-end from CAS through Layer 0 and ASMAE."""
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
     store = NativeWeatherEvidenceStore(tmp_path)
     params = {
         "latitude": 45.0, "longitude": 10.0, "start_date": "2026-11-01", "end_date": "2026-11-03", "daily": "precipitation_sum",

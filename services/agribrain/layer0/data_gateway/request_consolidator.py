@@ -20,6 +20,7 @@ from __future__ import annotations
 import time
 import math
 import logging
+import hashlib
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
@@ -95,15 +96,28 @@ class RequestConsolidator:
 
     def get_or_create_batch(
         self, source: str, lat: float, lng: float, plot_id: str = "",
+        param_hash: str = "", **kwargs,
     ) -> ConsolidatedBatch:
         """Get an existing batch or create a new one.
 
-        If a fresh batch already exists for this grid cell,
+        If a fresh batch already exists for this grid cell and matching request parameters,
         join it (the result will be shared).
         """
         lat_snap = _snap(lat)
         lng_snap = _snap(lng)
-        key = f"{source}:{lat_snap:.4f}:{lng_snap:.4f}"
+        key_parts = [source, f"{lat_snap:.4f}", f"{lng_snap:.4f}"]
+        start_date = kwargs.get("start_date")
+        end_date = kwargs.get("end_date")
+        if start_date or end_date:
+            key_parts.append(f"{start_date or ''}_{end_date or ''}")
+        if param_hash:
+            key_parts.append(param_hash)
+        elif kwargs:
+            clean_kwargs = {k: str(v) for k, v in kwargs.items() if k not in ("plot_id",)}
+            if clean_kwargs:
+                raw = repr(sorted(clean_kwargs.items())).encode("utf-8")
+                key_parts.append(hashlib.sha256(raw).hexdigest()[:12])
+        key = ":".join(key_parts)
 
         with self._lock:
             now = time.time()

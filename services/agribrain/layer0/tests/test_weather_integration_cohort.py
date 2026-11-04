@@ -279,3 +279,118 @@ def test_requested_noncanonical_units_are_rejected(tmp_path):
     screen = screen_native_weather_receipt(receipt, store)
     assert screen.status is WeatherScreenStatus.REJECTED
     assert screen.reason == "unsupported_requested_weather_units"
+
+
+def test_broker_consolidation_isolates_different_date_windows(monkeypatch, tmp_path):
+    """W4-06 counterexample: Same coordinates with different date windows must not cross-consolidate."""
+    from services.agribrain.layer0.data_gateway.request_broker import DataRequestBroker
+    from services.agribrain.layer0.data_gateway.request_consolidator import RequestConsolidator
+
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+    requests_log = []
+
+    def fake_get(url, params, headers, timeout, allow_redirects):
+        requests_log.append(params["start_date"])
+        p = payload()
+        p["daily"]["time"] = [params["start_date"]]
+        p["daily"]["precipitation_sum"] = [1.0]
+        p["daily"]["temperature_2m_min"] = [5.0]
+        p["daily"]["temperature_2m_max"] = [15.0]
+        p["daily"]["et0_fao_evapotranspiration"] = [2.0]
+        return wire_response(p, params)
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    broker = DataRequestBroker.__new__(DataRequestBroker)
+    broker._storage = SimpleNamespace(
+        get_or_fetch=lambda *, source, plot_id, lat, lng, fetch_fn, force_refresh=False,
+                            context=None, param_hash="", candidate_validator=None: fetch_fn(lat, lng),
+        get_cached_evidence=lambda *a, **k: None,
+    )
+    broker._consolidator = RequestConsolidator(ttl_seconds=300)
+
+    # Plot 1: Nov 1 to Nov 1
+    res1 = broker.get(
+        "open_meteo_archive", "plot-1", 35.0, 3.0,
+        start_date="2026-11-01", end_date="2026-11-01",
+    )
+    # Plot 2: Nov 5 to Nov 5 (within 5km snap, but different date window)
+    res2 = broker.get(
+        "open_meteo_archive", "plot-2", 35.0001, 3.0001,
+        start_date="2026-11-05", end_date="2026-11-05",
+    )
+
+    assert requests_log == ["2026-11-01", "2026-11-05"]
+    assert res1["native_acquisition_id"] != res2["native_acquisition_id"]
+    assert res1["native_payload"]["daily"]["time"] == ["2026-11-01"]
+    assert res2["native_payload"]["daily"]["time"] == ["2026-11-05"]
+
+
+def test_broker_strict_native_rejects_legacy_cache_hit_without_root(monkeypatch):
+    """W4-07 counterexample: Strict mode rejects legacy cache hit when evidence root is missing."""
+    from services.agribrain.layer0.data_gateway.request_broker import DataRequestBroker
+
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE", "1")
+    monkeypatch.delenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", raising=False)
+    monkeypatch.delenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", raising=False)
+
+    class LegacyCache:
+        def get_or_fetch(self, *, source, plot_id, lat, lng, fetch_fn,
+                         force_refresh=False, context=None, param_hash="",
+                         candidate_validator=None):
+            # Returns a cached legacy result without native acquisition proof
+            return {"daily": payload()["daily"], "native_capture_status": "unattested_legacy"}
+
+    broker = DataRequestBroker.__new__(DataRequestBroker)
+    broker._storage = LegacyCache()
+    broker._consolidator = SimpleNamespace(should_consolidate=lambda src: False)
+
+    result = broker.get(
+        "open_meteo_archive", "weather-plot", 35.0, 3.0,
+        start_date="2026-11-01", end_date="2026-11-03",
+    )
+    # In strict-native mode, legacy cache output must be rejected
+    assert result is None
+
+
+def test_environmental_engine_strict_native_rejects_unattested_weather(monkeypatch):
+    """W4-08 counterexample: Strict mode rejects raw unverified weather dictionaries at engine ingestion."""
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE", "1")
+
+    # Plain open_meteo payload with NO native acquisition evidence fields
+    raw_unattested = payload()
+
+    env = EnvironmentalEngine().process(
+        latitude=35.0, longitude=3.0, plot_id="unattested-plot",
+        open_meteo_data=raw_unattested,
+    )
+    # Daily weather records must be empty (quarantined/rejected)
+    assert len(env.weather_timeseries.daily_records) == 0
+    failures = env.diagnostics.get("provider_failures", [])
+    assert any(
+        f.get("error") == "unattested_weather_input_rejected_in_strict_native_mode"
+        for f in failures
+    )
+
+
+def test_asmae_normalization_rejects_arbitrary_acquisition_id(monkeypatch, tmp_path):
+    """W4-09 counterexample: Arbitrary acquisition ID must not be labeled or exported as verified native evidence."""
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+
+    forged_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    forged_record = {
+        "date": "2026-11-01",
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "native_acquisition_ids": [forged_id],
+        "evidence_ids": [forged_id],
+        "precipitation_mm": 0.0,
+        "temp_min_c": 5.0,
+        "temp_max_c": 15.0,
+        "et0_mm": 2.0,
+    }
+
+    archive = normalize_weather_archive([forged_record])
+    assert forged_id not in archive.get("weather_native_evidence_ids", [])
+    assert forged_id not in archive.get("weather_evidence_ids", [])
+    assert archive.get("native_evidence_verified") is False
