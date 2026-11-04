@@ -90,3 +90,68 @@ the prior 562/562 receipt belongs to an older B2B-05 head.
 - Must also run: full Layer 0 suite, affected Layer 1 and ASMAE fast, Next.js typecheck/build and route tests before milestone acceptance.
 - Open deployment/architecture gates: actual Mongo replica ownership race validation, live FastAPI signed endpoints, frontend session signer integration, trusted backfill and atomic plot ownership transfer protocol, scoped background refresh and direct raw storage access.
 - This candidate does not inherit any prior passing test count. Do not merge without exact-head verification.
+
+## B2B-05 owned plot write-envelope completion — P1/P2 closure candidate
+
+**Status: implementation published; NOT frozen; exact-head tests and connected workflow pending.**
+
+This bounded addition closes only the two audit findings at prior head 256e6e7.
+It does NOT reopen the frozen B2B-04B selected historical Open-Meteo software path.
+
+- **B05-API-01 (P1), both PUT paths:** `src/lib/plot/owned-plot-mutation.ts`
+  is the sole scalar metadata parser. It constructs a typed Prisma update object
+  from explicit fields: name, nameAr, area, perimeter, ownership,
+  irrigationDistrict, soilType, irrigation, physicalConstraints. Geometry
+  remains separately handled by the signed CAS epoch service. Unknown,
+  authority-bearing and relation fields (`farm`, `photos`, `sensors`,
+  `farmId`, geometryHash, etc.) are rejected, not stripped or forwarded.
+  The root PUT accepts an authenticated plot ID in its request envelope;
+  the detail PUT uses the URL plot ID. No generic Prisma nested writes.
+- **B05-API-02 (P2), POST:** after a successful geometry initialization
+  receipt, the handler re-reads the plot under the authenticated owner's
+  relationship and requires exactly matching committed geometryVersion/hash.
+  The response uses that persisted record, not the earlier detached create
+  object. Missing/unmatched identity or failed initialization yields explicit
+  spatial-authority-unready status (not a false successful 201).
+- **Focused regression:** `tests/frontend/plot-write-lifecycle-security.test.mjs`
+  executes both native route functions with explicit session/Prisma/epoch/
+  HTTP fixtures. It checks the original foreign-farm nested `connect`
+  counterexample, other relation envelopes, scalar edits, existing 401/404
+  controls, stale create response, failed/mismatched epoch and signed-epoch
+  invocation. The file is included in `npm run test:frontend`.
+  Fixture tests do not prove a real Prisma/MongoDB relation mutation.
+
+### Required final candidate qualification
+
+Run **at one final SHA** and record command output, exact HEAD, failure/skips:
+
+```powershell
+git rev-parse HEAD
+node --test tests/frontend/plot-write-lifecycle-security.test.mjs
+npm run test:frontend
+npx prisma generate
+npx tsc --noEmit
+npm run build
+py -m pytest -q services/agribrain/layer0/tests/
+py -m pytest -q services/agribrain/layer1_fusion/tests/
+# Also run the known ASMAE fast tests and existing comprehensive
+# 365-day real-raster EnKF command as pinned by prior local receipts.
+```
+
+**One connected workflow (not covered by fixture tests):**
+create an owned plot with real Prisma MongoDB + signed FastAPI endpoint;
+verify returned 201 geometry hash/version equals a fresh owned GET;
+perform a normal scalar metadata PUT with neither farmId nor Farm association
+changed; submit original `farm.connect` payload to BOTH PUT routes and
+verify zero Prisma writes / unchanged owner; edit the geometry through signed
+CAS and verify old epoch scope rejected; initiate the existing scoped plot
+assessment and require its tenant/geometry context to match the new epoch.
+Keep the DB isolated and use a test tenant and disposable test plots only.
+
+A passing 365-day numerical pipeline alone does NOT close a frontend
+authorization P1. Conversely, the bounded frontend fix does not reopen
+already-closed weather/numerical/source-lineage work.
+
+**No merge, freeze or B2B-06 release handoff before those exact-head
+checks and connected workflow are recorded.** Protected master monograph,
+frozen findings/layer0.md, Pilot PR #9, PR #25 and main are unchanged.
