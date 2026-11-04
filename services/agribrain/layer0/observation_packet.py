@@ -153,6 +153,8 @@ class Provenance:
     license: str = "copernicus-open"
     download_timestamp: Optional[datetime] = None
     cache_hit: bool = False
+    native_evidence_id: Optional[str] = None
+    native_evidence_domain: Optional[str] = None
 
 
 @dataclass
@@ -331,6 +333,8 @@ class ObservationPacket:
         ]
         if self.unrecognized_data_status is not None:
             parts.append(self.unrecognized_data_status)
+        if self.provenance and self.provenance.native_evidence_id:
+            parts.append(str(self.provenance.native_evidence_id))
         raw = "|".join(parts).encode()
         return hashlib.sha256(raw).hexdigest()[:20]
     

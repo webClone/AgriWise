@@ -113,6 +113,14 @@ def build_daily_consensus(
     consensus.source_qualified = False
     consensus.data_kind = next(iter(kinds))
 
+    # Collect contributing native acquisition evidence IDs
+    ev_ids = [
+        getattr(r, "evidence_id")
+        for r in records_by_provider.values()
+        if getattr(r, "evidence_id", None)
+    ]
+    consensus.evidence_ids = sorted(set(ev_ids))
+
     # Temperature consensus
     consensus.variable_consensus["temp_mean"] = _consensus_temperature(
         records_by_provider, "temp_mean"

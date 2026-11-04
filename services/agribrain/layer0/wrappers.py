@@ -332,7 +332,7 @@ def ensure_observation_packet(
             pkt.content_hash = pkt._generate_content_hash()
         return pkt
 
-    from .observation_packet import ObservationType, QAMetadata, QAFlag, UncertaintyModel
+    from .observation_packet import ObservationType, QAMetadata, QAFlag, UncertaintyModel, Provenance
     
     payload = pkt.copy() if isinstance(pkt, dict) else {}
     
@@ -407,6 +407,12 @@ def ensure_observation_packet(
         data_status = DataStatus.FALLBACK
 
     raw_unc = finite_real(payload.get("uncertainty"))
+    prov = Provenance()
+    ev_id = payload.get("evidence_id") or payload.get("native_evidence_id")
+    if ev_id:
+        prov.native_evidence_id = str(ev_id)
+        prov.native_evidence_domain = str(payload.get("evidence_domain") or "akaloris/layer0/native-weather-acquisition-evidence/v1")
+
     return ObservationPacket(
         source=refined_source,
         obs_type=ObservationType.TABULAR,
@@ -420,6 +426,7 @@ def ensure_observation_packet(
         uncertainty=UncertaintyModel(sigmas={
             "observation": float(raw_unc)
         }) if raw_unc is not None and raw_unc > 0.0 else UncertaintyModel(),
+        provenance=prov,
         reliability_weight=rel_val,
         spatial_scope=spatial_scope,
     )

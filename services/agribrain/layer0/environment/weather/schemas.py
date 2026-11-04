@@ -31,6 +31,10 @@ class WeatherDailyRecord:
     source_role: str = "UNVERIFIED"
     source_qualified: bool = False
 
+    # Native acquisition evidence link (B2B-04B CAS manifest / acquisition ID)
+    evidence_id: Optional[str] = None
+    evidence_domain: Optional[str] = None
+
     # Temperature (°C)
     temp_min: Optional[float] = None
     temp_max: Optional[float] = None
@@ -110,6 +114,7 @@ class WeatherConsensusDaily:
     data_kind: str = ""  # what kind of data was used (current/reanalysis)
     source_role: str = "UNVERIFIED"
     source_qualified: bool = False
+    evidence_ids: List[str] = field(default_factory=list)
 
     variable_consensus: Dict[str, VariableConsensus] = field(default_factory=dict)
 

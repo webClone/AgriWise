@@ -18,6 +18,8 @@ def normalize_openweather_daily(
     raw_response: Dict[str, Any],
     data_kind: Optional[str] = None,
     retrieval_time: Optional[str] = None,
+    evidence_id: Optional[str] = None,
+    evidence_domain: Optional[str] = None,
 ) -> List[WeatherDailyRecord]:
     """Convert OpenWeather response to list of WeatherDailyRecord.
 
@@ -96,6 +98,8 @@ def normalize_openweather_daily(
             source_role=role_for_data_kind(data_kind).value,
             source_qualified=False,
             retrieval_time=retrieval_time,
+            evidence_id=evidence_id,
+            evidence_domain=evidence_domain,
             temp_min=round(temp_min, 2) if temp_min is not None else None,
             temp_max=round(temp_max, 2) if temp_max is not None else None,
             temp_mean=round(temp_mean, 2) if temp_mean is not None else None,

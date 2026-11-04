@@ -238,15 +238,15 @@ def validate_weather_product_request(
     if lat_key is not None:
         try:
             lat = float(params[lat_key])
-            if not (-90.0 <= lat <= 90.0):
-                raise WeatherRegistryError(f"invalid_latitude_range: {lat}")
         except (ValueError, TypeError):
             raise WeatherRegistryError(f"non_numeric_latitude: {params[lat_key]}")
+        if not (-90.0 <= lat <= 90.0):
+            raise WeatherRegistryError(f"invalid_latitude_range: {lat}")
 
     if lon_key is not None:
         try:
             lon = float(params[lon_key])
-            if not (-180.0 <= lon <= 180.0):
-                raise WeatherRegistryError(f"invalid_longitude_range: {lon}")
         except (ValueError, TypeError):
             raise WeatherRegistryError(f"non_numeric_longitude: {params[lon_key]}")
+        if not (-180.0 <= lon <= 180.0):
+            raise WeatherRegistryError(f"invalid_longitude_range: {lon}")

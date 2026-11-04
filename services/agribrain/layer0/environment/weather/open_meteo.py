@@ -45,6 +45,8 @@ def normalize_open_meteo_daily(
     raw_response: Dict[str, Any],
     data_kind: str = "historical_reanalysis",
     retrieval_time: Optional[str] = None,
+    evidence_id: Optional[str] = None,
+    evidence_domain: Optional[str] = None,
 ) -> List[WeatherDailyRecord]:
     """Convert Open-Meteo daily response to list of WeatherDailyRecord.
 
@@ -71,6 +73,8 @@ def normalize_open_meteo_daily(
             source_role=role_for_data_kind(data_kind).value,
             source_qualified=False,
             retrieval_time=retrieval_time,
+            evidence_id=evidence_id,
+            evidence_domain=evidence_domain,
         )
 
         for om_key, common_key in OPEN_METEO_DAILY_MAP.items():
