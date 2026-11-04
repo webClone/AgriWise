@@ -14,7 +14,7 @@ manually building Kalman observations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from copy import deepcopy
 import hashlib
@@ -175,10 +175,16 @@ class Layer0StateEngine:
 
         now = run_timestamp or datetime.now(timezone.utc)
 
-        # Initialize assimilation engine
+        # The initialization state is a prior. Its timestamp must precede
+        # the first predicted day by exactly one UTC daily interval.
+        # Previously it was stamped on start_date and then predicted for
+        # that same date, disguising a zero-duration prediction.
+        prior_date = (
+            datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
         engine = self._DailyAssimilationEngine()
         primary_zone = "plot"
-        engine.add_zone(primary_zone, soil_props=soil_props, start_day=start_date)
+        engine.add_zone(primary_zone, soil_props=soil_props, start_day=prior_date)
 
         # Stamp the caller-scoped run identity onto filters so the event
         # evidence router can reject foreign/unsupported event envelopes.
@@ -190,7 +196,7 @@ class Layer0StateEngine:
         # Add extra zones
         for zid in (zone_ids or []):
             if zid != primary_zone:
-                engine.add_zone(zid, soil_props=soil_props, start_day=start_date)
+                engine.add_zone(zid, soil_props=soil_props, start_day=prior_date)
                 engine.filters[zid].parent_plot_id = plot_id
                 engine.filters[zid].expected_geometry_hash = geometry_hash
                 engine.filters[zid].evidence_cutoff = now

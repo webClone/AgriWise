@@ -24,6 +24,9 @@ import math
 from services.agribrain.layer0.event_forcing_admission import (
     classify_management_event_evidence,
 )
+from services.agribrain.layer0.temporal_process_noise import (
+    TemporalGapContract, validate_dt_days,
+)
 
 
 def _qualified_weather_for_prediction(weather: Optional[Dict[str, float]]):
@@ -155,6 +158,9 @@ class ZoneKalmanFilter:
         # Ephemeral per-filter evidence identity fence. Restart/replay durability
         # is a separate L0-02C4 gate; do not describe this as exactly-once.
         self._event_evidence_seen: set[str] = set()
+        self._last_temporal_contract: Optional[TemporalGapContract] = None
+        self._last_process_q: Optional[List[float]] = None
+        self._last_q_regime = ""
         self.parent_plot_id = ""
         self.expected_geometry_hash = ""
         self.evidence_cutoff = None
@@ -194,14 +200,15 @@ class ZoneKalmanFilter:
             # verified execution receipt. Reject before any state mutation.
             raise ValueError("physical management forcing requires trusted L3 admission")
 
-        # Advance the physical state using the current process model.
-        # The matching Jacobian must be derived from the SAME inputs/model;
-        # do not independently assume F=I when physical couplings exist.
+        # The stored state timestamp, not wall clock or guessed cadence,
+        # defines the unique physical duration for f, F and Q.
+        gap = TemporalGapContract.between(self.state.day, day)
         predicted_state, Q = self.process_model.predict(
-            self.state, weather, events
+            self.state, weather, events, dt_days=gap.dt_days,
         )
         F = self.process_model.transition_jacobian(
-            self.state, weather, events, predicted_state=predicted_state
+            self.state, weather, events,
+            dt_days=gap.dt_days, predicted_state=predicted_state,
         )
 
         # Stage a complete covariance update before committing anything.
@@ -216,39 +223,53 @@ class ZoneKalmanFilter:
 
         self.covariance = candidate_covariance
         self.state = predicted_state
-        self.days_since_obs += 1
+        self.days_since_obs += gap.dt_days
+        self._last_temporal_contract = gap
+        self._last_process_q = list(Q)
+        self._last_q_regime = "NOMINAL_RATE_DISCRETIZATION"
         return predicted_state
 
     def predict_missing_weather(self, day: str) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Predict step when weather is missing:
-        - evolve state with no weather forcing (skip weather forcing)
-        - inflate process covariance (Q multiplied by 5.0)
-        - return (state_values, covariance_P)
+        """No physical weather evolution; accumulate declared drift covariance.
+
+        There is no synthetic rainfall/temperature. Q is a variance rate
+        integrated over the exact UTC gap, not an unexplained global 5x.
+        Invalid time or covariance leaves filter state fully unchanged.
         """
         import numpy as np
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
-        
-        predicted_state, Q = self.process_model.predict(
-            self.state, {}, None, skip_weather_forcing=True
-        )
-        predicted_state.day = day
-        
-        Q_inflated = [q * 5.0 for q in Q]
-        self.covariance.add_process_noise(Q_inflated)
-        predicted_state.variance = self.covariance.diagonal()
 
+        gap = TemporalGapContract.between(self.state.day, day)
+        predicted_state, Q = self.process_model.predict(
+            self.state, {}, None,
+            dt_days=gap.dt_days, skip_weather_forcing=True,
+        )
+        candidate_covariance = StateCovariance(
+            P=[row[:] for row in self.covariance.P]
+        )
+        identity = [
+            [float(i == j) for j in range(N_STATES)]
+            for i in range(N_STATES)
+        ]
+        candidate_covariance.propagate(identity, Q)
+        predicted_state.day = day
+        predicted_state.variance = candidate_covariance.diagonal()
+
+        self.covariance = candidate_covariance
         self.state = predicted_state
-        self.days_since_obs += 1
-        
+        self.days_since_obs += gap.dt_days
+        self._last_temporal_contract = gap
+        self._last_process_q = list(Q)
+        self._last_q_regime = "UNFORCED_DRIFT_VARIANCE_RATE"
         self.provenance_history.append({
-            "day": day,
-            "weather_update_mode": "missing_weather_high_uncertainty"
+            "day": day, "weather_update_mode": "missing_weather_high_uncertainty",
+            "q_temporal_contract": gap.provenance(
+                "UNFORCED_DRIFT_VARIANCE_RATE", Q,
+            ),
         })
-        
         return np.array(self.state.values), np.array(self.covariance.P)
-    
+
     def update(self, observations: List[KalmanObservation]) -> Dict[str, float]:
         """
         Update step: correct state using observations.
@@ -448,7 +469,22 @@ class ZoneKalmanFilter:
             cutoff=self.evidence_cutoff,
             seen_ids=self._event_evidence_seen,
         )
+        gap = TemporalGapContract.between(self.state.day, day)
         qualified_weather = _qualified_weather_for_prediction(weather)
+        # An isolated target-day weather row does not prove a whole 2-day
+        # interval. Require explicit interval coverage for irregular gaps;
+        # otherwise use unforced drift rather than inventing prior weather.
+        temporal_forcing_covered = True
+        if qualified_weather is not None and abs(gap.dt_days - 1.0) > 1e-12:
+            coverage = weather.get("interval_coverage_days") if isinstance(weather, dict) else None
+            temporal_forcing_covered = (
+                not isinstance(coverage, bool)
+                and isinstance(coverage, (int, float))
+                and math.isfinite(coverage)
+                and math.isclose(float(coverage), gap.dt_days, abs_tol=1e-10)
+            )
+            if not temporal_forcing_covered:
+                qualified_weather = None
         weather_availability = (
             "COMPLETE" if qualified_weather is not None
             else ("PARTIAL" if weather else "MISSING")
@@ -487,6 +523,10 @@ class ZoneKalmanFilter:
                 else "missing_weather_high_uncertainty"
             ),
             "weather_availability": weather_availability,
+            "interval_forcing_coverage_verified": temporal_forcing_covered,
+            "q_temporal_contract": self._last_temporal_contract.provenance(
+                self._last_q_regime, self._last_process_q,
+            ),
             "management_event_evidence": event_dispositions,
             "physical_management_events_applied": 0,
             "event_forcing_status": "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT",
