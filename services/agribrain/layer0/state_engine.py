@@ -20,6 +20,7 @@ from copy import deepcopy
 import hashlib
 import json
 import math
+import os
 
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
 from services.agribrain.layer0.observation_packet import DataStatus
@@ -70,6 +71,8 @@ class Layer0StateEngine:
     def __init__(
         self,
         positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
+        plot_ownership_store: Any = None,
+        principal_provider: Any = None,
     ):
         # Production/staging cannot silently opt out of cryptographic
         # input admission; explicit development mode remains legacy-compatible.
@@ -84,6 +87,9 @@ class Layer0StateEngine:
                 "Mandatory state admission requires a trusted verifier type"
             )
         self._positive_observation_admission_verifier = positive_admission_verifier
+        # Trusted backend infrastructure only; never supplied by packet JSON.
+        self._plot_ownership_store = plot_ownership_store
+        self._principal_provider = principal_provider
         self.__packet_run_capability = object()
         self._has_kalman = False
         try:
@@ -286,6 +292,8 @@ class Layer0StateEngine:
         geometry_hash: str = "",
         geometry_version: Optional[int] = None,
         positive_admission_receipts: Optional[Dict[str, Dict[str, Any]]] = None,
+        tenant_id: str = "",
+        scope_hash: str = "",
     ) -> Layer0StatePackage:
         """Run assimilation from ObservationPacket[] — the canonical entrypoint.
 
@@ -330,10 +338,50 @@ class Layer0StateEngine:
         if signed_inputs_required():
             run_timestamp = datetime.now(timezone.utc)
 
-        # Geometry scope must come from the *caller* rather than borrowing
-        # identity from an arbitrary packet. Missing caller scope remains
-        # explicitly unbound; positive scope/receipt enforcement is a
-        # separate L0-002/L0-004 producer-compatibility gate.
+        # B2B-05: Resolve tenant + exact geometry epoch independently from
+        # the current plot authority store, not from a packet or caller digest.
+        strict_scope = (
+            os.getenv("AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE", "").lower()
+            in ("1", "true", "yes")
+        )
+        scoped_run = strict_scope or bool(tenant_id or scope_hash)
+        verified_scope = None
+
+        def resolve_current_scope():
+            from services.agribrain.layer0.spatial_tenant_contract import (
+                AuthenticatedPrincipal, ScopedPlotRequest, SpatialTenantDenied,
+                authorize_plot_scope,
+            )
+            store = self._plot_ownership_store
+            principal_provider = self._principal_provider
+            if (
+                not isinstance(tenant_id, str) or not tenant_id
+                or not isinstance(scope_hash, str) or not scope_hash
+                or not isinstance(geometry_hash, str) or not geometry_hash
+                or type(geometry_version) is not int or geometry_version <= 0
+                or not callable(getattr(store, "get_active_plot", None))
+                or not callable(principal_provider)
+            ):
+                raise Layer0AdmissionRequiredError("trusted_plot_scope_required")
+            try:
+                principal = principal_provider()
+                if not isinstance(principal, AuthenticatedPrincipal):
+                    raise SpatialTenantDenied("principal_not_authenticated")
+                current = authorize_plot_scope(
+                    principal,
+                    ScopedPlotRequest(
+                        tenant_id, plot_id, geometry_hash, geometry_version,
+                    ),
+                    store.get_active_plot,
+                )
+                if current.scope_hash != scope_hash:
+                    raise SpatialTenantDenied("scope_identity_mismatch")
+                return current
+            except Exception:
+                raise Layer0AdmissionRequiredError("trusted_plot_scope_denied") from None
+
+        if scoped_run:
+            verified_scope = resolve_current_scope()
 
         daily_weather: Dict[str, Dict[str, Any]] = {}
         observations_by_day: Dict[str, Dict[str, List[Any]]] = {}
@@ -352,6 +400,8 @@ class Layer0StateEngine:
             "skipped_observation_nonfinite": 0,
             "skipped_observation_low_effective_quality": 0,
             "skipped_foreign_plot": 0,
+            "skipped_foreign_tenant": 0,
+            "skipped_unverified_spatial_scope": 0,
             "skipped_foreign_geometry": 0,
             "skipped_foreign_geometry_version": 0,
             "skipped_missing_positive_source_grant": 0,
@@ -414,6 +464,42 @@ class Layer0StateEngine:
             packet_plot = getattr(pkt, "plot_id", "") or ""
             packet_geometry = getattr(pkt, "geometry_hash", "") or ""
             packet_version = getattr(pkt, "geometry_version", None)
+
+            # Caller-provided scope strings are NEVER enough. For a scoped
+            # state run a current DB-backed authority has already been checked.
+            # All scoped packets must be bound in-process by the spatial
+            # verification path; raw/deserialized dictionaries are rejected.
+            packet_tenant = getattr(pkt, "tenant_id", "") or ""
+            packet_scope = getattr(pkt, "scope_hash", "") or ""
+            spatial = getattr(pkt, "spatial_provenance", None) or {}
+            if scoped_run:
+                if packet_tenant and packet_tenant != tenant_id:
+                    excluded_counts["skipped_foreign_tenant"] += 1
+                    continue
+                if (
+                    packet_tenant != tenant_id or packet_scope != scope_hash
+                    or not isinstance(spatial, dict)
+                    or spatial.get("tenant_id") != tenant_id
+                    or spatial.get("plot_id") != plot_id
+                    or spatial.get("scope_hash") != scope_hash
+                    or spatial.get("geometry_hash") != geometry_hash
+                    or spatial.get("geometry_version") != geometry_version
+                    or spatial.get("spatial_classification") != "FULL_CONTAINED"
+                    or spatial.get("geometry_support_verified") is not True
+                    or spatial.get("source_qualified") is not False
+                    or spatial.get("eligible_for_state_grant") is not False
+                    or spatial.get("authority") != "spatial_diagnostic_only"
+                    or getattr(pkt, "_spatial_binding_verified", False) is not True
+                    or not isinstance(getattr(pkt, "content_hash", None), str)
+                    or pkt.content_hash != pkt._generate_content_hash()
+                ):
+                    excluded_counts["skipped_unverified_spatial_scope"] += 1
+                    continue
+            elif packet_tenant or packet_scope or spatial:
+                # Unscoped state calls may still process old legacy packets,
+                # but never silently treat scoped/claimed data as legacy input.
+                excluded_counts["skipped_unverified_spatial_scope"] += 1
+                continue
             if packet_plot and packet_plot != plot_id:
                 excluded_counts["skipped_foreign_plot"] += 1
                 continue
@@ -771,8 +857,11 @@ class Layer0StateEngine:
                     "Issuer revocation revision changed during state admission"
                 )
 
-        # Fence both before and after the potentially long state run.
+        # Fence both source revocation and live plot ownership before the
+        # potentially long state run. A changed owner or geometry epoch denies.
         ensure_current_revocation_snapshot()
+        if scoped_run and resolve_current_scope() != verified_scope:
+            raise Layer0AdmissionRequiredError("plot_scope_changed_before_state")
 
         # Build state using the private capability granted only by the
         # packet entrypoint; direct scalar state calls remain unavailable
@@ -799,6 +888,8 @@ class Layer0StateEngine:
         # release a new state root after that revocation. Publishing still
         # requires the separate pilot gate's transactional source check.
         ensure_current_revocation_snapshot()
+        if scoped_run and resolve_current_scope() != verified_scope:
+            raise Layer0AdmissionRequiredError("plot_scope_changed_during_state")
 
         # Attach the source packets to the state package
         state_pkg.all_packets = list(packets)
@@ -807,6 +898,11 @@ class Layer0StateEngine:
         if state_pkg.health_report is None:
             state_pkg.health_report = {}
         state_pkg.health_report["state_packets_excluded_by_status"] = excluded_counts
+        state_pkg.health_report["b2b05_scope_mode"] = (
+            "TRUSTED_ACTIVE_PLOT_SCOPE" if scoped_run else "LEGACY_UNSCOPED"
+        )
+        if scoped_run:
+            state_pkg.health_report["b2b05_scope_hash"] = verified_scope.scope_hash
         state_pkg.health_report["positive_source_admission_mode"] = (
             "MANDATORY_SIGNED_STATE_INPUTS"
             if signed_inputs_required()

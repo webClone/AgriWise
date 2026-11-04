@@ -112,6 +112,13 @@ model Plot {
   soilType   SoilType?
   irrigation IrrigationType?
   geoJson    Json? // Plot boundary polygon
+  // B2B-05 scoped admission epochs. Existing Mongo documents require
+  // explicit trusted backfill before strict-native plot scope is enabled.
+  geometryVersion Int?
+  geometryHash    String?
+  isActive        Boolean @default(true)
+  isRevoked       Boolean @default(false)
+  deletedAt       DateTime?
 
   // [NEW] Enhanced Fields
   perimeter           Float?
