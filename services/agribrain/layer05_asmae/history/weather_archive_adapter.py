@@ -120,6 +120,9 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
         return None
     payload = _as_mapping(outer.get("payload"))
     record = {**outer, **payload}
+    # Admission uses the original outer+payload envelope; flattening first
+    # would erase denied roles carried only by the outer packet.
+    outer_reality = _record_reality(outer)
     variables = _as_mapping(record.get("variable_consensus") or record.get("variables"))
     date = str(_first_non_none(record, "date", "timestamp", "valid_time") or "")[:10]
     if len(date) != 10:
@@ -154,7 +157,7 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
 
     authority = str(record.get("authority") or "")
     reality = _record_reality(record)
-    if reality == "unknown":
+    if reality == "unknown" or reality != outer_reality:
         # Do not permit an unqualified provider 'current' context to
         # enter historical ASMAE weather as observed truth.
         return None

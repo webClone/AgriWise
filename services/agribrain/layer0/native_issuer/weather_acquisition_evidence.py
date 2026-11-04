@@ -412,11 +412,15 @@ class NativeWeatherEvidenceStore:
         
         # Check that base URL of response matches target normalized endpoint
         parts_resp = urlsplit(resp_url)
+        if (
+            parts_resp.scheme.lower() != "https"
+            or parts_resp.username is not None or parts_resp.password is not None
+            or parts_resp.fragment
+        ):
+            raise NativeWeatherEvidenceError("weather_response_origin_mismatch")
         normalized_resp_base = f"https://{parts_resp.netloc.lower()}{parts_resp.path.rstrip('/')}"
         if normalized_resp_base != normalized_endpoint:
-            raise NativeWeatherEvidenceError(
-                f"response URL mismatch: {normalized_resp_base} vs expected endpoint {normalized_endpoint}"
-            )
+            raise NativeWeatherEvidenceError("weather_response_origin_mismatch")
 
         # 3. Transmitted Request Wire Inspection
         req = getattr(response, "request", None)
@@ -428,11 +432,15 @@ class NativeWeatherEvidenceStore:
             raise NativeWeatherEvidenceError("prepared request missing valid URL")
 
         parts_req = urlsplit(req_url)
+        if (
+            parts_req.scheme.lower() != "https"
+            or parts_req.username is not None or parts_req.password is not None
+            or parts_req.fragment
+        ):
+            raise NativeWeatherEvidenceError("weather_prepared_request_origin_mismatch")
         normalized_req_base = f"https://{parts_req.netloc.lower()}{parts_req.path.rstrip('/')}"
         if normalized_req_base != normalized_endpoint:
-            raise NativeWeatherEvidenceError(
-                f"prepared request endpoint mismatch: {normalized_req_base} vs {normalized_endpoint}"
-            )
+            raise NativeWeatherEvidenceError("weather_prepared_request_origin_mismatch")
 
         # Extract and sanitize query parameters actually transmitted on the wire
         raw_transmitted_qsl = parse_qsl(parts_req.query, keep_blank_values=True)

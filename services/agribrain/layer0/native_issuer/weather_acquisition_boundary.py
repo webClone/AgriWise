@@ -58,8 +58,10 @@ def execute_and_capture_weather_get(
             timeout=timeout,
             allow_redirects=False,
         )
-    except requests.RequestException as exc:
-        raise NativeWeatherEvidenceError(f"weather network request failed: {exc}") from exc
+    except requests.RequestException:
+        # Provider exception strings commonly contain the full URL, including
+        # query credentials. Do not propagate them into logs or API errors.
+        raise NativeWeatherEvidenceError("weather_network_request_failed") from None
 
     return store.capture_http_response(
         response=resp,
