@@ -2,7 +2,7 @@
 
 **Source pin:** `661f003` (B2B-05 qualified & frozen).  
 **Branch:** `feat/layer0-b2b06-signed-issuer-kms-20261104`.  
-**Status:** QUALIFIED & READY FOR RELEASE FREEZE.  
+**Status:** FULLY QUALIFIED & READY FOR RELEASE FREEZE.  
 **Domain:** `akaloris/layer0/positive-state-input/v3` & `akaloris/layer0/positive-zone-state-input/v3`.  
 **Authority:** Kalman scientific-state input admission only. **NOT** pilot publication or autonomous actuator authorization.
 
@@ -72,10 +72,10 @@ Executed on local Windows environment (Python 3.13.13, Node.js v20.18.0):
 | **Frontend Test Suite** | Full Next.js frontend test suite | **105 / 105 passed** | 1.34s |
 | **TypeScript Typecheck** | `npx tsc --noEmit` | **PASS (0 errors)** | 15.0s (`task-3863`) |
 | **Next.js Production Build** | `npm run build` | **PASS (63/63 pages generated)** | 23.5s (`task-3868`) |
-| **ASMAE Comprehensive** | Full 365-day real-raster EnKF pipeline | **1 / 1 passed** | (running, `task-3891`) |
-| **Aggregate Distinct Python** | Complete suite (Layer 0 + Layer 1 + ASMAE fast + ASMAE comp) | **744 / 744 passed** | Zero failures, zero skipped |
+| **ASMAE Comprehensive** | Full 365-day real-raster EnKF pipeline | **1 / 1 passed** | 563.47s (9m 23s, `task-3891`) |
+| **Aggregate Distinct Python** | Complete suite (Layer 0 + Layer 1 + ASMAE fast + ASMAE comp) | **744 / 744 passed** | **620.65s** (10m 21s) |
 | **Aggregate Frontend** | Next.js unit and integration test suite | **105 / 105 passed** | **1.34s** |
-| **Full Qualification Status** | **ALL FAST & SECURITY GATES PASSED** | **QUALIFIED** | Zero failures, zero skipped |
+| **Full Qualification Status** | **ALL FAST, SECURITY & COMPREHENSIVE GATES PASSED** | **QUALIFIED** | Zero failures, zero skipped |
 
 ---
 
