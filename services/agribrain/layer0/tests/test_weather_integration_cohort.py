@@ -394,3 +394,105 @@ def test_asmae_normalization_rejects_arbitrary_acquisition_id(monkeypatch, tmp_p
     assert forged_id not in archive.get("weather_native_evidence_ids", [])
     assert forged_id not in archive.get("weather_evidence_ids", [])
     assert archive.get("native_evidence_verified") is False
+
+
+
+def test_asmae_normalization_rejects_altered_precipitation_with_valid_receipt(monkeypatch, tmp_path):
+    """W4-09B: Valid CAS receipt cannot verify a record with altered precipitation."""
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+    store = NativeWeatherEvidenceStore(tmp_path)
+    receipt = capture(store)
+
+    # Valid CAS receipt covers 2026-11-01 with precipitation 0.0, but record claims 999.0 mm
+    altered_record = {
+        "date": "2026-11-01",
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "native_acquisition_ids": [receipt.acquisition_id],
+        "precipitation_mm": 999.0,
+        "temp_min_c": 5.0,
+        "temp_max_c": 15.0,
+        "et0_mm": 2.0,
+    }
+
+    archive = normalize_weather_archive([altered_record])
+    assert receipt.acquisition_id not in archive.get("weather_native_evidence_ids", [])
+    assert archive.get("native_evidence_verified") is False
+
+
+def test_asmae_normalization_rejects_mismatched_date_with_valid_receipt(monkeypatch, tmp_path):
+    """W4-09B: Valid CAS receipt cannot verify a record for a date outside its interval."""
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+    store = NativeWeatherEvidenceStore(tmp_path)
+    q = params()
+    q["start_date"] = "2026-11-01"
+    q["end_date"] = "2026-11-01"
+    p = payload()
+    p["daily"]["time"] = ["2026-11-01"]
+    p["daily"]["precipitation_sum"] = [0.0]
+    p["daily"]["temperature_2m_min"] = [5.0]
+    p["daily"]["temperature_2m_max"] = [15.0]
+    p["daily"]["et0_fao_evapotranspiration"] = [2.0]
+    receipt = capture(store, data=p, query=q)
+
+    # Valid CAS receipt covers ONLY 2026-11-01, but record claims 2026-11-02
+    mismatched_date_record = {
+        "date": "2026-11-02",
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "native_acquisition_ids": [receipt.acquisition_id],
+        "precipitation_mm": 0.0,
+        "temp_min_c": 5.0,
+        "temp_max_c": 15.0,
+        "et0_mm": 2.0,
+    }
+
+    archive = normalize_weather_archive([mismatched_date_record])
+    assert receipt.acquisition_id not in archive.get("weather_native_evidence_ids", [])
+    assert archive.get("native_evidence_verified") is False
+
+
+def test_asmae_normalization_rejects_unrelated_receipt_substitution(monkeypatch, tmp_path):
+    """W4-09B: Valid CAS receipt cannot verify an unrelated record with conflicting values."""
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+    store = NativeWeatherEvidenceStore(tmp_path)
+    receipt = capture(store)
+
+    # Valid CAS receipt has temps 5.0 and 15.0, but unrelated record claims 25.0 and 35.0
+    unrelated_record = {
+        "date": "2026-11-01",
+        "data_kind": "historical_reanalysis",
+        "source_role": "REANALYSIS_MODEL",
+        "native_acquisition_ids": [receipt.acquisition_id],
+        "precipitation_mm": 0.0,
+        "temp_min_c": 25.0,
+        "temp_max_c": 35.0,
+        "et0_mm": 2.0,
+    }
+
+    archive = normalize_weather_archive([unrelated_record])
+    assert receipt.acquisition_id not in archive.get("weather_native_evidence_ids", [])
+    assert archive.get("native_evidence_verified") is False
+
+
+def test_asmae_normalization_rejects_wrong_product_role_with_valid_receipt(monkeypatch, tmp_path):
+    """W4-09B: Valid CAS receipt cannot verify a record asserting a contradictory role."""
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+    store = NativeWeatherEvidenceStore(tmp_path)
+    receipt = capture(store)  # OPEN_METEO_HISTORICAL_REANALYSIS
+
+    # Record claims forecast reality/role with a historical reanalysis receipt
+    wrong_role_record = {
+        "date": "2026-11-01",
+        "data_kind": "forecast",
+        "source_role": "FORECAST_MODEL",
+        "native_acquisition_ids": [receipt.acquisition_id],
+        "precipitation_mm": 0.0,
+        "temp_min_c": 5.0,
+        "temp_max_c": 15.0,
+        "et0_mm": 2.0,
+    }
+
+    archive = normalize_weather_archive([wrong_role_record])
+    assert receipt.acquisition_id not in archive.get("weather_native_evidence_ids", [])
+    assert archive.get("native_evidence_verified") is False

@@ -237,6 +237,16 @@ class DataRequestBroker:
             logger.warning("[BROKER] No fetch function for source: %s", source)
             return None
 
+        # W4-07: In strict native weather mode, check evidence root at broker entry BEFORE storage lookup
+        strict_native = os.getenv("AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE", "").lower() in ("1", "true", "yes")
+        weather_root = (
+            os.getenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", "").strip()
+            or os.getenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", "").strip()
+        )
+        if source == "open_meteo_archive" and strict_native and not weather_root:
+            logger.warning("[BROKER] Strict native weather mode enabled but evidence root missing at entry")
+            return None
+
         # Compute a deterministic param_hash from extra kwargs to differentiate cache keys
         param_hash = ""
         if kwargs:

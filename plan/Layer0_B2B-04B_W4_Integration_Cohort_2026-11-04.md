@@ -2,9 +2,9 @@
 
 **Starting revision:** `e4dfe2ffe3efefcfefa69e5462b656852da2445a`  
 **Branch:** `fix/layer0-weather-integration-cohort-20261104`  
-**Status:** VERIFIED & QUALIFIED (644/644 passed)
+**Status:** VERIFIED & ACCEPTED (648/648 passed)
 
-This cohort addresses the independent W4-01 through W4-09 weather findings.
+This cohort addresses the independent W4-01 through W4-09B weather findings.
 It does not modify the master architecture monograph, frozen historical
 `findings/layer0.md`, the scientific-pilot PR #9, or `main`.
 Previously accepted S1/S2 producer/operator/tile contracts are not reopened.
@@ -50,14 +50,21 @@ stale legacy broker caches must refresh or return no attested native output.
   different temporal windows produce distinct batch keys, preventing cross-window
   batch consolidation and result substitution.
 - **W4-07:** Strict native mode (`AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE=1`)
-  is enforced at broker entry, cache-read, and return boundaries. An existing
-  legacy cache hit cannot bypass native verification when the evidence root is absent.
+  is enforced at broker entry (prior to storage queries), cache-read, and return boundaries.
+  An existing legacy cache hit cannot bypass native verification when the evidence root is absent.
 - **W4-08:** Strict native mode is enforced at direct environmental ingestion.
   When enabled, `EnvironmentalEngine.process()` rejects and quarantines unattested
   weather inputs that lack verifiable native CAS acquisition records.
 - **W4-09:** ASMAE archive adapter independently verifies claimed native acquisition
   IDs against CAS manifests before export. Directly submitted arbitrary IDs are
   discarded from native evidence exports and fall back to synthetic content hashes.
+- **W4-09B:** Archive native provenance reconciliation binds claimed CAS acquisitions
+  to the specific validated record. Reconciles scientific screening (`WeatherScreenStatus.SCREENED_NATIVE_QA`),
+  valid date intervals (`req_start <= record_date <= req_end`), exact presence in daily times,
+  product role consistency (rejects forecast receipts on reanalysis records and vice-versa),
+  and physical values (precipitation, $T_{min}$, $T_{max}$, $ET_0$). Valid receipts attached
+  to mismatched dates, altered precipitation, or wrong product roles are rejected from native
+  evidence export (`native_evidence_verified=False`).
 
 ## Exact-Head Software Qualification Receipt
 
@@ -65,11 +72,11 @@ Executed locally on Windows environment (Python 3.13.13, pytest 9.0.3, pluggy 1.
 
 | Test Suite | Scope | Result | Duration | Task Receipt |
 | :--- | :--- | :--- | :--- | :--- |
-| **Layer 0 Complete** | Full Layer 0 unit and integration suite | **539 / 539 passed** | 16.90s | `task-2651` |
-| *W4 Integration Cohort* | Broker-to-archive, schema, unit, transport, W4-06..09 counterexamples | *28 / 28 passed* | 1.75s | `test_weather_integration_cohort.py` |
+| **Layer 0 Complete** | Full Layer 0 unit and integration suite | **543 / 543 passed** | 22.33s | `task-2737` |
+| *W4 Integration Cohort* | Broker-to-archive, schema, unit, transport, W4-06..09B | *32 / 32 passed* | 2.32s | `test_weather_integration_cohort.py` |
 | *Native Acquisition* | Boundary, CAS, replay, manifest reconciliation | *27 / 27 passed* | 1.06s | `test_weather_native_acquisition.py` |
 | *Role Isolation* | Descriptive classification & archive admission | *58 / 58 passed* | 0.54s | `test_weather_source_role_isolation.py` |
-| **Layer 1 Fusion** | Layer 1 feature fusion & temporal alignment | **21 / 21 passed** | 0.67s | Synchronous |
-| **ASMAE Fast** | Archive adapter, evidence ingestion, EnKF fast | **83 / 83 passed** (3 subtests) | 27.69s | `task-2657` |
-| **ASMAE Comprehensive** | Full 365-day real-raster Sentinel-1/2, ERA5, EnKF | **1 / 1 passed** | 432.21s (7m 12s) | `task-2661` |
-| **Aggregate Distinct Total** | **Zero failures, zero skipped** | **644 / 644 passed** | **477.47s** (7m 57s) | Complete Exact-Head Suite |
+| **Layer 1 Fusion** | Layer 1 feature fusion & temporal alignment | **21 / 21 passed** | 0.62s | Synchronous |
+| **ASMAE Fast** | Archive adapter, evidence ingestion, EnKF fast | **83 / 83 passed** (3 subtests) | 35.55s | `task-2743` |
+| **ASMAE Comprehensive** | Full 365-day real-raster Sentinel-1/2, ERA5, EnKF | **1 / 1 passed** | 572.61s (9m 32s) | `task-2747` |
+| **Aggregate Distinct Total** | **Zero failures, zero skipped** | **648 / 648 passed** | **631.11s** (10m 31s) | Complete Exact-Head Suite |

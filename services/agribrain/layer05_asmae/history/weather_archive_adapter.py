@@ -16,7 +16,14 @@ from typing import Any, Dict, List, Optional
 import os
 
 
-def _is_verified_native_acquisition(acq_id: str) -> bool:
+def _reconcile_record_with_native_acquisition(
+    acq_id: str,
+    record_date: str,
+    record_values: Mapping[str, Any],
+    record_reality: str,
+    record_role: str = "",
+) -> bool:
+    """Independently verify receipt screening and reconcile date, role, and physical values with stored CAS payload."""
     if not acq_id or not isinstance(acq_id, str):
         return False
     if acq_id.startswith("weather:"):
@@ -27,13 +34,96 @@ def _is_verified_native_acquisition(acq_id: str) -> bool:
     )
     if not root:
         return False
+
     try:
         from services.agribrain.layer0.native_issuer.weather_acquisition_evidence import (
             NativeWeatherEvidenceStore,
         )
+        from services.agribrain.layer0.native_issuer.weather_qualifier import (
+            screen_native_weather_receipt,
+            WeatherScreenStatus,
+        )
+        from services.agribrain.layer0.native_issuer.weather_product_registry import (
+            WeatherProductId,
+        )
+
         store = NativeWeatherEvidenceStore(root)
         receipt = store.verified_cache_receipt(acq_id)
-        return bool(receipt and receipt.response_sha256)
+        if not receipt or not receipt.response_sha256:
+            return False
+
+        # 1. Scientific Screening Verification
+        screen = screen_native_weather_receipt(receipt, store)
+        if screen.status is not WeatherScreenStatus.SCREENED_NATIVE_QA:
+            return False
+
+        # 2. Product & Role Consistency
+        if record_reality == "reanalysis_archive":
+            if receipt.product_id != WeatherProductId.OPEN_METEO_HISTORICAL_REANALYSIS.value:
+                return False
+            if record_role and record_role not in ("REANALYSIS_MODEL", "HISTORICAL_REANALYSIS"):
+                return False
+        elif record_reality == "forecast":
+            if receipt.product_id not in (
+                WeatherProductId.OPEN_METEO_LIVE_FORECAST.value,
+                WeatherProductId.OPENWEATHER_ONECALL_3_0.value,
+            ):
+                return False
+            if record_role and record_role != "FORECAST_MODEL":
+                return False
+
+        # 3. Date Reconciliation
+        req_start, req_end = receipt.valid_interval
+        if req_start and req_end:
+            if not (req_start <= record_date <= req_end):
+                return False
+
+        # 4. Load raw CAS payload and reconcile physical values for record_date
+        raw_bytes = store.read_response_bytes(receipt.object_id)
+        payload = json.loads(raw_bytes.decode("utf-8"))
+        if not isinstance(payload, dict):
+            return False
+
+        daily = payload.get("daily")
+        if not isinstance(daily, dict):
+            return False
+
+        times = daily.get("time")
+        if not isinstance(times, list) or record_date not in times:
+            return False
+
+        idx = times.index(record_date)
+
+        # 5. Value Reconciliation: record's physical measurements must match CAS payload
+        p_sums = daily.get("precipitation_sum")
+        rec_precip = record_values.get("precipitation_mm")
+        if rec_precip is not None and isinstance(p_sums, list) and idx < len(p_sums):
+            if p_sums[idx] is not None:
+                if abs(float(rec_precip) - float(p_sums[idx])) > 1e-3:
+                    return False
+
+        t_mins = daily.get("temperature_2m_min")
+        rec_tmin = record_values.get("temp_min_c")
+        if rec_tmin is not None and isinstance(t_mins, list) and idx < len(t_mins):
+            if t_mins[idx] is not None:
+                if abs(float(rec_tmin) - float(t_mins[idx])) > 1e-3:
+                    return False
+
+        t_maxs = daily.get("temperature_2m_max")
+        rec_tmax = record_values.get("temp_max_c")
+        if rec_tmax is not None and isinstance(t_maxs, list) and idx < len(t_maxs):
+            if t_maxs[idx] is not None:
+                if abs(float(rec_tmax) - float(t_maxs[idx])) > 1e-3:
+                    return False
+
+        et0s = daily.get("et0_fao_evapotranspiration")
+        rec_et0 = record_values.get("et0_mm")
+        if rec_et0 is not None and isinstance(et0s, list) and idx < len(et0s):
+            if et0s[idx] is not None:
+                if abs(float(rec_et0) - float(et0s[idx])) > 1e-3:
+                    return False
+
+        return True
     except Exception:
         return False
 
@@ -171,10 +261,22 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
         if values[key] is None:
             values[key] = _finite_float(_consensus_value(variables, *aliases))
 
+    source_role = str(_first_non_none(record, "source_role", "role", "data_role") or "").upper()
+    reality = _record_reality(record)
+    if reality == "unknown" or reality != outer_reality:
+        # Do not permit an unqualified provider 'current' context to
+        # enter historical ASMAE weather as observed truth.
+        return None
+
     native_ids = record.get("native_acquisition_ids") or []
     if isinstance(native_ids, str):
         native_ids = [native_ids]
-    verified_native_ids = [str(x) for x in native_ids if _is_verified_native_acquisition(str(x))]
+    verified_native_ids = [
+        str(x) for x in native_ids
+        if _reconcile_record_with_native_acquisition(
+            str(x), date, values, reality, source_role
+        )
+    ]
 
     raw_ev_ids = record.get("evidence_ids")
     if isinstance(raw_ev_ids, str):
@@ -186,15 +288,12 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
     final_evidence_ids = list(verified_native_ids)
     if not final_evidence_ids:
         for eid in raw_ev_ids:
-            if _is_verified_native_acquisition(str(eid)):
+            if _reconcile_record_with_native_acquisition(
+                str(eid), date, values, reality, source_role
+            ):
                 final_evidence_ids.append(str(eid))
 
     authority = str(record.get("authority") or "")
-    reality = _record_reality(record)
-    if reality == "unknown" or reality != outer_reality:
-        # Do not permit an unqualified provider 'current' context to
-        # enter historical ASMAE weather as observed truth.
-        return None
 
     synthetic_fallback = "weather:" + stable_value_hash({"date": date, "reality": reality, **values})
     if not final_evidence_ids:
@@ -204,11 +303,19 @@ def _normalize_record(raw: Any) -> Optional[Dict[str, Any]]:
             clean_raw = [str(eid) for eid in raw_ev_ids if not str(eid).startswith("native_")]
             final_evidence_ids = clean_raw if clean_raw else [synthetic_fallback]
 
+    reconciled_native = [
+        str(x) for x in final_evidence_ids
+        if _reconcile_record_with_native_acquisition(
+            str(x), date, values, reality, source_role
+        )
+    ]
+
     normalized = {
         **values,
         "date": date,
         "source_reality": reality,
         "evidence_ids": final_evidence_ids,
+        "native_evidence_ids": reconciled_native,
         "authority_refs": [authority] if authority else [],
         "overall_confidence": _finite_float(record.get("overall_confidence")),
     }
@@ -282,7 +389,7 @@ def normalize_weather_archive(raw_weather: Any) -> Dict[str, Any]:
 
     evidence_ids = sorted({evidence_id for row in normalized for evidence_id in row.get("evidence_ids", [])})
     verified_native_ids = sorted({
-        evidence_id for evidence_id in evidence_ids if _is_verified_native_acquisition(evidence_id)
+        acq_id for row in normalized for acq_id in row.get("native_evidence_ids", [])
     })
     hash_payload = {"historical": historical, "forecast": forecast, "evidence_ids": evidence_ids}
     return {
