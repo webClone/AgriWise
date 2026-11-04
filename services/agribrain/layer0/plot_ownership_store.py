@@ -148,13 +148,15 @@ class PrismaPlotOwnershipStore:
                 or not isinstance(geometry, Mapping)
             ):
                 return None
-            computed = canonical_geometry_hash(geometry)
+            from .spatial_tenant_contract import normalize_plot_polygon
+            canonical_polygon = normalize_plot_polygon(geometry)
+            computed = canonical_geometry_hash(canonical_polygon)
             if persisted_hash != computed:
                 return None
             return PlotOwnershipRecord(
                 tenant_id=str(user_id), plot_id=plot_id,
                 geometry_version=version, geometry_hash=computed,
-                polygon_geojson=geometry,
+                polygon_geojson=canonical_polygon,
             )
         except Exception:
             # Never fall back to request-supplied geometry or previous ownership.

@@ -124,9 +124,27 @@ def _geometry_json(geometry: Any) -> str:
     )
 
 
+def normalize_plot_polygon(geojson: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve stored GeoJSON Feature or geometry into canonical WGS84 polygon.
+
+    Explicit foreign CRS declarations fail closed. Geometry hash deliberately
+    excludes unrelated Feature properties while retaining the original
+    GeoJSON container in the application database.
+    """
+    if not isinstance(geojson, Mapping) or geojson.get("crs") is not None:
+        raise SpatialTenantDenied("invalid_or_foreign_geometry_crs")
+    candidate = geojson
+    if geojson.get("type") == "Feature":
+        candidate = geojson.get("geometry")
+    if not isinstance(candidate, Mapping) or candidate.get("crs") is not None:
+        raise SpatialTenantDenied("invalid_or_foreign_geometry_crs")
+    geom = _validate_geometry(candidate)
+    return json.loads(_geometry_json(geom))
+
+
 def canonical_geometry_hash(polygon_geojson: Mapping[str, Any]) -> str:
     """Stable digest of canonical stored geometry; NOT a signature/ownership proof."""
-    geom = _validate_geometry(polygon_geojson)
+    geom = _validate_geometry(normalize_plot_polygon(polygon_geojson))
     return hashlib.sha256(
         (CONTRACT_VERSION + "\x00" + _geometry_json(geom)).encode("utf-8")
     ).hexdigest()
