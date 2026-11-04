@@ -479,7 +479,7 @@ class DataRequestBroker:
                 )
                 result = self._storage.get_or_fetch(
                     source=source,
-                    plot_id=plot_id,
+                    plot_id=storage_plot_id,
                     lat=lat,
                     lng=lng,
                     fetch_fn=guarded_fetch,
@@ -522,7 +522,7 @@ class DataRequestBroker:
             )
             candidate = self._storage.get_or_fetch(
                 source=source,
-                plot_id=plot_id,
+                plot_id=storage_plot_id,
                 lat=lat,
                 lng=lng,
                 fetch_fn=guarded_fetch,
