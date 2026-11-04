@@ -460,6 +460,23 @@ class NativeWeatherEvidenceStore:
             else:
                 transmitted_dict[clean_k] = parsed_v
 
+        # The request and response must identify the same wire query. No
+        # redirect history does not by itself prove query identity.
+        response_qsl = parse_qsl(parts_resp.query, keep_blank_values=True)
+        response_params: dict[str, Any] = {}
+        for k, v in response_qsl:
+            key = k.lower().strip().replace("-", "_")
+            if key in _FORBIDDEN_QUERY_KEYS:
+                continue
+            value = _parse_query_val(v)
+            if key in response_params:
+                prior = response_params[key]
+                response_params[key] = prior + [value] if isinstance(prior, list) else [prior, value]
+            else:
+                response_params[key] = value
+        if not _canonical_params_equal(response_params, transmitted_dict):
+            raise NativeWeatherEvidenceError("weather_response_request_query_mismatch")
+
         # Clean caller query_params and verify exact equivalence with transmitted parameters
         clean_params = _clean_query_params(query_params)
         if not _canonical_params_equal(clean_params, transmitted_dict):

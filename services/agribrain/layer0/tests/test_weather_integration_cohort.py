@@ -221,3 +221,61 @@ def test_provider_exception_message_never_exposes_api_key(monkeypatch, tmp_path)
 def test_missing_precipitation_cannot_generate_zero_rain_forcing():
     with pytest.raises(ValueError, match="weather_precipitation_unavailable_for_process_forcing"):
         compute_daily_forcing(WeatherConsensusDaily(date="2026-11-01"))
+
+
+def test_broker_revalidates_stale_legacy_cache_against_native_cas(monkeypatch, tmp_path):
+    """Normal DataRequestBroker.get must not return a stale unattributed weather cache."""
+    from services.agribrain.layer0.data_gateway.request_broker import DataRequestBroker
+    from services.agribrain.layer0.data_gateway import request_broker
+
+    monkeypatch.setenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", str(tmp_path))
+    captured = []
+    def fake_get(url, params, headers, timeout, allow_redirects):
+        captured.append(1)
+        return wire_response(payload(), params)
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(request_broker.external_provider_circuit, "before_request", lambda source: None)
+    monkeypatch.setattr(request_broker.external_provider_circuit, "record_success", lambda source: None)
+
+    class Cache:
+        calls = []
+        result = {"daily": payload()["daily"], "native_capture_status": "unattested_legacy"}
+        def get_or_fetch(self, *, source, plot_id, lat, lng, fetch_fn,
+                         force_refresh=False, context=None, param_hash="",
+                         candidate_validator=None):
+            self.calls.append(force_refresh)
+            if force_refresh:
+                updated = fetch_fn(lat, lng)
+                if candidate_validator and not candidate_validator(updated):
+                    return None
+                self.result = updated
+            return self.result
+
+    broker = DataRequestBroker.__new__(DataRequestBroker)
+    broker._storage = Cache()
+    broker._consolidator = SimpleNamespace(should_consolidate=lambda src: False)
+    result = broker.get(
+        "open_meteo_archive", "weather-plot", 35.0, 3.0,
+        start_date="2026-11-01", end_date="2026-11-03",
+    )
+    assert broker._storage.calls == [False, True]
+    assert captured == [1]
+    assert result["native_capture_status"] == "screened_native_qa"
+    # A later normal cache read must verify CAS and must not re-fetch.
+    cached = broker.get(
+        "open_meteo_archive", "weather-plot", 35.0, 3.0,
+        start_date="2026-11-01", end_date="2026-11-03",
+    )
+    assert cached["native_acquisition_id"] == result["native_acquisition_id"]
+    assert captured == [1]
+
+
+def test_requested_noncanonical_units_are_rejected(tmp_path):
+    store = NativeWeatherEvidenceStore(tmp_path)
+    q = params()
+    q["precipitation_unit"] = "inch"
+    p = payload()
+    receipt = capture(store, p, q)
+    screen = screen_native_weather_receipt(receipt, store)
+    assert screen.status is WeatherScreenStatus.REJECTED
+    assert screen.reason == "unsupported_requested_weather_units"
