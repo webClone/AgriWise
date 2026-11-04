@@ -77,11 +77,21 @@ class Layer0StateEngine:
         # Production/staging cannot silently opt out of cryptographic
         # input admission; explicit development mode remains legacy-compatible.
         require_trusted_verifier(positive_admission_verifier)
+        allowed_verifiers = (PositiveObservationAdmissionVerifier,)
+        try:
+            from services.agribrain.layer0.v3_kms_signed_issuer import V3KmsGrantVerifier
+            from services.agribrain.layer0.v3_state_admission import UnifiedAdmissionVerifier
+            allowed_verifiers = (
+                PositiveObservationAdmissionVerifier,
+                V3KmsGrantVerifier,
+                UnifiedAdmissionVerifier,
+            )
+        except ImportError:
+            pass
+
         if (
             signed_inputs_required()
-            and not isinstance(
-                positive_admission_verifier, PositiveObservationAdmissionVerifier
-            )
+            and not isinstance(positive_admission_verifier, allowed_verifiers)
         ):
             raise Layer0AdmissionRequiredError(
                 "Mandatory state admission requires a trusted verifier type"
