@@ -58,6 +58,20 @@ A complete weather provider grant will require an independently retained provide
 - `weather_archive_adapter.py` does not classify `current` API/model context as `observed_archive`; unqualified current rows and rejected rows are dropped from historical ASMAE archives rather than acquiring apparent observational authority.
 - `create_weak_kalman_observations()` excludes `current` model contexts. Only `historical_reanalysis` may produce the existing bounded **modelled** weak soil moisture observations under the legacy low-reliability contract; this is not an issuer grant or a verified physical moisture measurement. Reanalysis source attestation itself is still missing.
 
+### D. Fail-closed unverified weather-to-archive classification
+
+- `wrappers.py`: Default classification for unverified/unknown roles is strictly `rec_status="unverified"`, never `observed`. Declaring `data_status="observed"` without an authentic observation role (`HISTORICAL_OBSERVATION`, `OBSERVED_STATION`) fails closed to `unverified`.
+- `weather_archive_adapter.py`: A record with unverified/unknown source role, even if manually asserting `data_status="observed"` by bypassing the engine, returns `reality="unknown"` and is excluded from historical ASMAE archives.
+
+### E. Duplicate provider records on same date fail closed
+
+- `engine.py`: Duplicate records for the same provider and date are inspected. If they have conflicting roles, data kinds, or values, the day is marked conflicted (`__conflict__`), preventing silent overwrite.
+- `consensus.py`: Sequence-input handling in `build_daily_consensus()` detects same-provider role conflicts directly and sets `source_role="REJECTED"`, `data_kind="unqualified"`, and flag `DUPLICATE_PROVIDER_ROLE_CONFLICT`, returning empty `variable_consensus`.
+
+### F. Historical weather completeness calculated from eligible historical dates
+
+- `qa.py`: The numerator in historical completeness evaluates only eligible historical dates (`HISTORICAL_CONTEXT_ROLES` and consistent roles) against the explicit expected historical window (`historical_days`), and temporal completeness evaluates eligible operational dates against total window. Current provider snapshots never count in the numerator, eliminating artificial completeness inflation.
+
 ## 4. Counterexample regression suite
 
 `services/agribrain/layer0/tests/test_weather_source_role_isolation.py` exercises:
@@ -70,6 +84,13 @@ A complete weather provider grant will require an independently retained provide
 - A current provider context manually inserted downstream stays **estimated** in Layer 0 wrapper and is **not an observed weather archive** in ASMAE.
 - Open-Meteo labelled historical reanalysis is modelled, never a verified station; current Open-Meteo soil moisture cannot become a weak Kalman observation.
 - Weather QA marks current-only/forecast-only historical weather unusable.
+- Direct wrapper call with unverified role or unverified `data_status='observed'` fails closed to `unverified`.
+- Direct ASMAE archive adapter call with unverified role or missing role asserting observed is rejected.
+- Same-provider same-day conflicting roles fail closed in `engine._build_consensus()` and `build_daily_consensus()`.
+- Same-provider same-day conflicting values fail closed.
+- Same-provider same-day identical records pass idempotently.
+- Historical completeness excludes current-only days from numerator.
+- Current-only day cannot mask missing historical day in QA completeness.
 
 Exact new-head commands:
 

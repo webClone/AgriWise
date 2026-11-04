@@ -312,11 +312,35 @@ class EnvironmentalEngine:
         """Group records by date, separate forecast from historical, build consensus."""
         from collections import defaultdict
 
-        # Group by date
+        # Group by date with duplicate provider detection
         by_date: Dict[str, Dict[str, WeatherDailyRecord]] = defaultdict(dict)
+        conflicted_days: set[str] = set()
+
         for rec in records:
-            if rec.date and rec.data_kind != "forecast":
-                by_date[rec.date][rec.provider] = rec
+            if not rec.date or rec.data_kind == "forecast":
+                continue
+            day_providers = by_date[rec.date]
+            if rec.provider in day_providers:
+                existing = day_providers[rec.provider]
+                if (
+                    existing.data_kind != rec.data_kind
+                    or existing.source_role != rec.source_role
+                    or existing != rec
+                ):
+                    conflicted_days.add(rec.date)
+            else:
+                day_providers[rec.provider] = rec
+
+        # Fail closed on any date where incompatible duplicate records occurred
+        for d in conflicted_days:
+            by_date[d] = {
+                "__conflict__": WeatherDailyRecord(
+                    date=d,
+                    provider="__conflict__",
+                    data_kind="unqualified",
+                    source_role="REJECTED",
+                )
+            }
 
         consensus_list: List[WeatherConsensusDaily] = []
         for date in sorted(by_date.keys()):

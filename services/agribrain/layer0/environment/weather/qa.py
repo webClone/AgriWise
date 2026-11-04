@@ -25,6 +25,7 @@ def evaluate_weather_qa(
         return {
             "provider_count": 0,
             "temporal_completeness": 0.0,
+            "historical_completeness": 0.0,
             "has_et0": False,
             "has_soil_moisture": False,
             "flags": ["NO_WEATHER_DATA"],
@@ -34,11 +35,38 @@ def evaluate_weather_qa(
     # Provider availability
     providers = set(r.provider for r in timeseries.daily_records)
 
-    # Temporal completeness
-    dates = sorted(set(r.date for r in timeseries.daily_records if r.date))
-    temporal_completeness = len(dates) / max(
-        timeseries.historical_days + timeseries.forecast_days, 1
-    )
+    # Temporal and historical completeness
+    eligible_historical_dates = sorted(set(
+        r.date for r in timeseries.daily_records
+        if r.date
+        and role_for_data_kind(getattr(r, "data_kind", None)) in HISTORICAL_CONTEXT_ROLES
+        and record_role_is_consistent(r)
+    ))
+    eligible_forecast_dates = sorted(set(
+        r.date for r in timeseries.daily_records
+        if r.date
+        and role_for_data_kind(getattr(r, "data_kind", None)) in FORECAST_ROLES
+        and record_role_is_consistent(r)
+    ))
+
+    expected_historical = timeseries.historical_days
+    expected_forecast = timeseries.forecast_days
+    expected_total = expected_historical + expected_forecast
+
+    if expected_historical > 0:
+        historical_completeness = min(1.0, len(eligible_historical_dates) / expected_historical)
+    elif eligible_historical_dates:
+        historical_completeness = 1.0
+    else:
+        historical_completeness = 0.0
+
+    eligible_dates = set(eligible_historical_dates) | set(eligible_forecast_dates)
+    if expected_total > 0:
+        temporal_completeness = min(1.0, len(eligible_dates) / expected_total)
+    elif eligible_dates:
+        temporal_completeness = min(1.0, len(eligible_dates) / max(len(eligible_dates), 1))
+    else:
+        temporal_completeness = 0.0
 
     # Check for ET₀
     has_et0 = any(
@@ -75,7 +103,7 @@ def evaluate_weather_qa(
         quality = "unusable"
     elif "MIXED_DATA_KINDS" in flags:
         quality = "degraded"
-    if temporal_completeness < 0.5:
+    if historical_completeness < 0.5 or temporal_completeness < 0.5:
         if quality != "unusable":
             quality = "degraded"
         flags.append("LOW_TEMPORAL_COMPLETENESS")
@@ -86,6 +114,7 @@ def evaluate_weather_qa(
         "provider_count": len(providers),
         "providers": sorted(providers),
         "temporal_completeness": round(temporal_completeness, 4),
+        "historical_completeness": round(historical_completeness, 4),
         "has_et0": has_et0,
         "has_soil_moisture": has_soil_moisture,
         "data_kinds": sorted(data_kinds),

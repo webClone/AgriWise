@@ -20,7 +20,7 @@ from services.agribrain.layer0.environment.weather.open_meteo import (
     normalize_open_meteo_daily,
 )
 from services.agribrain.layer0.environment.weather.schemas import (
-    WeatherDailyRecord, WeatherConsensusDaily, VariableConsensus,
+    WeatherDailyRecord, WeatherConsensusDaily, VariableConsensus, WeatherTimeSeries,
 )
 from services.agribrain.layer0.environment.state_adapter import (
     create_weak_kalman_observations,
@@ -329,3 +329,139 @@ def test_weather_qa_reanalysis_context_is_modelled_not_measured():
     result=evaluate_weather_qa(build_weather_timeseries([_record()]))
     assert "REANALYSIS_OR_MODEL_DATA" in result["flags"]
     assert result["quality"]!="unusable"
+
+
+def test_unverified_weather_role_in_wrapper_cannot_receive_observed_status():
+    # An unknown or unverified role must never receive 'observed' status in the wrapper
+    unverified_day = SimpleNamespace(
+        date=DAY,
+        variable_consensus={"temp_mean": VariableConsensus(variable="temp_mean", selected_value=15.0)},
+        data_kind="historical_reanalysis",
+        source_role="UNVERIFIED",
+        overall_confidence=0.5,
+    )
+    rows = _canonical_weather_records(
+        SimpleNamespace(weather_consensus=[unverified_day], forecast_consensus=[]),
+        packets=[],
+    )
+    assert len(rows) == 1
+    assert rows[0]["data_status"] == "unverified"
+    assert rows[0]["source_qualified"] is False
+
+    # Even if an unverified dict explicitly declares data_status='observed', it must fail closed to 'unverified'
+    spoofed_dict = {
+        "date": DAY,
+        "variable_consensus": {"temp_mean": VariableConsensus(variable="temp_mean", selected_value=15.0)},
+        "data_kind": "historical_reanalysis",
+        "source_role": "UNVERIFIED",
+        "data_status": "observed",
+        "overall_confidence": 0.5,
+    }
+    rows_spoofed = _canonical_weather_records(
+        SimpleNamespace(weather_consensus=[spoofed_dict], forecast_consensus=[]),
+        packets=[],
+    )
+    assert len(rows_spoofed) == 1
+    assert rows_spoofed[0]["data_status"] == "unverified"
+
+
+def test_unverified_weather_record_bypassing_engine_rejected_by_asmae_archive_adapter():
+    # Direct caller bypass: passing a dict directly to ASMAE adapter with data_status='observed' but unverified role
+    bypassed_record = {
+        "date": DAY,
+        "data_status": "observed",
+        "source_role": "UNVERIFIED",
+        "temp_mean_c": 18.0,
+        "precipitation_mm": 5.0,
+    }
+    archive = normalize_weather_archive([bypassed_record])
+    assert archive["weather_daily_series"] == {}
+    assert archive["weather_archive_status"] == "unavailable"
+    assert archive["weather_source_reality"] == "missing"
+
+    # Missing role entirely with data_status='observed' must also fail closed
+    missing_role_record = {
+        "date": DAY,
+        "data_status": "observed",
+        "temp_mean_c": 18.0,
+    }
+    archive2 = normalize_weather_archive([missing_role_record])
+    assert archive2["weather_daily_series"] == {}
+    assert archive2["weather_archive_status"] == "unavailable"
+
+
+def test_duplicate_provider_records_same_day_role_conflict_fails_closed_in_engine():
+    engine = EnvironmentalEngine()
+    rec_reanalysis = _record(provider="openweather", kind="historical_reanalysis", rain=0.0)
+    rec_current = _record(provider="openweather", kind="current", rain=10.0)
+
+    # Incompatible duplicates for same provider on same date must be detected and rejected
+    consensus_list = engine._build_consensus([rec_reanalysis, rec_current])
+    assert consensus_list == []
+
+
+def test_duplicate_provider_records_same_day_in_build_daily_consensus_rejects():
+    rec_reanalysis = _record(provider="openweather", kind="historical_reanalysis", rain=0.0)
+    rec_current = _record(provider="openweather", kind="current", rain=10.0)
+
+    result = build_daily_consensus([rec_reanalysis, rec_current], DAY)
+    assert result.source_role == "REJECTED"
+    assert result.data_kind == "unqualified"
+    assert "DUPLICATE_PROVIDER_ROLE_CONFLICT" in result.flags
+    assert result.variable_consensus == {}
+
+
+def test_duplicate_provider_records_conflicting_values_fails_closed():
+    engine = EnvironmentalEngine()
+    rec1 = _record(provider="open_meteo", kind="historical_reanalysis", rain=0.0)
+    rec2 = _record(provider="open_meteo", kind="historical_reanalysis", rain=15.0)
+
+    # Conflicting values from same provider on same date must not silently overwrite
+    consensus_list = engine._build_consensus([rec1, rec2])
+    assert consensus_list == []
+
+
+def test_duplicate_provider_records_identical_idempotent_passes():
+    engine = EnvironmentalEngine()
+    rec = _record(provider="open_meteo", kind="historical_reanalysis", rain=0.0)
+    consensus_list = engine._build_consensus([rec, rec])
+    assert len(consensus_list) == 1
+    assert consensus_list[0].date == DAY
+
+
+def test_historical_weather_qa_completeness_excludes_current_dates():
+    # 1 reanalysis day + 1 current day when 1 historical day expected
+    # The current day must not count in the numerator, avoiding completeness = 2.0
+    rec_hist = _record(provider="open_meteo", kind="historical_reanalysis")
+    rec_hist.date = "2026-11-01"
+    rec_curr = _record(provider="openweather", kind="current")
+    rec_curr.date = "2026-11-02"
+
+    ts = WeatherTimeSeries(
+        daily_records=[rec_hist, rec_curr],
+        historical_days=1,
+        forecast_days=0,
+    )
+    qa = evaluate_weather_qa(ts)
+    assert qa["historical_completeness"] == 1.0
+    assert qa["temporal_completeness"] == 1.0
+
+
+def test_historical_weather_qa_completeness_current_day_cannot_mask_missing_historical_day():
+    # 1 reanalysis day + 1 current day when 3 historical days expected
+    # Completeness must be 0.3333 (1/3), not 0.6667 (2/3)
+    rec_hist = _record(provider="open_meteo", kind="historical_reanalysis")
+    rec_hist.date = "2026-11-01"
+    rec_curr = _record(provider="openweather", kind="current")
+    rec_curr.date = "2026-11-02"
+
+    ts = WeatherTimeSeries(
+        daily_records=[rec_hist, rec_curr],
+        historical_days=3,
+        forecast_days=0,
+    )
+    qa = evaluate_weather_qa(ts)
+    assert qa["historical_completeness"] == round(1 / 3, 4)
+    assert qa["temporal_completeness"] == round(1 / 3, 4)
+    assert "LOW_TEMPORAL_COMPLETENESS" in qa["flags"]
+    assert qa["quality"] == "degraded"

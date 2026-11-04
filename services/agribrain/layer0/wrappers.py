@@ -133,8 +133,16 @@ def _canonical_weather_records(env_package: Any, packets: List[ObservationPacket
                 or any(r in ("FORECAST", "ESTIMATED", "DERIVED", "MODELLED", "PRIOR", "RECONSTRUCTION") for r in declared_roles)
             ):
                 rec_status = "estimated"
+            elif (
+                declared_status == "observed"
+                or any(r in ("OBSERVED", "STATION_MEASURED") for r in declared_roles)
+            ):
+                if source_role not in ("HISTORICAL_OBSERVATION", "OBSERVED_STATION", "STATION_OBSERVATION"):
+                    rec_status = "unverified"
+                else:
+                    rec_status = "observed"
             else:
-                rec_status = "observed"
+                rec_status = "unverified"
 
             record = {
                 "date": date,

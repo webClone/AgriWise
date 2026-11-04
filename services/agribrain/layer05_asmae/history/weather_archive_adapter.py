@@ -111,17 +111,22 @@ def _record_reality(record: Mapping[str, Any]) -> str:
     status = str(record.get("data_status") or "").lower()
     combined = " ".join((kind, packet, status))
     if (
-        source_role == "CURRENT_PROVIDER_CONTEXT" or kind == "current"
-        or source_role == "REJECTED"
+        source_role in ("CURRENT_PROVIDER_CONTEXT", "REJECTED")
+        or kind in ("current", "mixed", "unqualified")
+        or status in ("unavailable", "rejected")
     ):
-        # A current API/model context (and rejected mixed-role data)
+        # A current API/model context or rejected mixed data
         # is not an observed station archive.
         return "unknown"
     if "forecast" in combined:
         return "forecast"
-    if "reanalysis" in combined or "historical_reanalysis" in combined:
+    if "reanalysis" in combined or "historical_reanalysis" in combined or source_role == "REANALYSIS_MODEL":
         return "reanalysis_archive"
-    if "observed" in combined:
+    if "observed" in combined or status == "observed":
+        # Fail-closed: only an explicit authenticated observation source role
+        # may enter as observed_archive. Unverified or unknown roles are rejected.
+        if source_role not in ("HISTORICAL_OBSERVATION", "OBSERVED_STATION", "STATION_OBSERVATION"):
+            return "unknown"
         return "observed_archive"
     return "unknown"
 

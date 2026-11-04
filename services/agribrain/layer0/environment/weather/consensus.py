@@ -27,7 +27,7 @@ RAIN_NEAR_ZERO = 0.5            # mm
 
 
 def build_daily_consensus(
-    records_by_provider: Dict[str, WeatherDailyRecord],
+    records_by_provider: Dict[str, WeatherDailyRecord] | Sequence[WeatherDailyRecord],
     date: str,
 ) -> WeatherConsensusDaily:
     """Build per-day per-variable consensus from multiple provider records.
@@ -37,6 +37,33 @@ def build_daily_consensus(
     """
     consensus = WeatherConsensusDaily(date=date)
     flags: List[str] = []
+
+    if isinstance(records_by_provider, (list, tuple)):
+        mapped: Dict[str, WeatherDailyRecord] = {}
+        for rec in records_by_provider:
+            if not isinstance(rec, WeatherDailyRecord):
+                consensus.data_kind = "unqualified"
+                consensus.source_role = "REJECTED"
+                consensus.overall_confidence = 0.0
+                consensus.flags = ["INVALID_WEATHER_SOURCE_ROLE_OR_IDENTITY"]
+                return consensus
+            if rec.provider in mapped:
+                existing = mapped[rec.provider]
+                if (
+                    existing.data_kind != rec.data_kind
+                    or existing.source_role != rec.source_role
+                    or existing != rec
+                ):
+                    consensus.data_kind = "unqualified"
+                    consensus.source_role = "REJECTED"
+                    consensus.overall_confidence = 0.0
+                    consensus.flags = [
+                        "WEATHER_SOURCE_ROLE_MIXING_DENIED",
+                        "DUPLICATE_PROVIDER_ROLE_CONFLICT",
+                    ]
+                    return consensus
+            mapped[rec.provider] = rec
+        records_by_provider = mapped
 
     if not records_by_provider:
         consensus.overall_confidence = 0.0
@@ -75,6 +102,8 @@ def build_daily_consensus(
             flags.append("NON_HISTORICAL_WEATHER_ROLE_DENIED")
         if invalid:
             flags.append("INVALID_WEATHER_SOURCE_ROLE_OR_IDENTITY")
+        if "__conflict__" in records_by_provider:
+            flags.append("DUPLICATE_PROVIDER_ROLE_CONFLICT")
         consensus.flags = flags
         # No selected values: a flag-only warning with averaged precipitation
         # would still let forecast rainfall enter physical process forcing.
