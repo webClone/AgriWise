@@ -85,7 +85,9 @@ SAMPLE_OPEN_METEO_PAYLOAD = {
         "time": "iso8601",
         "temperature_2m_min": "°C",
         "temperature_2m_max": "°C",
+        "temperature_2m_mean": "°C",
         "precipitation_sum": "mm",
+        "rain_sum": "mm",
     },
     "daily": {
         "time": ["2026-11-01", "2026-11-02", "2026-11-03"],
