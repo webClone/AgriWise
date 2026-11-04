@@ -44,7 +44,7 @@ def test_verified_tenant_plot_geometry_scope_is_non_authorizing():
     assert grant().scope_hash == scope.scope_hash
 
 
-@pytest.mark.parametrize("principal,request", [
+@pytest.mark.parametrize("principal,plot_request", [
     (AuthenticatedPrincipal("tenant-A", "user-A", False), REQUEST),
     (AuthenticatedPrincipal("tenant-B", "user-B", True), REQUEST),
     (PRINCIPAL, replace(REQUEST, tenant_id="tenant-B")),
@@ -53,9 +53,9 @@ def test_verified_tenant_plot_geometry_scope_is_non_authorizing():
     (PRINCIPAL, replace(REQUEST, geometry_version=3)),
     (PRINCIPAL, replace(REQUEST, geometry_version=True)),
 ])
-def test_missing_or_foreign_tenant_plot_epoch_never_admitted(principal, request):
+def test_missing_or_foreign_tenant_plot_epoch_never_admitted(principal, plot_request):
     with pytest.raises(SpatialTenantDenied):
-        authorize_plot_scope(principal, request, resolve)
+        authorize_plot_scope(principal, plot_request, resolve)
 
 
 def test_resolver_is_mandatory_and_must_not_be_an_untrusted_request_record():
