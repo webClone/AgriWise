@@ -66,3 +66,14 @@ Targeted test: `py -m pytest -q services/agribrain/layer0/tests/test_b2b05_produ
 
 This candidate has NOT been executed by the connected GitHub assistant;
 the prior 562/562 receipt belongs to an older B2B-05 head.
+
+## B2B-05 Prisma and state-ingestion integration candidate
+
+- PrismaPlotOwnershipStore joins actual case-sensitive MongoDB collections Plot, Farm, User with BSON ObjectIds, validates Farm.userId ownership and active User, and checks the current exact plot geometry hash and version.
+- Schema now adds Plot.geometryVersion (optional int), geometryHash (optional string), isActive, isRevoked and deletedAt. This DOES NOT backfill existing Mongo documents or establish an atomic geometry-write lifecycle. Strict scoped requests intentionally deny uninitialized epochs.
+- StateEngine.run_from_packets accepts tenant_id and scope_hash. In strict scope mode it independently resolves authenticated principal and authoritative current plot, rejects packet claims not matching the caller scope, blocks deserialized/unbound/partial/exterior packets, and rechecks current geometry before and after the state run.
+- Direct scalar run() is blocked in mandatory spatial scope mode; signed-purpose source admission remains separate and unchanged.
+- The in-memory spatial binding marker is not a cryptographic issuer or standalone statement of physical provenance; source grants and actual producer footprint validation remain required.
+- Targeted test: py -m pytest -q services/agribrain/layer0/tests/test_b2b05_prisma_state_ingestion.py
+- Also run all Layer 0 tests and affected Layer 1/ASMAE fast tests at the exact new head. Existing 684/684 receipt is not transferable.
+- Deployment gates remain: live DB authorization tests, Prisma schema/index rollout and backfill, atomic geometry epoch writes, middleware principal wiring, operational entry-point strict configuration and publication scoped receipt integration.
