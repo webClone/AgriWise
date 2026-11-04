@@ -412,11 +412,15 @@ class NativeWeatherEvidenceStore:
         
         # Check that base URL of response matches target normalized endpoint
         parts_resp = urlsplit(resp_url)
+        if (
+            parts_resp.scheme.lower() != "https"
+            or parts_resp.username is not None or parts_resp.password is not None
+            or parts_resp.fragment
+        ):
+            raise NativeWeatherEvidenceError("weather_response_origin_mismatch")
         normalized_resp_base = f"https://{parts_resp.netloc.lower()}{parts_resp.path.rstrip('/')}"
         if normalized_resp_base != normalized_endpoint:
-            raise NativeWeatherEvidenceError(
-                f"response URL mismatch: {normalized_resp_base} vs expected endpoint {normalized_endpoint}"
-            )
+            raise NativeWeatherEvidenceError("weather_response_origin_mismatch")
 
         # 3. Transmitted Request Wire Inspection
         req = getattr(response, "request", None)
@@ -428,11 +432,15 @@ class NativeWeatherEvidenceStore:
             raise NativeWeatherEvidenceError("prepared request missing valid URL")
 
         parts_req = urlsplit(req_url)
+        if (
+            parts_req.scheme.lower() != "https"
+            or parts_req.username is not None or parts_req.password is not None
+            or parts_req.fragment
+        ):
+            raise NativeWeatherEvidenceError("weather_prepared_request_origin_mismatch")
         normalized_req_base = f"https://{parts_req.netloc.lower()}{parts_req.path.rstrip('/')}"
         if normalized_req_base != normalized_endpoint:
-            raise NativeWeatherEvidenceError(
-                f"prepared request endpoint mismatch: {normalized_req_base} vs {normalized_endpoint}"
-            )
+            raise NativeWeatherEvidenceError("weather_prepared_request_origin_mismatch")
 
         # Extract and sanitize query parameters actually transmitted on the wire
         raw_transmitted_qsl = parse_qsl(parts_req.query, keep_blank_values=True)
@@ -451,6 +459,23 @@ class NativeWeatherEvidenceStore:
                     transmitted_dict[clean_k] = [existing, parsed_v]
             else:
                 transmitted_dict[clean_k] = parsed_v
+
+        # The request and response must identify the same wire query. No
+        # redirect history does not by itself prove query identity.
+        response_qsl = parse_qsl(parts_resp.query, keep_blank_values=True)
+        response_params: dict[str, Any] = {}
+        for k, v in response_qsl:
+            key = k.lower().strip().replace("-", "_")
+            if key in _FORBIDDEN_QUERY_KEYS:
+                continue
+            value = _parse_query_val(v)
+            if key in response_params:
+                prior = response_params[key]
+                response_params[key] = prior + [value] if isinstance(prior, list) else [prior, value]
+            else:
+                response_params[key] = value
+        if not _canonical_params_equal(response_params, transmitted_dict):
+            raise NativeWeatherEvidenceError("weather_response_request_query_mismatch")
 
         # Clean caller query_params and verify exact equivalence with transmitted parameters
         clean_params = _clean_query_params(query_params)

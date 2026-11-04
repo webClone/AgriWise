@@ -41,6 +41,7 @@ import logging
 import copy
 import hashlib
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -236,16 +237,15 @@ class DataRequestBroker:
             logger.warning("[BROKER] No fetch function for source: %s", source)
             return None
 
-        # Build a fetch wrapper that handles consolidation
-        call_kwargs = {"plot_id": plot_id, **kwargs}
-        if self._consolidator.should_consolidate(source) and not force_refresh:
-            consolidated_fn = self._make_consolidated_fetch(
-                source, fetch_fn, lat, lng, plot_id, **kwargs
-            )
-        else:
-            # Direct fetch (fine-resolution or force refresh)
-            def consolidated_fn(lat_arg, lng_arg, **kw):
-                return fetch_fn(lat_arg, lng_arg, **{**call_kwargs, **kw})
+        # W4-07: In strict native weather mode, check evidence root at broker entry BEFORE storage lookup
+        strict_native = os.getenv("AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE", "").lower() in ("1", "true", "yes")
+        weather_root = (
+            os.getenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", "").strip()
+            or os.getenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", "").strip()
+        )
+        if source == "open_meteo_archive" and strict_native and not weather_root:
+            logger.warning("[BROKER] Strict native weather mode enabled but evidence root missing at entry")
+            return None
 
         # Compute a deterministic param_hash from extra kwargs to differentiate cache keys
         param_hash = ""
@@ -266,6 +266,17 @@ class DataRequestBroker:
                     param_hash = hashlib.sha256(raw).hexdigest()[:12]
                 except Exception:
                     pass
+
+        # Build a fetch wrapper that handles consolidation
+        call_kwargs = {"plot_id": plot_id, **kwargs}
+        if self._consolidator.should_consolidate(source) and not force_refresh:
+            consolidated_fn = self._make_consolidated_fetch(
+                source, fetch_fn, lat, lng, plot_id, param_hash=param_hash, **kwargs
+            )
+        else:
+            # Direct fetch (fine-resolution or force refresh)
+            def consolidated_fn(lat_arg, lng_arg, **kw):
+                return fetch_fn(lat_arg, lng_arg, **{**call_kwargs, **kw})
 
         temporal_contracts = {
             "sentinel2_ndvi_ts": "s2_daily_plot_statistic_v1",
@@ -333,6 +344,53 @@ class DataRequestBroker:
                 else None
             ),
         )
+
+        # Native weather cache items must re-verify their CAS parent before
+        # return. Old EO cache records or arbitrary ID strings cannot inherit
+        # native weather provenance merely because they are cached.
+        weather_root = (
+            os.getenv("AKALORIS_LAYER0_NATIVE_WEATHER_EVIDENCE_ROOT", "").strip()
+            or os.getenv("AKALORIS_LAYER0_NATIVE_EVIDENCE_ROOT", "").strip()
+        )
+        strict_native = os.getenv("AKALORIS_LAYER0_REQUIRE_NATIVE_EVIDENCE", "").lower() in ("1", "true", "yes")
+
+        if source == "open_meteo_archive":
+            if strict_native and not weather_root:
+                # In strict mode, absence of evidence root fails closed across cache and provider
+                return None
+
+            if weather_root:
+                from services.agribrain.layer0.native_issuer.weather_native_pipeline import (
+                    resolve_verified_open_meteo_payload,
+                )
+
+                def native_candidate_valid(value):
+                    if not isinstance(value, dict):
+                        return False
+                    try:
+                        resolve_verified_open_meteo_payload(
+                            value, latitude=lat, longitude=lng,
+                        )
+                        return True
+                    except (ValueError, TypeError, OSError, KeyError):
+                        return False
+
+                if not native_candidate_valid(result):
+                    if result is not None and not force_refresh:
+                        result = self._storage.get_or_fetch(
+                            source=source, plot_id=plot_id, lat=lat, lng=lng,
+                            fetch_fn=guarded_fetch, force_refresh=True,
+                            context=context, param_hash=param_hash,
+                            candidate_validator=native_candidate_valid,
+                        )
+                    if not native_candidate_valid(result):
+                        return None
+
+            if strict_native:
+                # Enforce strict-native verification at the broker boundary:
+                # Cache hits must be verified native QA, never unattested legacy.
+                if not isinstance(result, dict) or result.get("native_capture_status") != "screened_native_qa":
+                    return None
 
         # Storage validators protect fetched candidates, but cache reads occur
         # before candidate validation.  Refresh metadata-poor legacy raster
@@ -635,6 +693,7 @@ class DataRequestBroker:
         lat: float,
         lng: float,
         plot_id: str,
+        param_hash: str = "",
         **kwargs,
     ) -> Callable:
         """Create a fetch function that uses spatial batching.
@@ -643,7 +702,7 @@ class DataRequestBroker:
         this source recently, return the cached batch result.
         """
         batch = self._consolidator.get_or_create_batch(
-            source, lat, lng, plot_id
+            source, lat, lng, plot_id, param_hash=param_hash, **kwargs
         )
 
         def _consolidated_fetch(lat_arg, lng_arg, **kw):

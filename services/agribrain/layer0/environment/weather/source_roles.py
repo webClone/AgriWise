@@ -85,87 +85,72 @@ def classify_weather_record_admission(record: Any) -> str:
     if record is None:
         return "rejected"
 
-    def _get(obj: Any, *keys: str) -> Any:
-        if isinstance(obj, Mapping):
-            for k in keys:
-                if k in obj and obj[k] is not None:
-                    return obj[k]
-            if "payload" in obj and isinstance(obj["payload"], Mapping):
-                for k in keys:
-                    if k in obj["payload"] and obj["payload"][k] is not None:
-                        return obj["payload"][k]
-        else:
-            for k in keys:
-                if hasattr(obj, k):
-                    val = getattr(obj, k)
-                    if val is not None:
-                        return val
-        return None
+    # Resolve *all* declared carriers, including the original envelope.
+    # A permissive preferred alias must never conceal a restrictive sibling.
+    nodes = [record]
+    if isinstance(record, Mapping):
+        payload = record.get("payload")
+        if isinstance(payload, Mapping):
+            nodes.append(payload)
 
-    data_kind = str(_get(record, "data_kind", "source_reality") or "").lower()
-    source_role = str(_get(record, "source_role", "role", "data_role") or "").upper()
-    data_status = str(_get(record, "data_status", "status") or "").lower()
-    source_qualified = bool(_get(record, "source_qualified") or False)
-    date_str = str(_get(record, "date", "timestamp", "valid_time") or "")[:10]
+    def values(*keys: str) -> list[Any]:
+        found = []
+        for node in nodes:
+            if isinstance(node, Mapping):
+                found.extend(node[key] for key in keys if key in node and node[key] is not None)
+            else:
+                found.extend(getattr(node, key) for key in keys
+                             if getattr(node, key, None) is not None)
+        return found
 
-    # 1. Invalid or missing valid date
-    if not date_str or len(date_str) != 10:
-        return "rejected"
-
-    # 2. Hard fail-closed / rejection / conflict checks
-    if (
-        source_role in ("REJECTED",)
-        or data_kind in ("mixed", "unqualified", "rejected")
-        or data_status in ("unavailable", "rejected")
-    ):
-        return "rejected"
-
-    # 3. Source qualification: B2B-04A does not grant provider qualification credentials.
-    # Self-asserted source_qualified=True is an unauthorized authority escalation.
-    if source_qualified:
-        return "rejected"
-
-    # 4. Observation claims: B2B-04A strictly prohibits string-only or self-asserted
-    # station promotion. No authenticated station credentials or WMO calibration exist.
-    if (
-        data_status == "observed"
-        or source_role in ("OBSERVED_STATION", "STATION_OBSERVATION", "HISTORICAL_OBSERVATION")
-        or "observed" in data_kind
-    ):
+    kinds = [str(x).lower() for x in values("data_kind")]
+    if not kinds:
         return "unverified"
-
-    # 5. Current provider context is not a daily aggregate or reanalysis archive
-    if (
-        source_role in ("CURRENT_PROVIDER_CONTEXT", "UNVERIFIED")
-        or data_kind in ("current", "unknown", "")
-        or data_status in ("unverified",)
-    ):
-        return "unverified"
-
-    # 6. Explicit role and kind must be present and mutually consistent
+    if len(set(kinds)) != 1:
+        return "rejected"
+    data_kind = kinds[0]
     expected_role = KIND_TO_ROLE.get(data_kind)
     if expected_role is None or expected_role == WeatherSourceRole.UNVERIFIED:
         return "unverified"
 
-    if not source_role:
-        # A record lacking an explicit source_role cannot be admitted as an archive
-        return "unverified"
-
-    if source_role != expected_role.value:
-        # Contradictory role and kind (e.g. historical_reanalysis with FORECAST_MODEL)
-        # must fail closed and be rejected from ALL archives (historical AND forecast)
+    date_values = [str(x)[:10] for x in values("date", "timestamp", "valid_time")]
+    if not date_values or len(set(date_values)) != 1:
+        return "rejected"
+    try:
+        if date.fromisoformat(date_values[0]).isoformat() != date_values[0]:
+            return "rejected"
+    except (TypeError, ValueError):
         return "rejected"
 
-    # 7. Check for Forecast Model Context
+    if any(x is not False for x in values("source_qualified")):
+        # This component is never an issuer; even literal True on a nested
+        # carrier is an unauthorized source-grant claim.
+        return "rejected"
+
+    roles = [str(x).upper() for x in values("source_role", "role", "data_role", "status_role")]
+    statuses = [str(x).lower() for x in values("data_status", "status")]
+    restricted = {"REJECTED", "EXCLUDED", "UNAVAILABLE", "DENIED"}
+    if any(role in restricted for role in roles):
+        return "rejected"
+    if any(s in ("unavailable", "rejected", "excluded", "denied") for s in statuses):
+        return "rejected"
+    if data_kind in ("mixed", "unqualified", "rejected"):
+        return "rejected"
+
+    observational = {"OBSERVED_STATION", "STATION_OBSERVATION", "HISTORICAL_OBSERVATION", "OBSERVED"}
+    if any(r in observational for r in roles) or any(s == "observed" for s in statuses):
+        return "unverified"
+    if any(r in ("UNVERIFIED", "CURRENT_PROVIDER_CONTEXT") for r in roles):
+        return "unverified"
+    if any(s in ("unverified", "simulated", "synthetic", "fallback", "proxy", "reconstruction") for s in statuses):
+        return "unverified"
+    if not roles:
+        return "unverified"
+    if any(r != expected_role.value for r in roles):
+        return "rejected"
+
     if expected_role in FORECAST_ROLES:
-        if data_status in ("unverified", "unavailable", "rejected"):
-            return "unverified"
         return "forecast"
-
-    # 8. Check for Historical Reanalysis Context
     if expected_role in HISTORICAL_CONTEXT_ROLES:
-        if data_status in ("unverified", "unavailable", "rejected"):
-            return "unverified"
         return "reanalysis_archive"
-
     return "unverified"
