@@ -255,6 +255,15 @@ def screen_native_weather_receipt(
         # A requested series is admissible only with aligned values and known
         # physical units. Do not reinterpret inches as millimeters or null as zero.
         requested = [k.strip() for k in str(replayed_params.get("daily", "")).split(",") if k.strip()]
+        # Reject requests that ask the provider for units incompatible with
+        # the internal weather schema, even if the returned body mislabels them.
+        unit_options = {
+            "precipitation_unit": ("mm", None),
+            "temperature_unit": ("celsius", None),
+            "wind_speed_unit": ("ms", None),
+        }
+        if any(replayed_params.get(k) not in allowed for k, allowed in unit_options.items()):
+            return _deny("unsupported_requested_weather_units", receipt.product_id, receipt.authoritative_role)
         canonical_units = {
             "precipitation_sum": "mm", "rain_sum": "mm",
             "temperature_2m_min": "°C", "temperature_2m_max": "°C",
@@ -308,6 +317,8 @@ def screen_native_weather_receipt(
                 except (TypeError, ValueError, OverflowError):
                     return _deny("non_numeric_weather_measurement", receipt.product_id, receipt.authoritative_role)
                 if not math.isfinite(number):
+                    if variable in ("precipitation_sum", "rain_sum"):
+                        return _deny("non_finite_precipitation_value", receipt.product_id, receipt.authoritative_role)
                     return _deny("non_finite_weather_measurement", receipt.product_id, receipt.authoritative_role)
                 if variable in ("precipitation_sum", "rain_sum", "et0_fao_evapotranspiration") and number < 0:
                     return _deny("invalid_precipitation_value", receipt.product_id, receipt.authoritative_role)

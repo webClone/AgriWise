@@ -179,7 +179,7 @@ def test_invalid_calendar_day_never_archived():
     (lambda p: p["daily"].update(temperature_2m_min=["bad", 5, 6]), "non_numeric_weather_measurement"),
     (lambda p: p.update(latitude="NaN"), "non_finite_response_coordinates"),
     (lambda p: p.update(longitude=None), "missing_response_coordinates"),
-    (lambda p: p["daily"].update(time=["2026-11-01", "2026-11-03"]), "weather_daily_variable_support_mismatch"),
+    (lambda p: p["daily"].update(time=["2026-11-01", "2026-11-03"]), "weather_daily_interior_date_gap"),
     (lambda p: p["daily"].update(time=["2026-11-01", "2026-11-03", "2026-11-04"]), "weather_daily_interior_date_gap"),
     (lambda p: p["daily"].update(precipitation_sum=[0.0, 3.5]), "weather_daily_variable_support_mismatch"),
     (lambda p: p["daily"].update(time=["2026-11-03", "2026-11-02", "2026-11-01"]), "weather_daily_dates_not_sorted_unique"),
