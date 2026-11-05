@@ -204,7 +204,15 @@ class ZoneKalmanFilter:
             for evt in events:
                 if (
                     isinstance(evt, AdmittedDeliveredIrrigation)
-                    and evt.is_authoritative()
+                    and evt.applies_to_filter(
+                        tenant_id=self.tenant_id,
+                        plot_id=self.parent_plot_id,
+                        zone_id=self.zone_id,
+                        geometry_hash=self.expected_geometry_hash,
+                        geometry_version=self.geometry_version,
+                        day=day,
+                        cutoff=self.evidence_cutoff,
+                    )
                     and evt.scientific_publication_authorized is False
                     and evt.actuator_control_authorized is False
                 ):
@@ -270,7 +278,15 @@ class ZoneKalmanFilter:
             for evt in events:
                 if (
                     isinstance(evt, AdmittedDeliveredIrrigation)
-                    and evt.is_authoritative()
+                    and evt.applies_to_filter(
+                        tenant_id=self.tenant_id,
+                        plot_id=self.parent_plot_id,
+                        zone_id=self.zone_id,
+                        geometry_hash=self.expected_geometry_hash,
+                        geometry_version=self.geometry_version,
+                        day=day,
+                        cutoff=self.evidence_cutoff,
+                    )
                     and evt.scientific_publication_authorized is False
                     and evt.actuator_control_authorized is False
                 ):

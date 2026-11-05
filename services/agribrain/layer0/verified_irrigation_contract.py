@@ -438,6 +438,8 @@ class DurableIrrigationIdempotencyStore:
         return reservation
 
     def _commit_reservation(self, res: IrrigationIdempotencyReservation) -> None:
+        if not self.reservation_is_live(res):
+            raise RuntimeError("idempotency_reservation_not_staged")
         self._pending_receipts.pop(res.receipt_id, None)
         self._pending_replay_keys.pop(res.replay_key, None)
         rec = {
@@ -454,9 +456,17 @@ class DurableIrrigationIdempotencyStore:
         self._committed_replay_keys[res.replay_key] = rec
         self._flush_to_storage()
 
+    def reservation_is_live(self, res: IrrigationIdempotencyReservation) -> bool:
+        return (
+            self._pending_receipts.get(res.receipt_id) is res
+            and self._pending_replay_keys.get(res.replay_key) is res
+        )
+
     def _rollback_reservation(self, res: IrrigationIdempotencyReservation) -> None:
-        self._pending_receipts.pop(res.receipt_id, None)
-        self._pending_replay_keys.pop(res.replay_key, None)
+        if self._pending_receipts.get(res.receipt_id) is res:
+            self._pending_receipts.pop(res.receipt_id, None)
+        if self._pending_replay_keys.get(res.replay_key) is res:
+            self._pending_replay_keys.pop(res.replay_key, None)
 
 
 @dataclass(frozen=True)
@@ -499,6 +509,52 @@ class AdmittedDeliveredIrrigation:
             geometry_version=self.geometry_version,
         )
         return hmac.compare_digest(self._admission_seal, expected_seal)
+
+    def applies_to_filter(
+        self, *, tenant_id: str, plot_id: str, zone_id: str,
+        geometry_hash: str, geometry_version: int | None,
+        day: str, cutoff: datetime | None = None,
+    ) -> bool:
+        """Re-bind an admitted token to the exact consuming filter.
+
+        The verifier's HMAC seal does not by itself authorize a different
+        plot, management zone, day, or second application. The reservation
+        must still be in the live staged set (not committed/rolled back).
+        """
+        if not self.is_authoritative():
+            return False
+        reservation = self._reservation
+        if (
+            not isinstance(reservation, IrrigationIdempotencyReservation)
+            or reservation.status != "STAGED"
+            or not reservation.store.reservation_is_live(reservation)
+            or not all((tenant_id, plot_id, zone_id, geometry_hash, day))
+            or type(geometry_version) is not int
+            or self.tenant_id != tenant_id
+            or self.plot_id != plot_id
+            or self.zone_id != zone_id
+            or self.geometry_hash != geometry_hash
+            or self.geometry_version != geometry_version
+            or reservation.receipt_id != self.receipt_id
+            or reservation.replay_key != self.replay_idempotency_key
+            or reservation.day != day
+            or reservation.tenant_id != tenant_id
+            or reservation.plot_id != plot_id
+            or reservation.geometry_hash != geometry_hash
+            or reservation.geometry_version != geometry_version
+        ):
+            return False
+        try:
+            start = _parse_iso_utc(self.delivery_start)
+            end = _parse_iso_utc(self.delivery_end)
+            if (
+                start > end or end.date().isoformat() != day
+                or (cutoff is not None and end > _ensure_utc(cutoff))
+            ):
+                return False
+        except (ValueError, TypeError):
+            return False
+        return True
 
     def commit_idempotency(self) -> None:
         if self._reservation is not None:
