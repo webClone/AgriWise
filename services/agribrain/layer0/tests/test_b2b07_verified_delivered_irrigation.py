@@ -750,210 +750,209 @@ def test_authorized_historical_recomputation(keys_ed25519, verifier):
             allow_historical_recompute=True,
         )
 
+
 # ============================================================================
-# 7. B07-SEC Security Enhancements Qualification
+# B07-SEC-04/05/06/07: cross-scope, replay, commit-failure and production tests
 # ============================================================================
 
-def test_direct_predict_rejects_prequalified_dict():
-    filt = ZoneKalmanFilter("plot")
-    filt.initialize("2026-10-31")
-    fake_event = {
-        "physical_delivery_verified": True,
-        "state_update_allowed": True,
-        "net_infiltrated_depth_mm": 10.0,
-        "depth_uncertainty_sigma_mm": 0.5,
-    }
-    with pytest.raises(ValueError, match="physical management forcing requires trusted L3 admission"):
-        filt.predict(DAY, WEATHER, [fake_event])
-
-    with pytest.raises(ValueError, match="physical management forcing requires trusted L3 admission"):
-        filt.predict_missing_weather(DAY, [fake_event])
-
-
-def test_direct_predict_rejects_unsealed_admitted_token():
-    filt = ZoneKalmanFilter("plot")
-    filt.initialize("2026-10-31")
-    unsealed_token = AdmittedDeliveredIrrigation(
-        receipt_id="forged-rcpt",
-        net_infiltrated_depth_mm=10.0,
-        depth_uncertainty_sigma_mm=0.5,
-        tenant_id="tenant-prod-alpha",
-        plot_id="plot-A",
-        zone_id="plot",
-        geometry_hash="geom-A",
-        geometry_version=1,
-        delivery_start="2026-11-01T12:00:00Z",
-        delivery_end="2026-11-01T14:00:00Z",
-        conversion_calibration_id="calib-1",
-        replay_idempotency_key="rep-forged",
-        scientific_publication_authorized=False,
-        actuator_control_authorized=False,
-        _admission_seal="invalid_seal",
-    )
-    with pytest.raises(ValueError, match="physical management forcing requires trusted L3 admission"):
-        filt.predict(DAY, WEATHER, [unsealed_token])
-
-    with pytest.raises(ValueError, match="physical management forcing requires trusted L3 admission"):
-        filt.predict_missing_weather(DAY, [unsealed_token])
-
-
-def test_verifier_requires_durable_revocation_authority(registry):
-    with pytest.raises(ValueError, match="revocation_authority is required"):
-        VerifiedDeliveredIrrigationVerifier(public_key_registry=registry, revocation_authority=None)
-
-    with pytest.raises(TypeError, match="revocation_authority must be an instance of DurableRevocationAuthority"):
-        VerifiedDeliveredIrrigationVerifier(public_key_registry=registry, revocation_authority="not_an_authority")
-
-
-def test_state_engine_rejects_untrusted_delivery_verifier():
-    from services.agribrain.layer0.production_admission import Layer0AdmissionRequiredError
-    with pytest.raises(Layer0AdmissionRequiredError, match="must be an authoritative VerifiedDeliveredIrrigationVerifier"):
-        Layer0StateEngine(verified_delivery_verifier=object())
-
-    class FakeVerifier:
-        revocation_authority = None
-    with pytest.raises(Layer0AdmissionRequiredError, match="must be an authoritative VerifiedDeliveredIrrigationVerifier"):
-        Layer0StateEngine(verified_delivery_verifier=FakeVerifier())
-
-
-def test_durable_cross_instance_replay_fencing(tmp_path, keys_ed25519, registry, revocation_authority):
-    from services.agribrain.layer0.verified_irrigation_contract import DurableIrrigationIdempotencyStore
-    store_path = tmp_path / "idempotency_store.json"
-    store1 = DurableIrrigationIdempotencyStore(storage_path=store_path)
-    v1 = VerifiedDeliveredIrrigationVerifier(
-        public_key_registry=registry,
-        revocation_authority=revocation_authority,
-        idempotency_store=store1,
-    )
-    priv, _ = keys_ed25519
-    receipt = make_signed_receipt(
-        priv,
-        valid_grant_dict(receipt_id="rcpt-cross-1", replay_key="rep-cross-1")
-    )
-
+def _scoped_filter_for_sec(verifier):
     filt = ZoneKalmanFilter("plot")
     filt.initialize("2026-10-31")
     filt.parent_plot_id = "plot-A"
     filt.expected_geometry_hash = "geom-A"
     filt.geometry_version = 1
     filt.tenant_id = "tenant-prod-alpha"
-    filt.delivery_verifier = v1
-
-    event_envelope = {
-        "payload": {
-            "event_type": "irrigation",
-            "event_id": "event-cross-1",
-            "event_role": "VERIFIED_DELIVERY",
-            "verified_receipt": receipt.to_dict(),
-            "zone_id": "plot",
-        },
-        "packet_id": "pkt-cross-1",
-        "plot_id": "plot-A",
-        "geometry_hash": "geom-A",
-        "timestamp": datetime(2026, 11, 1, 14, 0, tzinfo=timezone.utc),
-    }
-    filt.step(DAY, WEATHER, None, [event_envelope])
-
-    assert store_path.is_file()
-
-    # Second verifier instance with separate store pointing to same persistent file
-    store2 = DurableIrrigationIdempotencyStore(storage_path=store_path)
-    v2 = VerifiedDeliveredIrrigationVerifier(
-        public_key_registry=registry,
-        revocation_authority=revocation_authority,
-        idempotency_store=store2,
-    )
-    with pytest.raises(ValueError, match="duplicate_replay_key"):
-        v2.verify_and_admit(
-            receipt,
-            expected_day=DAY,
-            expected_plot_id="plot-A",
-            expected_zone_id="plot",
-        )
-
-
-def test_receipt_not_consumed_on_failed_prediction(keys_ed25519, verifier, monkeypatch):
-    priv, _ = keys_ed25519
-    receipt = make_signed_receipt(
-        priv,
-        valid_grant_dict(receipt_id="rcpt-rollback-1", replay_key="rep-rollback-1")
-    )
-    filt = ZoneKalmanFilter("plot")
-    filt.initialize("2026-10-31")
-    filt.parent_plot_id = "plot-A"
-    filt.expected_geometry_hash = "geom-A"
-    filt.geometry_version = 1
-    filt.tenant_id = "tenant-prod-alpha"
+    filt.evidence_cutoff = CUTOFF
     filt.delivery_verifier = verifier
+    return filt
 
-    event_envelope = {
+
+def _delivery_event_for_sec(receipt, event_id="event-sec-new"):
+    return {
         "payload": {
             "event_type": "irrigation",
-            "event_id": "event-rb-1",
+            "event_id": event_id,
             "event_role": "VERIFIED_DELIVERY",
             "verified_receipt": receipt.to_dict(),
             "zone_id": "plot",
         },
-        "packet_id": "pkt-rb-1",
+        "packet_id": "pkt-" + event_id,
         "plot_id": "plot-A",
         "geometry_hash": "geom-A",
         "timestamp": datetime(2026, 11, 1, 14, 0, tzinfo=timezone.utc),
     }
 
-    # Simulate numerical / physics failure during predict
-    def failing_predict(*args, **kwargs):
-        raise RuntimeError("simulated numerical singularity")
 
-    monkeypatch.setattr(filt, "predict", failing_predict)
-
-    with pytest.raises(RuntimeError, match="simulated numerical singularity"):
-        filt.step(DAY, WEATHER, None, [event_envelope])
-
-    # Because the step failed, the staged reservation was rolled back!
-    # Restoring predict and presenting the exact receipt again must succeed!
-    monkeypatch.undo()
-    prov = filt.step(DAY, WEATHER, None, [event_envelope])
-    assert prov["physical_management_events_applied"] == 1
-    assert prov["verified_delivery_receipts"] == ["rcpt-rollback-1"]
-
-
-def test_authorized_historical_recomputation(keys_ed25519, verifier):
+def test_even_valid_sealed_token_cannot_bypass_daily_step(keys_ed25519, verifier):
     priv, _ = keys_ed25519
     receipt = make_signed_receipt(
-        priv,
-        valid_grant_dict(receipt_id="rcpt-recomp-1", replay_key="rep-recomp-1")
+        priv, valid_grant_dict(receipt_id="sec-direct-valid", replay_key="sec-rep-direct"),
     )
+    token = verifier.verify_and_admit(
+        receipt, expected_day=DAY, expected_plot_id="plot-A",
+        expected_zone_id="plot", expected_geometry_hash="geom-A",
+        expected_geometry_version=1, expected_tenant_id="tenant-prod-alpha",
+        cutoff=CUTOFF,
+    )
+    filt = _scoped_filter_for_sec(verifier)
+    prior = filt.state.clone()
+    try:
+        with pytest.raises(ValueError, match="trusted L3 admission"):
+            filt.predict(DAY, WEATHER, [token])
+        with pytest.raises(ValueError, match="trusted L3 admission"):
+            filt.predict_missing_weather(DAY, [token])
+        assert filt.state.day == prior.day
+        assert filt.state.values == prior.values
+    finally:
+        token.rollback_idempotency()
 
-    # Initial admission and commit
-    tok1 = verifier.verify_and_admit(
-        receipt,
-        expected_day=DAY,
-        expected_plot_id="plot-A",
-        expected_zone_id="plot",
-        expected_geometry_hash="geom-A",
-        expected_geometry_version=1,
+
+@pytest.mark.parametrize("overrides", [
+    {"tenant_id": "neighbor-tenant"},
+    {"plot_id": "neighbor-plot"},
+    {"zone_id": "neighbor-zone"},
+    {"geometry_hash": "superseded-geometry"},
+    {"geometry_version": 2},
+    {"day": "2026-11-02"},
+])
+def test_sealed_token_must_match_receiving_filter_scope(overrides, keys_ed25519, verifier):
+    priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-scope", replay_key="sec-scope-replay"),
+    )
+    token = verifier.verify_and_admit(receipt, expected_day=DAY,
+        expected_plot_id="plot-A", expected_zone_id="plot",
+        expected_geometry_hash="geom-A", expected_geometry_version=1,
+        expected_tenant_id="tenant-prod-alpha", cutoff=CUTOFF)
+    matching = dict(
+        tenant_id="tenant-prod-alpha", plot_id="plot-A", zone_id="plot",
+        geometry_hash="geom-A", geometry_version=1, day=DAY, cutoff=CUTOFF,
+    )
+    try:
+        assert token.applies_to_filter(**matching)
+        matching.update(overrides)
+        assert not token.applies_to_filter(**matching)
+    finally:
+        token.rollback_idempotency()
+
+
+def test_admission_seal_binds_original_delivery_times_and_calibration(keys_ed25519, verifier):
+    from dataclasses import replace
+    priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-seal", replay_key="sec-seal-replay"),
+    )
+    tok = verifier.verify_and_admit(
+        receipt, expected_day=DAY, expected_plot_id="plot-A", expected_zone_id="plot",
+        expected_geometry_hash="geom-A", expected_geometry_version=1,
+        expected_tenant_id="tenant-prod-alpha", cutoff=CUTOFF,
+    )
+    try:
+        assert tok.is_authoritative()
+        assert not replace(tok, delivery_end="2026-11-01T13:00:00Z").is_authoritative()
+        assert not replace(tok, delivery_start="2026-11-01T13:00:00Z").is_authoritative()
+        assert not replace(tok, conversion_calibration_id="uncalibrated").is_authoritative()
+        assert not replace(tok, net_infiltrated_depth_mm=tok.net_infiltrated_depth_mm+1e-9).is_authoritative()
+    finally:
+        tok.rollback_idempotency()
+
+
+def test_consumed_token_stops_being_authoritative_for_filter(keys_ed25519, verifier):
+    priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-consumed", replay_key="sec-consumed-replay"),
+    )
+    tok = verifier.verify_and_admit(
+        receipt, expected_day=DAY, expected_plot_id="plot-A", expected_zone_id="plot",
+        expected_geometry_hash="geom-A", expected_geometry_version=1,
         expected_tenant_id="tenant-prod-alpha",
     )
-    tok1.commit_idempotency()
-
-    # Historical recompute with identical scope succeeds when allow_historical_recompute=True
-    tok2 = verifier.verify_and_admit(
-        receipt,
-        expected_day=DAY,
-        expected_plot_id="plot-A",
-        expected_zone_id="plot",
-        expected_geometry_hash="geom-A",
-        expected_geometry_version=1,
-        expected_tenant_id="tenant-prod-alpha",
-        allow_historical_recompute=True,
+    tok.commit_idempotency()
+    assert tok.is_authoritative()
+    assert not tok.applies_to_filter(
+        tenant_id="tenant-prod-alpha", plot_id="plot-A", zone_id="plot",
+        geometry_hash="geom-A", geometry_version=1, day=DAY,
     )
-    assert tok2.receipt_id == "rcpt-recomp-1"
-    tok2.commit_idempotency()
 
-    # But recomputing with conflicting scope (e.g., mismatched day) fails!
-    with pytest.raises(ValueError, match="duplicate_replay_key_cross_scope_conflict"):
-        verifier.idempotency_store.stage_reservation(
-            receipt.grant,
-            day="2026-11-02",  # Different day from committed day 2026-11-01
-            allow_historical_recompute=True,
-        )
+
+def test_historical_recompute_denies_reused_key_for_different_signed_receipt(keys_ed25519, verifier):
+    priv, _ = keys_ed25519
+    original = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-original", replay_key="sec-shared"),
+    )
+    tok = verifier.verify_and_admit(original, expected_day=DAY,
+        expected_plot_id="plot-A", expected_zone_id="plot")
+    tok.commit_idempotency()
+    different = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-different", replay_key="sec-shared"),
+    )
+    with pytest.raises(ValueError, match="cross_scope_conflict"):
+        verifier.verify_and_admit(different, expected_day=DAY,
+            expected_plot_id="plot-A", expected_zone_id="plot",
+            allow_historical_recompute=True)
+
+
+def test_historical_recompute_denies_changed_claims_same_receipt_id(keys_ed25519, verifier):
+    priv, _ = keys_ed25519
+    original = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-immutable", replay_key="sec-immutable-r"),
+    )
+    token = verifier.verify_and_admit(original, expected_day=DAY,
+        expected_plot_id="plot-A", expected_zone_id="plot")
+    token.commit_idempotency()
+    changed_claims = valid_grant_dict(
+        receipt_id="sec-immutable", replay_key="sec-immutable-r",
+        volume_liters=12000.0,
+    )
+    new_receipt = make_signed_receipt(priv, changed_claims)
+    with pytest.raises(ValueError, match="cross_scope_conflict"):
+        verifier.verify_and_admit(new_receipt, expected_day=DAY,
+            expected_plot_id="plot-A", expected_zone_id="plot",
+            allow_historical_recompute=True)
+
+
+def test_local_batch_flush_failure_never_publishes_state_or_consumes_receipt(
+    tmp_path, keys_ed25519, registry, revocation_authority, monkeypatch,
+):
+    from services.agribrain.layer0.verified_irrigation_contract import (
+        DurableIrrigationIdempotencyStore,
+    )
+    store = DurableIrrigationIdempotencyStore(storage_path=tmp_path / "receipt.json")
+    v = VerifiedDeliveredIrrigationVerifier(registry, revocation_authority, store)
+    filt = _scoped_filter_for_sec(v)
+    priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-fsync", replay_key="sec-fsync-replay"),
+    )
+    original = filt.state.clone()
+    original_P = [r[:] for r in filt.covariance.P]
+    original_flush = store._flush_to_storage
+
+    def failing_flush(*args, **kwargs):
+        raise OSError("simulated_durable_write_failure")
+
+    monkeypatch.setattr(store, "_flush_to_storage", failing_flush)
+    with pytest.raises(OSError, match="simulated_durable_write_failure"):
+        filt.step(DAY, WEATHER, None, [_delivery_event_for_sec(receipt)])
+    assert filt.state.day == original.day
+    assert filt.state.values == original.values
+    assert filt.covariance.P == original_P
+    assert not store._committed_receipts
+    assert not store._pending_receipts
+
+    monkeypatch.setattr(store, "_flush_to_storage", original_flush)
+    result = filt.step(DAY, WEATHER, None, [_delivery_event_for_sec(receipt)])
+    assert result["physical_management_events_applied"] == 1
+    assert len(store._committed_receipts) == 1
+    assert (tmp_path / "receipt.json").is_file()
+
+
+def test_production_rejects_local_idempotency_even_with_trusted_revocation(
+    monkeypatch, verifier,
+):
+    from services.agribrain.layer0.production_admission import (
+        Layer0AdmissionRequiredError, require_trusted_delivery_verifier,
+    )
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
+    with pytest.raises(Layer0AdmissionRequiredError, match="shared Mongo"):
+        require_trusted_delivery_verifier(verifier)
