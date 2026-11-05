@@ -112,8 +112,10 @@ def _load_l3_keys(raw: str) -> KmsPublicKeyRegistry:
                 valid_until=_utc_time(spec["valid_until"]),
                 permitted_purposes=(VERIFIED_IRRIGATION_PURPOSE,),
             )
-        except (ValueError, TypeError, UnicodeError) as exc:
-            # Avoid exposing public-key configuration or raw parsing errors.
+        except Exception:
+            # Cryptography may also raise UnsupportedAlgorithm on malformed
+            # imported public keys. No raw configuration is included in error
+            # reports or logs from this untrusted deployment surface.
             raise Layer0AdmissionRequiredError("invalid L3 public key entry") from None
     return registry
 
