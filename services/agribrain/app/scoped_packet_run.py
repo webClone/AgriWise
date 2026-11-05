@@ -356,6 +356,19 @@ def _run_assessment(
             raise Layer0AdmissionRequiredError("scientific_state_authority_violation")
         if not isinstance(pkg.input_hash, str) or not pkg.input_hash:
             raise Layer0AdmissionRequiredError("signed_input_manifest_absent")
+        # B2B-08B: reconcile only server-generated scientific L3
+        # provenance against the actual committed state/receipt journals.
+        from services.agribrain.app.scientific_commit_lineage import (
+            attest_delivery_commit_lineage,
+        )
+        delivery_links = attest_delivery_commit_lineage(
+            db,
+            tenant_id=scope.tenant_id,
+            plot_id=scope.plot_id,
+            geometry_hash=scope.geometry_hash,
+            geometry_version=scope.geometry_version,
+            provenance_log=pkg.provenance.get("provenance_log"),
+        )
         summary = {
             "assessment_id": body.assessment_id,
             "state_run_id": pkg.run_id,
@@ -366,6 +379,10 @@ def _run_assessment(
             "state_uncertainty": pkg.state_uncertainty,
             "q_temporal_contract": "declared_unforced_or_temporal_rate_process_q",
             "source_manifest": pkg.provenance.get("positive_state_input_manifest"),
+            "verified_delivery_commits": delivery_links,
+            "verified_delivery_receipt_count": sum(
+                len(link["receipt_ids"]) for link in delivery_links
+            ),
             "scientific_publication_authorized": False,
             "actuator_control_authorized": False,
         }
@@ -384,6 +401,7 @@ def _run_assessment(
             "input_hash": pkg.input_hash,
             "output_hash": pkg.output_hash,
             "signed_input_count": summary["signed_input_count"],
+            "verified_delivery_receipt_count": summary["verified_delivery_receipt_count"],
             "scientific_publication_authorized": False,
             "actuator_control_authorized": False,
         }

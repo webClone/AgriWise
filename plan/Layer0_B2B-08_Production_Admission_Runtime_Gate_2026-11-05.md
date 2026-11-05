@@ -129,3 +129,26 @@ py -m pytest -v services/agribrain/layer0/tests/manual_b2b08_irrigation_connecte
 
 - Layer 0 current B2B cohort gate progress: **7 / 8 frozen = 87.5%**. This is *not* a percentage of all possible Layer 0 capabilities; B2B-08 is the open integration cohort.
 - Whole 52-package register: October 18 `AgriBrain_WIP_Package_Register_52_2e1fbcb_2026-10-18.json` reports **0/52 formally fully accepted = 0%** at that historical snapshot, despite partially implemented work in all packages. It also lists **137 verified slices / (137 verified + 150 remaining criteria) = 47.7%** unweighted source-evidence slice coverage **as of October 18**. This proxy is not a present-day implementation percentage and cannot be extrapolated from Layer 0 milestone freezes alone. A refreshed 153-requirement evidence mapping is required to assign a defensible current overall percentage.
+
+## 8. B2B-08B-II — Cross-journal signed-delivery lineage (unqualified candidate)
+
+Read-only assessment attestation now matches each server-produced Kalman applied
+or recovered L3 receipt to the exact committed scoped Mongo snapshot and
+COMMITTED receipt, including the independent physical-evidence fingerprint.
+The HTTP response exposes only a receipt count; the internal journal retains
+verified snapshot/receipt IDs. Missing, foreign, contradictory or legacy
+unfingerprinted records fail closed and leave the assessment STAGED.
+
+Files: app/scientific_commit_lineage.py; app/scoped_packet_run.py;
+layer0/tests/test_b2b08_scientific_commit_lineage.py.
+
+**Exact-head tests NOT executed yet**. Run:
+
+    py -m pytest -q services/agribrain/layer0/tests/test_b2b08_scientific_commit_lineage.py
+    py -m pytest -q services/agribrain/layer0/tests/test_b2b08_production_delivery_runtime.py services/agribrain/layer0/tests/test_b2b07_verified_delivered_irrigation.py
+    py -m pytest -v services/agribrain/layer0/tests/manual_b2b08_irrigation_connected_gate.py
+
+The new check does not repair historical records, provide atomic revocation
+with file-backed snapshots, grant publication/actuation, or satisfy B2B-08B
+real FastAPI integration and B2B-08C operations acceptance. Keep the 365-day
+ASMAE run for the final integrated A+B+C candidate. Do not merge until reviewed.
