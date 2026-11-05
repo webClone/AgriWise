@@ -74,6 +74,8 @@ async def lifespan(app: FastAPI):
     strict_plot_scope = os.getenv(
         "AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE", ""
     ).lower() in ("1", "true", "yes")
+    db_for_authority = None
+    app.state.layer0_verified_irrigation_verifier = None
     try:
         from app.mongo_client import get_db
         from layer0.data_gateway import get_broker
@@ -93,6 +95,24 @@ async def lifespan(app: FastAPI):
         logger.exception("[STARTUP] B2B-05 plot authority unavailable")
         if strict_plot_scope:
             raise RuntimeError("mandatory_b2b05_plot_authority_unavailable") from None
+
+    # B2B-08A: server-only opt-in physical delivery authority. This must NOT
+    # be placed inside a "try/except: log and continue" startup branch:
+    # if an operator explicitly enables L3 delivery, absent public keys,
+    # expired revocation or non-transactional MongoDB must abort startup.
+    # With no opt-in, delivery stays disabled even in development.
+    from services.agribrain.app.production_delivery_runtime import (
+        bootstrap_server_verified_irrigation,
+        verified_irrigation_enabled,
+    )
+    app.state.layer0_verified_irrigation_verifier = (
+        bootstrap_server_verified_irrigation(db_for_authority)
+    )
+    logger.info(
+        "[STARTUP] L3 verified delivery runtime: %s",
+        "provisioned" if verified_irrigation_enabled() else "disabled",
+    )
+
     logger.info("[STARTUP] Starting background data refresh worker...")
     try:
         from layer0.data_gateway.refresh_worker import DataRefreshWorker
@@ -171,6 +191,9 @@ async def lifespan(app: FastAPI):
         logger.error(f"[STARTUP] Surfaces cache temp and legacy cleanup failed: {e}")
 
     yield
+    # Remove server-owned, privileged verifier from the application runtime
+    # before subsequent shutdown work. It is never request-controlled.
+    app.state.layer0_verified_irrigation_verifier = None
     logger.info("[SHUTDOWN] Stopping background data refresh worker...")
     if _asmae_recovery_stop is not None:
         _asmae_recovery_stop.set()
