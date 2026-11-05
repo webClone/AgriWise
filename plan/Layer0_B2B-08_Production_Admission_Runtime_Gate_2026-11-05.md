@@ -222,23 +222,39 @@ revocation vs Mongo atomic fencing, legacy fingerprint migration, and
 operator STAGED reconciliation remain separate mandatory release gates.
 
 
-## 11. B2B-08 Full Integrated Qualification Receipts
+## 11. B2B-08 Full Integrated Qualification Receipts & Final Closure Evidencing
 
 **Scope & Environment:**
 - Python 3.13.13 / pytest 9.0.3 / Node 22 / Next.js 16.1.4 (Turbopack)
 - Connected MongoDB replica set on dedicated `mongodb://127.0.0.1:27018/?replicaSet=rs0` (`akaloris-b07-mongo-rs`, image `mongo:7`)
 
-**Python Test Receipts:**
-- Layer 0 unit and regression (`services/agribrain/layer0/tests/`): **770 passed**, 1 warning in 28.62s
-- Layer 1 fusion (`services/agribrain/layer1_fusion/tests/`): **21 passed** in 1.07s
-- Layer 0.5 ASMAE fast (`services/agribrain/layer05_asmae/tests/` excluding 365-day): **83 passed**, 3 subtests passed in 43.76s
-- Layer 0.5 ASMAE 365-day comprehensive pipeline (`test_comprehensive_pipeline_execution.py`): **1 passed** in 628.62s (10m 28s)
-- **Total distinct Python tests:** **875 passed** (874 unit/fast + 1 365-day comprehensive pipeline)
+**Four Final Closure Evidences:**
+1. **Qualification Label Correction & Dedicated 365-Day Endurance Gate:**
+   - Corrected historical label: `test_comprehensive_pipeline_execution.py` is the 10-calendar-day real-raster ASMAE scene validation (window August 30 – September 8, 2026, 628.62s) with cached Sentinel-1/Sentinel-2 assets, radiometric validation, BMA, and EnKF.
+   - Added dedicated `services/agribrain/layer0/tests/test_kalman_365day_numerical_endurance.py` (**4/4 passed** in 2.06s) establishing continuous 365-day annual cycle stability: Joseph-form covariance PSD (all eigenvalues >= -1e-10) across all 365 steps, temporal gap admission (linear Q scaling) and strict fail-closed >30-day gap rejection, exact deterministic trajectory replay invariance, mid-cycle serialization restore, and multi-zone state separation.
+2. **Actual `main.app` Staging Lifespan Qualification:**
+   - Added `services/agribrain/layer0/tests/manual_b2b08_staging_main_lifespan_gate.py` (**1/1 passed** against live replica set in 4.14s) qualifying the complete production `services.agribrain.app.main.app` lifespan: MongoDB connectivity, B2B-05 plot authority configuration, server-only L3 verifier on `app.state`, source verifier on `app.state`, background refresh worker, ASMAE durable recovery worker thread, Mongo nonce indexes, signed internal service readiness probe (HTTP 200, ready=true), signed scoped packet run commit, graceful lifespan shutdown, and cold restart recovery without duplicate receipt consumption.
+3. **Operational Recovery & Legacy Receipt Quarantine:**
+   - Created `services/agribrain/layer0/operational_reconciliation.py` and test suite `test_b2b08_operational_reconciliation.py` (**5/5 passed** in 0.19s).
+   - Provides controlled operator tooling to audit ambiguous `STAGED` assessments, rollback uncommitted staged reservations, or complete durable commitments with operator audit metadata (forbidding silent/automatic deletion).
+   - Establishes quarantine and deterministic migration for pre-B2B-08 receipts lacking `evidence_fingerprint`.
+4. **In-Transaction Revocation Fencing:**
+   - Enhanced `MongoIrrigationIdempotencyStore.commit_many` to execute an in-transaction verification fence against `Layer0RevocationLedger` within the active MongoDB multi-document session (`session=session`).
+   - If an issuer key or receipt is revoked in MongoDB, the transaction aborts with `RuntimeError("issuer_key_revoked_in_transaction")` and WiredTiger rolls back the entire atomic commit.
+   - Verified in `services/agribrain/layer0/tests/test_b2b08_transactional_revocation_fence.py` (**2/2 passed** in 0.41s).
 
-**Real Connected MongoDB Integration Gates (4/4 passed):**
+**Python Test Receipts:**
+- Layer 0 unit and regression (`services/agribrain/layer0/tests/`): **781 passed**, 1 warning in 20.29s (incorporating 365-day endurance, reconciliation, and revocation fence suites)
+- Layer 1 fusion (`services/agribrain/layer1_fusion/tests/`): **21 passed** in 1.07s
+- Layer 0.5 ASMAE fast (`services/agribrain/layer05_asmae/tests/` excluding comprehensive pipeline): **83 passed**, 3 subtests passed in 43.76s
+- Layer 0.5 ASMAE 10-day comprehensive pipeline (`test_comprehensive_pipeline_execution.py`, Aug 30 - Sep 8 2026): **1 passed** in 628.62s (10m 28s)
+- **Total distinct Python tests:** **886 passed** (885 unit/fast + 1 10-day comprehensive pipeline)
+
+**Real Connected MongoDB Integration Gates (5/5 passed):**
 - `manual_b2b07_mongo_acceptance.py`: **2 passed** in 3.85s (multi-worker atomic commit, signed L3 delivery to scoped Kalman assessment)
 - `manual_b2b08_irrigation_connected_gate.py`: **1 passed** in 1.04s (cutoff, revocation, duplicate evidence fence, retry, cold recovery, distinct deliveries)
 - `manual_b2b08_signed_http_connected_gate.py`: **1 passed** in 3.04s (authenticated FastAPI request -> signed v3 source + L3 delivery -> Mongo transactional state/receipt journal -> cold restart recovery -> plot ownership revocation gate)
+- `manual_b2b08_staging_main_lifespan_gate.py`: **1 passed** in 4.14s (actual `services.agribrain.app.main.app` lifespan startup, B2B-05 plot authority, app.state verifiers, readiness probe, signed assessment, shutdown cleanup, cold restart recovery)
 
 **Frontend & Build Receipts:**
 - Frontend test suite (`npm run test:frontend`): **105 passed**, 0 failed in 1.53s

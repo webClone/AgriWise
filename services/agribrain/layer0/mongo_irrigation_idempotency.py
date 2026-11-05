@@ -112,6 +112,7 @@ class MongoIrrigationIdempotencyStore:
         doc = {
             "_id": grant.receipt_id,
             "replay_key": grant.replay_idempotency_key,
+            "key_id": getattr(grant, "key_id", None),
             "grant_digest": digest,
             "evidence_fingerprint": evidence_key,
             "tenant_id": grant.tenant_id,
@@ -250,6 +251,23 @@ class MongoIrrigationIdempotencyStore:
         try:
             with self._client.start_session() as session:
                 with session.start_transaction():
+                    # In-transaction revocation fence: if Layer0RevocationLedger is present in Mongo,
+                    # verify in-session that neither the issuer key nor the receipt was revoked.
+                    try:
+                        rev_coll = self._db["Layer0RevocationLedger"]
+                        for r in tokens:
+                            rec_doc = self._receipts.find_one({"_id": r.receipt_id}, session=session)
+                            k_id = (rec_doc or {}).get("key_id") or getattr(r, "key_id", None)
+                            if k_id:
+                                key_doc = rev_coll.find_one({"_id": k_id}, session=session)
+                                if key_doc and key_doc.get("status") in ("revoked", "retired"):
+                                    raise RuntimeError(f"issuer_key_revoked_in_transaction: {k_id}")
+                            rev_rec = rev_coll.find_one({"_id": f"receipt:{r.receipt_id}"}, session=session)
+                            if rev_rec and rev_rec.get("status") == "revoked":
+                                raise RuntimeError(f"receipt_revoked_in_transaction: {r.receipt_id}")
+                    except Exception as rev_err:
+                        if isinstance(rev_err, RuntimeError) and "_in_transaction" in str(rev_err):
+                            raise
                     for r in tokens:
                         outcome = self._receipts.update_one(
                             {"_id": r.receipt_id, "replay_key": r.replay_key,

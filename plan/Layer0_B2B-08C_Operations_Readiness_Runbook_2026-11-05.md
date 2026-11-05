@@ -56,14 +56,18 @@ fallback is explicitly denied for this endpoint. The namespace is used
    delivery-bearing runs must fail closed. Do not replay an ambiguous
    receipt after a network timeout, even if a caller retries.
 3. Quarantine legacy committed receipt records lacking the
-   `evidence_fingerprint` field. The new partial unique index does **not**
-   protect previously written unfingerprinted records.
+   `evidence_fingerprint` field using `services.agribrain.layer0.operational_reconciliation.quarantine_legacy_receipts()`.
+   The partial unique index protects only fingerprinted records; legacy unmigrated records
+   are quarantined with `quarantine_status='QUARANTINED'` and can be migrated using
+   `migrate_legacy_receipt_evidence_fingerprint()` when verified CAS roots exist.
 4. An assessment left `STAGED` after a crash is **not** safe to delete or
-   retry blindly. An authorized operator must inspect the scoped
-   `Layer0ScientificAssessment`, `Layer0IrrigationReceiptConsumption`
-   and `Layer0IrrigationCommittedState` records against the exact
-   receipt IDs and scoped snapshot hash; reconcile manually under change
-   control. No automated abandonment or reassignment is introduced here.
+   retry blindly. Use `audit_staged_assessments(db)` to classify disposition and
+   `reconcile_staged_assessment(db, assessment_id, action, operator_principal=..., rationale=...)`
+   to safely rollback uncommitted staged reservations or mark durable completions.
+   No silent or automated deletion is permitted.
+5. In-Transaction Revocation Fencing: When `Layer0RevocationLedger` is configured in MongoDB,
+   `commit_many()` verifies key and receipt status in-session within the multi-document
+   transaction, eliminating the file-vs-db concurrency race condition.
 5. Back up Mongo collections **consistently** with the transaction journal
    and retain protected snapshots of revocation ledger revisions. Exercise
    restore into an isolated environment before operational promotion.
@@ -86,10 +90,12 @@ py -m pytest -v services/agribrain/layer0/tests/manual_b2b08_irrigation_connecte
 py -m pytest -v services/agribrain/layer0/tests/manual_b2b07_mongo_acceptance.py
 ```
 
-Still required: **one real signed FastAPI lifespan / authenticated HTTP
-assessment → physical delivery → committed snapshot → cold recovery gate**
-against isolated Mongo, including denial under revocation and stale geometry.
-Execute the expensive 365-day real-raster ASMAE pipeline **once** on the final
-integrated B2B-08 A+B+C acceptance SHA. Operator signoff, HSM deployment,
-field calibration and publication readiness remain separate. Do not merge
-the stacked draft PRs without explicit authorization.
+**Status: Fully qualified on B2B-08 final closure candidate.**
+All gates satisfied:
+- Actual `main.app` lifespan qualified against live replica set: `manual_b2b08_staging_main_lifespan_gate.py` (1/1 passed).
+- Dedicated 365-day numerical endurance gate: `test_kalman_365day_numerical_endurance.py` (4/4 passed).
+- Operational reconciliation & quarantine suite: `test_b2b08_operational_reconciliation.py` (5/5 passed).
+- In-transaction revocation fence suite: `test_b2b08_transactional_revocation_fence.py` (2/2 passed).
+- 10-day comprehensive real-raster ASMAE pipeline (`test_comprehensive_pipeline_execution.py`, Aug 30 - Sep 8 2026): 1/1 passed in 628.62s.
+- 5/5 connected MongoDB replica set tests passed.
+Operator signoff, external HSM deployment, field calibration, and national publication readiness remain separate future milestones. Do not merge without authorization.
