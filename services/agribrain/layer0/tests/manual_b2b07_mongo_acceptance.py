@@ -46,7 +46,7 @@ from services.agribrain.layer0.kalman_engine import ZoneKalmanFilter
 DAY = "2026-11-01"
 
 
-def _grant(receipt_id="b07-real", replay_key="b07-real-replay"):
+def _grant(receipt_id="b07-real", replay_key="b07-real-replay", evidence_root="integration-fixture-evidence"):
     return VerifiedDeliveredIrrigationGrant(
         domain=VERIFIED_IRRIGATION_DOMAIN,
         version="v3", algorithm="Ed25519",
@@ -67,7 +67,7 @@ def _grant(receipt_id="b07-real", replay_key="b07-real-replay"):
         net_infiltrated_depth_mm=9.0,
         conversion_calibration_id="integration-fixture-calibration",
         depth_uncertainty_sigma_mm=0.5,
-        source_evidence_cas_root="integration-fixture-evidence",
+        source_evidence_cas_root=evidence_root,
         replay_idempotency_key=replay_key,
         revocation_revision_anchor=0,
         issued_at="2026-11-01T14:05:00Z",
@@ -160,7 +160,7 @@ def test_real_replica_set_two_processes_one_commit_and_atomic_failure():
         # the receipt update when the state-document insert conflicts.
         store = MongoIrrigationIdempotencyStore(database)
         late = store.stage_reservation(
-            _grant("b07-late", "b07-late-replay"), DAY,
+            _grant("b07-late", "b07-late-replay", evidence_root="integration-fixture-evidence-late"), DAY,
         )
         with pytest.raises(RuntimeError, match="irrigation_state_commit_unconfirmed"):
             store.commit_many([late], state_snapshot=_snapshot())

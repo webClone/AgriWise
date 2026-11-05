@@ -557,7 +557,8 @@ class ZoneKalmanFilter:
             self.delivery_verifier, "idempotency_store", None,
         )
         if (
-            isinstance(delivery_store, MongoIrrigationIdempotencyStore)
+            not getattr(self, "allow_historical_recompute", False)
+            and isinstance(delivery_store, MongoIrrigationIdempotencyStore)
             and self.tenant_id and self.parent_plot_id
             and self.expected_geometry_hash and type(self.geometry_version) is int
         ):
