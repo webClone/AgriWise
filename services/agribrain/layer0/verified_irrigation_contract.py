@@ -310,6 +310,7 @@ class IrrigationIdempotencyReservation:
     geometry_hash: str
     geometry_version: int
     day: str
+    grant_digest: str = ""
     status: str = "STAGED"  # "STAGED", "COMMITTED", "ROLLED_BACK"
 
     def commit(self) -> None:
@@ -317,7 +318,7 @@ class IrrigationIdempotencyReservation:
             return
         if self.status == "ROLLED_BACK":
             raise RuntimeError("cannot commit a rolled back reservation")
-        self.store._commit_reservation(self)
+        self.store.commit_many([self])
         self.status = "COMMITTED"
 
     def rollback(self) -> None:
@@ -354,13 +355,15 @@ class DurableIrrigationIdempotencyStore:
         except Exception as exc:
             raise RuntimeError(f"failed to load idempotency store from {self.storage_path}: {exc}") from exc
 
-    def _flush_to_storage(self) -> None:
+    def _flush_to_storage(self, candidate: Optional[dict[str, dict[str, Any]]] = None) -> None:
         if self.storage_path is None:
             return
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "version": "1.0",
-            "committed": list(self._committed_receipts.values()),
+            "committed": list(
+                (candidate if candidate is not None else self._committed_receipts).values()
+            ),
         }
         raw = json.dumps(data, indent=2, sort_keys=True)
         tmp_path = self.storage_path.with_suffix(f".tmp.{os.getpid()}.{os.urandom(4).hex()}")
@@ -378,6 +381,7 @@ class DurableIrrigationIdempotencyStore:
         geometry_version: int,
         tenant_id: str,
         allow_historical_recompute: bool = False,
+        receipt_digest: str = "",
     ) -> tuple[bool, str]:
         if replay_key in self._pending_replay_keys:
             return True, "duplicate_replay_key"
@@ -387,8 +391,15 @@ class DurableIrrigationIdempotencyStore:
         rec = self._committed_replay_keys.get(replay_key) or self._committed_receipts.get(receipt_id)
         if rec is not None:
             if allow_historical_recompute:
+                # Historical replay must identify the EXACT original receipt,
+                # signature-verified grant content, scope and day. Reusing one
+                # replay key for a different receipt is always forbidden.
                 matches_scope = (
-                    rec.get("plot_id") == plot_id
+                    rec.get("receipt_id") == receipt_id
+                    and rec.get("replay_key") == replay_key
+                    and bool(receipt_digest)
+                    and rec.get("grant_digest") == receipt_digest
+                    and rec.get("plot_id") == plot_id
                     and rec.get("geometry_hash") == geometry_hash
                     and rec.get("geometry_version") == geometry_version
                     and rec.get("tenant_id") == tenant_id
@@ -409,6 +420,7 @@ class DurableIrrigationIdempotencyStore:
         day: str,
         allow_historical_recompute: bool = False,
     ) -> IrrigationIdempotencyReservation:
+        digest = hashlib.sha256(canonical_grant_bytes(grant.to_dict())).hexdigest()
         consumed, reason = self.is_consumed(
             grant.receipt_id,
             grant.replay_idempotency_key,
@@ -418,6 +430,7 @@ class DurableIrrigationIdempotencyStore:
             geometry_version=grant.geometry_version,
             tenant_id=grant.tenant_id,
             allow_historical_recompute=allow_historical_recompute,
+            receipt_digest=digest,
         )
         if consumed:
             raise ValueError(reason)
@@ -431,30 +444,73 @@ class DurableIrrigationIdempotencyStore:
             geometry_hash=grant.geometry_hash,
             geometry_version=grant.geometry_version,
             day=day,
+            grant_digest=digest,
             status="STAGED",
         )
         self._pending_receipts[grant.receipt_id] = reservation
         self._pending_replay_keys[grant.replay_idempotency_key] = reservation
         return reservation
 
-    def _commit_reservation(self, res: IrrigationIdempotencyReservation) -> None:
-        if not self.reservation_is_live(res):
+    def commit_many(
+        self, reservations: Sequence[IrrigationIdempotencyReservation],
+        *, state_snapshot: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        """Single durable write before any reservation becomes consumed.
+
+        Research-only file backend: atomic replace on one process, NOT a
+        distributed locking/CAS store. Production must use the shared Mongo
+        transactional backend. On fsync/replace failure, neither the
+        committed dictionaries nor reservation statuses are changed.
+        """
+        unique = list(reservations)
+        if not unique:
+            return
+        if len({r.receipt_id for r in unique}) != len(unique):
+            raise ValueError("duplicate_receipt_in_transaction")
+        if len({r.replay_key for r in unique}) != len(unique):
+            raise ValueError("duplicate_replay_key_in_transaction")
+        if any(not self.reservation_is_live(r) or r.status != "STAGED" for r in unique):
             raise RuntimeError("idempotency_reservation_not_staged")
-        self._pending_receipts.pop(res.receipt_id, None)
-        self._pending_replay_keys.pop(res.replay_key, None)
-        rec = {
-            "receipt_id": res.receipt_id,
-            "replay_key": res.replay_key,
-            "tenant_id": res.tenant_id,
-            "plot_id": res.plot_id,
-            "geometry_hash": res.geometry_hash,
-            "geometry_version": res.geometry_version,
-            "day": res.day,
-            "committed_at": datetime.now(timezone.utc).isoformat(),
-        }
-        self._committed_receipts[res.receipt_id] = rec
-        self._committed_replay_keys[res.replay_key] = rec
-        self._flush_to_storage()
+        candidate = dict(self._committed_receipts)
+        replay = dict(self._committed_replay_keys)
+        for res in unique:
+            if res.receipt_id in candidate or res.replay_key in replay:
+                # Explicit historical research recomputation retains the same
+                # previously committed grant but never overwrites its record.
+                old = candidate.get(res.receipt_id)
+                if old is None or old != replay.get(res.replay_key) or (
+                    old.get("grant_digest") != res.grant_digest
+                    or old.get("tenant_id") != res.tenant_id
+                    or old.get("plot_id") != res.plot_id
+                    or old.get("geometry_hash") != res.geometry_hash
+                    or old.get("geometry_version") != res.geometry_version
+                    or old.get("day") != res.day
+                ):
+                    raise ValueError("historical_recompute_identity_conflict")
+                continue
+            rec = {
+                "receipt_id": res.receipt_id,
+                "replay_key": res.replay_key,
+                "tenant_id": res.tenant_id,
+                "plot_id": res.plot_id,
+                "geometry_hash": res.geometry_hash,
+                "geometry_version": res.geometry_version,
+                "day": res.day,
+                "grant_digest": res.grant_digest,
+                "committed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            candidate[res.receipt_id] = rec
+            replay[res.replay_key] = rec
+        self._flush_to_storage(candidate)
+        self._committed_receipts = candidate
+        self._committed_replay_keys = replay
+        for res in unique:
+            self._pending_receipts.pop(res.receipt_id, None)
+            self._pending_replay_keys.pop(res.replay_key, None)
+            res.status = "COMMITTED"
+
+    def _commit_reservation(self, res: IrrigationIdempotencyReservation) -> None:
+        self.commit_many([res])
 
     def reservation_is_live(self, res: IrrigationIdempotencyReservation) -> bool:
         return (
