@@ -368,16 +368,28 @@ class Layer0StateEngine:
         # configuration after an estimator instance was constructed.
         require_trusted_verifier(self._positive_observation_admission_verifier)
         require_trusted_delivery_verifier(self._verified_delivery_verifier)
-        if (
-            signed_inputs_required()
-            and not isinstance(
+        # The production authority gate already enforces the exact trusted
+        # asymmetric-v3 verifier or a strict unified dispatcher. Do not
+        # regress here to the legacy-only HMAC class: that would reject the
+        # qualified B2B-06 KMS verifier at the real packet entrypoint.
+        if signed_inputs_required():
+            from services.agribrain.layer0.v3_kms_signed_issuer import (
+                V3KmsGrantVerifier,
+            )
+            from services.agribrain.layer0.v3_state_admission import (
+                UnifiedAdmissionVerifier,
+            )
+            if not isinstance(
                 self._positive_observation_admission_verifier,
-                PositiveObservationAdmissionVerifier
-            )
-        ):
-            raise Layer0AdmissionRequiredError(
-                "Mandatory packet admission requires a trusted verifier"
-            )
+                (
+                    PositiveObservationAdmissionVerifier,
+                    V3KmsGrantVerifier,
+                    UnifiedAdmissionVerifier,
+                ),
+            ):
+                raise Layer0AdmissionRequiredError(
+                    "Mandatory packet admission requires a trusted verifier"
+                )
 
         # Mandatory live admission has its own trusted UTC run timestamp.
         # Caller-controlled historical timestamps cannot backdate receipt
