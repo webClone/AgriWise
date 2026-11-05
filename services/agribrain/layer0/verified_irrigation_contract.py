@@ -72,6 +72,10 @@ def _compute_admission_seal(
     conversion_calibration_id: str,
     grant_digest: str,
     claim_nonce: str,
+    issued_at: str = "",
+    expires_at: str = "",
+    key_id: str = "",
+    revocation_revision_anchor: int = 0,
 ) -> str:
     # Canonical JSON avoids ':' concatenation ambiguity, and exact float.hex()
     # prevents same-seal values differing below eight decimal places.
@@ -85,6 +89,8 @@ def _compute_admission_seal(
         "delivery_start": delivery_start, "delivery_end": delivery_end,
         "calibration": conversion_calibration_id,
         "grant_digest": grant_digest, "claim_nonce": claim_nonce,
+        "issued_at": issued_at, "expires_at": expires_at,
+        "key_id": key_id, "revocation_revision_anchor": revocation_revision_anchor,
     }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hmac.new(_ADMISSION_SECRET, msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -553,6 +559,10 @@ class AdmittedDeliveredIrrigation:
     delivery_end: str
     conversion_calibration_id: str
     replay_idempotency_key: str
+    issued_at: str = ""
+    expires_at: str = ""
+    key_id: str = ""
+    revocation_revision_anchor: int = 0
     scientific_publication_authorized: bool = False
     actuator_control_authorized: bool = False
     provenance: dict[str, Any] = field(default_factory=dict)
@@ -581,6 +591,9 @@ class AdmittedDeliveredIrrigation:
             conversion_calibration_id=self.conversion_calibration_id,
             grant_digest=self._reservation.grant_digest if self._reservation else "",
             claim_nonce=getattr(self._reservation, "claim_nonce", ""),
+            issued_at=self.issued_at, expires_at=self.expires_at,
+            key_id=self.key_id,
+            revocation_revision_anchor=self.revocation_revision_anchor,
         )
         return hmac.compare_digest(self._admission_seal, expected_seal)
 
@@ -694,6 +707,41 @@ class VerifiedDeliveredIrrigationVerifier:
         self.revocation_authority = revocation_authority
         self.idempotency_store = idempotency_store or DurableIrrigationIdempotencyStore()
 
+    def revalidate_for_commit(
+        self, token: AdmittedDeliveredIrrigation, *,
+        cutoff: Optional[datetime] = None,
+    ) -> None:
+        """Re-check live signer, expiry and revocation after prediction.
+
+        This is the final application-level gate before a Mongo transaction.
+        Future deployments should place revocation revision fencing into the
+        same server-side transactional authority to eliminate the last
+        check/commit race against an external file-backed revocation source.
+        """
+        if not isinstance(token, AdmittedDeliveredIrrigation) or not token.is_authoritative():
+            raise ValueError("untrusted_l3_admission_token")
+        current = datetime.now(timezone.utc)
+        issued = _parse_iso_utc(token.issued_at)
+        expires = _parse_iso_utc(token.expires_at)
+        assessment = _ensure_utc(cutoff) if cutoff is not None else current
+        if issued > assessment:
+            raise ValueError("receipt_issued_after_assessment_cutoff")
+        if assessment >= expires:
+            raise ValueError("receipt_expired_at_assessment")
+        if current >= expires and not getattr(token._reservation, "historical_readonly", False):
+            raise ValueError("receipt_expired_at_commit")
+        key_entry = self.public_key_registry.get_entry(token.key_id)
+        if key_entry is None or not key_entry.is_valid_at(current):
+            raise ValueError("l3_key_not_currently_valid")
+        ok, reason = self.revocation_authority.check_authority(
+            token.key_id, current,
+            revision_anchor=token.revocation_revision_anchor,
+            plot_id=token.plot_id, zone_id=token.zone_id,
+            grant_id=token.replay_idempotency_key,
+        )
+        if not ok:
+            raise ValueError(reason)
+
     @property
     def seen_replay_keys(self) -> Set[str]:
         return set(self.idempotency_store._committed_replay_keys) | set(self.idempotency_store._pending_replay_keys)
@@ -748,7 +796,22 @@ class VerifiedDeliveredIrrigationVerifier:
         except InvalidSignature:
             raise ValueError("tampered_receipt_signature") from None
 
-        # 3. Temporal validity checks
+        # 3. Receipt authorization-time and event-time are distinct.
+        # A receipt created after an assessment cutoff cannot retroactively
+        # alter that assessment; historical delivery time alone is insufficient.
+        authorization_time = datetime.now(timezone.utc)
+        assessment_time = _ensure_utc(cutoff) if cutoff is not None else authorization_time
+        issued_at_dt = _parse_iso_utc(grant.issued_at)
+        expires_at_dt = _parse_iso_utc(grant.expires_at)
+        if issued_at_dt > assessment_time:
+            raise ValueError("receipt_issued_after_assessment_cutoff")
+        if assessment_time >= expires_at_dt:
+            raise ValueError("receipt_expired_at_assessment")
+        if (
+            authorization_time >= expires_at_dt
+            and not allow_historical_recompute
+        ):
+            raise ValueError("receipt_expired_at_authorization")
         delivery_end_dt = _parse_iso_utc(grant.delivery_end)
         delivery_day = delivery_end_dt.date().isoformat()
         if expected_day and delivery_day != expected_day:
@@ -775,7 +838,7 @@ class VerifiedDeliveredIrrigationVerifier:
         if self.revocation_authority is not None:
             rev_ok, rev_reason = self.revocation_authority.check_authority(
                 grant.key_id,
-                delivery_end_dt,
+                authorization_time,
                 revision_anchor=grant.revocation_revision_anchor,
                 plot_id=grant.plot_id,
                 zone_id=grant.zone_id,
@@ -788,8 +851,7 @@ class VerifiedDeliveredIrrigationVerifier:
         if not key_entry.is_valid_at(delivery_end_dt):
             raise ValueError("key_expired_or_not_yet_valid")
 
-        # Receipt validity
-        expires_at_dt = _parse_iso_utc(grant.expires_at)
+        # Receipt must remain valid at the actual delivery time as well.
         if delivery_end_dt > expires_at_dt:
             raise ValueError("receipt_expired")
 
@@ -816,6 +878,9 @@ class VerifiedDeliveredIrrigationVerifier:
             conversion_calibration_id=grant.conversion_calibration_id,
             grant_digest=reservation.grant_digest,
             claim_nonce=getattr(reservation, "claim_nonce", ""),
+            issued_at=grant.issued_at, expires_at=grant.expires_at,
+            key_id=grant.key_id,
+            revocation_revision_anchor=grant.revocation_revision_anchor,
         )
 
         # 8. Admitted token
@@ -832,6 +897,9 @@ class VerifiedDeliveredIrrigationVerifier:
             delivery_end=grant.delivery_end,
             conversion_calibration_id=grant.conversion_calibration_id,
             replay_idempotency_key=grant.replay_idempotency_key,
+            issued_at=grant.issued_at, expires_at=grant.expires_at,
+            key_id=grant.key_id,
+            revocation_revision_anchor=grant.revocation_revision_anchor,
             scientific_publication_authorized=False,
             actuator_control_authorized=False,
             provenance={
