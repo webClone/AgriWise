@@ -237,6 +237,9 @@ app = FastAPI(
 # unauthenticated endpoint grants state, publication or actuator authority.
 from services.agribrain.app.scoped_packet_run import router as b2b08_packet_router
 app.include_router(b2b08_packet_router)
+# B2B-08C: signed internal operations readiness; never an authority endpoint.
+from services.agribrain.app.layer0_operational_readiness import router as b2b08c_readiness_router
+app.include_router(b2b08c_readiness_router)
 
 _cors_origins = [
     "http://localhost:3000",

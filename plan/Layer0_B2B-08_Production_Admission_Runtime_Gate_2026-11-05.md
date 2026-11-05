@@ -152,3 +152,29 @@ The new check does not repair historical records, provide atomic revocation
 with file-backed snapshots, grant publication/actuation, or satisfy B2B-08B
 real FastAPI integration and B2B-08C operations acceptance. Keep the 365-day
 ASMAE run for the final integrated A+B+C candidate. Do not merge until reviewed.
+
+## 9. B2B-08C-I — Authenticated operations readiness candidate
+
+**Status:** New code and tests committed on the B2B-08 branch, exact-head
+qualification pending (not a B2B-08 freeze). See
+`plan/Layer0_B2B-08C_Operations_Readiness_Runbook_2026-11-05.md`.
+
+The internal HMAC-authenticated endpoint
+`/v2/b2b08/internal/readiness` independently rechecks shared Mongo ping
+and session-capable replica/sharded topology, plot-ownership availability,
+strict v3/source admission, dedicated L3 public-key verification and live
+revocation freshness. It returns allowlisted statuses only, never secrets,
+signer IDs, unredacted plot identifiers, receipt tokens or file paths.
+Missing, revoked or stale authorities produce 503 and no operational
+fallback. The endpoint requires a real signed internal service request,
+even when development mode permits unsigned legacy endpoints.
+
+Readiness expressly reports `mongo_transaction_executed=false`; a
+topology probe is not a committed multi-document transaction. Key rotation,
+audit recovery, snapshot backup and migration/quarantine procedures are
+documented. No automated deletion/retry of ambiguous STAGED claims.
+
+Targeted suite: `test_b2b08c_operational_readiness.py`.
+Connected FastAPI signed-request acceptance, full final suites and final
+365-day comprehensive remain pending. Existing B2B-07, weather, Pilot,
+main, findings and master monograph remain protected.
