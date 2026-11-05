@@ -46,3 +46,41 @@
 - No modifications to `findings/layer0.md`, the master monograph, or prior frozen gate documents.
 - Do not merge PR #26, PR #27 or B2B-08 without explicit authorization.
 - B2B-08 stays **NOT FROZEN** until live service and actual packet-run acceptance; passing isolated factory/startup tests is only B2B-08A progress.
+
+## 6. B2B-08A initial runtime candidate — exact-head tests pending
+
+**Implementation status:** published on this B2B-08 branch; **NOT YET QUALIFIED**.
+No B2B-07 frozen production contract was modified.
+
+- New `services/agribrain/app/production_delivery_runtime.py`: backend-only opt-in `AKALORIS_LAYER0_ENABLE_VERIFIED_IRRIGATION=true`, strict booleans, separate L3 public key registry, trusted file-backed revocation snapshot live refresh and shared MongoDB replica-set/sharded topology gate. A disabled deployment never creates a physical-delivery verifier.
+- FastAPI `lifespan` in `services/agribrain/app/main.py` uses the trusted bootstrap and stores the verifier on `app.state.layer0_verified_irrigation_verifier`; startup fails when explicitly enabled without its trust roots. Shutdown drops this app-state reference. No HTTP endpoint exposes the verifier.
+- `create_server_layer0_state_engine()` provides an internal integration point for a later authenticated packet-run consumer. It drops stale verifier references when delivery is disabled and fails when delivery is enabled but no verifier is provisioned. **It is not yet wired into a production API route**; request-scoped integration is B2B-08B.
+- A new `services/agribrain/layer0/tests/test_b2b08_production_delivery_runtime.py` covers disabled-default, unrecognized toggle, policy omissions, missing DB/keys/revocation, standalone topology, active public-only verification key, live revocation change, revoked/retired/stale snapshot, duplicate JSON key, private-key rejection, and factory non-injection. These are **unexecuted test declarations**, not passed receipts.
+- Independent L3 KMS signer/HSM provisioning, field calibration and publication/actuator authority remain outside this phase.
+
+### B2B-08A exact-head qualification
+
+Run from the branch and record the full `git rev-parse HEAD`, Python runtime and pytest output:
+
+```powershell
+git pull
+git rev-parse HEAD
+
+py -m pytest -q services/agribrain/layer0/tests/test_b2b08_production_delivery_runtime.py
+py -m pytest -q services/agribrain/layer0/tests/test_b2b07_verified_delivered_irrigation.py
+py -m pytest -q services/agribrain/layer0/tests/
+py -m pytest -q services/agribrain/layer1_fusion/tests/
+py -m pytest -q services/agribrain/layer05_asmae/tests/ --ignore=services/agribrain/layer05_asmae/tests/test_comprehensive_pipeline_execution.py
+```
+
+The 365-day EnKF comprehensive pipeline is reserved for the final B2B-08A+B+C integrated gate. The 2/2 connected Mongo gate was already satisfied at the frozen B2B-07 software scope and is not claimed to qualify this new FastAPI startup. A new server-lifespan and signed request workflow gate is required for B2B-08B.
+
+### Server-only configuration example (no private keys)
+
+- `AKALORIS_LAYER0_ENABLE_VERIFIED_IRRIGATION=true`
+- `AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS=true`, `AKALORIS_LAYER0_REQUIRE_V3_KMS=true`, `AKALORIS_LAYER0_REQUIRE_LIVE_REVOCATION=true`, `AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE=true`.
+- `AKALORIS_LAYER0_L3_PUBLIC_KEYS_JSON` holds L3 issuer IDs, source, algorithm, **public key PEM**, valid_from and valid_until in the declared JSON schema. No private signing keys may be supplied.
+- `AKALORIS_LAYER0_L3_DURABLE_REVOCATION_PATH` refers to a trusted, frequently refreshed durable revocation snapshot. Old, revoked, retired or unavailable keys fail closed.
+- Server `get_db()` must reach the same transaction-capable shared MongoDB as the signed assessment consumer. No request-side database URL or trust-root override is accepted.
+
+**Do not freeze B2B-08 on B2B-08A completion alone.** B2B-08B request integration and B2B-08C operations remain pending.
