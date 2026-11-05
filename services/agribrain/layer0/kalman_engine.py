@@ -575,10 +575,12 @@ class ZoneKalmanFilter:
             candidate.state = deepcopy(self.state)
             candidate.covariance = deepcopy(self.covariance)
             candidate.process_model = deepcopy(self.process_model)
-            candidate.state_history = deepcopy(self.state_history)
-            candidate.provenance_history = deepcopy(self.provenance_history)
+            # Histories are append-only. A deep copy would traverse old
+            # admitted tokens and their MongoDB client/session locks.
+            candidate.state_history = list(self.state_history)
+            candidate.provenance_history = list(self.provenance_history)
             candidate._event_evidence_seen = set(self._event_evidence_seen)
-            candidate._innovation_history = deepcopy(self._innovation_history)
+            candidate._innovation_history = list(self._innovation_history)
             candidate._last_process_q = (
                 list(self._last_process_q) if self._last_process_q is not None else None
             )
