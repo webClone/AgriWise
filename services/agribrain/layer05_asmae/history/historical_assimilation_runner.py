@@ -92,8 +92,9 @@ class HistoricalAssimilationRunner:
                 crop_params=crop_params,
                 observation_model_provider=patched_get_model
             )
-            start_day_str = timeline[0].strftime("%Y-%m-%d")
-            filt.initialize(start_day_str)
+
+            prior_day_str = (timeline[0] - timedelta(days=1)).strftime("%Y-%m-%d")
+            filt.initialize(prior_day_str)
 
             # Lists for RTS backward pass
             states_pred: List[np.ndarray] = []

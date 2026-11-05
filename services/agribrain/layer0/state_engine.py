@@ -14,7 +14,7 @@ manually building Kalman observations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from copy import deepcopy
 import hashlib
@@ -25,7 +25,8 @@ import os
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
 from services.agribrain.layer0.observation_packet import DataStatus
 from services.agribrain.layer0.production_admission import (
-    Layer0AdmissionRequiredError, require_trusted_verifier, signed_inputs_required,
+    Layer0AdmissionRequiredError, require_trusted_verifier,
+    require_trusted_delivery_verifier, signed_inputs_required,
 )
 from services.agribrain.layer0.positive_observation_admission import (
     observation_packet_digest, PositiveObservationAdmissionVerifier,
@@ -73,6 +74,7 @@ class Layer0StateEngine:
         positive_admission_verifier: Optional[PositiveObservationAdmissionVerifier] = None,
         plot_ownership_store: Any = None,
         principal_provider: Any = None,
+        verified_delivery_verifier: Any = None,
     ):
         # Production/staging cannot silently opt out of cryptographic
         # input admission; explicit development mode remains legacy-compatible.
@@ -98,8 +100,11 @@ class Layer0StateEngine:
             )
         self._positive_observation_admission_verifier = positive_admission_verifier
         # Trusted backend infrastructure only; never supplied by packet JSON.
+        require_trusted_delivery_verifier(verified_delivery_verifier)
         self._plot_ownership_store = plot_ownership_store
         self._principal_provider = principal_provider
+        self._verified_delivery_verifier = verified_delivery_verifier
+        self._tenant_id = ""
         self.__packet_run_capability = object()
         self._has_kalman = False
         try:
@@ -156,6 +161,7 @@ class Layer0StateEngine:
         # carry independently verified packet receipts. For scientific
         # production use, only run_from_packets may provide the private
         # per-instance capability after it gates each input.
+        require_trusted_delivery_verifier(self._verified_delivery_verifier)
         if (
             signed_inputs_required()
             or os.getenv("AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE", "").lower() in ("1", "true", "yes")
@@ -169,16 +175,32 @@ class Layer0StateEngine:
                 geometry_hash=geometry_hash,
                 geometry_version=geometry_version,
                 run_id=f"layer0_{plot_id}_{start_date}_{end_date}",
-                health_report={"kalman_available": False},
-                provenance={"error": "Kalman engine not available"},
+                scientific_publication_authorized=False,
+                actuator_control_authorized=False,
+                health_report={
+                    "kalman_available": False,
+                    "scientific_publication_authorized": False,
+                    "actuator_control_authorized": False,
+                },
+                provenance={
+                    "error": "Kalman engine not available",
+                    "scientific_publication_authorized": False,
+                    "actuator_control_authorized": False,
+                },
             )
 
         now = run_timestamp or datetime.now(timezone.utc)
 
-        # Initialize assimilation engine
+        # The initialization state is a prior. Its timestamp must precede
+        # the first predicted day by exactly one UTC daily interval.
+        # Previously it was stamped on start_date and then predicted for
+        # that same date, disguising a zero-duration prediction.
+        prior_date = (
+            datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=1)
+        ).strftime("%Y-%m-%d")
         engine = self._DailyAssimilationEngine()
         primary_zone = "plot"
-        engine.add_zone(primary_zone, soil_props=soil_props, start_day=start_date)
+        engine.add_zone(primary_zone, soil_props=soil_props, start_day=prior_date)
 
         # Stamp the caller-scoped run identity onto filters so the event
         # evidence router can reject foreign/unsupported event envelopes.
@@ -186,14 +208,20 @@ class Layer0StateEngine:
             zone_filter.parent_plot_id = plot_id
             zone_filter.expected_geometry_hash = geometry_hash
             zone_filter.evidence_cutoff = now
+            zone_filter.tenant_id = getattr(self, "_tenant_id", "") or ""
+            zone_filter.geometry_version = geometry_version
+            zone_filter.delivery_verifier = getattr(self, "_verified_delivery_verifier", None)
 
         # Add extra zones
         for zid in (zone_ids or []):
             if zid != primary_zone:
-                engine.add_zone(zid, soil_props=soil_props, start_day=start_date)
+                engine.add_zone(zid, soil_props=soil_props, start_day=prior_date)
                 engine.filters[zid].parent_plot_id = plot_id
                 engine.filters[zid].expected_geometry_hash = geometry_hash
                 engine.filters[zid].evidence_cutoff = now
+                engine.filters[zid].tenant_id = getattr(self, "_tenant_id", "") or ""
+                engine.filters[zid].geometry_version = geometry_version
+                engine.filters[zid].delivery_verifier = getattr(self, "_verified_delivery_verifier", None)
                 # A plot-level statistical observation is NOT an independent
                 # zone-local measurement. Unobserved zones retain a prior
                 # prediction; only explicitly assigned zone evidence can
@@ -267,6 +295,8 @@ class Layer0StateEngine:
             daily_state=daily_state,
             state_uncertainty=state_uncertainty,
             validation_conflicts=validation_conflicts,
+            scientific_publication_authorized=False,
+            actuator_control_authorized=False,
             health_report={
                 "kalman_available": True,
                 "zones": list(daily_state.keys()),
@@ -278,6 +308,8 @@ class Layer0StateEngine:
                 ),
                 "source_reliability": source_reliability,
                 "audit": audit_report,
+                "scientific_publication_authorized": False,
+                "actuator_control_authorized": False,
             },
             provenance={
                 "run_id": run_id,
@@ -286,6 +318,8 @@ class Layer0StateEngine:
                 "run_timestamp": now.isoformat(),
                 "engine": "Layer0StateEngine",
                 "provenance_log": provenance_log,
+                "scientific_publication_authorized": False,
+                "actuator_control_authorized": False,
             },
         )
 
@@ -333,6 +367,7 @@ class Layer0StateEngine:
         # in __init__: long-lived workers can receive a hardened deployment
         # configuration after an estimator instance was constructed.
         require_trusted_verifier(self._positive_observation_admission_verifier)
+        require_trusted_delivery_verifier(self._verified_delivery_verifier)
         if (
             signed_inputs_required()
             and not isinstance(
@@ -353,6 +388,7 @@ class Layer0StateEngine:
 
         # B2B-05: Resolve tenant + exact geometry epoch independently from
         # the current plot authority store, not from a packet or caller digest.
+        self._tenant_id = tenant_id
         strict_scope = (
             os.getenv("AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE", "").lower()
             in ("1", "true", "yes")

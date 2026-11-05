@@ -24,6 +24,12 @@ import math
 from services.agribrain.layer0.event_forcing_admission import (
     classify_management_event_evidence,
 )
+from services.agribrain.layer0.temporal_process_noise import (
+    TemporalGapContract, validate_dt_days,
+)
+from services.agribrain.layer0.verified_irrigation_contract import (
+    AdmittedDeliveredIrrigation,
+)
 
 
 def _qualified_weather_for_prediction(weather: Optional[Dict[str, float]]):
@@ -155,9 +161,18 @@ class ZoneKalmanFilter:
         # Ephemeral per-filter evidence identity fence. Restart/replay durability
         # is a separate L0-02C4 gate; do not describe this as exactly-once.
         self._event_evidence_seen: set[str] = set()
+        self._last_temporal_contract: Optional[TemporalGapContract] = None
+        self._last_process_q: Optional[List[float]] = None
+        self._last_q_regime = ""
         self.parent_plot_id = ""
         self.expected_geometry_hash = ""
         self.evidence_cutoff = None
+        self.tenant_id = ""
+        self.geometry_version = None
+        self.delivery_verifier = None
+        # A sealed L3 token is insufficient for direct prediction: only the
+        # canonical daily step may consume it and journal the new state.
+        self.__delivery_step_capability = object()
         
         # ── Adaptive ML Recalibration Engine ─────────────────────────
         # Learns optimal LAI growth rate from observation residuals.
@@ -179,7 +194,8 @@ class ZoneKalmanFilter:
         self.state_history.append(self.state.clone())
     
     def predict(self, day: str, weather: Dict[str, float],
-                events: Optional[List[Dict]] = None) -> StateVector:
+                events: Optional[List[Dict]] = None, *,
+                _l3_step_authority: object = None) -> StateVector:
         """
         Predict step: evolve state to the next day using process model.
         
@@ -187,21 +203,51 @@ class ZoneKalmanFilter:
         """
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
+        admitted_deliveries: List[AdmittedDeliveredIrrigation] = []
         if events:
-            # Direct raw event forcing bypasses the canonical evidence router.
-            # No trusted L3 infiltration operator is bound yet. Even an event
-            # with role='VERIFIED_DELIVERY' in an ordinary dict is not a
-            # verified execution receipt. Reject before any state mutation.
-            raise ValueError("physical management forcing requires trusted L3 admission")
+            if _l3_step_authority is not self.__delivery_step_capability:
+                raise ValueError("physical management forcing requires trusted L3 admission")
+            for evt in events:
+                if (
+                    isinstance(evt, AdmittedDeliveredIrrigation)
+                    and evt.applies_to_filter(
+                        tenant_id=self.tenant_id,
+                        plot_id=self.parent_plot_id,
+                        zone_id=self.zone_id,
+                        geometry_hash=self.expected_geometry_hash,
+                        geometry_version=self.geometry_version,
+                        day=day,
+                        cutoff=self.evidence_cutoff,
+                    )
+                    and evt.scientific_publication_authorized is False
+                    and evt.actuator_control_authorized is False
+                ):
+                    admitted_deliveries.append(evt)
+                else:
+                    # Direct raw event forcing or unsealed/tampered admission tokens
+                    # are strictly rejected before any state or covariance mutation.
+                    raise ValueError("physical management forcing requires trusted L3 admission")
 
-        # Advance the physical state using the current process model.
-        # The matching Jacobian must be derived from the SAME inputs/model;
-        # do not independently assume F=I when physical couplings exist.
+        gap = TemporalGapContract.between(self.state.day, day)
+        net_irrigation_mm = 0.0
+        irrigation_variance = 0.0
+        if admitted_deliveries:
+            whc_top = self.process_model.params["whc_mm_per_m"] * 0.1
+            for d in admitted_deliveries:
+                depth = d.net_infiltrated_depth_mm
+                sigma = d.depth_uncertainty_sigma_mm
+                net_irrigation_mm += depth
+                irrigation_variance += (sigma / max(whc_top, 0.01)) ** 2
+
         predicted_state, Q = self.process_model.predict(
-            self.state, weather, events
+            self.state, weather, events, dt_days=gap.dt_days,
+            net_irrigation_mm=net_irrigation_mm,
+            irrigation_variance=irrigation_variance,
         )
         F = self.process_model.transition_jacobian(
-            self.state, weather, events, predicted_state=predicted_state
+            self.state, weather, events,
+            dt_days=gap.dt_days, predicted_state=predicted_state,
+            net_irrigation_mm=net_irrigation_mm,
         )
 
         # Stage a complete covariance update before committing anything.
@@ -216,39 +262,91 @@ class ZoneKalmanFilter:
 
         self.covariance = candidate_covariance
         self.state = predicted_state
-        self.days_since_obs += 1
+        self.days_since_obs += gap.dt_days
+        self._last_temporal_contract = gap
+        self._last_process_q = list(Q)
+        self._last_q_regime = "NOMINAL_RATE_DISCRETIZATION"
         return predicted_state
 
-    def predict_missing_weather(self, day: str) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Predict step when weather is missing:
-        - evolve state with no weather forcing (skip weather forcing)
-        - inflate process covariance (Q multiplied by 5.0)
-        - return (state_values, covariance_P)
+    def predict_missing_weather(
+        self, day: str, events: Optional[List[Dict]] = None, *,
+        _l3_step_authority: object = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """No physical weather evolution; accumulate declared drift covariance.
+
+        There is no synthetic rainfall/temperature. Q is a variance rate
+        integrated over the exact UTC gap, not an unexplained global 5x.
+        Invalid time or covariance leaves filter state fully unchanged.
         """
         import numpy as np
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
-        
-        predicted_state, Q = self.process_model.predict(
-            self.state, {}, None, skip_weather_forcing=True
-        )
-        predicted_state.day = day
-        
-        Q_inflated = [q * 5.0 for q in Q]
-        self.covariance.add_process_noise(Q_inflated)
-        predicted_state.variance = self.covariance.diagonal()
 
+        admitted_deliveries: List[AdmittedDeliveredIrrigation] = []
+        if events:
+            if _l3_step_authority is not self.__delivery_step_capability:
+                raise ValueError("physical management forcing requires trusted L3 admission")
+            for evt in events:
+                if (
+                    isinstance(evt, AdmittedDeliveredIrrigation)
+                    and evt.applies_to_filter(
+                        tenant_id=self.tenant_id,
+                        plot_id=self.parent_plot_id,
+                        zone_id=self.zone_id,
+                        geometry_hash=self.expected_geometry_hash,
+                        geometry_version=self.geometry_version,
+                        day=day,
+                        cutoff=self.evidence_cutoff,
+                    )
+                    and evt.scientific_publication_authorized is False
+                    and evt.actuator_control_authorized is False
+                ):
+                    admitted_deliveries.append(evt)
+                else:
+                    raise ValueError("physical management forcing requires trusted L3 admission")
+
+        gap = TemporalGapContract.between(self.state.day, day)
+        net_irrigation_mm = 0.0
+        irrigation_variance = 0.0
+        if admitted_deliveries:
+            whc_top = self.process_model.params["whc_mm_per_m"] * 0.1
+            for d in admitted_deliveries:
+                depth = d.net_infiltrated_depth_mm
+                sigma = d.depth_uncertainty_sigma_mm
+                net_irrigation_mm += depth
+                irrigation_variance += (sigma / max(whc_top, 0.01)) ** 2
+
+        predicted_state, Q = self.process_model.predict(
+            self.state, {}, None,
+            dt_days=gap.dt_days, skip_weather_forcing=True,
+            net_irrigation_mm=net_irrigation_mm,
+            irrigation_variance=irrigation_variance,
+        )
+        candidate_covariance = StateCovariance(
+            P=[row[:] for row in self.covariance.P]
+        )
+        identity = [
+            [float(i == j) for j in range(N_STATES)]
+            for i in range(N_STATES)
+        ]
+        candidate_covariance.propagate(identity, Q)
+        predicted_state.day = day
+        predicted_state.variance = candidate_covariance.diagonal()
+
+        self.covariance = candidate_covariance
         self.state = predicted_state
-        self.days_since_obs += 1
-        
+        self.days_since_obs += gap.dt_days
+        self._last_temporal_contract = gap
+        self._last_process_q = list(Q)
+        self._last_q_regime = "UNFORCED_DRIFT_VARIANCE_RATE"
         self.provenance_history.append({
-            "day": day,
-            "weather_update_mode": "missing_weather_high_uncertainty"
+            "day": day, "weather_update_mode": "missing_weather_high_uncertainty",
+            "q_temporal_contract": gap.provenance(
+                "UNFORCED_DRIFT_VARIANCE_RATE", Q,
+            ),
         })
-        
         return np.array(self.state.values), np.array(self.covariance.P)
-    
+
     def update(self, observations: List[KalmanObservation]) -> Dict[str, float]:
         """
         Update step: correct state using observations.
@@ -434,67 +532,318 @@ class ZoneKalmanFilter:
         
         Returns provenance record for this day.
         """
+        # Direct filter use must obey the same trusted production verifier
+        # policy as Layer0StateEngine, rather than using a weaker entrypoint.
+        if self.delivery_verifier is not None:
+            from services.agribrain.layer0.production_admission import (
+                require_trusted_delivery_verifier,
+            )
+            require_trusted_delivery_verifier(self.delivery_verifier)
+
         # C1/C2: classify and retain management evidence, but NEVER pass
         # user-declared/planned/claimed-verified events into the proxy water
         # balance. A separate trusted L3 net-infiltration operator/receipt is
         # needed for physical forcing (L0-02C3). This rule applies equally
         # to weather-present and missing-weather days.
+        staged_seen_ids = set(self._event_evidence_seen)
         event_dispositions = classify_management_event_evidence(
             events,
             day=day,
             plot_id=self.parent_plot_id,
             zone_id=self.zone_id,
             geometry_hash=self.expected_geometry_hash,
+            geometry_version=self.geometry_version,
+            tenant_id=self.tenant_id,
             cutoff=self.evidence_cutoff,
-            seen_ids=self._event_evidence_seen,
+            seen_ids=staged_seen_ids,
+            delivery_verifier=self.delivery_verifier,
+            allow_historical_recompute=getattr(self, "allow_historical_recompute", False),
         )
+        admitted_deliveries = [
+            d["admitted_token"] for d in event_dispositions
+            if d.get("physical_delivery_verified") is True
+            and d.get("state_update_allowed") is True
+            and "admitted_token" in d
+        ]
+        gap = TemporalGapContract.between(self.state.day, day)
         qualified_weather = _qualified_weather_for_prediction(weather)
+        # A self-declared interval_coverage_days field cannot attest
+        # provider coverage. Until independently verified multi-day forcing
+        # exists, use unforced drift for every irregular step.
+        temporal_forcing_covered = (
+            qualified_weather is not None
+            and math.isclose(gap.dt_days, 1.0, abs_tol=1e-12)
+        )
+        if not temporal_forcing_covered:
+            qualified_weather = None
         weather_availability = (
             "COMPLETE" if qualified_weather is not None
             else ("PARTIAL" if weather else "MISSING")
         )
 
-        # A truthy but incomplete weather dictionary is NOT a measured day.
-        # On degraded forcing, do not invent temperature or rainfall.
-        if qualified_weather is None:
-            self.predict_missing_weather(day)
-        else:
-            self.predict(day, qualified_weather, None)
-        
-        # Update (if observations exist)
         source_weights = {}
         conflicts = []
-        
-        if observations:
-            source_weights = self.update(observations)
-        
-        # Store history
-        state_copy = self.state.clone()
-        state_copy.day = day
-        self.state_history.append(state_copy)
-        
-        # Build provenance record
-        provenance = {
-            "day": day,
-            "zone": self.zone_id,
-            "sources": source_weights,
-            "n_obs": self.last_update_admitted_count if observations else 0,
-            "days_since_obs": self.days_since_obs,
-            "conflicts": conflicts,
-            "uncertainty_mean": sum(self.state.variance) / N_STATES,
-            "weather_update_mode": (
-                "measured" if qualified_weather is not None
-                else "missing_weather_high_uncertainty"
+
+        # A physical receipt triggers a detached candidate filter. No
+        # externally visible state or covariance changes until the shared
+        # durable journal commits its receipt uses AND scientific snapshot.
+        # For ordinary weather-only steps retain the existing fast path.
+        if admitted_deliveries:
+            from copy import copy, deepcopy
+            candidate = copy(self)
+            candidate.state = deepcopy(self.state)
+            candidate.covariance = deepcopy(self.covariance)
+            candidate.process_model = deepcopy(self.process_model)
+            # Histories are append-only. A deep copy would traverse old
+            # admitted tokens and their MongoDB client/session locks.
+            candidate.state_history = list(self.state_history)
+            candidate.provenance_history = list(self.provenance_history)
+            candidate._event_evidence_seen = set(self._event_evidence_seen)
+            candidate._innovation_history = list(self._innovation_history)
+            candidate._last_process_q = (
+                list(self._last_process_q) if self._last_process_q is not None else None
+            )
+        else:
+            candidate = self
+
+        try:
+            # An isolated daily weather dictionary is not proof of measured
+            # interval coverage; never fabricate missing climate inputs.
+            if qualified_weather is None:
+                candidate.predict_missing_weather(
+                    day, admitted_deliveries,
+                    _l3_step_authority=candidate.__delivery_step_capability,
+                )
+            else:
+                candidate.predict(
+                    day, qualified_weather, admitted_deliveries,
+                    _l3_step_authority=candidate.__delivery_step_capability,
+                )
+
+            if observations:
+                source_weights = candidate.update(observations)
+
+            state_copy = candidate.state.clone()
+            state_copy.day = day
+            candidate.state_history.append(state_copy)
+            candidate._event_evidence_seen.update(staged_seen_ids)
+
+            # Build provenance record
+            provenance = {
+                "day": day,
+                "zone": candidate.zone_id,
+                "sources": source_weights,
+                "n_obs": candidate.last_update_admitted_count if observations else 0,
+                "days_since_obs": candidate.days_since_obs,
+                "conflicts": conflicts,
+                "uncertainty_mean": sum(candidate.state.variance) / N_STATES,
+                "weather_update_mode": (
+                    "measured" if qualified_weather is not None
+                    else "missing_weather_high_uncertainty"
+                ),
+                "weather_availability": weather_availability,
+                "interval_forcing_coverage_verified": temporal_forcing_covered,
+                "q_temporal_contract": candidate._last_temporal_contract.provenance(
+                    candidate._last_q_regime, candidate._last_process_q,
+                ),
+                # Never export privileged in-process admission tokens,
+                # reservation handles, Mongo clients or ephemeral HMAC seals
+                # in scientific provenance or JSON state packages.
+                "management_event_evidence": [
+                    {k: v for k, v in disposition.items() if k != "admitted_token"}
+                    for disposition in event_dispositions
+                ],
+                "physical_management_events_applied": len(admitted_deliveries),
+                "event_forcing_status": (
+                    "APPLIED" if admitted_deliveries else "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT"
+                ),
+                "verified_delivery_receipts": [
+                    tok.receipt_id for tok in admitted_deliveries
+                ],
+                "scientific_publication_authorized": False,
+                "actuator_control_authorized": False,
+            }
+            candidate.provenance_history.append(provenance)
+
+            if admitted_deliveries:
+                reservations = [tok._reservation for tok in admitted_deliveries]
+                if any(res is None for res in reservations):
+                    raise RuntimeError("verified_delivery_missing_durable_reservation")
+                stores = {id(res.store) for res in reservations}
+                if len(stores) != 1:
+                    raise RuntimeError("delivery_receipts_different_authoritative_stores")
+
+                # One transactional batch: no partial receipt consumption on
+                # commit error. The Mongo store also inserts the scientific
+                # state journal in the SAME transaction as receipt updates.
+                # All values are BSON-safe primitives (no token objects).
+                snapshot = {
+                    "tenant_id": candidate.tenant_id,
+                    "plot_id": candidate.parent_plot_id,
+                    "zone_id": candidate.zone_id,
+                    "geometry_hash": candidate.expected_geometry_hash,
+                    "geometry_version": candidate.geometry_version,
+                    "day": day,
+                    "state": {
+                        "day": candidate.state.day,
+                        "values": list(candidate.state.values),
+                        "variance": list(candidate.state.variance),
+                        "last_obs_day": candidate.last_obs_day,
+                        "days_since_obs": candidate.days_since_obs,
+                        "adaptive_lai_rate": candidate._adaptive_lai_rate,
+                        "ema_error": candidate._ema_error,
+                        "recalibration_count": candidate._recalibration_count,
+                        "process_adaptive_lai_rate":
+                            getattr(candidate.process_model, "_adaptive_lai_rate", None),
+                        "process_last_model_error":
+                            getattr(candidate.process_model, "_last_model_error", None),
+                    },
+                    "covariance": [list(r) for r in candidate.covariance.P],
+                    "provenance": {
+                        "q_temporal_contract": provenance["q_temporal_contract"],
+                        "weather_update_mode": provenance["weather_update_mode"],
+                        "verified_delivery_receipts": provenance["verified_delivery_receipts"],
+                        "physical_management_events_applied":
+                            provenance["physical_management_events_applied"],
+                        "scientific_publication_authorized": False,
+                        "actuator_control_authorized": False,
+                    },
+                }
+                reservations[0].store.commit_many(
+                    reservations, state_snapshot=snapshot,
+                )
+                if any(getattr(r, "historical_readonly", False) for r in reservations):
+                    # A specifically authorized historical calculation is an
+                    # isolated scientific result, NOT a mutation of the live
+                    # filter nor a new receipt consumption. The original
+                    # committed snapshot remains untouched.
+                    provenance["historical_recompute_readonly"] = True
+                    provenance["historical_recomputed_state"] = (
+                        candidate.state.to_dict()
+                    )
+                else:
+                    # At this point durability is confirmed and the detached
+                    # candidate may become the live filter in one Python step.
+                    self.__dict__.update(candidate.__dict__)
+            return provenance
+        except Exception:
+            # No mutation to self took place for a delivery-bearing step.
+            # On an ambiguous Mongo commit result, the receipt remains
+            # unavailable; rollback only removes matching STAGED claims,
+            # never a COMMITTED receipt. Recovery reads the committed state
+            # journal rather than blindly replaying events.
+            for tok in admitted_deliveries:
+                reservation = tok._reservation
+                if reservation is not None and reservation.status == "STAGED":
+                    try:
+                        tok.rollback_idempotency()
+                    except Exception:
+                        # Fail closed: stranded pending claims block replay
+                        # until privileged recovery reconciles them.
+                        pass
+            raise
+
+    def recover_committed_delivery_state(self, day: str) -> bool:
+        """Explicit, scope-bound crash recovery from the Mongo state journal.
+
+        This is NOT a replay grant or an actuator/publication capability.
+        The caller must supply a trusted production verifier and exact
+        tenant/plot/zone/geometry identifiers. A failed recovery leaves the
+        filter unchanged. This is invoked by trusted process recovery only.
+        """
+        from services.agribrain.layer0.mongo_irrigation_idempotency import (
+            MongoIrrigationIdempotencyStore,
+        )
+        if not self.initialized or self.state is None or self.covariance is None:
+            raise RuntimeError("initialize_filter_before_crash_recovery")
+        if (
+            self.delivery_verifier is None
+            or not isinstance(
+                getattr(self.delivery_verifier, "idempotency_store", None),
+                MongoIrrigationIdempotencyStore,
+            )
+            or not all((
+                self.tenant_id, self.parent_plot_id, self.zone_id,
+                self.expected_geometry_hash, day,
+            ))
+            or type(self.geometry_version) is not int
+        ):
+            raise RuntimeError("trusted_delivery_recovery_scope_required")
+        stored = self.delivery_verifier.idempotency_store.recover_snapshot(
+            tenant_id=self.tenant_id,
+            plot_id=self.parent_plot_id,
+            zone_id=self.zone_id,
+            geometry_hash=self.expected_geometry_hash,
+            geometry_version=self.geometry_version,
+            day=day,
+        )
+        if stored is None:
+            return False
+        import numpy as np
+        values = stored.get("state")
+        if (
+            not isinstance(values, dict)
+            or values.get("day") != day
+            or not isinstance(values.get("values"), list)
+            or not isinstance(values.get("variance"), list)
+            or len(values["values"]) != N_STATES
+            or len(values["variance"]) != N_STATES
+        ):
+            raise RuntimeError("corrupt_authoritative_state_checkpoint")
+        all_values = values["values"] + values["variance"]
+        if any(
+            isinstance(v, bool) or not isinstance(v, (float, int))
+            or not math.isfinite(v)
+            for v in all_values
+        ):
+            raise RuntimeError("nonfinite_authoritative_state_checkpoint")
+        candidate_covariance = StateCovariance(
+            P=[list(row) for row in stored["covariance"]],
+        )
+        identity = [
+            [float(i == j) for j in range(N_STATES)]
+            for i in range(N_STATES)
+        ]
+        candidate_covariance.propagate(identity, [0.0] * N_STATES)
+        if any(
+            not math.isclose(
+                values["variance"][i], candidate_covariance.P[i][i],
+                rel_tol=1e-8, abs_tol=1e-10,
+            )
+            for i in range(N_STATES)
+        ):
+            raise RuntimeError("state_covariance_checkpoint_mismatch")
+        recovered_state = self.state.clone()
+        recovered_state.day = day
+        recovered_state.values = list(values["values"])
+        recovered_state.variance = list(values["variance"])
+        # Publish only after ALL scope, numerical, and receipt checks pass.
+        self.state = recovered_state
+        self.covariance = candidate_covariance
+        self.days_since_obs = values["days_since_obs"]
+        self.last_obs_day = values.get("last_obs_day")
+        self._adaptive_lai_rate = values.get("adaptive_lai_rate")
+        self._ema_error = values.get("ema_error", 0.0)
+        self._recalibration_count = values.get("recalibration_count", 0)
+        self.process_model._adaptive_lai_rate = values.get(
+            "process_adaptive_lai_rate",
+        )
+        self.process_model._last_model_error = values.get(
+            "process_last_model_error",
+        )
+        self.state_history.append(recovered_state.clone())
+        provenance = stored.get("provenance", {})
+        self.provenance_history.append({
+            "day": day, "zone": self.zone_id,
+            "recovered_from_durable_l3_commit": True,
+            "verified_delivery_receipts": list(
+                provenance.get("verified_delivery_receipts", [])
             ),
-            "weather_availability": weather_availability,
-            "management_event_evidence": event_dispositions,
-            "physical_management_events_applied": 0,
-            "event_forcing_status": "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT",
-        }
-        self.provenance_history.append(provenance)
-        
-        return provenance
-    
+            "scientific_publication_authorized": False,
+            "actuator_control_authorized": False,
+        })
+        return True
+
     def get_daily_states(self) -> List[Dict]:
         """Return all historical states as dicts (for FieldTensor.daily_state)."""
         return [s.to_dict() for s in self.state_history]
