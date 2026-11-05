@@ -21,6 +21,7 @@ from pymongo.errors import DuplicateKeyError, PyMongoError
 from services.agribrain.layer0.verified_irrigation_contract import (
     IrrigationIdempotencyReservation,
     VerifiedDeliveredIrrigationGrant,
+    physical_evidence_fingerprint,
 )
 from services.agribrain.layer0.v3_kms_signed_issuer import canonical_grant_bytes
 
@@ -65,6 +66,15 @@ class MongoIrrigationIdempotencyStore:
         self._receipts = database["Layer0IrrigationReceiptConsumption"]
         self._states = database["Layer0IrrigationCommittedState"]
         self._receipts.create_index([("replay_key", ASCENDING)], unique=True)
+        # Unique evidence identity prevents double-counting when the same
+        # physical meter record is re-signed under fresh receipt/replay IDs.
+        # Partial unique index supports existing older receipt records.
+        self._receipts.create_index(
+            [("evidence_fingerprint", ASCENDING)], unique=True,
+            partialFilterExpression={
+                "evidence_fingerprint": {"$type": "string"},
+            },
+        )
         self._states.create_index(
             [("tenant_id", ASCENDING), ("plot_id", ASCENDING),
              ("zone_id", ASCENDING), ("day", ASCENDING)]
@@ -83,6 +93,7 @@ class MongoIrrigationIdempotencyStore:
             and record.get("_id") == grant.receipt_id
             and record.get("replay_key") == grant.replay_idempotency_key
             and record.get("grant_digest") == digest
+            and record.get("evidence_fingerprint") == physical_evidence_fingerprint(grant)
             and record.get("tenant_id") == grant.tenant_id
             and record.get("plot_id") == grant.plot_id
             and record.get("geometry_hash") == grant.geometry_hash
@@ -96,11 +107,13 @@ class MongoIrrigationIdempotencyStore:
         allow_historical_recompute: bool = False,
     ) -> IrrigationIdempotencyReservation:
         digest = hashlib.sha256(canonical_grant_bytes(grant.to_dict())).hexdigest()
+        evidence_key = physical_evidence_fingerprint(grant)
         nonce = os.urandom(24).hex()
         doc = {
             "_id": grant.receipt_id,
             "replay_key": grant.replay_idempotency_key,
             "grant_digest": digest,
+            "evidence_fingerprint": evidence_key,
             "tenant_id": grant.tenant_id,
             "plot_id": grant.plot_id,
             "geometry_hash": grant.geometry_hash,
@@ -136,6 +149,7 @@ class MongoIrrigationIdempotencyStore:
             geometry_hash=grant.geometry_hash,
             geometry_version=grant.geometry_version,
             day=day, grant_digest=digest,
+            evidence_fingerprint=evidence_key,
         )
         res.claim_nonce = nonce
         res.zone_id = grant.zone_id
@@ -157,6 +171,7 @@ class MongoIrrigationIdempotencyStore:
                 return bool(
                     row and row.get("status") == "COMMITTED"
                     and row.get("grant_digest") == res.grant_digest
+                    and row.get("evidence_fingerprint") == res.evidence_fingerprint
                     and row.get("replay_key") == res.replay_key
                     and row.get("tenant_id") == res.tenant_id
                     and row.get("plot_id") == res.plot_id
@@ -167,6 +182,7 @@ class MongoIrrigationIdempotencyStore:
             row = self._receipts.find_one({
                 "_id": res.receipt_id,
                 "replay_key": res.replay_key,
+                "evidence_fingerprint": res.evidence_fingerprint,
                 "claim_nonce": res.claim_nonce,
                 "status": "STAGED",
             })
@@ -187,6 +203,8 @@ class MongoIrrigationIdempotencyStore:
             raise ValueError("duplicate_receipt_in_transaction")
         if len({r.replay_key for r in tokens}) != len(tokens):
             raise ValueError("duplicate_replay_key_in_transaction")
+        if len({r.evidence_fingerprint for r in tokens}) != len(tokens):
+            raise ValueError("duplicate_physical_delivery_evidence")
         if any(not self.reservation_is_live(r) for r in tokens):
             raise RuntimeError("idempotency_reservation_not_staged")
         snap = dict(state_snapshot)
@@ -235,6 +253,7 @@ class MongoIrrigationIdempotencyStore:
                     for r in tokens:
                         outcome = self._receipts.update_one(
                             {"_id": r.receipt_id, "replay_key": r.replay_key,
+                             "evidence_fingerprint": r.evidence_fingerprint,
                              "claim_nonce": r.claim_nonce, "status": "STAGED"},
                             {"$set": {"status": "COMMITTED",
                                       "state_snapshot_id": snapshot_id,
