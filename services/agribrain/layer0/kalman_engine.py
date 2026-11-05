@@ -565,67 +565,134 @@ class ZoneKalmanFilter:
         source_weights = {}
         conflicts = []
 
-        # A truthy but incomplete weather dictionary is NOT a measured day.
-        # On degraded forcing, do not invent temperature or rainfall.
-        # Atomic two-phase execution: stage reservations, then rollback if prediction or update fails.
+        # A physical receipt triggers a detached candidate filter. No
+        # externally visible state or covariance changes until the shared
+        # durable journal commits its receipt uses AND scientific snapshot.
+        # For ordinary weather-only steps retain the existing fast path.
+        if admitted_deliveries:
+            from copy import copy, deepcopy
+            candidate = copy(self)
+            candidate.state = deepcopy(self.state)
+            candidate.covariance = deepcopy(self.covariance)
+            candidate.process_model = deepcopy(self.process_model)
+            candidate.state_history = deepcopy(self.state_history)
+            candidate.provenance_history = deepcopy(self.provenance_history)
+            candidate._event_evidence_seen = set(self._event_evidence_seen)
+            candidate._innovation_history = deepcopy(self._innovation_history)
+            candidate._last_process_q = (
+                list(self._last_process_q) if self._last_process_q is not None else None
+            )
+        else:
+            candidate = self
+
         try:
+            # An isolated daily weather dictionary is not proof of measured
+            # interval coverage; never fabricate missing climate inputs.
             if qualified_weather is None:
-                self.predict_missing_weather(day, admitted_deliveries)
+                candidate.predict_missing_weather(day, admitted_deliveries)
             else:
-                self.predict(day, qualified_weather, admitted_deliveries)
+                candidate.predict(day, qualified_weather, admitted_deliveries)
 
-            # Update (if observations exist)
             if observations:
-                source_weights = self.update(observations)
+                source_weights = candidate.update(observations)
 
-            # Store history
-            state_copy = self.state.clone()
+            state_copy = candidate.state.clone()
             state_copy.day = day
-            self.state_history.append(state_copy)
+            candidate.state_history.append(state_copy)
+            candidate._event_evidence_seen.update(staged_seen_ids)
 
-            # State prediction and update succeeded; commit idempotency reservations and seen event IDs
-            self._event_evidence_seen.update(staged_seen_ids)
-            for tok in admitted_deliveries:
-                tok.commit_idempotency()
+    # Build provenance record
+    provenance = {
+        "day": day,
+        "zone": candidate.zone_id,
+        "sources": source_weights,
+        "n_obs": candidate.last_update_admitted_count if observations else 0,
+        "days_since_obs": candidate.days_since_obs,
+        "conflicts": conflicts,
+        "uncertainty_mean": sum(candidate.state.variance) / N_STATES,
+        "weather_update_mode": (
+            "measured" if qualified_weather is not None
+            else "missing_weather_high_uncertainty"
+        ),
+        "weather_availability": weather_availability,
+        "interval_forcing_coverage_verified": temporal_forcing_covered,
+        "q_temporal_contract": candidate._last_temporal_contract.provenance(
+            candidate._last_q_regime, candidate._last_process_q,
+        ),
+        "management_event_evidence": event_dispositions,
+        "physical_management_events_applied": len(admitted_deliveries),
+        "event_forcing_status": (
+            "APPLIED" if admitted_deliveries else "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT"
+        ),
+        "verified_delivery_receipts": [
+            tok.receipt_id for tok in admitted_deliveries
+        ],
+        "scientific_publication_authorized": False,
+        "actuator_control_authorized": False,
+    }
+            candidate.provenance_history.append(provenance)
+
+            if admitted_deliveries:
+                reservations = [tok._reservation for tok in admitted_deliveries]
+                if any(res is None for res in reservations):
+                    raise RuntimeError("verified_delivery_missing_durable_reservation")
+                stores = {id(res.store) for res in reservations}
+                if len(stores) != 1:
+                    raise RuntimeError("delivery_receipts_different_authoritative_stores")
+
+                # One transactional batch: no partial receipt consumption on
+                # commit error. The Mongo store also inserts the scientific
+                # state journal in the SAME transaction as receipt updates.
+                # All values are BSON-safe primitives (no token objects).
+                snapshot = {
+                    "tenant_id": candidate.tenant_id,
+                    "plot_id": candidate.parent_plot_id,
+                    "zone_id": candidate.zone_id,
+                    "geometry_hash": candidate.expected_geometry_hash,
+                    "geometry_version": candidate.geometry_version,
+                    "day": day,
+                    "state": {
+                        "day": candidate.state.day,
+                        "values": list(candidate.state.values),
+                        "variance": list(candidate.state.variance),
+                        "last_obs_day": candidate.last_obs_day,
+                        "days_since_obs": candidate.days_since_obs,
+                    },
+                    "covariance": [list(r) for r in candidate.covariance.P],
+                    "provenance": {
+                        "q_temporal_contract": provenance["q_temporal_contract"],
+                        "weather_update_mode": provenance["weather_update_mode"],
+                        "verified_delivery_receipts": provenance["verified_delivery_receipts"],
+                        "physical_management_events_applied":
+                            provenance["physical_management_events_applied"],
+                        "scientific_publication_authorized": False,
+                        "actuator_control_authorized": False,
+                    },
+                }
+                reservations[0].store.commit_many(
+                    reservations, state_snapshot=snapshot,
+                )
+                # At this point durability is confirmed and the detached
+                # candidate may become the live filter in one Python step.
+                self.__dict__.update(candidate.__dict__)
+            return provenance
         except Exception:
-            # Numerical prediction, differentiation or covariance failed; roll back reservations
+            # No mutation to self took place for a delivery-bearing step.
+            # On an ambiguous Mongo commit result, the receipt remains
+            # unavailable; rollback only removes matching STAGED claims,
+            # never a COMMITTED receipt. Recovery reads the committed state
+            # journal rather than blindly replaying events.
             for tok in admitted_deliveries:
-                tok.rollback_idempotency()
+                reservation = tok._reservation
+                if reservation is not None and reservation.status == "STAGED":
+                    try:
+                        tok.rollback_idempotency()
+                    except Exception:
+                        # Fail closed: stranded pending claims block replay
+                        # until privileged recovery reconciles them.
+                        pass
             raise
 
-        # Build provenance record
-        provenance = {
-            "day": day,
-            "zone": self.zone_id,
-            "sources": source_weights,
-            "n_obs": self.last_update_admitted_count if observations else 0,
-            "days_since_obs": self.days_since_obs,
-            "conflicts": conflicts,
-            "uncertainty_mean": sum(self.state.variance) / N_STATES,
-            "weather_update_mode": (
-                "measured" if qualified_weather is not None
-                else "missing_weather_high_uncertainty"
-            ),
-            "weather_availability": weather_availability,
-            "interval_forcing_coverage_verified": temporal_forcing_covered,
-            "q_temporal_contract": self._last_temporal_contract.provenance(
-                self._last_q_regime, self._last_process_q,
-            ),
-            "management_event_evidence": event_dispositions,
-            "physical_management_events_applied": len(admitted_deliveries),
-            "event_forcing_status": (
-                "APPLIED" if admitted_deliveries else "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT"
-            ),
-            "verified_delivery_receipts": [
-                tok.receipt_id for tok in admitted_deliveries
-            ],
-            "scientific_publication_authorized": False,
-            "actuator_control_authorized": False,
-        }
-        self.provenance_history.append(provenance)
-        
-        return provenance
-    
     def get_daily_states(self) -> List[Dict]:
         """Return all historical states as dicts (for FieldTensor.daily_state)."""
         return [s.to_dict() for s in self.state_history]
