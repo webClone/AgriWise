@@ -228,7 +228,7 @@ def load_server_issuer_verifier():
         # trusted backend to rotate/revoke without restarting the worker.
         revocation_path = os.getenv("AKALORIS_LAYER0_REVOCATION_SNAPSHOT_PATH", "").strip()
         gate = None
-        if live_revocation_required() and not revocation_path:
+        if (raw or not v3_kms_required()) and live_revocation_required() and not revocation_path:
             raise Layer0AdmissionRequiredError(
                 "Live issuer revocation is mandatory but no trusted policy path is provisioned"
             )

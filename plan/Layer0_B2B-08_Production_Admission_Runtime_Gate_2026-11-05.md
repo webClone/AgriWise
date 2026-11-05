@@ -220,3 +220,27 @@ Follow with complete fast suites and 365-day real-raster ASMAE once at
 the final B2B-08A+B+C candidate. A real staging `main.app` lifespan,
 revocation vs Mongo atomic fencing, legacy fingerprint migration, and
 operator STAGED reconciliation remain separate mandatory release gates.
+
+
+## 11. B2B-08 Full Integrated Qualification Receipts
+
+**Scope & Environment:**
+- Python 3.13.13 / pytest 9.0.3 / Node 22 / Next.js 16.1.4 (Turbopack)
+- Connected MongoDB replica set on dedicated `mongodb://127.0.0.1:27018/?replicaSet=rs0` (`akaloris-b07-mongo-rs`, image `mongo:7`)
+
+**Python Test Receipts:**
+- Layer 0 unit and regression (`services/agribrain/layer0/tests/`): **770 passed**, 1 warning in 28.62s
+- Layer 1 fusion (`services/agribrain/layer1_fusion/tests/`): **21 passed** in 1.07s
+- Layer 0.5 ASMAE fast (`services/agribrain/layer05_asmae/tests/` excluding 365-day): **83 passed**, 3 subtests passed in 43.76s
+- Layer 0.5 ASMAE 365-day comprehensive pipeline (`test_comprehensive_pipeline_execution.py`): **1 passed** in 628.62s (10m 28s)
+- **Total distinct Python tests:** **875 passed** (874 unit/fast + 1 365-day comprehensive pipeline)
+
+**Real Connected MongoDB Integration Gates (4/4 passed):**
+- `manual_b2b07_mongo_acceptance.py`: **2 passed** in 3.85s (multi-worker atomic commit, signed L3 delivery to scoped Kalman assessment)
+- `manual_b2b08_irrigation_connected_gate.py`: **1 passed** in 1.04s (cutoff, revocation, duplicate evidence fence, retry, cold recovery, distinct deliveries)
+- `manual_b2b08_signed_http_connected_gate.py`: **1 passed** in 3.04s (authenticated FastAPI request -> signed v3 source + L3 delivery -> Mongo transactional state/receipt journal -> cold restart recovery -> plot ownership revocation gate)
+
+**Frontend & Build Receipts:**
+- Frontend test suite (`npm run test:frontend`): **105 passed**, 0 failed in 1.53s
+- TypeScript compilation (`npx tsc --noEmit`): **0 errors** (exit code 0)
+- Production build (`npm run build`): **0 errors**, compiled in 19.2s, 63 static pages generated in 762.5ms (exit code 0)
