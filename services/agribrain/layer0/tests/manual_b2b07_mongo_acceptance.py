@@ -71,7 +71,7 @@ def _grant(receipt_id="b07-real", replay_key="b07-real-replay"):
         replay_idempotency_key=replay_key,
         revocation_revision_anchor=0,
         issued_at="2026-11-01T14:05:00Z",
-        expires_at="2026-11-02T14:05:00Z",
+        expires_at="2026-12-31T14:05:00Z",
     )
 
 
@@ -212,6 +212,7 @@ def test_real_replica_set_signed_l3_delivery_to_scoped_kalman_assessment():
         )
 
         t_base = datetime(2026, 11, 1, 0, 0, 0, tzinfo=timezone.utc)
+        authority_time = datetime.now(timezone.utc)
         registry = KmsPublicKeyRegistry()
         registry.register_public_key(
             key_id="l3-meter-real-1",
@@ -225,8 +226,8 @@ def test_real_replica_set_signed_l3_delivery_to_scoped_kalman_assessment():
 
         snap = DurableRevocationSnapshot(
             revision=0,
-            issued_at=t_base,
-            expires_at=t_base + timedelta(days=1),
+            issued_at=authority_time - timedelta(seconds=10),
+            expires_at=authority_time + timedelta(days=1),
             key_statuses={"l3-meter-real-1": "active"},
         )
         revocation_authority = DurableRevocationAuthority(snap, max_snapshot_age_seconds=86400)
@@ -264,7 +265,7 @@ def test_real_replica_set_signed_l3_delivery_to_scoped_kalman_assessment():
             "replay_idempotency_key": "b07-real-l3-replay",
             "revocation_revision_anchor": 0,
             "issued_at": "2026-11-01T14:05:00Z",
-            "expires_at": "2026-11-02T14:05:00Z",
+            "expires_at": "2026-12-31T14:05:00Z",
             "scientific_publication_authorized": False,
             "actuator_control_authorized": False,
         }

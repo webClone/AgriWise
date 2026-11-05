@@ -105,7 +105,7 @@ def registry(keys_ed25519, keys_es256):
 
 @pytest.fixture
 def revocation_authority():
-    t_base = datetime(2026, 11, 1, 0, 0, 0, tzinfo=timezone.utc)
+    t_base = datetime.now(timezone.utc) - timedelta(seconds=10)
     snap0 = DurableRevocationSnapshot(
         revision=0,
         issued_at=t_base,
@@ -171,7 +171,7 @@ def valid_grant_dict(
         "replay_idempotency_key": replay_key,
         "revocation_revision_anchor": revocation_anchor,
         "issued_at": "2026-11-01T14:05:00Z",
-        "expires_at": "2026-11-02T14:00:00Z",
+        "expires_at": "2026-12-31T14:00:00Z",
         "scientific_publication_authorized": False,
         "actuator_control_authorized": False,
     }
@@ -385,7 +385,7 @@ def test_durable_revocation_enforcement(keys_ed25519, verifier, revocation_autho
     receipt = make_signed_receipt(priv, valid_grant_dict(receipt_id="rev-1", replay_key="k-rev-1"))
 
     # Revoke plot via new snapshot
-    t_base = datetime(2026, 11, 1, 0, 0, 0, tzinfo=timezone.utc)
+    t_base = datetime.now(timezone.utc) - timedelta(seconds=5)
     snap1 = DurableRevocationSnapshot(
         revision=1,
         issued_at=t_base + timedelta(hours=1),
