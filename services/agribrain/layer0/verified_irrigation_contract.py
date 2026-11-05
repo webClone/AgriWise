@@ -67,12 +67,25 @@ def _compute_admission_seal(
     zone_id: str,
     geometry_hash: str,
     geometry_version: int,
+    delivery_start: str,
+    delivery_end: str,
+    conversion_calibration_id: str,
+    grant_digest: str,
+    claim_nonce: str,
 ) -> str:
-    msg = (
-        f"{receipt_id}:{net_infiltrated_depth_mm:.8f}:{depth_uncertainty_sigma_mm:.8f}:"
-        f"{replay_idempotency_key}:{tenant_id}:{plot_id}:{zone_id}:"
-        f"{geometry_hash}:{geometry_version}"
-    )
+    # Canonical JSON avoids ':' concatenation ambiguity, and exact float.hex()
+    # prevents same-seal values differing below eight decimal places.
+    msg = json.dumps({
+        "receipt_id": receipt_id,
+        "depth_hex": float(net_infiltrated_depth_mm).hex(),
+        "sigma_hex": float(depth_uncertainty_sigma_mm).hex(),
+        "replay": replay_idempotency_key,
+        "tenant": tenant_id, "plot": plot_id, "zone": zone_id,
+        "geometry_hash": geometry_hash, "geometry_version": geometry_version,
+        "delivery_start": delivery_start, "delivery_end": delivery_end,
+        "calibration": conversion_calibration_id,
+        "grant_digest": grant_digest, "claim_nonce": claim_nonce,
+    }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hmac.new(_ADMISSION_SECRET, msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
@@ -563,6 +576,11 @@ class AdmittedDeliveredIrrigation:
             zone_id=self.zone_id,
             geometry_hash=self.geometry_hash,
             geometry_version=self.geometry_version,
+            delivery_start=self.delivery_start,
+            delivery_end=self.delivery_end,
+            conversion_calibration_id=self.conversion_calibration_id,
+            grant_digest=self._reservation.grant_digest if self._reservation else "",
+            claim_nonce=getattr(self._reservation, "claim_nonce", ""),
         )
         return hmac.compare_digest(self._admission_seal, expected_seal)
 
@@ -793,6 +811,11 @@ class VerifiedDeliveredIrrigationVerifier:
             zone_id=grant.zone_id,
             geometry_hash=grant.geometry_hash,
             geometry_version=grant.geometry_version,
+            delivery_start=grant.delivery_start,
+            delivery_end=grant.delivery_end,
+            conversion_calibration_id=grant.conversion_calibration_id,
+            grant_digest=reservation.grant_digest,
+            claim_nonce=getattr(reservation, "claim_nonce", ""),
         )
 
         # 8. Admitted token
