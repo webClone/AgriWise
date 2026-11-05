@@ -601,35 +601,35 @@ class ZoneKalmanFilter:
             candidate.state_history.append(state_copy)
             candidate._event_evidence_seen.update(staged_seen_ids)
 
-    # Build provenance record
-    provenance = {
-        "day": day,
-        "zone": candidate.zone_id,
-        "sources": source_weights,
-        "n_obs": candidate.last_update_admitted_count if observations else 0,
-        "days_since_obs": candidate.days_since_obs,
-        "conflicts": conflicts,
-        "uncertainty_mean": sum(candidate.state.variance) / N_STATES,
-        "weather_update_mode": (
-            "measured" if qualified_weather is not None
-            else "missing_weather_high_uncertainty"
-        ),
-        "weather_availability": weather_availability,
-        "interval_forcing_coverage_verified": temporal_forcing_covered,
-        "q_temporal_contract": candidate._last_temporal_contract.provenance(
-            candidate._last_q_regime, candidate._last_process_q,
-        ),
-        "management_event_evidence": event_dispositions,
-        "physical_management_events_applied": len(admitted_deliveries),
-        "event_forcing_status": (
-            "APPLIED" if admitted_deliveries else "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT"
-        ),
-        "verified_delivery_receipts": [
-            tok.receipt_id for tok in admitted_deliveries
-        ],
-        "scientific_publication_authorized": False,
-        "actuator_control_authorized": False,
-    }
+            # Build provenance record
+            provenance = {
+                "day": day,
+                "zone": candidate.zone_id,
+                "sources": source_weights,
+                "n_obs": candidate.last_update_admitted_count if observations else 0,
+                "days_since_obs": candidate.days_since_obs,
+                "conflicts": conflicts,
+                "uncertainty_mean": sum(candidate.state.variance) / N_STATES,
+                "weather_update_mode": (
+                    "measured" if qualified_weather is not None
+                    else "missing_weather_high_uncertainty"
+                ),
+                "weather_availability": weather_availability,
+                "interval_forcing_coverage_verified": temporal_forcing_covered,
+                "q_temporal_contract": candidate._last_temporal_contract.provenance(
+                    candidate._last_q_regime, candidate._last_process_q,
+                ),
+                "management_event_evidence": event_dispositions,
+                "physical_management_events_applied": len(admitted_deliveries),
+                "event_forcing_status": (
+                    "APPLIED" if admitted_deliveries else "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT"
+                ),
+                "verified_delivery_receipts": [
+                    tok.receipt_id for tok in admitted_deliveries
+                ],
+                "scientific_publication_authorized": False,
+                "actuator_control_authorized": False,
+            }
             candidate.provenance_history.append(provenance)
 
             if admitted_deliveries:
