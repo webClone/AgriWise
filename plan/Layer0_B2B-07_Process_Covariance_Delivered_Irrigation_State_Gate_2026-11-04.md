@@ -233,3 +233,29 @@ py -m pytest -q services/agribrain/layer05_asmae/tests/test_comprehensive_pipeli
 **Freeze rule:** no formal B2B-07 freeze or B2B-08 handoff until these exact-head gates and connected Mongo check are recorded. No general re-audit of frozen B2B-04B, B2B-05, B2B-06, or Pilot.
 
 **Protected boundaries:** `main@6edd372`, Scientific Pilot PR #9, frozen weather PR #25, frozen B2B-05 and B2B-06, historical findings/layer0.md and intended master monograph remain unchanged.
+
+### Opt-in real MongoDB acceptance harness
+
+A non-auto-collected integration test has been added at
+`services/agribrain/layer0/tests/manual_b2b07_mongo_acceptance.py`.
+Do not use the production Mongo URI. Use an isolated replica-set test cluster.
+Explicit invocation (Windows PowerShell):
+
+```powershell
+$env:AKALORIS_B07_MONGO_TEST_URI='mongodb://127.0.0.1:27017/?replicaSet=rs0'
+py -m pytest -q services/agribrain/layer0/tests/manual_b2b07_mongo_acceptance.py
+```
+
+This creates and deletes ONLY a newly generated `akaloris_b2b07_gate_<uuid>`
+database. It verifies two spawned processes contend on the same unique
+receipt/replay key, one transaction commits, another fails safely, rollback
+after a conflicting state insert restores the previous receipt status, and
+a new store instance can recover a journaled state without unlocking replay.
+Driver/replica-set testing is still pending; no executed result is asserted.
+
+The production factory `configure_server_delivery_verifier()` must be
+installed into the actual service's trusted startup/dependency wiring before
+live delivery is enabled. The verifier is intentionally optional: without
+such startup provisioning, verified physical delivery remains disabled.
+Runtime setup and a genuinely signed L3 delivery → Kalman assessment on a
+disposable plot remain explicit deployment acceptance checks.
