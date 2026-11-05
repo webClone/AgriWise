@@ -956,3 +956,192 @@ def test_production_rejects_local_idempotency_even_with_trusted_revocation(
     monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
     with pytest.raises(Layer0AdmissionRequiredError, match="shared Mongo"):
         require_trusted_delivery_verifier(verifier)
+
+
+
+# ============================================================================
+# Shared transactional ledger: two independent workers against same DB double
+# ============================================================================
+
+class _FakeMongoResult:
+    def __init__(self, matched_count=0):
+        self.matched_count = matched_count
+
+
+class _FakeMongoCollection:
+    def __init__(self, database):
+        self.database = database
+        self.rows = {}
+        self.fail_insert = False
+
+    def create_index(self, *args, **kwargs):
+        return "unique-replay-key"
+
+    def insert_one(self, item, session=None):
+        from pymongo.errors import DuplicateKeyError
+        if self.fail_insert:
+            raise RuntimeError("simulated_state_journal_write_failure")
+        if item["_id"] in self.rows or (
+            "replay_key" in item and any(
+                row.get("replay_key") == item["replay_key"]
+                for row in self.rows.values()
+            )
+        ):
+            raise DuplicateKeyError("duplicate receipt/replay key")
+        self.rows[item["_id"]] = dict(item)
+
+    def find_one(self, query, session=None):
+        for row in self.rows.values():
+            if all(row.get(key) == val for key, val in query.items()):
+                return dict(row)
+        return None
+
+    def update_one(self, query, update, session=None):
+        for row in self.rows.values():
+            if all(row.get(key) == val for key, val in query.items()):
+                row.update(update.get("$set", {}))
+                return _FakeMongoResult(1)
+        return _FakeMongoResult(0)
+
+    def delete_one(self, query, session=None):
+        for ident, row in list(self.rows.items()):
+            if all(row.get(key) == val for key, val in query.items()):
+                del self.rows[ident]
+                return _FakeMongoResult(1)
+        return _FakeMongoResult(0)
+
+
+class _FakeMongoTransaction:
+    def __init__(self, database):
+        self.database = database
+        self.original = None
+
+    def __enter__(self):
+        from copy import deepcopy
+        self.original = {
+            key: deepcopy(col.rows) for key, col in self.database.collections.items()
+        }
+        return self
+
+    def __exit__(self, typ, value, traceback):
+        if typ is not None:
+            for name, snapshot in self.original.items():
+                self.database.collections[name].rows = snapshot
+        return False
+
+
+class _FakeMongoSession:
+    def __init__(self, database):
+        self.database = database
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def start_transaction(self):
+        return _FakeMongoTransaction(self.database)
+
+
+class _FakeMongoClient:
+    def __init__(self, database):
+        self.database = database
+
+    def start_session(self):
+        return _FakeMongoSession(self.database)
+
+
+class _FakeMongoDatabase:
+    def __init__(self):
+        self.collections = {}
+        self.client = _FakeMongoClient(self)
+
+    def command(self, name):
+        assert name == "ping"
+        return {"ok": 1}
+
+    def __getitem__(self, name):
+        return self.collections.setdefault(name, _FakeMongoCollection(self))
+
+
+def test_shared_mongo_ledger_fences_two_independent_store_instances(
+    keys_ed25519, registry, revocation_authority,
+):
+    from services.agribrain.layer0.mongo_irrigation_idempotency import (
+        MongoIrrigationIdempotencyStore,
+    )
+    db = _FakeMongoDatabase()
+    store_a = MongoIrrigationIdempotencyStore(db)
+    store_b = MongoIrrigationIdempotencyStore(db)
+    verifier_a = VerifiedDeliveredIrrigationVerifier(registry, revocation_authority, store_a)
+    verifier_b = VerifiedDeliveredIrrigationVerifier(registry, revocation_authority, store_b)
+    priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-mongo", replay_key="sec-mongo-replay"),
+    )
+    filt = _scoped_filter_for_sec(verifier_a)
+    provenance = filt.step(DAY, WEATHER, None, [_delivery_event_for_sec(receipt, "mongo-event")])
+    assert provenance["physical_management_events_applied"] == 1
+
+    with pytest.raises(ValueError, match="duplicate_receipt_or_replay_key"):
+        verifier_b.verify_and_admit(
+            receipt, expected_day=DAY, expected_plot_id="plot-A",
+            expected_zone_id="plot", expected_geometry_hash="geom-A",
+            expected_geometry_version=1, expected_tenant_id="tenant-prod-alpha",
+        )
+
+    other = _scoped_filter_for_sec(verifier_b)
+    assert other.recover_committed_delivery_state(DAY)
+    assert other.state.values == pytest.approx(filt.state.values)
+    assert other.state.day == filt.state.day
+    assert other.covariance.P == pytest.approx(filt.covariance.P)
+    assert other.provenance_history[-1]["recovered_from_durable_l3_commit"] is True
+
+
+def test_shared_mongo_transaction_failure_rolls_back_state_and_receipt(
+    keys_ed25519, registry, revocation_authority,
+):
+    from services.agribrain.layer0.mongo_irrigation_idempotency import (
+        MongoIrrigationIdempotencyStore,
+    )
+    db = _FakeMongoDatabase()
+    store = MongoIrrigationIdempotencyStore(db)
+    v = VerifiedDeliveredIrrigationVerifier(registry, revocation_authority, store)
+    filt = _scoped_filter_for_sec(v)
+    priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-mongo-fail", replay_key="sec-mongo-fail-replay"),
+    )
+    previous = filt.state.clone()
+    previous_P = [row[:] for row in filt.covariance.P]
+    db["Layer0IrrigationCommittedState"].fail_insert = True
+    with pytest.raises(RuntimeError, match="irrigation_state_commit_unconfirmed"):
+        filt.step(DAY, WEATHER, None, [_delivery_event_for_sec(receipt, "mongo-fail-event")])
+    assert filt.state.day == previous.day
+    assert filt.state.values == previous.values
+    assert filt.covariance.P == previous_P
+    assert not db["Layer0IrrigationReceiptConsumption"].rows
+    assert not db["Layer0IrrigationCommittedState"].rows
+    db["Layer0IrrigationCommittedState"].fail_insert = False
+    outcome = filt.step(DAY, WEATHER, None, [_delivery_event_for_sec(receipt, "mongo-fail-event")])
+    assert outcome["physical_management_events_applied"] == 1
+    assert len(db["Layer0IrrigationCommittedState"].rows) == 1
+
+
+def test_signed_production_accepts_only_shared_mongo_delivery_ledger(
+    monkeypatch, keys_ed25519, registry, revocation_authority,
+):
+    from services.agribrain.layer0.production_admission import (
+        require_trusted_delivery_verifier,
+    )
+    from services.agribrain.layer0.mongo_irrigation_idempotency import (
+        MongoIrrigationIdempotencyStore,
+    )
+    db = _FakeMongoDatabase()
+    v = VerifiedDeliveredIrrigationVerifier(
+        registry, revocation_authority,
+        MongoIrrigationIdempotencyStore(db),
+    )
+    monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
+    require_trusted_delivery_verifier(v)
