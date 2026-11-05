@@ -1095,7 +1095,8 @@ def test_shared_mongo_ledger_fences_two_independent_store_instances(
     assert other.recover_committed_delivery_state(DAY)
     assert other.state.values == pytest.approx(filt.state.values)
     assert other.state.day == filt.state.day
-    assert other.covariance.P == pytest.approx(filt.covariance.P)
+    for got, expected in zip(other.covariance.P, filt.covariance.P):
+        assert got == pytest.approx(expected)
     assert other.provenance_history[-1]["recovered_from_durable_l3_commit"] is True
 
 
