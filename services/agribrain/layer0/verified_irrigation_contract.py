@@ -300,13 +300,12 @@ def physical_evidence_fingerprint(
         "zone_id": grant.zone_id,
         "geometry_hash": grant.geometry_hash,
         "geometry_version": grant.geometry_version,
+        # The immutable source record and interval identify ONE physical
+        # delivery. Claiming a different volume, efficiency or calibration
+        # for that same source/interval MUST NOT mint another application.
         "source_evidence_cas_root": grant.source_evidence_cas_root,
         "delivery_start": _parse_iso_utc(grant.delivery_start).isoformat(),
         "delivery_end": _parse_iso_utc(grant.delivery_end).isoformat(),
-        "delivered_volume_liters": float(grant.delivered_volume_liters).hex(),
-        "wetted_area_m2": float(grant.wetted_area_m2).hex(),
-        "delivery_efficiency_fraction": float(grant.delivery_efficiency_fraction).hex(),
-        "conversion_calibration_id": grant.conversion_calibration_id,
     }
     return hashlib.sha256(
         json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
