@@ -84,3 +84,48 @@ The 365-day EnKF comprehensive pipeline is reserved for the final B2B-08A+B+C in
 - Server `get_db()` must reach the same transaction-capable shared MongoDB as the signed assessment consumer. No request-side database URL or trust-root override is accepted.
 
 **Do not freeze B2B-08 on B2B-08A completion alone.** B2B-08B request integration and B2B-08C operations remain pending.
+
+## 7. B2B-08B-I — Four-issue signed irrigation integration corrective batch
+
+**Scope:** Current B2B-08 working branch only. PR #27 remains draft and B2B-07 stays pinned at `f7f40cb`. The observation-only Scientific Pilot PR #9 is unchanged and may continue independently. **Status: code and executable acceptance gate committed; exact-head qualification PENDING.** The 848/848 Python and 105/105 frontend fast receipts apply to the earlier `3bfbc0f` B2B-08A baseline, not this candidate.
+
+### Reproduced defects and targeted controls
+
+1. **Receipt timing and revocation — P1:** L3 `issued_at` must be no later than the trusted assessment cutoff, `expires_at` must exceed the assessment cutoff, and live nonhistorical use cannot rely on an already expired receipt. The live `DurableRevocationAuthority` is now evaluated against authorization time, **not delivery_end**. Signed tokens retain the issue/expiry/key/revision fields under the internal admission seal. `ZoneKalmanFilter.step()` rechecks current issuer, expiry and live revocation **after numerical prediction and immediately before transactional state+receipt commit**. This is an application-level precommit check; fully atomic revocation relative to a separately refreshed file authority would require transactionally co-locating its authoritative revision with the receipt/state commit.
+2. **Cold replay omission — P1:** An identical scoped day with a committed Mongo L3 scientific checkpoint is recovered through the existing validated checkpoint recovery path **before new physical prediction**. The returned provenance flags `recovered_from_durable_l3_commit`, `event_forcing_status=RECOVERED_COMMITTED_CHECKPOINT`, and `physical_management_events_applied=0` for the recovery itself. No receipt is silently re-consumed, and the prior moisture state is not downgraded to an ordinary re-estimate.
+3. **Duplicate physical evidence — P1:** A signer-independent physical evidence fingerprint now binds tenant, plot, zone, geometry hash/version, source evidence CAS root, and normalized delivery interval. It does **not** include receipt ID, replay key, or re-issued physical quantity claims, so re-signing the same physical record under different amounts also cannot mint extra water. Local research state tracks pending/committed evidence; production Mongo uses a cross-worker partial unique `evidence_fingerprint` index. Two *different* source/interval deliveries may both be admitted in one scoped transaction. Legacy Mongo receipt rows without an evidence fingerprint require a migration/quarantine policy before activating this guarantee against previously committed historical data.
+4. **Failed preflight strands receipt — P2:** A new prediction validates the positive temporal gap before event classification stages any receipt. Rejected zero/negative gaps therefore cannot strand a claim. A separate previously committed day is allowed to recover its checkpoint read-only without a new prediction.
+
+### One connected acceptance gate
+
+`services/agribrain/layer0/tests/manual_b2b08_irrigation_connected_gate.py` contains one opt-in **live Mongo replica-set** test covering:
+- issue timestamp after assessment cutoff; expired receipt; stale revocation snapshot;
+- authorized first water delivery, duplicate source evidence with different signer receipt/replay IDs denied;
+- cold restart of the same receipt restores committed moisture and explicitly reports recovery;
+- zero-duration step fails before receipt staging, then successful retry after proper prior initialization;
+- two genuinely distinct physical deliveries both contribute; and
+- plot revocation introduced after prediction but before durable journal commit rejects the new state/receipt.
+
+It uses a disposable `akaloris_b2b08_irrigation_<uuid>` database and drops that unique database at completion. Use a dedicated nonproduction Mongo test replica set **only**.
+
+```powershell
+git pull
+git rev-parse HEAD
+py -m pytest -q services/agribrain/layer0/tests/test_b2b07_verified_delivered_irrigation.py
+py -m pytest -q services/agribrain/layer0/tests/test_b2b08_production_delivery_runtime.py
+py -m pytest -q services/agribrain/layer0/tests/
+py -m pytest -q services/agribrain/layer1_fusion/tests/
+py -m pytest -q services/agribrain/layer05_asmae/tests/ --ignore=services/agribrain/layer05_asmae/tests/test_comprehensive_pipeline_execution.py
+npm run test:frontend
+npx tsc --noEmit
+npm run build
+$env:AKALORIS_B07_MONGO_TEST_URI = 'mongodb://127.0.0.1:27018/?replicaSet=rs0'
+py -m pytest -v services/agribrain/layer0/tests/manual_b2b08_irrigation_connected_gate.py
+```
+
+**Gate rule:** Do not claim the four findings closed or freeze B2B-08 until the fast and connected gate pass on the final SHA. Run the 365-day comprehensive once at the final integrated B2B-08A+B+C acceptance, not after every correction.
+
+### Progress accounting, with denominator discipline
+
+- Layer 0 current B2B cohort gate progress: **7 / 8 frozen = 87.5%**. This is *not* a percentage of all possible Layer 0 capabilities; B2B-08 is the open integration cohort.
+- Whole 52-package register: October 18 `AgriBrain_WIP_Package_Register_52_2e1fbcb_2026-10-18.json` reports **0/52 formally fully accepted = 0%** at that historical snapshot, despite partially implemented work in all packages. It also lists **137 verified slices / (137 verified + 150 remaining criteria) = 47.7%** unweighted source-evidence slice coverage **as of October 18**. This proxy is not a present-day implementation percentage and cannot be extrapolated from Layer 0 milestone freezes alone. A refreshed 153-requirement evidence mapping is required to assign a defensible current overall percentage.
