@@ -154,7 +154,24 @@ class MongoIrrigationIdempotencyStore:
         }
         historical = False
         try:
-            self._receipts.insert_one(doc)  # atomic receipt/replay uniqueness
+            if self._require_transactional_revocation:
+                # The authoritative revoker and this store MUST mutate the
+                # same receipt:<id> document. Create it before consumption,
+                # atomically with the STAGED claim; never overwrite revocation.
+                with self._client.start_session() as session:
+                    with session.start_transaction():
+                        self._db["Layer0RevocationLedger"].update_one(
+                            {"_id": f"receipt:{grant.receipt_id}"},
+                            {"$setOnInsert": {
+                                "status": "active",
+                                "receipt_id": grant.receipt_id,
+                                "created_at": datetime.now(timezone.utc),
+                            }},
+                            upsert=True, session=session,
+                        )
+                        self._receipts.insert_one(doc, session=session)
+            else:
+                self._receipts.insert_one(doc)
         except DuplicateKeyError:
             existing = self._receipts.find_one({"_id": grant.receipt_id})
             if (
@@ -324,9 +341,21 @@ class MongoIrrigationIdempotencyStore:
                             )
                             if fence_res.matched_count != 1:
                                 raise RuntimeError(f"issuer_key_revoked_or_missing_in_transaction: {k_id}")
-                            rev_rec = rev_coll.find_one({"_id": f"receipt:{r.receipt_id}"}, session=session)
-                            if rev_rec and rev_rec.get("status") == "revoked":
-                                raise RuntimeError(f"receipt_revoked_in_transaction: {r.receipt_id}")
+                            # A read of a separate revocation row would see
+                            # snapshot-isolated stale status. Writing THIS
+                            # receipt document conflicts with a revoker's
+                            # out-of-band update of the exact same _id.
+                            rec_fence = rev_coll.update_one(
+                                {"_id": f"receipt:{r.receipt_id}", "status": "active"},
+                                {"$set": {
+                                    "last_fenced_commit_at": datetime.now(timezone.utc),
+                                }},
+                                session=session,
+                            )
+                            if rec_fence.matched_count != 1:
+                                raise RuntimeError(
+                                    f"receipt_revoked_or_missing_in_transaction: {r.receipt_id}"
+                                )
                     for r in tokens:
                         outcome = self._receipts.update_one(
                             {"_id": r.receipt_id, "replay_key": r.replay_key,

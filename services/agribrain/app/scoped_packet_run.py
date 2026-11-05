@@ -464,9 +464,17 @@ async def assess_signed_plot_state(
         return await run_in_threadpool(_run_assessment, request.app, namespace, body)
     except HTTPException:
         raise
-    except (Layer0AdmissionRequiredError, SpatialTenantDenied):
-        raise HTTPException(403, "signed_scoped_assessment_denied") from None
-    except (ValueError, TypeError):
-        raise HTTPException(422, "invalid_signed_assessment_input") from None
-    except Exception:
+    except Exception as exc:
+        from services.agribrain.layer0.irrigation_checkpoint_inputs import (
+            CheckpointInputConflict,
+        )
+        if isinstance(exc, CheckpointInputConflict):
+            raise HTTPException(
+                409, "committed_irrigation_checkpoint_input_conflict",
+            ) from None
+        if isinstance(exc, (Layer0AdmissionRequiredError, SpatialTenantDenied)):
+            raise HTTPException(403, "signed_scoped_assessment_denied") from None
+        if isinstance(exc, (ValueError, TypeError)):
+            raise HTTPException(422, "invalid_signed_assessment_input") from None
         raise HTTPException(503, "signed_assessment_runtime_unavailable") from None
+

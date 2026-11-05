@@ -784,6 +784,8 @@ class VerifiedDeliveredIrrigationVerifier:
         issued = _parse_iso_utc(token.issued_at)
         expires = _parse_iso_utc(token.expires_at)
         assessment = _ensure_utc(cutoff) if cutoff is not None else current
+        if issued < _parse_iso_utc(token.delivery_end):
+            raise ValueError("receipt_attested_before_delivery_completion")
         if issued > assessment:
             raise ValueError("receipt_issued_after_assessment_cutoff")
         if assessment >= expires:
@@ -873,6 +875,8 @@ class VerifiedDeliveredIrrigationVerifier:
         ):
             raise ValueError("receipt_expired_at_authorization")
         delivery_end_dt = _parse_iso_utc(grant.delivery_end)
+        if issued_at_dt < delivery_end_dt:
+            raise ValueError("receipt_attested_before_delivery_completion")
         delivery_day = delivery_end_dt.date().isoformat()
         if expected_day and delivery_day != expected_day:
             raise ValueError("unqualified_event_time")

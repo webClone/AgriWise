@@ -209,7 +209,7 @@ def test_transactional_revocation_write_fence_active_and_missing_key():
         res_r = store.stage_reservation(grant_r, day_date.isoformat())
         with pytest.raises(RuntimeError, match="irrigation_state_commit_unconfirmed") as exc:
             store.commit_many([res_r], state_snapshot=snap)
-        assert "receipt_revoked_in_transaction" in str(exc.value.__cause__)
+        assert "receipt_revoked_or_missing_in_transaction" in str(exc.value.__cause__)
 
     finally:
         client.drop_database(db_name)
@@ -280,7 +280,9 @@ def test_production_factory_enforces_mandatory_transaction_fence_and_rejects_emp
         # Attempt commit: MUST fail closed due to uninitialized revocation ledger
         with pytest.raises(RuntimeError, match="irrigation_state_commit_unconfirmed") as exc:
             verifier.idempotency_store.commit_many([res], state_snapshot=snap)
-        assert "uninitialized_revocation_ledger" in str(exc.value.__cause__)
+        # Staging now creates only its own receipt authority document;
+        # absence of an issuer key still blocks commit before publication.
+        assert "issuer_key_revoked_or_missing_in_transaction" in str(exc.value.__cause__)
 
     finally:
         client.drop_database(db_name)

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import math
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
 
 
 def _utc_timestamp(value: Any) -> Optional[datetime]:
@@ -39,6 +39,20 @@ def _finite_nonnegative(value: Any) -> bool:
         and math.isfinite(float(value))
         and value >= 0.0
     )
+
+
+def extract_irrigation_receipt(envelope: Mapping[str, Any]) -> Any:
+    """Shared B2B-08 extraction used by both L3 filter and HTTP journal.
+
+    An event's role is not an authority claim. A signed physical receipt
+    may be presented with REPORTED or another untrusted label.
+    """
+    payload = envelope.get("payload")
+    if not isinstance(payload, Mapping):
+        payload = envelope
+    if payload.get("event_type") != "irrigation":
+        return None
+    return payload.get("verified_receipt") or envelope.get("verified_receipt")
 
 
 def classify_management_event_evidence(
@@ -141,7 +155,7 @@ def classify_management_event_evidence(
             decision.update(status="RETAINED", reason="non_water_management_event")
         else:
             # Check for authentic L3 verified receipt
-            receipt_data = payload.get("verified_receipt") or envelope.get("verified_receipt")
+            receipt_data = extract_irrigation_receipt(envelope)
             if receipt_data is not None:
                 if delivery_verifier is None:
                     decision.update(

@@ -268,8 +268,11 @@ def test_in_transaction_revocation_fence_aborts_if_receipt_revoked():
     
     fence_res = MagicMock()
     fence_res.matched_count = 1
-    rev_coll.update_one.return_value = fence_res
-    rev_coll.find_one.return_value = {"_id": "receipt:rec-1", "status": "revoked"}
+    def receipt_specific_fence(query, *_args, **_kwargs):
+        outcome = MagicMock()
+        outcome.matched_count = 0 if query.get("_id") == "receipt:rec-1" else 1
+        return outcome
+    rev_coll.update_one.side_effect = receipt_specific_fence
     
     def get_coll(name):
         if name == "Layer0IrrigationReceiptConsumption":
@@ -314,7 +317,7 @@ def test_in_transaction_revocation_fence_aborts_if_receipt_revoked():
     
     with pytest.raises(RuntimeError, match="irrigation_state_commit_unconfirmed") as exc:
         store.commit_many([res], state_snapshot=snap)
-    assert "receipt_revoked_in_transaction" in str(exc.value.__cause__)
+    assert "receipt_revoked_or_missing_in_transaction" in str(exc.value.__cause__)
     assert session.aborted is True
 
 def test_in_transaction_revocation_fence_rejects_empty_uninitialized_ledger():

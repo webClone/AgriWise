@@ -556,6 +556,18 @@ class ZoneKalmanFilter:
         delivery_store = getattr(
             self.delivery_verifier, "idempotency_store", None,
         )
+        checkpoint_digest = None
+        if isinstance(delivery_store, MongoIrrigationIdempotencyStore):
+            from services.agribrain.layer0.irrigation_checkpoint_inputs import (
+                checkpoint_input_digest,
+            )
+            checkpoint_digest = checkpoint_input_digest(
+                day=day, zone_id=self.zone_id, weather=weather,
+                observations=observations, events=events,
+                prior_state=self.state, prior_covariance=self.covariance,
+                last_obs_day=self.last_obs_day,
+                days_since_obs=self.days_since_obs,
+            )
         if (
             not getattr(self, "allow_historical_recompute", False)
             and isinstance(delivery_store, MongoIrrigationIdempotencyStore)
@@ -571,6 +583,19 @@ class ZoneKalmanFilter:
                 day=day,
             )
             if committed is not None:
+                from services.agribrain.layer0.irrigation_checkpoint_inputs import (
+                    CheckpointInputConflict,
+                )
+                if (
+                    not isinstance(committed.get("input_digest"), str)
+                    or committed["input_digest"] != checkpoint_digest
+                ):
+                    # A stale state MUST NOT discard newer rain, observations
+                    # or an additional signed physical delivery. Never stage
+                    # a new receipt or return the old posterior on conflict.
+                    raise CheckpointInputConflict(
+                        "committed_irrigation_checkpoint_input_conflict"
+                    )
                 if not self.recover_committed_delivery_state(day):
                     raise RuntimeError("committed_irrigation_checkpoint_recovery_required")
                 return {
@@ -729,6 +754,7 @@ class ZoneKalmanFilter:
                     "geometry_hash": candidate.expected_geometry_hash,
                     "geometry_version": candidate.geometry_version,
                     "day": day,
+                    "input_digest": checkpoint_digest,
                     "state": {
                         "day": candidate.state.day,
                         "values": list(candidate.state.values),
