@@ -178,3 +178,45 @@ Targeted suite: `test_b2b08c_operational_readiness.py`.
 Connected FastAPI signed-request acceptance, full final suites and final
 365-day comprehensive remain pending. Existing B2B-07, weather, Pilot,
 main, findings and master monograph remain protected.
+
+## 10. B2B-08C-II — Signed HTTP-to-Mongo connected gate candidate
+
+**Implementation stage: explicit operator-executed acceptance added, NOT
+executed or frozen.** File:
+`services/agribrain/layer0/tests/manual_b2b08_signed_http_connected_gate.py`.
+
+This is an opt-in, real FastAPI TestClient request against the B2B-08
+production assessment router, actual HMAC internal auth and Mongo nonce store,
+real B2B-05 Prisma Plot→Farm→User ownership reads, real B2B-08 A+B
+server-only v3 public verifier bootstraps, separate Ed25519 source and L3
+test signers, verified spatially contained source NDVI observation,
+physical-delivery event, scoped Kalman assimilation, Mongo transactional
+receipt and snapshot journal, and lineage attestation. It then restarts
+the ASGI lifespan (new verifier/filter) against the same disposable
+replica-set database and verifies recovery without a second physical
+consumption. Negative HTTP assertions cover unsigned caller, foreign tenant,
+duplicate assessment, and revoked plot ownership.
+
+**Boundary:** This uses a minimal isolated ASGI lifespan that executes
+exactly the production bootstrap functions and router rather than starting
+unrelated `main.py` refresh and ASMAE background workers. Therefore it
+qualifies the *actual route and trust bootstraps*, not the entire deployed
+`main.app` lifespan under a staging process manager.
+
+Mandatory local-only dedicated MongoDB replica set, exact head:
+```powershell
+git pull
+git rev-parse HEAD
+$env:AKALORIS_B07_MONGO_TEST_URI = "mongodb://127.0.0.1:27018/?replicaSet=rs0"
+py -m pytest -v services/agribrain/layer0/tests/manual_b2b08_signed_http_connected_gate.py
+```
+
+The gate intentionally fails without the opt-in URI and uses a random
+`akaloris_b2b08_http_<uuid>` database. It must not run against production.
+
+No operational merge is authorized. On failure inspect exact traceback,
+repair only the reproduced integration fault and rerun the same head.
+Follow with complete fast suites and 365-day real-raster ASMAE once at
+the final B2B-08A+B+C candidate. A real staging `main.app` lifespan,
+revocation vs Mongo atomic fencing, legacy fingerprint migration, and
+operator STAGED reconciliation remain separate mandatory release gates.
