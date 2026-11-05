@@ -1027,6 +1027,9 @@ class _FakeMongoTransaction:
         if typ is not None:
             for name, snapshot in self.original.items():
                 self.database.collections[name].rows = snapshot
+        elif self.database.ambiguous_commit_after_success:
+            # Server committed but the caller lost the acknowledgement.
+            raise ConnectionError("simulated_unknown_commit_result")
         return False
 
 
@@ -1056,6 +1059,7 @@ class _FakeMongoDatabase:
     def __init__(self):
         self.collections = {}
         self.client = _FakeMongoClient(self)
+        self.ambiguous_commit_after_success = False
 
     def command(self, name):
         assert name == "ping"
@@ -1146,3 +1150,87 @@ def test_signed_production_accepts_only_shared_mongo_delivery_ledger(
     )
     monkeypatch.setenv("AKALORIS_LAYER0_REQUIRE_SIGNED_INPUTS", "true")
     require_trusted_delivery_verifier(v)
+
+
+
+def test_ambiguous_mongo_commit_fails_closed_then_recovers_committed_state(
+    keys_ed25519, registry, revocation_authority,
+):
+    from services.agribrain.layer0.mongo_irrigation_idempotency import (
+        MongoIrrigationIdempotencyStore,
+    )
+    db = _FakeMongoDatabase()
+    store = MongoIrrigationIdempotencyStore(db)
+    verifier = VerifiedDeliveredIrrigationVerifier(registry, revocation_authority, store)
+    priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-ack-lost", replay_key="sec-ack-lost-r"),
+    )
+    filt = _scoped_filter_for_sec(verifier)
+    prior = filt.state.clone()
+    db.ambiguous_commit_after_success = True
+    with pytest.raises(RuntimeError, match="irrigation_state_commit_unconfirmed"):
+        filt.step(DAY, WEATHER, None, [_delivery_event_for_sec(receipt, "sec-ack-lost-e")])
+    # No locally published state despite unknown server-side commit result.
+    assert filt.state.day == prior.day
+    assert filt.state.values == prior.values
+    assert len(db["Layer0IrrigationCommittedState"].rows) == 1
+    assert db["Layer0IrrigationReceiptConsumption"].rows["sec-ack-lost"]["status"] == "COMMITTED"
+    db.ambiguous_commit_after_success = False
+    with pytest.raises(ValueError, match="duplicate_receipt_or_replay_key"):
+        verifier.verify_and_admit(
+            receipt, expected_day=DAY, expected_plot_id="plot-A",
+            expected_zone_id="plot",
+        )
+    # Explicit recovery is scope-bound and does NOT consume the receipt again.
+    assert filt.recover_committed_delivery_state(DAY)
+    assert filt.state.day == DAY
+    assert filt.state.values != prior.values
+
+
+def test_shared_mongo_recompute_requires_server_approval_and_identical_receipt(
+    keys_ed25519, registry, revocation_authority,
+):
+    from services.agribrain.layer0.mongo_irrigation_idempotency import (
+        MongoIrrigationIdempotencyStore,
+    )
+    db = _FakeMongoDatabase()
+    no_authorizer = MongoIrrigationIdempotencyStore(db)
+    signer_priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        signer_priv, valid_grant_dict(receipt_id="sec-hist", replay_key="sec-hist-r"),
+    )
+    v = VerifiedDeliveredIrrigationVerifier(registry, revocation_authority, no_authorizer)
+    filt = _scoped_filter_for_sec(v)
+    filt.step(DAY, WEATHER, None, [_delivery_event_for_sec(receipt, "sec-hist-e")])
+    with pytest.raises(ValueError, match="duplicate_receipt_or_replay_key"):
+        v.verify_and_admit(
+            receipt, expected_day=DAY, expected_plot_id="plot-A",
+            expected_zone_id="plot", allow_historical_recompute=True,
+        )
+
+    auth_store = MongoIrrigationIdempotencyStore(
+        db, historical_recompute_authorizer=lambda grant, day: (
+            grant.receipt_id == "sec-hist" and day == DAY
+        ),
+    )
+    v2 = VerifiedDeliveredIrrigationVerifier(registry, revocation_authority, auth_store)
+    allowed = v2.verify_and_admit(
+        receipt, expected_day=DAY, expected_plot_id="plot-A",
+        expected_zone_id="plot", allow_historical_recompute=True,
+    )
+    assert allowed.applies_to_filter(
+        tenant_id="tenant-prod-alpha", plot_id="plot-A", zone_id="plot",
+        geometry_hash="geom-A", geometry_version=1, day=DAY,
+    )
+    allowed.rollback_idempotency()
+    counterfeit = make_signed_receipt(
+        signer_priv, valid_grant_dict(
+            receipt_id="sec-hist-other", replay_key="sec-hist-r",
+        ),
+    )
+    with pytest.raises(ValueError, match="duplicate_receipt_or_replay_key"):
+        v2.verify_and_admit(
+            counterfeit, expected_day=DAY, expected_plot_id="plot-A",
+            expected_zone_id="plot", allow_historical_recompute=True,
+        )
