@@ -269,3 +269,24 @@ Results:
 | `test_real_replica_set_signed_l3_delivery_to_scoped_kalman_assessment` | `configure_server_delivery_verifier` trusted backend factory wiring, live Ed25519 signature admission, scoped `ZoneKalmanFilter.step()`, physical moisture increase, MongoDB receipt/snapshot commit, live replay prevention, independent worker checkpoint recovery | **PASS** | 0.53s |
 
 **Total:** 2 passed in 3.93s on live MongoDB replica set (`rs0`). Throwaway databases `akaloris_b2b07_gate_<uuid>` and `akaloris_b2b07_kalman_<uuid>` were created, fully exercised across multi-document transactions, and dropped on completion with zero residual state. Both connected acceptance requirements (store-level transaction boundary and trusted L3 startup wiring + signed delivery assessment) are completely satisfied.
+
+## 8. B2B-07 FORMAL MILESTONE FREEZE — 2026-11-05
+
+**Decision:** **FROZEN — Layer 0 B2B-07 signed-delivery and scientific-state software/integration milestone**. The acceptance condition in Section 7 ("no freeze until connected Mongo acceptance") is now satisfied by the signed, isolated live replica-set execution receipts directly above. This freeze supersedes earlier **HOLD** or **PENDING** text in this historical incremental gate document; those earlier entries remain as the chronological audit trail.
+
+**Frozen implementation and gate evidence:**
+
+- **Fully qualified software/head for normal regression gates:** `6f5787e2b7e3d5ea169625eeedab13a9747fd379`. Local Windows execution receipt: Layer 0 **724/724**, Layer 1 **21/21**, ASMAE fast **83/83** (plus 3 separately reported subtests), 365-day real-raster comprehensive **1/1**, aggregate **829/829 distinct Python tests**; frontend **105/105**; `tsc --noEmit` and Next.js build **PASS**.
+- **Connected integration-qualified head:** `d0a820bbbca09cd1ecda26531f31a748ff9c3faa`. This commit changes **only** `services/agribrain/layer0/tests/manual_b2b07_mongo_acceptance.py` and this milestone document relative to the software receipt head; the B07 production implementation is identical.
+- **Live replica-set tests:** `test_real_replica_set_two_processes_one_commit_and_atomic_failure` **PASS (3.40s)**; `test_real_replica_set_signed_l3_delivery_to_scoped_kalman_assessment` **PASS (0.53s)**. Both executed by the project operator against disposable Docker `rs0` MongoDB at `127.0.0.1:27018`. The reported per-test durations total **3.93s**, while the operator also reported **3.64s** for the overall test command; those two timing figures are inconsistent and retained as reported without inventing a corrected aggregate. **2/2 tests passed** is the relevant acceptance count.
+- **Live scope verified by operator report:** two spawned workers competing for the same receipt/replay key; one commit only; transactional rollback on conflict; durable snapshot recovery; genuine signed Ed25519 L3 delivery via `configure_server_delivery_verifier()` and a scoped `ZoneKalmanFilter.step()`; topsoil moisture change, Mongo receipt/state commit, replay refusal, and fresh-verifier checkpoint recovery.
+- **Limit of verification:** these are operator-executed local receipts, committed and reviewed from GitHub source. This freeze is not a claim of GitHub-hosted CI, production HSM deployment, field-level agronomic calibration, or deployed cross-service publication/actuation qualification. The trusted verifier factory is exercised by the integration test, not proof that a production application deployment has enabled it.
+
+**Release contract:**
+
+1. Freeze and protect B07-A covariance/temporal contracts, B07-B trusted physical delivery authority, B07-C scientific publication/actuation separation and B07-SEC-01 through SEC-07 replay/transaction protections. Do not amend this qualified implementation as part of later cohorts except for a demonstrated regression subject to an explicit new acceptance gate.
+2. Keep B2B-04B weather, B2B-05 plot/tenant authority, B2B-06 KMS and the independent Scientific Pilot PR #9 at their existing frozen versions; leave `main`, `findings/layer0.md`, and the master intended-architecture monograph unchanged.
+3. PR #27 remains a stacked, unmerged integration PR targeting the frozen B2B-06 branch; the formal milestone freeze **does not authorize a merge** or direct deployment.
+4. Any future B2B-08 work must branch from this **formal freeze documentation commit**, not from an older B07 candidate.
+
+**Disposition:** **B2B-07 COMPLETE / FROZEN** at the milestone level; external deployment, real-field calibration, and release integration remain distinct milestones.
