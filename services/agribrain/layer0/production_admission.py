@@ -7,6 +7,7 @@ unless explicitly enabled by the trusted deployment.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import os
 
 
@@ -128,12 +129,14 @@ def require_trusted_delivery_verifier(verifier: object) -> None:
 def configure_server_delivery_verifier(
     *, database, public_key_registry, revocation_authority,
     historical_recompute_authorizer=None,
+    require_transactional_revocation: bool = True,
 ):
     """Trusted backend factory: fail closed without a shared Mongo ledger.
 
     Never accept database/registry/authorizer from HTTP payloads. The
     deployment must supply a transaction-capable Mongo replica set and L3
     public keys from its own protected configuration.
+    Mandates in-transaction revocation write fencing in production.
     """
     from services.agribrain.layer0.mongo_irrigation_idempotency import (
         MongoIrrigationIdempotencyStore,
@@ -141,8 +144,28 @@ def configure_server_delivery_verifier(
     from services.agribrain.layer0.verified_irrigation_contract import (
         VerifiedDeliveredIrrigationVerifier,
     )
+    # Provision/sync active keys into Layer0RevocationLedger in MongoDB so that
+    # in-transaction write-fencing is provisioned from the trusted public key registry
+    if database is not None and callable(getattr(database, "command", None)):
+        rev_coll = database["Layer0RevocationLedger"]
+        entries = getattr(public_key_registry, "_entries", {})
+        now_utc = datetime.now(timezone.utc)
+        for key_id, entry in entries.items():
+            status = "active"
+            if revocation_authority and callable(getattr(revocation_authority, "check_authority", None)):
+                ok, _ = revocation_authority.check_authority(key_id, now_utc)
+                if not ok:
+                    status = "revoked"
+            rev_coll.update_one(
+                {"_id": key_id},
+                {"$setOnInsert": {"_id": key_id, "status": status, "initialized_at": now_utc}},
+                upsert=True,
+            )
+
     store = MongoIrrigationIdempotencyStore(
-        database, historical_recompute_authorizer=historical_recompute_authorizer,
+        database,
+        historical_recompute_authorizer=historical_recompute_authorizer,
+        require_transactional_revocation=require_transactional_revocation,
     )
     verifier = VerifiedDeliveredIrrigationVerifier(
         public_key_registry=public_key_registry,

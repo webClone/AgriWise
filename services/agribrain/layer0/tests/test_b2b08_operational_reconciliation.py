@@ -6,6 +6,7 @@ from services.agribrain.layer0.operational_reconciliation import (
     OperationalReconciliationError,
     audit_staged_assessments,
     compute_operator_authorization_signature,
+    get_trusted_reconciliation_secret,
     migrate_legacy_receipt_evidence_fingerprint,
     quarantine_legacy_receipts,
     reconcile_staged_assessment,
@@ -34,7 +35,7 @@ class MockCollection:
     def __init__(self, initial=None):
         self.docs = {d["_id"]: dict(d) for d in (initial or [])}
 
-    def find(self, query=None):
+    def find(self, query=None, session=None):
         query = query or {}
         matches = []
         for d in self.docs.values():
@@ -63,14 +64,14 @@ class MockCollection:
                 matches.append(dict(d))
         return MockCursor(matches)
 
-    def find_one(self, query=None):
+    def find_one(self, query=None, session=None):
         res = list(self.find(query))
         return dict(res[0]) if res else None
 
-    def count_documents(self, query=None):
+    def count_documents(self, query=None, session=None):
         return len(list(self.find(query)))
 
-    def update_one(self, query, update):
+    def update_one(self, query, update, session=None):
         target = self.find_one(query)
         if not target:
             return MockUpdateResult(0)
@@ -82,7 +83,7 @@ class MockCollection:
                 doc.pop(k, None)
         return MockUpdateResult(1)
 
-    def update_many(self, query, update):
+    def update_many(self, query, update, session=None):
         targets = list(self.find(query))
         for t in targets:
             self.update_one({"_id": t["_id"]}, update)
@@ -165,16 +166,18 @@ def test_reconcile_abort_and_rollback_leaves_unrelated_assessments_untouched():
     db["Layer0ScientificAssessment"].docs = {
         "a1": {
             "_id": "a1", "assessment_id": "a1", "tenant_id": "t1", "plot_id": "plot-shared",
+            "geometry_hash": "g1", "geometry_version": 1,
             "status": "STAGED", "claim_nonce": "nonce-A", "submitted_receipt_ids": ["rA"],
         },
         "a2": {
             "_id": "a2", "assessment_id": "a2", "tenant_id": "t1", "plot_id": "plot-shared",
+            "geometry_hash": "g1", "geometry_version": 1,
             "status": "STAGED", "claim_nonce": "nonce-B", "submitted_receipt_ids": ["rB"],
         },
     }
     db["Layer0IrrigationReceiptConsumption"].docs = {
-        "rA": {"_id": "rA", "tenant_id": "t1", "plot_id": "plot-shared", "status": "STAGED"},
-        "rB": {"_id": "rB", "tenant_id": "t1", "plot_id": "plot-shared", "status": "STAGED"},
+        "rA": {"_id": "rA", "tenant_id": "t1", "plot_id": "plot-shared", "geometry_hash": "g1", "geometry_version": 1, "status": "STAGED"},
+        "rB": {"_id": "rB", "tenant_id": "t1", "plot_id": "plot-shared", "geometry_hash": "g1", "geometry_version": 1, "status": "STAGED"},
     }
     
     now = datetime.now(UTC)
@@ -197,10 +200,66 @@ def test_reconcile_abort_and_rollback_leaves_unrelated_assessments_untouched():
     # Check that a1 was aborted and rA rolled back
     assert db["Layer0ScientificAssessment"].docs["a1"]["status"] == "ABORTED"
     assert db["Layer0IrrigationReceiptConsumption"].docs["rA"]["status"] == "ROLLED_BACK"
-    
+
     # CRUCIAL: Check that a2 and rB on the same plot remain strictly STAGED!
     assert db["Layer0ScientificAssessment"].docs["a2"]["status"] == "STAGED"
     assert db["Layer0IrrigationReceiptConsumption"].docs["rB"]["status"] == "STAGED"
+
+
+def test_reconcile_rejects_receipt_scope_mismatch():
+    """Verify that reconciliation denies unverified submitted receipts from a foreign plot or tenant."""
+    db = MockDatabase()
+    db["Layer0ScientificAssessment"].docs = {
+        "a1": {
+            "_id": "a1", "assessment_id": "a1", "tenant_id": "t1", "plot_id": "p1",
+            "geometry_hash": "g1", "geometry_version": 1,
+            "status": "STAGED", "claim_nonce": "nonce-A", "submitted_receipt_ids": ["r_foreign"],
+        },
+    }
+    # r_foreign has a different plot_id!
+    db["Layer0IrrigationReceiptConsumption"].docs = {
+        "r_foreign": {"_id": "r_foreign", "tenant_id": "t1", "plot_id": "p_different", "geometry_hash": "g1", "geometry_version": 1, "status": "STAGED"},
+    }
+    now = datetime.now(UTC)
+    ts = now.isoformat().replace("+00:00", "Z")
+    sig = compute_operator_authorization_signature("lead-op", "ABORT_AND_ROLLBACK", "a1", ts, SECRET)
+
+    with pytest.raises(OperationalReconciliationError, match="receipt_scope_mismatch_with_assessment"):
+        reconcile_staged_assessment(
+            db, "a1", "ABORT_AND_ROLLBACK",
+            operator_principal="lead-op",
+            rationale="Attempting to abort with foreign receipt",
+            authorization_signature=sig,
+            secret=SECRET,
+            authorization_timestamp=ts,
+            now=now,
+        )
+
+
+def test_reconcile_enforces_server_secret_authority(monkeypatch):
+    """Verify that caller cannot supply an arbitrary secret when server authority secret is configured."""
+    monkeypatch.setenv("AKALORIS_RECONCILIATION_HMAC_SECRET", "authoritative-server-secret-999")
+    now = datetime.now(UTC)
+    ts = now.isoformat().replace("+00:00", "Z")
+    db = MockDatabase()
+    db["Layer0ScientificAssessment"].docs = {
+        "a1": {"_id": "a1", "status": "STAGED", "submitted_receipt_ids": []},
+    }
+
+    # Caller attempts to self-authorize with their own secret
+    rogue_secret = "rogue-caller-supplied-secret"
+    rogue_sig = compute_operator_authorization_signature("rogue-op", "ABORT_AND_ROLLBACK", "a1", ts, rogue_secret)
+
+    with pytest.raises(OperationalReconciliationError, match="caller_secret_mismatch_with_server_authority"):
+        reconcile_staged_assessment(
+            db, "a1", "ABORT_AND_ROLLBACK",
+            operator_principal="rogue-op",
+            rationale="Attempting self-authorized reconciliation",
+            authorization_signature=rogue_sig,
+            secret=rogue_secret,
+            authorization_timestamp=ts,
+            now=now,
+        )
 
 
 def test_reconcile_complete_reconciled_with_exact_lineage():
@@ -215,8 +274,8 @@ def test_reconcile_complete_reconciled_with_exact_lineage():
     }
     db["Layer0IrrigationReceiptConsumption"].docs = {
         "r1": {
-            "_id": "r1", "tenant_id": "t1", "plot_id": "p1", "status": "COMMITTED",
-            "state_snapshot_id": snap_id, "evidence_fingerprint": "fp1",
+            "_id": "r1", "tenant_id": "t1", "plot_id": "p1", "geometry_hash": "geom1", "geometry_version": 2,
+            "status": "COMMITTED", "state_snapshot_id": snap_id, "evidence_fingerprint": "fp1",
         },
     }
     db["Layer0IrrigationCommittedState"].docs = {
@@ -248,6 +307,8 @@ def test_reconcile_complete_reconciled_with_exact_lineage():
 def test_legacy_migration_reproduces_exact_production_fingerprint():
     """Verify legacy migration produces the exact same fingerprint as physical_evidence_fingerprint."""
     db = MockDatabase()
+    cas_root = "a" * 64
+    interval = ("2026-05-01T12:00:00Z", "2026-05-01T14:00:00Z")
     db["Layer0IrrigationReceiptConsumption"].docs = {
         "r_leg": {
             "_id": "r_leg", "tenant_id": "t1", "plot_id": "p1",
@@ -255,9 +316,6 @@ def test_legacy_migration_reproduces_exact_production_fingerprint():
             "status": "COMMITTED",
         }
     }
-    
-    cas_root = "cas://authoritative-flow-meter-evidence-001"
-    interval = ("2026-05-01T12:00:00Z", "2026-05-01T14:00:00Z")
     
     res = migrate_legacy_receipt_evidence_fingerprint(
         db, "r_leg",
@@ -267,7 +325,6 @@ def test_legacy_migration_reproduces_exact_production_fingerprint():
         rationale="Audited physical meter log from gateway hardware",
     )
     
-    # Construct a modern grant with the identical physical evidence
     modern_grant = VerifiedDeliveredIrrigationGrant(
         domain=VERIFIED_IRRIGATION_DOMAIN,
         version="v3",
@@ -297,7 +354,59 @@ def test_legacy_migration_reproduces_exact_production_fingerprint():
     )
     
     prod_fingerprint = physical_evidence_fingerprint(modern_grant)
-    assert res["evidence_fingerprint"] == prod_fingerprint, (
-        f"Migration fingerprint mismatch: {res['evidence_fingerprint']} != {prod_fingerprint}"
-    )
+    assert res["evidence_fingerprint"] == prod_fingerprint
     assert db["Layer0IrrigationReceiptConsumption"].docs["r_leg"]["evidence_fingerprint"] == prod_fingerprint
+
+
+def test_legacy_migration_rejects_missing_scope_and_unauthenticated_evidence():
+    db = MockDatabase()
+    interval = ("2026-05-01T12:00:00Z", "2026-05-01T14:00:00Z")
+    cas_root = "b" * 64
+
+    # 1. Missing geometry_version fails without fallbacks
+    db["Layer0IrrigationReceiptConsumption"].docs = {
+        "r_bad": {
+            "_id": "r_bad", "tenant_id": "t1", "plot_id": "p1",
+            "zone_id": "plot", "geometry_hash": "geom1",
+            # geometry_version omitted!
+            "status": "COMMITTED",
+        }
+    }
+    with pytest.raises(OperationalReconciliationError, match="unverifiable_legacy_record_missing_geometry_version"):
+        migrate_legacy_receipt_evidence_fingerprint(
+            db, "r_bad",
+            source_evidence_cas_root=cas_root,
+            delivery_interval=interval,
+            operator_principal="data-lead",
+            rationale="Attempting migration on incomplete scope",
+        )
+
+    # 2. Inverted interval fails
+    db["Layer0IrrigationReceiptConsumption"].docs["r_valid"] = {
+        "_id": "r_valid", "tenant_id": "t1", "plot_id": "p1",
+        "zone_id": "plot", "geometry_hash": "geom1", "geometry_version": 2,
+        "status": "COMMITTED",
+    }
+    bad_interval = ("2026-05-01T14:00:00Z", "2026-05-01T12:00:00Z")
+    with pytest.raises(OperationalReconciliationError, match="invalid_delivery_interval_end_must_exceed_start"):
+        migrate_legacy_receipt_evidence_fingerprint(
+            db, "r_valid",
+            source_evidence_cas_root=cas_root,
+            delivery_interval=bad_interval,
+            operator_principal="data-lead",
+            rationale="Testing inverted interval",
+        )
+
+    # 3. External evidence authenticator rejecting evidence fails
+    def rejecting_authenticator(root, ivl, rec):
+        return False
+
+    with pytest.raises(OperationalReconciliationError, match="historical_evidence_unauthenticated"):
+        migrate_legacy_receipt_evidence_fingerprint(
+            db, "r_valid",
+            source_evidence_cas_root=cas_root,
+            delivery_interval=interval,
+            operator_principal="data-lead",
+            rationale="Testing external authenticator failure",
+            evidence_authenticator=rejecting_authenticator,
+        )

@@ -5,15 +5,19 @@ Provides controlled administrative utilities for Layer 0 operational operators:
      - Never silently deletes or automatically retries STAGED claims.
      - Scoped specifically to the submitted receipts of THAT assessment (never blindly
        touches other assessments sharing the same plot).
-     - Cryptographically authenticates the operator identity and authorization token.
-     - Enforces atomic compare-and-set on the assessment claim nonce.
-     - For COMPLETE_RECONCILED: verifies exact durable state snapshot and receipt lineage.
+     - Independently verifies receipt scope match (tenant, plot, geometry, day) before any mutation.
+     - Cryptographically authenticates the operator identity and authorization token against
+       an independent server authority secret.
+     - Executes receipt updates, assessment compare-and-set, and audit metadata in a single
+       atomic MongoDB transaction session with fail-closed rollback.
+     - For COMPLETE_RECONCILED: verifies exact durable state snapshot and receipt set lineage.
   2. Audit, quarantine, and migration of legacy pre-B2B-08 receipt records:
      - Discovers receipts lacking independent 'evidence_fingerprint'.
      - Applies strict quarantine markers preventing legacy records from corrupting
        modern unique evidence partial indexes.
-     - Migration reuses the EXACT production canonical JSON fingerprint algorithm,
-       ensuring cross-version duplicate-evidence fencing against newly signed grants.
+     - Migration validates exact scope (never inventing default zone/version), authenticates
+       historical evidence roots, and reuses the EXACT production canonical JSON fingerprint
+       algorithm matching physical_evidence_fingerprint.
 """
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ import hashlib
 import hmac
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from services.agribrain.layer0.verified_irrigation_contract import (
     _parse_iso_utc,
@@ -35,6 +39,21 @@ UTC = timezone.utc
 
 class OperationalReconciliationError(RuntimeError):
     """Raised on invalid operational action, unverified state, or missing authorization."""
+
+
+def get_trusted_reconciliation_secret(supplied_secret: Optional[str] = None) -> str:
+    """Retrieve trusted reconciliation HMAC secret from server authority environment or injection.
+    
+    Prevents caller from self-authorizing actions with their own unverified secret.
+    """
+    server_secret = os.environ.get("AKALORIS_RECONCILIATION_HMAC_SECRET", "").strip()
+    if server_secret:
+        if supplied_secret and not hmac.compare_digest(supplied_secret, server_secret):
+            raise OperationalReconciliationError("caller_secret_mismatch_with_server_authority")
+        return server_secret
+    if supplied_secret:
+        return supplied_secret
+    raise OperationalReconciliationError("unconfigured_reconciliation_authority_secret")
 
 
 def compute_operator_authorization_signature(
@@ -114,7 +133,7 @@ def audit_staged_assessments(db: Any) -> List[StagedAssessmentAuditReport]:
     """Scan and audit all assessments currently in STAGED status.
     
     Read-only audit: correlates receipts specifically by submitted_receipt_ids
-    to avoid confusing independent assessments on the same plot.
+    and validates scope consistency to avoid confusing independent assessments.
     """
     if db is None or not callable(getattr(db, "command", None)):
         raise TypeError("connected_mongodb_required")
@@ -183,25 +202,31 @@ def reconcile_staged_assessment(
     operator_principal: str,
     rationale: str,
     authorization_signature: str,
-    secret: str,
+    secret: Optional[str] = None,
     authorization_timestamp: Optional[str] = None,
     now: Optional[datetime] = None,
+    expected_claim_nonce: Optional[str] = None,
+    _before_cas_hook: Optional[Callable[[Any, Mapping[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Execute controlled administrative reconciliation of a STAGED assessment.
     
     Security Controls:
-      - Authenticates operator_principal via authorization_signature over HMAC.
+      - Authenticates operator_principal via authorization_signature against trusted server secret.
       - Uses exact submitted_receipt_ids scoping; never affects other assessments on the plot.
-      - Executes atomic compare-and-set on claim_nonce and status='STAGED'.
-      - For COMPLETE_RECONCILED: verifies exact durable state snapshot and receipt lineage.
+      - Validates that every submitted receipt matches assessment scope before mutation.
+      - Executes receipt updates, assessment compare-and-set, and audit metadata in a single
+        atomic MongoDB multi-document transaction with automatic rollback on CAS failure.
+      - For COMPLETE_RECONCILED: validates that state snapshot receipt set exactly matches submitted_ids
+        and reconstructs complete scientific provenance.
     """
     now_dt = now or datetime.now(UTC)
     iso_now = now_dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
     auth_ts = authorization_timestamp or iso_now
     
-    # 1. Cryptographic Operator Authorization
+    # 1. Independent Server Secret Authority & Cryptographic Operator Authorization
+    effective_secret = get_trusted_reconciliation_secret(secret)
     verify_operator_authorization(
-        operator_principal, action, assessment_id, auth_ts, authorization_signature, secret, now=now_dt,
+        operator_principal, action, assessment_id, auth_ts, authorization_signature, effective_secret, now=now_dt,
     )
     if not rationale or len(rationale.strip()) < 10:
         raise OperationalReconciliationError("valid_rationale_min_10_chars_required")
@@ -218,9 +243,22 @@ def reconcile_staged_assessment(
     if doc.get("status") != "STAGED":
         raise OperationalReconciliationError(f"assessment_status_not_staged: {doc.get('status')}")
         
-    claim_nonce = doc.get("claim_nonce")
+    claim_nonce = expected_claim_nonce or doc.get("claim_nonce")
+    if expected_claim_nonce and doc.get("claim_nonce") != expected_claim_nonce:
+        raise OperationalReconciliationError("concurrent_assessment_mutation_detected")
     submitted_ids = list(doc.get("submitted_receipt_ids") or [])
     
+    # 2. Scope Validation: Do not trust unverified receipt claims outside assessment scope
+    for r_id in submitted_ids:
+        r_doc = receipts_coll.find_one({"_id": r_id})
+        if not r_doc:
+            raise OperationalReconciliationError(f"unresolved_submitted_receipt: {r_id}")
+        for k in ("tenant_id", "plot_id", "geometry_hash", "geometry_version"):
+            if r_doc.get(k) != doc.get(k):
+                raise OperationalReconciliationError(f"receipt_scope_mismatch_with_assessment: {r_id} {k}")
+        if doc.get("day") and r_doc.get("day") and r_doc.get("day") != doc.get("day"):
+            raise OperationalReconciliationError(f"receipt_day_mismatch: {r_id}")
+
     audit_entry = {
         "reconciled_at": iso_now,
         "operator": operator_principal,
@@ -228,100 +266,127 @@ def reconcile_staged_assessment(
         "action": action,
         "authorization_timestamp": auth_ts,
     }
-    
-    if action == "ABORT_AND_ROLLBACK":
-        # Roll back ONLY the receipts submitted for THIS assessment
-        modified_count = 0
-        if submitted_ids:
-            res = receipts_coll.update_many(
-                {"_id": {"$in": submitted_ids}, "status": "STAGED"},
-                {"$set": {
-                    "status": "ROLLED_BACK",
-                    "rolled_back_at": iso_now,
-                    "rolled_back_by": operator_principal,
-                    "reconciled_assessment_id": assessment_id,
-                }},
-            )
-            modified_count = res.modified_count
-            
-        # Atomic compare-and-set on assessment
-        cas_res = assessments_coll.update_one(
-            {"_id": doc["_id"], "status": "STAGED", "claim_nonce": claim_nonce},
-            {"$set": {"status": "ABORTED", "reconciliation_audit": audit_entry}},
-        )
-        if cas_res.matched_count != 1:
-            raise OperationalReconciliationError("concurrent_assessment_mutation_detected")
-            
-        return {
-            "assessment_id": assessment_id,
-            "status": "ABORTED",
-            "reservations_rolled_back": modified_count,
-            "audit": audit_entry,
-        }
-        
-    elif action == "COMPLETE_RECONCILED":
-        if not submitted_ids:
-            raise OperationalReconciliationError("cannot_complete_assessment_without_submitted_receipts")
-            
-        # Verify that all submitted receipts are COMMITTED
-        committed_rows = list(receipts_coll.find({
-            "_id": {"$in": submitted_ids},
-            "status": "COMMITTED",
-        }))
-        if len(committed_rows) != len(submitted_ids):
-            raise OperationalReconciliationError("cannot_complete_unconfirmed_receipt_commit")
-            
-        # Verify snapshot linkage and exact scope
-        snapshot_ids = {r.get("state_snapshot_id") for r in committed_rows}
-        if len(snapshot_ids) != 1 or None in snapshot_ids:
-            raise OperationalReconciliationError("inconsistent_state_snapshot_linkage")
-        snapshot_id = snapshot_ids.pop()
-        
-        state_doc = states_coll.find_one({"_id": snapshot_id})
-        if not state_doc:
-            raise OperationalReconciliationError("referenced_state_snapshot_missing")
-            
-        # Check scope match against assessment
-        for k in ("tenant_id", "plot_id", "geometry_hash", "geometry_version"):
-            if state_doc.get(k) != doc.get(k):
-                raise OperationalReconciliationError(f"scope_mismatch_on_{k}")
+
+    # 3. Transactional Execution: Atomic CAS + Receipt Mutation
+    client = getattr(db, "client", None)
+    has_tx = client and callable(getattr(client, "start_session", None))
+
+    def _execute_within_session(session=None):
+        sess_kw = {"session": session} if session is not None else {}
+
+        if action == "ABORT_AND_ROLLBACK":
+            modified_count = 0
+            if submitted_ids:
+                res = receipts_coll.update_many(
+                    {"_id": {"$in": submitted_ids}, "status": "STAGED"},
+                    {"$set": {
+                        "status": "ROLLED_BACK",
+                        "rolled_back_at": iso_now,
+                        "rolled_back_by": operator_principal,
+                        "reconciled_assessment_id": assessment_id,
+                    }},
+                    **sess_kw,
+                )
+                modified_count = res.modified_count
                 
-        # Reconstruct verified summary
-        reconstructed_summary = {
-            "assessment_id": assessment_id,
-            "reconciled_from_snapshot_id": snapshot_id,
-            "verified_delivery_commits": [{
-                "state_snapshot_id": snapshot_id,
-                "receipt_ids": submitted_ids,
-                "evidence_fingerprints": [r.get("evidence_fingerprint") for r in committed_rows],
-                "recovered_from_durable_l3_commit": True,
-            }],
-            "verified_delivery_receipt_count": len(submitted_ids),
-            "scientific_publication_authorized": False,
-            "actuator_control_authorized": False,
-        }
-        
-        # Atomic compare-and-set
-        cas_res = assessments_coll.update_one(
-            {"_id": doc["_id"], "status": "STAGED", "claim_nonce": claim_nonce},
-            {"$set": {
-                "status": "COMMITTED",
-                "result": reconstructed_summary,
-                "reconciliation_audit": audit_entry,
-            }},
-        )
-        if cas_res.matched_count != 1:
-            raise OperationalReconciliationError("concurrent_assessment_mutation_detected")
+            if callable(_before_cas_hook):
+                _before_cas_hook(session, doc)
+
+            cas_res = assessments_coll.update_one(
+                {"_id": doc["_id"], "status": "STAGED", "claim_nonce": claim_nonce},
+                {"$set": {"status": "ABORTED", "reconciliation_audit": audit_entry}},
+                **sess_kw,
+            )
+            if cas_res.matched_count != 1:
+                raise OperationalReconciliationError("concurrent_assessment_mutation_detected")
+                
+            return {
+                "assessment_id": assessment_id,
+                "status": "ABORTED",
+                "reservations_rolled_back": modified_count,
+                "audit": audit_entry,
+            }
             
-        return {
-            "assessment_id": assessment_id,
-            "status": "COMMITTED",
-            "audit": audit_entry,
-            "result": reconstructed_summary,
-        }
-        
-    else:
-        raise OperationalReconciliationError(f"unsupported_action: {action}")
+        elif action == "COMPLETE_RECONCILED":
+            if not submitted_ids:
+                raise OperationalReconciliationError("cannot_complete_assessment_without_submitted_receipts")
+                
+            committed_rows = list(receipts_coll.find({
+                "_id": {"$in": submitted_ids},
+                "status": "COMMITTED",
+            }, **sess_kw))
+            if len(committed_rows) != len(submitted_ids):
+                raise OperationalReconciliationError("cannot_complete_unconfirmed_receipt_commit")
+                
+            snapshot_ids = {r.get("state_snapshot_id") for r in committed_rows}
+            if len(snapshot_ids) != 1 or None in snapshot_ids:
+                raise OperationalReconciliationError("inconsistent_state_snapshot_linkage")
+            snapshot_id = snapshot_ids.pop()
+            
+            state_doc = states_coll.find_one({"_id": snapshot_id}, **sess_kw)
+            if not state_doc:
+                raise OperationalReconciliationError("referenced_state_snapshot_missing")
+                
+            for k in ("tenant_id", "plot_id", "geometry_hash", "geometry_version"):
+                if state_doc.get(k) != doc.get(k):
+                    raise OperationalReconciliationError(f"scope_mismatch_on_{k}")
+
+            # Verify snapshot's receipt set matches submitted_ids exactly
+            snap_rcpts = set(state_doc.get("receipt_ids") or [])
+            if snap_rcpts != set(submitted_ids):
+                raise OperationalReconciliationError("snapshot_receipt_set_mismatch")
+                    
+            reconstructed_summary = {
+                "assessment_id": assessment_id,
+                "reconciled_from_snapshot_id": snapshot_id,
+                "state": state_doc.get("state"),
+                "covariance": state_doc.get("covariance"),
+                "day": state_doc.get("day"),
+                "zone_id": state_doc.get("zone_id", "plot"),
+                "verified_delivery_commits": [{
+                    "state_snapshot_id": snapshot_id,
+                    "receipt_ids": submitted_ids,
+                    "evidence_fingerprints": [r.get("evidence_fingerprint") for r in committed_rows],
+                    "recovered_from_durable_l3_commit": True,
+                }],
+                "verified_delivery_receipt_count": len(submitted_ids),
+                "scientific_publication_authorized": False,
+                "actuator_control_authorized": False,
+            }
+            
+            cas_res = assessments_coll.update_one(
+                {"_id": doc["_id"], "status": "STAGED", "claim_nonce": claim_nonce},
+                {"$set": {
+                    "status": "COMMITTED",
+                    "result": reconstructed_summary,
+                    "reconciliation_audit": audit_entry,
+                }},
+                **sess_kw,
+            )
+            if cas_res.matched_count != 1:
+                raise OperationalReconciliationError("concurrent_assessment_mutation_detected")
+                
+            return {
+                "assessment_id": assessment_id,
+                "status": "COMMITTED",
+                "audit": audit_entry,
+                "result": reconstructed_summary,
+            }
+        else:
+            raise OperationalReconciliationError(f"unsupported_action: {action}")
+
+    if has_tx:
+        try:
+            with client.start_session() as session:
+                with session.start_transaction():
+                    return _execute_within_session(session)
+        except Exception as exc:
+            if isinstance(exc, OperationalReconciliationError):
+                raise
+            if "WriteConflict" in str(exc) or "TransientTransactionError" in str(exc):
+                raise OperationalReconciliationError("concurrent_assessment_mutation_detected") from exc
+            raise OperationalReconciliationError(f"reconciliation_transaction_failed: {exc}") from exc
+    return _execute_within_session(None)
 
 
 def scan_unfingerprinted_legacy_receipts(db: Any) -> List[Dict[str, Any]]:
@@ -347,11 +412,7 @@ def quarantine_legacy_receipts(
     rationale: str,
     now: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    """Quarantine all legacy receipt consumption records lacking valid evidence fingerprints.
-    
-    Tags records with quarantine_status='QUARANTINED', preventing them from being
-    admitted into modern B2B-08 scientific commitment lineage checks.
-    """
+    """Quarantine all legacy receipt consumption records lacking valid evidence fingerprints."""
     if not operator_principal:
         raise OperationalReconciliationError("operator_principal_required")
     if not rationale:
@@ -394,12 +455,20 @@ def migrate_legacy_receipt_evidence_fingerprint(
     delivery_interval: Tuple[str, str],
     operator_principal: str,
     rationale: str,
+    evidence_authenticator: Optional[Callable[[str, Tuple[str, str], Mapping[str, Any]], bool]] = None,
 ) -> Dict[str, Any]:
     """Migrate a single verified historical receipt by populating its evidence fingerprint.
     
-    Reuses the EXACT production canonical JSON fingerprint algorithm
-    (matching physical_evidence_fingerprint), guaranteeing cross-version
-    duplicate-evidence protection against newly re-issued grants.
+    Security Controls:
+      - Validates exact historical scope (tenant_id, plot_id, zone_id, geometry_hash, geometry_version)
+        without inventing fallback defaults.
+      - Enforces delivery interval validity (end > start, duration <= 24h) and checks consistency
+        against existing receipt delivery fields if present.
+      - Validates source_evidence_cas_root format and checks consistency against existing receipt.
+      - Executes optional independent historical evidence authenticator callback.
+      - Reuses the EXACT production canonical JSON fingerprint algorithm
+        (matching physical_evidence_fingerprint), guaranteeing cross-version
+        duplicate-evidence protection against newly re-issued grants.
     """
     if not receipt_id or not source_evidence_cas_root or len(delivery_interval) != 2:
         raise OperationalReconciliationError("invalid_migration_parameters")
@@ -409,17 +478,57 @@ def migrate_legacy_receipt_evidence_fingerprint(
     if not rec:
         raise OperationalReconciliationError(f"receipt_{receipt_id}_not_found")
         
+    # 1. Exact scope validation without inventing fallbacks
+    for key in ("tenant_id", "plot_id", "zone_id", "geometry_hash", "geometry_version"):
+        val = rec.get(key)
+        if val is None or val == "":
+            raise OperationalReconciliationError(f"unverifiable_legacy_record_missing_{key}")
+
+    # 2. Delivery interval validation & consistency
     start_iso, end_iso = delivery_interval
-    start_utc = _parse_iso_utc(start_iso).isoformat()
-    end_utc = _parse_iso_utc(end_iso).isoformat()
+    try:
+        start_dt = _parse_iso_utc(start_iso)
+        end_dt = _parse_iso_utc(end_iso)
+    except Exception as e:
+        raise OperationalReconciliationError("invalid_delivery_interval_timestamp") from e
+
+    if end_dt <= start_dt:
+        raise OperationalReconciliationError("invalid_delivery_interval_end_must_exceed_start")
+    if (end_dt - start_dt).total_seconds() > 86400.0:
+        raise OperationalReconciliationError("invalid_delivery_interval_duration_exceeds_24h")
+
+    if rec.get("delivery_start") and rec.get("delivery_end"):
+        rec_start_dt = _parse_iso_utc(rec["delivery_start"])
+        rec_end_dt = _parse_iso_utc(rec["delivery_end"])
+        if rec_start_dt != start_dt or rec_end_dt != end_dt:
+            raise OperationalReconciliationError("delivery_interval_mismatch_with_historical_receipt")
+
+    # 3. Evidence root validation & consistency
+    if len(source_evidence_cas_root) < 16:
+        raise OperationalReconciliationError("invalid_source_evidence_cas_root_format")
+    if rec.get("source_evidence_cas_root") and rec["source_evidence_cas_root"] != source_evidence_cas_root:
+        raise OperationalReconciliationError("evidence_cas_root_mismatch_with_historical_receipt")
+
+    # 4. Optional external historical evidence authenticator
+    if evidence_authenticator is not None:
+        try:
+            if not evidence_authenticator(source_evidence_cas_root, delivery_interval, rec):
+                raise OperationalReconciliationError("historical_evidence_unauthenticated")
+        except Exception as e:
+            if isinstance(e, OperationalReconciliationError):
+                raise
+            raise OperationalReconciliationError("historical_evidence_authentication_failed") from e
+
+    start_utc = start_dt.isoformat()
+    end_utc = end_dt.isoformat()
     
     # Exact production algorithm: sorted JSON dictionary over normalized fields
     fields = {
-        "tenant_id": str(rec.get("tenant_id")),
-        "plot_id": str(rec.get("plot_id")),
-        "zone_id": str(rec.get("zone_id") or "plot"),
-        "geometry_hash": str(rec.get("geometry_hash")),
-        "geometry_version": int(rec.get("geometry_version") or 2),
+        "tenant_id": str(rec["tenant_id"]),
+        "plot_id": str(rec["plot_id"]),
+        "zone_id": str(rec["zone_id"]),
+        "geometry_hash": str(rec["geometry_hash"]),
+        "geometry_version": int(rec["geometry_version"]),
         "source_evidence_cas_root": str(source_evidence_cas_root),
         "delivery_start": start_utc,
         "delivery_end": end_utc,

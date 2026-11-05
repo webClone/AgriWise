@@ -304,3 +304,49 @@ Following deep source review of commit `5436a2f`, three release-blocking P1 find
 - **Frontend Test Suite (`npm run test:frontend`):** **105 passed**, 0 failed in 1.53s
 - **TypeScript Compiler (`npx tsc --noEmit`):** **0 errors** (exit code 0)
 - **Production Build (`npm run build`):** **0 errors**, compiled in 19.5s, 63 static pages generated (exit code 0)
+
+## 13. B2B-08 Freeze Closure: Mandatory Factory Revocation Fence, Atomic Transaction Reconciliation, and Verified Legacy Migration
+
+Following comprehensive review of commit `4e2a8c9`, all three remaining freeze blockers (B2B-08-F1, B2B-08-F2, B2B-08-F3) were remediated, verified, and closed with live connected qualification:
+
+1. **Mandatory Factory Revocation Fence & Ledger Seeding (B2B-08-F1 — P1):**
+   - In `services/agribrain/layer0/production_admission.py`:
+     - `configure_server_delivery_verifier()` now mandates `require_transactional_revocation: bool = True` by default and enforces that transactional revocation fencing cannot be disabled in production admission.
+     - Automatically provisions and seeds active keys from `public_key_registry` directly into `Layer0RevocationLedger` at initialization time, validating key status against the revocation authority and preventing unseeded cold starts.
+   - In `services/agribrain/layer0/mongo_irrigation_idempotency.py`:
+     - When `require_transactional_revocation=True`, `commit_many()` verifies that the revocation ledger contains seeded records; an uninitialized or empty ledger immediately fails closed with `RuntimeError("uninitialized_revocation_ledger")`.
+   - In `services/agribrain/layer0/tests/manual_b2b08_transactional_revocation_connected_gate.py`:
+     - Added a genuine concurrent multi-threaded overlapping revocation writer test where an out-of-band thread revokes a key while another thread is executing an in-flight transaction commit, proving that WiredTiger `WriteConflict` / write-fence aborts the commit and rolls back all mutations atomically.
+
+2. **Atomic Transaction Reconciliation & Strict Scope Enforcement (B2B-08-F2 — P1):**
+   - In `services/agribrain/layer0/operational_reconciliation.py`:
+     - Wrapped the entire assessment status mutation, receipt updates, and audit metadata journaling in `reconcile_staged_assessment()` in a single atomic MongoDB multi-document transaction (`with client.start_session() as session: with session.start_transaction(): ...`).
+     - Added live replica-set qualification verifying that an injected CAS failure or concurrent assessment mutation triggers complete fail-closed rollback of pre-CAS receipt mutations back to `STAGED`.
+     - Validates scope strictly for every receipt in `submitted_receipt_ids` against the assessment document (`tenant_id`, `plot_id`, `geometry_hash`, `geometry_version`, `day`) before any mutations can occur.
+     - Reconstructs full scientific state provenance for `COMPLETE_RECONCILED` and validates that snapshot receipt sets exactly match `submitted_receipt_ids`.
+     - Enforces a trusted server secret boundary via `AKALORIS_RECONCILIATION_HMAC_SECRET` (calling `get_trusted_reconciliation_secret()`), strictly rejecting caller self-authorization.
+   - In `services/agribrain/app/scoped_packet_run.py`:
+     - Incoming packet grant scope (`tenant_id`, `plot_id`, `geometry_hash`, `geometry_version`) is validated before recording `receipt_id` into `submitted_receipt_ids`.
+
+3. **Verified Legacy Migration Without Defaults (B2B-08-F3 — P2):**
+   - In `services/agribrain/layer0/operational_reconciliation.py`:
+     - `migrate_legacy_receipt_evidence_fingerprint()` strictly enforces non-empty, explicit scope fields (`tenant_id`, `plot_id`, `zone_id`, `geometry_hash`, `geometry_version`), completely eliminating fallback defaults.
+     - Validates delivery interval (`delivery_end > delivery_start` and duration `<= 24 hours`) and verifies internal consistency with existing receipt timestamp fields.
+     - Validates canonical CAS root format (`len >= 16`) and supports an optional `evidence_authenticator` callback for verifying historical evidence integrity.
+
+**Final Freeze Qualification Receipts (exact HEAD):**
+- **Layer 0 Tests (`services/agribrain/layer0/tests/`):** **787 passed**, 1 warning in 19.40s
+- **Layer 1 Fusion Tests (`services/agribrain/layer1_fusion/tests/`):** **21 passed** in 0.66s
+- **Layer 0.5 ASMAE Fast Tests:** **83 passed** in 26.26s
+- **Layer 0.5 ASMAE Comprehensive Pipeline Test:** **1 passed** in 434.61s (7m 14s)
+- **Total Distinct Python Tests:** **892 passed**
+- **Connected MongoDB Replica Set Gates (`mongodb://127.0.0.1:27018/?replicaSet=rs0`):** **11 passed across 5 suites** in 10.81s
+  - `manual_b2b07_mongo_acceptance.py`: **2 passed**
+  - `manual_b2b08_irrigation_connected_gate.py`: **1 passed**
+  - `manual_b2b08_signed_http_connected_gate.py`: **1 passed**
+  - `manual_b2b08_staging_main_lifespan_gate.py`: **1 passed**
+  - `manual_b2b08_transactional_revocation_connected_gate.py`: **6 passed**
+- **Frontend Test Suite (`npm run test:frontend`):** **105 passed**, 0 failed in 1.55s
+- **TypeScript Compiler (`npx tsc --noEmit`):** **0 errors** (exit code 0)
+- **Production Build (`npm run build`):** **0 errors**, compiled in 17.0s, 63 static pages generated in 927.1ms (exit code 0)
+

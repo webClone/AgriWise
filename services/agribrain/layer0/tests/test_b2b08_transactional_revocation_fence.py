@@ -316,3 +316,62 @@ def test_in_transaction_revocation_fence_aborts_if_receipt_revoked():
         store.commit_many([res], state_snapshot=snap)
     assert "receipt_revoked_in_transaction" in str(exc.value.__cause__)
     assert session.aborted is True
+
+def test_in_transaction_revocation_fence_rejects_empty_uninitialized_ledger():
+    """Verify that when require_transactional_revocation is True, an empty ledger fails closed."""
+    db = MagicMock()
+    client = MagicMock()
+    session = MockTransactionSession()
+    client.start_session.return_value = session
+    db.client = client
+
+    receipts_coll = MagicMock()
+    states_coll = MagicMock()
+    rev_coll = MagicMock()
+    rev_coll.count_documents.return_value = 0  # Empty ledger!
+
+    def get_coll(name):
+        if name == "Layer0IrrigationReceiptConsumption":
+            return receipts_coll
+        elif name == "Layer0IrrigationCommittedState":
+            return states_coll
+        elif name == "Layer0RevocationLedger":
+            return rev_coll
+        return MagicMock()
+
+    db.__getitem__.side_effect = get_coll
+
+    store = MongoIrrigationIdempotencyStore(db, require_transactional_revocation=True)
+
+    receipts_coll.find_one.return_value = {
+        "_id": "rec-1", "key_id": "l3-key",
+        "replay_key": "rep-1", "evidence_fingerprint": "fp1",
+        "claim_nonce": "nonce-1", "status": "STAGED",
+    }
+
+    res = IrrigationIdempotencyReservation(
+        store=store,
+        receipt_id="rec-1",
+        replay_key="rep-1",
+        tenant_id="t1",
+        plot_id="p1",
+        geometry_hash="geom1",
+        geometry_version=2,
+        day="2026-05-01",
+        evidence_fingerprint="fp1",
+    )
+    res.claim_nonce = "nonce-1"
+    res.zone_id = "plot"
+    store._pending_receipts[res.receipt_id] = res
+    store._pending_replay_keys[res.replay_key] = res
+
+    snap = {
+        "tenant_id": "t1", "plot_id": "p1", "zone_id": "plot",
+        "geometry_hash": "geom1", "geometry_version": 2, "day": "2026-05-01",
+        "state": {"lai": 1.0}, "covariance": [[0.1] * 9 for _ in range(9)],
+    }
+
+    with pytest.raises(RuntimeError, match="irrigation_state_commit_unconfirmed") as exc:
+        store.commit_many([res], state_snapshot=snap)
+    assert "uninitialized_revocation_ledger" in str(exc.value.__cause__)
+    assert session.aborted is True

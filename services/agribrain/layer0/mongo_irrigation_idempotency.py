@@ -87,6 +87,7 @@ class MongoIrrigationIdempotencyStore:
         self._historical_authorizer = historical_recompute_authorizer
         self._pending_receipts: dict[str, IrrigationIdempotencyReservation] = {}
         self._pending_replay_keys: dict[str, IrrigationIdempotencyReservation] = {}
+        self._before_revocation_fence_hook: Optional[Callable[[Any, str], None]] = None
 
     def _matching_committed(
         self, record: Mapping[str, Any], grant: VerifiedDeliveredIrrigationGrant,
@@ -260,13 +261,27 @@ class MongoIrrigationIdempotencyStore:
                     # verify in-session that every issuer key is active, and write-fence the key
                     # to trip WiredTiger write-conflict detection against concurrent revocation.
                     rev_coll = self._db["Layer0RevocationLedger"]
-                    has_ledger = getattr(self, "_require_transactional_revocation", False)
-                    if not has_ledger and callable(getattr(rev_coll, "count_documents", None)):
-                        try:
-                            cnt = rev_coll.count_documents({}, session=session)
-                            has_ledger = bool(isinstance(cnt, int) and cnt > 0)
-                        except Exception as e:
-                            raise RuntimeError("revocation_ledger_probe_failed") from e
+                    req_rev = getattr(self, "_require_transactional_revocation", False)
+                    if req_rev:
+                        cnt = 0
+                        if callable(getattr(rev_coll, "count_documents", None)):
+                            try:
+                                cnt = rev_coll.count_documents({}, session=session)
+                            except Exception as e:
+                                raise RuntimeError("revocation_ledger_probe_failed") from e
+                        else:
+                            cnt = 1
+                        if isinstance(cnt, int) and cnt == 0:
+                            raise RuntimeError("uninitialized_revocation_ledger")
+                        has_ledger = True
+                    else:
+                        has_ledger = False
+                        if callable(getattr(rev_coll, "count_documents", None)):
+                            try:
+                                cnt = rev_coll.count_documents({}, session=session)
+                                has_ledger = bool(isinstance(cnt, int) and cnt > 0)
+                            except Exception as e:
+                                raise RuntimeError("revocation_ledger_probe_failed") from e
                     if has_ledger:
                         for r in tokens:
                             rec_doc = self._receipts.find_one({"_id": r.receipt_id}, session=session)
@@ -275,6 +290,11 @@ class MongoIrrigationIdempotencyStore:
                             k_id = rec_doc.get("key_id") or getattr(r, "key_id", None)
                             if not k_id:
                                 raise RuntimeError(f"missing_key_id_for_revocation_fence: {r.receipt_id}")
+
+                            hook = getattr(self, "_before_revocation_fence_hook", None)
+                            if callable(hook):
+                                hook(session, k_id)
+
                             # Transactional write-fence: update key with fenced timestamp
                             fence_res = rev_coll.update_one(
                                 {"_id": k_id, "status": "active"},

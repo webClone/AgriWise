@@ -10,15 +10,20 @@ Verifies:
      - Updates key with last_fenced_commit_at inside the transaction session.
      - Missing or non-active issuer key aborts transaction and raises fail-closed exception.
      - Individually revoked receipt in Layer0RevocationLedger aborts transaction.
-  2. Concurrent revocation collision:
-     - Out-of-band revocation write during active commit trips write-conflict/precondition failure.
-  3. Exact assessment isolation during operational reconciliation:
+  2. Production factory bootstrap enforcement:
+     - configure_server_delivery_verifier mandates require_transactional_revocation=True.
+     - Empty uninitialized revocation ledger fails closed with uninitialized_revocation_ledger.
+  3. Genuine concurrent overlapping revocation writer:
+     - Multi-threaded overlapping write race trips WiredTiger write conflict / precondition abort.
+  4. Atomic operational reconciliation with CAS failure rollback:
+     - Reconcile executes in a single multi-document transaction.
+     - When assessment CAS fails, receipt mutations are rolled back by WiredTiger to STAGED.
+     - Receipts outside assessment scope are strictly rejected before any mutation.
+  5. Exact assessment isolation during operational reconciliation:
      - Staged assessments on the same plot do not interfere with each other.
-     - Aborting Assessment A rolls back ONLY Assessment A's submitted receipts, leaving Assessment B intact.
-     - Validates operator cryptographic HMAC-SHA256 signature and nonce CAS.
-  4. Canonical legacy evidence fingerprint migration:
-     - Legacy receipts migrated to canonical SHA-256 fingerprint match modern grants byte-for-byte.
-     - Unique index on evidence_fingerprint blocks duplicate injection of previously delivered water.
+  6. Canonical legacy evidence fingerprint migration:
+     - Legacy receipts migrated with verified exact scope match modern grants byte-for-byte.
+     - Partial unique index blocks duplicate injection of previously delivered water.
 """
 from __future__ import annotations
 
@@ -26,25 +31,37 @@ from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
 import os
+import threading
 import uuid
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from pymongo import MongoClient
 
+from services.agribrain.layer0.durable_revocation_authority import (
+    DurableRevocationAuthority,
+    DurableRevocationSnapshot,
+)
 from services.agribrain.layer0.mongo_irrigation_idempotency import (
     MongoIrrigationIdempotencyStore,
 )
 from services.agribrain.layer0.operational_reconciliation import (
+    OperationalReconciliationError,
     audit_staged_assessments,
     compute_operator_authorization_signature,
     migrate_legacy_receipt_evidence_fingerprint,
     reconcile_staged_assessment,
 )
+from services.agribrain.layer0.production_admission import (
+    configure_server_delivery_verifier,
+)
+from services.agribrain.layer0.v3_kms_signed_issuer import KmsPublicKeyRegistry
 from services.agribrain.layer0.verified_irrigation_contract import (
     VERIFIED_IRRIGATION_DOMAIN,
     VERIFIED_IRRIGATION_PURPOSE,
     VerifiedDeliveredIrrigationSigner,
+    VerifiedDeliveredIrrigationVerifier,
     physical_evidence_fingerprint,
 )
 
@@ -199,8 +216,79 @@ def test_transactional_revocation_write_fence_active_and_missing_key():
         client.close()
 
 
+def test_production_factory_enforces_mandatory_transaction_fence_and_rejects_empty_ledger():
+    """Verify configure_server_delivery_verifier mandates fence and rejects an uninitialized ledger."""
+    client, db, db_name = _setup_test_db()
+    try:
+        now = datetime.now(UTC)
+        day_date = now.date()
+        priv = Ed25519PrivateKey.generate()
+        key_id = "l3-factory-key"
+
+        registry = KmsPublicKeyRegistry()
+        registry.register_public_key(
+            key_id=key_id,
+            issuer_id="l3-issuer-corp",
+            source="sensor_iot",
+            algorithm="Ed25519",
+            public_key_pem_or_bytes=priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw),
+            valid_from=now - timedelta(days=1),
+            valid_until=now + timedelta(days=5),
+        )
+        snapshot = DurableRevocationSnapshot(
+            revision=0, issued_at=now - timedelta(seconds=10),
+            expires_at=now + timedelta(days=1),
+            key_statuses={key_id: "active"},
+        )
+        authority = DurableRevocationAuthority(snapshot, max_snapshot_age_seconds=300)
+
+        # Factory call without any manual flags
+        verifier = configure_server_delivery_verifier(
+            database=db,
+            public_key_registry=registry,
+            revocation_authority=authority,
+        )
+        # Store MUST have transactional revocation enabled
+        assert verifier.idempotency_store._require_transactional_revocation is True
+
+        # Simulate an uninitialized/empty ledger
+        db["Layer0RevocationLedger"].delete_many({})
+        signer = VerifiedDeliveredIrrigationSigner(key_id=key_id, issuer_id="l3-issuer-corp", algorithm="Ed25519", private_key=priv)
+        g_dict = _make_grant_dict(
+            day=day_date,
+            plot="plot-factory",
+            receipt_id="rec-factory-1",
+            replay_id="rep-factory-1",
+            evidence="cas-factory-1",
+            key_id=key_id,
+        )
+        receipt = signer.sign(g_dict)
+        grant = receipt.grant
+
+        res = verifier.idempotency_store.stage_reservation(grant, day_date.isoformat())
+        snap = {
+            "tenant_id": grant.tenant_id,
+            "plot_id": grant.plot_id,
+            "zone_id": grant.zone_id,
+            "geometry_hash": grant.geometry_hash,
+            "geometry_version": grant.geometry_version,
+            "day": day_date.isoformat(),
+            "state": {"lai": 1.5, "sm": [0.22] * 4},
+            "covariance": [[0.01] * 9 for _ in range(9)],
+        }
+
+        # Attempt commit: MUST fail closed due to uninitialized revocation ledger
+        with pytest.raises(RuntimeError, match="irrigation_state_commit_unconfirmed") as exc:
+            verifier.idempotency_store.commit_many([res], state_snapshot=snap)
+        assert "uninitialized_revocation_ledger" in str(exc.value.__cause__)
+
+    finally:
+        client.drop_database(db_name)
+        client.close()
+
+
 def test_concurrent_revocation_write_conflict_aborts_commit():
-    """Verify that an out-of-band revocation write during an in-flight commit forces WiredTiger conflict abort."""
+    """Verify that a genuine overlapping multi-threaded revocation writer forces transaction abort."""
     client, db, db_name = _setup_test_db()
     try:
         now = datetime.now(UTC)
@@ -238,17 +326,130 @@ def test_concurrent_revocation_write_conflict_aborts_commit():
             "covariance": [[0.01] * 9 for _ in range(9)],
         }
 
-        # Simulate concurrent revocation: revoke the key right before commit_many executes
+        # Thread coordination events
+        event_in_tx = threading.Event()
+        event_revoked = threading.Event()
+        worker_error = []
+
+        def before_fence_hook(session, k_id):
+            # Signal that Thread 1 has opened session & transaction
+            event_in_tx.set()
+            # Wait for Thread 2 to perform concurrent out-of-band revocation write
+            if not event_revoked.wait(timeout=5.0):
+                raise TimeoutError("concurrent writer timed out")
+
+        store._before_revocation_fence_hook = before_fence_hook
+
+        def thread1_worker():
+            try:
+                store.commit_many([res], state_snapshot=snap)
+            except Exception as e:
+                worker_error.append(e)
+
+        t1 = threading.Thread(target=thread1_worker)
+        t1.start()
+
+        # Thread 2 (Main Thread): Wait until Thread 1 enters transaction
+        assert event_in_tx.wait(timeout=5.0), "Thread 1 did not enter transaction"
+
+        # Concurrently revoke the key in an independent operation outside Session 1
         rev_coll.update_one({"_id": key_id}, {"$set": {"status": "revoked"}})
+        event_revoked.set()
 
-        # Attempt commit - write fence condition {"_id": key_id, "status": "active"} will find 0 matched docs!
-        with pytest.raises(RuntimeError, match="irrigation_state_commit_unconfirmed") as exc:
-            store.commit_many([res], state_snapshot=snap)
+        t1.join(timeout=5.0)
+        assert not t1.is_alive(), "Thread 1 hung"
+        assert len(worker_error) == 1, "Thread 1 did not fail"
+        err = worker_error[0]
+        assert "irrigation_state_commit_unconfirmed" in str(err)
+        assert (
+            "WriteConflict" in str(err.__cause__)
+            or "issuer_key_revoked_or_missing_in_transaction" in str(err.__cause__)
+        )
 
-        assert "issuer_key_revoked_or_missing_in_transaction" in str(exc.value.__cause__)
         # Ensure state was not published
         state_doc = db["Layer0IrrigationCommittedState"].find_one({"tenant_id": grant.tenant_id, "plot_id": grant.plot_id})
         assert state_doc is None
+
+    finally:
+        client.drop_database(db_name)
+        client.close()
+
+
+def test_reconciliation_transactional_cas_failure_rolls_back_receipt_mutations():
+    """Verify that if assessment CAS fails, receipt updates are atomically rolled back by MongoDB transaction."""
+    client, db, db_name = _setup_test_db()
+    try:
+        now = datetime.now(UTC)
+        day_date = now.date()
+        tenant_id = "test-tenant-cas"
+        plot_id = "plot-cas-1"
+        secret = "test-reconciliation-secret-0000"
+
+        assessment_coll = db["Layer0ScientificAssessment"]
+        receipts_coll = db["Layer0IrrigationReceiptConsumption"]
+
+        ass_id = "ass-cas-test"
+        rec_id = "rec-cas-1"
+
+        receipts_coll.insert_one({
+            "_id": rec_id,
+            "replay_key": "rep-cas-1",
+            "tenant_id": tenant_id,
+            "plot_id": plot_id,
+            "geometry_hash": "geom-1",
+            "geometry_version": 1,
+            "claim_nonce": "nonce-rec-1",
+            "status": "STAGED",
+            "staged_at": now - timedelta(hours=1),
+        })
+
+        # Insert staged assessment
+        assessment_coll.insert_one({
+            "_id": ass_id,
+            "tenant_id": tenant_id,
+            "plot_id": plot_id,
+            "geometry_hash": "geom-1",
+            "geometry_version": 1,
+            "status": "STAGED",
+            "submitted_receipt_ids": [rec_id],
+            "claim_nonce": "original-nonce",
+            "staged_at": now - timedelta(hours=1),
+        })
+
+        action = "ABORT_AND_ROLLBACK"
+        op_id = "op-lead"
+        ts = _iso(now)
+        sig = compute_operator_authorization_signature(
+            operator_principal=op_id,
+            action=action,
+            assessment_id=ass_id,
+            timestamp_str=ts,
+            secret=secret,
+        )
+
+        def inject_cas_tamper(session, doc):
+            # Tamper claim_nonce in independent write right before CAS executes
+            assessment_coll.update_one({"_id": ass_id}, {"$set": {"claim_nonce": "tampered-nonce"}})
+
+        with pytest.raises(OperationalReconciliationError, match="concurrent_assessment_mutation_detected"):
+            reconcile_staged_assessment(
+                db,
+                assessment_id=ass_id,
+                action=action,
+                operator_principal=op_id,
+                rationale="Attempting abort when CAS will fail",
+                authorization_signature=sig,
+                secret=secret,
+                authorization_timestamp=ts,
+                now=now,
+                _before_cas_hook=inject_cas_tamper,
+            )
+
+        # CRITICAL VERIFICATION: In a single multi-document transaction, the receipt
+        # must NOT be left as ROLLED_BACK. It MUST still be STAGED!
+        r_doc = receipts_coll.find_one({"_id": rec_id})
+        assert r_doc is not None
+        assert r_doc["status"] == "STAGED", f"Receipt status was mutated to {r_doc['status']} despite CAS failure!"
 
     finally:
         client.drop_database(db_name)
@@ -273,8 +474,8 @@ def test_connected_operational_reconciliation_plot_isolation():
         rec_a1 = "rec-A1"
         rec_a2 = "rec-A2"
         receipts_coll.insert_many([
-            {"_id": rec_a1, "replay_key": "rep-A1", "tenant_id": tenant_id, "plot_id": plot_id, "claim_nonce": "nonce-A1", "status": "STAGED", "staged_at": now - timedelta(hours=2)},
-            {"_id": rec_a2, "replay_key": "rep-A2", "tenant_id": tenant_id, "plot_id": plot_id, "claim_nonce": "nonce-A2", "status": "STAGED", "staged_at": now - timedelta(hours=2)},
+            {"_id": rec_a1, "replay_key": "rep-A1", "tenant_id": tenant_id, "plot_id": plot_id, "geometry_hash": "geom-1", "geometry_version": 1, "claim_nonce": "nonce-A1", "status": "STAGED", "staged_at": now - timedelta(hours=2)},
+            {"_id": rec_a2, "replay_key": "rep-A2", "tenant_id": tenant_id, "plot_id": plot_id, "geometry_hash": "geom-1", "geometry_version": 1, "claim_nonce": "nonce-A2", "status": "STAGED", "staged_at": now - timedelta(hours=2)},
         ])
         assessment_coll.insert_one({
             "_id": ass_a_id,
@@ -294,7 +495,7 @@ def test_connected_operational_reconciliation_plot_isolation():
         ass_b_id = "ass-test-B"
         rec_b1 = "rec-B1"
         receipts_coll.insert_one({
-            "_id": rec_b1, "replay_key": "rep-B1", "tenant_id": tenant_id, "plot_id": plot_id, "claim_nonce": "nonce-B1", "status": "STAGED", "staged_at": now - timedelta(hours=2),
+            "_id": rec_b1, "replay_key": "rep-B1", "tenant_id": tenant_id, "plot_id": plot_id, "geometry_hash": "geom-1", "geometry_version": 1, "claim_nonce": "nonce-B1", "status": "STAGED", "staged_at": now - timedelta(hours=2),
         })
         assessment_coll.insert_one({
             "_id": ass_b_id,
@@ -397,16 +598,16 @@ def test_connected_legacy_migration_canonical_fingerprint_blocks_duplicate():
             "net_infiltrated_depth_mm": 13.5,
             "conversion_calibration_id": "meter-fixture-v1",
             "depth_uncertainty_sigma_mm": 0.5,
-            "source_evidence_cas_root": "cas-shared-water-evidence",
+            "source_evidence_cas_root": "c" * 64,
             "status": "COMMITTED",
         }
         receipts_coll.insert_one(legacy_doc)
 
-        # Run canonical migration
+        # Run canonical migration with exact scope & evidence validation
         mig_res = migrate_legacy_receipt_evidence_fingerprint(
             db,
             "rec-legacy-01",
-            source_evidence_cas_root="cas-shared-water-evidence",
+            source_evidence_cas_root="c" * 64,
             delivery_interval=(_iso(t0), _iso(t1)),
             operator_principal="op-eng-42",
             rationale="Migrate legacy receipt to canonical evidence fingerprint",
@@ -437,7 +638,7 @@ def test_connected_legacy_migration_canonical_fingerprint_blocks_duplicate():
             "net_infiltrated_depth_mm": 13.5,
             "conversion_calibration_id": "meter-fixture-v1",
             "depth_uncertainty_sigma_mm": 0.5,
-            "source_evidence_cas_root": "cas-shared-water-evidence",
+            "source_evidence_cas_root": "c" * 64,
             "replay_idempotency_key": "rep-modern-attempt-02",
             "revocation_revision_anchor": 0,
             "issued_at": _iso(t1 + timedelta(minutes=5)),

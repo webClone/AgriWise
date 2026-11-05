@@ -300,7 +300,13 @@ def _run_assessment(
             grant = rcpt.get("grant") or rcpt if isinstance(rcpt, Mapping) else {}
             rid = grant.get("receipt_id") if isinstance(grant, Mapping) else None
             if rid:
-                submitted_receipt_ids.append(str(rid))
+                if (
+                    grant.get("tenant_id") == scope.tenant_id
+                    and grant.get("plot_id") == scope.plot_id
+                    and grant.get("geometry_hash") == scope.geometry_hash
+                    and int(grant.get("geometry_version") or 0) == int(scope.geometry_version)
+                ):
+                    submitted_receipt_ids.append(str(rid))
 
     journal = db["Layer0ScientificAssessment"]
     journal.create_index(

@@ -90,15 +90,17 @@ py -m pytest -v services/agribrain/layer0/tests/manual_b2b08_irrigation_connecte
 py -m pytest -v services/agribrain/layer0/tests/manual_b2b07_mongo_acceptance.py
 ```
 
-**Status: Fully qualified on B2B-08 final closure candidate.**
+**Status: Fully qualified on B2B-08 final freeze closure candidate.**
 All gates satisfied:
-- Actual `main.app` lifespan qualified against live replica set: `manual_b2b08_staging_main_lifespan_gate.py` (1/1 passed).
-- Dedicated 365-day numerical endurance gate: `test_kalman_365day_numerical_endurance.py` (4/4 passed).
-- Operational reconciliation & quarantine suite: `test_b2b08_operational_reconciliation.py` (5/5 passed).
-- In-transaction revocation fence suite: `test_b2b08_transactional_revocation_fence.py` (2/2 passed).
-- 10-day comprehensive real-raster ASMAE pipeline (`test_comprehensive_pipeline_execution.py`, Aug 30 - Sep 8 2026): 1/1 passed in 628.62s.
-- 5/5 connected MongoDB replica set tests passed.
+- Actual main.app lifespan qualified against live replica set: manual_b2b08_staging_main_lifespan_gate.py (1/1 passed).
+- Dedicated 365-day numerical endurance gate: 	est_kalman_365day_numerical_endurance.py (4/4 passed).
+- Operational reconciliation & quarantine suite: 	est_b2b08_operational_reconciliation.py (8/8 passed).
+- In-transaction revocation fence suite: 	est_b2b08_transactional_revocation_fence.py (5/5 passed).
+- 10-day comprehensive real-raster ASMAE pipeline (	est_comprehensive_pipeline_execution.py, Aug 30 - Sep 8 2026): 1/1 passed in 434.61s.
+- Connected transactional revocation gate: manual_b2b08_transactional_revocation_connected_gate.py (6/6 passed including genuine concurrent multi-threaded write conflicts and transactional CAS failure rollback).
+- Total distinct Python tests: **892 passed** (787 Layer 0 + 21 Layer 1 + 83 ASMAE fast + 1 comprehensive ASMAE).
+- Total connected MongoDB replica set tests: **11 passed** across 5 gates.
+- Frontend test suite: **105 passed**, 0 failed.
+- TypeScript compilation: **0 errors**.
+- Production build: **0 errors** (63 static pages generated).
 Operator signoff, external HSM deployment, field calibration, and national publication readiness remain separate future milestones. Do not merge without authorization.
-- Connected transactional revocation gate: `manual_b2b08_transactional_revocation_connected_gate.py` (4/4 passed).
-- Total distinct Python tests: **888 passed** (783 Layer 0 + 21 Layer 1 + 83 ASMAE fast + 1 comprehensive ASMAE).
-- Total connected MongoDB replica set tests: **9 passed** across 5 gates.
