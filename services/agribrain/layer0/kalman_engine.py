@@ -543,8 +543,10 @@ class ZoneKalmanFilter:
         # B2B-08 irrigation integration: preflight the exact physical time
         # BEFORE reserving any L3 receipt. Invalid/zero-duration steps must
         # never strand a claim or consume an otherwise valid delivery.
-        gap = TemporalGapContract.between(self.state.day, day)
-
+        # For a prior checkpoint this remains a safety preflight, but
+        # recovering a *previously committed* day is an idempotent read, not
+        # a new physical prediction. Recover first; reject zero/negative
+        # duration if no committed checkpoint exists.
         # A cold process cannot silently recompute a state without an already
         # committed L3 receipt. Prefer the exact recovered checkpoint, not an
         # apparently ordinary estimate with irrigation omitted on replay.
@@ -580,6 +582,8 @@ class ZoneKalmanFilter:
                     "scientific_publication_authorized": False,
                     "actuator_control_authorized": False,
                 }
+
+        gap = TemporalGapContract.between(self.state.day, day)
 
         # C1/C2: classify and retain management evidence, but NEVER pass
         # user-declared/planned/claimed-verified events into the proxy water
