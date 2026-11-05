@@ -540,6 +540,47 @@ class ZoneKalmanFilter:
             )
             require_trusted_delivery_verifier(self.delivery_verifier)
 
+        # B2B-08 irrigation integration: preflight the exact physical time
+        # BEFORE reserving any L3 receipt. Invalid/zero-duration steps must
+        # never strand a claim or consume an otherwise valid delivery.
+        gap = TemporalGapContract.between(self.state.day, day)
+
+        # A cold process cannot silently recompute a state without an already
+        # committed L3 receipt. Prefer the exact recovered checkpoint, not an
+        # apparently ordinary estimate with irrigation omitted on replay.
+        from services.agribrain.layer0.mongo_irrigation_idempotency import (
+            MongoIrrigationIdempotencyStore,
+        )
+        delivery_store = getattr(
+            self.delivery_verifier, "idempotency_store", None,
+        )
+        if (
+            isinstance(delivery_store, MongoIrrigationIdempotencyStore)
+            and self.tenant_id and self.parent_plot_id
+            and self.expected_geometry_hash and type(self.geometry_version) is int
+        ):
+            committed = delivery_store.recover_snapshot(
+                tenant_id=self.tenant_id,
+                plot_id=self.parent_plot_id,
+                zone_id=self.zone_id,
+                geometry_hash=self.expected_geometry_hash,
+                geometry_version=self.geometry_version,
+                day=day,
+            )
+            if committed is not None:
+                if not self.recover_committed_delivery_state(day):
+                    raise RuntimeError("committed_irrigation_checkpoint_recovery_required")
+                return {
+                    "day": day,
+                    "zone": self.zone_id,
+                    "recovered_from_durable_l3_commit": True,
+                    "physical_management_events_applied": 0,
+                    "verified_delivery_receipts": list(committed["receipt_ids"]),
+                    "event_forcing_status": "RECOVERED_COMMITTED_CHECKPOINT",
+                    "scientific_publication_authorized": False,
+                    "actuator_control_authorized": False,
+                }
+
         # C1/C2: classify and retain management evidence, but NEVER pass
         # user-declared/planned/claimed-verified events into the proxy water
         # balance. A separate trusted L3 net-infiltration operator/receipt is
@@ -565,7 +606,6 @@ class ZoneKalmanFilter:
             and d.get("state_update_allowed") is True
             and "admitted_token" in d
         ]
-        gap = TemporalGapContract.between(self.state.day, day)
         qualified_weather = _qualified_weather_for_prediction(weather)
         # A self-declared interval_coverage_days field cannot attest
         # provider coverage. Until independently verified multi-day forcing
@@ -709,6 +749,13 @@ class ZoneKalmanFilter:
                         "actuator_control_authorized": False,
                     },
                 }
+                # Revocation or expiry may change after the prediction.
+                # An L3 token must remain authorized at this late gate,
+                # not just when its evidence was first staged.
+                for token in admitted_deliveries:
+                    self.delivery_verifier.revalidate_for_commit(
+                        token, cutoff=self.evidence_cutoff,
+                    )
                 reservations[0].store.commit_many(
                     reservations, state_snapshot=snapshot,
                 )
