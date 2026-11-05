@@ -179,3 +179,57 @@ Following the review of initial candidate commit `44026a4`, three material secur
 | `services/agribrain/layer05_asmae/tests/` (fast) | ASMAE historical assimilation & diagnostics | 83 passed, 3 subtests | **PASS** | 50.89s |
 | `npm run test:frontend` | Frontend security, plot lifecycle, telemetry isolation | 105 / 105 | **PASS** | 1.55s |
 | `test_comprehensive_pipeline_execution.py` | 365-day real-raster EnKF numerical regression gate (Task `task-4700`) | 1 / 1 | **PASS** | 562.34s (9m 22s) |
+
+## 7. B07-SEC-04 through SEC-07 — Integrated corrective candidate (UNQUALIFIED)
+
+**Base:** local-qualified B07-SEC at `8867f6c9b5c7d25c3f0d3530c1d1cce0b828aac5`.
+**Status:** corrective code and test counterexamples published on the B2B-07 working branch; exact-head execution gates, live MongoDB integration and milestone freeze are **PENDING**. Do not attribute the previously reported 809/809 Python + 105/105 frontend passes to the new candidate.
+
+### B07-SEC-04 — Filter and consumption binding
+
+- `AdmittedDeliveredIrrigation.applies_to_filter()` requires original tenant, plot, geometry hash/version, zone, delivery day, cutoff, and the exact still-STAGED reservation. A consumed/rolled-back token can no longer be reused as physical forcing.
+- The ephemeral process seal now covers original receipt grant digest, staged claim nonce, delivered interval, calibration ID, exact binary float values, and scope; mutable token replay/alteration is denied.
+- `ZoneKalmanFilter.predict()` and `predict_missing_weather()` reject even valid signed physical tokens unless called from `step()` using the private daily-step capability. Raw role/flag dictionaries remain denied.
+- Public scientific provenance strips privileged `admitted_token` handles before JSON/package output. Receipt IDs are retained.
+
+### B07-SEC-05 — Shared transactional production replay authority
+
+- New `services/agribrain/layer0/mongo_irrigation_idempotency.py`: a shared MongoDB journal with unique receipt ID and replay-key indexes; durable STAGED records, claim nonces and fail-closed cross-process admission.
+- `configure_server_delivery_verifier` is a backend-only factory that accepts a real connected DB, L3 public-key registry, durable revocation authority and an optional server-side historical authorization callback. HTTP payloads do not configure this trust root.
+- Production/staging signed-input policy rejects any configured delivery verifier whose idempotency store is NOT `MongoIrrigationIdempotencyStore`. A missing verifier still means NO delivery is admitted.
+- Requires MongoDB multi-document transactions (replica set/sharded cluster). A standalone MongoDB server cannot pass the production commit. The legacy in-memory/JSON store is retained only for local/research compatibility and is not a distributed exactly-once mechanism.
+- Pending claims stranded by a crash must not be automatically expired/reclaimed; they require privileged reconciliation to avoid double-application.
+
+### B07-SEC-06 — Atomic receipt consumption and scientific snapshot
+
+- The daily step evaluates delivery-bearing work on a detached candidate filter. The shared Mongo transaction commits all receipt uses and the scoped final state/covariance snapshot atomically before the in-memory candidate replaces the live filter.
+- On numerical, differentiation, observation-update or journal-write failure, the original filter is unchanged. A lost/ambiguous Mongo acknowledgement fails closed; the persisted COMMITTED snapshot, if any, is recoverable via `ZoneKalmanFilter.recover_committed_delivery_state()` after strict scope, receipt-link and PSD validation.
+- Crash recovery is an explicit trusted procedure; blindly resubmitting committed events is forbidden. The journal covers the **per-zone scientific-state checkpoint**, NOT an end-to-end transaction with Layer 10 publication or actuators.
+
+### B07-SEC-07 — Historical identity and immutable results
+
+- Recompute identity must match the exact original receipt ID, replay key, grant canonical digest, tenant, plot, geometry epoch, zone and day. Different signed claims reusing an old replay key fail.
+- Shared Mongo historical recomputation requires an explicitly installed trusted server-side authorizer; caller-supplied `allow_historical_recompute=True` is insufficient. Authorized recomputation returns an isolated scientific result and does not replace the live state or committed journal.
+- Seven shadowed duplicate test names have been eliminated. Added adversarial tests for cross-scope sealed-token use, tampered signed claim fields, flushed-write rollback, two shared store instances, ambiguous commit/recovery, and protected historical recompute.
+
+### Exact-head acceptance gates
+
+From the working branch, record `git rev-parse HEAD`, clean tree, runtime versions, passed/skipped/failures:
+
+```powershell
+py -m pytest -q services/agribrain/layer0/tests/test_b2b07_verified_delivered_irrigation.py
+py -m pytest -q services/agribrain/layer0/tests/test_kalman_temporal_process_noise.py
+py -m pytest -q services/agribrain/layer0/tests/
+py -m pytest -q services/agribrain/layer1_fusion/tests/
+py -m pytest -q services/agribrain/layer05_asmae/tests/ --ignore=services/agribrain/layer05_asmae/tests/test_comprehensive_pipeline_execution.py
+npm run test:frontend
+npx tsc --noEmit
+npm run build
+py -m pytest -q services/agribrain/layer05_asmae/tests/test_comprehensive_pipeline_execution.py
+```
+
+**Required connected Mongo acceptance (NOT covered by mocks):** an isolated test tenant/plot on a real transaction-capable replica set; two independent workers concurrently staging identical receipt/replay key; only one physical state advancement; forced failure before transaction commit leaves receipt/state unchanged; lost-ack outcome can be reconciled via committed receipt+state snapshot; process restart restores the exact scoped checkpoint without replay; cross-plot, geometry-epoch and day mismatches are denied. Verify historical recompute requires an authenticated server-issued approval and leaves live journal untouched.
+
+**Freeze rule:** no formal B2B-07 freeze or B2B-08 handoff until these exact-head gates and connected Mongo check are recorded. No general re-audit of frozen B2B-04B, B2B-05, B2B-06, or Pilot.
+
+**Protected boundaries:** `main@6edd372`, Scientific Pilot PR #9, frozen weather PR #25, frozen B2B-05 and B2B-06, historical findings/layer0.md and intended master monograph remain unchanged.
