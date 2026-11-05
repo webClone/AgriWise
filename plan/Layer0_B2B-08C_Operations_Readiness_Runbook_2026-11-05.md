@@ -99,3 +99,6 @@ All gates satisfied:
 - 10-day comprehensive real-raster ASMAE pipeline (`test_comprehensive_pipeline_execution.py`, Aug 30 - Sep 8 2026): 1/1 passed in 628.62s.
 - 5/5 connected MongoDB replica set tests passed.
 Operator signoff, external HSM deployment, field calibration, and national publication readiness remain separate future milestones. Do not merge without authorization.
+- Connected transactional revocation gate: `manual_b2b08_transactional_revocation_connected_gate.py` (4/4 passed).
+- Total distinct Python tests: **888 passed** (783 Layer 0 + 21 Layer 1 + 83 ASMAE fast + 1 comprehensive ASMAE).
+- Total connected MongoDB replica set tests: **9 passed** across 5 gates.

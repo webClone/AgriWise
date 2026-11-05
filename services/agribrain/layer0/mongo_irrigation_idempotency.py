@@ -55,7 +55,12 @@ class MongoIrrigationIdempotencyStore:
         historical_recompute_authorizer: Optional[
             Callable[[VerifiedDeliveredIrrigationGrant, str], bool]
         ] = None,
+        require_transactional_revocation: bool = False,
     ):
+        self._require_transactional_revocation = (
+            require_transactional_revocation
+            or os.getenv("AKALORIS_LAYER0_REQUIRE_TRANSACTIONAL_REVOCATION", "").lower() in ("1", "true", "yes")
+        )
         if database is None or not callable(getattr(database, "command", None)):
             raise TypeError("connected_mongodb_database_required")
         if not callable(getattr(getattr(database, "client", None), "start_session", None)):
@@ -251,23 +256,36 @@ class MongoIrrigationIdempotencyStore:
         try:
             with self._client.start_session() as session:
                 with session.start_transaction():
-                    # In-transaction revocation fence: if Layer0RevocationLedger is present in Mongo,
-                    # verify in-session that neither the issuer key nor the receipt was revoked.
-                    try:
-                        rev_coll = self._db["Layer0RevocationLedger"]
+                    # In-transaction revocation fence: when Layer0RevocationLedger is provisioned,
+                    # verify in-session that every issuer key is active, and write-fence the key
+                    # to trip WiredTiger write-conflict detection against concurrent revocation.
+                    rev_coll = self._db["Layer0RevocationLedger"]
+                    has_ledger = getattr(self, "_require_transactional_revocation", False)
+                    if not has_ledger and callable(getattr(rev_coll, "count_documents", None)):
+                        try:
+                            cnt = rev_coll.count_documents({}, session=session)
+                            has_ledger = bool(isinstance(cnt, int) and cnt > 0)
+                        except Exception as e:
+                            raise RuntimeError("revocation_ledger_probe_failed") from e
+                    if has_ledger:
                         for r in tokens:
                             rec_doc = self._receipts.find_one({"_id": r.receipt_id}, session=session)
-                            k_id = (rec_doc or {}).get("key_id") or getattr(r, "key_id", None)
-                            if k_id:
-                                key_doc = rev_coll.find_one({"_id": k_id}, session=session)
-                                if key_doc and key_doc.get("status") in ("revoked", "retired"):
-                                    raise RuntimeError(f"issuer_key_revoked_in_transaction: {k_id}")
+                            if rec_doc is None:
+                                raise RuntimeError(f"staged_receipt_missing_in_transaction: {r.receipt_id}")
+                            k_id = rec_doc.get("key_id") or getattr(r, "key_id", None)
+                            if not k_id:
+                                raise RuntimeError(f"missing_key_id_for_revocation_fence: {r.receipt_id}")
+                            # Transactional write-fence: update key with fenced timestamp
+                            fence_res = rev_coll.update_one(
+                                {"_id": k_id, "status": "active"},
+                                {"$set": {"last_fenced_commit_at": datetime.now(timezone.utc)}},
+                                session=session,
+                            )
+                            if fence_res.matched_count != 1:
+                                raise RuntimeError(f"issuer_key_revoked_or_missing_in_transaction: {k_id}")
                             rev_rec = rev_coll.find_one({"_id": f"receipt:{r.receipt_id}"}, session=session)
                             if rev_rec and rev_rec.get("status") == "revoked":
                                 raise RuntimeError(f"receipt_revoked_in_transaction: {r.receipt_id}")
-                    except Exception as rev_err:
-                        if isinstance(rev_err, RuntimeError) and "_in_transaction" in str(rev_err):
-                            raise
                     for r in tokens:
                         outcome = self._receipts.update_one(
                             {"_id": r.receipt_id, "replay_key": r.replay_key,

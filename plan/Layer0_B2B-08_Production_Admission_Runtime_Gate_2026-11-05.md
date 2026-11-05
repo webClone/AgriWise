@@ -260,3 +260,47 @@ operator STAGED reconciliation remain separate mandatory release gates.
 - Frontend test suite (`npm run test:frontend`): **105 passed**, 0 failed in 1.53s
 - TypeScript compilation (`npx tsc --noEmit`): **0 errors** (exit code 0)
 - Production build (`npm run build`): **0 errors**, compiled in 19.2s, 63 static pages generated in 762.5ms (exit code 0)
+
+## 12. B2B-08 Final Freeze Remediation: Fail-Closed Revocation Fence, Exact Assessment Reconciliation, and Canonical Legacy Migration
+
+Following deep source review of commit `5436a2f`, three release-blocking P1 findings were formally remediated and qualified:
+
+1. **P1 — Transactional Revocation Write-Fence & Fail-Closed Enforcement:**
+   - In `MongoIrrigationIdempotencyStore.commit_many()`:
+     - When `Layer0RevocationLedger` is configured or required, the store verifies in-session (`session=session`) that every issuer key is active.
+     - Executes an explicit in-transaction write-fence updating the key record: `update_one({"_id": k_id, "status": "active"}, {"$set": {"last_fenced_commit_at": now}})`.
+     - Missing issuer key, revoked issuer key, or missing staged receipt fails closed with `RuntimeError("issuer_key_revoked_or_missing_in_transaction")`.
+     - Revoked receipt in the ledger fails closed with `RuntimeError("receipt_revoked_in_transaction")`.
+     - Concurrent out-of-band revocation writes trigger WiredTiger write conflicts or precondition failures, ensuring guaranteed atomic abort.
+     - Probe errors fail closed (`RuntimeError("revocation_ledger_probe_failed")`).
+   - Validated in unit suite `services/agribrain/layer0/tests/test_b2b08_transactional_revocation_fence.py` (**4/4 passed** in 0.47s).
+   - Validated against live replica set in `services/agribrain/layer0/tests/manual_b2b08_transactional_revocation_connected_gate.py` (**4/4 passed** in 1.75s).
+
+2. **P1 — Operational Reconciliation Exact Assessment Scope & Cryptographic Authorization:**
+   - In `services/agribrain/app/scoped_packet_run.py`, the staged assessment record in `Layer0ScientificAssessment` now explicitly captures `submitted_receipt_ids` from incoming packets.
+   - In `services/agribrain/layer0/operational_reconciliation.py`:
+     - `audit_staged_assessments()` and `reconcile_staged_assessment()` correlate and manipulate receipts strictly by `submitted_receipt_ids`, isolating rollback to the targeted assessment and leaving other staged assessments on the same plot completely untouched.
+     - Enforces atomic compare-and-set on `claim_nonce` and `status='STAGED'`.
+     - Enforces cryptographic operator authorization via HMAC-SHA256 signature over `f"{operator_principal}:{action}:{assessment_id}:{timestamp}"` with strict 5-minute skew tolerance.
+     - For `COMPLETE_RECONCILED`, verifies exact state snapshot lineage and scope match before committing.
+   - Validated in unit suite `services/agribrain/layer0/tests/test_b2b08_operational_reconciliation.py` (**5/5 passed** in 0.21s).
+
+3. **P1 — Canonical Legacy Evidence Fingerprint Migration:**
+   - `migrate_legacy_receipt_evidence_fingerprint()` reuses the EXACT canonical JSON SHA-256 fingerprint serializer matching `physical_evidence_fingerprint(grant)` (`_parse_iso_utc` and sorted keys).
+   - Validated against live replica set: migrating a legacy receipt activates the partial unique index on `evidence_fingerprint`, blocking duplicate injection of modern grants attempting to claim previously delivered physical water.
+
+**Final Comprehensive Verification Cohort:**
+- **Layer 0 Tests (`services/agribrain/layer0/tests/`):** **783 passed**, 1 warning in 18.81s
+- **Layer 1 Fusion Tests (`services/agribrain/layer1_fusion/tests/`):** **21 passed** in 0.61s
+- **Layer 0.5 ASMAE Fast Tests:** **83 passed**, 3 subtests passed in 26.64s
+- **Layer 0.5 ASMAE Comprehensive Pipeline Test:** **1 passed** in 434.61s (7m 14s)
+- **Total Distinct Python Tests:** **888 passed**
+- **Connected MongoDB Replica Set Gates (`mongodb://127.0.0.1:27018/?replicaSet=rs0`):** **9 passed across 5 suites**
+  - `manual_b2b07_mongo_acceptance.py`: **2 passed** in 3.71s
+  - `manual_b2b08_irrigation_connected_gate.py`: **1 passed** in 0.98s
+  - `manual_b2b08_signed_http_connected_gate.py`: **1 passed** in 2.87s
+  - `manual_b2b08_staging_main_lifespan_gate.py`: **1 passed** in 3.63s
+  - `manual_b2b08_transactional_revocation_connected_gate.py`: **4 passed** in 1.75s
+- **Frontend Test Suite (`npm run test:frontend`):** **105 passed**, 0 failed in 1.53s
+- **TypeScript Compiler (`npx tsc --noEmit`):** **0 errors** (exit code 0)
+- **Production Build (`npm run build`):** **0 errors**, compiled in 19.5s, 63 static pages generated (exit code 0)

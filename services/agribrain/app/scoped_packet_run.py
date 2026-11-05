@@ -292,6 +292,16 @@ def _run_assessment(
         ).encode("utf-8")
     ).hexdigest()
     claim = secrets.token_hex(16)
+    submitted_receipt_ids = []
+    for pkt in body.packets:
+        payload = getattr(pkt, "payload", {}) if not isinstance(pkt, Mapping) else pkt.get("payload", {})
+        if isinstance(payload, Mapping) and payload.get("event_role") == "VERIFIED_DELIVERY":
+            rcpt = payload.get("verified_receipt") or {}
+            grant = rcpt.get("grant") or rcpt if isinstance(rcpt, Mapping) else {}
+            rid = grant.get("receipt_id") if isinstance(grant, Mapping) else None
+            if rid:
+                submitted_receipt_ids.append(str(rid))
+
     journal = db["Layer0ScientificAssessment"]
     journal.create_index(
         [("tenant_id", 1), ("plot_id", 1),
@@ -306,6 +316,7 @@ def _run_assessment(
             "geometry_version": scope.geometry_version,
             "assessment_id": body.assessment_id,
             "claim_nonce": claim,
+            "submitted_receipt_ids": submitted_receipt_ids,
             "status": "STAGED",
             "started_at": datetime.now(timezone.utc),
             "scientific_publication_authorized": False,
