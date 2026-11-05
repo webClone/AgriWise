@@ -47,13 +47,11 @@ def get_trusted_reconciliation_secret(supplied_secret: Optional[str] = None) -> 
     Prevents caller from self-authorizing actions with their own unverified secret.
     """
     server_secret = os.environ.get("AKALORIS_RECONCILIATION_HMAC_SECRET", "").strip()
-    if server_secret:
-        if supplied_secret and not hmac.compare_digest(supplied_secret, server_secret):
-            raise OperationalReconciliationError("caller_secret_mismatch_with_server_authority")
-        return server_secret
-    if supplied_secret:
-        return supplied_secret
-    raise OperationalReconciliationError("unconfigured_reconciliation_authority_secret")
+    if not server_secret:
+        raise OperationalReconciliationError("unconfigured_reconciliation_authority_secret")
+    if supplied_secret is not None and not hmac.compare_digest(supplied_secret, server_secret):
+        raise OperationalReconciliationError("caller_secret_mismatch_with_server_authority")
+    return server_secret
 
 
 def compute_operator_authorization_signature(
@@ -247,17 +245,18 @@ def reconcile_staged_assessment(
     if expected_claim_nonce and doc.get("claim_nonce") != expected_claim_nonce:
         raise OperationalReconciliationError("concurrent_assessment_mutation_detected")
     submitted_ids = list(doc.get("submitted_receipt_ids") or [])
-    
-    # 2. Scope Validation: Do not trust unverified receipt claims outside assessment scope
-    for r_id in submitted_ids:
-        r_doc = receipts_coll.find_one({"_id": r_id})
-        if not r_doc:
-            raise OperationalReconciliationError(f"unresolved_submitted_receipt: {r_id}")
-        for k in ("tenant_id", "plot_id", "geometry_hash", "geometry_version"):
-            if r_doc.get(k) != doc.get(k):
-                raise OperationalReconciliationError(f"receipt_scope_mismatch_with_assessment: {r_id} {k}")
-        if doc.get("day") and r_doc.get("day") and r_doc.get("day") != doc.get("day"):
-            raise OperationalReconciliationError(f"receipt_day_mismatch: {r_id}")
+    receipt_digests = doc.get("submitted_receipt_digests")
+    if (len(submitted_ids) != len(set(submitted_ids))
+            or not isinstance(receipt_digests, Mapping)
+            or set(receipt_digests) != set(submitted_ids)):
+        raise OperationalReconciliationError("unverified_assessment_receipt_manifest")
+    start_day = doc.get("assessment_start_date") or doc.get("day")
+    end_day = doc.get("assessment_end_date") or doc.get("day")
+    if submitted_ids and (
+        not isinstance(start_day, str) or not isinstance(end_day, str)
+        or start_day > end_day
+    ):
+        raise OperationalReconciliationError("unverified_assessment_temporal_window")
 
     audit_entry = {
         "reconciled_at": iso_now,
@@ -269,10 +268,33 @@ def reconcile_staged_assessment(
 
     # 3. Transactional Execution: Atomic CAS + Receipt Mutation
     client = getattr(db, "client", None)
-    has_tx = client and callable(getattr(client, "start_session", None))
+    has_tx = client is not None and callable(getattr(client, "start_session", None))
+    if not has_tx:
+        raise OperationalReconciliationError("transactional_mongodb_required")
 
-    def _execute_within_session(session=None):
-        sess_kw = {"session": session} if session is not None else {}
+    def _execute_within_session(session):
+        sess_kw = {"session": session}
+
+        # All proof checks participate in the same transaction as the CAS.
+        # A receipt for the same plot but a different scientific assessment
+        # cannot be reassigned or rolled back by this operator procedure.
+        for r_id in submitted_ids:
+            r_doc = receipts_coll.find_one({"_id": r_id}, **sess_kw)
+            if r_doc is None:
+                raise OperationalReconciliationError(f"unresolved_submitted_receipt: {r_id}")
+            for k in ("tenant_id", "plot_id", "geometry_hash", "geometry_version"):
+                if r_doc.get(k) != doc.get(k):
+                    raise OperationalReconciliationError(
+                        f"receipt_scope_mismatch_with_assessment: {r_id} {k}"
+                    )
+            if r_doc.get("assessment_claim_id") != doc["_id"]:
+                raise OperationalReconciliationError(f"receipt_not_bound_to_assessment: {r_id}")
+            if (not isinstance(receipt_digests[r_id], str)
+                    or r_doc.get("grant_digest") != receipt_digests[r_id]):
+                raise OperationalReconciliationError(f"receipt_grant_digest_mismatch: {r_id}")
+            day = r_doc.get("day")
+            if not isinstance(day, str) or not (start_day <= day <= end_day):
+                raise OperationalReconciliationError(f"receipt_day_mismatch: {r_id}")
 
         if action == "ABORT_AND_ROLLBACK":
             modified_count = 0
@@ -386,7 +408,7 @@ def reconcile_staged_assessment(
             if "WriteConflict" in str(exc) or "TransientTransactionError" in str(exc):
                 raise OperationalReconciliationError("concurrent_assessment_mutation_detected") from exc
             raise OperationalReconciliationError(f"reconciliation_transaction_failed: {exc}") from exc
-    return _execute_within_session(None)
+    raise OperationalReconciliationError("transactional_mongodb_required")
 
 
 def scan_unfingerprinted_legacy_receipts(db: Any) -> List[Dict[str, Any]]:
@@ -497,27 +519,32 @@ def migrate_legacy_receipt_evidence_fingerprint(
     if (end_dt - start_dt).total_seconds() > 86400.0:
         raise OperationalReconciliationError("invalid_delivery_interval_duration_exceeds_24h")
 
-    if rec.get("delivery_start") and rec.get("delivery_end"):
-        rec_start_dt = _parse_iso_utc(rec["delivery_start"])
-        rec_end_dt = _parse_iso_utc(rec["delivery_end"])
-        if rec_start_dt != start_dt or rec_end_dt != end_dt:
-            raise OperationalReconciliationError("delivery_interval_mismatch_with_historical_receipt")
+    if not rec.get("delivery_start") or not rec.get("delivery_end"):
+        raise OperationalReconciliationError("unverifiable_historical_delivery_interval")
+    rec_start_dt = _parse_iso_utc(rec["delivery_start"])
+    rec_end_dt = _parse_iso_utc(rec["delivery_end"])
+    if rec_start_dt != start_dt or rec_end_dt != end_dt:
+        raise OperationalReconciliationError("delivery_interval_mismatch_with_historical_receipt")
 
     # 3. Evidence root validation & consistency
     if len(source_evidence_cas_root) < 16:
         raise OperationalReconciliationError("invalid_source_evidence_cas_root_format")
-    if rec.get("source_evidence_cas_root") and rec["source_evidence_cas_root"] != source_evidence_cas_root:
+    if not rec.get("source_evidence_cas_root"):
+        raise OperationalReconciliationError("unverifiable_historical_evidence_root")
+    if rec["source_evidence_cas_root"] != source_evidence_cas_root:
         raise OperationalReconciliationError("evidence_cas_root_mismatch_with_historical_receipt")
 
-    # 4. Optional external historical evidence authenticator
-    if evidence_authenticator is not None:
-        try:
-            if not evidence_authenticator(source_evidence_cas_root, delivery_interval, rec):
-                raise OperationalReconciliationError("historical_evidence_unauthenticated")
-        except Exception as e:
-            if isinstance(e, OperationalReconciliationError):
-                raise
-            raise OperationalReconciliationError("historical_evidence_authentication_failed") from e
+    # 4. Authentication is mandatory. The trusted operator runtime must
+    # supply an evidence verifier; a bare CAS string does not prove origin.
+    if not callable(evidence_authenticator):
+        raise OperationalReconciliationError("historical_evidence_authenticator_required")
+    try:
+        if evidence_authenticator(source_evidence_cas_root, delivery_interval, rec) is not True:
+            raise OperationalReconciliationError("historical_evidence_unauthenticated")
+    except Exception as e:
+        if isinstance(e, OperationalReconciliationError):
+            raise
+        raise OperationalReconciliationError("historical_evidence_authentication_failed") from e
 
     start_utc = start_dt.isoformat()
     end_utc = end_dt.isoformat()

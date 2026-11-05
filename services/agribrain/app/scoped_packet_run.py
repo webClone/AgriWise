@@ -25,6 +25,10 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from pymongo.errors import DuplicateKeyError
 
+from services.agribrain.layer0.mongo_irrigation_idempotency import (
+    bound_scientific_assessment_claim,
+)
+from services.agribrain.layer0.v3_kms_signed_issuer import canonical_grant_bytes
 from services.agribrain.app.plot_scope_context import (
     current_authenticated_plot_principal,
     require_b2b05_internal_request,
@@ -293,6 +297,7 @@ def _run_assessment(
     ).hexdigest()
     claim = secrets.token_hex(16)
     submitted_receipt_ids = []
+    submitted_receipt_digests = {}
     for pkt in body.packets:
         payload = getattr(pkt, "payload", {}) if not isinstance(pkt, Mapping) else pkt.get("payload", {})
         if isinstance(payload, Mapping) and payload.get("event_role") == "VERIFIED_DELIVERY":
@@ -306,7 +311,13 @@ def _run_assessment(
                     and grant.get("geometry_hash") == scope.geometry_hash
                     and int(grant.get("geometry_version") or 0) == int(scope.geometry_version)
                 ):
-                    submitted_receipt_ids.append(str(rid))
+                    receipt_id = str(rid)
+                    if receipt_id in submitted_receipt_digests:
+                        raise ValueError("duplicate_submitted_receipt_in_assessment")
+                    submitted_receipt_ids.append(receipt_id)
+                    submitted_receipt_digests[receipt_id] = hashlib.sha256(
+                        canonical_grant_bytes(grant)
+                    ).hexdigest()
 
     journal = db["Layer0ScientificAssessment"]
     journal.create_index(
@@ -323,6 +334,9 @@ def _run_assessment(
             "assessment_id": body.assessment_id,
             "claim_nonce": claim,
             "submitted_receipt_ids": submitted_receipt_ids,
+            "submitted_receipt_digests": submitted_receipt_digests,
+            "assessment_start_date": start_date,
+            "assessment_end_date": end_date,
             "status": "STAGED",
             "started_at": datetime.now(timezone.utc),
             "scientific_publication_authorized": False,
@@ -339,17 +353,18 @@ def _run_assessment(
         positive_admission_verifier=verifier,
     )
     try:
-        pkg = engine.run_from_packets(
-            plot_id=scope.plot_id,
-            packets=packets,
-            start_date=start_date,
-            end_date=end_date,
-            geometry_hash=scope.geometry_hash,
-            geometry_version=scope.geometry_version,
-            tenant_id=scope.tenant_id,
-            scope_hash=scope.scope_hash,
-            positive_admission_receipts=body.positive_receipts,
-        )
+        with bound_scientific_assessment_claim(digest):
+            pkg = engine.run_from_packets(
+                plot_id=scope.plot_id,
+                packets=packets,
+                start_date=start_date,
+                end_date=end_date,
+                geometry_hash=scope.geometry_hash,
+                geometry_version=scope.geometry_version,
+                tenant_id=scope.tenant_id,
+                scope_hash=scope.scope_hash,
+                positive_admission_receipts=body.positive_receipts,
+            )
         # A concurrent geometry CAS or owner revocation blocks publication of
         # a new scientific result, even if a consumed physical receipt has
         # already been durably journaled for manual recovery.

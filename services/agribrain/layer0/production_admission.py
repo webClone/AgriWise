@@ -138,6 +138,8 @@ def configure_server_delivery_verifier(
     public keys from its own protected configuration.
     Mandates in-transaction revocation write fencing in production.
     """
+    if require_transactional_revocation is not True:
+        raise Layer0AdmissionRequiredError("transactional_revocation_required_in_production")
     from services.agribrain.layer0.mongo_irrigation_idempotency import (
         MongoIrrigationIdempotencyStore,
     )

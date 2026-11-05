@@ -104,3 +104,11 @@ All gates satisfied:
 - TypeScript compilation: **0 errors**.
 - Production build: **0 errors** (63 static pages generated).
 Operator signoff, external HSM deployment, field calibration, and national publication readiness remain separate future milestones. Do not merge without authorization.
+
+## 6. F4 no-bypass safeguards
+
+Privileged reconciliation requires an independently configured AKALORIS_RECONCILIATION_HMAC_SECRET and a transaction-capable MongoDB replica-set client. Neither arbitrary caller-supplied HMAC secrets nor unsessioned fallback operations are accepted. All new signed HTTP assessment reservations carry the assessment journal claim ID, and the assessment journal stores canonical signed-grant digests and its date window. Transactional reconciliation matches all values to the actual staged receipt records; old unbound claims are **manual review only**, never silently promoted or rolled back.
+
+The legacy migration operator **must** use a trusted, independently provisioned historical-evidence authenticator that validates the immutable source CAS record, signed provenance and delivery interval. Providing a callback is not, by itself, proof of trustworthy external evidence: integrations must authenticate the source, and bare always-true callbacks are prohibited outside controlled tests. If the evidence service is not configured, leave historical receipts quarantined.
+
+Exact-head regression, isolated Mongo tests and operator acceptance remain **pending** on the F4 implementation candidate. This appendix does not modify the intended architecture monograph or authorize any protected branch merge.

@@ -375,7 +375,7 @@ def test_concurrent_revocation_write_conflict_aborts_commit():
         client.close()
 
 
-def test_reconciliation_transactional_cas_failure_rolls_back_receipt_mutations():
+def test_reconciliation_transactional_cas_failure_rolls_back_receipt_mutations(monkeypatch):
     """Verify that if assessment CAS fails, receipt updates are atomically rolled back by MongoDB transaction."""
     client, db, db_name = _setup_test_db()
     try:
@@ -384,6 +384,7 @@ def test_reconciliation_transactional_cas_failure_rolls_back_receipt_mutations()
         tenant_id = "test-tenant-cas"
         plot_id = "plot-cas-1"
         secret = "test-reconciliation-secret-0000"
+        monkeypatch.setenv("AKALORIS_RECONCILIATION_HMAC_SECRET", secret)
 
         assessment_coll = db["Layer0ScientificAssessment"]
         receipts_coll = db["Layer0IrrigationReceiptConsumption"]
@@ -400,6 +401,8 @@ def test_reconciliation_transactional_cas_failure_rolls_back_receipt_mutations()
             "geometry_version": 1,
             "claim_nonce": "nonce-rec-1",
             "status": "STAGED",
+            "assessment_claim_id": ass_id, "grant_digest": "digest-cas",
+            "day": day_date.isoformat(),
             "staged_at": now - timedelta(hours=1),
         })
 
@@ -412,6 +415,9 @@ def test_reconciliation_transactional_cas_failure_rolls_back_receipt_mutations()
             "geometry_version": 1,
             "status": "STAGED",
             "submitted_receipt_ids": [rec_id],
+            "submitted_receipt_digests": {rec_id: "digest-cas"},
+            "assessment_start_date": day_date.isoformat(),
+            "assessment_end_date": day_date.isoformat(),
             "claim_nonce": "original-nonce",
             "staged_at": now - timedelta(hours=1),
         })
@@ -456,7 +462,7 @@ def test_reconciliation_transactional_cas_failure_rolls_back_receipt_mutations()
         client.close()
 
 
-def test_connected_operational_reconciliation_plot_isolation():
+def test_connected_operational_reconciliation_plot_isolation(monkeypatch):
     """Verify that multiple staged assessments on the same plot remain strictly isolated."""
     client, db, db_name = _setup_test_db()
     try:
@@ -465,6 +471,7 @@ def test_connected_operational_reconciliation_plot_isolation():
         tenant_id = "test-tenant-iso"
         plot_id = "plot-iso-1"
         secret = "test-operator-hmac-secret-123456"
+        monkeypatch.setenv("AKALORIS_RECONCILIATION_HMAC_SECRET", secret)
 
         assessment_coll = db["Layer0ScientificAssessment"]
         receipts_coll = db["Layer0IrrigationReceiptConsumption"]
@@ -474,8 +481,10 @@ def test_connected_operational_reconciliation_plot_isolation():
         rec_a1 = "rec-A1"
         rec_a2 = "rec-A2"
         receipts_coll.insert_many([
-            {"_id": rec_a1, "replay_key": "rep-A1", "tenant_id": tenant_id, "plot_id": plot_id, "geometry_hash": "geom-1", "geometry_version": 1, "claim_nonce": "nonce-A1", "status": "STAGED", "staged_at": now - timedelta(hours=2)},
-            {"_id": rec_a2, "replay_key": "rep-A2", "tenant_id": tenant_id, "plot_id": plot_id, "geometry_hash": "geom-1", "geometry_version": 1, "claim_nonce": "nonce-A2", "status": "STAGED", "staged_at": now - timedelta(hours=2)},
+            {"_id": rec_a1, "replay_key": "rep-A1", "tenant_id": tenant_id, "plot_id": plot_id, "geometry_hash": "geom-1", "geometry_version": 1, "claim_nonce": "nonce-A1", "status": "STAGED", "day": day_date.isoformat(),
+             "assessment_claim_id": ass_a_id, "grant_digest": "digest-A1", "staged_at": now - timedelta(hours=2)},
+            {"_id": rec_a2, "replay_key": "rep-A2", "tenant_id": tenant_id, "plot_id": plot_id, "geometry_hash": "geom-1", "geometry_version": 1, "claim_nonce": "nonce-A2", "status": "STAGED", "day": day_date.isoformat(),
+             "assessment_claim_id": ass_a_id, "grant_digest": "digest-A2", "staged_at": now - timedelta(hours=2)},
         ])
         assessment_coll.insert_one({
             "_id": ass_a_id,
@@ -483,6 +492,9 @@ def test_connected_operational_reconciliation_plot_isolation():
             "plot_id": plot_id,
             "status": "STAGED",
             "submitted_receipt_ids": [rec_a1, rec_a2],
+            "submitted_receipt_digests": {rec_a1: "digest-A1", rec_a2: "digest-A2"},
+            "assessment_start_date": day_date.isoformat(),
+            "assessment_end_date": day_date.isoformat(),
             "claim_nonce": "ass-nonce-A",
             "staged_at": now - timedelta(hours=2),
             "zone_id": "plot",
@@ -495,7 +507,8 @@ def test_connected_operational_reconciliation_plot_isolation():
         ass_b_id = "ass-test-B"
         rec_b1 = "rec-B1"
         receipts_coll.insert_one({
-            "_id": rec_b1, "replay_key": "rep-B1", "tenant_id": tenant_id, "plot_id": plot_id, "geometry_hash": "geom-1", "geometry_version": 1, "claim_nonce": "nonce-B1", "status": "STAGED", "staged_at": now - timedelta(hours=2),
+            "_id": rec_b1, "replay_key": "rep-B1", "tenant_id": tenant_id, "plot_id": plot_id, "geometry_hash": "geom-1", "geometry_version": 1, "claim_nonce": "nonce-B1", "status": "STAGED", "day": day_date.isoformat(),
+            "assessment_claim_id": ass_b_id, "grant_digest": "digest-B1", "staged_at": now - timedelta(hours=2),
         })
         assessment_coll.insert_one({
             "_id": ass_b_id,
@@ -503,6 +516,9 @@ def test_connected_operational_reconciliation_plot_isolation():
             "plot_id": plot_id,
             "status": "STAGED",
             "submitted_receipt_ids": [rec_b1],
+            "submitted_receipt_digests": {rec_b1: "digest-B1"},
+            "assessment_start_date": day_date.isoformat(),
+            "assessment_end_date": day_date.isoformat(),
             "claim_nonce": "ass-nonce-B",
             "staged_at": now - timedelta(hours=2),
             "zone_id": "plot",
@@ -611,6 +627,10 @@ def test_connected_legacy_migration_canonical_fingerprint_blocks_duplicate():
             delivery_interval=(_iso(t0), _iso(t1)),
             operator_principal="op-eng-42",
             rationale="Migrate legacy receipt to canonical evidence fingerprint",
+            evidence_authenticator=lambda root, ivl, rec: (
+                root == rec["source_evidence_cas_root"]
+                and ivl == (rec["delivery_start"], rec["delivery_end"])
+            ),
         )
         assert mig_res["migration_status"] == "MIGRATED"
         migrated_fp = mig_res["evidence_fingerprint"]

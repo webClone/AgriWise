@@ -11,6 +11,8 @@ One-node JSON stores are intentionally never accepted in signed production.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import os
 from typing import Any, Callable, Mapping, Optional, Sequence
@@ -24,6 +26,24 @@ from services.agribrain.layer0.verified_irrigation_contract import (
     physical_evidence_fingerprint,
 )
 from services.agribrain.layer0.v3_kms_signed_issuer import canonical_grant_bytes
+
+
+# Request-local binding of a signed HTTP assessment to its L3 reservations.
+# This does not add authority to direct research/non-HTTP Kalman runs.
+_active_scientific_assessment_claim: ContextVar[str | None] = ContextVar(
+    "akaloris_scoped_assessment_claim", default=None,
+)
+
+
+@contextmanager
+def bound_scientific_assessment_claim(claim_id: str):
+    if not isinstance(claim_id, str) or not claim_id:
+        raise ValueError("invalid_scientific_assessment_claim")
+    token = _active_scientific_assessment_claim.set(claim_id)
+    try:
+        yield
+    finally:
+        _active_scientific_assessment_claim.reset(token)
 
 
 def _scope_state_id(rec: Mapping[str, Any]) -> str:
@@ -129,6 +149,7 @@ class MongoIrrigationIdempotencyStore:
             "day": day,
             "status": "STAGED",
             "claim_nonce": nonce,
+            "assessment_claim_id": _active_scientific_assessment_claim.get(),
             "staged_at": datetime.now(timezone.utc),
         }
         historical = False

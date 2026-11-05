@@ -24,6 +24,21 @@ UTC = timezone.utc
 SECRET = "test-operator-auth-secret-key-12345"
 
 
+@pytest.fixture(autouse=True)
+def trusted_operator_secret(monkeypatch):
+    monkeypatch.setenv("AKALORIS_RECONCILIATION_HMAC_SECRET", SECRET)
+
+
+class MockTransaction:
+    def __enter__(self): return self
+    def __exit__(self, exc_type, exc, traceback): return False
+    def start_transaction(self): return self
+
+
+class MockClient:
+    def start_session(self): return MockTransaction()
+
+
 class MockCursor:
     def __init__(self, docs):
         self._docs = list(docs)
@@ -98,6 +113,7 @@ class MockUpdateResult:
 
 class MockDatabase:
     def __init__(self):
+        self.client = MockClient()
         self.collections = {
             "Layer0ScientificAssessment": MockCollection(),
             "Layer0IrrigationReceiptConsumption": MockCollection(),
@@ -168,16 +184,22 @@ def test_reconcile_abort_and_rollback_leaves_unrelated_assessments_untouched():
             "_id": "a1", "assessment_id": "a1", "tenant_id": "t1", "plot_id": "plot-shared",
             "geometry_hash": "g1", "geometry_version": 1,
             "status": "STAGED", "claim_nonce": "nonce-A", "submitted_receipt_ids": ["rA"],
+            "submitted_receipt_digests": {"rA": "digest-A"},
+            "assessment_start_date": "2026-05-01", "assessment_end_date": "2026-05-01",
         },
         "a2": {
             "_id": "a2", "assessment_id": "a2", "tenant_id": "t1", "plot_id": "plot-shared",
             "geometry_hash": "g1", "geometry_version": 1,
             "status": "STAGED", "claim_nonce": "nonce-B", "submitted_receipt_ids": ["rB"],
+            "submitted_receipt_digests": {"rB": "digest-B"},
+            "assessment_start_date": "2026-05-01", "assessment_end_date": "2026-05-01",
         },
     }
     db["Layer0IrrigationReceiptConsumption"].docs = {
-        "rA": {"_id": "rA", "tenant_id": "t1", "plot_id": "plot-shared", "geometry_hash": "g1", "geometry_version": 1, "status": "STAGED"},
-        "rB": {"_id": "rB", "tenant_id": "t1", "plot_id": "plot-shared", "geometry_hash": "g1", "geometry_version": 1, "status": "STAGED"},
+        "rA": {"_id": "rA", "tenant_id": "t1", "plot_id": "plot-shared", "geometry_hash": "g1", "geometry_version": 1, "status": "STAGED",
+         "day": "2026-05-01", "assessment_claim_id": "a1", "grant_digest": "digest-A"},
+        "rB": {"_id": "rB", "tenant_id": "t1", "plot_id": "plot-shared", "geometry_hash": "g1", "geometry_version": 1, "status": "STAGED",
+         "day": "2026-05-01", "assessment_claim_id": "a2", "grant_digest": "digest-B"},
     }
     
     now = datetime.now(UTC)
@@ -214,6 +236,8 @@ def test_reconcile_rejects_receipt_scope_mismatch():
             "_id": "a1", "assessment_id": "a1", "tenant_id": "t1", "plot_id": "p1",
             "geometry_hash": "g1", "geometry_version": 1,
             "status": "STAGED", "claim_nonce": "nonce-A", "submitted_receipt_ids": ["r_foreign"],
+            "submitted_receipt_digests": {"r_foreign": "digest-F"},
+            "assessment_start_date": "2026-05-01", "assessment_end_date": "2026-05-01",
         },
     }
     # r_foreign has a different plot_id!
@@ -270,12 +294,15 @@ def test_reconcile_complete_reconciled_with_exact_lineage():
             "_id": "a1", "assessment_id": "a1", "tenant_id": "t1", "plot_id": "p1",
             "geometry_hash": "geom1", "geometry_version": 2,
             "status": "STAGED", "claim_nonce": "nonce-1", "submitted_receipt_ids": ["r1"],
+            "submitted_receipt_digests": {"r1": "digest-1"},
+            "assessment_start_date": "2026-05-01", "assessment_end_date": "2026-05-01",
         },
     }
     db["Layer0IrrigationReceiptConsumption"].docs = {
         "r1": {
             "_id": "r1", "tenant_id": "t1", "plot_id": "p1", "geometry_hash": "geom1", "geometry_version": 2,
             "status": "COMMITTED", "state_snapshot_id": snap_id, "evidence_fingerprint": "fp1",
+            "assessment_claim_id": "a1", "grant_digest": "digest-1", "day": "2026-05-01",
         },
     }
     db["Layer0IrrigationCommittedState"].docs = {
@@ -314,6 +341,8 @@ def test_legacy_migration_reproduces_exact_production_fingerprint():
             "_id": "r_leg", "tenant_id": "t1", "plot_id": "p1",
             "zone_id": "plot", "geometry_hash": "geom1", "geometry_version": 2,
             "status": "COMMITTED",
+            "source_evidence_cas_root": cas_root,
+            "delivery_start": interval[0], "delivery_end": interval[1],
         }
     }
     
@@ -323,6 +352,10 @@ def test_legacy_migration_reproduces_exact_production_fingerprint():
         delivery_interval=interval,
         operator_principal="data-lead",
         rationale="Audited physical meter log from gateway hardware",
+        evidence_authenticator=lambda root, ivl, rec: (
+            root == rec["source_evidence_cas_root"]
+            and ivl == (rec["delivery_start"], rec["delivery_end"])
+        ),
     )
     
     modern_grant = VerifiedDeliveredIrrigationGrant(
@@ -386,6 +419,8 @@ def test_legacy_migration_rejects_missing_scope_and_unauthenticated_evidence():
         "_id": "r_valid", "tenant_id": "t1", "plot_id": "p1",
         "zone_id": "plot", "geometry_hash": "geom1", "geometry_version": 2,
         "status": "COMMITTED",
+        "source_evidence_cas_root": cas_root,
+        "delivery_start": interval[0], "delivery_end": interval[1],
     }
     bad_interval = ("2026-05-01T14:00:00Z", "2026-05-01T12:00:00Z")
     with pytest.raises(OperationalReconciliationError, match="invalid_delivery_interval_end_must_exceed_start"):

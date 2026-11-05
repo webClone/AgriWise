@@ -350,3 +350,15 @@ Following comprehensive review of commit `4e2a8c9`, all three remaining freeze b
 - **TypeScript Compiler (`npx tsc --noEmit`):** **0 errors** (exit code 0)
 - **Production Build (`npm run build`):** **0 errors**, compiled in 17.0s, 63 static pages generated in 927.1ms (exit code 0)
 
+
+## 14. B2B-08-F4 strict authority and recovery correction — unqualified candidate
+
+**Code implemented on B2B-08 integration branch; exact-head tests pending.**
+The three final no-bypass corrections are:
+- **F1:** configure_server_delivery_verifier fails closed on explicit require_transactional_revocation=False. The production-only factory cannot silently disable its Mongo write fence.
+- **F2:** get_trusted_reconciliation_secret requires AKALORIS_RECONCILIATION_HMAC_SECRET from the trusted server environment even when a caller supplies a secret. Operator reconciliation requires a transaction-capable Mongo client and no longer falls back to unsessioned updates. Scoped FastAPI assessment execution binds its assessment journal ID to each staged L3 receipt in a request-local context; its STAGED journal records canonical grant digests and the assessment date window. Within the same reconciliation transaction, each receipt must match the exact assessment claim ID, signed grant digest, tenant, plot, geometry and temporal interval. Legacy STAGED receipts without this binding must remain for manual review.
+- **F3:** legacy fingerprint migration refuses absent authenticators, absent stored interval or missing stored CAS root. Only an explicit trusted historical evidence verifier returning exactly True can authorize migration. No external evidence verification service is claimed as deployed here.
+
+**Negative suite:** services/agribrain/layer0/tests/test_b2b08_freeze_strict_negative_contracts.py. Existing unit/connected fixtures were updated to exercise trusted claim binding and independently configured server HMAC.
+
+**Qualification:** NOT EXECUTED by GitHub or this implementation pass. Run on the exact new SHA: negative suite, full Layer0/Layer1/ASMAE fast regression, B2B-07/08 connected gates (including signed HTTP + actual main.app lifespan), frontend tests, typecheck and build. Preserve the already qualified historical 10-day real-raster ASMAE receipt, and rerun that expensive suite only if science dependencies change. No merge, formal freeze, field release or scientific publication authorization.
