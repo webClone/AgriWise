@@ -170,6 +170,9 @@ class ZoneKalmanFilter:
         self.tenant_id = ""
         self.geometry_version = None
         self.delivery_verifier = None
+        # A sealed L3 token is insufficient for direct prediction: only the
+        # canonical daily step may consume it and journal the new state.
+        self.__delivery_step_capability = object()
         
         # ── Adaptive ML Recalibration Engine ─────────────────────────
         # Learns optimal LAI growth rate from observation residuals.
@@ -191,7 +194,8 @@ class ZoneKalmanFilter:
         self.state_history.append(self.state.clone())
     
     def predict(self, day: str, weather: Dict[str, float],
-                events: Optional[List[Dict]] = None) -> StateVector:
+                events: Optional[List[Dict]] = None, *,
+                _l3_step_authority: object = None) -> StateVector:
         """
         Predict step: evolve state to the next day using process model.
         
@@ -201,6 +205,8 @@ class ZoneKalmanFilter:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
         admitted_deliveries: List[AdmittedDeliveredIrrigation] = []
         if events:
+            if _l3_step_authority is not self.__delivery_step_capability:
+                raise ValueError("physical management forcing requires trusted L3 admission")
             for evt in events:
                 if (
                     isinstance(evt, AdmittedDeliveredIrrigation)
@@ -262,7 +268,10 @@ class ZoneKalmanFilter:
         self._last_q_regime = "NOMINAL_RATE_DISCRETIZATION"
         return predicted_state
 
-    def predict_missing_weather(self, day: str, events: Optional[List[Dict]] = None) -> Tuple[np.ndarray, np.ndarray]:
+    def predict_missing_weather(
+        self, day: str, events: Optional[List[Dict]] = None, *,
+        _l3_step_authority: object = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """No physical weather evolution; accumulate declared drift covariance.
 
         There is no synthetic rainfall/temperature. Q is a variance rate
@@ -275,6 +284,8 @@ class ZoneKalmanFilter:
 
         admitted_deliveries: List[AdmittedDeliveredIrrigation] = []
         if events:
+            if _l3_step_authority is not self.__delivery_step_capability:
+                raise ValueError("physical management forcing requires trusted L3 admission")
             for evt in events:
                 if (
                     isinstance(evt, AdmittedDeliveredIrrigation)
@@ -591,9 +602,15 @@ class ZoneKalmanFilter:
             # An isolated daily weather dictionary is not proof of measured
             # interval coverage; never fabricate missing climate inputs.
             if qualified_weather is None:
-                candidate.predict_missing_weather(day, admitted_deliveries)
+                candidate.predict_missing_weather(
+                    day, admitted_deliveries,
+                    _l3_step_authority=candidate.__delivery_step_capability,
+                )
             else:
-                candidate.predict(day, qualified_weather, admitted_deliveries)
+                candidate.predict(
+                    day, qualified_weather, admitted_deliveries,
+                    _l3_step_authority=candidate.__delivery_step_capability,
+                )
 
             if observations:
                 source_weights = candidate.update(observations)
