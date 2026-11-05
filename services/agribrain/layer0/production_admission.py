@@ -109,6 +109,48 @@ def require_trusted_delivery_verifier(verifier: object) -> None:
         raise Layer0AdmissionRequiredError(
             "Authoritative delivered irrigation verifier requires active durable revocation authority"
         )
+    # A JSON file or an in-memory set is process-local and does not fence
+    # receipt replay between horizontally scaled production workers.
+    # An absent verifier is safe (no physical forcing), but a configured
+    # production verifier MUST use the same transactional Mongo authority.
+    if signed_inputs_required():
+        from services.agribrain.layer0.mongo_irrigation_idempotency import (
+            MongoIrrigationIdempotencyStore,
+        )
+        if not isinstance(
+            verifier.idempotency_store, MongoIrrigationIdempotencyStore
+        ):
+            raise Layer0AdmissionRequiredError(
+                "Production delivered irrigation requires shared Mongo transaction journal"
+            )
+
+
+def configure_server_delivery_verifier(
+    *, database, public_key_registry, revocation_authority,
+    historical_recompute_authorizer=None,
+):
+    """Trusted backend factory: fail closed without a shared Mongo ledger.
+
+    Never accept database/registry/authorizer from HTTP payloads. The
+    deployment must supply a transaction-capable Mongo replica set and L3
+    public keys from its own protected configuration.
+    """
+    from services.agribrain.layer0.mongo_irrigation_idempotency import (
+        MongoIrrigationIdempotencyStore,
+    )
+    from services.agribrain.layer0.verified_irrigation_contract import (
+        VerifiedDeliveredIrrigationVerifier,
+    )
+    store = MongoIrrigationIdempotencyStore(
+        database, historical_recompute_authorizer=historical_recompute_authorizer,
+    )
+    verifier = VerifiedDeliveredIrrigationVerifier(
+        public_key_registry=public_key_registry,
+        revocation_authority=revocation_authority,
+        idempotency_store=store,
+    )
+    require_trusted_delivery_verifier(verifier)
+    return verifier
 
 
 def load_server_issuer_verifier():
