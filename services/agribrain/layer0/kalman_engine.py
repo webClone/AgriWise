@@ -676,6 +676,13 @@ class ZoneKalmanFilter:
                         "variance": list(candidate.state.variance),
                         "last_obs_day": candidate.last_obs_day,
                         "days_since_obs": candidate.days_since_obs,
+                        "adaptive_lai_rate": candidate._adaptive_lai_rate,
+                        "ema_error": candidate._ema_error,
+                        "recalibration_count": candidate._recalibration_count,
+                        "process_adaptive_lai_rate":
+                            getattr(candidate.process_model, "_adaptive_lai_rate", None),
+                        "process_last_model_error":
+                            getattr(candidate.process_model, "_last_model_error", None),
                     },
                     "covariance": [list(r) for r in candidate.covariance.P],
                     "provenance": {
@@ -711,6 +718,107 @@ class ZoneKalmanFilter:
                         # until privileged recovery reconciles them.
                         pass
             raise
+
+    def recover_committed_delivery_state(self, day: str) -> bool:
+        """Explicit, scope-bound crash recovery from the Mongo state journal.
+
+        This is NOT a replay grant or an actuator/publication capability.
+        The caller must supply a trusted production verifier and exact
+        tenant/plot/zone/geometry identifiers. A failed recovery leaves the
+        filter unchanged. This is invoked by trusted process recovery only.
+        """
+        from services.agribrain.layer0.mongo_irrigation_idempotency import (
+            MongoIrrigationIdempotencyStore,
+        )
+        if not self.initialized or self.state is None or self.covariance is None:
+            raise RuntimeError("initialize_filter_before_crash_recovery")
+        if (
+            self.delivery_verifier is None
+            or not isinstance(
+                getattr(self.delivery_verifier, "idempotency_store", None),
+                MongoIrrigationIdempotencyStore,
+            )
+            or not all((
+                self.tenant_id, self.parent_plot_id, self.zone_id,
+                self.expected_geometry_hash, day,
+            ))
+            or type(self.geometry_version) is not int
+        ):
+            raise RuntimeError("trusted_delivery_recovery_scope_required")
+        stored = self.delivery_verifier.idempotency_store.recover_snapshot(
+            tenant_id=self.tenant_id,
+            plot_id=self.parent_plot_id,
+            zone_id=self.zone_id,
+            geometry_hash=self.expected_geometry_hash,
+            geometry_version=self.geometry_version,
+            day=day,
+        )
+        if stored is None:
+            return False
+        import numpy as np
+        values = stored.get("state")
+        if (
+            not isinstance(values, dict)
+            or values.get("day") != day
+            or not isinstance(values.get("values"), list)
+            or not isinstance(values.get("variance"), list)
+            or len(values["values"]) != N_STATES
+            or len(values["variance"]) != N_STATES
+        ):
+            raise RuntimeError("corrupt_authoritative_state_checkpoint")
+        all_values = values["values"] + values["variance"]
+        if any(
+            isinstance(v, bool) or not isinstance(v, (float, int))
+            or not math.isfinite(v)
+            for v in all_values
+        ):
+            raise RuntimeError("nonfinite_authoritative_state_checkpoint")
+        candidate_covariance = StateCovariance(
+            P=[list(row) for row in stored["covariance"]],
+        )
+        identity = [
+            [float(i == j) for j in range(N_STATES)]
+            for i in range(N_STATES)
+        ]
+        candidate_covariance.propagate(identity, [0.0] * N_STATES)
+        if any(
+            not math.isclose(
+                values["variance"][i], candidate_covariance.P[i][i],
+                rel_tol=1e-8, abs_tol=1e-10,
+            )
+            for i in range(N_STATES)
+        ):
+            raise RuntimeError("state_covariance_checkpoint_mismatch")
+        recovered_state = self.state.clone()
+        recovered_state.day = day
+        recovered_state.values = list(values["values"])
+        recovered_state.variance = list(values["variance"])
+        # Publish only after ALL scope, numerical, and receipt checks pass.
+        self.state = recovered_state
+        self.covariance = candidate_covariance
+        self.days_since_obs = values["days_since_obs"]
+        self.last_obs_day = values.get("last_obs_day")
+        self._adaptive_lai_rate = values.get("adaptive_lai_rate")
+        self._ema_error = values.get("ema_error", 0.0)
+        self._recalibration_count = values.get("recalibration_count", 0)
+        self.process_model._adaptive_lai_rate = values.get(
+            "process_adaptive_lai_rate",
+        )
+        self.process_model._last_model_error = values.get(
+            "process_last_model_error",
+        )
+        self.state_history.append(recovered_state.clone())
+        provenance = stored.get("provenance", {})
+        self.provenance_history.append({
+            "day": day, "zone": self.zone_id,
+            "recovered_from_durable_l3_commit": True,
+            "verified_delivery_receipts": list(
+                provenance.get("verified_delivery_receipts", [])
+            ),
+            "scientific_publication_authorized": False,
+            "actuator_control_authorized": False,
+        })
+        return True
 
     def get_daily_states(self) -> List[Dict]:
         """Return all historical states as dicts (for FieldTensor.daily_state)."""

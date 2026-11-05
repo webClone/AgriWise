@@ -296,4 +296,15 @@ class MongoIrrigationIdempotencyStore:
         )
         if not exact:
             raise RuntimeError("recovered_state_scope_mismatch")
+        receipts = row.get("receipt_ids")
+        if not isinstance(receipts, list) or not receipts:
+            raise RuntimeError("recovered_state_has_no_committed_delivery")
+        for receipt_id in receipts:
+            committed = self._receipts.find_one({
+                "_id": receipt_id,
+                "status": "COMMITTED",
+                "state_snapshot_id": row["_id"],
+            })
+            if committed is None:
+                raise RuntimeError("recovered_state_receipt_commit_mismatch")
         return dict(row)
