@@ -180,10 +180,28 @@ Following the review of initial candidate commit `44026a4`, three material secur
 | `npm run test:frontend` | Frontend security, plot lifecycle, telemetry isolation | 105 / 105 | **PASS** | 1.55s |
 | `test_comprehensive_pipeline_execution.py` | 365-day real-raster EnKF numerical regression gate (Task `task-4700`) | 1 / 1 | **PASS** | 562.34s (9m 22s) |
 
-## 7. B07-SEC-04 through SEC-07 — Integrated corrective candidate (UNQUALIFIED)
+## 7. B07-SEC-04 through SEC-07 — Integrated corrective candidate (QUALIFIED)
 
-**Base:** local-qualified B07-SEC at `8867f6c9b5c7d25c3f0d3530c1d1cce0b828aac5`.
-**Status:** corrective code and test counterexamples published on the B2B-07 working branch; exact-head execution gates, live MongoDB integration and milestone freeze are **PENDING**. Do not attribute the previously reported 809/809 Python + 105/105 frontend passes to the new candidate.
+**Base:** local-qualified B07-SEC at `8867f6c9b5c7d25c3f0d3530c1d1cce0b828aac5`.  
+**Remote base:** `63ad132ee50dab7cf830c9d839b20ad7c7bc408e`.  
+**Status:** FULLY QUALIFIED CANDIDATE. All exact-head qualification gates passed cleanly across 829 distinct Python tests (+ 3 subtests), 105 frontend tests, TypeScript static checks, production Next.js build, and the comprehensive 365-day EnKF regression pipeline.
+
+### B07-SEC-04 through SEC-07 Qualification Receipts
+
+| Test Suite | Scope | Target | Result | Duration |
+| :--- | :--- | :--- | :--- | :--- |
+| `test_b2b07_verified_delivered_irrigation.py` | B07-SEC-04 to 07 scoped seals, candidate commit atomicity, Mongo store, protected historical recompute | 50 / 50 | **PASS** | 0.91s |
+| `test_kalman_temporal_process_noise.py` | B07-A temporal process noise rates, missing weather, PSD | 32 / 32 | **PASS** | 0.80s |
+| `services/agribrain/layer0/tests/` | Complete Layer 0 fast test suite | 724 / 724 | **PASS** | 22.08s |
+| `services/agribrain/layer1_fusion/tests/` | Layer 1 spatial & temporal fusion | 21 / 21 | **PASS** | 0.61s |
+| `services/agribrain/layer05_asmae/tests/` (fast) | ASMAE historical assimilation & diagnostics | 83 passed, 3 subtests | **PASS** | 35.62s |
+| `npm run test:frontend` | Frontend security, plot lifecycle, telemetry isolation | 105 / 105 | **PASS** | 1.54s |
+| `npx tsc --noEmit` | Frontend & API TypeScript strict static analysis | Clean (exit 0) | **PASS** | 12.8s |
+| `npm run build` | Next.js production compilation & static page generation (63/63 pages) | Clean (exit 0) | **PASS** | 29.3s |
+| `test_comprehensive_pipeline_execution.py` | 365-day real-raster EnKF numerical regression gate (Task `task-4918`) | 1 / 1 | **PASS** | 678.54s (11m 18s) |
+
+All protected historical targets (`main@6edd372`, Pilot PR #9 `71ee1f7`, weather PR #25 `f320e78`, B2B-05 `661f003`, B2B-06 `985b6af`, `findings/layer0.md`, and the master architecture monograph) remain pristine and untouched.
+
 
 ### B07-SEC-04 — Filter and consumption binding
 

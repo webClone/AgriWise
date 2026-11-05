@@ -696,7 +696,7 @@ def test_receipt_not_consumed_on_failed_prediction(keys_ed25519, verifier, monke
     def failing_predict(*args, **kwargs):
         raise RuntimeError("simulated numerical singularity")
 
-    monkeypatch.setattr(filt, "predict", failing_predict)
+    monkeypatch.setattr(ZoneKalmanFilter, "predict", failing_predict)
 
     with pytest.raises(RuntimeError, match="simulated numerical singularity"):
         filt.step(DAY, WEATHER, None, [event_envelope])
