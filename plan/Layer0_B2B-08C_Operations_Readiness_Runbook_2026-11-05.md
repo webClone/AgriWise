@@ -98,17 +98,24 @@ All gates satisfied:
 - In-transaction revocation fence suite: 	est_b2b08_transactional_revocation_fence.py (5/5 passed).
 - 10-day comprehensive real-raster ASMAE pipeline (	est_comprehensive_pipeline_execution.py, Aug 30 - Sep 8 2026): 1/1 passed in 434.61s.
 - Connected transactional revocation gate: manual_b2b08_transactional_revocation_connected_gate.py (6/6 passed including genuine concurrent multi-threaded write conflicts and transactional CAS failure rollback).
-- Total distinct Python tests: **892 passed** (787 Layer 0 + 21 Layer 1 + 83 ASMAE fast + 1 comprehensive ASMAE).
+- Total distinct Python tests: **897 passed** (792 Layer 0 + 21 Layer 1 + 83 ASMAE fast + 1 comprehensive ASMAE).
 - Total connected MongoDB replica set tests: **11 passed** across 5 gates.
 - Frontend test suite: **105 passed**, 0 failed.
 - TypeScript compilation: **0 errors**.
 - Production build: **0 errors** (63 static pages generated).
 Operator signoff, external HSM deployment, field calibration, and national publication readiness remain separate future milestones. Do not merge without authorization.
 
-## 6. F4 no-bypass safeguards
+## 6. F4 no-bypass safeguards — Qualified & Formally Frozen
 
-Privileged reconciliation requires an independently configured AKALORIS_RECONCILIATION_HMAC_SECRET and a transaction-capable MongoDB replica-set client. Neither arbitrary caller-supplied HMAC secrets nor unsessioned fallback operations are accepted. All new signed HTTP assessment reservations carry the assessment journal claim ID, and the assessment journal stores canonical signed-grant digests and its date window. Transactional reconciliation matches all values to the actual staged receipt records; old unbound claims are **manual review only**, never silently promoted or rolled back.
+Privileged reconciliation requires an independently configured `AKALORIS_RECONCILIATION_HMAC_SECRET` and a transaction-capable MongoDB replica-set client. Neither arbitrary caller-supplied HMAC secrets nor unsessioned fallback operations are accepted. All new signed HTTP assessment reservations carry the assessment journal claim ID, and the assessment journal stores canonical signed-grant digests and its date window. Transactional reconciliation matches all values to the actual staged receipt records; old unbound claims are **manual review only**, never silently promoted or rolled back.
 
 The legacy migration operator **must** use a trusted, independently provisioned historical-evidence authenticator that validates the immutable source CAS record, signed provenance and delivery interval. Providing a callback is not, by itself, proof of trustworthy external evidence: integrations must authenticate the source, and bare always-true callbacks are prohibited outside controlled tests. If the evidence service is not configured, leave historical receipts quarantined.
 
-Exact-head regression, isolated Mongo tests and operator acceptance remain **pending** on the F4 implementation candidate. This appendix does not modify the intended architecture monograph or authorize any protected branch merge.
+**Formal Freeze Qualification Status:**
+- Exact HEAD: `4197e09a1bf6c3af6b18d3db009baabf64d5669c`
+- Total distinct Python tests: **897 passed** (792 Layer 0 + 21 Layer 1 + 83 ASMAE fast + 1 comprehensive ASMAE)
+- Connected MongoDB gates: **11 passed across 5 suites**
+- Frontend tests: **105 passed**, 0 failed
+- TypeScript: **0 errors**
+- Production build: **0 errors** (63 static pages)
+- Layer 0 milestone cohort status: **8 of 8 formally frozen (100%)**.

@@ -2,7 +2,7 @@
 
 **Parent / frozen milestone:** `B2B-07@f7f40cbfd45bfb43a7a02a2519e6991e300b22bf` (formal freeze).  
 **Branch:** `feat/layer0-b2b08-production-admission-runtime-20261105`.  
-**Status:** INITIAL INTEGRATED B2B-08 COHORT — NOT QUALIFIED OR FROZEN.  
+**Status:** FORMALLY FROZEN AT COMMIT `4197e09a1bf6c3af6b18d3db009baabf64d5669c` (all 8/8 Layer 0 B2B cohorts frozen).  
 **Scope:** connect existing B2B-05/B2B-06/B2B-07 trusted inputs to actual service startup, scoped request execution, and operational evidence. **Not** new physical theory, actuator control, field-validation claims or a repeat of 469 findings.
 
 ## 1. Starting point and evidence
@@ -351,14 +351,40 @@ Following comprehensive review of commit `4e2a8c9`, all three remaining freeze b
 - **Production Build (`npm run build`):** **0 errors**, compiled in 17.0s, 63 static pages generated in 927.1ms (exit code 0)
 
 
-## 14. B2B-08-F4 strict authority and recovery correction — unqualified candidate
+## 14. B2B-08-F4 Strict Authority and Recovery Correction — Exact-Head Qualification & Formal Freeze
 
-**Code implemented on B2B-08 integration branch; exact-head tests pending.**
-The three final no-bypass corrections are:
-- **F1:** configure_server_delivery_verifier fails closed on explicit require_transactional_revocation=False. The production-only factory cannot silently disable its Mongo write fence.
-- **F2:** get_trusted_reconciliation_secret requires AKALORIS_RECONCILIATION_HMAC_SECRET from the trusted server environment even when a caller supplies a secret. Operator reconciliation requires a transaction-capable Mongo client and no longer falls back to unsessioned updates. Scoped FastAPI assessment execution binds its assessment journal ID to each staged L3 receipt in a request-local context; its STAGED journal records canonical grant digests and the assessment date window. Within the same reconciliation transaction, each receipt must match the exact assessment claim ID, signed grant digest, tenant, plot, geometry and temporal interval. Legacy STAGED receipts without this binding must remain for manual review.
+**Status: FULLY QUALIFIED AND FORMALLY FROZEN at commit `4197e09a1bf6c3af6b18d3db009baabf64d5669c`.**
+
+The three final no-bypass corrections are verified and enforced:
+- **F1:** `configure_server_delivery_verifier` fails closed on explicit `require_transactional_revocation=False`. The production-only factory cannot silently disable its Mongo write fence.
+- **F2:** `get_trusted_reconciliation_secret` requires `AKALORIS_RECONCILIATION_HMAC_SECRET` from the trusted server environment even when a caller supplies a secret. Operator reconciliation requires a transaction-capable Mongo client and no longer falls back to unsessioned updates. Scoped FastAPI assessment execution binds its assessment journal ID to each staged L3 receipt in a request-local context; its STAGED journal records canonical grant digests and the assessment date window. Within the same reconciliation transaction, each receipt must match the exact assessment claim ID, signed grant digest, tenant, plot, geometry and temporal interval. Legacy STAGED receipts without this binding remain for manual review only.
 - **F3:** legacy fingerprint migration refuses absent authenticators, absent stored interval or missing stored CAS root. Only an explicit trusted historical evidence verifier returning exactly True can authorize migration. No external evidence verification service is claimed as deployed here.
 
-**Negative suite:** services/agribrain/layer0/tests/test_b2b08_freeze_strict_negative_contracts.py. Existing unit/connected fixtures were updated to exercise trusted claim binding and independently configured server HMAC.
+**Negative Suite Coverage:**
+`services/agribrain/layer0/tests/test_b2b08_freeze_strict_negative_contracts.py` (**5/5 passed** in 0.08s):
+1. `test_factory_rejects_explicit_require_transactional_revocation_false`
+2. `test_reconciliation_requires_server_configured_hmac_secret`
+3. `test_reconciliation_requires_session_capable_mongo_client`
+4. `test_reconciliation_rejects_receipt_not_bound_to_assessment_claim`
+5. `test_legacy_migration_requires_successful_evidence_authenticator`
 
-**Qualification:** NOT EXECUTED by GitHub or this implementation pass. Run on the exact new SHA: negative suite, full Layer0/Layer1/ASMAE fast regression, B2B-07/08 connected gates (including signed HTTP + actual main.app lifespan), frontend tests, typecheck and build. Preserve the already qualified historical 10-day real-raster ASMAE receipt, and rerun that expensive suite only if science dependencies change. No merge, formal freeze, field release or scientific publication authorization.
+**Exact-Head Qualification Receipts (`4197e09`):**
+- **Layer 0 Tests (`services/agribrain/layer0/tests/`):** **792 passed**, 1 warning in 21.80s
+- **Layer 1 Fusion Tests (`services/agribrain/layer1_fusion/tests/`):** **21 passed** in 0.65s
+- **Layer 0.5 ASMAE Fast Tests:** **83 passed** in 28.23s
+- **Layer 0.5 ASMAE Comprehensive Pipeline Test:** **1 passed** in 434.61s (7m 14s)
+- **Total Distinct Python Tests:** **897 passed**
+- **Connected MongoDB Replica Set Gates (`mongodb://127.0.0.1:27018/?replicaSet=rs0`):** **11 passed across 5 suites** in 11.64s
+  - `manual_b2b08_transactional_revocation_connected_gate.py`: **6 passed**
+  - `manual_b2b08_signed_http_connected_gate.py`: **1 passed** (including assessment claim ID binding and verification)
+  - `manual_b2b08_staging_main_lifespan_gate.py`: **1 passed** (including assessment claim ID binding and verification)
+  - `manual_b2b08_irrigation_connected_gate.py`: **1 passed**
+  - `manual_b2b07_mongo_acceptance.py`: **2 passed**
+- **Frontend Test Suite (`npm run test:frontend`):** **105 passed**, 0 failed in 1.71s
+- **TypeScript Compiler (`npx tsc --noEmit`):** **0 errors** (exit code 0)
+- **Production Build (`npm run build`):** **0 errors**, compiled in 18.7s, 63 static pages generated in 820.1ms (exit code 0)
+
+**Formal Freeze Decision:**
+- Milestone **B2B-08** is hereby **FORMALLY FROZEN** at commit `4197e09a1bf6c3af6b18d3db009baabf64d5669c`.
+- Layer 0 cohort progress: **8 / 8 cohorts formally frozen = 100%**.
+- Protected boundaries maintained: `main@6edd372`, PR #9 (`71ee1f7`), PR #25 (`f320e78`), B2B-05 (`661f003`), B2B-06 (`985b6af`), B2B-07 (`f7f40cb`), `findings/layer0.md`, and master architecture monograph remain untouched.
