@@ -227,8 +227,14 @@ def create_server_layer0_state_engine(
     """
     from services.agribrain.layer0.state_engine import Layer0StateEngine
 
-    verifier = getattr(app.state, "layer0_verified_irrigation_verifier", None)
-    if verified_irrigation_enabled() and verifier is None:
+    enabled = verified_irrigation_enabled()
+    # A disabled deployment never imports an accidental/stale verifier from
+    # mutable app.state, even if another server component assigned one.
+    verifier = (
+        getattr(app.state, "layer0_verified_irrigation_verifier", None)
+        if enabled else None
+    )
+    if enabled and verifier is None:
         raise Layer0AdmissionRequiredError(
             "enabled L3 authority is unavailable in application runtime"
         )
