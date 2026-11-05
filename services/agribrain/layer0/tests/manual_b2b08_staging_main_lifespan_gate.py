@@ -336,6 +336,18 @@ def test_actual_main_app_staging_lifespan(monkeypatch, tmp_path):
             assert db["Layer0ScientificAssessment"].count_documents({"status": "COMMITTED"}) == 1
             assert db["Layer0IrrigationReceiptConsumption"].count_documents({"status": "COMMITTED"}) == 1
             assert db["Layer0IrrigationCommittedState"].count_documents({}) == 1
+            primary_journal = db["Layer0ScientificAssessment"].find_one({
+                "status": "COMMITTED",
+            })
+            assert primary_journal is not None
+            primary_receipt_id = primary_journal["submitted_receipt_ids"][0]
+            primary_receipt = db["Layer0IrrigationReceiptConsumption"].find_one({
+                "_id": primary_receipt_id,
+            })
+            assert primary_receipt["assessment_claim_id"] == primary_journal["_id"]
+            assert primary_receipt["grant_digest"] == primary_journal[
+                "submitted_receipt_digests"
+            ][primary_receipt_id]
             
         # Phase 2: Verify shutdown cleanup
         assert app.state.layer0_verified_irrigation_verifier is None

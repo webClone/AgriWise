@@ -347,6 +347,15 @@ def test_authenticated_http_delivery_mongo_and_cold_restart(monkeypatch, tmp_pat
             refs = committed["result"]["verified_delivery_commits"]
             assert len(refs) == 1 and refs[0]["receipt_ids"] == ["isolated-http-delivery-1"]
             assert len(refs[0]["evidence_fingerprints"]) == 1
+            # Authoritative, server-generated proof that the L3 reservation
+            # belongs to this exact scientific assessment, not just its plot.
+            receipt_doc = db["Layer0IrrigationReceiptConsumption"].find_one({
+                "_id": "isolated-http-delivery-1",
+            })
+            assert receipt_doc["assessment_claim_id"] == committed["_id"]
+            assert receipt_doc["grant_digest"] == committed["submitted_receipt_digests"][
+                "isolated-http-delivery-1"
+            ]
             assert db["Layer0IrrigationReceiptConsumption"].count_documents({
                 "status": "COMMITTED",
             }) == 1
@@ -373,6 +382,11 @@ def test_authenticated_http_delivery_mongo_and_cold_restart(monkeypatch, tmp_pat
                 "status": "COMMITTED",
             }) == 1
             assert db["Layer0IrrigationCommittedState"].count_documents({}) == 1
+            # A cold-recovered assessment cannot steal/rebind the original
+            # physical-delivery reservation's immutable assessment claim.
+            assert db["Layer0IrrigationReceiptConsumption"].find_one({
+                "_id": "isolated-http-delivery-1",
+            })["assessment_claim_id"] == committed["_id"]
             journal = db["Layer0ScientificAssessment"].find_one({
                 "assessment_id": rerun["assessment_id"], "status": "COMMITTED",
             })
