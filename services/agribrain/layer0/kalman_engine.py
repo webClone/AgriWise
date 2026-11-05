@@ -646,7 +646,13 @@ class ZoneKalmanFilter:
                 "q_temporal_contract": candidate._last_temporal_contract.provenance(
                     candidate._last_q_regime, candidate._last_process_q,
                 ),
-                "management_event_evidence": event_dispositions,
+                # Never export privileged in-process admission tokens,
+                # reservation handles, Mongo clients or ephemeral HMAC seals
+                # in scientific provenance or JSON state packages.
+                "management_event_evidence": [
+                    {k: v for k, v in disposition.items() if k != "admitted_token"}
+                    for disposition in event_dispositions
+                ],
                 "physical_management_events_applied": len(admitted_deliveries),
                 "event_forcing_status": (
                     "APPLIED" if admitted_deliveries else "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT"
