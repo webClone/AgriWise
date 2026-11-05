@@ -287,6 +287,32 @@ class VerifiedDeliveredIrrigationGrant:
         )
 
 
+def physical_evidence_fingerprint(
+    grant: VerifiedDeliveredIrrigationGrant,
+) -> str:
+    """Same physical delivery cannot gain additional state authority through
+    a second signer-issued receipt/replay ID. Two genuinely different meter
+    evidence roots or nonidentical delivery intervals remain distinct.
+    """
+    fields = {
+        "tenant_id": grant.tenant_id,
+        "plot_id": grant.plot_id,
+        "zone_id": grant.zone_id,
+        "geometry_hash": grant.geometry_hash,
+        "geometry_version": grant.geometry_version,
+        "source_evidence_cas_root": grant.source_evidence_cas_root,
+        "delivery_start": _parse_iso_utc(grant.delivery_start).isoformat(),
+        "delivery_end": _parse_iso_utc(grant.delivery_end).isoformat(),
+        "delivered_volume_liters": float(grant.delivered_volume_liters).hex(),
+        "wetted_area_m2": float(grant.wetted_area_m2).hex(),
+        "delivery_efficiency_fraction": float(grant.delivery_efficiency_fraction).hex(),
+        "conversion_calibration_id": grant.conversion_calibration_id,
+    }
+    return hashlib.sha256(
+        json.dumps(fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 @dataclass(frozen=True)
 class VerifiedDeliveredIrrigationReceipt:
     """Detached cryptographic receipt enclosing physical delivery grant and signature."""
@@ -330,6 +356,7 @@ class IrrigationIdempotencyReservation:
     geometry_version: int
     day: str
     grant_digest: str = ""
+    evidence_fingerprint: str = ""
     status: str = "STAGED"  # "STAGED", "COMMITTED", "ROLLED_BACK"
 
     def commit(self) -> None:
@@ -358,6 +385,8 @@ class DurableIrrigationIdempotencyStore:
         self._committed_replay_keys: dict[str, dict[str, Any]] = {}
         self._pending_receipts: dict[str, IrrigationIdempotencyReservation] = {}
         self._pending_replay_keys: dict[str, IrrigationIdempotencyReservation] = {}
+        self._pending_evidence_keys: dict[str, IrrigationIdempotencyReservation] = {}
+        self._committed_evidence_keys: dict[str, dict[str, Any]] = {}
         self._load_from_storage()
 
     def _load_from_storage(self) -> None:
@@ -371,6 +400,10 @@ class DurableIrrigationIdempotencyStore:
                 rep_key = rec["replay_key"]
                 self._committed_receipts[rcpt_id] = rec
                 self._committed_replay_keys[rep_key] = rec
+                if rec.get("evidence_fingerprint"):
+                    if rec["evidence_fingerprint"] in self._committed_evidence_keys:
+                        raise RuntimeError("duplicate_physical_evidence_in_history")
+                    self._committed_evidence_keys[rec["evidence_fingerprint"]] = rec
         except Exception as exc:
             raise RuntimeError(f"failed to load idempotency store from {self.storage_path}: {exc}") from exc
 
@@ -454,6 +487,20 @@ class DurableIrrigationIdempotencyStore:
         if consumed:
             raise ValueError(reason)
 
+        evidence_key = physical_evidence_fingerprint(grant)
+        pending = self._pending_evidence_keys.get(evidence_key)
+        committed = self._committed_evidence_keys.get(evidence_key)
+        if pending is not None or (
+            committed is not None
+            and not (
+                allow_historical_recompute
+                and committed.get("receipt_id") == grant.receipt_id
+                and committed.get("replay_key") == grant.replay_idempotency_key
+                and committed.get("grant_digest") == digest
+            )
+        ):
+            raise ValueError("duplicate_physical_delivery_evidence")
+
         reservation = IrrigationIdempotencyReservation(
             store=self,
             receipt_id=grant.receipt_id,
@@ -464,8 +511,10 @@ class DurableIrrigationIdempotencyStore:
             geometry_version=grant.geometry_version,
             day=day,
             grant_digest=digest,
+            evidence_fingerprint=evidence_key,
             status="STAGED",
         )
+        self._pending_evidence_keys[evidence_key] = reservation
         self._pending_receipts[grant.receipt_id] = reservation
         self._pending_replay_keys[grant.replay_idempotency_key] = reservation
         return reservation
@@ -488,10 +537,13 @@ class DurableIrrigationIdempotencyStore:
             raise ValueError("duplicate_receipt_in_transaction")
         if len({r.replay_key for r in unique}) != len(unique):
             raise ValueError("duplicate_replay_key_in_transaction")
+        if len({r.evidence_fingerprint for r in unique}) != len(unique):
+            raise ValueError("duplicate_physical_delivery_evidence")
         if any(not self.reservation_is_live(r) or r.status != "STAGED" for r in unique):
             raise RuntimeError("idempotency_reservation_not_staged")
         candidate = dict(self._committed_receipts)
         replay = dict(self._committed_replay_keys)
+        evidence = dict(self._committed_evidence_keys)
         for res in unique:
             if res.receipt_id in candidate or res.replay_key in replay:
                 # Explicit historical research recomputation retains the same
@@ -507,6 +559,8 @@ class DurableIrrigationIdempotencyStore:
                 ):
                     raise ValueError("historical_recompute_identity_conflict")
                 continue
+            if res.evidence_fingerprint in evidence:
+                raise ValueError("duplicate_physical_delivery_evidence")
             rec = {
                 "receipt_id": res.receipt_id,
                 "replay_key": res.replay_key,
@@ -516,16 +570,20 @@ class DurableIrrigationIdempotencyStore:
                 "geometry_version": res.geometry_version,
                 "day": res.day,
                 "grant_digest": res.grant_digest,
+                "evidence_fingerprint": res.evidence_fingerprint,
                 "committed_at": datetime.now(timezone.utc).isoformat(),
             }
             candidate[res.receipt_id] = rec
             replay[res.replay_key] = rec
+            evidence[res.evidence_fingerprint] = rec
         self._flush_to_storage(candidate)
         self._committed_receipts = candidate
         self._committed_replay_keys = replay
+        self._committed_evidence_keys = evidence
         for res in unique:
             self._pending_receipts.pop(res.receipt_id, None)
             self._pending_replay_keys.pop(res.replay_key, None)
+            self._pending_evidence_keys.pop(res.evidence_fingerprint, None)
             res.status = "COMMITTED"
 
     def _commit_reservation(self, res: IrrigationIdempotencyReservation) -> None:
@@ -535,6 +593,7 @@ class DurableIrrigationIdempotencyStore:
         return (
             self._pending_receipts.get(res.receipt_id) is res
             and self._pending_replay_keys.get(res.replay_key) is res
+            and self._pending_evidence_keys.get(res.evidence_fingerprint) is res
         )
 
     def _rollback_reservation(self, res: IrrigationIdempotencyReservation) -> None:
@@ -542,6 +601,8 @@ class DurableIrrigationIdempotencyStore:
             self._pending_receipts.pop(res.receipt_id, None)
         if self._pending_replay_keys.get(res.replay_key) is res:
             self._pending_replay_keys.pop(res.replay_key, None)
+        if self._pending_evidence_keys.get(res.evidence_fingerprint) is res:
+            self._pending_evidence_keys.pop(res.evidence_fingerprint, None)
 
 
 @dataclass(frozen=True)
