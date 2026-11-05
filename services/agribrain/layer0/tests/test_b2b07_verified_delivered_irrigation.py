@@ -388,7 +388,7 @@ def test_durable_revocation_enforcement(keys_ed25519, verifier, revocation_autho
     t_base = datetime.now(timezone.utc) - timedelta(seconds=5)
     snap1 = DurableRevocationSnapshot(
         revision=1,
-        issued_at=t_base + timedelta(hours=1),
+        issued_at=t_base + timedelta(seconds=1),
         expires_at=t_base + timedelta(days=1),
         key_statuses={
             "l3-meter-key-1": "active",
