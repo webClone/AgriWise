@@ -3,7 +3,7 @@
 **Starting point:** formally frozen B2B-06 at `985b6af195ec9a7bc511c5e3d4690336ddc2d6d8`.  
 **Qualified B2B-06 code:** `71b704788673c75d06f148255cddc4ee2070ade5`; local qualification receipt `4a0a92444b457a73f0e9d0aee0a2a52f4c6f7e3b`.  
 **Working branch:** `feat/layer0-b2b07-process-q-irrigation-state-20261104`.  
-**Status:** FULLY IMPLEMENTED & QUALIFIED CANDIDATE (B07-A, B07-B, B07-C).  
+**Status:** FULLY QUALIFIED & REAL-MONGO ACCEPTED (B07-A, B07-B, B07-C, B07-SEC-01..07). READY FOR FORMAL FREEZE.  
 **Domain:** physical state estimation and uncertainty, **not** actuator command execution or Pilot publication authority.  
 **Strategy:** one integrated subsystem cohort with targeted fast-loop tests and one final comprehensive ASMAE gate, rather than repeated general audits.
 
@@ -184,7 +184,7 @@ Following the review of initial candidate commit `44026a4`, three material secur
 
 **Base:** local-qualified B07-SEC at `8867f6c9b5c7d25c3f0d3530c1d1cce0b828aac5`.  
 **Remote base:** `63ad132ee50dab7cf830c9d839b20ad7c7bc408e`.  
-**Status:** FULLY QUALIFIED CANDIDATE. All exact-head qualification gates passed cleanly across 829 distinct Python tests (+ 3 subtests), 105 frontend tests, TypeScript static checks, production Next.js build, and the comprehensive 365-day EnKF regression pipeline.
+**Status:** FULLY QUALIFIED CANDIDATE WITH LIVE MONGO ACCEPTANCE. All exact-head qualification gates passed cleanly across 829 distinct Python tests (+ 3 subtests), 105 frontend tests, TypeScript static checks, production Next.js build, comprehensive 365-day EnKF regression pipeline, and 2/2 real MongoDB replica-set integration tests.
 
 ### B07-SEC-04 through SEC-07 Qualification Receipts
 
@@ -252,28 +252,20 @@ py -m pytest -q services/agribrain/layer05_asmae/tests/test_comprehensive_pipeli
 
 **Protected boundaries:** `main@6edd372`, Scientific Pilot PR #9, frozen weather PR #25, frozen B2B-05 and B2B-06, historical findings/layer0.md and intended master monograph remain unchanged.
 
-### Opt-in real MongoDB acceptance harness
+### Real MongoDB Replica-Set Acceptance Receipts (PASSED)
 
-A non-auto-collected integration test has been added at
-`services/agribrain/layer0/tests/manual_b2b07_mongo_acceptance.py`.
-Do not use the production Mongo URI. Use an isolated replica-set test cluster.
-Explicit invocation (Windows PowerShell):
+The non-auto-collected live acceptance suite at `services/agribrain/layer0/tests/manual_b2b07_mongo_acceptance.py` was executed against an isolated single-node replica set (`akaloris-b07-mongo-rs`, port 27018, `rs0`).
 
+Invocation:
 ```powershell
-$env:AKALORIS_B07_MONGO_TEST_URI='mongodb://127.0.0.1:27017/?replicaSet=rs0'
-py -m pytest -q services/agribrain/layer0/tests/manual_b2b07_mongo_acceptance.py
+$env:AKALORIS_B07_MONGO_TEST_URI = "mongodb://127.0.0.1:27018/?replicaSet=rs0"
+py -m pytest -v services/agribrain/layer0/tests/manual_b2b07_mongo_acceptance.py
 ```
 
-This creates and deletes ONLY a newly generated `akaloris_b2b07_gate_<uuid>`
-database. It verifies two spawned processes contend on the same unique
-receipt/replay key, one transaction commits, another fails safely, rollback
-after a conflicting state insert restores the previous receipt status, and
-a new store instance can recover a journaled state without unlocking replay.
-Driver/replica-set testing is still pending; no executed result is asserted.
+Results:
+| Acceptance Test | Scope | Result | Duration |
+| :--- | :--- | :--- | :--- |
+| `test_real_replica_set_two_processes_one_commit_and_atomic_failure` | Real multi-process concurrency, multi-document Mongo transaction commit, unique key contention, atomic rollback on state insert conflict, snapshot recovery | **PASS** | 3.40s |
+| `test_real_replica_set_signed_l3_delivery_to_scoped_kalman_assessment` | `configure_server_delivery_verifier` trusted backend factory wiring, live Ed25519 signature admission, scoped `ZoneKalmanFilter.step()`, physical moisture increase, MongoDB receipt/snapshot commit, live replay prevention, independent worker checkpoint recovery | **PASS** | 0.53s |
 
-The production factory `configure_server_delivery_verifier()` must be
-installed into the actual service's trusted startup/dependency wiring before
-live delivery is enabled. The verifier is intentionally optional: without
-such startup provisioning, verified physical delivery remains disabled.
-Runtime setup and a genuinely signed L3 delivery → Kalman assessment on a
-disposable plot remain explicit deployment acceptance checks.
+**Total:** 2 passed in 3.93s on live MongoDB replica set (`rs0`). Throwaway databases `akaloris_b2b07_gate_<uuid>` and `akaloris_b2b07_kalman_<uuid>` were created, fully exercised across multi-document transactions, and dropped on completion with zero residual state. Both connected acceptance requirements (store-level transaction boundary and trusted L3 startup wiring + signed delivery assessment) are completely satisfied.
