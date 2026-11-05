@@ -1234,3 +1234,74 @@ def test_shared_mongo_recompute_requires_server_approval_and_identical_receipt(
             counterfeit, expected_day=DAY, expected_plot_id="plot-A",
             expected_zone_id="plot", allow_historical_recompute=True,
         )
+
+
+
+def test_authorized_mongo_historical_recompute_is_read_only_and_has_no_token_leak(
+    keys_ed25519, registry, revocation_authority,
+):
+    from services.agribrain.layer0.mongo_irrigation_idempotency import (
+        MongoIrrigationIdempotencyStore,
+    )
+    db = _FakeMongoDatabase()
+    priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-ro-historical", replay_key="sec-ro-r"),
+    )
+    original_store = MongoIrrigationIdempotencyStore(db)
+    initial = _scoped_filter_for_sec(
+        VerifiedDeliveredIrrigationVerifier(registry, revocation_authority, original_store),
+    )
+    initial.step(DAY, WEATHER, None, [_delivery_event_for_sec(receipt, "ro-first")])
+
+    history_store = MongoIrrigationIdempotencyStore(
+        db, historical_recompute_authorizer=lambda grant, day: (
+            grant.receipt_id == "sec-ro-historical" and day == DAY
+        ),
+    )
+    v = VerifiedDeliveredIrrigationVerifier(registry, revocation_authority, history_store)
+    historical_filter = _scoped_filter_for_sec(v)
+    historical_filter.allow_historical_recompute = True
+    prior = historical_filter.state.clone()
+    prior_P = [list(row) for row in historical_filter.covariance.P]
+    result = historical_filter.step(
+        DAY, WEATHER, None, [_delivery_event_for_sec(receipt, "ro-again")],
+    )
+    assert result["historical_recompute_readonly"] is True
+    assert result["historical_recomputed_state"]["day"] == DAY
+    assert result["physical_management_events_applied"] == 1
+    assert all(
+        "admitted_token" not in item for item in result["management_event_evidence"]
+    )
+    assert historical_filter.state.day == prior.day
+    assert historical_filter.state.values == prior.values
+    assert historical_filter.covariance.P == prior_P
+    # Original transaction remains the ONLY committed state for that day.
+    assert len(db["Layer0IrrigationCommittedState"].rows) == 1
+
+
+def test_live_delivery_provenance_serializes_without_hmac_or_mongo_handles(
+    keys_ed25519, registry, revocation_authority,
+):
+    import json
+    from services.agribrain.layer0.mongo_irrigation_idempotency import (
+        MongoIrrigationIdempotencyStore,
+    )
+    db = _FakeMongoDatabase()
+    v = VerifiedDeliveredIrrigationVerifier(
+        registry, revocation_authority, MongoIrrigationIdempotencyStore(db),
+    )
+    priv, _ = keys_ed25519
+    receipt = make_signed_receipt(
+        priv, valid_grant_dict(receipt_id="sec-json-safe", replay_key="sec-json-r"),
+    )
+    f = _scoped_filter_for_sec(v)
+    result = f.step(DAY, WEATHER, None, [_delivery_event_for_sec(receipt, "json-e")])
+    assert result["physical_management_events_applied"] == 1
+    assert result["scientific_publication_authorized"] is False
+    assert result["actuator_control_authorized"] is False
+    assert "admitted_token" not in str(result)
+    assert "_ADMISSION_SECRET" not in str(result)
+    # The scientific state provenance is JSON-safe, not an object containing
+    # a crypto verifier, session, privileged token or private HMAC seal.
+    assert isinstance(json.dumps(result, default=str), str)
