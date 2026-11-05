@@ -25,7 +25,8 @@ import os
 from services.agribrain.layer0.source_package import Layer0StatePackage, Layer0SourcePackage
 from services.agribrain.layer0.observation_packet import DataStatus
 from services.agribrain.layer0.production_admission import (
-    Layer0AdmissionRequiredError, require_trusted_verifier, signed_inputs_required,
+    Layer0AdmissionRequiredError, require_trusted_verifier,
+    require_trusted_delivery_verifier, signed_inputs_required,
 )
 from services.agribrain.layer0.positive_observation_admission import (
     observation_packet_digest, PositiveObservationAdmissionVerifier,
@@ -99,6 +100,7 @@ class Layer0StateEngine:
             )
         self._positive_observation_admission_verifier = positive_admission_verifier
         # Trusted backend infrastructure only; never supplied by packet JSON.
+        require_trusted_delivery_verifier(verified_delivery_verifier)
         self._plot_ownership_store = plot_ownership_store
         self._principal_provider = principal_provider
         self._verified_delivery_verifier = verified_delivery_verifier
@@ -159,6 +161,7 @@ class Layer0StateEngine:
         # carry independently verified packet receipts. For scientific
         # production use, only run_from_packets may provide the private
         # per-instance capability after it gates each input.
+        require_trusted_delivery_verifier(self._verified_delivery_verifier)
         if (
             signed_inputs_required()
             or os.getenv("AKALORIS_LAYER0_REQUIRE_PLOT_SCOPE", "").lower() in ("1", "true", "yes")
@@ -364,6 +367,7 @@ class Layer0StateEngine:
         # in __init__: long-lived workers can receive a hardened deployment
         # configuration after an estimator instance was constructed.
         require_trusted_verifier(self._positive_observation_admission_verifier)
+        require_trusted_delivery_verifier(self._verified_delivery_verifier)
         if (
             signed_inputs_required()
             and not isinstance(

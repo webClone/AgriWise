@@ -27,6 +27,9 @@ from services.agribrain.layer0.event_forcing_admission import (
 from services.agribrain.layer0.temporal_process_noise import (
     TemporalGapContract, validate_dt_days,
 )
+from services.agribrain.layer0.verified_irrigation_contract import (
+    AdmittedDeliveredIrrigation,
+)
 
 
 def _qualified_weather_for_prediction(weather: Optional[Dict[str, float]]):
@@ -196,18 +199,19 @@ class ZoneKalmanFilter:
         """
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
-        admitted_deliveries = []
+        admitted_deliveries: List[AdmittedDeliveredIrrigation] = []
         if events:
             for evt in events:
-                if hasattr(evt, "net_infiltrated_depth_mm") and hasattr(evt, "depth_uncertainty_sigma_mm"):
-                    admitted_deliveries.append(evt)
-                elif isinstance(evt, dict) and evt.get("physical_delivery_verified") is True and evt.get("state_update_allowed") is True:
+                if (
+                    isinstance(evt, AdmittedDeliveredIrrigation)
+                    and evt.is_authoritative()
+                    and evt.scientific_publication_authorized is False
+                    and evt.actuator_control_authorized is False
+                ):
                     admitted_deliveries.append(evt)
                 else:
-                    # Direct raw event forcing bypasses the canonical evidence router.
-                    # No trusted L3 infiltration operator is bound yet. Even an event
-                    # with role='VERIFIED_DELIVERY' in an ordinary dict is not a
-                    # verified execution receipt. Reject before any state mutation.
+                    # Direct raw event forcing or unsealed/tampered admission tokens
+                    # are strictly rejected before any state or covariance mutation.
                     raise ValueError("physical management forcing requires trusted L3 admission")
 
         gap = TemporalGapContract.between(self.state.day, day)
@@ -216,8 +220,8 @@ class ZoneKalmanFilter:
         if admitted_deliveries:
             whc_top = self.process_model.params["whc_mm_per_m"] * 0.1
             for d in admitted_deliveries:
-                depth = getattr(d, "net_infiltrated_depth_mm", None) or d.get("net_infiltrated_depth_mm", 0.0)
-                sigma = getattr(d, "depth_uncertainty_sigma_mm", None) or d.get("depth_uncertainty_sigma_mm", 0.0)
+                depth = d.net_infiltrated_depth_mm
+                sigma = d.depth_uncertainty_sigma_mm
                 net_irrigation_mm += depth
                 irrigation_variance += (sigma / max(whc_top, 0.01)) ** 2
 
@@ -261,12 +265,15 @@ class ZoneKalmanFilter:
         if not self.initialized:
             raise RuntimeError("Filter not initialized. Call initialize() first.")
 
-        admitted_deliveries = []
+        admitted_deliveries: List[AdmittedDeliveredIrrigation] = []
         if events:
             for evt in events:
-                if hasattr(evt, "net_infiltrated_depth_mm") and hasattr(evt, "depth_uncertainty_sigma_mm"):
-                    admitted_deliveries.append(evt)
-                elif isinstance(evt, dict) and evt.get("physical_delivery_verified") is True and evt.get("state_update_allowed") is True:
+                if (
+                    isinstance(evt, AdmittedDeliveredIrrigation)
+                    and evt.is_authoritative()
+                    and evt.scientific_publication_authorized is False
+                    and evt.actuator_control_authorized is False
+                ):
                     admitted_deliveries.append(evt)
                 else:
                     raise ValueError("physical management forcing requires trusted L3 admission")
@@ -277,8 +284,8 @@ class ZoneKalmanFilter:
         if admitted_deliveries:
             whc_top = self.process_model.params["whc_mm_per_m"] * 0.1
             for d in admitted_deliveries:
-                depth = getattr(d, "net_infiltrated_depth_mm", None) or d.get("net_infiltrated_depth_mm", 0.0)
-                sigma = getattr(d, "depth_uncertainty_sigma_mm", None) or d.get("depth_uncertainty_sigma_mm", 0.0)
+                depth = d.net_infiltrated_depth_mm
+                sigma = d.depth_uncertainty_sigma_mm
                 net_irrigation_mm += depth
                 irrigation_variance += (sigma / max(whc_top, 0.01)) ** 2
 
@@ -503,6 +510,7 @@ class ZoneKalmanFilter:
         # balance. A separate trusted L3 net-infiltration operator/receipt is
         # needed for physical forcing (L0-02C3). This rule applies equally
         # to weather-present and missing-weather days.
+        staged_seen_ids = set(self._event_evidence_seen)
         event_dispositions = classify_management_event_evidence(
             events,
             day=day,
@@ -512,12 +520,15 @@ class ZoneKalmanFilter:
             geometry_version=self.geometry_version,
             tenant_id=self.tenant_id,
             cutoff=self.evidence_cutoff,
-            seen_ids=self._event_evidence_seen,
+            seen_ids=staged_seen_ids,
             delivery_verifier=self.delivery_verifier,
+            allow_historical_recompute=getattr(self, "allow_historical_recompute", False),
         )
         admitted_deliveries = [
-            d for d in event_dispositions
-            if d.get("physical_delivery_verified") is True and d.get("state_update_allowed") is True
+            d["admitted_token"] for d in event_dispositions
+            if d.get("physical_delivery_verified") is True
+            and d.get("state_update_allowed") is True
+            and "admitted_token" in d
         ]
         gap = TemporalGapContract.between(self.state.day, day)
         qualified_weather = _qualified_weather_for_prediction(weather)
@@ -535,25 +546,37 @@ class ZoneKalmanFilter:
             else ("PARTIAL" if weather else "MISSING")
         )
 
-        # A truthy but incomplete weather dictionary is NOT a measured day.
-        # On degraded forcing, do not invent temperature or rainfall.
-        if qualified_weather is None:
-            self.predict_missing_weather(day, admitted_deliveries)
-        else:
-            self.predict(day, qualified_weather, admitted_deliveries)
-        
-        # Update (if observations exist)
         source_weights = {}
         conflicts = []
-        
-        if observations:
-            source_weights = self.update(observations)
-        
-        # Store history
-        state_copy = self.state.clone()
-        state_copy.day = day
-        self.state_history.append(state_copy)
-        
+
+        # A truthy but incomplete weather dictionary is NOT a measured day.
+        # On degraded forcing, do not invent temperature or rainfall.
+        # Atomic two-phase execution: stage reservations, then rollback if prediction or update fails.
+        try:
+            if qualified_weather is None:
+                self.predict_missing_weather(day, admitted_deliveries)
+            else:
+                self.predict(day, qualified_weather, admitted_deliveries)
+
+            # Update (if observations exist)
+            if observations:
+                source_weights = self.update(observations)
+
+            # Store history
+            state_copy = self.state.clone()
+            state_copy.day = day
+            self.state_history.append(state_copy)
+
+            # State prediction and update succeeded; commit idempotency reservations and seen event IDs
+            self._event_evidence_seen.update(staged_seen_ids)
+            for tok in admitted_deliveries:
+                tok.commit_idempotency()
+        except Exception:
+            # Numerical prediction, differentiation or covariance failed; roll back reservations
+            for tok in admitted_deliveries:
+                tok.rollback_idempotency()
+            raise
+
         # Build provenance record
         provenance = {
             "day": day,
@@ -578,8 +601,7 @@ class ZoneKalmanFilter:
                 "APPLIED" if admitted_deliveries else "DEFERRED_UNTIL_TRUSTED_L3_SUPPORT"
             ),
             "verified_delivery_receipts": [
-                (getattr(d, "receipt_id", None) or d.get("receipt_id", ""))
-                for d in admitted_deliveries
+                tok.receipt_id for tok in admitted_deliveries
             ],
             "scientific_publication_authorized": False,
             "actuator_control_authorized": False,

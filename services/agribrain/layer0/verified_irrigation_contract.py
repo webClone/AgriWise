@@ -27,7 +27,12 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
+import hmac
+import json
 import math
+import os
+from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, Set, Tuple
 
 from cryptography.exceptions import InvalidSignature
@@ -48,6 +53,27 @@ from services.agribrain.layer0.v3_kms_signed_issuer import (
 VERIFIED_IRRIGATION_DOMAIN = "akaloris/layer0/verified-delivered-irrigation/v3"
 VERIFIED_IRRIGATION_PURPOSE = "physical_delivered_irrigation_forcing"
 _ALLOWED_IRRIGATION_ALGORITHMS = frozenset(("Ed25519", "ES256"))
+
+_ADMISSION_SECRET: bytes = os.urandom(32)
+
+
+def _compute_admission_seal(
+    receipt_id: str,
+    net_infiltrated_depth_mm: float,
+    depth_uncertainty_sigma_mm: float,
+    replay_idempotency_key: str,
+    tenant_id: str,
+    plot_id: str,
+    zone_id: str,
+    geometry_hash: str,
+    geometry_version: int,
+) -> str:
+    msg = (
+        f"{receipt_id}:{net_infiltrated_depth_mm:.8f}:{depth_uncertainty_sigma_mm:.8f}:"
+        f"{replay_idempotency_key}:{tenant_id}:{plot_id}:{zone_id}:"
+        f"{geometry_hash}:{geometry_version}"
+    )
+    return hmac.new(_ADMISSION_SECRET, msg.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _parse_iso_utc(value: Any) -> datetime:
@@ -273,6 +299,166 @@ class VerifiedDeliveredIrrigationReceipt:
         )
 
 
+@dataclass
+class IrrigationIdempotencyReservation:
+    """Staged two-phase reservation for a verified delivered irrigation receipt."""
+    store: DurableIrrigationIdempotencyStore
+    receipt_id: str
+    replay_key: str
+    tenant_id: str
+    plot_id: str
+    geometry_hash: str
+    geometry_version: int
+    day: str
+    status: str = "STAGED"  # "STAGED", "COMMITTED", "ROLLED_BACK"
+
+    def commit(self) -> None:
+        if self.status == "COMMITTED":
+            return
+        if self.status == "ROLLED_BACK":
+            raise RuntimeError("cannot commit a rolled back reservation")
+        self.store._commit_reservation(self)
+        self.status = "COMMITTED"
+
+    def rollback(self) -> None:
+        if self.status == "ROLLED_BACK":
+            return
+        if self.status == "COMMITTED":
+            raise RuntimeError("cannot roll back an already committed reservation")
+        self.store._rollback_reservation(self)
+        self.status = "ROLLED_BACK"
+
+
+class DurableIrrigationIdempotencyStore:
+    """Durable receipt and replay fencing for physical delivered irrigation."""
+
+    def __init__(self, storage_path: Optional[str | Path] = None) -> None:
+        self.storage_path = Path(storage_path) if storage_path is not None else None
+        self._committed_receipts: dict[str, dict[str, Any]] = {}
+        self._committed_replay_keys: dict[str, dict[str, Any]] = {}
+        self._pending_receipts: dict[str, IrrigationIdempotencyReservation] = {}
+        self._pending_replay_keys: dict[str, IrrigationIdempotencyReservation] = {}
+        self._load_from_storage()
+
+    def _load_from_storage(self) -> None:
+        if self.storage_path is None or not self.storage_path.is_file():
+            return
+        try:
+            raw = self.storage_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            for rec in data.get("committed", []):
+                rcpt_id = rec["receipt_id"]
+                rep_key = rec["replay_key"]
+                self._committed_receipts[rcpt_id] = rec
+                self._committed_replay_keys[rep_key] = rec
+        except Exception as exc:
+            raise RuntimeError(f"failed to load idempotency store from {self.storage_path}: {exc}") from exc
+
+    def _flush_to_storage(self) -> None:
+        if self.storage_path is None:
+            return
+        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "version": "1.0",
+            "committed": list(self._committed_receipts.values()),
+        }
+        raw = json.dumps(data, indent=2, sort_keys=True)
+        tmp_path = self.storage_path.with_suffix(f".tmp.{os.getpid()}.{os.urandom(4).hex()}")
+        tmp_path.write_text(raw, encoding="utf-8")
+        tmp_path.replace(self.storage_path)
+
+    def is_consumed(
+        self,
+        receipt_id: str,
+        replay_key: str,
+        *,
+        day: str,
+        plot_id: str,
+        geometry_hash: str,
+        geometry_version: int,
+        tenant_id: str,
+        allow_historical_recompute: bool = False,
+    ) -> tuple[bool, str]:
+        if replay_key in self._pending_replay_keys:
+            return True, "duplicate_replay_key"
+        if receipt_id in self._pending_receipts:
+            return True, "duplicate_receipt_id"
+
+        rec = self._committed_replay_keys.get(replay_key) or self._committed_receipts.get(receipt_id)
+        if rec is not None:
+            if allow_historical_recompute:
+                matches_scope = (
+                    rec.get("plot_id") == plot_id
+                    and rec.get("geometry_hash") == geometry_hash
+                    and rec.get("geometry_version") == geometry_version
+                    and rec.get("tenant_id") == tenant_id
+                    and rec.get("day") == day
+                )
+                if matches_scope:
+                    return False, ""
+                return True, "duplicate_replay_key_cross_scope_conflict"
+            if replay_key in self._committed_replay_keys:
+                return True, "duplicate_replay_key"
+            return True, "duplicate_receipt_id"
+
+        return False, ""
+
+    def stage_reservation(
+        self,
+        grant: VerifiedDeliveredIrrigationGrant,
+        day: str,
+        allow_historical_recompute: bool = False,
+    ) -> IrrigationIdempotencyReservation:
+        consumed, reason = self.is_consumed(
+            grant.receipt_id,
+            grant.replay_idempotency_key,
+            day=day,
+            plot_id=grant.plot_id,
+            geometry_hash=grant.geometry_hash,
+            geometry_version=grant.geometry_version,
+            tenant_id=grant.tenant_id,
+            allow_historical_recompute=allow_historical_recompute,
+        )
+        if consumed:
+            raise ValueError(reason)
+
+        reservation = IrrigationIdempotencyReservation(
+            store=self,
+            receipt_id=grant.receipt_id,
+            replay_key=grant.replay_idempotency_key,
+            tenant_id=grant.tenant_id,
+            plot_id=grant.plot_id,
+            geometry_hash=grant.geometry_hash,
+            geometry_version=grant.geometry_version,
+            day=day,
+            status="STAGED",
+        )
+        self._pending_receipts[grant.receipt_id] = reservation
+        self._pending_replay_keys[grant.replay_idempotency_key] = reservation
+        return reservation
+
+    def _commit_reservation(self, res: IrrigationIdempotencyReservation) -> None:
+        self._pending_receipts.pop(res.receipt_id, None)
+        self._pending_replay_keys.pop(res.replay_key, None)
+        rec = {
+            "receipt_id": res.receipt_id,
+            "replay_key": res.replay_key,
+            "tenant_id": res.tenant_id,
+            "plot_id": res.plot_id,
+            "geometry_hash": res.geometry_hash,
+            "geometry_version": res.geometry_version,
+            "day": res.day,
+            "committed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._committed_receipts[res.receipt_id] = rec
+        self._committed_replay_keys[res.replay_key] = rec
+        self._flush_to_storage()
+
+    def _rollback_reservation(self, res: IrrigationIdempotencyReservation) -> None:
+        self._pending_receipts.pop(res.receipt_id, None)
+        self._pending_replay_keys.pop(res.replay_key, None)
+
+
 @dataclass(frozen=True)
 class AdmittedDeliveredIrrigation:
     """Authoritative output of successful physical delivery admission."""
@@ -291,6 +477,37 @@ class AdmittedDeliveredIrrigation:
     scientific_publication_authorized: bool = False
     actuator_control_authorized: bool = False
     provenance: dict[str, Any] = field(default_factory=dict)
+    _admission_seal: str = field(default="", repr=False)
+    _reservation: Optional[IrrigationIdempotencyReservation] = field(default=None, repr=False)
+
+    def is_authoritative(self) -> bool:
+        if self.scientific_publication_authorized is not False:
+            return False
+        if self.actuator_control_authorized is not False:
+            return False
+        if not self._admission_seal:
+            return False
+        expected_seal = _compute_admission_seal(
+            receipt_id=self.receipt_id,
+            net_infiltrated_depth_mm=self.net_infiltrated_depth_mm,
+            depth_uncertainty_sigma_mm=self.depth_uncertainty_sigma_mm,
+            replay_idempotency_key=self.replay_idempotency_key,
+            tenant_id=self.tenant_id,
+            plot_id=self.plot_id,
+            zone_id=self.zone_id,
+            geometry_hash=self.geometry_hash,
+            geometry_version=self.geometry_version,
+        )
+        return hmac.compare_digest(self._admission_seal, expected_seal)
+
+    def commit_idempotency(self) -> None:
+        if self._reservation is not None:
+            self._reservation.commit()
+
+    def rollback_idempotency(self) -> None:
+        if self._reservation is not None:
+            self._reservation.rollback()
+
 
 
 class VerifiedDeliveredIrrigationSigner:
@@ -336,12 +553,24 @@ class VerifiedDeliveredIrrigationVerifier:
     def __init__(
         self,
         public_key_registry: KmsPublicKeyRegistry,
-        revocation_authority: Optional[DurableRevocationAuthority] = None,
+        revocation_authority: DurableRevocationAuthority,
+        idempotency_store: Optional[DurableIrrigationIdempotencyStore] = None,
     ) -> None:
+        if revocation_authority is None:
+            raise ValueError("revocation_authority is required")
+        if not isinstance(revocation_authority, DurableRevocationAuthority):
+            raise TypeError("revocation_authority must be an instance of DurableRevocationAuthority")
         self.public_key_registry = public_key_registry
         self.revocation_authority = revocation_authority
-        self.seen_replay_keys: Set[str] = set()
-        self.seen_receipt_ids: Set[str] = set()
+        self.idempotency_store = idempotency_store or DurableIrrigationIdempotencyStore()
+
+    @property
+    def seen_replay_keys(self) -> Set[str]:
+        return set(self.idempotency_store._committed_replay_keys) | set(self.idempotency_store._pending_replay_keys)
+
+    @property
+    def seen_receipt_ids(self) -> Set[str]:
+        return set(self.idempotency_store._committed_receipts) | set(self.idempotency_store._pending_receipts)
 
     def verify_and_admit(
         self,
@@ -354,6 +583,7 @@ class VerifiedDeliveredIrrigationVerifier:
         expected_geometry_version: Optional[int] = None,
         expected_tenant_id: str = "",
         cutoff: Optional[datetime] = None,
+        allow_historical_recompute: bool = False,
     ) -> AdmittedDeliveredIrrigation:
         """Verify detached L3 delivery receipt and admit physical forcing."""
         receipt = (
@@ -433,16 +663,27 @@ class VerifiedDeliveredIrrigationVerifier:
         if delivery_end_dt > expires_at_dt:
             raise ValueError("receipt_expired")
 
-        # 6. Replay & Idempotency fencing
-        if grant.replay_idempotency_key in self.seen_replay_keys:
-            raise ValueError("duplicate_replay_key")
-        if grant.receipt_id in self.seen_receipt_ids:
-            raise ValueError("duplicate_receipt_id")
+        # 6. Replay & Idempotency fencing (two-phase reservation)
+        reservation = self.idempotency_store.stage_reservation(
+            grant,
+            delivery_day,
+            allow_historical_recompute=allow_historical_recompute,
+        )
 
-        self.seen_replay_keys.add(grant.replay_idempotency_key)
-        self.seen_receipt_ids.add(grant.receipt_id)
+        # 7. Unforgeable process-secret admission seal
+        admission_seal = _compute_admission_seal(
+            receipt_id=grant.receipt_id,
+            net_infiltrated_depth_mm=grant.net_infiltrated_depth_mm,
+            depth_uncertainty_sigma_mm=grant.depth_uncertainty_sigma_mm,
+            replay_idempotency_key=grant.replay_idempotency_key,
+            tenant_id=grant.tenant_id,
+            plot_id=grant.plot_id,
+            zone_id=grant.zone_id,
+            geometry_hash=grant.geometry_hash,
+            geometry_version=grant.geometry_version,
+        )
 
-        # 7. Admitted token
+        # 8. Admitted token
         return AdmittedDeliveredIrrigation(
             receipt_id=grant.receipt_id,
             net_infiltrated_depth_mm=grant.net_infiltrated_depth_mm,
@@ -468,4 +709,6 @@ class VerifiedDeliveredIrrigationVerifier:
                 "delivery_efficiency_fraction": grant.delivery_efficiency_fraction,
                 "revocation_revision_anchor": grant.revocation_revision_anchor,
             },
+            _admission_seal=admission_seal,
+            _reservation=reservation,
         )

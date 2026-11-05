@@ -508,7 +508,7 @@ class ProcessModel:
         irrigation_mm = 0.0
         if events:
             for evt in events:
-                if evt.get("event_type") == "irrigation":
+                if isinstance(evt, dict) and evt.get("event_type") == "irrigation":
                     irrigation_mm += evt.get("amount_mm", 0.0)
         
         water_in = rain_mm + irrigation_mm + net_irrigation_mm

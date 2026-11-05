@@ -53,6 +53,7 @@ def classify_management_event_evidence(
     cutoff: Optional[datetime] = None,
     seen_ids: Optional[Set[str]] = None,
     delivery_verifier: Optional[Any] = None,
+    allow_historical_recompute: bool = False,
 ) -> List[Dict[str, Any]]:
     """Classify an event once per scoped run without granting physical force.
 
@@ -158,6 +159,7 @@ def classify_management_event_evidence(
                             expected_geometry_version=geometry_version,
                             expected_tenant_id=tenant_id,
                             cutoff=cutoff,
+                            allow_historical_recompute=allow_historical_recompute,
                         )
                         decision.update(
                             status="ADMITTED",
@@ -170,6 +172,7 @@ def classify_management_event_evidence(
                             replay_idempotency_key=admitted.replay_idempotency_key,
                             scientific_publication_authorized=False,
                             actuator_control_authorized=False,
+                            admitted_token=admitted,
                         )
                     except Exception as exc:
                         decision.update(

@@ -140,3 +140,42 @@ The entire B2B-07 cohort (Workstreams B07-A, B07-B, B07-C) has been implemented 
 | `test_comprehensive_pipeline_execution.py` | 365-day real-raster EnKF numerical regression gate (Task `task-4434`) | 1 / 1 | **PASS** | 632.91s (10m 32s) |
 
 All protected historical targets (`main@6edd372`, Pilot PR #9 `71ee1f7`, weather PR #25 `f320e78`, B2B-05 `661f003`, B2B-06 `985b6af`, `findings/layer0.md`, and the master architecture monograph) remain pristine and untouched.
+
+
+## 6. B07-SEC Security Enhancements & Closure Receipts
+
+Following the review of initial candidate commit `44026a4`, three material security findings were identified and resolved in the B07-SEC batch:
+
+### Findings Addressed and Resolved
+
+1. **B07-SEC-01 (P1) — Direct Kalman physical forcing bypass:**
+   - **Vulnerability:** `ZoneKalmanFilter.predict()` and `predict_missing_weather()` accepted dictionaries containing `physical_delivery_verified=True` and `state_update_allowed=True`, permitting direct callers to bypass L3 cryptographic verification.
+   - **Resolution:**
+     - Introduced an unforgeable process-secret HMAC seal (`_compute_admission_seal`) calculated with an ephemeral 32-byte secret (`_ADMISSION_SECRET`).
+     - Added `is_authoritative() -> bool` on `AdmittedDeliveredIrrigation` to assert cryptographic seal validity and verify that `scientific_publication_authorized` and `actuator_control_authorized` are both strictly `False`.
+     - `ZoneKalmanFilter.predict()` and `predict_missing_weather()` reject all caller-supplied dictionaries (even if claiming pre-qualified status) and unsealed/tampered objects with `ValueError("physical management forcing requires trusted L3 admission")`.
+
+2. **B07-SEC-02 (P1) — Mandatory delivery revocation authority & trusted verifier typing:**
+   - **Vulnerability:** `VerifiedDeliveredIrrigationVerifier` accepted `revocation_authority=None`, and `Layer0StateEngine` accepted arbitrary injected verifier objects without trusted type checking.
+   - **Resolution:**
+     - `VerifiedDeliveredIrrigationVerifier.__init__` strictly requires `revocation_authority: DurableRevocationAuthority`. Passing `None` raises `ValueError`, and non-instance types raise `TypeError`.
+     - Added `require_trusted_delivery_verifier` in `production_admission.py` and enforced it across `Layer0StateEngine.__init__`, `run()`, and `run_from_packets()`. Untrusted types or verifiers lacking active durable revocation fail closed with `Layer0AdmissionRequiredError`.
+
+3. **B07-SEC-03 (P2) — Durable idempotency store with two-phase staged reservations:**
+   - **Vulnerability:** Replay protection was maintained via process-local Python sets, vulnerable to replay across process restarts, and receipts were prematurely consumed upon initial admission even if subsequent numerical Kalman prediction failed.
+   - **Resolution:**
+     - Introduced `DurableIrrigationIdempotencyStore(storage_path=...)` supporting persistent atomic disk storage of committed records.
+     - Implemented two-phase staged reservations (`stage_reservation` -> `commit` / `rollback` via `IrrigationIdempotencyReservation`).
+     - `ZoneKalmanFilter.step()` stages reservations during event classification. If numerical prediction, Jacobian calculation, or covariance update encounters an exception, all staged reservations and newly seen event identities are rolled back, preserving receipts for subsequent retry.
+     - Fully supports authorized historical recomputation (`allow_historical_recompute=True`) when scope (plot, geometry hash, version, tenant, and day) is identical, while strictly rejecting cross-scope replay conflicts.
+
+### B07-SEC Qualification Receipts
+
+| Test Suite | Scope | Target | Result | Duration |
+| :--- | :--- | :--- | :--- | :--- |
+| `test_b2b07_verified_delivered_irrigation.py` | B07-SEC direct bypass rejection, unsealed token rejection, mandatory revocation, durable replay fencing, atomic rollback, historical recompute | 30 / 30 | **PASS** | 0.66s |
+| `services/agribrain/layer0/tests/` | Complete Layer 0 fast test suite | 704 / 704 | **PASS** | 26.97s |
+| `services/agribrain/layer1_fusion/tests/` | Layer 1 spatial & temporal fusion | 21 / 21 | **PASS** | 0.68s |
+| `services/agribrain/layer05_asmae/tests/` (fast) | ASMAE historical assimilation & diagnostics | 83 passed, 3 subtests | **PASS** | 50.89s |
+| `npm run test:frontend` | Frontend security, plot lifecycle, telemetry isolation | 105 / 105 | **PASS** | 1.55s |
+| `test_comprehensive_pipeline_execution.py` | 365-day real-raster EnKF numerical regression gate (Task `task-4700`) | 1 / 1 | **PASS** | 562.34s (9m 22s) |

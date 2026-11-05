@@ -87,6 +87,30 @@ def require_trusted_verifier(verifier: object) -> None:
         )
 
 
+def require_trusted_delivery_verifier(verifier: object) -> None:
+    """Reject untrusted physical delivery verifier or missing live revocation authority."""
+    if verifier is None:
+        return
+    from services.agribrain.layer0.verified_irrigation_contract import (
+        VerifiedDeliveredIrrigationVerifier,
+    )
+    from services.agribrain.layer0.durable_revocation_authority import (
+        DurableRevocationAuthority,
+    )
+
+    if not isinstance(verifier, VerifiedDeliveredIrrigationVerifier):
+        raise Layer0AdmissionRequiredError(
+            "Delivered irrigation verifier must be an authoritative VerifiedDeliveredIrrigationVerifier"
+        )
+    if (
+        verifier.revocation_authority is None
+        or not isinstance(verifier.revocation_authority, DurableRevocationAuthority)
+    ):
+        raise Layer0AdmissionRequiredError(
+            "Authoritative delivered irrigation verifier requires active durable revocation authority"
+        )
+
+
 def load_server_issuer_verifier():
     """Read a backend-only issuer registry provisioned via deployment secrets.
 
