@@ -532,6 +532,14 @@ class ZoneKalmanFilter:
         
         Returns provenance record for this day.
         """
+        # Direct filter use must obey the same trusted production verifier
+        # policy as Layer0StateEngine, rather than using a weaker entrypoint.
+        if self.delivery_verifier is not None:
+            from services.agribrain.layer0.production_admission import (
+                require_trusted_delivery_verifier,
+            )
+            require_trusted_delivery_verifier(self.delivery_verifier)
+
         # C1/C2: classify and retain management evidence, but NEVER pass
         # user-declared/planned/claimed-verified events into the proxy water
         # balance. A separate trusted L3 net-infiltration operator/receipt is
@@ -698,9 +706,19 @@ class ZoneKalmanFilter:
                 reservations[0].store.commit_many(
                     reservations, state_snapshot=snapshot,
                 )
-                # At this point durability is confirmed and the detached
-                # candidate may become the live filter in one Python step.
-                self.__dict__.update(candidate.__dict__)
+                if any(getattr(r, "historical_readonly", False) for r in reservations):
+                    # A specifically authorized historical calculation is an
+                    # isolated scientific result, NOT a mutation of the live
+                    # filter nor a new receipt consumption. The original
+                    # committed snapshot remains untouched.
+                    provenance["historical_recompute_readonly"] = True
+                    provenance["historical_recomputed_state"] = (
+                        candidate.state.to_dict()
+                    )
+                else:
+                    # At this point durability is confirmed and the detached
+                    # candidate may become the live filter in one Python step.
+                    self.__dict__.update(candidate.__dict__)
             return provenance
         except Exception:
             # No mutation to self took place for a delivery-bearing step.
