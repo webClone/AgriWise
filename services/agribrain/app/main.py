@@ -76,6 +76,9 @@ async def lifespan(app: FastAPI):
     ).lower() in ("1", "true", "yes")
     db_for_authority = None
     app.state.layer0_verified_irrigation_verifier = None
+    app.state.layer0_positive_admission_verifier = None
+    app.state.layer0_packet_ownership_store = None
+    store_for_authority = None
     try:
         from app.mongo_client import get_db
         from layer0.data_gateway import get_broker
@@ -85,8 +88,9 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("plot_authority_mongodb_unavailable")
         db_for_authority.command("ping")
         _b2b05_broker = get_broker()
+        store_for_authority = PrismaPlotOwnershipStore(db_for_authority)
         _b2b05_broker.configure_plot_authority(
-            PrismaPlotOwnershipStore(db_for_authority),
+            store_for_authority,
             current_authenticated_plot_principal,
         )
         logger.info("[STARTUP] B2B-05 trusted plot authority configured")
@@ -111,6 +115,21 @@ async def lifespan(app: FastAPI):
     logger.info(
         "[STARTUP] L3 verified delivery runtime: %s",
         "provisioned" if verified_irrigation_enabled() else "disabled",
+    )
+
+    # B2B-08B: independently provision the *source* issuer verifier for
+    # signed packet runs. A delivery signature does NOT authorize weather or
+    # observation sources. Enabled mode must fail startup without a trusted
+    # v3 source verifier and the real, already configured ownership store.
+    from services.agribrain.app.scoped_packet_run import (
+        bootstrap_server_packet_runtime, signed_packet_run_enabled,
+    )
+    bootstrap_server_packet_runtime(
+        app, ownership_store=store_for_authority,
+    )
+    logger.info(
+        "[STARTUP] signed scoped packet runtime: %s",
+        "provisioned" if signed_packet_run_enabled() else "disabled",
     )
 
     logger.info("[STARTUP] Starting background data refresh worker...")
@@ -194,6 +213,8 @@ async def lifespan(app: FastAPI):
     # Remove server-owned, privileged verifier from the application runtime
     # before subsequent shutdown work. It is never request-controlled.
     app.state.layer0_verified_irrigation_verifier = None
+    app.state.layer0_positive_admission_verifier = None
+    app.state.layer0_packet_ownership_store = None
     logger.info("[SHUTDOWN] Stopping background data refresh worker...")
     if _asmae_recovery_stop is not None:
         _asmae_recovery_stop.set()
@@ -211,6 +232,11 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan
 )
+
+# B2B-08B: separate signed internal packet assessment surface. No public
+# unauthenticated endpoint grants state, publication or actuator authority.
+from services.agribrain.app.scoped_packet_run import router as b2b08_packet_router
+app.include_router(b2b08_packet_router)
 
 _cors_origins = [
     "http://localhost:3000",
