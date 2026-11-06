@@ -28,6 +28,12 @@ from pymongo.errors import DuplicateKeyError
 from services.agribrain.layer0.mongo_irrigation_idempotency import (
     bound_scientific_assessment_claim,
 )
+from services.agribrain.layer0.event_forcing_admission import (
+    extract_irrigation_receipt,
+)
+from services.agribrain.layer0.verified_irrigation_contract import (
+    VerifiedDeliveredIrrigationGrant,
+)
 from services.agribrain.layer0.v3_kms_signed_issuer import canonical_grant_bytes
 from services.agribrain.app.plot_scope_context import (
     current_authenticated_plot_principal,
@@ -299,24 +305,33 @@ def _run_assessment(
     submitted_receipt_ids = []
     submitted_receipt_digests = {}
     for pkt in body.packets:
-        payload = getattr(pkt, "payload", {}) if not isinstance(pkt, Mapping) else pkt.get("payload", {})
-        if isinstance(payload, Mapping) and payload.get("event_role") == "VERIFIED_DELIVERY":
-            rcpt = payload.get("verified_receipt") or {}
-            grant = rcpt.get("grant") or rcpt if isinstance(rcpt, Mapping) else {}
-            rid = grant.get("receipt_id") if isinstance(grant, Mapping) else None
+        envelope = pkt if isinstance(pkt, Mapping) else (pkt.model_dump() if hasattr(pkt, "model_dump") else getattr(pkt, "__dict__", {}))
+        if not isinstance(envelope, Mapping):
+            envelope = {}
+        rcpt = extract_irrigation_receipt(envelope)
+        if rcpt:
+            grant_raw = rcpt.get("grant") or rcpt if isinstance(rcpt, Mapping) else getattr(rcpt, "grant", rcpt)
+            try:
+                if isinstance(grant_raw, VerifiedDeliveredIrrigationGrant):
+                    grant_dict = grant_raw.to_dict()
+                else:
+                    grant_dict = VerifiedDeliveredIrrigationGrant.from_dict(grant_raw).to_dict()
+            except Exception:
+                grant_dict = dict(grant_raw) if isinstance(grant_raw, Mapping) else {}
+            rid = grant_dict.get("receipt_id")
             if rid:
                 if (
-                    grant.get("tenant_id") == scope.tenant_id
-                    and grant.get("plot_id") == scope.plot_id
-                    and grant.get("geometry_hash") == scope.geometry_hash
-                    and int(grant.get("geometry_version") or 0) == int(scope.geometry_version)
+                    grant_dict.get("tenant_id") == scope.tenant_id
+                    and grant_dict.get("plot_id") == scope.plot_id
+                    and grant_dict.get("geometry_hash") == scope.geometry_hash
+                    and int(grant_dict.get("geometry_version") or 0) == int(scope.geometry_version)
                 ):
                     receipt_id = str(rid)
                     if receipt_id in submitted_receipt_digests:
                         raise ValueError("duplicate_submitted_receipt_in_assessment")
                     submitted_receipt_ids.append(receipt_id)
                     submitted_receipt_digests[receipt_id] = hashlib.sha256(
-                        canonical_grant_bytes(grant)
+                        canonical_grant_bytes(grant_dict)
                     ).hexdigest()
 
     journal = db["Layer0ScientificAssessment"]

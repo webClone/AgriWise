@@ -875,8 +875,6 @@ class VerifiedDeliveredIrrigationVerifier:
         ):
             raise ValueError("receipt_expired_at_authorization")
         delivery_end_dt = _parse_iso_utc(grant.delivery_end)
-        if issued_at_dt < delivery_end_dt:
-            raise ValueError("receipt_attested_before_delivery_completion")
         delivery_day = delivery_end_dt.date().isoformat()
         if expected_day and delivery_day != expected_day:
             raise ValueError("unqualified_event_time")
@@ -885,6 +883,9 @@ class VerifiedDeliveredIrrigationVerifier:
             cutoff_utc = _ensure_utc(cutoff)
             if delivery_end_dt > cutoff_utc:
                 raise ValueError("future_or_unavailable_event")
+
+        if issued_at_dt < delivery_end_dt:
+            raise ValueError("receipt_attested_before_delivery_completion")
 
         # 4. Scope matching
         if expected_plot_id and grant.plot_id != expected_plot_id:

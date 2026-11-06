@@ -62,12 +62,19 @@ def checkpoint_input_digest(
     for raw in events or []:
         if not isinstance(raw, Mapping):
             raise CheckpointInputConflict("invalid_checkpoint_event_envelope")
-        normalized_events.append({
+        payload = raw.get("payload")
+        if isinstance(payload, Mapping):
+            norm_payload = {k: v for k, v in payload.items() if k != "event_id"}
+        else:
+            norm_payload = payload
+        evt_dict = {
             k: raw[k] for k in (
-                "payload", "source", "timestamp", "plot_id",
+                "source", "timestamp", "plot_id",
                 "geometry_hash", "geometry_version",
             ) if k in raw
-        })
+        }
+        evt_dict["payload"] = norm_payload
+        normalized_events.append(evt_dict)
     body = {
         "contract": "akaloris/layer0/physical-checkpoint-input/v1",
         "day": day,

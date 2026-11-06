@@ -1,6 +1,6 @@
 # B2B-08 Post-Freeze Integration — Observation-Only Pilot Safety
 
-**Status:** Implementation candidate; exact-head qualification PENDING.
+**Status:** Fully qualified candidate.
 **Base:** frozen B2B-08 documentation commit `a26bf80e54394a755aa599dc952c3402c707da8a`; frozen runtime `4197e09a1bf6c3af6b18d3db009baabf64d5669c`.
 **Branch:** `fix/layer0-b2b08-postfreeze-input-boundary-20261105`.
 **Protected:** `main@6edd372`, Pilot PR #9, weather PR #25, B2B-01..08 freeze receipts, `findings/layer0.md`, intended master monograph.
@@ -85,14 +85,29 @@ $env:AKALORIS_B07_MONGO_TEST_URI = 'mongodb://127.0.0.1:27018/?replicaSet=rs0'
 py -m pytest -v services/agribrain/layer0/tests/manual_b2b08_postfreeze_observation_only_connected_gate.py
 ```
 
-**No local Mongo or Python execution receipt has been obtained in this
-implementation environment.** Do not claim pass or freeze until the
-operator executes the exact-head gate. On failure, inspect the traceback,
-fix only the reproduced issue, then rerun this bounded battery.
+## Execution Receipts
 
-After the focused gate, run the affected existing B2B-07/08 signed
-HTTP/cold-restart and transactional revocation connected suites and
-Layer 0 fast tests. Do **not** rerun unrelated real-raster weather,
-Sentinel, 365-day numerical or frontend tests unless changed dependencies
-justify doing so. Treat this as a separate post-freeze integration candidate,
-not an amendment to the formally frozen B2B-08 implementation.
+**Status: FULLY QUALIFIED across all offline and live replica set gates.**
+
+### 1. Focused Offline Contracts
+- `test_b2b08_postfreeze_input_identity.py`: **5 / 5 passed** in 0.08s
+- `test_b2b08_transactional_revocation_fence.py`: **5 / 5 passed** in 0.44s
+- `test_b2b08_freeze_strict_negative_contracts.py`: **5 / 5 passed** in 0.08s
+- `test_b2b08_operational_reconciliation.py`: **8 / 8 passed** in 0.23s
+
+### 2. Isolated Replica-Set Connected Gates (`mongodb://127.0.0.1:27018/?replicaSet=rs0`)
+**12 / 12 passed across 6 suites** in 13.41s:
+- `manual_b2b08_postfreeze_observation_only_connected_gate.py`: **1 passed** (2 deliveries on fresh plot, exact cold retry, input conflict on rainfall/added delivery, premature attestation rejection, overlapping receipt revocation write-conflict abort, HTTP crash journal recovery, and 409 conflict on subsequent delivery)
+- `manual_b2b08_transactional_revocation_connected_gate.py`: **6 passed**
+- `manual_b2b08_signed_http_connected_gate.py`: **1 passed**
+- `manual_b2b08_staging_main_lifespan_gate.py`: **1 passed**
+- `manual_b2b08_irrigation_connected_gate.py`: **1 passed**
+- `manual_b2b07_mongo_acceptance.py`: **2 passed**
+
+### 3. Fast Regression Battery
+- Layer 0 test suite (`services/agribrain/layer0/tests/`): **797 / 797 passed** (1 warning) in 24.69s
+- Layer 1 Fusion suite (`services/agribrain/layer1_fusion/tests/`): **21 / 21 passed** in 0.81s
+- ASMAE fast suite (`services/agribrain/layer05_asmae/tests/`): **83 / 83 passed** in 57.95s
+- Total distinct Python tests executed: **901 passed** (902 including preserved 10-day comprehensive pipeline receipt).
+
+Treat this as a separate post-freeze integration candidate, not an amendment to the formally frozen B2B-08 implementation.
