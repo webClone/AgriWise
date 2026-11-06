@@ -177,3 +177,32 @@ def test_future_sensor_timestamp_without_timezone_is_quarantined():
         and "INVALID_TEMPORAL_REFERENCE" in q.reason_codes
         for q in result.diagnostics.quarantined_evidence
     )
+
+
+def test_legacy_runner_cannot_swallow_failed_l0_admission(monkeypatch):
+    """Modern trust denial must remain terminal even when ENV is development."""
+    from types import SimpleNamespace
+    from services.agribrain.layer1_fusion import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "is_production", lambda: False)
+
+    def refuse(*_args, **_kwargs):
+        raise runner_module.Layer1StateAdmissionError("layer0_state_integrity_not_qualified")
+
+    def forbidden_fallback(*_args, **_kwargs):
+        pytest.fail("legacy fallback must never run after a C1B admission denial")
+
+    monkeypatch.setattr(runner_module, "run_layer1_fusion_v1", refuse)
+    monkeypatch.setattr(runner_module, "run_layer1_fusion_legacy", forbidden_fallback)
+    input_obj = SimpleNamespace(operational_context={})
+    unqualified_l0_output = SimpleNamespace(
+        layer0_state_package={"unverified": True},
+        layer0_source_packages={},
+    )
+    with pytest.raises(
+        runner_module.Layer1StateAdmissionError,
+        match="layer0_state_integrity_not_qualified",
+    ):
+        runner_module.run_layer1_fusion(
+            input_obj, layer0_output=unqualified_l0_output,
+        )

@@ -6,6 +6,7 @@ from orchestrator_v2.schema import OrchestratorInput
 
 # New Layer 1 Fusion Engine (V1 deterministic context engine)
 from layer1_fusion.engine import Layer1FusionEngine
+from layer1_fusion.layer0_state_admission import Layer1StateAdmissionError
 from layer1_fusion.schemas import Layer1InputBundle, Layer1ContextPackage
 from layer1_fusion.outputs.legacy_compat import build_legacy_fieldtensor
 
@@ -90,6 +91,11 @@ def run_layer1_fusion(
             return tensor
 
         except Exception as e:
+            # A failed canonical Layer 0 state admission is a security and
+            # scientific trust boundary, never an invitation to rerun an
+            # older, less-qualified fusion engine (including in development).
+            if isinstance(e, Layer1StateAdmissionError):
+                raise
             import traceback
             print(f"[L1] Modern path failed: {e}. Falling back to legacy.", file=sys.stderr, flush=True)
             traceback.print_exc(file=sys.stderr)

@@ -27,6 +27,11 @@
    scientific publication authority, and diagnostic-only,
    non-updating evidence.
 
+4. **C1B-04 — No legacy bypass after trust denial:**
+   `runner.run_layer1_fusion` rethrows `Layer1StateAdmissionError`
+   immediately in **all environments**, including development,
+   instead of falling back to the unqualified legacy engine.
+
 3. **C1B-03 — Future evidence admission:** `validate_evidence`
    accepts an optional explicit replay reference time and permits
    **at most 5 minutes of positive clock skew** for a datetime
