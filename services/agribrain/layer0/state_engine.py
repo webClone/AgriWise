@@ -179,6 +179,7 @@ class Layer0StateEngine:
                 actuator_control_authorized=False,
                 health_report={
                     "kalman_available": False,
+                    "scientific_state_admissible": False,
                     "scientific_publication_authorized": False,
                     "actuator_control_authorized": False,
                 },
@@ -258,7 +259,29 @@ class Layer0StateEngine:
                 validation_conflicts = conflicts
                 source_reliability = dict(validator.source_reliability)
         except Exception as ve:
-            validation_conflicts = [{"error": str(ve)}]
+            # A crashed validation graph is not a positive scientific result.
+            # Stop before a state package can be consumed by Layer 1.
+            from services.agribrain.layer0.scientific_integrity_gate import (
+                Layer0ScientificIntegrityError,
+            )
+            raise Layer0ScientificIntegrityError(
+                "layer0_cross_source_validation_failed"
+            ) from ve
+
+        # Mandatory runtime invariants must not silently clamp/rewrite
+        # evidence or allow a failed state to be consumed as trusted.
+        from services.agribrain.layer0.scientific_integrity_gate import (
+            Layer0ScientificIntegrityError,
+            assert_layer0_scientific_integrity,
+            assert_structural_audit_passed,
+        )
+        invariant_decisions = assert_layer0_scientific_integrity(
+            daily_state=daily_state,
+            state_uncertainty=state_uncertainty,
+            provenance_log=provenance_log,
+            source_reliability=source_reliability,
+            enforce_invariants=self._enforce_all_invariants,
+        )
 
         # Self-audit
         audit_report = {}
@@ -280,9 +303,13 @@ class Layer0StateEngine:
                 expected_days=len(provenance_log),
             )
         except Exception as ex_audit:
-            print(f"[WARN] [Layer 0] StateEngine audit failed: {ex_audit}")
+            raise Layer0ScientificIntegrityError(
+                "layer0_structural_audit_execution_failed"
+            ) from ex_audit
+        assert_structural_audit_passed(audit_report)
 
-        # Build stable content-addressed run_id
+        # Execution attempt ID: includes clock time; it is NOT a
+        # content-addressed input identity or scientific replay root.
         import hashlib
         run_key = f"{plot_id}:{geometry_hash}:{geometry_version}:{start_date}:{end_date}:{now.isoformat()}"
         run_id = f"layer0_{hashlib.sha256(run_key.encode()).hexdigest()[:16]}"
@@ -299,6 +326,8 @@ class Layer0StateEngine:
             actuator_control_authorized=False,
             health_report={
                 "kalman_available": True,
+                "scientific_state_admissible": True,
+                "invariant_decisions": invariant_decisions,
                 "zones": list(daily_state.keys()),
                 "days": len(provenance_log),
                 "obs_days": sum(
@@ -317,6 +346,7 @@ class Layer0StateEngine:
                 "end_date": end_date,
                 "run_timestamp": now.isoformat(),
                 "engine": "Layer0StateEngine",
+                "scientific_state_integrity": "PASSED_RUNTIME_BOUNDARY",
                 "provenance_log": provenance_log,
                 "scientific_publication_authorized": False,
                 "actuator_control_authorized": False,

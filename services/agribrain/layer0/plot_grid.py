@@ -114,10 +114,15 @@ class PlotGrid:
         w = int(math.ceil((max_x - origin_x) / pixel_size))
         h = int(math.ceil((origin_y - min_y) / pixel_size))
         
-        # Cap at reasonable size (prevent accidental huge grids)
-        MAX_DIM = 500  # 500 × 10m = 5km
-        w = min(w, MAX_DIM)
-        h = min(h, MAX_DIM)
+        # Scientific grids must never report a partial raster as full plot
+        # support. Large plots require a separate, explicitly qualified
+        # tiled-grid implementation; rejecting is safer than silent clipping.
+        MAX_DIM = 500  # 500 × 10m = 5km at the default pixel size
+        if w > MAX_DIM or h > MAX_DIM:
+            raise ValueError(
+                "plot_grid_full_coverage_exceeds_single_grid_limit:"
+                f"requested={w}x{h},maximum={MAX_DIM}x{MAX_DIM}"
+            )
         
         buffer_pixels = max(1, int(buffer_m / pixel_size))
         
