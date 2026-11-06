@@ -16,16 +16,28 @@ numerical endurance and frontend acceptance evidence is preserved.
 
 ## Bounded corrections
 
-1. **Checkpoint input identity / I03:** A durable physical delivery snapshot
-   now stores a versioned SHA-256 digest of the zone/day weather, ordered
-   Kalman observations, management evidence (including signed L3 grants),
-   and the pre-step scientific state/covariance. A cold state is recovered
-   only when this exact digest matches. Changed rainfall, an added receipt,
-   or changed observations cause
-   `CheckpointInputConflict("committed_irrigation_checkpoint_input_conflict")`,
-   surfaced as HTTP 409. No new L3 reservation is staged on a mismatch.
-   Old snapshots without the digest are **not** silently reused and need
-   an explicit operator recovery/migration decision.
+1. **Checkpoint input identity / I03 & P1 (Execution Plan Equivalence):**
+   A single authoritative, deterministic physical-event execution plan
+   (`resolve_physical_event_plan`) is shared by:
+   - Checkpoint input hashing (`checkpoint_input_digest`),
+   - L3 event admission (`classify_management_event_evidence`), and
+   - HTTP journal manifest attestation (`scoped_packet_run.py`).
+   Intra-batch distinctness of `event_id` and `receipt_id` is strictly
+   enforced. Colliding event IDs or duplicate receipts mark subsequent
+   events inadmissible.
+   - For checkpoint hashing, inadmissible events are excluded from the
+     fingerprint; a cold retry presenting colliding event IDs hashes only
+     the first event, producing an input digest conflict
+     (`CheckpointInputConflict`) against any committed multi-delivery checkpoint.
+   - For exact cold retries, transport-generated identifiers (`packet_id`
+     and outer `event_id`) are decoupled from physical receipt grants, so
+     retries with renamed transport IDs deterministically match the committed
+     checkpoint digest.
+   - For the HTTP router (`scoped_packet_run.py`), colliding `event_id` or
+     duplicate receipts reject the request upfront with HTTP 422
+     (`invalid_signed_assessment_input`), and `submitted_receipt_ids` in
+     `Layer0ScientificAssessment` strictly matches receipts admitted and
+     consumed by the scientific engine.
 2. **Receipt attestation timing / I01:** The actual signed L3 verifier and
    precommit revalidator reject `issued_at < delivery_end`. A signed
    attestation is not proof of a completed physical delivery if issued
@@ -60,12 +72,22 @@ This single opt-in gate runs against a **dedicated local** MongoDB replica
 set at `127.0.0.1:27018/?replicaSet=rs0`, using a random disposable
 `akaloris_b08_postfreeze_<uuid>` database. It covers:
 
-- Positive: two independently metered signed deliveries on a fresh day.
-- Positive: an exact cold retry returns the committed water state without
-  staging or applying a second receipt.
-- Negative: changed rainfall, second delivery, and both changed inputs on
+- Positive Control 1: exact cold retry with renamed transport identifiers
+  (`packet_id` and `event_id`) preserves durable checkpoint identity and
+  recovers the committed snapshot without staging duplicate receipts.
+- Positive Control 2: two independently metered signed deliveries on a fresh day
+  produce two genuine L3 applications and one durable snapshot.
+- Negative P1 (Cold): cold retry with colliding event IDs produces an input
+  digest conflict (`CheckpointInputConflict`) against the committed 2-receipt
+  checkpoint.
+- Negative P1 (Fresh): colliding event IDs on a fresh plot admits only the
+  first event and commits exactly one delivery.
+- Negative P1 (HTTP): submitting an assessment payload with duplicate `event_id`
+  returns HTTP 422 (`invalid_signed_assessment_input`) without staging claims
+  or consuming receipts.
+- Negative I03: changed rainfall, second delivery, and both changed inputs on
   an already committed day conflict before physical staging.
-- Negative: genuine signature with `issued_at < delivery_end`.
+- Negative I01: genuine signature with `issued_at < delivery_end`.
 - Negative: overlapping per-receipt revocation writer during commit,
   demonstrating atomic rollback and no published state.
 - HTTP crash boundary: a valid signed L3 receipt with `REPORTED` role
@@ -90,14 +112,14 @@ py -m pytest -v services/agribrain/layer0/tests/manual_b2b08_postfreeze_observat
 **Status: FULLY QUALIFIED across all offline and live replica set gates.**
 
 ### 1. Focused Offline Contracts
-- `test_b2b08_postfreeze_input_identity.py`: **5 / 5 passed** in 0.08s
-- `test_b2b08_transactional_revocation_fence.py`: **5 / 5 passed** in 0.44s
+- `test_b2b08_postfreeze_input_identity.py`: **8 / 8 passed** in 0.30s
+- `test_b2b08_transactional_revocation_fence.py`: **5 / 5 passed** in 0.47s
 - `test_b2b08_freeze_strict_negative_contracts.py`: **5 / 5 passed** in 0.08s
 - `test_b2b08_operational_reconciliation.py`: **8 / 8 passed** in 0.23s
 
 ### 2. Isolated Replica-Set Connected Gates (`mongodb://127.0.0.1:27018/?replicaSet=rs0`)
-**12 / 12 passed across 6 suites** in 13.41s:
-- `manual_b2b08_postfreeze_observation_only_connected_gate.py`: **1 passed** (2 deliveries on fresh plot, exact cold retry, input conflict on rainfall/added delivery, premature attestation rejection, overlapping receipt revocation write-conflict abort, HTTP crash journal recovery, and 409 conflict on subsequent delivery)
+**12 / 12 passed across 6 suites** in 14.2s:
+- `manual_b2b08_postfreeze_observation_only_connected_gate.py`: **1 passed** (Positive Controls 1 & 2, Negative P1 cold/fresh/HTTP, Negative I01 premature attestation, Negative I03 rainfall/delivery changes, overlapping receipt revocation write-conflict abort, HTTP crash journal recovery, and 409 conflict on subsequent delivery)
 - `manual_b2b08_transactional_revocation_connected_gate.py`: **6 passed**
 - `manual_b2b08_signed_http_connected_gate.py`: **1 passed**
 - `manual_b2b08_staging_main_lifespan_gate.py`: **1 passed**
@@ -105,9 +127,9 @@ py -m pytest -v services/agribrain/layer0/tests/manual_b2b08_postfreeze_observat
 - `manual_b2b07_mongo_acceptance.py`: **2 passed**
 
 ### 3. Fast Regression Battery
-- Layer 0 test suite (`services/agribrain/layer0/tests/`): **797 / 797 passed** (1 warning) in 24.69s
-- Layer 1 Fusion suite (`services/agribrain/layer1_fusion/tests/`): **21 / 21 passed** in 0.81s
-- ASMAE fast suite (`services/agribrain/layer05_asmae/tests/`): **83 / 83 passed** in 57.95s
-- Total distinct Python tests executed: **901 passed** (902 including preserved 10-day comprehensive pipeline receipt).
+- Layer 0 test suite (`services/agribrain/layer0/tests/`): **800 / 800 passed** (1 warning) in 26.83s
+- Layer 1 Fusion suite (`services/agribrain/layer1_fusion/tests/`): **21 / 21 passed** in 0.70s
+- ASMAE fast suite (`services/agribrain/layer05_asmae/tests/`): **84 / 84 passed** in 667.10s
+- Total distinct Python tests executed: **905 passed** (906 including preserved 10-day comprehensive pipeline receipt).
 
 Treat this as a separate post-freeze integration candidate, not an amendment to the formally frozen B2B-08 implementation.

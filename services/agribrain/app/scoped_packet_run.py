@@ -30,6 +30,7 @@ from services.agribrain.layer0.mongo_irrigation_idempotency import (
 )
 from services.agribrain.layer0.event_forcing_admission import (
     extract_irrigation_receipt,
+    resolve_physical_event_plan,
 )
 from services.agribrain.layer0.verified_irrigation_contract import (
     VerifiedDeliveredIrrigationGrant,
@@ -304,13 +305,43 @@ def _run_assessment(
     claim = secrets.token_hex(16)
     submitted_receipt_ids = []
     submitted_receipt_digests = {}
-    for pkt in body.packets:
-        envelope = pkt if isinstance(pkt, Mapping) else (pkt.model_dump() if hasattr(pkt, "model_dump") else getattr(pkt, "__dict__", {}))
-        if not isinstance(envelope, Mapping):
-            envelope = {}
-        rcpt = extract_irrigation_receipt(envelope)
-        if rcpt:
-            grant_raw = rcpt.get("grant") or rcpt if isinstance(rcpt, Mapping) else getattr(rcpt, "grant", rcpt)
+
+    event_envelopes = []
+    for pkt in packets:
+        payload = getattr(pkt, "payload", {}) or {}
+        if payload.get("event_type"):
+            event_envelopes.append({
+                "payload": payload,
+                "packet_id": getattr(pkt, "packet_id", ""),
+                "content_hash": getattr(pkt, "content_hash", None),
+                "source": pkt.source.value if hasattr(pkt.source, "value") else str(pkt.source),
+                "timestamp": pkt.timestamp,
+                "plot_id": getattr(pkt, "plot_id", scope.plot_id),
+                "geometry_hash": getattr(pkt, "geometry_hash", scope.geometry_hash),
+                "geometry_version": getattr(pkt, "geometry_version", scope.geometry_version),
+            })
+
+    plan = resolve_physical_event_plan(
+        event_envelopes,
+        plot_id=scope.plot_id,
+        geometry_hash=scope.geometry_hash,
+        geometry_version=scope.geometry_version,
+        tenant_id=scope.tenant_id,
+    )
+
+    for item in plan:
+        if item.rejection_reason == "duplicate_event_identity":
+            raise ValueError("duplicate_event_identity_in_assessment")
+        if item.rejection_reason == "duplicate_receipt_in_assessment":
+            raise ValueError("duplicate_submitted_receipt_in_assessment")
+        if item.is_admissible and item.receipt_id:
+            envelope = item.envelope
+            rcpt = extract_irrigation_receipt(envelope)
+            grant_raw = (
+                rcpt.get("grant") or rcpt
+                if isinstance(rcpt, Mapping)
+                else getattr(rcpt, "grant", rcpt)
+            )
             try:
                 if isinstance(grant_raw, VerifiedDeliveredIrrigationGrant):
                     grant_dict = grant_raw.to_dict()

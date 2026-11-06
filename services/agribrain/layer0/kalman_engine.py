@@ -567,6 +567,7 @@ class ZoneKalmanFilter:
                 prior_state=self.state, prior_covariance=self.covariance,
                 last_obs_day=self.last_obs_day,
                 days_since_obs=self.days_since_obs,
+                seen_event_ids=self._event_evidence_seen,
             )
         if (
             not getattr(self, "allow_historical_recompute", False)

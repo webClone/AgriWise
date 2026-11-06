@@ -139,6 +139,60 @@ def test_postfreeze_connected_safety_and_positive_controls(monkeypatch, tmp_path
             "plot_id": plot_two, "status": "COMMITTED",
         }) == original_receipts
 
+        # POSITIVE CONTROL 1: exact cold retry with renamed transport identifiers (packet_id and event_id)
+        # preserves durable checkpoint identity and recovers the committed snapshot.
+        events_renamed = [
+            dict(
+                events_two[0],
+                packet_id="packet-two-1-transport-retry",
+                payload=dict(events_two[0]["payload"], event_id="event-two-1-renamed-transport"),
+            ),
+            dict(
+                events_two[1],
+                packet_id="packet-two-2-transport-retry",
+                payload=dict(events_two[1]["payload"], event_id="event-two-2-renamed-transport"),
+            ),
+        ]
+        cold_renamed = _filter(verifier, plot_two, day, now)
+        recovered_renamed = cold_renamed.step(day_str, dict(WEATHER), events=events_renamed)
+        assert recovered_renamed["recovered_from_durable_l3_commit"] is True
+        assert recovered_renamed["physical_management_events_applied"] == 0
+        assert cold_renamed.state.values == original_state
+
+        # NEGATIVE: cold retry with colliding event IDs produces an input conflict
+        # against the committed 2-receipt checkpoint (because the colliding event is not planned).
+        events_colliding_retry = [
+            dict(
+                events_two[0],
+                packet_id="packet-two-1-collision",
+                payload=dict(events_two[0]["payload"], event_id="event-collision-identity"),
+            ),
+            dict(
+                events_two[1],
+                packet_id="packet-two-2-collision",
+                payload=dict(events_two[1]["payload"], event_id="event-collision-identity"),
+            ),
+        ]
+        cold_colliding = _filter(verifier, plot_two, day, now)
+        with pytest.raises(CheckpointInputConflict,
+                           match="committed_irrigation_checkpoint_input_conflict"):
+            cold_colliding.step(day_str, dict(WEATHER), events=events_colliding_retry)
+
+        # NEGATIVE: colliding event IDs on a fresh plot admits only the first event
+        plot_collision_fresh = "plot-collision-fresh"
+        events_collision_fresh = [
+            event(signed(plot_collision_fresh, "col-rcpt-1", "col-1"), plot_collision_fresh, "colliding-id"),
+            event(signed(plot_collision_fresh, "col-rcpt-2", "col-2"), plot_collision_fresh, "colliding-id"),
+        ]
+        collision_filter = _filter(verifier, plot_collision_fresh, day, now)
+        applied_collision = collision_filter.step(day_str, WEATHER, events=events_collision_fresh)
+        assert applied_collision["physical_management_events_applied"] == 1
+        assert len(applied_collision["verified_delivery_receipts"]) == 1
+        assert applied_collision["verified_delivery_receipts"][0] == "col-rcpt-1"
+        assert db["Layer0IrrigationReceiptConsumption"].count_documents({
+            "plot_id": plot_collision_fresh, "status": "COMMITTED",
+        }) == 1
+
         # NEGATIVE I03: a fresh signed second delivery and changed rainfall
         # cannot reuse yesterday's checkpoint for the same scope/day.
         plot_conflict = "plot-changed-input"
@@ -336,6 +390,27 @@ def test_postfreeze_connected_safety_and_positive_controls(monkeypatch, tmp_path
             )
         assert db["Layer0IrrigationReceiptConsumption"].count_documents({
             "_id": "isolated-http-delivery-second",
+        }) == 0
+
+        # NEGATIVE HTTP: submitting assessment payload with duplicate event_id returns 422
+        body_duplicate_event = signed_assessment_payload(db, identity, source_signer, l3_signer, now)
+        body_duplicate_event["assessment_id"] = "isolated-assessment-dup-event-422"
+        dup_packet = deepcopy(body_duplicate_event["packets"][1])
+        dup_packet["payload"]["event_id"] = body_duplicate_event["packets"][1]["payload"]["event_id"]
+        dup_claim = dict(dup_packet["payload"]["verified_receipt"]["grant"])
+        dup_claim.update({
+            "receipt_id": "isolated-http-delivery-dup-event",
+            "replay_idempotency_key": "isolated-l3-replay-dup-event",
+            "source_evidence_cas_root": "isolated-meter-record-dup-event",
+        })
+        dup_packet["payload"]["verified_receipt"] = l3_signer.sign(dup_claim).to_dict()
+        body_duplicate_event["packets"].append(dup_packet)
+        with TestClient(application(db)) as http:
+            dup_resp = signed_post(http, identity, body_duplicate_event)
+            assert dup_resp.status_code == 422, (dup_resp.status_code, dup_resp.text)
+            assert dup_resp.json()["detail"] == "invalid_signed_assessment_input"
+        assert db["Layer0IrrigationReceiptConsumption"].count_documents({
+            "_id": "isolated-http-delivery-dup-event",
         }) == 0
     finally:
         if db_name.startswith(PREFIX):

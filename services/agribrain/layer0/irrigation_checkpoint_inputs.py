@@ -50,6 +50,7 @@ def checkpoint_input_digest(
     observations: Any, events: Any, prior_state: Any,
     prior_covariance: Any,
     last_obs_day: Any, days_since_obs: Any,
+    seen_event_ids: Any = None,
 ) -> str:
     """One versioned digest for both durable writes and cold recovery checks.
 
@@ -58,10 +59,27 @@ def checkpoint_input_digest(
     or adding a distinct delivery changes the digest. Observation order is
     preserved because sequential Kalman updates need not commute.
     """
+    from services.agribrain.layer0.event_forcing_admission import (
+        resolve_physical_event_plan,
+    )
+
+    if events:
+        for raw in events:
+            if not isinstance(raw, Mapping):
+                raise CheckpointInputConflict("invalid_checkpoint_event_envelope")
+
+    plan = resolve_physical_event_plan(
+        events,
+        day=day,
+        zone_id=zone_id,
+        seen_event_ids=set(seen_event_ids) if seen_event_ids is not None else None,
+    )
+
     normalized_events = []
-    for raw in events or []:
-        if not isinstance(raw, Mapping):
-            raise CheckpointInputConflict("invalid_checkpoint_event_envelope")
+    for item in plan:
+        if not item.is_admissible:
+            continue
+        raw = item.envelope
         payload = raw.get("payload")
         if isinstance(payload, Mapping):
             norm_payload = {k: v for k, v in payload.items() if k != "event_id"}

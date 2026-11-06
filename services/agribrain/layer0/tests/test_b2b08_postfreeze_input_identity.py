@@ -74,3 +74,56 @@ def test_reported_label_does_not_hide_a_signed_irrigation_receipt():
     assert extract_irrigation_receipt(e) == e["payload"]["verified_receipt"]
     e["payload"]["event_type"] = "fertilizer"
     assert extract_irrigation_receipt(e) is None
+
+
+def test_colliding_event_ids_produce_different_digest_than_distinct_event_ids():
+    distinct_first = event("r1")
+    distinct_first["payload"]["event_id"] = "event-1"
+    distinct_second = event("r2")
+    distinct_second["payload"]["event_id"] = "event-2"
+
+    colliding_first = event("r1")
+    colliding_first["payload"]["event_id"] = "event-collision"
+    colliding_second = event("r2")
+    colliding_second["payload"]["event_id"] = "event-collision"
+
+    assert (
+        digest(events=[colliding_first, colliding_second])
+        != digest(events=[distinct_first, distinct_second])
+    )
+    # The colliding second event is excluded from physical execution planning,
+    # so its digest matches a single delivery rather than two deliveries.
+    assert (
+        digest(events=[colliding_first, colliding_second])
+        == digest(events=[colliding_first])
+    )
+
+
+def test_renamed_transport_event_id_preserves_digest_for_same_physical_receipt():
+    original_first = event("r1")
+    original_first["payload"]["event_id"] = "event-transport-run-1"
+    original_first["packet_id"] = "packet-run-1"
+    original_second = event("r2")
+    original_second["payload"]["event_id"] = "event-transport-run-2"
+    original_second["packet_id"] = "packet-run-2"
+
+    retry_first = event("r1")
+    retry_first["payload"]["event_id"] = "event-transport-retry-1"
+    retry_first["packet_id"] = "packet-retry-1"
+    retry_second = event("r2")
+    retry_second["payload"]["event_id"] = "event-transport-retry-2"
+    retry_second["packet_id"] = "packet-retry-2"
+
+    assert (
+        digest(events=[original_first, original_second])
+        == digest(events=[retry_first, retry_second])
+    )
+
+
+def test_duplicate_receipt_ids_are_deduplicated_in_execution_plan():
+    first = event("r1")
+    first["payload"]["event_id"] = "event-1"
+    second = event("r1")
+    second["payload"]["event_id"] = "event-2"
+    # Even though event_ids are distinct, receipt_id "r1" is duplicated:
+    assert digest(events=[first, second]) == digest(events=[first])
