@@ -437,14 +437,16 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
         item.experimental_visual_allowed = True
         item.composite_advisory_allowed = True
 
-    # 6d. Level 0 State
+    # 6d. Level 0 State — derived Kalman posterior, NEVER raw provider
+    # observation. A separately verified Layer 0 admission boundary must
+    # precede this transformation; these values cannot update native state.
     elif item.source_family == "l0_state":
-        item.data_status = "observed"
-        item.truth_class = "observed_provider"
-        item.source_reality = "real_provider_raster"
-        item.production_usable = True
-        item.real_provider_product = True
-        item.diagnostic_only = False
+        item.data_status = "assimilated"
+        item.truth_class = "assimilated_state"
+        item.source_reality = "model_estimate"
+        item.production_usable = False
+        item.real_provider_product = False
+        item.diagnostic_only = True
         item.state_update_allowed = False
         item.scientific_surface_allowed = False
         item.prescription_driver_allowed = False

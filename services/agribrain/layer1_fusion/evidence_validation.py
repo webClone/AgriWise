@@ -18,7 +18,8 @@ Checks:
 from __future__ import annotations
 
 import math
-from typing import List
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 
 try:
     from scientific_contracts.numeric import finite_real
@@ -37,9 +38,27 @@ from .schemas import (
 )
 
 
-def validate_evidence(item: EvidenceItem) -> List[str]:
+def validate_evidence(item: EvidenceItem, *, run_timestamp: Optional[datetime] = None, future_skew: timedelta = timedelta(minutes=5)) -> List[str]:
     """Validate a single evidence item. Returns list of violation messages."""
     violations: List[str] = []
+
+    # C1B: enforce acquisition availability BEFORE ledger admission and
+    # freshness weighting. Explicit run_timestamp keeps replay deterministic.
+    # Callers without a reference time cannot assert temporal qualification.
+    if run_timestamp is not None and item.observed_at is not None:
+        rt = run_timestamp
+        observed = item.observed_at
+        if (
+            not isinstance(rt, datetime)
+            or not isinstance(observed, datetime)
+            or rt.tzinfo is None or rt.utcoffset() is None
+            or observed.tzinfo is None or observed.utcoffset() is None
+            or not isinstance(future_skew, timedelta)
+            or future_skew < timedelta(0)
+        ):
+            violations.append("INVALID_TEMPORAL_REFERENCE")
+        elif observed.astimezone(timezone.utc) > rt.astimezone(timezone.utc) + future_skew:
+            violations.append("FUTURE_EVIDENCE_BEYOND_SKEW")
 
     if not item.evidence_id:
         violations.append("EMPTY_EVIDENCE_ID")

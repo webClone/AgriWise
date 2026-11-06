@@ -128,6 +128,15 @@ class Layer1FusionEngine:
         if not bundle.run_id:
             raise ValueError("Layer1InputBundle.run_id is required")
 
+        # C1B: Layer 0 state is optional, but supplied state must come from
+        # the canonical, structurally qualified C1 producer. Never allow a
+        # forged/legacy dictionary to masquerade as trusted Kalman state.
+        if bundle.layer0_state_package is not None:
+            from .layer0_state_admission import require_admissible_layer0_state
+            require_admissible_layer0_state(
+                bundle.layer0_state_package, plot_id=bundle.plot_id,
+            )
+
         all_evidence: List[EvidenceItem] = []
         all_envelopes: List[SourceEnvelope] = []
         all_quarantined: List[QuarantinedEvidence] = []
@@ -165,7 +174,7 @@ class Layer1FusionEngine:
             # context-free second classification can only discard provenance
             # (for example, downgrading a provider raster to proxy).  This
             # stage is deliberately a non-destructive invariant check.
-            violations = validate_evidence(item)
+            violations = validate_evidence(item, run_timestamp=bundle.run_timestamp)
             if violations:
                 all_quarantined.append(quarantine_evidence(item, violations))
             else:
@@ -199,7 +208,7 @@ class Layer1FusionEngine:
             for re in raster_evidence:
                 # ingest_raster_composites normalized this item against the
                 # individual raster, not the multi-raster wrapper.
-                violations = validate_evidence(re)
+                violations = validate_evidence(re, run_timestamp=bundle.run_timestamp)
                 if violations:
                     all_quarantined.append(quarantine_evidence(re, violations))
                 else:
