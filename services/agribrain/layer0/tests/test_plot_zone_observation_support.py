@@ -29,7 +29,14 @@ def _engine():
     instance = Layer0StateEngine()
     assert instance._has_kalman
     instance._ValidationGraph = _Validator
-    instance._layer0_audit = lambda **kwargs: {"test_adapter": True}
+    instance._layer0_audit = lambda **kwargs: {
+        "test_adapter": True,
+        "structural_audit": {
+            "status": "PASS",
+            "checks_run": 1,
+            "checks_failed": 0,
+        },
+    }
     return instance
 
 

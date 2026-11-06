@@ -31,7 +31,14 @@ def _engine():
     engine = Layer0StateEngine()
     assert engine._has_kalman
     engine._ValidationGraph = _Validator
-    engine._layer0_audit = lambda **kwargs: {"test_adapter": True}
+    engine._layer0_audit = lambda **kwargs: {
+        "test_adapter": True,
+        "structural_audit": {
+            "status": "PASS",
+            "checks_run": 1,
+            "checks_failed": 0,
+        },
+    }
     return engine
 
 
