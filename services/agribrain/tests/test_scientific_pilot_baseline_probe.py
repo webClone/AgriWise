@@ -89,6 +89,34 @@ class PilotBaselineReceiptTests(unittest.TestCase):
         x["run_id"] = ""
         self.assertEqual(probe.inspect_run(x, PLOT)["status"], "INVALID")
 
+    def test_observation_only_guard_disallows_signed_irrigation(self):
+        from unittest.mock import patch as env_patch
+        from types import SimpleNamespace
+        args = SimpleNamespace(
+            plot_id=PLOT, snapshot_id=SNAPSHOT,
+            self_test=True, snapshot_json=None,
+            live_snapshot=True, run_json=None, origin="http://localhost:3000",
+        )
+        with env_patch.dict(
+            "os.environ",
+            {"AKALORIS_LAYER0_ENABLE_VERIFIED_IRRIGATION": "true"},
+        ):
+            result = probe.run_probe(args)
+        self.assertEqual(result["gate_status"], "FAIL_SIGNED_IRRIGATION_NOT_DISABLED")
+        self.assertEqual(result["observation_only_runtime"]["status"], "FAIL")
+        self.assertEqual(result["snapshot"]["status"], "NOT_RUN")
+        self.assertEqual(result["source_boundary"]["status"], "NOT_RUN")
+
+    def test_observation_only_guard_allows_explicit_disabled(self):
+        from unittest.mock import patch as env_patch
+        with env_patch.dict(
+            "os.environ",
+            {"AKALORIS_LAYER0_ENABLE_VERIFIED_IRRIGATION": "false"},
+        ):
+            result = probe.inspect_observation_only_runtime()
+        self.assertEqual(result["status"], "PASS")
+        self.assertFalse(result["other_processes_verified"])
+
     def test_no_provider_clock_cannot_be_substituted_for_cutoff(self):
         x = snapshot()
         x["evidence_cutoff_at"] = None

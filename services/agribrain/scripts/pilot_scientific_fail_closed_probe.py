@@ -45,6 +45,18 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def inspect_observation_only_runtime():
+    """Local-process safety preflight; not a claim about other deployments."""
+    setting = os.getenv("AKALORIS_LAYER0_ENABLE_VERIFIED_IRRIGATION", "").strip().lower()
+    disabled = setting in ("", "false", "0", "off", "no")
+    return {
+        "status": "PASS" if disabled else "FAIL",
+        "reason": "signed_irrigation_disabled" if disabled else "signed_irrigation_not_disabled",
+        "local_process_flag_checked": True,
+        "other_processes_verified": False,
+    }
+
+
 def read_json(path: str):
     with open(path, "r", encoding="utf-8") as file:
         return json.load(file)
@@ -215,6 +227,7 @@ def run_probe(args):
         "expected_snapshot_id": args.snapshot_id,
         "non_invasive": True,
         "executed_new_orchestrator_run": False,
+        "observation_only_runtime": inspect_observation_only_runtime(),
         "snapshot": {"status": "NOT_RUN"},
         "source_boundary": {"status": "NOT_RUN"},
         "run_boundary": {"status": "NOT_RUN"},
@@ -226,6 +239,11 @@ def run_probe(args):
             "positive_prescription_pilot": False,
         },
     }
+    if report["observation_only_runtime"]["status"] != "PASS":
+        # Do not even fetch a live snapshot with signed irrigation enabled
+        # in this process. The operator must disable L3 first.
+        report["gate_status"] = "FAIL_SIGNED_IRRIGATION_NOT_DISABLED"
+        return report
     if args.self_test:
         try:
             report["source_boundary"] = inspect_source_boundary()
