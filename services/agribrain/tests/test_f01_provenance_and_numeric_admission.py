@@ -1744,6 +1744,7 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
         out_zero = PerceptionEngineOutput(
             engine_family=PerceptionEngineFamily.DRONE,
             plot_id="plot_pilot",
+            timestamp=CUTOFF,
             qa_score=0.9,
             reliability_weight=0.0,  # Zero quality/reliability
             variables=[

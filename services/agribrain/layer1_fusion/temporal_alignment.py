@@ -98,13 +98,16 @@ def is_available_at_cutoff(
     cutoff_utc = ensure_utc(as_of_cutoff)
 
     # 1. Check publication/recorded/ingested time
-    pub_time = getattr(item, "published_at", None) or getattr(item, "recorded_at", None)
+    pub_time = getattr(item, "published_at", None) or getattr(item, "recorded_at", None) or getattr(item, "ingested_at", None)
+    has_pub_flag = False
     if pub_time is not None:
         if ensure_utc(pub_time) > cutoff_utc:
             return False, f"PUBLISHED_AFTER_CUTOFF: published {pub_time} > cutoff {cutoff_utc}"
+        has_pub_flag = True
 
     for f in item.flags:
         if f.startswith("PUBLISHED_AT:"):
+            has_pub_flag = True
             try:
                 p_dt = datetime.fromisoformat(f.split(":", 1)[1])
                 if ensure_utc(p_dt) > cutoff_utc:
@@ -112,6 +115,7 @@ def is_available_at_cutoff(
             except Exception:
                 pass
         elif f.startswith("RECORDED_AT:"):
+            has_pub_flag = True
             try:
                 r_dt = datetime.fromisoformat(f.split(":", 1)[1])
                 if ensure_utc(r_dt) > cutoff_utc:
@@ -119,12 +123,22 @@ def is_available_at_cutoff(
             except Exception:
                 pass
         elif f.startswith("ISSUED_AT:"):
+            has_pub_flag = True
             try:
                 i_dt = datetime.fromisoformat(f.split(":", 1)[1])
                 if ensure_utc(i_dt) > cutoff_utc:
                     return False, f"FORECAST_ISSUED_AFTER_CUTOFF: {i_dt} > {cutoff_utc}"
             except Exception:
                 pass
+
+    # SPEC-B: On historical replay or when publication verification is demanded, missing publication time is rejected
+    requires_pub = (
+        "REQUIRES_PUBLICATION_VERIFICATION" in item.flags
+        or "HISTORICAL_REPLAY" in item.flags
+        or ("HISTORICAL" in item.flags and item.source_family in ("sentinel2", "sentinel1", "sentinel5p", "weather_reanalysis", "asmae"))
+    )
+    if requires_pub and not has_pub_flag:
+        return False, "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY: missing verified publication or recording timestamp"
 
     # 2. Check future observation time relative to cutoff
     if item.observed_at is not None:

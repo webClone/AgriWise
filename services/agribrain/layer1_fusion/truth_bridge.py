@@ -365,10 +365,37 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
         has_instrument = bool(getattr(item, "instrument_id", None))
         has_calibration = bool(getattr(item, "calibration_version", None))
         has_valid_provenance = bool(item.provenance_ref and item.source_id)
-        if item.provenance_ref in ("user-supplied-string", "unverified-string", "fake", "unattested"):
-            has_valid_provenance = False
+        
+        prov_str = str(item.provenance_ref or "").lower()
+        inst_str = str(getattr(item, "instrument_id", "") or "").lower()
+        cal_str = str(getattr(item, "calibration_version", "") or "").lower()
+        
+        is_unattested = (
+            not has_valid_provenance
+            or not has_instrument
+            or not has_calibration
+            or any(s in prov_str for s in ("user-supplied", "unverified", "fake", "unattested", "dummy", "spoofed"))
+            or any(s in inst_str for s in ("fake", "dummy", "unattested", "spoofed"))
+            or any(s in cal_str for s in ("fake", "dummy", "unattested", "spoofed"))
+        )
+        
+        # Revocation check across flags
+        is_revoked = any("REVOKED" in str(f).upper() for f in (getattr(item, "flags", []) or []))
+        
+        # Check registered device status & plot scope if available
+        try:
+            from services.agribrain.sensor_runtime.registry import get_device_registration
+            reg = get_device_registration(item.instrument_id or item.source_id)
+            if reg:
+                if reg.plot_id and item.plot_id and reg.plot_id != item.plot_id:
+                    is_unattested = True
+                if reg.status != "active":
+                    is_unattested = True
+        except Exception:
+            pass
+
         is_synthetic = getattr(item, "data_status", "") in ("synthetic", "simulated", "fallback")
-        if not has_valid_provenance or is_synthetic or not has_instrument or not has_calibration:
+        if is_unattested or is_revoked or is_synthetic:
             item.data_status = "synthetic" if is_synthetic else getattr(item, "data_status", "unverified")
             item.truth_class = "unverified_sensor"
             item.source_reality = "synthetic_or_uncalibrated"

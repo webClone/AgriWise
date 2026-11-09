@@ -141,6 +141,24 @@ def observation_packet_to_evidence(
         base_sigma = next(iter(packet.uncertainty.sigmas.values()), 0.05)
 
     flags = [f.value for f in (packet.qa.flags or [])] if packet.qa else []
+    if "published_at" in payload and payload["published_at"]:
+        p_val = payload["published_at"]
+        p_str = p_val.isoformat() if hasattr(p_val, "isoformat") else str(p_val)
+        flags.append(f"PUBLISHED_AT:{p_str}")
+    if "recorded_at" in payload and payload["recorded_at"]:
+        r_val = payload["recorded_at"]
+        r_str = r_val.isoformat() if hasattr(r_val, "isoformat") else str(r_val)
+        flags.append(f"RECORDED_AT:{r_str}")
+    if hasattr(source_package, "published_at") and getattr(source_package, "published_at", None):
+        p_val = source_package.published_at
+        p_str = p_val.isoformat() if hasattr(p_val, "isoformat") else str(p_val)
+        flags.append(f"PUBLISHED_AT:{p_str}")
+    if hasattr(source_package, "recorded_at") and getattr(source_package, "recorded_at", None):
+        r_val = source_package.recorded_at
+        r_str = r_val.isoformat() if hasattr(r_val, "isoformat") else str(r_val)
+        flags.append(f"RECORDED_AT:{r_str}")
+    if "flags" in payload and isinstance(payload["flags"], list):
+        flags.extend(payload["flags"])
     
     diagnostic_only = False
     state_update_allowed = True
@@ -218,12 +236,11 @@ def observation_packet_to_evidence(
     payload_unit = payload.get("unit")
     
     pkt_time = packet.timestamp
-    if pkt_time and bundle and bundle.run_timestamp:
-        if obs_type not in ("forecast", "weather_forecast", "reconstructed_forecast") and pkt_time > bundle.run_timestamp:
-            pkt_time = bundle.run_timestamp
 
-    inst_id = payload.get("instrument_id") or payload.get("device_id") or (packet.packet_id if source_fam == "sensor" else None)
-    cal_ver = payload.get("calibration_version") or getattr(packet.qa, "calibration_version", None) or ("l0_calibrated_sensor_v1" if source_fam == "sensor" and packet.data_status == DataStatus.OBSERVED else None)
+    inst_id = payload.get("instrument_id") or payload.get("device_id") or (packet.packet_id if source_fam == "sensor" and packet.data_status == DataStatus.OBSERVED else None)
+    cal_ver = payload.get("calibration_version") or getattr(packet.qa, "calibration_version", None) or (
+        f"l0_calibrated_{packet.source.value}" if (packet.qa and packet.qa.sensor_health is not None and packet.data_status == DataStatus.OBSERVED) else None
+    )
 
     extracted_keys = set()
     for src_key, (target_var, default_unit) in PAYLOAD_VARIABLE_MAP.items():
@@ -274,6 +291,7 @@ def observation_packet_to_evidence(
                 valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
                 instrument_id=inst_id,
                 calibration_version=cal_ver,
+                parent_acquisition_id=payload.get("parent_acquisition_id") or getattr(getattr(packet, "provenance", None), "acquisition_id", None) or getattr(source_package, "package_id", None) or provenance_ref,
             )
             items.append(item)
             
@@ -318,6 +336,7 @@ def observation_packet_to_evidence(
             valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
             instrument_id=inst_id,
             calibration_version=cal_ver,
+            parent_acquisition_id=payload.get("parent_acquisition_id") or getattr(getattr(packet, "provenance", None), "acquisition_id", None) or getattr(source_package, "package_id", None) or provenance_ref,
         ))
 
     return items

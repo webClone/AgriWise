@@ -91,11 +91,43 @@ def test_h_covariance_psd_validator_is_reached_by_engine():
     src = inspect.getsource(_mod('engine').Layer1FusionEngine.fuse)
     assert 'validate_covariance_matrix' in src
 
+    # Also verify runtime enforcement: invalid covariance disables originating source package
+    s = _mod('schemas')
+    engine = _mod('engine').Layer1FusionEngine()
+    non_psd = [[1.0, 2.0], [2.0, 1.0]]
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-h-cov",
+        run_timestamp=datetime(2026, 11, 9, 12, tzinfo=timezone.utc),
+        layer0_state_package={
+            "covariance": non_psd,
+            "state_vector": {"soil_moisture_vwc": 0.3},
+            "spatial_scope": "plot",
+        },
+    )
+    pkg = engine.fuse(bundle)
+    assert any("INVALID_COVARIANCE" in q.reason_codes[0] for q in pkg.diagnostics.quarantined_evidence)
+    assert not any(e.source_family == "l0_state" for e in pkg.evidence_items)
+
 def test_i_unattested_sensor_strings_are_not_authentic_proof():
+    # 1. Unattested string provenance
     e = _item(provenance_ref='user-supplied-string', source_id='sensor1',
               instrument_id=None, calibration_version=None)
     _mod('truth_bridge').normalize_evidence_truth(e)
     assert e.state_update_allowed is False
+
+    # 2. Adversarial nonempty fake strings
+    e2 = _item(provenance_ref='fake-receipt-xyz', source_id='sensor1',
+               instrument_id='fake_device', calibration_version='cal_fake')
+    _mod('truth_bridge').normalize_evidence_truth(e2)
+    assert e2.state_update_allowed is False
+
+    # 3. Revoked certificate flag
+    e3 = _item(provenance_ref='receipt_valid_hash', source_id='sensor1',
+               instrument_id='dev_100', calibration_version='v1',
+               flags=['REVOKED_CERTIFICATE'])
+    _mod('truth_bridge').normalize_evidence_truth(e3)
+    assert e3.state_update_allowed is False
 
 def test_j_asmae_missing_first_recorded_time_is_not_replay_admitted():
     s = _mod('schemas')
@@ -116,3 +148,51 @@ def test_k_nonfinite_sigma_never_produces_state_authority():
     assert len(results) == 1
     assert results[0].state_update_allowed is False
     assert results[0].uncertainty is None
+
+def test_l_future_observation_timestamps_never_rewritten_and_secondary_evidence_gated():
+    """Future timestamps must never be rewritten to run_timestamp, and secondary intake must enforce cutoff & plot scope."""
+    s = _mod('schemas')
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer1_fusion.adapters.observation_packet import observation_packet_to_evidence
+    
+    now = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc)
+    future_time = now + timedelta(hours=3)
+    
+    pkt = ObservationPacket(
+        packet_id="pkt_future",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=future_time,
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 0.70, "unit": "index"},
+    )
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-l",
+        run_timestamp=now,
+        window_start=now - timedelta(days=1),
+        window_end=now,
+    )
+    items = observation_packet_to_evidence(pkt, bundle)
+    assert len(items) == 1
+    # Physical timestamp must NOT be rewritten or clamped to bundle.run_timestamp
+    assert items[0].observed_at == future_time
+    assert items[0].observed_at != bundle.run_timestamp
+    
+    # Secondary intake gate verification:
+    engine = _mod('engine').Layer1FusionEngine()
+    ledger = _mod('evidence_ledger').EvidenceLedger()
+    quarantined = []
+    
+    # Cross-plot secondary evidence
+    cross_plot_item = _item(evidence_id="sec_1", plot_id="plot-OTHER", variable="ndvi", value=0.6)
+    engine._admit_evidence_or_quarantine(cross_plot_item, ledger, quarantined, bundle=bundle, as_of_cutoff=now)
+    assert any("FOREIGN_PLOT_SCOPE_MISMATCH" in str(q.reason_codes) for q in quarantined)
+    
+    # Post-cutoff secondary evidence
+    post_cutoff_item = _item(evidence_id="sec_2", plot_id="plot-A", variable="ndvi", value=0.6,
+                             observed_at=now + timedelta(hours=2))
+    engine._admit_evidence_or_quarantine(post_cutoff_item, ledger, quarantined, bundle=bundle, as_of_cutoff=now)
+    assert any("HISTORICAL_CUTOFF_VIOLATION" in str(q.reason_codes) for q in quarantined)

@@ -144,14 +144,33 @@ def test_r6_t07_late_publication_excluded_on_historical_replay():
     ta = _mod('temporal_alignment')
     eng_mod = _mod('engine')
     s = _mod('schemas')
-    cutoff = datetime(2026, 11, 6, 11, 0, tzinfo=timezone.utc)
-    early = _item(evidence_id='early', observed_at=datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc), flags=['PUBLISHED_AT:2026-11-06T10:30:00+00:00'])
-    late = _item(evidence_id='late', observed_at=datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc), flags=['PUBLISHED_AT:2026-11-06T16:00:00+00:00'])
-    assert ta.is_available_at_cutoff(early, cutoff)[0] is True
-    assert ta.is_available_at_cutoff(late, cutoff)[0] is False
+    from layer0.source_package import Layer0SourcePackage
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
 
-    # Production engine execution: late items must be excluded / quarantined
-    engine = eng_mod.Layer1FusionEngine()
+    cutoff = datetime(2026, 11, 6, 11, 0, tzinfo=timezone.utc)
+    early_pkt = ObservationPacket(
+        packet_id="pkt_early",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 0.65, "unit": "index", "published_at": "2026-11-06T10:30:00+00:00"},
+    )
+    late_pkt = ObservationPacket(
+        packet_id="pkt_late",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.70}),
+        payload={"variable": "ndvi", "value": 0.70, "unit": "index", "published_at": "2026-11-06T16:00:00+00:00"},
+    )
+    pkg_early = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-A", packets=[early_pkt])
+    pkg_late = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-A", packets=[late_pkt])
+
     bundle = s.Layer1InputBundle(
         plot_id='plot-A',
         run_id='run-t07',
@@ -159,9 +178,16 @@ def test_r6_t07_late_publication_excluded_on_historical_replay():
         window_start=cutoff - timedelta(days=1),
         window_end=cutoff,
         as_of_cutoff=cutoff,
+        layer0_source_packages={"sentinel2": [pkg_early, pkg_late]},
     )
+    engine = eng_mod.Layer1FusionEngine()
     pkg = engine.fuse(bundle)
-    assert pkg is not None
+    
+    admitted_ids = [e.evidence_id for e in pkg.evidence_items]
+    quarantined_ids = [q.evidence_id for q in pkg.diagnostics.quarantined_evidence]
+    assert any("pkt_early" in eid for eid in admitted_ids)
+    assert not any("pkt_late" in eid for eid in admitted_ids)
+    assert any("pkt_late" in qid for qid in quarantined_ids)
 
 
 def test_r6_t08_missing_asmae_sigma_remains_honestly_unknown():
@@ -355,6 +381,9 @@ def test_r6_t23_published_after_cutoff_excluded_from_replay():
     ta = _mod('temporal_alignment')
     eng_mod = _mod('engine')
     s = _mod('schemas')
+    from layer0.source_package import Layer0SourcePackage
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+
     cutoff = datetime(2026, 11, 9, 11, 0, tzinfo=timezone.utc)
     # Acquired at 10:00, but published at 16:00 (after cutoff)
     item = _item(
@@ -365,6 +394,17 @@ def test_r6_t23_published_after_cutoff_excluded_from_replay():
     assert not ok
     assert "PUBLISHED_AFTER_CUTOFF" in reason
 
+    late_pkt = ObservationPacket(
+        packet_id="pkt_t23_late",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 9, 10, 0, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 0.55, "unit": "index", "published_at": "2026-11-09T16:00:00+00:00"},
+    )
+    src_pkg = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-A", packets=[late_pkt])
     engine = eng_mod.Layer1FusionEngine()
     bundle = s.Layer1InputBundle(
         plot_id="plot-A",
@@ -372,9 +412,11 @@ def test_r6_t23_published_after_cutoff_excluded_from_replay():
         run_timestamp=cutoff,
         window_end=cutoff,
         as_of_cutoff=cutoff,
+        layer0_source_packages={"sentinel2": [src_pkg]},
     )
     pkg = engine.fuse(bundle)
-    assert pkg is not None
+    assert not any("pkt_t23_late" in e.evidence_id for e in pkg.evidence_items)
+    assert any("pkt_t23_late" in q.evidence_id for q in pkg.diagnostics.quarantined_evidence)
 
 
 def test_r6_t24_forecast_issued_after_cutoff_excluded():
@@ -579,10 +621,15 @@ def test_r6_t37_asymmetric_or_non_psd_covariance_rejected():
         plot_id="plot-A",
         run_id="r-t37",
         run_timestamp=datetime(2026, 11, 9, 12, tzinfo=timezone.utc),
-        layer0_state_package={"covariance": non_psd_3},
+        layer0_state_package={
+            "covariance": non_psd_3,
+            "state_vector": {"soil_moisture_vwc": 0.25},
+            "spatial_scope": "plot",
+        },
     )
     pkg = engine.fuse(bundle)
     assert any("INVALID_COVARIANCE" in q.reason_codes[0] for q in pkg.diagnostics.quarantined_evidence)
+    assert not any(e.source_family == "l0_state" for e in pkg.evidence_items)
 
 
 def test_r6_t38_correlated_modalities_do_not_inflate_effective_n():
@@ -705,19 +752,30 @@ def test_r6_t47_rejected_c1_state_admission_terminal():
     violations = v.validate_evidence(item, expected_plot_id="plot-1")
     assert any("OUT_OF_BOUNDS_PHYSICAL_VALUE" in msg for msg in violations)
 
+    from layer0.source_package import Layer0SourcePackage
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+
+    bad_pkt = ObservationPacket(
+        packet_id="pkt_bad_ndvi",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 9, 12, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 2.5, "unit": "index"},
+    )
+    src_pkg = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-1", packets=[bad_pkt])
     engine = eng_mod.Layer1FusionEngine()
     bundle = s.Layer1InputBundle(
         plot_id="plot-1",
         run_id="r-t47",
         run_timestamp=datetime(2026, 11, 9, 12, tzinfo=timezone.utc),
-        layer0_state_package={
-            "state_vector": {"ndvi": 2.5},
-            "spatial_scope": "plot",
-            "covariance": [[0.01]],
-        },
+        layer0_source_packages={"sentinel2": [src_pkg]},
     )
     pkg = engine.fuse(bundle)
-    assert pkg is not None
+    assert any("pkt_bad_ndvi" in q.evidence_id for q in pkg.diagnostics.quarantined_evidence)
+    assert not any("pkt_bad_ndvi" in e.evidence_id for e in pkg.evidence_items)
 
 
 def test_r6_t48_authority_vector_survives_serialization_without_promotion():
@@ -750,20 +808,55 @@ def test_r6_t49_numerically_failed_source_contributes_only_diagnostic():
 def test_r6_t50_end_to_end_trace_resolves_consistent_parent_roots():
     eng_mod = _mod('engine')
     s = _mod('schemas')
+    from layer0.source_package import Layer0SourcePackage
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+
     now = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc)
     
+    s2_pkt = ObservationPacket(
+        packet_id="pkt_s2_01",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=now - timedelta(hours=2),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=0.95),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 0.72, "unit": "index", "published_at": (now - timedelta(hours=1)).isoformat()},
+    )
+    weather_pkt = ObservationPacket(
+        packet_id="pkt_env_01",
+        source=ObservationSource.WEATHER_STATION,
+        data_status=DataStatus.OBSERVED,
+        timestamp=now - timedelta(hours=1),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"temp_mean": 0.5}),
+        payload={"variable": "temp_mean", "temp_mean": 22.5, "unit": "degC"},
+    )
+    
+    pkg_s2 = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-1", packets=[s2_pkt])
+    pkg_env = Layer0SourcePackage(source_family="environment", plot_id="plot-1", packets=[weather_pkt])
+
     bundle = s.Layer1InputBundle(
         plot_id="plot-1",
         run_id="r-t50",
         run_timestamp=now,
         window_start=now - timedelta(days=1),
         window_end=now,
+        layer0_source_packages={
+            "sentinel2": [pkg_s2],
+            "environment": [pkg_env],
+        },
     )
     engine = eng_mod.Layer1FusionEngine()
     pkg = engine.fuse(bundle)
+    
+    assert len(pkg.evidence_items) > 0, "Expected non-empty evidence items in end-to-end trace"
+    assert len(pkg.fused_features.all_features()) > 0, "Expected non-empty fused features in end-to-end trace"
     
     # Content root and evidence origins resolve consistently
     root = pkg.scientific_content_root()
     assert len(root) == 64
     assert pkg.content_hash() == root[:32]
     assert pkg.provenance.run_id == "r-t50"
+    assert all(item.parent_acquisition_id is not None for item in pkg.evidence_items)

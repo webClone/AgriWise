@@ -158,6 +158,9 @@ class Layer1FusionEngine:
                             severity="error",
                         )
                     )
+                    # SPEC-D: Disable originating source when covariance is mathematically invalid
+                    bundle.layer0_state_package = None
+
         if bundle.asmae_output and isinstance(bundle.asmae_output, dict):
             asmae_cov = bundle.asmae_output.get("covariance") or bundle.asmae_output.get("P")
             if asmae_cov is not None:
@@ -172,6 +175,8 @@ class Layer1FusionEngine:
                             severity="error",
                         )
                     )
+                    # SPEC-D: Disable originating source when covariance is mathematically invalid
+                    bundle.asmae_output = None
 
         # 2–3. Build source envelopes and run adapters
         source_packages = self._gather_packages(bundle)
@@ -278,12 +283,12 @@ class Layer1FusionEngine:
         if bundle.raster_composites:
             # 8.6 EO Foundation Model embedding
             eo_embedding_audit = self._try_eo_embedding(
-                bundle, ledger, all_quarantined,
+                bundle, ledger, all_quarantined, as_of_cutoff=as_of_cutoff,
             )
 
             # 8.7 Zone segmentation
             zone_seg_audit = self._try_zone_segmentation(
-                bundle, ledger, spatial_index, all_quarantined,
+                bundle, ledger, spatial_index, all_quarantined, as_of_cutoff=as_of_cutoff,
             )
 
         # 9. Freshness
@@ -629,6 +634,7 @@ class Layer1FusionEngine:
         ledger: EvidenceLedger,
         spatial_index,
         all_quarantined: list,
+        as_of_cutoff: Optional[datetime] = None,
     ) -> Optional[Dict]:
         """Conditionally run zone segmentation from NDVI rasters.
 
@@ -727,6 +733,8 @@ class Layer1FusionEngine:
                         ),
                         ledger,
                         all_quarantined,
+                        bundle=bundle,
+                        as_of_cutoff=as_of_cutoff,
                         source_context=bundle.raster_composites,
                     )
 
@@ -744,6 +752,7 @@ class Layer1FusionEngine:
         bundle: Layer1InputBundle,
         ledger: EvidenceLedger,
         all_quarantined: list,
+        as_of_cutoff: Optional[datetime] = None,
     ) -> Optional[Dict]:
         """Run EO Foundation Model embedding on multi-spectral rasters.
 
@@ -874,6 +883,8 @@ class Layer1FusionEngine:
                 ),
                 ledger,
                 all_quarantined,
+                bundle=bundle,
+                as_of_cutoff=as_of_cutoff,
                 source_context=bundle.raster_composites,
             )
 
@@ -905,6 +916,8 @@ class Layer1FusionEngine:
                 ),
                 ledger,
                 all_quarantined,
+                bundle=bundle,
+                as_of_cutoff=as_of_cutoff,
                 source_context=bundle.raster_composites,
             )
 
@@ -927,10 +940,13 @@ class Layer1FusionEngine:
         item: EvidenceItem,
         ledger: EvidenceLedger,
         all_quarantined: list,
+        bundle: Optional[Layer1InputBundle] = None,
+        as_of_cutoff: Optional[datetime] = None,
         source_context: Any = None,
     ):
         from .evidence_validation import validate_evidence, quarantine_evidence
         from .truth_bridge import normalize_evidence_truth
+        from .temporal_alignment import is_available_at_cutoff
         
         if "UNQUALIFIED_SPATIAL_IDENTITY" in getattr(item, "flags", []):
             item.state_update_allowed = False
@@ -942,7 +958,20 @@ class Layer1FusionEngine:
             normalized_item.state_update_allowed = False
             normalized_item.production_usable = False
             normalized_item.diagnostic_only = True
-        violations = validate_evidence(normalized_item, expected_plot_id=getattr(normalized_item, "plot_id", None))
+
+        # SPEC-B / Gate 12: Universal cutoff check on secondary evidence intake
+        eff_cutoff = as_of_cutoff or (getattr(bundle, "as_of_cutoff", None) if bundle else None) or (getattr(bundle, "as_of", None) if bundle else None) or (bundle.window_end if bundle else None) or (bundle.run_timestamp if bundle else None)
+        if eff_cutoff is not None:
+            is_avail, avail_reason = is_available_at_cutoff(normalized_item, eff_cutoff)
+            if not is_avail:
+                all_quarantined.append(
+                    quarantine_evidence(normalized_item, [f"HISTORICAL_CUTOFF_VIOLATION:{avail_reason}"])
+                )
+                return
+
+        # SPEC-C / Gate 12: Plot namespace isolation against bundle.plot_id
+        expected_plot = bundle.plot_id if bundle else getattr(normalized_item, "plot_id", None)
+        violations = validate_evidence(normalized_item, expected_plot_id=expected_plot)
         if violations:
             all_quarantined.append(quarantine_evidence(normalized_item, violations))
         else:
