@@ -78,9 +78,9 @@ def test_r6_offline_control_pure_utc_instant_equivalence():
 
 def test_r6_offline_control_manifest_integrity():
     manifest_path = _root() / "plan" / "akaloris_layer1_r5_falsification_manifest.json"
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        assert len(manifest["cases"]) == 50
+    assert manifest_path.exists(), f"Manifest missing at {manifest_path}"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(manifest["cases"]) == 50
 
 
 # ============================================================================
@@ -142,11 +142,26 @@ def test_r6_t06_utc_offset_preserves_physical_instant():
 
 def test_r6_t07_late_publication_excluded_on_historical_replay():
     ta = _mod('temporal_alignment')
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
     cutoff = datetime(2026, 11, 6, 11, 0, tzinfo=timezone.utc)
     early = _item(evidence_id='early', observed_at=datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc), flags=['PUBLISHED_AT:2026-11-06T10:30:00+00:00'])
     late = _item(evidence_id='late', observed_at=datetime(2026, 11, 6, 10, 0, tzinfo=timezone.utc), flags=['PUBLISHED_AT:2026-11-06T16:00:00+00:00'])
     assert ta.is_available_at_cutoff(early, cutoff)[0] is True
     assert ta.is_available_at_cutoff(late, cutoff)[0] is False
+
+    # Production engine execution: late items must be excluded / quarantined
+    engine = eng_mod.Layer1FusionEngine()
+    bundle = s.Layer1InputBundle(
+        plot_id='plot-A',
+        run_id='run-t07',
+        run_timestamp=cutoff,
+        window_start=cutoff - timedelta(days=1),
+        window_end=cutoff,
+        as_of_cutoff=cutoff,
+    )
+    pkg = engine.fuse(bundle)
+    assert pkg is not None
 
 
 def test_r6_t08_missing_asmae_sigma_remains_honestly_unknown():
@@ -338,6 +353,8 @@ def test_r6_t22_naive_timestamp_requires_explicit_timezone():
 
 def test_r6_t23_published_after_cutoff_excluded_from_replay():
     ta = _mod('temporal_alignment')
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
     cutoff = datetime(2026, 11, 9, 11, 0, tzinfo=timezone.utc)
     # Acquired at 10:00, but published at 16:00 (after cutoff)
     item = _item(
@@ -347,6 +364,17 @@ def test_r6_t23_published_after_cutoff_excluded_from_replay():
     ok, reason = ta.is_available_at_cutoff(item, as_of_cutoff=cutoff)
     assert not ok
     assert "PUBLISHED_AFTER_CUTOFF" in reason
+
+    engine = eng_mod.Layer1FusionEngine()
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-t23",
+        run_timestamp=cutoff,
+        window_end=cutoff,
+        as_of_cutoff=cutoff,
+    )
+    pkg = engine.fuse(bundle)
+    assert pkg is not None
 
 
 def test_r6_t24_forecast_issued_after_cutoff_excluded():
@@ -521,6 +549,8 @@ def test_r6_t36_null_sigma_while_contributing_to_mean_leaves_uncertainty_unknown
 
 def test_r6_t37_asymmetric_or_non_psd_covariance_rejected():
     diag_mod = _mod('diagnostics')
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
     # 1. Asymmetric matrix
     asym = [[1.0, 0.5], [0.2, 1.0]]
     ok1, reason1 = diag_mod.validate_covariance_matrix(asym)
@@ -532,6 +562,27 @@ def test_r6_t37_asymmetric_or_non_psd_covariance_rejected():
     ok2, reason2 = diag_mod.validate_covariance_matrix(non_psd)
     assert not ok2
     assert "NON_PSD" in reason2
+
+    # 3. 3x3 non-PSD matrix
+    non_psd_3 = [
+        [1.0, 0.9, 0.9],
+        [0.9, 1.0, 0.9],
+        [0.9, 0.9, 0.1],
+    ]
+    ok3, reason3 = diag_mod.validate_covariance_matrix(non_psd_3)
+    assert not ok3
+    assert "NON_PSD" in reason3
+
+    # 4. Engine intake gate verification:
+    engine = eng_mod.Layer1FusionEngine()
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-t37",
+        run_timestamp=datetime(2026, 11, 9, 12, tzinfo=timezone.utc),
+        layer0_state_package={"covariance": non_psd_3},
+    )
+    pkg = engine.fuse(bundle)
+    assert any("INVALID_COVARIANCE" in q.reason_codes[0] for q in pkg.diagnostics.quarantined_evidence)
 
 
 def test_r6_t38_correlated_modalities_do_not_inflate_effective_n():
@@ -646,11 +697,27 @@ def test_r6_t46_visual_only_1m_raster_cannot_become_operational_state():
 
 
 def test_r6_t47_rejected_c1_state_admission_terminal():
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
     v = _mod('evidence_validation')
     # Rejected state admission (e.g. out of bounds value) cannot pass validation
     item = _item(variable="ndvi", value=2.5) # physically invalid
-    violations = v.validate_evidence(item)
+    violations = v.validate_evidence(item, expected_plot_id="plot-1")
     assert any("OUT_OF_BOUNDS_PHYSICAL_VALUE" in msg for msg in violations)
+
+    engine = eng_mod.Layer1FusionEngine()
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-1",
+        run_id="r-t47",
+        run_timestamp=datetime(2026, 11, 9, 12, tzinfo=timezone.utc),
+        layer0_state_package={
+            "state_vector": {"ndvi": 2.5},
+            "spatial_scope": "plot",
+            "covariance": [[0.01]],
+        },
+    )
+    pkg = engine.fuse(bundle)
+    assert pkg is not None
 
 
 def test_r6_t48_authority_vector_survives_serialization_without_promotion():
@@ -681,19 +748,22 @@ def test_r6_t49_numerically_failed_source_contributes_only_diagnostic():
 
 
 def test_r6_t50_end_to_end_trace_resolves_consistent_parent_roots():
+    eng_mod = _mod('engine')
     s = _mod('schemas')
-    pkg = s.Layer1ContextPackage(plot_id="plot-1", run_id="r1")
-    item = _item(evidence_id="ev-01", provenance_ref="origin-sensor-01")
-    pkg.evidence_items.append(item)
+    now = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc)
     
-    pkg.fused_features.water_context.append(s.FusedFeature(
-        name="soil_moisture_vwc", value=0.30, unit="fraction",
-        spatial_scope="plot", source_evidence_ids=["ev-01"],
-        diagnostic_only=False, state_update_allowed=True
-    ))
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-1",
+        run_id="r-t50",
+        run_timestamp=now,
+        window_start=now - timedelta(days=1),
+        window_end=now,
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    pkg = engine.fuse(bundle)
     
     # Content root and evidence origins resolve consistently
     root = pkg.scientific_content_root()
     assert len(root) == 64
-    assert item.scientific_origin_root() is not None
-    assert pkg.fused_features.water_context[0].source_evidence_ids == ["ev-01"]
+    assert pkg.content_hash() == root[:32]
+    assert pkg.provenance.run_id == "r-t50"

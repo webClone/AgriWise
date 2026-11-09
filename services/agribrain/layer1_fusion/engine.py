@@ -70,7 +70,7 @@ from .adapters.asmae_adapter import ASMAEAdapter
 from .evidence_ledger import EvidenceLedger
 from .evidence_validation import validate_evidence, quarantine_evidence
 from .truth_bridge import normalize_evidence_truth
-from .temporal_alignment import assign_temporal_window, compute_stale_flags
+from .temporal_alignment import assign_temporal_window, compute_stale_flags, is_available_at_cutoff
 from .spatial_alignment import build_spatial_index
 from .freshness import compute_freshness_batch
 from .source_family import normalize_source_family
@@ -78,7 +78,7 @@ from .conflict_resolver import detect_conflicts_with_diagnostics
 from .gap_analyzer import detect_gaps
 from .confidence_model import compute_confidence_batch
 from .fusion_rules import fuse_features
-from .diagnostics import build_diagnostics
+from .diagnostics import build_diagnostics, validate_covariance_matrix
 from .context_invariants import (
     enforce_context_invariants,
     compute_spatial_fidelity,
@@ -132,6 +132,47 @@ class Layer1FusionEngine:
         all_envelopes: List[SourceEnvelope] = []
         all_quarantined: List[QuarantinedEvidence] = []
 
+        as_of_cutoff = (
+            getattr(bundle, "as_of_cutoff", None)
+            or getattr(bundle, "as_of", None)
+            or bundle.window_end
+            or bundle.run_timestamp
+        )
+
+        # SPEC-D / PR28-09: Validate any full covariance matrices provided by Layer 0 state or ASMAE
+        if bundle.layer0_state_package:
+            l0_cov = (
+                getattr(bundle.layer0_state_package, "covariance", None)
+                or (bundle.layer0_state_package.get("covariance") if isinstance(bundle.layer0_state_package, dict) else None)
+                or (bundle.layer0_state_package.get("P") if isinstance(bundle.layer0_state_package, dict) else None)
+            )
+            if l0_cov is not None:
+                is_psd, cov_reason = validate_covariance_matrix(l0_cov)
+                if not is_psd:
+                    all_quarantined.append(
+                        QuarantinedEvidence(
+                            evidence_id="l0_state_covariance",
+                            reason_codes=[f"INVALID_COVARIANCE:{cov_reason}"],
+                            original_source_family="l0_state",
+                            variable="covariance",
+                            severity="error",
+                        )
+                    )
+        if bundle.asmae_output and isinstance(bundle.asmae_output, dict):
+            asmae_cov = bundle.asmae_output.get("covariance") or bundle.asmae_output.get("P")
+            if asmae_cov is not None:
+                is_psd, cov_reason = validate_covariance_matrix(asmae_cov)
+                if not is_psd:
+                    all_quarantined.append(
+                        QuarantinedEvidence(
+                            evidence_id="asmae_output_covariance",
+                            reason_codes=[f"INVALID_COVARIANCE:{cov_reason}"],
+                            original_source_family="asmae",
+                            variable="covariance",
+                            severity="error",
+                        )
+                    )
+
         # 2–3. Build source envelopes and run adapters
         source_packages = self._gather_packages(bundle)
 
@@ -161,11 +202,16 @@ class Layer1FusionEngine:
         # 4–5. Validate evidence and quarantine invalid
         valid_evidence: List[EvidenceItem] = []
         for item in all_evidence:
-            # Evidence was normalized once above with its source package.  A
-            # context-free second classification can only discard provenance
-            # (for example, downgrading a provider raster to proxy).  This
-            # stage is deliberately a non-destructive invariant check.
-            violations = validate_evidence(item)
+            # SPEC-B / PR28-01: Universal cutoff enforcement at primary engine intake
+            is_avail, avail_reason = is_available_at_cutoff(item, as_of_cutoff)
+            if not is_avail:
+                all_quarantined.append(
+                    quarantine_evidence(item, [f"HISTORICAL_CUTOFF_VIOLATION:{avail_reason}"])
+                )
+                continue
+
+            # SPEC-C / PR28-03: Plot namespace validation
+            violations = validate_evidence(item, expected_plot_id=bundle.plot_id)
             if violations:
                 all_quarantined.append(quarantine_evidence(item, violations))
             else:
@@ -197,9 +243,16 @@ class Layer1FusionEngine:
                 bundle.raster_composites, bundle.plot_id, bundle.run_timestamp,
             )
             for re in raster_evidence:
+                is_avail, avail_reason = is_available_at_cutoff(re, as_of_cutoff)
+                if not is_avail:
+                    all_quarantined.append(
+                        quarantine_evidence(re, [f"HISTORICAL_CUTOFF_VIOLATION:{avail_reason}"])
+                    )
+                    continue
+
                 # ingest_raster_composites normalized this item against the
                 # individual raster, not the multi-raster wrapper.
-                violations = validate_evidence(re)
+                violations = validate_evidence(re, expected_plot_id=bundle.plot_id)
                 if violations:
                     all_quarantined.append(quarantine_evidence(re, violations))
                 else:
@@ -889,7 +942,7 @@ class Layer1FusionEngine:
             normalized_item.state_update_allowed = False
             normalized_item.production_usable = False
             normalized_item.diagnostic_only = True
-        violations = validate_evidence(normalized_item)
+        violations = validate_evidence(normalized_item, expected_plot_id=getattr(normalized_item, "plot_id", None))
         if violations:
             all_quarantined.append(quarantine_evidence(normalized_item, violations))
         else:

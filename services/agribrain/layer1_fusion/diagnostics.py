@@ -565,11 +565,34 @@ def validate_covariance_matrix(matrix: List[List[float]], tol: float = 1e-6) -> 
         if det < -tol:
             return False, f"NON_PSD_COVARIANCE_NEGATIVE_DETERMINANT: det={det} < 0"
     elif n > 2:
+        # Check PSD using numpy if present, otherwise pure Python Cholesky decomposition
         try:
             import numpy as np
-            eigs = np.linalg.eigvalsh(np.array(matrix))
+            eigs = np.linalg.eigvalsh(np.array(matrix, dtype=float))
             if any(e < -tol for e in eigs):
                 return False, f"NON_PSD_COVARIANCE_NEGATIVE_EIGENVALUE: min_eig={min(eigs)}"
-        except Exception:
-            pass
+        except ImportError:
+            # Pure Python Cholesky decomposition on A + tol*I to test PSD
+            A = [[float(matrix[i][j]) for j in range(n)] for i in range(n)]
+            for i in range(n):
+                A[i][i] += tol
+            L = [[0.0] * n for _ in range(n)]
+            for i in range(n):
+                for j in range(i + 1):
+                    s = sum(L[i][k] * L[j][k] for k in range(j))
+                    if i == j:
+                        val = A[i][i] - s
+                        if val < -1e-9:
+                            return False, f"NON_PSD_COVARIANCE_NEGATIVE_PIVOT: pivot={val} at {i}"
+                        L[i][j] = math.sqrt(max(0.0, val))
+                    else:
+                        if L[j][j] == 0.0:
+                            if abs(A[i][j] - s) > 1e-7:
+                                return False, f"NON_PSD_COVARIANCE_SINGULAR_MISMATCH: off-diagonal nonzero at ({i},{j})"
+                            L[i][j] = 0.0
+                        else:
+                            L[i][j] = (A[i][j] - s) / L[j][j]
+        except Exception as ex:
+            # Fail closed on any computational error
+            return False, f"COVARIANCE_EVALUATION_ERROR: {ex}"
     return True, "valid_psd_covariance"

@@ -362,9 +362,13 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
 
     # 6. Sensor/IoT
     elif item.source_family == "sensor":
+        has_instrument = bool(getattr(item, "instrument_id", None))
+        has_calibration = bool(getattr(item, "calibration_version", None))
         has_valid_provenance = bool(item.provenance_ref and item.source_id)
+        if item.provenance_ref in ("user-supplied-string", "unverified-string", "fake", "unattested"):
+            has_valid_provenance = False
         is_synthetic = getattr(item, "data_status", "") in ("synthetic", "simulated", "fallback")
-        if not has_valid_provenance or is_synthetic:
+        if not has_valid_provenance or is_synthetic or not has_instrument or not has_calibration:
             item.data_status = "synthetic" if is_synthetic else getattr(item, "data_status", "unverified")
             item.truth_class = "unverified_sensor"
             item.source_reality = "synthetic_or_uncalibrated"

@@ -342,7 +342,7 @@ def _fuse_group(
                 # Uncertainty propagation: estimator-consistent linear error propagation
                 # For mu = sum(a_i * y_i) with a_i = w_i / total_weight,
                 # Var(mu) = sum(a_i^2 * sigma_i^2) under independent errors.
-                has_unknown_sigma = any((item[2] is None or item[2] <= 0) for item, w in weights_raw if w > 0)
+                has_unknown_sigma = any((item[2] is None or not math.isfinite(item[2]) or item[2] <= 0) for item, w in weights_raw if w > 0)
                 if has_unknown_sigma:
                     fused_uncertainty = None
                     is_state_update_allowed = False
@@ -352,7 +352,12 @@ def _fuse_group(
                         ((w / total_weight) * item[2]) ** 2
                         for item, w in weights_raw
                     )
-                    fused_uncertainty = round(math.sqrt(var_sum), 4)
+                    if math.isnan(var_sum) or not math.isfinite(var_sum) or var_sum < 0:
+                        fused_uncertainty = None
+                        is_state_update_allowed = False
+                        flags.append("UNKNOWN_SIGMA_PRESENT")
+                    else:
+                        fused_uncertainty = round(math.sqrt(var_sum), 4)
 
                     # Check for duplicate ancestry (same provenance_ref or parent_acquisition_id)
                     parent_refs = [

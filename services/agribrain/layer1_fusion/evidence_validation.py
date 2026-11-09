@@ -47,19 +47,8 @@ def validate_evidence(item: EvidenceItem, expected_plot_id: Optional[str] = None
         violations.append("EMPTY_PLOT_ID")
     elif expected_plot_id and item.plot_id != expected_plot_id:
         violations.append(f"FOREIGN_PLOT_SCOPE_MISMATCH: item plot {item.plot_id} != expected plot {expected_plot_id}")
-
-    # Cross-plot scope validation: check for conflicting plot markers in source or provenance
-    if item.plot_id:
-        for ref in (item.provenance_ref, item.source_id):
-            if ref and isinstance(ref, str):
-                ref_suffix = ref.rsplit("-", 1)[-1] if "-" in ref else ""
-                plot_suffix = item.plot_id.rsplit("-", 1)[-1] if "-" in item.plot_id else ""
-                if ref_suffix and plot_suffix and ref_suffix != plot_suffix and len(ref_suffix) == 1 and len(plot_suffix) == 1:
-                    violations.append(f"FOREIGN_PLOT_SCOPE_MISMATCH: plot {item.plot_id} does not match source {ref}")
-                    break
-    if item.evidence_id == "foreign":
-        if not any("PLOT" in v or "SCOPE" in v for v in violations):
-            violations.append(f"FOREIGN_PLOT_REJECTED: item {item.evidence_id} for plot {item.plot_id}")
+    if expected_plot_id and getattr(item, "scope_id", None) and item.spatial_scope == "plot" and item.scope_id != expected_plot_id:
+        violations.append(f"FOREIGN_PLOT_SCOPE_MISMATCH: scope_id {item.scope_id} != expected plot {expected_plot_id}")
     if not item.variable:
         violations.append("EMPTY_VARIABLE")
     if item.source_family not in SOURCE_FAMILIES:
@@ -213,7 +202,10 @@ def validate_evidence(item: EvidenceItem, expected_plot_id: Optional[str] = None
                 violations.append(f"NON_FINITE_OR_MALFORMED_VALUE:{item.variable}={item.value!r}")
             elif item.variable in _BOUNDS:
                 lo, hi = _BOUNDS[item.variable]
-                if val < lo or val > hi:
+                check_val = val
+                if item.unit == "percent" and hi <= 1.0:
+                    check_val = val / 100.0
+                if check_val < lo or check_val > hi:
                     violations.append(
                         f"VALUE_OUT_OF_BOUNDS:{item.variable}={val:.4f} not in [{lo},{hi}]"
                     )

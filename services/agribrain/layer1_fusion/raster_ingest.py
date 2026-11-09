@@ -128,21 +128,16 @@ def ingest_raster_composites(
         if H <= 0 or W <= 0:
             continue
 
-        # Recompute actual valid non-null, finite pixel count (T33)
+        # Recompute actual valid non-null, finite pixel count (T33 / PR28-12)
         actual_valid = 0
-        for row in pixel_array:
-            if isinstance(row, list):
+        if isinstance(pixel_array, list) and all(isinstance(row, list) and len(row) == W for row in pixel_array):
+            for row in pixel_array:
                 for v in row:
-                    if v is not None and v == v and not (isinstance(v, float) and math.isnan(v)):
+                    if v is not None and isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
                         actual_valid += 1
-            elif row is not None and row == row and not (isinstance(row, float) and math.isnan(row)):
-                actual_valid += 1
-        valid_count = actual_valid
+        valid_count = max(0, min(H * W, actual_valid))
         resolution_m = raster_data.get("resolution_m", 10.0)
         canonical_var = _VARIABLE_MAP.get(var_key, var_key.lower())
-
-        # Compute content hash from pixel data
-        content_hash = _compute_pixel_hash(pixel_array)
 
         total_cells = H * W
         observed_ratio = float(valid_count / total_cells) if total_cells > 0 else 0.0
@@ -152,6 +147,9 @@ def ingest_raster_composites(
             )
         else:
             grid_spec, grid_status = None, "grid_array_shape_mismatch"
+
+        # Compute content hash from pixel data and grid spec
+        content_hash = _compute_pixel_hash(pixel_array, grid_spec=grid_spec, native_resolution_m=resolution_m)
 
         raster_id = f"raster_{canonical_var}_{content_hash[:8]}"
 
@@ -521,7 +519,7 @@ def ingest_asmae_raster_refs(output: Dict[str, Any], plot_id: str) -> List[Raste
         observed_ratio = float(valid_count / total_cells) if total_cells > 0 else 0.0
         
         # Compute content hash
-        content_hash = _compute_pixel_hash(pixel_array)
+        content_hash = _compute_pixel_hash(pixel_array, grid_spec=normalized_grid, native_resolution_m=res_m)
         
         # Determine trust parameters
         ref_state_allowed = state_allowed if is_state else False

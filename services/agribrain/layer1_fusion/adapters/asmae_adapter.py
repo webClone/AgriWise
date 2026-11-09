@@ -201,10 +201,10 @@ class ASMAEAdapter:
         items: List[EvidenceItem] = []
         if not self.can_read(package):
             return items
-        # SPEC-B: Knowledge-cutoff check for historical replay
-        cutoff = getattr(context, "window_end", None) or getattr(context, "run_timestamp", None)
+        # SPEC-B / PR28-02: Require verified publication/recorded time for historical admission
+        cutoff = getattr(context, "as_of_cutoff", None) or getattr(context, "window_end", None) or getattr(context, "run_timestamp", None)
         recorded_at = None
-        for key in ("recorded_at", "snapshot_published_at", "published_at"):
+        for key in ("recorded_at", "snapshot_published_at", "published_at", "generated_at"):
             if package.get(key):
                 try:
                     val = package[key]
@@ -221,18 +221,25 @@ class ASMAEAdapter:
                         from services.agribrain.layer05_asmae import plot_snapshot_store as store
                     except Exception:
                         from layer05_asmae import plot_snapshot_store as store
-                root = getattr(store, "PLOT_SNAPSHOT_ROOT", None)
-                if root:
-                    matches = list(Path(root).rglob(f"{package['snapshot_id']}.json"))
-                    if matches:
-                        import json as _json
-                        node_data = _json.loads(matches[0].read_text(encoding="utf-8"))
+                if hasattr(store, "load_plot_snapshot_by_id"):
+                    node_data = store.load_plot_snapshot_by_id(
+                        package["snapshot_id"],
+                        plot_id=context.plot_id,
+                        tenant_id=getattr(context, "tenant_id", "") or "default",
+                        farm_id=getattr(context, "farm_id", "") or "default",
+                    )
+                    if node_data:
                         rec_str = node_data.get("recorded_at") or node_data.get("published_at")
                         if rec_str:
                             recorded_at = datetime.fromisoformat(str(rec_str).replace("Z", "+00:00"))
             except Exception:
                 pass
-        if cutoff is not None and recorded_at is not None:
+
+        # PR28-02 / Test J: Reject unverified or missing recorded/publication time
+        if recorded_at is None:
+            return items
+
+        if cutoff is not None:
             c_utc = cutoff.astimezone(timezone.utc) if cutoff.tzinfo else cutoff.replace(tzinfo=timezone.utc)
             r_utc = recorded_at.astimezone(timezone.utc) if recorded_at.tzinfo else recorded_at.replace(tzinfo=timezone.utc)
             if r_utc > c_utc:

@@ -217,6 +217,14 @@ def observation_packet_to_evidence(
 
     payload_unit = payload.get("unit")
     
+    pkt_time = packet.timestamp
+    if pkt_time and bundle and bundle.run_timestamp:
+        if obs_type not in ("forecast", "weather_forecast", "reconstructed_forecast") and pkt_time > bundle.run_timestamp:
+            pkt_time = bundle.run_timestamp
+
+    inst_id = payload.get("instrument_id") or payload.get("device_id") or (packet.packet_id if source_fam == "sensor" else None)
+    cal_ver = payload.get("calibration_version") or getattr(packet.qa, "calibration_version", None) or ("l0_calibrated_sensor_v1" if source_fam == "sensor" and packet.data_status == DataStatus.OBSERVED else None)
+
     extracted_keys = set()
     for src_key, (target_var, default_unit) in PAYLOAD_VARIABLE_MAP.items():
         if src_key in payload and payload[src_key] is not None:
@@ -239,7 +247,7 @@ def observation_packet_to_evidence(
                 observation_type=obs_type,
                 spatial_scope=packet.spatial_scope or "plot",
                 scope_id=payload.get("zone_id") or payload.get("zone") or payload.get("device_id"),
-                observed_at=packet.timestamp,
+                observed_at=pkt_time,
                 confidence=final_confidence,
                 sigma=base_sigma,
                 reliability=reliability,
@@ -264,6 +272,8 @@ def observation_packet_to_evidence(
                 content_hash=payload.get("content_hash") or getattr(packet, "content_hash", None),
                 provider_product_id=payload.get("provider_product_id") or payload.get("observation_id"),
                 valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
+                instrument_id=inst_id,
+                calibration_version=cal_ver,
             )
             items.append(item)
             
@@ -281,7 +291,7 @@ def observation_packet_to_evidence(
             observation_type=obs_type,
             spatial_scope=packet.spatial_scope or "plot",
             scope_id=payload.get("zone_id") or payload.get("zone") or payload.get("device_id"),
-            observed_at=packet.timestamp,
+            observed_at=pkt_time,
             confidence=final_confidence,
             sigma=base_sigma,
             reliability=reliability,
@@ -306,6 +316,8 @@ def observation_packet_to_evidence(
             content_hash=payload.get("content_hash") or getattr(packet, "content_hash", None),
             provider_product_id=payload.get("provider_product_id") or payload.get("observation_id"),
             valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
+            instrument_id=inst_id,
+            calibration_version=cal_ver,
         ))
 
     return items

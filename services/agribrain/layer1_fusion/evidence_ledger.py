@@ -95,9 +95,16 @@ class EvidenceLedger:
         self._superseded[target_id] = old_item
 
         # Bind pointer and register new item
-        if new_item.evidence_id == target_id:
-            # SPEC-A: Revisions must use a distinct immutable ID to prevent self-referencing DAG cycles
-            new_item.evidence_id = f"{target_id}__rev1"
+        if new_item.evidence_id == target_id or new_item.evidence_id in self._ids:
+            # SPEC-A: Revisions must use a distinct immutable ID to prevent collisions and DAG cycles
+            rev = 1
+            while (
+                f"{target_id}__rev{rev}" in self._ids
+                or f"{target_id}__rev{rev}" in self._superseded
+                or any(i.evidence_id == f"{target_id}__rev{rev}" for i in self._items)
+            ):
+                rev += 1
+            new_item.evidence_id = f"{target_id}__rev{rev}"
             new_item.supersedes_evidence_id = target_id
         elif not new_item.supersedes_evidence_id:
             new_item.supersedes_evidence_id = target_id

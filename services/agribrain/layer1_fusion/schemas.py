@@ -900,10 +900,12 @@ class Layer1InputBundle:
     """
     plot_id: str
     run_id: str
-    run_timestamp: datetime
+    run_timestamp: Optional[datetime] = None
 
-    window_start: datetime
-    window_end: datetime
+    window_start: Optional[datetime] = None
+    window_end: Optional[datetime] = None
+    as_of_cutoff: Optional[datetime] = None
+    as_of: Optional[datetime] = None
 
     plot_geometry: Any = None
     plot_grid: Any = None
@@ -1035,11 +1037,11 @@ class Layer1ContextPackage:
         tw_end = self.time_window.end.isoformat() if self.time_window and self.time_window.end else ""
 
         ev_parts = sorted(
-            f"{e.evidence_id}:{e.source_family}:{e.variable}:{e.value}:{e.unit}:{e.sigma}:{e.confidence}:{e.reliability}:{e.diagnostic_only}:{e.state_update_allowed}:{getattr(e, 'calibration_version', '')}:{e.provenance_ref}"
+            f"{e.evidence_id}:{e.source_family}:{getattr(e, 'source_id', '') or ''}:{e.variable}:{e.value}:{e.unit}:{e.sigma}:{e.confidence}:{e.reliability}:{e.diagnostic_only}:{e.state_update_allowed}:{getattr(e, 'calibration_version', '') or ''}:{getattr(e, 'parent_acquisition_id', '') or ''}:{e.observed_at.isoformat() if getattr(e, 'observed_at', None) else ''}:{getattr(e, 'geometry_ref', '') or ''}:{e.provenance_ref}"
             for e in self.evidence_items
         )
         ff_parts = sorted(
-            f"{f.name}:{f.value}:{f.unit}:{f.uncertainty}:{f.confidence}:{getattr(f, 'diagnostic_only', False)}:{getattr(f, 'state_update_allowed', False)}:{f.spatial_scope}"
+            f"{f.name}:{f.value}:{f.unit}:{f.uncertainty}:{f.confidence}:{getattr(f, 'diagnostic_only', False)}:{getattr(f, 'state_update_allowed', False)}:{f.spatial_scope}:{','.join(getattr(f, 'source_evidence_ids', []) or [])}:{getattr(f, 'conflict_status', '')}"
             for f in self.fused_features.all_features()
         )
         parts = [
