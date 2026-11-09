@@ -243,6 +243,9 @@ class EvidenceItem:
 
     provenance_ref: str = ""
     flags: List[str] = field(default_factory=list)
+    calibration_version: Optional[str] = None
+    instrument_id: Optional[str] = None
+    parent_acquisition_id: Optional[str] = None
 
     # Temporal scope (persisted by engine from assign_temporal_window)
     temporal_scope: str = "daily"
@@ -283,6 +286,20 @@ class EvidenceItem:
 
     # Lineage / superseding pointer
     supersedes_evidence_id: Optional[str] = None
+
+    def scientific_origin_root(self) -> str:
+        parts = [
+            f"id={self.evidence_id}",
+            f"source={self.source_family}:{self.source_id}",
+            f"var={self.variable}",
+            f"val={self.value}",
+            f"unit={self.unit}",
+            f"cal={getattr(self, 'calibration_version', '') or ''}",
+            f"inst={getattr(self, 'instrument_id', '') or ''}",
+            f"parent={getattr(self, 'parent_acquisition_id', '') or self.provenance_ref or ''}",
+            f"obs_at={self.observed_at.isoformat() if self.observed_at else ''}",
+        ]
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
 
@@ -387,6 +404,8 @@ class EvidenceGap:
 # Fused feature
 # ============================================================================
 
+
+
 @dataclass
 class FusedFeature:
     """A canonical fused feature with full provenance.
@@ -431,6 +450,17 @@ class FusedFeatureSet:
     soil_site_context: List[FusedFeature] = field(default_factory=list)
     operational_context: List[FusedFeature] = field(default_factory=list)
     data_quality_context: List[FusedFeature] = field(default_factory=list)
+
+    def all_features(self) -> List[FusedFeature]:
+        return (
+            self.water_context
+            + self.vegetation_context
+            + self.phenology_context
+            + self.stress_evidence_context
+            + self.soil_site_context
+            + self.operational_context
+            + self.data_quality_context
+        )
 
 
 # ============================================================================
@@ -710,6 +740,19 @@ class SpatialIndex:
 # ============================================================================
 # Data health score (correction #12)
 # ============================================================================
+    plot_polygon_wkt: Optional[str] = None
+    bounds: Optional[Tuple[float, float, float, float]] = None
+    utm_epsg: Optional[int] = None
+
+    def geometry_hash(self) -> str:
+        parts = [
+            f"plot={self.plot_id}",
+            f"bounds={self.bounds}",
+            f"epsg={self.utm_epsg}",
+            f"wkt={self.plot_polygon_wkt or ''}",
+            "zones=" + ",".join(sorted(f"{z.zone_id}:{getattr(z, 'geometry_wkt', '')}" for z in self.zones)),
+        ]
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 @dataclass
 class DataHealthScore:
@@ -984,26 +1027,37 @@ class Layer1ContextPackage:
     asmae_run_record: Optional[Dict[str, Any]] = None
     asmae_output: Optional[Dict[str, Any]] = None
 
-    def content_hash(self) -> str:
-        """Deterministic hash for reproducibility verification.
+    def scientific_content_root(self) -> str:
+        bounds_str = str(self.spatial_index.bounds) if self.spatial_index else ""
+        epsg_str = str(self.spatial_index.utm_epsg) if self.spatial_index else ""
+        geom_str = str(self.plot_geometry) if self.plot_geometry is not None else ""
+        tw_start = self.time_window.start.isoformat() if self.time_window and self.time_window.start else ""
+        tw_end = self.time_window.end.isoformat() if self.time_window and self.time_window.end else ""
 
-        Self-contained: uses stdlib only to avoid circular imports.
-        Hashes the core identity + provenance fields. For full
-        deterministic serialization, use api_serializer.compute_package_hash().
-        """
+        ev_parts = sorted(
+            f"{e.evidence_id}:{e.source_family}:{e.variable}:{e.value}:{e.unit}:{e.sigma}:{e.confidence}:{e.reliability}:{e.diagnostic_only}:{e.state_update_allowed}:{getattr(e, 'calibration_version', '')}:{e.provenance_ref}"
+            for e in self.evidence_items
+        )
+        ff_parts = sorted(
+            f"{f.name}:{f.value}:{f.unit}:{f.uncertainty}:{f.confidence}:{getattr(f, 'diagnostic_only', False)}:{getattr(f, 'state_update_allowed', False)}:{f.spatial_scope}"
+            for f in self.fused_features.all_features()
+        )
         parts = [
-            self.plot_id,
-            self.run_id,
-            self.generated_at.isoformat() if self.generated_at else "",
-            str(self.provenance.evidence_count),
-            str(self.provenance.fused_feature_count),
-            str(self.provenance.conflicts_count),
-            str(self.provenance.gaps_count),
-            str(self.provenance.quarantined_count),
-            self.provenance.engine_version,
-            self.provenance.contract_version,
-            # Include sorted evidence IDs for content sensitivity
-            ",".join(sorted(f"{e.evidence_id}:{e.variable}:{e.value}:{e.sigma}:{e.confidence}" for e in self.evidence_items)),
+            f"plot={self.plot_id}",
+            f"bounds={bounds_str}",
+            f"epsg={epsg_str}",
+            f"geom={geom_str}",
+            f"tw_start={tw_start}",
+            f"tw_end={tw_end}",
+            f"contract={self.provenance.contract_version}",
+            f"ev_count={len(self.evidence_items)}",
+            f"ff_count={len(self.fused_features.all_features())}",
+            "evidence=" + ",".join(ev_parts),
+            "fused=" + ",".join(ff_parts),
         ]
         raw = "|".join(parts).encode("utf-8")
-        return hashlib.sha256(raw).hexdigest()[:32]
+        return hashlib.sha256(raw).hexdigest()
+
+    def content_hash(self) -> str:
+        """Deterministic 32-hex scientific content hash (SPEC-A)."""
+        return self.scientific_content_root()[:32]

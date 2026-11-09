@@ -288,20 +288,29 @@ def _fuse_group(
                 ))
             continue
 
-        # Numeric fusion: weighted average by confidence × reliability
-        numeric = [e for e in updatable if isinstance(e.value, (int, float))]
+        # Numeric fusion: unit-normalized, weighted average by confidence × reliability
+        def _norm_item(e):
+            val = e.value
+            sig = e.sigma
+            u = e.unit
+            if isinstance(val, (int, float)):
+                if var in ("soil_moisture_vwc", "vegetation_fraction", "bare_soil_fraction", "canopy_cover") and u == "percent":
+                    val = val / 100.0
+                    sig = (sig / 100.0) if (sig is not None and sig > 0) else sig
+                    u = "fraction"
+            return (e, val, sig, u)
+
+        numeric = [_norm_item(e) for e in updatable if isinstance(e.value, (int, float))]
 
         if numeric:
+            target_unit = numeric[0][3]
             # weight = confidence × reliability (per CONTRACT.md)
-            weights_raw = [(e, e.confidence * e.reliability) for e in numeric]
+            weights_raw = [(item, item[0].confidence * item[0].reliability) for item in numeric]
             total_weight_raw = sum(w for _, w in weights_raw)
-            avg_freshness = sum(e.freshness_score for e in numeric) / len(numeric)
-            source_families = set(e.source_family for e in numeric)
+            avg_freshness = sum(item[0].freshness_score for item in numeric) / len(numeric)
+            source_families = set(item[0].source_family for item in numeric)
 
             # F12: Source-aware confidence ceiling
-            # The ceiling for a multi-source fusion is the maximum of contributing
-            # source ceilings — because having multiple independent sources
-            # increases confidence (but never beyond the best instrument's limit).
             max_ceiling = max(
                 SOURCE_CONFIDENCE_CEILING.get(sf, _DEFAULT_CEILING)
                 for sf in source_families
@@ -309,55 +318,70 @@ def _fuse_group(
 
             flags = []
             if total_weight_raw == 0.0:
-                fused_value = sum(e.value for e in numeric) / len(numeric)
+                fused_value = sum(item[1] for item in numeric) / len(numeric)
                 max_confidence = 0.0
                 flags.append("ZERO_WEIGHT_UNWEIGHTED_AVERAGE")
                 source_weights = {sf: 0.0 for sf in source_families}
+                fused_uncertainty = None
+                is_diagnostic_only = True
+                is_state_update_allowed = False
             else:
                 total_weight = total_weight_raw
-                fused_value = sum(e.value * w for e, w in weights_raw) / total_weight
-                # Accumulate weights per source_family (not overwrite)
+                fused_value = sum(item[1] * w for item, w in weights_raw) / total_weight
                 source_weights: Dict[str, float] = {}
-                for e, w in weights_raw:
-                    source_weights[e.source_family] = (
-                        source_weights.get(e.source_family, 0.0)
+                for item, w in weights_raw:
+                    source_weights[item[0].source_family] = (
+                        source_weights.get(item[0].source_family, 0.0)
                         + round(w / total_weight, 4)
                     )
-                weighted_conf = sum(e.confidence * w for e, w in weights_raw) / total_weight
+                weighted_conf = sum(item[0].confidence * w for item, w in weights_raw) / total_weight
                 max_confidence = min(max_ceiling, weighted_conf)
+                is_diagnostic_only = False
+                is_state_update_allowed = any(item[0].state_update_allowed for item in numeric)
 
-            # Uncertainty propagation: estimator-consistent linear error propagation
-            # For mu = sum(a_i * y_i) with a_i = w_i / total_weight,
-            # Var(mu) = sum(a_i^2 * sigma_i^2) under independent errors.
-            fused_uncertainty = None
-            sigmas = [e.sigma for e in numeric if e.sigma is not None and e.sigma > 0]
-            if sigmas and total_weight > 0:
-                var_sum = sum(
-                    ((w / total_weight) * e.sigma) ** 2
-                    for e, w in weights_raw
-                    if e.sigma is not None and e.sigma > 0
-                )
-                fused_uncertainty = round(math.sqrt(var_sum), 4)
-
-                # Check for duplicate ancestry (same provenance_ref and value)
-                has_duplicate_ancestry = (
-                    len(numeric) > 1 and
-                    any(
-                        e.provenance_ref and
-                        sum(1 for o in numeric if o.provenance_ref == e.provenance_ref and o.value == e.value) > 1
-                        for e in numeric
+                # Uncertainty propagation: estimator-consistent linear error propagation
+                # For mu = sum(a_i * y_i) with a_i = w_i / total_weight,
+                # Var(mu) = sum(a_i^2 * sigma_i^2) under independent errors.
+                has_unknown_sigma = any((item[2] is None or item[2] <= 0) for item, w in weights_raw if w > 0)
+                if has_unknown_sigma:
+                    fused_uncertainty = None
+                    is_state_update_allowed = False
+                    flags.append("UNKNOWN_SIGMA_PRESENT")
+                else:
+                    var_sum = sum(
+                        ((w / total_weight) * item[2]) ** 2
+                        for item, w in weights_raw
                     )
-                )
-                if has_duplicate_ancestry:
-                    # Duplicate parent roots cannot reduce uncertainty below max contributing duplicate sigma
-                    max_dup_sigma = max(e.sigma for e in numeric if e.sigma is not None and e.sigma > 0)
-                    if fused_uncertainty < max_dup_sigma:
-                        fused_uncertainty = round(max_dup_sigma, 4)
+                    fused_uncertainty = round(math.sqrt(var_sum), 4)
+
+                    # Check for duplicate ancestry (same provenance_ref or parent_acquisition_id)
+                    parent_refs = [
+                        (getattr(item[0], "parent_acquisition_id", None) or item[0].provenance_ref)
+                        for item in numeric
+                        if (getattr(item[0], "parent_acquisition_id", None) or item[0].provenance_ref)
+                    ]
+                    has_duplicate_ancestry = (
+                        len(numeric) > 1 and
+                        (len(parent_refs) != len(set(parent_refs)) or
+                         any(sum(1 for o in numeric if o[0].provenance_ref == item[0].provenance_ref and o[1] == item[1]) > 1 for item in numeric))
+                    )
+                    if has_duplicate_ancestry and fused_uncertainty is not None:
+                        max_dup_sigma = max(item[2] for item in numeric if item[2] is not None and item[2] > 0)
+                        if fused_uncertainty < max_dup_sigma:
+                            fused_uncertainty = round(max_dup_sigma, 4)
+
+            # Conflict preservation (T42)
+            vals = [item[1] for item in numeric if item[1] is not None]
+            if vals and (max(vals) - min(vals) > 0.3):
+                flags.append("CONFLICT_PRESENT")
+                conflict_status = "unresolved"
+            else:
+                conflict_status = "none"
 
             features.append(FusedFeature(
                 name=var,
                 value=round(fused_value, 4),
-                unit=numeric[0].unit,
+                unit=target_unit,
                 spatial_scope=scope,
                 scope_id=scope_id,
                 temporal_scope=temporal_scope,
@@ -366,8 +390,10 @@ def _fuse_group(
                 freshness=avg_freshness,
                 source_evidence_ids=[e.evidence_id for e in all_items],
                 source_weights=source_weights,
+                conflict_status=conflict_status,
                 flags=flags,
-                state_update_allowed=any(e.state_update_allowed for e in updatable),
+                diagnostic_only=is_diagnostic_only,
+                state_update_allowed=is_state_update_allowed,
             ))
         else:
             # Non-numeric: take highest-confidence value

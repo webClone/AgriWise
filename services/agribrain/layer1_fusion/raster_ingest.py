@@ -128,7 +128,16 @@ def ingest_raster_composites(
         if H <= 0 or W <= 0:
             continue
 
-        valid_count = raster_data.get("valid_pixel_count", 0)
+        # Recompute actual valid non-null, finite pixel count (T33)
+        actual_valid = 0
+        for row in pixel_array:
+            if isinstance(row, list):
+                for v in row:
+                    if v is not None and v == v and not (isinstance(v, float) and math.isnan(v)):
+                        actual_valid += 1
+            elif row is not None and row == row and not (isinstance(row, float) and math.isnan(row)):
+                actual_valid += 1
+        valid_count = actual_valid
         resolution_m = raster_data.get("resolution_m", 10.0)
         canonical_var = _VARIABLE_MAP.get(var_key, var_key.lower())
 
@@ -296,6 +305,8 @@ def _compute_pixel_hash(
         flat.append(f"res={native_resolution_m}")
     if grid_spec is not None:
         flat.append(f"crs={grid_spec.get('crs')}")
+        flat.append(f"transform={grid_spec.get('transform') or grid_spec.get('affine')}")
+        flat.append(f"bounds={grid_spec.get('bounds')}")
     for row in pixel_array:
         if isinstance(row, list):
             for v in row:

@@ -228,7 +228,7 @@ def _fallback_single_zone(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]
             "mask": mask_a,
             "centroid": [height / 6.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "north"
+            "spatial_label": "north", "diagnostic_only": True
         },
         "Zone B": {
             "label": "Average Vigor Zone",
@@ -236,7 +236,7 @@ def _fallback_single_zone(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]
             "mask": mask_b,
             "centroid": [height / 2.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "central"
+            "spatial_label": "central", "diagnostic_only": True
         },
         "Zone C": {
             "label": "Lagging / Stress Zone",
@@ -244,7 +244,7 @@ def _fallback_single_zone(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]
             "mask": mask_c,
             "centroid": [5 * height / 6.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "south"
+            "spatial_label": "south", "diagnostic_only": True
         }
     }
 
@@ -567,7 +567,7 @@ def _fallback_single_zone_pp(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, A
             "mask": mask_a,
             "centroid": [height / 6.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "north"
+            "spatial_label": "north", "diagnostic_only": True
         },
         "Zone B": {
             "label": "Average Vigor Zone",
@@ -575,7 +575,7 @@ def _fallback_single_zone_pp(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, A
             "mask": mask_b,
             "centroid": [height / 2.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "central"
+            "spatial_label": "central", "diagnostic_only": True
         },
         "Zone C": {
             "label": "Lagging / Stress Zone",
@@ -583,7 +583,7 @@ def _fallback_single_zone_pp(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, A
             "mask": mask_c,
             "centroid": [5 * height / 6.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "south"
+            "spatial_label": "south", "diagnostic_only": True
         }
     }
 

@@ -88,3 +88,48 @@ def compute_stale_flags(
         if age > timedelta(days=30) and "VERY_STALE" not in item.flags:
             item.flags.append("VERY_STALE")
     return items
+
+
+def is_available_at_cutoff(
+    item: EvidenceItem,
+    as_of_cutoff: datetime,
+) -> Tuple[bool, str]:
+    """Check if evidence item was available to the decision system at as_of_cutoff (SPEC-B/T23-T25)."""
+    cutoff_utc = ensure_utc(as_of_cutoff)
+
+    # 1. Check publication/recorded/ingested time
+    pub_time = getattr(item, "published_at", None) or getattr(item, "recorded_at", None)
+    if pub_time is not None:
+        if ensure_utc(pub_time) > cutoff_utc:
+            return False, f"PUBLISHED_AFTER_CUTOFF: published {pub_time} > cutoff {cutoff_utc}"
+
+    for f in item.flags:
+        if f.startswith("PUBLISHED_AT:"):
+            try:
+                p_dt = datetime.fromisoformat(f.split(":", 1)[1])
+                if ensure_utc(p_dt) > cutoff_utc:
+                    return False, f"PUBLISHED_AFTER_CUTOFF: {p_dt} > {cutoff_utc}"
+            except Exception:
+                pass
+        elif f.startswith("RECORDED_AT:"):
+            try:
+                r_dt = datetime.fromisoformat(f.split(":", 1)[1])
+                if ensure_utc(r_dt) > cutoff_utc:
+                    return False, f"RECORDED_AFTER_CUTOFF: {r_dt} > {cutoff_utc}"
+            except Exception:
+                pass
+        elif f.startswith("ISSUED_AT:"):
+            try:
+                i_dt = datetime.fromisoformat(f.split(":", 1)[1])
+                if ensure_utc(i_dt) > cutoff_utc:
+                    return False, f"FORECAST_ISSUED_AFTER_CUTOFF: {i_dt} > {cutoff_utc}"
+            except Exception:
+                pass
+
+    # 2. Check future observation time relative to cutoff
+    if item.observed_at is not None:
+        obs_utc = ensure_utc(item.observed_at)
+        if obs_utc > cutoff_utc + timedelta(minutes=5):
+            return False, f"OBSERVED_AFTER_CUTOFF: observed {obs_utc} > cutoff {cutoff_utc}"
+
+    return True, "available"

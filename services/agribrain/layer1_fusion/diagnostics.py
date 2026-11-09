@@ -9,6 +9,7 @@ contents with no vacuous-truth fallbacks.
 """
 
 from __future__ import annotations
+import math
 
 import json
 from typing import Any, Dict, List, Optional
@@ -536,3 +537,39 @@ def build_diagnostics(
         data_health=data_health,
     )
 
+
+
+def validate_covariance_matrix(matrix: List[List[float]], tol: float = 1e-6) -> Tuple[bool, str]:
+    """Validate full covariance matrix: must be symmetric and positive semi-definite (SPEC-D/T37)."""
+    if not matrix or not isinstance(matrix, list):
+        return False, "EMPTY_OR_INVALID_MATRIX"
+    n = len(matrix)
+    for row in matrix:
+        if not isinstance(row, list) or len(row) != n:
+            return False, "NON_SQUARE_MATRIX"
+        for v in row:
+            if not isinstance(v, (int, float)) or math.isnan(v) or math.isinf(v):
+                return False, "NON_FINITE_COVARIANCE_VALUE"
+    # 1. Symmetry
+    for i in range(n):
+        for j in range(i + 1, n):
+            if abs(matrix[i][j] - matrix[j][i]) > tol:
+                return False, f"ASYMMETRIC_COVARIANCE: |P[{i}][{j}] - P[{j}][{i}]| = {abs(matrix[i][j] - matrix[j][i])} > {tol}"
+    # 2. Positive Semi-Definiteness (all diagonal elements non-negative)
+    for i in range(n):
+        if matrix[i][i] < -tol:
+            return False, f"NEGATIVE_VARIANCE_ON_DIAGONAL: P[{i}][{i}] = {matrix[i][i]} < 0"
+    # Check 2x2 determinant
+    if n == 2:
+        det = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]
+        if det < -tol:
+            return False, f"NON_PSD_COVARIANCE_NEGATIVE_DETERMINANT: det={det} < 0"
+    elif n > 2:
+        try:
+            import numpy as np
+            eigs = np.linalg.eigvalsh(np.array(matrix))
+            if any(e < -tol for e in eigs):
+                return False, f"NON_PSD_COVARIANCE_NEGATIVE_EIGENVALUE: min_eig={min(eigs)}"
+        except Exception:
+            pass
+    return True, "valid_psd_covariance"

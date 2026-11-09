@@ -165,6 +165,9 @@ def _feature_to_dict(f: Any) -> Dict[str, Any]:
         "source_count": len(f.source_evidence_ids),
         "source_weights": {k: _round4(v) for k, v in sorted(f.source_weights.items())},
         "conflict_status": f.conflict_status,
+        "uncertainty": _round4(f.uncertainty) if getattr(f, "uncertainty", None) is not None else None,
+        "diagnostic_only": bool(getattr(f, "diagnostic_only", True)),
+        "state_update_allowed": bool(getattr(f, "state_update_allowed", False)),
         "flags": sorted(f.flags),
     }
 

@@ -16,6 +16,8 @@ SOURCE_FAMILY_ALIASES = {
     "sentinel_1": "sentinel1",
     "sentinel-1": "sentinel1",
     "s1": "sentinel1",
+    "sar": "sentinel1",
+    "sar_vv": "sentinel1",
 
     "weather": "environment",
     "weather_reanalysis": "environment",

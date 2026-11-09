@@ -362,15 +362,26 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
 
     # 6. Sensor/IoT
     elif item.source_family == "sensor":
-        existing_diagnostic_only = bool(getattr(item, "diagnostic_only", False))
-        existing_state_update_allowed = bool(getattr(item, "state_update_allowed", True))
-        item.data_status = "observed"
-        item.truth_class = "observed_sensor"
-        item.source_reality = "sensor_physical"
-        item.production_usable = True
-        item.real_provider_product = True
-        item.diagnostic_only = existing_diagnostic_only
-        item.state_update_allowed = existing_state_update_allowed and not existing_diagnostic_only
+        has_valid_provenance = bool(item.provenance_ref and item.source_id)
+        is_synthetic = getattr(item, "data_status", "") in ("synthetic", "simulated", "fallback")
+        if not has_valid_provenance or is_synthetic:
+            item.data_status = "synthetic" if is_synthetic else getattr(item, "data_status", "unverified")
+            item.truth_class = "unverified_sensor"
+            item.source_reality = "synthetic_or_uncalibrated"
+            item.production_usable = False
+            item.real_provider_product = False
+            item.diagnostic_only = True
+            item.state_update_allowed = False
+        else:
+            existing_diagnostic_only = bool(getattr(item, "diagnostic_only", False))
+            existing_state_update_allowed = bool(getattr(item, "state_update_allowed", True))
+            item.data_status = "observed"
+            item.truth_class = "observed_sensor"
+            item.source_reality = "sensor_physical"
+            item.production_usable = True
+            item.real_provider_product = True
+            item.diagnostic_only = existing_diagnostic_only
+            item.state_update_allowed = existing_state_update_allowed and not existing_diagnostic_only
         
         item.scientific_surface_allowed = False
         item.prescription_driver_allowed = False
@@ -437,13 +448,13 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
         item.experimental_visual_allowed = True
         item.composite_advisory_allowed = True
 
-    # 6d. Level 0 State
+    # 6d. Level 0 State (assimilated model state, NOT raw provider measurement - E-04/T15)
     elif item.source_family == "l0_state":
-        item.data_status = "observed"
-        item.truth_class = "observed_provider"
-        item.source_reality = "real_provider_raster"
+        item.data_status = "assimilated"
+        item.truth_class = "model_state"
+        item.source_reality = "model_derived"
         item.production_usable = True
-        item.real_provider_product = True
+        item.real_provider_product = False
         item.diagnostic_only = False
         item.state_update_allowed = False
         item.scientific_surface_allowed = False
