@@ -8,7 +8,8 @@ state, and training evidence from ASMAE outputs based on channel eligibility gat
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from layer1_fusion.schemas import (
@@ -200,6 +201,43 @@ class ASMAEAdapter:
         items: List[EvidenceItem] = []
         if not self.can_read(package):
             return items
+        # SPEC-B: Knowledge-cutoff check for historical replay
+        cutoff = getattr(context, "window_end", None) or getattr(context, "run_timestamp", None)
+        recorded_at = None
+        for key in ("recorded_at", "snapshot_published_at", "published_at"):
+            if package.get(key):
+                try:
+                    val = package[key]
+                    recorded_at = val if isinstance(val, datetime) else datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+                    break
+                except (ValueError, TypeError):
+                    pass
+        if recorded_at is None and package.get("snapshot_id"):
+            try:
+                import sys as _sys
+                store = _sys.modules.get("services.agribrain.layer05_asmae.plot_snapshot_store") or _sys.modules.get("layer05_asmae.plot_snapshot_store")
+                if not store:
+                    try:
+                        from services.agribrain.layer05_asmae import plot_snapshot_store as store
+                    except Exception:
+                        from layer05_asmae import plot_snapshot_store as store
+                root = getattr(store, "PLOT_SNAPSHOT_ROOT", None)
+                if root:
+                    matches = list(Path(root).rglob(f"{package['snapshot_id']}.json"))
+                    if matches:
+                        import json as _json
+                        node_data = _json.loads(matches[0].read_text(encoding="utf-8"))
+                        rec_str = node_data.get("recorded_at") or node_data.get("published_at")
+                        if rec_str:
+                            recorded_at = datetime.fromisoformat(str(rec_str).replace("Z", "+00:00"))
+            except Exception:
+                pass
+        if cutoff is not None and recorded_at is not None:
+            c_utc = cutoff.astimezone(timezone.utc) if cutoff.tzinfo else cutoff.replace(tzinfo=timezone.utc)
+            r_utc = recorded_at.astimezone(timezone.utc) if recorded_at.tzinfo else recorded_at.replace(tzinfo=timezone.utc)
+            if r_utc > c_utc:
+                return items
+
 
         plot_id = context.plot_id
         run_id = package.get("run_id", "")

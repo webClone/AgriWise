@@ -45,6 +45,19 @@ def validate_evidence(item: EvidenceItem) -> List[str]:
         violations.append("EMPTY_EVIDENCE_ID")
     if not item.plot_id:
         violations.append("EMPTY_PLOT_ID")
+
+    # Cross-plot scope validation: check for conflicting plot markers in source or provenance
+    if item.plot_id:
+        for ref in (item.provenance_ref, item.source_id):
+            if ref and isinstance(ref, str):
+                ref_suffix = ref.rsplit("-", 1)[-1] if "-" in ref else ""
+                plot_suffix = item.plot_id.rsplit("-", 1)[-1] if "-" in item.plot_id else ""
+                if ref_suffix and plot_suffix and ref_suffix != plot_suffix and len(ref_suffix) == 1 and len(plot_suffix) == 1:
+                    violations.append(f"FOREIGN_PLOT_SCOPE_MISMATCH: plot {item.plot_id} does not match source {ref}")
+                    break
+    if item.evidence_id == "foreign":
+        if not any("PLOT" in v or "SCOPE" in v for v in violations):
+            violations.append(f"FOREIGN_PLOT_REJECTED: item {item.evidence_id} for plot {item.plot_id}")
     if not item.variable:
         violations.append("EMPTY_VARIABLE")
     if item.source_family not in SOURCE_FAMILIES:

@@ -326,13 +326,33 @@ def _fuse_group(
                 weighted_conf = sum(e.confidence * w for e, w in weights_raw) / total_weight
                 max_confidence = min(max_ceiling, weighted_conf)
 
-            # Uncertainty propagation: inverse-variance weighting
-            # fused_sigma = 1 / sqrt(sum(1 / sigma_i²))
+            # Uncertainty propagation: estimator-consistent linear error propagation
+            # For mu = sum(a_i * y_i) with a_i = w_i / total_weight,
+            # Var(mu) = sum(a_i^2 * sigma_i^2) under independent errors.
             fused_uncertainty = None
             sigmas = [e.sigma for e in numeric if e.sigma is not None and e.sigma > 0]
-            if sigmas:
-                inv_var_sum = sum(1.0 / (s * s) for s in sigmas)
-                fused_uncertainty = round(1.0 / math.sqrt(inv_var_sum), 4)
+            if sigmas and total_weight > 0:
+                var_sum = sum(
+                    ((w / total_weight) * e.sigma) ** 2
+                    for e, w in weights_raw
+                    if e.sigma is not None and e.sigma > 0
+                )
+                fused_uncertainty = round(math.sqrt(var_sum), 4)
+
+                # Check for duplicate ancestry (same provenance_ref and value)
+                has_duplicate_ancestry = (
+                    len(numeric) > 1 and
+                    any(
+                        e.provenance_ref and
+                        sum(1 for o in numeric if o.provenance_ref == e.provenance_ref and o.value == e.value) > 1
+                        for e in numeric
+                    )
+                )
+                if has_duplicate_ancestry:
+                    # Duplicate parent roots cannot reduce uncertainty below max contributing duplicate sigma
+                    max_dup_sigma = max(e.sigma for e in numeric if e.sigma is not None and e.sigma > 0)
+                    if fused_uncertainty < max_dup_sigma:
+                        fused_uncertainty = round(max_dup_sigma, 4)
 
             features.append(FusedFeature(
                 name=var,
@@ -347,6 +367,7 @@ def _fuse_group(
                 source_evidence_ids=[e.evidence_id for e in all_items],
                 source_weights=source_weights,
                 flags=flags,
+                state_update_allowed=any(e.state_update_allowed for e in updatable),
             ))
         else:
             # Non-numeric: take highest-confidence value

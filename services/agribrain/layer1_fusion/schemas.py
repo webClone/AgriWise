@@ -411,6 +411,7 @@ class FusedFeature:
 
     # Propagated from evidence: diagnostic features should not drive state updates
     diagnostic_only: bool = False
+    state_update_allowed: bool = False
 
     flags: List[str] = field(default_factory=list)
     explanation_basis: List[str] = field(default_factory=list)
@@ -1002,7 +1003,7 @@ class Layer1ContextPackage:
             self.provenance.engine_version,
             self.provenance.contract_version,
             # Include sorted evidence IDs for content sensitivity
-            ",".join(sorted(e.evidence_id for e in self.evidence_items)),
+            ",".join(sorted(f"{e.evidence_id}:{e.variable}:{e.value}:{e.sigma}:{e.confidence}" for e in self.evidence_items)),
         ]
         raw = "|".join(parts).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()[:32]

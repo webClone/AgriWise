@@ -598,7 +598,7 @@ def _parse_date(date_str: str, fallback: datetime) -> datetime:
     if not date_str:
         return fallback
     try:
-        return datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(date_str); return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return fallback
 

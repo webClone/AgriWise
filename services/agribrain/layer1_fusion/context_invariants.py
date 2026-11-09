@@ -436,6 +436,29 @@ def enforce_context_invariants(
     violations.extend(check_zone_area_fractions(pkg))
     violations.extend(check_data_health(pkg))
 
+    # SPEC-E: Synchronize fused feature values with clamped/validated evidence
+    if auto_fix and pkg.fused_features:
+        fused_groups = [
+            pkg.fused_features.water_context,
+            pkg.fused_features.vegetation_context,
+            pkg.fused_features.phenology_context,
+            pkg.fused_features.stress_evidence_context,
+            pkg.fused_features.soil_site_context,
+            pkg.fused_features.operational_context,
+            pkg.fused_features.data_quality_context,
+        ]
+        ev_by_id = {e.evidence_id: e for e in pkg.evidence_items}
+        for grp in fused_groups:
+            for ff in grp:
+                if ff.name in VALUE_BOUNDS and isinstance(ff.value, (int, float)):
+                    lo, hi = VALUE_BOUNDS[ff.name]
+                    if ff.value < lo or ff.value > hi:
+                        ff.value = max(lo, min(hi, ff.value))
+                if ff.source_evidence_ids and len(ff.source_evidence_ids) == 1:
+                    src_ev = ev_by_id.get(ff.source_evidence_ids[0])
+                    if src_ev is not None and isinstance(src_ev.value, (int, float)) and ff.value != src_ev.value:
+                        ff.value = src_ev.value
+
     return violations
 
 

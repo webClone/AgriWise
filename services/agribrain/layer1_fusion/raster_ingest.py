@@ -283,15 +283,28 @@ def ingest_raster_composites(
     return evidence, raster_refs
 
 
-def _compute_pixel_hash(pixel_array: List[List[float]]) -> str:
-    """Deterministic hash of pixel data."""
-    flat = []
+def _compute_pixel_hash(
+    pixel_array: List[List[float]],
+    grid_spec: Optional[Dict[str, Any]] = None,
+    native_resolution_m: Optional[float] = None,
+) -> str:
+    """Deterministic hash of pixel data and grid geometry."""
+    h = len(pixel_array) if pixel_array else 0
+    w = len(pixel_array[0]) if (pixel_array and isinstance(pixel_array[0], list)) else 0
+    flat = [f"shape={h}x{w}"]
+    if native_resolution_m is not None:
+        flat.append(f"res={native_resolution_m}")
+    if grid_spec is not None:
+        flat.append(f"crs={grid_spec.get('crs')}")
     for row in pixel_array:
-        for v in row:
-            if v is not None and v == v:  # not NaN
-                flat.append(f"{v:.6f}")
-            else:
-                flat.append("NaN")
+        if isinstance(row, list):
+            for v in row:
+                if v is not None and v == v:  # not NaN
+                    flat.append(f"{v:.6f}")
+                else:
+                    flat.append("NaN")
+        else:
+            flat.append(f"{row:.6f}" if (row is not None and row == row) else "NaN")
     raw = ",".join(flat).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
 
