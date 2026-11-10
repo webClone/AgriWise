@@ -171,8 +171,11 @@ def observation_packet_to_evidence(
         elif not verified_pub:
             flags.append("CALLER_CLAIMED_PUBLICATION_TIME")
 
+    is_verified_publication = bool(verified_pub or verified_rec)
+
     if "flags" in payload and isinstance(payload["flags"], list):
-        flags.extend(payload["flags"])
+        _reserved_flags = {"VERIFIED_PUBLICATION_RECEIPT", "AUTHENTICATED_SENSOR_RECEIPT", "AUTHENTICATED_PUBLICATION_RECORD"}
+        flags.extend([f for f in payload["flags"] if f not in _reserved_flags])
     
     diagnostic_only = False
     state_update_allowed = True
@@ -242,7 +245,14 @@ def observation_packet_to_evidence(
 
     pkg_hash = getattr(source_package, "package_hash", "") or ""
     pkt_hash = getattr(packet, "content_hash", "") or packet.packet_id
-    if pkg_hash:
+    explicit_prov = (
+        payload.get("provenance_ref")
+        or getattr(packet, "provenance_ref", None)
+        or (getattr(getattr(packet, "provenance", None), "receipt_ref", None) if getattr(packet, "provenance", None) else None)
+    )
+    if explicit_prov:
+        provenance_ref = str(explicit_prov)
+    elif pkg_hash:
         provenance_ref = f"pkg_{pkg_hash}_pkt_{pkt_hash}"
     else:
         provenance_ref = f"packet_{pkt_hash}"
@@ -264,6 +274,19 @@ def observation_packet_to_evidence(
         or getattr(source_package, "package_id", None)
         or packet.packet_id
     )
+
+    v_published = verified_pub if verified_pub else (verified_rec if verified_rec else None)
+    if v_published is not None and not isinstance(v_published, datetime):
+        try:
+            from layer1_fusion.temporal_alignment import ensure_utc
+            v_published = ensure_utc(datetime.fromisoformat(str(v_published)))
+        except Exception:
+            v_published = None
+    elif isinstance(v_published, datetime):
+        from layer1_fusion.temporal_alignment import ensure_utc
+        v_published = ensure_utc(v_published)
+
+    active_receipt = getattr(packet, "receipt", None) or getattr(source_package, "receipt", None)
 
     extracted_keys = set()
     for src_key, (target_var, default_unit) in PAYLOAD_VARIABLE_MAP.items():
@@ -315,6 +338,9 @@ def observation_packet_to_evidence(
                 instrument_id=inst_id,
                 calibration_version=cal_ver,
                 parent_acquisition_id=parent_acq_id,
+                receipt=active_receipt,
+                publication_receipt_verified=is_verified_publication,
+                verified_published_at=v_published,
             )
             items.append(item)
             
@@ -360,6 +386,9 @@ def observation_packet_to_evidence(
             instrument_id=inst_id,
             calibration_version=cal_ver,
             parent_acquisition_id=parent_acq_id,
+            receipt=active_receipt,
+            publication_receipt_verified=is_verified_publication,
+            verified_published_at=v_published,
         ))
 
     return items

@@ -28,6 +28,72 @@ class EvidenceTruth:
     current_1m_approval_allowed: bool = False
 
 
+@dataclass(frozen=True)
+class SensorAttestationReceipt:
+    """Cryptographic sensor attestation receipt (R9-01).
+    
+    Binds canonical device ID, namespace/plot, variable, calibration, observation instant,
+    issuer authority, and signature.
+    """
+    receipt_id: str
+    issuer: str
+    device_id: str
+    plot_id: str
+    variable: str
+    calibration_profile_id: str
+    status: str = "active"
+    content_digest: Optional[str] = None
+    observation_instant: Optional[str] = None
+    first_available_at: Optional[str] = None
+    revocation_epoch: Optional[int] = None
+    signature: Optional[str] = None
+
+
+_TRUSTED_SENSOR_RECEIPTS: Dict[str, SensorAttestationReceipt] = {}
+_TRUSTED_SENSOR_ISSUERS: frozenset = frozenset({
+    "agriwise:ca:sensor",
+    "agriwise:edge:attestation",
+    "agriwise:trust:sensor_authority",
+})
+
+
+def register_sensor_receipt(receipt: SensorAttestationReceipt) -> None:
+    """Register an authentic cryptographic sensor attestation receipt."""
+    if not isinstance(receipt, SensorAttestationReceipt) and getattr(receipt, "__class__", None).__name__ != "SensorAttestationReceipt":
+        raise TypeError("receipt must be an instance of SensorAttestationReceipt")
+    _TRUSTED_SENSOR_RECEIPTS[receipt.receipt_id] = receipt
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_TRUSTED_SENSOR_RECEIPTS"):
+            mod._TRUSTED_SENSOR_RECEIPTS[receipt.receipt_id] = receipt
+
+
+def clear_sensor_receipts() -> None:
+    """Clear all registered sensor attestation receipts."""
+    _TRUSTED_SENSOR_RECEIPTS.clear()
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_TRUSTED_SENSOR_RECEIPTS"):
+            mod._TRUSTED_SENSOR_RECEIPTS.clear()
+
+
+def get_sensor_receipt(receipt_id: str) -> Optional[SensorAttestationReceipt]:
+    """Retrieve a registered sensor attestation receipt by ID."""
+    r = _TRUSTED_SENSOR_RECEIPTS.get(receipt_id)
+    if r is not None:
+        return r
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_TRUSTED_SENSOR_RECEIPTS"):
+            r = mod._TRUSTED_SENSOR_RECEIPTS.get(receipt_id)
+            if r is not None:
+                return r
+    return None
+
+
 def _context_value(source_context: Any, key: str, default: Any = None) -> Any:
     """Read truth/grid metadata without confusing a composite wrapper for a raster."""
     if source_context is None:
@@ -87,7 +153,7 @@ def verify_sensor_attestation(
     plot_id: Optional[str],
     variable: Optional[str],
     calibration_version: Optional[str],
-    provenance_ref: Optional[str],
+    provenance_ref: Optional[str] = None,
     flags: Optional[List[str]] = None,
     receipt: Optional[Any] = None,
     raw_status: Optional[str] = None,
@@ -174,35 +240,49 @@ def verify_sensor_attestation(
     if reg_cal.strip() != cal_str:
         return False, f"calibration_profile_mismatch: registered {reg_cal} != item {cal_str}"
 
-    # 8. Authentic receipt / provenance format check (R8-G02)
+    # 8. Cryptographic Sensor Attestation Receipt Verification (R9-01)
+    target_receipt: Optional[SensorAttestationReceipt] = None
     if receipt is not None:
-        return True, "attested_via_receipt"
+        if isinstance(receipt, SensorAttestationReceipt) or getattr(receipt, "__class__", None).__name__ == "SensorAttestationReceipt":
+            target_receipt = receipt
+        elif isinstance(receipt, dict) and "receipt_id" in receipt and "issuer" in receipt:
+            try:
+                target_receipt = SensorAttestationReceipt(**receipt)
+            except Exception:
+                return False, "invalid_receipt_dict_structure"
+        else:
+            return False, "unauthenticated_receipt_object"
+    elif provenance_ref:
+        p_ref = provenance_ref.strip()
+        target_receipt = get_sensor_receipt(p_ref)
 
-    if not provenance_ref or not isinstance(provenance_ref, str) or not provenance_ref.strip():
-        return False, "missing_provenance_ref"
+    if target_receipt is None:
+        return False, f"unverified_sensor_receipt:{provenance_ref or 'none'}"
 
-    p_ref = provenance_ref.strip()
-    p_low = p_ref.lower()
+    # Validate target receipt claims and authority
+    if target_receipt.status != "active":
+        return False, f"inactive_receipt_status:{target_receipt.status}"
 
-    # Reject arbitrary unauthenticated mock strings
-    if p_low in ("receipt_valid", "receipt123", "receipt-a", "receipt", "test", "valid", "dummy", "mock", "test_receipt"):
-        return False, "unauthenticated_receipt_mock_string"
+    if target_receipt.issuer not in _TRUSTED_SENSOR_ISSUERS:
+        return False, f"untrusted_receipt_issuer:{target_receipt.issuer}"
 
-    # Authentic receipt formats:
-    # - URN format: urn:agriwise:receipt:..., urn:uuid:..., urn:agriwise:..., urn:...
-    # - Hash format: sha256:..., sha512:..., blake2b:..., hash:...
-    # - Packet / package provenance: pkg_..._pkt_..., packet_...
-    # - 32+ hex character cryptographic digest or UUID
-    is_authentic_format = (
-        p_ref.startswith(("urn:agriwise:receipt:", "urn:uuid:", "urn:agriwise:", "urn:", "sha256:", "sha512:", "blake2b:", "hash:"))
-        or p_ref.startswith("pkg_")
-        or p_ref.startswith("packet_")
-        or (len(p_ref) >= 32 and all(c in "0123456789abcdefABCDEF-_:" for c in p_ref))
-    )
-    if not is_authentic_format:
-        return False, f"unauthenticated_receipt_format:{p_ref}"
+    if target_receipt.device_id != dev_str:
+        return False, f"receipt_device_mismatch: {target_receipt.device_id} != {dev_str}"
 
-    return True, "attested_sensor"
+    if target_receipt.plot_id != plot_str:
+        return False, f"receipt_plot_mismatch: {target_receipt.plot_id} != {plot_str}"
+
+    if target_receipt.variable != var_str:
+        return False, f"receipt_variable_mismatch: {target_receipt.variable} != {var_str}"
+
+    if target_receipt.calibration_profile_id != cal_str:
+        return False, f"receipt_calibration_mismatch: {target_receipt.calibration_profile_id} != {cal_str}"
+
+    sig = str(target_receipt.signature or "").strip()
+    if not sig or any(bad in sig.lower() for bad in ("dummy", "fake", "forged", "unverified", "none")):
+        return False, "unverified_receipt_signature"
+
+    return True, "attested_via_verified_receipt"
 
 
 def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] = None, source_family: Optional[str] = None) -> EvidenceItem:
@@ -497,6 +577,7 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
             calibration_version=cal_ver,
             provenance_ref=getattr(item, "provenance_ref", None),
             flags=getattr(item, "flags", None),
+            receipt=getattr(item, "receipt", None),
             raw_status=getattr(item, "data_status", None),
         )
 
@@ -897,7 +978,6 @@ def truth_for_observation_packet(packet: ObservationPacket, package: Optional[An
             payload.get("provenance_ref")
             or getattr(packet, "provenance_ref", None)
             or (getattr(getattr(packet, "provenance", None), "receipt_ref", None) if getattr(packet, "provenance", None) else None)
-            or (f"pkg_{pkg_hash}_pkt_{pkt_hash}" if pkg_hash else (f"packet_{pkt_hash}" if pkt_hash else None))
         )
         receipt_obj = getattr(packet, "receipt", None)
         flags = [f.value if hasattr(f, "value") else str(f) for f in (packet.qa.flags if packet.qa else [])]

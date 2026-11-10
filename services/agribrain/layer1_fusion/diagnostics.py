@@ -539,62 +539,104 @@ def build_diagnostics(
 
 
 
-def validate_covariance_matrix(matrix: List[List[float]], tol: float = 1e-6) -> Tuple[bool, str]:
-    """Validate full covariance matrix: must be symmetric and positive semi-definite (SPEC-D/T37)."""
-    if not matrix or not isinstance(matrix, list):
+def validate_covariance_matrix(matrix: List[List[float]], tol: float = 1e-9) -> Tuple[bool, str]:
+    """Validate full covariance matrix: must be symmetric and positive semi-definite (SPEC-D/T37, R9-02).
+    
+    Scale-stable validation:
+    - Relative determinant tolerance: scale = max(a*d, b^2, 1e-15), det < -1e-9 * scale is rejected
+    - Numerical overflow rejection: non-finite intermediate values fail closed
+    - Scale-aware eigenspectrum / LDL^T decomposition for n >= 3
+    - Proper PSD semantics: zero matrix and rank-deficient PSD matrices pass
+    """
+    if matrix is None or not isinstance(matrix, list) or len(matrix) == 0:
         return False, "EMPTY_OR_INVALID_MATRIX"
     n = len(matrix)
     for row in matrix:
         if not isinstance(row, list) or len(row) != n:
             return False, "NON_SQUARE_MATRIX"
         for v in row:
-            if not isinstance(v, (int, float)) or math.isnan(v) or math.isinf(v):
+            if not isinstance(v, (int, float)) or not math.isfinite(v):
                 return False, "NON_FINITE_COVARIANCE_VALUE"
-    # 1. Symmetry
+
+    # Scale calculation
+    diag_max = max(float(matrix[i][i]) for i in range(n))
+    for i in range(n):
+        if matrix[i][i] < -1e-15 * max(diag_max, 1.0):
+            return False, f"NEGATIVE_VARIANCE_ON_DIAGONAL: P[{i}][{i}] = {matrix[i][i]} < 0"
+
+    # Zero matrix / zero diagonal check (proper PSD semantics: rank 0 is valid PSD)
+    if diag_max <= 0.0:
+        for i in range(n):
+            for j in range(n):
+                if abs(matrix[i][j]) > 1e-15:
+                    return False, f"NON_PSD_COVARIANCE_ZERO_DIAGONAL_NONZERO_OFFDIAG: P[{i}][{j}] != 0"
+        return True, "valid_psd_covariance"
+
+    # 1. Scale-aware Symmetry check
     for i in range(n):
         for j in range(i + 1, n):
-            if abs(matrix[i][j] - matrix[j][i]) > tol:
-                return False, f"ASYMMETRIC_COVARIANCE: |P[{i}][{j}] - P[{j}][{i}]| = {abs(matrix[i][j] - matrix[j][i])} > {tol}"
-    # 2. Positive Semi-Definiteness (all diagonal elements non-negative)
-    for i in range(n):
-        if matrix[i][i] < -tol:
-            return False, f"NEGATIVE_VARIANCE_ON_DIAGONAL: P[{i}][{i}] = {matrix[i][i]} < 0"
-    # Check 2x2 determinant
-    if n == 2:
-        det = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0]
-        if det < -tol:
-            return False, f"NON_PSD_COVARIANCE_NEGATIVE_DETERMINANT: det={det} < 0"
-    elif n > 2:
-        # Check PSD using numpy if present, otherwise pure Python Cholesky decomposition
+            scale = max(abs(matrix[i][i]), abs(matrix[j][j]), 1e-12)
+            if abs(matrix[i][j] - matrix[j][i]) > 1e-6 * scale:
+                return False, f"ASYMMETRIC_COVARIANCE: |P[{i}][{j}] - P[{j}][{i}]| = {abs(matrix[i][j] - matrix[j][i])} exceeds tolerance"
+
+    # 2. Positive Semi-Definiteness
+    if n == 1:
+        return True, "valid_psd_covariance"
+    elif n == 2:
+        a = float(matrix[0][0])
+        b = float(matrix[0][1])
+        d = float(matrix[1][1])
+        try:
+            prod = a * d
+            sq = b * b
+            if not math.isfinite(prod) or not math.isfinite(sq):
+                return False, "NUMERICAL_OVERFLOW_DETECTED: intermediate product exceeds finite range"
+            det = prod - sq
+            if not math.isfinite(det):
+                return False, "NUMERICAL_OVERFLOW_DETECTED: non-finite determinant"
+        except OverflowError:
+            return False, "NUMERICAL_OVERFLOW_DETECTED: intermediate product overflow"
+
+        # Scale-aware determinant test (R9-02): indefinite eigenspectrum fails closed
+        scale = max(prod, sq, 1e-15)
+        if det < -1e-9 * scale:
+            return False, f"NON_PSD_COVARIANCE_NEGATIVE_DETERMINANT: det={det} < 0 (indefinite eigenspectrum)"
+    else:
+        # Check PSD using numpy if present, otherwise scale-normalized pure-Python LDL^T Cholesky
         try:
             import numpy as np
-            eigs = np.linalg.eigvalsh(np.array(matrix, dtype=float))
-            if any(e < -tol for e in eigs):
-                return False, f"NON_PSD_COVARIANCE_NEGATIVE_EIGENVALUE: min_eig={min(eigs)}"
+            mat_arr = np.array(matrix, dtype=float)
+            if not np.all(np.isfinite(mat_arr)):
+                return False, "NON_FINITE_COVARIANCE_VALUE"
+            eigs = np.linalg.eigvalsh(mat_arr)
+            if not np.all(np.isfinite(eigs)):
+                return False, "NUMERICAL_OVERFLOW_DETECTED: non-finite eigenspectrum"
+            scale = max(float(np.max(np.abs(eigs))), diag_max, 1e-12)
+            if any(e < -1e-9 * scale for e in eigs):
+                return False, f"NON_PSD_COVARIANCE_NEGATIVE_EIGENVALUE: min_eig={min(eigs)} < 0"
         except ImportError:
-            # Pure Python Cholesky decomposition on A + tol*I to test PSD
-            A = [[float(matrix[i][j]) for j in range(n)] for i in range(n)]
+            scale = max(diag_max, 1e-12)
+            A = [[float(matrix[i][j]) / scale for j in range(n)] for i in range(n)]
             for i in range(n):
-                A[i][i] += tol
+                A[i][i] += 1e-11
             L = [[0.0] * n for _ in range(n)]
             for i in range(n):
                 for j in range(i + 1):
                     s = sum(L[i][k] * L[j][k] for k in range(j))
+                    val = A[i][j] - s
+                    if not math.isfinite(val):
+                        return False, "NUMERICAL_OVERFLOW_DETECTED: non-finite intermediate pivot"
                     if i == j:
-                        val = A[i][i] - s
                         if val < -1e-9:
-                            return False, f"NON_PSD_COVARIANCE_NEGATIVE_PIVOT: pivot={val} at {i}"
+                            return False, f"NON_PSD_COVARIANCE_NEGATIVE_PIVOT: pivot={val * scale} < 0"
                         L[i][j] = math.sqrt(max(0.0, val))
                     else:
                         if L[j][j] == 0.0:
-                            if abs(A[i][j] - s) > 1e-7:
+                            if abs(val) > 1e-7:
                                 return False, f"NON_PSD_COVARIANCE_SINGULAR_MISMATCH: off-diagonal nonzero at ({i},{j})"
                             L[i][j] = 0.0
                         else:
-                            L[i][j] = (A[i][j] - s) / L[j][j]
-        except Exception as ex:
-            # Fail closed on any computational error
-            return False, f"COVARIANCE_EVALUATION_ERROR: {ex}"
+                            L[i][j] = val / L[j][j]
     return True, "valid_psd_covariance"
 
 
@@ -603,29 +645,55 @@ def extract_covariance_matrices_recursive(
     max_depth: int = 10,
     current_depth: int = 0,
     prefix: str = "",
+    visited: Optional[set] = None,
 ) -> List[Tuple[str, Any]]:
-    """Recursively extract covariance matrices from nested structures up to max_depth (R8-01, R8-03, R8-G05)."""
-    if current_depth > max_depth or data is None:
+    """Recursively extract covariance matrices from nested structures up to max_depth.
+    
+    Fail-closed guarantees (R9-06):
+    - Traversal beyond max_depth returns COVARIANCE_TRAVERSAL_LIMIT_EXCEEDED
+    - Circular references return CIRCULAR_REFERENCE_IN_COVARIANCE_STRUCTURE
+    - Malformed covariance keys (non-list) return MALFORMED_COVARIANCE_STRUCTURE
+    """
+    if data is None:
         return []
+    if visited is None:
+        visited = set()
+
+    obj_id = id(data)
+    if obj_id in visited:
+        return [(prefix or "root", "CIRCULAR_REFERENCE_IN_COVARIANCE_STRUCTURE")]
+    visited.add(obj_id)
+
+    if current_depth > max_depth:
+        if isinstance(data, (dict, list)) and len(data) > 0:
+            return [(prefix or "root", "COVARIANCE_TRAVERSAL_LIMIT_EXCEEDED")]
+        return []
+
     matrices: List[Tuple[str, Any]] = []
     if isinstance(data, dict):
         for k, v in data.items():
             path = f"{prefix}.{k}" if prefix else str(k)
-            if k in ("covariance", "P", "cov", "uncertainty_matrix") and isinstance(v, list):
-                matrices.append((path, v))
+            if k in ("covariance", "P", "cov", "uncertainty_matrix"):
+                if isinstance(v, list):
+                    matrices.append((path, v))
+                else:
+                    matrices.append((path, "MALFORMED_COVARIANCE_STRUCTURE"))
             elif isinstance(v, (dict, list)):
-                matrices.extend(extract_covariance_matrices_recursive(v, max_depth, current_depth + 1, path))
+                matrices.extend(extract_covariance_matrices_recursive(v, max_depth, current_depth + 1, path, visited.copy()))
     elif isinstance(data, list):
         for idx, item in enumerate(data):
             path = f"{prefix}[{idx}]"
             if isinstance(item, (dict, list)):
-                matrices.extend(extract_covariance_matrices_recursive(item, max_depth, current_depth + 1, path))
+                matrices.extend(extract_covariance_matrices_recursive(item, max_depth, current_depth + 1, path, visited.copy()))
     else:
         cov = getattr(data, "covariance", None) or getattr(data, "P", None)
-        if cov is not None and isinstance(cov, list):
-            path = f"{prefix}.covariance" if prefix else "covariance"
-            matrices.append((path, cov))
+        if cov is not None:
+            if isinstance(cov, list):
+                path = f"{prefix}.covariance" if prefix else "covariance"
+                matrices.append((path, cov))
+            else:
+                matrices.append((prefix or "covariance", "MALFORMED_COVARIANCE_STRUCTURE"))
         if hasattr(data, "__dict__") and isinstance(data.__dict__, dict):
-            matrices.extend(extract_covariance_matrices_recursive(data.__dict__, max_depth, current_depth + 1, prefix))
+            matrices.extend(extract_covariance_matrices_recursive(data.__dict__, max_depth, current_depth + 1, prefix, visited.copy()))
     return matrices
 

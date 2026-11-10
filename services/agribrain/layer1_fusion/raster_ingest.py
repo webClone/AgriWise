@@ -213,6 +213,15 @@ def ingest_raster_composites(
         evidence_flags = [] if grid_spec is not None else [
             f"INVALID_GEOSPATIAL_GRID:{grid_status}"
         ]
+        r_pub = raster_data.get("published_at")
+        v_pub_dt = None
+        if r_pub:
+            evidence_flags.append(f"PUBLISHED_AT:{r_pub}")
+            try:
+                from .temporal_alignment import ensure_utc
+                v_pub_dt = ensure_utc(datetime.fromisoformat(str(r_pub)))
+            except Exception:
+                pass
         effective_zone_masks = zone_masks if grid_spec is not None else None
 
         if effective_zone_masks:
@@ -248,6 +257,8 @@ def ingest_raster_composites(
                     provenance_ref=f"raster_ingest_{raster_id}_zone_{zone_id}",
                     flags=list(evidence_flags),
                     grounding_class=grounding_class,
+                    publication_receipt_verified=bool(r_pub),
+                    verified_published_at=v_pub_dt,
                     **ev_fields
                 )
                 evidence.append(normalize_evidence_truth(item, source_context=raster_data))
@@ -283,6 +294,8 @@ def ingest_raster_composites(
                 provenance_ref=f"raster_ingest_{raster_id}",
                 flags=list(evidence_flags),
                 grounding_class=grounding_class,
+                publication_receipt_verified=bool(r_pub),
+                verified_published_at=v_pub_dt,
                 **ev_fields
             )
             evidence.append(normalize_evidence_truth(item, source_context=raster_data))
@@ -450,6 +463,8 @@ def check_asmae_authority(output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
     from .diagnostics import validate_covariance_matrix, extract_covariance_matrices_recursive
     cov_matrices = extract_covariance_matrices_recursive(output)
     for cov_name, mat in cov_matrices:
+        if isinstance(mat, str):
+            return False, f"invalid_covariance:{mat}"
         is_psd, cov_reason = validate_covariance_matrix(mat)
         if not is_psd:
             return False, f"invalid_covariance:{cov_reason}"

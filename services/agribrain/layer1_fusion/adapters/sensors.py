@@ -117,13 +117,19 @@ class SensorAdapter:
 
             prov_dict = getattr(package, "provenance", {}) or {}
             receipt_ref = prov_dict.get("receipt_ref") if isinstance(prov_dict, dict) else getattr(prov_dict, "receipt_ref", None)
+            reading_receipt = getattr(reading, "receipt", None) or getattr(reading, "receipt_ref", None)
+            package_receipt = getattr(package, "receipt", None)
+            active_receipt = reading_receipt if reading_receipt is not None else (package_receipt or (receipt_ref if hasattr(receipt_ref, "receipt_id") else None))
+
             raw_ref = getattr(reading, "raw_payload_ref", None)
-            if receipt_ref:
+            if active_receipt and hasattr(active_receipt, "receipt_id"):
+                prov_ref = str(active_receipt.receipt_id)
+            elif receipt_ref:
                 prov_ref = str(receipt_ref)
-            elif raw_ref and raw_ref.startswith(("urn:", "sha256:", "sha512:", "pkg_", "packet_")):
+            elif raw_ref:
                 prov_ref = str(raw_ref)
             else:
-                prov_ref = f"urn:agriwise:receipt:sensor:{device_id}:{plot_id or 'unknown'}:{i}"
+                prov_ref = f"raw_reading_{device_id}_{i}"
 
             items.append(EvidenceItem(
                 evidence_id=f"sensor_{device_id}_{variable}_{i}",
@@ -142,6 +148,7 @@ class SensorAdapter:
                 reliability=reliability,
                 freshness_score=0.0,
                 provenance_ref=prov_ref,
+                receipt=active_receipt,
                 diagnostic_only=is_diag,
                 state_update_allowed=update_allowed and not is_diag,
                 instrument_id=device_id,

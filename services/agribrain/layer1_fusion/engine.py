@@ -151,6 +151,18 @@ class Layer1FusionEngine:
                 return
             matrices = extract_covariance_matrices_recursive(pkg_data)
             for cov_name, mat in matrices:
+                if isinstance(mat, str):
+                    all_quarantined.append(
+                        QuarantinedEvidence(
+                            evidence_id=f"{source_name}_{cov_name}",
+                            reason_codes=[f"INVALID_COVARIANCE:{mat}"],
+                            original_source_family=source_name,
+                            variable="covariance",
+                            severity="error",
+                        )
+                    )
+                    disabled_sources.add(source_name)
+                    break
                 is_psd, cov_reason = validate_covariance_matrix(mat)
                 if not is_psd:
                     all_quarantined.append(
@@ -228,10 +240,11 @@ class Layer1FusionEngine:
             item.temporal_scope = assign_temporal_window(item, bundle.run_timestamp)
         compute_stale_flags(ledger.all_items, bundle.run_timestamp)
 
-        # 8. Spatial alignment (enriched with L0 WSR data if available)
+        # 8. Spatial alignment (enriched with L0 WSR data if available; R9-04: disabled sources excluded)
+        l0_spatial = bundle.layer0_state_package if "l0_state" not in disabled_sources else None
         spatial_index = build_spatial_index(
             ledger.all_items, bundle.plot_id,
-            layer0_state=bundle.layer0_state_package,
+            layer0_state=l0_spatial,
         )
 
         # 8.5 Raster grid ingestion (optional — pixel-level fidelity)
@@ -240,6 +253,7 @@ class Layer1FusionEngine:
             raster_evidence, raster_refs = ingest_raster_composites(
                 bundle.raster_composites, bundle.plot_id, bundle.run_timestamp,
             )
+            admitted_raster_vars = set()
             for re in raster_evidence:
                 is_avail, avail_reason = is_available_at_cutoff(re, as_of_cutoff, is_historical_replay=is_historical_replay)
                 if not is_avail:
@@ -257,18 +271,44 @@ class Layer1FusionEngine:
                     rejected_re = ledger.add(re)
                     if rejected_re:
                         all_quarantined.append(quarantine_evidence(re, rejected_re))
+                    else:
+                        admitted_raster_vars.add(re.variable)
+            # R9-05: Only admit raster references whose evidence was admitted (not quarantined)
             for rr in raster_refs:
-                spatial_index.raster_refs.append(rr)
+                if rr.variable in admitted_raster_vars:
+                    spatial_index.raster_refs.append(rr)
             raster_audit_count = len(raster_evidence)
 
-        # 8.5.1 ASMAE Raster Ingestion (R8-01: block raster export when ASMAE covariance is invalid)
+        # 8.5.1 ASMAE Raster Ingestion (R8-01: block raster export when ASMAE covariance is invalid; R9-05: check cutoff)
         if bundle.asmae_output and "asmae" not in disabled_sources:
-            from .raster_ingest import ingest_asmae_raster_refs
-            asmae_raster_refs = ingest_asmae_raster_refs(
-                bundle.asmae_output, bundle.plot_id,
-            )
-            for rr in asmae_raster_refs:
-                spatial_index.raster_refs.append(rr)
+            asmae_prov = bundle.asmae_output.get("provenance") or {}
+            asmae_ts = asmae_prov.get("published_at") or asmae_prov.get("timestamp") or bundle.asmae_output.get("timestamp")
+            asmae_cutoff_violation = False
+            if is_historical_replay and asmae_ts:
+                try:
+                    from .temporal_alignment import ensure_utc
+                    asmae_dt = ensure_utc(datetime.fromisoformat(str(asmae_ts)))
+                    if asmae_dt > as_of_cutoff:
+                        asmae_cutoff_violation = True
+                        all_quarantined.append(
+                            QuarantinedEvidence(
+                                evidence_id="asmae_raster_output",
+                                reason_codes=[f"HISTORICAL_CUTOFF_VIOLATION: asmae {asmae_dt} > cutoff {as_of_cutoff}"],
+                                original_source_family="asmae",
+                                variable="asmae_raster",
+                                severity="error",
+                            )
+                        )
+                except Exception:
+                    pass
+
+            if not asmae_cutoff_violation:
+                from .raster_ingest import ingest_asmae_raster_refs
+                asmae_raster_refs = ingest_asmae_raster_refs(
+                    bundle.asmae_output, bundle.plot_id,
+                )
+                for rr in asmae_raster_refs:
+                    spatial_index.raster_refs.append(rr)
 
         # 8.7 Zone segmentation (optional — when NDVI rasters have ≥16 valid cells)
         zone_seg_audit = None

@@ -246,6 +246,9 @@ class EvidenceItem:
     calibration_version: Optional[str] = None
     instrument_id: Optional[str] = None
     parent_acquisition_id: Optional[str] = None
+    receipt: Optional[Any] = None
+    publication_receipt_verified: bool = False
+    verified_published_at: Optional[datetime] = None
 
     # Temporal scope (persisted by engine from assign_temporal_window)
     temporal_scope: str = "daily"

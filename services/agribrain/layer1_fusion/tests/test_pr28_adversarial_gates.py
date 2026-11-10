@@ -427,6 +427,15 @@ def test_r7_g09_registered_sensor_negative_controls():
         status="active",
         calibration_profile_id="cal_valid",
     ))
+    tb.register_sensor_receipt(tb.SensorAttestationReceipt(
+        receipt_id="urn:agriwise:receipt:sensor_dev_active_plotA",
+        issuer="agriwise:trust:sensor_authority",
+        device_id="sensor_dev_active",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal_valid",
+        signature="valid_sig_abc123",
+    ))
     
     # Negative 1: Wrong variable (sensor only calibrated for soil_moisture_vwc, trying to report ndvi)
     item_wrong_var = _item(
@@ -557,12 +566,14 @@ def test_r7_g12_historical_cutoff_revision_replay():
         evidence_id="acq_01",
         value=0.22,
         flags=["PUBLISHED_AT:2026-11-09T09:00:00+00:00"],
+        publication_receipt_verified=True,
     )
     # Corrected revision published at 18:00 (after cutoff)
     rev = _item(
         evidence_id="acq_01__rev1",
         value=0.25,
         flags=["PUBLISHED_AT:2026-11-09T18:00:00+00:00"],
+        publication_receipt_verified=True,
     )
     
     ok_orig, _ = ta.is_available_at_cutoff(orig, cutoff, is_historical_replay=True)
@@ -660,7 +671,16 @@ def test_r8_g02_arbitrary_unauthenticated_receipt_string_denied():
     tb.normalize_evidence_truth(item_mock_2)
     assert item_mock_2.state_update_allowed is False
     
-    # Positive control: authentic URN receipt
+    # Positive control: authentic registered receipt
+    tb.register_sensor_receipt(tb.SensorAttestationReceipt(
+        receipt_id="urn:agriwise:receipt:sensor_auth_test:valid_batch_01",
+        issuer="agriwise:trust:sensor_authority",
+        device_id="sensor_auth_test",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal_valid_z",
+        signature="valid_sig_xyz987",
+    ))
     item_auth = _item(
         source_family="sensor",
         plot_id="plot-A",
@@ -956,4 +976,696 @@ def test_r8_g09_full_engine_replay_superseded_revision_cutoff_isolation():
     admitted = [e for e in res.evidence_items if "acq_temp_orig" in e.evidence_id]
     assert len(admitted) == 1
     assert admitted[0].value == 20.0
+
+
+def test_r9_g01_sensor_receipt_forged_urn_and_dummy_object_denied():
+    """R9-G01: Forged URN, arbitrary non-None dummy object, manufactured URN, and raw fallback denied; authentic receipt accepted."""
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+    tb = _mod('truth_bridge')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+    
+    register_device(SensorDeviceRegistration(
+        device_id="sensor_r9_dev",
+        vendor="acme",
+        model="probe-r9",
+        protocol="lora",
+        farm_id="farm-1",
+        plot_id="plot-A",
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now,
+        status="active",
+        calibration_profile_id="cal_r9_profile",
+    ))
+    
+    # Negative (a): Forged valid-looking URN string with no registered receipt backing
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r9_dev",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_r9_profile",
+        provenance_ref="urn:agriwise:receipt:sensor:sensor_r9_dev:plot-A:01",
+    )
+    assert ok is False
+    assert "unverified_sensor_receipt" in reason
+
+    # Negative (b): Arbitrary non-None dummy receipt object
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r9_dev",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_r9_profile",
+        receipt=object(),
+    )
+    assert ok is False
+    assert "unauthenticated_receipt_object" in reason
+
+    # Negative (c): Arbitrary dummy dict receipt object
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r9_dev",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_r9_profile",
+        receipt={"dummy": "payload", "receipt_id": "r1"},
+    )
+    assert ok is False
+    assert "unauthenticated_receipt_object" in reason
+
+    # Negative (d): pkg_* and packet_* string without registered receipt
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r9_dev",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_r9_profile",
+        provenance_ref="pkg_hash123_pkt_hash456",
+    )
+    assert ok is False
+    assert "unverified_sensor_receipt" in reason
+
+    # Negative (e): Receipt with fake / dummy signature
+    fake_sig_receipt = tb.SensorAttestationReceipt(
+        receipt_id="urn:agriwise:receipt:fake_sig",
+        issuer="agriwise:trust:sensor_authority",
+        device_id="sensor_r9_dev",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal_r9_profile",
+        signature="dummy_signature",
+    )
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r9_dev",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_r9_profile",
+        receipt=fake_sig_receipt,
+    )
+    assert ok is False
+    assert "unverified_receipt_signature" in reason
+
+    # Positive control: Authentic registered receipt
+    valid_receipt = tb.SensorAttestationReceipt(
+        receipt_id="urn:agriwise:receipt:sensor_r9_dev:auth_001",
+        issuer="agriwise:trust:sensor_authority",
+        device_id="sensor_r9_dev",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal_r9_profile",
+        status="active",
+        signature="ed25519:valid_auth_signature_xyz",
+    )
+    tb.register_sensor_receipt(valid_receipt)
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r9_dev",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_r9_profile",
+        provenance_ref="urn:agriwise:receipt:sensor_r9_dev:auth_001",
+    )
+    assert ok is True
+    assert reason == "attested_via_verified_receipt"
+
+    # Normalized evidence truth accepts positive control
+    item = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_r9_dev",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_r9_profile",
+        provenance_ref="urn:agriwise:receipt:sensor_r9_dev:auth_001",
+    )
+    tb.normalize_evidence_truth(item)
+    assert item.state_update_allowed is True
+    assert item.truth_class == "observed_sensor"
+
+
+def test_r9_g02_covariance_scale_aware_indefinite_and_overflow_denied():
+    """R9-G02: Scale-aware indefinite rejection (det < -1e-9 * scale), overflow rejection, near-singular PSD pass."""
+    diag = _mod('diagnostics')
+    ri = _mod('raster_ingest')
+    
+    # 1. Tiny indefinite matrix: det = -3e-12, min eig = -1e-6
+    tiny_indefinite = [[1e-6, 2e-6], [2e-6, 1e-6]]
+    is_psd, reason = diag.validate_covariance_matrix(tiny_indefinite)
+    assert is_psd is False
+    assert "NEGATIVE_DETERMINANT" in reason
+
+    # 2. Overflow-sized finite indefinite matrix
+    overflow_indefinite = [[1e308, 1e308], [1e308, 1e307]]
+    is_psd, reason = diag.validate_covariance_matrix(overflow_indefinite)
+    assert is_psd is False
+    assert "NUMERICAL_OVERFLOW_DETECTED" in reason
+
+    # 3. Near-singular PSD matrix (rank 1, det = 0)
+    near_singular_psd = [[1e-4, 1e-4], [1e-4, 1e-4]]
+    is_psd, reason = diag.validate_covariance_matrix(near_singular_psd)
+    assert is_psd is True
+    assert reason == "valid_psd_covariance"
+
+    # 4. Zero matrix (rank 0, det = 0)
+    zero_mat = [[0.0, 0.0], [0.0, 0.0]]
+    is_psd, reason = diag.validate_covariance_matrix(zero_mat)
+    assert is_psd is True
+    assert reason == "valid_psd_covariance"
+
+    # 5. Small asymmetric matrix
+    asymmetric_mat = [[1.0, 1.0001], [1.0, 1.0]]
+    is_psd, reason = diag.validate_covariance_matrix(asymmetric_mat)
+    assert is_psd is False
+    assert "ASYMMETRIC_COVARIANCE" in reason
+
+    # 6. ASMAE authority check rejects tiny indefinite covariance
+    asmae_bad = {
+        "status": "success",
+        "grid_spec": {
+            "crs": "EPSG:4326",
+            "bounds": [10.0, 35.0, 10.1, 35.1],
+            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+            "width": 10,
+            "height": 10,
+            "resolution_m": 10.0,
+        },
+        "provenance": {
+            "operator_locked": True,
+            "graph_locked": True,
+            "radiometric_mode": "ht_per_pixel",
+            "full_radiometric_credit_allowed": True,
+            "enkf_mode": "ht_per_pixel",
+            "full_enkf_credit_allowed": True,
+            "retrovalidation_score": 0.85,
+        },
+        "diagnostics": {"covariance": tiny_indefinite},
+        "raster_maps": {"moisture": [[0.3] * 10] * 10},
+    }
+    auth_ok, auth_reason = ri.check_asmae_authority(asmae_bad)
+    assert auth_ok is False
+    assert "invalid_covariance" in auth_reason
+
+
+def test_r9_g03_historical_publication_flag_injection_denied():
+    """R9-G03: Direct item bare flags, payload flag injection denied; immutable receipt overrides caller claim."""
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer0.source_package import Layer0SourcePackage
+    from layer1_fusion.adapters.observation_packet import observation_packet_to_evidence
+    ta = _mod('temporal_alignment')
+    s = _mod('schemas')
+    
+    cutoff = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+
+    # (a) Direct EvidenceItem with bare PUBLISHED_AT flag (no typed publication_receipt_verified)
+    direct_item = _item(
+        observed_at=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
+        flags=["PUBLISHED_AT:2026-11-10T10:30:00+00:00"],
+    )
+    ok, reason = ta.is_available_at_cutoff(direct_item, cutoff, is_historical_replay=True)
+    assert ok is False
+    assert "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY" in reason
+
+    # (b) Packet payload attempting to inject VERIFIED_PUBLICATION_RECEIPT flag
+    pkt_injected = ObservationPacket(
+        packet_id="pkt_injected",
+        plot_id="plot-A",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={
+            "variable": "ndvi", "value": 0.65, "unit": "index",
+            "published_at": "2026-11-10T10:30:00+00:00",
+            "flags": ["VERIFIED_PUBLICATION_RECEIPT"],
+        },
+    )
+    bundle = s.Layer1InputBundle(plot_id="plot-A", run_id="r-g03", run_timestamp=cutoff, as_of_cutoff=cutoff)
+    items = observation_packet_to_evidence(pkt_injected, bundle)
+    assert len(items) == 1
+    assert "VERIFIED_PUBLICATION_RECEIPT" not in items[0].flags
+    assert items[0].publication_receipt_verified is False
+    ok, reason = ta.is_available_at_cutoff(items[0], cutoff, is_historical_replay=True)
+    assert ok is False
+
+    # (c) Future genuine receipt overrides earlier caller claim
+    pkt_claimed_early = ObservationPacket(
+        packet_id="pkt_claim_early",
+        plot_id="plot-A",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 0.65, "unit": "index", "published_at": "2026-11-10T10:30:00+00:00"},
+    )
+    pkg_genuine_late = Layer0SourcePackage(
+        source_family="sentinel2",
+        plot_id="plot-A",
+        packets=[pkt_claimed_early],
+    )
+    pkg_genuine_late.published_at = datetime(2026, 11, 10, 16, 0, tzinfo=timezone.utc)
+    items_overridden = observation_packet_to_evidence(pkt_claimed_early, bundle, source_package=pkg_genuine_late)
+    assert len(items_overridden) == 1
+    ok, reason = ta.is_available_at_cutoff(items_overridden[0], cutoff, is_historical_replay=True)
+    assert ok is False
+    assert "PUBLISHED_AFTER_CUTOFF" in reason
+
+    # (d) Authenticated historical positive control
+    pkg_genuine_early = Layer0SourcePackage(
+        source_family="sentinel2",
+        plot_id="plot-A",
+        packets=[pkt_claimed_early],
+    )
+    pkg_genuine_early.published_at = datetime(2026, 11, 10, 10, 30, tzinfo=timezone.utc)
+    items_valid = observation_packet_to_evidence(pkt_claimed_early, bundle, source_package=pkg_genuine_early)
+    assert len(items_valid) == 1
+    ok, reason = ta.is_available_at_cutoff(items_valid[0], cutoff, is_historical_replay=True)
+    assert ok is True
+
+
+def test_r9_g04_disabled_layer0_state_excluded_from_spatial_index():
+    """R9-G04: Disabled Layer 0 state package is excluded from spatial index enrichment and Layer 10."""
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+
+    # L0 state package with invalid covariance and zone summary
+    bad_l0_state = {
+        "covariance": [[1.0, 5.0], [5.0, 1.0]],
+        "state_vector": {"soil_moisture_vwc": 0.25},
+        "spatial_scope": "plot",
+        "zone_summaries": [{"zone_id": "zone-1", "label": "Zone 1", "area_fraction": 0.5}],
+        "edge_contamination": [{"edge_id": "edge-1", "contamination_score": 0.8}],
+    }
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g04-l0",
+        run_timestamp=now,
+        layer0_state_package=bad_l0_state,
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    pkg = engine.fuse(bundle)
+    
+    # 1. Source l0_state quarantined and disabled
+    assert any("INVALID_COVARIANCE" in q.reason_codes[0] for q in pkg.diagnostics.quarantined_evidence)
+    assert not any(e.source_family == "l0_state" for e in pkg.evidence_items)
+
+    # 2. Spatial index has zero leaked zone summaries or edge regions from disabled L0 state
+    assert len(pkg.spatial_index.zones) == 0
+    assert len(pkg.spatial_index.edge_regions) == 0
+
+    # 3. Layer 10 payload has zero leaked overlays from disabled L0 state
+    assert len(pkg.layer10_payload["zone_overlays"]) == 0
+    assert len(pkg.layer10_payload["edge_regions"]) == 0
+
+    # Positive control: Valid L0 state package enriches spatial index
+    good_l0_state = {
+        "covariance": [[0.01, 0.0], [0.0, 0.01]],
+        "state_vector": {"soil_moisture_vwc": 0.25},
+        "spatial_scope": "plot",
+        "zone_summaries": [{"zone_id": "zone-1", "label": "Zone 1", "area_fraction": 0.5}],
+        "edge_contamination": [{"edge_id": "edge-1", "contamination_score": 0.8}],
+    }
+    bundle_good = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g04-good",
+        run_timestamp=now,
+        layer0_state_package=good_l0_state,
+    )
+    pkg_good = engine.fuse(bundle_good)
+    assert len(pkg_good.spatial_index.zones) > 0
+    assert len(pkg_good.layer10_payload["zone_overlays"]) > 0
+
+
+def test_r9_g05_raster_reference_consistent_with_evidence_cutoff():
+    """R9-G05: Late raster composites and late ASMAE outputs have RasterRefs excluded on historical replay."""
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
+    cutoff = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+
+    # 1. Late raster composite published at 16:00 (cutoff 12:00)
+    late_composite = {
+        "NDVI": {
+            "values": [[0.6] * 10] * 10,
+            "crs": "EPSG:4326",
+            "bounds": [10.0, 35.0, 10.1, 35.1],
+            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+            "width": 10,
+            "height": 10,
+            "resolution_m": 10.0,
+            "published_at": "2026-11-10T16:00:00+00:00",
+        }
+    }
+    bundle_late_raster = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g05-late",
+        run_timestamp=cutoff,
+        as_of_cutoff=cutoff,
+        raster_composites=late_composite,
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    pkg_late = engine.fuse(bundle_late_raster)
+    
+    # Evidence quarantined with cutoff violation
+    assert any("HISTORICAL_CUTOFF_VIOLATION" in q.reason_codes[0] for q in pkg_late.diagnostics.quarantined_evidence)
+    # RasterRef NOT admitted to spatial_index.raster_refs
+    assert not any(r.variable == "ndvi" for r in pkg_late.spatial_index.raster_refs)
+    assert not any(r["variable"] == "ndvi" for r in pkg_late.layer10_payload["raster_refs"])
+
+    # 2. Late ASMAE output published at 18:00
+    late_asmae = {
+        "status": "success",
+        "grid_spec": {
+            "crs": "EPSG:4326",
+            "bounds": [10.0, 35.0, 10.1, 35.1],
+            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+            "width": 10,
+            "height": 10,
+            "resolution_m": 10.0,
+        },
+        "provenance": {
+            "operator_locked": True,
+            "graph_locked": True,
+            "radiometric_mode": "ht_per_pixel",
+            "full_radiometric_credit_allowed": True,
+            "enkf_mode": "ht_per_pixel",
+            "full_enkf_credit_allowed": True,
+            "retrovalidation_score": 0.85,
+            "published_at": "2026-11-10T18:00:00+00:00",
+        },
+        "diagnostics": {"covariance": [[0.01, 0.0], [0.0, 0.01]]},
+        "raster_maps": {"moisture": [[0.3] * 10] * 10},
+    }
+    bundle_late_asmae = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g05-asmae-late",
+        run_timestamp=cutoff,
+        as_of_cutoff=cutoff,
+        asmae_output=late_asmae,
+    )
+    pkg_asmae_late = engine.fuse(bundle_late_asmae)
+    assert any("HISTORICAL_CUTOFF_VIOLATION" in q.reason_codes[0] for q in pkg_asmae_late.diagnostics.quarantined_evidence)
+    assert not any(r.variable == "moisture" for r in pkg_asmae_late.spatial_index.raster_refs)
+
+    # 3. Positive control: In-cutoff raster composite and ASMAE
+    early_composite = {
+        "NDVI": {
+            "values": [[0.6] * 10] * 10,
+            "crs": "EPSG:4326",
+            "bounds": [10.0, 35.0, 10.1, 35.1],
+            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+            "width": 10,
+            "height": 10,
+            "resolution_m": 10.0,
+            "published_at": "2026-11-10T10:00:00+00:00",
+        }
+    }
+    early_asmae = {
+        "status": "success",
+        "grid_spec": {
+            "crs": "EPSG:4326",
+            "bounds": [10.0, 35.0, 10.1, 35.1],
+            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+            "width": 10,
+            "height": 10,
+            "resolution_m": 10.0,
+        },
+        "provenance": {
+            "operator_locked": True,
+            "graph_locked": True,
+            "radiometric_mode": "ht_per_pixel",
+            "full_radiometric_credit_allowed": True,
+            "enkf_mode": "ht_per_pixel",
+            "full_enkf_credit_allowed": True,
+            "retrovalidation_score": 0.85,
+            "published_at": "2026-11-10T10:00:00+00:00",
+        },
+        "diagnostics": {"covariance": [[0.01, 0.0], [0.0, 0.01]]},
+        "raster_maps": {"moisture": [[0.3] * 10] * 10},
+    }
+    bundle_in_cutoff = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g05-ok",
+        run_timestamp=cutoff,
+        as_of_cutoff=cutoff,
+        raster_composites=early_composite,
+        asmae_output=early_asmae,
+    )
+    pkg_ok = engine.fuse(bundle_in_cutoff)
+    assert any(r.variable == "ndvi" for r in pkg_ok.spatial_index.raster_refs)
+    assert any("moisture" in r.variable for r in pkg_ok.spatial_index.raster_refs)
+
+
+def test_r9_g06_covariance_traversal_depth_limit_and_malformed_fails_closed():
+    """R9-G06: Depth > 10, circular references, and malformed non-list covariance keys fail closed."""
+    diag = _mod('diagnostics')
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+
+    # 1. Depth > 10
+    deep = {}
+    curr = deep
+    for i in range(12):
+        curr["nested"] = {}
+        curr = curr["nested"]
+    curr["covariance"] = [[1.0, 0.0], [0.0, 1.0]]
+    extracted = diag.extract_covariance_matrices_recursive(deep, max_depth=10)
+    assert any(mat == "COVARIANCE_TRAVERSAL_LIMIT_EXCEEDED" for _, mat in extracted)
+
+    # Full engine quarantines depth-exceeded structure
+    bundle_deep = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g06-deep",
+        run_timestamp=now,
+        layer0_state_package=deep,
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    pkg_deep = engine.fuse(bundle_deep)
+    assert any("COVARIANCE_TRAVERSAL_LIMIT_EXCEEDED" in q.reason_codes[0] for q in pkg_deep.diagnostics.quarantined_evidence)
+    assert not any(e.source_family == "l0_state" for e in pkg_deep.evidence_items)
+
+    # 2. Circular reference
+    circular_dict = {}
+    circular_dict["self"] = circular_dict
+    circular_dict["covariance"] = [[1.0, 0.0], [0.0, 1.0]]
+    extracted_circ = diag.extract_covariance_matrices_recursive(circular_dict)
+    assert any(mat == "CIRCULAR_REFERENCE_IN_COVARIANCE_STRUCTURE" for _, mat in extracted_circ)
+
+    # 3. Malformed non-list covariance key
+    malformed = {"covariance": "not_a_matrix", "state_vector": {"moisture": 0.3}}
+    extracted_mal = diag.extract_covariance_matrices_recursive(malformed)
+    assert any(mat == "MALFORMED_COVARIANCE_STRUCTURE" for _, mat in extracted_mal)
+
+    bundle_mal = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g06-mal",
+        run_timestamp=now,
+        layer0_state_package=malformed,
+    )
+    pkg_mal = engine.fuse(bundle_mal)
+    assert any("MALFORMED_COVARIANCE_STRUCTURE" in q.reason_codes[0] for q in pkg_mal.diagnostics.quarantined_evidence)
+
+
+def test_r9_g07_revision_supersession_graph_lineage_cutoff():
+    """R9-G07: Revision supersession graph preserves original when revised observation is past cutoff."""
+    ta = _mod('temporal_alignment')
+    el = _mod('evidence_ledger')
+    cutoff = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+
+    # Original observation
+    ev_orig = _item(
+        evidence_id="ev_weather_station_001",
+        variable="temp_mean",
+        value=20.0,
+        source_family="environment",
+        observed_at=cutoff - timedelta(hours=3),
+        flags=["PUBLISHED_AT:2026-11-10T09:30:00+00:00"],
+        publication_receipt_verified=True,
+    )
+
+    # Revision with explicit supersedes_evidence_id, published after cutoff
+    ev_rev_late = _item(
+        evidence_id="ev_weather_station_001__rev1",
+        variable="temp_mean",
+        value=22.5,
+        source_family="environment",
+        observed_at=cutoff - timedelta(hours=3),
+        flags=["PUBLISHED_AT:2026-11-10T15:00:00+00:00"],
+        publication_receipt_verified=True,
+    )
+    ev_rev_late.supersedes_evidence_id = "ev_weather_station_001"
+
+    # Availability check at cutoff
+    ok_orig, _ = ta.is_available_at_cutoff(ev_orig, cutoff, is_historical_replay=True)
+    ok_rev, reason_rev = ta.is_available_at_cutoff(ev_rev_late, cutoff, is_historical_replay=True)
+    assert ok_orig is True
+    assert ok_rev is False
+    assert "PUBLISHED_AFTER_CUTOFF" in reason_rev
+
+    # Ledger admits original; late revision rejected
+    ledger = el.EvidenceLedger()
+    assert ledger.add(ev_orig) == []
+    assert len(ledger.all_items) == 1
+    assert ledger.all_items[0].value == 20.0
+
+    # In-cutoff revision properly supersedes
+    ev_rev_early = _item(
+        evidence_id="ev_weather_station_001__rev0",
+        variable="temp_mean",
+        value=21.0,
+        source_family="environment",
+        observed_at=cutoff - timedelta(hours=3),
+        flags=["PUBLISHED_AT:2026-11-10T10:00:00+00:00"],
+        publication_receipt_verified=True,
+    )
+    ev_rev_early.supersedes_evidence_id = "ev_weather_station_001"
+    ok_early, _ = ta.is_available_at_cutoff(ev_rev_early, cutoff, is_historical_replay=True)
+    assert ok_early is True
+
+
+def test_r9_g08_full_engine_healthy_sensor_and_asmae_layer10_positive_control():
+    """R9-G08: Healthy registered sensor + signed receipt and valid ASMAE produce authoritative Layer 10 state update."""
+    from layer0.source_package import Layer0SourcePackage
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+    tb = _mod('truth_bridge')
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
+    now = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+
+    # 1. Register active sensor in device registry
+    register_device(SensorDeviceRegistration(
+        device_id="sensor_full_01",
+        vendor="soil-tech",
+        model="probe-pro",
+        protocol="lora",
+        farm_id="farm-1",
+        plot_id="plot-A",
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now - timedelta(days=30),
+        status="active",
+        calibration_profile_id="cal-soil-pro-1",
+    ))
+
+    # 2. Register cryptographic sensor attestation receipt
+    receipt = tb.SensorAttestationReceipt(
+        receipt_id="urn:agriwise:receipt:sensor_full_01:reading_01",
+        issuer="agriwise:trust:sensor_authority",
+        device_id="sensor_full_01",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal-soil-pro-1",
+        status="active",
+        signature="ed25519:sig_valid_hardware_root_of_trust_001",
+    )
+    tb.register_sensor_receipt(receipt)
+
+    # 3. Create sensor packet with authentic receipt reference
+    sensor_pkt = ObservationPacket(
+        packet_id="pkt_sensor_01",
+        plot_id="plot-A",
+        source=ObservationSource.SENSOR_IOT,
+        data_status=DataStatus.OBSERVED,
+        timestamp=now - timedelta(minutes=15),
+        spatial_scope="point",
+        qa=QAMetadata(scene_score=1.0, sensor_health=0.98),
+        uncertainty=UncertaintyModel(sigmas={"soil_moisture_vwc": 0.01}),
+        payload={
+            "device_id": "sensor_full_01",
+            "instrument_id": "sensor_full_01",
+            "variable": "soil_moisture_vwc",
+            "value": 0.28,
+            "unit": "fraction",
+            "calibration_version": "cal-soil-pro-1",
+            "provenance_ref": "urn:agriwise:receipt:sensor_full_01:reading_01",
+        },
+    )
+    sensor_pkg = Layer0SourcePackage(
+        source_family="sensor",
+        plot_id="plot-A",
+        packets=[sensor_pkt],
+    )
+
+    # 4. Valid ASMAE output with all required credentials
+    valid_asmae = {
+        "status": "success",
+        "run_id": "asmae_run_01",
+        "package_id": "pkg_asmae_valid_01",
+        "schema_version": "1.0",
+        "package_version": "1.0",
+        "source_id": "asmae_engine_01",
+        "production_usable": True,
+        "layer1_export_allowed": True,
+        "observation_operator_refs": ["op-1"],
+        "grid_spec": {
+            "crs": "EPSG:4326",
+            "bounds": [10.0, 35.0, 10.1, 35.1],
+            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+            "width": 10,
+            "height": 10,
+            "resolution_m": 10.0,
+        },
+        "provenance": {
+            "operator_locked": True,
+            "graph_locked": True,
+            "radiometric_mode": "ht_per_pixel",
+            "full_radiometric_credit_allowed": True,
+            "enkf_mode": "ht_per_pixel",
+            "full_enkf_credit_allowed": True,
+            "retrovalidation_score": 0.88,
+            "published_at": (now - timedelta(minutes=30)).isoformat(),
+        },
+        "diagnostics": {
+            "scientific_pass": True,
+            "scene_stack_mode": "real_raster",
+            "enkf_mode": "ht_per_pixel",
+            "radiometric_mode": "ht_per_pixel",
+            "retro_status": "success_with_holdouts",
+            "diagnostic_only": False,
+            "state_update_allowed": True,
+            "operator_count": 1,
+            "covariance": [[0.02, 0.0], [0.0, 0.02]],
+        },
+        "raster_maps": {"moisture": [[0.3] * 10] * 10},
+    }
+
+    # 5. Run full engine fusion
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="run-r9-g08",
+        run_timestamp=now,
+        window_start=now - timedelta(days=1),
+        window_end=now,
+        layer0_source_packages={"sensor": [sensor_pkg]},
+        asmae_output=valid_asmae,
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    pkg = engine.fuse(bundle)
+
+    # Assertions:
+    # Sensor evidence is admitted with full state authority
+    sensor_ev = [e for e in pkg.evidence_items if e.source_family == "sensor"]
+    assert len(sensor_ev) == 1
+    assert sensor_ev[0].truth_class == "observed_sensor"
+    assert sensor_ev[0].state_update_allowed is True
+    assert sensor_ev[0].diagnostic_only is False
+
+    # ASMAE raster refs are exported to spatial_index
+    asmae_refs = [r for r in pkg.spatial_index.raster_refs if "moisture" in r.variable]
+    assert len(asmae_refs) == 1
+    assert asmae_refs[0].state_update_allowed is True
+
+    # Layer 10 payload contains sensor markers and ASMAE raster ref
+    assert len(pkg.layer10_payload["sensor_markers"]) > 0
+    assert any("moisture" in r["variable"] for r in pkg.layer10_payload["raster_refs"])
+
+    # Zero quarantine for these healthy sources
+    assert len(pkg.diagnostics.quarantined_evidence) == 0
+
+    # Content root is 64 hex characters and matches hash
+    root = pkg.scientific_content_root()
+    assert len(root) == 64
+    assert pkg.content_hash() == root[:32]
 

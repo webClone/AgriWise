@@ -114,7 +114,12 @@ def is_available_at_cutoff(
             elif isinstance(val, datetime):
                 pub_times.append(ensure_utc(val))
 
-    # Parse flags with strict validation (L1-R7-04 / R7-G04)
+    # Parse flags with strict validation (L1-R7-04 / R7-G04, R9-03)
+    v_pub = getattr(item, "verified_published_at", None)
+    if v_pub is not None:
+        v_dt = ensure_utc(v_pub)
+        pub_times.append(v_dt)
+
     has_pub_flag = len(pub_times) > 0
     for f in item.flags:
         if f.startswith("PUBLISHED_AT:"):
@@ -149,31 +154,33 @@ def is_available_at_cutoff(
         if p_dt > cutoff_utc:
             return False, f"PUBLISHED_AFTER_CUTOFF: published {p_dt} > cutoff {cutoff_utc}"
 
-    # SPEC-B / L1-R7-05 / R7-G05 / R8-02: Historical replay mode verification
-    # Controlled by trusted execution context (is_historical_replay) or evidence flags
+    # Check future observation time relative to cutoff (physical causality)
+    # R8-06 / R8-G08: Enforce zero clock-skew tolerance on historical replay; live streaming retains 5-minute tolerance
     is_replay = (
         is_historical_replay
         or "REQUIRES_PUBLICATION_VERIFICATION" in item.flags
         or "HISTORICAL_REPLAY" in item.flags
         or ("HISTORICAL" in item.flags and item.source_family in ("sentinel2", "sentinel1", "sentinel5p", "weather_reanalysis", "asmae"))
     )
-    
-    # Static priors are exempt from publication verification; dynamic observations are subject to it
-    is_static_prior = item.source_family in ("geo_context", "static_soil")
-    
-    if is_replay and not is_static_prior:
-        # R8-02 / R8-G04: Unauthenticated caller publication claims without verified receipt rejected on historical replay
-        if "CALLER_CLAIMED_PUBLICATION_TIME" in item.flags and "VERIFIED_PUBLICATION_RECEIPT" not in item.flags:
-            return False, "CALLER_CLAIMED_PUBLICATION_TIME_REJECTED: caller asserted publication availability without verified receipt proof on historical replay"
-        if not has_pub_flag:
-            return False, "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY: missing verified publication or recording timestamp"
-
-    # 2. Check future observation time relative to cutoff
-    # R8-06 / R8-G08: Enforce zero clock-skew tolerance on historical replay; live streaming retains 5-minute tolerance
     if item.observed_at is not None:
         obs_utc = ensure_utc(item.observed_at)
         skew_tolerance = timedelta(0) if is_replay else timedelta(minutes=5)
         if obs_utc > cutoff_utc + skew_tolerance:
             return False, f"OBSERVED_AFTER_CUTOFF: observed {obs_utc} > cutoff {cutoff_utc}"
+
+    # SPEC-B / L1-R7-05 / R7-G05 / R8-02 / R9-03: Historical replay mode verification
+    # Static priors are exempt from publication verification; dynamic observations are subject to it
+    is_static_prior = item.source_family in ("geo_context", "static_soil")
+    
+    if is_replay and not is_static_prior:
+        is_pub_verified = getattr(item, "publication_receipt_verified", False)
+        # R8-02 / R8-G04: Unauthenticated caller publication claims without verified receipt rejected on historical replay
+        if "CALLER_CLAIMED_PUBLICATION_TIME" in item.flags and not is_pub_verified:
+            return False, "CALLER_CLAIMED_PUBLICATION_TIME_REJECTED: caller asserted publication availability without verified receipt proof on historical replay"
+        # R9-03: Derive admission from typed verified publication record; reject untrusted flags
+        if not is_pub_verified:
+            return False, "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY: missing verified publication or recording timestamp"
+        if not has_pub_flag:
+            return False, "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY: missing verified publication or recording timestamp"
 
     return True, "available"
