@@ -90,6 +90,7 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
         and source_family is None
         and item.truth_class not in (None, "", "unknown")
         and item.source_reality not in (None, "", "unknown")
+        and item.source_family != "sensor"
     ):
         return item
     if source_family is not None:
@@ -374,25 +375,37 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
             not has_valid_provenance
             or not has_instrument
             or not has_calibration
-            or any(s in prov_str for s in ("user-supplied", "unverified", "fake", "unattested", "dummy", "spoofed"))
-            or any(s in inst_str for s in ("fake", "dummy", "unattested", "spoofed"))
-            or any(s in cal_str for s in ("fake", "dummy", "unattested", "spoofed"))
+            or any(s in prov_str for s in ("user-supplied", "unverified", "fake", "unattested", "dummy", "spoofed", "forged"))
+            or any(s in inst_str for s in ("fake", "dummy", "unattested", "spoofed", "unverified", "forged"))
+            or any(s in cal_str for s in ("fake", "dummy", "unattested", "spoofed", "unverified", "forged"))
         )
         
         # Revocation check across flags
         is_revoked = any("REVOKED" in str(f).upper() for f in (getattr(item, "flags", []) or []))
         
-        # Check registered device status & plot scope if available
+        # Check registered device status & plot scope fail-closed (L1-R7-01 / R7-G01 / R7-G02 / R7-G09)
+        reg = None
+        registry_error = None
         try:
             from services.agribrain.sensor_runtime.registry import get_device_registration
-            reg = get_device_registration(item.instrument_id or item.source_id)
-            if reg:
-                if reg.plot_id and item.plot_id and reg.plot_id != item.plot_id:
+            dev_key = item.instrument_id or item.source_id
+            reg = get_device_registration(dev_key) if dev_key else None
+        except Exception as ex:
+            registry_error = str(ex)
+            reg = None
+
+        if reg is None or registry_error is not None:
+            is_unattested = True
+        else:
+            if getattr(reg, "status", None) != "active":
+                is_unattested = True
+            if reg.plot_id and item.plot_id and reg.plot_id != item.plot_id:
+                is_unattested = True
+            if item.variable and reg.variables and item.variable not in reg.variables:
+                is_unattested = True
+            if getattr(reg, "calibration_profile_id", None) and item.calibration_version:
+                if reg.calibration_profile_id != item.calibration_version:
                     is_unattested = True
-                if reg.status != "active":
-                    is_unattested = True
-        except Exception:
-            pass
 
         is_synthetic = getattr(item, "data_status", "") in ("synthetic", "simulated", "fallback")
         if is_unattested or is_revoked or is_synthetic:
@@ -777,6 +790,60 @@ def truth_for_observation_packet(packet: ObservationPacket, package: Optional[An
             composite_advisory_allowed=True,
             experimental_visual_allowed=True,
         )
+
+    if packet.source.value in ("sensor", "sensor_iot", "soil_probe"):
+        payload = packet.payload or {}
+        has_inst = bool(payload.get("instrument_id") or payload.get("device_id") or getattr(packet, "instrument_id", None))
+        has_cal = bool(payload.get("calibration_version") or (packet.qa and getattr(packet.qa, "calibration_version", None)))
+        
+        reg = None
+        dev_key = payload.get("instrument_id") or payload.get("device_id") or getattr(packet, "instrument_id", None) or packet.packet_id
+        try:
+            from services.agribrain.sensor_runtime.registry import get_device_registration
+            reg = get_device_registration(dev_key) if dev_key else None
+        except Exception:
+            reg = None
+
+        is_valid_sensor = (
+            packet.data_status.value == "observed"
+            and has_inst
+            and has_cal
+            and reg is not None
+            and getattr(reg, "status", None) == "active"
+            and (not getattr(reg, "plot_id", None) or not packet.plot_id or reg.plot_id == packet.plot_id)
+        )
+        if is_valid_sensor:
+            return EvidenceTruth(
+                data_status="observed",
+                truth_class="observed_sensor",
+                source_reality="sensor_physical",
+                production_usable=True,
+                real_provider_product=True,
+                diagnostic_only=False,
+                state_update_allowed=True,
+                visualization_allowed=True,
+                experimental_visual_allowed=True,
+                composite_advisory_allowed=True,
+                scientific_surface_allowed=False,
+                prescription_driver_allowed=False,
+                current_1m_approval_allowed=False,
+            )
+        else:
+            return EvidenceTruth(
+                data_status="unverified" if packet.data_status.value == "observed" else packet.data_status.value,
+                truth_class="unverified_sensor",
+                source_reality="synthetic_or_uncalibrated",
+                production_usable=False,
+                real_provider_product=False,
+                diagnostic_only=True,
+                state_update_allowed=False,
+                visualization_allowed=True,
+                experimental_visual_allowed=True,
+                composite_advisory_allowed=True,
+                scientific_surface_allowed=False,
+                prescription_driver_allowed=False,
+                current_1m_approval_allowed=False,
+            )
         
     if packet.data_status.value == "observed":
         is_sentinel = packet.source.value in ("sentinel1", "sentinel2")

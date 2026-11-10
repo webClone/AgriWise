@@ -196,3 +196,381 @@ def test_l_future_observation_timestamps_never_rewritten_and_secondary_evidence_
                              observed_at=now + timedelta(hours=2))
     engine._admit_evidence_or_quarantine(post_cutoff_item, ledger, quarantined, bundle=bundle, as_of_cutoff=now)
     assert any("HISTORICAL_CUTOFF_VIOLATION" in str(q.reason_codes) for q in quarantined)
+
+
+# ============================================================================
+# R7 Corrective Qualification Gates (Table 5: R7-G01 through R7-G12)
+# ============================================================================
+
+def test_r7_g01_unregistered_plausibly_named_sensor_denied_state_update():
+    """R7-G01: Plausibly named sensor, registry returns None -> Denied state-update permission."""
+    tb = _mod('truth_bridge')
+    item = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_realistic_1",
+        calibration_version="v1",
+        provenance_ref="receipt123",
+        source_id="sensor_realistic_1",
+        data_status="observed",
+        diagnostic_only=False,
+        state_update_allowed=True,
+    )
+    tb.normalize_evidence_truth(item)
+    assert item.state_update_allowed is False
+    assert item.diagnostic_only is True
+    assert item.truth_class == "unverified_sensor"
+
+
+def test_r7_g02_sensor_registry_error_fails_closed(monkeypatch):
+    """R7-G02: Registry absent, corrupt or raises exception -> Denied state-update permission."""
+    tb = _mod('truth_bridge')
+    import services.agribrain.sensor_runtime.registry as reg_mod
+    def mock_get(dev_id):
+        raise ValueError("sensor_registry_unavailable")
+    monkeypatch.setattr(reg_mod, "get_device_registration", mock_get)
+    
+    item = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="dev_corrupt",
+        calibration_version="v1",
+        provenance_ref="receipt123",
+    )
+    tb.normalize_evidence_truth(item)
+    assert item.state_update_allowed is False
+    assert item.diagnostic_only is True
+
+
+def test_r7_g03_observed_sensor_without_calibration_receipt_never_fabricates_id():
+    """R7-G03: Observed sensor with QA health but no calibration receipt -> No calibration ID fabricated; denied authority."""
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer1_fusion.adapters.observation_packet import observation_packet_to_evidence
+    s = _mod('schemas')
+    
+    now = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
+    pkt = ObservationPacket(
+        packet_id="pkt_uncal",
+        source=ObservationSource.SENSOR_IOT,
+        data_status=DataStatus.OBSERVED,
+        timestamp=now,
+        spatial_scope="point",
+        qa=QAMetadata(scene_score=1.0, sensor_health=0.95),
+        uncertainty=UncertaintyModel(sigmas={"soil_moisture_vwc": 0.02}),
+        payload={"variable": "soil_moisture_vwc", "value": 0.28, "unit": "fraction"},
+    )
+    bundle = s.Layer1InputBundle(plot_id="plot-A", run_id="r-g03", run_timestamp=now)
+    items = observation_packet_to_evidence(pkt, bundle)
+    assert len(items) == 1
+    assert items[0].calibration_version is None
+    assert "l0_calibrated" not in str(items[0].calibration_version)
+    assert items[0].state_update_allowed is False
+    assert items[0].diagnostic_only is True
+
+
+def test_r7_g04_malformed_publication_timestamp_quarantined():
+    """R7-G04: PUBLISHED_AT:not-a-date plus verification-required flag -> Quarantined as invalid publication time."""
+    ta = _mod('temporal_alignment')
+    cutoff = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
+    item = _item(
+        observed_at=datetime(2026, 11, 9, 10, tzinfo=timezone.utc),
+        flags=["REQUIRES_PUBLICATION_VERIFICATION", "PUBLISHED_AT:not-a-date"],
+    )
+    ok, reason = ta.is_available_at_cutoff(item, as_of_cutoff=cutoff)
+    assert not ok
+    assert "MALFORMED_PUBLICATION_TIMESTAMP" in reason
+
+
+def test_r7_g05_historical_replay_without_receipt_quarantined():
+    """R7-G05: Historical replay with no caller flags and no first-available receipt -> Quarantined until trusted first-known time established."""
+    ta = _mod('temporal_alignment')
+    cutoff = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
+    # Dynamic source item (sentinel2) with no publication flags
+    item = _item(
+        source_family="sentinel2",
+        observed_at=datetime(2026, 11, 9, 10, tzinfo=timezone.utc),
+        flags=[],
+    )
+    ok, reason = ta.is_available_at_cutoff(item, as_of_cutoff=cutoff, is_historical_replay=True)
+    assert not ok
+    assert "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY" in reason
+    
+    # Static prior (geo_context) exempt from replay publication requirement
+    static_item = _item(
+        source_family="geo_context",
+        observed_at=datetime(2026, 11, 9, 10, tzinfo=timezone.utc),
+        flags=[],
+    )
+    ok_static, _ = ta.is_available_at_cutoff(static_item, as_of_cutoff=cutoff, is_historical_replay=True)
+    assert ok_static is True
+
+
+def test_r7_g06_immutable_source_receipt_overrides_caller_claim():
+    """R7-G06: Packet claims 10:30 publication but immutable source receipt says 16:00 -> Excluded at 11:00 replay despite caller claim."""
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer0.source_package import Layer0SourcePackage
+    from layer1_fusion.adapters.observation_packet import observation_packet_to_evidence
+    ta = _mod('temporal_alignment')
+    s = _mod('schemas')
+    
+    cutoff = datetime(2026, 11, 9, 11, 0, tzinfo=timezone.utc)
+    pkt = ObservationPacket(
+        packet_id="pkt_spoof_pub",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 9, 10, 0, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 0.65, "unit": "index", "published_at": "2026-11-09T10:30:00+00:00"},
+    )
+    # Authoritative package published_at is 16:00 (after 11:00 cutoff)
+    src_pkg = Layer0SourcePackage(
+        source_family="sentinel2",
+        plot_id="plot-A",
+        packets=[pkt],
+    )
+    src_pkg.published_at = datetime(2026, 11, 9, 16, 0, tzinfo=timezone.utc)
+    bundle = s.Layer1InputBundle(plot_id="plot-A", run_id="r-g06", run_timestamp=cutoff, as_of_cutoff=cutoff)
+    items = observation_packet_to_evidence(pkt, bundle, source_package=src_pkg)
+    assert len(items) == 1
+    ok, reason = ta.is_available_at_cutoff(items[0], as_of_cutoff=cutoff, is_historical_replay=True)
+    assert not ok
+    assert "PUBLISHED_AFTER_CUTOFF" in reason
+
+
+def test_r7_g07_source_package_plot_containment_fails_closed():
+    """R7-G07: Source package plot B, blank packet plot, destination bundle A -> Package excluded before packet normalization."""
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer0.source_package import Layer0SourcePackage
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
+    
+    now = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
+    pkt_blank_plot = ObservationPacket(
+        packet_id="pkt_blank_plot",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=now,
+        spatial_scope="plot",
+        plot_id="",  # Blank packet plot
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 0.65, "unit": "index"},
+    )
+    # Foreign source package for plot-B
+    pkg_b = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-B", packets=[pkt_blank_plot])
+    engine = eng_mod.Layer1FusionEngine()
+    bundle_a = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g07",
+        run_timestamp=now,
+        layer0_source_packages={"sentinel2": [pkg_b]},
+    )
+    res = engine.fuse(bundle_a)
+    # Packets from plot-B package must NOT be admitted into plot-A context
+    assert not any("pkt_blank_plot" in e.evidence_id for e in res.evidence_items)
+    assert any("FOREIGN_PLOT_SCOPE_MISMATCH" in q.reason_codes[0] for q in res.diagnostics.quarantined_evidence)
+
+
+def test_r7_g08_immutable_bundle_on_covariance_failure():
+    """R7-G08: Same bundle evaluated twice with invalid covariance -> Input unchanged; stable quarantine and output roots."""
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
+    
+    now = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
+    non_psd = [[1.0, 2.0], [2.0, 1.0]]
+    l0_state = {
+        "covariance": non_psd,
+        "state_vector": {"soil_moisture_vwc": 0.3},
+        "spatial_scope": "plot",
+    }
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g08",
+        run_timestamp=now,
+        layer0_state_package=l0_state,
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    
+    # First evaluation
+    res1 = engine.fuse(bundle)
+    # Verify bundle is NOT mutated in place!
+    assert bundle.layer0_state_package is l0_state
+    assert bundle.layer0_state_package is not None
+    
+    # Second evaluation
+    res2 = engine.fuse(bundle)
+    assert bundle.layer0_state_package is l0_state
+    assert res1.scientific_content_root() == res2.scientific_content_root()
+    assert len(res1.diagnostics.quarantined_evidence) == len(res2.diagnostics.quarantined_evidence)
+
+
+def test_r7_g09_registered_sensor_negative_controls():
+    """R7-G09: Registered sensor active but receipt forgery / expired / wrong variable / wrong plot -> Denied."""
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+    tb = _mod('truth_bridge')
+    now = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
+    
+    # Register active device for plot-A and soil_moisture_vwc
+    register_device(SensorDeviceRegistration(
+        device_id="sensor_dev_active",
+        vendor="acme",
+        model="probe-x",
+        protocol="lora",
+        farm_id="farm-1",
+        plot_id="plot-A",
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now,
+        status="active",
+        calibration_profile_id="cal_valid",
+    ))
+    
+    # Negative 1: Wrong variable (sensor only calibrated for soil_moisture_vwc, trying to report ndvi)
+    item_wrong_var = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_dev_active",
+        variable="ndvi",
+        calibration_version="cal_valid",
+        provenance_ref="receipt_valid",
+    )
+    tb.normalize_evidence_truth(item_wrong_var)
+    assert item_wrong_var.state_update_allowed is False
+    
+    # Negative 2: Wrong plot (sensor registered for plot-A, item claims plot-B)
+    item_wrong_plot = _item(
+        source_family="sensor",
+        plot_id="plot-B",
+        instrument_id="sensor_dev_active",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_valid",
+        provenance_ref="receipt_valid",
+    )
+    tb.normalize_evidence_truth(item_wrong_plot)
+    assert item_wrong_plot.state_update_allowed is False
+    
+    # Negative 3: Calibration mismatch / forgery
+    item_bad_cal = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_dev_active",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_forged_999",
+        provenance_ref="receipt_valid",
+    )
+    tb.normalize_evidence_truth(item_bad_cal)
+    assert item_bad_cal.state_update_allowed is False
+    
+    # Positive control: Everything matches
+    item_good = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_dev_active",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_valid",
+        provenance_ref="receipt_valid",
+    )
+    tb.normalize_evidence_truth(item_good)
+    assert item_good.state_update_allowed is True
+    assert item_good.truth_class == "observed_sensor"
+
+
+def test_r7_g10_evidence_ancestry_graph_and_monotonicity():
+    """R7-G10: Complete L0 packet -> L1 -> output ancestry; authority never increases."""
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer0.source_package import Layer0SourcePackage
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
+    
+    now = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
+    # Create unverified/diagnostic packet
+    pkt = ObservationPacket(
+        packet_id="pkt_unverified_l0",
+        source=ObservationSource.SENSOR_IOT,
+        data_status=DataStatus.ESTIMATED,  # Estimated -> cannot drive state
+        timestamp=now,
+        spatial_scope="point",
+        qa=QAMetadata(scene_score=0.8),
+        uncertainty=UncertaintyModel(sigmas={"soil_moisture_vwc": 0.05}),
+        payload={"variable": "soil_moisture_vwc", "value": 0.25, "unit": "fraction"},
+    )
+    src_pkg = Layer0SourcePackage(
+        source_family="sensor",
+        plot_id="plot-A",
+        packets=[pkt],
+        package_id="pkg_test_ancestry",
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g10",
+        run_timestamp=now,
+        layer0_source_packages={"sensor": [src_pkg]},
+    )
+    res = engine.fuse(bundle)
+    ev_items = [e for e in res.evidence_items if "pkt_unverified_l0" in e.evidence_id]
+    assert len(ev_items) == 1
+    assert ev_items[0].parent_acquisition_id is not None
+    # Monotonicity: Fused feature authority cannot increase beyond evidence authority
+    fused_sm = [f for f in res.fused_features.water_context if f.name == "soil_moisture_vwc"]
+    if fused_sm:
+        for f in fused_sm:
+            assert f.state_update_allowed is False
+
+
+def test_r7_g11_nested_malformed_covariance_quarantined():
+    """R7-G11: Non-finite or malformed nested covariance with valid-looking outer wrapper -> No authoritative derivative admitted."""
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
+    
+    now = datetime(2026, 11, 9, 12, tzinfo=timezone.utc)
+    nested_non_psd = {
+        "outer_valid": True,
+        "nested_block": {
+            "covariance": [[1.0, float('nan')], [float('nan'), 1.0]],
+        },
+        "state_vector": {"soil_moisture_vwc": 0.3},
+    }
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g11",
+        run_timestamp=now,
+        layer0_state_package=nested_non_psd,
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    res = engine.fuse(bundle)
+    assert any("INVALID_COVARIANCE" in q.reason_codes[0] for q in res.diagnostics.quarantined_evidence)
+    assert not any(e.source_family == "l0_state" for e in res.evidence_items)
+
+
+def test_r7_g12_historical_cutoff_revision_replay():
+    """R7-G12: Corrected and originally published data from the same acquisition at replay cutoff -> Only temporally available revision participates."""
+    ta = _mod('temporal_alignment')
+    ledger = _mod('evidence_ledger').EvidenceLedger()
+    cutoff = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc)
+    
+    # Original published at 09:00 (before cutoff)
+    orig = _item(
+        evidence_id="acq_01",
+        value=0.22,
+        flags=["PUBLISHED_AT:2026-11-09T09:00:00+00:00"],
+    )
+    # Corrected revision published at 18:00 (after cutoff)
+    rev = _item(
+        evidence_id="acq_01__rev1",
+        value=0.25,
+        flags=["PUBLISHED_AT:2026-11-09T18:00:00+00:00"],
+    )
+    
+    ok_orig, _ = ta.is_available_at_cutoff(orig, cutoff, is_historical_replay=True)
+    ok_rev, _ = ta.is_available_at_cutoff(rev, cutoff, is_historical_replay=True)
+    assert ok_orig is True
+    assert ok_rev is False
+    
+    # At replay cutoff 12:00, only the original is admitted to ledger
+    assert ledger.add(orig) == []
+    assert len(ledger.all_items) == 1
+    assert ledger.all_items[0].value == 0.22

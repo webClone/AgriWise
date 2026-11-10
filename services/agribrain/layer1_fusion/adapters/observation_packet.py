@@ -141,22 +141,28 @@ def observation_packet_to_evidence(
         base_sigma = next(iter(packet.uncertainty.sigmas.values()), 0.05)
 
     flags = [f.value for f in (packet.qa.flags or [])] if packet.qa else []
-    if "published_at" in payload and payload["published_at"]:
-        p_val = payload["published_at"]
-        p_str = p_val.isoformat() if hasattr(p_val, "isoformat") else str(p_val)
+    
+    # Authoritative publication time (package / receipt takes precedence over payload)
+    auth_pub = (
+        getattr(source_package, "published_at", None)
+        or (getattr(packet, "receipt", None) and getattr(packet.receipt, "published_at", None))
+        or (getattr(packet, "provenance", None) and getattr(packet.provenance, "published_at", None))
+        or payload.get("published_at")
+    )
+    if auth_pub:
+        p_str = auth_pub.isoformat() if hasattr(auth_pub, "isoformat") else str(auth_pub)
         flags.append(f"PUBLISHED_AT:{p_str}")
-    if "recorded_at" in payload and payload["recorded_at"]:
-        r_val = payload["recorded_at"]
-        r_str = r_val.isoformat() if hasattr(r_val, "isoformat") else str(r_val)
+
+    auth_rec = (
+        getattr(source_package, "recorded_at", None)
+        or (getattr(packet, "receipt", None) and getattr(packet.receipt, "recorded_at", None))
+        or (getattr(packet, "provenance", None) and getattr(packet.provenance, "recorded_at", None))
+        or payload.get("recorded_at")
+    )
+    if auth_rec:
+        r_str = auth_rec.isoformat() if hasattr(auth_rec, "isoformat") else str(auth_rec)
         flags.append(f"RECORDED_AT:{r_str}")
-    if hasattr(source_package, "published_at") and getattr(source_package, "published_at", None):
-        p_val = source_package.published_at
-        p_str = p_val.isoformat() if hasattr(p_val, "isoformat") else str(p_val)
-        flags.append(f"PUBLISHED_AT:{p_str}")
-    if hasattr(source_package, "recorded_at") and getattr(source_package, "recorded_at", None):
-        r_val = source_package.recorded_at
-        r_str = r_val.isoformat() if hasattr(r_val, "isoformat") else str(r_val)
-        flags.append(f"RECORDED_AT:{r_str}")
+
     if "flags" in payload and isinstance(payload["flags"], list):
         flags.extend(payload["flags"])
     
@@ -237,9 +243,17 @@ def observation_packet_to_evidence(
     
     pkt_time = packet.timestamp
 
-    inst_id = payload.get("instrument_id") or payload.get("device_id") or (packet.packet_id if source_fam == "sensor" and packet.data_status == DataStatus.OBSERVED else None)
-    cal_ver = payload.get("calibration_version") or getattr(packet.qa, "calibration_version", None) or (
-        f"l0_calibrated_{packet.source.value}" if (packet.qa and packet.qa.sensor_health is not None and packet.data_status == DataStatus.OBSERVED) else None
+    inst_id = payload.get("instrument_id") or payload.get("device_id") or getattr(packet, "instrument_id", None)
+    cal_ver = payload.get("calibration_version") or (getattr(packet.qa, "calibration_version", None) if packet.qa else None)
+
+    pkg_plot = getattr(source_package, "plot_id", None) if source_package else None
+    effective_plot_id = packet.plot_id or pkg_plot or bundle.plot_id
+
+    parent_acq_id = (
+        payload.get("parent_acquisition_id")
+        or getattr(getattr(packet, "provenance", None), "acquisition_id", None)
+        or getattr(source_package, "package_id", None)
+        or packet.packet_id
     )
 
     extracted_keys = set()
@@ -255,7 +269,7 @@ def observation_packet_to_evidence(
 
             item = EvidenceItem(
                 evidence_id=f"{source_fam}_{packet.packet_id}_{var_name}",
-                plot_id=packet.plot_id or bundle.plot_id,
+                plot_id=effective_plot_id,
                 variable=var_name,
                 value=val,
                 unit=unit_name,
@@ -291,7 +305,7 @@ def observation_packet_to_evidence(
                 valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
                 instrument_id=inst_id,
                 calibration_version=cal_ver,
-                parent_acquisition_id=payload.get("parent_acquisition_id") or getattr(getattr(packet, "provenance", None), "acquisition_id", None) or getattr(source_package, "package_id", None) or provenance_ref,
+                parent_acquisition_id=parent_acq_id,
             )
             items.append(item)
             
@@ -300,7 +314,7 @@ def observation_packet_to_evidence(
         unit_name = payload_unit or payload.get("unit") or None
         items.append(EvidenceItem(
             evidence_id=f"{source_fam}_{packet.packet_id}_{var_name}",
-            plot_id=packet.plot_id or bundle.plot_id,
+            plot_id=effective_plot_id,
             variable=var_name,
             value=payload["value"],
             unit=unit_name,
@@ -336,7 +350,7 @@ def observation_packet_to_evidence(
             valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
             instrument_id=inst_id,
             calibration_version=cal_ver,
-            parent_acquisition_id=payload.get("parent_acquisition_id") or getattr(getattr(packet, "provenance", None), "acquisition_id", None) or getattr(source_package, "package_id", None) or provenance_ref,
+            parent_acquisition_id=parent_acq_id,
         ))
 
     return items

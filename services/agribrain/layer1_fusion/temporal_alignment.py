@@ -93,51 +93,75 @@ def compute_stale_flags(
 def is_available_at_cutoff(
     item: EvidenceItem,
     as_of_cutoff: datetime,
+    is_historical_replay: bool = False,
 ) -> Tuple[bool, str]:
     """Check if evidence item was available to the decision system at as_of_cutoff (SPEC-B/T23-T25)."""
     cutoff_utc = ensure_utc(as_of_cutoff)
 
     # 1. Check publication/recorded/ingested time
-    pub_time = getattr(item, "published_at", None) or getattr(item, "recorded_at", None) or getattr(item, "ingested_at", None)
-    has_pub_flag = False
-    if pub_time is not None:
-        if ensure_utc(pub_time) > cutoff_utc:
-            return False, f"PUBLISHED_AFTER_CUTOFF: published {pub_time} > cutoff {cutoff_utc}"
-        has_pub_flag = True
+    pub_times: List[datetime] = []
+    
+    # Direct attributes
+    for attr in ("published_at", "recorded_at", "ingested_at"):
+        val = getattr(item, attr, None)
+        if val is not None:
+            if isinstance(val, str):
+                try:
+                    dt = ensure_utc(datetime.fromisoformat(val))
+                    pub_times.append(dt)
+                except Exception:
+                    return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed {attr} '{val}'"
+            elif isinstance(val, datetime):
+                pub_times.append(ensure_utc(val))
 
+    # Parse flags with strict validation (L1-R7-04 / R7-G04)
+    has_pub_flag = len(pub_times) > 0
     for f in item.flags:
         if f.startswith("PUBLISHED_AT:"):
-            has_pub_flag = True
+            raw_str = f.split(":", 1)[1].strip()
             try:
-                p_dt = datetime.fromisoformat(f.split(":", 1)[1])
-                if ensure_utc(p_dt) > cutoff_utc:
-                    return False, f"PUBLISHED_AFTER_CUTOFF: {p_dt} > {cutoff_utc}"
+                p_dt = ensure_utc(datetime.fromisoformat(raw_str))
+                pub_times.append(p_dt)
+                has_pub_flag = True
             except Exception:
-                pass
+                return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed published_at in flag '{f}'"
         elif f.startswith("RECORDED_AT:"):
-            has_pub_flag = True
+            raw_str = f.split(":", 1)[1].strip()
             try:
-                r_dt = datetime.fromisoformat(f.split(":", 1)[1])
-                if ensure_utc(r_dt) > cutoff_utc:
-                    return False, f"RECORDED_AFTER_CUTOFF: {r_dt} > {cutoff_utc}"
+                r_dt = ensure_utc(datetime.fromisoformat(raw_str))
+                pub_times.append(r_dt)
+                has_pub_flag = True
             except Exception:
-                pass
+                return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed recorded_at in flag '{f}'"
         elif f.startswith("ISSUED_AT:"):
-            has_pub_flag = True
+            raw_str = f.split(":", 1)[1].strip()
             try:
-                i_dt = datetime.fromisoformat(f.split(":", 1)[1])
-                if ensure_utc(i_dt) > cutoff_utc:
+                i_dt = ensure_utc(datetime.fromisoformat(raw_str))
+                if i_dt > cutoff_utc:
                     return False, f"FORECAST_ISSUED_AFTER_CUTOFF: {i_dt} > {cutoff_utc}"
+                pub_times.append(i_dt)
+                has_pub_flag = True
             except Exception:
-                pass
+                return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed issued_at in flag '{f}'"
 
-    # SPEC-B: On historical replay or when publication verification is demanded, missing publication time is rejected
-    requires_pub = (
-        "REQUIRES_PUBLICATION_VERIFICATION" in item.flags
+    # If any verified publication/recorded time is after cutoff, exclude! (L1-R7-03 / R7-G06)
+    for p_dt in pub_times:
+        if p_dt > cutoff_utc:
+            return False, f"PUBLISHED_AFTER_CUTOFF: published {p_dt} > cutoff {cutoff_utc}"
+
+    # SPEC-B / L1-R7-05 / R7-G05: Historical replay mode verification
+    # Controlled by trusted execution context (is_historical_replay) or evidence flags
+    is_replay = (
+        is_historical_replay
+        or "REQUIRES_PUBLICATION_VERIFICATION" in item.flags
         or "HISTORICAL_REPLAY" in item.flags
         or ("HISTORICAL" in item.flags and item.source_family in ("sentinel2", "sentinel1", "sentinel5p", "weather_reanalysis", "asmae"))
     )
-    if requires_pub and not has_pub_flag:
+    
+    # Static priors are exempt from publication verification; dynamic observations are subject to it
+    is_static_prior = item.source_family in ("geo_context", "static_soil")
+    
+    if is_replay and not is_static_prior and not has_pub_flag:
         return False, "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY: missing verified publication or recording timestamp"
 
     # 2. Check future observation time relative to cutoff

@@ -33,8 +33,8 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .schemas import (
     EvidenceGap,
@@ -138,48 +138,54 @@ class Layer1FusionEngine:
             or bundle.window_end
             or bundle.run_timestamp
         )
+        is_historical_replay = bool(
+            getattr(bundle, "is_historical_replay", False)
+            or (getattr(bundle, "as_of_cutoff", None) is not None)
+            or (getattr(bundle, "as_of", None) is not None)
+        )
 
-        # SPEC-D / PR28-09: Validate any full covariance matrices provided by Layer 0 state or ASMAE
+        disabled_sources: Set[str] = set()
+
+        def _check_and_validate_covariances(pkg_data: Any, source_name: str) -> None:
+            if pkg_data is None:
+                return
+            matrices: List[Tuple[str, Any]] = []
+            if isinstance(pkg_data, dict):
+                for k, v in pkg_data.items():
+                    if k in ("covariance", "P", "cov", "uncertainty_matrix") and isinstance(v, list):
+                        matrices.append((k, v))
+                    elif isinstance(v, dict):
+                        for sub_k, sub_v in v.items():
+                            if sub_k in ("covariance", "P", "cov", "uncertainty_matrix") and isinstance(sub_v, list):
+                                matrices.append((f"{k}.{sub_k}", sub_v))
+            else:
+                cov = getattr(pkg_data, "covariance", None) or getattr(pkg_data, "P", None)
+                if cov is not None:
+                    matrices.append(("covariance", cov))
+
+            for cov_name, mat in matrices:
+                is_psd, cov_reason = validate_covariance_matrix(mat)
+                if not is_psd:
+                    all_quarantined.append(
+                        QuarantinedEvidence(
+                            evidence_id=f"{source_name}_{cov_name}",
+                            reason_codes=[f"INVALID_COVARIANCE:{cov_reason}"],
+                            original_source_family=source_name,
+                            variable="covariance",
+                            severity="error",
+                        )
+                    )
+                    disabled_sources.add(source_name)
+                    break
+
         if bundle.layer0_state_package:
-            l0_cov = (
-                getattr(bundle.layer0_state_package, "covariance", None)
-                or (bundle.layer0_state_package.get("covariance") if isinstance(bundle.layer0_state_package, dict) else None)
-                or (bundle.layer0_state_package.get("P") if isinstance(bundle.layer0_state_package, dict) else None)
-            )
-            if l0_cov is not None:
-                is_psd, cov_reason = validate_covariance_matrix(l0_cov)
-                if not is_psd:
-                    all_quarantined.append(
-                        QuarantinedEvidence(
-                            evidence_id="l0_state_covariance",
-                            reason_codes=[f"INVALID_COVARIANCE:{cov_reason}"],
-                            original_source_family="l0_state",
-                            variable="covariance",
-                            severity="error",
-                        )
-                    )
-                    # SPEC-D: Disable originating source when covariance is mathematically invalid
-                    bundle.layer0_state_package = None
+            _check_and_validate_covariances(bundle.layer0_state_package, "l0_state")
 
-        if bundle.asmae_output and isinstance(bundle.asmae_output, dict):
-            asmae_cov = bundle.asmae_output.get("covariance") or bundle.asmae_output.get("P")
-            if asmae_cov is not None:
-                is_psd, cov_reason = validate_covariance_matrix(asmae_cov)
-                if not is_psd:
-                    all_quarantined.append(
-                        QuarantinedEvidence(
-                            evidence_id="asmae_output_covariance",
-                            reason_codes=[f"INVALID_COVARIANCE:{cov_reason}"],
-                            original_source_family="asmae",
-                            variable="covariance",
-                            severity="error",
-                        )
-                    )
-                    # SPEC-D: Disable originating source when covariance is mathematically invalid
-                    bundle.asmae_output = None
+        if bundle.asmae_output:
+            _check_and_validate_covariances(bundle.asmae_output, "asmae")
 
-        # 2–3. Build source envelopes and run adapters
-        source_packages = self._gather_packages(bundle)
+        # 2–3. Build source envelopes and run adapters (immutable bundle handling)
+        source_packages = self._gather_packages(bundle, disabled_sources=disabled_sources, all_quarantined=all_quarantined)
 
         for family, packages in source_packages.items():
             adapter = self._registry.get_adapter(family)
@@ -208,7 +214,7 @@ class Layer1FusionEngine:
         valid_evidence: List[EvidenceItem] = []
         for item in all_evidence:
             # SPEC-B / PR28-01: Universal cutoff enforcement at primary engine intake
-            is_avail, avail_reason = is_available_at_cutoff(item, as_of_cutoff)
+            is_avail, avail_reason = is_available_at_cutoff(item, as_of_cutoff, is_historical_replay=is_historical_replay)
             if not is_avail:
                 all_quarantined.append(
                     quarantine_evidence(item, [f"HISTORICAL_CUTOFF_VIOLATION:{avail_reason}"])
@@ -248,7 +254,7 @@ class Layer1FusionEngine:
                 bundle.raster_composites, bundle.plot_id, bundle.run_timestamp,
             )
             for re in raster_evidence:
-                is_avail, avail_reason = is_available_at_cutoff(re, as_of_cutoff)
+                is_avail, avail_reason = is_available_at_cutoff(re, as_of_cutoff, is_historical_replay=is_historical_replay)
                 if not is_avail:
                     all_quarantined.append(
                         quarantine_evidence(re, [f"HISTORICAL_CUTOFF_VIOLATION:{avail_reason}"])
@@ -431,7 +437,12 @@ class Layer1FusionEngine:
         # 19. Return context package
         return pkg
 
-    def _gather_packages(self, bundle: Layer1InputBundle) -> Dict[str, List[Any]]:
+    def _gather_packages(
+        self,
+        bundle: Layer1InputBundle,
+        disabled_sources: Optional[Set[str]] = None,
+        all_quarantined: Optional[List[QuarantinedEvidence]] = None,
+    ) -> Dict[str, List[Any]]:
         """Map Layer 0 data packages to source families for adapter dispatch.
 
         Source hierarchy (by agronomic measurement fidelity):
@@ -489,14 +500,32 @@ class Layer1FusionEngine:
                 canonical_family = normalize_source_family(source_family)
                 actual_pkgs = [p for p in pkgs if p is not None]
                 if actual_pkgs:
-                    # Normalize the package source_family attribute as well
+                    admitted_pkgs = []
                     for pkg in actual_pkgs:
+                        pkg_plot = getattr(pkg, "plot_id", None)
+                        if pkg_plot and bundle.plot_id and pkg_plot != bundle.plot_id:
+                            if all_quarantined is not None:
+                                all_quarantined.append(
+                                    QuarantinedEvidence(
+                                        evidence_id=getattr(pkg, "package_id", f"{canonical_family}_pkg"),
+                                        reason_codes=[f"FOREIGN_PLOT_SCOPE_MISMATCH: package plot {pkg_plot} != bundle {bundle.plot_id}"],
+                                        original_source_family=canonical_family,
+                                        variable="package",
+                                        severity="error",
+                                    )
+                                )
+                            continue
                         if hasattr(pkg, "source_family") and pkg.source_family:
                             pkg.source_family = normalize_source_family(pkg.source_family)
-                    packages.setdefault(canonical_family, []).extend(actual_pkgs)
+                        admitted_pkgs.append(pkg)
+                    if admitted_pkgs:
+                        packages.setdefault(canonical_family, []).extend(admitted_pkgs)
 
-            packages["l0_state"] = [bundle.layer0_state_package] if bundle.layer0_state_package else [None]
-            packages["asmae"] = [bundle.asmae_output] if bundle.asmae_output else [None]
+            l0_state_pkg = bundle.layer0_state_package if (disabled_sources is None or "l0_state" not in disabled_sources) else None
+            packages["l0_state"] = [l0_state_pkg] if l0_state_pkg else [None]
+
+            asmae_pkg = bundle.asmae_output if (disabled_sources is None or "asmae" not in disabled_sources) else None
+            packages["asmae"] = [asmae_pkg] if asmae_pkg else [None]
             
             if bundle.user_events:
                 packages["user_event"] = [bundle.user_events]
@@ -565,15 +594,11 @@ class Layer1FusionEngine:
 
             packages["sentinel5p"] = bundle.sentinel5p_packages or []
 
-            if bundle.layer0_state_package is not None:
-                packages["l0_state"] = [bundle.layer0_state_package]
-            else:
-                packages["l0_state"] = [None]
+            l0_state_pkg = bundle.layer0_state_package if (disabled_sources is None or "l0_state" not in disabled_sources) else None
+            packages["l0_state"] = [l0_state_pkg] if l0_state_pkg else [None]
 
-            if bundle.asmae_output is not None:
-                packages["asmae"] = [bundle.asmae_output]
-            else:
-                packages["asmae"] = [None]
+            asmae_pkg = bundle.asmae_output if (disabled_sources is None or "asmae" not in disabled_sources) else None
+            packages["asmae"] = [asmae_pkg] if asmae_pkg else [None]
 
         # Final safety cleanup: wrap non-list in lists, filter out None
         for k in list(packages.keys()):
@@ -961,8 +986,13 @@ class Layer1FusionEngine:
 
         # SPEC-B / Gate 12: Universal cutoff check on secondary evidence intake
         eff_cutoff = as_of_cutoff or (getattr(bundle, "as_of_cutoff", None) if bundle else None) or (getattr(bundle, "as_of", None) if bundle else None) or (bundle.window_end if bundle else None) or (bundle.run_timestamp if bundle else None)
+        is_replay = bool(
+            (bundle and getattr(bundle, "is_historical_replay", False))
+            or (bundle and getattr(bundle, "as_of_cutoff", None) is not None)
+            or (bundle and getattr(bundle, "as_of", None) is not None)
+        )
         if eff_cutoff is not None:
-            is_avail, avail_reason = is_available_at_cutoff(normalized_item, eff_cutoff)
+            is_avail, avail_reason = is_available_at_cutoff(normalized_item, eff_cutoff, is_historical_replay=is_replay)
             if not is_avail:
                 all_quarantined.append(
                     quarantine_evidence(normalized_item, [f"HISTORICAL_CUTOFF_VIOLATION:{avail_reason}"])
