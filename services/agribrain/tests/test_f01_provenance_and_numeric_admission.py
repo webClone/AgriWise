@@ -1997,7 +1997,10 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
         from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
 
         from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
-        from services.agribrain.layer1_fusion.truth_bridge import SensorAttestationReceipt, register_sensor_receipt, create_signed_sensor_receipt
+        from services.agribrain.layer1_fusion.truth_bridge import SensorAttestationReceipt, register_sensor_receipt, register_trusted_issuer_public_key
+        from services.agribrain.layer1_fusion.tests.trust_fixtures import create_signed_sensor_receipt, provision_test_issuer_keypair
+        _priv, pub_key = provision_test_issuer_keypair("agriwise:trust:sensor_authority")
+        register_trusted_issuer_public_key("agriwise:trust:sensor_authority", pub_key)
         register_device(SensorDeviceRegistration(
             device_id="pkt_sensor_1",
             vendor="acme",

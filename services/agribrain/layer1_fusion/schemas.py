@@ -909,6 +909,7 @@ class Layer1InputBundle:
     window_end: Optional[datetime] = None
     as_of_cutoff: Optional[datetime] = None
     as_of: Optional[datetime] = None
+    is_historical_replay: bool = False
 
     plot_geometry: Any = None
     plot_grid: Any = None

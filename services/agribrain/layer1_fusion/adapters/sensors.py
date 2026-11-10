@@ -15,6 +15,7 @@ Rules:
 
 from __future__ import annotations
 
+import math
 from typing import Any, List
 
 from layer1_fusion.schemas import EvidenceItem, Layer1InputBundle, SourceEnvelope
@@ -69,127 +70,170 @@ class SensorAdapter:
             qa_map[len(qa_map)] = qa
 
         for i, reading in enumerate(getattr(package, "readings", [])):
-            device_id = getattr(reading, "device_id", "unknown")
-            raw_var = getattr(reading, "variable", "")
-            variable = raw_var.value if hasattr(raw_var, "value") else str(raw_var)
-            value = getattr(reading, "value", None)
-            unit = getattr(reading, "unit", None)
-            timestamp = getattr(reading, "timestamp", None)
+            try:
+                device_id = getattr(reading, "device_id", "unknown")
+                raw_var = getattr(reading, "variable", "")
+                variable = raw_var.value if hasattr(raw_var, "value") else str(raw_var)
+                value = getattr(reading, "value", None)
+                unit = getattr(reading, "unit", None)
+                timestamp = getattr(reading, "timestamp", None)
 
-            # Match QA result
-            qa = qa_map.get(i)
-            usable = getattr(qa, "usable", True) if qa else True
-            if not usable:
-                continue
+                # Match QA result
+                qa = qa_map.get(i)
+                usable = getattr(qa, "usable", True) if qa else True
+                if not usable:
+                    continue
 
-            raw_rel = getattr(qa, "reading_reliability", 0.5) if qa else 0.5
-            fin_rel = finite_real(raw_rel)
-            reliability = fin_rel if fin_rel is not None else 0.0
-            update_allowed = getattr(qa, "update_allowed", True) if qa else True
-            if fin_rel is None or fin_rel <= 0.0:
-                update_allowed = False
+                raw_rel = getattr(qa, "reading_reliability", 0.5) if qa else 0.5
+                fin_rel = finite_real(raw_rel)
+                reliability = fin_rel if fin_rel is not None else 0.0
+                update_allowed = getattr(qa, "update_allowed", True) if qa else True
+                if fin_rel is None or fin_rel <= 0.0:
+                    update_allowed = False
 
-            # Determine scope from placement
-            scope = "point"  # default
-            scope_id = device_id
+                # Determine scope from placement
+                scope = "point"  # default
+                scope_id = device_id
 
-            # Diagnostic variables
-            is_diag = variable in _DIAGNOSTIC_VARIABLES or not update_allowed
+                # Diagnostic variables
+                is_diag = variable in _DIAGNOSTIC_VARIABLES or not update_allowed
 
-            # R8-04: Resolve authentic calibration identity from reading, QA, device entry or registry
-            d_entry = dev_map.get(device_id)
-            cal_ver = (
-                getattr(reading, "calibration_version", None)
-                or (getattr(qa, "calibration_version", None) if qa else None)
-                or (getattr(d_entry, "calibration_profile_id", None) if d_entry else None)
-                or (d_entry.get("calibration_profile_id") if isinstance(d_entry, dict) else None)
-                or getattr(package, "calibration_profile_id", None)
-            )
-            if not cal_ver:
+                # R8-04: Resolve authentic calibration identity from reading, QA, device entry or registry
+                d_entry = dev_map.get(device_id)
+                cal_ver = (
+                    getattr(reading, "calibration_version", None)
+                    or (getattr(qa, "calibration_version", None) if qa else None)
+                    or (getattr(d_entry, "calibration_profile_id", None) if d_entry else None)
+                    or (d_entry.get("calibration_profile_id") if isinstance(d_entry, dict) else None)
+                    or getattr(package, "calibration_profile_id", None)
+                )
+                if not cal_ver:
+                    try:
+                        from services.agribrain.sensor_runtime.registry import get_device_registration
+                        reg = get_device_registration(device_id)
+                        cal_ver = getattr(reg, "calibration_profile_id", None) if reg else None
+                    except Exception:
+                        cal_ver = None
+
+                parent_acq_id = getattr(reading, "reading_id", None) or getattr(package, "package_id", None) or f"sensor_{device_id}_{i}"
+
+                from layer1_fusion.truth_bridge import get_sensor_receipt, SensorAttestationReceipt, compute_reading_content_digest
+                reading_receipt = getattr(reading, "receipt", None)
+                reading_ref = getattr(reading, "receipt_ref", None)
+                package_receipt = getattr(package, "receipt", None)
+                prov_dict = getattr(package, "provenance", {}) or {}
+                pkg_receipt_ref = prov_dict.get("receipt_ref") if isinstance(prov_dict, dict) else getattr(prov_dict, "receipt_ref", None)
+
+                # R10-06: Resolve string receipt reference through trusted receipt store before supplying to verifier
+                active_receipt = None
+                candidate_ref = None
+
+                if reading_receipt is not None:
+                    if isinstance(reading_receipt, SensorAttestationReceipt) or hasattr(reading_receipt, "receipt_id"):
+                        active_receipt = reading_receipt
+                        candidate_ref = getattr(reading_receipt, "receipt_id", None)
+                    elif isinstance(reading_receipt, str):
+                        candidate_ref = reading_receipt
+                        active_receipt = get_sensor_receipt(reading_receipt.strip())
+                elif reading_ref is not None:
+                    if isinstance(reading_ref, SensorAttestationReceipt) or hasattr(reading_ref, "receipt_id"):
+                        active_receipt = reading_ref
+                        candidate_ref = getattr(reading_ref, "receipt_id", None)
+                    elif isinstance(reading_ref, str):
+                        candidate_ref = reading_ref
+                        active_receipt = get_sensor_receipt(reading_ref.strip())
+                elif package_receipt is not None:
+                    if isinstance(package_receipt, SensorAttestationReceipt) or hasattr(package_receipt, "receipt_id"):
+                        active_receipt = package_receipt
+                        candidate_ref = getattr(package_receipt, "receipt_id", None)
+                    elif isinstance(package_receipt, str):
+                        candidate_ref = package_receipt
+                        active_receipt = get_sensor_receipt(package_receipt.strip())
+                elif pkg_receipt_ref is not None:
+                    if isinstance(pkg_receipt_ref, SensorAttestationReceipt) or hasattr(pkg_receipt_ref, "receipt_id"):
+                        active_receipt = pkg_receipt_ref
+                        candidate_ref = getattr(pkg_receipt_ref, "receipt_id", None)
+                    elif isinstance(pkg_receipt_ref, str):
+                        candidate_ref = pkg_receipt_ref
+                        active_receipt = get_sensor_receipt(pkg_receipt_ref.strip())
+
+                raw_ref = getattr(reading, "raw_payload_ref", None)
+                if candidate_ref:
+                    prov_ref = str(candidate_ref)
+                elif active_receipt and hasattr(active_receipt, "receipt_id"):
+                    prov_ref = str(active_receipt.receipt_id)
+                elif raw_ref:
+                    prov_ref = str(raw_ref)
+                else:
+                    prov_ref = f"raw_reading_{device_id}_{i}"
+
+                # RC2: Safely catch digest failures on malformed or non-finite reading values
+                c_digest = None
                 try:
-                    from services.agribrain.sensor_runtime.registry import get_device_registration
-                    reg = get_device_registration(device_id)
-                    cal_ver = getattr(reg, "calibration_profile_id", None) if reg else None
+                    c_digest = compute_reading_content_digest(device_id, plot_id, variable, value, unit, timestamp)
                 except Exception:
-                    cal_ver = None
+                    c_digest = None
 
-            parent_acq_id = getattr(reading, "reading_id", None) or getattr(package, "package_id", None) or f"sensor_{device_id}_{i}"
+                is_malformed = (
+                    value is None
+                    or (isinstance(value, float) and (math.isnan(value) or math.isinf(value)))
+                    or c_digest is None
+                )
 
-            from layer1_fusion.truth_bridge import get_sensor_receipt, SensorAttestationReceipt, compute_reading_content_digest
-            reading_receipt = getattr(reading, "receipt", None)
-            reading_ref = getattr(reading, "receipt_ref", None)
-            package_receipt = getattr(package, "receipt", None)
-            prov_dict = getattr(package, "provenance", {}) or {}
-            pkg_receipt_ref = prov_dict.get("receipt_ref") if isinstance(prov_dict, dict) else getattr(prov_dict, "receipt_ref", None)
+                reading_flags: List[str] = []
+                if is_malformed:
+                    reading_flags.append("MALFORMED_READING")
+                    if isinstance(value, float) and math.isnan(value):
+                        reading_flags.append("NAN_INF_VALUE:nan")
+                    elif isinstance(value, float) and math.isinf(value):
+                        reading_flags.append("NAN_INF_VALUE:inf")
 
-            # R10-06: Resolve string receipt reference through trusted receipt store before supplying to verifier
-            active_receipt = None
-            candidate_ref = None
-
-            if reading_receipt is not None:
-                if isinstance(reading_receipt, SensorAttestationReceipt) or hasattr(reading_receipt, "receipt_id"):
-                    active_receipt = reading_receipt
-                    candidate_ref = getattr(reading_receipt, "receipt_id", None)
-                elif isinstance(reading_receipt, str):
-                    candidate_ref = reading_receipt
-                    active_receipt = get_sensor_receipt(reading_receipt.strip())
-            elif reading_ref is not None:
-                if isinstance(reading_ref, SensorAttestationReceipt) or hasattr(reading_ref, "receipt_id"):
-                    active_receipt = reading_ref
-                    candidate_ref = getattr(reading_ref, "receipt_id", None)
-                elif isinstance(reading_ref, str):
-                    candidate_ref = reading_ref
-                    active_receipt = get_sensor_receipt(reading_ref.strip())
-            elif package_receipt is not None:
-                if isinstance(package_receipt, SensorAttestationReceipt) or hasattr(package_receipt, "receipt_id"):
-                    active_receipt = package_receipt
-                    candidate_ref = getattr(package_receipt, "receipt_id", None)
-                elif isinstance(package_receipt, str):
-                    candidate_ref = package_receipt
-                    active_receipt = get_sensor_receipt(package_receipt.strip())
-            elif pkg_receipt_ref is not None:
-                if isinstance(pkg_receipt_ref, SensorAttestationReceipt) or hasattr(pkg_receipt_ref, "receipt_id"):
-                    active_receipt = pkg_receipt_ref
-                    candidate_ref = getattr(pkg_receipt_ref, "receipt_id", None)
-                elif isinstance(pkg_receipt_ref, str):
-                    candidate_ref = pkg_receipt_ref
-                    active_receipt = get_sensor_receipt(pkg_receipt_ref.strip())
-
-            raw_ref = getattr(reading, "raw_payload_ref", None)
-            if candidate_ref:
-                prov_ref = str(candidate_ref)
-            elif active_receipt and hasattr(active_receipt, "receipt_id"):
-                prov_ref = str(active_receipt.receipt_id)
-            elif raw_ref:
-                prov_ref = str(raw_ref)
-            else:
-                prov_ref = f"raw_reading_{device_id}_{i}"
-
-            items.append(EvidenceItem(
-                evidence_id=f"sensor_{device_id}_{variable}_{i}",
-                plot_id=plot_id,
-                variable=variable,
-                value=value,
-                unit=unit,
-                source_family="sensor",
-                source_id=device_id,
-                observation_type="measurement",
-                spatial_scope=scope,
-                scope_id=scope_id,
-                observed_at=timestamp,
-                confidence=min(0.95, reliability),
-                sigma=round(1.0 - reliability, 4),
-                reliability=reliability,
-                freshness_score=0.0,
-                provenance_ref=prov_ref,
-                receipt=active_receipt,
-                content_hash=compute_reading_content_digest(device_id, plot_id, variable, value, unit, timestamp),
-                diagnostic_only=is_diag,
-                state_update_allowed=update_allowed and not is_diag,
-                instrument_id=device_id,
-                calibration_version=cal_ver,
-                parent_acquisition_id=parent_acq_id,
-            ))
+                items.append(EvidenceItem(
+                    evidence_id=f"sensor_{device_id}_{variable}_{i}",
+                    plot_id=plot_id,
+                    variable=variable,
+                    value=value,
+                    unit=unit,
+                    source_family="sensor",
+                    source_id=device_id,
+                    observation_type="measurement",
+                    spatial_scope=scope,
+                    scope_id=scope_id,
+                    observed_at=timestamp,
+                    confidence=0.0 if is_malformed else min(0.95, reliability),
+                    sigma=round(1.0 - reliability, 4),
+                    reliability=0.0 if is_malformed else reliability,
+                    freshness_score=0.0,
+                    provenance_ref=prov_ref,
+                    receipt=active_receipt,
+                    content_hash=c_digest,
+                    diagnostic_only=True if is_malformed else is_diag,
+                    state_update_allowed=False if is_malformed else (update_allowed and not is_diag),
+                    instrument_id=device_id,
+                    calibration_version=cal_ver,
+                    parent_acquisition_id=parent_acq_id,
+                    flags=reading_flags,
+                    data_status="quarantined" if is_malformed else "observed",
+                ))
+            except Exception as reading_err:
+                # RC2: Individual reading extraction / serialization exception isolation
+                items.append(EvidenceItem(
+                    evidence_id=f"sensor_{getattr(reading, 'device_id', 'unknown')}_{getattr(reading, 'variable', 'unknown')}_{i}",
+                    plot_id=plot_id,
+                    variable=str(getattr(reading, 'variable', 'unknown')),
+                    value=getattr(reading, 'value', None),
+                    unit=getattr(reading, 'unit', None),
+                    source_family="sensor",
+                    source_id=getattr(reading, 'device_id', 'unknown'),
+                    observation_type="measurement",
+                    spatial_scope="point",
+                    confidence=0.0,
+                    reliability=0.0,
+                    flags=["MALFORMED_READING", f"SERIALIZATION_ERROR:{reading_err}"],
+                    data_status="quarantined",
+                    diagnostic_only=True,
+                    state_update_allowed=False,
+                ))
 
         # --- Aggregates ---
         for agg in getattr(package, "aggregates", []):

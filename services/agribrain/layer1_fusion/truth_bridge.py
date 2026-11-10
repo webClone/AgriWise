@@ -92,8 +92,65 @@ _TRUSTED_PUBLICATION_ISSUERS: frozenset = frozenset({
 _TRUSTED_ISSUER_PUBLIC_KEYS: Dict[str, Any] = {}
 
 
+import contextlib
+import sys
+import time
+
+@contextlib.contextmanager
+def _revocation_lock(path: str, timeout: float = 10.0):
+    """Cross-process file lock protecting revocation store updates across workers (RC2)."""
+    lock_file = path + ".lock"
+    parent = os.path.dirname(lock_file)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    f = open(lock_file, "a+")
+    start = time.time()
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            while True:
+                try:
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except (IOError, OSError):
+                    if time.time() - start > timeout:
+                        raise TimeoutError(f"Timed out acquiring revocation lock {lock_file}")
+                    time.sleep(0.01)
+        else:
+            import fcntl
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (IOError, OSError):
+                    if time.time() - start > timeout:
+                        raise TimeoutError(f"Timed out acquiring revocation lock {lock_file}")
+                    time.sleep(0.01)
+        yield
+    finally:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            f.close()
+        except Exception:
+            pass
+
+
 class DurableRevocationStore:
-    """Durable, fail-closed monotonic revocation store across workers and restarts (R11-07, R12-04)."""
+    """Durable, fail-closed monotonic revocation store across workers and restarts (R11-07, R12-04, RC2).
+    
+    Guarantees cross-worker consistency via cross-process file locking, read-modify-write,
+    monotonic epoch checks, and verification-time freshness synchronization.
+    """
 
     def __init__(self, persistence_path: Optional[str] = None):
         default_dir = os.environ.get("AGRIWISE_REVOCATION_DIR", os.path.join(os.path.expanduser("~"), ".agriwise"))
@@ -102,25 +159,84 @@ class DurableRevocationStore:
         self.revocation_epoch: int = 0
         self.revoked_sensor_receipts: Set[str] = set()
         self.revoked_publication_receipts: Set[str] = set()
+        self._last_loaded_mtime: float = 0.0
         if self.persistence_path and os.path.exists(self.persistence_path):
             self.load_from_disk()
 
+    def _sync_freshness(self) -> None:
+        """Enforce freshness at verification time by loading latest state from disk."""
+        if not self.persistence_path or not os.path.exists(self.persistence_path):
+            return
+        try:
+            mtime = os.path.getmtime(self.persistence_path)
+            if mtime <= self._last_loaded_mtime:
+                return
+            with open(self.persistence_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self._last_loaded_mtime = mtime
+            disk_epoch = int(data.get("revocation_epoch", 0))
+            if disk_epoch > self.revocation_epoch:
+                self.revocation_epoch = disk_epoch
+            self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
+            self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
+        except Exception:
+            pass
+
     def set_epoch(self, epoch: int) -> None:
         new_epoch = int(epoch)
-        if new_epoch < self.revocation_epoch:
-            raise ValueError(f"Monotonicity violation: cannot roll back epoch from {self.revocation_epoch} to {new_epoch}")
-        self.revocation_epoch = new_epoch
-        self._persist()
+        with _revocation_lock(self.persistence_path):
+            current_effective = self.revocation_epoch
+            if os.path.exists(self.persistence_path):
+                try:
+                    with open(self.persistence_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    disk_epoch = int(data.get("revocation_epoch", 0))
+                    self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
+                    self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
+                    current_effective = max(self.revocation_epoch, disk_epoch)
+                except Exception:
+                    pass
+            if new_epoch < current_effective:
+                raise ValueError(f"Monotonicity violation: cannot roll back epoch from {current_effective} to {new_epoch}")
+            self.revocation_epoch = new_epoch
+            self._persist_unlocked()
 
     def revoke_sensor(self, receipt_id: str) -> None:
-        self.revoked_sensor_receipts.add(str(receipt_id).strip())
-        self._persist()
+        clean_id = str(receipt_id).strip()
+        with _revocation_lock(self.persistence_path):
+            if os.path.exists(self.persistence_path):
+                try:
+                    with open(self.persistence_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    disk_epoch = int(data.get("revocation_epoch", 0))
+                    if disk_epoch > self.revocation_epoch:
+                        self.revocation_epoch = disk_epoch
+                    self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
+                    self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
+                except Exception:
+                    pass
+            self.revoked_sensor_receipts.add(clean_id)
+            self._persist_unlocked()
 
     def revoke_publication(self, receipt_id: str) -> None:
-        self.revoked_publication_receipts.add(str(receipt_id).strip())
-        self._persist()
+        clean_id = str(receipt_id).strip()
+        with _revocation_lock(self.persistence_path):
+            if os.path.exists(self.persistence_path):
+                try:
+                    with open(self.persistence_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    disk_epoch = int(data.get("revocation_epoch", 0))
+                    if disk_epoch > self.revocation_epoch:
+                        self.revocation_epoch = disk_epoch
+                    self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
+                    self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
+                except Exception:
+                    pass
+            self.revoked_publication_receipts.add(clean_id)
+            self._persist_unlocked()
 
     def is_sensor_revoked(self, receipt_id: str, receipt_epoch: Optional[int] = None, epoch: Optional[int] = None) -> Tuple[bool, Optional[str]]:
+        self._sync_freshness()
         r_id = str(receipt_id).strip()
         if r_id in self.revoked_sensor_receipts:
             return True, f"revoked_sensor_receipt:{r_id}"
@@ -130,12 +246,13 @@ class DurableRevocationStore:
         return False, None
 
     def is_publication_revoked(self, receipt_id: str) -> Tuple[bool, Optional[str]]:
+        self._sync_freshness()
         r_id = str(receipt_id).strip()
         if r_id in self.revoked_publication_receipts:
             return True, f"revoked_publication_receipt:{r_id}"
         return False, None
 
-    def _persist(self) -> None:
+    def _persist_unlocked(self) -> None:
         if not self.persistence_path:
             raise IOError("Cannot persist revocation store: persistence_path is not configured")
         try:
@@ -148,12 +265,25 @@ class DurableRevocationStore:
                 "revoked_publication_receipts": sorted(list(self.revoked_publication_receipts)),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-            tmp_path = self.persistence_path + ".tmp"
+            tmp_path = self.persistence_path + f".{os.getpid()}.{time.time_ns()}.tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             os.replace(tmp_path, self.persistence_path)
+            if os.path.exists(self.persistence_path):
+                self._last_loaded_mtime = os.path.getmtime(self.persistence_path)
         except Exception as ex:
             raise IOError(f"Atomic persistence failure writing revocation store to {self.persistence_path}: {ex}") from ex
+
+    def _persist(self) -> None:
+        with _revocation_lock(self.persistence_path):
+            self._persist_unlocked()
+
+    def clear(self) -> None:
+        with _revocation_lock(self.persistence_path):
+            self.revocation_epoch = 0
+            self.revoked_sensor_receipts.clear()
+            self.revoked_publication_receipts.clear()
+            self._persist_unlocked()
 
     def load_from_disk(self) -> None:
         if not self.persistence_path:
@@ -169,6 +299,7 @@ class DurableRevocationStore:
             self.revocation_epoch = disk_epoch
             self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
             self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
+            self._last_loaded_mtime = os.path.getmtime(self.persistence_path)
         except Exception as ex:
             raise IOError(f"Failed to load revocation store from {self.persistence_path}: {ex}") from ex
 
@@ -242,15 +373,18 @@ def get_trusted_issuer_public_key(issuer: str) -> Optional[Any]:
 
 
 def provision_test_issuer_keypair(issuer: str) -> Tuple[Any, Any]:
-    """Test authority keypair generator moved to test fixtures (R12-01)."""
-    from .tests.trust_fixtures import provision_test_issuer_keypair as _fixture_prov
-    return _fixture_prov(issuer)
+    """Production verifier strictly prohibits runtime test keypair generation (RC2)."""
+    raise PermissionError(
+        "Production verifier cannot provision test authorities. "
+        "Use services.agribrain.layer1_fusion.tests.trust_fixtures.provision_test_issuer_keypair in tests."
+    )
 
 
 def get_trusted_issuer_private_key(issuer: str):
-    """Prohibit runtime access to private keys in production verifier (R12-01)."""
-    from .tests.trust_fixtures import get_test_issuer_private_key as _fixture_get_priv
-    return _fixture_get_priv(issuer)
+    """Production verifier strictly prohibits runtime private key access (RC2)."""
+    raise PermissionError(
+        "Production verifier strictly prohibits runtime private key access."
+    )
 
 
 def set_current_revocation_epoch(epoch: int) -> None:
@@ -296,8 +430,8 @@ def compute_reading_content_digest(
     unit: Optional[str] = None,
     observed_at: Optional[Any] = None,
 ) -> str:
-    """Compute deterministic cryptographic SHA256 digest of physical reading payload (R11-02, R12-05).
-    Preserves full IEEE numerical precision, respecting variable precision contracts.
+    """Compute deterministic cryptographic SHA256 digest of physical reading payload (R11-02, R12-05, RC2).
+    Preserves exact IEEE double precision without truncation loss or floating-point collision (RC2).
     Fails closed on non-numeric or missing measurement values.
     """
     if value is None:
@@ -310,8 +444,9 @@ def compute_reading_content_digest(
     if not math.isfinite(val_float):
         raise ValueError(f"Non-finite measurement value {value!r} cannot be digested")
 
-    # Format float with full IEEE precision (12 significant digits) avoiding truncation loss (R12-05)
-    val_repr = f"{val_float:.12g}"
+    import struct
+    # Lossless IEEE-754 64-bit big-endian representation (RC2)
+    val_repr = f"ieee754:{struct.pack('>d', val_float).hex()}"
 
     obs_iso = ""
     if observed_at is not None:
@@ -408,9 +543,15 @@ def sign_sensor_receipt_data(
     revocation_epoch: Optional[int] = None,
     private_key: Optional[Any] = None,
 ) -> str:
-    """Sign sensor receipt fields with Ed25519 private key (R10-01)."""
+    """Sign sensor receipt fields with Ed25519 private key (R10-01, RC2).
+    Requires explicit authorized issuer signing capability (private_key).
+    Production verifier code cannot self-provision private keys.
+    """
     if private_key is None:
-        private_key = get_trusted_issuer_private_key(issuer)
+        raise PermissionError(
+            "Authorized issuer capability required: private_key must be explicitly provided to sign sensor receipts; "
+            "production verifier code cannot self-provision private keys."
+        )
     eff_epoch = _REVOCATION_STORE.revocation_epoch if revocation_epoch is None else int(revocation_epoch)
     canonical = compute_sensor_receipt_canonical_bytes(
         receipt_id=receipt_id,
@@ -446,7 +587,14 @@ def create_signed_sensor_receipt(
     reading_unit: Optional[str] = None,
     observed_at: Optional[Any] = None,
 ) -> SensorAttestationReceipt:
-    """Create a fully signed, authentic cryptographic sensor attestation receipt (R10-01, R11-02)."""
+    """Create a fully signed, authentic cryptographic sensor attestation receipt (R10-01, R11-02, RC2).
+    Requires explicit authorized issuer signing capability (private_key).
+    """
+    if private_key is None:
+        raise PermissionError(
+            "Authorized issuer capability required: private_key must be explicitly provided to sign sensor receipts; "
+            "production verifier code cannot self-provision private keys."
+        )
     if observation_instant is None:
         obs = observed_at or datetime(2026, 11, 9, 10, tzinfo=timezone.utc)
         observation_instant = obs.isoformat() if hasattr(obs, "isoformat") else str(obs)
@@ -526,9 +674,14 @@ def create_signed_publication_receipt(
     status: str = "active",
     private_key: Optional[Any] = None,
 ) -> PublicationAttestationReceipt:
-    """Create a fully signed, authentic cryptographic publication attestation receipt (R10-02)."""
+    """Create a fully signed, authentic cryptographic publication attestation receipt (R10-02, RC2).
+    Requires explicit authorized issuer signing capability (private_key).
+    """
     if private_key is None:
-        private_key = get_trusted_issuer_private_key(issuer)
+        raise PermissionError(
+            "Authorized issuer capability required: private_key must be explicitly provided to sign publication receipts; "
+            "production verifier code cannot self-provision private keys."
+        )
     canonical = compute_publication_receipt_canonical_bytes(
         receipt_id=receipt_id,
         issuer=issuer,
@@ -971,16 +1124,19 @@ def verify_sensor_attestation(
         return False, f"invalid_cryptographic_signature:{type(e).__name__}"
 
     if expected_value is not None:
-        calc_digest = compute_reading_content_digest(
-            device_id=dev_str,
-            plot_id=plot_str,
-            variable=var_str,
-            value=expected_value,
-            unit=expected_unit,
-            observed_at=expected_observed_at,
-        )
-        if target_receipt.content_digest != calc_digest:
-            return False, f"sensor_content_digest_mismatch:{target_receipt.content_digest}!={calc_digest}"
+        try:
+            calc_digest = compute_reading_content_digest(
+                device_id=dev_str,
+                plot_id=plot_str,
+                variable=var_str,
+                value=expected_value,
+                unit=expected_unit,
+                observed_at=expected_observed_at,
+            )
+            if target_receipt.content_digest != calc_digest:
+                return False, f"sensor_content_digest_mismatch:{target_receipt.content_digest}!={calc_digest}"
+        except Exception as e:
+            return False, f"invalid_measurement_digest_calculation:{e}"
     elif expected_content_digest is not None:
         if target_receipt.content_digest != expected_content_digest:
             return False, f"sensor_content_digest_mismatch:{target_receipt.content_digest}!={expected_content_digest}"

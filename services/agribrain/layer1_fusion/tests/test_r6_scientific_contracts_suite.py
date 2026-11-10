@@ -148,8 +148,9 @@ def test_r6_t07_late_publication_excluded_on_historical_replay():
     from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
 
     tb = _mod('truth_bridge')
+    tf = _mod('tests.trust_fixtures')
     cutoff = datetime(2026, 11, 6, 11, 0, tzinfo=timezone.utc)
-    rcpt_early = tb.create_signed_publication_receipt(
+    rcpt_early = tf.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sentinel2:t07_early",
         issuer="agriwise:trust:publication_authority",
         source_family="sentinel2",
@@ -157,7 +158,7 @@ def test_r6_t07_late_publication_excluded_on_historical_replay():
         published_at=datetime(2026, 11, 6, 10, 30, tzinfo=timezone.utc),
     )
     tb.register_publication_receipt(rcpt_early)
-    rcpt_late = tb.create_signed_publication_receipt(
+    rcpt_late = tf.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sentinel2:t07_late",
         issuer="agriwise:trust:publication_authority",
         source_family="sentinel2",

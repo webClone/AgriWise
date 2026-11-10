@@ -223,6 +223,10 @@ class Layer1FusionEngine:
         for item in all_evidence:
             # SPEC-C / PR28-03 & C1B: Plot namespace validation and non-destructive temporal invariant check
             violations = validate_evidence(item, expected_plot_id=bundle.plot_id, run_timestamp=bundle.run_timestamp)
+            if item.data_status == "quarantined" or "MALFORMED_READING" in (item.flags or []):
+                violations.extend([f for f in (item.flags or []) if "NAN_INF_VALUE" in f or "SERIALIZATION_ERROR" in f])
+                if not violations:
+                    violations.append("MALFORMED_READING_SERIALIZATION")
             if violations:
                 all_quarantined.append(quarantine_evidence(item, violations))
                 continue

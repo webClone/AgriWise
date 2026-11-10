@@ -142,8 +142,8 @@ def observation_packet_to_evidence(
 
     flags = [f.value for f in (packet.qa.flags or [])] if packet.qa else []
     
-    # Authenticated publication verification (R10-02)
-    from layer1_fusion.truth_bridge import verify_publication_receipt, PublicationAttestationReceipt
+    # Authenticated publication verification (R10-02, RC2)
+    from layer1_fusion.truth_bridge import verify_publication_receipt, PublicationAttestationReceipt, compute_reading_content_digest
     pub_receipt_candidate = (
         getattr(packet, "receipt", None)
         or getattr(source_package, "receipt", None)
@@ -152,11 +152,40 @@ def observation_packet_to_evidence(
         or getattr(getattr(packet, "provenance", None), "receipt_ref", None)
         or getattr(getattr(source_package, "provenance", None), "receipt_ref", None)
     )
+
+    inst_id = payload.get("instrument_id") or payload.get("device_id") or getattr(packet, "instrument_id", None)
+    pkg_plot = getattr(source_package, "plot_id", None) if source_package else None
+    effective_plot_id = (packet.plot_id if packet.plot_id and str(packet.plot_id).strip() else None) or (pkg_plot if pkg_plot and str(pkg_plot).strip() else None)
+    pkt_time = packet.timestamp
+
+    # Derive measurement digest from the actual canonical reading, not caller payload["content_hash"] (RC2)
+    canonical_reading_digest = None
+    if source_fam == "sensor":
+        first_var = payload.get("variable") or next((k for k in PAYLOAD_VARIABLE_MAP if k in payload and payload[k] is not None), None)
+        first_val = payload.get("value")
+        if first_val is None and first_var and first_var in payload:
+            first_val = payload[first_var]
+        first_unit = payload.get("unit")
+        if first_val is not None and first_var and effective_plot_id:
+            try:
+                canonical_reading_digest = compute_reading_content_digest(
+                    device_id=inst_id or packet.packet_id,
+                    plot_id=effective_plot_id,
+                    variable=first_var,
+                    value=first_val,
+                    unit=first_unit,
+                    observed_at=pkt_time,
+                )
+            except Exception:
+                canonical_reading_digest = None
+
+    expected_pub_hash = canonical_reading_digest if (source_fam == "sensor" and canonical_reading_digest) else payload.get("content_hash")
+
     is_verified_publication, pub_reason, v_published = verify_publication_receipt(
         pub_receipt_candidate,
         source_family=source_fam,
         acquisition_id=packet.packet_id,
-        content_hash=payload.get("content_hash"),
+        content_hash=expected_pub_hash,
     )
     if is_verified_publication and v_published is not None:
         p_str = v_published.isoformat()
@@ -344,9 +373,9 @@ def observation_packet_to_evidence(
                 current_1m_approval_allowed=truth.current_1m_approval_allowed and (final_data_status == "observed"),
                 temporal_basis=payload.get("temporal_basis"),
                 content_hash=(
-                    payload.get("content_hash")
-                    or getattr(packet, "content_hash", None)
-                    or (compute_reading_content_digest(inst_id or packet.packet_id, effective_plot_id, var_name, val, unit_name, pkt_time) if source_fam == "sensor" else None)
+                    (canonical_reading_digest or compute_reading_content_digest(inst_id or packet.packet_id, effective_plot_id, var_name, val, unit_name, pkt_time))
+                    if source_fam == "sensor"
+                    else (payload.get("content_hash") or getattr(packet, "content_hash", None))
                 ),
                 provider_product_id=payload.get("provider_product_id") or payload.get("observation_id"),
                 valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
@@ -395,7 +424,11 @@ def observation_packet_to_evidence(
             prescription_driver_allowed=truth.prescription_driver_allowed and (final_data_status == "observed"),
             current_1m_approval_allowed=truth.current_1m_approval_allowed and (final_data_status == "observed"),
             temporal_basis=payload.get("temporal_basis"),
-            content_hash=payload.get("content_hash") or getattr(packet, "content_hash", None),
+            content_hash=(
+                (canonical_reading_digest or compute_reading_content_digest(inst_id or packet.packet_id, effective_plot_id, var_name, payload["value"], unit_name, pkt_time))
+                if source_fam == "sensor"
+                else (payload.get("content_hash") or getattr(packet, "content_hash", None))
+            ),
             provider_product_id=payload.get("provider_product_id") or payload.get("observation_id"),
             valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
             instrument_id=inst_id,

@@ -704,23 +704,41 @@ def publish_canonical_layer10_snapshot(
         "phenology_context": copy.deepcopy(payload.get("phenology_context") or {}),
         "source_policy": str(payload.get("source_policy") or "canonical"),
         "crop_posterior_lineage": (
-            (payload.get("asmae_feature_pack") or {}).get("crop_posterior_lineage")
-            if isinstance(payload.get("asmae_feature_pack"), dict)
-            else None
+            (payload.get("scientific_evidence_lineage") or {}).get("crop_posterior_lineage")
+            if isinstance(payload.get("scientific_evidence_lineage"), dict) and (payload.get("scientific_evidence_lineage") or {}).get("crop_posterior_lineage")
+            else (
+                (payload.get("asmae_feature_pack") or {}).get("crop_posterior_lineage")
+                if isinstance(payload.get("asmae_feature_pack"), dict) and (payload.get("asmae_feature_pack") or {}).get("crop_posterior_lineage")
+                else payload.get("crop_posterior_lineage")
+            )
+        ),
+        "crop_worldline_event_id": (
+            (payload.get("scientific_evidence_lineage") or {}).get("crop_worldline_event_id")
+            if isinstance(payload.get("scientific_evidence_lineage"), dict) and (payload.get("scientific_evidence_lineage") or {}).get("crop_worldline_event_id")
+            else payload.get("crop_worldline_event_id")
+        ),
+        "phenology_worldline_event_id": (
+            (payload.get("scientific_evidence_lineage") or {}).get("phenology_worldline_event_id")
+            if isinstance(payload.get("scientific_evidence_lineage"), dict) and (payload.get("scientific_evidence_lineage") or {}).get("phenology_worldline_event_id")
+            else payload.get("phenology_worldline_event_id")
         ),
         "crop_evidence_ledger_hash": (
-            (payload.get("asmae_feature_pack") or {}).get(
-                "crop_evidence_ledger_hash"
+            (payload.get("scientific_evidence_lineage") or {}).get("crop_evidence_ledger_hash")
+            if isinstance(payload.get("scientific_evidence_lineage"), dict) and (payload.get("scientific_evidence_lineage") or {}).get("crop_evidence_ledger_hash")
+            else (
+                (payload.get("asmae_feature_pack") or {}).get("crop_evidence_ledger_hash")
+                if isinstance(payload.get("asmae_feature_pack"), dict) and (payload.get("asmae_feature_pack") or {}).get("crop_evidence_ledger_hash")
+                else payload.get("crop_evidence_ledger_hash")
             )
-            if isinstance(payload.get("asmae_feature_pack"), dict)
-            else None
         ),
         "crop_influence_manifest_hash": (
-            (payload.get("asmae_feature_pack") or {}).get(
-                "crop_influence_manifest_hash"
+            (payload.get("scientific_evidence_lineage") or {}).get("crop_influence_manifest_hash")
+            if isinstance(payload.get("scientific_evidence_lineage"), dict) and (payload.get("scientific_evidence_lineage") or {}).get("crop_influence_manifest_hash")
+            else (
+                (payload.get("asmae_feature_pack") or {}).get("crop_influence_manifest_hash")
+                if isinstance(payload.get("asmae_feature_pack"), dict) and (payload.get("asmae_feature_pack") or {}).get("crop_influence_manifest_hash")
+                else payload.get("crop_influence_manifest_hash")
             )
-            if isinstance(payload.get("asmae_feature_pack"), dict)
-            else None
         ),
     }
     scientific_identity["content_hash"] = hashlib.sha256(

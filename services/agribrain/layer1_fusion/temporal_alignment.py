@@ -98,23 +98,41 @@ def is_available_at_cutoff(
     """Check if evidence item was available to the decision system at as_of_cutoff (SPEC-B/T23-T25)."""
     cutoff_utc = ensure_utc(as_of_cutoff)
 
-    # 1. Check publication/recorded/ingested time
+    # 1. Check publication/recorded/ingested time and first_available_at (RC2)
     pub_times: List[datetime] = []
     
     # Direct attributes
-    for attr in ("published_at", "recorded_at", "ingested_at"):
+    for attr in ("published_at", "recorded_at", "ingested_at", "first_available_at"):
         val = getattr(item, attr, None)
         if val is not None:
             if isinstance(val, str):
                 try:
                     dt = ensure_utc(datetime.fromisoformat(val))
                     pub_times.append(dt)
+                    if dt > cutoff_utc and attr == "first_available_at":
+                        return False, f"FIRST_AVAILABLE_AFTER_CUTOFF: {attr} {dt} > cutoff {cutoff_utc}"
                 except Exception:
                     return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed {attr} '{val}'"
             elif isinstance(val, datetime):
-                pub_times.append(ensure_utc(val))
+                dt = ensure_utc(val)
+                pub_times.append(dt)
+                if dt > cutoff_utc and attr == "first_available_at":
+                    return False, f"FIRST_AVAILABLE_AFTER_CUTOFF: {attr} {dt} > cutoff {cutoff_utc}"
 
-    # Parse flags with strict validation (L1-R7-04 / R7-G04, R9-03)
+    # Also check signed receipt first_available_at (RC2: exact revision & publication binding)
+    rcpt = getattr(item, "receipt", None)
+    if rcpt is not None:
+        rcpt_fa = getattr(rcpt, "first_available_at", None)
+        if rcpt_fa:
+            try:
+                fa_dt = ensure_utc(datetime.fromisoformat(str(rcpt_fa)))
+                pub_times.append(fa_dt)
+                if fa_dt > cutoff_utc:
+                    return False, f"FIRST_AVAILABLE_AFTER_CUTOFF: signed receipt first_available_at {fa_dt} > cutoff {cutoff_utc}"
+            except Exception:
+                return False, f"MALFORMED_FIRST_AVAILABLE_AT: malformed receipt first_available_at '{rcpt_fa}'"
+
+    # Parse flags with strict validation (L1-R7-04 / R7-G04, R9-03, RC2)
     v_pub = getattr(item, "verified_published_at", None)
     if v_pub is not None:
         v_dt = ensure_utc(v_pub)
@@ -130,6 +148,16 @@ def is_available_at_cutoff(
                 has_pub_flag = True
             except Exception:
                 return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed published_at in flag '{f}'"
+        elif f.startswith("FIRST_AVAILABLE_AT:"):
+            raw_str = f.split(":", 1)[1].strip()
+            try:
+                fa_dt = ensure_utc(datetime.fromisoformat(raw_str))
+                pub_times.append(fa_dt)
+                has_pub_flag = True
+                if fa_dt > cutoff_utc:
+                    return False, f"FIRST_AVAILABLE_AFTER_CUTOFF: first available {fa_dt} > cutoff {cutoff_utc}"
+            except Exception:
+                return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed first_available_at in flag '{f}'"
         elif f.startswith("RECORDED_AT:"):
             raw_str = f.split(":", 1)[1].strip()
             try:
@@ -174,13 +202,17 @@ def is_available_at_cutoff(
     
     if is_replay and not is_static_prior:
         is_pub_verified = getattr(item, "publication_receipt_verified", False)
+        is_sensor_verified = bool(
+            getattr(item, "truth_class", None) == "observed_sensor"
+            and getattr(item, "receipt", None) is not None
+        )
         # R8-02 / R8-G04: Unauthenticated caller publication claims without verified receipt rejected on historical replay
-        if "CALLER_CLAIMED_PUBLICATION_TIME" in item.flags and not is_pub_verified:
+        if "CALLER_CLAIMED_PUBLICATION_TIME" in item.flags and not is_pub_verified and not is_sensor_verified:
             return False, "CALLER_CLAIMED_PUBLICATION_TIME_REJECTED: caller asserted publication availability without verified receipt proof on historical replay"
-        # R9-03: Derive admission from typed verified publication record; reject untrusted flags
-        if not is_pub_verified:
+        # R9-03: Derive admission from typed verified publication or sensor attestation record; reject untrusted flags
+        if not is_pub_verified and not is_sensor_verified:
             return False, "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY: missing verified publication or recording timestamp"
-        if not has_pub_flag:
+        if not has_pub_flag and not is_sensor_verified:
             return False, "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY: missing verified publication or recording timestamp"
 
     return True, "available"

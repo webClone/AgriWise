@@ -29,6 +29,9 @@ def _mod(name):
     _repo()
     return importlib.import_module('layer1_fusion.' + name)
 
+def _tf():
+    return _mod('tests.trust_fixtures')
+
 def _item(**overrides):
     fields = dict(evidence_id='e-1', plot_id='plot-A', variable='soil_moisture_vwc',
         value=0.35, source_family='sensor', source_id='sensor1',
@@ -439,7 +442,7 @@ def test_r7_g09_registered_sensor_negative_controls():
         status="active",
         calibration_profile_id="cal_valid",
     ))
-    tb.register_sensor_receipt(tb.create_signed_sensor_receipt(
+    tb.register_sensor_receipt(_tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_dev_active_plotA",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_dev_active",
@@ -684,7 +687,7 @@ def test_r8_g02_arbitrary_unauthenticated_receipt_string_denied():
     assert item_mock_2.state_update_allowed is False
     
     # Positive control: authentic registered receipt
-    tb.register_sensor_receipt(tb.create_signed_sensor_receipt(
+    tb.register_sensor_receipt(_tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_auth_test:valid_batch_01",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_auth_test",
@@ -936,7 +939,7 @@ def test_r8_g09_full_engine_replay_superseded_revision_cutoff_isolation():
     cutoff = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
     
     # Original revision published at 09:00 with value 20.0
-    rcpt_orig = tb.create_signed_publication_receipt(
+    rcpt_orig = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:weather:orig",
         issuer="agriwise:trust:publication_authority",
         source_family="environment",
@@ -964,7 +967,7 @@ def test_r8_g09_full_engine_replay_superseded_revision_cutoff_isolation():
     pkg_orig.published_at = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
     
     # Corrected revision published at 18:00 with value 25.0
-    rcpt_rev = tb.create_signed_publication_receipt(
+    rcpt_rev = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:weather:rev",
         issuer="agriwise:trust:publication_authority",
         source_family="environment",
@@ -1099,7 +1102,7 @@ def test_r9_g01_sensor_receipt_forged_urn_and_dummy_object_denied():
     assert "unverified_receipt_signature" in reason or "untrusted_issuer" in reason or "invalid_cryptographic_signature" in reason or "missing_receipt_content_digest" in reason
 
     # Positive control: Authentic registered receipt
-    valid_receipt = tb.create_signed_sensor_receipt(
+    valid_receipt = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r9_dev:auth_001",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r9_dev",
@@ -1244,7 +1247,7 @@ def test_r9_g03_historical_publication_flag_injection_denied():
 
     # (c) Future genuine receipt overrides earlier caller claim
     tb = _mod('truth_bridge')
-    rcpt_late = tb.create_signed_publication_receipt(
+    rcpt_late = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sentinel2:late",
         issuer="agriwise:trust:publication_authority",
         source_family="sentinel2",
@@ -1277,7 +1280,7 @@ def test_r9_g03_historical_publication_flag_injection_denied():
     assert "PUBLISHED_AFTER_CUTOFF" in reason
 
     # (d) Authenticated historical positive control
-    rcpt_early = tb.create_signed_publication_receipt(
+    rcpt_early = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sentinel2:early",
         issuer="agriwise:trust:publication_authority",
         source_family="sentinel2",
@@ -1476,7 +1479,7 @@ def test_r9_g05_raster_reference_consistent_with_evidence_cutoff():
         "published_at": "2026-11-10T10:00:00+00:00",
     }
     ch_comp = tb.compute_raster_composite_content_hash(early_composite_data)
-    rcpt_early_composite = tb.create_signed_publication_receipt(
+    rcpt_early_composite = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:early",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -1506,7 +1509,7 @@ def test_r9_g05_raster_reference_consistent_with_evidence_cutoff():
         "raster_maps": {"moisture": [[0.3] * 10] * 10},
     }
     ch_asmae = tb.compute_asmae_content_hash(early_asmae_base)
-    rcpt_early_asmae = tb.create_signed_publication_receipt(
+    rcpt_early_asmae = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:asmae:early",
         issuer="agriwise:trust:publication_authority",
         source_family="asmae",
@@ -1666,7 +1669,7 @@ def test_r9_g08_full_engine_healthy_sensor_and_asmae_layer10_positive_control():
     ))
 
     # 2. Register cryptographic sensor attestation receipt
-    receipt = tb.create_signed_sensor_receipt(
+    receipt = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_full_01:reading_01",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_full_01",
@@ -1815,7 +1818,7 @@ def test_r10_g01_sensor_cryptographic_signature_verification():
     ))
 
     # 1. Genuine signed receipt
-    valid_rcpt = tb.create_signed_sensor_receipt(
+    valid_rcpt = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r10_01:001",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r10_01",
@@ -1888,7 +1891,7 @@ def test_r10_g02_sensor_signature_tampering_and_revocation():
     ))
 
     # Signed receipt for soil_moisture_vwc
-    signed_rcpt = tb.create_signed_sensor_receipt(
+    signed_rcpt = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r10_02:tamper_test",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r10_02",
@@ -1943,7 +1946,7 @@ def test_r10_g02_sensor_signature_tampering_and_revocation():
     assert "revoked_sensor_receipt" in reason
 
     # 3. Expired revocation epoch
-    fresh_rcpt = tb.create_signed_sensor_receipt(
+    fresh_rcpt = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r10_02:epoch_test",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r10_02",
@@ -2001,7 +2004,7 @@ def test_r10_g03_caller_supplied_publication_timestamp_without_receipt_denied():
     assert "CALLER_CLAIMED_PUBLICATION_TIME_REJECTED" in reason
 
     # 2. Positive control: Verified publication receipt
-    rcpt = tb.create_signed_publication_receipt(
+    rcpt = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sentinel2:r10_g03",
         issuer="agriwise:trust:publication_authority",
         source_family="sentinel2",
@@ -2046,7 +2049,7 @@ def test_r10_g04_same_variable_distinct_acquisition_raster_ref_isolation():
         "published_at": "2026-11-10T10:00:00+00:00",
     }
     ch_early = tb.compute_raster_composite_content_hash(early_data)
-    rcpt_early = tb.create_signed_publication_receipt(
+    rcpt_early = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:early_r10",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -2069,7 +2072,7 @@ def test_r10_g04_same_variable_distinct_acquisition_raster_ref_isolation():
         "published_at": "2026-11-10T16:00:00+00:00",
     }
     ch_late = tb.compute_raster_composite_content_hash(late_data)
-    rcpt_late = tb.create_signed_publication_receipt(
+    rcpt_late = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:late_r10",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -2196,7 +2199,7 @@ def test_r10_g05_asmae_historical_cutoff_fail_closed():
         "published_at": "2026-11-10T10:00:00+00:00",
     }
     ch_asmae_ok = tb.compute_asmae_content_hash(asmae_ok)
-    rcpt_asmae = tb.create_signed_publication_receipt(
+    rcpt_asmae = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:asmae:r10_g05_ok",
         issuer="agriwise:trust:publication_authority",
         source_family="asmae",
@@ -2276,7 +2279,7 @@ def test_r10_g07_typed_sensor_receipt_ref_string_resolution():
 
     # Register authentic receipt
     receipt_id = "urn:agriwise:receipt:sensor_r10_07:read_99"
-    rcpt = tb.create_signed_sensor_receipt(
+    rcpt = _tf().create_signed_sensor_receipt(
         receipt_id=receipt_id,
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r10_07",
@@ -2374,7 +2377,7 @@ def test_r10_g08_full_engine_r10_positive_and_negative_control():
     ))
 
     # In-cutoff sensor receipt & packet (observed 10:00, published 10:15)
-    rcpt_sensor_early = tb.create_signed_sensor_receipt(
+    rcpt_sensor_early = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r10_08:reading_early",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r10_08",
@@ -2389,7 +2392,7 @@ def test_r10_g08_full_engine_r10_positive_and_negative_control():
     tb.register_sensor_receipt(rcpt_sensor_early)
 
     # Sensor publication receipt for historical replay admission (R10-02)
-    rcpt_sensor_pub = tb.create_signed_publication_receipt(
+    rcpt_sensor_pub = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sensor:r10_08",
         issuer="agriwise:trust:publication_authority",
         source_family="sensor",
@@ -2438,7 +2441,7 @@ def test_r10_g08_full_engine_r10_positive_and_negative_control():
         "published_at": (now - timedelta(hours=2)).isoformat(),
     }
     ch_raster_early = tb.compute_raster_composite_content_hash(early_raster_data)
-    rcpt_raster_early = tb.create_signed_publication_receipt(
+    rcpt_raster_early = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:early_08",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -2460,7 +2463,7 @@ def test_r10_g08_full_engine_r10_positive_and_negative_control():
         "published_at": (now + timedelta(hours=2)).isoformat(),
     }
     ch_raster_late = tb.compute_raster_composite_content_hash(late_raster_data)
-    rcpt_raster_late = tb.create_signed_publication_receipt(
+    rcpt_raster_late = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:late_08",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -2518,7 +2521,7 @@ def test_r10_g08_full_engine_r10_positive_and_negative_control():
         "raster_maps": {"moisture": [[0.3] * 10] * 10},
     }
     ch_asmae_08 = tb.compute_asmae_content_hash(valid_asmae)
-    rcpt_asmae = tb.create_signed_publication_receipt(
+    rcpt_asmae = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:asmae:r10_08",
         issuer="agriwise:trust:publication_authority",
         source_family="asmae",
@@ -2597,7 +2600,7 @@ def test_r11_g01_externally_provisioned_keys_reject_reproduced_seed_signatures()
     ))
 
     # Provision trusted key using OS entropy / external generation
-    priv_real, pub_real = tb.provision_test_issuer_keypair(issuer)
+    priv_real, pub_real = _tf().provision_test_issuer_keypair(issuer)
     assert tb.get_trusted_issuer_public_key(issuer) is not None
 
     # Attacker attempts to forge receipt using predictable seed derivation
@@ -2677,7 +2680,7 @@ def test_r11_g02_sensor_signature_bound_to_reading_payload_value_time_digest():
     ))
 
     # Authentic receipt for reading value 0.22 at 12:00
-    rcpt = tb.create_signed_sensor_receipt(
+    rcpt = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r11_02:exact",
         issuer=issuer,
         device_id="sensor_r11_02",
@@ -2741,7 +2744,7 @@ def test_r11_g03_publication_receipt_mandatory_content_digest_exact_match():
     issuer = "agriwise:trust:publication_authority"
 
     true_hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    rcpt = tb.create_signed_publication_receipt(
+    rcpt = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:r11_03",
         issuer=issuer,
         source_family="raster_composite",
@@ -2820,7 +2823,7 @@ def test_r11_g04_asmae_cutoff_uses_verified_signed_timestamp_not_claimed_timesta
 
     # Signed receipt with verified published_at at 14:00 (POST-CUTOFF)
     verified_post_cutoff_ts = datetime(2026, 11, 10, 14, 0, tzinfo=timezone.utc)
-    rcpt_post = tb.create_signed_publication_receipt(
+    rcpt_post = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:asmae:r11_04_post",
         issuer="agriwise:trust:publication_authority",
         source_family="asmae",
@@ -2874,7 +2877,7 @@ def test_r11_g05_asmae_quarantined_prior_to_evidence_ledger_population():
         status="active",
         calibration_profile_id="cal-r11-05",
     ))
-    rcpt_sensor = tb.create_signed_sensor_receipt(
+    rcpt_sensor = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r11_05:valid",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r11_05",
@@ -2888,7 +2891,7 @@ def test_r11_g05_asmae_quarantined_prior_to_evidence_ledger_population():
     )
     tb.register_sensor_receipt(rcpt_sensor)
 
-    rcpt_sensor_pub = tb.create_signed_publication_receipt(
+    rcpt_sensor_pub = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sensor:r11_05:valid",
         issuer="agriwise:trust:publication_authority",
         source_family="sensor",
@@ -2995,7 +2998,7 @@ def test_r11_g06_true_same_canonical_variable_raster_isolation_with_paired_hash(
         "published_at": "2026-11-10T10:00:00+00:00",
     }
     ch_early = tb.compute_raster_composite_content_hash(early_data)
-    rcpt_early = tb.create_signed_publication_receipt(
+    rcpt_early = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:early_r11",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -3019,7 +3022,7 @@ def test_r11_g06_true_same_canonical_variable_raster_isolation_with_paired_hash(
         "published_at": "2026-11-10T16:00:00+00:00",
     }
     ch_late = tb.compute_raster_composite_content_hash(late_data)
-    rcpt_late = tb.create_signed_publication_receipt(
+    rcpt_late = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:late_r11",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -3118,7 +3121,7 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
     ))
 
     # Authentic sensor receipt bound to reading value 0.31 at now - 1h
-    rcpt_sensor = tb.create_signed_sensor_receipt(
+    rcpt_sensor = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r11_08:pos",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r11_08",
@@ -3132,7 +3135,7 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
     )
     tb.register_sensor_receipt(rcpt_sensor)
 
-    rcpt_sensor_pub = tb.create_signed_publication_receipt(
+    rcpt_sensor_pub = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sensor:r11_08:pos",
         issuer="agriwise:trust:publication_authority",
         source_family="sensor",
@@ -3204,7 +3207,7 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
         "published_at": (now - timedelta(hours=2)).isoformat(),
     }
     ch_raster_valid = tb.compute_raster_composite_content_hash(valid_raster_data)
-    rcpt_raster_valid = tb.create_signed_publication_receipt(
+    rcpt_raster_valid = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:valid_r11_08",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -3227,7 +3230,7 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
         "published_at": (now + timedelta(hours=3)).isoformat(),
     }
     ch_raster_late = tb.compute_raster_composite_content_hash(late_raster_data)
-    rcpt_raster_late = tb.create_signed_publication_receipt(
+    rcpt_raster_late = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:late_r11_08",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -3285,7 +3288,7 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
         "raster_maps": {"moisture": [[0.32] * 10] * 10},
     }
     ch_asmae_r11 = tb.compute_asmae_content_hash(valid_asmae)
-    rcpt_asmae = tb.create_signed_publication_receipt(
+    rcpt_asmae = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:asmae:r11_08",
         issuer="agriwise:trust:publication_authority",
         source_family="asmae",
@@ -3381,7 +3384,7 @@ def test_r12_g02_sensor_attestation_fails_closed_when_digest_or_claims_omitted()
     ))
 
     # Genuine signed receipt
-    rcpt = tb.create_signed_sensor_receipt(
+    rcpt = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r12_02:001",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r12_g02",
@@ -3495,7 +3498,7 @@ def test_r12_g03_raster_ingestion_enforces_mandatory_content_digest_match():
     now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
 
     # 1. Raster composite with receipt missing content_hash -> Quarantined
-    rcpt_no_hash = tb.create_signed_publication_receipt(
+    rcpt_no_hash = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:r12_no_hash",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -3534,7 +3537,7 @@ def test_r12_g03_raster_ingestion_enforces_mandatory_content_digest_match():
         "published_at": (now - timedelta(hours=1)).isoformat(),
     }
     ch_good = tb.compute_raster_composite_content_hash(raster_good)
-    rcpt_good = tb.create_signed_publication_receipt(
+    rcpt_good = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:r12_good",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -3722,7 +3725,7 @@ def test_r12_g08_full_engine_end_to_end_native_r12_adversarial_and_positive_acce
         unit="fraction",
         observed_at=sensor_obs_time,
     )
-    rcpt_sensor = tb.create_signed_sensor_receipt(
+    rcpt_sensor = _tf().create_signed_sensor_receipt(
         receipt_id="urn:agriwise:receipt:sensor_r12_e2e:healthy",
         issuer="agriwise:trust:sensor_authority",
         device_id="sensor_r12_e2e",
@@ -3738,7 +3741,7 @@ def test_r12_g08_full_engine_end_to_end_native_r12_adversarial_and_positive_acce
     )
     tb.register_sensor_receipt(rcpt_sensor)
 
-    rcpt_sensor_pub = tb.create_signed_publication_receipt(
+    rcpt_sensor_pub = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sensor:r12_e2e",
         issuer="agriwise:trust:publication_authority",
         source_family="sensor",
@@ -3789,7 +3792,7 @@ def test_r12_g08_full_engine_end_to_end_native_r12_adversarial_and_positive_acce
         "published_at": (now - timedelta(hours=2)).isoformat(),
     }
     ch_raster_e2e = tb.compute_raster_composite_content_hash(valid_raster_data)
-    rcpt_raster = tb.create_signed_publication_receipt(
+    rcpt_raster = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:r12_e2e",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
@@ -3842,7 +3845,7 @@ def test_r12_g08_full_engine_end_to_end_native_r12_adversarial_and_positive_acce
         "raster_maps": {"moisture": [[0.32] * 10] * 10},
     }
     ch_asmae_e2e = tb.compute_asmae_content_hash(valid_asmae)
-    rcpt_asmae = tb.create_signed_publication_receipt(
+    rcpt_asmae = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:asmae:r12_e2e",
         issuer="agriwise:trust:publication_authority",
         source_family="asmae",

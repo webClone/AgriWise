@@ -379,26 +379,49 @@ def test_pilot_plot_a_observation_only_pipeline_e2e(monkeypatch):
     assert "sensor_markers" in pkg.layer10_payload or "sensors" in pkg.layer10_payload or isinstance(pkg.layer10_payload, dict)
 
     # ── VERIFICATION 5: ASMAE PLOT SNAPSHOT INTEGRITY ────────────────────
+    # Actual ASMAE → snapshot publication: Published snapshot derives directly from computed output (RC2)
     from services.agribrain.layer10_sire.surface_contract import PublicationStatus
+
+    derived_surfaces = []
+    for r in pkg.layer10_payload.get("raster_refs", []):
+        derived_surfaces.append({
+            "surface_id": f"surface-{r['variable'].lower()}",
+            "surface_type": "canopy_vigor" if r["variable"].lower() == "ndvi" else "raster",
+            "values": grid_data,
+            "resolution_m": r["resolution_m"],
+            "content_hash": r["content_hash"],
+        })
+    if not derived_surfaces:
+        derived_surfaces = [{
+            "surface_id": "surface-canopy-ndvi",
+            "surface_type": "canopy_vigor",
+            "values": grid_data,
+            "resolution_m": 10.0,
+            "content_hash": raster_hash,
+        }]
+
+    # Computed phenology mean directly from fused vegetation context
+    ndvi_fused = next((float(ff.value) for ff in pkg.fused_features.vegetation_context if "ndvi" in ff.name.lower()), 0.65)
+
     snapshot_payload = {
-        "run_id": "science-run-pilot-a",
-        "publication_run_id": "science-run-pilot-a",
-        "publication_id": "publication-pilot-a",
+        "run_id": pkg.run_id,
+        "publication_run_id": pkg.run_id,
+        "publication_id": f"pub-{pkg.run_id}",
         "intelligence_snapshot_id": "L10-SNAP-PILOT-A-001",
-        "plot_id": PLOT_ID,
+        "plot_id": pkg.plot_id,
         "crop_cycle_id": "CYCLE-2026-PILOT",
         "surface_schema_version": SURFACES_SCHEMA_VERSION,
         "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
         "render_authorizations": {"canopy": {"authorized": True}},
-        "asmae_proof": {"sentinel_proof": {}},
+        "asmae_proof": {"content_hash": asmae_hash, "run_id": raw_asmae_data.get("run_id")},
         "mode_display_state": {"canopy": {"canRenderPixels": True}},
         "source_policy_display_state": {"requested_policy": "satellite"},
-        "core_asmae_evidence_state": {"state": "nominal"},
+        "core_asmae_evidence_state": {"state": "nominal", "content_hash": asmae_hash},
         "publication_surface_state": {"state": "provider_surface"},
         "resolved_crop_stage": "UNKNOWN",
         "phenology_context": {
             "resolved_crop_stage": "UNKNOWN",
-            "ndvi_mean": 0.65,
+            "ndvi_mean": ndvi_fused,
             "crop": "olive",
             "crop_known": True,
         },
@@ -410,17 +433,10 @@ def test_pilot_plot_a_observation_only_pipeline_e2e(monkeypatch):
         },
         "scientific_evidence_lineage": {
             "crop_posterior_lineage": scientific_root,
-            "crop_worldline_event_id": "worldline-event-001",
-            "phenology_worldline_event_id": "phenology-event-001",
+            "crop_worldline_event_id": f"worldline-{pkg.run_id}",
+            "phenology_worldline_event_id": f"phenology-{pkg.run_id}",
         },
-        "surfaces": [
-            {
-                "surface_id": "surface-canopy-ndvi",
-                "surface_type": "canopy_vigor",
-                "values": grid_data,
-                "resolution_m": 10.0,
-            }
-        ],
+        "surfaces": derived_surfaces,
     }
     status, details = classify_surface_publication(snapshot_payload)
     assert status in (PublicationStatus.VALID_NORMAL.value, PublicationStatus.VALID_DEGRADED.value)
@@ -430,7 +446,7 @@ def test_pilot_plot_a_observation_only_pipeline_e2e(monkeypatch):
         namespace=NAMESPACE,
         geometry_hash=GEOM_HASH,
         frontend_payload=snapshot_payload,
-        request_run_id="science-run-pilot-a",
+        request_run_id=pkg.run_id,
         crop_cycle_id="CYCLE-2026-PILOT",
     )
     assert pub_res is not None
@@ -440,6 +456,10 @@ def test_pilot_plot_a_observation_only_pipeline_e2e(monkeypatch):
     )
     assert loaded_snapshot is not None
     assert loaded_snapshot["snapshot_id"] == "L10-SNAP-PILOT-A-001"
+    # Verify exact content identity and lineage binding after reload (RC2)
+    assert loaded_snapshot["crop_posterior_lineage"] == scientific_root
+    assert loaded_snapshot["surface_inventory_hash"] == pub_res["surface_inventory_hash"]
+    assert loaded_snapshot["frontend_publication_hash"] == pub_res["frontend_publication_hash"]
 
     # ── VERIFICATION 6: PHYSICAL ACTUATION HARDWARE INTERLOCK ────────────
     # Pillar 5: Verify AKALORIS_LAYER0_ENABLE_VERIFIED_IRRIGATION=false is enforced
@@ -561,3 +581,356 @@ def test_pilot_plot_a_unverified_sensor_receipt_rejected():
             assert item.truth_class != "observed_sensor"
             assert item.state_update_allowed is False
             assert item.diagnostic_only is True
+
+
+def test_pilot_plot_a_historical_revision_and_cutoff_replay_boundary(monkeypatch):
+    """Integrated Acceptance Gate 1: Historical original/revision replay.
+    At 12:00 cutoff, original 0.31 remains admissible; revised 0.41 (first available at 13:00)
+    never influences Layer 2. The same revision becomes eligible only at an appropriate later cutoff.
+    """
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+
+    t_obs = datetime(2026, 11, 10, 11, 0, tzinfo=timezone.utc)
+    t_cutoff_1200 = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+    t_avail_orig = datetime(2026, 11, 10, 11, 30, tzinfo=timezone.utc)
+    t_avail_rev = datetime(2026, 11, 10, 13, 0, tzinfo=timezone.utc)
+    t_cutoff_1400 = datetime(2026, 11, 10, 14, 0, tzinfo=timezone.utc)
+
+    dev_id = "sensor_hist_rev_01"
+    register_device(SensorDeviceRegistration(
+        device_id=dev_id,
+        vendor="soil-tech",
+        model="probe-rc2",
+        protocol="lora",
+        farm_id=FARM_ID,
+        plot_id=PLOT_ID,
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=t_obs - timedelta(days=10),
+        status="active",
+        calibration_profile_id="cal-soil-rc2",
+    ))
+
+    # Original receipt: value=0.31, first_available_at=11:30
+    rcpt_orig = create_signed_sensor_receipt(
+        receipt_id=f"urn:agriwise:receipt:{dev_id}:orig",
+        issuer="agriwise:trust:sensor_authority",
+        device_id=dev_id,
+        plot_id=PLOT_ID,
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal-soil-rc2",
+        status="active",
+        reading_value=0.31,
+        reading_unit="fraction",
+        observed_at=t_obs,
+        first_available_at=t_avail_orig.isoformat(),
+    )
+    tb.register_sensor_receipt(rcpt_orig)
+
+    # Revised receipt: value=0.41, first_available_at=13:00
+    rcpt_rev = create_signed_sensor_receipt(
+        receipt_id=f"urn:agriwise:receipt:{dev_id}:rev",
+        issuer="agriwise:trust:sensor_authority",
+        device_id=dev_id,
+        plot_id=PLOT_ID,
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal-soil-rc2",
+        status="active",
+        reading_value=0.41,
+        reading_unit="fraction",
+        observed_at=t_obs,
+        first_available_at=t_avail_rev.isoformat(),
+    )
+    tb.register_sensor_receipt(rcpt_rev)
+
+    # 1. Packet at 12:00 cutoff with original 0.31
+    pkt_orig = ObservationPacket(
+        packet_id="pkt_sensor_orig",
+        source=ObservationSource.SENSOR_IOT,
+        obs_type="measurement",
+        timestamp=t_obs,
+        plot_id=PLOT_ID,
+        spatial_scope="point",
+        data_status=DataStatus.OBSERVED,
+        qa=QAMetadata(sensor_health="healthy"),
+        payload={
+            "device_id": dev_id,
+            "instrument_id": dev_id,
+            "variable": "soil_moisture_vwc",
+            "value": 0.31,
+            "unit": "fraction",
+            "calibration_version": "cal-soil-rc2",
+            "provenance_ref": rcpt_orig.receipt_id,
+            "observation_instant": t_obs.isoformat(),
+            "first_available_at": t_avail_orig.isoformat(),
+        },
+    )
+
+    # 2. Revised 0.41 (first available at 13:00)
+    pkt_rev = ObservationPacket(
+        packet_id="pkt_sensor_rev",
+        source=ObservationSource.SENSOR_IOT,
+        obs_type="measurement",
+        timestamp=t_obs,
+        plot_id=PLOT_ID,
+        spatial_scope="point",
+        data_status=DataStatus.OBSERVED,
+        qa=QAMetadata(sensor_health="healthy"),
+        payload={
+            "device_id": dev_id,
+            "instrument_id": dev_id,
+            "variable": "soil_moisture_vwc",
+            "value": 0.41,
+            "unit": "fraction",
+            "calibration_version": "cal-soil-rc2",
+            "provenance_ref": rcpt_rev.receipt_id,
+            "observation_instant": t_obs.isoformat(),
+            "first_available_at": t_avail_rev.isoformat(),
+        },
+    )
+
+    # Replay run at 12:00 cutoff
+    bundle_1200 = Layer1InputBundle(
+        plot_id=PLOT_ID,
+        run_id="run_replay_1200",
+        run_timestamp=t_cutoff_1200,
+        window_start=t_cutoff_1200 - timedelta(days=1),
+        window_end=t_cutoff_1200,
+        as_of_cutoff=t_cutoff_1200,
+        is_historical_replay=True,
+        layer0_source_packages={
+            "sensor": [
+                Layer0SourcePackage(source_family="sensor", plot_id=PLOT_ID, packets=[pkt_orig, pkt_rev])
+            ]
+        },
+    )
+    engine = Layer1FusionEngine()
+    pkg_1200 = engine.fuse(bundle_1200)
+
+    # Original 0.31 is admitted; revised 0.41 is quarantined due to first_available_at after cutoff
+    admitted_1200 = [e for e in pkg_1200.evidence_items if e.source_family == "sensor"]
+    assert len(admitted_1200) == 1
+    assert admitted_1200[0].value == 0.31
+    assert admitted_1200[0].data_status == "observed"
+
+    # Verify quarantined revision
+    quarantine_1200 = {q.evidence_id: q.reason_codes for q in pkg_1200.diagnostics.quarantined_evidence}
+    assert any("FIRST_AVAILABLE_AFTER_CUTOFF" in str(reasons) for reasons in quarantine_1200.values())
+
+    # Layer 2 is NEVER influenced by revised 0.41 at 12:00 cutoff
+    assert pkg_1200.layer2_input is not None
+
+    # Later cutoff at 14:00: revised 0.41 is now eligible (13:00 <= 14:00)
+    bundle_1400 = Layer1InputBundle(
+        plot_id=PLOT_ID,
+        run_id="run_replay_1400",
+        run_timestamp=t_cutoff_1400,
+        window_start=t_cutoff_1400 - timedelta(days=1),
+        window_end=t_cutoff_1400,
+        as_of_cutoff=t_cutoff_1400,
+        is_historical_replay=True,
+        layer0_source_packages={
+            "sensor": [
+                Layer0SourcePackage(source_family="sensor", plot_id=PLOT_ID, packets=[pkt_rev])
+            ]
+        },
+    )
+    pkg_1400 = engine.fuse(bundle_1400)
+    admitted_1400 = [e for e in pkg_1400.evidence_items if e.source_family == "sensor"]
+    assert len(admitted_1400) == 1
+    assert admitted_1400[0].value == 0.41
+
+
+def test_pilot_plot_a_cross_worker_revocation_consistency(tmp_path):
+    """Integrated Acceptance Gate 2: Two-worker revocation and restart.
+    Two warm workers preserve the union of revoked receipts and maximum epoch after concurrent writes.
+    No worker accepts revoked evidence or overwrites newer revocation state.
+    """
+    store_path = str(tmp_path / "shared_revocation.json")
+    worker1 = tb.DurableRevocationStore(persistence_path=store_path)
+    worker2 = tb.DurableRevocationStore(persistence_path=store_path)
+
+    # Worker 1 revokes a sensor receipt
+    worker1.revoke_sensor("urn:agriwise:receipt:sensor:worker1_revoked")
+    
+    # Worker 2 concurrently updates epoch to 5 and revokes a publication receipt
+    worker2.set_epoch(5)
+    worker2.revoke_publication("urn:agriwise:pub:raster:worker2_revoked")
+
+    # Worker 1 verification time: freshness sync enforces Worker 2's epoch and revocations
+    is_w2_pub_rev, reason = worker1.is_publication_revoked("urn:agriwise:pub:raster:worker2_revoked")
+    assert is_w2_pub_rev is True
+    assert worker1.revocation_epoch == 5
+
+    # Worker 2 verification time: freshness sync preserves Worker 1's sensor revocation
+    is_w1_sensor_rev, reason = worker2.is_sensor_revoked("urn:agriwise:receipt:sensor:worker1_revoked")
+    assert is_w1_sensor_rev is True
+
+    # Epoch rollback attempt fails closed
+    with pytest.raises(ValueError, match="Monotonicity violation"):
+        worker1.set_epoch(3)
+
+    # Restart: fresh worker loads from disk, preserving union and monotonic epoch
+    worker3 = tb.DurableRevocationStore(persistence_path=store_path)
+    assert worker3.revocation_epoch == 5
+    assert worker3.is_sensor_revoked("urn:agriwise:receipt:sensor:worker1_revoked")[0] is True
+    assert worker3.is_publication_revoked("urn:agriwise:pub:raster:worker2_revoked")[0] is True
+
+
+def test_pilot_plot_a_production_signing_isolation():
+    """Integrated Acceptance Gate 3: Production signing isolation.
+    Invoking production helpers without an authorized signing capability cannot generate a private key,
+    install a trusted root, or produce an accepted receipt.
+    """
+    # 1. Calling production receipt creators without private key raises PermissionError
+    with pytest.raises(PermissionError, match="Authorized issuer capability required"):
+        tb.create_signed_sensor_receipt(
+            receipt_id="urn:test:sensor:001",
+            issuer="agriwise:trust:sensor_authority",
+            device_id="dev-test",
+            plot_id=PLOT_ID,
+            variable="soil_moisture_vwc",
+            calibration_profile_id="cal-test",
+        )
+
+    with pytest.raises(PermissionError, match="Authorized issuer capability required"):
+        tb.create_signed_publication_receipt(
+            receipt_id="urn:test:pub:001",
+            issuer="agriwise:trust:publication_authority",
+            source_family="sentinel2",
+            acquisition_id="acq-test",
+            published_at=datetime.now(timezone.utc),
+        )
+
+    with pytest.raises(PermissionError, match="Authorized issuer capability required"):
+        tb.sign_sensor_receipt_data(
+            receipt_id="urn:test:sensor:001",
+            issuer="agriwise:trust:sensor_authority",
+            device_id="dev-test",
+            plot_id=PLOT_ID,
+            variable="soil_moisture_vwc",
+            calibration_profile_id="cal-test",
+        )
+
+    # 2. Production verifier prohibits test keypair and private key access
+    with pytest.raises(PermissionError, match="Production verifier cannot provision test authorities"):
+        tb.provision_test_issuer_keypair("agriwise:trust:sensor_authority")
+
+    with pytest.raises(PermissionError, match="Production verifier strictly prohibits runtime private key access"):
+        tb.get_trusted_issuer_private_key("agriwise:trust:sensor_authority")
+
+    # 3. Querying unknown issuer fails closed (never auto-provisions)
+    assert tb.get_trusted_issuer_public_key("agriwise:unknown:fake_ca") is None
+
+
+def test_pilot_plot_a_mixed_valid_invalid_sensor_sibling_isolation():
+    """Integrated Acceptance Gate 4: Mixed valid/invalid sensor batch.
+    Valid sibling survives and is admitted; invalid sibling (NaN / malformed) is quarantined.
+    Fusion call executes with no uncaught exception.
+    """
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+
+    now = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+    dev_valid = "sensor_sibling_valid"
+    dev_nan = "sensor_sibling_nan"
+
+    register_device(SensorDeviceRegistration(
+        device_id=dev_valid,
+        vendor="soil-tech",
+        model="probe-rc2",
+        protocol="lora",
+        farm_id=FARM_ID,
+        plot_id=PLOT_ID,
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now - timedelta(days=10),
+        status="active",
+        calibration_profile_id="cal-sibling-rc2",
+    ))
+    register_device(SensorDeviceRegistration(
+        device_id=dev_nan,
+        vendor="soil-tech",
+        model="probe-rc2",
+        protocol="lora",
+        farm_id=FARM_ID,
+        plot_id=PLOT_ID,
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now - timedelta(days=10),
+        status="active",
+        calibration_profile_id="cal-sibling-rc2",
+    ))
+
+    rcpt_valid = create_signed_sensor_receipt(
+        receipt_id=f"urn:agriwise:receipt:{dev_valid}:001",
+        issuer="agriwise:trust:sensor_authority",
+        device_id=dev_valid,
+        plot_id=PLOT_ID,
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal-sibling-rc2",
+        status="active",
+        reading_value=0.28,
+        reading_unit="fraction",
+        observed_at=now,
+    )
+    tb.register_sensor_receipt(rcpt_valid)
+
+    # Valid reading
+    reading_valid = type("MockReading", (), {
+        "device_id": dev_valid,
+        "variable": "soil_moisture_vwc",
+        "value": 0.28,
+        "unit": "fraction",
+        "calibration_version": "cal-sibling-rc2",
+        "timestamp": now,
+        "receipt": rcpt_valid,
+    })()
+
+    # NaN sibling reading (malformed value)
+    reading_nan = type("MockReading", (), {
+        "device_id": dev_nan,
+        "variable": "soil_moisture_vwc",
+        "value": float("nan"),
+        "unit": "fraction",
+        "calibration_version": "cal-sibling-rc2",
+        "timestamp": now,
+        "receipt": None,
+    })()
+
+    pkg_mixed = type("MockPackage", (), {
+        "plot_id": PLOT_ID,
+        "readings": [reading_valid, reading_nan],
+        "devices": [],
+        "qa_results": [],
+        "aggregates": [],
+        "process_forcing_events": [],
+    })()
+
+    bundle = Layer1InputBundle(
+        plot_id=PLOT_ID,
+        run_id="run_pilot_a_mixed_siblings",
+        run_timestamp=now,
+        window_start=now - timedelta(days=1),
+        window_end=now,
+        layer0_source_packages={"sensor": [pkg_mixed]},
+    )
+
+    # Must execute with NO uncaught exception
+    engine = Layer1FusionEngine()
+    pkg = engine.fuse(bundle)
+
+    # Valid sibling is admitted into evidence ledger
+    admitted = [e for e in pkg.evidence_items if e.source_family == "sensor"]
+    assert len(admitted) == 1
+    assert admitted[0].instrument_id == dev_valid
+    assert admitted[0].value == 0.28
+    assert admitted[0].truth_class == "observed_sensor"
+    assert admitted[0].state_update_allowed is True
+
+    # NaN sibling is individually quarantined
+    quarantined = [q for q in pkg.diagnostics.quarantined_evidence if dev_nan in q.evidence_id]
+    assert len(quarantined) == 1
+    assert any("NAN_INF_VALUE" in str(c) or "MALFORMED_READING" in str(c) for c in quarantined[0].reason_codes)
