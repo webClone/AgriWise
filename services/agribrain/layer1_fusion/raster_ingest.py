@@ -445,7 +445,15 @@ def check_asmae_authority(output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         bma_dis = diag.get("bma_mean_disagreement")
     if bma_dis is not None and float(bma_dis) > 0.3:
         return False, "bma_disagreement_too_high"
-        
+
+    # 8. ASMAE covariance validation (R8-01: invalid ASMAE covariance disables authoritative raster export)
+    from .diagnostics import validate_covariance_matrix, extract_covariance_matrices_recursive
+    cov_matrices = extract_covariance_matrices_recursive(output)
+    for cov_name, mat in cov_matrices:
+        is_psd, cov_reason = validate_covariance_matrix(mat)
+        if not is_psd:
+            return False, f"invalid_covariance:{cov_reason}"
+
     return True, None
 
 

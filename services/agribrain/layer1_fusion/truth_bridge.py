@@ -1,5 +1,5 @@
 import math
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 from layer1_fusion.schemas import EvidenceItem
@@ -80,6 +80,130 @@ def _has_valid_geospatial_grid(source_context: Any) -> bool:
         - transform_values[1] * transform_values[3]
     )
     return abs(gdal_determinant) > 1e-15 or abs(affine_determinant) > 1e-15
+
+
+def verify_sensor_attestation(
+    device_id: Optional[str],
+    plot_id: Optional[str],
+    variable: Optional[str],
+    calibration_version: Optional[str],
+    provenance_ref: Optional[str],
+    flags: Optional[List[str]] = None,
+    receipt: Optional[Any] = None,
+    raw_status: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Unified fail-closed sensor attestation verification for Layer 1 (R8-03).
+    
+    Shared by both normalize_evidence_truth and truth_for_observation_packet.
+    Enforces:
+    - Active status in registry
+    - Mandatory registered plot matching observation plot
+    - Mandatory registered variable matching observation variable
+    - Mandatory registered calibration profile matching calibration version
+    - Authentic receipt/provenance format (cryptographic / URN prefix, not mock strings)
+    - No revocation in flags
+    """
+    if raw_status in ("synthetic", "simulated", "fallback", "unavailable"):
+        return False, f"raw_status_{raw_status}"
+
+    # 1. Mandatory non-empty device_id
+    if not device_id or not isinstance(device_id, str) or not device_id.strip():
+        return False, "missing_device_id"
+    dev_str = device_id.strip()
+
+    # 2. Mandatory non-empty plot_id
+    if not plot_id or not isinstance(plot_id, str) or not plot_id.strip():
+        return False, "missing_plot_id"
+    plot_str = plot_id.strip()
+
+    # 3. Mandatory non-empty variable
+    if not variable or not isinstance(variable, str) or not variable.strip():
+        return False, "missing_variable"
+    var_str = variable.strip()
+
+    # 4. Mandatory non-empty calibration_version
+    if not calibration_version or not isinstance(calibration_version, str) or not calibration_version.strip():
+        return False, "missing_calibration_version"
+    cal_str = calibration_version.strip()
+
+    # 5. Check unverified / forged / dummy tokens
+    for val, name in [(dev_str, "device_id"), (cal_str, "calibration_version"), (provenance_ref or "", "provenance_ref")]:
+        val_low = str(val).lower()
+        if any(token in val_low for token in ("fake", "dummy", "unattested", "spoofed", "unverified", "forged", "user-supplied")):
+            return False, f"unattested_or_forged_{name}"
+
+    # 6. Revocation check across flags
+    if flags:
+        for f in flags:
+            f_str = str(f).upper()
+            if "REVOKED" in f_str:
+                return False, "revoked_certificate_or_device"
+
+    # 7. Device Registry Verification (fail-closed on absent registry, exceptions, or unregistered devices)
+    try:
+        from services.agribrain.sensor_runtime.registry import get_device_registration
+        reg = get_device_registration(dev_str)
+    except Exception as ex:
+        return False, f"registry_error:{ex}"
+
+    if reg is None:
+        return False, "unregistered_device"
+
+    # Status must be active
+    if getattr(reg, "status", None) != "active":
+        return False, f"inactive_device_status:{getattr(reg, 'status', None)}"
+
+    # Plot scope must be non-empty and match
+    reg_plot = getattr(reg, "plot_id", None)
+    if not reg_plot or not isinstance(reg_plot, str) or not reg_plot.strip():
+        return False, "registry_missing_plot_scope"
+    if reg_plot.strip() != plot_str:
+        return False, f"plot_scope_mismatch: registered {reg_plot} != requested {plot_str}"
+
+    # Registered variables must be non-empty and declared variable must be in it
+    reg_vars = getattr(reg, "variables", None)
+    if not reg_vars or not isinstance(reg_vars, (list, tuple, set)):
+        return False, "registry_missing_variables"
+    if var_str not in reg_vars:
+        return False, f"variable_not_registered:{var_str}"
+
+    # Registered calibration_profile_id must be non-empty and match calibration_version
+    reg_cal = getattr(reg, "calibration_profile_id", None)
+    if not reg_cal or not isinstance(reg_cal, str) or not reg_cal.strip():
+        return False, "registry_missing_calibration_profile"
+    if reg_cal.strip() != cal_str:
+        return False, f"calibration_profile_mismatch: registered {reg_cal} != item {cal_str}"
+
+    # 8. Authentic receipt / provenance format check (R8-G02)
+    if receipt is not None:
+        return True, "attested_via_receipt"
+
+    if not provenance_ref or not isinstance(provenance_ref, str) or not provenance_ref.strip():
+        return False, "missing_provenance_ref"
+
+    p_ref = provenance_ref.strip()
+    p_low = p_ref.lower()
+
+    # Reject arbitrary unauthenticated mock strings
+    if p_low in ("receipt_valid", "receipt123", "receipt-a", "receipt", "test", "valid", "dummy", "mock", "test_receipt"):
+        return False, "unauthenticated_receipt_mock_string"
+
+    # Authentic receipt formats:
+    # - URN format: urn:agriwise:receipt:..., urn:uuid:..., urn:agriwise:..., urn:...
+    # - Hash format: sha256:..., sha512:..., blake2b:..., hash:...
+    # - Packet / package provenance: pkg_..._pkt_..., packet_...
+    # - 32+ hex character cryptographic digest or UUID
+    is_authentic_format = (
+        p_ref.startswith(("urn:agriwise:receipt:", "urn:uuid:", "urn:agriwise:", "urn:", "sha256:", "sha512:", "blake2b:", "hash:"))
+        or p_ref.startswith("pkg_")
+        or p_ref.startswith("packet_")
+        or (len(p_ref) >= 32 and all(c in "0123456789abcdefABCDEF-_:" for c in p_ref))
+    )
+    if not is_authentic_format:
+        return False, f"unauthenticated_receipt_format:{p_ref}"
+
+    return True, "attested_sensor"
+
 
 def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] = None, source_family: Optional[str] = None) -> EvidenceItem:
     # A context-free pass is allowed to classify a fresh/unknown item, but it
@@ -361,54 +485,23 @@ def normalize_evidence_truth(item: EvidenceItem, source_context: Optional[Any] =
         item.composite_advisory_allowed = True
         item.experimental_visual_allowed = True
 
-    # 6. Sensor/IoT
+    # 6. Sensor/IoT (R8-03: unified verify_sensor_attestation)
     elif item.source_family == "sensor":
-        has_instrument = bool(getattr(item, "instrument_id", None))
-        has_calibration = bool(getattr(item, "calibration_version", None))
-        has_valid_provenance = bool(item.provenance_ref and item.source_id)
+        dev_id = getattr(item, "instrument_id", None) or getattr(item, "source_id", None)
+        cal_ver = getattr(item, "calibration_version", None)
         
-        prov_str = str(item.provenance_ref or "").lower()
-        inst_str = str(getattr(item, "instrument_id", "") or "").lower()
-        cal_str = str(getattr(item, "calibration_version", "") or "").lower()
-        
-        is_unattested = (
-            not has_valid_provenance
-            or not has_instrument
-            or not has_calibration
-            or any(s in prov_str for s in ("user-supplied", "unverified", "fake", "unattested", "dummy", "spoofed", "forged"))
-            or any(s in inst_str for s in ("fake", "dummy", "unattested", "spoofed", "unverified", "forged"))
-            or any(s in cal_str for s in ("fake", "dummy", "unattested", "spoofed", "unverified", "forged"))
+        is_attested, att_reason = verify_sensor_attestation(
+            device_id=dev_id,
+            plot_id=getattr(item, "plot_id", None),
+            variable=getattr(item, "variable", None),
+            calibration_version=cal_ver,
+            provenance_ref=getattr(item, "provenance_ref", None),
+            flags=getattr(item, "flags", None),
+            raw_status=getattr(item, "data_status", None),
         )
-        
-        # Revocation check across flags
-        is_revoked = any("REVOKED" in str(f).upper() for f in (getattr(item, "flags", []) or []))
-        
-        # Check registered device status & plot scope fail-closed (L1-R7-01 / R7-G01 / R7-G02 / R7-G09)
-        reg = None
-        registry_error = None
-        try:
-            from services.agribrain.sensor_runtime.registry import get_device_registration
-            dev_key = item.instrument_id or item.source_id
-            reg = get_device_registration(dev_key) if dev_key else None
-        except Exception as ex:
-            registry_error = str(ex)
-            reg = None
-
-        if reg is None or registry_error is not None:
-            is_unattested = True
-        else:
-            if getattr(reg, "status", None) != "active":
-                is_unattested = True
-            if reg.plot_id and item.plot_id and reg.plot_id != item.plot_id:
-                is_unattested = True
-            if item.variable and reg.variables and item.variable not in reg.variables:
-                is_unattested = True
-            if getattr(reg, "calibration_profile_id", None) and item.calibration_version:
-                if reg.calibration_profile_id != item.calibration_version:
-                    is_unattested = True
 
         is_synthetic = getattr(item, "data_status", "") in ("synthetic", "simulated", "fallback")
-        if is_unattested or is_revoked or is_synthetic:
+        if not is_attested or is_synthetic:
             item.data_status = "synthetic" if is_synthetic else getattr(item, "data_status", "unverified")
             item.truth_class = "unverified_sensor"
             item.source_reality = "synthetic_or_uncalibrated"
@@ -793,24 +886,33 @@ def truth_for_observation_packet(packet: ObservationPacket, package: Optional[An
 
     if packet.source.value in ("sensor", "sensor_iot", "soil_probe"):
         payload = packet.payload or {}
-        has_inst = bool(payload.get("instrument_id") or payload.get("device_id") or getattr(packet, "instrument_id", None))
-        has_cal = bool(payload.get("calibration_version") or (packet.qa and getattr(packet.qa, "calibration_version", None)))
+        dev_id = payload.get("instrument_id") or payload.get("device_id") or getattr(packet, "instrument_id", None)
+        plot_id = packet.plot_id or (getattr(package, "plot_id", None) if package else None)
+        var_name = payload.get("variable") or next((k for k in ("soil_moisture_vwc", "soil_moisture", "leaf_wetness", "temperature", "humidity", "rainfall") if k in payload), None)
+        cal_ver = payload.get("calibration_version") or (getattr(packet.qa, "calibration_version", None) if packet.qa else None)
         
-        reg = None
-        dev_key = payload.get("instrument_id") or payload.get("device_id") or getattr(packet, "instrument_id", None) or packet.packet_id
-        try:
-            from services.agribrain.sensor_runtime.registry import get_device_registration
-            reg = get_device_registration(dev_key) if dev_key else None
-        except Exception:
-            reg = None
+        pkg_hash = getattr(package, "package_hash", "") if package else ""
+        pkt_hash = getattr(packet, "content_hash", "") or packet.packet_id
+        prov_ref = (
+            payload.get("provenance_ref")
+            or getattr(packet, "provenance_ref", None)
+            or (getattr(getattr(packet, "provenance", None), "receipt_ref", None) if getattr(packet, "provenance", None) else None)
+            or (f"pkg_{pkg_hash}_pkt_{pkt_hash}" if pkg_hash else (f"packet_{pkt_hash}" if pkt_hash else None))
+        )
+        receipt_obj = getattr(packet, "receipt", None)
+        flags = [f.value if hasattr(f, "value") else str(f) for f in (packet.qa.flags if packet.qa else [])]
+        if "flags" in payload and isinstance(payload["flags"], list):
+            flags.extend(payload["flags"])
 
-        is_valid_sensor = (
-            packet.data_status.value == "observed"
-            and has_inst
-            and has_cal
-            and reg is not None
-            and getattr(reg, "status", None) == "active"
-            and (not getattr(reg, "plot_id", None) or not packet.plot_id or reg.plot_id == packet.plot_id)
+        is_valid_sensor, att_reason = verify_sensor_attestation(
+            device_id=dev_id,
+            plot_id=plot_id,
+            variable=var_name,
+            calibration_version=cal_ver,
+            provenance_ref=prov_ref,
+            flags=flags,
+            receipt=receipt_obj,
+            raw_status=packet.data_status.value if packet.data_status else None,
         )
         if is_valid_sensor:
             return EvidenceTruth(

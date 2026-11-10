@@ -435,7 +435,7 @@ def test_r7_g09_registered_sensor_negative_controls():
         instrument_id="sensor_dev_active",
         variable="ndvi",
         calibration_version="cal_valid",
-        provenance_ref="receipt_valid",
+        provenance_ref="urn:agriwise:receipt:sensor_dev_active_plotA",
     )
     tb.normalize_evidence_truth(item_wrong_var)
     assert item_wrong_var.state_update_allowed is False
@@ -447,7 +447,7 @@ def test_r7_g09_registered_sensor_negative_controls():
         instrument_id="sensor_dev_active",
         variable="soil_moisture_vwc",
         calibration_version="cal_valid",
-        provenance_ref="receipt_valid",
+        provenance_ref="urn:agriwise:receipt:sensor_dev_active_plotA",
     )
     tb.normalize_evidence_truth(item_wrong_plot)
     assert item_wrong_plot.state_update_allowed is False
@@ -459,19 +459,19 @@ def test_r7_g09_registered_sensor_negative_controls():
         instrument_id="sensor_dev_active",
         variable="soil_moisture_vwc",
         calibration_version="cal_forged_999",
-        provenance_ref="receipt_valid",
+        provenance_ref="urn:agriwise:receipt:sensor_dev_active_plotA",
     )
     tb.normalize_evidence_truth(item_bad_cal)
     assert item_bad_cal.state_update_allowed is False
     
-    # Positive control: Everything matches
+    # Positive control: Everything matches with authentic URN receipt
     item_good = _item(
         source_family="sensor",
         plot_id="plot-A",
         instrument_id="sensor_dev_active",
         variable="soil_moisture_vwc",
         calibration_version="cal_valid",
-        provenance_ref="receipt_valid",
+        provenance_ref="urn:agriwise:receipt:sensor_dev_active_plotA",
     )
     tb.normalize_evidence_truth(item_good)
     assert item_good.state_update_allowed is True
@@ -574,3 +574,386 @@ def test_r7_g12_historical_cutoff_revision_replay():
     assert ledger.add(orig) == []
     assert len(ledger.all_items) == 1
     assert ledger.all_items[0].value == 0.22
+
+
+# =============================================================================
+# R8 ADVERSARIAL GATES (R8-G01 through R8-G09)
+# =============================================================================
+
+
+def test_r8_g01_active_sensor_missing_calibration_profile_denied():
+    """R8-G01: Active registered sensor missing calibration_profile_id in registry -> Denied authority fail-closed."""
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+    tb = _mod('truth_bridge')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+    
+    register_device(SensorDeviceRegistration(
+        device_id="sensor_no_cal_profile",
+        vendor="acme",
+        model="probe-y",
+        protocol="lora",
+        farm_id="farm-1",
+        plot_id="plot-A",
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now,
+        status="active",
+        calibration_profile_id=None,  # missing profile
+    ))
+    
+    item = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_no_cal_profile",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_claimed",
+        provenance_ref="urn:agriwise:receipt:probe_y_test",
+    )
+    tb.normalize_evidence_truth(item)
+    assert item.state_update_allowed is False
+    assert item.truth_class == "unverified_sensor"
+
+
+def test_r8_g02_arbitrary_unauthenticated_receipt_string_denied():
+    """R8-G02: Arbitrary unauthenticated receipt string (receipt_valid, receipt123) denied; authentic URN receipt accepted."""
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+    tb = _mod('truth_bridge')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+    
+    register_device(SensorDeviceRegistration(
+        device_id="sensor_auth_test",
+        vendor="acme",
+        model="probe-z",
+        protocol="lora",
+        farm_id="farm-1",
+        plot_id="plot-A",
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now,
+        status="active",
+        calibration_profile_id="cal_valid_z",
+    ))
+    
+    # Negative 1: arbitrary mock string receipt_valid
+    item_mock_1 = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_auth_test",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_valid_z",
+        provenance_ref="receipt_valid",
+    )
+    tb.normalize_evidence_truth(item_mock_1)
+    assert item_mock_1.state_update_allowed is False
+    
+    # Negative 2: arbitrary mock string receipt123
+    item_mock_2 = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_auth_test",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_valid_z",
+        provenance_ref="receipt123",
+    )
+    tb.normalize_evidence_truth(item_mock_2)
+    assert item_mock_2.state_update_allowed is False
+    
+    # Positive control: authentic URN receipt
+    item_auth = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_auth_test",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_valid_z",
+        provenance_ref="urn:agriwise:receipt:sensor_auth_test:valid_batch_01",
+    )
+    tb.normalize_evidence_truth(item_auth)
+    assert item_auth.state_update_allowed is True
+    assert item_auth.truth_class == "observed_sensor"
+
+
+def test_r8_g03_sensor_registry_missing_plot_or_variable_binding_denied():
+    """R8-G03: Incomplete device registration (missing plot_id or empty variables) cannot authorize measurements."""
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+    tb = _mod('truth_bridge')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+    
+    # Device registered without plot_id
+    reg_no_plot = SensorDeviceRegistration(
+        device_id="sensor_no_plot",
+        vendor="acme",
+        model="probe-w",
+        protocol="lora",
+        farm_id="farm-1",
+        plot_id="",
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now,
+        status="active",
+        calibration_profile_id="cal_w",
+    )
+    register_device(reg_no_plot)
+    
+    item = _item(
+        source_family="sensor",
+        plot_id="plot-A",
+        instrument_id="sensor_no_plot",
+        variable="soil_moisture_vwc",
+        calibration_version="cal_w",
+        provenance_ref="urn:agriwise:receipt:sensor_no_plot:01",
+    )
+    tb.normalize_evidence_truth(item)
+    assert item.state_update_allowed is False
+    assert item.truth_class == "unverified_sensor"
+
+
+def test_r8_g04_historical_replay_caller_publication_timestamp_without_verified_receipt_denied():
+    """R8-G04: Backdated caller payload publication timestamp without verified receipt denied on historical replay."""
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer1_fusion.adapters.observation_packet import observation_packet_to_evidence
+    ta = _mod('temporal_alignment')
+    s = _mod('schemas')
+    
+    cutoff = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+    
+    # Packet with backdated published_at only inside payload (caller claim, no receipt)
+    pkt_claimed = ObservationPacket(
+        packet_id="pkt_caller_claim",
+        plot_id="plot-A",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 0.65, "unit": "index", "published_at": "2026-11-10T10:30:00+00:00"},
+    )
+    bundle = s.Layer1InputBundle(plot_id="plot-A", run_id="r-g04", run_timestamp=cutoff, as_of_cutoff=cutoff)
+    items = observation_packet_to_evidence(pkt_claimed, bundle)
+    assert len(items) == 1
+    assert "CALLER_CLAIMED_PUBLICATION_TIME" in items[0].flags
+    
+    ok, reason = ta.is_available_at_cutoff(items[0], as_of_cutoff=cutoff, is_historical_replay=True)
+    assert not ok
+    assert "CALLER_CLAIMED_PUBLICATION_TIME_REJECTED" in reason
+
+
+def test_r8_g05_non_psd_covariance_at_3_plus_nested_levels_quarantined_and_source_disabled():
+    """R8-G05: Non-PSD covariance at 3+ arbitrary nested levels quarantined and originating source disabled."""
+    eng_mod = _mod('engine')
+    ri = _mod('raster_ingest')
+    s = _mod('schemas')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+    
+    # 4-level deep non-PSD covariance
+    deep_non_psd = {
+        "level1": {
+            "level2": {
+                "level3": {
+                    "uncertainty_matrix": [[1.0, 2.0], [2.0, 1.0]],  # det = -3 < 0 (non-PSD)
+                }
+            }
+        },
+        "state_vector": {"soil_moisture_vwc": 0.3},
+    }
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g05",
+        run_timestamp=now,
+        layer0_state_package=deep_non_psd,
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    res = engine.fuse(bundle)
+    assert any("INVALID_COVARIANCE" in q.reason_codes[0] for q in res.diagnostics.quarantined_evidence)
+    assert not any(e.source_family == "l0_state" for e in res.evidence_items)
+    
+    # Test ASMAE authority check on deeply nested non-PSD covariance
+    asmae_deep_bad_cov = {
+        "status": "success",
+        "grid_spec": {
+            "crs": "EPSG:4326",
+            "bounds": [10.0, 35.0, 10.1, 35.1],
+            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+            "width": 10,
+            "height": 10,
+            "resolution_m": 10.0,
+        },
+        "provenance": {
+            "operator_locked": True,
+            "graph_locked": True,
+            "radiometric_mode": "ht_per_pixel",
+            "full_radiometric_credit_allowed": True,
+            "enkf_mode": "ht_per_pixel",
+            "full_enkf_credit_allowed": True,
+            "retrovalidation_score": 0.85,
+        },
+        "diagnostics": {
+            "sub_analysis": {
+                "regional": {
+                    "covariance": [[1.0, 5.0], [5.0, 1.0]],  # non-PSD
+                }
+            }
+        },
+        "raster_maps": {"moisture": [[0.3] * 10] * 10},
+    }
+    auth_ok, auth_reason = ri.check_asmae_authority(asmae_deep_bad_cov)
+    assert auth_ok is False
+    assert "invalid_covariance" in auth_reason
+
+
+def test_r8_g06_missing_package_and_packet_plot_identity_denied():
+    """R8-G06: Missing package and packet plot identity fails closed; never synthesized from bundle."""
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer0.source_package import Layer0SourcePackage
+    from layer1_fusion.adapters.observation_packet import observation_packet_to_evidence
+    s = _mod('schemas')
+    eng_mod = _mod('engine')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+    
+    # Both packet and package have blank plot_id
+    blank_pkt = ObservationPacket(
+        packet_id="pkt_blank_all",
+        plot_id="",
+        source=ObservationSource.SENTINEL2,
+        data_status=DataStatus.OBSERVED,
+        timestamp=now,
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
+        payload={"variable": "ndvi", "value": 0.65, "unit": "index"},
+    )
+    blank_pkg = Layer0SourcePackage(
+        source_family="sentinel2",
+        plot_id="",
+        packets=[blank_pkt],
+    )
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g06",
+        run_timestamp=now,
+        layer0_source_packages={"sentinel2": [blank_pkg]},
+    )
+    # observation_packet_to_evidence must NOT synthesize from bundle.plot_id
+    items = observation_packet_to_evidence(blank_pkt, bundle, source_package=blank_pkg)
+    assert len(items) == 1
+    assert items[0].plot_id is None
+    
+    # Full engine must quarantine blank source package
+    engine = eng_mod.Layer1FusionEngine()
+    res = engine.fuse(bundle)
+    assert any("MISSING_SOURCE_PACKAGE_PLOT_SCOPE" in q.reason_codes[0] for q in res.diagnostics.quarantined_evidence)
+    assert not any("pkt_blank_all" in e.evidence_id for e in res.evidence_items)
+
+
+def test_r8_g07_bundle_source_package_source_family_never_mutated_in_place():
+    """R8-G07: Bundle containing source packages with aliases is never mutated in-place."""
+    from layer0.source_package import Layer0SourcePackage
+    s = _mod('schemas')
+    eng_mod = _mod('engine')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+    
+    alias_pkg = Layer0SourcePackage(
+        source_family="SENTINEL_2",  # alias with uppercase and underscore
+        plot_id="plot-A",
+        packets=[],
+    )
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g07",
+        run_timestamp=now,
+        layer0_source_packages={"SENTINEL_2": [alias_pkg]},
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    engine.fuse(bundle)
+    
+    # Original package object source_family must remain immutable
+    assert alias_pkg.source_family == "SENTINEL_2"
+
+
+def test_r8_g08_historical_replay_zero_clock_skew_enforced():
+    """R8-G08: Historical observation 1 minute after cutoff denied (zero clock-skew on replay; live streaming retains 5m)."""
+    ta = _mod('temporal_alignment')
+    cutoff = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)
+    
+    item_future_1m = _item(
+        observed_at=datetime(2026, 11, 10, 12, 1, 0, tzinfo=timezone.utc),
+        flags=["PUBLISHED_AT:2026-11-10T12:00:00+00:00", "VERIFIED_PUBLICATION_RECEIPT"],
+    )
+    
+    # On historical replay: zero tolerance -> denied
+    ok_replay, reason_replay = ta.is_available_at_cutoff(item_future_1m, cutoff, is_historical_replay=True)
+    assert ok_replay is False
+    assert "OBSERVED_AFTER_CUTOFF" in reason_replay
+    
+    # On live streaming: 5-minute tolerance -> accepted
+    ok_live, _ = ta.is_available_at_cutoff(item_future_1m, cutoff, is_historical_replay=False)
+    assert ok_live is True
+
+
+def test_r8_g09_full_engine_replay_superseded_revision_cutoff_isolation():
+    """R8-G09: Competing revisions in full engine replay: only cutoff-available revision participates in fusion."""
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer0.source_package import Layer0SourcePackage
+    eng_mod = _mod('engine')
+    s = _mod('schemas')
+    
+    cutoff = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+    
+    # Original revision published at 09:00 with value 20.0
+    pkt_orig = ObservationPacket(
+        packet_id="acq_temp_orig",
+        plot_id="plot-A",
+        source=ObservationSource.WEATHER_STATION,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 10, 8, 0, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"temp_mean": 0.5}),
+        payload={"variable": "temp_mean", "temp_mean": 20.0, "unit": "degC"},
+    )
+    pkg_orig = Layer0SourcePackage(
+        source_family="environment",
+        plot_id="plot-A",
+        packets=[pkt_orig],
+    )
+    pkg_orig.published_at = datetime(2026, 11, 10, 9, 0, tzinfo=timezone.utc)
+    
+    # Corrected revision published at 18:00 with value 25.0
+    pkt_rev = ObservationPacket(
+        packet_id="acq_temp_rev",
+        plot_id="plot-A",
+        source=ObservationSource.WEATHER_STATION,
+        data_status=DataStatus.OBSERVED,
+        timestamp=datetime(2026, 11, 10, 8, 0, tzinfo=timezone.utc),
+        spatial_scope="plot",
+        qa=QAMetadata(scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"temp_mean": 0.5}),
+        payload={"variable": "temp_mean", "temp_mean": 25.0, "unit": "degC"},
+    )
+    pkg_rev = Layer0SourcePackage(
+        source_family="environment",
+        plot_id="plot-A",
+        packets=[pkt_rev],
+    )
+    pkg_rev.published_at = datetime(2026, 11, 10, 18, 0, tzinfo=timezone.utc)
+    
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="r-g09",
+        run_timestamp=cutoff,
+        as_of_cutoff=cutoff,
+        layer0_source_packages={"environment": [pkg_orig, pkg_rev]},
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    res = engine.fuse(bundle)
+    
+    # Revision published after cutoff must be quarantined
+    assert any("acq_temp_rev" in q.evidence_id for q in res.diagnostics.quarantined_evidence)
+    # Original revision published before cutoff must participate
+    admitted = [e for e in res.evidence_items if "acq_temp_orig" in e.evidence_id]
+    assert len(admitted) == 1
+    assert admitted[0].value == 20.0
+

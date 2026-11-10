@@ -169,7 +169,9 @@ def test_r6_t07_late_publication_excluded_on_historical_replay():
         payload={"variable": "ndvi", "value": 0.70, "unit": "index", "published_at": "2026-11-06T16:00:00+00:00"},
     )
     pkg_early = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-A", packets=[early_pkt])
+    pkg_early.published_at = datetime(2026, 11, 6, 10, 30, tzinfo=timezone.utc)
     pkg_late = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-A", packets=[late_pkt])
+    pkg_late.published_at = datetime(2026, 11, 6, 16, 0, tzinfo=timezone.utc)
 
     bundle = s.Layer1InputBundle(
         plot_id='plot-A',

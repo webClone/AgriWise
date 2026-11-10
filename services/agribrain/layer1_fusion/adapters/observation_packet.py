@@ -142,26 +142,34 @@ def observation_packet_to_evidence(
 
     flags = [f.value for f in (packet.qa.flags or [])] if packet.qa else []
     
-    # Authoritative publication time (package / receipt takes precedence over payload)
-    auth_pub = (
+    # Authoritative publication time (package / receipt takes precedence over payload; R8-02)
+    verified_pub = (
         getattr(source_package, "published_at", None)
         or (getattr(packet, "receipt", None) and getattr(packet.receipt, "published_at", None))
         or (getattr(packet, "provenance", None) and getattr(packet.provenance, "published_at", None))
-        or payload.get("published_at")
     )
+    auth_pub = verified_pub or payload.get("published_at")
     if auth_pub:
         p_str = auth_pub.isoformat() if hasattr(auth_pub, "isoformat") else str(auth_pub)
         flags.append(f"PUBLISHED_AT:{p_str}")
+        if verified_pub:
+            flags.append("VERIFIED_PUBLICATION_RECEIPT")
+        else:
+            flags.append("CALLER_CLAIMED_PUBLICATION_TIME")
 
-    auth_rec = (
+    verified_rec = (
         getattr(source_package, "recorded_at", None)
         or (getattr(packet, "receipt", None) and getattr(packet.receipt, "recorded_at", None))
         or (getattr(packet, "provenance", None) and getattr(packet.provenance, "recorded_at", None))
-        or payload.get("recorded_at")
     )
+    auth_rec = verified_rec or payload.get("recorded_at")
     if auth_rec:
         r_str = auth_rec.isoformat() if hasattr(auth_rec, "isoformat") else str(auth_rec)
         flags.append(f"RECORDED_AT:{r_str}")
+        if verified_rec:
+            flags.append("VERIFIED_PUBLICATION_RECEIPT")
+        elif not verified_pub:
+            flags.append("CALLER_CLAIMED_PUBLICATION_TIME")
 
     if "flags" in payload and isinstance(payload["flags"], list):
         flags.extend(payload["flags"])
@@ -247,7 +255,8 @@ def observation_packet_to_evidence(
     cal_ver = payload.get("calibration_version") or (getattr(packet.qa, "calibration_version", None) if packet.qa else None)
 
     pkg_plot = getattr(source_package, "plot_id", None) if source_package else None
-    effective_plot_id = packet.plot_id or pkg_plot or bundle.plot_id
+    # R8-04 / R8-G06: Require non-empty plot identity on packet or source_package; do not synthesize from bundle.plot_id
+    effective_plot_id = (packet.plot_id if packet.plot_id and str(packet.plot_id).strip() else None) or (pkg_plot if pkg_plot and str(pkg_plot).strip() else None)
 
     parent_acq_id = (
         payload.get("parent_acquisition_id")

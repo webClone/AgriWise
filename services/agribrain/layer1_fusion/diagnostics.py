@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .conflict_resolver import ConflictResolverDiagnostics
 
@@ -596,3 +596,36 @@ def validate_covariance_matrix(matrix: List[List[float]], tol: float = 1e-6) -> 
             # Fail closed on any computational error
             return False, f"COVARIANCE_EVALUATION_ERROR: {ex}"
     return True, "valid_psd_covariance"
+
+
+def extract_covariance_matrices_recursive(
+    data: Any,
+    max_depth: int = 10,
+    current_depth: int = 0,
+    prefix: str = "",
+) -> List[Tuple[str, Any]]:
+    """Recursively extract covariance matrices from nested structures up to max_depth (R8-01, R8-03, R8-G05)."""
+    if current_depth > max_depth or data is None:
+        return []
+    matrices: List[Tuple[str, Any]] = []
+    if isinstance(data, dict):
+        for k, v in data.items():
+            path = f"{prefix}.{k}" if prefix else str(k)
+            if k in ("covariance", "P", "cov", "uncertainty_matrix") and isinstance(v, list):
+                matrices.append((path, v))
+            elif isinstance(v, (dict, list)):
+                matrices.extend(extract_covariance_matrices_recursive(v, max_depth, current_depth + 1, path))
+    elif isinstance(data, list):
+        for idx, item in enumerate(data):
+            path = f"{prefix}[{idx}]"
+            if isinstance(item, (dict, list)):
+                matrices.extend(extract_covariance_matrices_recursive(item, max_depth, current_depth + 1, path))
+    else:
+        cov = getattr(data, "covariance", None) or getattr(data, "P", None)
+        if cov is not None and isinstance(cov, list):
+            path = f"{prefix}.covariance" if prefix else "covariance"
+            matrices.append((path, cov))
+        if hasattr(data, "__dict__") and isinstance(data.__dict__, dict):
+            matrices.extend(extract_covariance_matrices_recursive(data.__dict__, max_depth, current_depth + 1, prefix))
+    return matrices
+

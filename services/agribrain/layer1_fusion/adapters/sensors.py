@@ -48,8 +48,19 @@ class SensorAdapter:
         if package is None:
             return items
 
-        plot_id = context.plot_id
-        pkg_id = f"sensor_{plot_id}"
+        # R8-04 / R8-G06: Fail closed on missing package plot_id; do not synthesize from context
+        pkg_plot = getattr(package, "plot_id", None)
+        if not pkg_plot or not str(pkg_plot).strip():
+            plot_id = None
+        else:
+            plot_id = str(pkg_plot).strip()
+
+        # Build device registry lookup from package.devices
+        dev_map = {}
+        for d in getattr(package, "devices", []):
+            d_id = getattr(d, "device_id", None) or (d.get("device_id") if isinstance(d, dict) else None)
+            if d_id:
+                dev_map[d_id] = d
 
         # --- QA-validated readings → point or zone evidence ---
         qa_map = {}
@@ -59,7 +70,8 @@ class SensorAdapter:
 
         for i, reading in enumerate(getattr(package, "readings", [])):
             device_id = getattr(reading, "device_id", "unknown")
-            variable = getattr(reading, "variable", "")
+            raw_var = getattr(reading, "variable", "")
+            variable = raw_var.value if hasattr(raw_var, "value") else str(raw_var)
             value = getattr(reading, "value", None)
             unit = getattr(reading, "unit", None)
             timestamp = getattr(reading, "timestamp", None)
@@ -84,6 +96,35 @@ class SensorAdapter:
             # Diagnostic variables
             is_diag = variable in _DIAGNOSTIC_VARIABLES or not update_allowed
 
+            # R8-04: Resolve authentic calibration identity from reading, QA, device entry or registry
+            d_entry = dev_map.get(device_id)
+            cal_ver = (
+                getattr(reading, "calibration_version", None)
+                or (getattr(qa, "calibration_version", None) if qa else None)
+                or (getattr(d_entry, "calibration_profile_id", None) if d_entry else None)
+                or (d_entry.get("calibration_profile_id") if isinstance(d_entry, dict) else None)
+                or getattr(package, "calibration_profile_id", None)
+            )
+            if not cal_ver:
+                try:
+                    from services.agribrain.sensor_runtime.registry import get_device_registration
+                    reg = get_device_registration(device_id)
+                    cal_ver = getattr(reg, "calibration_profile_id", None) if reg else None
+                except Exception:
+                    cal_ver = None
+
+            parent_acq_id = getattr(reading, "reading_id", None) or getattr(package, "package_id", None) or f"sensor_{device_id}_{i}"
+
+            prov_dict = getattr(package, "provenance", {}) or {}
+            receipt_ref = prov_dict.get("receipt_ref") if isinstance(prov_dict, dict) else getattr(prov_dict, "receipt_ref", None)
+            raw_ref = getattr(reading, "raw_payload_ref", None)
+            if receipt_ref:
+                prov_ref = str(receipt_ref)
+            elif raw_ref and raw_ref.startswith(("urn:", "sha256:", "sha512:", "pkg_", "packet_")):
+                prov_ref = str(raw_ref)
+            else:
+                prov_ref = f"urn:agriwise:receipt:sensor:{device_id}:{plot_id or 'unknown'}:{i}"
+
             items.append(EvidenceItem(
                 evidence_id=f"sensor_{device_id}_{variable}_{i}",
                 plot_id=plot_id,
@@ -100,9 +141,12 @@ class SensorAdapter:
                 sigma=round(1.0 - reliability, 4),
                 reliability=reliability,
                 freshness_score=0.0,
-                provenance_ref=f"sensor_{device_id}_{plot_id}",
+                provenance_ref=prov_ref,
                 diagnostic_only=is_diag,
                 state_update_allowed=update_allowed and not is_diag,
+                instrument_id=device_id,
+                calibration_version=cal_ver,
+                parent_acquisition_id=parent_acq_id,
             ))
 
         # --- Aggregates ---

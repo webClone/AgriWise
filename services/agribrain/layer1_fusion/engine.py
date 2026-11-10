@@ -78,7 +78,7 @@ from .conflict_resolver import detect_conflicts_with_diagnostics
 from .gap_analyzer import detect_gaps
 from .confidence_model import compute_confidence_batch
 from .fusion_rules import fuse_features
-from .diagnostics import build_diagnostics, validate_covariance_matrix
+from .diagnostics import build_diagnostics, validate_covariance_matrix, extract_covariance_matrices_recursive
 from .context_invariants import (
     enforce_context_invariants,
     compute_spatial_fidelity,
@@ -149,20 +149,7 @@ class Layer1FusionEngine:
         def _check_and_validate_covariances(pkg_data: Any, source_name: str) -> None:
             if pkg_data is None:
                 return
-            matrices: List[Tuple[str, Any]] = []
-            if isinstance(pkg_data, dict):
-                for k, v in pkg_data.items():
-                    if k in ("covariance", "P", "cov", "uncertainty_matrix") and isinstance(v, list):
-                        matrices.append((k, v))
-                    elif isinstance(v, dict):
-                        for sub_k, sub_v in v.items():
-                            if sub_k in ("covariance", "P", "cov", "uncertainty_matrix") and isinstance(sub_v, list):
-                                matrices.append((f"{k}.{sub_k}", sub_v))
-            else:
-                cov = getattr(pkg_data, "covariance", None) or getattr(pkg_data, "P", None)
-                if cov is not None:
-                    matrices.append(("covariance", cov))
-
+            matrices = extract_covariance_matrices_recursive(pkg_data)
             for cov_name, mat in matrices:
                 is_psd, cov_reason = validate_covariance_matrix(mat)
                 if not is_psd:
@@ -274,8 +261,8 @@ class Layer1FusionEngine:
                 spatial_index.raster_refs.append(rr)
             raster_audit_count = len(raster_evidence)
 
-        # 8.5.1 ASMAE Raster Ingestion
-        if bundle.asmae_output:
+        # 8.5.1 ASMAE Raster Ingestion (R8-01: block raster export when ASMAE covariance is invalid)
+        if bundle.asmae_output and "asmae" not in disabled_sources:
             from .raster_ingest import ingest_asmae_raster_refs
             asmae_raster_refs = ingest_asmae_raster_refs(
                 bundle.asmae_output, bundle.plot_id,
@@ -503,7 +490,20 @@ class Layer1FusionEngine:
                     admitted_pkgs = []
                     for pkg in actual_pkgs:
                         pkg_plot = getattr(pkg, "plot_id", None)
-                        if pkg_plot and bundle.plot_id and pkg_plot != bundle.plot_id:
+                        # R8-04 / R8-G06: Missing package plot identity must fail closed
+                        if not pkg_plot or not str(pkg_plot).strip():
+                            if all_quarantined is not None:
+                                all_quarantined.append(
+                                    QuarantinedEvidence(
+                                        evidence_id=getattr(pkg, "package_id", f"{canonical_family}_pkg"),
+                                        reason_codes=["MISSING_SOURCE_PACKAGE_PLOT_SCOPE: package has no plot_id"],
+                                        original_source_family=canonical_family,
+                                        variable="package",
+                                        severity="error",
+                                    )
+                                )
+                            continue
+                        if bundle.plot_id and pkg_plot != bundle.plot_id:
                             if all_quarantined is not None:
                                 all_quarantined.append(
                                     QuarantinedEvidence(
@@ -515,8 +515,7 @@ class Layer1FusionEngine:
                                     )
                                 )
                             continue
-                        if hasattr(pkg, "source_family") and pkg.source_family:
-                            pkg.source_family = normalize_source_family(pkg.source_family)
+                        # R8-05 / R8-G07: Preserve input package immutability; never mutate pkg.source_family in-place
                         admitted_pkgs.append(pkg)
                     if admitted_pkgs:
                         packages.setdefault(canonical_family, []).extend(admitted_pkgs)
