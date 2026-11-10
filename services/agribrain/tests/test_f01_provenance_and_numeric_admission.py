@@ -1744,6 +1744,7 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
         out_zero = PerceptionEngineOutput(
             engine_family=PerceptionEngineFamily.DRONE,
             plot_id="plot_pilot",
+            timestamp=CUTOFF,
             qa_score=0.9,
             reliability_weight=0.0,  # Zero quality/reliability
             variables=[
@@ -1994,6 +1995,35 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
         from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
         from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
 
+        from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+        from services.agribrain.layer1_fusion.truth_bridge import SensorAttestationReceipt, register_sensor_receipt, create_signed_sensor_receipt
+        register_device(SensorDeviceRegistration(
+            device_id="pkt_sensor_1",
+            vendor="acme",
+            model="probe-x",
+            protocol="lora",
+            farm_id="farm_pilot",
+            plot_id="plot_pilot",
+            latitude=35.0,
+            longitude=10.0,
+            variables=["vegetation_fraction"],
+            installation_datetime=CUTOFF,
+            status="active",
+            calibration_profile_id="cal_v1",
+        ))
+        register_sensor_receipt(create_signed_sensor_receipt(
+            receipt_id="urn:agriwise:receipt:pkt_sensor_1:v1",
+            issuer="agriwise:trust:sensor_authority",
+            device_id="pkt_sensor_1",
+            plot_id="plot_pilot",
+            variable="vegetation_fraction",
+            calibration_profile_id="cal_v1",
+            status="active",
+            reading_value=0.20,
+            reading_unit="fraction",
+            observed_at=CUTOFF,
+        ))
+
         # 1. Baseline: Valid point sensor vegetation_fraction=0.20 alone
         pkt_sensor = ObservationPacket(
             packet_id="pkt_sensor_1",
@@ -2005,7 +2035,7 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
             point=(35.0, 10.0),
             qa=QAMetadata(scene_score=1.0, sensor_health=1.0),
             uncertainty=UncertaintyModel(error_model="gaussian", sigmas={"vegetation_fraction": 0.02}),
-            payload={"variable": "vegetation_fraction", "value": 0.20, "unit": "fraction"},
+            payload={"variable": "vegetation_fraction", "value": 0.20, "unit": "fraction", "instrument_id": "pkt_sensor_1", "calibration_version": "cal_v1", "provenance_ref": "urn:agriwise:receipt:pkt_sensor_1:v1"},
             reliability_weight=1.0,
         )
         sensor_src = Layer0SourcePackage(source_family="sensor", plot_id="plot_pilot", packets=[pkt_sensor])

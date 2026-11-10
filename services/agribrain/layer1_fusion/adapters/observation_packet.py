@@ -142,6 +142,47 @@ def observation_packet_to_evidence(
 
     flags = [f.value for f in (packet.qa.flags or [])] if packet.qa else []
     
+    # Authenticated publication verification (R10-02)
+    from layer1_fusion.truth_bridge import verify_publication_receipt, PublicationAttestationReceipt
+    pub_receipt_candidate = (
+        getattr(packet, "receipt", None)
+        or getattr(source_package, "receipt", None)
+        or payload.get("publication_receipt")
+        or getattr(getattr(packet, "provenance", None), "receipt", None)
+        or getattr(getattr(packet, "provenance", None), "receipt_ref", None)
+        or getattr(getattr(source_package, "provenance", None), "receipt_ref", None)
+    )
+    is_verified_publication, pub_reason, v_published = verify_publication_receipt(
+        pub_receipt_candidate,
+        source_family=source_fam,
+        acquisition_id=packet.packet_id,
+        content_hash=payload.get("content_hash"),
+    )
+    if is_verified_publication and v_published is not None:
+        p_str = v_published.isoformat()
+        flags.append(f"PUBLISHED_AT:{p_str}")
+        flags.append("VERIFIED_PUBLICATION_RECEIPT")
+    else:
+        # Raw caller claims are recorded as claims only; NOT verified
+        raw_pub = (
+            getattr(source_package, "published_at", None)
+            or getattr(packet, "published_at", None)
+            or payload.get("published_at")
+            or getattr(source_package, "recorded_at", None)
+            or getattr(packet, "recorded_at", None)
+            or payload.get("recorded_at")
+        )
+        if raw_pub:
+            p_str = raw_pub.isoformat() if hasattr(raw_pub, "isoformat") else str(raw_pub)
+            flags.append(f"PUBLISHED_AT:{p_str}")
+            flags.append("CALLER_CLAIMED_PUBLICATION_TIME")
+        is_verified_publication = False
+        v_published = None
+
+    if "flags" in payload and isinstance(payload["flags"], list):
+        _reserved_flags = {"VERIFIED_PUBLICATION_RECEIPT", "AUTHENTICATED_SENSOR_RECEIPT", "AUTHENTICATED_PUBLICATION_RECORD"}
+        flags.extend([f for f in payload["flags"] if f not in _reserved_flags])
+    
     diagnostic_only = False
     state_update_allowed = True
     
@@ -210,13 +251,54 @@ def observation_packet_to_evidence(
 
     pkg_hash = getattr(source_package, "package_hash", "") or ""
     pkt_hash = getattr(packet, "content_hash", "") or packet.packet_id
-    if pkg_hash:
+    explicit_prov = (
+        payload.get("provenance_ref")
+        or getattr(packet, "provenance_ref", None)
+        or (getattr(getattr(packet, "provenance", None), "receipt_ref", None) if getattr(packet, "provenance", None) else None)
+    )
+    if explicit_prov:
+        provenance_ref = str(explicit_prov)
+    elif pkg_hash:
         provenance_ref = f"pkg_{pkg_hash}_pkt_{pkt_hash}"
     else:
         provenance_ref = f"packet_{pkt_hash}"
 
     payload_unit = payload.get("unit")
     
+    pkt_time = packet.timestamp
+
+    inst_id = payload.get("instrument_id") or payload.get("device_id") or getattr(packet, "instrument_id", None)
+    cal_ver = payload.get("calibration_version") or (getattr(packet.qa, "calibration_version", None) if packet.qa else None)
+
+    pkg_plot = getattr(source_package, "plot_id", None) if source_package else None
+    # R8-04 / R8-G06: Require non-empty plot identity on packet or source_package; do not synthesize from bundle.plot_id
+    effective_plot_id = (packet.plot_id if packet.plot_id and str(packet.plot_id).strip() else None) or (pkg_plot if pkg_plot and str(pkg_plot).strip() else None)
+
+    parent_acq_id = (
+        payload.get("parent_acquisition_id")
+        or getattr(getattr(packet, "provenance", None), "acquisition_id", None)
+        or getattr(source_package, "package_id", None)
+        or packet.packet_id
+    )
+
+    if v_published is not None and not isinstance(v_published, datetime):
+        try:
+            from layer1_fusion.temporal_alignment import ensure_utc
+            v_published = ensure_utc(datetime.fromisoformat(str(v_published)))
+        except Exception:
+            v_published = None
+    elif isinstance(v_published, datetime):
+        from layer1_fusion.temporal_alignment import ensure_utc
+        v_published = ensure_utc(v_published)
+
+    active_receipt = getattr(packet, "receipt", None) or getattr(source_package, "receipt", None)
+    if source_fam == "sensor":
+        from layer1_fusion.truth_bridge import get_sensor_receipt, SensorAttestationReceipt, compute_reading_content_digest
+        if isinstance(active_receipt, PublicationAttestationReceipt) or not isinstance(active_receipt, SensorAttestationReceipt):
+            resolved_sensor_rcpt = get_sensor_receipt(str(provenance_ref or "").strip())
+            if resolved_sensor_rcpt is not None:
+                active_receipt = resolved_sensor_rcpt
+
     extracted_keys = set()
     for src_key, (target_var, default_unit) in PAYLOAD_VARIABLE_MAP.items():
         if src_key in payload and payload[src_key] is not None:
@@ -230,7 +312,7 @@ def observation_packet_to_evidence(
 
             item = EvidenceItem(
                 evidence_id=f"{source_fam}_{packet.packet_id}_{var_name}",
-                plot_id=packet.plot_id or bundle.plot_id,
+                plot_id=effective_plot_id,
                 variable=var_name,
                 value=val,
                 unit=unit_name,
@@ -239,7 +321,7 @@ def observation_packet_to_evidence(
                 observation_type=obs_type,
                 spatial_scope=packet.spatial_scope or "plot",
                 scope_id=payload.get("zone_id") or payload.get("zone") or payload.get("device_id"),
-                observed_at=packet.timestamp,
+                observed_at=pkt_time,
                 confidence=final_confidence,
                 sigma=base_sigma,
                 reliability=reliability,
@@ -261,9 +343,19 @@ def observation_packet_to_evidence(
                 prescription_driver_allowed=truth.prescription_driver_allowed and (final_data_status == "observed"),
                 current_1m_approval_allowed=truth.current_1m_approval_allowed and (final_data_status == "observed"),
                 temporal_basis=payload.get("temporal_basis"),
-                content_hash=payload.get("content_hash") or getattr(packet, "content_hash", None),
+                content_hash=(
+                    payload.get("content_hash")
+                    or getattr(packet, "content_hash", None)
+                    or (compute_reading_content_digest(inst_id or packet.packet_id, effective_plot_id, var_name, val, unit_name, pkt_time) if source_fam == "sensor" else None)
+                ),
                 provider_product_id=payload.get("provider_product_id") or payload.get("observation_id"),
                 valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
+                instrument_id=inst_id,
+                calibration_version=cal_ver,
+                parent_acquisition_id=parent_acq_id,
+                receipt=active_receipt,
+                publication_receipt_verified=is_verified_publication,
+                verified_published_at=v_published,
             )
             items.append(item)
             
@@ -272,7 +364,7 @@ def observation_packet_to_evidence(
         unit_name = payload_unit or payload.get("unit") or None
         items.append(EvidenceItem(
             evidence_id=f"{source_fam}_{packet.packet_id}_{var_name}",
-            plot_id=packet.plot_id or bundle.plot_id,
+            plot_id=effective_plot_id,
             variable=var_name,
             value=payload["value"],
             unit=unit_name,
@@ -281,7 +373,7 @@ def observation_packet_to_evidence(
             observation_type=obs_type,
             spatial_scope=packet.spatial_scope or "plot",
             scope_id=payload.get("zone_id") or payload.get("zone") or payload.get("device_id"),
-            observed_at=packet.timestamp,
+            observed_at=pkt_time,
             confidence=final_confidence,
             sigma=base_sigma,
             reliability=reliability,
@@ -306,6 +398,12 @@ def observation_packet_to_evidence(
             content_hash=payload.get("content_hash") or getattr(packet, "content_hash", None),
             provider_product_id=payload.get("provider_product_id") or payload.get("observation_id"),
             valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
+            instrument_id=inst_id,
+            calibration_version=cal_ver,
+            parent_acquisition_id=parent_acq_id,
+            receipt=active_receipt,
+            publication_receipt_verified=is_verified_publication,
+            verified_published_at=v_published,
         ))
 
     return items

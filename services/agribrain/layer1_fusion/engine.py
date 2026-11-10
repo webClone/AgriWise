@@ -33,8 +33,8 @@ from __future__ import annotations
 
 import hashlib
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .schemas import (
     EvidenceGap,
@@ -70,7 +70,7 @@ from .adapters.asmae_adapter import ASMAEAdapter
 from .evidence_ledger import EvidenceLedger
 from .evidence_validation import validate_evidence, quarantine_evidence
 from .truth_bridge import normalize_evidence_truth
-from .temporal_alignment import assign_temporal_window, compute_stale_flags
+from .temporal_alignment import assign_temporal_window, compute_stale_flags, is_available_at_cutoff
 from .spatial_alignment import build_spatial_index
 from .freshness import compute_freshness_batch
 from .source_family import normalize_source_family
@@ -78,7 +78,7 @@ from .conflict_resolver import detect_conflicts_with_diagnostics
 from .gap_analyzer import detect_gaps
 from .confidence_model import compute_confidence_batch
 from .fusion_rules import fuse_features
-from .diagnostics import build_diagnostics
+from .diagnostics import build_diagnostics, validate_covariance_matrix, extract_covariance_matrices_recursive
 from .context_invariants import (
     enforce_context_invariants,
     compute_spatial_fidelity,
@@ -132,8 +132,59 @@ class Layer1FusionEngine:
         all_envelopes: List[SourceEnvelope] = []
         all_quarantined: List[QuarantinedEvidence] = []
 
-        # 2–3. Build source envelopes and run adapters
-        source_packages = self._gather_packages(bundle)
+        as_of_cutoff = (
+            getattr(bundle, "as_of_cutoff", None)
+            or getattr(bundle, "as_of", None)
+            or bundle.window_end
+            or bundle.run_timestamp
+        )
+        is_historical_replay = bool(
+            getattr(bundle, "is_historical_replay", False)
+            or (getattr(bundle, "as_of_cutoff", None) is not None)
+            or (getattr(bundle, "as_of", None) is not None)
+        )
+
+        disabled_sources: Set[str] = set()
+
+        def _check_and_validate_covariances(pkg_data: Any, source_name: str) -> None:
+            if pkg_data is None:
+                return
+            matrices = extract_covariance_matrices_recursive(pkg_data)
+            for cov_name, mat in matrices:
+                if isinstance(mat, str):
+                    all_quarantined.append(
+                        QuarantinedEvidence(
+                            evidence_id=f"{source_name}_{cov_name}",
+                            reason_codes=[f"INVALID_COVARIANCE:{mat}"],
+                            original_source_family=source_name,
+                            variable="covariance",
+                            severity="error",
+                        )
+                    )
+                    disabled_sources.add(source_name)
+                    break
+                is_psd, cov_reason = validate_covariance_matrix(mat)
+                if not is_psd:
+                    all_quarantined.append(
+                        QuarantinedEvidence(
+                            evidence_id=f"{source_name}_{cov_name}",
+                            reason_codes=[f"INVALID_COVARIANCE:{cov_reason}"],
+                            original_source_family=source_name,
+                            variable="covariance",
+                            severity="error",
+                        )
+                    )
+                    disabled_sources.add(source_name)
+                    break
+
+        if bundle.layer0_state_package:
+            _check_and_validate_covariances(bundle.layer0_state_package, "l0_state")
+
+        if bundle.asmae_output:
+            _check_and_validate_covariances(bundle.asmae_output, "asmae")
+
+        # 2–3. Build source envelopes and run adapters (immutable bundle handling)
+        source_packages = self._gather_packages(bundle, disabled_sources=disabled_sources, all_quarantined=all_quarantined)
 
         for family, packages in source_packages.items():
             adapter = self._registry.get_adapter(family)
@@ -161,17 +212,147 @@ class Layer1FusionEngine:
         # 4–5. Validate evidence and quarantine invalid
         valid_evidence: List[EvidenceItem] = []
         for item in all_evidence:
-            # Evidence was normalized once above with its source package.  A
-            # context-free second classification can only discard provenance
-            # (for example, downgrading a provider raster to proxy).  This
-            # stage is deliberately a non-destructive invariant check.
-            violations = validate_evidence(item)
+            # SPEC-B / PR28-01: Universal cutoff enforcement at primary engine intake
+            is_avail, avail_reason = is_available_at_cutoff(item, as_of_cutoff, is_historical_replay=is_historical_replay)
+            if not is_avail:
+                all_quarantined.append(
+                    quarantine_evidence(item, [f"HISTORICAL_CUTOFF_VIOLATION:{avail_reason}"])
+                )
+                continue
+
+            # SPEC-C / PR28-03: Plot namespace validation
+            violations = validate_evidence(item, expected_plot_id=bundle.plot_id)
             if violations:
                 all_quarantined.append(quarantine_evidence(item, violations))
             else:
                 valid_evidence.append(item)
 
-        # 6. Build evidence ledger
+        # 5.5 Pre-ledger ASMAE Authority & Causal Cutoff Check (R11-04, R11-05)
+        if bundle.asmae_output and "asmae" not in disabled_sources:
+            from .truth_bridge import compute_asmae_content_hash, verify_publication_receipt
+            from .temporal_alignment import ensure_utc
+
+            asmae_content_hash = compute_asmae_content_hash(bundle.asmae_output)
+            asmae_prov = bundle.asmae_output.get("provenance") or {}
+            asmae_ts = asmae_prov.get("published_at") or asmae_prov.get("timestamp") or bundle.asmae_output.get("timestamp")
+            asmae_cutoff_violation = False
+
+            if is_historical_replay:
+                if not asmae_ts or not str(asmae_ts).strip():
+                    asmae_cutoff_violation = True
+                    all_quarantined.append(
+                        QuarantinedEvidence(
+                            evidence_id="asmae_raster_output",
+                            reason_codes=["MISSING_ASMAE_PUBLICATION_TIMESTAMP_ON_REPLAY"],
+                            original_source_family="asmae",
+                            variable="asmae_raster",
+                            severity="error",
+                        )
+                    )
+                else:
+                    try:
+                        claimed_dt = ensure_utc(datetime.fromisoformat(str(asmae_ts)))
+                        if claimed_dt > as_of_cutoff:
+                            asmae_cutoff_violation = True
+                            all_quarantined.append(
+                                QuarantinedEvidence(
+                                    evidence_id="asmae_raster_output",
+                                    reason_codes=[f"HISTORICAL_CUTOFF_VIOLATION: asmae claimed publication {claimed_dt} > cutoff {as_of_cutoff}"],
+                                    original_source_family="asmae",
+                                    variable="asmae_raster",
+                                    severity="error",
+                                )
+                            )
+                        else:
+                            pub_candidate = (
+                                asmae_prov.get("publication_receipt")
+                                or bundle.asmae_output.get("publication_receipt")
+                                or asmae_prov.get("receipt_id")
+                                or bundle.asmae_output.get("package_id")
+                                or bundle.asmae_output.get("run_id")
+                            )
+                            cand_acq = bundle.asmae_output.get("run_id") or bundle.asmae_output.get("package_id")
+                            if hasattr(pub_candidate, "acquisition_id") and pub_candidate.acquisition_id == bundle.asmae_output.get("package_id"):
+                                cand_acq = bundle.asmae_output.get("package_id")
+
+                            is_ver_asmae, asmae_reason, verified_asmae_dt = verify_publication_receipt(
+                                pub_candidate,
+                                source_family="asmae",
+                                acquisition_id=cand_acq,
+                                content_hash=asmae_content_hash,
+                            )
+                            if not is_ver_asmae and bundle.asmae_output.get("package_id"):
+                                is_ver_alt, asmae_reason_alt, verified_dt_alt = verify_publication_receipt(
+                                    pub_candidate,
+                                    source_family="asmae",
+                                    acquisition_id=bundle.asmae_output.get("package_id"),
+                                    content_hash=asmae_content_hash,
+                                )
+                                if is_ver_alt:
+                                    is_ver_asmae, asmae_reason, verified_asmae_dt = is_ver_alt, asmae_reason_alt, verified_dt_alt
+
+                            if not is_ver_asmae:
+                                asmae_cutoff_violation = True
+                                all_quarantined.append(
+                                    QuarantinedEvidence(
+                                        evidence_id="asmae_raster_output",
+                                        reason_codes=[f"UNVERIFIED_ASMAE_PUBLICATION_ON_REPLAY: {asmae_reason}"],
+                                        original_source_family="asmae",
+                                        variable="asmae_raster",
+                                        severity="error",
+                                    )
+                                )
+                            elif verified_asmae_dt is None:
+                                asmae_cutoff_violation = True
+                                all_quarantined.append(
+                                    QuarantinedEvidence(
+                                        evidence_id="asmae_raster_output",
+                                        reason_codes=["MISSING_VERIFIED_ASMAE_TIMESTAMP"],
+                                        original_source_family="asmae",
+                                        variable="asmae_raster",
+                                        severity="error",
+                                    )
+                                )
+                            elif abs((claimed_dt - verified_asmae_dt).total_seconds()) > 1.0:
+                                asmae_cutoff_violation = True
+                                all_quarantined.append(
+                                    QuarantinedEvidence(
+                                        evidence_id="asmae_raster_output",
+                                        reason_codes=[f"ASMAE_PUBLICATION_TIMESTAMP_CLAIM_MISMATCH: claimed {claimed_dt} != verified {verified_asmae_dt}"],
+                                        original_source_family="asmae",
+                                        variable="asmae_raster",
+                                        severity="error",
+                                    )
+                                )
+                            elif verified_asmae_dt > as_of_cutoff:
+                                asmae_cutoff_violation = True
+                                all_quarantined.append(
+                                    QuarantinedEvidence(
+                                        evidence_id="asmae_raster_output",
+                                        reason_codes=[f"HISTORICAL_CUTOFF_VIOLATION: asmae verified publication {verified_asmae_dt} > cutoff {as_of_cutoff}"],
+                                        original_source_family="asmae",
+                                        variable="asmae_raster",
+                                        severity="error",
+                                    )
+                                )
+                    except Exception as ex:
+                        asmae_cutoff_violation = True
+                        all_quarantined.append(
+                            QuarantinedEvidence(
+                                evidence_id="asmae_raster_output",
+                                reason_codes=[f"MALFORMED_ASMAE_PUBLICATION_TIMESTAMP: {ex}"],
+                                original_source_family="asmae",
+                                variable="asmae_raster",
+                                severity="error",
+                            )
+                        )
+
+            if asmae_cutoff_violation:
+                disabled_sources.add("asmae")
+                valid_evidence = [e for e in valid_evidence if e.source_family != "asmae"]
+                all_evidence = [e for e in all_evidence if e.source_family != "asmae"]
+
+        # 6. Build evidence ledger (ASMAE quarantined items excluded prior to ledger population, R11-05)
         ledger = EvidenceLedger()
         rejected = ledger.add_batch(valid_evidence)
         for eid, violations in rejected.items():
@@ -184,10 +365,11 @@ class Layer1FusionEngine:
             item.temporal_scope = assign_temporal_window(item, bundle.run_timestamp)
         compute_stale_flags(ledger.all_items, bundle.run_timestamp)
 
-        # 8. Spatial alignment (enriched with L0 WSR data if available)
+        # 8. Spatial alignment (enriched with L0 WSR data if available; R9-04: disabled sources excluded)
+        l0_spatial = bundle.layer0_state_package if "l0_state" not in disabled_sources else None
         spatial_index = build_spatial_index(
             ledger.all_items, bundle.plot_id,
-            layer0_state=bundle.layer0_state_package,
+            layer0_state=l0_spatial,
         )
 
         # 8.5 Raster grid ingestion (optional — pixel-level fidelity)
@@ -196,22 +378,40 @@ class Layer1FusionEngine:
             raster_evidence, raster_refs = ingest_raster_composites(
                 bundle.raster_composites, bundle.plot_id, bundle.run_timestamp,
             )
+            admitted_raster_pairs = set()
+            admitted_raster_keys = set()
             for re in raster_evidence:
+                is_avail, avail_reason = is_available_at_cutoff(re, as_of_cutoff, is_historical_replay=is_historical_replay)
+                if not is_avail:
+                    all_quarantined.append(
+                        quarantine_evidence(re, [f"HISTORICAL_CUTOFF_VIOLATION:{avail_reason}"])
+                    )
+                    continue
+
                 # ingest_raster_composites normalized this item against the
                 # individual raster, not the multi-raster wrapper.
-                violations = validate_evidence(re)
+                violations = validate_evidence(re, expected_plot_id=bundle.plot_id)
                 if violations:
                     all_quarantined.append(quarantine_evidence(re, violations))
                 else:
                     rejected_re = ledger.add(re)
                     if rejected_re:
                         all_quarantined.append(quarantine_evidence(re, rejected_re))
+                    else:
+                        admitted_raster_keys.add(re.source_id)
+                        if getattr(re, "content_hash", None):
+                            admitted_raster_pairs.add((re.source_id, re.content_hash))
+            # R10-03, R11-06: Filter each RasterRef by exact matching paired (raster_id, content_hash)
             for rr in raster_refs:
-                spatial_index.raster_refs.append(rr)
+                if rr.content_hash:
+                    if (rr.raster_id, rr.content_hash) in admitted_raster_pairs:
+                        spatial_index.raster_refs.append(rr)
+                elif rr.raster_id in admitted_raster_keys:
+                    spatial_index.raster_refs.append(rr)
             raster_audit_count = len(raster_evidence)
 
-        # 8.5.1 ASMAE Raster Ingestion
-        if bundle.asmae_output:
+        # 8.5.1 ASMAE Raster Ingestion (R8-01, R9-05, R10-04, R11-04, R11-05)
+        if bundle.asmae_output and "asmae" not in disabled_sources:
             from .raster_ingest import ingest_asmae_raster_refs
             asmae_raster_refs = ingest_asmae_raster_refs(
                 bundle.asmae_output, bundle.plot_id,
@@ -225,12 +425,12 @@ class Layer1FusionEngine:
         if bundle.raster_composites:
             # 8.6 EO Foundation Model embedding
             eo_embedding_audit = self._try_eo_embedding(
-                bundle, ledger, all_quarantined,
+                bundle, ledger, all_quarantined, as_of_cutoff=as_of_cutoff,
             )
 
             # 8.7 Zone segmentation
             zone_seg_audit = self._try_zone_segmentation(
-                bundle, ledger, spatial_index, all_quarantined,
+                bundle, ledger, spatial_index, all_quarantined, as_of_cutoff=as_of_cutoff,
             )
 
         # 9. Freshness
@@ -373,7 +573,12 @@ class Layer1FusionEngine:
         # 19. Return context package
         return pkg
 
-    def _gather_packages(self, bundle: Layer1InputBundle) -> Dict[str, List[Any]]:
+    def _gather_packages(
+        self,
+        bundle: Layer1InputBundle,
+        disabled_sources: Optional[Set[str]] = None,
+        all_quarantined: Optional[List[QuarantinedEvidence]] = None,
+    ) -> Dict[str, List[Any]]:
         """Map Layer 0 data packages to source families for adapter dispatch.
 
         Source hierarchy (by agronomic measurement fidelity):
@@ -431,14 +636,44 @@ class Layer1FusionEngine:
                 canonical_family = normalize_source_family(source_family)
                 actual_pkgs = [p for p in pkgs if p is not None]
                 if actual_pkgs:
-                    # Normalize the package source_family attribute as well
+                    admitted_pkgs = []
                     for pkg in actual_pkgs:
-                        if hasattr(pkg, "source_family") and pkg.source_family:
-                            pkg.source_family = normalize_source_family(pkg.source_family)
-                    packages.setdefault(canonical_family, []).extend(actual_pkgs)
+                        pkg_plot = getattr(pkg, "plot_id", None)
+                        # R8-04 / R8-G06: Missing package plot identity must fail closed
+                        if not pkg_plot or not str(pkg_plot).strip():
+                            if all_quarantined is not None:
+                                all_quarantined.append(
+                                    QuarantinedEvidence(
+                                        evidence_id=getattr(pkg, "package_id", f"{canonical_family}_pkg"),
+                                        reason_codes=["MISSING_SOURCE_PACKAGE_PLOT_SCOPE: package has no plot_id"],
+                                        original_source_family=canonical_family,
+                                        variable="package",
+                                        severity="error",
+                                    )
+                                )
+                            continue
+                        if bundle.plot_id and pkg_plot != bundle.plot_id:
+                            if all_quarantined is not None:
+                                all_quarantined.append(
+                                    QuarantinedEvidence(
+                                        evidence_id=getattr(pkg, "package_id", f"{canonical_family}_pkg"),
+                                        reason_codes=[f"FOREIGN_PLOT_SCOPE_MISMATCH: package plot {pkg_plot} != bundle {bundle.plot_id}"],
+                                        original_source_family=canonical_family,
+                                        variable="package",
+                                        severity="error",
+                                    )
+                                )
+                            continue
+                        # R8-05 / R8-G07: Preserve input package immutability; never mutate pkg.source_family in-place
+                        admitted_pkgs.append(pkg)
+                    if admitted_pkgs:
+                        packages.setdefault(canonical_family, []).extend(admitted_pkgs)
 
-            packages["l0_state"] = [bundle.layer0_state_package] if bundle.layer0_state_package else [None]
-            packages["asmae"] = [bundle.asmae_output] if bundle.asmae_output else [None]
+            l0_state_pkg = bundle.layer0_state_package if (disabled_sources is None or "l0_state" not in disabled_sources) else None
+            packages["l0_state"] = [l0_state_pkg] if l0_state_pkg else [None]
+
+            asmae_pkg = bundle.asmae_output if (disabled_sources is None or "asmae" not in disabled_sources) else None
+            packages["asmae"] = [asmae_pkg] if asmae_pkg else [None]
             
             if bundle.user_events:
                 packages["user_event"] = [bundle.user_events]
@@ -507,15 +742,11 @@ class Layer1FusionEngine:
 
             packages["sentinel5p"] = bundle.sentinel5p_packages or []
 
-            if bundle.layer0_state_package is not None:
-                packages["l0_state"] = [bundle.layer0_state_package]
-            else:
-                packages["l0_state"] = [None]
+            l0_state_pkg = bundle.layer0_state_package if (disabled_sources is None or "l0_state" not in disabled_sources) else None
+            packages["l0_state"] = [l0_state_pkg] if l0_state_pkg else [None]
 
-            if bundle.asmae_output is not None:
-                packages["asmae"] = [bundle.asmae_output]
-            else:
-                packages["asmae"] = [None]
+            asmae_pkg = bundle.asmae_output if (disabled_sources is None or "asmae" not in disabled_sources) else None
+            packages["asmae"] = [asmae_pkg] if asmae_pkg else [None]
 
         # Final safety cleanup: wrap non-list in lists, filter out None
         for k in list(packages.keys()):
@@ -576,6 +807,7 @@ class Layer1FusionEngine:
         ledger: EvidenceLedger,
         spatial_index,
         all_quarantined: list,
+        as_of_cutoff: Optional[datetime] = None,
     ) -> Optional[Dict]:
         """Conditionally run zone segmentation from NDVI rasters.
 
@@ -674,6 +906,8 @@ class Layer1FusionEngine:
                         ),
                         ledger,
                         all_quarantined,
+                        bundle=bundle,
+                        as_of_cutoff=as_of_cutoff,
                         source_context=bundle.raster_composites,
                     )
 
@@ -691,6 +925,7 @@ class Layer1FusionEngine:
         bundle: Layer1InputBundle,
         ledger: EvidenceLedger,
         all_quarantined: list,
+        as_of_cutoff: Optional[datetime] = None,
     ) -> Optional[Dict]:
         """Run EO Foundation Model embedding on multi-spectral rasters.
 
@@ -821,6 +1056,8 @@ class Layer1FusionEngine:
                 ),
                 ledger,
                 all_quarantined,
+                bundle=bundle,
+                as_of_cutoff=as_of_cutoff,
                 source_context=bundle.raster_composites,
             )
 
@@ -852,6 +1089,8 @@ class Layer1FusionEngine:
                 ),
                 ledger,
                 all_quarantined,
+                bundle=bundle,
+                as_of_cutoff=as_of_cutoff,
                 source_context=bundle.raster_composites,
             )
 
@@ -874,10 +1113,13 @@ class Layer1FusionEngine:
         item: EvidenceItem,
         ledger: EvidenceLedger,
         all_quarantined: list,
+        bundle: Optional[Layer1InputBundle] = None,
+        as_of_cutoff: Optional[datetime] = None,
         source_context: Any = None,
     ):
         from .evidence_validation import validate_evidence, quarantine_evidence
         from .truth_bridge import normalize_evidence_truth
+        from .temporal_alignment import is_available_at_cutoff
         
         if "UNQUALIFIED_SPATIAL_IDENTITY" in getattr(item, "flags", []):
             item.state_update_allowed = False
@@ -889,7 +1131,25 @@ class Layer1FusionEngine:
             normalized_item.state_update_allowed = False
             normalized_item.production_usable = False
             normalized_item.diagnostic_only = True
-        violations = validate_evidence(normalized_item)
+
+        # SPEC-B / Gate 12: Universal cutoff check on secondary evidence intake
+        eff_cutoff = as_of_cutoff or (getattr(bundle, "as_of_cutoff", None) if bundle else None) or (getattr(bundle, "as_of", None) if bundle else None) or (bundle.window_end if bundle else None) or (bundle.run_timestamp if bundle else None)
+        is_replay = bool(
+            (bundle and getattr(bundle, "is_historical_replay", False))
+            or (bundle and getattr(bundle, "as_of_cutoff", None) is not None)
+            or (bundle and getattr(bundle, "as_of", None) is not None)
+        )
+        if eff_cutoff is not None:
+            is_avail, avail_reason = is_available_at_cutoff(normalized_item, eff_cutoff, is_historical_replay=is_replay)
+            if not is_avail:
+                all_quarantined.append(
+                    quarantine_evidence(normalized_item, [f"HISTORICAL_CUTOFF_VIOLATION:{avail_reason}"])
+                )
+                return
+
+        # SPEC-C / Gate 12: Plot namespace isolation against bundle.plot_id
+        expected_plot = bundle.plot_id if bundle else getattr(normalized_item, "plot_id", None)
+        violations = validate_evidence(normalized_item, expected_plot_id=expected_plot)
         if violations:
             all_quarantined.append(quarantine_evidence(normalized_item, violations))
         else:

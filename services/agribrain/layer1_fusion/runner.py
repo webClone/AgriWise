@@ -589,8 +589,8 @@ def run_layer1_fusion_v1(
     return pkg
 
 
-def _parse_date(date_str: str, fallback: datetime) -> datetime:
-    """Parse date string to datetime.
+def _parse_date(date_str: str, fallback: datetime, location_tz: Optional[str] = None) -> datetime:
+    """Parse date string to unambiguous UTC datetime (SPEC-B/T21-T22).
 
     Falls back to the provided timestamp (not datetime.now) so that
     deterministic replay with explicit run_timestamp stays deterministic.
@@ -598,7 +598,15 @@ def _parse_date(date_str: str, fallback: datetime) -> datetime:
     if not date_str:
         return fallback
     try:
-        return datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(date_str)
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc)
+        elif location_tz:
+            import zoneinfo
+            loc = zoneinfo.ZoneInfo(location_tz)
+            return dt.replace(tzinfo=loc).astimezone(timezone.utc)
+        else:
+            return dt.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return fallback
 
