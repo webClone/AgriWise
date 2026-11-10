@@ -253,7 +253,8 @@ class Layer1FusionEngine:
             raster_evidence, raster_refs = ingest_raster_composites(
                 bundle.raster_composites, bundle.plot_id, bundle.run_timestamp,
             )
-            admitted_raster_vars = set()
+            admitted_raster_keys = set()
+            admitted_raster_hashes = set()
             for re in raster_evidence:
                 is_avail, avail_reason = is_available_at_cutoff(re, as_of_cutoff, is_historical_replay=is_historical_replay)
                 if not is_avail:
@@ -272,37 +273,100 @@ class Layer1FusionEngine:
                     if rejected_re:
                         all_quarantined.append(quarantine_evidence(re, rejected_re))
                     else:
-                        admitted_raster_vars.add(re.variable)
-            # R9-05: Only admit raster references whose evidence was admitted (not quarantined)
+                        admitted_raster_keys.add(re.source_id)
+                        if getattr(re, "content_hash", None):
+                            admitted_raster_hashes.add(re.content_hash)
+            # R10-03: Filter each RasterRef by exact matching admitted acquisition identity / content hash
             for rr in raster_refs:
-                if rr.variable in admitted_raster_vars:
+                if rr.raster_id in admitted_raster_keys and (rr.content_hash in admitted_raster_hashes if rr.content_hash else True):
                     spatial_index.raster_refs.append(rr)
             raster_audit_count = len(raster_evidence)
 
-        # 8.5.1 ASMAE Raster Ingestion (R8-01: block raster export when ASMAE covariance is invalid; R9-05: check cutoff)
+        # 8.5.1 ASMAE Raster Ingestion (R8-01, R9-05, R10-04)
         if bundle.asmae_output and "asmae" not in disabled_sources:
             asmae_prov = bundle.asmae_output.get("provenance") or {}
             asmae_ts = asmae_prov.get("published_at") or asmae_prov.get("timestamp") or bundle.asmae_output.get("timestamp")
             asmae_cutoff_violation = False
-            if is_historical_replay and asmae_ts:
-                try:
-                    from .temporal_alignment import ensure_utc
-                    asmae_dt = ensure_utc(datetime.fromisoformat(str(asmae_ts)))
-                    if asmae_dt > as_of_cutoff:
+            if is_historical_replay:
+                if not asmae_ts or not str(asmae_ts).strip():
+                    asmae_cutoff_violation = True
+                    all_quarantined.append(
+                        QuarantinedEvidence(
+                            evidence_id="asmae_raster_output",
+                            reason_codes=["MISSING_ASMAE_PUBLICATION_TIMESTAMP_ON_REPLAY"],
+                            original_source_family="asmae",
+                            variable="asmae_raster",
+                            severity="error",
+                        )
+                    )
+                else:
+                    try:
+                        from .temporal_alignment import ensure_utc
+                        asmae_dt = ensure_utc(datetime.fromisoformat(str(asmae_ts)))
+                        if asmae_dt > as_of_cutoff:
+                            asmae_cutoff_violation = True
+                            all_quarantined.append(
+                                QuarantinedEvidence(
+                                    evidence_id="asmae_raster_output",
+                                    reason_codes=[f"HISTORICAL_CUTOFF_VIOLATION: asmae {asmae_dt} > cutoff {as_of_cutoff}"],
+                                    original_source_family="asmae",
+                                    variable="asmae_raster",
+                                    severity="error",
+                                )
+                            )
+                        else:
+                            # Verify publication receipt proof on historical replay (R10-04)
+                            from .truth_bridge import verify_publication_receipt
+                            pub_candidate = (
+                                asmae_prov.get("publication_receipt")
+                                or bundle.asmae_output.get("publication_receipt")
+                                or asmae_prov.get("receipt_id")
+                                or bundle.asmae_output.get("package_id")
+                                or bundle.asmae_output.get("run_id")
+                            )
+                            cand_acq = bundle.asmae_output.get("run_id") or bundle.asmae_output.get("package_id")
+                            if hasattr(pub_candidate, "acquisition_id") and pub_candidate.acquisition_id == bundle.asmae_output.get("package_id"):
+                                cand_acq = bundle.asmae_output.get("package_id")
+                            is_ver_asmae, asmae_reason, _ = verify_publication_receipt(
+                                pub_candidate,
+                                source_family="asmae",
+                                acquisition_id=cand_acq,
+                            )
+                            if not is_ver_asmae and bundle.asmae_output.get("package_id"):
+                                is_ver_asmae_alt, asmae_reason_alt, _ = verify_publication_receipt(
+                                    pub_candidate,
+                                    source_family="asmae",
+                                    acquisition_id=bundle.asmae_output.get("package_id"),
+                                )
+                                if is_ver_asmae_alt:
+                                    is_ver_asmae, asmae_reason = is_ver_asmae_alt, asmae_reason_alt
+                            if not is_ver_asmae:
+                                asmae_cutoff_violation = True
+                                all_quarantined.append(
+                                    QuarantinedEvidence(
+                                        evidence_id="asmae_raster_output",
+                                        reason_codes=[f"UNVERIFIED_ASMAE_PUBLICATION_ON_REPLAY: {asmae_reason}"],
+                                        original_source_family="asmae",
+                                        variable="asmae_raster",
+                                        severity="error",
+                                    )
+                                )
+                    except Exception as ex:
                         asmae_cutoff_violation = True
                         all_quarantined.append(
                             QuarantinedEvidence(
                                 evidence_id="asmae_raster_output",
-                                reason_codes=[f"HISTORICAL_CUTOFF_VIOLATION: asmae {asmae_dt} > cutoff {as_of_cutoff}"],
+                                reason_codes=[f"MALFORMED_ASMAE_PUBLICATION_TIMESTAMP: {ex}"],
                                 original_source_family="asmae",
                                 variable="asmae_raster",
                                 severity="error",
                             )
                         )
-                except Exception:
-                    pass
 
-            if not asmae_cutoff_violation:
+            if asmae_cutoff_violation:
+                disabled_sources.add("asmae")
+                valid_evidence = [e for e in valid_evidence if e.source_family != "asmae"]
+            else:
                 from .raster_ingest import ingest_asmae_raster_refs
                 asmae_raster_refs = ingest_asmae_raster_refs(
                     bundle.asmae_output, bundle.plot_id,

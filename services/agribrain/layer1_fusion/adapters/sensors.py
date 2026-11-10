@@ -115,17 +115,51 @@ class SensorAdapter:
 
             parent_acq_id = getattr(reading, "reading_id", None) or getattr(package, "package_id", None) or f"sensor_{device_id}_{i}"
 
-            prov_dict = getattr(package, "provenance", {}) or {}
-            receipt_ref = prov_dict.get("receipt_ref") if isinstance(prov_dict, dict) else getattr(prov_dict, "receipt_ref", None)
-            reading_receipt = getattr(reading, "receipt", None) or getattr(reading, "receipt_ref", None)
+            from layer1_fusion.truth_bridge import get_sensor_receipt, SensorAttestationReceipt
+            reading_receipt = getattr(reading, "receipt", None)
+            reading_ref = getattr(reading, "receipt_ref", None)
             package_receipt = getattr(package, "receipt", None)
-            active_receipt = reading_receipt if reading_receipt is not None else (package_receipt or (receipt_ref if hasattr(receipt_ref, "receipt_id") else None))
+            prov_dict = getattr(package, "provenance", {}) or {}
+            pkg_receipt_ref = prov_dict.get("receipt_ref") if isinstance(prov_dict, dict) else getattr(prov_dict, "receipt_ref", None)
+
+            # R10-06: Resolve string receipt reference through trusted receipt store before supplying to verifier
+            active_receipt = None
+            candidate_ref = None
+
+            if reading_receipt is not None:
+                if isinstance(reading_receipt, SensorAttestationReceipt) or hasattr(reading_receipt, "receipt_id"):
+                    active_receipt = reading_receipt
+                    candidate_ref = getattr(reading_receipt, "receipt_id", None)
+                elif isinstance(reading_receipt, str):
+                    candidate_ref = reading_receipt
+                    active_receipt = get_sensor_receipt(reading_receipt.strip())
+            elif reading_ref is not None:
+                if isinstance(reading_ref, SensorAttestationReceipt) or hasattr(reading_ref, "receipt_id"):
+                    active_receipt = reading_ref
+                    candidate_ref = getattr(reading_ref, "receipt_id", None)
+                elif isinstance(reading_ref, str):
+                    candidate_ref = reading_ref
+                    active_receipt = get_sensor_receipt(reading_ref.strip())
+            elif package_receipt is not None:
+                if isinstance(package_receipt, SensorAttestationReceipt) or hasattr(package_receipt, "receipt_id"):
+                    active_receipt = package_receipt
+                    candidate_ref = getattr(package_receipt, "receipt_id", None)
+                elif isinstance(package_receipt, str):
+                    candidate_ref = package_receipt
+                    active_receipt = get_sensor_receipt(package_receipt.strip())
+            elif pkg_receipt_ref is not None:
+                if isinstance(pkg_receipt_ref, SensorAttestationReceipt) or hasattr(pkg_receipt_ref, "receipt_id"):
+                    active_receipt = pkg_receipt_ref
+                    candidate_ref = getattr(pkg_receipt_ref, "receipt_id", None)
+                elif isinstance(pkg_receipt_ref, str):
+                    candidate_ref = pkg_receipt_ref
+                    active_receipt = get_sensor_receipt(pkg_receipt_ref.strip())
 
             raw_ref = getattr(reading, "raw_payload_ref", None)
-            if active_receipt and hasattr(active_receipt, "receipt_id"):
+            if candidate_ref:
+                prov_ref = str(candidate_ref)
+            elif active_receipt and hasattr(active_receipt, "receipt_id"):
                 prov_ref = str(active_receipt.receipt_id)
-            elif receipt_ref:
-                prov_ref = str(receipt_ref)
             elif raw_ref:
                 prov_ref = str(raw_ref)
             else:

@@ -1,5 +1,8 @@
 import math
-from typing import Any, Dict, List, Optional, Tuple
+import hashlib
+import json
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 
 from layer1_fusion.schemas import EvidenceItem
@@ -30,7 +33,7 @@ class EvidenceTruth:
 
 @dataclass(frozen=True)
 class SensorAttestationReceipt:
-    """Cryptographic sensor attestation receipt (R9-01).
+    """Cryptographic sensor attestation receipt (R9-01, R10-01).
     
     Binds canonical device ID, namespace/plot, variable, calibration, observation instant,
     issuer authority, and signature.
@@ -45,16 +48,281 @@ class SensorAttestationReceipt:
     content_digest: Optional[str] = None
     observation_instant: Optional[str] = None
     first_available_at: Optional[str] = None
-    revocation_epoch: Optional[int] = None
+    revocation_epoch: Optional[int] = 0
+    signature: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PublicationAttestationReceipt:
+    """Authenticated immutable publication receipt (R10-02).
+    
+    Binds issuer authority, source family, acquisition ID, published timestamp,
+    content hash digest, and signature.
+    """
+    receipt_id: str
+    issuer: str
+    source_family: str
+    acquisition_id: str
+    published_at: datetime
+    content_hash: Optional[str] = None
+    status: str = "active"
     signature: Optional[str] = None
 
 
 _TRUSTED_SENSOR_RECEIPTS: Dict[str, SensorAttestationReceipt] = {}
+_TRUSTED_PUBLICATION_RECEIPTS: Dict[str, PublicationAttestationReceipt] = {}
 _TRUSTED_SENSOR_ISSUERS: frozenset = frozenset({
     "agriwise:ca:sensor",
     "agriwise:edge:attestation",
     "agriwise:trust:sensor_authority",
 })
+_TRUSTED_PUBLICATION_ISSUERS: frozenset = frozenset({
+    "agriwise:publisher:copernicus",
+    "agriwise:publisher:weather",
+    "agriwise:publisher:asmae",
+    "agriwise:publisher:iot",
+    "agriwise:publisher:root",
+    "agriwise:trust:publication_authority",
+    "agriwise:publisher:raster",
+    "agriwise:publisher:sentinel2",
+    "agriwise:trust:publisher",
+})
+
+_TRUSTED_ISSUER_KEYS: Dict[str, Any] = {}
+_REVOKED_SENSOR_RECEIPTS: Set[str] = set()
+_REVOKED_PUBLICATION_RECEIPTS: Set[str] = set()
+_CURRENT_REVOCATION_EPOCH: int = 0
+
+
+def get_trusted_issuer_private_key(issuer: str):
+    """Derive deterministic Ed25519 private key for canonical system issuers."""
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    seed = hashlib.sha256(f"agriwise:keyseed:{issuer}".encode("utf-8")).digest()
+    return ed25519.Ed25519PrivateKey.from_private_bytes(seed)
+
+
+def get_trusted_issuer_public_key(issuer: str):
+    """Retrieve or derive trusted Ed25519 public key for an issuer."""
+    if issuer in _TRUSTED_ISSUER_KEYS:
+        return _TRUSTED_ISSUER_KEYS[issuer]
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_TRUSTED_ISSUER_KEYS") and issuer in mod._TRUSTED_ISSUER_KEYS:
+            return mod._TRUSTED_ISSUER_KEYS[issuer]
+    if issuer in _TRUSTED_SENSOR_ISSUERS or issuer in _TRUSTED_PUBLICATION_ISSUERS:
+        priv = get_trusted_issuer_private_key(issuer)
+        pub = priv.public_key()
+        _TRUSTED_ISSUER_KEYS[issuer] = pub
+        return pub
+    return None
+
+
+def register_trusted_issuer_key(issuer: str, public_key: Any) -> None:
+    """Register a custom public key for an issuer."""
+    _TRUSTED_ISSUER_KEYS[issuer] = public_key
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_TRUSTED_ISSUER_KEYS"):
+            mod._TRUSTED_ISSUER_KEYS[issuer] = public_key
+
+
+def set_current_revocation_epoch(epoch: int) -> None:
+    """Set global revocation epoch."""
+    global _CURRENT_REVOCATION_EPOCH
+    _CURRENT_REVOCATION_EPOCH = epoch
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod:
+            mod._CURRENT_REVOCATION_EPOCH = epoch
+
+
+def revoke_sensor_receipt(receipt_id: str) -> None:
+    """Revoke a specific sensor receipt."""
+    _REVOKED_SENSOR_RECEIPTS.add(receipt_id)
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_REVOKED_SENSOR_RECEIPTS"):
+            mod._REVOKED_SENSOR_RECEIPTS.add(receipt_id)
+
+
+def revoke_publication_receipt(receipt_id: str) -> None:
+    """Revoke a specific publication receipt."""
+    _REVOKED_PUBLICATION_RECEIPTS.add(receipt_id)
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_REVOKED_PUBLICATION_RECEIPTS"):
+            mod._REVOKED_PUBLICATION_RECEIPTS.add(receipt_id)
+
+
+def compute_sensor_receipt_canonical_bytes(
+    receipt_id: str,
+    issuer: str,
+    device_id: str,
+    plot_id: str,
+    variable: str,
+    calibration_profile_id: str,
+    status: str = "active",
+    content_digest: Optional[str] = None,
+    observation_instant: Optional[str] = None,
+    first_available_at: Optional[str] = None,
+    revocation_epoch: Optional[int] = 0,
+) -> bytes:
+    """Compute canonical deterministic serialization for sensor attestation receipt (R10-01)."""
+    payload = {
+        "receipt_id": str(receipt_id),
+        "issuer": str(issuer),
+        "device_id": str(device_id),
+        "plot_id": str(plot_id),
+        "variable": str(variable),
+        "calibration_profile_id": str(calibration_profile_id),
+        "status": str(status),
+        "content_digest": str(content_digest or ""),
+        "observation_instant": str(observation_instant or ""),
+        "first_available_at": str(first_available_at or ""),
+        "revocation_epoch": int(revocation_epoch or 0),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def sign_sensor_receipt_data(
+    receipt_id: str,
+    issuer: str,
+    device_id: str,
+    plot_id: str,
+    variable: str,
+    calibration_profile_id: str,
+    status: str = "active",
+    content_digest: Optional[str] = None,
+    observation_instant: Optional[str] = None,
+    first_available_at: Optional[str] = None,
+    revocation_epoch: Optional[int] = 0,
+    private_key: Optional[Any] = None,
+) -> str:
+    """Sign sensor receipt fields with Ed25519 private key (R10-01)."""
+    if private_key is None:
+        private_key = get_trusted_issuer_private_key(issuer)
+    canonical = compute_sensor_receipt_canonical_bytes(
+        receipt_id=receipt_id,
+        issuer=issuer,
+        device_id=device_id,
+        plot_id=plot_id,
+        variable=variable,
+        calibration_profile_id=calibration_profile_id,
+        status=status,
+        content_digest=content_digest,
+        observation_instant=observation_instant,
+        first_available_at=first_available_at,
+        revocation_epoch=revocation_epoch,
+    )
+    sig_bytes = private_key.sign(canonical)
+    return "ed25519:" + sig_bytes.hex()
+
+
+def create_signed_sensor_receipt(
+    receipt_id: str,
+    issuer: str,
+    device_id: str,
+    plot_id: str,
+    variable: str,
+    calibration_profile_id: str,
+    status: str = "active",
+    content_digest: Optional[str] = None,
+    observation_instant: Optional[str] = None,
+    first_available_at: Optional[str] = None,
+    revocation_epoch: Optional[int] = 0,
+    private_key: Optional[Any] = None,
+) -> SensorAttestationReceipt:
+    """Create a fully signed, authentic cryptographic sensor attestation receipt (R10-01)."""
+    sig = sign_sensor_receipt_data(
+        receipt_id=receipt_id,
+        issuer=issuer,
+        device_id=device_id,
+        plot_id=plot_id,
+        variable=variable,
+        calibration_profile_id=calibration_profile_id,
+        status=status,
+        content_digest=content_digest,
+        observation_instant=observation_instant,
+        first_available_at=first_available_at,
+        revocation_epoch=revocation_epoch,
+        private_key=private_key,
+    )
+    return SensorAttestationReceipt(
+        receipt_id=receipt_id,
+        issuer=issuer,
+        device_id=device_id,
+        plot_id=plot_id,
+        variable=variable,
+        calibration_profile_id=calibration_profile_id,
+        status=status,
+        content_digest=content_digest,
+        observation_instant=observation_instant,
+        first_available_at=first_available_at,
+        revocation_epoch=revocation_epoch,
+        signature=sig,
+    )
+
+
+def compute_publication_receipt_canonical_bytes(
+    receipt_id: str,
+    issuer: str,
+    source_family: str,
+    acquisition_id: str,
+    published_at: Any,
+    content_hash: Optional[str] = None,
+    status: str = "active",
+) -> bytes:
+    """Compute canonical deterministic serialization for publication receipt (R10-02)."""
+    payload = {
+        "receipt_id": str(receipt_id),
+        "issuer": str(issuer),
+        "source_family": str(source_family),
+        "acquisition_id": str(acquisition_id),
+        "published_at": published_at.isoformat() if hasattr(published_at, "isoformat") else str(published_at),
+        "content_hash": str(content_hash or ""),
+        "status": str(status),
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def create_signed_publication_receipt(
+    receipt_id: str,
+    issuer: str,
+    source_family: str,
+    acquisition_id: str,
+    published_at: datetime,
+    content_hash: Optional[str] = None,
+    status: str = "active",
+    private_key: Optional[Any] = None,
+) -> PublicationAttestationReceipt:
+    """Create a fully signed, authentic cryptographic publication attestation receipt (R10-02)."""
+    if private_key is None:
+        private_key = get_trusted_issuer_private_key(issuer)
+    canonical = compute_publication_receipt_canonical_bytes(
+        receipt_id=receipt_id,
+        issuer=issuer,
+        source_family=source_family,
+        acquisition_id=acquisition_id,
+        published_at=published_at,
+        content_hash=content_hash,
+        status=status,
+    )
+    sig = "ed25519:" + private_key.sign(canonical).hex()
+    return PublicationAttestationReceipt(
+        receipt_id=receipt_id,
+        issuer=issuer,
+        source_family=source_family,
+        acquisition_id=acquisition_id,
+        published_at=published_at,
+        content_hash=content_hash,
+        status=status,
+        signature=sig,
+    )
 
 
 def register_sensor_receipt(receipt: SensorAttestationReceipt) -> None:
@@ -72,11 +340,14 @@ def register_sensor_receipt(receipt: SensorAttestationReceipt) -> None:
 def clear_sensor_receipts() -> None:
     """Clear all registered sensor attestation receipts."""
     _TRUSTED_SENSOR_RECEIPTS.clear()
+    _REVOKED_SENSOR_RECEIPTS.clear()
     import sys
     for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
         mod = sys.modules.get(mod_name)
         if mod and hasattr(mod, "_TRUSTED_SENSOR_RECEIPTS"):
             mod._TRUSTED_SENSOR_RECEIPTS.clear()
+        if mod and hasattr(mod, "_REVOKED_SENSOR_RECEIPTS"):
+            mod._REVOKED_SENSOR_RECEIPTS.clear()
 
 
 def get_sensor_receipt(receipt_id: str) -> Optional[SensorAttestationReceipt]:
@@ -92,6 +363,122 @@ def get_sensor_receipt(receipt_id: str) -> Optional[SensorAttestationReceipt]:
             if r is not None:
                 return r
     return None
+
+
+def register_publication_receipt(receipt: PublicationAttestationReceipt) -> None:
+    """Register an authentic publication attestation receipt (R10-02)."""
+    if not isinstance(receipt, PublicationAttestationReceipt) and getattr(receipt, "__class__", None).__name__ != "PublicationAttestationReceipt":
+        raise TypeError("receipt must be an instance of PublicationAttestationReceipt")
+    _TRUSTED_PUBLICATION_RECEIPTS[receipt.receipt_id] = receipt
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_TRUSTED_PUBLICATION_RECEIPTS"):
+            mod._TRUSTED_PUBLICATION_RECEIPTS[receipt.receipt_id] = receipt
+
+
+def clear_publication_receipts() -> None:
+    """Clear all registered publication attestation receipts."""
+    _TRUSTED_PUBLICATION_RECEIPTS.clear()
+    _REVOKED_PUBLICATION_RECEIPTS.clear()
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_TRUSTED_PUBLICATION_RECEIPTS"):
+            mod._TRUSTED_PUBLICATION_RECEIPTS.clear()
+        if mod and hasattr(mod, "_REVOKED_PUBLICATION_RECEIPTS"):
+            mod._REVOKED_PUBLICATION_RECEIPTS.clear()
+
+
+def get_publication_receipt(receipt_id: str) -> Optional[PublicationAttestationReceipt]:
+    """Retrieve a registered publication attestation receipt by ID."""
+    r = _TRUSTED_PUBLICATION_RECEIPTS.get(receipt_id)
+    if r is not None:
+        return r
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_TRUSTED_PUBLICATION_RECEIPTS"):
+            r = mod._TRUSTED_PUBLICATION_RECEIPTS.get(receipt_id)
+            if r is not None:
+                return r
+    return None
+
+
+def verify_publication_receipt(
+    receipt_or_id: Any,
+    source_family: Optional[str] = None,
+    acquisition_id: Optional[str] = None,
+    content_hash: Optional[str] = None,
+) -> Tuple[bool, str, Optional[datetime]]:
+    """Cryptographically verify an immutable publication attestation receipt (R10-02)."""
+    target: Optional[PublicationAttestationReceipt] = None
+    if isinstance(receipt_or_id, PublicationAttestationReceipt) or getattr(receipt_or_id, "__class__", None).__name__ == "PublicationAttestationReceipt":
+        target = receipt_or_id
+    elif isinstance(receipt_or_id, str):
+        target = get_publication_receipt(receipt_or_id.strip())
+    elif isinstance(receipt_or_id, dict):
+        try:
+            target = PublicationAttestationReceipt(**receipt_or_id)
+        except Exception:
+            return False, "invalid_publication_receipt_structure", None
+
+    if target is None:
+        return False, "unverified_publication_receipt", None
+
+    if target.status != "active":
+        return False, f"inactive_publication_receipt:{target.status}", None
+
+    if target.issuer not in _TRUSTED_PUBLICATION_ISSUERS:
+        return False, f"untrusted_publication_issuer:{target.issuer}", None
+
+    if target.receipt_id in _REVOKED_PUBLICATION_RECEIPTS:
+        return False, f"revoked_publication_receipt:{target.receipt_id}", None
+
+    if source_family and target.source_family:
+        t_sf = target.source_family.lower()
+        s_sf = source_family.lower()
+        if t_sf != s_sf and not (
+            (t_sf in ("sentinel2", "sentinel_2", "landsat", "satellite") and s_sf in ("sentinel2", "sentinel_2", "landsat", "satellite")) or
+            (t_sf in ("sensor", "sensor_iot", "iot") and s_sf in ("sensor", "sensor_iot", "iot")) or
+            (t_sf in ("environment", "weather_station", "weather") and s_sf in ("environment", "weather_station", "weather")) or
+            (t_sf in ("raster", "raster_composite", "satellite") and s_sf in ("raster", "raster_composite", "satellite"))
+        ):
+            return False, f"publication_source_family_mismatch:{target.source_family}!={source_family}", None
+
+    if acquisition_id and target.acquisition_id and str(target.acquisition_id).strip() != str(acquisition_id).strip():
+        return False, f"publication_acquisition_mismatch:{target.acquisition_id}!={acquisition_id}", None
+
+    if content_hash and target.content_hash and str(target.content_hash).strip() != str(content_hash).strip():
+        return False, f"publication_content_hash_mismatch:{target.content_hash}!={content_hash}", None
+
+    # Cryptographic signature verification
+    pub_key = get_trusted_issuer_public_key(target.issuer)
+    if pub_key is None:
+        return False, f"untrusted_publication_issuer_missing_key:{target.issuer}", None
+
+    sig_str = str(target.signature or "").strip()
+    if not sig_str or not sig_str.startswith("ed25519:"):
+        return False, "unverified_publication_signature", None
+
+    try:
+        sig_bytes = bytes.fromhex(sig_str[len("ed25519:"):])
+        if len(sig_bytes) != 64:
+            return False, "invalid_publication_signature_length", None
+        canonical = compute_publication_receipt_canonical_bytes(
+            receipt_id=target.receipt_id,
+            issuer=target.issuer,
+            source_family=target.source_family,
+            acquisition_id=target.acquisition_id,
+            published_at=target.published_at,
+            content_hash=target.content_hash,
+            status=target.status,
+        )
+        pub_key.verify(sig_bytes, canonical)
+    except Exception as e:
+        return False, f"invalid_publication_signature:{type(e).__name__}", None
+
+    return True, "verified_publication_receipt", target.published_at
 
 
 def _context_value(source_context: Any, key: str, default: Any = None) -> Any:
@@ -240,16 +627,21 @@ def verify_sensor_attestation(
     if reg_cal.strip() != cal_str:
         return False, f"calibration_profile_mismatch: registered {reg_cal} != item {cal_str}"
 
-    # 8. Cryptographic Sensor Attestation Receipt Verification (R9-01)
+    # 8. Cryptographic Sensor Attestation Receipt Verification (R9-01, R10-01, R10-06)
     target_receipt: Optional[SensorAttestationReceipt] = None
     if receipt is not None:
         if isinstance(receipt, SensorAttestationReceipt) or getattr(receipt, "__class__", None).__name__ == "SensorAttestationReceipt":
             target_receipt = receipt
+        elif isinstance(receipt, str):
+            # R10-06: Resolve string receipt reference through trusted receipt store
+            target_receipt = get_sensor_receipt(receipt.strip())
         elif isinstance(receipt, dict) and "receipt_id" in receipt and "issuer" in receipt:
             try:
                 target_receipt = SensorAttestationReceipt(**receipt)
             except Exception:
                 return False, "invalid_receipt_dict_structure"
+        elif isinstance(receipt, PublicationAttestationReceipt) or getattr(receipt, "__class__", None).__name__ == "PublicationAttestationReceipt":
+            target_receipt = get_sensor_receipt(provenance_ref.strip()) if provenance_ref else None
         else:
             return False, "unauthenticated_receipt_object"
     elif provenance_ref:
@@ -257,7 +649,7 @@ def verify_sensor_attestation(
         target_receipt = get_sensor_receipt(p_ref)
 
     if target_receipt is None:
-        return False, f"unverified_sensor_receipt:{provenance_ref or 'none'}"
+        return False, f"unverified_sensor_receipt:{provenance_ref or receipt or 'none'}"
 
     # Validate target receipt claims and authority
     if target_receipt.status != "active":
@@ -278,9 +670,43 @@ def verify_sensor_attestation(
     if target_receipt.calibration_profile_id != cal_str:
         return False, f"receipt_calibration_mismatch: {target_receipt.calibration_profile_id} != {cal_str}"
 
-    sig = str(target_receipt.signature or "").strip()
-    if not sig or any(bad in sig.lower() for bad in ("dummy", "fake", "forged", "unverified", "none")):
+    # Revocation verification (R10-01, R10-G02)
+    if target_receipt.receipt_id in _REVOKED_SENSOR_RECEIPTS:
+        return False, f"revoked_sensor_receipt:{target_receipt.receipt_id}"
+
+    if target_receipt.revocation_epoch is not None and target_receipt.revocation_epoch < _CURRENT_REVOCATION_EPOCH:
+        return False, f"expired_revocation_epoch:{target_receipt.revocation_epoch} < {_CURRENT_REVOCATION_EPOCH}"
+
+    # Cryptographic Ed25519 signature verification (R10-01, R10-G01, R10-G02)
+    pub_key = get_trusted_issuer_public_key(target_receipt.issuer)
+    if pub_key is None:
+        return False, f"untrusted_issuer_missing_key:{target_receipt.issuer}"
+
+    sig_str = str(target_receipt.signature or "").strip()
+    if not sig_str or not sig_str.startswith("ed25519:"):
         return False, "unverified_receipt_signature"
+
+    try:
+        sig_hex = sig_str[len("ed25519:"):]
+        sig_bytes = bytes.fromhex(sig_hex)
+        if len(sig_bytes) != 64:
+            return False, "invalid_signature_length"
+        canonical = compute_sensor_receipt_canonical_bytes(
+            receipt_id=target_receipt.receipt_id,
+            issuer=target_receipt.issuer,
+            device_id=target_receipt.device_id,
+            plot_id=target_receipt.plot_id,
+            variable=target_receipt.variable,
+            calibration_profile_id=target_receipt.calibration_profile_id,
+            status=target_receipt.status,
+            content_digest=target_receipt.content_digest,
+            observation_instant=target_receipt.observation_instant,
+            first_available_at=target_receipt.first_available_at,
+            revocation_epoch=target_receipt.revocation_epoch,
+        )
+        pub_key.verify(sig_bytes, canonical)
+    except Exception as e:
+        return False, f"invalid_cryptographic_signature:{type(e).__name__}"
 
     return True, "attested_via_verified_receipt"
 

@@ -1996,7 +1996,7 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
         from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
 
         from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
-        from services.agribrain.layer1_fusion.truth_bridge import SensorAttestationReceipt, register_sensor_receipt
+        from services.agribrain.layer1_fusion.truth_bridge import SensorAttestationReceipt, register_sensor_receipt, create_signed_sensor_receipt
         register_device(SensorDeviceRegistration(
             device_id="pkt_sensor_1",
             vendor="acme",
@@ -2011,7 +2011,7 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
             status="active",
             calibration_profile_id="cal_v1",
         ))
-        register_sensor_receipt(SensorAttestationReceipt(
+        register_sensor_receipt(create_signed_sensor_receipt(
             receipt_id="urn:agriwise:receipt:pkt_sensor_1:v1",
             issuer="agriwise:trust:sensor_authority",
             device_id="pkt_sensor_1",
@@ -2019,7 +2019,6 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
             variable="vegetation_fraction",
             calibration_profile_id="cal_v1",
             status="active",
-            signature="ed25519:sig_valid_001",
         ))
 
         # 1. Baseline: Valid point sensor vegetation_fraction=0.20 alone

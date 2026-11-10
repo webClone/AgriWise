@@ -147,7 +147,25 @@ def test_r6_t07_late_publication_excluded_on_historical_replay():
     from layer0.source_package import Layer0SourcePackage
     from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
 
+    tb = _mod('truth_bridge')
     cutoff = datetime(2026, 11, 6, 11, 0, tzinfo=timezone.utc)
+    rcpt_early = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:sentinel2:t07_early",
+        issuer="agriwise:trust:publication_authority",
+        source_family="sentinel2",
+        acquisition_id="pkt_early",
+        published_at=datetime(2026, 11, 6, 10, 30, tzinfo=timezone.utc),
+    )
+    tb.register_publication_receipt(rcpt_early)
+    rcpt_late = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:sentinel2:t07_late",
+        issuer="agriwise:trust:publication_authority",
+        source_family="sentinel2",
+        acquisition_id="pkt_late",
+        published_at=datetime(2026, 11, 6, 16, 0, tzinfo=timezone.utc),
+    )
+    tb.register_publication_receipt(rcpt_late)
+
     early_pkt = ObservationPacket(
         packet_id="pkt_early",
         source=ObservationSource.SENTINEL2,
@@ -156,7 +174,7 @@ def test_r6_t07_late_publication_excluded_on_historical_replay():
         spatial_scope="plot",
         qa=QAMetadata(scene_score=1.0),
         uncertainty=UncertaintyModel(sigmas={"ndvi": 0.02}),
-        payload={"variable": "ndvi", "value": 0.65, "unit": "index", "published_at": "2026-11-06T10:30:00+00:00"},
+        payload={"variable": "ndvi", "value": 0.65, "unit": "index", "published_at": "2026-11-06T10:30:00+00:00", "publication_receipt": rcpt_early},
     )
     late_pkt = ObservationPacket(
         packet_id="pkt_late",
@@ -166,11 +184,13 @@ def test_r6_t07_late_publication_excluded_on_historical_replay():
         spatial_scope="plot",
         qa=QAMetadata(scene_score=1.0),
         uncertainty=UncertaintyModel(sigmas={"ndvi": 0.70}),
-        payload={"variable": "ndvi", "value": 0.70, "unit": "index", "published_at": "2026-11-06T16:00:00+00:00"},
+        payload={"variable": "ndvi", "value": 0.70, "unit": "index", "published_at": "2026-11-06T16:00:00+00:00", "publication_receipt": rcpt_late},
     )
     pkg_early = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-A", packets=[early_pkt])
+    pkg_early.receipt = rcpt_early
     pkg_early.published_at = datetime(2026, 11, 6, 10, 30, tzinfo=timezone.utc)
     pkg_late = Layer0SourcePackage(source_family="sentinel2", plot_id="plot-A", packets=[late_pkt])
+    pkg_late.receipt = rcpt_late
     pkg_late.published_at = datetime(2026, 11, 6, 16, 0, tzinfo=timezone.utc)
 
     bundle = s.Layer1InputBundle(

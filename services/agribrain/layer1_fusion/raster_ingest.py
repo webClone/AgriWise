@@ -213,15 +213,42 @@ def ingest_raster_composites(
         evidence_flags = [] if grid_spec is not None else [
             f"INVALID_GEOSPATIAL_GRID:{grid_status}"
         ]
-        r_pub = raster_data.get("published_at")
-        v_pub_dt = None
-        if r_pub:
-            evidence_flags.append(f"PUBLISHED_AT:{r_pub}")
-            try:
-                from .temporal_alignment import ensure_utc
-                v_pub_dt = ensure_utc(datetime.fromisoformat(str(r_pub)))
-            except Exception:
-                pass
+        
+        # R10-02: Authenticated publication receipt check
+        from .truth_bridge import verify_publication_receipt, get_publication_receipt, PublicationAttestationReceipt
+        pub_cand = (
+            raster_data.get("publication_receipt")
+            or raster_data.get("receipt")
+            or raster_data.get("receipt_id")
+            or raster_data.get("content_hash")
+            or raster_id
+            or var_key
+        )
+        target_acq = raster_id
+        rcpt_obj = pub_cand
+        if isinstance(pub_cand, str):
+            rcpt_obj = get_publication_receipt(pub_cand.strip())
+        if rcpt_obj is not None:
+            r_acq = getattr(rcpt_obj, "acquisition_id", None)
+            if r_acq in (var_key, canonical_var, raster_id):
+                target_acq = r_acq
+
+        is_verified_pub, pub_reason, v_pub_dt = verify_publication_receipt(
+            pub_cand,
+            source_family="raster_composite",
+            acquisition_id=target_acq,
+            content_hash=content_hash,
+        )
+        if is_verified_pub and v_pub_dt is not None:
+            evidence_flags.append(f"PUBLISHED_AT:{v_pub_dt.isoformat()}")
+            evidence_flags.append("VERIFIED_PUBLICATION_RECEIPT")
+        else:
+            r_pub = raster_data.get("published_at")
+            if r_pub:
+                evidence_flags.append(f"PUBLISHED_AT:{r_pub}")
+                evidence_flags.append("CALLER_CLAIMED_PUBLICATION_TIME")
+            is_verified_pub = False
+            v_pub_dt = None
         effective_zone_masks = zone_masks if grid_spec is not None else None
 
         if effective_zone_masks:
@@ -246,6 +273,7 @@ def ingest_raster_composites(
                     unit="index" if canonical_var in ("ndvi", "ndmi", "ndre") else "dB",
                     source_family="raster_composite",
                     source_id=raster_id,
+                    content_hash=content_hash,
                     observation_type="measurement",
                     spatial_scope="zone",
                     scope_id=zone_id,
@@ -257,7 +285,7 @@ def ingest_raster_composites(
                     provenance_ref=f"raster_ingest_{raster_id}_zone_{zone_id}",
                     flags=list(evidence_flags),
                     grounding_class=grounding_class,
-                    publication_receipt_verified=bool(r_pub),
+                    publication_receipt_verified=is_verified_pub,
                     verified_published_at=v_pub_dt,
                     **ev_fields
                 )
@@ -283,6 +311,7 @@ def ingest_raster_composites(
                 unit="index" if canonical_var in ("ndvi", "ndmi", "ndre") else "dB",
                 source_family="raster_composite",
                 source_id=raster_id,
+                content_hash=content_hash,
                 observation_type="measurement",
                 spatial_scope="raster" if grid_spec is not None else "plot",
                 scope_id=raster_id if grid_spec is not None else plot_id,
@@ -294,7 +323,7 @@ def ingest_raster_composites(
                 provenance_ref=f"raster_ingest_{raster_id}",
                 flags=list(evidence_flags),
                 grounding_class=grounding_class,
-                publication_receipt_verified=bool(r_pub),
+                publication_receipt_verified=is_verified_pub,
                 verified_published_at=v_pub_dt,
                 **ev_fields
             )

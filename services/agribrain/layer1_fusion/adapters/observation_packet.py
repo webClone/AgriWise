@@ -142,36 +142,42 @@ def observation_packet_to_evidence(
 
     flags = [f.value for f in (packet.qa.flags or [])] if packet.qa else []
     
-    # Authoritative publication time (package / receipt takes precedence over payload; R8-02)
-    verified_pub = (
-        getattr(source_package, "published_at", None)
-        or (getattr(packet, "receipt", None) and getattr(packet.receipt, "published_at", None))
-        or (getattr(packet, "provenance", None) and getattr(packet.provenance, "published_at", None))
+    # Authenticated publication verification (R10-02)
+    from layer1_fusion.truth_bridge import verify_publication_receipt, PublicationAttestationReceipt
+    pub_receipt_candidate = (
+        getattr(packet, "receipt", None)
+        or getattr(source_package, "receipt", None)
+        or payload.get("publication_receipt")
+        or getattr(getattr(packet, "provenance", None), "receipt", None)
+        or getattr(getattr(packet, "provenance", None), "receipt_ref", None)
+        or getattr(getattr(source_package, "provenance", None), "receipt_ref", None)
     )
-    auth_pub = verified_pub or payload.get("published_at")
-    if auth_pub:
-        p_str = auth_pub.isoformat() if hasattr(auth_pub, "isoformat") else str(auth_pub)
+    is_verified_publication, pub_reason, v_published = verify_publication_receipt(
+        pub_receipt_candidate,
+        source_family=source_fam,
+        acquisition_id=packet.packet_id,
+        content_hash=getattr(packet, "content_hash", None),
+    )
+    if is_verified_publication and v_published is not None:
+        p_str = v_published.isoformat()
         flags.append(f"PUBLISHED_AT:{p_str}")
-        if verified_pub:
-            flags.append("VERIFIED_PUBLICATION_RECEIPT")
-        else:
+        flags.append("VERIFIED_PUBLICATION_RECEIPT")
+    else:
+        # Raw caller claims are recorded as claims only; NOT verified
+        raw_pub = (
+            getattr(source_package, "published_at", None)
+            or getattr(packet, "published_at", None)
+            or payload.get("published_at")
+            or getattr(source_package, "recorded_at", None)
+            or getattr(packet, "recorded_at", None)
+            or payload.get("recorded_at")
+        )
+        if raw_pub:
+            p_str = raw_pub.isoformat() if hasattr(raw_pub, "isoformat") else str(raw_pub)
+            flags.append(f"PUBLISHED_AT:{p_str}")
             flags.append("CALLER_CLAIMED_PUBLICATION_TIME")
-
-    verified_rec = (
-        getattr(source_package, "recorded_at", None)
-        or (getattr(packet, "receipt", None) and getattr(packet.receipt, "recorded_at", None))
-        or (getattr(packet, "provenance", None) and getattr(packet.provenance, "recorded_at", None))
-    )
-    auth_rec = verified_rec or payload.get("recorded_at")
-    if auth_rec:
-        r_str = auth_rec.isoformat() if hasattr(auth_rec, "isoformat") else str(auth_rec)
-        flags.append(f"RECORDED_AT:{r_str}")
-        if verified_rec:
-            flags.append("VERIFIED_PUBLICATION_RECEIPT")
-        elif not verified_pub:
-            flags.append("CALLER_CLAIMED_PUBLICATION_TIME")
-
-    is_verified_publication = bool(verified_pub or verified_rec)
+        is_verified_publication = False
+        v_published = None
 
     if "flags" in payload and isinstance(payload["flags"], list):
         _reserved_flags = {"VERIFIED_PUBLICATION_RECEIPT", "AUTHENTICATED_SENSOR_RECEIPT", "AUTHENTICATED_PUBLICATION_RECORD"}
@@ -275,7 +281,6 @@ def observation_packet_to_evidence(
         or packet.packet_id
     )
 
-    v_published = verified_pub if verified_pub else (verified_rec if verified_rec else None)
     if v_published is not None and not isinstance(v_published, datetime):
         try:
             from layer1_fusion.temporal_alignment import ensure_utc
@@ -287,6 +292,12 @@ def observation_packet_to_evidence(
         v_published = ensure_utc(v_published)
 
     active_receipt = getattr(packet, "receipt", None) or getattr(source_package, "receipt", None)
+    if source_fam == "sensor":
+        from layer1_fusion.truth_bridge import get_sensor_receipt, SensorAttestationReceipt
+        if isinstance(active_receipt, PublicationAttestationReceipt) or not isinstance(active_receipt, SensorAttestationReceipt):
+            resolved_sensor_rcpt = get_sensor_receipt(str(provenance_ref or "").strip())
+            if resolved_sensor_rcpt is not None:
+                active_receipt = resolved_sensor_rcpt
 
     extracted_keys = set()
     for src_key, (target_var, default_unit) in PAYLOAD_VARIABLE_MAP.items():

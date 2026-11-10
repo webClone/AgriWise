@@ -540,13 +540,15 @@ def build_diagnostics(
 
 
 def validate_covariance_matrix(matrix: List[List[float]], tol: float = 1e-9) -> Tuple[bool, str]:
-    """Validate full covariance matrix: must be symmetric and positive semi-definite (SPEC-D/T37, R9-02).
+    """Validate full covariance matrix: must be symmetric and positive semi-definite (SPEC-D/T37, R9-02, R10-05).
     
-    Scale-stable validation:
-    - Relative determinant tolerance: scale = max(a*d, b^2, 1e-15), det < -1e-9 * scale is rejected
+    Scale-stable pre-normalized validation:
+    - Pre-normalization by matrix diagonal magnitude avoids underflow/overflow across all physical units
+    - Diagonal positivity: any negative diagonal entry fails closed immediately (no negative variance)
+    - Relative determinant tolerance: normalized det < -1e-9 is rejected
     - Numerical overflow rejection: non-finite intermediate values fail closed
     - Scale-aware eigenspectrum / LDL^T decomposition for n >= 3
-    - Proper PSD semantics: zero matrix and rank-deficient PSD matrices pass
+    - Proper PSD semantics: zero matrix (rank 0) and rank-deficient PSD matrices pass
     """
     if matrix is None or not isinstance(matrix, list) or len(matrix) == 0:
         return False, "EMPTY_OR_INVALID_MATRIX"
@@ -558,65 +560,79 @@ def validate_covariance_matrix(matrix: List[List[float]], tol: float = 1e-9) -> 
             if not isinstance(v, (int, float)) or not math.isfinite(v):
                 return False, "NON_FINITE_COVARIANCE_VALUE"
 
-    # Scale calculation
-    diag_max = max(float(matrix[i][i]) for i in range(n))
+    # Strictly reject negative diagonal elements (variance >= 0 is a physical and mathematical requirement)
     for i in range(n):
-        if matrix[i][i] < -1e-15 * max(diag_max, 1.0):
+        if matrix[i][i] < 0.0:
             return False, f"NEGATIVE_VARIANCE_ON_DIAGONAL: P[{i}][{i}] = {matrix[i][i]} < 0"
 
-    # Zero matrix / zero diagonal check (proper PSD semantics: rank 0 is valid PSD)
-    if diag_max <= 0.0:
+    # Maximum diagonal element
+    diag_max = max(float(matrix[i][i]) for i in range(n))
+
+    # Zero matrix check (proper PSD semantics: rank 0 is valid PSD)
+    if diag_max == 0.0:
         for i in range(n):
             for j in range(n):
-                if abs(matrix[i][j]) > 1e-15:
+                if matrix[i][j] != 0.0:
                     return False, f"NON_PSD_COVARIANCE_ZERO_DIAGONAL_NONZERO_OFFDIAG: P[{i}][{j}] != 0"
         return True, "valid_psd_covariance"
 
-    # 1. Scale-aware Symmetry check
+    # Pre-normalize matrix by diag_max to bring entries to O(1) and eliminate tiny/huge scale distortion (R10-05)
+    try:
+        M = [[float(matrix[i][j]) / diag_max for j in range(n)] for i in range(n)]
+    except OverflowError:
+        return False, "NUMERICAL_OVERFLOW_DETECTED: matrix normalization overflow"
+
+    for row in M:
+        if not all(math.isfinite(v) for v in row):
+            return False, "NUMERICAL_OVERFLOW_DETECTED: non-finite normalized value"
+
+    # 1. Scale-invariant Symmetry check
     for i in range(n):
         for j in range(i + 1, n):
-            scale = max(abs(matrix[i][i]), abs(matrix[j][j]), 1e-12)
-            if abs(matrix[i][j] - matrix[j][i]) > 1e-6 * scale:
+            if abs(M[i][j] - M[j][i]) > 1e-6:
                 return False, f"ASYMMETRIC_COVARIANCE: |P[{i}][{j}] - P[{j}][{i}]| = {abs(matrix[i][j] - matrix[j][i])} exceeds tolerance"
 
     # 2. Positive Semi-Definiteness
     if n == 1:
         return True, "valid_psd_covariance"
     elif n == 2:
-        a = float(matrix[0][0])
-        b = float(matrix[0][1])
-        d = float(matrix[1][1])
+        # Check unnormalized intermediate products for overflow (R9-02)
         try:
-            prod = a * d
-            sq = b * b
-            if not math.isfinite(prod) or not math.isfinite(sq):
-                return False, "NUMERICAL_OVERFLOW_DETECTED: intermediate product exceeds finite range"
-            det = prod - sq
-            if not math.isfinite(det):
-                return False, "NUMERICAL_OVERFLOW_DETECTED: non-finite determinant"
+            orig_prod = float(matrix[0][0]) * float(matrix[1][1])
+            orig_sq = float(matrix[0][1]) * float(matrix[1][0])
+            if not math.isfinite(orig_prod) or not math.isfinite(orig_sq):
+                return False, "NUMERICAL_OVERFLOW_DETECTED: unnormalized determinant components exceed floating point range"
         except OverflowError:
-            return False, "NUMERICAL_OVERFLOW_DETECTED: intermediate product overflow"
+            return False, "NUMERICAL_OVERFLOW_DETECTED: unnormalized determinant components exceed floating point range"
 
-        # Scale-aware determinant test (R9-02): indefinite eigenspectrum fails closed
-        scale = max(prod, sq, 1e-15)
-        if det < -1e-9 * scale:
-            return False, f"NON_PSD_COVARIANCE_NEGATIVE_DETERMINANT: det={det} < 0 (indefinite eigenspectrum)"
+        a = M[0][0]
+        b = M[0][1]
+        d = M[1][1]
+        prod = a * d
+        sq = b * b
+        if not math.isfinite(prod) or not math.isfinite(sq):
+            return False, "NUMERICAL_OVERFLOW_DETECTED: intermediate product exceeds finite range"
+        det_norm = prod - sq
+        if not math.isfinite(det_norm):
+            return False, "NUMERICAL_OVERFLOW_DETECTED: non-finite determinant"
+
+        # Pre-normalized determinant test (R10-05): indefinite eigenspectrum fails closed
+        if det_norm < -1e-9:
+            return False, f"NON_PSD_COVARIANCE_NEGATIVE_DETERMINANT: det_norm={det_norm} < 0 (indefinite eigenspectrum)"
     else:
         # Check PSD using numpy if present, otherwise scale-normalized pure-Python LDL^T Cholesky
         try:
             import numpy as np
-            mat_arr = np.array(matrix, dtype=float)
+            mat_arr = np.array(M, dtype=float)
             if not np.all(np.isfinite(mat_arr)):
                 return False, "NON_FINITE_COVARIANCE_VALUE"
             eigs = np.linalg.eigvalsh(mat_arr)
             if not np.all(np.isfinite(eigs)):
                 return False, "NUMERICAL_OVERFLOW_DETECTED: non-finite eigenspectrum"
-            scale = max(float(np.max(np.abs(eigs))), diag_max, 1e-12)
-            if any(e < -1e-9 * scale for e in eigs):
+            if any(e < -1e-9 for e in eigs):
                 return False, f"NON_PSD_COVARIANCE_NEGATIVE_EIGENVALUE: min_eig={min(eigs)} < 0"
         except ImportError:
-            scale = max(diag_max, 1e-12)
-            A = [[float(matrix[i][j]) / scale for j in range(n)] for i in range(n)]
+            A = [[M[i][j] for j in range(n)] for i in range(n)]
             for i in range(n):
                 A[i][i] += 1e-11
             L = [[0.0] * n for _ in range(n)]
@@ -628,7 +644,7 @@ def validate_covariance_matrix(matrix: List[List[float]], tol: float = 1e-9) -> 
                         return False, "NUMERICAL_OVERFLOW_DETECTED: non-finite intermediate pivot"
                     if i == j:
                         if val < -1e-9:
-                            return False, f"NON_PSD_COVARIANCE_NEGATIVE_PIVOT: pivot={val * scale} < 0"
+                            return False, f"NON_PSD_COVARIANCE_NEGATIVE_PIVOT: pivot={val * diag_max} < 0"
                         L[i][j] = math.sqrt(max(0.0, val))
                     else:
                         if L[j][j] == 0.0:
