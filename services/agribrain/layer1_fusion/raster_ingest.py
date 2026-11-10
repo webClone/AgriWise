@@ -137,7 +137,8 @@ def ingest_raster_composites(
                         actual_valid += 1
         valid_count = max(0, min(H * W, actual_valid))
         resolution_m = raster_data.get("resolution_m", 10.0)
-        canonical_var = _VARIABLE_MAP.get(var_key, var_key.lower())
+        raw_var = raster_data.get("variable") or var_key
+        canonical_var = _VARIABLE_MAP.get(raw_var, _VARIABLE_MAP.get(str(raw_var).upper(), str(raw_var).lower()))
 
         total_cells = H * W
         observed_ratio = float(valid_count / total_cells) if total_cells > 0 else 0.0

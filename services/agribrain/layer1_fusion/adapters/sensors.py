@@ -115,7 +115,7 @@ class SensorAdapter:
 
             parent_acq_id = getattr(reading, "reading_id", None) or getattr(package, "package_id", None) or f"sensor_{device_id}_{i}"
 
-            from layer1_fusion.truth_bridge import get_sensor_receipt, SensorAttestationReceipt
+            from layer1_fusion.truth_bridge import get_sensor_receipt, SensorAttestationReceipt, compute_reading_content_digest
             reading_receipt = getattr(reading, "receipt", None)
             reading_ref = getattr(reading, "receipt_ref", None)
             package_receipt = getattr(package, "receipt", None)
@@ -183,6 +183,7 @@ class SensorAdapter:
                 freshness_score=0.0,
                 provenance_ref=prov_ref,
                 receipt=active_receipt,
+                content_hash=compute_reading_content_digest(device_id, plot_id, variable, value, unit, timestamp),
                 diagnostic_only=is_diag,
                 state_update_allowed=update_allowed and not is_diag,
                 instrument_id=device_id,

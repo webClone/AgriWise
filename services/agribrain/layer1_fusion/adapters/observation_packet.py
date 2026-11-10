@@ -293,7 +293,7 @@ def observation_packet_to_evidence(
 
     active_receipt = getattr(packet, "receipt", None) or getattr(source_package, "receipt", None)
     if source_fam == "sensor":
-        from layer1_fusion.truth_bridge import get_sensor_receipt, SensorAttestationReceipt
+        from layer1_fusion.truth_bridge import get_sensor_receipt, SensorAttestationReceipt, compute_reading_content_digest
         if isinstance(active_receipt, PublicationAttestationReceipt) or not isinstance(active_receipt, SensorAttestationReceipt):
             resolved_sensor_rcpt = get_sensor_receipt(str(provenance_ref or "").strip())
             if resolved_sensor_rcpt is not None:
@@ -343,7 +343,11 @@ def observation_packet_to_evidence(
                 prescription_driver_allowed=truth.prescription_driver_allowed and (final_data_status == "observed"),
                 current_1m_approval_allowed=truth.current_1m_approval_allowed and (final_data_status == "observed"),
                 temporal_basis=payload.get("temporal_basis"),
-                content_hash=payload.get("content_hash") or getattr(packet, "content_hash", None),
+                content_hash=(
+                    payload.get("content_hash")
+                    or getattr(packet, "content_hash", None)
+                    or (compute_reading_content_digest(inst_id or packet.packet_id, effective_plot_id, var_name, val, unit_name, pkt_time) if source_fam == "sensor" else None)
+                ),
                 provider_product_id=payload.get("provider_product_id") or payload.get("observation_id"),
                 valid_fraction=payload.get("valid_fraction") or payload.get("clear_fraction"),
                 instrument_id=inst_id,

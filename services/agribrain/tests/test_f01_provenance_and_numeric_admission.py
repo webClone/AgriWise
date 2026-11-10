@@ -2019,6 +2019,9 @@ class TestF01DownstreamPerceptionZeroInfluenceIntegration(unittest.TestCase):
             variable="vegetation_fraction",
             calibration_profile_id="cal_v1",
             status="active",
+            reading_value=0.20,
+            reading_unit="fraction",
+            observed_at=CUTOFF,
         ))
 
         # 1. Baseline: Valid point sensor vegetation_fraction=0.20 alone
