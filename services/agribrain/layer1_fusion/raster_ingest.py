@@ -239,6 +239,7 @@ def ingest_raster_composites(
             source_family="raster_composite",
             acquisition_id=target_acq,
             content_hash=content_hash,
+            require_content_binding=True,
         )
         if is_verified_pub and v_pub_dt is not None:
             evidence_flags.append(f"PUBLISHED_AT:{v_pub_dt.isoformat()}")
@@ -339,8 +340,8 @@ def _compute_pixel_hash(
     native_resolution_m: Optional[float] = None,
 ) -> str:
     """Deterministic hash of pixel data and grid geometry."""
-    h = len(pixel_array) if pixel_array else 0
-    w = len(pixel_array[0]) if (pixel_array and isinstance(pixel_array[0], list)) else 0
+    h = len(pixel_array) if pixel_array is not None and len(pixel_array) > 0 else 0
+    w = len(pixel_array[0]) if (h > 0 and hasattr(pixel_array[0], '__len__')) else 0
     flat = [f"shape={h}x{w}"]
     if native_resolution_m is not None:
         flat.append(f"res={native_resolution_m}")
@@ -359,6 +360,19 @@ def _compute_pixel_hash(
             flat.append(f"{row:.6f}" if (row is not None and row == row) else "NaN")
     raw = ",".join(flat).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def compute_raster_composite_content_hash(
+    raster_data: Dict[str, Any],
+    native_resolution_m: Optional[float] = None,
+) -> str:
+    """Canonical content hash for raster composite dictionary (R12-03)."""
+    pixel_array = raster_data.get("values") or raster_data.get("grid") or []
+    h = len(pixel_array) if pixel_array is not None and len(pixel_array) > 0 else 0
+    w = len(pixel_array[0]) if (h > 0 and hasattr(pixel_array[0], '__len__')) else 0
+    res_m = raster_data.get("resolution_m", native_resolution_m or 10.0)
+    gs, _ = validate_raster_grid_spec(raster_data, h, w, res_m) if raster_grid_matches_dimensions(pixel_array, h, w) else (None, "shape_mismatch")
+    return _compute_pixel_hash(pixel_array, grid_spec=gs, native_resolution_m=res_m)
 
 
 def _compute_plot_stats(pixel_array: List[List[float]]) -> Dict[str, float]:

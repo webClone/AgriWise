@@ -90,24 +90,26 @@ _TRUSTED_PUBLICATION_ISSUERS: frozenset = frozenset({
 })
 
 _TRUSTED_ISSUER_PUBLIC_KEYS: Dict[str, Any] = {}
-_TEST_PRIVATE_KEYS: Dict[str, Any] = {}
 
 
 class DurableRevocationStore:
-    """Durable, monotonic revocation store across workers and restarts (R11-07)."""
+    """Durable, fail-closed monotonic revocation store across workers and restarts (R11-07, R12-04)."""
 
     def __init__(self, persistence_path: Optional[str] = None):
-        self.persistence_path = persistence_path or os.environ.get("AGRIWISE_REVOCATION_PATH", "")
+        default_dir = os.environ.get("AGRIWISE_REVOCATION_DIR", os.path.join(os.path.expanduser("~"), ".agriwise"))
+        default_file = os.path.join(default_dir, "revocation_store.json")
+        self.persistence_path = persistence_path or os.environ.get("AGRIWISE_REVOCATION_PATH") or default_file
         self.revocation_epoch: int = 0
         self.revoked_sensor_receipts: Set[str] = set()
         self.revoked_publication_receipts: Set[str] = set()
         if self.persistence_path and os.path.exists(self.persistence_path):
             self.load_from_disk()
 
-    def set_epoch(self, epoch: int, force: bool = False) -> None:
-        if not force and int(epoch) < self.revocation_epoch:
-            raise ValueError(f"Monotonicity violation: cannot roll back epoch from {self.revocation_epoch} to {epoch}")
-        self.revocation_epoch = int(epoch)
+    def set_epoch(self, epoch: int) -> None:
+        new_epoch = int(epoch)
+        if new_epoch < self.revocation_epoch:
+            raise ValueError(f"Monotonicity violation: cannot roll back epoch from {self.revocation_epoch} to {new_epoch}")
+        self.revocation_epoch = new_epoch
         self._persist()
 
     def revoke_sensor(self, receipt_id: str) -> None:
@@ -116,12 +118,6 @@ class DurableRevocationStore:
 
     def revoke_publication(self, receipt_id: str) -> None:
         self.revoked_publication_receipts.add(str(receipt_id).strip())
-        self._persist()
-
-    def clear(self) -> None:
-        self.revoked_sensor_receipts.clear()
-        self.revoked_publication_receipts.clear()
-        self.revocation_epoch = 0
         self._persist()
 
     def is_sensor_revoked(self, receipt_id: str, receipt_epoch: Optional[int] = None, epoch: Optional[int] = None) -> Tuple[bool, Optional[str]]:
@@ -141,8 +137,11 @@ class DurableRevocationStore:
 
     def _persist(self) -> None:
         if not self.persistence_path:
-            return
+            raise IOError("Cannot persist revocation store: persistence_path is not configured")
         try:
+            parent_dir = os.path.dirname(self.persistence_path)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
             data = {
                 "revocation_epoch": self.revocation_epoch,
                 "revoked_sensor_receipts": sorted(list(self.revoked_sensor_receipts)),
@@ -153,11 +152,13 @@ class DurableRevocationStore:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             os.replace(tmp_path, self.persistence_path)
-        except Exception:
-            pass
+        except Exception as ex:
+            raise IOError(f"Atomic persistence failure writing revocation store to {self.persistence_path}: {ex}") from ex
 
     def load_from_disk(self) -> None:
-        if not self.persistence_path or not os.path.exists(self.persistence_path):
+        if not self.persistence_path:
+            raise IOError("Cannot load revocation store: persistence_path is not configured")
+        if not os.path.exists(self.persistence_path):
             return
         try:
             with open(self.persistence_path, "r", encoding="utf-8") as f:
@@ -169,15 +170,30 @@ class DurableRevocationStore:
             self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
             self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
         except Exception as ex:
-            if "rollback" in str(ex):
-                raise
+            raise IOError(f"Failed to load revocation store from {self.persistence_path}: {ex}") from ex
 
 
 _REVOCATION_STORE = DurableRevocationStore()
 
 
+def get_revocation_store() -> DurableRevocationStore:
+    """Retrieve global revocation store instance (R12-04)."""
+    return _REVOCATION_STORE
+
+
+def set_revocation_store(store: DurableRevocationStore) -> None:
+    """Configure global revocation store instance (R12-04)."""
+    global _REVOCATION_STORE
+    _REVOCATION_STORE = store
+    import sys
+    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "_REVOCATION_STORE"):
+            mod._REVOCATION_STORE = store
+
+
 def register_trusted_issuer_public_key(issuer: str, public_key: Any) -> None:
-    """Register an independently provisioned Ed25519 public key for an issuer (R11-01)."""
+    """Register an independently provisioned Ed25519 public key for an issuer (R11-01, R12-01)."""
     from cryptography.hazmat.primitives.asymmetric import ed25519
     if isinstance(public_key, ed25519.Ed25519PublicKey):
         pub = public_key
@@ -198,15 +214,22 @@ def register_trusted_issuer_public_key(issuer: str, public_key: Any) -> None:
             mod._TRUSTED_ISSUER_PUBLIC_KEYS[issuer] = pub
 
 
+def load_trusted_public_roots(roots_config: Optional[Dict[str, Any]] = None) -> None:
+    """Load authorized public trust roots from immutable configuration (R12-01)."""
+    if roots_config:
+        for issuer, key_val in roots_config.items():
+            register_trusted_issuer_public_key(issuer, key_val)
+
+
 def register_trusted_issuer_key(issuer: str, public_key: Any) -> None:
     """Alias for register_trusted_issuer_public_key."""
     register_trusted_issuer_public_key(issuer, public_key)
 
 
 def get_trusted_issuer_public_key(issuer: str) -> Optional[Any]:
-    """Retrieve independently provisioned Ed25519 public key for an issuer (R11-01).
-    Fails closed if the issuer has not been explicitly provisioned with a trusted public key.
-    Never derives private keys from public constants or seeds.
+    """Retrieve independently provisioned Ed25519 public key for an issuer (R11-01, R12-01).
+    Fails closed (returns None) if the issuer has not been explicitly provisioned.
+    Never derives private keys or auto-provisions trust roots at runtime.
     """
     if issuer in _TRUSTED_ISSUER_PUBLIC_KEYS:
         return _TRUSTED_ISSUER_PUBLIC_KEYS[issuer]
@@ -215,49 +238,29 @@ def get_trusted_issuer_public_key(issuer: str) -> Optional[Any]:
         mod = sys.modules.get(mod_name)
         if mod and hasattr(mod, "_TRUSTED_ISSUER_PUBLIC_KEYS") and issuer in mod._TRUSTED_ISSUER_PUBLIC_KEYS:
             return mod._TRUSTED_ISSUER_PUBLIC_KEYS[issuer]
-    if issuer in _TEST_PRIVATE_KEYS:
-        pub = _TEST_PRIVATE_KEYS[issuer].public_key()
-        _TRUSTED_ISSUER_PUBLIC_KEYS[issuer] = pub
-        return pub
     return None
 
 
 def provision_test_issuer_keypair(issuer: str) -> Tuple[Any, Any]:
-    """Isolated test authority keypair generator (R11-01).
-    Generates a cryptographically secure, random Ed25519 keypair, registers the public key,
-    and isolates the private key strictly in the test key store.
-    """
-    from cryptography.hazmat.primitives.asymmetric import ed25519
-    priv = ed25519.Ed25519PrivateKey.generate()
-    pub = priv.public_key()
-    register_trusted_issuer_public_key(issuer, pub)
-    _TEST_PRIVATE_KEYS[issuer] = priv
-    import sys
-    for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
-        mod = sys.modules.get(mod_name)
-        if mod and hasattr(mod, "_TEST_PRIVATE_KEYS"):
-            mod._TEST_PRIVATE_KEYS[issuer] = priv
-    return priv, pub
+    """Test authority keypair generator moved to test fixtures (R12-01)."""
+    from .tests.trust_fixtures import provision_test_issuer_keypair as _fixture_prov
+    return _fixture_prov(issuer)
 
 
 def get_trusted_issuer_private_key(issuer: str):
-    """Retrieve isolated test private key or provision fresh test keypair (R11-01).
-    Private keys are never derived from predictable public seeds.
-    """
-    if issuer in _TEST_PRIVATE_KEYS:
-        return _TEST_PRIVATE_KEYS[issuer]
+    """Prohibit runtime access to private keys in production verifier (R12-01)."""
+    from .tests.trust_fixtures import get_test_issuer_private_key as _fixture_get_priv
+    return _fixture_get_priv(issuer)
+
+
+def set_current_revocation_epoch(epoch: int) -> None:
+    """Set global revocation epoch in durable revocation store (R11-07, R12-04)."""
+    _REVOCATION_STORE.set_epoch(epoch)
     import sys
     for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
         mod = sys.modules.get(mod_name)
-        if mod and hasattr(mod, "_TEST_PRIVATE_KEYS") and issuer in mod._TEST_PRIVATE_KEYS:
-            return mod._TEST_PRIVATE_KEYS[issuer]
-    priv, _ = provision_test_issuer_keypair(issuer)
-    return priv
-
-
-def set_current_revocation_epoch(epoch: int, force: bool = False) -> None:
-    """Set global revocation epoch in durable revocation store (R11-07)."""
-    _REVOCATION_STORE.set_epoch(epoch, force=force)
+        if mod and hasattr(mod, "_REVOCATION_STORE"):
+            mod._REVOCATION_STORE.revocation_epoch = int(epoch)
     import sys
     for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
         mod = sys.modules.get(mod_name)
@@ -293,11 +296,22 @@ def compute_reading_content_digest(
     unit: Optional[str] = None,
     observed_at: Optional[Any] = None,
 ) -> str:
-    """Compute deterministic cryptographic SHA256 digest of physical reading payload (R11-02)."""
+    """Compute deterministic cryptographic SHA256 digest of physical reading payload (R11-02, R12-05).
+    Preserves full IEEE numerical precision, respecting variable precision contracts.
+    Fails closed on non-numeric or missing measurement values.
+    """
+    if value is None:
+        raise ValueError("Measurement value cannot be None for content digest calculation")
     try:
-        val_float = round(float(value), 6) if value is not None else 0.0
-    except (ValueError, TypeError):
-        val_float = 0.0
+        val_float = float(value)
+    except (ValueError, TypeError) as e:
+        raise ValueError(f"Invalid non-numeric measurement value {value!r}: {e}") from e
+
+    if not math.isfinite(val_float):
+        raise ValueError(f"Non-finite measurement value {value!r} cannot be digested")
+
+    # Format float with full IEEE precision (12 significant digits) avoiding truncation loss (R12-05)
+    val_repr = f"{val_float:.12g}"
 
     obs_iso = ""
     if observed_at is not None:
@@ -312,7 +326,7 @@ def compute_reading_content_digest(
         "observed_at": obs_iso,
         "plot_id": str(plot_id).strip(),
         "unit": str(unit or "").strip().lower(),
-        "value": val_float,
+        "value": val_repr,
         "variable": str(variable).strip(),
     }
     raw_bytes = json.dumps(norm_dict, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -320,18 +334,34 @@ def compute_reading_content_digest(
 
 
 def compute_asmae_content_hash(asmae_output: Any) -> str:
-    """Compute deterministic SHA256 content hash of ASMAE output payload (R11-04)."""
+    """Compute deterministic SHA256 content hash of ASMAE output payload (R11-04, R12-06).
+    Binds all scientific authority claims in provenance (operator_locked, radiometric_mode, enkf_mode,
+    retrovalidation_score, published_at), excluding only the signature receipt envelope itself.
+    """
     if isinstance(asmae_output, dict):
         stable_dict = {}
         for k in sorted(asmae_output.keys()):
-            if k in ("provenance", "publication_receipt"):
+            if k == "publication_receipt":
                 continue
             v = asmae_output[k]
-            if isinstance(v, (list, tuple, dict, str, int, float, bool)):
+            if k == "provenance" and isinstance(v, dict):
+                # Filter out publication_receipt signature envelope, retain all scientific authority claims (R12-06)
+                prov_filtered = {
+                    pk: pv for pk, pv in sorted(v.items())
+                    if pk != "publication_receipt"
+                }
+                stable_dict["provenance"] = prov_filtered
+            elif isinstance(v, (list, tuple, dict, str, int, float, bool)):
                 stable_dict[k] = v
         raw = json.dumps(stable_dict, sort_keys=True, default=str).encode("utf-8")
         return "sha256:" + hashlib.sha256(raw).hexdigest()
     return "sha256:" + hashlib.sha256(str(asmae_output).encode("utf-8")).hexdigest()
+
+
+def compute_raster_composite_content_hash(raster_data: Dict[str, Any], native_resolution_m: Optional[float] = None) -> str:
+    """Canonical content hash for raster composite dictionary (R12-03)."""
+    from .raster_ingest import compute_raster_composite_content_hash as _ingest_hash
+    return _ingest_hash(raster_data, native_resolution_m=native_resolution_m)
 
 
 def compute_sensor_receipt_canonical_bytes(
@@ -375,12 +405,13 @@ def sign_sensor_receipt_data(
     content_digest: Optional[str] = None,
     observation_instant: Optional[str] = None,
     first_available_at: Optional[str] = None,
-    revocation_epoch: Optional[int] = 0,
+    revocation_epoch: Optional[int] = None,
     private_key: Optional[Any] = None,
 ) -> str:
     """Sign sensor receipt fields with Ed25519 private key (R10-01)."""
     if private_key is None:
         private_key = get_trusted_issuer_private_key(issuer)
+    eff_epoch = _REVOCATION_STORE.revocation_epoch if revocation_epoch is None else int(revocation_epoch)
     canonical = compute_sensor_receipt_canonical_bytes(
         receipt_id=receipt_id,
         issuer=issuer,
@@ -392,7 +423,7 @@ def sign_sensor_receipt_data(
         content_digest=content_digest,
         observation_instant=observation_instant,
         first_available_at=first_available_at,
-        revocation_epoch=revocation_epoch,
+        revocation_epoch=eff_epoch,
     )
     sig_bytes = private_key.sign(canonical)
     return "ed25519:" + sig_bytes.hex()
@@ -409,7 +440,7 @@ def create_signed_sensor_receipt(
     content_digest: Optional[str] = None,
     observation_instant: Optional[str] = None,
     first_available_at: Optional[str] = None,
-    revocation_epoch: Optional[int] = 0,
+    revocation_epoch: Optional[int] = None,
     private_key: Optional[Any] = None,
     reading_value: Optional[Any] = None,
     reading_unit: Optional[str] = None,
@@ -432,6 +463,7 @@ def create_signed_sensor_receipt(
             observed_at=obs_for_digest,
         )
 
+    eff_epoch = _REVOCATION_STORE.revocation_epoch if revocation_epoch is None else int(revocation_epoch)
     sig = sign_sensor_receipt_data(
         receipt_id=receipt_id,
         issuer=issuer,
@@ -443,7 +475,7 @@ def create_signed_sensor_receipt(
         content_digest=content_digest,
         observation_instant=observation_instant,
         first_available_at=first_available_at,
-        revocation_epoch=revocation_epoch,
+        revocation_epoch=eff_epoch,
         private_key=private_key,
     )
     return SensorAttestationReceipt(
@@ -457,7 +489,7 @@ def create_signed_sensor_receipt(
         content_digest=content_digest,
         observation_instant=observation_instant,
         first_available_at=first_available_at,
-        revocation_epoch=revocation_epoch,
+        revocation_epoch=eff_epoch,
         signature=sig,
     )
 
@@ -652,12 +684,13 @@ def verify_publication_receipt(
     elif require_content_binding and not target.acquisition_id:
         return False, "missing_publication_acquisition_id", None
 
-    # Mandatory content digest binding (R11-03)
-    if target.content_hash:
+    # Mandatory content digest binding (R11-03, R12-03)
+    must_bind_content = require_content_binding or bool(content_hash) or (source_family and source_family.lower() in ("raster_composite", "raster", "asmae"))
+    if must_bind_content:
+        if not target.content_hash or not str(target.content_hash).strip():
+            return False, "missing_publication_content_hash_in_receipt", None
         if content_hash and str(target.content_hash).strip() != str(content_hash).strip():
             return False, f"publication_content_hash_mismatch:{target.content_hash}!={content_hash}", None
-    elif require_content_binding:
-        return False, "missing_publication_content_hash_in_receipt", None
 
     # Cryptographic signature verification with provisioned public key (R11-01)
     pub_key = get_trusted_issuer_public_key(target.issuer)
@@ -893,6 +926,19 @@ def verify_sensor_attestation(
     if is_rev:
         return False, rev_reason
 
+    # Mandatory Reading Measurement & Physical Event Binding (R11-02, R12-02)
+    # Receipts must contain non-empty content_digest and observation_instant
+    if not target_receipt.content_digest or not str(target_receipt.content_digest).strip():
+        return False, "missing_receipt_content_digest"
+    if not target_receipt.observation_instant or not str(target_receipt.observation_instant).strip():
+        return False, "missing_receipt_observation_instant"
+
+    # Callers must provide reading claims to verify physical event binding
+    if expected_value is None and expected_content_digest is None:
+        return False, "missing_reading_claims_for_sensor_attestation"
+    if expected_observed_at is None:
+        return False, "missing_reading_observation_time_for_attestation"
+
     # Cryptographic Ed25519 signature verification against provisioned public key (R10-01, R11-01)
     pub_key = get_trusted_issuer_public_key(target_receipt.issuer)
     if pub_key is None:
@@ -924,14 +970,6 @@ def verify_sensor_attestation(
     except Exception as e:
         return False, f"invalid_cryptographic_signature:{type(e).__name__}"
 
-    # Reading measurement & physical event binding (R11-02)
-    has_reading_claim = expected_value is not None or expected_content_digest is not None or expected_observed_at is not None
-    if has_reading_claim or target_receipt.content_digest or target_receipt.observation_instant:
-        if not target_receipt.content_digest or not str(target_receipt.content_digest).strip():
-            return False, "missing_receipt_content_digest"
-        if not target_receipt.observation_instant or not str(target_receipt.observation_instant).strip():
-            return False, "missing_receipt_observation_instant"
-
     if expected_value is not None:
         calc_digest = compute_reading_content_digest(
             device_id=dev_str,
@@ -947,15 +985,14 @@ def verify_sensor_attestation(
         if target_receipt.content_digest != expected_content_digest:
             return False, f"sensor_content_digest_mismatch:{target_receipt.content_digest}!={expected_content_digest}"
 
-    if expected_observed_at is not None:
-        from .temporal_alignment import ensure_utc
-        try:
-            obs_dt = ensure_utc(expected_observed_at) if isinstance(expected_observed_at, datetime) else ensure_utc(datetime.fromisoformat(str(expected_observed_at)))
-            rcpt_dt = ensure_utc(datetime.fromisoformat(str(target_receipt.observation_instant)))
-            if abs((obs_dt - rcpt_dt).total_seconds()) > 1.0:
-                return False, f"sensor_observation_time_mismatch:{rcpt_dt}!={obs_dt}"
-        except Exception as e:
-            return False, f"malformed_observation_instant_comparison:{e}"
+    from .temporal_alignment import ensure_utc
+    try:
+        obs_dt = ensure_utc(expected_observed_at) if isinstance(expected_observed_at, datetime) else ensure_utc(datetime.fromisoformat(str(expected_observed_at)))
+        rcpt_dt = ensure_utc(datetime.fromisoformat(str(target_receipt.observation_instant)))
+        if abs((obs_dt - rcpt_dt).total_seconds()) > 1.0:
+            return False, f"sensor_observation_time_mismatch:{rcpt_dt}!={obs_dt}"
+    except Exception as e:
+        return False, f"malformed_observation_instant_comparison:{e}"
 
     return True, "attested_via_verified_receipt"
 

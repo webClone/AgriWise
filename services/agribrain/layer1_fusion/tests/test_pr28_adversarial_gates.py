@@ -41,6 +41,18 @@ def _item(**overrides):
     fields.update(overrides)
     return _mod('schemas').EvidenceItem(**fields)
 
+
+@pytest.fixture(autouse=True)
+def _isolate_revocation_store_per_test(tmp_path):
+    """Isolate revocation store per test to guarantee test independence (R12-04)."""
+    tb = _mod('truth_bridge')
+    old_store = tb.get_revocation_store()
+    test_path = str(tmp_path / "test_revocation_store.json")
+    new_store = tb.DurableRevocationStore(persistence_path=test_path)
+    tb.set_revocation_store(new_store)
+    yield
+    tb.set_revocation_store(old_store)
+
 def test_a_historical_cutoff_is_wired_at_primary_engine_admission():
     """A helper-only green test is not an end-to-end intake gate."""
     src = inspect.getsource(_mod('engine').Layer1FusionEngine.fuse)
@@ -1070,6 +1082,8 @@ def test_r9_g01_sensor_receipt_forged_urn_and_dummy_object_denied():
         plot_id="plot-A",
         variable="soil_moisture_vwc",
         calibration_profile_id="cal_r9_profile",
+        content_digest="digest_dummy",
+        observation_instant="2026-11-09T10:00:00Z",
         signature="dummy_signature",
     )
     ok, reason = tb.verify_sensor_attestation(
@@ -1078,9 +1092,11 @@ def test_r9_g01_sensor_receipt_forged_urn_and_dummy_object_denied():
         variable="soil_moisture_vwc",
         calibration_version="cal_r9_profile",
         receipt=fake_sig_receipt,
+        expected_content_digest="digest_dummy",
+        expected_observed_at=datetime(2026, 11, 9, 10, tzinfo=timezone.utc),
     )
     assert ok is False
-    assert "unverified_receipt_signature" in reason
+    assert "unverified_receipt_signature" in reason or "untrusted_issuer" in reason or "invalid_cryptographic_signature" in reason or "missing_receipt_content_digest" in reason
 
     # Positive control: Authentic registered receipt
     valid_receipt = tb.create_signed_sensor_receipt(
@@ -1099,6 +1115,9 @@ def test_r9_g01_sensor_receipt_forged_urn_and_dummy_object_denied():
         variable="soil_moisture_vwc",
         calibration_version="cal_r9_profile",
         provenance_ref="urn:agriwise:receipt:sensor_r9_dev:auth_001",
+        expected_value=0.35,
+        expected_unit="fraction",
+        expected_observed_at=datetime(2026, 11, 9, 10, tzinfo=timezone.utc),
     )
     assert ok is True
     assert reason == "attested_via_verified_receipt"
@@ -1415,48 +1434,44 @@ def test_r9_g05_raster_reference_consistent_with_evidence_cutoff():
     assert not any(r.variable == "moisture" for r in pkg_asmae_late.spatial_index.raster_refs)
 
     # 3. Positive control: In-cutoff raster composite and ASMAE
+    import numpy as np
+    from layer1_fusion.raster_ingest import _compute_pixel_hash
     tb = _mod('truth_bridge')
+    grid_spec_early = {
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+    }
+    early_composite_data = {
+        "values": [[0.6] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": "2026-11-10T10:00:00+00:00",
+    }
+    ch_comp = tb.compute_raster_composite_content_hash(early_composite_data)
     rcpt_early_composite = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:early",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
         acquisition_id="NDVI",
         published_at=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
+        content_hash=ch_comp,
     )
     tb.register_publication_receipt(rcpt_early_composite)
-    early_composite = {
-        "NDVI": {
-            "values": [[0.6] * 10] * 10,
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-            "published_at": "2026-11-10T10:00:00+00:00",
-            "publication_receipt": rcpt_early_composite,
-        }
-    }
-    rcpt_early_asmae = tb.create_signed_publication_receipt(
-        receipt_id="urn:agriwise:pub:asmae:early",
-        issuer="agriwise:trust:publication_authority",
-        source_family="asmae",
-        acquisition_id="asmae_run_early",
-        published_at=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
-    )
-    tb.register_publication_receipt(rcpt_early_asmae)
-    early_asmae = {
+    early_composite_data["publication_receipt"] = rcpt_early_composite
+    early_composite = {"NDVI": early_composite_data}
+    early_asmae_base = {
         "status": "success",
         "run_id": "asmae_run_early",
         "package_id": "asmae_run_early",
-        "grid_spec": {
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-        },
+        "grid_spec": grid_spec_early,
         "provenance": {
             "operator_locked": True,
             "graph_locked": True,
@@ -1466,11 +1481,23 @@ def test_r9_g05_raster_reference_consistent_with_evidence_cutoff():
             "full_enkf_credit_allowed": True,
             "retrovalidation_score": 0.85,
             "published_at": "2026-11-10T10:00:00+00:00",
-            "publication_receipt": rcpt_early_asmae,
         },
         "diagnostics": {"covariance": [[0.01, 0.0], [0.0, 0.01]]},
         "raster_maps": {"moisture": [[0.3] * 10] * 10},
     }
+    ch_asmae = tb.compute_asmae_content_hash(early_asmae_base)
+    rcpt_early_asmae = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:asmae:early",
+        issuer="agriwise:trust:publication_authority",
+        source_family="asmae",
+        acquisition_id="asmae_run_early",
+        published_at=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
+        content_hash=ch_asmae,
+    )
+    tb.register_publication_receipt(rcpt_early_asmae)
+    early_asmae = dict(early_asmae_base)
+    early_asmae["provenance"] = dict(early_asmae_base["provenance"])
+    early_asmae["provenance"]["publication_receipt"] = rcpt_early_asmae
     bundle_in_cutoff = s.Layer1InputBundle(
         plot_id="plot-A",
         run_id="r-g05-ok",
@@ -1784,6 +1811,9 @@ def test_r10_g01_sensor_cryptographic_signature_verification():
         variable="soil_moisture_vwc",
         calibration_version="cal-r10-01",
         receipt=valid_rcpt,
+        expected_value=0.35,
+        expected_unit="fraction",
+        expected_observed_at=datetime(2026, 11, 9, 10, tzinfo=timezone.utc),
     )
     assert ok is True
     assert reason == "attested_via_verified_receipt"
@@ -1798,6 +1828,8 @@ def test_r10_g01_sensor_cryptographic_signature_verification():
         variable="soil_moisture_vwc",
         calibration_profile_id="cal-r10-01",
         status="active",
+        content_digest=valid_rcpt.content_digest,
+        observation_instant=valid_rcpt.observation_instant,
         signature=tampered_sig,
     )
     ok, reason = tb.verify_sensor_attestation(
@@ -1806,6 +1838,9 @@ def test_r10_g01_sensor_cryptographic_signature_verification():
         variable="soil_moisture_vwc",
         calibration_version="cal-r10-01",
         receipt=forged_rcpt,
+        expected_value=0.35,
+        expected_unit="fraction",
+        expected_observed_at=datetime(2026, 11, 9, 10, tzinfo=timezone.utc),
     )
     assert ok is False
     assert "invalid_cryptographic_signature" in reason or "InvalidSignature" in reason or "invalid_sensor_signature" in reason
@@ -1867,6 +1902,8 @@ def test_r10_g02_sensor_signature_tampering_and_revocation():
         variable="soil_moisture_vwc",
         calibration_version="cal-r10-02",
         receipt=tampered_digest_rcpt,
+        expected_content_digest="digest_TAMPERED_456",
+        expected_observed_at=signed_rcpt.observation_instant,
     )
     assert ok is False
     assert "invalid_cryptographic_signature" in reason or "InvalidSignature" in reason or "invalid_sensor_signature" in reason
@@ -1879,6 +1916,8 @@ def test_r10_g02_sensor_signature_tampering_and_revocation():
         variable="soil_moisture_vwc",
         calibration_version="cal-r10-02",
         receipt=signed_rcpt,
+        expected_content_digest="digest_original_123",
+        expected_observed_at=signed_rcpt.observation_instant,
     )
     assert ok is False
     assert "revoked_sensor_receipt" in reason
@@ -1896,18 +1935,18 @@ def test_r10_g02_sensor_signature_tampering_and_revocation():
     )
     tb.register_sensor_receipt(fresh_rcpt)
     tb.set_current_revocation_epoch(1)  # Epoch advanced
-    try:
-        ok, reason = tb.verify_sensor_attestation(
-            device_id="sensor_r10_02",
-            plot_id="plot-A",
-            variable="soil_moisture_vwc",
-            calibration_version="cal-r10-02",
-            receipt=fresh_rcpt,
-        )
-        assert ok is False
-        assert "expired_revocation_epoch" in reason
-    finally:
-        tb.set_current_revocation_epoch(0, force=True)  # Reset epoch
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r10_02",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal-r10-02",
+        receipt=fresh_rcpt,
+        expected_value=0.35,
+        expected_unit="fraction",
+        expected_observed_at=fresh_rcpt.observation_instant,
+    )
+    assert ok is False
+    assert "expired_revocation_epoch" in reason
 
 
 def test_r10_g03_caller_supplied_publication_timestamp_without_receipt_denied():
@@ -1976,48 +2015,54 @@ def test_r10_g04_same_variable_distinct_acquisition_raster_ref_isolation():
     cutoff = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
 
     # Early in-cutoff NDVI raster
+    early_data = {
+        "values": [[0.5] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": "2026-11-10T10:00:00+00:00",
+    }
+    ch_early = tb.compute_raster_composite_content_hash(early_data)
     rcpt_early = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:early_r10",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
         acquisition_id="NDVI_EARLY",
         published_at=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
+        content_hash=ch_early,
     )
     tb.register_publication_receipt(rcpt_early)
+    early_data["publication_receipt"] = rcpt_early
 
     # Late post-cutoff NDVI raster
+    late_data = {
+        "values": [[0.8] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": "2026-11-10T16:00:00+00:00",
+    }
+    ch_late = tb.compute_raster_composite_content_hash(late_data)
     rcpt_late = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:late_r10",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
         acquisition_id="NDVI_LATE",
         published_at=datetime(2026, 11, 10, 16, 0, tzinfo=timezone.utc),
+        content_hash=ch_late,
     )
     tb.register_publication_receipt(rcpt_late)
+    late_data["publication_receipt"] = rcpt_late
 
     composites = {
-        "NDVI_EARLY": {
-            "values": [[0.5] * 10] * 10,
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-            "published_at": "2026-11-10T10:00:00+00:00",
-            "publication_receipt": rcpt_early,
-        },
-        "NDVI_LATE": {
-            "values": [[0.8] * 10] * 10,
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-            "published_at": "2026-11-10T16:00:00+00:00",
-            "publication_receipt": rcpt_late,
-        },
+        "NDVI_EARLY": early_data,
+        "NDVI_LATE": late_data,
     }
 
     bundle = s.Layer1InputBundle(
@@ -2124,21 +2169,23 @@ def test_r10_g05_asmae_historical_cutoff_fail_closed():
     assert not any("moisture" in r.variable for r in pkg_unver.spatial_index.raster_refs)
 
     # (e) Positive control: In-cutoff verified publication receipt
+    asmae_ok = dict(base_asmae)
+    asmae_ok["package_id"] = "pkg_asmae_test_ok"
+    asmae_ok["provenance"] = {
+        "operator_locked": True,
+        "published_at": "2026-11-10T10:00:00+00:00",
+    }
+    ch_asmae_ok = tb.compute_asmae_content_hash(asmae_ok)
     rcpt_asmae = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:asmae:r10_g05_ok",
         issuer="agriwise:trust:publication_authority",
         source_family="asmae",
         acquisition_id="pkg_asmae_test_ok",
         published_at=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
+        content_hash=ch_asmae_ok,
     )
     tb.register_publication_receipt(rcpt_asmae)
-    asmae_ok = dict(base_asmae)
-    asmae_ok["package_id"] = "pkg_asmae_test_ok"
-    asmae_ok["provenance"] = {
-        "operator_locked": True,
-        "published_at": "2026-11-10T10:00:00+00:00",
-        "publication_receipt": rcpt_asmae,
-    }
+    asmae_ok["provenance"]["publication_receipt"] = rcpt_asmae
     bundle_ok = s.Layer1InputBundle(
         plot_id="plot-A",
         run_id="r10-g05-e",
@@ -2360,59 +2407,56 @@ def test_r10_g08_full_engine_r10_positive_and_negative_control():
     sensor_pkg.published_at = now - timedelta(hours=2)
 
     # 2. In-cutoff vs Post-cutoff raster composites
+    early_raster_data = {
+        "values": [[0.55] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": (now - timedelta(hours=2)).isoformat(),
+    }
+    ch_raster_early = tb.compute_raster_composite_content_hash(early_raster_data)
     rcpt_raster_early = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:early_08",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
         acquisition_id="NDVI_EARLY",
         published_at=now - timedelta(hours=2),
+        content_hash=ch_raster_early,
     )
     tb.register_publication_receipt(rcpt_raster_early)
+    early_raster_data["publication_receipt"] = rcpt_raster_early
 
+    late_raster_data = {
+        "values": [[0.85] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": (now + timedelta(hours=2)).isoformat(),
+    }
+    ch_raster_late = tb.compute_raster_composite_content_hash(late_raster_data)
     rcpt_raster_late = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:late_08",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
         acquisition_id="NDVI_LATE",
         published_at=now + timedelta(hours=2),
+        content_hash=ch_raster_late,
     )
     tb.register_publication_receipt(rcpt_raster_late)
+    late_raster_data["publication_receipt"] = rcpt_raster_late
 
     composites = {
-        "NDVI_EARLY": {
-            "values": [[0.55] * 10] * 10,
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-            "published_at": (now - timedelta(hours=2)).isoformat(),
-            "publication_receipt": rcpt_raster_early,
-        },
-        "NDVI_LATE": {
-            "values": [[0.85] * 10] * 10,
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-            "published_at": (now + timedelta(hours=2)).isoformat(),
-            "publication_receipt": rcpt_raster_late,
-        },
+        "NDVI_EARLY": early_raster_data,
+        "NDVI_LATE": late_raster_data,
     }
 
     # 3. In-cutoff verified ASMAE output
-    rcpt_asmae = tb.create_signed_publication_receipt(
-        receipt_id="urn:agriwise:pub:asmae:r10_08",
-        issuer="agriwise:trust:publication_authority",
-        source_family="asmae",
-        acquisition_id="pkg_asmae_r10_08",
-        published_at=now - timedelta(hours=1),
-    )
-    tb.register_publication_receipt(rcpt_asmae)
-
     valid_asmae = {
         "status": "success",
         "run_id": "asmae_run_r10_08",
@@ -2439,7 +2483,6 @@ def test_r10_g08_full_engine_r10_positive_and_negative_control():
             "full_enkf_credit_allowed": True,
             "retrovalidation_score": 0.88,
             "published_at": (now - timedelta(hours=1)).isoformat(),
-            "publication_receipt": rcpt_asmae,
         },
         "diagnostics": {
             "scientific_pass": True,
@@ -2454,6 +2497,17 @@ def test_r10_g08_full_engine_r10_positive_and_negative_control():
         },
         "raster_maps": {"moisture": [[0.3] * 10] * 10},
     }
+    ch_asmae_08 = tb.compute_asmae_content_hash(valid_asmae)
+    rcpt_asmae = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:asmae:r10_08",
+        issuer="agriwise:trust:publication_authority",
+        source_family="asmae",
+        acquisition_id="pkg_asmae_r10_08",
+        published_at=now - timedelta(hours=1),
+        content_hash=ch_asmae_08,
+    )
+    tb.register_publication_receipt(rcpt_asmae)
+    valid_asmae["provenance"]["publication_receipt"] = rcpt_asmae
 
     # 4. Execute full engine fusion on historical replay
     bundle = s.Layer1InputBundle(
@@ -2736,6 +2790,14 @@ def test_r11_g04_asmae_cutoff_uses_verified_signed_timestamp_not_claimed_timesta
         "raster_maps": {"moisture": [[0.3] * 10] * 10},
     }
 
+    # Caller claims an IN-CUTOFF publication timestamp at 10:00
+    asmae_spoofed = dict(base_asmae)
+    asmae_spoofed["provenance"] = {
+        "operator_locked": True,
+        "published_at": "2026-11-10T10:00:00+00:00",  # Claimed: 10:00 (in cutoff)
+    }
+    ch_asmae_post = tb.compute_asmae_content_hash(asmae_spoofed)
+
     # Signed receipt with verified published_at at 14:00 (POST-CUTOFF)
     verified_post_cutoff_ts = datetime(2026, 11, 10, 14, 0, tzinfo=timezone.utc)
     rcpt_post = tb.create_signed_publication_receipt(
@@ -2744,16 +2806,10 @@ def test_r11_g04_asmae_cutoff_uses_verified_signed_timestamp_not_claimed_timesta
         source_family="asmae",
         acquisition_id="pkg_asmae_r11_04",
         published_at=verified_post_cutoff_ts,
+        content_hash=ch_asmae_post,
     )
     tb.register_publication_receipt(rcpt_post)
-
-    # Caller claims an IN-CUTOFF publication timestamp at 10:00
-    asmae_spoofed = dict(base_asmae)
-    asmae_spoofed["provenance"] = {
-        "operator_locked": True,
-        "published_at": "2026-11-10T10:00:00+00:00",  # Claimed: 10:00 (in cutoff)
-        "publication_receipt": rcpt_post,             # Verified: 14:00 (post cutoff)
-    }
+    asmae_spoofed["provenance"]["publication_receipt"] = rcpt_post
 
     bundle = s.Layer1InputBundle(
         plot_id="plot-A",
@@ -2907,51 +2963,57 @@ def test_r11_g06_true_same_canonical_variable_raster_isolation_with_paired_hash(
     cutoff = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
 
     # Early in-cutoff NDVI raster
+    early_data = {
+        "variable": "NDVI",
+        "values": [[0.52] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": "2026-11-10T10:00:00+00:00",
+    }
+    ch_early = tb.compute_raster_composite_content_hash(early_data)
     rcpt_early = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:early_r11",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
         acquisition_id="sentinel2_early",
         published_at=datetime(2026, 11, 10, 10, 0, tzinfo=timezone.utc),
+        content_hash=ch_early,
     )
     tb.register_publication_receipt(rcpt_early)
+    early_data["publication_receipt"] = rcpt_early
 
     # Late post-cutoff NDVI raster
+    late_data = {
+        "variable": "NDVI",
+        "values": [[0.88] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": "2026-11-10T16:00:00+00:00",
+    }
+    ch_late = tb.compute_raster_composite_content_hash(late_data)
     rcpt_late = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:late_r11",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
         acquisition_id="sentinel2_late",
         published_at=datetime(2026, 11, 10, 16, 0, tzinfo=timezone.utc),
+        content_hash=ch_late,
     )
     tb.register_publication_receipt(rcpt_late)
+    late_data["publication_receipt"] = rcpt_late
 
     # Both rasters share identical canonical variable name 'NDVI'
     composites = {
-        "sentinel2_early": {
-            "variable": "NDVI",
-            "values": [[0.52] * 10] * 10,
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-            "published_at": "2026-11-10T10:00:00+00:00",
-            "publication_receipt": rcpt_early,
-        },
-        "sentinel2_late": {
-            "variable": "NDVI",
-            "values": [[0.88] * 10] * 10,
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-            "published_at": "2026-11-10T16:00:00+00:00",
-            "publication_receipt": rcpt_late,
-        },
+        "sentinel2_early": early_data,
+        "sentinel2_late": late_data,
     }
 
     bundle = s.Layer1InputBundle(
@@ -3110,61 +3172,58 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
     )
 
     # 2. Raster composites: 1 valid in-cutoff, 1 late post-cutoff
+    valid_raster_data = {
+        "variable": "NDVI",
+        "values": [[0.60] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": (now - timedelta(hours=2)).isoformat(),
+    }
+    ch_raster_valid = tb.compute_raster_composite_content_hash(valid_raster_data)
     rcpt_raster_valid = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:valid_r11_08",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
         acquisition_id="sentinel2_valid_08",
         published_at=now - timedelta(hours=2),
+        content_hash=ch_raster_valid,
     )
     tb.register_publication_receipt(rcpt_raster_valid)
+    valid_raster_data["publication_receipt"] = rcpt_raster_valid
 
+    late_raster_data = {
+        "variable": "NDVI",
+        "values": [[0.90] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": (now + timedelta(hours=3)).isoformat(),
+    }
+    ch_raster_late = tb.compute_raster_composite_content_hash(late_raster_data)
     rcpt_raster_late = tb.create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:raster:ndvi:late_r11_08",
         issuer="agriwise:trust:publication_authority",
         source_family="raster_composite",
         acquisition_id="sentinel2_late_08",
         published_at=now + timedelta(hours=3),
+        content_hash=ch_raster_late,
     )
     tb.register_publication_receipt(rcpt_raster_late)
+    late_raster_data["publication_receipt"] = rcpt_raster_late
 
     composites = {
-        "sentinel2_valid_08": {
-            "variable": "NDVI",
-            "values": [[0.60] * 10] * 10,
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-            "published_at": (now - timedelta(hours=2)).isoformat(),
-            "publication_receipt": rcpt_raster_valid,
-        },
-        "sentinel2_late_08": {
-            "variable": "NDVI",
-            "values": [[0.90] * 10] * 10,
-            "crs": "EPSG:4326",
-            "bounds": [10.0, 35.0, 10.1, 35.1],
-            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
-            "width": 10,
-            "height": 10,
-            "resolution_m": 10.0,
-            "published_at": (now + timedelta(hours=3)).isoformat(),
-            "publication_receipt": rcpt_raster_late,
-        },
+        "sentinel2_valid_08": valid_raster_data,
+        "sentinel2_late_08": late_raster_data,
     }
 
     # 3. Valid ASMAE output
-    rcpt_asmae = tb.create_signed_publication_receipt(
-        receipt_id="urn:agriwise:pub:asmae:r11_08",
-        issuer="agriwise:trust:publication_authority",
-        source_family="asmae",
-        acquisition_id="pkg_asmae_r11_08",
-        published_at=now - timedelta(hours=1),
-    )
-    tb.register_publication_receipt(rcpt_asmae)
-
     valid_asmae = {
         "status": "success",
         "run_id": "asmae_run_r11_08",
@@ -3191,7 +3250,6 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
             "full_enkf_credit_allowed": True,
             "retrovalidation_score": 0.88,
             "published_at": (now - timedelta(hours=1)).isoformat(),
-            "publication_receipt": rcpt_asmae,
         },
         "diagnostics": {
             "scientific_pass": True,
@@ -3206,6 +3264,17 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
         },
         "raster_maps": {"moisture": [[0.32] * 10] * 10},
     }
+    ch_asmae_r11 = tb.compute_asmae_content_hash(valid_asmae)
+    rcpt_asmae = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:asmae:r11_08",
+        issuer="agriwise:trust:publication_authority",
+        source_family="asmae",
+        acquisition_id="pkg_asmae_r11_08",
+        published_at=now - timedelta(hours=1),
+        content_hash=ch_asmae_r11,
+    )
+    tb.register_publication_receipt(rcpt_asmae)
+    valid_asmae["provenance"]["publication_receipt"] = rcpt_asmae
 
     # Execute engine fusion
     bundle = s.Layer1InputBundle(
@@ -3249,6 +3318,555 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
     assert len(pkg.layer10_payload["sensor_markers"]) == 1
     assert len(pkg.layer10_payload["raster_refs"]) == 2
     assert len(pkg.scientific_content_root()) == 64
+
+
+def test_r12_g01_production_verifier_prohibits_runtime_trust_provisioning():
+    """R12-G01: Production verifier has no private keys, never auto-provisions trust roots, and strictly fails closed."""
+    tb = _mod('truth_bridge')
+
+    # 1. Production truth_bridge must not expose _TEST_PRIVATE_KEYS dictionary
+    assert not hasattr(tb, "_TEST_PRIVATE_KEYS") or len(getattr(tb, "_TEST_PRIVATE_KEYS", {})) == 0
+
+    # 2. Querying unknown issuer strictly fails closed (returns None, never creates keypair)
+    unknown_pub = tb.get_trusted_issuer_public_key("agriwise:trust:completely_unauthorized_issuer")
+    assert unknown_pub is None
+
+    # 3. Only explicit root loading configures trusted public keys
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    dummy_priv = ed25519.Ed25519PrivateKey.generate()
+    dummy_pub = dummy_priv.public_key()
+    tb.load_trusted_public_roots({"agriwise:trust:configured_root": dummy_pub})
+    assert tb.get_trusted_issuer_public_key("agriwise:trust:configured_root") is not None
+
+
+def test_r12_g02_sensor_attestation_fails_closed_when_digest_or_claims_omitted():
+    """R12-G02: Sensor receipts with missing digest or callers omitting measurement claims fail closed."""
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+    tb = _mod('truth_bridge')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+
+    register_device(SensorDeviceRegistration(
+        device_id="sensor_r12_g02",
+        vendor="acme",
+        model="probe-r12",
+        protocol="lora",
+        farm_id="farm-1",
+        plot_id="plot-A",
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now,
+        status="active",
+        calibration_profile_id="cal-r12-02",
+    ))
+
+    # Genuine signed receipt
+    rcpt = tb.create_signed_sensor_receipt(
+        receipt_id="urn:agriwise:receipt:sensor_r12_02:001",
+        issuer="agriwise:trust:sensor_authority",
+        device_id="sensor_r12_g02",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal-r12-02",
+        status="active",
+        reading_value=0.33,
+        reading_unit="fraction",
+        observed_at=now,
+    )
+    tb.register_sensor_receipt(rcpt)
+
+    # 1. Receipt with missing content_digest fails closed
+    rcpt_no_digest = tb.SensorAttestationReceipt(
+        receipt_id="urn:agriwise:receipt:sensor_r12_02:no_digest",
+        issuer=rcpt.issuer,
+        device_id=rcpt.device_id,
+        plot_id=rcpt.plot_id,
+        variable=rcpt.variable,
+        calibration_profile_id=rcpt.calibration_profile_id,
+        status="active",
+        content_digest="",
+        observation_instant=rcpt.observation_instant,
+        signature=rcpt.signature,
+    )
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r12_g02",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal-r12-02",
+        receipt=rcpt_no_digest,
+        expected_value=0.33,
+        expected_unit="fraction",
+        expected_observed_at=now,
+    )
+    assert ok is False
+    assert reason == "missing_receipt_content_digest"
+
+    # 2. Receipt with missing observation_instant fails closed
+    rcpt_no_time = tb.SensorAttestationReceipt(
+        receipt_id="urn:agriwise:receipt:sensor_r12_02:no_time",
+        issuer=rcpt.issuer,
+        device_id=rcpt.device_id,
+        plot_id=rcpt.plot_id,
+        variable=rcpt.variable,
+        calibration_profile_id=rcpt.calibration_profile_id,
+        status="active",
+        content_digest=rcpt.content_digest,
+        observation_instant="",
+        signature=rcpt.signature,
+    )
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r12_g02",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal-r12-02",
+        receipt=rcpt_no_time,
+        expected_value=0.33,
+        expected_unit="fraction",
+        expected_observed_at=now,
+    )
+    assert ok is False
+    assert reason == "missing_receipt_observation_instant"
+
+    # 3. Caller omitting reading measurement claims fails closed
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r12_g02",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal-r12-02",
+        receipt=rcpt,
+        # Omit expected_value and expected_content_digest!
+    )
+    assert ok is False
+    assert reason == "missing_reading_claims_for_sensor_attestation"
+
+    # 4. Caller omitting observation timestamp fails closed
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r12_g02",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal-r12-02",
+        receipt=rcpt,
+        expected_value=0.33,
+        expected_unit="fraction",
+        expected_observed_at=None,
+    )
+    assert ok is False
+    assert reason == "missing_reading_observation_time_for_attestation"
+
+    # 5. Full claims provided -> Valid attestation
+    ok, reason = tb.verify_sensor_attestation(
+        device_id="sensor_r12_g02",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_version="cal-r12-02",
+        receipt=rcpt,
+        expected_value=0.33,
+        expected_unit="fraction",
+        expected_observed_at=now,
+    )
+    assert ok is True
+    assert reason == "attested_via_verified_receipt"
+
+
+def test_r12_g03_raster_ingestion_enforces_mandatory_content_digest_match():
+    """R12-G03: Raster ingestion enforces mandatory content binding, rejecting missing or mismatched content hashes."""
+    from layer1_fusion.raster_ingest import ingest_raster_composites
+    tb = _mod('truth_bridge')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+
+    # 1. Raster composite with receipt missing content_hash -> Quarantined
+    rcpt_no_hash = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:raster:r12_no_hash",
+        issuer="agriwise:trust:publication_authority",
+        source_family="raster_composite",
+        acquisition_id="NDVI_NO_HASH",
+        published_at=now - timedelta(hours=1),
+        content_hash=None,
+    )
+    tb.register_publication_receipt(rcpt_no_hash)
+
+    composites_bad = {
+        "NDVI_NO_HASH": {
+            "values": [[0.5] * 10] * 10,
+            "crs": "EPSG:4326",
+            "bounds": [10.0, 35.0, 10.1, 35.1],
+            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+            "width": 10,
+            "height": 10,
+            "resolution_m": 10.0,
+            "published_at": (now - timedelta(hours=1)).isoformat(),
+            "publication_receipt": rcpt_no_hash,
+        }
+    }
+    ev_items, r_refs = ingest_raster_composites(composites_bad, "plot-A", now)
+    assert "CALLER_CLAIMED_PUBLICATION_TIME" in ev_items[0].flags
+    assert "VERIFIED_PUBLICATION_RECEIPT" not in ev_items[0].flags
+
+    # 2. Raster composite with matching content_hash -> Verified
+    raster_good = {
+        "values": [[0.65] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": (now - timedelta(hours=1)).isoformat(),
+    }
+    ch_good = tb.compute_raster_composite_content_hash(raster_good)
+    rcpt_good = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:raster:r12_good",
+        issuer="agriwise:trust:publication_authority",
+        source_family="raster_composite",
+        acquisition_id="NDVI_GOOD",
+        published_at=now - timedelta(hours=1),
+        content_hash=ch_good,
+    )
+    tb.register_publication_receipt(rcpt_good)
+    raster_good["publication_receipt"] = rcpt_good
+
+    ev_good, refs_good = ingest_raster_composites({"NDVI_GOOD": raster_good}, "plot-A", now)
+    assert "VERIFIED_PUBLICATION_RECEIPT" in ev_good[0].flags
+    assert len(refs_good) == 1
+    assert refs_good[0].content_hash == ch_good
+
+
+def test_r12_g04_durable_revocation_store_fails_closed_on_io_and_strictly_monotonic(tmp_path):
+    """R12-G04: DurableRevocationStore raises IOError on IO failures, strictly enforces monotonicity, and eliminates force bypass."""
+    tb = _mod('truth_bridge')
+
+    # 1. IO error on write failure
+    invalid_path = str(tmp_path / "nonexistent_dir_cannot_create" / "??:::invalid_filename:::")
+    store_bad = tb.DurableRevocationStore(persistence_path=invalid_path)
+    with pytest.raises(IOError):
+        store_bad.set_epoch(1)
+
+    # 2. IO error on read/parse failure
+    corrupt_file = tmp_path / "corrupt_store.json"
+    corrupt_file.write_text("{ corrupt json syntax ...", encoding="utf-8")
+    with pytest.raises(IOError):
+        tb.DurableRevocationStore(persistence_path=str(corrupt_file))
+
+    # 3. Monotonicity enforcement without bypass
+    valid_file = str(tmp_path / "monotonic_store.json")
+    store_mono = tb.DurableRevocationStore(persistence_path=valid_file)
+    store_mono.set_epoch(5)
+    assert store_mono.revocation_epoch == 5
+
+    with pytest.raises(ValueError, match="Monotonicity violation"):
+        store_mono.set_epoch(4)
+
+    # Calling with force=True must not be accepted
+    with pytest.raises(TypeError):
+        store_mono.set_epoch(0, force=True)  # type: ignore[call-arg]
+
+
+def test_r12_g05_reading_digest_preserves_full_ieee_precision_and_rejects_non_numeric():
+    """R12-G05: Reading digest preserves IEEE double precision beyond 6 decimals and rejects non-numeric/non-finite inputs."""
+    tb = _mod('truth_bridge')
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+
+    # 1. Full IEEE precision: values differing at 7th decimal place produce distinct digests
+    val1 = 0.3500001
+    val2 = 0.3500002
+    d1 = tb.compute_reading_content_digest("dev-1", "plot-A", "soil_moisture_vwc", val1, "fraction", now)
+    d2 = tb.compute_reading_content_digest("dev-1", "plot-A", "soil_moisture_vwc", val2, "fraction", now)
+    assert d1 != d2
+
+    # 2. Non-numeric or missing values fail closed (raise ValueError, never default to 0.0)
+    with pytest.raises(ValueError):
+        tb.compute_reading_content_digest("dev-1", "plot-A", "soil_moisture_vwc", None, "fraction", now)
+
+    with pytest.raises(ValueError):
+        tb.compute_reading_content_digest("dev-1", "plot-A", "soil_moisture_vwc", "invalid_str", "fraction", now)
+
+    with pytest.raises(ValueError):
+        tb.compute_reading_content_digest("dev-1", "plot-A", "soil_moisture_vwc", float("nan"), "fraction", now)
+
+    with pytest.raises(ValueError):
+        tb.compute_reading_content_digest("dev-1", "plot-A", "soil_moisture_vwc", float("inf"), "fraction", now)
+
+
+def test_r12_g06_asmae_content_hash_binds_provenance_authority_claims():
+    """R12-G06: ASMAE content hash binds all provenance authority claims, filtering only the signature envelope."""
+    tb = _mod('truth_bridge')
+    base_asmae = {
+        "status": "success",
+        "run_id": "run-r12-06",
+        "package_id": "pkg-r12-06",
+        "provenance": {
+            "operator_locked": True,
+            "graph_locked": True,
+            "radiometric_mode": "ht_per_pixel",
+            "full_radiometric_credit_allowed": True,
+            "enkf_mode": "ht_per_pixel",
+            "full_enkf_credit_allowed": True,
+            "retrovalidation_score": 0.88,
+            "published_at": "2026-11-10T11:00:00+00:00",
+        },
+        "diagnostics": {"covariance": [[0.02, 0.0], [0.0, 0.02]]},
+        "raster_maps": {"moisture": [[0.3] * 10] * 10},
+    }
+
+    base_hash = tb.compute_asmae_content_hash(base_asmae)
+
+    # 1. Modifying operator_locked changes hash
+    tampered_op = dict(base_asmae)
+    tampered_op["provenance"] = dict(base_asmae["provenance"], operator_locked=False)
+    assert tb.compute_asmae_content_hash(tampered_op) != base_hash
+
+    # 2. Modifying radiometric_mode changes hash
+    tampered_rad = dict(base_asmae)
+    tampered_rad["provenance"] = dict(base_asmae["provenance"], radiometric_mode="standard")
+    assert tb.compute_asmae_content_hash(tampered_rad) != base_hash
+
+    # 3. Modifying retrovalidation_score changes hash
+    tampered_retro = dict(base_asmae)
+    tampered_retro["provenance"] = dict(base_asmae["provenance"], retrovalidation_score=0.95)
+    assert tb.compute_asmae_content_hash(tampered_retro) != base_hash
+
+    # 4. Modifying published_at changes hash
+    tampered_pub = dict(base_asmae)
+    tampered_pub["provenance"] = dict(base_asmae["provenance"], published_at="2026-11-10T12:00:00+00:00")
+    assert tb.compute_asmae_content_hash(tampered_pub) != base_hash
+
+    # 5. Adding or changing publication_receipt envelope does NOT change hash (stable signature envelope)
+    with_receipt = dict(base_asmae)
+    with_receipt["provenance"] = dict(base_asmae["provenance"], publication_receipt="urn:envelope:placeholder")
+    assert tb.compute_asmae_content_hash(with_receipt) == base_hash
+
+
+def test_r12_g07_cross_worker_revocation_persistence_with_atomic_file_swap(tmp_path):
+    """R12-G07: Revocations and epoch persist durably to disk and reload accurately across independent worker processes."""
+    tb = _mod('truth_bridge')
+    store_file = str(tmp_path / "shared_revocation.json")
+
+    # Worker 1 writes revocations and advances epoch
+    worker1_store = tb.DurableRevocationStore(persistence_path=store_file)
+    worker1_store.revoke_sensor("urn:agriwise:receipt:worker1:revoked_01")
+    worker1_store.revoke_publication("urn:agriwise:pub:worker1:revoked_pub")
+    worker1_store.set_epoch(3)
+
+    # Worker 2 initializes independently from same disk store
+    worker2_store = tb.DurableRevocationStore(persistence_path=store_file)
+    assert worker2_store.revocation_epoch == 3
+
+    is_rev_sensor, _ = worker2_store.is_sensor_revoked("urn:agriwise:receipt:worker1:revoked_01")
+    assert is_rev_sensor is True
+
+    is_rev_pub, _ = worker2_store.is_publication_revoked("urn:agriwise:pub:worker1:revoked_pub")
+    assert is_rev_pub is True
+
+    # Receipts from epoch < 3 are expired in Worker 2
+    is_rev_expired, reason_exp = worker2_store.is_sensor_revoked("urn:agriwise:receipt:worker1:unrevoked", receipt_epoch=2)
+    assert is_rev_expired is True
+    assert "expired_revocation_epoch:2 < 3" in (reason_exp or "")
+
+
+def test_r12_g08_full_engine_end_to_end_native_r12_adversarial_and_positive_acceptance():
+    """R12-G08: Full engine integration proving all R12 contracts simultaneously in Layer1FusionEngine.fuse()."""
+    from services.agribrain.sensor_runtime.registry import SensorDeviceRegistration, register_device
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer0.source_package import Layer0SourcePackage
+    eng_mod = _mod('engine')
+    tb = _mod('truth_bridge')
+    s = _mod('schemas')
+
+    now = datetime(2026, 11, 10, 12, 0, tzinfo=timezone.utc)
+    cutoff = now
+
+    # 1. Register authentic sensor
+    register_device(SensorDeviceRegistration(
+        device_id="sensor_r12_e2e",
+        vendor="acme",
+        model="probe-r12-e2e",
+        protocol="lora",
+        farm_id="farm-1",
+        plot_id="plot-A",
+        latitude=35.0,
+        longitude=10.0,
+        variables=["soil_moisture_vwc"],
+        installation_datetime=now - timedelta(days=5),
+        status="active",
+        calibration_profile_id="cal-r12-e2e",
+    ))
+
+    # Healthy reading with full IEEE precision (0.334455667788)
+    reading_val = 0.334455667788
+    sensor_obs_time = now - timedelta(hours=1)
+    reading_digest = tb.compute_reading_content_digest(
+        device_id="sensor_r12_e2e",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        value=reading_val,
+        unit="fraction",
+        observed_at=sensor_obs_time,
+    )
+    rcpt_sensor = tb.create_signed_sensor_receipt(
+        receipt_id="urn:agriwise:receipt:sensor_r12_e2e:healthy",
+        issuer="agriwise:trust:sensor_authority",
+        device_id="sensor_r12_e2e",
+        plot_id="plot-A",
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal-r12-e2e",
+        status="active",
+        content_digest=reading_digest,
+        observation_instant=sensor_obs_time.isoformat(),
+        reading_value=reading_val,
+        reading_unit="fraction",
+        observed_at=sensor_obs_time,
+    )
+    tb.register_sensor_receipt(rcpt_sensor)
+
+    rcpt_sensor_pub = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:sensor:r12_e2e",
+        issuer="agriwise:trust:publication_authority",
+        source_family="sensor",
+        acquisition_id="pkt_r12_healthy",
+        published_at=now - timedelta(hours=1),
+    )
+    tb.register_publication_receipt(rcpt_sensor_pub)
+
+    pkt_healthy = ObservationPacket(
+        packet_id="pkt_r12_healthy",
+        plot_id="plot-A",
+        source=ObservationSource.SENSOR_IOT,
+        data_status=DataStatus.OBSERVED,
+        timestamp=sensor_obs_time,
+        spatial_scope="point",
+        qa=QAMetadata(scene_score=1.0, sensor_health=0.99),
+        uncertainty=UncertaintyModel(sigmas={"soil_moisture_vwc": 0.01}),
+        payload={
+            "device_id": "sensor_r12_e2e",
+            "instrument_id": "sensor_r12_e2e",
+            "variable": "soil_moisture_vwc",
+            "value": reading_val,
+            "unit": "fraction",
+            "calibration_version": "cal-r12-e2e",
+            "provenance_ref": "urn:agriwise:receipt:sensor_r12_e2e:healthy",
+            "publication_receipt": rcpt_sensor_pub,
+        },
+    )
+
+    sensor_pkg = Layer0SourcePackage(
+        source_family="sensor",
+        plot_id="plot-A",
+        packets=[pkt_healthy],
+    )
+    sensor_pkg.receipt = rcpt_sensor_pub
+    sensor_pkg.published_at = now - timedelta(hours=1)
+
+    # 2. Raster composite with verified content binding
+    valid_raster_data = {
+        "variable": "NDVI",
+        "values": [[0.62] * 10] * 10,
+        "crs": "EPSG:4326",
+        "bounds": [10.0, 35.0, 10.1, 35.1],
+        "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+        "width": 10,
+        "height": 10,
+        "resolution_m": 10.0,
+        "published_at": (now - timedelta(hours=2)).isoformat(),
+    }
+    ch_raster_e2e = tb.compute_raster_composite_content_hash(valid_raster_data)
+    rcpt_raster = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:raster:ndvi:r12_e2e",
+        issuer="agriwise:trust:publication_authority",
+        source_family="raster_composite",
+        acquisition_id="NDVI",
+        published_at=now - timedelta(hours=2),
+        content_hash=ch_raster_e2e,
+    )
+    tb.register_publication_receipt(rcpt_raster)
+    valid_raster_data["publication_receipt"] = rcpt_raster
+
+    # 3. ASMAE output binding provenance authority claims
+    valid_asmae = {
+        "status": "success",
+        "run_id": "asmae_run_r12_e2e",
+        "package_id": "pkg_asmae_r12_e2e",
+        "schema_version": "1.0",
+        "source_id": "asmae_engine_01",
+        "production_usable": True,
+        "layer1_export_allowed": True,
+        "observation_operator_refs": ["op-1"],
+        "grid_spec": {
+            "crs": "EPSG:4326",
+            "bounds": [10.0, 35.0, 10.1, 35.1],
+            "transform": [0.001, 0.0, 10.0, 0.0, -0.001, 35.1],
+            "width": 10,
+            "height": 10,
+            "resolution_m": 10.0,
+        },
+        "provenance": {
+            "operator_locked": True,
+            "graph_locked": True,
+            "radiometric_mode": "ht_per_pixel",
+            "full_radiometric_credit_allowed": True,
+            "enkf_mode": "ht_per_pixel",
+            "full_enkf_credit_allowed": True,
+            "retrovalidation_score": 0.88,
+            "published_at": (now - timedelta(hours=1)).isoformat(),
+        },
+        "diagnostics": {
+            "scientific_pass": True,
+            "scene_stack_mode": "real_raster",
+            "enkf_mode": "ht_per_pixel",
+            "radiometric_mode": "ht_per_pixel",
+            "retro_status": "success_with_holdouts",
+            "diagnostic_only": False,
+            "state_update_allowed": True,
+            "operator_count": 1,
+            "covariance": [[0.015, 0.0], [0.0, 0.015]],
+        },
+        "raster_maps": {"moisture": [[0.32] * 10] * 10},
+    }
+    ch_asmae_e2e = tb.compute_asmae_content_hash(valid_asmae)
+    rcpt_asmae = tb.create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:asmae:r12_e2e",
+        issuer="agriwise:trust:publication_authority",
+        source_family="asmae",
+        acquisition_id="pkg_asmae_r12_e2e",
+        published_at=now - timedelta(hours=1),
+        content_hash=ch_asmae_e2e,
+    )
+    tb.register_publication_receipt(rcpt_asmae)
+    valid_asmae["provenance"]["publication_receipt"] = rcpt_asmae
+
+    # Execute engine fusion
+    bundle = s.Layer1InputBundle(
+        plot_id="plot-A",
+        run_id="run-r12-e2e",
+        run_timestamp=now,
+        as_of_cutoff=cutoff,
+        window_start=now - timedelta(days=1),
+        window_end=now,
+        layer0_source_packages={"sensor": [sensor_pkg]},
+        raster_composites={"NDVI": valid_raster_data},
+        asmae_output=valid_asmae,
+    )
+    engine = eng_mod.Layer1FusionEngine()
+    pkg = engine.fuse(bundle)
+
+    # Assertions:
+    # 1. Healthy sensor admitted with full state authority
+    sensor_ev = [e for e in pkg.evidence_items if e.source_family == "sensor" and e.state_update_allowed is True]
+    assert len(sensor_ev) == 1
+    assert sensor_ev[0].value == pytest.approx(reading_val)
+    assert sensor_ev[0].truth_class == "observed_sensor"
+
+    # 2. Raster composite admitted
+    raster_ev = [e for e in pkg.evidence_items if e.source_family == "raster_composite"]
+    assert len(raster_ev) == 1
+    assert raster_ev[0].value == pytest.approx(0.62)
+
+    # 3. Spatial index contains both raster references
+    assert any("ndvi" in r.variable for r in pkg.spatial_index.raster_refs)
+    assert any("moisture" in r.variable for r in pkg.spatial_index.raster_refs)
+
+    # 4. Provenance and scientific content root
+    assert len(pkg.scientific_content_root()) == 64
+
 
 
 

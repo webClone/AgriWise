@@ -156,7 +156,7 @@ def observation_packet_to_evidence(
         pub_receipt_candidate,
         source_family=source_fam,
         acquisition_id=packet.packet_id,
-        content_hash=getattr(packet, "content_hash", None),
+        content_hash=payload.get("content_hash"),
     )
     if is_verified_publication and v_published is not None:
         p_str = v_published.isoformat()
