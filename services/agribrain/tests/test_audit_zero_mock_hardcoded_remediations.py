@@ -418,9 +418,15 @@ def test_process_forcing_and_derived_weather_confidence_fail_closed_to_zero():
     assert forcing_default.rainfall_confidence == 0.0
     assert forcing_default.weather_confidence == 0.0
 
+    from layer0.environment.weather.schemas import VariableConsensus
     consensus_empty = WeatherConsensusDaily(
         date="2024-05-01",
-        variable_consensus={},
+        variable_consensus={
+            "precipitation_sum": VariableConsensus(variable="precipitation_sum", selected_value=0.0, confidence=0.0),
+            "temp_min": VariableConsensus(variable="temp_min", selected_value=10.0, confidence=0.0),
+            "temp_max": VariableConsensus(variable="temp_max", selected_value=20.0, confidence=0.0),
+            "temp_mean": VariableConsensus(variable="temp_mean", selected_value=15.0, confidence=0.0),
+        },
         overall_confidence=None,
     )
     forcing_computed = compute_daily_forcing(consensus_empty)

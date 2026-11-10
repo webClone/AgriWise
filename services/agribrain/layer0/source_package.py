@@ -281,6 +281,10 @@ class Layer0StatePackage:
     # Cross-source validation
     validation_conflicts: List[Any] = field(default_factory=list)
 
+    # Spatial overlays
+    zone_summaries: List[Dict[str, Any]] = field(default_factory=list)
+    edge_contamination: List[Dict[str, Any]] = field(default_factory=list)
+
     # Health and provenance
     health_report: Dict[str, Any] = field(default_factory=dict)
     provenance: Dict[str, Any] = field(default_factory=dict)

@@ -36,6 +36,13 @@ class Layer0SourcePackageAdapter:
         if package is None:
             return items
 
+        # L1-R7-06 / R7-G07: Validate canonical package plot identity against context bundle
+        pkg_plot = getattr(package, "plot_id", None)
+        if pkg_plot and context.plot_id and pkg_plot != context.plot_id:
+            # Foreign package must not have its packets rebound to context plot!
+            # Exclude package before packet extraction.
+            return []
+
         canonical_package_family = normalize_source_family(getattr(package, "source_family", "environment"))
 
         # Transform packets to EvidenceItems using the observation packet bridge

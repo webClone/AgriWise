@@ -223,28 +223,28 @@ def _fallback_single_zone(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, Any]
                 
     return {
         "Zone A": {
-            "label": "High Vigor Zone",
+            "label": "Geometric Partition North (Diagnostic)",
             "area_pct": round((count_a / max(total, 1)) * 100, 1),
             "mask": mask_a,
             "centroid": [height / 6.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "north"
+            "spatial_label": "north", "diagnostic_only": True
         },
         "Zone B": {
-            "label": "Average Vigor Zone",
+            "label": "Geometric Partition Central (Diagnostic)",
             "area_pct": round((count_b / max(total, 1)) * 100, 1),
             "mask": mask_b,
             "centroid": [height / 2.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "central"
+            "spatial_label": "central", "diagnostic_only": True
         },
         "Zone C": {
-            "label": "Lagging / Stress Zone",
+            "label": "Geometric Partition South (Diagnostic)",
             "area_pct": round((count_c / max(total, 1)) * 100, 1),
             "mask": mask_c,
             "centroid": [5 * height / 6.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "south"
+            "spatial_label": "south", "diagnostic_only": True
         }
     }
 
@@ -562,28 +562,28 @@ def _fallback_single_zone_pp(grid_spec: Dict[str, Any]) -> Dict[str, Dict[str, A
                 
     return {
         "Zone A": {
-            "label": "High Vigor Zone",
+            "label": "Geometric Partition North (Diagnostic)",
             "area_pct": round((count_a / max(total, 1)) * 100, 1),
             "mask": mask_a,
             "centroid": [height / 6.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "north"
+            "spatial_label": "north", "diagnostic_only": True
         },
         "Zone B": {
-            "label": "Average Vigor Zone",
+            "label": "Geometric Partition Central (Diagnostic)",
             "area_pct": round((count_b / max(total, 1)) * 100, 1),
             "mask": mask_b,
             "centroid": [height / 2.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "central"
+            "spatial_label": "central", "diagnostic_only": True
         },
         "Zone C": {
-            "label": "Lagging / Stress Zone",
+            "label": "Geometric Partition South (Diagnostic)",
             "area_pct": round((count_c / max(total, 1)) * 100, 1),
             "mask": mask_c,
             "centroid": [5 * height / 6.0, width / 2.0],
             "signature": {"ndvi_median": None},
-            "spatial_label": "south"
+            "spatial_label": "south", "diagnostic_only": True
         }
     }
 
@@ -770,6 +770,9 @@ def build_spatial_zone_stats(
         "Average Vigor Zone": "MED_VIGOR",
         "Lagging / Stress Zone": "LOW_VIGOR",
         "Homogeneous Field": "HOMOGENEOUS",
+        "Geometric Partition North (Diagnostic)": "GEOMETRIC_FALLBACK",
+        "Geometric Partition Central (Diagnostic)": "GEOMETRIC_FALLBACK",
+        "Geometric Partition South (Diagnostic)": "GEOMETRIC_FALLBACK",
     }
     
     for z_id, z_data in zones.items():

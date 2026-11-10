@@ -38,7 +38,13 @@ from .schemas import (
 )
 
 
-def validate_evidence(item: EvidenceItem, *, run_timestamp: Optional[datetime] = None, future_skew: timedelta = timedelta(minutes=5)) -> List[str]:
+def validate_evidence(
+    item: EvidenceItem,
+    expected_plot_id: Optional[str] = None,
+    *,
+    run_timestamp: Optional[datetime] = None,
+    future_skew: timedelta = timedelta(minutes=5),
+) -> List[str]:
     """Validate a single evidence item. Returns list of violation messages."""
     violations: List[str] = []
 
@@ -64,6 +70,10 @@ def validate_evidence(item: EvidenceItem, *, run_timestamp: Optional[datetime] =
         violations.append("EMPTY_EVIDENCE_ID")
     if not item.plot_id:
         violations.append("EMPTY_PLOT_ID")
+    elif expected_plot_id and item.plot_id != expected_plot_id:
+        violations.append(f"FOREIGN_PLOT_SCOPE_MISMATCH: item plot {item.plot_id} != expected plot {expected_plot_id}")
+    if expected_plot_id and getattr(item, "scope_id", None) and item.spatial_scope == "plot" and item.scope_id != expected_plot_id:
+        violations.append(f"FOREIGN_PLOT_SCOPE_MISMATCH: scope_id {item.scope_id} != expected plot {expected_plot_id}")
     if not item.variable:
         violations.append("EMPTY_VARIABLE")
     if item.source_family not in SOURCE_FAMILIES:
@@ -72,6 +82,22 @@ def validate_evidence(item: EvidenceItem, *, run_timestamp: Optional[datetime] =
         violations.append(f"INVALID_OBSERVATION_TYPE:{item.observation_type}")
     if item.spatial_scope not in SPATIAL_SCOPES:
         violations.append(f"INVALID_SPATIAL_SCOPE:{item.spatial_scope}")
+
+    # Physical value bounds and finite check (T10, T27)
+    if isinstance(item.value, (int, float)):
+        import math
+        if math.isnan(item.value) or math.isinf(item.value):
+            violations.append(f"NON_FINITE_VALUE: {item.value}")
+        elif item.variable in ("ndvi", "ndmi", "ndre", "evi", "bsi"):
+            if item.value < -1.0 or item.value > 1.0:
+                violations.append(f"OUT_OF_BOUNDS_PHYSICAL_VALUE: {item.variable}={item.value} not in [-1, 1]")
+        elif item.variable in ("soil_moisture_vwc", "vegetation_fraction", "bare_soil_fraction", "canopy_cover"):
+            if item.unit == "percent":
+                if item.value < 0.0 or item.value > 100.0:
+                    violations.append(f"OUT_OF_BOUNDS_PHYSICAL_VALUE: {item.variable}={item.value}% not in [0, 100]")
+            else:
+                if item.value < 0.0 or item.value > 1.0:
+                    violations.append(f"OUT_OF_BOUNDS_PHYSICAL_VALUE: {item.variable}={item.value} not in [0, 1]")
 
     # Unit validation: if provided, must be canonical
     if item.unit is not None and item.unit not in CANONICAL_UNITS:
@@ -201,7 +227,10 @@ def validate_evidence(item: EvidenceItem, *, run_timestamp: Optional[datetime] =
                 violations.append(f"NON_FINITE_OR_MALFORMED_VALUE:{item.variable}={item.value!r}")
             elif item.variable in _BOUNDS:
                 lo, hi = _BOUNDS[item.variable]
-                if val < lo or val > hi:
+                check_val = val
+                if item.unit == "percent" and hi <= 1.0:
+                    check_val = val / 100.0
+                if check_val < lo or check_val > hi:
                     violations.append(
                         f"VALUE_OUT_OF_BOUNDS:{item.variable}={val:.4f} not in [{lo},{hi}]"
                     )

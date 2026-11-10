@@ -128,12 +128,17 @@ def ingest_raster_composites(
         if H <= 0 or W <= 0:
             continue
 
-        valid_count = raster_data.get("valid_pixel_count", 0)
+        # Recompute actual valid non-null, finite pixel count (T33 / PR28-12)
+        actual_valid = 0
+        if isinstance(pixel_array, list) and all(isinstance(row, list) and len(row) == W for row in pixel_array):
+            for row in pixel_array:
+                for v in row:
+                    if v is not None and isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                        actual_valid += 1
+        valid_count = max(0, min(H * W, actual_valid))
         resolution_m = raster_data.get("resolution_m", 10.0)
-        canonical_var = _VARIABLE_MAP.get(var_key, var_key.lower())
-
-        # Compute content hash from pixel data
-        content_hash = _compute_pixel_hash(pixel_array)
+        raw_var = raster_data.get("variable") or var_key
+        canonical_var = _VARIABLE_MAP.get(raw_var, _VARIABLE_MAP.get(str(raw_var).upper(), str(raw_var).lower()))
 
         total_cells = H * W
         observed_ratio = float(valid_count / total_cells) if total_cells > 0 else 0.0
@@ -143,6 +148,9 @@ def ingest_raster_composites(
             )
         else:
             grid_spec, grid_status = None, "grid_array_shape_mismatch"
+
+        # Compute content hash from pixel data and grid spec
+        content_hash = _compute_pixel_hash(pixel_array, grid_spec=grid_spec, native_resolution_m=resolution_m)
 
         raster_id = f"raster_{canonical_var}_{content_hash[:8]}"
 
@@ -206,6 +214,43 @@ def ingest_raster_composites(
         evidence_flags = [] if grid_spec is not None else [
             f"INVALID_GEOSPATIAL_GRID:{grid_status}"
         ]
+        
+        # R10-02: Authenticated publication receipt check
+        from .truth_bridge import verify_publication_receipt, get_publication_receipt, PublicationAttestationReceipt
+        pub_cand = (
+            raster_data.get("publication_receipt")
+            or raster_data.get("receipt")
+            or raster_data.get("receipt_id")
+            or raster_data.get("content_hash")
+            or raster_id
+            or var_key
+        )
+        target_acq = raster_id
+        rcpt_obj = pub_cand
+        if isinstance(pub_cand, str):
+            rcpt_obj = get_publication_receipt(pub_cand.strip())
+        if rcpt_obj is not None:
+            r_acq = getattr(rcpt_obj, "acquisition_id", None)
+            if r_acq in (var_key, canonical_var, raster_id):
+                target_acq = r_acq
+
+        is_verified_pub, pub_reason, v_pub_dt = verify_publication_receipt(
+            pub_cand,
+            source_family="raster_composite",
+            acquisition_id=target_acq,
+            content_hash=content_hash,
+            require_content_binding=True,
+        )
+        if is_verified_pub and v_pub_dt is not None:
+            evidence_flags.append(f"PUBLISHED_AT:{v_pub_dt.isoformat()}")
+            evidence_flags.append("VERIFIED_PUBLICATION_RECEIPT")
+        else:
+            r_pub = raster_data.get("published_at")
+            if r_pub:
+                evidence_flags.append(f"PUBLISHED_AT:{r_pub}")
+                evidence_flags.append("CALLER_CLAIMED_PUBLICATION_TIME")
+            is_verified_pub = False
+            v_pub_dt = None
         effective_zone_masks = zone_masks if grid_spec is not None else None
 
         if effective_zone_masks:
@@ -230,6 +275,7 @@ def ingest_raster_composites(
                     unit="index" if canonical_var in ("ndvi", "ndmi", "ndre") else "dB",
                     source_family="raster_composite",
                     source_id=raster_id,
+                    content_hash=content_hash,
                     observation_type="measurement",
                     spatial_scope="zone",
                     scope_id=zone_id,
@@ -241,6 +287,8 @@ def ingest_raster_composites(
                     provenance_ref=f"raster_ingest_{raster_id}_zone_{zone_id}",
                     flags=list(evidence_flags),
                     grounding_class=grounding_class,
+                    publication_receipt_verified=is_verified_pub,
+                    verified_published_at=v_pub_dt,
                     **ev_fields
                 )
                 evidence.append(normalize_evidence_truth(item, source_context=raster_data))
@@ -265,6 +313,7 @@ def ingest_raster_composites(
                 unit="index" if canonical_var in ("ndvi", "ndmi", "ndre") else "dB",
                 source_family="raster_composite",
                 source_id=raster_id,
+                content_hash=content_hash,
                 observation_type="measurement",
                 spatial_scope="raster" if grid_spec is not None else "plot",
                 scope_id=raster_id if grid_spec is not None else plot_id,
@@ -276,6 +325,8 @@ def ingest_raster_composites(
                 provenance_ref=f"raster_ingest_{raster_id}",
                 flags=list(evidence_flags),
                 grounding_class=grounding_class,
+                publication_receipt_verified=is_verified_pub,
+                verified_published_at=v_pub_dt,
                 **ev_fields
             )
             evidence.append(normalize_evidence_truth(item, source_context=raster_data))
@@ -283,17 +334,45 @@ def ingest_raster_composites(
     return evidence, raster_refs
 
 
-def _compute_pixel_hash(pixel_array: List[List[float]]) -> str:
-    """Deterministic hash of pixel data."""
-    flat = []
+def _compute_pixel_hash(
+    pixel_array: List[List[float]],
+    grid_spec: Optional[Dict[str, Any]] = None,
+    native_resolution_m: Optional[float] = None,
+) -> str:
+    """Deterministic hash of pixel data and grid geometry."""
+    h = len(pixel_array) if pixel_array is not None and len(pixel_array) > 0 else 0
+    w = len(pixel_array[0]) if (h > 0 and hasattr(pixel_array[0], '__len__')) else 0
+    flat = [f"shape={h}x{w}"]
+    if native_resolution_m is not None:
+        flat.append(f"res={native_resolution_m}")
+    if grid_spec is not None:
+        flat.append(f"crs={grid_spec.get('crs')}")
+        flat.append(f"transform={grid_spec.get('transform') or grid_spec.get('affine')}")
+        flat.append(f"bounds={grid_spec.get('bounds')}")
     for row in pixel_array:
-        for v in row:
-            if v is not None and v == v:  # not NaN
-                flat.append(f"{v:.6f}")
-            else:
-                flat.append("NaN")
+        if isinstance(row, list):
+            for v in row:
+                if v is not None and v == v:  # not NaN
+                    flat.append(f"{v:.6f}")
+                else:
+                    flat.append("NaN")
+        else:
+            flat.append(f"{row:.6f}" if (row is not None and row == row) else "NaN")
     raw = ",".join(flat).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def compute_raster_composite_content_hash(
+    raster_data: Dict[str, Any],
+    native_resolution_m: Optional[float] = None,
+) -> str:
+    """Canonical content hash for raster composite dictionary (R12-03)."""
+    pixel_array = raster_data.get("values") or raster_data.get("grid") or []
+    h = len(pixel_array) if pixel_array is not None and len(pixel_array) > 0 else 0
+    w = len(pixel_array[0]) if (h > 0 and hasattr(pixel_array[0], '__len__')) else 0
+    res_m = raster_data.get("resolution_m", native_resolution_m or 10.0)
+    gs, _ = validate_raster_grid_spec(raster_data, h, w, res_m) if raster_grid_matches_dimensions(pixel_array, h, w) else (None, "shape_mismatch")
+    return _compute_pixel_hash(pixel_array, grid_spec=gs, native_resolution_m=res_m)
 
 
 def _compute_plot_stats(pixel_array: List[List[float]]) -> Dict[str, float]:
@@ -423,7 +502,17 @@ def check_asmae_authority(output: Dict[str, Any]) -> tuple[bool, Optional[str]]:
         bma_dis = diag.get("bma_mean_disagreement")
     if bma_dis is not None and float(bma_dis) > 0.3:
         return False, "bma_disagreement_too_high"
-        
+
+    # 8. ASMAE covariance validation (R8-01: invalid ASMAE covariance disables authoritative raster export)
+    from .diagnostics import validate_covariance_matrix, extract_covariance_matrices_recursive
+    cov_matrices = extract_covariance_matrices_recursive(output)
+    for cov_name, mat in cov_matrices:
+        if isinstance(mat, str):
+            return False, f"invalid_covariance:{mat}"
+        is_psd, cov_reason = validate_covariance_matrix(mat)
+        if not is_psd:
+            return False, f"invalid_covariance:{cov_reason}"
+
     return True, None
 
 
@@ -497,7 +586,7 @@ def ingest_asmae_raster_refs(output: Dict[str, Any], plot_id: str) -> List[Raste
         observed_ratio = float(valid_count / total_cells) if total_cells > 0 else 0.0
         
         # Compute content hash
-        content_hash = _compute_pixel_hash(pixel_array)
+        content_hash = _compute_pixel_hash(pixel_array, grid_spec=normalized_grid, native_resolution_m=res_m)
         
         # Determine trust parameters
         ref_state_allowed = state_allowed if is_state else False

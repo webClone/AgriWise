@@ -90,10 +90,11 @@ class Layer0StateAdapter:
                 if not states:
                     continue
                 # Get the last state vector (for current/latest run day)
-                last_state = states[-1]
-                if not isinstance(last_state, dict) and hasattr(last_state, "to_dict"):
-                    last_state = last_state.to_dict()
-                elif not isinstance(last_state, dict):
+                if isinstance(states, (list, tuple)):
+                    last_state = states[-1] if len(states) > 0 else {}
+                elif isinstance(states, dict):
+                    last_state = states
+                else:
                     last_state = {}
 
                 # Build the zone summary dict

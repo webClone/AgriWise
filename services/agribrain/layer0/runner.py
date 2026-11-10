@@ -128,7 +128,7 @@ class Layer0Runner:
             run_timestamp = datetime.now(timezone.utc)
         plot_id = run_input.plot_id
         geometry_hash = run_input.geometry_hash
-        geometry_version = run_input.geometry_version
+        geometry_version = run_input.geometry_version if run_input.geometry_version is not None else 1
         start_date = run_input.start_date
         end_date = run_input.end_date
 

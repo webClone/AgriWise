@@ -117,7 +117,7 @@ def _extract_asmae_features(pkg: Layer1ContextPackage) -> Dict[str, Any]:
                     "source_weights": ff.source_weights,
                     "conflict_status": ff.conflict_status,
                     "diagnostic_only": ff.diagnostic_only,
-                    "state_update_allowed": not ff.diagnostic_only,
+                    "state_update_allowed": bool(getattr(ff, "state_update_allowed", False)),
                     "flags": ff.flags,
                     "resolution_m": resolution_m,
                     "asmae_channel": asmae_channel,

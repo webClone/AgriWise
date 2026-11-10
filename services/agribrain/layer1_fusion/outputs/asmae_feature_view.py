@@ -18,7 +18,7 @@ class ASMAEFeature:
     variable: str
     value: float
     confidence: float
-    uncertainty: float
+    uncertainty: Optional[float]
     resolution_m: float
     asmae_channel: str
     diagnostic_only: bool
@@ -226,14 +226,14 @@ def _extract_feature_from_obj(obj: Any, variable: str) -> Optional[ASMAEFeature]
     # Fallback default values
     if conf is None:
         conf = 0.5
-    if unc is None:
-        unc = 0.1
+    # SPEC-E: missing uncertainty remains unknown
+    # if unc is None: unc = 0.1
 
     return ASMAEFeature(
         variable=v_upper,
         value=float(val),
         confidence=float(conf),
-        uncertainty=float(unc),
+        uncertainty=float(unc) if unc is not None else None,
         resolution_m=float(res_m_val),
         asmae_channel=channel_val,
         diagnostic_only=bool(diag_only),
@@ -276,7 +276,9 @@ def evaluate_asmae_state_usability(feature: Optional[ASMAEFeature]) -> ASMAEUsab
         reasons.append("resolution_1m_blocked")
     if feature.confidence < 0.60:
         reasons.append("confidence_below_threshold")
-    if feature.uncertainty > 0.40:
+    if feature.uncertainty is None:
+        reasons.append("uncertainty_missing")
+    elif feature.uncertainty > 0.40:
         reasons.append("uncertainty_above_threshold")
     if feature.retro_status != "success_with_holdouts":
         reasons.append("retrovalidation_failed")

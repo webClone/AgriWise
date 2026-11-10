@@ -137,13 +137,16 @@ def check_value_bounds(
         # Index bounds
         if e.variable in VALUE_BOUNDS:
             lo, hi = VALUE_BOUNDS[e.variable]
-            if e.value < lo or e.value > hi:
+            eff_lo, eff_hi = lo, hi
+            if e.unit == "percent" and hi <= 1.0:
+                eff_lo, eff_hi = lo * 100.0, hi * 100.0
+            if e.value < eff_lo or e.value > eff_hi:
                 if auto_clamp:
-                    clamped = max(lo, min(hi, e.value))
+                    clamped = max(eff_lo, min(eff_hi, e.value))
                     violations.append(ContextInvariantViolation(
                         "value_bounds", "fixed",
                         f"evidence={e.evidence_id}/{e.variable}",
-                        f"Clamped {e.value:.4f} → [{lo}, {hi}]",
+                        f"Clamped {e.value:.4f} → [{eff_lo}, {eff_hi}]",
                         auto_fixed=True,
                     ))
                     e.value = clamped
@@ -151,7 +154,7 @@ def check_value_bounds(
                     violations.append(ContextInvariantViolation(
                         "value_bounds", "error",
                         f"evidence={e.evidence_id}/{e.variable}",
-                        f"Value {e.value:.4f} out of [{lo}, {hi}]",
+                        f"Value {e.value:.4f} out of [{eff_lo}, {eff_hi}]",
                     ))
 
         # Precipitation non-negative
@@ -435,6 +438,35 @@ def enforce_context_invariants(
     violations.extend(check_provenance_completeness(pkg))
     violations.extend(check_zone_area_fractions(pkg))
     violations.extend(check_data_health(pkg))
+
+    # SPEC-E: Synchronize fused feature values with clamped/validated evidence
+    if auto_fix and pkg.fused_features:
+        fused_groups = [
+            pkg.fused_features.water_context,
+            pkg.fused_features.vegetation_context,
+            pkg.fused_features.phenology_context,
+            pkg.fused_features.stress_evidence_context,
+            pkg.fused_features.soil_site_context,
+            pkg.fused_features.operational_context,
+            pkg.fused_features.data_quality_context,
+        ]
+        ev_by_id = {e.evidence_id: e for e in pkg.evidence_items}
+        for grp in fused_groups:
+            for ff in grp:
+                if ff.name in VALUE_BOUNDS and isinstance(ff.value, (int, float)):
+                    lo, hi = VALUE_BOUNDS[ff.name]
+                    if ff.value < lo or ff.value > hi:
+                        ff.value = max(lo, min(hi, ff.value))
+                if ff.source_evidence_ids and len(ff.source_evidence_ids) == 1:
+                    src_ev = ev_by_id.get(ff.source_evidence_ids[0])
+                    if src_ev is not None and isinstance(src_ev.value, (int, float)):
+                        norm_src_val = src_ev.value
+                        if src_ev.unit == "percent" and ff.unit == "fraction":
+                            norm_src_val = src_ev.value / 100.0
+                        elif src_ev.unit == "fraction" and ff.unit == "percent":
+                            norm_src_val = src_ev.value * 100.0
+                        if abs(ff.value - norm_src_val) > 1e-6:
+                            ff.value = norm_src_val
 
     return violations
 
