@@ -664,6 +664,14 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
             "numerical_vector_hash": asmae_vector_hash,
             "run_id": pkg.run_id,
         },
+        "asmae_posterior_numerical_record": {
+            "states": computed_states,
+            "sigmas": computed_sigmas,
+            "numerical_vector_hash": asmae_vector_hash,
+            "contract_version": ARCHIVE_POSTERIOR_CONTRACT_VERSION,
+            "model_version": "asmae-resilient-etkf-v1",
+            "input_evidence_root": scientific_root,
+        },
         "mode_display_state": {"canopy": {"canRenderPixels": True}},
         "source_policy_display_state": {"requested_policy": "satellite"},
         "core_asmae_evidence_state": {"state": "nominal", "content_hash": scientific_root},
@@ -716,6 +724,20 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
     assert reloaded_fp.get("asmae_proof", {}).get("numerical_vector_hash") == asmae_vector_hash
     assert reloaded_fp.get("scientific_evidence_lineage", {}).get("asmae_posterior_vector_hash") == asmae_vector_hash
 
+    # Complete downstream numerical verification:
+    # Independently retrieve the persisted numerical posterior states and sigmas and recompute the hash
+    reloaded_num_record = reloaded_fp.get("asmae_posterior_numerical_record", {})
+    assert reloaded_num_record, "Persisted snapshot must include asmae_posterior_numerical_record"
+    reloaded_states = reloaded_num_record.get("states", {})
+    reloaded_sigmas = reloaded_num_record.get("sigmas", {})
+    recomputed_vector_hash = tb.compute_asmae_vector_numerical_hash(reloaded_states, reloaded_sigmas)
+    assert recomputed_vector_hash == asmae_vector_hash, (
+        f"Recomputed hash {recomputed_vector_hash} must match original {asmae_vector_hash}"
+    )
+    assert reloaded_num_record.get("numerical_vector_hash") == asmae_vector_hash
+    assert reloaded_num_record.get("input_evidence_root") == scientific_root
+    assert reloaded_num_record.get("contract_version") == ARCHIVE_POSTERIOR_CONTRACT_VERSION
+
     evidence_manifest["pillar_4_publication"] = {
         "intelligence_snapshot_id": snapshot_id,
         "publication_status": pub_status,
@@ -724,6 +746,7 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
         "frontend_publication_hash": pub_result["frontend_publication_hash"],
         "crop_posterior_lineage": reloaded_snapshot["crop_posterior_lineage"],
         "asmae_posterior_vector_hash": asmae_vector_hash,
+        "posterior_vector_recomputed_and_verified": True,
         "dashboard_can_render_pixels": True,
         "render_authorized": True,
     }
@@ -760,7 +783,7 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
         "coverage_status": "WITHIN_95PCT_UNCERTAINTY_INTERVAL" if sensor_within_ci95 else "OUTSIDE_INTERVAL",
         "depth_representativeness": "single_depth_15cm_vs_integrated_root_zone",
         "validation_level": "preliminary_replay_coverage",
-        "soil_water_status": "Adequate Hydration (Loam field capacity reference ~0.32-0.35)",
+        "soil_water_status": "Pending Independent Field Validation (Single-depth controlled reference reading)",
     }
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -806,12 +829,14 @@ def test_pilot_phase1_empirical_run():
     )
     assert manifest["pillar_4_publication"]["dashboard_can_render_pixels"] is True
     assert manifest["pillar_4_publication"]["asmae_posterior_vector_hash"].startswith("sha256:")
+    assert manifest["pillar_4_publication"]["posterior_vector_recomputed_and_verified"] is True
 
     # Pillar 5
     assert manifest["pillar_5_ground_truth_comparison"]["sensor_within_95pct_ci"] is True
     assert manifest["pillar_5_ground_truth_comparison"]["agronomic_concordance"] == "UNCERTAINTY_COVERAGE_COMPATIBLE (SINGLE_POINT_PRELIMINARY)"
     assert manifest["pillar_5_ground_truth_comparison"]["coverage_status"] == "WITHIN_95PCT_UNCERTAINTY_INTERVAL"
     assert manifest["pillar_5_ground_truth_comparison"]["ci95_interval_span"] > 0.5  # Wide prior interval note
+    assert manifest["pillar_5_ground_truth_comparison"]["soil_water_status"].startswith("Pending Independent Field Validation")
 
     # Safety Interlock
     assert manifest["safety_interlock"]["verified_irrigation_enabled"] is False
