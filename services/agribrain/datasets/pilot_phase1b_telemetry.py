@@ -1,9 +1,17 @@
 """
-Akaloris Pilot Phase 1B — Independent Field Telemetry Dataset.
+Akaloris Pilot Phase 1B — Synthetic Multi-Depth Gateway Telemetry Benchmark Dataset.
 
 Provides persistent, file-backed LoRaWAN gateway records for Mitidja Plot-A,
 preserving source identity, UTC measurement times, ingestion times, depths,
-units, calibration profiles, and cryptographic source record hashes.
+units, calibration profiles, and SHA-256 source record hashes.
+
+NOTE (Scientific Provenance & Qualification Boundary):
+This dataset is a parameterized synthetic benchmark generated from physical soil moisture
+dynamics (exponential drying curves, rainfall wetting spikes, diurnal variation, and
+multi-depth attenuation) designed for Phase 1B engineering qualification. It validates
+file-backed parser mechanics, blind spatial partitioning, causal cutoff fences, 3-way
+cryptographic binding, and scalar Kalman assimilation algorithms, but does NOT represent
+independently collected measurements from physical field sensors.
 """
 from __future__ import annotations
 
