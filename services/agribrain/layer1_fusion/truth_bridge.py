@@ -98,16 +98,20 @@ import time
 
 @contextlib.contextmanager
 def _revocation_lock(path: str, timeout: float = 10.0):
-    """Cross-process file lock protecting revocation store updates across workers (RC2)."""
+    """Cross-process file lock protecting revocation store updates across workers (RC2/RC3)."""
     lock_file = path + ".lock"
     parent = os.path.dirname(lock_file)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    f = open(lock_file, "a+")
+    f = open(lock_file, "a+b")
     start = time.time()
     try:
         if sys.platform == "win32":
             import msvcrt
+            f.seek(0, os.SEEK_END)
+            if f.tell() == 0:
+                f.write(b"0")
+                f.flush()
             while True:
                 try:
                     f.seek(0)
@@ -146,10 +150,10 @@ def _revocation_lock(path: str, timeout: float = 10.0):
 
 
 class DurableRevocationStore:
-    """Durable, fail-closed monotonic revocation store across workers and restarts (R11-07, R12-04, RC2).
+    """Durable, fail-closed monotonic revocation store across workers and restarts (R11-07, R12-04, RC2, RC3).
     
-    Guarantees cross-worker consistency via cross-process file locking, read-modify-write,
-    monotonic epoch checks, and verification-time freshness synchronization.
+    Guarantees cross-worker consistency via cross-process file locking, atomic read-modify-write,
+    strictly monotonic epoch and membership validation, and fail-closed verification-time freshness.
     """
 
     def __init__(self, persistence_path: Optional[str] = None):
@@ -160,83 +164,94 @@ class DurableRevocationStore:
         self.revoked_sensor_receipts: Set[str] = set()
         self.revoked_publication_receipts: Set[str] = set()
         self._last_loaded_mtime: float = 0.0
+        self._corrupted_error: Optional[str] = None
         if self.persistence_path and os.path.exists(self.persistence_path):
             self.load_from_disk()
 
     def _sync_freshness(self) -> None:
-        """Enforce freshness at verification time by loading latest state from disk."""
+        """Enforce freshness at verification time by loading latest state from disk.
+        Fails closed on any corruption, I/O error, or monotonicity rollback.
+        """
         if not self.persistence_path or not os.path.exists(self.persistence_path):
             return
         try:
             mtime = os.path.getmtime(self.persistence_path)
-            if mtime <= self._last_loaded_mtime:
+            if mtime <= self._last_loaded_mtime and self._corrupted_error is None:
                 return
             with open(self.persistence_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self._last_loaded_mtime = mtime
+            if not isinstance(data, dict):
+                raise ValueError("Revocation store content is not a JSON object")
             disk_epoch = int(data.get("revocation_epoch", 0))
-            if disk_epoch > self.revocation_epoch:
-                self.revocation_epoch = disk_epoch
+            if disk_epoch < self.revocation_epoch:
+                raise ValueError(f"Monotonicity rollback detected on disk: {disk_epoch} < {self.revocation_epoch}")
+            if not isinstance(data.get("revoked_sensor_receipts"), list) or not isinstance(data.get("revoked_publication_receipts"), list):
+                raise ValueError("Corrupted revocation store structure: receipt lists missing or invalid")
+            
+            self._last_loaded_mtime = mtime
+            self.revocation_epoch = max(self.revocation_epoch, disk_epoch)
             self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
             self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
-        except Exception:
-            pass
+            self._corrupted_error = None
+        except Exception as ex:
+            self._corrupted_error = str(ex)
+            raise IOError(f"Revocation store read failure from {self.persistence_path}: {ex}") from ex
+
+    def _read_and_sync_under_lock(self) -> None:
+        """Read disk state under lock, failing immediately if disk is corrupted or unreadable."""
+        if not self.persistence_path or not os.path.exists(self.persistence_path):
+            return
+        try:
+            with open(self.persistence_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("Revocation store content is not a JSON object")
+            disk_epoch = int(data.get("revocation_epoch", 0))
+            if disk_epoch < self.revocation_epoch:
+                raise ValueError(f"Monotonicity rollback detected on disk: {disk_epoch} < {self.revocation_epoch}")
+            if not isinstance(data.get("revoked_sensor_receipts"), list) or not isinstance(data.get("revoked_publication_receipts"), list):
+                raise ValueError("Corrupted revocation store structure: receipt lists missing or invalid")
+            
+            self.revocation_epoch = max(self.revocation_epoch, disk_epoch)
+            self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
+            self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
+            self._last_loaded_mtime = os.path.getmtime(self.persistence_path)
+            self._corrupted_error = None
+        except Exception as ex:
+            self._corrupted_error = str(ex)
+            raise IOError(f"Cannot update revocation store: existing store at {self.persistence_path} is corrupted or unreadable: {ex}") from ex
 
     def set_epoch(self, epoch: int) -> None:
         new_epoch = int(epoch)
         with _revocation_lock(self.persistence_path):
-            current_effective = self.revocation_epoch
-            if os.path.exists(self.persistence_path):
-                try:
-                    with open(self.persistence_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    disk_epoch = int(data.get("revocation_epoch", 0))
-                    self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
-                    self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
-                    current_effective = max(self.revocation_epoch, disk_epoch)
-                except Exception:
-                    pass
-            if new_epoch < current_effective:
-                raise ValueError(f"Monotonicity violation: cannot roll back epoch from {current_effective} to {new_epoch}")
+            self._read_and_sync_under_lock()
+            if new_epoch < self.revocation_epoch:
+                raise ValueError(f"Monotonicity violation: cannot roll back epoch from {self.revocation_epoch} to {new_epoch}")
             self.revocation_epoch = new_epoch
             self._persist_unlocked()
 
     def revoke_sensor(self, receipt_id: str) -> None:
         clean_id = str(receipt_id).strip()
         with _revocation_lock(self.persistence_path):
-            if os.path.exists(self.persistence_path):
-                try:
-                    with open(self.persistence_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    disk_epoch = int(data.get("revocation_epoch", 0))
-                    if disk_epoch > self.revocation_epoch:
-                        self.revocation_epoch = disk_epoch
-                    self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
-                    self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
-                except Exception:
-                    pass
+            self._read_and_sync_under_lock()
             self.revoked_sensor_receipts.add(clean_id)
             self._persist_unlocked()
 
     def revoke_publication(self, receipt_id: str) -> None:
         clean_id = str(receipt_id).strip()
         with _revocation_lock(self.persistence_path):
-            if os.path.exists(self.persistence_path):
-                try:
-                    with open(self.persistence_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    disk_epoch = int(data.get("revocation_epoch", 0))
-                    if disk_epoch > self.revocation_epoch:
-                        self.revocation_epoch = disk_epoch
-                    self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
-                    self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
-                except Exception:
-                    pass
+            self._read_and_sync_under_lock()
             self.revoked_publication_receipts.add(clean_id)
             self._persist_unlocked()
 
     def is_sensor_revoked(self, receipt_id: str, receipt_epoch: Optional[int] = None, epoch: Optional[int] = None) -> Tuple[bool, Optional[str]]:
-        self._sync_freshness()
+        try:
+            self._sync_freshness()
+        except Exception as ex:
+            return True, f"revocation_store_unreadable:{ex}"
+        if self._corrupted_error:
+            return True, f"revocation_store_corrupted:{self._corrupted_error}"
+        
         r_id = str(receipt_id).strip()
         if r_id in self.revoked_sensor_receipts:
             return True, f"revoked_sensor_receipt:{r_id}"
@@ -246,7 +261,13 @@ class DurableRevocationStore:
         return False, None
 
     def is_publication_revoked(self, receipt_id: str) -> Tuple[bool, Optional[str]]:
-        self._sync_freshness()
+        try:
+            self._sync_freshness()
+        except Exception as ex:
+            return True, f"revocation_store_unreadable:{ex}"
+        if self._corrupted_error:
+            return True, f"revocation_store_corrupted:{self._corrupted_error}"
+        
         r_id = str(receipt_id).strip()
         if r_id in self.revoked_publication_receipts:
             return True, f"revoked_publication_receipt:{r_id}"
@@ -279,11 +300,8 @@ class DurableRevocationStore:
             self._persist_unlocked()
 
     def clear(self) -> None:
-        with _revocation_lock(self.persistence_path):
-            self.revocation_epoch = 0
-            self.revoked_sensor_receipts.clear()
-            self.revoked_publication_receipts.clear()
-            self._persist_unlocked()
+        """Operational clear is strictly forbidden to preserve monotonicity."""
+        raise PermissionError("Monotonicity violation: operational revocation store cannot be cleared or rolled back")
 
     def load_from_disk(self) -> None:
         if not self.persistence_path:
@@ -293,14 +311,20 @@ class DurableRevocationStore:
         try:
             with open(self.persistence_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("Revocation store content is not a JSON object")
             disk_epoch = int(data.get("revocation_epoch", 0))
             if disk_epoch < self.revocation_epoch:
-                raise ValueError(f"Revocation manifest rollback detected: {disk_epoch} < {self.revocation_epoch}")
-            self.revocation_epoch = disk_epoch
+                raise ValueError(f"Monotonicity rollback detected: {disk_epoch} < {self.revocation_epoch}")
+            if not isinstance(data.get("revoked_sensor_receipts"), list) or not isinstance(data.get("revoked_publication_receipts"), list):
+                raise ValueError("Corrupted revocation store structure: receipt lists missing or invalid")
+            self.revocation_epoch = max(self.revocation_epoch, disk_epoch)
             self.revoked_sensor_receipts.update(data.get("revoked_sensor_receipts", []))
             self.revoked_publication_receipts.update(data.get("revoked_publication_receipts", []))
             self._last_loaded_mtime = os.path.getmtime(self.persistence_path)
+            self._corrupted_error = None
         except Exception as ex:
+            self._corrupted_error = str(ex)
             raise IOError(f"Failed to load revocation store from {self.persistence_path}: {ex}") from ex
 
 
@@ -717,16 +741,13 @@ def register_sensor_receipt(receipt: SensorAttestationReceipt) -> None:
 
 
 def clear_sensor_receipts() -> None:
-    """Clear all registered sensor attestation receipts."""
+    """Clear all registered sensor attestation receipts (test fixture helper)."""
     _TRUSTED_SENSOR_RECEIPTS.clear()
-    _REVOCATION_STORE.revoked_sensor_receipts.clear()
     import sys
     for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
         mod = sys.modules.get(mod_name)
         if mod and hasattr(mod, "_TRUSTED_SENSOR_RECEIPTS"):
             mod._TRUSTED_SENSOR_RECEIPTS.clear()
-        if mod and hasattr(mod, "_REVOCATION_STORE"):
-            mod._REVOCATION_STORE.revoked_sensor_receipts.clear()
 
 
 def get_sensor_receipt(receipt_id: str) -> Optional[SensorAttestationReceipt]:
@@ -757,16 +778,13 @@ def register_publication_receipt(receipt: PublicationAttestationReceipt) -> None
 
 
 def clear_publication_receipts() -> None:
-    """Clear all registered publication attestation receipts."""
+    """Clear all registered publication attestation receipts (test fixture helper)."""
     _TRUSTED_PUBLICATION_RECEIPTS.clear()
-    _REVOCATION_STORE.revoked_publication_receipts.clear()
     import sys
     for mod_name in ("layer1_fusion.truth_bridge", "services.agribrain.layer1_fusion.truth_bridge"):
         mod = sys.modules.get(mod_name)
         if mod and hasattr(mod, "_TRUSTED_PUBLICATION_RECEIPTS"):
             mod._TRUSTED_PUBLICATION_RECEIPTS.clear()
-        if mod and hasattr(mod, "_REVOCATION_STORE"):
-            mod._REVOCATION_STORE.revoked_publication_receipts.clear()
 
 
 def get_publication_receipt(receipt_id: str) -> Optional[PublicationAttestationReceipt]:
