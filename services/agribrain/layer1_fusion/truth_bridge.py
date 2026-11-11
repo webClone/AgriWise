@@ -1,4 +1,5 @@
 import math
+import struct
 import hashlib
 import json
 import os
@@ -525,6 +526,68 @@ def compute_asmae_content_hash(asmae_output: Any) -> str:
         raw = json.dumps(stable_dict, sort_keys=True, default=str).encode("utf-8")
         return "sha256:" + hashlib.sha256(raw).hexdigest()
     return "sha256:" + hashlib.sha256(str(asmae_output).encode("utf-8")).hexdigest()
+
+
+def compute_asmae_vector_numerical_hash(
+    state_vector: Any,
+    covariance_or_sigmas: Optional[Any] = None,
+) -> str:
+    """Compute deterministic cryptographic SHA256 binding of ASMAE numerical output states and uncertainties.
+    
+    Uses canonical IEEE-754 double precision (64-bit big-endian, '>d') binary serialization to guarantee
+    exact bitwise reproducibility across platforms, preventing numerical drift or silent divergence
+    between the posterior state estimation and published decision surfaces.
+    """
+    hasher = hashlib.sha256()
+    hasher.update(b"asmae_numerical_v1:")
+
+    # 1. Canonical State Vector Serialization
+    if isinstance(state_vector, dict):
+        for k in sorted(state_vector.keys()):
+            val = float(state_vector[k])
+            hasher.update(k.encode("utf-8"))
+            hasher.update(b"=")
+            hasher.update(struct.pack(">d", val))
+            hasher.update(b";")
+    elif isinstance(state_vector, (list, tuple)):
+        for idx, val in enumerate(state_vector):
+            hasher.update(str(idx).encode("utf-8"))
+            hasher.update(b"=")
+            hasher.update(struct.pack(">d", float(val)))
+            hasher.update(b";")
+    else:
+        hasher.update(struct.pack(">d", float(state_vector)))
+
+    # 2. Canonical Uncertainty Serialization (Covariance or Sigmas)
+    if covariance_or_sigmas is not None:
+        hasher.update(b"|uncertainty:")
+        if isinstance(covariance_or_sigmas, dict):
+            for k in sorted(covariance_or_sigmas.keys()):
+                val = covariance_or_sigmas[k]
+                hasher.update(k.encode("utf-8"))
+                hasher.update(b"=")
+                if isinstance(val, (list, tuple)):
+                    for v in val:
+                        hasher.update(struct.pack(">d", float(v)))
+                else:
+                    hasher.update(struct.pack(">d", float(val)))
+                hasher.update(b";")
+        elif isinstance(covariance_or_sigmas, (list, tuple)):
+            for i, row in enumerate(covariance_or_sigmas):
+                if isinstance(row, (list, tuple)):
+                    for j, v in enumerate(row):
+                        hasher.update(f"{i},{j}=".encode("utf-8"))
+                        hasher.update(struct.pack(">d", float(v)))
+                        hasher.update(b";")
+                else:
+                    hasher.update(str(i).encode("utf-8"))
+                    hasher.update(b"=")
+                    hasher.update(struct.pack(">d", float(row)))
+                    hasher.update(b";")
+        else:
+            hasher.update(struct.pack(">d", float(covariance_or_sigmas)))
+
+    return "sha256:" + hasher.hexdigest()
 
 
 def compute_raster_composite_content_hash(raster_data: Dict[str, Any], native_resolution_m: Optional[float] = None) -> str:

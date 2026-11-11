@@ -1,5 +1,5 @@
 """
-Akaloris Scientific Pilot Phase 1 — First Empirical Plot-A Observation Run.
+Akaloris Scientific Pilot Phase 1 — Real-Satellite-Data Integration Replay with Controlled In-Situ and Posterior Inputs.
 
 Executes a single authentic observation batch capturing the 5 mandatory evidence pillars:
   Pillar 1: Acquisition — Exact Sentinel-2/Sentinel-1 product identities, native receipts,
@@ -7,11 +7,13 @@ Executes a single authentic observation batch capturing the 5 mandatory evidence
   Pillar 2: Admission — Pre-ledger validation proving verified evidence items are admitted
             while out-of-scope and tampered/unverified readings are quarantined fail-closed.
   Pillar 3: Scientific Computation — ASMAE resilient posterior estimation producing biophysical
-            states (lai, canopy_water, vigor, root_zone_water), covariance, and deterministic lineage root.
+            states (lai, canopy_water, vigor, root_zone_water), covariance, deterministic lineage root,
+            and canonical IEEE-754 double precision posterior state vector hash binding.
   Pillar 4: Publication — Canonical Layer 10 snapshot store publication, surface validation,
             and reload verification ensuring display readiness.
   Pillar 5: Ground Truth Comparison — Quantitative comparison between field soil-moisture
-            probe readings and ASMAE estimated root-zone water status.
+            probe readings and ASMAE estimated root-zone water status, evaluating uncertainty coverage
+            probability without conflating coverage with fine-scale agronomic precision.
   Safety Interlock: Independent verification that AKALORIS_LAYER0_ENABLE_VERIFIED_IRRIGATION=false
             permanently prohibits physical actuator control.
 """
@@ -22,6 +24,12 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+_SERVICES_AGRIBRAIN = _REPO_ROOT / "services" / "agribrain"
+if str(_SERVICES_AGRIBRAIN) not in sys.path:
+    sys.path.insert(0, str(_SERVICES_AGRIBRAIN))
 from typing import Any, Dict, List
 import numpy as np
 import pytest
@@ -611,14 +619,19 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
         if post.get(st) and post[st].get("sigma") is not None
     }
 
-    # Deterministic Scientific Content Root SHA-256
+    # Deterministic Scientific Content Root SHA-256 (Evidence Ledger + Fused Features)
     scientific_root = pkg.scientific_content_root()
     assert isinstance(scientific_root, str) and len(scientific_root) == 64
+
+    # Canonical IEEE-754 Numerical State Vector Hash (R12-06 Extension)
+    asmae_vector_hash = tb.compute_asmae_vector_numerical_hash(computed_states, computed_sigmas)
+    assert asmae_vector_hash.startswith("sha256:") and len(asmae_vector_hash) == 71
 
     evidence_manifest["pillar_3_scientific_computation"] = {
         "latent_state_posterior": computed_states,
         "latent_state_sigmas": computed_sigmas,
         "scientific_content_root": scientific_root,
+        "numerical_vector_hash": asmae_vector_hash,
         "etkf_mode": "resilient_ensemble",
         "archive_conditioned": True,
         "scene_support_refs": hist_refs,
@@ -646,7 +659,11 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
         "surface_schema_version": SURFACES_SCHEMA_VERSION,
         "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
         "render_authorizations": {"canopy": {"authorized": True}},
-        "asmae_proof": {"content_hash": scientific_root, "run_id": pkg.run_id},
+        "asmae_proof": {
+            "content_hash": scientific_root,
+            "numerical_vector_hash": asmae_vector_hash,
+            "run_id": pkg.run_id,
+        },
         "mode_display_state": {"canopy": {"canRenderPixels": True}},
         "source_policy_display_state": {"requested_policy": "satellite"},
         "core_asmae_evidence_state": {"state": "nominal", "content_hash": scientific_root},
@@ -666,6 +683,7 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
         },
         "scientific_evidence_lineage": {
             "crop_posterior_lineage": scientific_root,
+            "asmae_posterior_vector_hash": asmae_vector_hash,
             "crop_worldline_event_id": f"worldline-{pkg.run_id}",
             "phenology_worldline_event_id": f"phenology-{pkg.run_id}",
         },
@@ -693,6 +711,10 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
     assert reloaded_snapshot["crop_posterior_lineage"] == scientific_root
     assert reloaded_snapshot["surface_inventory_hash"] == pub_result["surface_inventory_hash"]
     assert reloaded_snapshot["frontend_publication_hash"] == pub_result["frontend_publication_hash"]
+    # Cryptographic binding of ASMAE numerical output in reloaded snapshot
+    reloaded_fp = reloaded_snapshot.get("frontend_payload", {})
+    assert reloaded_fp.get("asmae_proof", {}).get("numerical_vector_hash") == asmae_vector_hash
+    assert reloaded_fp.get("scientific_evidence_lineage", {}).get("asmae_posterior_vector_hash") == asmae_vector_hash
 
     evidence_manifest["pillar_4_publication"] = {
         "intelligence_snapshot_id": snapshot_id,
@@ -701,6 +723,7 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
         "surface_inventory_hash": pub_result["surface_inventory_hash"],
         "frontend_publication_hash": pub_result["frontend_publication_hash"],
         "crop_posterior_lineage": reloaded_snapshot["crop_posterior_lineage"],
+        "asmae_posterior_vector_hash": asmae_vector_hash,
         "dashboard_can_render_pixels": True,
         "render_authorized": True,
     }
@@ -718,10 +741,12 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
     z_score_asmae = float(residual_asmae / (sigma_asmae_root or 1e-4))
     ci95_lower = float(theta_asmae_root - 1.96 * sigma_asmae_root)
     ci95_upper = float(theta_asmae_root + 1.96 * sigma_asmae_root)
+    ci95_span = float(ci95_upper - ci95_lower)
     sensor_within_ci95 = ci95_lower <= theta_sensor <= ci95_upper
 
     evidence_manifest["pillar_5_ground_truth_comparison"] = {
         "in_situ_sensor_vwc": theta_sensor,
+        "sensor_depth_cm": 15.0,
         "layer0_kalman_sm_0_10": theta_kalman_top,
         "layer0_kalman_sm_10_40": theta_kalman_root,
         "asmae_posterior_root_zone_water": theta_asmae_root,
@@ -729,9 +754,13 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
         "residual_sensor_minus_asmae": residual_asmae,
         "z_score": z_score_asmae,
         "ci95_interval": [ci95_lower, ci95_upper],
+        "ci95_interval_span": round(ci95_span, 4),
         "sensor_within_95pct_ci": sensor_within_ci95,
-        "agronomic_concordance": "HIGH" if sensor_within_ci95 else "DEVIATION_UNDER_OBSERVATION",
-        "soil_water_status": "Adequate Hydration (No acute drought stress, loam field capacity ~0.32-0.35)",
+        "agronomic_concordance": "UNCERTAINTY_COVERAGE_COMPATIBLE (SINGLE_POINT_PRELIMINARY)" if sensor_within_ci95 else "DEVIATION_UNDER_OBSERVATION",
+        "coverage_status": "WITHIN_95PCT_UNCERTAINTY_INTERVAL" if sensor_within_ci95 else "OUTSIDE_INTERVAL",
+        "depth_representativeness": "single_depth_15cm_vs_integrated_root_zone",
+        "validation_level": "preliminary_replay_coverage",
+        "soil_water_status": "Adequate Hydration (Loam field capacity reference ~0.32-0.35)",
     }
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -767,6 +796,7 @@ def test_pilot_phase1_empirical_run():
 
     # Pillar 3
     assert len(manifest["pillar_3_scientific_computation"]["scientific_content_root"]) == 64
+    assert manifest["pillar_3_scientific_computation"]["numerical_vector_hash"].startswith("sha256:")
     assert "root_zone_water" in manifest["pillar_3_scientific_computation"]["latent_state_posterior"]
 
     # Pillar 4
@@ -775,10 +805,13 @@ def test_pilot_phase1_empirical_run():
         PublicationStatus.VALID_DEGRADED.value,
     )
     assert manifest["pillar_4_publication"]["dashboard_can_render_pixels"] is True
+    assert manifest["pillar_4_publication"]["asmae_posterior_vector_hash"].startswith("sha256:")
 
     # Pillar 5
     assert manifest["pillar_5_ground_truth_comparison"]["sensor_within_95pct_ci"] is True
-    assert manifest["pillar_5_ground_truth_comparison"]["agronomic_concordance"] == "HIGH"
+    assert manifest["pillar_5_ground_truth_comparison"]["agronomic_concordance"] == "UNCERTAINTY_COVERAGE_COMPATIBLE (SINGLE_POINT_PRELIMINARY)"
+    assert manifest["pillar_5_ground_truth_comparison"]["coverage_status"] == "WITHIN_95PCT_UNCERTAINTY_INTERVAL"
+    assert manifest["pillar_5_ground_truth_comparison"]["ci95_interval_span"] > 0.5  # Wide prior interval note
 
     # Safety Interlock
     assert manifest["safety_interlock"]["verified_irrigation_enabled"] is False
@@ -791,7 +824,7 @@ if __name__ == "__main__":
     try:
         manifest = run_empirical_plot_a_observation_batch()
         print("\n" + "=" * 80)
-        print("AKALORIS PILOT PHASE 1: EMPIRICAL OBSERVATION RUN EVIDENCE MANIFEST")
+        print("AKALORIS PILOT PHASE 1: REAL-SATELLITE-DATA INTEGRATION REPLAY MANIFEST")
         print("=" * 80)
         print(json.dumps(manifest, indent=2))
         print("=" * 80)
