@@ -166,3 +166,127 @@ def test_pilot_phase1b_missing_ground_truth_depth_fails_closed(tmp_path):
 
     with pytest.raises(ValueError, match="missing required depths"):
         extract_held_out_ground_truth(t_eval, incomplete_records)
+
+
+def test_pilot_phase1b_rejected_sensor_cannot_alter_asmae_posterior():
+    """
+    Negative control proving admission-to-ASMAE enforcement:
+    A sensor observation rejected or downgraded by Layer 1 (e.g., unverified / unadmitted)
+    is strictly excluded by build_asmae_timeseries_from_admitted_evidence(), and
+    CANNOT alter the ASMAE biophysical posterior or trigger a Kalman update.
+    """
+    from datetime import datetime, timezone, timedelta
+    from services.agribrain.layer0.observation_packet import (
+        ObservationPacket,
+        ObservationSource,
+        DataStatus,
+        QAMetadata,
+        UncertaintyModel,
+    )
+    from services.agribrain.layer0.source_package import Layer0SourcePackage
+    from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+    from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+    from services.agribrain.layer05_asmae.schema import ASMAEInput
+    from services.agribrain.layer05_asmae.resilient_posterior import (
+        estimate_resilient_plot_posterior,
+        ARCHIVE_POSTERIOR_CONTRACT_VERSION,
+    )
+    from services.agribrain.layer05_asmae.config import STATE_NAMES
+    from services.agribrain.evaluation.phase1b_held_out_validation import (
+        build_asmae_timeseries_from_admitted_evidence,
+        PLOT_ID,
+        GEOMETRY_HASH,
+    )
+
+    t0 = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    # Unverified / unadmitted sensor packet with spoofed high reading (0.5500)
+    unverified_pkt = ObservationPacket(
+        packet_id="pkt_unverified_spoof_001",
+        source=ObservationSource.SENSOR_IOT,
+        obs_type="measurement",
+        timestamp=t0,
+        plot_id=PLOT_ID,
+        spatial_scope="point",
+        data_status=DataStatus.FALLBACK,  # Fallback data status: diagnostic only, state_update_allowed=False
+        qa=QAMetadata(sensor_health=1.0, scene_score=1.0),
+        uncertainty=UncertaintyModel(sigmas={"soil_moisture_vwc": 0.015}),
+        payload={
+            "device_id": "sensor_unregistered_dev",
+            "variable": "soil_moisture_vwc",
+            "value": 0.5500,
+            "unit": "fraction",
+            "observation_instant": t0.isoformat(),
+            "first_available_at": t0.isoformat(),
+            "depth_cm": 15.0,
+        },
+    )
+
+    pkg0 = Layer0SourcePackage(source_family="sensor", plot_id=PLOT_ID, packets=[unverified_pkt])
+    bundle = Layer1InputBundle(
+        plot_id=PLOT_ID,
+        run_id="run_test_unverified_guard",
+        run_timestamp=t0,
+        as_of_cutoff=t0,
+        window_start=t0 - timedelta(days=1),
+        window_end=t0,
+        is_historical_replay=True,
+        layer0_source_packages={"sensor": [pkg0]},
+    )
+    engine = Layer1FusionEngine()
+    fused_pkg = engine.fuse(bundle)
+
+    # 1. Assert Layer 1 rejected state update authority for this sensor
+    sensor_evidence = [e for e in fused_pkg.evidence_items if e.source_family == "sensor"]
+    assert not any(e.state_update_allowed for e in sensor_evidence)
+
+    # 2. Assert admission safeguard excludes unadmitted reading from ASMAE timeseries
+    timeseries = build_asmae_timeseries_from_admitted_evidence(fused_pkg, [unverified_pkt])
+    assert timeseries == []
+
+    # 3. Assert ASMAE posterior remains completely unaltered at archive prior
+    archive = {
+        "contract_version": ARCHIVE_POSTERIOR_CONTRACT_VERSION,
+        "state_means": {
+            "lai": 1.70,
+            "canopy_water": 0.365,
+            "vigor": 0.531,
+            "root_zone_water": 0.365,
+        },
+        "state_covariance": {st: 0.0263 for st in STATE_NAMES},
+        "last_update_date": "2026-08-13",
+        "geometry_hash": GEOMETRY_HASH,
+        "crop_context": {"crop_type": "citrus"},
+        "state_support_ledger": {
+            st: {
+                "source_feature_ids": ["S2_scene_A", "S2_scene_B"],
+                "support_status": "archive_conditioned",
+                "spatial_support": "plot_level_only",
+                "observation_count": 2,
+            }
+            for st in STATE_NAMES
+        },
+        "content_distinct_scene_ids": ["S2_scene_A", "S2_scene_B"],
+        "historical_validation_status": "validated",
+    }
+    inp = ASMAEInput(
+        plot_id=PLOT_ID,
+        run_id="run_safeguard_asmae",
+        polygon_geojson={"type": "Polygon", "coordinates": [[[2.65, 36.50], [2.65, 36.51], [2.66, 36.51], [2.65, 36.50]]]},
+        geometry_hash=GEOMETRY_HASH,
+        start_date=(t0 - timedelta(days=10)).date(),
+        end_date=t0.date(),
+        layer0_source_packages={"sensor": [pkg0]},
+        plot_timeseries=timeseries,  # Strictly admitted timeseries (empty)
+        archive_posterior=archive,
+        historical_scene_refs=["S2_scene_A", "S2_scene_B"],
+        mode="standard",
+        crop_context={"crop_type": "citrus"},
+    )
+    est = estimate_resilient_plot_posterior(inp, as_of=t0)
+    post = est["plot_level_posterior"]
+    ledger = est["state_support_ledger"]
+
+    # Posterior root-zone water is completely unaltered from archive prior 0.365
+    assert float(post["root_zone_water"]["mean"]) == 0.365
+    assert float(ledger["root_zone_water"].get("kalman_gain", 0.0)) == 0.0
+    assert ledger["root_zone_water"].get("update_mode") == "certified_archive_age_propagation"
