@@ -162,34 +162,91 @@ def extract_held_out_ground_truth(
 def build_asmae_timeseries_from_admitted_evidence(
     pkg: Any,
     packets: List[ObservationPacket],
+    plot_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Construct ASMAE temporal input records strictly from Layer 1 admitted,
-    state-update-authorized sensor evidence, with exact packet identity binding.
-    Any reading rejected or downgraded to diagnostic-only is excluded.
+    state-update-authorized sensor evidence, with full cryptographic content-level identity binding.
+    Any reading rejected, downgraded to diagnostic-only, or mismatched in content is excluded.
+
+    Verifications:
+      1. Layer 1 Admission Gate: EvidenceItem must exist for packet ID with state_update_allowed=True
+         and diagnostic_only=False.
+      2. Authenticated Values & Timestamps: Uses admitted EvidenceItem values directly, after verifying
+         numerical equality and timestamp alignment with packet payload.
+      3. Content Identity Verification: Recomputes canonical reading content digest and verifies
+         exact match against the admitted EvidenceItem.content_hash, preventing packet ID reuse
+         with altered payload or post-admission tampering.
     """
-    admitted_packet_ids = {
-        e.source_id
+    admitted_evidence_map: Dict[str, Any] = {
+        e.source_id: e
         for e in getattr(pkg, "evidence_items", [])
-        if getattr(e, "source_family", "") == "sensor" and getattr(e, "state_update_allowed", False)
+        if getattr(e, "source_family", "") == "sensor"
+        and getattr(e, "state_update_allowed", False)
+        and not getattr(e, "diagnostic_only", False)
     }
-    admitted_packets = [pkt for pkt in packets if pkt.packet_id in admitted_packet_ids]
-    if not admitted_packets:
+    if not admitted_evidence_map:
         return []
 
+    effective_plot = plot_id or getattr(pkg, "plot_id", None) or PLOT_ID
+
     time_groups: Dict[str, Dict[str, Any]] = {}
-    for pkt in admitted_packets:
-        obs_iso = pkt.payload.get("observation_instant") or pkt.timestamp.isoformat()
-        ingest_iso = pkt.payload.get("first_available_at") or obs_iso
-        depth = float(pkt.payload.get("depth_cm", 15.0))
-        val = float(pkt.payload.get("value", 0.0))
+    for pkt in packets:
+        ev = admitted_evidence_map.get(pkt.packet_id)
+        if ev is None:
+            # Unadmitted or rejected sensor packet
+            continue
+
+        payload = pkt.payload if isinstance(pkt.payload, dict) else {}
+        val_candidate = payload.get("value")
+        if val_candidate is None and getattr(ev, "variable", None) in payload:
+            val_candidate = payload[ev.variable]
+        if val_candidate is None:
+            continue
+
+        try:
+            val_float = float(val_candidate)
+            ev_val_float = float(ev.value)
+        except (ValueError, TypeError):
+            continue
+
+        # 1. Numerical consistency check
+        if not math.isclose(val_float, ev_val_float, abs_tol=1e-5):
+            continue
+
+        # 2. Timestamp alignment check
+        ev_obs = ev.observed_at.isoformat() if hasattr(ev.observed_at, "isoformat") else str(ev.observed_at)
+        pkt_obs = pkt.timestamp.isoformat() if hasattr(pkt.timestamp, "isoformat") else str(pkt.timestamp)
+        if ev_obs != pkt_obs:
+            continue
+
+        # 3. Canonical cryptographic content digest verification
+        dev_id = payload.get("instrument_id") or payload.get("device_id") or pkt.packet_id
+        target_var = getattr(ev, "variable", None) or payload.get("variable", "soil_moisture_vwc")
+        target_unit = getattr(ev, "unit", None) or payload.get("unit")
+        
+        computed_digest = tb.compute_reading_content_digest(
+            device_id=dev_id,
+            plot_id=getattr(ev, "plot_id", None) or getattr(pkt, "plot_id", None) or effective_plot,
+            variable=target_var,
+            value=ev_val_float,
+            unit=target_unit,
+            observed_at=pkt.timestamp,
+        )
+        if getattr(ev, "content_hash", None) and computed_digest != ev.content_hash:
+            continue
+
+        obs_iso = payload.get("observation_instant") or pkt_obs
+        ingest_iso = payload.get("first_available_at") or obs_iso
+        depth = float(payload.get("depth_cm", 15.0))
         if obs_iso not in time_groups:
             time_groups[obs_iso] = {
                 "timestamp": obs_iso,
                 "ingested_at": ingest_iso,
                 "depths": {},
             }
-        time_groups[obs_iso]["depths"][depth] = val
+        # Ingest the verified, admitted measurement value
+        time_groups[obs_iso]["depths"][depth] = ev_val_float
 
     timeseries_records: List[Dict[str, Any]] = []
     for obs_iso, data in sorted(time_groups.items()):

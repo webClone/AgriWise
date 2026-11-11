@@ -10,8 +10,9 @@ Proves:
      without default fallback assumptions.
   4. Numerical Integrity: 3-way hash binding enforced across snapshot record, proof,
      and lineage upon reload from disk.
-  5. Assimilation Benefit: Statistically verified error reduction over BOTH the
-     archive-only baseline (Config A) and independent Layer 0 hydrological model (Config B).
+  5. Assimilation Benefit: Descriptively observed error reduction over BOTH the
+     archive-only baseline (Config A) and independent Layer 0 hydrological model (Config B)
+     in the synthetic benchmark.
   6. Safety Interlock: Zero physical actuator delivery commands under fail-closed lock.
 
 NOTE: This qualification establishes engineering pipeline reliability over a synthetic
@@ -113,7 +114,7 @@ def test_pilot_phase1b_synthetic_longitudinal_engineering_qualification(tmp_path
     assert assimilated.coverage_95pct >= MIN_ALLOWED_95PCT_COVERAGE, f"Coverage {assimilated.coverage_95pct} < threshold {MIN_ALLOWED_95PCT_COVERAGE}"
     assert res["all_thresholds_met"] is True
 
-    # 4. Assert Statistically Verified Assimilation Benefit Over BOTH Baselines
+    # 4. Assert Descriptively Observed Assimilation Benefit Over BOTH Baselines in the Synthetic Benchmark
     # Must outperform BOTH Config A (archive prior) AND Config B (leak-free Layer 0 hydrological model)
     assert res["delta_mae_vs_archive"] > 0.0, f"Expected positive MAE reduction vs archive, got {res['delta_mae_vs_archive']}"
     assert res["delta_rmse_vs_archive"] > 0.0, f"Expected positive RMSE reduction vs archive, got {res['delta_rmse_vs_archive']}"
@@ -290,3 +291,222 @@ def test_pilot_phase1b_rejected_sensor_cannot_alter_asmae_posterior():
     assert float(post["root_zone_water"]["mean"]) == 0.365
     assert float(ledger["root_zone_water"].get("kalman_gain", 0.0)) == 0.0
     assert ledger["root_zone_water"].get("update_mode") == "certified_archive_age_propagation"
+
+
+def test_pilot_phase1b_mixed_batch_admission_safeguard() -> None:
+    """
+    Mixed-batch regression: When a batch contains one valid/admitted reading
+    and one unadmitted/rejected reading, verify:
+      1. Layer 1 admits only the valid reading with state_update_allowed=True.
+      2. build_asmae_timeseries_from_admitted_evidence admits strictly the valid reading
+         and excludes the rejected reading.
+      3. The resulting ASMAE timeseries aggregates only authorized readings.
+    """
+    import math
+    from datetime import datetime, timezone, timedelta
+    from services.agribrain.layer0.observation_packet import (
+        ObservationPacket,
+        ObservationSource,
+        DataStatus,
+        QAMetadata,
+    )
+    from services.agribrain.layer0.source_package import Layer0SourcePackage
+    from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+    from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+    from services.agribrain.evaluation.phase1b_held_out_validation import (
+        build_asmae_timeseries_from_admitted_evidence,
+        PLOT_ID,
+    )
+    from services.agribrain.datasets.pilot_phase1b_telemetry import (
+        ensure_phase1b_gateway_logs,
+        load_telemetry_observation_packets,
+    )
+
+    issuer = "agriwise:trust:sensor_authority"
+    priv, _ = provision_test_issuer_keypair(issuer)
+    ensure_phase1b_gateway_logs()
+
+    t0 = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    alpha_packets = load_telemetry_observation_packets(
+        as_of_cutoff=t0,
+        stations=("station_alpha",),
+        signing_key=priv,
+        issuer=issuer,
+    )
+    valid_pkt = alpha_packets[0]  # Valid 15cm probe reading, value 0.3375
+
+    # Unverified / unadmitted sensor packet at 30cm
+    rejected_pkt = ObservationPacket(
+        packet_id="lora_msg_rejected_30cm_test",
+        source=ObservationSource.SENSOR_IOT,
+        obs_type="measurement",
+        timestamp=valid_pkt.timestamp,
+        plot_id=PLOT_ID,
+        spatial_scope="point",
+        data_status=DataStatus.FALLBACK,
+        qa=QAMetadata(sensor_health=1.0, scene_score=1.0),
+        payload={
+            "device_id": "sensor_unregistered_dev_30cm",
+            "variable": "soil_moisture_vwc",
+            "value": 0.4900,
+            "unit": "fraction",
+            "depth_cm": 30.0,
+        },
+    )
+
+    pkg0 = Layer0SourcePackage(source_family="sensor", plot_id=PLOT_ID, packets=[valid_pkt, rejected_pkt])
+    bundle = Layer1InputBundle(
+        plot_id=PLOT_ID,
+        run_id="run_test_mixed_batch",
+        run_timestamp=t0,
+        as_of_cutoff=t0,
+        window_start=t0 - timedelta(days=10),
+        window_end=t0,
+        is_historical_replay=True,
+        layer0_source_packages={"sensor": [pkg0]},
+    )
+    engine = Layer1FusionEngine()
+    fused_pkg = engine.fuse(bundle)
+
+    # Layer 1 admits valid_pkt and rejects rejected_pkt
+    admitted_items = [e for e in fused_pkg.evidence_items if e.source_family == "sensor" and e.state_update_allowed]
+    assert len(admitted_items) == 1
+    assert admitted_items[0].source_id == valid_pkt.packet_id
+    assert math.isclose(float(admitted_items[0].value), float(valid_pkt.payload["value"]), abs_tol=1e-5)
+
+    # Helper filters out rejected_pkt and admits strictly valid_pkt
+    mixed_batch = [valid_pkt, rejected_pkt]
+    timeseries = build_asmae_timeseries_from_admitted_evidence(fused_pkg, mixed_batch)
+    assert len(timeseries) == 1
+    assert timeseries[0]["soil_moisture"] == round(float(valid_pkt.payload["value"]), 4)
+    assert timeseries[0]["source_id"] == "station_alpha"
+
+
+def test_pilot_phase1b_reused_packet_id_content_mismatch_rejected() -> None:
+    """
+    Test packet-content identity binding against packet-ID reuse attacks:
+    If an attacker reuses an admitted packet ID but provides altered measurement values,
+    different timestamps, or tampered payload contents:
+      1. The helper recomputes the canonical content digest and compares it with
+         the admitted EvidenceItem.content_hash.
+      2. Content hash and numerical value equality checks fail-closed.
+      3. The tampered packet is excluded from ASMAE timeseries construction.
+      4. Feeding the tampered packet produces no state update in ASMAE, leaving the
+         posterior at the certified archive prior.
+    """
+    import copy
+    from datetime import datetime, timezone, timedelta
+    from services.agribrain.layer0.source_package import Layer0SourcePackage
+    from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+    from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+    from services.agribrain.evaluation.phase1b_held_out_validation import (
+        build_asmae_timeseries_from_admitted_evidence,
+        PLOT_ID,
+        GEOMETRY_HASH,
+    )
+    from services.agribrain.datasets.pilot_phase1b_telemetry import (
+        ensure_phase1b_gateway_logs,
+        load_telemetry_observation_packets,
+    )
+    from services.agribrain.layer05_asmae.schema import ASMAEInput
+    from services.agribrain.layer05_asmae.resilient_posterior import (
+        estimate_resilient_plot_posterior,
+        ARCHIVE_POSTERIOR_CONTRACT_VERSION,
+    )
+    from services.agribrain.layer05_asmae.config import STATE_NAMES
+
+    issuer = "agriwise:trust:sensor_authority"
+    priv, _ = provision_test_issuer_keypair(issuer)
+    ensure_phase1b_gateway_logs()
+
+    t0 = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    alpha_packets = load_telemetry_observation_packets(
+        as_of_cutoff=t0,
+        stations=("station_alpha",),
+        signing_key=priv,
+        issuer=issuer,
+    )
+    valid_pkt = alpha_packets[0]  # Valid 15cm probe reading, value 0.3375
+
+    pkg0 = Layer0SourcePackage(source_family="sensor", plot_id=PLOT_ID, packets=[valid_pkt])
+    bundle = Layer1InputBundle(
+        plot_id=PLOT_ID,
+        run_id="run_test_content_binding",
+        run_timestamp=t0,
+        as_of_cutoff=t0,
+        window_start=t0 - timedelta(days=10),
+        window_end=t0,
+        is_historical_replay=True,
+        layer0_source_packages={"sensor": [pkg0]},
+    )
+    engine = Layer1FusionEngine()
+    fused_pkg = engine.fuse(bundle)
+
+    # Verify that valid_pkt was admitted in fused_pkg
+    admitted = [e for e in fused_pkg.evidence_items if e.source_family == "sensor" and e.state_update_allowed]
+    assert len(admitted) == 1
+    ev = admitted[0]
+    assert ev.source_id == valid_pkt.packet_id
+    assert ev.content_hash is not None
+
+    # Construct spoofed packet that REUSES the admitted packet_id, but tampers with value
+    spoofed_pkt = copy.deepcopy(valid_pkt)
+    spoofed_pkt.payload["value"] = 0.5500  # Tampered measurement value
+
+    # Helper must detect content mismatch (value and canonical hash) and reject spoofed packet
+    timeseries_spoofed = build_asmae_timeseries_from_admitted_evidence(fused_pkg, [spoofed_pkt])
+    assert timeseries_spoofed == [], "Spoofed packet with reused ID but altered content must be rejected"
+
+    # Also test mixed list: valid packet + spoofed packet with reused ID
+    timeseries_mixed = build_asmae_timeseries_from_admitted_evidence(fused_pkg, [valid_pkt, spoofed_pkt])
+    assert len(timeseries_mixed) == 1
+    # Only the authentic value is ingested
+    assert timeseries_mixed[0]["soil_moisture"] == round(float(valid_pkt.payload["value"]), 4)
+
+    # Assert ASMAE posterior given the spoofed packet receives zero Kalman update
+    archive = {
+        "contract_version": ARCHIVE_POSTERIOR_CONTRACT_VERSION,
+        "state_means": {
+            "lai": 1.70,
+            "canopy_water": 0.365,
+            "vigor": 0.531,
+            "root_zone_water": 0.365,
+        },
+        "state_covariance": {st: 0.0263 for st in STATE_NAMES},
+        "last_update_date": "2026-08-13",
+        "geometry_hash": GEOMETRY_HASH,
+        "crop_context": {"crop_type": "citrus"},
+        "state_support_ledger": {
+            st: {
+                "source_feature_ids": ["S2_scene_A", "S2_scene_B"],
+                "support_status": "archive_conditioned",
+                "spatial_support": "plot_level_only",
+                "observation_count": 2,
+            }
+            for st in STATE_NAMES
+        },
+        "content_distinct_scene_ids": ["S2_scene_A", "S2_scene_B"],
+        "historical_validation_status": "validated",
+    }
+    inp = ASMAEInput(
+        plot_id=PLOT_ID,
+        run_id="run_spoof_content_asmae",
+        polygon_geojson={"type": "Polygon", "coordinates": [[[2.65, 36.50], [2.65, 36.51], [2.66, 36.51], [2.65, 36.50]]]},
+        geometry_hash=GEOMETRY_HASH,
+        start_date=(t0 - timedelta(days=10)).date(),
+        end_date=t0.date(),
+        layer0_source_packages={"sensor": [pkg0]},
+        plot_timeseries=timeseries_spoofed,
+        archive_posterior=archive,
+        historical_scene_refs=["S2_scene_A", "S2_scene_B"],
+        mode="standard",
+        crop_context={"crop_type": "citrus"},
+    )
+    est = estimate_resilient_plot_posterior(inp, as_of=t0)
+    post = est["plot_level_posterior"]
+    ledger = est["state_support_ledger"]
+
+    assert float(post["root_zone_water"]["mean"]) == 0.365
+    assert float(ledger["root_zone_water"].get("kalman_gain", 0.0)) == 0.0
+    assert ledger["root_zone_water"].get("update_mode") == "certified_archive_age_propagation"
+
