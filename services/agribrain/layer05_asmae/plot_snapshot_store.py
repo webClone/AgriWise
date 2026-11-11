@@ -705,15 +705,15 @@ def publish_canonical_layer10_snapshot(
         claimed_proof_hash = (payload.get("asmae_proof") or {}).get("numerical_vector_hash")
         claimed_lineage_hash = (payload.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
 
-        if claimed_num_hash and claimed_num_hash != actual_num_hash:
+        if not claimed_num_hash or claimed_num_hash != actual_num_hash:
             raise ValueError(
                 f"ASMAE numerical posterior hash mismatch: recomputed {actual_num_hash} != claimed record {claimed_num_hash}"
             )
-        if claimed_proof_hash and claimed_proof_hash != actual_num_hash:
+        if not claimed_proof_hash or claimed_proof_hash != actual_num_hash:
             raise ValueError(
                 f"ASMAE proof numerical vector hash mismatch: recomputed {actual_num_hash} != claimed asmae_proof {claimed_proof_hash}"
             )
-        if claimed_lineage_hash and claimed_lineage_hash != actual_num_hash:
+        if not claimed_lineage_hash or claimed_lineage_hash != actual_num_hash:
             raise ValueError(
                 f"ASMAE lineage numerical vector hash mismatch: recomputed {actual_num_hash} != claimed lineage {claimed_lineage_hash}"
             )
@@ -972,9 +972,12 @@ def load_latest_plot_snapshot(
                 claimed_lineage_hash = (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
 
                 is_valid = (
-                    claimed_num_hash == recomputed_num_hash
-                    and (not claimed_proof_hash or claimed_proof_hash == recomputed_num_hash)
-                    and (not claimed_lineage_hash or claimed_lineage_hash == recomputed_num_hash)
+                    bool(claimed_num_hash)
+                    and bool(claimed_proof_hash)
+                    and bool(claimed_lineage_hash)
+                    and claimed_num_hash == recomputed_num_hash
+                    and claimed_proof_hash == recomputed_num_hash
+                    and claimed_lineage_hash == recomputed_num_hash
                 )
                 numerical_binding_valid = bool(is_valid)
             except Exception:

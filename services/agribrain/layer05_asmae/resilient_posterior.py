@@ -490,6 +490,14 @@ _SIGNAL_ALIASES = {
     "ndmi": ("ndmi", "NDMI"),
     "vv": ("vv", "sar_vv", "VV"),
     "vh": ("vh", "sar_vh", "VH"),
+    "soil_moisture": (
+        "soil_moisture",
+        "soil_moisture_vwc",
+        "sm_10_40",
+        "root_zone_water",
+        "soil_moisture_fraction",
+        "vwc",
+    ),
 }
 
 
@@ -737,6 +745,17 @@ def _timeseries_state_estimates(inp: Any, as_of: Any = None) -> Dict[str, Dict[s
             "status": "timeseries_conditioned",
             "support": ["S1_VH"],
             "observation_count": vh["count"],
+            "update_mode": "direct_temporal_filter",
+        }
+
+    sm = signals.get("soil_moisture")
+    if sm:
+        result["root_zone_water"] = {
+            "mean": max(0.0, min(1.0, sm["mean"])),
+            "variance": max(0.0005, sm["variance"]),
+            "status": "timeseries_conditioned",
+            "support": ["in_situ_soil_sensor"],
+            "observation_count": sm["count"],
             "update_mode": "direct_temporal_filter",
         }
 
