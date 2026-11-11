@@ -12,6 +12,8 @@ Demonstrates and proves the complete, connected scientific pipeline:
 """
 from __future__ import annotations
 
+import copy
+import json
 import os
 import sys
 import subprocess
@@ -713,7 +715,7 @@ def test_pilot_plot_a_historical_revision_and_cutoff_replay_boundary(monkeypatch
     )
     tb.register_sensor_receipt(rcpt_rev)
 
-    # 1. Packet at 12:00 cutoff with original 0.31
+    # 1. Packet at 12:00 cutoff with original 0.31 (first_available_at=11:30 <= 12:00)
     pkt_orig = ObservationPacket(
         packet_id="pkt_sensor_orig",
         source=ObservationSource.SENSOR_IOT,
@@ -736,7 +738,7 @@ def test_pilot_plot_a_historical_revision_and_cutoff_replay_boundary(monkeypatch
         },
     )
 
-    # 2. Revised 0.41 (first available at 13:00)
+    # 2. Revised 0.41 (first available at 13:00 > 12:00 cutoff)
     pkt_rev = ObservationPacket(
         packet_id="pkt_sensor_rev",
         source=ObservationSource.SENSOR_IOT,
@@ -759,7 +761,80 @@ def test_pilot_plot_a_historical_revision_and_cutoff_replay_boundary(monkeypatch
         },
     )
 
-    # Replay run at 12:00 cutoff
+    # 3. Signed sensor with NO verified availability timestamp (first_available_at=None)
+    rcpt_no_avail = create_signed_sensor_receipt(
+        receipt_id=f"urn:agriwise:receipt:{dev_id}:no_avail",
+        issuer="agriwise:trust:sensor_authority",
+        device_id=dev_id,
+        plot_id=PLOT_ID,
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal-soil-rc2",
+        status="active",
+        reading_value=0.33,
+        reading_unit="fraction",
+        observed_at=t_obs,
+        first_available_at=None,
+    )
+    tb.register_sensor_receipt(rcpt_no_avail)
+    pkt_no_avail = ObservationPacket(
+        packet_id="pkt_sensor_no_avail",
+        source=ObservationSource.SENSOR_IOT,
+        obs_type="measurement",
+        timestamp=t_obs,
+        plot_id=PLOT_ID,
+        spatial_scope="point",
+        data_status=DataStatus.OBSERVED,
+        qa=QAMetadata(sensor_health="healthy"),
+        payload={
+            "device_id": dev_id,
+            "instrument_id": dev_id,
+            "variable": "soil_moisture_vwc",
+            "value": 0.33,
+            "unit": "fraction",
+            "calibration_version": "cal-soil-rc2",
+            "provenance_ref": rcpt_no_avail.receipt_id,
+            "observation_instant": t_obs.isoformat(),
+        },
+    )
+
+    # 4. Signed late revision with mismatched earlier receipt
+    rcpt_mismatched = create_signed_sensor_receipt(
+        receipt_id=f"urn:agriwise:receipt:{dev_id}:mismatched",
+        issuer="agriwise:trust:sensor_authority",
+        device_id=dev_id,
+        plot_id=PLOT_ID,
+        variable="soil_moisture_vwc",
+        calibration_profile_id="cal-soil-rc2",
+        status="active",
+        reading_value=0.20,
+        reading_unit="fraction",
+        observed_at=t_obs,
+        first_available_at=t_avail_orig.isoformat(),
+    )
+    tb.register_sensor_receipt(rcpt_mismatched)
+    pkt_mismatched = ObservationPacket(
+        packet_id="pkt_sensor_mismatched",
+        source=ObservationSource.SENSOR_IOT,
+        obs_type="measurement",
+        timestamp=t_obs,
+        plot_id=PLOT_ID,
+        spatial_scope="point",
+        data_status=DataStatus.OBSERVED,
+        qa=QAMetadata(sensor_health="healthy"),
+        payload={
+            "device_id": dev_id,
+            "instrument_id": dev_id,
+            "variable": "soil_moisture_vwc",
+            "value": 0.45,
+            "unit": "fraction",
+            "calibration_version": "cal-soil-rc2",
+            "provenance_ref": rcpt_mismatched.receipt_id,
+            "observation_instant": t_obs.isoformat(),
+            "first_available_at": t_avail_orig.isoformat(),
+        },
+    )
+
+    # Replay run at 12:00 cutoff with all 4 scenario packets
     bundle_1200 = Layer1InputBundle(
         plot_id=PLOT_ID,
         run_id="run_replay_1200",
@@ -770,24 +845,36 @@ def test_pilot_plot_a_historical_revision_and_cutoff_replay_boundary(monkeypatch
         is_historical_replay=True,
         layer0_source_packages={
             "sensor": [
-                Layer0SourcePackage(source_family="sensor", plot_id=PLOT_ID, packets=[pkt_orig, pkt_rev])
+                Layer0SourcePackage(
+                    source_family="sensor",
+                    plot_id=PLOT_ID,
+                    packets=[pkt_orig, pkt_rev, pkt_no_avail, pkt_mismatched],
+                )
             ]
         },
     )
     engine = Layer1FusionEngine()
     pkg_1200 = engine.fuse(bundle_1200)
 
-    # Original 0.31 is admitted; revised 0.41 is quarantined due to first_available_at after cutoff
-    admitted_1200 = [e for e in pkg_1200.evidence_items if e.source_family == "sensor"]
-    assert len(admitted_1200) == 1
-    assert admitted_1200[0].value == 0.31
-    assert admitted_1200[0].data_status == "observed"
+    # 1. Original 0.31 has authenticated availability before cutoff -> Admitted with full authority
+    admitted_orig = next(e for e in pkg_1200.evidence_items if e.source_id == "pkt_sensor_orig")
+    assert admitted_orig.value == 0.31
+    assert admitted_orig.state_update_allowed is True
+    assert admitted_orig.diagnostic_only is False
 
-    # Verify quarantined revision
+    # 2. Signed sensor with NO availability time -> Admitted as diagnostic-only, state update DENIED
+    admitted_no_avail = next(e for e in pkg_1200.evidence_items if e.source_id == "pkt_sensor_no_avail")
+    assert admitted_no_avail.value == 0.33
+    assert admitted_no_avail.state_update_allowed is False
+    assert admitted_no_avail.diagnostic_only is True
+    assert "NO_AUTHENTICATED_AVAILABILITY_ON_HISTORICAL_REPLAY" in admitted_no_avail.flags
+
+    # 3. Quarantines: Revised 0.41 (after cutoff) and Mismatched earlier receipt
     quarantine_1200 = {q.evidence_id: q.reason_codes for q in pkg_1200.diagnostics.quarantined_evidence}
     assert any("FIRST_AVAILABLE_AFTER_CUTOFF" in str(reasons) for reasons in quarantine_1200.values())
+    assert any("MISMATCHED_SENSOR_RECEIPT_DIGEST" in str(reasons) for reasons in quarantine_1200.values())
 
-    # Layer 2 is NEVER influenced by revised 0.41 at 12:00 cutoff
+    # Layer 2 is NEVER influenced by revised 0.41 or unverified availability 0.33 at 12:00 cutoff
     assert pkg_1200.layer2_input is not None
 
     # Later cutoff at 14:00: revised 0.41 is now eligible (13:00 <= 14:00)
@@ -1155,3 +1242,116 @@ def test_pilot_plot_a_mixed_valid_invalid_sensor_sibling_isolation():
     quarantined = [q for q in pkg.diagnostics.quarantined_evidence if dev_nan in q.evidence_id]
     assert len(quarantined) == 1
     assert any("NAN_INF_VALUE" in str(c) or "MALFORMED_READING" in str(c) for c in quarantined[0].reason_codes)
+
+
+def test_pilot_plot_a_production_asmae_numerical_binding_verification(tmp_path, monkeypatch):
+    """Integrated Acceptance Gate 5: Production ASMAE numerical binding validation.
+    1. Publisher rejects snapshot when posterior vector contradicts claimed hash.
+    2. Reader refuses scientific authority when posterior vector hash is tampered/mismatched.
+    3. Reader certifies numerical authority when posterior vector and hashes agree.
+    """
+    monkeypatch.setattr(asmae_store, "PLOT_SNAPSHOT_ROOT", tmp_path / "snapshots")
+
+    # Base valid posterior vector and uncertainties
+    valid_states = {"lai": 1.70, "canopy_water": 0.365, "vigor": 0.531, "root_zone_water": 0.365}
+    valid_sigmas = {"lai": 0.30, "canopy_water": 0.16, "vigor": 0.16, "root_zone_water": 0.16}
+    valid_hash = tb.compute_asmae_vector_numerical_hash(valid_states, valid_sigmas)
+
+    surfaces = [{
+        "surface_id": "surface-canopy-ndvi",
+        "surface_type": "canopy_vigor",
+        "values": [[0.5]],
+        "resolution_m": 10.0,
+        "content_hash": "dummy_surf_hash",
+    }]
+
+    # Case 1: Tampered posterior at publication time -> Publisher raises ValueError
+    tampered_payload = {
+        "run_id": "run_test_num_001",
+        "publication_run_id": "run_test_num_001",
+        "publication_id": "pub-run_test_num_001",
+        "intelligence_snapshot_id": "L10-SNAP-NUM-TAMPER-001",
+        "plot_id": PLOT_ID,
+        "crop_cycle_id": "CYCLE-2026-TEST",
+        "surface_schema_version": SURFACES_SCHEMA_VERSION,
+        "render_authorization_version": RENDER_AUTHORIZATION_VERSION,
+        "render_authorizations": {"canopy": {"authorized": True}},
+        "asmae_proof": {"content_hash": "dummy_root", "numerical_vector_hash": valid_hash},
+        "scientific_evidence_lineage": {
+            "crop_posterior_lineage": "dummy_root",
+            "asmae_posterior_vector_hash": valid_hash,
+            "crop_worldline_event_id": "worldline-run_test_num_001",
+            "phenology_worldline_event_id": "phenology-run_test_num_001",
+        },
+        "asmae_posterior_numerical_record": {
+            "states": {"lai": 9.99, "root_zone_water": 0.99},  # Contradicts valid_hash!
+            "sigmas": valid_sigmas,
+            "numerical_vector_hash": valid_hash,
+        },
+        "surfaces": surfaces,
+        "published_at": RUN_TIME.isoformat(),
+        "evidence_cutoff_at": RUN_TIME.isoformat(),
+        "observation_window": {"start": RUN_TIME.isoformat(), "end": RUN_TIME.isoformat()},
+        "mode_display_state": {"canopy": {"canRenderPixels": True}},
+        "source_policy_display_state": {"requested_policy": "satellite"},
+        "core_asmae_evidence_state": {"state": "nominal", "content_hash": "dummy_root"},
+        "publication_surface_state": {"state": "provider_surface"},
+        "resolved_crop_stage": "UNKNOWN",
+        "phenology_context": {
+            "resolved_crop_stage": "UNKNOWN",
+            "ndvi_mean": 0.5,
+            "crop": "citrus",
+            "crop_known": True,
+        },
+    }
+
+    with pytest.raises(ValueError, match="ASMAE numerical posterior hash mismatch"):
+        asmae_store.publish_canonical_layer10_snapshot(
+            namespace=NAMESPACE,
+            geometry_hash=GEOM_HASH,
+            frontend_payload=tampered_payload,
+            request_run_id="run_tamper_test",
+        )
+
+    # Case 2: Matching posterior publishes cleanly
+    valid_payload = copy.deepcopy(tampered_payload)
+    valid_payload["intelligence_snapshot_id"] = "L10-SNAP-NUM-VALID-001"
+    valid_payload["asmae_posterior_numerical_record"]["states"] = valid_states
+    pub_res = asmae_store.publish_canonical_layer10_snapshot(
+        namespace=NAMESPACE,
+        geometry_hash=GEOM_HASH,
+        frontend_payload=valid_payload,
+        request_run_id="run_valid_test",
+    )
+    assert pub_res is not None
+
+    loaded = asmae_store.load_latest_plot_snapshot(namespace=NAMESPACE, geometry_hash=GEOM_HASH)
+    assert loaded is not None
+    assert loaded["validation"]["numericalBindingValid"] is True
+    assert loaded["validation"]["bindingValid"] is True
+    assert loaded["contract_validation"]["numerical_authority_verified"] is True
+    assert loaded["contract_validation"]["derived_publication_status"] in ("VALID_NORMAL", "VALID_DEGRADED")
+
+    # Case 3: Tampered publication JSON on disk -> Reader refuses scientific authority
+    pub_files = list((asmae_store._plot_dir(NAMESPACE) / "publications").glob("*.json"))
+    assert len(pub_files) == 1
+    snap_pub_file = pub_files[0]
+    with open(snap_pub_file, "r", encoding="utf-8") as f:
+        pub_data = json.load(f)
+
+    # Modify posterior states in stored frontend payload
+    pub_data["frontend_payload"]["asmae_posterior_numerical_record"]["states"]["root_zone_water"] = 0.01
+    with open(snap_pub_file, "w", encoding="utf-8") as f:
+        json.dump(pub_data, f)
+
+    # Invalidate memory cache to force disk read
+    asmae_store._CANONICAL_SNAPSHOT_CACHE.clear()
+
+    tampered_loaded = asmae_store.load_latest_plot_snapshot(namespace=NAMESPACE, geometry_hash=GEOM_HASH)
+    assert tampered_loaded is not None
+    assert tampered_loaded["validation"]["numericalBindingValid"] is False
+    assert tampered_loaded["validation"]["bindingValid"] is False
+    assert tampered_loaded["contract_validation"]["numerical_binding_valid"] is False
+    assert tampered_loaded["contract_validation"]["numerical_authority_verified"] is False
+    assert tampered_loaded["contract_validation"]["derived_publication_status"] == "INVALID_NUMERICAL_BINDING"
+    assert tampered_loaded.get("scientific_authority_certified") is False

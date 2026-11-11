@@ -685,6 +685,39 @@ def publish_canonical_layer10_snapshot(
     inventory_hash = compute_surface_inventory_hash(surfaces)
     payload["surface_inventory_hash"] = inventory_hash
 
+    # ASMAE numerical posterior verification in production publisher (R12-06)
+    num_rec = payload.get("asmae_posterior_numerical_record")
+    if num_rec is not None:
+        if not isinstance(num_rec, dict) or "states" not in num_rec:
+            raise ValueError("terminal Layer 10 asmae_posterior_numerical_record is malformed")
+        try:
+            from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+        except ImportError:
+            from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+        states = num_rec.get("states", {})
+        sigmas = num_rec.get("sigmas", {})
+        try:
+            actual_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
+        except Exception as e:
+            raise ValueError(f"Failed to compute ASMAE vector numerical hash: {e}") from e
+
+        claimed_num_hash = num_rec.get("numerical_vector_hash")
+        claimed_proof_hash = (payload.get("asmae_proof") or {}).get("numerical_vector_hash")
+        claimed_lineage_hash = (payload.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+
+        if claimed_num_hash and claimed_num_hash != actual_num_hash:
+            raise ValueError(
+                f"ASMAE numerical posterior hash mismatch: recomputed {actual_num_hash} != claimed record {claimed_num_hash}"
+            )
+        if claimed_proof_hash and claimed_proof_hash != actual_num_hash:
+            raise ValueError(
+                f"ASMAE proof numerical vector hash mismatch: recomputed {actual_num_hash} != claimed asmae_proof {claimed_proof_hash}"
+            )
+        if claimed_lineage_hash and claimed_lineage_hash != actual_num_hash:
+            raise ValueError(
+                f"ASMAE lineage numerical vector hash mismatch: recomputed {actual_num_hash} != claimed lineage {claimed_lineage_hash}"
+            )
+
     resolved_crop_cycle_id = requested_crop_cycle_id
     if resolved_crop_cycle_id:
         resolved_crop_cycle_id = str(resolved_crop_cycle_id).strip() or None
@@ -921,12 +954,41 @@ def load_latest_plot_snapshot(
         and head.get("observation_window") == authoritative_observation_window
     )
 
+    # Cryptographic ASMAE numerical binding validation (R12-06 production reader)
+    num_rec = publication_frontend.get("asmae_posterior_numerical_record")
+    numerical_binding_valid: Optional[bool] = None
+    if num_rec is not None:
+        if isinstance(num_rec, dict) and "states" in num_rec:
+            try:
+                try:
+                    from services.agribrain.layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                except ImportError:
+                    from layer1_fusion.truth_bridge import compute_asmae_vector_numerical_hash
+                states = num_rec.get("states", {})
+                sigmas = num_rec.get("sigmas", {})
+                recomputed_num_hash = compute_asmae_vector_numerical_hash(states, sigmas)
+                claimed_num_hash = num_rec.get("numerical_vector_hash")
+                claimed_proof_hash = (publication_frontend.get("asmae_proof") or {}).get("numerical_vector_hash")
+                claimed_lineage_hash = (publication_frontend.get("scientific_evidence_lineage") or {}).get("asmae_posterior_vector_hash")
+
+                is_valid = (
+                    claimed_num_hash == recomputed_num_hash
+                    and (not claimed_proof_hash or claimed_proof_hash == recomputed_num_hash)
+                    and (not claimed_lineage_hash or claimed_lineage_hash == recomputed_num_hash)
+                )
+                numerical_binding_valid = bool(is_valid)
+            except Exception:
+                numerical_binding_valid = False
+        else:
+            numerical_binding_valid = False
+
     validation_flags = {
         "nodeValid": bool(node.get("node_hash") and node.get("node_hash") == head.get("node_hash") and node.get("node_hash") == computed_node_hash),
         "publicationValid": bool(publication.get("publication_hash") and publication.get("publication_hash") == head.get("frontend_publication_hash") and publication.get("publication_hash") == computed_pub_hash),
         "receiptValid": bool(receipt.get("receipt_hash") and receipt.get("receipt_hash") == head.get("publication_receipt_hash") and receipt.get("receipt_hash") == computed_receipt_hash),
         "inventoryValid": bool(head.get("surface_inventory_hash") and computed_inv_hash and head.get("surface_inventory_hash") == computed_inv_hash),
         "temporalBindingValid": temporal_binding_valid,
+        "numericalBindingValid": numerical_binding_valid,
         "bindingValid": bool(
             head.get("snapshot_id") == snapshot_id
             and head.get("plot_id") == ns.plot_id
@@ -939,6 +1001,7 @@ def load_latest_plot_snapshot(
             and receipt.get("frontend_publication_hash")
             == publication.get("publication_hash")
             and temporal_binding_valid
+            and (numerical_binding_valid is not False)
         ),
         "lineageValid": bool(
             node.get("snapshot_kind") != "asmae"
@@ -964,17 +1027,32 @@ def load_latest_plot_snapshot(
         # flags are deliberately separate so callers can refresh a stale head
         # without misreporting it as cryptographic corruption.
         "schemaValid": published_schema_version == SURFACES_SCHEMA_VERSION,
-        "contractValid": derived_publication_status in VALID_PUBLICATION_STATUSES,
+        "contractValid": derived_publication_status in VALID_PUBLICATION_STATUSES and (numerical_binding_valid is not False),
         "publicationStatusValid": declared_status_valid,
     }
+    effective_publication_status = (
+        derived_publication_status
+        if numerical_binding_valid is not False
+        else "INVALID_NUMERICAL_BINDING"
+    )
+    effective_contract_reason = (
+        contract_reason
+        if numerical_binding_valid is not False
+        else "ASMAE numerical vector hash contradicts stored states/sigmas"
+    )
     node["validation"] = validation_flags
     node["contract_validation"] = {
         "current_surface_schema_version": SURFACES_SCHEMA_VERSION,
         "published_surface_schema_version": published_schema_version,
-        "derived_publication_status": derived_publication_status,
-        "contract_reason": contract_reason,
+        "derived_publication_status": effective_publication_status,
+        "contract_reason": effective_contract_reason,
         "declared_status_reason": declared_status_reason,
+        "numerical_binding_valid": numerical_binding_valid,
+        "numerical_authority_verified": bool(numerical_binding_valid is True),
     }
+    if numerical_binding_valid is False:
+        node["scientific_authority_certified"] = False
+        node["scientific_publication_authorized"] = False
     node["refresh_required"] = bool(
         all(
             validation_flags[key]

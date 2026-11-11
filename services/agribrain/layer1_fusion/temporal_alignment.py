@@ -132,6 +132,22 @@ def is_available_at_cutoff(
             except Exception:
                 return False, f"MALFORMED_FIRST_AVAILABLE_AT: malformed receipt first_available_at '{rcpt_fa}'"
 
+        # Check content digest binding on sensor receipt
+        rcpt_digest = getattr(rcpt, "content_digest", None)
+        item_digest = getattr(item, "content_hash", None)
+        if rcpt_digest and item_digest and str(rcpt_digest).strip() != str(item_digest).strip():
+            return False, f"MISMATCHED_SENSOR_RECEIPT_DIGEST: receipt digest {rcpt_digest} != measurement digest {item_digest}"
+
+    # Also check publication receipt content hash binding
+    pub_rcpt = getattr(item, "publication_receipt", None)
+    if pub_rcpt is None and rcpt is not None and hasattr(rcpt, "source_family") and getattr(rcpt, "source_family", "") != "sensor":
+        pub_rcpt = rcpt
+    if pub_rcpt is not None:
+        pub_hash = getattr(pub_rcpt, "content_hash", None)
+        item_digest = getattr(item, "content_hash", None)
+        if pub_hash and item_digest and str(pub_hash).strip() != str(item_digest).strip():
+            return False, f"MISMATCHED_PUBLICATION_RECEIPT_DIGEST: publication receipt hash {pub_hash} != measurement digest {item_digest}"
+
     # Parse flags with strict validation (L1-R7-04 / R7-G04, R9-03, RC2)
     v_pub = getattr(item, "verified_published_at", None)
     if v_pub is not None:
@@ -203,16 +219,65 @@ def is_available_at_cutoff(
     if is_replay and not is_static_prior:
         is_pub_verified = getattr(item, "publication_receipt_verified", False)
         is_sensor_verified = bool(
-            getattr(item, "truth_class", None) == "observed_sensor"
+            (item.source_family == "sensor" or getattr(item, "truth_class", None) in ("observed_sensor", "unverified_sensor"))
             and getattr(item, "receipt", None) is not None
+            and getattr(item, "truth_class", None) == "observed_sensor"
         )
-        # R8-02 / R8-G04: Unauthenticated caller publication claims without verified receipt rejected on historical replay
-        if "CALLER_CLAIMED_PUBLICATION_TIME" in item.flags and not is_pub_verified and not is_sensor_verified:
+        
+        if is_sensor_verified:
+            # P1 Historical Replay: Authenticated availability required for historical state authority
+            # Measurement authenticity (signed by authority) != Historical availability (available before cutoff).
+            has_auth_availability = False
+            
+            # Check 1: Sensor receipt with first_available_at <= cutoff
+            if rcpt is not None and getattr(rcpt, "first_available_at", None):
+                try:
+                    fa_dt = ensure_utc(datetime.fromisoformat(str(rcpt.first_available_at)))
+                    if fa_dt <= cutoff_utc:
+                        has_auth_availability = True
+                    else:
+                        return False, f"FIRST_AVAILABLE_AFTER_CUTOFF: signed receipt first_available_at {fa_dt} > cutoff {cutoff_utc}"
+                except Exception:
+                    return False, f"MALFORMED_FIRST_AVAILABLE_AT: malformed receipt first_available_at '{rcpt.first_available_at}'"
+            
+            # Check 2: Exact-content publication receipt with published_at <= cutoff
+            v_published = getattr(item, "verified_published_at", None)
+            if v_published is not None and getattr(item, "publication_receipt_verified", False):
+                try:
+                    p_dt = ensure_utc(v_published if isinstance(v_published, datetime) else datetime.fromisoformat(str(v_published)))
+                    if p_dt <= cutoff_utc:
+                        has_auth_availability = True
+                    else:
+                        return False, f"PUBLISHED_AFTER_CUTOFF: publication receipt published_at {p_dt} > cutoff {cutoff_utc}"
+                except Exception:
+                    return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed publication timestamp '{v_published}'"
+            elif pub_rcpt is not None and getattr(item, "publication_receipt_verified", False):
+                p_val = getattr(pub_rcpt, "published_at", None)
+                if p_val:
+                    try:
+                        p_dt = ensure_utc(datetime.fromisoformat(str(p_val)) if isinstance(p_val, str) else p_val)
+                        if p_dt <= cutoff_utc:
+                            has_auth_availability = True
+                        else:
+                            return False, f"PUBLISHED_AFTER_CUTOFF: publication receipt published_at {p_dt} > cutoff {cutoff_utc}"
+                    except Exception:
+                        return False, f"MALFORMED_PUBLICATION_TIMESTAMP: malformed publication timestamp '{p_val}'"
+
+            if not has_auth_availability:
+                # Signed sensor without authenticated first-availability timestamp <= cutoff.
+                # Must be diagnostic-only on historical replay: deny historical state update and Layer 2 influence.
+                item.state_update_allowed = False
+                item.diagnostic_only = True
+                if "NO_AUTHENTICATED_AVAILABILITY_ON_HISTORICAL_REPLAY" not in item.flags:
+                    item.flags.append("NO_AUTHENTICATED_AVAILABILITY_ON_HISTORICAL_REPLAY")
+                return True, "admitted_diagnostic_only_no_availability_proof"
+
+            return True, "available_authenticated_sensor"
+
+        # Non-sensor dynamic observations or unverified sensors require verified publication timestamp
+        if "CALLER_CLAIMED_PUBLICATION_TIME" in item.flags and not is_pub_verified:
             return False, "CALLER_CLAIMED_PUBLICATION_TIME_REJECTED: caller asserted publication availability without verified receipt proof on historical replay"
-        # R9-03: Derive admission from typed verified publication or sensor attestation record; reject untrusted flags
-        if not is_pub_verified and not is_sensor_verified:
-            return False, "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY: missing verified publication or recording timestamp"
-        if not has_pub_flag and not is_sensor_verified:
+        if not is_pub_verified or not has_pub_flag:
             return False, "UNVERIFIED_PUBLICATION_TIME_ON_HISTORICAL_REPLAY: missing verified publication or recording timestamp"
 
     return True, "available"
