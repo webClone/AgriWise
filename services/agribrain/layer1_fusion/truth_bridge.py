@@ -172,7 +172,12 @@ class DurableRevocationStore:
         """Enforce freshness at verification time by loading latest state from disk.
         Fails closed on any corruption, I/O error, or monotonicity rollback.
         """
-        if not self.persistence_path or not os.path.exists(self.persistence_path):
+        if not self.persistence_path:
+            return
+        if not os.path.exists(self.persistence_path):
+            if self._last_loaded_mtime > 0:
+                self._corrupted_error = f"Revocation store file disappeared from configured path: {self.persistence_path}"
+                raise IOError(self._corrupted_error)
             return
         try:
             mtime = os.path.getmtime(self.persistence_path)
@@ -199,7 +204,12 @@ class DurableRevocationStore:
 
     def _read_and_sync_under_lock(self) -> None:
         """Read disk state under lock, failing immediately if disk is corrupted or unreadable."""
-        if not self.persistence_path or not os.path.exists(self.persistence_path):
+        if not self.persistence_path:
+            return
+        if not os.path.exists(self.persistence_path):
+            if self._last_loaded_mtime > 0:
+                self._corrupted_error = f"Revocation store file disappeared from configured path: {self.persistence_path}"
+                raise IOError(self._corrupted_error)
             return
         try:
             with open(self.persistence_path, "r", encoding="utf-8") as f:
