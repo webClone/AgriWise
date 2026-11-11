@@ -159,6 +159,12 @@ def observation_packet_to_evidence(
     pkt_time = packet.timestamp
 
     # Derive measurement digest from the actual canonical reading, not caller payload["content_hash"] (RC2)
+    def _safe_reading_digest(dev_id, p_id, var, val, unit, t):
+        try:
+            return compute_reading_content_digest(dev_id, p_id, var, val, unit, t)
+        except Exception:
+            return None
+
     canonical_reading_digest = None
     if source_fam == "sensor":
         first_var = payload.get("variable") or next((k for k in PAYLOAD_VARIABLE_MAP if k in payload and payload[k] is not None), None)
@@ -167,17 +173,14 @@ def observation_packet_to_evidence(
             first_val = payload[first_var]
         first_unit = payload.get("unit")
         if first_val is not None and first_var and effective_plot_id:
-            try:
-                canonical_reading_digest = compute_reading_content_digest(
-                    device_id=inst_id or packet.packet_id,
-                    plot_id=effective_plot_id,
-                    variable=first_var,
-                    value=first_val,
-                    unit=first_unit,
-                    observed_at=pkt_time,
-                )
-            except Exception:
-                canonical_reading_digest = None
+            canonical_reading_digest = _safe_reading_digest(
+                dev_id=inst_id or packet.packet_id,
+                p_id=effective_plot_id,
+                var=first_var,
+                val=first_val,
+                unit=first_unit,
+                t=pkt_time,
+            )
 
     expected_pub_hash = canonical_reading_digest if (source_fam == "sensor" and canonical_reading_digest) else payload.get("content_hash")
 
@@ -373,7 +376,7 @@ def observation_packet_to_evidence(
                 current_1m_approval_allowed=truth.current_1m_approval_allowed and (final_data_status == "observed"),
                 temporal_basis=payload.get("temporal_basis"),
                 content_hash=(
-                    (canonical_reading_digest or compute_reading_content_digest(inst_id or packet.packet_id, effective_plot_id, var_name, val, unit_name, pkt_time))
+                    (canonical_reading_digest or _safe_reading_digest(inst_id or packet.packet_id, effective_plot_id, var_name, val, unit_name, pkt_time))
                     if source_fam == "sensor"
                     else (payload.get("content_hash") or getattr(packet, "content_hash", None))
                 ),
@@ -425,7 +428,7 @@ def observation_packet_to_evidence(
             current_1m_approval_allowed=truth.current_1m_approval_allowed and (final_data_status == "observed"),
             temporal_basis=payload.get("temporal_basis"),
             content_hash=(
-                (canonical_reading_digest or compute_reading_content_digest(inst_id or packet.packet_id, effective_plot_id, var_name, payload["value"], unit_name, pkt_time))
+                (canonical_reading_digest or _safe_reading_digest(inst_id or packet.packet_id, effective_plot_id, var_name, payload["value"], unit_name, pkt_time))
                 if source_fam == "sensor"
                 else (payload.get("content_hash") or getattr(packet, "content_hash", None))
             ),
