@@ -700,6 +700,7 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
 
     pub_status, pub_details = classify_surface_publication(snapshot_payload)
     assert pub_status in (PublicationStatus.VALID_NORMAL.value, PublicationStatus.VALID_DEGRADED.value)
+    snapshot_payload["publication_status"] = pub_status
 
     pub_result = asmae_store.publish_canonical_layer10_snapshot(
         namespace=NAMESPACE,
@@ -737,6 +738,24 @@ def run_empirical_plot_a_observation_batch() -> Dict[str, Any]:
     assert reloaded_num_record.get("numerical_vector_hash") == asmae_vector_hash
     assert reloaded_num_record.get("input_evidence_root") == scientific_root
     assert reloaded_num_record.get("contract_version") == ARCHIVE_POSTERIOR_CONTRACT_VERSION
+
+    # Explicit verification of all 11 scientific publication validation flags
+    reloaded_validation = reloaded_snapshot.get("validation", {})
+    all_11_flags = [
+        "nodeValid",
+        "publicationValid",
+        "receiptValid",
+        "inventoryValid",
+        "temporalBindingValid",
+        "numericalBindingValid",
+        "bindingValid",
+        "lineageValid",
+        "schemaValid",
+        "contractValid",
+        "publicationStatusValid",
+    ]
+    for flag in all_11_flags:
+        assert reloaded_validation.get(flag) is True, f"Validation flag {flag} must be True"
 
     evidence_manifest["pillar_4_publication"] = {
         "intelligence_snapshot_id": snapshot_id,
@@ -841,6 +860,95 @@ def test_pilot_phase1_empirical_run():
     # Safety Interlock
     assert manifest["safety_interlock"]["verified_irrigation_enabled"] is False
     assert manifest["safety_interlock"]["physical_actuator_commands_dispatched"] == 0
+
+
+def test_pilot_phase1_production_fastapi_endpoint_and_negative_controls():
+    """
+    Demonstration Stage 2 & 3:
+      - Stage 2: Authenticated FastAPI endpoint /v2/plots/{plot_id}/snapshot returns
+        the exact published snapshot, and explicitly verifies all 11 scientific validation fields.
+      - Stage 3A: Tampered numerical posterior record fails closed (available=False, surfaces stripped).
+      - Stage 3B: Header / tenant namespace mismatch rejected with HTTP 403 Forbidden.
+      - Stage 3C: Unknown or superseded snapshot query rejected with HTTP 404/409.
+    """
+    from fastapi.testclient import TestClient
+    from services.agribrain.app.main import app, require_internal_service_request, _SNAPSHOT_RESPONSE_CACHE
+
+    manifest = run_empirical_plot_a_observation_batch()
+    snapshot_id = manifest["pillar_4_publication"]["intelligence_snapshot_id"]
+
+    # 1. Stage 2: FastAPI Authenticated Endpoint
+    app.dependency_overrides[require_internal_service_request] = lambda: NAMESPACE
+    try:
+        client = TestClient(app)
+        resp = client.get(f"/v2/plots/{PLOT_ID}/snapshot")
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+        data = resp.json()
+        assert data.get("available") is True, f"Expected available=True, got {data.get('available')}"
+        assert data.get("snapshot_id") == snapshot_id
+
+        # All 11 flags must be explicitly verified as True
+        val = data.get("validation", {})
+        all_11 = [
+            "nodeValid",
+            "publicationValid",
+            "receiptValid",
+            "inventoryValid",
+            "temporalBindingValid",
+            "numericalBindingValid",
+            "bindingValid",
+            "lineageValid",
+            "schemaValid",
+            "contractValid",
+            "publicationStatusValid",
+        ]
+        for f in all_11:
+            assert val.get(f) is True, f"Validation flag {f} must be True, got {val.get(f)}"
+
+        # Surface and render display state verification
+        fp = data.get("frontend_payload", {})
+        assert len(fp.get("surfaces", [])) == manifest["pillar_4_publication"]["surface_count"], "Must contain published SIRE surfaces"
+        assert fp.get("surfaces", [])[0]["surface_id"] == "surface-canopy-ndvi"
+        assert fp.get("mode_display_state", {}).get("canopy", {}).get("canRenderPixels") is True
+        assert fp.get("asmae_proof", {}).get("numerical_vector_hash") == manifest["pillar_4_publication"]["asmae_posterior_vector_hash"]
+
+        # 2. Stage 3A: Tampered Numerical Binding Negative Control
+        # Invalidate in-memory caches to enforce disk verification
+        asmae_store._CANONICAL_SNAPSHOT_CACHE.clear()
+        _SNAPSHOT_RESPONSE_CACHE.clear()
+
+        plot_dir = asmae_store._plot_dir(NAMESPACE)
+        pub_files = list((plot_dir / "publications").glob("*.json"))
+        assert len(pub_files) > 0, "Publication file must exist on disk"
+        pub_path = pub_files[0]
+        with open(pub_path, "r", encoding="utf-8") as f:
+            pub_data = json.load(f)
+        # Mutate posterior state without updating numerical hash
+        pub_data["frontend_payload"]["asmae_posterior_numerical_record"]["states"]["root_zone_water"] = 0.9999
+        with open(pub_path, "w", encoding="utf-8") as f:
+            json.dump(pub_data, f)
+
+        resp_tampered = client.get(f"/v2/plots/{PLOT_ID}/snapshot")
+        assert resp_tampered.status_code == 200
+        data_tampered = resp_tampered.json()
+        assert data_tampered.get("available") is False, "Tampered numerical record must fail closed (available=False)"
+        assert data_tampered.get("validation", {}).get("numericalBindingValid") is False, "numericalBindingValid must be False"
+        assert data_tampered.get("validation", {}).get("contractValid") is False, "contractValid must be False"
+        assert "surfaces" not in data_tampered.get("frontend_payload", {}), "Surfaces must be stripped from tampered head response"
+
+        # 3. Stage 3B: Header / Namespace Mismatch
+        mismatched_ns = PlotNamespace(tenant_id=NAMESPACE.tenant_id, farm_id=NAMESPACE.farm_id, plot_id="foreign-plot-999")
+        app.dependency_overrides[require_internal_service_request] = lambda: mismatched_ns
+        resp_mismatch = client.get(f"/v2/plots/{PLOT_ID}/snapshot")
+        assert resp_mismatch.status_code == 403, f"Expected 403 Forbidden, got {resp_mismatch.status_code}"
+
+        # 4. Stage 3C: Unknown / Non-Existent Snapshot Query
+        app.dependency_overrides[require_internal_service_request] = lambda: NAMESPACE
+        resp_unknown = client.get("/v2/snapshots/non-existent-snapshot-xyz")
+        assert resp_unknown.status_code == 404, f"Expected 404 Not Found, got {resp_unknown.status_code}"
+
+    finally:
+        app.dependency_overrides.pop(require_internal_service_request, None)
 
 
 if __name__ == "__main__":

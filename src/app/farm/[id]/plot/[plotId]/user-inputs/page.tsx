@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { getAuthorizedPlotRouteContext, getPlotCenter } from "@/lib/farm-services";
+import { getSession } from "@/lib/session";
 import PlotIdentityForm from "@/components/farm/PlotIdentityForm";
 import PlotVisualGroundTruth from "@/components/farm/PlotVisualGroundTruth";
 import PlotSoilData from "@/components/farm/PlotSoilData";
@@ -19,6 +20,15 @@ export default async function UserInputsPage({ params }: PageProps) {
 
   const routeContext = await getAuthorizedPlotRouteContext(plotId, id);
   if (!routeContext) notFound();
+
+  const session = await getSession();
+  if (!session?.userId || session.userId !== routeContext.ownerUserId) {
+    if (process.env.NODE_ENV === "development") {
+      return null;
+    }
+    notFound();
+  }
+
   const { plot, farm, cropCycles: cycles } = routeContext;
 
   // 2. Calculate Weighted Readiness Score

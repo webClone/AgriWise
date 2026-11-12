@@ -1,7 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { getAuthorizedPlotRouteContext, getPlotCenter } from "@/lib/farm-services";
-import { getFAOLandIntelligence } from "@/lib/agribrain/fao-data-service";
-
+import { getSession } from "@/lib/session";
 import PlotPageClient from "@/components/farm/PlotPageClient";
 import RawSatelliteViewer from "@/components/farm/RawSatelliteViewer";
 import RawTelemetryHub from "@/components/farm/RawTelemetryHub";
@@ -13,6 +12,14 @@ export default async function RawDataPage({ params }: { params: Promise<{ id: st
   
   const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
   if (!routeContext) notFound();
+
+  const session = await getSession();
+  if (!session?.userId || session.userId !== routeContext.ownerUserId) {
+    if (process.env.NODE_ENV === "development") {
+      return null;
+    }
+    notFound();
+  }
 
   const { plot, farm, cropCycles } = routeContext;
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));

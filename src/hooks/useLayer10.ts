@@ -919,7 +919,7 @@ function canonicalPublicationToRunData(cacheJson: any, plotId: string): Record<s
     plot_id: plotId,
     timestamp: cacheJson.capturedAt,
     audit: cacheJson.audit || null,
-    surfaces: cacheJson.surfaceGrids || [],
+    surfaces: cacheJson.surfaces || cacheJson.surfaceGrids || cacheJson.surface_pack || [],
     zones: cacheJson.zones || [],
     histograms: cacheJson.histograms || {},
     quality: cacheJson.quality || {},

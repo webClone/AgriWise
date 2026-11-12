@@ -23,8 +23,18 @@ export default async function PlotDetailsPage({ params }: { params: Promise<{ id
     notFound();
   }
 
-  const { plot, farm, cropCycles } = routeContext;
+  const { plot, farm, cropCycles, ownerUserId } = routeContext;
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
+
+  // If the active session is not the plot owner, layout.tsx renders
+  // DevelopmentSessionBootstrap (dev) or notFound (prod).
+  // page.tsx must not render PlotDashboard outside the required providers.
+  if (!session?.userId || session.userId !== ownerUserId) {
+    if (process.env.NODE_ENV === "development") {
+      return null;
+    }
+    notFound();
+  }
 
   return (
     <div className="w-full h-full" style={{ minHeight: 'calc(100vh - 48px)' }} suppressHydrationWarning={true}>

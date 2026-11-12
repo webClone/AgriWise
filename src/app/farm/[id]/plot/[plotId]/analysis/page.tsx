@@ -1,5 +1,6 @@
 import { getAuthorizedPlotRouteContext } from "@/lib/farm-services";
 import { notFound } from "next/navigation";
+import { getSession } from "@/lib/session";
 import AgriBrainCommandCenterClient from "@/components/farm/intelligence/AgriBrainCommandCenterClient";
 import { isActiveCropCycleStatus } from "@/lib/agribrain/crop-cycle-status.mjs";
 
@@ -8,6 +9,14 @@ export default async function AnalysisPage({ params }: { params: Promise<{ id: s
   
   const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
   if (!routeContext) return notFound();
+
+  const session = await getSession();
+  if (!session?.userId || session.userId !== routeContext.ownerUserId) {
+    if (process.env.NODE_ENV === "development") {
+      return null;
+    }
+    notFound();
+  }
 
   const { plot, farm, cropCycles } = routeContext;
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status)) ?? null;

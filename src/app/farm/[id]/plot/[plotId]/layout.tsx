@@ -8,6 +8,7 @@ import { PlotTelemetryProvider } from "@/hooks/usePlotTelemetry";
 import { ParcelAssessmentProvider } from "@/hooks/useParcelAssessment";
 import PlotLayoutClient from "./PlotLayoutClient";
 import FarmThemeWrapper from "@/components/farm/FarmThemeWrapper";
+import DevelopmentSessionBootstrap from "@/components/auth/DevelopmentSessionBootstrap";
 import { notFound } from "next/navigation";
 import { getSession } from "@/lib/session";
 import { isActiveCropCycleStatus } from "@/lib/agribrain/crop-cycle-status.mjs";
@@ -34,7 +35,22 @@ export default async function PlotLayout({
     notFound();
   }
 
-  const { plot, farm, cropCycles } = routeContext;
+  const { plot, farm, cropCycles, ownerUserId } = routeContext;
+
+  // A plot must never mount tenant-scoped providers
+  // before its authenticated owner identity is established.
+  if (!session?.userId || session.userId !== ownerUserId) {
+    if (process.env.NODE_ENV === "development") {
+      return (
+        <DevelopmentSessionBootstrap
+          farmId={farmId}
+          plotId={plotId}
+        />
+      );
+    }
+
+    notFound();
+  }
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
   
   // Coordinate Calculation for Context
@@ -56,7 +72,13 @@ export default async function PlotLayout({
     <FarmThemeWrapper>
     <ParcelAssessmentProvider plotGeoJson={plot.geoJson} cropCycleId={currentCrop?.id || null}>
     <Layer10Provider plotGeoJson={plot.geoJson}>
-      <PlotTelemetryProvider scope={{ tenantId: String(session?.userId || (farm as any)?.userId || (farm as any)?.ownerId || ""), farmId, plotId }}>
+      <PlotTelemetryProvider
+        scope={{
+          tenantId: session.userId,
+          farmId,
+          plotId,
+        }}
+      >
       <PlotIntelligenceProvider>
       <PlotLayoutClient 
         farmId={farmId}

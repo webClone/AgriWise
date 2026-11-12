@@ -109,6 +109,10 @@ function AssessmentConsumerProbe({
 }) {
   const assessmentCtx = useParcelAssessment();
   const l10 = useLayer10();
+  const assessmentCtxRef = useRef(assessmentCtx);
+  assessmentCtxRef.current = assessmentCtx;
+  const l10Ref = useRef(l10);
+  l10Ref.current = l10;
   const renderHistoryRef = useRef<any[]>([]);
 
   // Capture every render frame to verify atomic intermediate transitions
@@ -129,17 +133,17 @@ function AssessmentConsumerProbe({
 
   useEffect(() => {
     onRegisterHarness({
-      fetchAssessment: assessmentCtx.fetchAssessment,
-      fetchLayer10: l10.fetchLayer10,
-      commitBrowserRenderReceipt: l10.commitBrowserRenderReceipt,
-      getAssessmentCtx: () => assessmentCtx,
-      getLayer10Ctx: () => l10,
+      fetchAssessment: (...args: any[]) => (assessmentCtxRef.current.fetchAssessment as any)(...args),
+      fetchLayer10: (...args: any[]) => (l10Ref.current.fetchLayer10 as any)(...args),
+      commitBrowserRenderReceipt: (...args: any[]) => (l10Ref.current.commitBrowserRenderReceipt as any)(...args),
+      getAssessmentCtx: () => assessmentCtxRef.current,
+      getLayer10Ctx: () => l10Ref.current,
       getRenderHistory: () => [...renderHistoryRef.current],
       clearRenderHistory: () => {
         renderHistoryRef.current = [];
       },
     });
-  }, [assessmentCtx, l10, onRegisterHarness]);
+  }, [onRegisterHarness]);
 
   useEffect(() => {
     onStateSample({

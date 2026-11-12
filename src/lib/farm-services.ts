@@ -91,6 +91,7 @@ export const getAuthorizedPlotRouteContext = cache(
     return {
       plot: mapPlot(plot),
       farm: mapFarm(plot.farm),
+      ownerUserId: plot.farm.userId,
       cropCycles: (plot.cropCycles || []).map(mapCropCycle),
     };
   },
