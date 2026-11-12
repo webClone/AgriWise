@@ -7,6 +7,7 @@ import { PlotIntelligenceProvider } from "@/hooks/usePlotIntelligence";
 import { PlotTelemetryProvider } from "@/hooks/usePlotTelemetry";
 import { ParcelAssessmentProvider } from "@/hooks/useParcelAssessment";
 import PlotLayoutClient from "./PlotLayoutClient";
+import DevelopmentSessionBootstrap from "@/components/auth/DevelopmentSessionBootstrap";
 import FarmThemeWrapper from "@/components/farm/FarmThemeWrapper";
 import { notFound } from "next/navigation";
 import { getSession } from "@/lib/session";
@@ -24,15 +25,18 @@ export default async function PlotLayout({
   const plotId = plotIdRaw.replace(/\/+$/, "");
 
   const session = await getSession();
-  if (!session?.userId && process.env.NODE_ENV !== "development") {
+  // Local development must establish a scoped session before fetching any
+  // plot details or mounting the scientific/telemetry providers.
+  if (!session?.userId) {
+    if (process.env.NODE_ENV === "development") {
+      return <DevelopmentSessionBootstrap plotId={plotId} farmId={farmId} />;
+    }
     notFound();
   }
-  
+
   const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
-  if (!routeContext) {
-    if (process.env.NODE_ENV === "development") return <>{children}</>;
-    notFound();
-  }
+  // A signed session for another owner is never a development bypass.
+  if (!routeContext) notFound();
 
   const { plot, farm, cropCycles } = routeContext;
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
@@ -56,7 +60,7 @@ export default async function PlotLayout({
     <FarmThemeWrapper>
     <ParcelAssessmentProvider plotGeoJson={plot.geoJson} cropCycleId={currentCrop?.id || null}>
     <Layer10Provider plotGeoJson={plot.geoJson}>
-      <PlotTelemetryProvider scope={{ tenantId: String(session?.userId || (farm as any)?.userId || (farm as any)?.ownerId || ""), farmId, plotId }}>
+      <PlotTelemetryProvider scope={{ tenantId: session.userId, farmId, plotId }}>
       <PlotIntelligenceProvider>
       <PlotLayoutClient 
         farmId={farmId}
