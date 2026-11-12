@@ -11,17 +11,16 @@ export default async function PlotDetailsPage({ params }: { params: Promise<{ id
   const plotId = plotIdRaw.replace(/\/+$/, "");
   const session = await getSession();
 
-  if (!session?.userId && process.env.NODE_ENV !== "development") {
-    notFound();
-  }
-  
-  const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
-  if (!routeContext) {
+  if (!session?.userId) {
     if (process.env.NODE_ENV === "development") {
       return <DevelopmentSessionBootstrap plotId={plotId} farmId={farmId} />;
     }
     notFound();
   }
+
+  const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
+  // Do not switch an already signed-in user into another owner's session.
+  if (!routeContext) notFound();
 
   const { plot, farm, cropCycles } = routeContext;
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
