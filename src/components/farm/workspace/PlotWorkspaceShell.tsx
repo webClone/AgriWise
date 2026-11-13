@@ -37,7 +37,7 @@ export default function PlotWorkspaceShell(props: PlotWorkspaceProps) {
       aria-label="Akaloris Plot Workspace">
       <WorkspaceToolDock farmId={farmId} plotId={plotId} onOpenTool={openTool} />
 
-      <main className="pw-map-slot" aria-label="Shared plot map and visualization">
+      <section className="pw-map-slot" aria-label="Shared plot map and visualization">
         <div className="pw-scientific-status">
           <WorkspaceScientificStatus />
         </div>
@@ -59,18 +59,19 @@ export default function PlotWorkspaceShell(props: PlotWorkspaceProps) {
         <div className="pw-legacy-map-host">
           <PlotDashboard {...props} embeddedInWorkspace />
         </div>
-      </main>
+      </section>
 
-      {desktopInspectorOpen && (
-        <aside className="pw-context-slot" id="pw-context-inspector">
-          <WorkspaceContextInspector farmId={farmId} plotId={plotId}
-            onCollapse={() => {
-              setDesktopInspectorOpen(false);
+      <aside className="pw-context-slot" id="pw-context-inspector">
+        <WorkspaceContextInspector farmId={farmId} plotId={plotId}
+          onCollapse={() => {
+            if (window.matchMedia("(max-width: 820px)").matches) {
               setMobileInspectorOpen(false);
-            }}
-          />
-        </aside>
-      )}
+            } else {
+              setDesktopInspectorOpen(false);
+            }
+          }}
+        />
+      </aside>
       <WorkspaceTimelineContainer />
       <span className="sr-only">
         V2 shell preview: the full Tool Registry, cross-panel selection and
