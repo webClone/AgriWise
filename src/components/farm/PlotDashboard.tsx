@@ -88,6 +88,8 @@ interface PlotDashboardProps {
   context: Record<string, unknown> | null;
   plotId?: string;
   farmId?: string;
+  /** P02 transition: map stays here; timeline is presented in the outer shell. */
+  embeddedInWorkspace?: boolean;
 }
 
 const containerVariants = {
@@ -103,7 +105,7 @@ const slideUp = { hidden: { y: 40, opacity: 0 }, visible: { y: 0, opacity: 1, tr
 const slideDown = { hidden: { y: -40, opacity: 0 }, visible: { y: 0, opacity: 1, transition: { type: "spring" as const, stiffness: 300, damping: 30 } } };
 const popIn = { hidden: { scale: 0.5, opacity: 0 }, visible: { scale: 1, opacity: 1, transition: { type: "spring" as const, stiffness: 400, damping: 25 } } };
 
-export default function PlotDashboard({ farm, plot, cropName, context, plotId: _plotId, farmId: _farmId }: PlotDashboardProps) {
+export default function PlotDashboard({ farm, plot, cropName, context, plotId: _plotId, farmId: _farmId, embeddedInWorkspace = false }: PlotDashboardProps) {
   const plotId = _plotId || String(plot?.id || "");
   const farmId = _farmId || String(farm?.id || "");
   const [mounted, setMounted] = useState(false);
@@ -123,6 +125,28 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
   // ── PRESENTATION VIEW ADAPTERS ──────────────────────────────────────────
   const l10 = useLayer10();
   const pi = usePlotIntelligence();
+
+  // P02-only UI bridge. Real tool execution still belongs to the original
+  // bounded workspaces; the shell dispatches *only* open-panel commands.
+  // P03/P04 replace this temporary bridge with the scoped Tool Registry.
+  useEffect(() => {
+    if (!embeddedInWorkspace) return;
+    const onOpenTool = (event: Event) => {
+      const detail = (event as CustomEvent<{ plotId: string; tool: string }>).detail;
+      if (!detail || detail.plotId !== plotId) return;
+      switch (detail.tool) {
+        case "sensors": setShowSensorsPanel(true); break;
+        case "drone": setShowDronePanel(true); break;
+        case "mesia": setShowMesiaPanel(true); break;
+        case "irrigation": setShowIrrigationPanel(true); break;
+        case "evidence": setIsEvidenceModalOpen(true); break;
+        case "assistant": l10.setIsDecideMode(true); break;
+        default: break;
+      }
+    };
+    window.addEventListener("akaloris:p02:open-tool", onOpenTool);
+    return () => window.removeEventListener("akaloris:p02:open-tool", onOpenTool);
+  }, [embeddedInWorkspace, plotId, l10.setIsDecideMode]);
 
   useEffect(() => { setMounted(true); }, []);
 
@@ -504,7 +528,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
 
             {/* ── Timeline Strip — bottom bar (from usePlotIntelligence) ── */}
             <motion.div variants={slideUp} style={{ pointerEvents: "auto" }}>
-              <TimelineStrip />
+              {!embeddedInWorkspace && <TimelineStrip />}
             </motion.div>
 
             {/* ── Sensors Button ──────────────────────────────────────────── */}
