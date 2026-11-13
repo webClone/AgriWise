@@ -94,7 +94,7 @@ export default function WorkspaceToolDock({
           );
           const content = <><Icon size={19} aria-hidden="true" strokeWidth={1.8} /><span>{item.label}</span></>;
           return href ? (
-            <Link key={item.id} className="pw-dock-item" title={item.label}
+            <Link key={item.id} className="pw-dock-item" title={item.label} aria-label={item.label}
               aria-current={current ? "page" : undefined}
               data-active={current ? "true" : undefined} href={href}>
               {content}
