@@ -1,6 +1,10 @@
 /* P02 Akaloris Map-First Workspace. Scoped tokens; the V2-off path is untouched.
    Scientific truth still comes from the existing Layer10/Parcel providers.
    Responsive sizes are intentionally in logical layout coordinates (RTL/LTR). */
+.plot-immersive:has(.pw-shell) > div:first-child {
+  /* The existing PlotContextBand must remain above new docks and inspectors. */
+  z-index: 100 !important;
+}
 .pw-shell {
   --pw-canopy: #102820;
   --pw-pine: #18392d;
