@@ -1,4 +1,10 @@
+import { computeGeometryHash } from "../../../../lib/agribrain/parcel-assessment-contract.mjs";
+
 const maskCache = new Map();
+
+export function clearPolygonMaskCache() {
+  maskCache.clear();
+}
 
 function extractPolygons(geometry) {
   if (!geometry) return [];
@@ -82,8 +88,11 @@ export function buildPolygonMask(plotId, width, height, plotGeoJson, gridBounds)
   const polygons = extractPolygons(plotGeoJson);
   if (polygons.length === 0) return null;
 
-  // Geometry identity binding for the cache
-  const geometryHash =
+  // Geometry identity binding for the cache:
+  // Compute canonical coordinate hash so any change in coordinates invalidates the cache,
+  // even if the caller did not supply a geometry hash or passed a stale version string.
+  const canonicalHash = computeGeometryHash(plotGeoJson);
+  const explicitHash =
     plotGeoJson.geometryHash ||
     plotGeoJson.geometry_hash ||
     plotGeoJson.properties?.geometryHash ||
@@ -92,7 +101,7 @@ export function buildPolygonMask(plotId, width, height, plotGeoJson, gridBounds)
     plotGeoJson.properties?.geometryVersion ||
     "";
   const boundsKey = gridBounds?.map((value) => Number(value).toFixed(8)).join(",") || "plot-envelope";
-  const cacheKey = `${plotId || "noid"}:${geometryHash}:${width}x${height}:${boundsKey}`;
+  const cacheKey = `${plotId || "noid"}:${canonicalHash}:${explicitHash}:${width}x${height}:${boundsKey}`;
 
   if (maskCache.has(cacheKey)) {
     return maskCache.get(cacheKey) || null;

@@ -136,3 +136,140 @@ test("P01-G03: Geometry version/hash invalidates cached mask", () => {
   assert.equal(mask1.data[bottomLeftIdx], 1, "v1 bottom-left was inside");
   assert.equal(mask2.data[bottomLeftIdx], 0, "v2 bottom-left must be outside (0), cache invalidated");
 });
+
+test("P01-F01: Coordinate change WITHOUT any hash invalidates polygon mask cache", () => {
+  const plotId = "coord-change-no-hash";
+  const bounds = [0, 0, 10, 10];
+
+  // Geom A: full box [0,0] to [10,10] with NO geometryHash/geometryVersion
+  const geomA = {
+    type: "Polygon",
+    coordinates: [
+      [
+        [0, 0],
+        [10, 0],
+        [10, 10],
+        [0, 10],
+        [0, 0],
+      ],
+    ],
+  };
+
+  const maskA = buildPolygonMask(plotId, 4, 4, geomA, bounds);
+  assert.ok(maskA !== null);
+  const bottomLeftIdx = 3 * 4 + 0;
+  assert.equal(maskA.data[bottomLeftIdx], 1, "geomA bottom-left corner is inside (1)");
+
+  // Geom B: coordinates moved to [5,5]-[10,10], still with NO geometryHash
+  const geomB = {
+    type: "Polygon",
+    coordinates: [
+      [
+        [5, 5],
+        [10, 5],
+        [10, 10],
+        [5, 10],
+        [5, 5],
+      ],
+    ],
+  };
+
+  const maskB = buildPolygonMask(plotId, 4, 4, geomB, bounds);
+  assert.ok(maskB !== null);
+  assert.notEqual(maskA, maskB, "Mask reference must differ due to coordinate identity invalidation");
+  assert.equal(maskB.data[bottomLeftIdx], 0, "geomB bottom-left corner must be outside (0), cache correctly invalidated");
+});
+
+test("P01-F01: Coordinate change with STALE/UNCHANGED hash invalidates polygon mask cache", () => {
+  const plotId = "stale-hash-test";
+  const bounds = [0, 0, 10, 10];
+  const sameStaleHash = "sha256:same-stale-hash-v1";
+
+  // Geom 1 with sameStaleHash: full box
+  const geom1 = {
+    type: "Polygon",
+    geometryHash: sameStaleHash,
+    coordinates: [
+      [
+        [0, 0],
+        [10, 0],
+        [10, 10],
+        [0, 10],
+        [0, 0],
+      ],
+    ],
+  };
+
+  const mask1 = buildPolygonMask(plotId, 4, 4, geom1, bounds);
+  const bottomLeftIdx = 3 * 4 + 0;
+  assert.equal(mask1.data[bottomLeftIdx], 1, "geom1 bottom-left corner is inside (1)");
+
+  // Geom 2 with THE EXACT SAME staleHash: coordinates moved
+  const geom2 = {
+    type: "Polygon",
+    geometryHash: sameStaleHash,
+    coordinates: [
+      [
+        [5, 5],
+        [10, 5],
+        [10, 10],
+        [5, 10],
+        [5, 5],
+      ],
+    ],
+  };
+
+  const mask2 = buildPolygonMask(plotId, 4, 4, geom2, bounds);
+  assert.notEqual(mask1, mask2, "Mask reference must differ because coordinate hash changed");
+  assert.equal(mask2.data[bottomLeftIdx], 0, "geom2 bottom-left must be 0 despite identical supplied hash");
+});
+
+test("P01-F01: Identical coordinates and bounds hit the mask cache", () => {
+  const plotId = "cache-hit-test";
+  const bounds = [0, 0, 10, 10];
+  const geom = {
+    type: "Polygon",
+    coordinates: [
+      [
+        [1, 1],
+        [8, 1],
+        [8, 8],
+        [1, 8],
+        [1, 1],
+      ],
+    ],
+  };
+
+  const mask1 = buildPolygonMask(plotId, 6, 6, geom, bounds);
+  const mask2 = buildPolygonMask(plotId, 6, 6, geom, bounds);
+  assert.equal(mask1, mask2, "Identical request must return cached instance");
+});
+
+test("P01-F01: Grid bounds change invalidates polygon mask cache", () => {
+  const plotId = "bounds-change-test";
+  const geom = {
+    type: "Polygon",
+    coordinates: [
+      [
+        [0, 0],
+        [10, 0],
+        [10, 10],
+        [0, 10],
+        [0, 0],
+      ],
+    ],
+  };
+
+  const bounds1 = [0, 0, 10, 10];
+  const bounds2 = [0, 0, 20, 20];
+
+  const mask1 = buildPolygonMask(plotId, 4, 4, geom, bounds1);
+  const mask2 = buildPolygonMask(plotId, 4, 4, geom, bounds2);
+  assert.notEqual(mask1, mask2, "Different bounds must produce different cache keys");
+});
+
+test("P01-F01: Invalid or empty geometry fails closed returning null", () => {
+  assert.equal(buildPolygonMask("null-plot", 10, 10, null), null);
+  assert.equal(buildPolygonMask("empty-plot", 10, 10, { type: "Polygon", coordinates: [] }), null);
+  assert.equal(buildPolygonMask("invalid-dim", 0, 10, { type: "Polygon", coordinates: [[[0,0],[1,0],[1,1],[0,0]]] }), null);
+});

@@ -70,14 +70,14 @@ function generateMockFleet(): FleetStatus {
     {
       device_id: 'ACT-SPR-001',
       vendor: 'HUNTER',
-      model: 'Pro-HC',
+      model: 'Pro-HC (Simulated)',
       protocol: 'MQTT',
       farm_id: 'farm-1',
       plot_id: 'plot-3',
       zone_ids: ['zone-d', 'zone-e', 'zone-f'],
-      status: 'ONLINE' as ActuatorStatus,
+      status: 'OFFLINE' as ActuatorStatus,
       last_seen: new Date().toISOString(),
-      is_connected: true,
+      is_connected: false,
       capabilities: {
         system_type: 'SPRINKLER',
         max_flow_rate_lpm: 500,
@@ -92,7 +92,7 @@ function generateMockFleet(): FleetStatus {
     {
       device_id: 'ACT-VLV-001',
       vendor: 'GALCON',
-      model: 'GSI-AC24',
+      model: 'GSI-AC24 (Simulated)',
       protocol: 'MQTT',
       farm_id: 'farm-1',
       plot_id: 'plot-1',
@@ -117,9 +117,9 @@ function generateMockFleet(): FleetStatus {
     total_actuators: devices.length,
     total_zones: 7,
     status_summary: {
-      ONLINE: 2,
-      OFFLINE: 1,
-      EXECUTING: 1,
+      ONLINE: 0,
+      OFFLINE: devices.length,
+      EXECUTING: 0,
       ERROR: 0,
       MAINTENANCE: 0,
       UNKNOWN: 0,
@@ -129,39 +129,9 @@ function generateMockFleet(): FleetStatus {
 }
 
 function generateMockEvents(): IrrigationEvent[] {
-  return [
-    {
-      event_id: 'EVT-a1b2c3d4e5f6',
-      plot_id: 'plot-2',
-      zone_id: 'zone-c',
-      device_id: 'ACT-PIV-001',
-      system_type: 'CENTER_PIVOT',
-      automation_mode: 'FULL_AUTO',
-      status: 'EXECUTING' as EventStatus,
-      target_volume_mm: 25,
-      target_duration_minutes: 120,
-      actual_volume_l: 12500,
-      actual_duration_minutes: 65,
-      scheduled_start: new Date(Date.now() - 3900000).toISOString(),
-      scheduled_end: new Date(Date.now() + 3300000).toISOString(),
-      actual_start: new Date(Date.now() - 3900000).toISOString(),
-      actual_end: '',
-      source_action_id: 'ACT-L8-001',
-      approved_by: 'SYSTEM_AUTO',
-      validation_outcome: 'PENDING',
-      pre_irrigation_vwc: 0.18,
-      post_irrigation_vwc: 0,
-      safety_violations: [],
-      emergency_stopped: false,
-      emergency_stop_reason: '',
-      water_consumed_mm: 13.5,
-      status_log: [
-        { from: 'SCHEDULED', to: 'QUEUED', timestamp: new Date(Date.now() - 4200000).toISOString(), reason: 'Created from schedule' },
-        { from: 'QUEUED', to: 'DISPATCHING', timestamp: new Date(Date.now() - 4000000).toISOString(), reason: 'Starting dispatch' },
-        { from: 'DISPATCHING', to: 'EXECUTING', timestamp: new Date(Date.now() - 3900000).toISOString(), reason: 'ACK received' },
-      ],
-    },
-  ];
+  // In observation-only mode without connected actuator hardware, there are
+  // NO active or executing physical irrigation events.
+  return [];
 }
 
 function generateMockSchedule(): IrrigationScheduleEntry[] {
@@ -243,15 +213,15 @@ function generateMockBudget(): WaterBudget {
     plot_id: 'farm-1',
     season: '2026-SPRING',
     season_quota_mm: 800,
-    season_consumed_mm: 340,
-    season_remaining_mm: 460,
+    season_consumed_mm: 0,
+    season_remaining_mm: 800,
     daily_quota_mm: 40,
-    daily_consumed_mm: 13.5,
-    daily_remaining_mm: 26.5,
-    projected_season_total_mm: 720,
+    daily_consumed_mm: 0,
+    daily_remaining_mm: 40,
+    projected_season_total_mm: 0,
     days_remaining_in_season: 85,
     water_cost_per_m3: 0.45,
-    season_cost_eur: 1530,
+    season_cost_eur: 0,
   };
 }
 
@@ -278,6 +248,11 @@ interface UseIrrigationStateReturn {
   // Loading / Error
   isLoading: boolean;
   error: string | null;
+
+  // Observability & Simulation Scope
+  isSimulationMode: boolean;
+  isPhysicalHardwareConnected: boolean;
+  actuatorLinkStatus: 'DISCONNECTED' | 'CONNECTED';
 
   // Actions
   dispatchCommand: (req: DispatchCommandRequest) => Promise<CommandResult | null>;
@@ -401,13 +376,10 @@ export function useIrrigationState(
   }, []);
 
   const cancelEvent = useCallback(async (eventId: string): Promise<boolean> => {
-    setActiveEvents(prev =>
-      prev.map(e => e.event_id === eventId
-        ? { ...e, status: 'CANCELLED' as EventStatus }
-        : e
-      )
-    );
-    return true;
+    console.warn('[Irrigation] Physical actuator hardware not connected. Cancel command not acknowledged physically.');
+    setActiveEvents(prev => prev.filter(e => e.event_id !== eventId));
+    // Return false: Physical cancellation was not acknowledged by field hardware
+    return false;
   }, []);
 
   const setAutomationMode = useCallback((deviceId: string, mode: AutomationMode) => {
@@ -432,6 +404,9 @@ export function useIrrigationState(
     recentValidations,
     isLoading,
     error,
+    isSimulationMode: true,
+    isPhysicalHardwareConnected: false,
+    actuatorLinkStatus: 'DISCONNECTED' as const,
     dispatchCommand,
     approveSchedule,
     rejectSchedule,
