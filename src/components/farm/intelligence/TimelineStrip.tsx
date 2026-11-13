@@ -379,7 +379,7 @@ function DayTooltip({ day, metric, style }: {
 
 
 /* ─── Main Timeline Component ─────────────────────────────────────────── */
-export default function TimelineStrip() {
+export default function TimelineStrip({ docked = false }: { docked?: boolean } = {}) {
   const { timeline, loading, selectedDate, setSelectedDate } = usePlotIntelligence();
   const parcel = useParcelAssessment();
   const { stream: liveTelemetryStream } = usePlotTelemetry();
@@ -584,9 +584,12 @@ export default function TimelineStrip() {
   if (loading && !timeline) {
     return (
       <div style={{
-        position: "absolute", bottom: "52px", left: "50%", transform: "translateX(-50%)",
+        position: docked ? "relative" : "absolute",
+        bottom: docked ? undefined : "52px",
+        left: docked ? undefined : "50%",
+        transform: docked ? undefined : "translateX(-50%)",
         zIndex: 20, pointerEvents: "auto",
-        width: "100%", maxWidth: "860px",
+        width: "100%", maxWidth: docked ? "none" : "860px",
         padding: "0 12px", boxSizing: "border-box",
       }}>
         <div className="tl-panel" style={{
@@ -608,9 +611,12 @@ export default function TimelineStrip() {
 
   return (
     <div style={{
-      position: "absolute", bottom: "52px", left: "50%", transform: "translateX(-50%)",
-      zIndex: 20, pointerEvents: "auto",
-      width: "100%", maxWidth: "860px",
+      position: docked ? "relative" : "absolute",
+        bottom: docked ? undefined : "52px",
+        left: docked ? undefined : "50%",
+        transform: docked ? undefined : "translateX(-50%)",
+        zIndex: 20, pointerEvents: "auto",
+        width: "100%", maxWidth: docked ? "none" : "860px",
       padding: "0 12px", boxSizing: "border-box",
     }}>
       <div className="tl-panel" style={{
