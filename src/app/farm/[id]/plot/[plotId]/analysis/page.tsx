@@ -8,15 +8,7 @@ export default async function AnalysisPage({ params }: { params: Promise<{ id: s
   const { id: farmId, plotId } = await params;
   
   const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
-  if (!routeContext) return notFound();
-
-  const session = await getSession();
-  if (!session?.userId || session.userId !== routeContext.ownerUserId) {
-    if (process.env.NODE_ENV === "development") {
-      return null;
-    }
-    notFound();
-  }
+  if (!routeContext) notFound();
 
   const { plot, farm, cropCycles } = routeContext;
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status)) ?? null;

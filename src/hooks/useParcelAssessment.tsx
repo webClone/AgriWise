@@ -362,7 +362,10 @@ export function ParcelAssessmentProvider({
 
           if (isLatest()) {
             setRawPublication(null);
-            setState({ status: "unavailable", reason: "Timed out waiting for canonical publication head" });
+            setState({
+              status: "unavailable",
+              reason: "Canonical publication pending (timed out waiting for head)",
+            });
           }
           return null;
         }

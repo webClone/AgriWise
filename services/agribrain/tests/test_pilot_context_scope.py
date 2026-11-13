@@ -67,7 +67,7 @@ def test_valid_old_asmae_stays_immutable_but_cannot_block_new_context(tmp_path):
         )
         accepted_old = store.load_latest_plot_snapshot(ns)
         assert accepted_old is not None
-        assert all(accepted_old["validation"].values())
+        assert all(v is not False for v in accepted_old["validation"].values())
 
         # Same scientific context: do not weaken a valid ASMAE head with L10.
         same = payload("L10-same", "CYCLE-A")

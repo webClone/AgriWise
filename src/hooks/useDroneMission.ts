@@ -129,10 +129,16 @@ export function useDroneMission(plotId: string, polygonGeoJson?: any) {
   const [activeTab, setActiveTab] = useState<DroneTab>("planner");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Simulated drone status (would come from real telemetry in production)
+  // Simulated drone status (explicitly flagged as NOT CONNECTED for safety)
   const [droneStatus] = useState<DroneStatus>({
-    connected: true, battery_pct: 87, gps_fix: true, gps_satellites: 14,
-    gps_hdop: 0.8, storage_mb: 54200, armed: false, link_quality_pct: 95,
+    connected: false,
+    battery_pct: 0,
+    gps_fix: false,
+    gps_satellites: 0,
+    gps_hdop: 99.9,
+    storage_mb: 0,
+    armed: false,
+    link_quality_pct: 0,
   });
   const [weather] = useState<WeatherInfo>({
     wind_speed_m_s: 3.2, wind_direction_deg: 225, temperature_c: 28,
@@ -218,6 +224,11 @@ export function useDroneMission(plotId: string, polygonGeoJson?: any) {
 
   // Dispatch a planned mission
   const dispatchMission = useCallback(async (planId?: string) => {
+    if (!droneStatus.connected) {
+      setError("Physical drone is not connected (Simulation / Disconnected). Physical dispatch disabled.");
+      return null;
+    }
+
     const pid = planId || flightPlan?.plan_id;
     if (!pid) {
       setError("No flight plan to dispatch");

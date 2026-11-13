@@ -21,14 +21,6 @@ export default async function UserInputsPage({ params }: PageProps) {
   const routeContext = await getAuthorizedPlotRouteContext(plotId, id);
   if (!routeContext) notFound();
 
-  const session = await getSession();
-  if (!session?.userId || session.userId !== routeContext.ownerUserId) {
-    if (process.env.NODE_ENV === "development") {
-      return null;
-    }
-    notFound();
-  }
-
   const { plot, farm, cropCycles: cycles } = routeContext;
 
   // 2. Calculate Weighted Readiness Score

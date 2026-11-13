@@ -7,14 +7,6 @@ export default async function LiveAssistancePage({ params }: { params: Promise<{
   const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
   if (!routeContext) notFound();
 
-  const session = await getSession();
-  if (!session?.userId || session.userId !== routeContext.ownerUserId) {
-    if (process.env.NODE_ENV === "development") {
-      return null;
-    }
-    notFound();
-  }
-
   return (
     <div className="min-h-screen p-8 flex flex-col items-center justify-center text-center">
       <h1 className="text-3xl font-bold mb-4 text-slate-800 dark:text-slate-200">

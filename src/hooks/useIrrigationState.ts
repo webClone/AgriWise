@@ -26,14 +26,14 @@ function generateMockFleet(): FleetStatus {
     {
       device_id: 'ACT-DRP-001',
       vendor: 'NETAFIM',
-      model: 'NetBeat-A',
+      model: 'NetBeat-A (Simulated)',
       protocol: 'HTTP_REST',
       farm_id: 'farm-1',
       plot_id: 'plot-1',
       zone_ids: ['zone-a', 'zone-b'],
-      status: 'ONLINE' as ActuatorStatus,
+      status: 'OFFLINE' as ActuatorStatus,
       last_seen: new Date().toISOString(),
-      is_connected: true,
+      is_connected: false,
       capabilities: {
         system_type: 'DRIP',
         max_flow_rate_lpm: 1000,
@@ -48,14 +48,14 @@ function generateMockFleet(): FleetStatus {
     {
       device_id: 'ACT-PIV-001',
       vendor: 'LINDSAY',
-      model: 'Zimmatic-9500',
+      model: 'Zimmatic-9500 (Simulated)',
       protocol: 'HTTP_REST',
       farm_id: 'farm-1',
       plot_id: 'plot-2',
       zone_ids: ['zone-c'],
-      status: 'EXECUTING' as ActuatorStatus,
+      status: 'OFFLINE' as ActuatorStatus,
       last_seen: new Date().toISOString(),
-      is_connected: true,
+      is_connected: false,
       capabilities: {
         system_type: 'CENTER_PIVOT',
         max_flow_rate_lpm: 5000,
@@ -342,23 +342,19 @@ export function useIrrigationState(
   // ─── Actions ─────────────────────────────────────────────────────
   const dispatchCommand = useCallback(async (req: DispatchCommandRequest): Promise<CommandResult | null> => {
     try {
-      // const res = await fetch('/api/irrigation/command', {
-      //   method: 'POST', body: JSON.stringify(req), headers: { 'Content-Type': 'application/json' }
-      // });
-      // return await res.json();
-      console.log('[Irrigation] Dispatch command:', req);
+      console.warn('[Irrigation] Physical actuator hardware not connected. Simulated dispatch rejected fail-closed:', req);
       return {
-        command_id: `CMD-${Date.now()}`,
+        command_id: `SIM-${Date.now()}`,
         device_id: req.device_id,
-        success: true,
+        success: false,
         timestamp: new Date().toISOString(),
         actual_volume_l: 0,
         actual_duration_minutes: 0,
         actual_flow_rate_lpm: 0,
         actual_pressure_bar: 0,
-        error_code: '',
-        error_message: '',
-        ack_latency_ms: 150,
+        error_code: 'SIMULATION_NOT_CONNECTED',
+        error_message: 'Physical actuator hardware is not connected. Simulation mode cannot execute real physical irrigation commands.',
+        ack_latency_ms: 0,
       };
     } catch {
       return null;
@@ -386,16 +382,22 @@ export function useIrrigationState(
   }, []);
 
   const emergencyStopAll = useCallback(async (): Promise<boolean> => {
-    console.log('[Irrigation] 🚨 EMERGENCY STOP ALL');
+    console.warn('[Irrigation] 🚨 EMERGENCY STOP CALLED (SIMULATION / NOT CONNECTED)');
     setActiveEvents(prev =>
-      prev.map(e => ({ ...e, status: 'EMERGENCY_STOPPED' as EventStatus, emergency_stopped: true }))
+      prev.map(e => ({
+        ...e,
+        status: 'EMERGENCY_STOPPED' as EventStatus,
+        emergency_stopped: true,
+        emergency_stop_reason: 'Simulated local emergency stop (hardware not connected)',
+      }))
     );
-    return true;
+    // Return false: Physical actuator acknowledgment was not obtained
+    return false;
   }, []);
 
   const emergencyStopDevice = useCallback(async (deviceId: string): Promise<boolean> => {
-    console.log('[Irrigation] 🚨 EMERGENCY STOP device:', deviceId);
-    return true;
+    console.warn('[Irrigation] 🚨 EMERGENCY STOP device (SIMULATION / NOT CONNECTED):', deviceId);
+    return false;
   }, []);
 
   const cancelEvent = useCallback(async (eventId: string): Promise<boolean> => {

@@ -11,30 +11,19 @@ export default async function PlotDetailsPage({ params }: { params: Promise<{ id
   const plotId = plotIdRaw.replace(/\/+$/, "");
   const session = await getSession();
 
-  if (!session?.userId && process.env.NODE_ENV !== "development") {
-    notFound();
-  }
-  
-  const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
-  if (!routeContext) {
+  if (!session?.userId) {
     if (process.env.NODE_ENV === "development") {
       return <DevelopmentSessionBootstrap plotId={plotId} farmId={farmId} />;
     }
     notFound();
   }
 
-  const { plot, farm, cropCycles, ownerUserId } = routeContext;
-  const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
+  const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
+  // Do not switch an already signed-in user into another owner's session.
+  if (!routeContext) notFound();
 
-  // If the active session is not the plot owner, layout.tsx renders
-  // DevelopmentSessionBootstrap (dev) or notFound (prod).
-  // page.tsx must not render PlotDashboard outside the required providers.
-  if (!session?.userId || session.userId !== ownerUserId) {
-    if (process.env.NODE_ENV === "development") {
-      return null;
-    }
-    notFound();
-  }
+  const { plot, farm, cropCycles } = routeContext;
+  const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
 
   return (
     <div className="w-full h-full" style={{ minHeight: 'calc(100vh - 48px)' }} suppressHydrationWarning={true}>

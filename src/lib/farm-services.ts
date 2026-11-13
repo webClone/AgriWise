@@ -64,15 +64,16 @@ export const getAuthorizedPlotRouteContext = cache(
   async (plotId: string, farmId: string) => {
     if (!ObjectId.isValid(plotId) || !ObjectId.isValid(farmId)) return null;
 
+    // Owner scope is required in every environment, including local development.
+    // The local-only dev-session endpoint must establish a verified session first.
     const ownerId = await currentOwnerId();
-    const isDev = process.env.NODE_ENV === "development";
-    if (!ownerId && !isDev) return null;
+    if (!ownerId) return null;
 
     const plot = await prisma.plot.findFirst({
       where: {
         id: plotId,
         farmId,
-        ...(ownerId && !isDev ? ownerScope(ownerId) : {}),
+        ...ownerScope(ownerId),
       },
       include: {
         farm: true,
@@ -91,7 +92,6 @@ export const getAuthorizedPlotRouteContext = cache(
     return {
       plot: mapPlot(plot),
       farm: mapFarm(plot.farm),
-      ownerUserId: plot.farm.userId,
       cropCycles: (plot.cropCycles || []).map(mapCropCycle),
     };
   },

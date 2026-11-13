@@ -13,14 +13,6 @@ export default async function RawDataPage({ params }: { params: Promise<{ id: st
   const routeContext = await getAuthorizedPlotRouteContext(plotId, farmId);
   if (!routeContext) notFound();
 
-  const session = await getSession();
-  if (!session?.userId || session.userId !== routeContext.ownerUserId) {
-    if (process.env.NODE_ENV === "development") {
-      return null;
-    }
-    notFound();
-  }
-
   const { plot, farm, cropCycles } = routeContext;
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
   

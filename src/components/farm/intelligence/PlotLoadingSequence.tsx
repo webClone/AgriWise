@@ -252,17 +252,25 @@ export default function PlotLoadingSequence({
   if (!showDurableView && !loading && !requestError && !transportNote) return null;
 
   const requestIsPending = Boolean(
-    requestError && /pending|generating|queued|in progress/i.test(requestError),
+    requestError && /pending|generating|queued|in progress|timed out|timeout|waiting/i.test(requestError),
   );
+  // An active, queued, or reintegrating worker must never be reported as
+  // failed simply because a client-side polling cycle timed out.
+  const workerIsActive = Boolean(
+    view && (view.active || view.reintegrating || ["queued", "running", "in_progress"].includes(view.status))
+  );
+
   const effectiveTone: WorkerProgressView["tone"] = awaitingReplacementJob
     ? "active"
+    : (workerIsActive || requestIsPending)
+    ? (view?.tone || "active")
     : requestError
-    ? (requestIsPending ? "active" : "failure")
+    ? "failure"
     : view?.tone || "active";
   const colors = toneClasses(effectiveTone);
   const exactPercent = awaitingReplacementJob ? null : view?.progressPct;
   const fallbackActive = hasCanonicalFallback || view?.hasCanonicalFallback === true;
-  const headline = showDurableView
+  const headline = showDurableView && !view?.failed
     ? view!.headline
     : requestIsPending
       ? "Canonical surface publication pending"
@@ -271,15 +279,15 @@ export default function PlotLoadingSequence({
       : "Checking ASMAE worker";
   const detail = awaitingReplacementJob
     ? "Waiting for the new durable worker record"
-    : showDurableView
+    : showDurableView && !view?.failed
     ? view!.detail
     : requestError || transportNote || "Reading the durable job record";
   const statusLabel = awaitingReplacementJob
     ? "STARTING"
+    : showDurableView && !view?.failed
+    ? (view!.reintegrating ? "REINTEGRATION" : view!.status.toUpperCase())
     : requestError
     ? (requestIsPending ? "PENDING" : "FAILED")
-    : showDurableView
-    ? (view!.reintegrating ? "REINTEGRATION" : view!.status.toUpperCase())
     : "CONNECTING";
 
   return (
@@ -344,7 +352,7 @@ export default function PlotLoadingSequence({
         {transportNote && showDurableView && (
           <p className="mt-2 text-[10px] text-amber-200/80">{transportNote}</p>
         )}
-        {((view?.failed && view.retryEligible) || (requestError && !requestIsPending)) && onRetry && (
+        {((view?.failed && view.retryEligible) || (requestError && !requestIsPending && !workerIsActive)) && onRetry && (
           <button
             type="button"
             onClick={onRetry}
