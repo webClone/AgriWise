@@ -53,7 +53,7 @@ export default function PlotContextBand({ plotName, plotArea, cropName, telemetr
  return <div id="plot-context-band" className="akaloris-plot-context">
    <div className="akaloris-plot-context-main">
     {id&&<Link className="akaloris-plot-back" href={`/farm/${id}`} aria-label="Back to farm" title="Back to farm"><ChevronLeft size={18}/></Link>}
-    <Image className="akaloris-plot-mark" src="/brand/akaloris/akaloris_A_monogram_exploration.png" alt="Akaloris" width={34} height={27}/>
+    <Image className="akaloris-plot-mark" src="/brand/akaloris/akaloris_A_monogram_exploration.png" alt="Akaloris" width={34} height={27} style={{ height: "auto" }} />
     <div className="akaloris-plot-identity"><strong title={plotName}>{plotName}</strong><span>{cropName} <span aria-hidden="true">·</span> {Number.isFinite(plotArea)?plotArea.toFixed(1)+" ha":"Area unavailable"}</span></div>
     {phenology&&<span className="akaloris-plot-chip" title={phenology.userLabel}>{phenology.stage?phenology.userLabel:"Stage unknown"}</span>}
     {l10.data&&<button className="akaloris-plot-layer" type="button" onClick={()=>{pi.setShowAnalysisSidebar(true);pi.setActiveSidebarTab("layers");}}><Layers3 size={14}/>{activeLabel}</button>}

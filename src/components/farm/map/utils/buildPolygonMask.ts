@@ -1,9 +1,13 @@
-import { buildPolygonMask as buildPolygonMaskImpl } from "./buildPolygonMask.mjs";
+import { buildPolygonMask as buildPolygonMaskImpl, clearPolygonMaskCache as clearPolygonMaskCacheImpl } from "./buildPolygonMask.mjs";
 
 export interface RasterMask {
   data: Uint8Array;
   width: number;
   height: number;
+}
+
+export function clearPolygonMaskCache(): void {
+  clearPolygonMaskCacheImpl();
 }
 
 export function buildPolygonMask(

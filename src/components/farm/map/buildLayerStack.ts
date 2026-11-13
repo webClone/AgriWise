@@ -1148,14 +1148,16 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
       // Build polygon mask to filter out cells outside field boundary
       const mask = buildPolygonMask(plotId, gridW, gridH, plotGeoJson, baseMaterialization.gridBounds);
 
-      // Count total in-polygon cells for accurate percentage calculation
+      // Count total in-polygon cells for accurate percentage calculation.
+      // Fail-closed: if the polygon boundary mask is unavailable, do NOT assume the full bounding box is inside.
       let totalInPolygonCells = 0;
       if (mask) {
         for (let i = 0; i < mask.data.length; i++) {
           if (mask.data[i] === 1) totalInPolygonCells++;
         }
       } else {
-        totalInPolygonCells = gridW * gridH;
+        console.warn(`[buildLayerStack] Polygon boundary mask unavailable for plot ${plotId}; rejecting fail-open zone calculation.`);
+        totalInPolygonCells = 0;
       }
 
       // Track per-zone in-polygon cell counts
@@ -1169,10 +1171,8 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
           if (!Number.isInteger(r) || !Number.isInteger(c) || r < 0 || r >= gridH || c < 0 || c >= gridW) {
             continue;
           }
-          // Skip cells outside the field polygon
-          if (mask) {
-            if (mask.data[r * gridW + c] === 0) continue;
-          }
+          // Strictly require cells to be inside the field polygon mask (fail closed if mask is null)
+          if (!mask || mask.data[r * gridW + c] === 0) continue;
           zoneInPolygonCount++;
           let lng0 = gMinLng + c * gLngStep;
           let lng1 = gMinLng + (c + 1) * gLngStep;

@@ -172,12 +172,12 @@ function EventCard({ event, onCancel }: {
           padding: '3px 10px', borderRadius: 10, fontSize: 11, fontWeight: 700,
           background: `${sc}20`, color: sc,
         }}>
-          {event.status}
+          {event.status} [SIMULATED]
         </span>
         <span style={{ color: '#E2E8F0', fontSize: 13, fontWeight: 600, flex: 1 }}>
           {SYSTEM_TYPE_LABELS[event.system_type]} — {event.zone_id}
         </span>
-        <span style={{ fontSize: 11, color: '#64748B' }}>{event.device_id}</span>
+        <span style={{ fontSize: 11, color: '#64748B' }}>{event.device_id} (Simulated)</span>
       </div>
 
       {event.status === 'EXECUTING' && (
@@ -192,14 +192,14 @@ function EventCard({ event, onCancel }: {
             }} />
           </div>
           <div style={{ fontSize: 11, color: '#64748B', marginTop: 4 }}>
-            {Math.round(progress)}% — {Math.round(event.actual_duration_minutes)}min / {event.target_duration_minutes}min
+            {Math.round(progress)}% — {Math.round(event.actual_duration_minutes)}min / {event.target_duration_minutes}min (Simulated preview)
           </div>
         </div>
       )}
 
       <div style={{ display: 'flex', gap: 16, fontSize: 11, color: '#94A3B8' }}>
         <span>💧 {event.target_volume_mm}mm target</span>
-        {event.actual_volume_l > 0 && <span>📊 {event.actual_volume_l}L delivered</span>}
+        <span>📊 0 L physical delivered (Simulated preview)</span>
         <span>🤖 {event.automation_mode}</span>
       </div>
 
@@ -209,7 +209,7 @@ function EventCard({ event, onCancel }: {
           border: '1px solid #EF444440', background: '#EF444410',
           color: '#EF4444', fontSize: 11, fontWeight: 600, cursor: 'pointer',
         }}>
-          ⏹ Stop
+          ⏹ Cancel (Local Preview)
         </button>
       )}
     </div>
@@ -254,10 +254,18 @@ export default function IrrigationDashboard() {
   } = useIrrigationState();
 
   const [tab, setTab] = useState<'overview' | 'schedule' | 'devices'>('overview');
+  const [eStopNotice, setEStopNotice] = useState<string | null>(null);
 
   const onlineCount = fleet?.status_summary?.ONLINE || 0;
   const executingCount = fleet?.status_summary?.EXECUTING || 0;
-  const offlineCount = fleet?.status_summary?.OFFLINE || 0;
+  const offlineCount = fleet?.status_summary?.OFFLINE || (fleet?.total_actuators || 0);
+
+  const handleEStop = async () => {
+    await emergencyStopAll();
+    setEStopNotice(
+      "Physical actuator hardware is disconnected in the observation-only pilot. Emergency stop signal cannot be acknowledged by physical field equipment (fail-closed)."
+    );
+  };
 
   if (isLoading) {
     return (
@@ -272,41 +280,96 @@ export default function IrrigationDashboard() {
       fontFamily: "'Inter', -apple-system, sans-serif",
       color: '#E2E8F0', maxWidth: 960, margin: '0 auto',
     }}>
+      {/* Simulation / Disconnected Mode Banner */}
+      <div
+        role="alert"
+        aria-label="Simulation mode banner"
+        style={{
+          background: 'rgba(239, 68, 68, 0.08)',
+          border: '1px solid rgba(239, 68, 68, 0.3)',
+          borderRadius: 12,
+          padding: '12px 18px',
+          marginBottom: 20,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+        }}
+      >
+        <span style={{ fontSize: 22 }}>⚠️</span>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#F87171' }}>
+            SIMULATION / OBSERVATION-ONLY MODE — NO PHYSICAL ACTUATOR HARDWARE CONNECTED
+          </div>
+          <div style={{ fontSize: 12, color: '#CBD5E1', marginTop: 2 }}>
+            Physical irrigation actuators are not connected. All device counts, schedules, and flow metrics operate in preview simulation. Physical command dispatch is blocked fail-closed.
+          </div>
+        </div>
+      </div>
+
+      {eStopNotice && (
+        <div
+          role="status"
+          style={{
+            background: 'rgba(245, 158, 11, 0.1)',
+            border: '1px solid rgba(245, 158, 11, 0.4)',
+            borderRadius: 10,
+            padding: '10px 16px',
+            marginBottom: 16,
+            fontSize: 12,
+            color: '#FCD34D',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
+          <span>🛑 {eStopNotice}</span>
+          <button
+            onClick={() => setEStopNotice(null)}
+            style={{ background: 'transparent', border: 'none', color: '#FCD34D', cursor: 'pointer', fontWeight: 700, fontSize: 14 }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 24 }}>
         <div>
-          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: '#F1F5F9' }}>
-            💧 Irrigation Control Center
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: '#F1F5F9', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span>💧 Irrigation Control Center</span>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#F87171', background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.3)', padding: '2px 8px', borderRadius: 6 }}>
+              SIMULATION / DISCONNECTED
+            </span>
           </h2>
           <p style={{ margin: '4px 0 0', fontSize: 13, color: '#64748B' }}>
-            {fleet?.total_actuators || 0} actuators · {fleet?.total_zones || 0} zones
+            Observation-Only Pilot · 0 Connected Actuators · {fleet?.total_zones || 0} zones
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <SafetyBadge score={safetyScore} />
           <button
-            onClick={emergencyStopAll}
+            onClick={handleEStop}
             style={{
               padding: '8px 20px', borderRadius: 10, border: '2px solid #EF4444',
               background: '#EF444418', color: '#EF4444', fontSize: 13,
               fontWeight: 700, cursor: 'pointer', letterSpacing: 0.5,
             }}
           >
-            🚨 E-STOP ALL
+            🚨 E-STOP (Simulation)
           </button>
         </div>
       </div>
 
       {/* Stats Row */}
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 24 }}>
-        <StatCard label="Online" value={onlineCount} accent="#22C55E" sub="Ready" />
-        <StatCard label="Executing" value={executingCount} accent="#3B82F6" sub="Active now" />
-        <StatCard label="Offline" value={offlineCount} accent="#6B7280" sub="Disconnected" />
+        <StatCard label="Online Actuators" value={onlineCount} accent="#6B7280" sub="No hardware connected" />
+        <StatCard label="Executing" value={executingCount} accent="#6B7280" sub="Physical dispatch blocked" />
+        <StatCard label="Offline / Disconnected" value={offlineCount} accent="#F59E0B" sub="All devices disconnected" />
         <StatCard
           label="Water Today"
-          value={`${waterBudget?.daily_consumed_mm || 0}mm`}
+          value="0 mm"
           accent="#06B6D4"
-          sub={`of ${waterBudget?.daily_quota_mm || 0}mm quota`}
+          sub="0 L delivered (Observation-only)"
         />
       </div>
 
@@ -337,8 +400,8 @@ export default function IrrigationDashboard() {
               Active Events
             </h3>
             {activeEvents.length === 0 ? (
-              <div style={{ padding: 32, textAlign: 'center', color: '#475569', fontSize: 13 }}>
-                No active irrigation events
+              <div style={{ padding: 32, textAlign: 'center', color: '#64748B', fontSize: 13, background: 'rgba(255,255,255,0.02)', borderRadius: 12, border: '1px solid rgba(255,255,255,0.05)' }}>
+                No active physical irrigation events (Actuator hardware disconnected in observation pilot)
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

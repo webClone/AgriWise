@@ -51,8 +51,13 @@ export function getContourSurfaceLayer({
   const latDiff = maxLat - minLat;
   const lngDiff = maxLng - minLng;
 
-  // Utilize globally cached high-perf binary polygon mask for this plot
+  // Utilize globally cached high-perf binary polygon mask for this plot.
+  // Fail-closed: contour generation strictly requires a valid field boundary mask.
   const mask = buildPolygonMask(plotId, w, h, plotGeoJson);
+  if (!mask) {
+    console.warn(`[ContourSurfaceLayer] Critical: Polygon boundary mask unavailable for plot ${plotId}; failing closed.`);
+    return [];
+  }
 
   const gridData = [];
   let maskPtr = 0;
@@ -60,8 +65,8 @@ export function getContourSurfaceLayer({
     for (let c = 0; c < w; c++) {
       const val = surfaceData.values[r][c];
 
-      // Strict gating: we drop the pixel from contour consideration if NO-DATA or masked out
-      if (val !== null && val !== undefined && (!mask || mask.data[maskPtr] === 1)) {
+      // Strict gating: drop the pixel if NO-DATA or masked out of field boundary
+      if (val !== null && val !== undefined && mask.data[maskPtr] === 1) {
         let lng = minLng + (c / w) * lngDiff + (lngDiff / (2 * w));
         const lat = maxLat - (r / h) * latDiff - (latDiff / (2 * h));
         
