@@ -96,6 +96,7 @@ export default function WorkspaceToolDock({
         <span>All tools</span>
       </button>
 
+      {/* Catalog entries are design concepts; Full capability and permission qualification belongs to P04. */}
       {libraryOpen && (
         <ToolLibraryP04 onClose={() => {
           setLibraryOpen(false);
