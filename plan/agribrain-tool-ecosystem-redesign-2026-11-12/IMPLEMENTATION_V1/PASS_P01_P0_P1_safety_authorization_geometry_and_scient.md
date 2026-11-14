@@ -1,7 +1,7 @@
 # P01 — P0/P1 safety, authorization, geometry and scientific-status corrections
-**Status:** NOT STARTED · design-to-code pass · **Dependency:** P00  
+**Status:** COMPLETED & VERIFIED · integrated into `integrate/layer0-layer1-observation-pilot` · **Dependency:** P00 (Reconciled & Closed)  
 **Owner agents:** A6+A3+A2 (A4 veto) · Independent red-team: A7 with A6/A4 as applicable  
-**Proposed code branch:** `fix/plot-workspace-p01-safety-contracts` (does not exist yet).
+**Integrated code branch:** `integrate/layer0-layer1-observation-pilot` (Remediation commits: `4799662` and follow-up bounded fixes).
 ## Goal, existing constraints and proposed boundary
 Repair known defects before layering new UI over invalid identity or geometry. Only bounded bug repairs, with failing-before regression cases; no cosmetic redesign.
 ## Source paths to inspect and likely modify (paths grounded in repository, proposed new names clearly marked)
