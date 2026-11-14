@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelRightOpen, PanelRightClose } from "lucide-react";
-import PlotDashboard from "@/components/farm/PlotDashboard";
+import WorkspaceNativeSpatialCanvas from "./WorkspaceNativeSpatialCanvas";
+import WorkspaceExistingToolHost from "./WorkspaceExistingToolHost";
 import WorkspaceToolDock, { type WorkspaceQuickAction } from "./WorkspaceToolDock";
 import WorkspaceContextInspector from "./WorkspaceContextInspector";
 import WorkspaceScientificStatus from "./WorkspaceScientificStatus";
 import WorkspaceTimelineContainer from "./WorkspaceTimelineContainer";
+import WorkspaceLegacyTimelineBridge from "./WorkspaceLegacyTimelineBridge";
 import WorkspaceContextActionsP04, { type P04InvestigationKind } from "./WorkspaceContextActionsP04";
 import WorkspaceInvestigationHostP04, { type P04HostMode } from "./WorkspaceInvestigationHostP04";
 import "./p04-investigation.css";
@@ -51,6 +53,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
 
   // Development & testing affordance for direct zone investigation
   useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
     if (typeof window !== "undefined") {
       const onTestSelectZone = (e: Event) => {
         const detail = (e as CustomEvent<{ zoneId: string }>).detail;
@@ -91,12 +94,8 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
 
   const openTool = useCallback((tool: WorkspaceQuickAction) => {
     setActiveTool(tool);
-    // UI bridge to legacy PlotDashboard tool implementations.
-    window.dispatchEvent(new CustomEvent("akaloris:p02:open-tool", {
-      detail: { plotId, tool },
-    }));
     setMobileInspectorOpen(false);
-  }, [plotId, setActiveTool]);
+  }, [setActiveTool]);
 
   return (
     <div
@@ -134,9 +133,8 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             : <PanelRightOpen size={18} aria-hidden="true" />}
           {mobileInspectorOpen ? "Close inspector" : "Inspector"}
         </button>
-        <div className="pw-legacy-map-host">
-          <PlotDashboard {...props} embeddedInWorkspace />
-        </div>
+        <WorkspaceNativeSpatialCanvas {...props} />
+        <WorkspaceExistingToolHost {...props} />
         <WorkspaceContextActionsP04 onLaunch={launchInvestigation} />
         {investigation && (
           <WorkspaceInvestigationHostP04
@@ -196,6 +194,7 @@ export default function PlotWorkspaceShell(props: PlotWorkspaceProps) {
   return (
     <PlotWorkspaceProvider scope={scope}>
       <WorkspaceStateBridge />
+      <WorkspaceLegacyTimelineBridge />
       <PlotWorkspaceShellContent {...props} />
     </PlotWorkspaceProvider>
   );
