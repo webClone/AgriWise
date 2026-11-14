@@ -1,7 +1,8 @@
 # P03 — Scoped Workspace Store, selection reducer, temporal controller and safe concurrency
-**Status:** NOT STARTED · design-to-code pass · **Dependency:** P01,P02  
+**Status:** IMPLEMENTED CANDIDATE · Fully Qualified (156/156 Frontend, 172/172 Python, 63/63 Routes)  
+**Dependency:** P01 (commit `0517f43`), P02 (commit `89512f7`)  
 **Owner agents:** A2+A6+A4 · Independent red-team: A7 with A6/A4 as applicable  
-**Proposed code branch:** `feat/plot-workspace-p03-shared-context` (does not exist yet).
+**Branch:** `feat/plot-workspace-p03-shared-context`  
 ## Goal, existing constraints and proposed boundary
 Build one immutable state controller for plot/tenant/crop-cycle/geometry/publication/time/selected entity/active tool. Split presentation state from authoritative scientific data; no broad global mutable dataset.
 ## Source paths to inspect and likely modify (paths grounded in repository, proposed new names clearly marked)
@@ -59,3 +60,15 @@ Run rapid plot switch, 3 simultaneous tool opens, failed fetch and snap switch; 
 - **R3:** A7 writes and runs adversarial tests; report failing-old and passing-new evidence, not fabricated counts.
 - **R4:** A2/A8 inspect actual browser where UI changes, cleanup/RTL/perf and no invisible regression.
 - **R5:** A0 records exact SHA, test receipts, explicit `GO/CONDITIONAL/HOLD`, unresolved risks and rollback.
+
+### Verification Matrix & Acceptance Receipts (November 14, 2026)
+- **P03-G01 Discard Cross-Tenant / Cross-Plot Late Response:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 1).
+- **P03-G02 Selection Isolation Across Snapshots:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 2).
+- **P03-G03 Clock Separation (Live Telemetry vs Scientific As-Of):** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 3).
+- **P03-G04 Invalidation on Scope Change (Plot / Crop Cycle):** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 4).
+- **P03-G05 Unified Time Cursor with Semantic Classification:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 5).
+- **P03-G06 Generation Bump on Invalidation:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 6).
+- **Frontend Test Suite:** 156/156 passed (`node --experimental-vm-modules --test`).
+- **Python Scientific Suite:** 172/172 passed (`pytest`).
+- **Production Build:** 63/63 routes compiled successfully (`npm run build`).
+- **TypeScript:** 0 errors (`npx tsc --noEmit`).
