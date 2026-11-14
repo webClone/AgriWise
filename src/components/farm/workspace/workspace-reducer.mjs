@@ -95,7 +95,7 @@ export function workspaceReducer(state, action) {
 
   switch (action.type) {
     case "PLOT_CHANGED": {
-      const { scope, publication } = action.payload;
+      const { scope } = action.payload || {};
       if (!scope || !scope.plotId) return state;
 
       const isSamePlot =
@@ -110,6 +110,9 @@ export function workspaceReducer(state, action) {
         return state;
       }
 
+      // P03-R4-F05: Unconditional publication state reset on plot/scope transition.
+      // Callers CANNOT supply a publication or pre-certify state during PLOT_CHANGED;
+      // the scientific bridge is the sole path for establishing validated publication authority.
       return {
         ...state,
         generationId: state.generationId + 1,
@@ -125,7 +128,7 @@ export function workspaceReducer(state, action) {
           geometryHash: scope.geometryHash || null,
           geometryVersion: scope.geometryVersion || null,
         },
-        publication: publication || {
+        publication: {
           snapshotId: null,
           capturedAt: null,
           publicationDigest: null,
@@ -139,12 +142,12 @@ export function workspaceReducer(state, action) {
           timestamp: null,
         },
         clocks: {
-          scientificAsOf: publication?.capturedAt || null,
+          scientificAsOf: null,
           operationalObserved: null,
           forecastValidTime: null,
           scenarioSimulationTime: null,
           activeTimeMode: "LATEST",
-          cursorTimestamp: publication?.capturedAt || null,
+          cursorTimestamp: null,
         },
         scenario: {
           isActive: false,

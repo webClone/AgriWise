@@ -89,7 +89,6 @@ export type WorkspaceAction =
       type: "PLOT_CHANGED";
       payload: {
         scope: PlotScope;
-        publication?: PublicationRef;
       };
     }
   | {

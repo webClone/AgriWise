@@ -24,9 +24,14 @@ import type {
   RenderIntent,
 } from "./workspace-types";
 
-interface PlotWorkspaceContextValue {
+/**
+ * Public workspace API exposed to UI components, inspectors, docks, and tools.
+ * In accordance with P03-R4-F05, this interface exposes only controlled, safe
+ * workspace actions. It strictly omits raw reducer dispatch and publication-authority
+ * mutation so tool consumers cannot fabricate or tamper with scientific certification.
+ */
+export interface PlotWorkspacePublicApi {
   state: WorkspaceState;
-  dispatch: React.Dispatch<WorkspaceAction>;
   selectEntity: (entity: {
     kind: EntityKind;
     id: string | null;
@@ -46,7 +51,41 @@ interface PlotWorkspaceContextValue {
   ) => Promise<{ ok: boolean; status: number; data: any; isStale: boolean }>;
 }
 
-const PlotWorkspaceContext = createContext<PlotWorkspaceContextValue | null>(null);
+export type PlotWorkspaceContextValue = PlotWorkspacePublicApi;
+
+/**
+ * Dedicated internal bridging authority interface.
+ * Exclusively consumed by the scientific state bridge (useWorkspaceStateBridging).
+ * This establishes the scientific bridge as the sole path for introducing validated
+ * publication references into the UI store (P03-R4-F05).
+ */
+export interface PlotWorkspaceBridgeApi {
+  bridgePublication: (payload: {
+    snapshotId: string;
+    capturedAt: string | null;
+    publicationDigest: string | null;
+    generationId: number;
+    plotId: string;
+    tenantId: string;
+    cropCycleId?: string | null;
+    geometryHash?: string | null;
+    geometryVersion?: number | string | null;
+  }) => void;
+  invalidatePublication: (payload: {
+    generationId: number;
+    plotId: string;
+    tenantId: string;
+    cropCycleId?: string | null;
+    geometryHash?: string | null;
+    geometryVersion?: number | string | null;
+  }) => void;
+  syncTelemetry: (observedAt: string) => void;
+  setRenderIntentActiveLens: (activeLens: string) => void;
+  selectZoneEntity: (zoneId: string, snapshotId: string | null) => void;
+}
+
+const PlotWorkspaceContext = createContext<PlotWorkspacePublicApi | null>(null);
+const PlotWorkspaceBridgeContext = createContext<PlotWorkspaceBridgeApi | null>(null);
 
 export interface PlotWorkspaceProviderProps {
   scope: PlotScope;
@@ -316,10 +355,113 @@ export function PlotWorkspaceProvider({
     });
   }, []);
 
-  const contextValue = useMemo<PlotWorkspaceContextValue>(
+  const bridgePublication = useCallback(
+    (payload: {
+      snapshotId: string;
+      capturedAt: string | null;
+      publicationDigest: string | null;
+      generationId: number;
+      plotId: string;
+      tenantId: string;
+      cropCycleId?: string | null;
+      geometryHash?: string | null;
+      geometryVersion?: number | string | null;
+    }) => {
+      dispatch({
+        type: "SNAPSHOT_SELECTED",
+        payload: {
+          snapshotId: payload.snapshotId,
+          capturedAt: payload.capturedAt,
+          publicationDigest: payload.publicationDigest,
+          authorityStatus: "CERTIFIED",
+          generationId: payload.generationId,
+          plotId: payload.plotId,
+          tenantId: payload.tenantId,
+          cropCycleId: payload.cropCycleId,
+          geometryHash: payload.geometryHash,
+          geometryVersion: payload.geometryVersion,
+          source: "PARCEL_ASSESSMENT_AUTHORITY",
+        },
+      });
+    },
+    []
+  );
+
+  const invalidatePublication = useCallback(
+    (payload: {
+      generationId: number;
+      plotId: string;
+      tenantId: string;
+      cropCycleId?: string | null;
+      geometryHash?: string | null;
+      geometryVersion?: number | string | null;
+    }) => {
+      dispatch({
+        type: "SNAPSHOT_SELECTED",
+        payload: {
+          snapshotId: null,
+          capturedAt: null,
+          publicationDigest: null,
+          authorityStatus: "UNAVAILABLE",
+          generationId: payload.generationId,
+          plotId: payload.plotId,
+          tenantId: payload.tenantId,
+          cropCycleId: payload.cropCycleId,
+          geometryHash: payload.geometryHash,
+          geometryVersion: payload.geometryVersion,
+          source: "SYSTEM_WORKSPACE_INVALIDATION",
+        },
+      });
+    },
+    []
+  );
+
+  const syncTelemetry = useCallback((observedAt: string) => {
+    dispatch({
+      type: "TELEMETRY_SYNCED",
+      payload: { observedAt },
+    });
+  }, []);
+
+  const setRenderIntentActiveLens = useCallback((activeLens: string) => {
+    dispatch({
+      type: "RENDER_INTENT_SET",
+      payload: { activeLens },
+    });
+  }, []);
+
+  const selectZoneEntity = useCallback((zoneId: string, snapshotId: string | null) => {
+    dispatch({
+      type: "ENTITY_SELECTED",
+      payload: {
+        kind: "ZONE",
+        id: zoneId,
+        sourceSnapshotId: snapshotId,
+        timestamp: latestStateRef.current.clocks.cursorTimestamp,
+      },
+    });
+  }, []);
+
+  const bridgeValue = useMemo<PlotWorkspaceBridgeApi>(
+    () => ({
+      bridgePublication,
+      invalidatePublication,
+      syncTelemetry,
+      setRenderIntentActiveLens,
+      selectZoneEntity,
+    }),
+    [
+      bridgePublication,
+      invalidatePublication,
+      syncTelemetry,
+      setRenderIntentActiveLens,
+      selectZoneEntity,
+    ]
+  );
+
+  const contextValue = useMemo<PlotWorkspacePublicApi>(
     () => ({
       state,
-      dispatch,
       selectEntity,
       clearSelection,
       setActiveTool,
@@ -346,7 +488,9 @@ export function PlotWorkspaceProvider({
 
   return (
     <PlotWorkspaceContext.Provider value={contextValue}>
-      {children}
+      <PlotWorkspaceBridgeContext.Provider value={bridgeValue}>
+        {children}
+      </PlotWorkspaceBridgeContext.Provider>
     </PlotWorkspaceContext.Provider>
   );
 }
@@ -369,11 +513,21 @@ function anySignal(signals: AbortSignal[]): AbortSignal {
   return controller.signal;
 }
 
-export function usePlotWorkspace(): PlotWorkspaceContextValue {
+export function usePlotWorkspace(): PlotWorkspacePublicApi {
   const context = useContext(PlotWorkspaceContext);
   if (!context) {
     throw new Error(
       "usePlotWorkspace must be used within a PlotWorkspaceProvider"
+    );
+  }
+  return context;
+}
+
+export function usePlotWorkspaceBridge(): PlotWorkspaceBridgeApi {
+  const context = useContext(PlotWorkspaceBridgeContext);
+  if (!context) {
+    throw new Error(
+      "usePlotWorkspaceBridge must be used within a PlotWorkspaceProvider"
     );
   }
   return context;

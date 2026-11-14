@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { usePlotWorkspace } from "./PlotWorkspaceProvider";
+import { usePlotWorkspace, usePlotWorkspaceBridge } from "./PlotWorkspaceProvider";
 import { useParcelAssessment } from "@/hooks/useParcelAssessment";
 import { usePlotTelemetry } from "@/hooks/usePlotTelemetry";
 import { useLayer10 } from "@/hooks/useLayer10";
@@ -10,9 +10,12 @@ import { useLayer10 } from "@/hooks/useLayer10";
  * P03 State Bridging Adapter.
  * Bridges existing ParcelAssessment, Layer10, and PlotTelemetry providers
  * into the unified workspace state store without duplicating data fetching.
+ * In accordance with P03-R4-F05, this bridge is the sole authoritative pathway
+ * for introducing validated scientific publications into the workspace.
  */
 export function useWorkspaceStateBridging() {
-  const { dispatch, state, selectEntity } = usePlotWorkspace();
+  const { state } = usePlotWorkspace();
+  const bridge = usePlotWorkspaceBridge();
 
   // 1. Bridge ParcelAssessment (Scientific Publication Authority)
   const assessmentContext = useParcelAssessment();
@@ -26,21 +29,13 @@ export function useWorkspaceStateBridging() {
     if (!assessment || assessmentStatus !== "ready") {
       if (lastBridgedKeyRef.current !== null) {
         lastBridgedKeyRef.current = null;
-        dispatch({
-          type: "SNAPSHOT_SELECTED",
-          payload: {
-            snapshotId: null,
-            capturedAt: null,
-            publicationDigest: null,
-            authorityStatus: "UNAVAILABLE",
-            generationId: state.generationId,
-            plotId: state.plotScope.plotId,
-            tenantId: state.ownerScope.tenantId,
-            cropCycleId: state.plotScope.cropCycleId,
-            geometryHash: state.plotScope.geometryHash,
-            geometryVersion: state.plotScope.geometryVersion,
-            source: "SYSTEM_WORKSPACE_INVALIDATION",
-          },
+        bridge.invalidatePublication({
+          generationId: state.generationId,
+          plotId: state.plotScope.plotId,
+          tenantId: state.ownerScope.tenantId,
+          cropCycleId: state.plotScope.cropCycleId,
+          geometryHash: state.plotScope.geometryHash,
+          geometryVersion: state.plotScope.geometryVersion,
         });
       }
       return;
@@ -61,21 +56,13 @@ export function useWorkspaceStateBridging() {
     if (isScopeIncompatible) {
       if (lastBridgedKeyRef.current !== null || state.publication.snapshotId !== null) {
         lastBridgedKeyRef.current = null;
-        dispatch({
-          type: "SNAPSHOT_SELECTED",
-          payload: {
-            snapshotId: null,
-            capturedAt: null,
-            publicationDigest: null,
-            authorityStatus: "UNAVAILABLE",
-            generationId: state.generationId,
-            plotId: state.plotScope.plotId,
-            tenantId: state.ownerScope.tenantId,
-            cropCycleId: state.plotScope.cropCycleId,
-            geometryHash: state.plotScope.geometryHash,
-            geometryVersion: state.plotScope.geometryVersion,
-            source: "SYSTEM_WORKSPACE_INVALIDATION",
-          },
+        bridge.invalidatePublication({
+          generationId: state.generationId,
+          plotId: state.plotScope.plotId,
+          tenantId: state.ownerScope.tenantId,
+          cropCycleId: state.plotScope.cropCycleId,
+          geometryHash: state.plotScope.geometryHash,
+          geometryVersion: state.plotScope.geometryVersion,
         });
       }
       return;
@@ -93,21 +80,16 @@ export function useWorkspaceStateBridging() {
     if (bridgedKey === lastBridgedKeyRef.current) return;
     lastBridgedKeyRef.current = bridgedKey;
 
-    dispatch({
-      type: "SNAPSHOT_SELECTED",
-      payload: {
-        snapshotId: identity.snapshotId,
-        capturedAt: identity.evidenceCutoffAt || identity.publishedAt,
-        publicationDigest: digest,
-        authorityStatus: "CERTIFIED",
-        generationId: state.generationId,
-        plotId: identity.plotId,
-        tenantId: identity.tenantId,
-        cropCycleId: identity.cropCycleId || state.plotScope.cropCycleId,
-        geometryHash: identity.geometryHash || state.plotScope.geometryHash,
-        geometryVersion: state.plotScope.geometryVersion,
-        source: "PARCEL_ASSESSMENT_AUTHORITY",
-      },
+    bridge.bridgePublication({
+      snapshotId: identity.snapshotId,
+      capturedAt: identity.evidenceCutoffAt || identity.publishedAt,
+      publicationDigest: digest,
+      generationId: state.generationId,
+      plotId: identity.plotId,
+      tenantId: identity.tenantId,
+      cropCycleId: identity.cropCycleId || state.plotScope.cropCycleId,
+      geometryHash: identity.geometryHash || state.plotScope.geometryHash,
+      geometryVersion: state.plotScope.geometryVersion,
     });
   }, [
     assessment,
@@ -118,7 +100,7 @@ export function useWorkspaceStateBridging() {
     state.plotScope.cropCycleId,
     state.plotScope.geometryHash,
     state.plotScope.geometryVersion,
-    dispatch,
+    bridge,
   ]);
 
   // 2. Bridge PlotTelemetry (Live Operational Telemetry)
@@ -135,13 +117,8 @@ export function useWorkspaceStateBridging() {
 
     // Strict P03-G03 separation:
     // Live telemetry updates operational clock ONLY; does NOT alter scientificAsOf
-    dispatch({
-      type: "TELEMETRY_SYNCED",
-      payload: {
-        observedAt: obsTs,
-      },
-    });
-  }, [stream, dispatch]);
+    bridge.syncTelemetry(obsTs);
+  }, [stream, bridge]);
 
   // 3. Bridge Layer10 (Zone and Lens Selection)
   const layer10Context = useLayer10();
@@ -150,20 +127,13 @@ export function useWorkspaceStateBridging() {
 
   useEffect(() => {
     if (selectedZone && state.selectedEntity.id !== selectedZone) {
-      selectEntity({
-        kind: "ZONE",
-        id: selectedZone,
-        sourceSnapshotId: state.publication.snapshotId,
-      });
+      bridge.selectZoneEntity(selectedZone, state.publication.snapshotId);
     }
-  }, [selectedZone, state.selectedEntity.id, state.publication.snapshotId, selectEntity]);
+  }, [selectedZone, state.selectedEntity.id, state.publication.snapshotId, bridge]);
 
   useEffect(() => {
     if (activeMode && activeMode !== state.renderIntent.activeLens) {
-      dispatch({
-        type: "RENDER_INTENT_SET",
-        payload: { activeLens: activeMode },
-      });
+      bridge.setRenderIntentActiveLens(activeMode);
     }
-  }, [activeMode, state.renderIntent.activeLens, dispatch]);
+  }, [activeMode, state.renderIntent.activeLens, bridge]);
 }
