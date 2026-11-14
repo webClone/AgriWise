@@ -2028,7 +2028,7 @@ export function getToolConcept(id) {
   return typeof id === "string" ? byId.get(id) ?? null : null;
 }
 export function searchToolConcepts(query = "", family = "all") {
-  const tokens = String(query).normalize("NFKD").toLowerCase().trim().split(/\\s+/).filter(Boolean);
+  const tokens = String(query).normalize("NFKD").toLowerCase().trim().split(/\s+/).filter(Boolean);
   return TOOL_MANIFEST.filter(tool => {
     if (family !== "all" && tool.family !== family) return false;
     if (!tokens.length) return true;
