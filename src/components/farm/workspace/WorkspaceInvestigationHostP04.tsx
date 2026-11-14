@@ -117,7 +117,7 @@ export default function WorkspaceInvestigationHostP04({
             </div>
             {state.clocks.scientificAsOf && (
               <button type="button" className="p04-investigation-primary"
-                onClick={() => setTimeCursor(state.clocks.scientificAsOf!, "HISTORICAL")}>
+                onClick={() => setTimeCursor(state.clocks.scientificAsOf!, "LATEST")}>
                 Select scientific cutoff time
               </button>
             )}
