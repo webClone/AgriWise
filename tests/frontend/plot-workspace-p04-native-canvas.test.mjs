@@ -37,3 +37,15 @@ test("P04-C03 contextual action pill requires actual current Layer10 selection a
  assert.match(actions,/layer10\.selectedZone === selection\.id/);
  assert.doesNotMatch(actions,/!layer10\.data \|\|/);
 });
+
+test("P04-C03 legacy timeline receives canonical Layer10 data through an explicit temporary bridge",()=>{
+ const b=read("src/components/farm/workspace/WorkspaceLegacyTimelineBridge.tsx");
+ assert.match(shell, /<WorkspaceLegacyTimelineBridge/);
+ assert.match(b, /usePlotIntelligence\(\)/);
+ assert.match(b, /injectData\(layer10\.data, plotId, applicable\)/);
+ assert.match(b, /layer10\.data\?\.plot_id === plotId/);
+ assert.doesNotMatch(b, /fetchAssessment\(|fetchLayer10\(/);
+});
+test("P04-C03 synthetic selection hooks cannot be invoked in production",()=>{
+ assert.match(shell, /process\.env\.NODE_ENV !== "development"/);
+});

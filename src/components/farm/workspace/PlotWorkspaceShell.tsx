@@ -8,6 +8,7 @@ import WorkspaceToolDock, { type WorkspaceQuickAction } from "./WorkspaceToolDoc
 import WorkspaceContextInspector from "./WorkspaceContextInspector";
 import WorkspaceScientificStatus from "./WorkspaceScientificStatus";
 import WorkspaceTimelineContainer from "./WorkspaceTimelineContainer";
+import WorkspaceLegacyTimelineBridge from "./WorkspaceLegacyTimelineBridge";
 import WorkspaceContextActionsP04, { type P04InvestigationKind } from "./WorkspaceContextActionsP04";
 import WorkspaceInvestigationHostP04, { type P04HostMode } from "./WorkspaceInvestigationHostP04";
 import "./p04-investigation.css";
@@ -52,6 +53,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
 
   // Development & testing affordance for direct zone investigation
   useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
     if (typeof window !== "undefined") {
       const onTestSelectZone = (e: Event) => {
         const detail = (e as CustomEvent<{ zoneId: string }>).detail;
@@ -192,6 +194,7 @@ export default function PlotWorkspaceShell(props: PlotWorkspaceProps) {
   return (
     <PlotWorkspaceProvider scope={scope}>
       <WorkspaceStateBridge />
+      <WorkspaceLegacyTimelineBridge />
       <PlotWorkspaceShellContent {...props} />
     </PlotWorkspaceProvider>
   );
