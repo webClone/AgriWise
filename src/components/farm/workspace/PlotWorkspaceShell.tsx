@@ -27,7 +27,7 @@ function WorkspaceStateBridge() {
 function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const farmId = props.farmId || String(props.farm?.id || "");
   const plotId = props.plotId || String(props.plot?.id || "");
-  const { state, setActiveTool, toggleInspector } = usePlotWorkspace();
+  const { state, setActiveTool, toggleInspector, selectEntity } = usePlotWorkspace();
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [investigation, setInvestigation] = useState<P04InvestigationKind | null>(null);
   const [hostMode, setHostMode] = useState<P04HostMode>("context");
@@ -48,6 +48,36 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
       if (control?.isConnected) control.focus();
     });
   }, [setActiveTool]);
+
+  // Development & testing affordance for direct zone investigation
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const onTestSelectZone = (e: Event) => {
+        const detail = (e as CustomEvent<{ zoneId: string }>).detail;
+        if (detail?.zoneId) {
+          selectEntity({
+            kind: "ZONE",
+            id: detail.zoneId,
+            sourceSnapshotId: state.publication.snapshotId,
+          });
+        }
+      };
+      const onTestLaunch = (e: Event) => {
+        const detail = (e as CustomEvent<{ kind: P04InvestigationKind; mode?: P04HostMode }>).detail;
+        if (detail?.kind) {
+          setInvestigation(detail.kind);
+          if (detail.mode) setHostMode(detail.mode);
+          setActiveTool(`p04:${detail.kind}`);
+        }
+      };
+      window.addEventListener("akaloris:test:select-zone", onTestSelectZone);
+      window.addEventListener("akaloris:test:launch-investigation", onTestLaunch);
+      return () => {
+        window.removeEventListener("akaloris:test:select-zone", onTestSelectZone);
+        window.removeEventListener("akaloris:test:launch-investigation", onTestLaunch);
+      };
+    }
+  }, [selectEntity, setActiveTool, state.publication.snapshotId]);
 
   // An open investigation must never retain context across tenant, plot,
   // crop-cycle, geometry or request-generation changes.
