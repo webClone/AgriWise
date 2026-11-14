@@ -363,7 +363,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
 
       {/* ── OBSERVE: Intelligence Surfaces ─────────────────────────── */}
       <AnimatePresence>
-        {screenState === "observe" && l10.data && (
+        {screenState === "observe" && l10.data && !embeddedInWorkspace && (
           <motion.div
             key="observe-ui"
             initial="hidden"
@@ -775,7 +775,7 @@ export default function PlotDashboard({ farm, plot, cropName, context, plotId: _
 
       {/* ── Loading / Error state ─────────────────────────────────── */}
       <AnimatePresence>
-        {mounted && showAsmaeWorkerProgress && (
+        {mounted && showAsmaeWorkerProgress && !embeddedInWorkspace && (
           <motion.div
             initial={{ opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}

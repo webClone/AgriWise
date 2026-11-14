@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, type ElementType } from "react";
+import { useEffect, useRef, useState, type ElementType } from "react";
 import {
   Map, BrainCircuit, Satellite, RadioTower, Plane, Radio, Droplets,
-  FilePlus2, MessageCircle, Library, X, Search, FlaskConical,
+  FilePlus2, MessageCircle, Library, FlaskConical,
 } from "lucide-react";
-import { TOOL_CONCEPT_COUNT, TOOL_CONCEPT_FAMILIES } from "./workspace-tool-concepts";
+import { TOOL_MANIFEST_COUNT } from "./tool-registry-p04.mjs";
+import ToolLibraryP04 from "./ToolLibraryP04";
 
 export type WorkspaceQuickAction =
   | "sensors" | "drone" | "mesia" | "irrigation" | "evidence" | "assistant";
@@ -42,26 +43,10 @@ export default function WorkspaceToolDock({
 }) {
   const pathname = usePathname();
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const searchRef = useRef<HTMLInputElement>(null);
   const libraryButtonRef = useRef<HTMLButtonElement>(null);
   const base = `/farm/${encodeURIComponent(farmId)}/plot/${encodeURIComponent(plotId)}`;
-  const filteredFamilies = useMemo(() => {
-    const search = query.toLowerCase().trim();
-    if (!search) return TOOL_CONCEPT_FAMILIES;
-    return TOOL_CONCEPT_FAMILIES
-      .map(family => ({
-        ...family,
-        concepts: family.concepts.filter(concept =>
-          concept.toLowerCase().includes(search)
-          || family.label.toLowerCase().includes(search)),
-      }))
-      .filter(family => family.concepts.length > 0);
-  }, [query]);
-
   useEffect(() => {
     if (!libraryOpen) return;
-    searchRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -73,12 +58,6 @@ export default function WorkspaceToolDock({
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [libraryOpen]);
 
-  const openFamilyWorkspace = (entry: string) => {
-    setLibraryOpen(false);
-    if (entry === "sensors" || entry === "drone" || entry === "mesia") {
-      onOpenTool(entry);
-    }
-  };
 
   return (
     <aside className="pw-tool-dock" aria-label="Plot instruments and tools">
@@ -110,69 +89,19 @@ export default function WorkspaceToolDock({
       </nav>
       <button type="button" className="pw-dock-item pw-dock-library"
         aria-expanded={libraryOpen} aria-controls="pw-tool-library"
-        aria-label={`Browse all ${TOOL_CONCEPT_COUNT} tool concepts`}
+        aria-label={`Browse all ${TOOL_MANIFEST_COUNT} tool concepts`}
         ref={libraryButtonRef} title="Full tool concept library"
-        onClick={() => { setQuery(""); setLibraryOpen(open => !open); }}>
+        onClick={() => setLibraryOpen(open => !open)}>
         <Library size={20} aria-hidden="true" />
         <span>All tools</span>
       </button>
 
+      {/* Catalog entries are design concepts; Full capability and permission qualification belongs to P04. */}
       {libraryOpen && (
-        <div className="pw-tool-library" id="pw-tool-library"
-          role="dialog" aria-label="Tool concept library — P02 preview">
-          <div className="pw-library-header">
-            <div>
-              <strong>Tool Library</strong>
-              <p>{TOOL_CONCEPT_COUNT} product concepts · discoverability preview</p>
-            </div>
-            <button type="button" aria-label="Close Tool Library" className="pw-icon-button"
-              onClick={() => { setLibraryOpen(false); libraryButtonRef.current?.focus(); }}>
-              <X size={18} />
-            </button>
-          </div>
-          <label className="pw-library-search">
-            <Search size={16} aria-hidden="true" />
-            <span className="sr-only">Search tool concepts</span>
-            <input ref={searchRef} type="search" value={query}
-              onChange={event => setQuery(event.target.value)}
-              placeholder="Find a tool or capability…" />
-          </label>
-          <p className="pw-library-disclaimer">
-            Catalog entries are design concepts, not evidence of operational
-            availability. Full capability and permission qualification belongs to P04.
-          </p>
-          <div className="pw-library-groups">
-            {filteredFamilies.map(family => (
-              <section className="pw-library-group" key={family.id}>
-                <div className="pw-library-group-heading">
-                  <h3>{family.label}</h3>
-                  <span>{family.concepts.length}</span>
-                </div>
-                <p>{family.description}</p>
-                <div className="pw-library-concepts">
-                  {family.concepts.map(concept => (
-                    <span className="pw-library-concept" key={concept} title="Catalog concept; capability not verified">
-                      {concept}
-                    </span>
-                  ))}
-                </div>
-                {["sensors","drone","mesia"].includes(family.relatedEntry) ? (
-                  <button type="button" className="pw-library-related"
-                    onClick={() => openFamilyWorkspace(family.relatedEntry)}>
-                    Open existing related workspace
-                  </button>
-                ) : (
-                  <Link className="pw-library-related"
-                    href={`${base}/${family.relatedEntry}`}
-                    onClick={() => setLibraryOpen(false)}>
-                    Open related existing page
-                  </Link>
-                )}
-              </section>
-            ))}
-            {filteredFamilies.length === 0 && <p>No tool concepts match your search.</p>}
-          </div>
-        </div>
+        <ToolLibraryP04 onClose={() => {
+          setLibraryOpen(false);
+          libraryButtonRef.current?.focus();
+        }} />
       )}
     </aside>
   );
