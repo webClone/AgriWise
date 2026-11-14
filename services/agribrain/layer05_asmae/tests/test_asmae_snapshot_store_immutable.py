@@ -319,3 +319,75 @@ def test_canonical_publication_rejects_empty_surface_inventory_for_visual_asmae(
             job_id="job-a",
             manifest_hash="manifest-a",
         )
+
+
+def test_canonical_snapshot_cache_deep_copy_isolation_adversarial_mutation(
+    snapshot_store, tmp_path, monkeypatch
+) -> None:
+    """Batch A verification: mutating returned snapshot nested fields cannot taint cache or subsequent callers."""
+    from services.agribrain.layer05_asmae import plot_snapshot_store
+    from services.agribrain.common.plot_namespace import PlotNamespace
+
+    monkeypatch.setattr(
+        plot_snapshot_store, "PLOT_SNAPSHOT_ROOT", tmp_path / "plot_snapshots"
+    )
+
+    result = _result()
+    snapshot_ref = snapshot_store.publish_latest_snapshot(
+        result, context_hash="ctx-a", geometry_hash="geometry-a"
+    )
+    result["snapshot_ref"] = snapshot_ref
+
+    frontend = {
+        "intelligence_snapshot_id": result["snapshot_id"],
+        "surfaces": [],
+        "phenology_stage": "flowering",
+        "scientific_evidence_lineage": {
+            "crop_posterior_lineage": result["crop_posterior_lineage"],
+            "crop_worldline_event_id": result["crop_worldline_event_id"],
+            "phenology_worldline_event_id": result["phenology_worldline_event_id"],
+        },
+    }
+
+    ns = PlotNamespace("tenant-a", "farm-a", "plot-a")
+    published = plot_snapshot_store.publish_canonical_plot_snapshot(
+        namespace=ns,
+        geometry_hash="geometry-a",
+        snapshot_id=result["snapshot_id"],
+        asmae_result=result,
+        frontend_payload=frontend,
+        job_id="job-a",
+        manifest_hash="manifest-a",
+    )
+    assert published is not None
+
+    # Caller 1: Cold read (populates cache)
+    caller1 = plot_snapshot_store.load_latest_plot_snapshot(namespace=ns)
+    assert caller1 is not None
+    orig_lineage = caller1["frontend_payload"]["scientific_evidence_lineage"]["crop_posterior_lineage"]
+    orig_snap_id = caller1["snapshot_id"]
+
+    # Adversarially mutate caller 1's scientific and validation metadata
+    caller1["frontend_payload"]["scientific_evidence_lineage"]["crop_posterior_lineage"] = "ADVERSARIAL_MUTATION_TAINT"
+    caller1["frontend_payload"]["tampered_nested_key"] = 99999.99
+    if "validation" not in caller1 or caller1["validation"] is None:
+        caller1["validation"] = {}
+    caller1["validation"]["injected_exploit_state"] = "POISONED"
+    caller1["snapshot_id"] = "FORGED_SNAPSHOT_ID"
+
+    # Caller 2: Warm read (from cache)
+    caller2 = plot_snapshot_store.load_latest_plot_snapshot(namespace=ns)
+    assert caller2 is not None
+
+    # Assert Caller 2 is completely isolated and pristine
+    assert caller2["snapshot_id"] == orig_snap_id
+    assert caller2["frontend_payload"]["scientific_evidence_lineage"]["crop_posterior_lineage"] == orig_lineage
+    assert "tampered_nested_key" not in caller2["frontend_payload"]
+    assert "injected_exploit_state" not in (caller2.get("validation") or {})
+
+    # Mutate Caller 2 and assert Caller 3 remains pristine
+    caller2["frontend_payload"]["scientific_evidence_lineage"]["crop_posterior_lineage"] = "SECOND_TAINT"
+    caller3 = plot_snapshot_store.load_latest_plot_snapshot(namespace=ns)
+    assert caller3 is not None
+    assert caller3["frontend_payload"]["scientific_evidence_lineage"]["crop_posterior_lineage"] == orig_lineage
+

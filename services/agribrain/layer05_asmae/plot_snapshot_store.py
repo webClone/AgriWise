@@ -841,7 +841,7 @@ def load_latest_plot_snapshot(
     with _SNAPSHOT_CACHE_LOCK:
         cached = _CANONICAL_SNAPSHOT_CACHE.get(cache_key)
         if cached is not None:
-            return copy.copy(cached)
+            return copy.deepcopy(cached)
 
     directory = _plot_dir(ns)
     node_path = directory / "nodes" / f"{snapshot_id}.json"
@@ -1107,9 +1107,9 @@ def load_latest_plot_snapshot(
     with _SNAPSHOT_CACHE_LOCK:
         if len(_CANONICAL_SNAPSHOT_CACHE) > 20:
             _CANONICAL_SNAPSHOT_CACHE.clear()
-        _CANONICAL_SNAPSHOT_CACHE[cache_key] = copy.copy(node)
+        _CANONICAL_SNAPSHOT_CACHE[cache_key] = copy.deepcopy(node)
 
-    return node
+    return copy.deepcopy(node)
 
 
 def load_plot_snapshot_by_id(

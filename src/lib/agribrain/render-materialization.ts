@@ -176,23 +176,41 @@ export function validateSurfaceGrid(
     return { valid: false, reason: "grid_spec_bounds_metric_crs_mismatch", bounds: null, width, height };
   }
 
-  // Cross-validate affine transform against dimensions and bounds if present
+  // Cross-validate affine transform against dimensions and bounds if present (Batch B)
   if (spec.transform !== undefined) {
-    if (!Array.isArray(spec.transform) || spec.transform.length !== 6 || !spec.transform.every((v) => typeof v === "number" && Number.isFinite(v))) {
+    if (
+      !Array.isArray(spec.transform) ||
+      spec.transform.length !== 6 ||
+      !spec.transform.every((v) => typeof v === "number" && Number.isFinite(v))
+    ) {
       return { valid: false, reason: "grid_spec_affine_invalid", bounds: null, width, height };
     }
-    const [x0, dx, , y0, , dy] = spec.transform;
-    if (Math.abs(dx) <= 0 || Math.abs(dy) <= 0) {
-      return { valid: false, reason: "grid_spec_affine_degenerate", bounds: null, width, height };
+    const [x0, dx, rx, y0, ry, dy] = spec.transform;
+
+    // 1. Require unrotated, unsheared transform
+    if (Math.abs(rx) > 1e-7 || Math.abs(ry) > 1e-7) {
+      return { valid: false, reason: "grid_spec_affine_rotated_or_sheared", bounds: null, width, height };
     }
-    const cellTolX = Math.abs(dx) * 0.5;
-    const cellTolY = Math.abs(dy) * 0.5;
-    if (Math.abs(x0 - minLng) > cellTolX) {
+
+    // 2. Require north-up orientation: dx > 0 (west-to-east), dy < 0 (north-to-south)
+    if (dx <= 0 || dy >= 0) {
+      return { valid: false, reason: "grid_spec_affine_orientation_not_north_up", bounds: null, width, height };
+    }
+
+    // Numerical tolerance for origin and endpoint alignment
+    const tolX = Math.max(dx * 0.1, 1e-5);
+    const tolY = Math.max(Math.abs(dy) * 0.1, 1e-5);
+
+    // 3. Origin check: x0 must match minLng, y0 must match maxLat (upper-left corner)
+    if (Math.abs(x0 - minLng) > tolX || Math.abs(y0 - maxLat) > tolY) {
       return { valid: false, reason: "grid_spec_affine_bounds_mismatch", bounds: null, width, height };
     }
-    const expectedY0 = dy < 0 ? maxLat : minLat;
-    if (Math.abs(y0 - expectedY0) > cellTolY) {
-      return { valid: false, reason: "grid_spec_affine_bounds_mismatch", bounds: null, width, height };
+
+    // 4. Extent check: full raster extent endpoints must match declared bounds and dimensions
+    const xEnd = x0 + width * dx;
+    const yEnd = y0 + height * dy;
+    if (Math.abs(xEnd - maxLng) > tolX || Math.abs(yEnd - minLat) > tolY) {
+      return { valid: false, reason: "grid_spec_affine_extent_mismatch", bounds: null, width, height };
     }
   }
 

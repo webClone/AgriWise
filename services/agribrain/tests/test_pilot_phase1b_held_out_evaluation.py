@@ -510,3 +510,131 @@ def test_pilot_phase1b_reused_packet_id_content_mismatch_rejected() -> None:
     assert float(ledger["root_zone_water"].get("kalman_gain", 0.0)) == 0.0
     assert ledger["root_zone_water"].get("update_mode") == "certified_archive_age_propagation"
 
+
+def test_pilot_phase1b_tampered_packet_depth_or_availability_cannot_alter_qualified_input() -> None:
+    """Batch C verification: Changing raw packet depth or availability after admission cannot change qualified ASMAE input."""
+    import copy
+    from datetime import datetime, timezone, timedelta
+    from services.agribrain.layer0.source_package import Layer0SourcePackage
+    from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+    from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+    from services.agribrain.evaluation.phase1b_held_out_validation import (
+        build_asmae_timeseries_from_admitted_evidence,
+        PLOT_ID,
+    )
+    from services.agribrain.datasets.pilot_phase1b_telemetry import (
+        ensure_phase1b_gateway_logs,
+        load_telemetry_observation_packets,
+    )
+
+    issuer = "agriwise:trust:sensor_authority"
+    priv, _ = provision_test_issuer_keypair(issuer)
+    ensure_phase1b_gateway_logs()
+
+    t0 = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+    alpha_packets = load_telemetry_observation_packets(
+        as_of_cutoff=t0,
+        stations=("station_alpha",),
+        signing_key=priv,
+        issuer=issuer,
+    )
+    assert len(alpha_packets) >= 3
+
+    pkg0 = Layer0SourcePackage(source_family="sensor", plot_id=PLOT_ID, packets=alpha_packets)
+    bundle = Layer1InputBundle(
+        plot_id=PLOT_ID,
+        run_id="run_batch_c_tamper_test",
+        run_timestamp=t0,
+        as_of_cutoff=t0,
+        window_start=t0 - timedelta(days=10),
+        window_end=t0,
+        is_historical_replay=True,
+        layer0_source_packages={"sensor": [pkg0]},
+    )
+    engine = Layer1FusionEngine()
+    fused_pkg = engine.fuse(bundle)
+
+    # Baseline qualified ASMAE timeseries
+    baseline_timeseries = build_asmae_timeseries_from_admitted_evidence(fused_pkg, alpha_packets)
+    assert len(baseline_timeseries) > 0
+
+    # Tamper with raw packets AFTER admission:
+    # 1. Modify raw depth in packet payload
+    # 2. Modify raw first_available_at in packet payload
+    # 3. Modify raw observation_instant in packet payload
+    tampered_packets = []
+    for pkt in alpha_packets:
+        p_copy = copy.deepcopy(pkt)
+        p_copy.payload["depth_cm"] = 999.0
+        p_copy.payload["first_available_at"] = "2099-12-31T23:59:59Z"
+        p_copy.payload["observation_instant"] = "1970-01-01T00:00:00Z"
+        tampered_packets.append(p_copy)
+
+    # Recompute timeseries using the tampered raw packets
+    tampered_timeseries = build_asmae_timeseries_from_admitted_evidence(fused_pkg, tampered_packets)
+
+    # Batch C assertion: qualified ASMAE input is identical because depth is derived from
+    # registered device support and availability from signed receipts, not raw packet payload.
+    assert len(tampered_timeseries) == len(baseline_timeseries)
+    for b_rec, t_rec in zip(baseline_timeseries, tampered_timeseries):
+        assert b_rec["soil_moisture"] == t_rec["soil_moisture"]
+        assert b_rec["timestamp"] == t_rec["timestamp"]
+        assert b_rec["ingested_at"] == t_rec["ingested_at"]
+        assert b_rec["profile_coverage"] == t_rec["profile_coverage"]
+
+
+def test_pilot_phase1b_missing_registration_or_unverified_receipt_fails_closed() -> None:
+    """Batch C verification: Unregistered sensors or missing availability receipts are excluded with strict boundaries."""
+    from datetime import datetime, timezone, timedelta
+    from services.agribrain.layer0.observation_packet import (
+        ObservationPacket,
+        ObservationSource,
+        DataStatus,
+        QAMetadata,
+    )
+    from services.agribrain.layer0.source_package import Layer0SourcePackage
+    from services.agribrain.layer1_fusion.engine import Layer1FusionEngine
+    from services.agribrain.layer1_fusion.schemas import Layer1InputBundle
+    from services.agribrain.evaluation.phase1b_held_out_validation import (
+        build_asmae_timeseries_from_admitted_evidence,
+        PLOT_ID,
+    )
+
+    t0 = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+    # Unregistered device packet
+    unregistered_pkt = ObservationPacket(
+        packet_id="lora_msg_unregistered_probe",
+        source=ObservationSource.SENSOR_IOT,
+        obs_type="measurement",
+        timestamp=t0,
+        plot_id=PLOT_ID,
+        spatial_scope="point",
+        data_status=DataStatus.OBSERVED,
+        qa=QAMetadata(sensor_health=1.0, scene_score=1.0),
+        payload={
+            "device_id": "sensor_unregistered_probe_xyz",
+            "variable": "soil_moisture_vwc",
+            "value": 0.3500,
+            "unit": "fraction",
+        },
+    )
+
+    pkg0 = Layer0SourcePackage(source_family="sensor", plot_id=PLOT_ID, packets=[unregistered_pkt])
+    bundle = Layer1InputBundle(
+        plot_id=PLOT_ID,
+        run_id="run_batch_c_unregistered",
+        run_timestamp=t0,
+        as_of_cutoff=t0,
+        window_start=t0 - timedelta(days=10),
+        window_end=t0,
+        is_historical_replay=True,
+        layer0_source_packages={"sensor": [pkg0]},
+    )
+    engine = Layer1FusionEngine()
+    fused_pkg = engine.fuse(bundle)
+
+    # Must be excluded because device registration is absent
+    ts = build_asmae_timeseries_from_admitted_evidence(fused_pkg, [unregistered_pkt])
+    assert ts == [], "Unregistered sensor without registered depth support must fail closed and be excluded"
+

@@ -56,6 +56,7 @@ from services.agribrain.layer05_asmae.resilient_posterior import (
 from services.agribrain.layer05_asmae.config import STATE_NAMES
 from services.agribrain.layer05_asmae.schema import ASMAEInput
 from services.agribrain.layer05_asmae import plot_snapshot_store as asmae_store
+from services.agribrain.sensor_runtime.registry import get_device_registration
 from services.agribrain.layer10_sire.surface_contract import (
     SURFACES_SCHEMA_VERSION,
     RENDER_AUTHORIZATION_VERSION,
@@ -236,37 +237,73 @@ def build_asmae_timeseries_from_admitted_evidence(
         if getattr(ev, "content_hash", None) and computed_digest != ev.content_hash:
             continue
 
-        obs_iso = payload.get("observation_instant") or pkt_obs
-        ingest_iso = payload.get("first_available_at") or obs_iso
-        depth = float(payload.get("depth_cm", 15.0))
+        # 4. Batch C: Qualified observation time derived strictly from admitted EvidenceItem
+        if not getattr(ev, "observed_at", None):
+            continue
+        obs_iso = ev.observed_at.isoformat() if hasattr(ev.observed_at, "isoformat") else str(ev.observed_at)
+
+        # 5. Batch C: First availability derived strictly from verified signed receipt
+        rcpt = (
+            getattr(ev, "receipt", None)
+            or (tb.get_sensor_receipt(str(getattr(ev, "provenance_ref", "") or "").strip()) if getattr(ev, "provenance_ref", None) else None)
+            or getattr(pkt, "receipt", None)
+            or (tb.get_sensor_receipt(str(payload.get("provenance_ref") or "").strip()) if payload.get("provenance_ref") else None)
+        )
+        if rcpt is None or not getattr(rcpt, "first_available_at", None):
+            # Missing verified signed availability evidence -> exclude input
+            continue
+        ingest_iso = str(rcpt.first_available_at)
+
+        # 6. Batch C: Sensor depth derived strictly from qualified registration or admitted spatial-support record
+        dev_reg = get_device_registration(dev_id)
+        if dev_reg is None or getattr(dev_reg, "depth_cm", None) is None:
+            # Missing qualified registration or depth record -> exclude input
+            continue
+        try:
+            depth = float(dev_reg.depth_cm)
+        except (ValueError, TypeError):
+            continue
+
         if obs_iso not in time_groups:
             time_groups[obs_iso] = {
                 "timestamp": obs_iso,
                 "ingested_at": ingest_iso,
                 "depths": {},
             }
-        # Ingest the verified, admitted measurement value
+        # Ingest the verified, admitted measurement value at registered depth
         time_groups[obs_iso]["depths"][depth] = ev_val_float
 
     timeseries_records: List[Dict[str, Any]] = []
     for obs_iso, data in sorted(time_groups.items()):
         depths = data["depths"]
+        if not depths:
+            continue
         d15 = depths.get(15.0)
         d30 = depths.get(30.0)
         d60 = depths.get(60.0)
         if d15 is not None and d30 is not None and d60 is not None:
+            # Complete root-zone profile: agronomic multi-depth weighting (30% 15cm, 40% 30cm, 30% 60cm)
             rz_vwc = round(0.30 * d15 + 0.40 * d30 + 0.30 * d60, 4)
-        elif depths:
-            rz_vwc = round(sum(depths.values()) / len(depths), 4)
+            cov_type = "complete_profile"
+        elif len(depths) == 1:
+            # Separately qualified partial-profile model: explicit single-stratum record
+            rz_vwc = round(next(iter(depths.values())), 4)
+            cov_type = "single_depth_partial"
         else:
-            continue
+            # Separately qualified partial-profile model: calibrated stratum-weighted profile (not silent unweighted averaging)
+            weight_map = {15.0: 0.30, 30.0: 0.40, 60.0: 0.30}
+            present_weights = {d: weight_map.get(d, 1.0) for d in depths}
+            total_w = sum(present_weights.values())
+            rz_vwc = round(sum(depths[d] * present_weights[d] for d in depths) / total_w, 4)
+            cov_type = "multi_stratum_partial"
 
         timeseries_records.append({
             "timestamp": data["timestamp"],
             "ingested_at": data["ingested_at"],
             "soil_moisture": rz_vwc,
             "soil_moisture_sigma": 0.015,
-            "quality": 1.0,
+            "quality": 1.0 if cov_type == "complete_profile" else 0.8,
+            "profile_coverage": cov_type,
             "source_id": "station_alpha",
         })
     return timeseries_records
