@@ -9,10 +9,11 @@ export interface WorkspaceEntityPinsLayerProps {
 
 /**
  * DeckGL layer for rendering authoritative, registered agricultural entities
- * (e.g., ground-truth soil moisture probes, weather stations, cameras) on the field map.
+ * (e.g., ground-truth soil moisture probes, weather stations, cameras, drone missions, field observations)
+ * directly on the field map.
  * 
  * Enforces Gate P05-G02: Strictly renders pins for entities with verified
- * registered coordinates. Unlocated devices are excluded from this layer.
+ * registered coordinates. Unlocated devices/photos are excluded from this layer.
  */
 export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProps) {
   const { entities, selectedEntityId, onEntityClick } = props;
@@ -36,20 +37,28 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
     filled: true,
     radiusScale: 1,
     radiusMinPixels: 9,
-    radiusMaxPixels: 22,
+    radiusMaxPixels: 24,
     lineWidthMinPixels: 2,
     getPosition: (d) => d.geometry!.coordinates as [number, number],
     getRadius: (d) => {
       const isSelected = selectedEntityId === d.entity_id || selectedEntityId === d.envelope_id;
-      return isSelected ? 12 : 7;
+      return isSelected ? 13 : 8;
     },
     getFillColor: (d) => {
       const isSelected = selectedEntityId === d.entity_id || selectedEntityId === d.envelope_id;
-      return isSelected ? [34, 211, 238, 70] : [15, 23, 42, 140];
+      if (isSelected) return [34, 211, 238, 70]; // Cyan glow
+      if (d.entity_kind === "CAMERA") return [168, 85, 247, 45]; // Violet glow
+      if (d.entity_kind === "DRONE_MISSION") return [249, 115, 22, 45]; // Orange glow
+      if (d.entity_kind === "FIELD_OBSERVATION" || d.entity_kind === "FIELD_EVENT") return [244, 63, 94, 45]; // Rose glow
+      return [15, 23, 42, 140];
     },
     getLineColor: (d) => {
       const isSelected = selectedEntityId === d.entity_id || selectedEntityId === d.envelope_id;
-      return isSelected ? [34, 211, 238, 255] : [255, 255, 255, 120];
+      if (isSelected) return [34, 211, 238, 255];
+      if (d.entity_kind === "CAMERA") return [168, 85, 247, 200];
+      if (d.entity_kind === "DRONE_MISSION") return [249, 115, 22, 200];
+      if (d.entity_kind === "FIELD_OBSERVATION" || d.entity_kind === "FIELD_EVENT") return [244, 63, 94, 200];
+      return [255, 255, 255, 120];
     },
     updateTriggers: {
       getRadius: [selectedEntityId],
@@ -58,7 +67,7 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
     },
   });
 
-  // 2. Core Interactive Sensor Pin Layer
+  // 2. Core Interactive Entity Pin Layer
   const coreLayer = new ScatterplotLayer<WorkspaceFeatureEnvelope>({
     id: "workspace-entity-pins-core",
     data: locatedEntities,
@@ -68,12 +77,12 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
     filled: true,
     radiusScale: 1,
     radiusMinPixels: 5,
-    radiusMaxPixels: 12,
+    radiusMaxPixels: 13,
     lineWidthMinPixels: 1.5,
     getPosition: (d) => d.geometry!.coordinates as [number, number],
     getRadius: (d) => {
       const isSelected = selectedEntityId === d.entity_id || selectedEntityId === d.envelope_id;
-      return isSelected ? 6 : 4.5;
+      return isSelected ? 6.5 : 5;
     },
     getFillColor: (d) => {
       const isSelected = selectedEntityId === d.entity_id || selectedEntityId === d.envelope_id;
@@ -81,7 +90,27 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
         return [34, 211, 238, 255]; // Bright cyan when selected
       }
 
+      // Family 1: CAMERA (Optical Traps, Fixed Field Cameras)
+      if (d.entity_kind === "CAMERA") {
+        return [168, 85, 247, 255]; // Violet / Aperture Purple (#a855f7)
+      }
+
+      // Family 2: DRONE_MISSION (Waypoints, Flight Corridors)
+      if (d.entity_kind === "DRONE_MISSION") {
+        return [249, 115, 22, 255]; // Aviation Orange (#f97316)
+      }
+
+      // Family 3: FIELD_OBSERVATION / FIELD_EVENT (Scouting, Symptoms, Ground Samples)
+      if (d.entity_kind === "FIELD_OBSERVATION" || d.entity_kind === "FIELD_EVENT") {
+        return [244, 63, 94, 255]; // Observation Rose (#f43f5e)
+      }
+
+      // Family 4: SENSOR (IoT Telemetry, Soil Probes, Weather Stations)
       const isOnline = (d.properties as any)?.isOnline ?? true;
+      const isFixture = (d.properties as any)?.is_benchmark_fixture ?? false;
+      if (isFixture) {
+        return [234, 179, 8, 255]; // Amber for synthetic benchmark fixtures
+      }
       if (!isOnline) {
         return [148, 163, 184, 220]; // Muted slate if offline
       }

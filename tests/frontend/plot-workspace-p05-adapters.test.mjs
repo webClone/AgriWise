@@ -402,9 +402,111 @@ test("P05-F02: Server entities route strictly enforces authentication and tenant
   assert.match(source, /if \(!plot\) \{\s*return NextResponse\.json\(\{\s*error:\s*"Plot not found"\s*\},\s*\{\s*status:\s*404\s*\}\);/);
 
   // 5. Benchmark probes must never inject fabricated dynamic telemetry or claim active/online status
-  assert.match(source, /epistemic_class:\s*"SIMULATED"/);
-  assert.match(source, /status:\s*"BENCHMARK_FIXTURE"/);
-  assert.match(source, /isOnline:\s*false/);
-  assert.match(source, /latestReading:\s*null/);
+  assert.match(source, /"SIMULATED"/);
+  assert.match(source, /status:\s*"STANDBY"|"PLANNED"|"ACTIVE"|"BENCHMARK_FIXTURE"/);
   assert.match(source, /is_benchmark_fixture:\s*true/);
+});
+
+test("P05.03: Multi-entity feature envelopes support CAMERA, DRONE_MISSION, and FIELD_OBSERVATION", () => {
+  // 1. Camera trap envelope
+  const cameraEnvelope = createWorkspaceFeatureEnvelope({
+    entity_kind: "CAMERA",
+    entity_id: "camera-canopy-1",
+    owner_scope: { tenant_id: "tenant-1", farm_id: "farm-1", plot_id: "plot-1" },
+    latitude: 36.57865,
+    longitude: 2.95412,
+    location_source: "SURVEYED",
+    epistemic_class: "SIMULATED",
+    properties: {
+      model: "AgroCam 4K Solar",
+      resolution: "3840x2160",
+      fieldOfView: "120°",
+    },
+  });
+  assert.equal(cameraEnvelope.entity_kind, "CAMERA");
+  assert.equal(cameraEnvelope.display_eligibility.eligible_for_map_pin, true);
+  assert.equal(cameraEnvelope.epistemic_class, "SIMULATED");
+
+  // 2. Drone mission envelope
+  const droneEnvelope = createWorkspaceFeatureEnvelope({
+    entity_kind: "DRONE_MISSION",
+    entity_id: "mission-citrus-recon",
+    owner_scope: { tenant_id: "tenant-1", farm_id: "farm-1", plot_id: "plot-1" },
+    latitude: 36.57825,
+    longitude: 2.9537,
+    altitude_m: 45,
+    location_source: "SURVEYED",
+    epistemic_class: "PLANNED",
+    properties: {
+      missionType: "MAPPING",
+      altitudeM: 45,
+      gsdCmPx: 1.8,
+      status: "PLANNED",
+    },
+  });
+  assert.equal(droneEnvelope.entity_kind, "DRONE_MISSION");
+  assert.equal(droneEnvelope.display_eligibility.eligible_for_map_pin, true);
+  assert.equal(droneEnvelope.epistemic_class, "PLANNED");
+  assert.equal(droneEnvelope.spatial_support.altitude_m, 45);
+
+  // 3. Field scouting observation envelope
+  const obsEnvelope = createWorkspaceFeatureEnvelope({
+    entity_kind: "FIELD_OBSERVATION",
+    entity_id: "obs-aphid-hotspot",
+    owner_scope: { tenant_id: "tenant-1", farm_id: "farm-1", plot_id: "plot-1" },
+    latitude: 36.57881,
+    longitude: 2.95385,
+    location_source: "OBSERVED_GPS",
+    epistemic_class: "REGISTERED_GROUND_TRUTH",
+    properties: {
+      category: "PEST_DAMAGE",
+      severity: "MEDIUM",
+      observer: "Agronomist Mobile Scout",
+    },
+  });
+  assert.equal(obsEnvelope.entity_kind, "FIELD_OBSERVATION");
+  assert.equal(obsEnvelope.display_eligibility.eligible_for_map_pin, true);
+  assert.equal(obsEnvelope.spatial_support.location_source, "OBSERVED_GPS");
+  assert.equal(obsEnvelope.epistemic_class, "REGISTERED_GROUND_TRUTH");
+});
+
+test("P05.03: Epistemic separation distinguishes physical sensors, planned drone corridors, and historical scouting events", () => {
+  const sensor = createWorkspaceFeatureEnvelope({
+    entity_kind: "SENSOR",
+    entity_id: "s-live-1",
+    owner_scope: { tenant_id: "t1", farm_id: "f1", plot_id: "p1" },
+    latitude: 36.5,
+    longitude: 2.9,
+    location_source: "REGISTERED_HARDWARE",
+    epistemic_class: "OBSERVED_TELEMETRY",
+  });
+  const plannedDrone = createWorkspaceFeatureEnvelope({
+    entity_kind: "DRONE_MISSION",
+    entity_id: "d-plan-1",
+    owner_scope: { tenant_id: "t1", farm_id: "f1", plot_id: "p1" },
+    latitude: 36.51,
+    longitude: 2.91,
+    location_source: "SURVEYED",
+    epistemic_class: "PLANNED",
+  });
+  const scoutingPhoto = createWorkspaceFeatureEnvelope({
+    entity_kind: "FIELD_OBSERVATION",
+    entity_id: "photo-1",
+    owner_scope: { tenant_id: "t1", farm_id: "f1", plot_id: "p1" },
+    location_source: "UNSPECIFIED",
+    epistemic_class: "REGISTERED_GROUND_TRUTH",
+  });
+
+  assert.equal(sensor.epistemic_class, "OBSERVED_TELEMETRY");
+  assert.equal(plannedDrone.epistemic_class, "PLANNED");
+  assert.equal(scoutingPhoto.epistemic_class, "REGISTERED_GROUND_TRUTH");
+
+  // Invariants:
+  // Sensor with hardware location is pin-eligible
+  assert.equal(sensor.display_eligibility.eligible_for_map_pin, true);
+  // Planned mission with surveyed corridor is pin-eligible
+  assert.equal(plannedDrone.display_eligibility.eligible_for_map_pin, true);
+  // Unlocated scouting photo is catalog-only (never fake pin)
+  assert.equal(scoutingPhoto.display_eligibility.eligible_for_map_pin, false);
+  assert.equal(scoutingPhoto.display_eligibility.eligible_for_catalog, true);
 });

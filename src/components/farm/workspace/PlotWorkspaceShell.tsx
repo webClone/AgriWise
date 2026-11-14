@@ -215,6 +215,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
         <WorkspaceContextActionsP04
           onLaunch={launchInvestigation}
           onOpenSensor={handleOpenSensor}
+          onOpenTool={openTool}
           workspaceEntities={entities}
         />
         {investigation && (
@@ -230,6 +231,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           farmId={farmId}
           plotId={plotId}
           onOpenSensor={handleOpenSensor}
+          onOpenTool={openTool}
           workspaceEntities={entities}
           onCollapse={() => {
             if (window.matchMedia("(max-width: 820px)").matches) {
