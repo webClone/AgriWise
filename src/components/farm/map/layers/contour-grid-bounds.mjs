@@ -126,8 +126,8 @@ export function generateContourGridData({
     for (let c = 0; c < w; c++) {
       const val = surfaceData.values[r][c];
 
-      // Strict gating: drop the pixel if NO-DATA or masked out of field boundary
-      if (val !== null && val !== undefined && mask.data[maskPtr] === 1) {
+      // Strict gating: drop the pixel if NO-DATA, non-finite, or masked out of field boundary
+      if (val !== null && val !== undefined && Number.isFinite(val) && mask.data[maskPtr] === 1) {
         let lng = minLng + (c / w) * lngDiff + lngDiff / (2 * w);
         const lat = maxLat - (r / h) * latDiff - latDiff / (2 * h);
 

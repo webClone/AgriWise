@@ -127,3 +127,50 @@ test("P01-F03: Contour coordinates correctly georeference asymmetric MultiPolygo
   assert.ok(resolvedEnvelope[0] <= 10.0, "Envelope minLng must cover Island 1");
   assert.ok(resolvedEnvelope[2] >= 10.06, "Envelope maxLng must cover Island 2");
 });
+
+test("P01 Hardening: Non-finite surface values (NaN, Infinity, -Infinity) are excluded from contour grid points", () => {
+  const plotGeoJson = {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [
+        [
+          [10.0, 36.0],
+          [10.1, 36.0],
+          [10.1, 36.1],
+          [10.0, 36.1],
+          [10.0, 36.0],
+        ],
+      ],
+    },
+  };
+
+  const values = [
+    [0.5, NaN],
+    [Infinity, -Infinity],
+  ];
+
+  const surfaceData = {
+    type: "NDVI_CLEAN",
+    values,
+    render_range: [0, 1],
+    grid_spec: {
+      bounds: [10.0, 36.0, 10.1, 36.1],
+      width: 2,
+      height: 2,
+      crs: "EPSG:4326",
+    },
+  };
+
+  const gridData = generateContourGridData({
+    plotId: "nonfinite-test",
+    surfaceData,
+    plotGeoJson,
+  });
+
+  // Only the single finite value (0.5) should be included
+  assert.equal(gridData.length, 1, "Only finite surface values should be admitted into contour data");
+  assert.equal(gridData[0].value, 0.5);
+  assert.ok(Number.isFinite(gridData[0].position[0]));
+  assert.ok(Number.isFinite(gridData[0].position[1]));
+});
