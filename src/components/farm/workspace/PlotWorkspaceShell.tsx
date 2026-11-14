@@ -1,12 +1,15 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelRightOpen, PanelRightClose } from "lucide-react";
 import PlotDashboard from "@/components/farm/PlotDashboard";
 import WorkspaceToolDock, { type WorkspaceQuickAction } from "./WorkspaceToolDock";
 import WorkspaceContextInspector from "./WorkspaceContextInspector";
 import WorkspaceScientificStatus from "./WorkspaceScientificStatus";
 import WorkspaceTimelineContainer from "./WorkspaceTimelineContainer";
+import WorkspaceContextActionsP04, { type P04InvestigationKind } from "./WorkspaceContextActionsP04";
+import WorkspaceInvestigationHostP04, { type P04HostMode } from "./WorkspaceInvestigationHostP04";
+import "./p04-investigation.css";
 import {
   PlotWorkspaceProvider,
   usePlotWorkspace,
@@ -26,6 +29,33 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const plotId = props.plotId || String(props.plot?.id || "");
   const { state, setActiveTool, toggleInspector } = usePlotWorkspace();
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
+  const [investigation, setInvestigation] = useState<P04InvestigationKind | null>(null);
+  const [hostMode, setHostMode] = useState<P04HostMode>("context");
+  const launchControlRef = useRef<HTMLElement | null>(null);
+
+  const launchInvestigation = useCallback((kind: P04InvestigationKind) => {
+    launchControlRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setInvestigation(kind);
+    setHostMode("context");
+    setActiveTool(`p04:${kind}`);
+  }, [setActiveTool]);
+
+  const closeInvestigation = useCallback(() => {
+    setInvestigation(null);
+    setActiveTool("map");
+    const control = launchControlRef.current;
+    requestAnimationFrame(() => {
+      if (control?.isConnected) control.focus();
+    });
+  }, [setActiveTool]);
+
+  // An open investigation must never retain context across tenant, plot,
+  // crop-cycle, geometry or request-generation changes.
+  useEffect(() => {
+    setInvestigation(null);
+  }, [state.generationId, state.plotScope.plotId, state.plotScope.cropCycleId,
+      state.plotScope.geometryHash, state.plotScope.geometryVersion]);
+
 
   const desktopInspectorOpen = !state.isInspectorCollapsed;
 
@@ -77,6 +107,13 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
         <div className="pw-legacy-map-host">
           <PlotDashboard {...props} embeddedInWorkspace />
         </div>
+        <WorkspaceContextActionsP04 onLaunch={launchInvestigation} />
+        {investigation && (
+          <WorkspaceInvestigationHostP04
+            kind={investigation} mode={hostMode}
+            onMode={setHostMode} onClose={closeInvestigation}
+          />
+        )}
       </section>
 
       <aside className="pw-context-slot" id="pw-context-inspector">
