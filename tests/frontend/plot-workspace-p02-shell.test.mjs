@@ -29,23 +29,23 @@ test("V2 is opt-in and V2-disabled renders the unmodified legacy component path"
   assert.doesNotMatch(shell, /createLiveTelemetryStream|createLayer10|fetch\("/);
 });
 
-test("V2 mounts exactly one legacy dashboard and one moved existing timeline", () => {
-  assert.equal((shell.match(/<PlotDashboard /g) || []).length, 1);
-  assert.match(shell, /embeddedInWorkspace/);
+test("V2 mounts native spatial canvas and preserves the standalone legacy timeline", () => {
+  assert.doesNotMatch(shell, /<PlotDashboard|embeddedInWorkspace/);
+  assert.match(shell, /<WorkspaceNativeSpatialCanvas/);
   assert.match(dashboard, /\{!embeddedInWorkspace\s*&&\s*<TimelineStrip\s*\/>\}/);
   assert.match(timeline, /export default function TimelineStrip\(\{ docked = false \}/);
   assert.match(shell, /<WorkspaceTimelineContainer\s*\/>/);
   assert.match(read("src/components/farm/workspace/WorkspaceTimelineContainer.tsx"), /<TimelineStrip docked\s*\/>/);
-  assert.doesNotMatch(shell, /<PlotMapShell/);
 });
 
-test("Tool Dock preserves real legacy feature entry points with plot-scoped UI bridge", () => {
+test("Tool Dock invokes dedicated workspace adapters without forwarding events to legacy PlotDashboard", () => {
+  const toolHost = read("src/components/farm/workspace/WorkspaceExistingToolHost.tsx");
   for (const action of ["sensors", "drone", "mesia", "irrigation", "evidence", "assistant"]) {
-    assert.match(dashboard, new RegExp('case "' + action + '"'));
     assert.match(dock, new RegExp('action: "' + action + '"'));
+    assert.match(toolHost, new RegExp('tool === "' + action + '"'));
   }
-  assert.match(dashboard, /detail\.plotId !== plotId/);
-  assert.match(shell, /CustomEvent\("akaloris:p02:open-tool"/);
+  assert.match(shell, /<WorkspaceExistingToolHost/);
+  assert.doesNotMatch(shell, /CustomEvent\("akaloris:p02:open-tool"/);
   assert.match(dock, /aria-label=\{item\.label\}|title=\{item\.label\}/);
 });
 

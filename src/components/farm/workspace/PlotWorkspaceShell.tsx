@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelRightOpen, PanelRightClose } from "lucide-react";
-import PlotDashboard from "@/components/farm/PlotDashboard";
+import WorkspaceNativeSpatialCanvas from "./WorkspaceNativeSpatialCanvas";
+import WorkspaceExistingToolHost from "./WorkspaceExistingToolHost";
 import WorkspaceToolDock, { type WorkspaceQuickAction } from "./WorkspaceToolDock";
 import WorkspaceContextInspector from "./WorkspaceContextInspector";
 import WorkspaceScientificStatus from "./WorkspaceScientificStatus";
@@ -91,12 +92,8 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
 
   const openTool = useCallback((tool: WorkspaceQuickAction) => {
     setActiveTool(tool);
-    // UI bridge to legacy PlotDashboard tool implementations.
-    window.dispatchEvent(new CustomEvent("akaloris:p02:open-tool", {
-      detail: { plotId, tool },
-    }));
     setMobileInspectorOpen(false);
-  }, [plotId, setActiveTool]);
+  }, [setActiveTool]);
 
   return (
     <div
@@ -134,9 +131,8 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             : <PanelRightOpen size={18} aria-hidden="true" />}
           {mobileInspectorOpen ? "Close inspector" : "Inspector"}
         </button>
-        <div className="pw-legacy-map-host">
-          <PlotDashboard {...props} embeddedInWorkspace />
-        </div>
+        <WorkspaceNativeSpatialCanvas {...props} />
+        <WorkspaceExistingToolHost {...props} />
         <WorkspaceContextActionsP04 onLaunch={launchInvestigation} />
         {investigation && (
           <WorkspaceInvestigationHostP04

@@ -467,3 +467,13 @@
 @media (prefers-reduced-motion: reduce) {
   .pw-dock-item { transition: none; }
 }
+
+/* P04-C03 native map and bounded existing-tool adapters. */
+.pw-native-map-host{position:absolute;inset:0;min-height:0;min-width:0;overflow:hidden;background:#081719}
+.pw-native-map-loading{position:absolute;inset:0;display:grid;place-items:center;background:#071719;color:#bdcebf;font-size:13px}
+.pw-native-tool-modal{position:fixed;inset:0;z-index:100;overflow:auto;background:rgba(3,13,13,.97);color:#edf7f0}
+.pw-native-tool-modal>p{padding:24px;font-size:14px;color:#cbdfd1}
+.pw-native-tool-header{position:sticky;inset-block-start:0;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:16px 22px;background:#112720;border-bottom:1px solid #ffffff2b}
+.pw-native-tool-header>div{display:grid;gap:5px}
+.pw-native-tool-header small{font-size:11px;color:#b7ceb9}
+.pw-native-tool-header button{border:1px solid #ffffff40;border-radius:8px;background:#285940;color:white;padding:8px 12px}
