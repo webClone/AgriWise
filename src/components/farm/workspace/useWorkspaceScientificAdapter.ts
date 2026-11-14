@@ -32,15 +32,15 @@ export function useWorkspaceScientificAdapter({ farm, plot }: ScientificAdapterP
   // 3. Rebind after a geometry or active crop-cycle edit on the same plot
   const geometrySignature = plot?.geoJson ? computeGeometryHash(plot.geoJson) : "";
   const activeCropCycleId = parcelAssessment.activeCropCycleId;
+  const fetchAssessment = parcelAssessment.fetchAssessment;
 
   useEffect(() => {
-    if (plot?.id && farm?.id) {
-      void parcelAssessment.fetchAssessment(String(plot.id), String(farm.id), {
-        geometry: plot.geoJson,
-        cropCycleId: activeCropCycleId,
-      });
-    }
-  }, [plot?.id, farm?.id, geometrySignature, activeCropCycleId, parcelAssessment]);
+    if (!plot?.id || !farm?.id) return;
+    void fetchAssessment(String(plot.id), String(farm.id), {
+      geometry: plot.geoJson,
+      cropCycleId: activeCropCycleId,
+    });
+  }, [plot?.id, farm?.id, geometrySignature, activeCropCycleId, fetchAssessment]);
 
   // 4. Derive presentation state strictly from canonical assessment
   const injectData = pi.injectData;

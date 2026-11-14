@@ -89,10 +89,11 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     }
   }, [scientific.l10, selectEntity, setActiveTool, state.publication.snapshotId]);
 
-  // An open investigation must never retain context across tenant, plot,
-  // crop-cycle, geometry or request-generation changes.
+  // An open investigation or specialized tool must never retain context across
+  // tenant, plot, crop-cycle, geometry or request-generation changes.
   useEffect(() => {
     setInvestigation(null);
+    setActiveSpecializedTool(null);
   }, [state.generationId, state.plotScope.plotId, state.plotScope.cropCycleId,
       state.plotScope.geometryHash, state.plotScope.geometryVersion]);
 
