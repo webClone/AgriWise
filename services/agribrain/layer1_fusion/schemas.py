@@ -247,6 +247,7 @@ class EvidenceItem:
     instrument_id: Optional[str] = None
     parent_acquisition_id: Optional[str] = None
     receipt: Optional[Any] = None
+    publication_receipt: Optional[Any] = None
     publication_receipt_verified: bool = False
     verified_published_at: Optional[datetime] = None
 

@@ -166,6 +166,8 @@ export function workspaceReducer(state, action) {
         plotId,
         tenantId,
         cropCycleId,
+        geometryHash,
+        geometryVersion,
         source,
       } = action.payload || {};
 
@@ -185,6 +187,23 @@ export function workspaceReducer(state, action) {
       }
 
       if (cropCycleId !== undefined && (cropCycleId || null) !== (state.plotScope.cropCycleId || null)) {
+        return state;
+      }
+
+      if (
+        geometryHash !== undefined &&
+        state.plotScope.geometryHash &&
+        (geometryHash || null) !== (state.plotScope.geometryHash || null)
+      ) {
+        return state;
+      }
+
+      if (
+        geometryVersion !== undefined &&
+        state.plotScope.geometryVersion !== null &&
+        state.plotScope.geometryVersion !== undefined &&
+        geometryVersion !== state.plotScope.geometryVersion
+      ) {
         return state;
       }
 

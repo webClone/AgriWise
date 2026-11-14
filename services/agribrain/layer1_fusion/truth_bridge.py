@@ -928,11 +928,13 @@ def verify_publication_receipt(
     elif require_content_binding and not target.acquisition_id:
         return False, "missing_publication_acquisition_id", None
 
-    # Mandatory content digest binding (R11-03, R12-03)
+    # Mandatory content digest binding (R11-03, R12-03, S01)
     must_bind_content = require_content_binding or (source_family and source_family.lower() in ("raster_composite", "raster", "asmae"))
     if must_bind_content:
         if not target.content_hash or not str(target.content_hash).strip():
             return False, "missing_publication_content_hash_in_receipt", None
+        if require_content_binding and (not content_hash or not str(content_hash).strip()):
+            return False, "missing_content_hash_for_binding", None
         if content_hash and str(target.content_hash).strip() != str(content_hash).strip():
             return False, f"publication_content_hash_mismatch:{target.content_hash}!={content_hash}", None
     elif target.content_hash and content_hash:

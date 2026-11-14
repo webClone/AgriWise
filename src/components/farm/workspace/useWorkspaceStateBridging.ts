@@ -37,6 +37,8 @@ export function useWorkspaceStateBridging() {
             plotId: state.plotScope.plotId,
             tenantId: state.ownerScope.tenantId,
             cropCycleId: state.plotScope.cropCycleId,
+            geometryHash: state.plotScope.geometryHash,
+            geometryVersion: state.plotScope.geometryVersion,
             source: "SYSTEM_WORKSPACE_INVALIDATION",
           },
         });
@@ -44,29 +46,60 @@ export function useWorkspaceStateBridging() {
       return;
     }
 
-    const digest =
-      assessment.identity.publicationReceiptHash ||
-      assessment.identity.receiptHash ||
-      assessment.identity.publicationId;
+    const identity = assessment.identity;
 
-    // Deduplication composite key: generation, plot, tenant, snapshotId, and digest.
-    // Ensures that when generation bumps, a valid same-digest publication is cleanly re-published
+    // Strict Scope & Identity Boundary Verification:
+    // If incoming assessment does not match the active workspace tenant, plot, crop cycle, or geometry,
+    // do NOT bridge it into the active workspace!
+    if (
+      !identity ||
+      identity.plotId !== state.plotScope.plotId ||
+      identity.tenantId !== state.ownerScope.tenantId
+    ) {
+      return;
+    }
+
+    if (
+      state.plotScope.cropCycleId &&
+      identity.cropCycleId &&
+      identity.cropCycleId !== state.plotScope.cropCycleId
+    ) {
+      return;
+    }
+
+    if (
+      state.plotScope.geometryHash &&
+      identity.geometryHash &&
+      identity.geometryHash !== state.plotScope.geometryHash
+    ) {
+      return;
+    }
+
+    const digest =
+      identity.publicationReceiptHash ||
+      identity.receiptHash ||
+      identity.publicationId;
+
+    // Deduplication composite key: generation, plot, tenant, snapshotId, geometry, and digest.
+    // Ensures that when generation bumps or plot/geometry changes, a valid same-digest publication is cleanly re-published
     // into the new generation rather than silently dropped.
-    const bridgedKey = `${state.generationId}|${state.plotScope.plotId}|${state.ownerScope.tenantId}|${assessment.identity.snapshotId}|${digest}`;
+    const bridgedKey = `${state.generationId}|${identity.plotId}|${identity.tenantId}|${identity.snapshotId}|${identity.geometryHash || ""}|${digest}`;
     if (bridgedKey === lastBridgedKeyRef.current) return;
     lastBridgedKeyRef.current = bridgedKey;
 
     dispatch({
       type: "SNAPSHOT_SELECTED",
       payload: {
-        snapshotId: assessment.identity.snapshotId,
-        capturedAt: assessment.identity.evidenceCutoffAt || assessment.identity.publishedAt,
+        snapshotId: identity.snapshotId,
+        capturedAt: identity.evidenceCutoffAt || identity.publishedAt,
         publicationDigest: digest,
         authorityStatus: "CERTIFIED",
         generationId: state.generationId,
-        plotId: state.plotScope.plotId,
-        tenantId: state.ownerScope.tenantId,
-        cropCycleId: state.plotScope.cropCycleId,
+        plotId: identity.plotId,
+        tenantId: identity.tenantId,
+        cropCycleId: identity.cropCycleId || state.plotScope.cropCycleId,
+        geometryHash: identity.geometryHash || state.plotScope.geometryHash,
+        geometryVersion: state.plotScope.geometryVersion,
         source: "PARCEL_ASSESSMENT_AUTHORITY",
       },
     });
@@ -77,6 +110,8 @@ export function useWorkspaceStateBridging() {
     state.plotScope.plotId,
     state.ownerScope.tenantId,
     state.plotScope.cropCycleId,
+    state.plotScope.geometryHash,
+    state.plotScope.geometryVersion,
     dispatch,
   ]);
 

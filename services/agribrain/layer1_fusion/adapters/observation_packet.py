@@ -386,6 +386,7 @@ def observation_packet_to_evidence(
                 calibration_version=cal_ver,
                 parent_acquisition_id=parent_acq_id,
                 receipt=active_receipt,
+                publication_receipt=pub_receipt_candidate if is_verified_publication else None,
                 publication_receipt_verified=is_verified_publication,
                 verified_published_at=v_published,
             )
@@ -438,6 +439,7 @@ def observation_packet_to_evidence(
             calibration_version=cal_ver,
             parent_acquisition_id=parent_acq_id,
             receipt=active_receipt,
+            publication_receipt=pub_receipt_candidate if is_verified_publication else None,
             publication_receipt_verified=is_verified_publication,
             verified_published_at=v_published,
         ))

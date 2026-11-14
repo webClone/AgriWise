@@ -174,3 +174,95 @@ test("P01 Hardening: Non-finite surface values (NaN, Infinity, -Infinity) are ex
   assert.ok(Number.isFinite(gridData[0].position[0]));
   assert.ok(Number.isFinite(gridData[0].position[1]));
 });
+
+test("S02: Contour generation applies observed-pixel authorization and masking", () => {
+  const plotGeoJson = {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [
+        [
+          [10.0, 36.0],
+          [10.02, 36.0],
+          [10.02, 36.02],
+          [10.0, 36.02],
+          [10.0, 36.0],
+        ],
+      ],
+    },
+  };
+
+  const values = [
+    [0.4, 0.8],
+    [0.6, 0.9],
+  ];
+
+  const surfaceData = {
+    type: "NDVI_CLEAN",
+    values,
+    render_range: [0, 1],
+    grid_spec: {
+      bounds: [10.0, 36.0, 10.02, 36.02],
+      width: 2,
+      height: 2,
+      crs: "EPSG:4326",
+    },
+  };
+
+  // 1. Unobserved pixel masking: only cells marked 1/true are included
+  // Cell (0, 0) observed, Cell (0, 1) unobserved, Cell (1, 0) unobserved, Cell (1, 1) observed
+  const observationMask = [
+    [1, 0],
+    [0, 1],
+  ];
+
+  const maskedGridData = generateContourGridData({
+    plotId: "s02-mask-test",
+    surfaceData,
+    plotGeoJson,
+    observationMask,
+  });
+
+  assert.equal(maskedGridData.length, 2, "Only the 2 observed pixels must be included");
+  const valuesIncluded = maskedGridData.map((d) => d.value).sort();
+  assert.deepEqual(valuesIncluded, [0.4, 0.9], "Unobserved pixels 0.8 and 0.6 must not influence contour generation");
+
+  // 2. Negative control: requiresObservedMask is true but mask is missing -> fails closed
+  const failClosedMissingMask = generateContourGridData({
+    plotId: "s02-fail-closed-missing",
+    surfaceData,
+    plotGeoJson,
+    requiresObservedMask: true,
+  });
+  assert.deepEqual(failClosedMissingMask, [], "Must fail closed (empty array) when required mask is missing");
+
+  // 3. Negative control: requiresObservedMask is true and mask is empty -> fails closed
+  const failClosedEmptyMask = generateContourGridData({
+    plotId: "s02-fail-closed-empty",
+    surfaceData,
+    plotGeoJson,
+    observationMask: [],
+    requiresObservedMask: true,
+  });
+  assert.deepEqual(failClosedEmptyMask, [], "Must fail closed when required mask is empty array");
+
+  // 4. Negative control: authorized is false -> fails closed
+  const unauthorizedData = generateContourGridData({
+    plotId: "s02-unauthorized",
+    surfaceData,
+    plotGeoJson,
+    observationMask,
+    authorized: false,
+  });
+  assert.deepEqual(unauthorizedData, [], "Must fail closed when authorized is false");
+
+  // 5. Positive control: requiresObservedMask is true and mask is provided -> succeeds with observed cells
+  const validRequiredMask = generateContourGridData({
+    plotId: "s02-valid-required",
+    surfaceData,
+    plotGeoJson,
+    observationMask,
+    requiresObservedMask: true,
+  });
+  assert.equal(validRequiredMask.length, 2, "Must succeed and return observed cells when required mask is valid");
+});

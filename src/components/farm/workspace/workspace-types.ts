@@ -103,6 +103,8 @@ export type WorkspaceAction =
         plotId: string;
         tenantId: string;
         cropCycleId?: string | null;
+        geometryHash?: string | null;
+        geometryVersion?: number | string | null;
         source?: "PARCEL_ASSESSMENT_AUTHORITY" | "SYSTEM_WORKSPACE_INVALIDATION";
       };
     }

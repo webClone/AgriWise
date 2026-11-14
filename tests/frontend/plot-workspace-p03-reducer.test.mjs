@@ -431,3 +431,73 @@ test("P03 Reducer: PLOT_CHANGED invalidates when geometryVersion changes", () =>
   assert.equal(s1.generationId, s0.generationId + 1, "Geometry version change must bump generation");
   assert.equal(s1.plotScope.geometryVersion, 2);
 });
+
+test("P03 Reducer: SNAPSHOT_SELECTED enforces geometryHash and geometryVersion checks", () => {
+  const s0 = createInitialWorkspaceState({
+    tenantId: "tenant-1",
+    farmId: "farm-1",
+    plotId: "plot-1",
+    cropCycleId: "cycle-1",
+    geometryHash: "gh-canonical-1",
+    geometryVersion: 1,
+  });
+
+  // 1. Mismatched geometryHash must be rejected
+  const sMismatchedHash = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-1",
+      capturedAt: "2026-11-14T10:00:00Z",
+      publicationDigest: "sha256:abc",
+      authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: "plot-1",
+      tenantId: "tenant-1",
+      cropCycleId: "cycle-1",
+      geometryHash: "gh-different-2", // Mismatched
+      geometryVersion: 1,
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
+    },
+  });
+  assert.equal(sMismatchedHash, s0, "Mismatched geometryHash must be rejected without altering state");
+
+  // 2. Mismatched geometryVersion must be rejected
+  const sMismatchedVersion = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-1",
+      capturedAt: "2026-11-14T10:00:00Z",
+      publicationDigest: "sha256:abc",
+      authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: "plot-1",
+      tenantId: "tenant-1",
+      cropCycleId: "cycle-1",
+      geometryHash: "gh-canonical-1",
+      geometryVersion: 99, // Mismatched version
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
+    },
+  });
+  assert.equal(sMismatchedVersion, s0, "Mismatched geometryVersion must be rejected without altering state");
+
+  // 3. Matching geometryHash and geometryVersion succeeds
+  const sMatching = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-1",
+      capturedAt: "2026-11-14T10:00:00Z",
+      publicationDigest: "sha256:abc",
+      authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: "plot-1",
+      tenantId: "tenant-1",
+      cropCycleId: "cycle-1",
+      geometryHash: "gh-canonical-1",
+      geometryVersion: 1,
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
+    },
+  });
+  assert.notEqual(sMatching, s0);
+  assert.equal(sMatching.publication.snapshotId, "snap-1");
+  assert.equal(sMatching.publication.authorityStatus, "CERTIFIED");
+});

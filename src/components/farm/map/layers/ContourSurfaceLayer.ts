@@ -14,6 +14,10 @@ export function getContourSurfaceLayer({
   plotGeoJson,
   gridBounds,
   visible = true,
+  observedMaskSurface,
+  observationMask,
+  requiresObservedMask = false,
+  authorized = true,
 }: {
   id?: string;
   plotId?: string;
@@ -22,8 +26,13 @@ export function getContourSurfaceLayer({
   plotGeoJson?: any;
   gridBounds?: [number, number, number, number] | null;
   visible?: boolean;
+  observedMaskSurface?: SurfaceData | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  observationMask?: any;
+  requiresObservedMask?: boolean;
+  authorized?: boolean;
 }) {
-  if (!visible || !surfaceData || !plotGeoJson || !surfaceData.values) return null;
+  if (!visible || !authorized || !surfaceData || !plotGeoJson || !surfaceData.values) return null;
 
   const h = surfaceData.values.length;
   if (h === 0) return null;
@@ -52,6 +61,10 @@ export function getContourSurfaceLayer({
     surfaceData,
     plotGeoJson,
     gridBounds,
+    observedMaskSurface,
+    observationMask,
+    requiresObservedMask,
+    authorized,
   });
 
   if (!gridData || gridData.length === 0) {

@@ -2391,13 +2391,14 @@ def test_r10_g08_full_engine_r10_positive_and_negative_control():
     )
     tb.register_sensor_receipt(rcpt_sensor_early)
 
-    # Sensor publication receipt for historical replay admission (R10-02)
+    # Sensor publication receipt for historical replay admission (R10-02, S01 exact content binding)
     rcpt_sensor_pub = _tf().create_signed_publication_receipt(
         receipt_id="urn:agriwise:pub:sensor:r10_08",
         issuer="agriwise:trust:publication_authority",
         source_family="sensor",
         acquisition_id="pkt_sensor_early",
         published_at=now - timedelta(hours=2),
+        content_hash=rcpt_sensor_early.content_digest,
     )
     tb.register_publication_receipt(rcpt_sensor_pub)
 
@@ -3141,6 +3142,7 @@ def test_r11_g08_full_engine_end_to_end_native_adversarial_and_positive_acceptan
         source_family="sensor",
         acquisition_id="pkt_sensor_r11_08_pos",
         published_at=now - timedelta(hours=1),
+        content_hash=rcpt_sensor.content_digest,
     )
     tb.register_publication_receipt(rcpt_sensor_pub)
 
@@ -3747,6 +3749,7 @@ def test_r12_g08_full_engine_end_to_end_native_r12_adversarial_and_positive_acce
         source_family="sensor",
         acquisition_id="pkt_r12_healthy",
         published_at=now - timedelta(hours=1),
+        content_hash=reading_digest,
     )
     tb.register_publication_receipt(rcpt_sensor_pub)
 
@@ -3889,6 +3892,167 @@ def test_r12_g08_full_engine_end_to_end_native_r12_adversarial_and_positive_acce
 
     # 4. Provenance and scientific content root
     assert len(pkg.scientific_content_root()) == 64
+
+
+def test_s01_historical_sensor_unhashed_publication_receipt_fails_availability():
+    """S01: Prohibit unhashed sensor receipts from asserting historical availability evidence.
+    
+    Signed sensor measurements without first_available_at must provide a publication receipt
+    with exact matching content hash to gain historical state update authority.
+    Unhashed or mismatched receipts must be admitted diagnostic-only.
+    """
+    ta = _mod('temporal_alignment')
+    tb = _mod('truth_bridge')
+    s = _mod('schemas')
+
+    now = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+    cutoff = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+    obs_time = datetime(2026, 11, 14, 10, 0, tzinfo=timezone.utc)
+    pub_time = datetime(2026, 11, 14, 11, 0, tzinfo=timezone.utc)
+
+    reading_digest = tb.compute_reading_content_digest(
+        device_id="dev-s01",
+        plot_id="plot-s01",
+        variable="soil_moisture",
+        value=25.4,
+        unit="percent",
+        observed_at=obs_time,
+    )
+
+    signed_rcpt = _tf().create_signed_sensor_receipt(
+        receipt_id="urn:agriwise:receipt:sensor:s01",
+        issuer="agriwise:authority:test_signer",
+        device_id="dev-s01",
+        plot_id="plot-s01",
+        variable="soil_moisture",
+        calibration_profile_id="cal-s01",
+        status="active",
+        reading_value=25.4,
+        reading_unit="percent",
+        observed_at=obs_time,
+        first_available_at=None,
+    )
+    tb.register_sensor_receipt(signed_rcpt)
+
+    # 1. Negative control: Unhashed publication receipt (content_hash is None or empty)
+    unhashed_pub_rcpt = _tf().create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:sensor:unhashed-01",
+        issuer="agriwise:authority:test_signer",
+        source_family="sensor",
+        acquisition_id="dev-s01",
+        published_at=pub_time,
+        content_hash=None,
+    )
+    tb.register_publication_receipt(unhashed_pub_rcpt)
+
+    item_unhashed = s.EvidenceItem(
+        evidence_id="ev-unhashed",
+        plot_id="plot-s01",
+        variable="soil_moisture",
+        value=25.4,
+        source_family="sensor",
+        source_id="dev-s01",
+        observation_type="soil_moisture",
+        spatial_scope="point",
+        unit="percent",
+        observed_at=obs_time,
+        confidence=0.9,
+        flags=["HISTORICAL_REPLAY", "REQUIRES_PUBLICATION_VERIFICATION"],
+        receipt=signed_rcpt,
+        publication_receipt=unhashed_pub_rcpt,
+        publication_receipt_verified=True,
+        verified_published_at=pub_time,
+        content_hash=reading_digest,
+        truth_class="observed_sensor",
+        state_update_allowed=True,
+        diagnostic_only=False,
+    )
+
+    ok, reason = ta.is_available_at_cutoff(item_unhashed, cutoff, is_historical_replay=True)
+    assert ok is True
+    assert reason == "admitted_diagnostic_only_no_availability_proof"
+    assert item_unhashed.state_update_allowed is False
+    assert item_unhashed.diagnostic_only is True
+    assert "NO_AUTHENTICATED_AVAILABILITY_ON_HISTORICAL_REPLAY" in item_unhashed.flags
+
+    # 2. Positive control: Publication receipt with exact matching content hash
+    hashed_pub_rcpt = _tf().create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:sensor:hashed-01",
+        issuer="agriwise:authority:test_signer",
+        source_family="sensor",
+        acquisition_id="dev-s01",
+        published_at=pub_time,
+        content_hash=reading_digest,
+    )
+    tb.register_publication_receipt(hashed_pub_rcpt)
+
+    item_hashed = s.EvidenceItem(
+        evidence_id="ev-hashed",
+        plot_id="plot-s01",
+        variable="soil_moisture",
+        value=25.4,
+        source_family="sensor",
+        source_id="dev-s01",
+        observation_type="soil_moisture",
+        spatial_scope="point",
+        unit="percent",
+        observed_at=obs_time,
+        confidence=0.9,
+        flags=["HISTORICAL_REPLAY", "REQUIRES_PUBLICATION_VERIFICATION"],
+        receipt=signed_rcpt,
+        publication_receipt=hashed_pub_rcpt,
+        publication_receipt_verified=True,
+        verified_published_at=pub_time,
+        content_hash=reading_digest,
+        truth_class="observed_sensor",
+        state_update_allowed=True,
+        diagnostic_only=False,
+    )
+
+    ok_hashed, reason_hashed = ta.is_available_at_cutoff(item_hashed, cutoff, is_historical_replay=True)
+    assert ok_hashed is True
+    assert reason_hashed == "available_authenticated_sensor"
+    assert item_hashed.state_update_allowed is True
+    assert item_hashed.diagnostic_only is False
+
+    # 3. Negative control: Mismatched content hash on publication receipt fails closed
+    mismatched_pub_rcpt = _tf().create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:sensor:mismatched-01",
+        issuer="agriwise:authority:test_signer",
+        source_family="sensor",
+        acquisition_id="dev-s01",
+        published_at=pub_time,
+        content_hash="sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    tb.register_publication_receipt(mismatched_pub_rcpt)
+
+    item_mismatched = s.EvidenceItem(
+        evidence_id="ev-mismatched",
+        plot_id="plot-s01",
+        variable="soil_moisture",
+        value=25.4,
+        source_family="sensor",
+        source_id="dev-s01",
+        observation_type="soil_moisture",
+        spatial_scope="point",
+        unit="percent",
+        observed_at=obs_time,
+        confidence=0.9,
+        flags=["HISTORICAL_REPLAY", "REQUIRES_PUBLICATION_VERIFICATION"],
+        receipt=signed_rcpt,
+        publication_receipt=mismatched_pub_rcpt,
+        publication_receipt_verified=True,
+        verified_published_at=pub_time,
+        content_hash=reading_digest,
+        truth_class="observed_sensor",
+        state_update_allowed=True,
+        diagnostic_only=False,
+    )
+
+    ok_mismatched, reason_mismatched = ta.is_available_at_cutoff(item_mismatched, cutoff, is_historical_replay=True)
+    assert ok_mismatched is False
+    assert "MISMATCHED_PUBLICATION_RECEIPT_DIGEST" in reason_mismatched
+
 
 
 

@@ -85,22 +85,74 @@ export function resolveContourGridBounds(gridBounds, surfaceData, plotGeoJson) {
 }
 
 /**
+ * Helper to sample an observation mask or surface eligibility matrix at (row, col)
+ * matching the target grid dimensions (h, w) using nearest-neighbor alignment.
+ */
+function sampleObservationEligibility(maskInput, row, col, targetH, targetW) {
+  if (!maskInput) return null;
+  const values = Array.isArray(maskInput) ? maskInput : maskInput?.values;
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const maskH = values.length;
+  const maskW = Array.isArray(values[0]) ? values[0].length : 0;
+  if (maskH <= 0 || maskW <= 0) return null;
+
+  const alignedRow =
+    maskH === targetH
+      ? row
+      : Math.min(maskH - 1, Math.max(0, Math.floor(((row + 0.5) * maskH) / targetH)));
+  const alignedCol =
+    maskW === targetW
+      ? col
+      : Math.min(maskW - 1, Math.max(0, Math.floor(((col + 0.5) * maskW) / targetW)));
+
+  const v = values[alignedRow]?.[alignedCol];
+  if (v === null || v === undefined) return null;
+  if (typeof v === "boolean") return v ? 1 : 0;
+  const num = Number(v);
+  return Number.isFinite(num) ? num : null;
+}
+
+/**
  * Builds the array of contour grid points [{ position: [lng, lat], value }]
  * by mapping 2D raster cells into the validated geographic gridBounds,
- * masked against field boundary (MultiPolygon & holes).
+ * masked against field boundary (MultiPolygon & holes) and observed-pixel eligibility.
  */
 export function generateContourGridData({
   plotId,
   surfaceData,
   plotGeoJson,
   gridBounds,
+  observedMaskSurface,
+  observationMask,
+  requiresObservedMask = false,
+  authorized = true,
 }) {
+  // Authorization fail-closed (S02)
+  if (!authorized) {
+    return [];
+  }
+
   if (!surfaceData || !plotGeoJson || !surfaceData.values) return [];
 
   const h = surfaceData.values.length;
   if (h === 0) return [];
   const w = surfaceData.values[0].length;
   if (w === 0) return [];
+
+  const effectiveMaskSource = observationMask || observedMaskSurface;
+  const mustRequireObservedMask =
+    Boolean(requiresObservedMask) ||
+    Boolean(surfaceData?.requiresObservedMask) ||
+    Boolean(surfaceData?.provenance?.requires_observed_mask);
+
+  // If observed mask is strictly required, fail closed if missing or empty
+  if (mustRequireObservedMask) {
+    const testSample = sampleObservationEligibility(effectiveMaskSource, 0, 0, h, w);
+    if (testSample === null) {
+      console.warn(`[ContourSurfaceLayer] Required observed mask missing for plot ${plotId}; failing closed.`);
+      return [];
+    }
+  }
 
   const resolvedBounds = resolveContourGridBounds(gridBounds, surfaceData, plotGeoJson);
   if (!resolvedBounds) {
@@ -126,8 +178,25 @@ export function generateContourGridData({
     for (let c = 0; c < w; c++) {
       const val = surfaceData.values[r][c];
 
-      // Strict gating: drop the pixel if NO-DATA, non-finite, or masked out of field boundary
-      if (val !== null && val !== undefined && Number.isFinite(val) && mask.data[maskPtr] === 1) {
+      // Observed-pixel eligibility check (S02)
+      let isPixelEligible = true;
+      if (effectiveMaskSource) {
+        const maskVal = sampleObservationEligibility(effectiveMaskSource, r, c, h, w);
+        if (mustRequireObservedMask) {
+          isPixelEligible = maskVal !== null && maskVal > 0;
+        } else if (maskVal !== null) {
+          isPixelEligible = maskVal > 0;
+        }
+      }
+
+      // Strict gating: drop pixel if NO-DATA, non-finite, masked out of boundary, or unobserved
+      if (
+        isPixelEligible &&
+        val !== null &&
+        val !== undefined &&
+        Number.isFinite(val) &&
+        mask.data[maskPtr] === 1
+      ) {
         let lng = minLng + (c / w) * lngDiff + lngDiff / (2 * w);
         const lat = maxLat - (r / h) * latDiff - latDiff / (2 * h);
 
