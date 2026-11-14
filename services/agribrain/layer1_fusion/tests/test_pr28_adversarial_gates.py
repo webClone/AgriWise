@@ -4054,6 +4054,162 @@ def test_s01_historical_sensor_unhashed_publication_receipt_fails_availability()
     assert "MISMATCHED_PUBLICATION_RECEIPT_DIGEST" in reason_mismatched
 
 
+def test_r3_f03_dict_form_publication_receipt_equivalence():
+    """R3-F03: Dict-form signed publication receipts must produce identical admission
+    and availability decisions to typed PublicationAttestationReceipt without false negatives.
+    """
+    ta = _mod('temporal_alignment')
+    tb = _mod('truth_bridge')
+    s = _mod('schemas')
+    from layer0.observation_packet import ObservationPacket, ObservationSource, DataStatus, QAMetadata, UncertaintyModel
+    from layer1_fusion.adapters.observation_packet import observation_packet_to_evidence
+
+    now = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+    cutoff = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+    obs_time = datetime(2026, 11, 14, 10, 0, tzinfo=timezone.utc)
+    pub_time = datetime(2026, 11, 14, 11, 0, tzinfo=timezone.utc)
+
+    reading_digest = tb.compute_reading_content_digest(
+        device_id="dev-dict-01",
+        plot_id="plot-dict-01",
+        variable="soil_moisture",
+        value=28.5,
+        unit="percent",
+        observed_at=obs_time,
+    )
+
+    signed_rcpt = _tf().create_signed_sensor_receipt(
+        receipt_id="urn:agriwise:receipt:sensor:dict-01",
+        issuer="agriwise:trust:sensor_authority",
+        device_id="dev-dict-01",
+        plot_id="plot-dict-01",
+        variable="soil_moisture",
+        calibration_profile_id="cal-dict-01",
+        status="active",
+        content_digest=reading_digest,
+        observation_instant=obs_time.isoformat(),
+        reading_value=28.5,
+        reading_unit="percent",
+        observed_at=obs_time,
+        first_available_at=None,
+    )
+    tb.register_sensor_receipt(signed_rcpt)
+
+    typed_pub_rcpt = _tf().create_signed_publication_receipt(
+        receipt_id="urn:agriwise:pub:sensor:dict-01",
+        issuer="agriwise:trust:publication_authority",
+        source_family="sensor",
+        acquisition_id="pkt-dict-01",
+        published_at=pub_time,
+        content_hash=reading_digest,
+    )
+    tb.register_publication_receipt(typed_pub_rcpt)
+
+    # Convert typed receipt to a raw dict payload
+    dict_pub_rcpt = {
+        "receipt_id": typed_pub_rcpt.receipt_id,
+        "issuer": typed_pub_rcpt.issuer,
+        "source_family": typed_pub_rcpt.source_family,
+        "acquisition_id": typed_pub_rcpt.acquisition_id,
+        "published_at": typed_pub_rcpt.published_at if isinstance(typed_pub_rcpt.published_at, str) else typed_pub_rcpt.published_at.isoformat(),
+        "content_hash": typed_pub_rcpt.content_hash,
+        "status": typed_pub_rcpt.status,
+        "signature": typed_pub_rcpt.signature,
+    }
+
+    # 1. Direct temporal alignment check with dict-form publication receipt
+    item_direct_dict = s.EvidenceItem(
+        evidence_id="ev-dict-direct",
+        plot_id="plot-dict-01",
+        variable="soil_moisture",
+        value=28.5,
+        source_family="sensor",
+        source_id="dev-dict-01",
+        observation_type="soil_moisture",
+        spatial_scope="point",
+        unit="percent",
+        observed_at=obs_time,
+        confidence=0.9,
+        flags=["HISTORICAL_REPLAY", "REQUIRES_PUBLICATION_VERIFICATION"],
+        receipt=signed_rcpt,
+        publication_receipt=dict_pub_rcpt,
+        publication_receipt_verified=True,
+        verified_published_at=pub_time,
+        content_hash=reading_digest,
+        truth_class="observed_sensor",
+        state_update_allowed=True,
+        diagnostic_only=False,
+    )
+    ok_direct, reason_direct = ta.is_available_at_cutoff(item_direct_dict, cutoff, is_historical_replay=True)
+    assert ok_direct is True, f"Expected True for valid dict publication receipt, got {reason_direct}"
+    assert reason_direct == "available_authenticated_sensor"
+
+    # 2. End-to-end via observation_packet_to_evidence adapter
+    pkt = ObservationPacket(
+        packet_id="pkt-dict-01",
+        plot_id="plot-dict-01",
+        source=ObservationSource.SENSOR_IOT,
+        data_status=DataStatus.OBSERVED,
+        timestamp=obs_time,
+        spatial_scope="point",
+        qa=QAMetadata(scene_score=1.0, sensor_health=0.99),
+        uncertainty=UncertaintyModel(sigmas={"soil_moisture": 0.01}),
+        payload={
+            "device_id": "dev-dict-01",
+            "instrument_id": "dev-dict-01",
+            "variable": "soil_moisture",
+            "value": 28.5,
+            "unit": "percent",
+            "calibration_version": "cal-dict-01",
+            "provenance_ref": "urn:agriwise:receipt:sensor:dict-01",
+            "publication_receipt": dict_pub_rcpt,
+        },
+    )
+    bundle = s.Layer1InputBundle(plot_id="plot-dict-01", run_id="run-dict-01", as_of_cutoff=cutoff)
+    evidence_items = observation_packet_to_evidence(pkt, bundle)
+    assert len(evidence_items) == 1
+    ev_item = evidence_items[0]
+
+    assert ev_item.publication_receipt_verified is True
+    assert isinstance(ev_item.publication_receipt, tb.PublicationAttestationReceipt)
+    assert ev_item.publication_receipt.receipt_id == "urn:agriwise:pub:sensor:dict-01"
+    assert ev_item.publication_receipt.content_hash == reading_digest
+    assert ev_item.verified_published_at == pub_time
+
+    ok_adapter, reason_adapter = ta.is_available_at_cutoff(ev_item, cutoff, is_historical_replay=True)
+    assert ok_adapter is True, f"Expected adapter item to be available, got {reason_adapter}"
+
+    # 3. Negative control: dict-form receipt with mismatched digest fails closed
+    mismatched_dict = dict(dict_pub_rcpt)
+    mismatched_dict["content_hash"] = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    item_mismatched = s.EvidenceItem(
+        evidence_id="ev-dict-mismatched",
+        plot_id="plot-dict-01",
+        variable="soil_moisture",
+        value=28.5,
+        source_family="sensor",
+        source_id="dev-dict-01",
+        observation_type="soil_moisture",
+        spatial_scope="point",
+        unit="percent",
+        observed_at=obs_time,
+        confidence=0.9,
+        flags=["HISTORICAL_REPLAY", "REQUIRES_PUBLICATION_VERIFICATION"],
+        receipt=signed_rcpt,
+        publication_receipt=mismatched_dict,
+        publication_receipt_verified=True,
+        verified_published_at=pub_time,
+        content_hash=reading_digest,
+        truth_class="observed_sensor",
+        state_update_allowed=True,
+        diagnostic_only=False,
+    )
+    ok_bad, reason_bad = ta.is_available_at_cutoff(item_mismatched, cutoff, is_historical_replay=True)
+    assert ok_bad is False
+    assert "MISMATCHED_PUBLICATION_RECEIPT_DIGEST" in reason_bad
+
+
+
 
 
 

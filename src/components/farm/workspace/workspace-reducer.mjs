@@ -190,11 +190,7 @@ export function workspaceReducer(state, action) {
         return state;
       }
 
-      if (
-        geometryHash !== undefined &&
-        state.plotScope.geometryHash &&
-        (geometryHash || null) !== (state.plotScope.geometryHash || null)
-      ) {
+      if (geometryHash !== undefined && (geometryHash || null) !== (state.plotScope.geometryHash || null)) {
         return state;
       }
 

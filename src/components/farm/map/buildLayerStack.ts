@@ -1065,19 +1065,34 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
     })(),
     
     // 2. Intelligence Topography (Contours)
-    (surfaceData?.type === "NDVI_CLEAN" || surfaceData?.type === "NUTRIENT_STRESS_PROB") &&
-    baseMaterialization.status === "rendered" &&
-    showSemanticSurface &&
-    policyAllowsSurface(canopySource || "satellite", surfaceData?.semantic_type || surfaceData?.type || "", "base", renderAuthorizations, activeMode)
-      ? getContourSurfaceLayer({
-          id: "l10-surface-contours",
-          plotId,
-          surfaceData: surfaceData,
-          plotGeoJson: plotGeoJson || undefined,
-          gridBounds: baseMaterialization.gridBounds,
-          visible: policy.showContours
-        }) 
-      : null,
+    (() => {
+      if (
+        (surfaceData?.type !== "NDVI_CLEAN" && surfaceData?.type !== "NUTRIENT_STRESS_PROB") ||
+        baseMaterialization.status !== "rendered" ||
+        !showSemanticSurface ||
+        !policyAllowsSurface(canopySource || "satellite", surfaceData?.semantic_type || surfaceData?.type || "", "base", renderAuthorizations, activeMode)
+      ) {
+        return null;
+      }
+      const baseAuth = getRenderAuthorization(
+        surfaceData?.semantic_type || surfaceData?.type || "",
+        canopySource || "satellite",
+        normalizedActiveMode,
+        "base",
+        renderAuthorizations
+      );
+      return getContourSurfaceLayer({
+        id: "l10-surface-contours",
+        plotId,
+        surfaceData: surfaceData,
+        plotGeoJson: plotGeoJson || undefined,
+        gridBounds: baseMaterialization.gridBounds,
+        visible: policy.showContours,
+        observedMaskSurface,
+        requiresObservedMask: Boolean(baseAuth?.requiresObservedMask),
+        authorized: Boolean(baseAuth?.authorized),
+      });
+    })(),
       
     // 3. Secondary Evidence (Uncertainty Grid)
     showConfidenceMask &&

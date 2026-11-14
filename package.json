@@ -2,12 +2,15 @@
   "name": "agriwise",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:frontend": "node --experimental-vm-modules --test tests/frontend",
+    "test:frontend": "node scripts/run-frontend-tests.mjs",
     "validate:r2-world": "npx tsx src/components/experience/world/validation.ts",
     "api": "py -m uvicorn services.agribrain.app.main:app --port 8000 --reload"
   },

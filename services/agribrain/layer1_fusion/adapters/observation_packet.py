@@ -143,7 +143,7 @@ def observation_packet_to_evidence(
     flags = [f.value for f in (packet.qa.flags or [])] if packet.qa else []
     
     # Authenticated publication verification (R10-02, RC2)
-    from layer1_fusion.truth_bridge import verify_publication_receipt, PublicationAttestationReceipt, compute_reading_content_digest
+    from layer1_fusion.truth_bridge import verify_publication_receipt, PublicationAttestationReceipt, compute_reading_content_digest, get_publication_receipt
     pub_receipt_candidate = (
         getattr(packet, "receipt", None)
         or getattr(source_package, "receipt", None)
@@ -194,6 +194,17 @@ def observation_packet_to_evidence(
         p_str = v_published.isoformat()
         flags.append(f"PUBLISHED_AT:{p_str}")
         flags.append("VERIFIED_PUBLICATION_RECEIPT")
+        if isinstance(pub_receipt_candidate, dict):
+            try:
+                cand_dict = dict(pub_receipt_candidate)
+                cand_dict["published_at"] = v_published
+                pub_receipt_candidate = PublicationAttestationReceipt(**cand_dict)
+            except Exception:
+                pass
+        elif isinstance(pub_receipt_candidate, str):
+            resolved_pub = get_publication_receipt(pub_receipt_candidate.strip())
+            if resolved_pub is not None:
+                pub_receipt_candidate = resolved_pub
     else:
         # Raw caller claims are recorded as claims only; NOT verified
         raw_pub = (

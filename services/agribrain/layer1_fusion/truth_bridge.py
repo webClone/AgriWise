@@ -890,7 +890,13 @@ def verify_publication_receipt(
         target = get_publication_receipt(receipt_or_id.strip())
     elif isinstance(receipt_or_id, dict):
         try:
-            target = PublicationAttestationReceipt(**receipt_or_id)
+            rcpt_dict = dict(receipt_or_id)
+            if "published_at" in rcpt_dict and isinstance(rcpt_dict["published_at"], str):
+                try:
+                    rcpt_dict["published_at"] = datetime.fromisoformat(rcpt_dict["published_at"])
+                except Exception:
+                    pass
+            target = PublicationAttestationReceipt(**rcpt_dict)
         except Exception:
             return False, "invalid_publication_receipt_structure", None
 

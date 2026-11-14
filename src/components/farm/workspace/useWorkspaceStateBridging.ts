@@ -48,30 +48,36 @@ export function useWorkspaceStateBridging() {
 
     const identity = assessment.identity;
 
-    // Strict Scope & Identity Boundary Verification:
-    // If incoming assessment does not match the active workspace tenant, plot, crop cycle, or geometry,
-    // do NOT bridge it into the active workspace!
-    if (
+    // Strict Scope & Identity Boundary Verification (R3-F04):
+    // If incoming assessment does not match the active workspace tenant, plot, crop cycle, or canonical geometry,
+    // explicitly invalidate/clear workspace publication rather than silently returning.
+    const isScopeIncompatible =
       !identity ||
       identity.plotId !== state.plotScope.plotId ||
-      identity.tenantId !== state.ownerScope.tenantId
-    ) {
-      return;
-    }
+      identity.tenantId !== state.ownerScope.tenantId ||
+      Boolean(state.plotScope.cropCycleId && (!identity.cropCycleId || identity.cropCycleId !== state.plotScope.cropCycleId)) ||
+      Boolean(state.plotScope.geometryHash && (!identity.geometryHash || identity.geometryHash !== state.plotScope.geometryHash));
 
-    if (
-      state.plotScope.cropCycleId &&
-      identity.cropCycleId &&
-      identity.cropCycleId !== state.plotScope.cropCycleId
-    ) {
-      return;
-    }
-
-    if (
-      state.plotScope.geometryHash &&
-      identity.geometryHash &&
-      identity.geometryHash !== state.plotScope.geometryHash
-    ) {
+    if (isScopeIncompatible) {
+      if (lastBridgedKeyRef.current !== null || state.publication.snapshotId !== null) {
+        lastBridgedKeyRef.current = null;
+        dispatch({
+          type: "SNAPSHOT_SELECTED",
+          payload: {
+            snapshotId: null,
+            capturedAt: null,
+            publicationDigest: null,
+            authorityStatus: "UNAVAILABLE",
+            generationId: state.generationId,
+            plotId: state.plotScope.plotId,
+            tenantId: state.ownerScope.tenantId,
+            cropCycleId: state.plotScope.cropCycleId,
+            geometryHash: state.plotScope.geometryHash,
+            geometryVersion: state.plotScope.geometryVersion,
+            source: "SYSTEM_WORKSPACE_INVALIDATION",
+          },
+        });
+      }
       return;
     }
 

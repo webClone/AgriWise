@@ -122,10 +122,10 @@ def is_available_at_cutoff(
     # Also check signed receipt first_available_at (RC2: exact revision & publication binding)
     rcpt = getattr(item, "receipt", None)
     if rcpt is not None:
-        rcpt_fa = getattr(rcpt, "first_available_at", None)
+        rcpt_fa = rcpt.get("first_available_at") if isinstance(rcpt, dict) else getattr(rcpt, "first_available_at", None)
         if rcpt_fa:
             try:
-                fa_dt = ensure_utc(datetime.fromisoformat(str(rcpt_fa)))
+                fa_dt = ensure_utc(datetime.fromisoformat(str(rcpt_fa))) if not isinstance(rcpt_fa, datetime) else ensure_utc(rcpt_fa)
                 pub_times.append(fa_dt)
                 if fa_dt > cutoff_utc:
                     return False, f"FIRST_AVAILABLE_AFTER_CUTOFF: signed receipt first_available_at {fa_dt} > cutoff {cutoff_utc}"
@@ -133,17 +133,19 @@ def is_available_at_cutoff(
                 return False, f"MALFORMED_FIRST_AVAILABLE_AT: malformed receipt first_available_at '{rcpt_fa}'"
 
         # Check content digest binding on sensor receipt
-        rcpt_digest = getattr(rcpt, "content_digest", None)
+        rcpt_digest = rcpt.get("content_digest") if isinstance(rcpt, dict) else getattr(rcpt, "content_digest", None)
         item_digest = getattr(item, "content_hash", None)
         if rcpt_digest and item_digest and str(rcpt_digest).strip() != str(item_digest).strip():
             return False, f"MISMATCHED_SENSOR_RECEIPT_DIGEST: receipt digest {rcpt_digest} != measurement digest {item_digest}"
 
     # Also check publication receipt content hash binding
     pub_rcpt = getattr(item, "publication_receipt", None)
-    if pub_rcpt is None and rcpt is not None and hasattr(rcpt, "source_family") and getattr(rcpt, "source_family", "") != "sensor":
-        pub_rcpt = rcpt
+    if pub_rcpt is None and rcpt is not None:
+        rcpt_sf = rcpt.get("source_family", "") if isinstance(rcpt, dict) else getattr(rcpt, "source_family", "")
+        if rcpt_sf and rcpt_sf != "sensor":
+            pub_rcpt = rcpt
     if pub_rcpt is not None:
-        pub_hash = getattr(pub_rcpt, "content_hash", None)
+        pub_hash = pub_rcpt.get("content_hash") if isinstance(pub_rcpt, dict) else getattr(pub_rcpt, "content_hash", None)
         item_digest = getattr(item, "content_hash", None)
         if pub_hash and item_digest and str(pub_hash).strip() != str(item_digest).strip():
             return False, f"MISMATCHED_PUBLICATION_RECEIPT_DIGEST: publication receipt hash {pub_hash} != measurement digest {item_digest}"
@@ -230,21 +232,23 @@ def is_available_at_cutoff(
             has_auth_availability = False
             
             # Check 1: Sensor receipt with first_available_at <= cutoff
-            if rcpt is not None and getattr(rcpt, "first_available_at", None):
+            rcpt_first_avail = rcpt.get("first_available_at") if isinstance(rcpt, dict) else getattr(rcpt, "first_available_at", None)
+            if rcpt is not None and rcpt_first_avail:
                 try:
-                    fa_dt = ensure_utc(datetime.fromisoformat(str(rcpt.first_available_at)))
+                    fa_dt = ensure_utc(datetime.fromisoformat(str(rcpt_first_avail)))
                     if fa_dt <= cutoff_utc:
                         has_auth_availability = True
                     else:
                         return False, f"FIRST_AVAILABLE_AFTER_CUTOFF: signed receipt first_available_at {fa_dt} > cutoff {cutoff_utc}"
                 except Exception:
-                    return False, f"MALFORMED_FIRST_AVAILABLE_AT: malformed receipt first_available_at '{rcpt.first_available_at}'"
+                    return False, f"MALFORMED_FIRST_AVAILABLE_AT: malformed receipt first_available_at '{rcpt_first_avail}'"
             
             # Check 2: Exact-content publication receipt with published_at <= cutoff
             # S01: Prohibit unhashed sensor receipts from asserting historical availability evidence.
             # Exact matching content digest required between publication receipt and measurement.
-            item_digest = getattr(item, "content_hash", None) or (getattr(rcpt, "content_digest", None) if rcpt is not None else None)
-            pub_hash = getattr(pub_rcpt, "content_hash", None) if pub_rcpt is not None else None
+            rcpt_digest = (rcpt.get("content_digest") if isinstance(rcpt, dict) else getattr(rcpt, "content_digest", None)) if rcpt is not None else None
+            item_digest = getattr(item, "content_hash", None) or rcpt_digest
+            pub_hash = (pub_rcpt.get("content_hash") if isinstance(pub_rcpt, dict) else getattr(pub_rcpt, "content_hash", None)) if pub_rcpt is not None else None
 
             has_matching_content_hash = bool(
                 pub_hash and str(pub_hash).strip()
@@ -255,7 +259,7 @@ def is_available_at_cutoff(
             if has_matching_content_hash and getattr(item, "publication_receipt_verified", False):
                 v_published = getattr(item, "verified_published_at", None)
                 if v_published is None and pub_rcpt is not None:
-                    v_published = getattr(pub_rcpt, "published_at", None)
+                    v_published = pub_rcpt.get("published_at") if isinstance(pub_rcpt, dict) else getattr(pub_rcpt, "published_at", None)
                 if v_published is not None:
                     try:
                         p_dt = ensure_utc(v_published if isinstance(v_published, datetime) else datetime.fromisoformat(str(v_published)))

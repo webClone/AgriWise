@@ -501,3 +501,91 @@ test("P03 Reducer: SNAPSHOT_SELECTED enforces geometryHash and geometryVersion c
   assert.equal(sMatching.publication.snapshotId, "snap-1");
   assert.equal(sMatching.publication.authorityStatus, "CERTIFIED");
 });
+
+test("P03 Reducer (R3-F04): SNAPSHOT_SELECTED enforces exact cropCycleId and geometryHash equality", () => {
+  const s0 = createInitialWorkspaceState({
+    tenantId: "tenant-1",
+    farmId: "farm-1",
+    plotId: "plot-1",
+    cropCycleId: "cycle-autumn-2026",
+    geometryHash: "gh-canonical-exact",
+    geometryVersion: 1,
+  });
+
+  // 1. Mismatched geometryHash when specified must be rejected
+  const sMismatchedGeom = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-1",
+      capturedAt: "2026-11-14T10:00:00Z",
+      publicationDigest: "sha256:abc",
+      authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: "plot-1",
+      tenantId: "tenant-1",
+      cropCycleId: "cycle-autumn-2026",
+      geometryHash: "gh-canonical-wrong",
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
+    },
+  });
+  assert.equal(sMismatchedGeom, s0, "Mismatched geometryHash must reject snapshot selection");
+
+  // 2. Mismatched cropCycleId when specified must be rejected
+  const sMismatchedCycle = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-1",
+      capturedAt: "2026-11-14T10:00:00Z",
+      publicationDigest: "sha256:abc",
+      authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: "plot-1",
+      tenantId: "tenant-1",
+      cropCycleId: "cycle-autumn-different",
+      geometryHash: "gh-canonical-exact",
+      geometryVersion: 1,
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
+    },
+  });
+  assert.equal(sMismatchedCycle, s0, "Mismatched cropCycleId must reject snapshot selection");
+
+  // 3. Invalidation action with snapshotId: null clears active publication
+  const sActive = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-1",
+      capturedAt: "2026-11-14T10:00:00Z",
+      publicationDigest: "sha256:abc",
+      authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: "plot-1",
+      tenantId: "tenant-1",
+      cropCycleId: "cycle-autumn-2026",
+      geometryHash: "gh-canonical-exact",
+      geometryVersion: 1,
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
+    },
+  });
+  assert.equal(sActive.publication.authorityStatus, "CERTIFIED");
+
+  const sInvalidated = workspaceReducer(sActive, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: null,
+      capturedAt: null,
+      publicationDigest: null,
+      authorityStatus: "UNAVAILABLE",
+      generationId: s0.generationId,
+      plotId: "plot-1",
+      tenantId: "tenant-1",
+      cropCycleId: "cycle-autumn-2026",
+      geometryHash: "gh-canonical-exact",
+      geometryVersion: 1,
+      source: "SYSTEM_WORKSPACE_INVALIDATION",
+    },
+  });
+  assert.equal(sInvalidated.publication.snapshotId, null);
+  assert.equal(sInvalidated.publication.authorityStatus, "UNAVAILABLE");
+  assert.equal(sInvalidated.publication.isStale, true);
+});
+
