@@ -241,7 +241,7 @@ interface UseIrrigationStateReturn {
   activeEvents: IrrigationEvent[];
   pendingSchedule: IrrigationScheduleEntry[];
   waterBudget: WaterBudget | null;
-  safetyScore: number;
+  safetyScore: number | null;
   activeViolations: SafetyViolation[];
   recentValidations: ValidationReport[];
 
@@ -274,7 +274,7 @@ export function useIrrigationState(
   const [activeEvents, setActiveEvents] = useState<IrrigationEvent[]>([]);
   const [pendingSchedule, setPendingSchedule] = useState<IrrigationScheduleEntry[]>([]);
   const [waterBudget, setWaterBudget] = useState<WaterBudget | null>(null);
-  const [safetyScore, setSafetyScore] = useState(1.0);
+  const [safetyScore, setSafetyScore] = useState<number | null>(null);
   const [activeViolations, setActiveViolations] = useState<SafetyViolation[]>([]);
   const [recentValidations, setRecentValidations] = useState<ValidationReport[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -294,7 +294,8 @@ export function useIrrigationState(
       setActiveEvents(generateMockEvents());
       setPendingSchedule(generateMockSchedule());
       setWaterBudget(generateMockBudget());
-      setSafetyScore(0.95);
+      // F06: Never fabricate a nominal 0.95 safety score when devices are disconnected simulation
+      setSafetyScore(null);
       setActiveViolations([]);
       setRecentValidations([]);
       setError(null);
@@ -339,7 +340,7 @@ export function useIrrigationState(
   const approveSchedule = useCallback(async (scheduleId: string): Promise<boolean> => {
     setPendingSchedule(prev =>
       prev.map(s => s.schedule_id === scheduleId
-        ? { ...s, approval_status: 'APPROVED' as const, approved_by: 'farmer' }
+        ? { ...s, approval_status: 'APPROVED' as const, approved_by: 'farmer (local preview only — non-operational)' }
         : s
       )
     );

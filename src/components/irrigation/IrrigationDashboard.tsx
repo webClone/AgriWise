@@ -20,16 +20,35 @@ import type {
    Sub-Components
    ================================================================ */
 
-function SafetyBadge({ score }: { score: number }) {
+function SafetyBadge({ score }: { score: number | null | undefined }) {
+  if (score === null || score === undefined) {
+    return (
+      <span
+        data-testid="irrigation-safety-badge"
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: '4px 12px', borderRadius: 20,
+          background: 'rgba(148, 163, 184, 0.12)', color: '#94a3b8', fontSize: 12, fontWeight: 700,
+          border: '1px solid rgba(148, 163, 184, 0.3)',
+        }}
+      >
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#94a3b8' }} />
+        Safety: Not evaluated — Simulation
+      </span>
+    );
+  }
   const color = score >= 0.8 ? '#22C55E' : score >= 0.5 ? '#F59E0B' : '#EF4444';
   const label = score >= 0.8 ? 'NOMINAL' : score >= 0.5 ? 'WARNING' : 'CRITICAL';
   return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 6,
-      padding: '4px 12px', borderRadius: 20,
-      background: `${color}18`, color, fontSize: 12, fontWeight: 700,
-      border: `1px solid ${color}40`,
-    }}>
+    <span
+      data-testid="irrigation-safety-badge"
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 6,
+        padding: '4px 12px', borderRadius: 20,
+        background: `${color}18`, color, fontSize: 12, fontWeight: 700,
+        border: `1px solid ${color}40`,
+      }}
+    >
       <span style={{ width: 8, height: 8, borderRadius: '50%', background: color }} />
       {label} — {Math.round(score * 100)}%
     </span>
@@ -125,7 +144,7 @@ function ScheduleRow({ entry, onApprove, onReject }: {
           padding: '2px 8px', borderRadius: 8, fontSize: 10, fontWeight: 600,
           background: `${sb}20`, color: sb,
         }}>
-          {entry.approval_status}
+          {entry.approval_status === 'APPROVED' ? 'APPROVED (Local Preview — Non-operational)' : entry.approval_status}
         </span>
       </div>
       <div style={{ fontSize: 11, color: '#94A3B8', marginBottom: 6 }}>{entry.reason}</div>
@@ -141,11 +160,11 @@ function ScheduleRow({ entry, onApprove, onReject }: {
           <button onClick={() => onApprove(entry.schedule_id)} style={{
             padding: '6px 16px', borderRadius: 8, border: 'none', cursor: 'pointer',
             background: '#22C55E', color: '#fff', fontSize: 12, fontWeight: 600,
-          }}>✓ Approve</button>
+          }}>✓ Approve (Local Preview)</button>
           <button onClick={() => onReject(entry.schedule_id)} style={{
             padding: '6px 16px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)',
             cursor: 'pointer', background: 'transparent', color: '#94A3B8', fontSize: 12,
-          }}>✕ Reject</button>
+          }}>✕ Reject (Local Preview)</button>
         </div>
       )}
     </div>

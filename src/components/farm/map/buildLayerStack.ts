@@ -1074,6 +1074,7 @@ export function buildLayerStack(options: BuildLayerStackOptions) {
           plotId,
           surfaceData: surfaceData,
           plotGeoJson: plotGeoJson || undefined,
+          gridBounds: baseMaterialization.gridBounds,
           visible: policy.showContours
         }) 
       : null,

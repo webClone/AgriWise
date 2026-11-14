@@ -51,11 +51,45 @@ test("P01-F02: Irrigation hook mock fleet enforces 100% disconnected devices and
   assert.match(content, /isSimulationMode:\s*true/);
   assert.match(content, /isPhysicalHardwareConnected:\s*false/);
   assert.match(content, /actuatorLinkStatus:\s*['"]DISCONNECTED['"]/);
+
+  // F06: Safety score must not be fabricated as nominal 0.95 in simulation mode
+  assert.doesNotMatch(
+    content,
+    /setSafetyScore\(\s*0\.95\s*\)/,
+    "F06: Must not assign fabricated nominal safety score 0.95"
+  );
+  assert.match(
+    content,
+    /setSafetyScore\(\s*null\s*\)/,
+    "F06: Safety score in simulation mode must be null (not evaluated)"
+  );
+  assert.match(
+    content,
+    /approved_by:\s*['"]farmer \(local preview only — non-operational\)['"]/,
+    "F06: Mock schedule approval must be marked explicitly local preview only"
+  );
 });
 
-test("P01-F02: IrrigationDashboard displays unequivocal simulation banners and no live operational claims", () => {
+test("P01-F02 & F06: IrrigationDashboard displays simulation safety badge and local preview approvals", () => {
   const dashPath = path.join(root, "src/components/irrigation/IrrigationDashboard.tsx");
   const content = fs.readFileSync(dashPath, "utf8");
+
+  // F06: Safety badge must display 'Safety: Not evaluated — Simulation'
+  assert.match(
+    content,
+    /Safety:\s*Not evaluated\s*—\s*Simulation/,
+    "F06: Irrigation dashboard must display 'Safety: Not evaluated — Simulation' when safetyScore is null"
+  );
+  assert.match(
+    content,
+    /Approve \(Local Preview\)/,
+    "F06: Schedule approval action must explicitly state Local Preview"
+  );
+  assert.match(
+    content,
+    /APPROVED \(Local Preview — Non-operational\)/,
+    "F06: Approved schedule status must state non-operational local preview"
+  );
 
   // Must render simulation mode banner with alert role
   assert.match(content, /role="alert"/);

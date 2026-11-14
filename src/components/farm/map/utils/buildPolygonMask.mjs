@@ -83,31 +83,38 @@ function isPointInPolygons(pt, polygons, crossesAntiMeridian) {
  * mapping directly to physical field boundaries.
  */
 export function buildPolygonMask(plotId, width, height, plotGeoJson, gridBounds) {
-  if (!plotGeoJson || width <= 0 || height <= 0) return null;
-
-  const polygons = extractPolygons(plotGeoJson);
-  if (polygons.length === 0) return null;
-
-  // Geometry identity binding for the cache:
-  // Compute canonical coordinate hash so any change in coordinates invalidates the cache,
-  // even if the caller did not supply a geometry hash or passed a stale version string.
-  const canonicalHash = computeGeometryHash(plotGeoJson);
-  const explicitHash =
-    plotGeoJson.geometryHash ||
-    plotGeoJson.geometry_hash ||
-    plotGeoJson.properties?.geometryHash ||
-    plotGeoJson.properties?.geometry_hash ||
-    plotGeoJson.geometryVersion ||
-    plotGeoJson.properties?.geometryVersion ||
-    "";
-  const boundsKey = gridBounds?.map((value) => Number(value).toFixed(8)).join(",") || "plot-envelope";
-  const cacheKey = `${plotId || "noid"}:${canonicalHash}:${explicitHash}:${width}x${height}:${boundsKey}`;
-
-  if (maskCache.has(cacheKey)) {
-    return maskCache.get(cacheKey) || null;
-  }
-
   try {
+    if (!plotGeoJson || width <= 0 || height <= 0) return null;
+
+    const polygons = extractPolygons(plotGeoJson);
+    if (polygons.length === 0) return null;
+
+    // Geometry identity binding for the cache:
+    // Compute canonical coordinate hash so any change in coordinates invalidates the cache,
+    // even if the caller did not supply a geometry hash or passed a stale version string.
+    // Fail-closed: malformed coordinates (e.g. NaN, Infinity) throw in canonicalizeGeoJson/computeGeometryHash.
+    let canonicalHash = "";
+    try {
+      canonicalHash = computeGeometryHash(plotGeoJson);
+    } catch (_hashErr) {
+      console.warn(`[buildPolygonMask] Malformed geometry provided for plot ${plotId}; failing closed.`);
+      return null;
+    }
+
+    const explicitHash =
+      plotGeoJson.geometryHash ||
+      plotGeoJson.geometry_hash ||
+      plotGeoJson.properties?.geometryHash ||
+      plotGeoJson.properties?.geometry_hash ||
+      plotGeoJson.geometryVersion ||
+      plotGeoJson.properties?.geometryVersion ||
+      "";
+    const boundsKey = gridBounds?.map((value) => Number(value).toFixed(8)).join(",") || "plot-envelope";
+    const cacheKey = `${plotId || "noid"}:${canonicalHash}:${explicitHash}:${width}x${height}:${boundsKey}`;
+
+    if (maskCache.has(cacheKey)) {
+      return maskCache.get(cacheKey) || null;
+    }
     let minLng = Infinity;
     let maxLng = -Infinity;
     let minLat = Infinity;

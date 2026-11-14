@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPolygonMask } from "../../src/components/farm/map/utils/buildPolygonMask.mjs";
+import { buildPolygonMask, clearPolygonMaskCache } from "../../src/components/farm/map/utils/buildPolygonMask.mjs";
 
 test("P01-G03: Polygon hole is masked out (value = 0 inside hole)", () => {
   // A 10x10 outer box from (0,0) to (10,10)
@@ -272,4 +272,44 @@ test("P01-F01: Invalid or empty geometry fails closed returning null", () => {
   assert.equal(buildPolygonMask("null-plot", 10, 10, null), null);
   assert.equal(buildPolygonMask("empty-plot", 10, 10, { type: "Polygon", coordinates: [] }), null);
   assert.equal(buildPolygonMask("invalid-dim", 0, 10, { type: "Polygon", coordinates: [[[0,0],[1,0],[1,1],[0,0]]] }), null);
+});
+
+test("P01-F04: Geometry containing NaN or Infinity fails closed returning null without throwing", () => {
+  clearPolygonMaskCache();
+
+  // Coordinates with NaN
+  const nanGeom = {
+    type: "Polygon",
+    coordinates: [
+      [
+        [NaN, 10],
+        [10, 10],
+        [10, 20],
+        [NaN, 10],
+      ],
+    ],
+  };
+
+  assert.doesNotThrow(() => {
+    const mask = buildPolygonMask("nan-plot", 4, 4, nanGeom);
+    assert.equal(mask, null, "Geometry with NaN must fail closed and return null");
+  }, "buildPolygonMask must not throw on NaN coordinate geometry");
+
+  // Coordinates with Infinity
+  const infGeom = {
+    type: "Polygon",
+    coordinates: [
+      [
+        [0, Infinity],
+        [10, Infinity],
+        [10, 20],
+        [0, Infinity],
+      ],
+    ],
+  };
+
+  assert.doesNotThrow(() => {
+    const mask = buildPolygonMask("inf-plot", 4, 4, infGeom);
+    assert.equal(mask, null, "Geometry with Infinity must fail closed and return null");
+  }, "buildPolygonMask must not throw on Infinity coordinate geometry");
 });
