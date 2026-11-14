@@ -166,9 +166,29 @@ export function workspaceReducer(state, action) {
         plotId,
         tenantId,
         cropCycleId,
+        source,
       } = action.payload || {};
 
-      // Snapshot cleared or unavailable
+      // 1. Mandatory Identity & Scope Fencing (P03-R1-F05 & P03-R1-F06):
+      // Every publication action (valid selection OR invalidation) MUST present complete
+      // identity matching current workspace generation, tenant, and plot scope.
+      // Unscoped or stale actions from previous generations/plots are strictly rejected.
+      if (
+        typeof generationId !== "number" ||
+        generationId !== state.generationId ||
+        !plotId ||
+        plotId !== state.plotScope.plotId ||
+        !tenantId ||
+        tenantId !== state.ownerScope.tenantId
+      ) {
+        return state;
+      }
+
+      if (cropCycleId !== undefined && (cropCycleId || null) !== (state.plotScope.cropCycleId || null)) {
+        return state;
+      }
+
+      // 2. Snapshot Cleared / Loss of Applicability:
       if (!snapshotId) {
         return {
           ...state,
@@ -182,18 +202,19 @@ export function workspaceReducer(state, action) {
         };
       }
 
-      // Reject snapshot if it targets a stale generation or wrong plot/tenant scope
-      if (typeof generationId === "number" && generationId !== state.generationId) {
-        return state;
-      }
-      if (plotId && plotId !== state.plotScope.plotId) {
-        return state;
-      }
-      if (tenantId && tenantId !== state.ownerScope.tenantId) {
-        return state;
-      }
-      if (cropCycleId !== undefined && cropCycleId !== state.plotScope.cropCycleId) {
-        return state;
+      // 3. Strict Scientific Authority Verification (P03-R1-F06):
+      // "CERTIFIED" authority is accepted ONLY from the verified ParcelAssessment authority bridge
+      // with a non-empty publication digest. Unverified or tool-asserted certifications are demoted.
+      let finalAuthority = authorityStatus;
+      if (finalAuthority === "CERTIFIED") {
+        const isAuthoritative =
+          source === "PARCEL_ASSESSMENT_AUTHORITY" &&
+          typeof publicationDigest === "string" &&
+          publicationDigest.trim().length > 0;
+
+        if (!isAuthoritative) {
+          finalAuthority = "PENDING";
+        }
       }
 
       let selectedEntity = state.selectedEntity;
@@ -215,7 +236,7 @@ export function workspaceReducer(state, action) {
           snapshotId,
           capturedAt: capturedAt || null,
           publicationDigest: publicationDigest || null,
-          authorityStatus: authorityStatus || "UNAVAILABLE",
+          authorityStatus: finalAuthority,
           isStale: false,
         },
         selectedEntity,

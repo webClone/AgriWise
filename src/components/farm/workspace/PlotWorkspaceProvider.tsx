@@ -69,6 +69,11 @@ export function PlotWorkspaceProvider({
   const latestStateRef = useRef<WorkspaceState>(state);
   latestStateRef.current = state;
 
+  // Track incoming verified scope props synchronously during render to close
+  // the render-to-effect timing gap when plot transitions occur
+  const incomingScopeRef = useRef<PlotScope>(scope);
+  incomingScopeRef.current = scope;
+
   // Track each concurrent request by a unique ID so concurrent requests in the same
   // generation never overwrite each other's abort controllers (P03-F02)
   interface ActiveRequestEntry {
@@ -191,14 +196,19 @@ export function PlotWorkspaceProvider({
           data = null;
         }
 
-        // Live check against authoritative latestStateRef right before returning or committing:
+        // Live check against authoritative latestStateRef AND incomingScopeRef right before returning or committing:
         const liveState = latestStateRef.current;
+        const liveScope = incomingScopeRef.current;
         const isStale =
           liveState.generationId !== requestGen ||
           liveState.ownerScope.tenantId !== requestTenant ||
           liveState.plotScope.plotId !== requestPlot ||
           liveState.plotScope.cropCycleId !== requestCropCycle ||
-          liveState.plotScope.geometryHash !== requestGeomHash;
+          liveState.plotScope.geometryHash !== requestGeomHash ||
+          liveScope.plotId !== requestPlot ||
+          liveScope.tenantId !== requestTenant ||
+          liveScope.cropCycleId !== requestCropCycle ||
+          liveScope.geometryHash !== requestGeomHash;
 
         return {
           ok: response.ok && !isStale,

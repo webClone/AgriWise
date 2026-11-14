@@ -18,14 +18,14 @@ export function useWorkspaceStateBridging() {
   const assessmentContext = useParcelAssessment();
   const assessment = assessmentContext?.assessment;
   const assessmentStatus = assessmentContext?.state?.status;
-  const lastAssessedDigestRef = useRef<string | null>(null);
+  const lastBridgedKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     // When assessment becomes unavailable, invalid, superseded or null,
-    // explicitly invalidate the derived workspace publication (P03-F04)
+    // explicitly invalidate the derived workspace publication (P03-F04 & P03-R1-F05)
     if (!assessment || assessmentStatus !== "ready") {
-      if (lastAssessedDigestRef.current !== null) {
-        lastAssessedDigestRef.current = null;
+      if (lastBridgedKeyRef.current !== null) {
+        lastBridgedKeyRef.current = null;
         dispatch({
           type: "SNAPSHOT_SELECTED",
           payload: {
@@ -37,6 +37,7 @@ export function useWorkspaceStateBridging() {
             plotId: state.plotScope.plotId,
             tenantId: state.ownerScope.tenantId,
             cropCycleId: state.plotScope.cropCycleId,
+            source: "SYSTEM_WORKSPACE_INVALIDATION",
           },
         });
       }
@@ -47,8 +48,13 @@ export function useWorkspaceStateBridging() {
       assessment.identity.publicationReceiptHash ||
       assessment.identity.receiptHash ||
       assessment.identity.publicationId;
-    if (digest === lastAssessedDigestRef.current) return;
-    lastAssessedDigestRef.current = digest;
+
+    // Deduplication composite key: generation, plot, tenant, snapshotId, and digest.
+    // Ensures that when generation bumps, a valid same-digest publication is cleanly re-published
+    // into the new generation rather than silently dropped.
+    const bridgedKey = `${state.generationId}|${state.plotScope.plotId}|${state.ownerScope.tenantId}|${assessment.identity.snapshotId}|${digest}`;
+    if (bridgedKey === lastBridgedKeyRef.current) return;
+    lastBridgedKeyRef.current = bridgedKey;
 
     dispatch({
       type: "SNAPSHOT_SELECTED",
@@ -61,6 +67,7 @@ export function useWorkspaceStateBridging() {
         plotId: state.plotScope.plotId,
         tenantId: state.ownerScope.tenantId,
         cropCycleId: state.plotScope.cropCycleId,
+        source: "PARCEL_ASSESSMENT_AUTHORITY",
       },
     });
   }, [

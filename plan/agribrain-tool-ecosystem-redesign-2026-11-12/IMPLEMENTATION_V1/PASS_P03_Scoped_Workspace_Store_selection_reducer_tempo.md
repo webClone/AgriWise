@@ -1,5 +1,5 @@
 # P03 — Scoped Workspace Store, selection reducer, temporal controller and safe concurrency
-**Status:** IMPLEMENTED CANDIDATE · Fully Qualified (156/156 Frontend, 172/172 Python, 63/63 Routes)  
+**Status:** IMPLEMENTED CANDIDATE · Fully Qualified P03-R2 (163/163 Frontend, 172/172 Python, 63/63 Routes)  
 **Dependency:** P01 (commit `0517f43`), P02 (commit `89512f7`)  
 **Owner agents:** A2+A6+A4 · Independent red-team: A7 with A6/A4 as applicable  
 **Branch:** `feat/plot-workspace-p03-shared-context`  
@@ -61,16 +61,19 @@ Run rapid plot switch, 3 simultaneous tool opens, failed fetch and snap switch; 
 - **R4:** A2/A8 inspect actual browser where UI changes, cleanup/RTL/perf and no invisible regression.
 - **R5:** A0 records exact SHA, test receipts, explicit `GO/CONDITIONAL/HOLD`, unresolved risks and rollback.
 
-### Verification Matrix & Acceptance Receipts (November 14, 2026 · P03-R1 Remediation)
-- **P03-F01 & P03-G01 Discard Cross-Tenant / Cross-Plot Late Response:** Verified via live mutable state ref check in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 1) even when fetch resolves after transition.
+### Verification Matrix & Acceptance Receipts (November 14, 2026 · P03-R2 Remediation)
+- **P03-R1-F05 Scope Precedence over Invalidation:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 4) and reducer suite, proving a stale invalidation from Plot A cannot clear Plot B's publication.
+- **P03-R1-F06 Mandatory Identity & Authority Verification:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 5) and reducer suite, proving missing scope fields are rejected and unauthoritative CERTIFIED claims are demoted to PENDING.
+- **P03-R2 Same-Digest Publication Re-Bridging:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 6), ensuring valid publications are restored after generation change.
+- **P03-F01 & P03-G01 Discard Cross-Tenant / Cross-Plot Late Response:** Verified via live mutable state and incoming scope ref checks in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 1).
 - **P03-F02 Concurrent Request Controller Independence:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 2) with 3 concurrent requests where early completion does not delete sibling controllers.
-- **P03-F03 Verified Server Scope:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 3) for `mapFarm` (userId/ownerId), `mapPlot` (geometryHash/geometryVersion), `mapCropCycle` (id), and `page.tsx` verifiedScope passing.
-- **P03-F04 Loss-of-Applicability Publication Invalidation:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 4) and reducer tests, enforcing that lost assessment applicability resets authority to UNAVAILABLE and marks isStale: true.
+- **P03-F03 Verified Server Scope:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 3) for `mapFarm`, `mapPlot`, `mapCropCycle`, and `page.tsx`.
+- **P03-F04 Loss-of-Applicability Publication Invalidation:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 4).
 - **P03 Reducer Purity & Determinism:** Verified in `tests/frontend/plot-workspace-p03-reducer.test.mjs` (test 7) with zero non-deterministic Date calls inside reducer.
 - **P03 Reducer Scope Gates & Temporal Modes:** Verified in `tests/frontend/plot-workspace-p03-reducer.test.mjs` (tests 8-11), classifying FORECAST, HISTORICAL, LATEST, SCENARIO and rejecting mismatched scopes.
-- **P03-G02 Selection Isolation Across Snapshots:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 5).
-- **P03-G03 Clock Separation (Live Telemetry vs Scientific As-Of):** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 6).
-- **Frontend Test Suite:** 161/161 passed (`node --experimental-vm-modules --test`).
+- **P03-G02 Selection Isolation Across Snapshots:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 7).
+- **P03-G03 Clock Separation (Live Telemetry vs Scientific As-Of):** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 8).
+- **Frontend Test Suite:** 163/163 passed (`node --experimental-vm-modules --test`).
 - **Python Scientific Suite:** 172/172 passed (`pytest`).
 - **Production Build:** 63/63 routes compiled successfully (`npm run build`).
 - **TypeScript:** 0 errors without `as any` casting (`npx tsc --noEmit`).

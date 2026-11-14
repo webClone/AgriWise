@@ -125,6 +125,10 @@ test("P03 Reducer: SNAPSHOT_SELECTED sets scientificAsOf clock and preserves cro
       capturedAt: "2026-11-14T08:00:00Z",
       publicationDigest: "sha256:pub102",
       authorityStatus: "CERTIFIED",
+      generationId: s1.generationId,
+      plotId: s1.plotScope.plotId,
+      tenantId: s1.ownerScope.tenantId,
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
     },
   });
 
@@ -138,7 +142,11 @@ test("P03 Reducer: SNAPSHOT_SELECTED sets scientificAsOf clock and preserves cro
 });
 
 test("P03 Reducer: TIME_SET classifies historical vs latest and preserves operational clock", () => {
-  const s0 = createInitialWorkspaceState();
+  const s0 = createInitialWorkspaceState({
+    tenantId: "tenant-1",
+    farmId: "farm-1",
+    plotId: "plot-1",
+  });
   const s1 = workspaceReducer(s0, {
     type: "SNAPSHOT_SELECTED",
     payload: {
@@ -146,6 +154,10 @@ test("P03 Reducer: TIME_SET classifies historical vs latest and preserves operat
       capturedAt: "2026-11-14T10:00:00Z",
       publicationDigest: "sha256:1",
       authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: s0.plotScope.plotId,
+      tenantId: s0.ownerScope.tenantId,
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
     },
   });
 
@@ -173,7 +185,11 @@ test("P03 Reducer: TIME_SET classifies historical vs latest and preserves operat
 });
 
 test("P03 Reducer: SCENARIO_STARTED enters sandbox mode without modifying scientificAsOf clock", () => {
-  const s0 = createInitialWorkspaceState();
+  const s0 = createInitialWorkspaceState({
+    tenantId: "tenant-1",
+    farmId: "farm-1",
+    plotId: "plot-1",
+  });
   const s1 = workspaceReducer(s0, {
     type: "SNAPSHOT_SELECTED",
     payload: {
@@ -181,6 +197,10 @@ test("P03 Reducer: SCENARIO_STARTED enters sandbox mode without modifying scient
       capturedAt: "2026-11-14T09:00:00Z",
       publicationDigest: "sha256:cert",
       authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: s0.plotScope.plotId,
+      tenantId: s0.ownerScope.tenantId,
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
     },
   });
 
@@ -285,26 +305,62 @@ test("P03 Reducer: SNAPSHOT_SELECTED enforces generation, plot, tenant, and crop
     payload: {
       snapshotId: "snap-valid",
       capturedAt: "2026-11-14T10:00:00Z",
+      publicationDigest: "sha256:valid",
       authorityStatus: "CERTIFIED",
       generationId: s0.generationId,
       plotId: "plot-A",
       tenantId: "tenant-A",
       cropCycleId: "cycle-A",
+      source: "PARCEL_ASSESSMENT_AUTHORITY",
     },
   });
   assert.equal(sValid.publication.snapshotId, "snap-valid");
   assert.equal(sValid.publication.authorityStatus, "CERTIFIED");
 
+  // Invalidation with stale generation or foreign plot must be REJECTED (P03-R1-F05)
+  const sStaleInvalidation = workspaceReducer(sValid, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: null,
+      authorityStatus: "UNAVAILABLE",
+      generationId: sValid.generationId - 1, // Stale generation
+      plotId: "plot-A",
+      tenantId: "tenant-A",
+    },
+  });
+  assert.equal(sStaleInvalidation, sValid, "Stale invalidation action must be rejected without clearing publication");
+
+  // Valid scoped invalidation clears publication
   const sCleared = workspaceReducer(sValid, {
     type: "SNAPSHOT_SELECTED",
     payload: {
       snapshotId: null,
       authorityStatus: "UNAVAILABLE",
+      generationId: sValid.generationId,
+      plotId: "plot-A",
+      tenantId: "tenant-A",
+      cropCycleId: "cycle-A",
     },
   });
   assert.equal(sCleared.publication.snapshotId, null);
   assert.equal(sCleared.publication.authorityStatus, "UNAVAILABLE");
   assert.equal(sCleared.publication.isStale, true);
+
+  // 6. Unauthoritative CERTIFIED assertion is demoted to PENDING (P03-R1-F06)
+  const sForgedCert = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-forged",
+      capturedAt: "2026-11-14T10:00:00Z",
+      publicationDigest: "sha256:forged",
+      authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: "plot-A",
+      tenantId: "tenant-A",
+      // source is missing or not PARCEL_ASSESSMENT_AUTHORITY
+    },
+  });
+  assert.equal(sForgedCert.publication.authorityStatus, "PENDING", "Unauthoritative CERTIFIED assertion must be demoted to PENDING");
 });
 
 test("P03 Reducer: TIME_SET classifies FORECAST when cursor is past operational telemetry", () => {

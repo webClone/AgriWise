@@ -17,6 +17,7 @@ async function currentOwnerId(): Promise<string | null> {
 }
 
 function mapPlot(plot: any) {
+  const canonicalHash = plot.geoJson ? computeGeometryHash(plot.geoJson) : null;
   return {
     id: plot.id,
     name: plot.name,
@@ -26,7 +27,7 @@ function mapPlot(plot: any) {
     irrigation: plot.irrigation,
     farmId: plot.farmId,
     geoJson: plot.geoJson,
-    geometryHash: plot.geometryHash || (plot.geoJson ? computeGeometryHash(plot.geoJson) : null),
+    geometryHash: canonicalHash || plot.geometryHash || null,
     geometryVersion: plot.geometryVersion ?? null,
     perimeter: plot.perimeter,
     ownership: plot.ownership,

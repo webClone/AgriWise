@@ -99,10 +99,11 @@ export type WorkspaceAction =
         capturedAt?: string | null;
         publicationDigest?: string | null;
         authorityStatus?: AuthorityStatus;
-        generationId?: number;
-        plotId?: string;
-        tenantId?: string;
+        generationId: number;
+        plotId: string;
+        tenantId: string;
         cropCycleId?: string | null;
+        source?: "PARCEL_ASSESSMENT_AUTHORITY" | "SYSTEM_WORKSPACE_INVALIDATION";
       };
     }
   | {
