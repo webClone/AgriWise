@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelRightOpen, PanelRightClose } from "lucide-react";
-import PlotDashboard from "@/components/farm/PlotDashboard";
+import WorkspaceSpatialCanvas from "./WorkspaceSpatialCanvas";
+import WorkspaceSpecializedToolsP04 from "./WorkspaceSpecializedToolsP04";
+import { useWorkspaceScientificAdapter } from "./useWorkspaceScientificAdapter";
 import WorkspaceToolDock, { type WorkspaceQuickAction } from "./WorkspaceToolDock";
 import WorkspaceContextInspector from "./WorkspaceContextInspector";
 import WorkspaceScientificStatus from "./WorkspaceScientificStatus";
@@ -31,7 +33,14 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [investigation, setInvestigation] = useState<P04InvestigationKind | null>(null);
   const [hostMode, setHostMode] = useState<P04HostMode>("context");
+  const [activeSpecializedTool, setActiveSpecializedTool] = useState<WorkspaceQuickAction | null>(null);
   const launchControlRef = useRef<HTMLElement | null>(null);
+
+  const scientific = useWorkspaceScientificAdapter({
+    farm: props.farm,
+    plot: props.plot,
+    cropName: props.cropName,
+  });
 
   const launchInvestigation = useCallback((kind: P04InvestigationKind) => {
     launchControlRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -55,6 +64,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
       const onTestSelectZone = (e: Event) => {
         const detail = (e as CustomEvent<{ zoneId: string }>).detail;
         if (detail?.zoneId) {
+          scientific.l10.setSelectedZone(detail.zoneId);
           selectEntity({
             kind: "ZONE",
             id: detail.zoneId,
@@ -77,7 +87,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
         window.removeEventListener("akaloris:test:launch-investigation", onTestLaunch);
       };
     }
-  }, [selectEntity, setActiveTool, state.publication.snapshotId]);
+  }, [scientific.l10, selectEntity, setActiveTool, state.publication.snapshotId]);
 
   // An open investigation must never retain context across tenant, plot,
   // crop-cycle, geometry or request-generation changes.
@@ -91,10 +101,13 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
 
   const openTool = useCallback((tool: WorkspaceQuickAction) => {
     setActiveTool(tool);
-    // UI bridge to legacy PlotDashboard tool implementations.
-    window.dispatchEvent(new CustomEvent("akaloris:p02:open-tool", {
-      detail: { plotId, tool },
-    }));
+    setActiveSpecializedTool(tool);
+    // UI bridge to legacy/external listeners.
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("akaloris:p02:open-tool", {
+        detail: { plotId, tool },
+      }));
+    }
     setMobileInspectorOpen(false);
   }, [plotId, setActiveTool]);
 
@@ -134,9 +147,35 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             : <PanelRightOpen size={18} aria-hidden="true" />}
           {mobileInspectorOpen ? "Close inspector" : "Inspector"}
         </button>
-        <div className="pw-legacy-map-host">
-          <PlotDashboard {...props} embeddedInWorkspace />
+        <div className="pw-spatial-canvas-host">
+          <WorkspaceSpatialCanvas
+            farm={props.farm}
+            plot={props.plot}
+            cropName={props.cropName}
+            l10={scientific.l10}
+            mapVisualLens={scientific.mapVisualLens}
+            onPaletteChange={scientific.setMapVisualLens}
+            onZoneClick={(zoneId) => {
+              scientific.l10.setSelectedZone(zoneId);
+              selectEntity({
+                kind: "ZONE",
+                id: zoneId,
+                sourceSnapshotId: state.publication.snapshotId,
+              });
+            }}
+          />
         </div>
+        <WorkspaceSpecializedToolsP04
+          plotId={plotId}
+          plot={props.plot}
+          activeSpecializedTool={activeSpecializedTool}
+          onClose={() => setActiveSpecializedTool(null)}
+          onEvidenceAdded={() => {
+            if (scientific.l10.fetchLayer10) {
+              void scientific.l10.fetchLayer10(plotId, farmId, undefined, undefined, props.cropName);
+            }
+          }}
+        />
         <WorkspaceContextActionsP04 onLaunch={launchInvestigation} />
         {investigation && (
           <WorkspaceInvestigationHostP04

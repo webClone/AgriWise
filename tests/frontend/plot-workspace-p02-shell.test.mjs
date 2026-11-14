@@ -29,9 +29,10 @@ test("V2 is opt-in and V2-disabled renders the unmodified legacy component path"
   assert.doesNotMatch(shell, /createLiveTelemetryStream|createLayer10|fetch\("/);
 });
 
-test("V2 mounts exactly one legacy dashboard and one moved existing timeline", () => {
-  assert.equal((shell.match(/<PlotDashboard /g) || []).length, 1);
-  assert.match(shell, /embeddedInWorkspace/);
+test("V2 mounts native spatial canvas without legacy dashboard and one moved existing timeline", () => {
+  assert.equal((shell.match(/<PlotDashboard /g) || []).length, 0);
+  assert.match(shell, /<WorkspaceSpatialCanvas\s/);
+  assert.match(gate, /<PlotDashboard \{\.\.\.props\} \/>/);
   assert.match(dashboard, /\{!embeddedInWorkspace\s*&&\s*<TimelineStrip\s*\/>\}/);
   assert.match(timeline, /export default function TimelineStrip\(\{ docked = false \}/);
   assert.match(shell, /<WorkspaceTimelineContainer\s*\/>/);

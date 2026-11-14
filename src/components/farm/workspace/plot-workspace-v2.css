@@ -130,6 +130,7 @@
   isolation: isolate;
   background: #081719;
 }
+.pw-spatial-canvas-host,
 .pw-legacy-map-host {
   position: absolute;
   inset: 0;
