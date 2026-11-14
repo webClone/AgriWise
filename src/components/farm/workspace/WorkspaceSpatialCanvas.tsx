@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import type { useLayer10 } from "@/hooks/useLayer10";
 import type { MapVisualLens } from "./useWorkspaceScientificAdapter";
+import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
 
 const PlotMapShell = dynamic(() => import("@/components/farm/map/PlotMapShell"), {
   ssr: false,
@@ -24,6 +25,9 @@ interface WorkspaceSpatialCanvasProps {
   mapVisualLens: MapVisualLens;
   onPaletteChange: (lens: MapVisualLens) => void;
   onZoneClick: (zoneId: string) => void;
+  workspaceEntities?: WorkspaceFeatureEnvelope[];
+  selectedEntityId?: string | null;
+  onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
 }
 
 /**
@@ -39,6 +43,9 @@ export default function WorkspaceSpatialCanvas({
   mapVisualLens,
   onPaletteChange,
   onZoneClick,
+  workspaceEntities,
+  selectedEntityId,
+  onEntityClick,
 }: WorkspaceSpatialCanvasProps) {
   const deviationSurface =
     l10.activeMode === "veg_attention"
@@ -71,6 +78,9 @@ export default function WorkspaceSpatialCanvas({
           candidateMaskSurface={l10.candidateMaskSurface}
           paletteId={mapVisualLens}
           onPaletteChange={onPaletteChange}
+          workspaceEntities={workspaceEntities}
+          selectedEntityId={selectedEntityId}
+          onEntityClick={onEntityClick}
         />
       )}
     </div>

@@ -30,11 +30,25 @@ function getRelativeTime(d: string | null) {
 
 type SensorTab = "readings" | "alerts" | "config";
 
-export default function SensorNetworkWorkspace({ plotId, onClose }: { plotId: string; onClose: () => void }) {
+export default function SensorNetworkWorkspace({
+  plotId,
+  initialSensorId = null,
+  onClose,
+}: {
+  plotId: string;
+  initialSensorId?: string | null;
+  onClose: () => void;
+}) {
   const [sensors, setSensors] = useState<SensorStatus[]>([]);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(initialSensorId);
   const [activeTab, setActiveTab] = useState<SensorTab>("readings");
+
+  useEffect(() => {
+    if (initialSensorId) {
+      setSelected(initialSensorId);
+    }
+  }, [initialSensorId]);
 
   const fetchSensors = useCallback(async () => {
     try {

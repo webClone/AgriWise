@@ -29,6 +29,7 @@ interface WorkspaceSpecializedToolsProps {
   plotId: string;
   plot?: Record<string, unknown> | null;
   activeSpecializedTool: WorkspaceQuickAction | null;
+  initialSensorId?: string | null;
   onClose: () => void;
   onEvidenceAdded?: () => void;
 }
@@ -43,6 +44,7 @@ export default function WorkspaceSpecializedToolsP04({
   plotId,
   plot,
   activeSpecializedTool,
+  initialSensorId,
   onClose,
   onEvidenceAdded,
 }: WorkspaceSpecializedToolsProps) {
@@ -71,7 +73,11 @@ export default function WorkspaceSpecializedToolsP04({
   return (
     <>
       {activeSpecializedTool === "sensors" && (
-        <SensorNetworkWorkspace plotId={plotId} onClose={onClose} />
+        <SensorNetworkWorkspace
+          plotId={plotId}
+          initialSensorId={initialSensorId}
+          onClose={onClose}
+        />
       )}
 
       {activeSpecializedTool === "drone" && (

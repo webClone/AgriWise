@@ -22,6 +22,8 @@ import {
   createCommittedRenderReceipt,
   isRenderedMaterialization,
 } from "@/lib/agribrain/render-materialization";
+import { getWorkspaceEntityPinsLayers } from "./layers/WorkspaceEntityPinsLayer";
+import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
 
 function hasStaleGatewayEvidence(rawData: Record<string, unknown> | undefined): boolean {
   for (const value of Object.values(rawData || {})) {
@@ -59,6 +61,9 @@ interface PlotMapShellProps {
   candidateMaskSurface?: SurfaceData | null;
   paletteId?: "standard" | "thermal" | "chlorophyll" | "chroma";
   onPaletteChange?: (palette: "standard" | "thermal" | "chlorophyll" | "chroma") => void;
+  workspaceEntities?: WorkspaceFeatureEnvelope[];
+  selectedEntityId?: string | null;
+  onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
 }
 
 export default function PlotMapShell(props: PlotMapShellProps) {
@@ -82,6 +87,9 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     candidateMaskSurface = null,
     paletteId = "standard",
     onPaletteChange,
+    workspaceEntities = [],
+    selectedEntityId = null,
+    onEntityClick,
   } = props;
 
   const primaryPlot = plots?.[0];
@@ -614,6 +622,16 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     experimentalRenderMaterialization,
   ]);
 
+  // 4c. Build WORKSPACE ENTITY layers (sensors, cameras, field equipment pins)
+  const entityLayers = useMemo(() => {
+    if (!workspaceEntities || workspaceEntities.length === 0) return [];
+    return getWorkspaceEntityPinsLayers({
+      entities: workspaceEntities,
+      selectedEntityId,
+      onEntityClick,
+    });
+  }, [workspaceEntities, selectedEntityId, onEntityClick]);
+
   // 5. Compute hovered zone centroid for floating chip
   const hoveredZoneData = useMemo(() => {
     if (!hoveredZoneId || !l10Zones || !surfaceData || !plotGeoJson) return null;
@@ -849,7 +867,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onViewStateChange={({ viewState }) => setViewState(viewState as any)}
         controller={true}
-        layers={[...surfaceLayers, ...zoneLayers]}
+        layers={[...surfaceLayers, ...zoneLayers, ...entityLayers]}
         getCursor={({ isHovering }) => {
 
           if (transectMode) return "crosshair";
@@ -859,7 +877,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         onClick={handleMapClick}
         onAfterRender={() => {
           const committedLayerIds = new Set<string>();
-          for (const layer of [...surfaceLayers, ...zoneLayers].flat(Infinity) as any[]) {
+          for (const layer of [...surfaceLayers, ...zoneLayers, ...entityLayers].flat(Infinity) as any[]) {
             if (layer?.id) committedLayerIds.add(String(layer.id));
           }
           const receiptDetails = {

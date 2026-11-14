@@ -27,7 +27,16 @@ export interface PublicationRef {
   isStale?: boolean;
 }
 
-export type EntityKind = "ZONE" | "SENSOR" | "CAMERA" | "DRONE_WAYPOINT" | "EQUIPMENT" | null;
+export type EntityKind =
+  | "ZONE"
+  | "SENSOR"
+  | "CAMERA"
+  | "DRONE_WAYPOINT"
+  | "DRONE_MISSION"
+  | "FIELD_OBSERVATION"
+  | "FIELD_EVENT"
+  | "EQUIPMENT"
+  | null;
 
 export interface SelectedEntityRef {
   kind: EntityKind;

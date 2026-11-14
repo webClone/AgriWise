@@ -17,6 +17,7 @@ import {
   usePlotWorkspace,
 } from "./PlotWorkspaceProvider";
 import { useWorkspaceStateBridging } from "./useWorkspaceStateBridging";
+import { useWorkspaceEntities } from "./useWorkspaceEntities";
 import type { PlotWorkspaceProps } from "./PlotWorkspaceFeatureGate";
 import type { PlotScope } from "./workspace-types";
 import "./plot-workspace-v2.css";
@@ -34,6 +35,8 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const [investigation, setInvestigation] = useState<P04InvestigationKind | null>(null);
   const [hostMode, setHostMode] = useState<P04HostMode>("context");
   const [activeSpecializedTool, setActiveSpecializedTool] = useState<WorkspaceQuickAction | null>(null);
+  const [activeInitialSensorId, setActiveInitialSensorId] = useState<string | null>(null);
+  const { entities } = useWorkspaceEntities(plotId);
   const launchControlRef = useRef<HTMLElement | null>(null);
 
   const scientific = useWorkspaceScientificAdapter({
@@ -80,10 +83,23 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           setActiveTool(`p04:${detail.kind}`);
         }
       };
+      const onTestSelectEntity = (e: Event) => {
+        const detail = (e as CustomEvent).detail;
+        if (detail?.kind && detail?.id) {
+          selectEntity({
+            kind: detail.kind,
+            id: detail.id,
+            sourceSnapshotId: state.publication.snapshotId,
+            metadata: detail.metadata || detail.properties,
+          });
+        }
+      };
       window.addEventListener("akaloris:test:select-zone", onTestSelectZone);
+      window.addEventListener("akaloris:test:select-entity", onTestSelectEntity);
       window.addEventListener("akaloris:test:launch-investigation", onTestLaunch);
       return () => {
         window.removeEventListener("akaloris:test:select-zone", onTestSelectZone);
+        window.removeEventListener("akaloris:test:select-entity", onTestSelectEntity);
         window.removeEventListener("akaloris:test:launch-investigation", onTestLaunch);
       };
     }
@@ -111,6 +127,11 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     }
     setMobileInspectorOpen(false);
   }, [plotId, setActiveTool]);
+
+  const handleOpenSensor = useCallback((sensorDeviceId: string) => {
+    setActiveInitialSensorId(sensorDeviceId);
+    openTool("sensors");
+  }, [openTool]);
 
   return (
     <div
@@ -156,6 +177,16 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             l10={scientific.l10}
             mapVisualLens={scientific.mapVisualLens}
             onPaletteChange={scientific.setMapVisualLens}
+            workspaceEntities={entities}
+            selectedEntityId={state.selectedEntity.id}
+            onEntityClick={(entity) => {
+              selectEntity({
+                kind: entity.entity_kind,
+                id: entity.entity_id,
+                sourceSnapshotId: entity.source_version,
+                metadata: entity as unknown as Record<string, unknown>,
+              });
+            }}
             onZoneClick={(zoneId) => {
               scientific.l10.setSelectedZone(zoneId);
               selectEntity({
@@ -170,14 +201,22 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           plotId={plotId}
           plot={props.plot}
           activeSpecializedTool={activeSpecializedTool}
-          onClose={() => setActiveSpecializedTool(null)}
+          initialSensorId={activeInitialSensorId}
+          onClose={() => {
+            setActiveSpecializedTool(null);
+            setActiveInitialSensorId(null);
+          }}
           onEvidenceAdded={() => {
             if (scientific.l10.fetchLayer10) {
               void scientific.l10.fetchLayer10(plotId, farmId, undefined, undefined, props.cropName);
             }
           }}
         />
-        <WorkspaceContextActionsP04 onLaunch={launchInvestigation} />
+        <WorkspaceContextActionsP04
+          onLaunch={launchInvestigation}
+          onOpenSensor={handleOpenSensor}
+          workspaceEntities={entities}
+        />
         {investigation && (
           <WorkspaceInvestigationHostP04
             kind={investigation} mode={hostMode}
@@ -190,6 +229,8 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
         <WorkspaceContextInspector
           farmId={farmId}
           plotId={plotId}
+          onOpenSensor={handleOpenSensor}
+          workspaceEntities={entities}
           onCollapse={() => {
             if (window.matchMedia("(max-width: 820px)").matches) {
               setMobileInspectorOpen(false);
