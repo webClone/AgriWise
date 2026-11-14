@@ -49,7 +49,8 @@ export default function WorkspaceContextActionsP04({
     const props = ((sensorEntity?.properties || {}) as Record<string, any>);
     const coords = sensorEntity?.geometry?.coordinates;
     const depth = sensorEntity?.spatial_support?.depth_cm;
-    const isOnline = props.isOnline ?? true;
+    const isFixture = props.is_benchmark_fixture === true || sensorEntity?.epistemic_class === "SIMULATED";
+    const isOnline = isFixture ? false : (props.isOnline ?? true);
     const battery = props.battery;
     const latest = props.latestReading;
     const digest = sensorEntity?.provenance?.record_digest;
@@ -62,12 +63,12 @@ export default function WorkspaceContextActionsP04({
         aria-label="Sensor device context"
         data-testid="p05-sensor-context"
         style={{
-          borderLeft: isOnline ? "4px solid #10b981" : "4px solid #94a3b8",
+          borderLeft: isFixture ? "4px solid #eab308" : isOnline ? "4px solid #10b981" : "4px solid #94a3b8",
         }}
       >
         <div className="p04-context-title" style={{ justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-            <Radio size={16} style={{ color: isOnline ? "#34d399" : "#94a3b8" }} aria-hidden="true" />
+            <Radio size={16} style={{ color: isFixture ? "#facc15" : isOnline ? "#34d399" : "#94a3b8" }} aria-hidden="true" />
             <span>
               Sensor <strong>{deviceId}</strong>
               {depth != null && (
@@ -82,14 +83,14 @@ export default function WorkspaceContextActionsP04({
               fontSize: "10px",
               padding: "2px 8px",
               borderRadius: "999px",
-              background: isOnline ? "rgba(16,185,129,0.2)" : "rgba(148,163,184,0.2)",
-              color: isOnline ? "#34d399" : "#94a3b8",
-              border: `1px solid ${isOnline ? "rgba(16,185,129,0.4)" : "rgba(148,163,184,0.3)"}`,
+              background: isFixture ? "rgba(234,179,8,0.15)" : isOnline ? "rgba(16,185,129,0.2)" : "rgba(148,163,184,0.2)",
+              color: isFixture ? "#facc15" : isOnline ? "#34d399" : "#94a3b8",
+              border: `1px solid ${isFixture ? "rgba(234,179,8,0.35)" : isOnline ? "rgba(16,185,129,0.4)" : "rgba(148,163,184,0.3)"}`,
               fontWeight: 700,
               letterSpacing: "0.05em",
             }}
           >
-            {isOnline ? "ONLINE" : "OFFLINE"}
+            {isFixture ? "DEMO FIXTURE" : isOnline ? "ONLINE" : "OFFLINE"}
           </span>
         </div>
 
@@ -113,14 +114,15 @@ export default function WorkspaceContextActionsP04({
 
         {digest && (
           <div style={{ fontSize: "10px", color: "#8ca895", marginBottom: "9px", fontFamily: "monospace" }}>
-            Certified: {digest.slice(0, 16)}… (Registered Hardware)
+            Envelope Integrity: {digest.slice(0, 16)}…
+            {sensorEntity?.provenance?.verified_identity ? " (Verified Identity)" : ""}
           </div>
         )}
 
         <div className="p04-context-actions">
           <button
             type="button"
-            onClick={() => onOpenSensor && onOpenSensor(String(deviceId))}
+            onClick={() => onOpenSensor && onOpenSensor(String(sensorEntity?.entity_id || deviceId))}
             style={{
               background: "#166534",
               borderColor: "#22c55e",

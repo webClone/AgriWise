@@ -96,6 +96,17 @@ export function createWorkspaceFeatureEnvelope(params) {
     plot_id,
   });
 
+  const TRUSTED_LOCATION_SOURCES = Object.freeze([
+    "REGISTERED_HARDWARE",
+    "OBSERVED_GPS",
+    "SURVEYED",
+  ]);
+
+  const sanitizedLocationSource = VALID_LOCATION_SOURCES.includes(location_source)
+    ? location_source
+    : "UNSPECIFIED";
+  const isLocationTrusted = TRUSTED_LOCATION_SOURCES.includes(sanitizedLocationSource);
+
   // Evaluate location and map pin eligibility
   let has_location = false;
   let geometry = null;
@@ -123,6 +134,9 @@ export function createWorkspaceFeatureEnvelope(params) {
       type: "Point",
       coordinates: [longitude, latitude], // GeoJSON standard [lng, lat]
     });
+    if (!isLocationTrusted) {
+      ineligibility_reason = "UNTRUSTED_LOCATION_SOURCE";
+    }
   } else {
     // Gate P05-G08: Unlocated device is valid for catalog, ineligible for map pin
     has_location = false;
@@ -130,15 +144,19 @@ export function createWorkspaceFeatureEnvelope(params) {
     ineligibility_reason = "LOCATION_UNREGISTERED";
   }
 
+  const eligible_for_map_pin = Boolean(
+    has_location && isLocationTrusted && !is_centroid_substitute
+  );
+
   const display_eligibility = Object.freeze({
-    eligible_for_map_pin: has_location,
+    eligible_for_map_pin,
     eligible_for_catalog: true, // Gate P05-G08
-    ineligibility_reason,
+    ineligibility_reason: eligible_for_map_pin ? null : ineligibility_reason,
   });
 
   const spatial_support = Object.freeze({
     has_location,
-    location_source: VALID_LOCATION_SOURCES.includes(location_source) ? location_source : "UNSPECIFIED",
+    location_source: sanitizedLocationSource,
     support_radius_m: typeof support_radius_m === "number" && Number.isFinite(support_radius_m) ? support_radius_m : null,
     depth_cm: typeof depth_cm === "number" && Number.isFinite(depth_cm) ? depth_cm : null,
     altitude_m: typeof altitude_m === "number" && Number.isFinite(altitude_m) ? altitude_m : null,
@@ -178,7 +196,7 @@ export function createWorkspaceFeatureEnvelope(params) {
   const sanitizedProvenance = Object.freeze({
     ...provenance,
     record_digest,
-    verified_identity: Boolean(provenance.verified_identity ?? true),
+    verified_identity: Boolean(provenance.verified_identity ?? false),
   });
 
   return Object.freeze({
@@ -258,6 +276,10 @@ export function validateWorkspaceFeatureEnvelope(envelope, expectedScope) {
   if (envelope.display_eligibility?.eligible_for_map_pin === true) {
     if (!envelope.geometry || envelope.spatial_support?.has_location !== true) {
       errors.push("eligible_for_map_pin is true but geometry or has_location is missing");
+    }
+    const trustedSources = ["REGISTERED_HARDWARE", "OBSERVED_GPS", "SURVEYED"];
+    if (!trustedSources.includes(envelope.spatial_support?.location_source)) {
+      errors.push(`eligible_for_map_pin is true but location_source "${envelope.spatial_support?.location_source}" is not trusted`);
     }
   }
 

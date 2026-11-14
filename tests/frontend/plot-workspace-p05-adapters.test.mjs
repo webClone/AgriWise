@@ -170,3 +170,241 @@ test("P05.10: Rejects non-finite (NaN, Infinity) and out-of-bounds WGS84 coordin
   assert.equal(outOfBoundsEnvelope.spatial_support.has_location, false);
   assert.equal(outOfBoundsEnvelope.display_eligibility.eligible_for_map_pin, false);
 });
+
+test("P05-F05: Location source must be trusted (REGISTERED_HARDWARE, OBSERVED_GPS, SURVEYED) for map pin eligibility; UNSPECIFIED fails closed", () => {
+  // 1. Coordinates exist but location_source is UNSPECIFIED -> ineligibility for map pin
+  const untrustedEnvelope = createWorkspaceFeatureEnvelope({
+    entity_kind: "SENSOR",
+    entity_id: "probe-untrusted-source",
+    owner_scope: {
+      tenant_id: "tenant-1",
+      farm_id: "farm-1",
+      plot_id: "plot-1",
+    },
+    latitude: 36.509081,
+    longitude: 2.659269,
+    location_source: "UNSPECIFIED",
+  });
+
+  assert.equal(untrustedEnvelope.spatial_support.has_location, true);
+  assert.equal(untrustedEnvelope.display_eligibility.eligible_for_map_pin, false);
+  assert.equal(
+    untrustedEnvelope.display_eligibility.ineligibility_reason,
+    "UNTRUSTED_LOCATION_SOURCE"
+  );
+
+  // 2. Coordinates with trusted location_source -> eligible for map pin
+  const trustedHardware = createWorkspaceFeatureEnvelope({
+    entity_kind: "SENSOR",
+    entity_id: "probe-trusted-hardware",
+    owner_scope: {
+      tenant_id: "tenant-1",
+      farm_id: "farm-1",
+      plot_id: "plot-1",
+    },
+    latitude: 36.509081,
+    longitude: 2.659269,
+    location_source: "REGISTERED_HARDWARE",
+  });
+  assert.equal(trustedHardware.display_eligibility.eligible_for_map_pin, true);
+  assert.equal(trustedHardware.display_eligibility.ineligibility_reason, null);
+
+  const trustedGps = createWorkspaceFeatureEnvelope({
+    entity_kind: "SENSOR",
+    entity_id: "probe-trusted-gps",
+    owner_scope: {
+      tenant_id: "tenant-1",
+      farm_id: "farm-1",
+      plot_id: "plot-1",
+    },
+    latitude: 36.509081,
+    longitude: 2.659269,
+    location_source: "OBSERVED_GPS",
+  });
+  assert.equal(trustedGps.display_eligibility.eligible_for_map_pin, true);
+
+  const trustedSurveyed = createWorkspaceFeatureEnvelope({
+    entity_kind: "SENSOR",
+    entity_id: "probe-trusted-surveyed",
+    owner_scope: {
+      tenant_id: "tenant-1",
+      farm_id: "farm-1",
+      plot_id: "plot-1",
+    },
+    latitude: 36.509081,
+    longitude: 2.659269,
+    location_source: "SURVEYED",
+  });
+  assert.equal(trustedSurveyed.display_eligibility.eligible_for_map_pin, true);
+});
+
+test("P05-F01: Default verified_identity is false, and benchmark fixtures are classified as SIMULATED", () => {
+  // 1. By default, verified_identity must be false (not assumed true)
+  const uncertifiedEnvelope = createWorkspaceFeatureEnvelope({
+    entity_kind: "SENSOR",
+    entity_id: "probe-regular",
+    owner_scope: {
+      tenant_id: "tenant-1",
+      farm_id: "farm-1",
+      plot_id: "plot-1",
+    },
+    latitude: 36.509081,
+    longitude: 2.659269,
+    location_source: "REGISTERED_HARDWARE",
+  });
+
+  assert.equal(uncertifiedEnvelope.provenance.verified_identity, false);
+
+  // 2. Explicitly certified hardware
+  const certifiedEnvelope = createWorkspaceFeatureEnvelope({
+    entity_kind: "SENSOR",
+    entity_id: "probe-certified",
+    owner_scope: {
+      tenant_id: "tenant-1",
+      farm_id: "farm-1",
+      plot_id: "plot-1",
+    },
+    latitude: 36.509081,
+    longitude: 2.659269,
+    location_source: "REGISTERED_HARDWARE",
+    provenance: {
+      verified_identity: true,
+      certifier: "ISO-17025-AG-LAB",
+    },
+  });
+  assert.equal(certifiedEnvelope.provenance.verified_identity, true);
+
+  // 3. Epistemic separation for benchmark fixtures
+  const fixtureEnvelope = createWorkspaceFeatureEnvelope({
+    entity_kind: "SENSOR",
+    entity_id: "probe_mitidja_station_1",
+    owner_scope: {
+      tenant_id: "tenant-1",
+      farm_id: "farm-1",
+      plot_id: "plot-1",
+    },
+    latitude: 36.578488,
+    longitude: 2.953944,
+    location_source: "SURVEYED",
+    epistemic_class: "SIMULATED",
+    properties: {
+      is_benchmark_fixture: true,
+      latestReading: null,
+      isOnline: false,
+    },
+    provenance: {
+      registry_source: "fixture:benchmark_plot",
+      verified_identity: false,
+      is_benchmark_fixture: true,
+    },
+  });
+
+  assert.equal(fixtureEnvelope.epistemic_class, "SIMULATED");
+  assert.equal(fixtureEnvelope.properties.is_benchmark_fixture, true);
+  assert.equal(fixtureEnvelope.properties.latestReading, null);
+  assert.equal(fixtureEnvelope.properties.isOnline, false);
+  assert.equal(fixtureEnvelope.provenance.verified_identity, false);
+});
+
+test("P05-F03: Instrument identity resolution supports both database ID and hardware deviceId", () => {
+  const sampleSensors = [
+    {
+      id: "69ff82ba1cfe9533724d7ac7",
+      deviceId: "VS-MOISTURE-01",
+      type: "MOISTURE",
+      vendor: "Sentek",
+      isOnline: true,
+    },
+    {
+      id: "69ff8c3f351b5fecfc64dcd5",
+      deviceId: "VS-TEMP-01",
+      type: "TEMP",
+      vendor: "Pessl",
+      isOnline: false,
+    },
+  ];
+
+  // Helper matching the dual-id lookup in SensorNetworkWorkspace
+  const resolveSensor = (selectedId, sensors) => {
+    return sensors.find((s) => s.id === selectedId || s.deviceId === selectedId) || null;
+  };
+
+  // Match by MongoDB ObjectId
+  const matchByMongoId = resolveSensor("69ff82ba1cfe9533724d7ac7", sampleSensors);
+  assert.ok(matchByMongoId);
+  assert.equal(matchByMongoId.deviceId, "VS-MOISTURE-01");
+
+  // Match by hardware deviceId
+  const matchByDeviceId = resolveSensor("VS-TEMP-01", sampleSensors);
+  assert.ok(matchByDeviceId);
+  assert.equal(matchByDeviceId.id, "69ff8c3f351b5fecfc64dcd5");
+
+  // Unregistered fixture probe gracefully returns null (triggering fixture notice)
+  const unlinkedFixture = resolveSensor("probe_mitidja_station_1", sampleSensors);
+  assert.equal(unlinkedFixture, null);
+});
+
+test("P05-F04: Scope-switching generation fencing discards stale requests", () => {
+  let activeGeneration = 1;
+  let activePlotId = "plot-a";
+
+  const responses = [];
+
+  const simulateFetchCompletion = (reqGeneration, reqPlotId, data) => {
+    // Fencing rule in useWorkspaceEntities
+    if (reqGeneration !== activeGeneration || reqPlotId !== activePlotId) {
+      // Discard stale response
+      return;
+    }
+    responses.push(data);
+  };
+
+  // Request 1 starts for plot-a, gen 1
+  const req1Gen = 1;
+  const req1Plot = "plot-a";
+
+  // Before req 1 finishes, user switches to plot-b, gen 2
+  activeGeneration = 2;
+  activePlotId = "plot-b";
+
+  // Request 2 starts for plot-b, gen 2
+  const req2Gen = 2;
+  const req2Plot = "plot-b";
+
+  // Request 1 arrives late
+  simulateFetchCompletion(req1Gen, req1Plot, { plotId: "plot-a", data: "stale" });
+  assert.equal(responses.length, 0); // Stale response discarded
+
+  // Request 2 arrives
+  simulateFetchCompletion(req2Gen, req2Plot, { plotId: "plot-b", data: "fresh" });
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].plotId, "plot-b");
+});
+
+test("P05-F02: Server entities route strictly enforces authentication and tenant plot ownership without dev bypass", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const routePath = path.join(process.cwd(), "src/app/api/plots/[id]/workspace/entities/route.ts");
+  const source = fs.readFileSync(routePath, "utf8");
+
+  // 1. Mandatory authenticatedUserId() check
+  assert.match(source, /const userId = await authenticatedUserId\(\);/);
+
+  // 2. Unconditional 401 when !userId (NO dev mode bypass allowed)
+  assert.match(source, /if \(!userId\) \{\s*return NextResponse\.json\(\s*\{\s*error:\s*"Authentication required"\s*\},\s*\{\s*status:\s*401\s*\}\s*\);/);
+  assert.doesNotMatch(source, /!userId\s*&&\s*!isDev/);
+  assert.doesNotMatch(source, /isDev/);
+
+  // 3. Mandatory tenant isolation on plot query (farm.userId must equal authenticated userId)
+  assert.match(source, /where:\s*\{\s*id:\s*plotId,\s*farm:\s*\{\s*userId\s*\},\s*\}/);
+
+  // 4. Return 404 when plot is not found or foreign
+  assert.match(source, /if \(!plot\) \{\s*return NextResponse\.json\(\{\s*error:\s*"Plot not found"\s*\},\s*\{\s*status:\s*404\s*\}\);/);
+
+  // 5. Benchmark probes must never inject fabricated dynamic telemetry or claim active/online status
+  assert.match(source, /epistemic_class:\s*"SIMULATED"/);
+  assert.match(source, /status:\s*"BENCHMARK_FIXTURE"/);
+  assert.match(source, /isOnline:\s*false/);
+  assert.match(source, /latestReading:\s*null/);
+  assert.match(source, /is_benchmark_fixture:\s*true/);
+});

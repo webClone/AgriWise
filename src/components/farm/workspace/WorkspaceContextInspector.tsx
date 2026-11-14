@@ -55,7 +55,8 @@ export default function WorkspaceContextInspector({
   const sensorProps = (sensorEntity?.properties || {}) as Record<string, any>;
   const sensorCoords = sensorEntity?.geometry?.coordinates;
   const sensorDepth = sensorEntity?.spatial_support?.depth_cm;
-  const isOnline = sensorProps.isOnline ?? true;
+  const isFixture = sensorProps.is_benchmark_fixture === true || sensorEntity?.epistemic_class === "SIMULATED";
+  const isOnline = isFixture ? false : (sensorProps.isOnline ?? true);
   const latest = sensorProps.latestReading;
 
   return (
@@ -82,8 +83,8 @@ export default function WorkspaceContextInspector({
         {selectedEntity.kind === "SENSOR" && sensorEntity ? (
           <div className="pw-info-section" data-testid="p05-sensor-inspector">
             <div className="pw-section-title">
-              <Radio size={15} className={isOnline ? "text-emerald-400" : "text-slate-400"} aria-hidden="true" />
-              <span>Registered Sensor</span>
+              <Radio size={15} className={isFixture ? "text-amber-400" : isOnline ? "text-emerald-400" : "text-slate-400"} aria-hidden="true" />
+              <span>{isFixture ? "Simulated Benchmark Probe" : "Registered Sensor"}</span>
             </div>
             <strong className="pw-info-large">{sensorProps.deviceId || selectedEntity.id}</strong>
             <p style={{ margin: "4px 0 10px", fontSize: "12px", color: "#94a3b8" }}>
@@ -93,10 +94,25 @@ export default function WorkspaceContextInspector({
             <dl className="pw-definition-list" style={{ marginBottom: "12px" }}>
               <div>
                 <dt>Hardware Status</dt>
-                <dd style={{ color: isOnline ? "#34d399" : "#94a3b8", fontWeight: 600 }}>
-                  {isOnline ? "ONLINE (Active)" : "OFFLINE"}
+                <dd style={{ color: isFixture ? "#facc15" : isOnline ? "#34d399" : "#94a3b8", fontWeight: 600 }}>
+                  {isFixture ? "DEMO FIXTURE (No Telemetry Feed)" : isOnline ? "ONLINE (Active)" : "OFFLINE"}
                 </dd>
               </div>
+              <div>
+                <dt>Epistemic Class</dt>
+                <dd style={{ fontFamily: "monospace", fontSize: "11px", color: "#e2e8f0" }}>
+                  {sensorEntity.epistemic_class}
+                </dd>
+              </div>
+              {sensorEntity.provenance?.record_digest && (
+                <div>
+                  <dt>Envelope Integrity</dt>
+                  <dd style={{ fontFamily: "monospace", fontSize: "11px", color: "#8ca895" }}>
+                    {sensorEntity.provenance.record_digest.slice(0, 16)}…
+                    {sensorEntity.provenance.verified_identity ? " (Verified)" : ""}
+                  </dd>
+                </div>
+              )}
               {sensorDepth != null && (
                 <div>
                   <dt>Placement Depth</dt>
@@ -160,7 +176,7 @@ export default function WorkspaceContextInspector({
                   borderRadius: "8px",
                 }}
                 onClick={() =>
-                  onOpenSensor && onOpenSensor(String(sensorProps.deviceId || selectedEntity.id))
+                  onOpenSensor && onOpenSensor(String(sensorEntity.entity_id || sensorProps.deviceId || selectedEntity.id))
                 }
               >
                 <Activity size={15} /> Open Sensor Instrument

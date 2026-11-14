@@ -68,7 +68,7 @@ export default function SensorNetworkWorkspace({
   }, [onClose]);
 
   const onlineCount = sensors.filter(s => s.isOnline).length;
-  const selectedSensor = sensors.find(s => s.id === selected) || null;
+  const selectedSensor = sensors.find(s => s.id === selected || s.deviceId === selected) || null;
 
   const S = {
     card: { background: "rgba(15,23,42,0.6)", border: "1px solid rgba(71,85,105,0.15)", borderRadius: "10px", padding: "12px" } as React.CSSProperties,
@@ -121,7 +121,7 @@ export default function SensorNetworkWorkspace({
             )}
             {sensors.map(s => {
               const meta = TYPE_META[s.type] || { icon: "📟", label: s.type, color: "#94a3b8" };
-              const isSelected = selected === s.id;
+              const isSelected = selected === s.id || selected === s.deviceId;
               return (
                 <div key={s.id} onClick={() => setSelected(s.id)}
                   style={{ ...S.card, marginBottom: "8px", cursor: "pointer", transition: "all 0.15s",
@@ -184,10 +184,20 @@ export default function SensorNetworkWorkspace({
           {/* Tab Content */}
           <div style={{ flex: 1, overflowY: "auto", padding: "24px" }} className="custom-scrollbar">
             {!selectedSensor ? (
-              <div style={{ textAlign: "center", padding: "80px 0", color: "#475569" }}>
+              <div style={{ textAlign: "center", padding: "80px 20px", color: "#475569" }}>
                 <div style={{ fontSize: "3rem", marginBottom: "12px", opacity: 0.5 }}>📡</div>
-                <div style={{ fontSize: "16px", color: "#94a3b8", fontWeight: 500 }}>{sensors.length > 0 ? "Select a sensor from the left" : "No sensors registered"}</div>
-                <div style={{ fontSize: "13px", marginTop: "6px" }}>Click a device to view its detailed readings and configuration.</div>
+                <div style={{ fontSize: "16px", color: "#94a3b8", fontWeight: 500 }}>
+                  {sensors.length > 0
+                    ? selected
+                      ? `Device "${selected}" is a demonstration fixture without a registered telemetry database record.`
+                      : "Select a sensor from the left"
+                    : "No sensors registered"}
+                </div>
+                <div style={{ fontSize: "13px", marginTop: "6px" }}>
+                  {selected
+                    ? "Select an active registered sensor from the left to view live telemetry."
+                    : "Click a device to view its detailed readings and configuration."}
+                </div>
               </div>
             ) : (
               <>

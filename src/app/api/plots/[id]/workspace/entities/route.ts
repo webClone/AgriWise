@@ -100,9 +100,8 @@ export async function GET(
 ) {
   try {
     const userId = await authenticatedUserId();
-    const isDev = process.env.NODE_ENV === "development";
 
-    if (!userId && !isDev) {
+    if (!userId) {
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 }
@@ -114,7 +113,7 @@ export async function GET(
     const plot = await prisma.plot.findFirst({
       where: {
         id: plotId,
-        ...(userId && !isDev ? { farm: { userId } } : {}),
+        farm: { userId },
       },
       include: {
         farm: {
@@ -185,7 +184,7 @@ export async function GET(
         depth_cm: depthCm,
         zone_id: zoneId,
         location_source: lat && lng ? "REGISTERED_HARDWARE" : "UNSPECIFIED",
-        epistemic_class: "REGISTERED_GROUND_TRUTH",
+        epistemic_class: latestReading ? "OBSERVED_TELEMETRY" : "REGISTERED_GROUND_TRUTH",
         temporal_extent: {
           observed_at: latestReading?.timestamp?.toISOString() || null,
           published_at: sensor.lastSync?.toISOString() || null,
@@ -201,6 +200,7 @@ export async function GET(
           rssi: sensor.rssi,
           depthCm,
           zoneId,
+          is_benchmark_fixture: false,
           latestReading: latestReading
             ? {
                 temperature: latestReading.temperature,
@@ -217,7 +217,8 @@ export async function GET(
           registry_source: matchedProbe
             ? "sensor_runtime:registry"
             : "prisma:sensor",
-          verified_identity: true,
+          verified_identity: Boolean(sensor.apiKey),
+          is_benchmark_fixture: false,
         },
       });
 
@@ -231,7 +232,7 @@ export async function GET(
       }
     }
 
-    // If plot has benchmark probes not in DB, add them directly from authoritative registry
+    // Benchmark probes not in DB: explicitly tagged as SIMULATED fixtures
     for (const probe of benchmarkProbes) {
       const alreadyIncluded = envelopes.some(
         (e) => (e.properties as any)?.deviceId === probe.deviceId
@@ -250,37 +251,31 @@ export async function GET(
           longitude: probe.lon,
           depth_cm: probe.depthCm,
           zone_id: probe.zoneId,
-          location_source: "REGISTERED_HARDWARE",
-          epistemic_class: "REGISTERED_GROUND_TRUTH",
+          location_source: "SURVEYED",
+          epistemic_class: "SIMULATED",
           temporal_extent: {
-            observed_at: new Date(now - 120000).toISOString(),
-            published_at: new Date(now - 120000).toISOString(),
+            observed_at: null,
+            published_at: "2026-03-01T00:00:00Z",
           },
           properties: {
             deviceId: probe.deviceId,
             vendor: probe.vendor,
             model: probe.model,
             type: probe.type,
-            status: "ACTIVE",
-            isOnline: true,
-            battery: 92,
-            rssi: -58,
+            status: "BENCHMARK_FIXTURE",
+            isOnline: false,
+            battery: null,
+            rssi: null,
             depthCm: probe.depthCm,
             zoneId: probe.zoneId,
             variables: probe.variables,
-            latestReading: {
-              temperature: 21.4,
-              humidity: 64.2,
-              soilMoisture: 0.324,
-              ec: 1.15,
-              windSpeed: probe.type === "WEATHER" ? 3.2 : null,
-              rainfall: probe.type === "WEATHER" ? 0.0 : null,
-              timestamp: new Date(now - 120000).toISOString(),
-            },
+            is_benchmark_fixture: true,
+            latestReading: null,
           },
           provenance: {
-            registry_source: "sensor_runtime:registry",
-            verified_identity: true,
+            registry_source: "fixture:benchmark_plot",
+            verified_identity: false,
+            is_benchmark_fixture: true,
           },
         });
 

@@ -36,7 +36,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const [hostMode, setHostMode] = useState<P04HostMode>("context");
   const [activeSpecializedTool, setActiveSpecializedTool] = useState<WorkspaceQuickAction | null>(null);
   const [activeInitialSensorId, setActiveInitialSensorId] = useState<string | null>(null);
-  const { entities } = useWorkspaceEntities(plotId);
+  const { entities } = useWorkspaceEntities(plotId, 30000, state.generationId);
   const launchControlRef = useRef<HTMLElement | null>(null);
 
   const scientific = useWorkspaceScientificAdapter({
