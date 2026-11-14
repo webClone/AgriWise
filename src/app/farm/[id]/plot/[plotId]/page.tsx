@@ -1,5 +1,5 @@
 import { getAuthorizedPlotRouteContext } from "@/lib/farm-services";
-import PlotDashboard from "@/components/farm/PlotDashboard";
+import PlotWorkspaceFeatureGate from "@/components/farm/workspace/PlotWorkspaceFeatureGate";
 import { notFound } from "next/navigation";
 import { getSession } from "@/lib/session";
 import DevelopmentSessionBootstrap from "@/components/auth/DevelopmentSessionBootstrap";
@@ -27,7 +27,7 @@ export default async function PlotDetailsPage({ params }: { params: Promise<{ id
 
   return (
     <div className="w-full h-full" style={{ minHeight: 'calc(100vh - 48px)' }} suppressHydrationWarning={true}>
-      <PlotDashboard
+      <PlotWorkspaceFeatureGate
         farm={farm}
         plot={plot}
         cropName={currentCrop?.cropNameAr || currentCrop?.cropCode}
