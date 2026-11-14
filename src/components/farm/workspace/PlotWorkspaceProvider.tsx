@@ -64,8 +64,24 @@ export function PlotWorkspaceProvider({
     createInitialWorkspaceState({ ...scope, initialTool })
   );
 
-  // AbortController registry tracking active generation
-  const activeControllersRef = useRef<Map<number, AbortController>>(new Map());
+  // Keep an authoritative live reference to current state
+  // to avoid stale closure pitfalls during asynchronous operations (P03-F01)
+  const latestStateRef = useRef<WorkspaceState>(state);
+  latestStateRef.current = state;
+
+  // Track each concurrent request by a unique ID so concurrent requests in the same
+  // generation never overwrite each other's abort controllers (P03-F02)
+  interface ActiveRequestEntry {
+    requestId: string;
+    generationId: number;
+    tenantId: string;
+    plotId: string;
+    cropCycleId: string | null;
+    geometryHash: string | null;
+    controller: AbortController;
+  }
+  const nextRequestIdRef = useRef(0);
+  const activeRequestsRef = useRef<Map<string, ActiveRequestEntry>>(new Map());
 
   // Detect server-passed scope changes and dispatch PLOT_CHANGED
   useEffect(() => {
@@ -79,29 +95,79 @@ export function PlotWorkspaceProvider({
     scope.plotId,
     scope.cropCycleId,
     scope.geometryHash,
+    scope.geometryVersion,
   ]);
 
-  // Clean up aborted controllers when generation increments
+  // Abort stale requests when generation increments or scope changes
   useEffect(() => {
     const currentGen = state.generationId;
-    activeControllersRef.current.forEach((controller, gen) => {
-      if (gen < currentGen) {
-        controller.abort("Workspace generation invalidated by plot/tenant switch");
-        activeControllersRef.current.delete(gen);
+    const currentTenant = state.ownerScope.tenantId;
+    const currentPlot = state.plotScope.plotId;
+    const currentCropCycle = state.plotScope.cropCycleId;
+    const currentGeomHash = state.plotScope.geometryHash;
+
+    activeRequestsRef.current.forEach((entry, reqId) => {
+      const isStale =
+        entry.generationId < currentGen ||
+        entry.tenantId !== currentTenant ||
+        entry.plotId !== currentPlot ||
+        entry.cropCycleId !== currentCropCycle ||
+        entry.geometryHash !== currentGeomHash;
+
+      if (isStale) {
+        try {
+          entry.controller.abort("Workspace generation/scope invalidated by plot or tenant switch");
+        } catch {
+          // ignore abort errors
+        }
+        activeRequestsRef.current.delete(reqId);
       }
     });
-  }, [state.generationId]);
+  }, [
+    state.generationId,
+    state.ownerScope.tenantId,
+    state.plotScope.plotId,
+    state.plotScope.cropCycleId,
+    state.plotScope.geometryHash,
+  ]);
+
+  // Clean up all active requests on unmount
+  useEffect(() => {
+    return () => {
+      activeRequestsRef.current.forEach((entry) => {
+        try {
+          entry.controller.abort("PlotWorkspaceProvider unmounted");
+        } catch {
+          // ignore
+        }
+      });
+      activeRequestsRef.current.clear();
+    };
+  }, []);
 
   // Scoped fetch helper that automatically binds to generation, tenant and plot,
-  // and discards late responses arriving after a scope transition (P03-G01)
+  // tracks request-specific controllers, and discards late responses using live refs (P03-F01/P03-F02)
   const createScopedFetch = useCallback(
     async (url: string, init?: RequestInit) => {
-      const currentGen = state.generationId;
-      const currentTenant = state.ownerScope.tenantId;
-      const currentPlot = state.plotScope.plotId;
+      const currentState = latestStateRef.current;
+      const requestGen = currentState.generationId;
+      const requestTenant = currentState.ownerScope.tenantId;
+      const requestPlot = currentState.plotScope.plotId;
+      const requestCropCycle = currentState.plotScope.cropCycleId;
+      const requestGeomHash = currentState.plotScope.geometryHash;
 
+      const reqId = `req_${++nextRequestIdRef.current}_${Date.now()}`;
       const controller = new AbortController();
-      activeControllersRef.current.set(currentGen, controller);
+
+      activeRequestsRef.current.set(reqId, {
+        requestId: reqId,
+        generationId: requestGen,
+        tenantId: requestTenant,
+        plotId: requestPlot,
+        cropCycleId: requestCropCycle,
+        geometryHash: requestGeomHash,
+        controller,
+      });
 
       const combinedSignal = init?.signal
         ? anySignal([init.signal, controller.signal])
@@ -113,17 +179,10 @@ export function PlotWorkspaceProvider({
           signal: combinedSignal,
           headers: {
             ...init?.headers,
-            "x-akaloris-generation": String(currentGen),
-            "x-akaloris-plot-scope": `${currentTenant}:${currentPlot}`,
+            "x-akaloris-generation": String(requestGen),
+            "x-akaloris-plot-scope": `${requestTenant}:${requestPlot}`,
           },
         });
-
-        // Verification after response resolves:
-        // Has the workspace changed scope or generation during transit?
-        const isStale =
-          state.generationId !== currentGen ||
-          state.ownerScope.tenantId !== currentTenant ||
-          state.plotScope.plotId !== currentPlot;
 
         let data = null;
         try {
@@ -131,6 +190,15 @@ export function PlotWorkspaceProvider({
         } catch {
           data = null;
         }
+
+        // Live check against authoritative latestStateRef right before returning or committing:
+        const liveState = latestStateRef.current;
+        const isStale =
+          liveState.generationId !== requestGen ||
+          liveState.ownerScope.tenantId !== requestTenant ||
+          liveState.plotScope.plotId !== requestPlot ||
+          liveState.plotScope.cropCycleId !== requestCropCycle ||
+          liveState.plotScope.geometryHash !== requestGeomHash;
 
         return {
           ok: response.ok && !isStale,
@@ -147,10 +215,10 @@ export function PlotWorkspaceProvider({
           isStale: true,
         };
       } finally {
-        activeControllersRef.current.delete(currentGen);
+        activeRequestsRef.current.delete(reqId);
       }
     },
-    [state.generationId, state.ownerScope.tenantId, state.plotScope.plotId]
+    []
   );
 
   const selectEntity = useCallback(

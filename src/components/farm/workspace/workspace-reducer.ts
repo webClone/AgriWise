@@ -7,12 +7,12 @@ import type { WorkspaceState, WorkspaceAction, PlotScope } from "./workspace-typ
 export function createInitialWorkspaceState(
   options?: Partial<PlotScope> & { initialTool?: string }
 ): WorkspaceState {
-  return (createInitialWorkspaceStateImpl as any)(options) as WorkspaceState;
+  return createInitialWorkspaceStateImpl(options);
 }
 
 export function workspaceReducer(
   state: WorkspaceState,
   action: WorkspaceAction
 ): WorkspaceState {
-  return (workspaceReducerImpl as any)(state, action) as WorkspaceState;
+  return workspaceReducerImpl(state, action);
 }

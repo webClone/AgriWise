@@ -14,7 +14,7 @@ export interface PlotScope {
   plotId: string;
   cropCycleId: string | null;
   geometryHash: string | null;
-  geometryVersion: string | null;
+  geometryVersion: number | string | null;
 }
 
 export type AuthorityStatus = "CERTIFIED" | "PENDING" | "UNAVAILABLE" | "STALE" | "DISCONNECTED";
@@ -95,10 +95,14 @@ export type WorkspaceAction =
   | {
       type: "SNAPSHOT_SELECTED";
       payload: {
-        snapshotId: string;
-        capturedAt: string;
-        publicationDigest: string | null;
-        authorityStatus: AuthorityStatus;
+        snapshotId: string | null;
+        capturedAt?: string | null;
+        publicationDigest?: string | null;
+        authorityStatus?: AuthorityStatus;
+        generationId?: number;
+        plotId?: string;
+        tenantId?: string;
+        cropCycleId?: string | null;
       };
     }
   | {
@@ -137,10 +141,11 @@ export type WorkspaceAction =
     }
   | {
       type: "SCENARIO_STARTED";
-      payload: {
-        scenarioId: string;
-        scenarioName: string;
+      payload?: {
+        scenarioId?: string;
+        scenarioName?: string;
         parameters?: Record<string, number>;
+        simulationTime?: string | null;
       };
     }
   | {

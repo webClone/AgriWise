@@ -4,6 +4,18 @@
  * clocks, request generations, and scenario sandbox state.
  */
 
+/**
+ * @param {{
+ *   tenantId?: string;
+ *   farmId?: string;
+ *   plotId?: string;
+ *   cropCycleId?: string | null;
+ *   geometryHash?: string | null;
+ *   geometryVersion?: number | string | null;
+ *   initialTool?: string;
+ * }} [options]
+ * @returns {import("./workspace-types").WorkspaceState}
+ */
 export function createInitialWorkspaceState({
   tenantId = "",
   farmId = "",
@@ -73,6 +85,11 @@ export function createInitialWorkspaceState({
   };
 }
 
+/**
+ * @param {import("./workspace-types").WorkspaceState} state
+ * @param {import("./workspace-types").WorkspaceAction} action
+ * @returns {import("./workspace-types").WorkspaceState}
+ */
 export function workspaceReducer(state, action) {
   if (!action || !action.type) return state;
 
@@ -85,8 +102,9 @@ export function workspaceReducer(state, action) {
         state.plotScope.plotId === scope.plotId &&
         state.plotScope.farmId === scope.farmId &&
         state.plotScope.tenantId === scope.tenantId &&
-        state.plotScope.cropCycleId === scope.cropCycleId &&
-        state.plotScope.geometryHash === scope.geometryHash;
+        (state.plotScope.cropCycleId || null) === (scope.cropCycleId || null) &&
+        (state.plotScope.geometryHash || null) === (scope.geometryHash || null) &&
+        (state.plotScope.geometryVersion ?? null) === (scope.geometryVersion ?? null);
 
       if (isSamePlot) {
         return state;
@@ -139,8 +157,44 @@ export function workspaceReducer(state, action) {
     }
 
     case "SNAPSHOT_SELECTED": {
-      const { snapshotId, capturedAt, publicationDigest, authorityStatus } = action.payload;
-      if (!snapshotId) return state;
+      const {
+        snapshotId,
+        capturedAt,
+        publicationDigest,
+        authorityStatus = "UNAVAILABLE",
+        generationId,
+        plotId,
+        tenantId,
+        cropCycleId,
+      } = action.payload || {};
+
+      // Snapshot cleared or unavailable
+      if (!snapshotId) {
+        return {
+          ...state,
+          publication: {
+            snapshotId: null,
+            capturedAt: null,
+            publicationDigest: null,
+            authorityStatus: "UNAVAILABLE",
+            isStale: true,
+          },
+        };
+      }
+
+      // Reject snapshot if it targets a stale generation or wrong plot/tenant scope
+      if (typeof generationId === "number" && generationId !== state.generationId) {
+        return state;
+      }
+      if (plotId && plotId !== state.plotScope.plotId) {
+        return state;
+      }
+      if (tenantId && tenantId !== state.ownerScope.tenantId) {
+        return state;
+      }
+      if (cropCycleId !== undefined && cropCycleId !== state.plotScope.cropCycleId) {
+        return state;
+      }
 
       let selectedEntity = state.selectedEntity;
       // If previous entity was selected from an older snapshot, keep selection reference
@@ -161,7 +215,7 @@ export function workspaceReducer(state, action) {
           snapshotId,
           capturedAt: capturedAt || null,
           publicationDigest: publicationDigest || null,
-          authorityStatus: authorityStatus || "CERTIFIED",
+          authorityStatus: authorityStatus || "UNAVAILABLE",
           isStale: false,
         },
         selectedEntity,
@@ -184,7 +238,12 @@ export function workspaceReducer(state, action) {
         } else if (state.clocks.scientificAsOf && cursorTimestamp < state.clocks.scientificAsOf) {
           activeTimeMode = "HISTORICAL";
         } else {
-          activeTimeMode = "LATEST";
+          const referenceTime = state.clocks.operationalObserved || state.clocks.scientificAsOf;
+          if (referenceTime && cursorTimestamp > referenceTime) {
+            activeTimeMode = "FORECAST";
+          } else {
+            activeTimeMode = "LATEST";
+          }
         }
       }
 
@@ -247,19 +306,24 @@ export function workspaceReducer(state, action) {
     }
 
     case "SCENARIO_STARTED": {
-      const { scenarioId, scenarioName, parameters } = action.payload;
+      const {
+        scenarioId = "scenario-default",
+        scenarioName = "Hypothetical Scenario",
+        parameters = {},
+        simulationTime = null,
+      } = action.payload || {};
       return {
         ...state,
         scenario: {
           isActive: true,
-          scenarioId: scenarioId || `scenario-${Date.now()}`,
-          scenarioName: scenarioName || "Hypothetical Scenario",
-          modifiedForcingParameters: parameters || {},
+          scenarioId,
+          scenarioName,
+          modifiedForcingParameters: parameters,
         },
         clocks: {
           ...state.clocks,
           activeTimeMode: "SCENARIO",
-          scenarioSimulationTime: new Date().toISOString(),
+          scenarioSimulationTime: simulationTime || state.clocks.cursorTimestamp || state.clocks.scientificAsOf || null,
         },
       };
     }
@@ -309,9 +373,15 @@ export function workspaceReducer(state, action) {
     }
 
     case "REQUEST_INVALIDATED": {
+      const isCertified = state.publication.authorityStatus === "CERTIFIED";
       return {
         ...state,
         generationId: state.generationId + 1,
+        publication: {
+          ...state.publication,
+          isStale: true,
+          authorityStatus: isCertified ? "CERTIFIED" : "UNAVAILABLE",
+        },
         activeError: action.payload?.reason || null,
       };
     }

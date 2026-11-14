@@ -61,14 +61,16 @@ Run rapid plot switch, 3 simultaneous tool opens, failed fetch and snap switch; 
 - **R4:** A2/A8 inspect actual browser where UI changes, cleanup/RTL/perf and no invisible regression.
 - **R5:** A0 records exact SHA, test receipts, explicit `GO/CONDITIONAL/HOLD`, unresolved risks and rollback.
 
-### Verification Matrix & Acceptance Receipts (November 14, 2026)
-- **P03-G01 Discard Cross-Tenant / Cross-Plot Late Response:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 1).
-- **P03-G02 Selection Isolation Across Snapshots:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 2).
-- **P03-G03 Clock Separation (Live Telemetry vs Scientific As-Of):** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 3).
-- **P03-G04 Invalidation on Scope Change (Plot / Crop Cycle):** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 4).
-- **P03-G05 Unified Time Cursor with Semantic Classification:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 5).
-- **P03-G06 Generation Bump on Invalidation:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 6).
-- **Frontend Test Suite:** 156/156 passed (`node --experimental-vm-modules --test`).
+### Verification Matrix & Acceptance Receipts (November 14, 2026 · P03-R1 Remediation)
+- **P03-F01 & P03-G01 Discard Cross-Tenant / Cross-Plot Late Response:** Verified via live mutable state ref check in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 1) even when fetch resolves after transition.
+- **P03-F02 Concurrent Request Controller Independence:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 2) with 3 concurrent requests where early completion does not delete sibling controllers.
+- **P03-F03 Verified Server Scope:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 3) for `mapFarm` (userId/ownerId), `mapPlot` (geometryHash/geometryVersion), `mapCropCycle` (id), and `page.tsx` verifiedScope passing.
+- **P03-F04 Loss-of-Applicability Publication Invalidation:** Verified in `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 4) and reducer tests, enforcing that lost assessment applicability resets authority to UNAVAILABLE and marks isStale: true.
+- **P03 Reducer Purity & Determinism:** Verified in `tests/frontend/plot-workspace-p03-reducer.test.mjs` (test 7) with zero non-deterministic Date calls inside reducer.
+- **P03 Reducer Scope Gates & Temporal Modes:** Verified in `tests/frontend/plot-workspace-p03-reducer.test.mjs` (tests 8-11), classifying FORECAST, HISTORICAL, LATEST, SCENARIO and rejecting mismatched scopes.
+- **P03-G02 Selection Isolation Across Snapshots:** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 5).
+- **P03-G03 Clock Separation (Live Telemetry vs Scientific As-Of):** Verified by `tests/frontend/plot-workspace-p03-concurrency.test.mjs` (test 6).
+- **Frontend Test Suite:** 161/161 passed (`node --experimental-vm-modules --test`).
 - **Python Scientific Suite:** 172/172 passed (`pytest`).
 - **Production Build:** 63/63 routes compiled successfully (`npm run build`).
-- **TypeScript:** 0 errors (`npx tsc --noEmit`).
+- **TypeScript:** 0 errors without `as any` casting (`npx tsc --noEmit`).

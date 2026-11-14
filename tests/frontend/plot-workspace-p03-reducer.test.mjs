@@ -201,3 +201,177 @@ test("P03 Reducer: SCENARIO_STARTED enters sandbox mode without modifying scient
   assert.equal(s3.scenario.isActive, false);
   assert.equal(s3.clocks.activeTimeMode, "LATEST");
 });
+
+test("P03 Reducer: SCENARIO_STARTED is pure and deterministic (no Date.now() or new Date() side-effects)", () => {
+  const s0 = createInitialWorkspaceState();
+  const action = {
+    type: "SCENARIO_STARTED",
+    payload: {
+      scenarioId: "sc-fixed-id",
+      scenarioName: "Deterministic Drought",
+      parameters: { et0: 1.2 },
+      simulationTime: "2026-11-14T12:00:00Z",
+    },
+  };
+
+  const res1 = workspaceReducer(s0, action);
+  const res2 = workspaceReducer(s0, action);
+
+  assert.deepEqual(res1, res2, "Reducer outputs must be strictly deterministic across calls");
+  assert.equal(res1.scenario.scenarioId, "sc-fixed-id");
+  assert.equal(res1.clocks.scenarioSimulationTime, "2026-11-14T12:00:00Z");
+});
+
+test("P03 Reducer: SNAPSHOT_SELECTED enforces generation, plot, tenant, and crop cycle scoping", () => {
+  const s0 = createInitialWorkspaceState({
+    tenantId: "tenant-A",
+    farmId: "farm-A",
+    plotId: "plot-A",
+    cropCycleId: "cycle-A",
+  });
+
+  // 1. Stale generationId must be rejected
+  const sStaleGen = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-late-gen",
+      generationId: s0.generationId - 1,
+      plotId: "plot-A",
+      tenantId: "tenant-A",
+    },
+  });
+  assert.equal(sStaleGen, s0, "Snapshot targeting stale generationId must be rejected");
+
+  // 2. Mismatched plotId must be rejected
+  const sWrongPlot = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-wrong-plot",
+      generationId: s0.generationId,
+      plotId: "plot-FOREIGN",
+      tenantId: "tenant-A",
+    },
+  });
+  assert.equal(sWrongPlot, s0, "Snapshot targeting foreign plotId must be rejected");
+
+  // 3. Mismatched tenantId must be rejected
+  const sWrongTenant = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-wrong-tenant",
+      generationId: s0.generationId,
+      plotId: "plot-A",
+      tenantId: "tenant-FOREIGN",
+    },
+  });
+  assert.equal(sWrongTenant, s0, "Snapshot targeting foreign tenantId must be rejected");
+
+  // 4. Mismatched cropCycleId must be rejected
+  const sWrongCycle = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-wrong-cycle",
+      generationId: s0.generationId,
+      plotId: "plot-A",
+      tenantId: "tenant-A",
+      cropCycleId: "cycle-OTHER",
+    },
+  });
+  assert.equal(sWrongCycle, s0, "Snapshot targeting foreign cropCycleId must be rejected");
+
+  // 5. Cleared snapshot (snapshotId: null) explicitly marks UNAVAILABLE and isStale
+  const sValid = workspaceReducer(s0, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: "snap-valid",
+      capturedAt: "2026-11-14T10:00:00Z",
+      authorityStatus: "CERTIFIED",
+      generationId: s0.generationId,
+      plotId: "plot-A",
+      tenantId: "tenant-A",
+      cropCycleId: "cycle-A",
+    },
+  });
+  assert.equal(sValid.publication.snapshotId, "snap-valid");
+  assert.equal(sValid.publication.authorityStatus, "CERTIFIED");
+
+  const sCleared = workspaceReducer(sValid, {
+    type: "SNAPSHOT_SELECTED",
+    payload: {
+      snapshotId: null,
+      authorityStatus: "UNAVAILABLE",
+    },
+  });
+  assert.equal(sCleared.publication.snapshotId, null);
+  assert.equal(sCleared.publication.authorityStatus, "UNAVAILABLE");
+  assert.equal(sCleared.publication.isStale, true);
+});
+
+test("P03 Reducer: TIME_SET classifies FORECAST when cursor is past operational telemetry", () => {
+  let state = createInitialWorkspaceState();
+  state = workspaceReducer(state, {
+    type: "TELEMETRY_SYNCED",
+    payload: { observedAt: "2026-11-14T12:00:00Z" },
+  });
+
+  // Cursor placed 6 hours into future
+  state = workspaceReducer(state, {
+    type: "TIME_SET",
+    payload: { cursorTimestamp: "2026-11-14T18:00:00Z" },
+  });
+
+  assert.equal(state.clocks.activeTimeMode, "FORECAST");
+});
+
+test("P03 Reducer: REQUEST_INVALIDATED marks uncertified publication UNAVAILABLE and stale", () => {
+  let state = createInitialWorkspaceState();
+  state = {
+    ...state,
+    publication: {
+      snapshotId: "pending-snap",
+      capturedAt: "2026-11-14T10:00:00Z",
+      publicationDigest: "sha256:pending",
+      authorityStatus: "PENDING",
+      isStale: false,
+    },
+  };
+
+  const next = workspaceReducer(state, {
+    type: "REQUEST_INVALIDATED",
+    payload: { reason: "network_timeout" },
+  });
+
+  assert.equal(next.generationId, state.generationId + 1);
+  assert.equal(next.publication.authorityStatus, "UNAVAILABLE");
+  assert.equal(next.publication.isStale, true);
+  assert.equal(next.activeError, "network_timeout");
+});
+
+test("P03 Reducer: PLOT_CHANGED invalidates when geometryVersion changes", () => {
+  const s0 = createInitialWorkspaceState({
+    tenantId: "tenant-1",
+    farmId: "farm-1",
+    plotId: "plot-1",
+    cropCycleId: "cycle-1",
+    geometryHash: "gh-1",
+    geometryVersion: 1,
+  });
+
+  const s1 = workspaceReducer(s0, {
+    type: "PLOT_CHANGED",
+    payload: {
+      scope: {
+        tenantId: "tenant-1",
+        farmId: "farm-1",
+        plotId: "plot-1",
+        cropCycleId: "cycle-1",
+        geometryHash: "gh-1",
+        geometryVersion: 2, // version incremented
+      },
+    },
+  });
+
+  assert.notEqual(s1, s0);
+  assert.equal(s1.generationId, s0.generationId + 1, "Geometry version change must bump generation");
+  assert.equal(s1.plotScope.geometryVersion, 2);
+});

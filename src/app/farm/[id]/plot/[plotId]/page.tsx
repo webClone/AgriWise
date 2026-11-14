@@ -25,6 +25,15 @@ export default async function PlotDetailsPage({ params }: { params: Promise<{ id
   const { plot, farm, cropCycles } = routeContext;
   const currentCrop = cropCycles.find(c => isActiveCropCycleStatus(c.status));
 
+  const verifiedScope = {
+    tenantId: session.userId,
+    farmId,
+    plotId,
+    cropCycleId: currentCrop?.id || null,
+    geometryHash: (plot as any)?.geometryHash || null,
+    geometryVersion: (plot as any)?.geometryVersion ?? null,
+  };
+
   return (
     <div className="w-full h-full" style={{ minHeight: 'calc(100vh - 48px)' }} suppressHydrationWarning={true}>
       <PlotWorkspaceFeatureGate
@@ -36,6 +45,7 @@ export default async function PlotDetailsPage({ params }: { params: Promise<{ id
           farm, 
           crop: currentCrop, 
         }}
+        verifiedScope={verifiedScope}
       />
     </div>
   );

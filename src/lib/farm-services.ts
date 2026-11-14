@@ -4,6 +4,7 @@ import { cache } from "react";
 import { getPlotRepresentativePoint, isValidWgs84Point } from "@/lib/agribrain/plot-geometry";
 import { getSession } from "@/lib/session";
 import { activeCropCyclePrismaFilter } from "@/lib/agribrain/crop-cycle-status.mjs";
+import { computeGeometryHash } from "@/lib/agribrain/parcel-assessment-contract";
 
 function ownerScope(userId: string) {
   return { farm: { userId } };
@@ -25,6 +26,8 @@ function mapPlot(plot: any) {
     irrigation: plot.irrigation,
     farmId: plot.farmId,
     geoJson: plot.geoJson,
+    geometryHash: plot.geometryHash || (plot.geoJson ? computeGeometryHash(plot.geoJson) : null),
+    geometryVersion: plot.geometryVersion ?? null,
     perimeter: plot.perimeter,
     ownership: plot.ownership,
     irrigationDistrict: plot.irrigationDistrict,
@@ -39,6 +42,8 @@ function mapPlot(plot: any) {
 function mapFarm(farm: any) {
   return {
     id: farm.id,
+    userId: farm.userId || null,
+    ownerId: farm.userId || null,
     name: farm.name,
     nameAr: farm.nameAr,
     wilaya: farm.wilaya,

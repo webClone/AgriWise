@@ -8,6 +8,7 @@
  */
 import PlotDashboard from "@/components/farm/PlotDashboard";
 import PlotWorkspaceShell from "./PlotWorkspaceShell";
+import type { PlotScope } from "./workspace-types";
 
 export interface PlotWorkspaceProps {
   farm: Record<string, unknown> | null;
@@ -16,6 +17,7 @@ export interface PlotWorkspaceProps {
   context: Record<string, unknown> | null;
   plotId?: string;
   farmId?: string;
+  verifiedScope?: PlotScope;
 }
 
 export const isPlotWorkspaceV2Enabled = () =>

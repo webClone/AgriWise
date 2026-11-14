@@ -13,6 +13,7 @@ import {
 } from "./PlotWorkspaceProvider";
 import { useWorkspaceStateBridging } from "./useWorkspaceStateBridging";
 import type { PlotWorkspaceProps } from "./PlotWorkspaceFeatureGate";
+import type { PlotScope } from "./workspace-types";
 import "./plot-workspace-v2.css";
 
 function WorkspaceStateBridge() {
@@ -103,22 +104,30 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
 export default function PlotWorkspaceShell(props: PlotWorkspaceProps) {
   const farmId = props.farmId || String(props.farm?.id || "");
   const plotId = props.plotId || String(props.plot?.id || "");
-  const tenantId = String((props.farm as any)?.userId || (props.farm as any)?.ownerId || "");
-  const cropCycleId = (props.context?.crop as any)?.id || null;
-  const geometryHash = (props.plot as any)?.geometryHash || (props.plot as any)?.geometry_hash || null;
-  const geometryVersion = (props.plot as any)?.geometryVersion || null;
+  const tenantId =
+    props.verifiedScope?.tenantId ||
+    String((props.farm as any)?.userId || (props.farm as any)?.ownerId || "");
+  const cropCycleId =
+    props.verifiedScope?.cropCycleId ??
+    ((props.context?.crop as any)?.id || null);
+  const geometryHash =
+    props.verifiedScope?.geometryHash ??
+    ((props.plot as any)?.geometryHash || (props.plot as any)?.geometry_hash || null);
+  const geometryVersion =
+    props.verifiedScope?.geometryVersion ??
+    ((props.plot as any)?.geometryVersion ?? null);
+
+  const scope: PlotScope = props.verifiedScope || {
+    tenantId,
+    farmId,
+    plotId,
+    cropCycleId,
+    geometryHash,
+    geometryVersion,
+  };
 
   return (
-    <PlotWorkspaceProvider
-      scope={{
-        tenantId,
-        farmId,
-        plotId,
-        cropCycleId,
-        geometryHash,
-        geometryVersion,
-      }}
-    >
+    <PlotWorkspaceProvider scope={scope}>
       <WorkspaceStateBridge />
       <PlotWorkspaceShellContent {...props} />
     </PlotWorkspaceProvider>

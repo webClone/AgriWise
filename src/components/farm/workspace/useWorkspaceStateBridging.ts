@@ -17,10 +17,32 @@ export function useWorkspaceStateBridging() {
   // 1. Bridge ParcelAssessment (Scientific Publication Authority)
   const assessmentContext = useParcelAssessment();
   const assessment = assessmentContext?.assessment;
+  const assessmentStatus = assessmentContext?.state?.status;
   const lastAssessedDigestRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!assessment) return;
+    // When assessment becomes unavailable, invalid, superseded or null,
+    // explicitly invalidate the derived workspace publication (P03-F04)
+    if (!assessment || assessmentStatus !== "ready") {
+      if (lastAssessedDigestRef.current !== null) {
+        lastAssessedDigestRef.current = null;
+        dispatch({
+          type: "SNAPSHOT_SELECTED",
+          payload: {
+            snapshotId: null,
+            capturedAt: null,
+            publicationDigest: null,
+            authorityStatus: "UNAVAILABLE",
+            generationId: state.generationId,
+            plotId: state.plotScope.plotId,
+            tenantId: state.ownerScope.tenantId,
+            cropCycleId: state.plotScope.cropCycleId,
+          },
+        });
+      }
+      return;
+    }
+
     const digest =
       assessment.identity.publicationReceiptHash ||
       assessment.identity.receiptHash ||
@@ -34,15 +56,22 @@ export function useWorkspaceStateBridging() {
         snapshotId: assessment.identity.snapshotId,
         capturedAt: assessment.identity.evidenceCutoffAt || assessment.identity.publishedAt,
         publicationDigest: digest,
-        authorityStatus:
-          assessmentContext?.state?.status === "ready"
-            ? "CERTIFIED"
-            : assessmentContext?.state?.status === "unavailable"
-            ? "UNAVAILABLE"
-            : "PENDING",
+        authorityStatus: "CERTIFIED",
+        generationId: state.generationId,
+        plotId: state.plotScope.plotId,
+        tenantId: state.ownerScope.tenantId,
+        cropCycleId: state.plotScope.cropCycleId,
       },
     });
-  }, [assessment, assessmentContext?.state, dispatch]);
+  }, [
+    assessment,
+    assessmentStatus,
+    state.generationId,
+    state.plotScope.plotId,
+    state.ownerScope.tenantId,
+    state.plotScope.cropCycleId,
+    dispatch,
+  ]);
 
   // 2. Bridge PlotTelemetry (Live Operational Telemetry)
   const telemetryContext = usePlotTelemetry();
