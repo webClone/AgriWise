@@ -216,6 +216,8 @@ body {
 .deckgl-blend-screen #deckgl-overlay {
   /* V63B: No CSS blend mode — the surface overlay handles transparency via per-pixel alpha.
      CSS blend modes (overlay, multiply) interfere with smooth/earth-tone surface colors. */
+  width: 100% !important;
+  height: 100% !important;
   mix-blend-mode: normal !important;
 }
 

@@ -228,6 +228,16 @@ export default function PlotMapShell(props: PlotMapShellProps) {
       const entry = entries[0];
       if (entry && entry.contentRect.width > 0 && entry.contentRect.height > 0) {
         setDimensions({ width: entry.contentRect.width, height: entry.contentRect.height });
+        const canvas = containerRef.current?.querySelector<HTMLCanvasElement>("#deckgl-overlay");
+        if (canvas) {
+          const dpr = window.devicePixelRatio || 1;
+          const targetW = Math.round(entry.contentRect.width * dpr);
+          const targetH = Math.round(entry.contentRect.height * dpr);
+          if (canvas.width !== targetW || canvas.height !== targetH) {
+            canvas.width = targetW;
+            canvas.height = targetH;
+          }
+        }
       }
     });
 
@@ -824,6 +834,9 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     <div ref={containerRef} className="absolute inset-0 w-full h-full overflow-hidden deckgl-blend-screen bg-slate-950">
       <DeckGL
         id="deckgl-overlay"
+        width="100%"
+        height="100%"
+        style={{ width: "100%", height: "100%", position: "absolute", inset: 0 }}
         viewState={viewState}
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         onViewStateChange={({ viewState }) => setViewState(viewState as any)}

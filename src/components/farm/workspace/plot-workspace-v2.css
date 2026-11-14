@@ -137,6 +137,18 @@
   min-width: 0;
   min-height: 0;
 }
+.pw-spatial-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.pw-spatial-canvas #deckgl-overlay,
+.pw-spatial-canvas-host #deckgl-overlay,
+.pw-spatial-canvas canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
 .pw-legacy-map-host > .aw-dashboard {
   width: 100%;
   height: 100%;
