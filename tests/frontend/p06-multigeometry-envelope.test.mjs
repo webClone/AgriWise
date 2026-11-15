@@ -62,3 +62,17 @@ test("P06.03: digest includes full geometry not only its bbox",()=>{
  const b=make({type:"LineString",coordinates:[[2,36],[2.0005,36.0005],[2.001,36.001]]});
  assert.notEqual(a.provenance.record_digest,b.provenance.record_digest);
 });
+
+test("P06.03: digest and explicit farm scope prevent transformed-geometry tampering",()=>{
+ const original=make(line);
+ const clone=JSON.parse(JSON.stringify(original));
+ clone.geometry.coordinates[1][0]=2.5;
+ assert.equal(validateWorkspaceFeatureEnvelope(clone,scope).valid,false);
+ assert.ok(validateWorkspaceFeatureEnvelope(clone,scope).errors.some(x=>x.includes("record_digest")));
+ assert.equal(validateWorkspaceFeatureEnvelope(original,{tenant_id:"t",farm_id:"foreign",plot_id:"p"}).valid,false);
+});
+test("P06.03: a polygon cannot claim point-pin eligibility",()=>{
+ const clone=JSON.parse(JSON.stringify(make(poly)));
+ clone.display_eligibility.eligible_for_map_pin=true;
+ assert.equal(validateWorkspaceFeatureEnvelope(clone,scope).valid,false);
+});

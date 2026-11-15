@@ -112,5 +112,5 @@ export function createWorkspaceFeatureEnvelope(params: CreateFeatureEnvelopePara
 
 export function validateWorkspaceFeatureEnvelope(
   envelope: unknown,
-  expectedScope?: { tenant_id?: string; tenantId?: string; plot_id?: string; plotId?: string }
+  expectedScope?: { tenant_id?: string; tenantId?: string; farm_id?: string; farmId?: string; plot_id?: string; plotId?: string }
 ): { valid: boolean; errors: string[] };

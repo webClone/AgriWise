@@ -234,9 +234,14 @@ export function validateWorkspaceFeatureEnvelope(envelope, expectedScope) {
   if (expectedScope) {
     const expectedTenant = expectedScope.tenant_id || expectedScope.tenantId;
     const expectedPlot = expectedScope.plot_id || expectedScope.plotId;
+    const expectedFarm = expectedScope.farm_id || expectedScope.farmId;
 
     if (expectedTenant && envelope.owner_scope?.tenant_id !== expectedTenant) {
       errors.push(`tenant_id mismatch: expected "${expectedTenant}", got "${envelope.owner_scope?.tenant_id}"`);
+    }
+
+    if (expectedFarm && envelope.owner_scope?.farm_id !== expectedFarm) {
+      errors.push(`farm_id mismatch: expected "${expectedFarm}", got "${envelope.owner_scope?.farm_id}"`);
     }
 
     if (expectedPlot && envelope.owner_scope?.plot_id !== expectedPlot) {
@@ -250,9 +255,27 @@ export function validateWorkspaceFeatureEnvelope(envelope, expectedScope) {
     errors.push("invalid or unsupported WGS84 workspace geometry");
   }
 
+  // A digest is a tamper-evident checksum, not a device signature. Check all
+  // spatial coordinates and identity fields, never only the feature bbox.
+  const canonicalForDigest = {
+    contract_version: envelope.contract_version,
+    envelope_id: envelope.envelope_id,
+    entity_kind: envelope.entity_kind,
+    entity_id: envelope.entity_id,
+    source_version: envelope.source_version,
+    owner_scope: envelope.owner_scope,
+    geometry: envelope.geometry,
+    spatial_support: envelope.spatial_support,
+    epistemic_class: envelope.epistemic_class,
+    temporal_extent: envelope.temporal_extent,
+    properties: envelope.properties,
+  };
+  if (envelope.provenance?.record_digest !== computeRecordDigest(canonicalForDigest)) {
+    errors.push("record_digest mismatch");
+  }
   // Map pin consistency check
   if (envelope.display_eligibility?.eligible_for_map_pin === true) {
-    if (!envelope.geometry || envelope.spatial_support?.has_location !== true) {
+    if (!envelope.geometry || envelope.geometry.type !== "Point" || envelope.spatial_support?.has_location !== true) {
       errors.push("eligible_for_map_pin is true but geometry or has_location is missing");
     }
     const trustedSources = ["REGISTERED_HARDWARE", "OBSERVED_GPS", "SURVEYED"];
@@ -262,7 +285,7 @@ export function validateWorkspaceFeatureEnvelope(envelope, expectedScope) {
   }
 
   if (envelope.display_eligibility?.eligible_for_map_geometry === true) {
-    if (!envelope.geometry || envelope.geometry.type==="Point" || envelope.spatial_support?.has_location !== true) errors.push("eligible_for_map_geometry is true without valid non-point geometry");
+    if (!envelope.geometry || !["LineString","Polygon","MultiPolygon"].includes(envelope.geometry.type) || envelope.spatial_support?.has_location !== true) errors.push("eligible_for_map_geometry is true without valid non-point geometry");
     if (!["REGISTERED_HARDWARE","OBSERVED_GPS","SURVEYED"].includes(envelope.spatial_support?.location_source)) errors.push("untrusted geometry location source");
   }
   return {
