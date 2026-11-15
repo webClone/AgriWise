@@ -47,7 +47,7 @@ export default function WorkspaceContextActionsP04({
     const sensorEntity =
       workspaceEntities.find(
         (e) => e.entity_id === selection.id || e.envelope_id === selection.id
-      ) || ((selection.metadata as unknown) as WorkspaceFeatureEnvelope | undefined);
+      );
 
     const props = ((sensorEntity?.properties || {}) as Record<string, any>);
     const coords = sensorEntity?.geometry?.type === "Point" ? sensorEntity.geometry.coordinates : null;
@@ -169,7 +169,7 @@ export default function WorkspaceContextActionsP04({
     const cameraEntity =
       workspaceEntities.find(
         (e) => e.entity_id === selection.id || e.envelope_id === selection.id
-      ) || ((selection.metadata as unknown) as WorkspaceFeatureEnvelope | undefined);
+      );
 
     const props = ((cameraEntity?.properties || {}) as Record<string, any>);
     const coords = cameraEntity?.geometry?.type === "Point" ? cameraEntity.geometry.coordinates : null;
@@ -265,7 +265,7 @@ export default function WorkspaceContextActionsP04({
     const droneEntity =
       workspaceEntities.find(
         (e) => e.entity_id === selection.id || e.envelope_id === selection.id
-      ) || ((selection.metadata as unknown) as WorkspaceFeatureEnvelope | undefined);
+      );
 
     const props = ((droneEntity?.properties || {}) as Record<string, any>);
     const coords = droneEntity?.geometry?.type === "Point" ? droneEntity.geometry.coordinates : null;
@@ -362,7 +362,7 @@ export default function WorkspaceContextActionsP04({
     const obsEntity =
       workspaceEntities.find(
         (e) => e.entity_id === selection.id || e.envelope_id === selection.id
-      ) || ((selection.metadata as unknown) as WorkspaceFeatureEnvelope | undefined);
+      );
 
     const props = ((obsEntity?.properties || {}) as Record<string, any>);
     const coords = obsEntity?.geometry?.type === "Point" ? obsEntity.geometry.coordinates : null;

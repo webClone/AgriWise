@@ -4,6 +4,7 @@ import { authenticatedUserId } from "@/lib/tenant-authorization";
 import {
   createWorkspaceFeatureEnvelope,
   validateWorkspaceFeatureEnvelope,
+  WORKSPACE_FEATURE_CONTRACT_VERSION,
   type WorkspaceFeatureEnvelope,
   type EntityKind,
 } from "@/lib/agribrain/workspace-feature-envelope";
@@ -477,7 +478,7 @@ export async function GET(
 
     return NextResponse.json({
       success: true,
-      contract_version: "2026.11-p05.1",
+      contract_version: WORKSPACE_FEATURE_CONTRACT_VERSION,
       plot_id: plotId,
       tenant_id: tenantId,
       total: filtered.length,

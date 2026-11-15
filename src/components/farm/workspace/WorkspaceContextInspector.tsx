@@ -51,7 +51,7 @@ export default function WorkspaceContextInspector({
     selectedEntity.kind && selectedEntity.id
       ? workspaceEntities.find(
           (e) => e.entity_id === selectedEntity.id || e.envelope_id === selectedEntity.id
-        ) || ((selectedEntity.metadata as unknown) as WorkspaceFeatureEnvelope | undefined)
+        )
       : null;
 
   const snapshotId =
