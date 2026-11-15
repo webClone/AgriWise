@@ -16,3 +16,9 @@
 .p04-investigation-footer{padding:12px 17px;border-top:1px solid #ffffff1c;color:#aac0b0;font-size:10px;line-height:1.4}
 @media(max-width:820px){.p04-map-context{inset-inline-start:8px;inset-inline-end:8px;max-width:none;inset-block-end:80px}.p04-investigation,.p04-investigation.p04-mode-split,.p04-investigation.p04-mode-workbench{position:absolute;inset-inline:8px;width:auto;inset-block:calc(var(--pw-topbar-clearance,95px) + 10px) 78px}.p04-context-actions button{font-size:11px;padding:8px}}
 @media(max-width:410px){.p04-map-context{padding:9px}.p04-context-actions{gap:5px}.p04-context-actions button{font-size:10px}.p04-investigation-header{padding:13px}}
+
+/* P06: Entity chronology is observational context, never synthetic model history. */
+.p06-temporal-entity{margin-top:18px;padding:13px;border:1px solid #a5c9ad42;border-radius:10px;background:#152d25}
+.p06-temporal-entity h4{margin:0 0 10px;font-size:13px;color:#deefe1}
+.p06-time-guidance{border-inline-start:3px solid #d5b378;padding:8px 10px;background:#473e261f}
+.p06-time-digest{display:block;margin-top:12px;font-size:10px;line-height:1.6;color:#aabfb1;overflow-wrap:anywhere}

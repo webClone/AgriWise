@@ -123,6 +123,7 @@ export default function WorkspaceContextActionsP04({
         )}
 
         <div className="p04-context-actions">
+          <button type="button" onClick={() => onLaunch("compare")}><History size={15} /> Compare time</button>
           <button
             type="button"
             onClick={() => onOpenSensor && onOpenSensor(String(sensorEntity?.entity_id || deviceId))}
@@ -224,6 +225,7 @@ export default function WorkspaceContextActionsP04({
         )}
 
         <div className="p04-context-actions">
+          <button type="button" onClick={() => onLaunch("compare")}><History size={15} /> Compare time</button>
           <button
             type="button"
             onClick={() => onOpenTool && onOpenTool("evidence")}
@@ -320,6 +322,7 @@ export default function WorkspaceContextActionsP04({
         )}
 
         <div className="p04-context-actions">
+          <button type="button" onClick={() => onLaunch("compare")}><History size={15} /> Compare time</button>
           <button
             type="button"
             onClick={() => onOpenTool && onOpenTool("drone")}
@@ -415,6 +418,7 @@ export default function WorkspaceContextActionsP04({
         )}
 
         <div className="p04-context-actions">
+          <button type="button" onClick={() => onLaunch("compare")}><History size={15} /> Compare time</button>
           <button
             type="button"
             onClick={() => onOpenTool && onOpenTool("evidence")}

@@ -220,7 +220,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
         />
         {investigation && (
           <WorkspaceInvestigationHostP04
-            kind={investigation} mode={hostMode}
+            kind={investigation} mode={hostMode} workspaceEntities={entities}
             onMode={setHostMode} onClose={closeInvestigation}
           />
         )}

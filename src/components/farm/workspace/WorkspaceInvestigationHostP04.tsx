@@ -7,6 +7,8 @@ import { useParcelAssessment } from "@/hooks/useParcelAssessment";
 import { usePlotWorkspace } from "./PlotWorkspaceProvider";
 import { evaluateZoneInvestigationContext } from "./p04-context-runtime.mjs";
 import type { P04InvestigationKind } from "./WorkspaceContextActionsP04";
+import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
+import { buildEntityTemporalComparison } from "./p06-time-comparison.mjs";
 
 export type P04HostMode = "context" | "split" | "workbench";
 
@@ -18,10 +20,11 @@ const kindTitle: Record<P04InvestigationKind, string> = {
 const kindIcon = { water: Droplets, compare: History, simulate: FlaskConical };
 
 export default function WorkspaceInvestigationHostP04({
-  kind, mode, onClose, onMode,
+  kind, mode, onClose, onMode, workspaceEntities = [],
 }: {
   kind: P04InvestigationKind;
   mode: P04HostMode;
+  workspaceEntities?: WorkspaceFeatureEnvelope[];
   onClose: () => void;
   onMode: (mode: P04HostMode) => void;
 }) {
@@ -53,6 +56,11 @@ export default function WorkspaceInvestigationHostP04({
   const zone = context.zoneId && context.canShowZoneNumbers
     ? (layer10.data?.zones?.find(z => z.zone_id === context.zoneId) ?? null)
     : null;
+  const selectedEnvelope = workspaceEntities.find(e =>
+    e.entity_kind === state.selectedEntity.kind &&
+    (e.entity_id === state.selectedEntity.id || e.envelope_id === state.selectedEntity.id)
+  ) ?? null;
+  const entityTime = buildEntityTemporalComparison({ workspace: state, entity: selectedEnvelope });
   const Icon = kindIcon[kind];
   const fmt = (value: unknown) => typeof value === "number" && Number.isFinite(value)
     ? value.toFixed(3) : "Unavailable";
@@ -112,16 +120,39 @@ export default function WorkspaceInvestigationHostP04({
             <h3>Choose a temporal basis</h3>
             <div className="p04-temporal-readout">
               <div><span>Scientific cutoff</span><strong>{state.clocks.scientificAsOf ?? "Not available"}</strong></div>
-              <div><span>Operational observation</span><strong>{state.clocks.operationalObserved ?? "Not available"}</strong></div>
-              <div><span>Selected time</span><strong>{state.clocks.cursorTimestamp ?? "Not selected"}</strong></div>
+              <div><span>Scientific authority</span><strong>{state.publication.authorityStatus}{state.publication.isStale ? " · stale" : ""}</strong></div>
+              <div><span>Operational clock</span><strong>{state.clocks.operationalObserved ?? "Not available"}</strong></div>
+              <div><span>Selected UI cursor</span><strong>{state.clocks.cursorTimestamp ?? "Not selected"}</strong></div>
             </div>
+            {state.selectedEntity.kind !== null && state.selectedEntity.kind !== "ZONE" && (
+              <div className="p06-temporal-entity" data-testid="p06-entity-time-context" data-context-status={entityTime.status}>
+                <h4>Selected entity · temporal evidence</h4>
+                {entityTime.status === "matched" ? (
+                  <>
+                    <div className="p04-temporal-readout">
+                      <div><span>Entity</span><strong>{entityTime.entityKind} · {entityTime.entityId}</strong></div>
+                      <div><span>Epistemic class</span><strong>{entityTime.epistemicClass}</strong></div>
+                      <div><span>Observed at</span><strong>{entityTime.observedAt ?? "Not registered"}</strong></div>
+                      <div><span>First available at</span><strong>{entityTime.firstAvailableAt ?? "Not established"}</strong></div>
+                      <div><span>Publication / upload time</span><strong>{entityTime.publishedAt ?? "Not registered"}</strong></div>
+                      <div><span>Observation vs scientific cutoff</span><strong>{entityTime.observationRelation}</strong></div>
+                      <div><span>Availability vs scientific cutoff</span><strong>{entityTime.availabilityRelation}</strong></div>
+                    </div>
+                    <p className="p06-time-guidance">{entityTime.guidance}</p>
+                    <small className="p06-time-digest">Envelope checksum: {entityTime.envelopeDigest ?? "Not available"} · A checksum is not a device signature or evidence-admission receipt.</small>
+                  </>
+                ) : (
+                  <p className="p04-evidence-empty">{entityTime.guidance} The workspace will not display stale or unscoped evidence.</p>
+                )}
+              </div>
+            )}
             {state.clocks.scientificAsOf && (
               <button type="button" className="p04-investigation-primary"
                 onClick={() => setTimeCursor(state.clocks.scientificAsOf!, "LATEST")}>
                 Select scientific cutoff time
               </button>
             )}
-            <p className="p04-evidence-empty">No dual-snapshot comparison is implied. Historical comparison needs two separately admitted scientific publications; live IoT never becomes historical proof.</p>
+            <p className="p04-evidence-empty">Chronological alignment only. No point-to-raster numerical comparison or second historical snapshot is computed. Publication cutoff, sensor observation, receipt availability, and operational clock remain independent; historical scientific admission is not inferred.</p>
           </div>
         )}
         {kind === "simulate" && (
