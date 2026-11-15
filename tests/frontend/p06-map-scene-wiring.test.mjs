@@ -12,6 +12,7 @@ const controls=read("src/components/farm/workspace/WorkspaceSceneControlsP06.tsx
 const reducer=read("src/components/farm/workspace/workspace-reducer.mjs");
 test("P06-G02/G03 raster, zones and entity pins remain independently gated",()=>{
  assert.match(map,/const surfaceLayers=showRaster/);
+ assert.match(map,/surfaceStack\.surfaceLayers\.filter\(Boolean\)/);
  assert.match(map,/const zoneLayers=showZones/);
  assert.match(map,/sceneVisibility\?\.\[layer\]/);
  assert.match(map,/getWorkspaceEntityPinsLayers/);

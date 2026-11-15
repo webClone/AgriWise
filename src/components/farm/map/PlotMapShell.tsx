@@ -584,7 +584,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     l10.renderPlan,
   ]);
   // Render-plan computation remains unchanged; layer absence invalidates the pixel receipt.
-  const surfaceLayers=showRaster?surfaceStack.surfaceLayers.map((layer:any)=>
+  const surfaceLayers=showRaster?surfaceStack.surfaceLayers.filter(Boolean).map((layer:any)=>
     layer.clone({opacity:(layer.props.opacity??1)*(sceneOpacity?.raster??1)})) : [];
   const renderMaterialization = surfaceStack.materialization;
   const experimentalRenderMaterialization = surfaceStack.experimentalMaterialization;
