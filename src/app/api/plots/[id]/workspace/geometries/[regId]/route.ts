@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authenticatedUserId } from "@/lib/tenant-authorization";
-import { validateGeometryRevisionInput } from "@/lib/agribrain/geometry-registration-policy.mjs";
+import {
+  validateGeometryRevisionInput,
+  validateParcelContainment,
+} from "@/lib/agribrain/geometry-registration-policy.mjs";
 import {
   geometryIntegrityDigest,
   projectWorkspaceGeometryRegistration,
 } from "@/lib/agribrain/geometry-registration-projection.mjs";
-import { validateParcelContainment } from "../route";
 
 const objectIdRegex = /^[a-f\d]{24}$/i;
 
@@ -104,7 +106,9 @@ export async function PATCH(
 
     // Validate parcel footprint containment if geometry is being revised
     if (input.geometry) {
-      const containment = validateParcelContainment(input.geometry, scope.geoJson);
+      const containment = validateParcelContainment(input.geometry, scope.geoJson, {
+        entityKind: record.entityKind,
+      });
       if (!containment.ok) {
         return NextResponse.json({ error: containment.error }, { status: 400 });
       }

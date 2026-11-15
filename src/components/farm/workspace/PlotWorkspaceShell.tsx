@@ -17,6 +17,7 @@ import WorkspaceInvestigationHostP04, { type P04HostMode } from "./WorkspaceInve
 import WorkspaceGeometryAuthoringHUD from "./WorkspaceGeometryAuthoringHUD";
 import WorkspaceGeometryLifecycleModal from "./WorkspaceGeometryLifecycleModal";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
+import type { GeometryEditingSession } from "@/lib/agribrain/geometry-authoring";
 import "./p04-investigation.css";
 import {
   PlotWorkspaceProvider,
@@ -56,6 +57,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   // P06.05 Authoring & Controlled Lifecycle State
   const [drawingKind, setDrawingKind] = useState<"DRONE_MISSION" | "FIELD_OBSERVATION" | null>(null);
   const [draftCoordinates, setDraftCoordinates] = useState<[number, number][]>([]);
+  const [editingSession, setEditingSession] = useState<GeometryEditingSession | null>(null);
   const [lifecycleModal, setLifecycleModal] = useState<{
     mode: "revise" | "revoke" | "history" | null;
     entity: WorkspaceFeatureEnvelope | null;
@@ -64,6 +66,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const handleStartDrawing = useCallback((kind: "DRONE_MISSION" | "FIELD_OBSERVATION") => {
     setDrawingKind(kind);
     setDraftCoordinates([]);
+    setEditingSession({ mode: "create" });
     clearSelection();
   }, [clearSelection]);
 
@@ -83,11 +86,13 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const handleCancelDrawing = useCallback(() => {
     setDrawingKind(null);
     setDraftCoordinates([]);
+    setEditingSession(null);
   }, []);
 
   const handleAuthoringComplete = useCallback(async (newEntity: WorkspaceFeatureEnvelope) => {
     setDrawingKind(null);
     setDraftCoordinates([]);
+    setEditingSession(null);
     await refetchEntities();
     selectSceneEntity(newEntity);
   }, [refetchEntities, selectSceneEntity]);
@@ -128,6 +133,19 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
       }
     }
     const kind = entity.entity_kind === "DRONE_MISSION" ? "DRONE_MISSION" : "FIELD_OBSERVATION";
+    const regId = (entity.provenance as any)?.registration_id || entity.entity_id;
+    const currentRevision = Number((entity.properties as any)?.revision) || 1;
+    const initialLabel = String((entity.properties as any)?.name || entity.entity_id);
+    const initialNotes = String((entity.properties as any)?.notes || "");
+
+    setEditingSession({
+      mode: "revise",
+      registrationId: regId,
+      expectedRevision: currentRevision,
+      originalEntity: entity,
+      initialLabel,
+      initialNotes,
+    });
     setDrawingKind(kind);
     setDraftCoordinates(coords);
     setLifecycleModal({ mode: null, entity: null });
@@ -227,7 +245,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     }
   }, [scientific.l10, selectEntity, setActiveTool, state.publication.snapshotId, handleStartDrawing, handleCanvasMapClick]);
 
-  // An open investigation, specialized tool, authoring draft or lifecycle modal
+  // An open investigation, specialized tool, authoring draft, editing session or lifecycle modal
   // must never retain context across tenant, plot, crop-cycle, geometry or request-generation changes.
   useEffect(() => {
     setInvestigation(null);
@@ -235,6 +253,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
     setActiveInitialSensorId(null);
     setDrawingKind(null);
     setDraftCoordinates([]);
+    setEditingSession(null);
     setLifecycleModal({ mode: null, entity: null });
   }, [state.generationId, state.plotScope.plotId, state.plotScope.cropCycleId,
       state.plotScope.geometryHash, state.plotScope.geometryVersion]);
@@ -370,6 +389,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             plotId={plotId}
             drawingKind={drawingKind}
             draftCoordinates={draftCoordinates}
+            editingSession={editingSession}
             onAddVertex={handleCanvasMapClick}
             onUndoVertex={handleUndoVertex}
             onClearVertices={handleClearVertices}

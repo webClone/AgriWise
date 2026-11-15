@@ -9,6 +9,15 @@ export interface GeometryDraft {
   coordinates: [number, number][]; // [lon, lat]
 }
 
+export interface GeometryEditingSession {
+  mode: "create" | "revise";
+  registrationId?: string;
+  expectedRevision?: number;
+  originalEntity?: any;
+  initialLabel?: string;
+  initialNotes?: string;
+}
+
 export interface NewCropObservationPayload {
   title: string;
   type?: string;

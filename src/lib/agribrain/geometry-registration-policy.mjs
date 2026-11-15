@@ -6,6 +6,13 @@ export const REGISTRATION_SOURCES=Object.freeze({
   CAMERA:"IP_CAMERA",
   FIELD_OBSERVATION:"CROP_OBSERVATION",
 });
+export const VALID_OBSERVATION_TYPES = Object.freeze(new Set([
+  "pest",
+  "disease",
+  "growth",
+  "health",
+  "weather_impact"
+]));
 const OBJECT_ID=/^[a-f\d]{24}$/i;
 const permittedGeometry=Object.freeze({
   DRONE_MISSION:["LineString","Polygon","MultiPolygon"],
@@ -25,6 +32,10 @@ export function validateGeometryRegistrationInput(raw){
      return {ok:false,error:"New crop observation requires a title"};
    }
    if(raw.source_id!==undefined&&raw.source_id!==null)return {ok:false,error:"Cannot supply both source_id and new_observation"};
+   const obsType = (raw.new_observation.type || "pest").toLowerCase().trim();
+   if(!VALID_OBSERVATION_TYPES.has(obsType)) {
+     return {ok:false,error:`Invalid observation category: ${raw.new_observation.type}. Allowed: pest, disease, growth, health, weather_impact`};
+   }
  }else if(typeof raw.source_id!=="string"||!OBJECT_ID.test(raw.source_id)){
    return {ok:false,error:"Source record ID must be a Mongo ObjectId"};
  }
@@ -47,7 +58,7 @@ export function validateGeometryRegistrationInput(raw){
    entity_kind:kind,source_kind:source,source_id:source==="OWNER_PLAN"?null:(raw.source_id||null),
    new_observation:raw.new_observation?{
      title:raw.new_observation.title.trim(),
-     type:raw.new_observation.type?.trim()||"pest",
+     type:(raw.new_observation.type?.trim().toLowerCase())||"pest",
      severity:raw.new_observation.severity?.trim()||"warning",
      description:raw.new_observation.description?.trim()||null,
    }:null,
@@ -106,15 +117,135 @@ function extractGeometry(geoJson) {
   return null;
 }
 
-export function validateParcelContainment(geometry, plotGeoJson) {
-  if (!plotGeoJson) return { ok: true };
+function pointInRing(pt, ring) {
+  const x = pt[0], y = pt[1];
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1];
+    const xj = ring[j][0], yj = ring[j][1];
+    const intersect = ((yi > y) !== (yj > y)) &&
+      (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function minDistanceToRing(pt, ring) {
+  let minD = Infinity;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const a = ring[i];
+    const b = ring[i + 1];
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const l2 = dx * dx + dy * dy;
+    let d;
+    if (l2 === 0) {
+      d = Math.hypot(pt[0] - a[0], pt[1] - a[1]);
+    } else {
+      let t = ((pt[0] - a[0]) * dx + (pt[1] - a[1]) * dy) / l2;
+      t = Math.max(0, Math.min(1, t));
+      const px = a[0] + t * dx;
+      const py = a[1] + t * dy;
+      d = Math.hypot(pt[0] - px, pt[1] - py);
+    }
+    if (d < minD) minD = d;
+  }
+  return minD;
+}
+
+function pointInPolygonWithTolerance(pt, polyCoords, tolerance = 0.0001) {
+  const outerRing = polyCoords[0];
+  if (!outerRing || outerRing.length < 4) return false;
+  const inOuter = pointInRing(pt, outerRing);
+  if (!inOuter) {
+    const dist = minDistanceToRing(pt, outerRing);
+    return dist <= tolerance;
+  }
+  for (let h = 1; h < polyCoords.length; h++) {
+    const hole = polyCoords[h];
+    if (pointInRing(pt, hole)) {
+      const distHole = minDistanceToRing(pt, hole);
+      if (distHole > tolerance) return false;
+    }
+  }
+  return true;
+}
+
+function extractPolygons(geom) {
+  if (!geom) return [];
+  if (geom.type === "Polygon") return [geom.coordinates];
+  if (geom.type === "MultiPolygon") return geom.coordinates;
+  return [];
+}
+
+function collectVertices(coords) {
+  const pts = [];
+  const recurse = (c) => {
+    if (Array.isArray(c) && c.length === 2 && typeof c[0] === "number" && typeof c[1] === "number") {
+      pts.push(c);
+    } else if (Array.isArray(c)) {
+      c.forEach(recurse);
+    }
+  };
+  recurse(coords);
+  return pts;
+}
+
+export function validateParcelContainment(geometry, plotGeoJson, options = {}) {
+  // Fail closed if authoritative parcel boundary is unavailable
+  if (!plotGeoJson) {
+    return {
+      ok: false,
+      error: "Authoritative plot parcel boundary is missing or unavailable; spatial containment cannot be validated",
+    };
+  }
   const plotGeom = extractGeometry(plotGeoJson);
-  if (!plotGeom) return { ok: true };
+  if (!plotGeom || (plotGeom.type !== "Polygon" && plotGeom.type !== "MultiPolygon")) {
+    return {
+      ok: false,
+      error: "Authoritative plot parcel has no valid Polygon or MultiPolygon geometry; spatial containment cannot be validated",
+    };
+  }
+
+  const entityKind = options.entityKind || "FIELD_OBSERVATION";
+  const tolerance = typeof options.tolerance === "number" ? options.tolerance : 0.0001; // ~10m tolerance at mid-latitudes
+
+  // 1. Strict polygon containment for field observations / scouting areas
+  if (entityKind === "FIELD_OBSERVATION" || entityKind === "CROP_OBSERVATION") {
+    const parcelPolygons = extractPolygons(plotGeom);
+    if (parcelPolygons.length === 0) {
+      return {
+        ok: false,
+        error: "Authoritative parcel contains no valid polygon boundaries; failing closed",
+      };
+    }
+
+    const vertices = collectVertices(geometry?.coordinates);
+    if (vertices.length === 0) {
+      return { ok: false, error: "Geometry contains no valid coordinates to validate" };
+    }
+
+    for (const pt of vertices) {
+      const isContained = parcelPolygons.some((poly) => pointInPolygonWithTolerance(pt, poly, tolerance));
+      if (!isContained) {
+        return {
+          ok: false,
+          error: `Field observation vertex [${pt[0].toFixed(5)}, ${pt[1].toFixed(5)}] is outside authoritative parcel boundary (exceeds ${Math.round(tolerance * 100000)}m tolerance)`,
+        };
+      }
+    }
+
+    return { ok: true };
+  }
+
+  // 2. Operational envelope containment with buffer for drone missions / flight corridors
   const pBounds = geometryBounds(plotGeom);
   const gBounds = geometryBounds(geometry);
-  if (!pBounds || !gBounds) return { ok: true };
+  if (!pBounds || !gBounds) {
+    return { ok: false, error: "Unable to calculate bounding coordinates for geometry" };
+  }
 
-  const buffer = 0.02; // ~2.2 km operational envelope margin
+  const buffer = typeof options.buffer === "number" ? options.buffer : 0.02; // ~2.2 km operational envelope margin
   const [pMinX, pMinY, pMaxX, pMaxY] = pBounds;
   const [gMinX, gMinY, gMaxX, gMaxY] = gBounds;
 
@@ -126,8 +257,9 @@ export function validateParcelContainment(geometry, plotGeoJson) {
   ) {
     return {
       ok: false,
-      error: `Geometry vertices exceed authorized plot operational envelope (bounds: [${gMinX.toFixed(4)}, ${gMinY.toFixed(4)}] to [${gMaxX.toFixed(4)}, ${gMaxY.toFixed(4)}]; allowed plot bounds with buffer: [${(pMinX - buffer).toFixed(4)}, ${(pMinY - buffer).toFixed(4)}] to [${(pMaxX + buffer).toFixed(4)}, ${(pMaxY + buffer).toFixed(4)}])`,
+      error: `Flight corridor bounds [${gMinX.toFixed(4)}, ${gMinY.toFixed(4)}, ${gMaxX.toFixed(4)}, ${gMaxY.toFixed(4)}] exceed authorized operational margin [${(pMinX - buffer).toFixed(4)}, ${(pMinY - buffer).toFixed(4)}] to [${(pMaxX + buffer).toFixed(4)}, ${(pMaxY + buffer).toFixed(4)}]`,
     };
   }
+
   return { ok: true };
 }

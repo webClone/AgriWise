@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { authenticatedUserId } from "@/lib/tenant-authorization";
-import { validateGeometryRegistrationInput } from "@/lib/agribrain/geometry-registration-policy.mjs";
+import {
+  validateGeometryRegistrationInput,
+  validateParcelContainment,
+} from "@/lib/agribrain/geometry-registration-policy.mjs";
 import {
   geometryIntegrityDigest,
   projectWorkspaceGeometryRegistration,
@@ -32,39 +35,6 @@ async function authorizedScope(rawId: string, userId: string) {
         geoJson: plot.geoJson,
       }
     : null;
-}
-
-function extractGeometry(geoJson: any) {
-  if (!geoJson) return null;
-  if (geoJson.type === "Feature" && geoJson.geometry) return geoJson.geometry;
-  if (geoJson.type === "Polygon" || geoJson.type === "MultiPolygon") return geoJson;
-  return null;
-}
-
-export function validateParcelContainment(geometry: any, plotGeoJson: any): { ok: boolean; error?: string } {
-  if (!plotGeoJson) return { ok: true };
-  const plotGeom = extractGeometry(plotGeoJson);
-  if (!plotGeom) return { ok: true };
-  const pBounds = geometryBounds(plotGeom);
-  const gBounds = geometryBounds(geometry);
-  if (!pBounds || !gBounds) return { ok: true };
-
-  const buffer = 0.02; // ~2.2 km operational envelope margin
-  const [pMinX, pMinY, pMaxX, pMaxY] = pBounds;
-  const [gMinX, gMinY, gMaxX, gMaxY] = gBounds;
-
-  if (
-    gMinX < pMinX - buffer ||
-    gMaxX > pMaxX + buffer ||
-    gMinY < pMinY - buffer ||
-    gMaxY > pMaxY + buffer
-  ) {
-    return {
-      ok: false,
-      error: `Submitted geometry bounds [${gMinX.toFixed(4)}, ${gMinY.toFixed(4)}, ${gMaxX.toFixed(4)}, ${gMaxY.toFixed(4)}] exceed authorized parcel boundary [${(pMinX - buffer).toFixed(4)}, ${(pMinY - buffer).toFixed(4)}, ${(pMaxX + buffer).toFixed(4)}, ${(pMaxY + buffer).toFixed(4)}].`,
-    };
-  }
-  return { ok: true };
 }
 
 const objectId = /^[a-f\d]{24}$/i;
@@ -129,7 +99,9 @@ export async function POST(
     const input = validation.value;
 
     // Validate parcel footprint containment
-    const containment = validateParcelContainment(input.geometry, scope.geoJson);
+    const containment = validateParcelContainment(input.geometry, scope.geoJson, {
+      entityKind: input.entity_kind,
+    });
     if (!containment.ok) {
       return NextResponse.json({ error: containment.error }, { status: 400 });
     }

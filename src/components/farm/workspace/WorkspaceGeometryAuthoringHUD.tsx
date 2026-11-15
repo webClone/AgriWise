@@ -1,11 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { PenTool, Undo2, Trash2, X, Check, Plane, FileText, AlertCircle, ShieldAlert } from "lucide-react";
+import { PenTool, Undo2, Trash2, X, Check, Plane, FileText, AlertCircle, ShieldAlert, Edit3 } from "lucide-react";
 import {
   createGeometryRegistration,
+  reviseGeometryRegistration,
   formatDraftGeometry,
   type GeometryDraft,
+  type GeometryEditingSession,
   type RegisterGeometryPayload,
 } from "@/lib/agribrain/geometry-authoring";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
@@ -14,6 +16,7 @@ interface AuthoringHUDProps {
   plotId: string;
   drawingKind: "DRONE_MISSION" | "FIELD_OBSERVATION" | null;
   draftCoordinates: [number, number][];
+  editingSession?: GeometryEditingSession | null;
   onAddVertex: (coord: [number, number]) => void;
   onUndoVertex: () => void;
   onClearVertices: () => void;
@@ -25,15 +28,18 @@ export default function WorkspaceGeometryAuthoringHUD({
   plotId,
   drawingKind,
   draftCoordinates,
+  editingSession,
   onUndoVertex,
   onClearVertices,
   onCancel,
   onComplete,
 }: AuthoringHUDProps) {
+  const isRevise = editingSession?.mode === "revise";
   const [modalOpen, setModalOpen] = useState(false);
   const [label, setLabel] = useState("");
   const [notes, setNotes] = useState("");
   const [scoutTitle, setScoutTitle] = useState("");
+  const [scoutType, setScoutType] = useState<"pest" | "disease" | "growth" | "health" | "weather_impact">("pest");
   const [scoutSeverity, setScoutSeverity] = useState("warning");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -46,8 +52,14 @@ export default function WorkspaceGeometryAuthoringHUD({
 
   const handleFinishClick = () => {
     if (!canFinish) return;
-    setLabel(isLine ? `Flight Corridor Plan ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : `Scouting Boundary ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
-    setScoutTitle(isLine ? "" : "Field Scouting Observation Record");
+    if (isRevise) {
+      setLabel(editingSession?.initialLabel || "");
+      setNotes(editingSession?.initialNotes || "");
+    } else {
+      setLabel(isLine ? `Flight Corridor Plan ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : `Scouting Boundary ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+      setScoutTitle(isLine ? "" : "Field Scouting Observation Record");
+      setScoutType("pest");
+    }
     setErrorMessage(null);
     setModalOpen(true);
   };
@@ -73,6 +85,28 @@ export default function WorkspaceGeometryAuthoringHUD({
     setIsSubmitting(true);
     setErrorMessage(null);
 
+    // Graphical revision workflow via PATCH
+    if (isRevise && editingSession?.registrationId && typeof editingSession.expectedRevision === "number") {
+      try {
+        const res = await reviseGeometryRegistration(plotId, editingSession.registrationId, {
+          expected_revision: editingSession.expectedRevision,
+          label: label.trim(),
+          notes: notes.trim() || null,
+          geometry,
+        });
+        setIsSubmitting(false);
+        setModalOpen(false);
+        if (res.entity) {
+          onComplete(res.entity);
+        }
+      } catch (err: any) {
+        setIsSubmitting(false);
+        setErrorMessage(err.message || "Failed to save geometry revision.");
+      }
+      return;
+    }
+
+    // New registration workflow via POST
     try {
       const payload: RegisterGeometryPayload = {
         entity_kind: drawingKind,
@@ -86,7 +120,7 @@ export default function WorkspaceGeometryAuthoringHUD({
               new_observation: {
                 title: scoutTitle.trim() || label.trim(),
                 severity: scoutSeverity,
-                type: "pest",
+                type: scoutType,
                 description: notes.trim() || null,
               },
             }),
@@ -131,13 +165,21 @@ export default function WorkspaceGeometryAuthoringHUD({
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          {isLine ? (
+          {isRevise ? (
+            <Edit3 size={16} className="text-amber-400" />
+          ) : isLine ? (
             <Plane size={16} className="text-orange-400" />
           ) : (
             <FileText size={16} className="text-rose-400" />
           )}
-          <span style={{ fontWeight: 600, color: isLine ? "#fb923c" : "#f43f5e" }}>
-            {isLine ? "Drawing Drone Corridor (LineString)" : "Mapping Scouting Area (Polygon)"}
+          <span style={{ fontWeight: 600, color: isRevise ? "#f59e0b" : isLine ? "#fb923c" : "#f43f5e" }}>
+            {isRevise
+              ? isLine
+                ? `Adjusting Drone Corridor Vertices (Rev ${editingSession?.expectedRevision} → ${editingSession?.expectedRevision! + 1})`
+                : `Adjusting Scouting Area Vertices (Rev ${editingSession?.expectedRevision} → ${editingSession?.expectedRevision! + 1})`
+              : isLine
+                ? "Drawing Drone Corridor (LineString)"
+                : "Mapping Scouting Area (Polygon)"}
           </span>
         </div>
 
@@ -271,7 +313,9 @@ export default function WorkspaceGeometryAuthoringHUD({
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <PenTool size={18} className="text-amber-400" />
                 <h3 style={{ fontSize: "16px", fontWeight: 700, margin: 0 }}>
-                  Save Owner-Declared {isLine ? "Flight Corridor" : "Scouting Polygon"}
+                  {isRevise
+                    ? `Save Geometry Revision (Rev ${editingSession?.expectedRevision} → ${editingSession?.expectedRevision! + 1})`
+                    : `Save Owner-Declared ${isLine ? "Flight Corridor" : "Scouting Polygon"}`}
                 </h3>
               </div>
               <button
@@ -307,7 +351,7 @@ export default function WorkspaceGeometryAuthoringHUD({
                 />
               </div>
 
-              {!isLine && (
+              {!isLine && !isRevise && (
                 <div>
                   <label style={{ display: "block", fontSize: "12px", color: "#cbd5e1", marginBottom: "5px", fontWeight: 600 }}>
                     Linked Scouting Observation Record *
@@ -330,35 +374,66 @@ export default function WorkspaceGeometryAuthoringHUD({
                     }}
                   />
                   <div style={{ display: "flex", gap: "10px", marginTop: "8px" }}>
-                    <select
-                      value={scoutSeverity}
-                      onChange={(e) => setScoutSeverity(e.target.value)}
-                      style={{
-                        background: "rgba(255,255,255,0.06)",
-                        border: "1px solid rgba(255,255,255,0.15)",
-                        borderRadius: "6px",
-                        padding: "6px 10px",
-                        color: "#f8fafc",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <option value="info">Severity: Info</option>
-                      <option value="warning">Severity: Warning</option>
-                      <option value="critical">Severity: Critical</option>
-                    </select>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ display: "block", fontSize: "11px", color: "#94a3b8", marginBottom: "3px" }}>
+                        Observation Category
+                      </label>
+                      <select
+                        data-testid="p06-observation-type-select"
+                        value={scoutType}
+                        onChange={(e) => setScoutType(e.target.value as any)}
+                        style={{
+                          width: "100%",
+                          background: "rgba(255,255,255,0.06)",
+                          border: "1px solid rgba(255,255,255,0.15)",
+                          borderRadius: "6px",
+                          padding: "6px 10px",
+                          color: "#f8fafc",
+                          fontSize: "12px",
+                        }}
+                      >
+                        <option value="pest">Pest Infestation</option>
+                        <option value="disease">Foliar / Soil Disease</option>
+                        <option value="growth">Growth Stage & Vigor</option>
+                        <option value="health">Crop Health & Stress</option>
+                        <option value="weather_impact">Weather Impact & Damage</option>
+                      </select>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <label style={{ display: "block", fontSize: "11px", color: "#94a3b8", marginBottom: "3px" }}>
+                        Severity Level
+                      </label>
+                      <select
+                        value={scoutSeverity}
+                        onChange={(e) => setScoutSeverity(e.target.value)}
+                        style={{
+                          width: "100%",
+                          background: "rgba(255,255,255,0.06)",
+                          border: "1px solid rgba(255,255,255,0.15)",
+                          borderRadius: "6px",
+                          padding: "6px 10px",
+                          color: "#f8fafc",
+                          fontSize: "12px",
+                        }}
+                      >
+                        <option value="info">Info / Normal</option>
+                        <option value="warning">Warning / Elevated</option>
+                        <option value="critical">Critical / Severe</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
               )}
 
               <div>
                 <label style={{ display: "block", fontSize: "12px", color: "#cbd5e1", marginBottom: "5px", fontWeight: 600 }}>
-                  Field Notes (Optional)
+                  {isRevise ? "Revision Notes" : "Field Notes (Optional)"}
                 </label>
                 <textarea
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   rows={2}
-                  placeholder="Additional context or agronomic observations..."
+                  placeholder={isRevise ? "Reason or field context for this vertex revision..." : "Additional context or agronomic observations..."}
                   style={{
                     width: "100%",
                     background: "rgba(255,255,255,0.06)",
@@ -373,28 +448,46 @@ export default function WorkspaceGeometryAuthoringHUD({
                 />
               </div>
 
-              {/* Epistemic Boundary Notice */}
-              <div
-                style={{
-                  background: "rgba(234, 179, 8, 0.12)",
-                  border: "1px solid rgba(234, 179, 8, 0.3)",
-                  borderRadius: "8px",
-                  padding: "10px 12px",
-                  display: "flex",
-                  gap: "10px",
-                  alignItems: "flex-start",
-                  fontSize: "11px",
-                  color: "#fef08a",
-                }}
-              >
-                <ShieldAlert size={16} className="text-amber-400 shrink-0" style={{ marginTop: "2px" }} />
-                <div>
-                  <strong>Owner-Declared Provisional Record</strong>
-                  <p style={{ margin: "2px 0 0", color: "#fde047" }}>
-                    This spatial feature will be persisted as <code>{isLine ? "PLANNED" : "ESTIMATED"}</code> with revision 1 and an append-only audit trail. It does not certify hardware measurements or scientific publication authority.
+              {isRevise ? (
+                <div
+                  style={{
+                    background: "rgba(56, 189, 248, 0.12)",
+                    border: "1px solid rgba(56, 189, 248, 0.3)",
+                    borderRadius: "8px",
+                    padding: "10px 12px",
+                    fontSize: "11px",
+                    color: "#7dd3fc",
+                  }}
+                >
+                  <strong>Optimistic Concurrency Protection</strong>
+                  <p style={{ margin: "2px 0 0", color: "#bae6fd" }}>
+                    Asserting revision <code>{editingSession?.expectedRevision}</code>. The previous geometry will be permanently recorded in the immutable revision log before advancing to revision <code>{editingSession?.expectedRevision! + 1}</code>.
                   </p>
                 </div>
-              </div>
+              ) : (
+                /* Epistemic Boundary Notice */
+                <div
+                  style={{
+                    background: "rgba(234, 179, 8, 0.12)",
+                    border: "1px solid rgba(234, 179, 8, 0.3)",
+                    borderRadius: "8px",
+                    padding: "10px 12px",
+                    display: "flex",
+                    gap: "10px",
+                    alignItems: "flex-start",
+                    fontSize: "11px",
+                    color: "#fef08a",
+                  }}
+                >
+                  <ShieldAlert size={16} className="text-amber-400 shrink-0" style={{ marginTop: "2px" }} />
+                  <div>
+                    <strong>Owner-Declared Provisional Record</strong>
+                    <p style={{ margin: "2px 0 0", color: "#fde047" }}>
+                      This spatial feature will be persisted as <code>{isLine ? "PLANNED" : "ESTIMATED"}</code> with revision 1 and an append-only audit trail. It does not certify hardware measurements or scientific publication authority.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {errorMessage && (
                 <div style={{ color: "#f87171", fontSize: "12px", display: "flex", alignItems: "center", gap: "6px" }}>
@@ -423,8 +516,8 @@ export default function WorkspaceGeometryAuthoringHUD({
                   disabled={isSubmitting}
                   data-testid="p06-save-geometry-btn"
                   style={{
-                    background: "#059669",
-                    border: "1px solid rgba(52, 211, 153, 0.5)",
+                    background: isRevise ? "#d97706" : "#059669",
+                    border: `1px solid ${isRevise ? "#f59e0b" : "rgba(52, 211, 153, 0.5)"}`,
                     color: "#ffffff",
                     fontWeight: 600,
                     borderRadius: "8px",
@@ -436,7 +529,9 @@ export default function WorkspaceGeometryAuthoringHUD({
                     gap: "6px",
                   }}
                 >
-                  {isSubmitting ? "Persisting..." : "Save to Field"}
+                  {isSubmitting
+                    ? isRevise ? "Applying Revision..." : "Persisting..."
+                    : isRevise ? `Apply Revision (Rev ${editingSession?.expectedRevision! + 1})` : "Save to Field"}
                 </button>
               </footer>
             </form>

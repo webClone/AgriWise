@@ -104,7 +104,7 @@ test("P06.05: FIELD_OBSERVATION registration allows new_observation creation wit
     new_observation: {
       title: "Aphid Scout Zone Alpha",
       severity: "warning",
-      type: "pest",
+      type: "disease",
       description: "Infestation spotted on leaves",
     },
     label: "Aphid Cluster Area",
@@ -113,13 +113,24 @@ test("P06.05: FIELD_OBSERVATION registration allows new_observation creation wit
   const val = validateGeometryRegistrationInput(input);
   assert.equal(val.ok, true);
   assert.equal(val.value.new_observation.title, "Aphid Scout Zone Alpha");
+  assert.equal(val.value.new_observation.type, "disease");
   assert.equal(val.value.source_id, null); // Will be populated by DB creation
+
+  // Validates observation category against taxonomy
+  const invalidCategoryInput = {
+    ...input,
+    new_observation: {
+      title: "Bad category",
+      type: "unsupported_alien_category",
+    },
+  };
+  assert.equal(validateGeometryRegistrationInput(invalidCategoryInput).ok, false);
 
   // Conflict if both source_id and new_observation provided
   assert.equal(validateGeometryRegistrationInput({ ...input, source_id: "507f1f77bcf86cd799439099" }).ok, false);
 });
 
-test("P06.05: validateParcelContainment accepts coordinates within plot footprint plus operational margin and rejects out-of-envelope geometry", () => {
+test("P06.05: validateParcelContainment enforces strict polygon containment for scouting areas and fails closed on missing parcel", () => {
   const plotGeoJson = {
     type: "Feature",
     geometry: {
@@ -136,39 +147,66 @@ test("P06.05: validateParcelContainment accepts coordinates within plot footprin
     },
   };
 
-  // 1. Inside plot polygon
-  const insideGeom = {
-    type: "LineString",
+  // 1. Scouting polygon strictly inside parcel polygon
+  const insideScout = {
+    type: "Polygon",
     coordinates: [
-      [2.658, 36.508],
-      [2.660, 36.509],
+      [
+        [2.658, 36.508],
+        [2.660, 36.508],
+        [2.660, 36.509],
+        [2.658, 36.509],
+        [2.658, 36.508],
+      ],
     ],
   };
-  const resInside = validateParcelContainment(insideGeom, plotGeoJson);
-  assert.equal(resInside.ok, true);
+  const resInsideScout = validateParcelContainment(insideScout, plotGeoJson, { entityKind: "FIELD_OBSERVATION" });
+  assert.equal(resInsideScout.ok, true);
 
-  // 2. Just outside parcel boundary but within 0.02 deg buffer margin (~2.2 km)
-  const marginGeom = {
+  // 2. Scouting polygon outside parcel polygon (within 2km buffer, but outside parcel boundary) -> MUST FAIL
+  const bufferScout = {
+    type: "Polygon",
+    coordinates: [
+      [
+        [2.665, 36.512],
+        [2.668, 36.512],
+        [2.668, 36.515],
+        [2.665, 36.515],
+        [2.665, 36.512],
+      ],
+    ],
+  };
+  const resBufferScout = validateParcelContainment(bufferScout, plotGeoJson, { entityKind: "FIELD_OBSERVATION" });
+  assert.equal(resBufferScout.ok, false);
+  assert.match(resBufferScout.error, /outside authoritative parcel boundary/);
+
+  // 3. Fail-closed: missing parcel boundary fails closed for scouting areas
+  const resMissingParcel = validateParcelContainment(insideScout, null, { entityKind: "FIELD_OBSERVATION" });
+  assert.equal(resMissingParcel.ok, false);
+  assert.match(resMissingParcel.error, /missing or unavailable/);
+
+  // 4. Drone flight corridor: off-field operational turnaround margin is permitted
+  const marginDrone = {
     type: "LineString",
     coordinates: [
       [2.665, 36.512],
       [2.668, 36.515],
     ],
   };
-  const resMargin = validateParcelContainment(marginGeom, plotGeoJson);
-  assert.equal(resMargin.ok, true);
+  const resMarginDrone = validateParcelContainment(marginDrone, plotGeoJson, { entityKind: "DRONE_MISSION" });
+  assert.equal(resMarginDrone.ok, true);
 
-  // 3. Far outside (California coordinates)
-  const farGeom = {
+  // 5. Drone flight corridor: far away out of envelope (California) -> MUST FAIL
+  const farDrone = {
     type: "LineString",
     coordinates: [
       [-119.825, 34.421],
       [-119.820, 34.425],
     ],
   };
-  const resFar = validateParcelContainment(farGeom, plotGeoJson);
-  assert.equal(resFar.ok, false);
-  assert.match(resFar.error, /exceed authorized plot operational envelope/);
+  const resFarDrone = validateParcelContainment(farDrone, plotGeoJson, { entityKind: "DRONE_MISSION" });
+  assert.equal(resFarDrone.ok, false);
+  assert.match(resFarDrone.error, /exceed authorized operational margin/);
 });
 
 test("P06.05: optimistic concurrency predicates strictly enforce revision matching and reject state regressions", () => {
