@@ -4,7 +4,7 @@ import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature
 export interface WorkspaceEntityPinsLayerProps {
   entities: WorkspaceFeatureEnvelope[];
   selectedEntityId?: string | null;
-  onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
+  onEntityClick?: (entity: WorkspaceFeatureEnvelope, info?: any) => void;
   sceneOpacity?: Record<string,number>;
 }
 
@@ -70,7 +70,7 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
     updateTriggers: {
       getRadius: [selectedEntityId],
       getFillColor: [selectedEntityId,sceneOpacity],
-      getLineColor: [selectedEntityId],
+      getLineColor: [selectedEntityId,sceneOpacity],
     },
   });
 
@@ -140,7 +140,7 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
     getLineColor: () => [255, 255, 255, 240],
     onClick: (info) => {
       if (info.object && onEntityClick) {
-        onEntityClick(info.object);
+        onEntityClick(info.object,info);
       }
     },
     updateTriggers: {

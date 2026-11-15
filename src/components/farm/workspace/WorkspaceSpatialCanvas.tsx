@@ -28,6 +28,7 @@ interface WorkspaceSpatialCanvasProps {
   workspaceEntities?: WorkspaceFeatureEnvelope[];
   sceneVisibility?: Record<string,boolean>;
   sceneOpacity?: Record<string,number>;
+  sceneGeneration?: number;
   selectedEntityId?: string | null;
   onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
 }
@@ -48,6 +49,7 @@ export default function WorkspaceSpatialCanvas({
   workspaceEntities,
   sceneVisibility,
   sceneOpacity,
+  sceneGeneration,
   selectedEntityId,
   onEntityClick,
 }: WorkspaceSpatialCanvasProps) {
@@ -85,6 +87,7 @@ export default function WorkspaceSpatialCanvas({
           workspaceEntities={workspaceEntities}
           sceneVisibility={sceneVisibility}
           sceneOpacity={sceneOpacity}
+          sceneGeneration={sceneGeneration}
           selectedEntityId={selectedEntityId}
           onEntityClick={onEntityClick}
         />

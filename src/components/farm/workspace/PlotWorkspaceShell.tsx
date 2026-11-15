@@ -197,6 +197,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             workspaceEntities={scopedEntities}
             sceneVisibility={state.renderIntent.visibleVectors}
             sceneOpacity={state.renderIntent.sceneLayerOpacity}
+            sceneGeneration={state.generationId}
             selectedEntityId={state.selectedEntity.id}
             onEntityClick={selectSceneEntity}
             onZoneClick={(zoneId) => {

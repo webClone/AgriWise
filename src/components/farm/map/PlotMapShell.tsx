@@ -24,7 +24,7 @@ import {
 } from "@/lib/agribrain/render-materialization";
 import { getWorkspaceEntityPinsLayers } from "./layers/WorkspaceEntityPinsLayer";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
-import {sceneLayerForEntityKind} from "@/components/farm/workspace/p06-scene-registry.mjs";
+import {sceneLayerForEntityKind,coincidentSceneEntities} from "@/components/farm/workspace/p06-scene-registry.mjs";
 
 function hasStaleGatewayEvidence(rawData: Record<string, unknown> | undefined): boolean {
   for (const value of Object.values(rawData || {})) {
@@ -67,6 +67,7 @@ interface PlotMapShellProps {
   onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
   sceneVisibility?: Record<string,boolean>;
   sceneOpacity?: Record<string,number>;
+  sceneGeneration?: number;
 }
 
 export default function PlotMapShell(props: PlotMapShellProps) {
@@ -95,10 +96,21 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     onEntityClick,
     sceneVisibility,
     sceneOpacity,
+    sceneGeneration,
   } = props;
 
   const primaryPlot = plots?.[0];
   const containerRef = useRef<HTMLDivElement>(null);
+  const [overlap, setOverlap] = useState<{items:WorkspaceFeatureEnvelope[];x:number;y:number}|null>(null);
+  const overlapRef=useRef<HTMLDivElement>(null);
+  useEffect(()=>setOverlap(null),[primaryPlot?._id,primaryPlot?.id,sceneGeneration]);
+  useEffect(()=>{
+    if(!overlap)return;
+    overlapRef.current?.querySelector<HTMLButtonElement>("button[data-entity-choice]")?.focus();
+    const escape=(e:KeyboardEvent)=>{if(e.key==="Escape"){e.stopPropagation();setOverlap(null);}};
+    window.addEventListener("keydown",escape);
+    return ()=>window.removeEventListener("keydown",escape);
+  },[overlap]);
   const showRaster=sceneVisibility?.raster!==false && (sceneOpacity?.raster??1)>0;
   const showZones=sceneVisibility?.zones!==false && (sceneOpacity?.zones??1)>0;
 
@@ -640,9 +652,25 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     return !!layer && sceneVisibility?.[layer]!==false && (sceneOpacity?.[layer]??1)>0;
   }),[workspaceEntities,sceneVisibility,sceneOpacity]);
 
+  const pickEntity=useCallback((entity:WorkspaceFeatureEnvelope,info:any)=>{
+    if(transectMode)return;
+    const project=typeof info?.viewport?.project==="function"
+      ? (point:[number,number])=>info.viewport.project(point) as [number,number] : undefined;
+    const items=coincidentSceneEntities(visibleEntities,entity,project,13);
+    if(items.length>1){
+      const rect=containerRef.current?.getBoundingClientRect();
+      const x=Math.min(Math.max(8,Number(info?.x)||20),Math.max(8,(rect?.width||360)-285));
+      const y=Math.min(Math.max(8,Number(info?.y)||20),Math.max(8,(rect?.height||360)-210));
+      setOverlap({items,x,y});
+    }else{
+      setOverlap(null);
+      onEntityClick?.(entity);
+    }
+  },[visibleEntities,onEntityClick,transectMode]);
+
   const entityLayers=useMemo(()=>visibleEntities.length?getWorkspaceEntityPinsLayers({
-    entities:visibleEntities,selectedEntityId,onEntityClick,sceneOpacity,
-  }):[],[visibleEntities,selectedEntityId,onEntityClick,sceneOpacity]);
+    entities:visibleEntities,selectedEntityId,onEntityClick:pickEntity,sceneOpacity,
+  }):[],[visibleEntities,selectedEntityId,pickEntity,sceneOpacity]);
 
   // 5. Compute hovered zone centroid for floating chip
   const hoveredZoneData = useMemo(() => {
@@ -1782,6 +1810,24 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         />
       )}
 
+      {overlap && (
+        <div ref={overlapRef} role="group" aria-label="Choose overlapping field entity"
+          className="absolute z-[90] min-w-[240px] max-w-[280px] rounded-xl border border-cyan-400/50 bg-slate-950/95 p-3 shadow-2xl"
+          style={{left:overlap.x,top:overlap.y}}>
+          <div className="mb-2 flex items-center justify-between gap-2 text-xs font-semibold text-cyan-100">
+            <span>Choose an entity ({overlap.items.length})</span>
+            <button type="button" className="text-slate-300" onClick={()=>setOverlap(null)} aria-label="Dismiss entity choices">✕</button>
+          </div>
+          <div className="max-h-40 overflow-auto">
+            {overlap.items.map(entity=><button type="button" data-entity-choice key={entity.envelope_id}
+              className="block w-full rounded-md border-b border-slate-700 p-2 text-left text-xs text-slate-100 hover:bg-cyan-900/50 focus-visible:outline focus-visible:outline-cyan-400"
+              onClick={()=>{setOverlap(null);onEntityClick?.(entity);}}>
+              {entity.entity_kind.replaceAll("_"," ")} · {String(entity.properties?.name||entity.entity_id)}
+              {entity.properties?.is_benchmark_fixture===true?" · DEMO":""}
+            </button>)}
+          </div>
+        </div>
+      )}
       {/* Render persistent pinned chip for selected zone */}
       {showZones && selectedZoneData && (
         <ZoneChip
