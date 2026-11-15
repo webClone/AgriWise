@@ -218,7 +218,7 @@ export default function WorkspaceContextInspector({
           <div className="pw-info-section" data-testid="p05-camera-inspector">
             <div className="pw-section-title">
               <Camera size={15} className="text-purple-400" aria-hidden="true" />
-              <span>{isFixture ? "Simulated Camera Trap" : "Fixed Field Camera"}</span>
+              <span>{ownerDeclared ? "Owner-declared camera coverage" : isFixture ? "Simulated Camera Trap" : "Fixed Field Camera"}</span>
             </div>
             <strong className="pw-info-large">{entityProps.deviceId || selectedEntity.id}</strong>
             <p style={{ margin: "4px 0 10px", fontSize: "12px", color: "#94a3b8" }}>
@@ -229,7 +229,7 @@ export default function WorkspaceContextInspector({
               <div>
                 <dt>Camera Status</dt>
                 <dd style={{ color: "#c084fc", fontWeight: 600 }}>
-                  {isFixture ? "DEMO FIXTURE (Standby)" : "ACTIVE STREAM"}
+                  {ownerDeclared ? "COVERAGE ONLY · LIVE STATUS UNKNOWN" : isFixture ? "DEMO FIXTURE (Standby)" : "ACTIVE STREAM"}
                 </dd>
               </div>
               <div>
@@ -240,11 +240,11 @@ export default function WorkspaceContextInspector({
               </div>
               <div>
                 <dt>Resolution</dt>
-                <dd>{entityProps.resolution || "4K UHD (3840x2160)"}</dd>
+                <dd>{entityProps.resolution || (ownerDeclared ? "Not registered" : "4K UHD (3840x2160)")}</dd>
               </div>
               <div>
                 <dt>Field of View</dt>
-                <dd>{entityProps.fieldOfView || "120° Wide Angle"}</dd>
+                <dd>{entityProps.fieldOfView || (ownerDeclared ? "Not calibrated" : "120° Wide Angle")}</dd>
               </div>
               {ownerDeclared && <div role="note" style={{color:"#f59e0b",fontSize:"12px",fontWeight:600}}>
                 Owner-declared geometry · Not independently verified or scientifically admitted
@@ -289,7 +289,7 @@ export default function WorkspaceContextInspector({
                 }}
                 onClick={() => onOpenTool && onOpenTool("evidence")}
               >
-                <Camera size={15} /> View Visual Stream
+                <Camera size={15} /> {ownerDeclared ? "Open evidence workspace" : "View Visual Stream"}
               </button>
               <button
                 type="button"

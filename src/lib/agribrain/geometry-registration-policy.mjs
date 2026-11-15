@@ -22,17 +22,21 @@ export function validateGeometryRegistrationInput(raw){
  }else if(typeof raw.source_id!=="string"||!OBJECT_ID.test(raw.source_id)){
    return {ok:false,error:"Source record ID must be a Mongo ObjectId"};
  }
+ let serializedGeometry;
+ try{serializedGeometry=JSON.stringify(raw.geometry);}catch{return {ok:false,error:"Invalid geometry serialization"};}
+ if(!serializedGeometry)return {ok:false,error:"Missing geometry"};
+ if(serializedGeometry.length>131072)return {ok:false,error:"Geometry exceeds 128KiB"};
  if(!permittedGeometry[kind].includes(raw.geometry?.type)||!isSupportedWorkspaceGeometry(raw.geometry))
    return {ok:false,error:"Invalid or unsupported WGS84 geometry"};
- if(JSON.stringify(raw.geometry).length>131072)return {ok:false,error:"Geometry exceeds 128KiB"};
  if(typeof raw.label!=="string"||!raw.label.trim()||raw.label.length>160)
    return {ok:false,error:"Label is required (maximum 160 characters)"};
  if(raw.notes!==undefined&&raw.notes!==null&&(typeof raw.notes!=="string"||raw.notes.length>2000))
    return {ok:false,error:"Notes exceed 2000 characters"};
  // Never accept client claims about scientific admission, executed status,
  // owner scope, source verification, publication, timestamps or hardware signatures.
- const forbidden=["tenant_id","farm_id","plot_id","epistemic_class","location_source","verified_identity","is_benchmark_fixture","observed_at","published_at","first_available_at","publication_id","is_executed","attestation","source_version","revision"];
- for(const name of forbidden)if(Object.hasOwn(raw,name))return {ok:false,error:`Client authority field forbidden: ${name}`};
+ const allowed=new Set(["entity_kind","source_kind","source_id","geometry","label","notes"]);
+ for(const name of Object.keys(raw))if(!allowed.has(name))
+   return {ok:false,error:`Unsupported or authority-bearing client field: ${name}`};
  return {ok:true,value:{
    entity_kind:kind,source_kind:source,source_id:source==="OWNER_PLAN"?null:raw.source_id,
    geometry:normalizeWorkspaceGeometry(raw.geometry),label:raw.label.trim(),notes:raw.notes?.trim()||null,

@@ -69,11 +69,12 @@ export default function WorkspaceSceneControlsP06({
          const layerId=sceneLayerForEntityKind(entity.entity_kind);
          const hidden=manifest.find(l=>l.id===layerId)?.visible===false;
          const demo=entity.properties?.is_benchmark_fixture===true||entity.epistemic_class==="SIMULATED";
+         const provisional=entity.spatial_support?.location_source==="USER_DECLARED";
          return <li key={entity.envelope_id}>
           <button type="button" aria-current={selectedId===entity.entity_id||selectedId===entity.envelope_id?"true":undefined}
             onClick={()=>onSelectEntity(entity)}>
             <span>{entity.entity_kind.replaceAll("_"," ")} · {label}</span>
-            <small>{demo?"DEMO · ":""}{located?hidden?"Layer hidden":`${entity.geometry?.type} mapped`:"Location not registered (list only)"}</small>
+            <small>{provisional?"OWNER-DECLARED · ":demo?"DEMO · ":""}{located?hidden?"Layer hidden":`${entity.geometry?.type} mapped`:"Location not registered (list only)"}</small>
           </button>
          </li>;
        })}
