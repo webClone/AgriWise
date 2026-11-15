@@ -43,6 +43,9 @@ export interface PlotWorkspacePublicApi {
   setTimeCursor: (timestamp: string, mode?: TimeClockMode) => void;
   setRenderIntent: (intent: Partial<RenderIntent>) => void;
   toggleVectorVisibility: (vectorKey: string, visible?: boolean) => void;
+  toggleSceneLayer: (layerId: string, visible?: boolean) => void;
+  setSceneLayerOpacity: (layerId: string, opacity: number) => void;
+  setAllSceneLayersVisibility: (visible: boolean) => void;
   toggleInspector: (collapsed?: boolean) => void;
   invalidateRequests: (reason?: string) => void;
   createScopedFetch: (
@@ -341,6 +344,10 @@ export function PlotWorkspaceProvider({
     [state.renderIntent.visibleVectors]
   );
 
+  const toggleSceneLayer = useCallback((layerId: string, visible?: boolean) => dispatch({type:"TOGGLE_SCENE_LAYER",payload:{layerId,visible}}), []);
+  const setSceneLayerOpacity = useCallback((layerId: string, opacity: number) => dispatch({type:"SET_LAYER_OPACITY",payload:{layerId,opacity}}), []);
+  const setAllSceneLayersVisibility = useCallback((visible: boolean) => dispatch({type:"SET_ALL_LAYERS_VISIBILITY",payload:{visible}}), []);
+
   const toggleInspector = useCallback((collapsed?: boolean) => {
     dispatch({
       type: "INSPECTOR_TOGGLED",
@@ -468,6 +475,9 @@ export function PlotWorkspaceProvider({
       setTimeCursor,
       setRenderIntent,
       toggleVectorVisibility,
+      toggleSceneLayer,
+      setSceneLayerOpacity,
+      setAllSceneLayersVisibility,
       toggleInspector,
       invalidateRequests,
       createScopedFetch,
@@ -480,6 +490,9 @@ export function PlotWorkspaceProvider({
       setTimeCursor,
       setRenderIntent,
       toggleVectorVisibility,
+      toggleSceneLayer,
+      setSceneLayerOpacity,
+      setAllSceneLayersVisibility,
       toggleInspector,
       invalidateRequests,
       createScopedFetch,

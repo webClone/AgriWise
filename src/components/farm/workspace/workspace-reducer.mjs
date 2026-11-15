@@ -4,6 +4,8 @@
  * clocks, request generations, and scenario sandbox state.
  */
 
+import {SCENE_LAYER_IDS,isSceneLayerId} from "./p06-scene-registry.mjs";
+
 /**
  * @param {{
  *   tenantId?: string;
@@ -71,7 +73,12 @@ export function createInitialWorkspaceState({
         zones: true,
         sensors: true,
         irrigation: true,
+        raster: true,
+        cameras: true,
+        drones: true,
+        observations: true,
       },
+      sceneLayerOpacity: {},
     },
     scenario: {
       isActive: false,
@@ -319,6 +326,28 @@ export function workspaceReducer(state, action) {
       };
     }
 
+    case "TOGGLE_SCENE_LAYER": {
+      const {layerId,visible}=action.payload||{};
+      if(!isSceneLayerId(layerId))return state;
+      const current=state.renderIntent.visibleVectors[layerId]!==false;
+      const next=typeof visible==="boolean"?visible:!current;
+      if(current===next)return state;
+      return {...state,renderIntent:{...state.renderIntent,visibleVectors:{...state.renderIntent.visibleVectors,[layerId]:next}}};
+    }
+    case "SET_LAYER_OPACITY": {
+      const {layerId,opacity}=action.payload||{};
+      if(!isSceneLayerId(layerId)||typeof opacity!=="number"||!Number.isFinite(opacity))return state;
+      const value=Math.max(0,Math.min(1,opacity));
+      if((state.renderIntent.sceneLayerOpacity?.[layerId]??1)===value)return state;
+      return {...state,renderIntent:{...state.renderIntent,sceneLayerOpacity:{...(state.renderIntent.sceneLayerOpacity||{}),[layerId]:value}}};
+    }
+    case "SET_ALL_LAYERS_VISIBILITY": {
+      const {visible}=action.payload||{};
+      if(typeof visible!=="boolean")return state;
+      const next={...state.renderIntent.visibleVectors};
+      for(const id of SCENE_LAYER_IDS)next[id]=visible;
+      return {...state,renderIntent:{...state.renderIntent,visibleVectors:next}};
+    }
     case "VECTOR_VISIBILITY_SET": {
       const { vectorKey, visible } = action.payload;
       if (!vectorKey) return state;

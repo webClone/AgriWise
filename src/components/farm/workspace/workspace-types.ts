@@ -70,6 +70,8 @@ export interface RenderIntent {
   showHatching: boolean;
   showGridCells: boolean;
   visibleVectors: Record<string, boolean>;
+  /** UI transparency only; cannot grant scientific rendering rights. */
+  sceneLayerOpacity: Record<string, number>;
 }
 
 export interface ScenarioState {
@@ -139,6 +141,9 @@ export type WorkspaceAction =
         tool: string;
       };
     }
+  | { type: "TOGGLE_SCENE_LAYER"; payload: {layerId:string;visible?:boolean} }
+  | { type: "SET_LAYER_OPACITY"; payload: {layerId:string;opacity:number} }
+  | { type: "SET_ALL_LAYERS_VISIBILITY"; payload: {visible:boolean} }
   | {
       type: "VECTOR_VISIBILITY_SET";
       payload: {
