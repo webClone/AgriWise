@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { authenticatedUserId } from "@/lib/tenant-authorization";
-import {projectWorkspaceGeometryRegistration} from "@/lib/agribrain/geometry-registration-projection.mjs";
+import {readScopedWorkspaceGeometry} from "@/lib/agribrain/read-scoped-workspace-geometry";
 import {
   createWorkspaceFeatureEnvelope,
   validateWorkspaceFeatureEnvelope,
@@ -416,14 +416,7 @@ export async function GET(
 
     // 3. Durable registered geometry, always scoped to the authenticated plot.
     // Owner declarations remain PLANNED or ESTIMATED; no scientific admission is inferred.
-    const registrations = await prisma.workspaceGeometryRegistration.findMany({
-      where:{tenantId,farmId,plotId,status:"OWNER_DECLARED"},
-      orderBy:{createdAt:"desc"},take:200,
-    });
-    for(const record of registrations){
-      const envelope=projectWorkspaceGeometryRegistration(record as any,{tenantId,farmId,plotId});
-      if(envelope)envelopes.push(envelope);
-    }
+    envelopes.push(...await readScopedWorkspaceGeometry({tenantId,farmId,plotId}));
 
     // 4. Add Benchmark Entities (Sensors, Cameras, Drone Missions, Field Observations)
     for (const item of benchmarkEntities) {

@@ -4,15 +4,16 @@ import {prisma} from "@/lib/prisma";
 import {authenticatedUserId} from "@/lib/tenant-authorization";
 import {validateGeometryRegistrationInput} from "@/lib/agribrain/geometry-registration-policy.mjs";
 import {geometryIntegrityDigest,projectWorkspaceGeometryRegistration} from "@/lib/agribrain/geometry-registration-projection.mjs";
+import {readScopedWorkspaceGeometry} from "@/lib/agribrain/read-scoped-workspace-geometry";
 
 /**
  * P06.04 — strictly owner-scoped geometry registration.
  * These records are USER_DECLARED and must not be mistaken for scientific admission,
  * signed field measurements, executed missions or hardware calibration.
  */
-async function authorizedScope(rawId:string){
+async function authorizedScope(rawId:string,userId:string){
  const plot=await prisma.plot.findFirst({
-   where:{id:rawId,farm:{userId:await authenticatedUserId() || "__none__"}},
+   where:{id:rawId,farm:{userId}},
    select:{id:true,farm:{select:{id:true,userId:true}}},
  });
  return plot?{tenantId:plot.farm.userId,farmId:plot.farm.id,plotId:plot.id}:null;
@@ -28,16 +29,9 @@ export async function GET(
   if(!userId)return NextResponse.json({error:"Authentication required"},{status:401});
   const plotId=await paramsId(params);
   if(!objectId.test(plotId))return NextResponse.json({error:"Plot not found"},{status:404});
-  const scope=await authorizedScope(plotId);
+  const scope=await authorizedScope(plotId,userId);
   if(!scope)return NextResponse.json({error:"Plot not found"},{status:404});
-  const records=await prisma.workspaceGeometryRegistration.findMany({
-   where:{tenantId:scope.tenantId,farmId:scope.farmId,plotId:scope.plotId,status:"OWNER_DECLARED"},
-   orderBy:{createdAt:"desc"},take:200,
-  });
-  const entities=records.flatMap(record=>{
-   const envelope=projectWorkspaceGeometryRegistration(record,scope);
-   return envelope?[envelope]:[];
-  });
+  const entities=await readScopedWorkspaceGeometry(scope);
   return NextResponse.json({success:true,plot_id:scope.plotId,entities,total:entities.length,
     authority:"OWNER_DECLARED_NOT_SCIENTIFICALLY_ADMITTED"},{headers:{"Cache-Control":"private, no-store"}});
  }catch(error){console.error("[workspace/geometries:GET]",error);
@@ -52,7 +46,7 @@ export async function POST(
   if(!userId)return NextResponse.json({error:"Authentication required"},{status:401});
   const plotId=await paramsId(params);
   if(!objectId.test(plotId))return NextResponse.json({error:"Plot not found"},{status:404});
-  const scope=await authorizedScope(plotId);
+  const scope=await authorizedScope(plotId,userId);
   if(!scope)return NextResponse.json({error:"Plot not found"},{status:404});
   if(request.headers.get("content-type")?.split(";")[0].toLowerCase()!=="application/json")
    return NextResponse.json({error:"Expected application/json"},{status:415});
