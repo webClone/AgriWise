@@ -1,8 +1,8 @@
 "use client";
 import {useState} from "react";
-import {Layers3, ListFilter, Eye, EyeOff, X} from "lucide-react";
+import {Layers3, ListFilter, X} from "lucide-react";
 import type {WorkspaceFeatureEnvelope} from "@/lib/agribrain/workspace-feature-envelope";
-import type {SceneLayerEntry} from "./p06-scene-registry";
+import type {SceneLayerEntry} from "./p06-scene-registry.mjs";
 import {sceneLayerForEntityKind} from "./p06-scene-registry.mjs";
 
 export default function WorkspaceSceneControlsP06({

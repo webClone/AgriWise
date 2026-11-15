@@ -37,5 +37,5 @@ export function coincidentSceneEntities(entities,selected,project,radiusPx=13){
   return projectFn?Math.hypot(p[0]-source[0],p[1]-source[1])<=radiusPx:p[0]===source[0]&&p[1]===source[1];
  });
  if(!hits.some(e=>e.envelope_id===selected.envelope_id))hits.unshift(selected);
- return hits.sort((a,b)=>String(a.envelope_id).localeCompare(String(b.envelope_id)));
+ return [selected,...hits.filter(e=>e.envelope_id!==selected.envelope_id).sort((a,b)=>String(a.envelope_id).localeCompare(String(b.envelope_id)))];
 }

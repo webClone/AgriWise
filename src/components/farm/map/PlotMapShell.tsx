@@ -652,7 +652,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     return !!layer && sceneVisibility?.[layer]!==false && (sceneOpacity?.[layer]??1)>0;
   }),[workspaceEntities,sceneVisibility,sceneOpacity]);
 
-  const pickEntity=useCallback((entity:WorkspaceFeatureEnvelope,info:any)=>{
+  const pickEntity=useCallback((entity:WorkspaceFeatureEnvelope,info?:any)=>{
     if(transectMode)return;
     const project=typeof info?.viewport?.project==="function"
       ? (point:[number,number])=>info.viewport.project(point) as [number,number] : undefined;
