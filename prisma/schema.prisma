@@ -1178,3 +1178,33 @@ model InstitutionalLead {
   @@index([intent])
   @@index([createdAt])
 }
+
+// P06.04: owner-declared spatial geometry, NOT a scientific admission certificate.
+// Registration is immutable in Candidate 01. Approval and execution require separate evidence pipelines.
+model WorkspaceGeometryRegistration {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  registrationKey String
+  tenantId       String   @db.ObjectId
+  farmId         String   @db.ObjectId
+  plotId         String   @db.ObjectId
+  registeredBy   String   @db.ObjectId
+  entityKind     String
+  entityId       String
+  sourceKind     String
+  sourceId       String?
+  geometry       Json
+  geometryDigest String
+  name           String
+  notes          String?
+  status         String   @default("OWNER_DECLARED")
+  epistemicClass String
+  locationSource String   @default("USER_DECLARED")
+  revision       Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([plotId, registrationKey])
+  @@index([tenantId, farmId, plotId, status])
+  @@index([plotId, entityKind, sourceId])
+}
+
