@@ -26,12 +26,12 @@ export function visibleSceneEntities(entities,scope,visibleVectors={}){
  });
 }
 export function coincidentSceneEntities(entities,selected,project,radiusPx=13){
- if(!selected?.geometry?.coordinates||!Array.isArray(entities))return selected?[selected]:[];
+ if(selected?.geometry?.type!=="Point"||!Array.isArray(entities))return selected?[selected]:[];
  const projectFn=typeof project==="function"?project:null;
  const source=projectFn?projectFn(selected.geometry.coordinates):selected.geometry.coordinates;
  if(!Array.isArray(source)||!source.every(Number.isFinite))return [selected];
  const hits=entities.filter(e=>{
-  if(e?.display_eligibility?.eligible_for_map_pin!==true||!e.geometry?.coordinates)return false;
+  if(e?.display_eligibility?.eligible_for_map_pin!==true||e.geometry?.type!=="Point")return false;
   const p=projectFn?projectFn(e.geometry.coordinates):e.geometry.coordinates;
   if(!Array.isArray(p)||!p.every(Number.isFinite))return false;
   return projectFn?Math.hypot(p[0]-source[0],p[1]-source[1])<=radiusPx:p[0]===source[0]&&p[1]===source[1];

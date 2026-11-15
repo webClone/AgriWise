@@ -44,3 +44,16 @@ test("P06 no fabricated coordinates for unlocated items",()=>{
  const e=entity("u","SENSOR",{geometry:null,display_eligibility:{eligible_for_catalog:true,eligible_for_map_pin:false}});
  assert.equal(filterCurrentSceneEntities([e],scope).length,1);assert.equal(visibleSceneEntities([e],scope,{}).length,0);
 });
+
+test("P06.03: polyline selection cannot be passed to point projection for overlap tests",()=>{
+ const line={...entity("line","DRONE_MISSION"),geometry:{type:"LineString",coordinates:[[2.95,36.58],[2.96,36.59]]},display_eligibility:{eligible_for_catalog:true,eligible_for_map_pin:false,eligible_for_map_geometry:true}};
+ let projections=0;
+ const hits=coincidentSceneEntities([line,entity("point","SENSOR")],line,()=>{projections++;throw Error("polygon coords are not positions")});
+ assert.equal(projections,0);assert.deepEqual(hits.map(x=>x.entity_id),["line"]);
+});
+test("P06.03: a polygon overlapping a point is excluded from point-only collision projection",()=>{
+ const point=entity("s","SENSOR");
+ const polygon=entity("a","FIELD_OBSERVATION",{geometry:{type:"Polygon",coordinates:[[[2.95,36.58],[2.96,36.58],[2.96,36.59],[2.95,36.58]]]},display_eligibility:{eligible_for_catalog:true,eligible_for_map_pin:false,eligible_for_map_geometry:true}});
+ const hits=coincidentSceneEntities([point,polygon],point,xy=>[xy[0]*100,xy[1]*100]);
+ assert.deepEqual(hits.map(x=>x.entity_id),["s"]);
+});
