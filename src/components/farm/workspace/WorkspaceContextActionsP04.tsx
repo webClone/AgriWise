@@ -174,9 +174,10 @@ export default function WorkspaceContextActionsP04({
     const props = ((cameraEntity?.properties || {}) as Record<string, any>);
     const coords = cameraEntity?.geometry?.type === "Point" ? cameraEntity.geometry.coordinates : null;
     const isFixture = props.is_benchmark_fixture === true || cameraEntity?.epistemic_class === "SIMULATED";
+    const ownerDeclared = cameraEntity?.spatial_support?.location_source === "USER_DECLARED";
     const deviceId = props.deviceId || selection.id;
-    const model = props.model || "AgroCam Vision Trap";
-    const resolution = props.resolution || "4K UHD";
+    const model = props.model || (ownerDeclared ? "Camera source record" : "AgroCam Vision Trap");
+    const resolution = props.resolution || (ownerDeclared ? "Uncalibrated" : "4K UHD");
     const digest = cameraEntity?.provenance?.record_digest;
 
     return (
@@ -198,14 +199,14 @@ export default function WorkspaceContextActionsP04({
               fontSize: "10px",
               padding: "2px 8px",
               borderRadius: "999px",
-              background: isFixture ? "rgba(234,179,8,0.15)" : "rgba(168,85,247,0.2)",
-              color: isFixture ? "#facc15" : "#c084fc",
-              border: `1px solid ${isFixture ? "rgba(234,179,8,0.35)" : "rgba(168,85,247,0.4)"}`,
+              background: (isFixture || ownerDeclared) ? "rgba(234,179,8,0.15)" : "rgba(168,85,247,0.2)",
+              color: (isFixture || ownerDeclared) ? "#facc15" : "#c084fc",
+              border: `1px solid ${(isFixture || ownerDeclared) ? "rgba(234,179,8,0.35)" : "rgba(168,85,247,0.4)"}`,
               fontWeight: 700,
               letterSpacing: "0.05em",
             }}
           >
-            {isFixture ? "DEMO FIXTURE" : "ACTIVE CAMERA"}
+            {ownerDeclared ? "OWNER-DECLARED COVERAGE" : isFixture ? "DEMO FIXTURE" : "ACTIVE CAMERA"}
           </span>
         </div>
 
@@ -239,7 +240,7 @@ export default function WorkspaceContextActionsP04({
               gap: 6,
             }}
           >
-            <Camera size={15} /> View Visual Stream
+            <Camera size={15} /> {ownerDeclared ? "Open evidence workspace" : "View Visual Stream"}
           </button>
           <button
             type="button"
