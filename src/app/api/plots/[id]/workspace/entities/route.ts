@@ -201,12 +201,12 @@ const BENCHMARK_PLOT_ENTITIES: Record<string, BenchmarkEntity[]> = {
       lon: 2.953850,
       zoneId: "zone-4",
       locationSource: "OBSERVED_GPS",
-      epistemicClass: "REGISTERED_GROUND_TRUTH",
+      epistemicClass: "SIMULATED",
       properties: {
         category: "PEST_DAMAGE",
         severity: "MEDIUM",
         notes: "Localized aphid colony on young citrus shoot",
-        observer: "Agronomist Mobile Scout",
+        observer: "Agronomist Mobile Scout (Demo)",
         aiTags: ["aphids", "leaf_curl"],
         is_benchmark_fixture: true,
       },
@@ -434,8 +434,8 @@ export async function GET(
           location_source: item.locationSource,
           epistemic_class: item.epistemicClass,
           temporal_extent: {
-            observed_at: item.epistemicClass === "REGISTERED_GROUND_TRUTH" ? "2026-11-12T14:30:00Z" : null,
-            published_at: "2026-03-01T00:00:00Z",
+            observed_at: null,
+            published_at: null,
           },
           properties: {
             ...item.properties,
