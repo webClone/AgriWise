@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import {isSupportedWorkspaceGeometry,normalizeWorkspaceGeometry} from "./workspace-geometry.mjs";
 
-export const WORKSPACE_FEATURE_CONTRACT_VERSION = "2026.11-p05.1";
+export const WORKSPACE_FEATURE_CONTRACT_VERSION = "2026.11-p06.3";
 
 export const VALID_ENTITY_KINDS = Object.freeze([
   "SENSOR",
@@ -58,6 +59,7 @@ export function createWorkspaceFeatureEnvelope(params) {
     owner_scope,
     latitude,
     longitude,
+    geometry: suppliedGeometry = undefined,
     altitude_m = null,
     depth_cm = null,
     support_radius_m = null,
@@ -113,45 +115,34 @@ export function createWorkspaceFeatureEnvelope(params) {
   let ineligibility_reason = null;
 
   if (is_centroid_substitute) {
-    // Gate P05-G02: Reject centroid substitute as map pin coordinates
-    has_location = false;
-    geometry = null;
     ineligibility_reason = "CENTROID_SUBSTITUTE_FORBIDDEN";
+  } else if (suppliedGeometry !== undefined && suppliedGeometry !== null) {
+    // Explicit geometry must validate; never downgrade a malformed footprint to a plausible point.
+    geometry=normalizeWorkspaceGeometry(suppliedGeometry);
+    has_location=true;
+    if (!isLocationTrusted) ineligibility_reason="UNTRUSTED_LOCATION_SOURCE";
   } else if (
-    latitude !== null &&
-    latitude !== undefined &&
-    longitude !== null &&
-    longitude !== undefined &&
-    typeof latitude === "number" &&
-    typeof longitude === "number" &&
-    Number.isFinite(latitude) &&
-    Number.isFinite(longitude) &&
-    Math.abs(latitude) <= 90 &&
-    Math.abs(longitude) <= 180
+    latitude!==null && latitude!==undefined &&
+    longitude!==null && longitude!==undefined &&
+    typeof latitude==="number" && typeof longitude==="number" &&
+    Number.isFinite(latitude) && Number.isFinite(longitude) &&
+    Math.abs(latitude)<=90 && Math.abs(longitude)<=180
   ) {
-    has_location = true;
-    geometry = Object.freeze({
-      type: "Point",
-      coordinates: [longitude, latitude], // GeoJSON standard [lng, lat]
-    });
-    if (!isLocationTrusted) {
-      ineligibility_reason = "UNTRUSTED_LOCATION_SOURCE";
-    }
+    has_location=true;
+    geometry=normalizeWorkspaceGeometry({type:"Point",coordinates:[longitude,latitude]});
+    if (!isLocationTrusted) ineligibility_reason="UNTRUSTED_LOCATION_SOURCE";
   } else {
-    // Gate P05-G08: Unlocated device is valid for catalog, ineligible for map pin
-    has_location = false;
-    geometry = null;
-    ineligibility_reason = "LOCATION_UNREGISTERED";
+    ineligibility_reason="LOCATION_UNREGISTERED";
   }
 
-  const eligible_for_map_pin = Boolean(
-    has_location && isLocationTrusted && !is_centroid_substitute
-  );
+  const eligible_for_map_pin=Boolean(has_location&&isLocationTrusted&&!is_centroid_substitute&&geometry?.type==="Point");
+  const eligible_for_map_geometry=Boolean(has_location&&isLocationTrusted&&!is_centroid_substitute&&geometry&&geometry.type!=="Point");
 
   const display_eligibility = Object.freeze({
     eligible_for_map_pin,
+    eligible_for_map_geometry,
     eligible_for_catalog: true, // Gate P05-G08
-    ineligibility_reason: eligible_for_map_pin ? null : ineligibility_reason,
+    ineligibility_reason: eligible_for_map_pin || eligible_for_map_geometry ? null : ineligibility_reason,
   });
 
   const spatial_support = Object.freeze({
@@ -253,23 +244,10 @@ export function validateWorkspaceFeatureEnvelope(envelope, expectedScope) {
     }
   }
 
-  // Geometry validation
-  if (envelope.geometry !== null) {
-    if (envelope.geometry.type !== "Point" && envelope.geometry.type !== "Polygon" && envelope.geometry.type !== "LineString") {
-      errors.push(`unsupported geometry type: "${envelope.geometry.type}"`);
-    }
-
-    if (envelope.geometry.type === "Point") {
-      const coords = envelope.geometry.coordinates;
-      if (!Array.isArray(coords) || coords.length < 2) {
-        errors.push("Point geometry coordinates must be an array of [lng, lat]");
-      } else {
-        const [lng, lat] = coords;
-        if (!Number.isFinite(lng) || !Number.isFinite(lat) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
-          errors.push(`coordinates out of valid bounds: [${lng}, ${lat}]`);
-        }
-      }
-    }
+  // Full nested WGS84 geometry validation; in particular Polygon and MultiPolygon
+  // coordinates must be closed, non-degenerate and finite.
+  if (envelope.geometry!==null && !isSupportedWorkspaceGeometry(envelope.geometry)) {
+    errors.push("invalid or unsupported WGS84 workspace geometry");
   }
 
   // Map pin consistency check
@@ -283,6 +261,10 @@ export function validateWorkspaceFeatureEnvelope(envelope, expectedScope) {
     }
   }
 
+  if (envelope.display_eligibility?.eligible_for_map_geometry === true) {
+    if (!envelope.geometry || envelope.geometry.type==="Point" || envelope.spatial_support?.has_location !== true) errors.push("eligible_for_map_geometry is true without valid non-point geometry");
+    if (!["REGISTERED_HARDWARE","OBSERVED_GPS","SURVEYED"].includes(envelope.spatial_support?.location_source)) errors.push("untrusted geometry location source");
+  }
   return {
     valid: errors.length === 0,
     errors,

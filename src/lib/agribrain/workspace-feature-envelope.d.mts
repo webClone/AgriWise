@@ -1,4 +1,4 @@
-export const WORKSPACE_FEATURE_CONTRACT_VERSION: "2026.11-p05.1";
+export const WORKSPACE_FEATURE_CONTRACT_VERSION: "2026.11-p06.3";
 
 export type EntityKind =
   | "SENSOR"
@@ -32,6 +32,9 @@ export interface PointGeometry {
   coordinates: [number, number]; // [lng, lat]
 }
 
+import type {WorkspaceGeometry} from "./workspace-geometry.mjs";
+export type {WorkspaceGeometry} from "./workspace-geometry.mjs";
+
 export interface SpatialSupportEnvelope {
   has_location: boolean;
   location_source: LocationSource;
@@ -51,6 +54,7 @@ export interface TemporalExtentEnvelope {
 
 export interface DisplayEligibilityEnvelope {
   eligible_for_map_pin: boolean;
+  eligible_for_map_geometry: boolean;
   eligible_for_catalog: boolean;
   ineligibility_reason: string | null;
 }
@@ -68,7 +72,7 @@ export interface WorkspaceFeatureEnvelope {
   entity_id: string;
   source_version: string;
   owner_scope: OwnerScopeEnvelope;
-  geometry: PointGeometry | null;
+  geometry: WorkspaceGeometry | null;
   spatial_support: SpatialSupportEnvelope;
   temporal_extent: TemporalExtentEnvelope;
   epistemic_class: EpistemicClass;
@@ -91,6 +95,7 @@ export interface CreateFeatureEnvelopeParams {
   };
   latitude?: number | null;
   longitude?: number | null;
+  geometry?: WorkspaceGeometry | null;
   altitude_m?: number | null;
   depth_cm?: number | null;
   support_radius_m?: number | null;
