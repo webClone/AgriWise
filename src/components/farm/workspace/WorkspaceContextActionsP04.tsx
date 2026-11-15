@@ -50,7 +50,7 @@ export default function WorkspaceContextActionsP04({
       ) || ((selection.metadata as unknown) as WorkspaceFeatureEnvelope | undefined);
 
     const props = ((sensorEntity?.properties || {}) as Record<string, any>);
-    const coords = sensorEntity?.geometry?.coordinates;
+    const coords = sensorEntity?.geometry?.type === "Point" ? sensorEntity.geometry.coordinates : null;
     const depth = sensorEntity?.spatial_support?.depth_cm;
     const isFixture = props.is_benchmark_fixture === true || sensorEntity?.epistemic_class === "SIMULATED";
     const isOnline = isFixture ? false : (props.isOnline ?? true);
@@ -172,7 +172,7 @@ export default function WorkspaceContextActionsP04({
       ) || ((selection.metadata as unknown) as WorkspaceFeatureEnvelope | undefined);
 
     const props = ((cameraEntity?.properties || {}) as Record<string, any>);
-    const coords = cameraEntity?.geometry?.coordinates;
+    const coords = cameraEntity?.geometry?.type === "Point" ? cameraEntity.geometry.coordinates : null;
     const isFixture = props.is_benchmark_fixture === true || cameraEntity?.epistemic_class === "SIMULATED";
     const deviceId = props.deviceId || selection.id;
     const model = props.model || "AgroCam Vision Trap";
@@ -268,7 +268,7 @@ export default function WorkspaceContextActionsP04({
       ) || ((selection.metadata as unknown) as WorkspaceFeatureEnvelope | undefined);
 
     const props = ((droneEntity?.properties || {}) as Record<string, any>);
-    const coords = droneEntity?.geometry?.coordinates;
+    const coords = droneEntity?.geometry?.type === "Point" ? droneEntity.geometry.coordinates : null;
     const missionId = props.missionId || selection.id;
     const missionType = props.missionType || "MAPPING";
     const altitudeM = props.altitudeM || 45;
@@ -365,7 +365,7 @@ export default function WorkspaceContextActionsP04({
       ) || ((selection.metadata as unknown) as WorkspaceFeatureEnvelope | undefined);
 
     const props = ((obsEntity?.properties || {}) as Record<string, any>);
-    const coords = obsEntity?.geometry?.coordinates;
+    const coords = obsEntity?.geometry?.type === "Point" ? obsEntity.geometry.coordinates : null;
     const category = props.category || "SCOUTING";
     const observer = props.observer || "Agronomist";
     const notes = props.notes || "Field scouting record";

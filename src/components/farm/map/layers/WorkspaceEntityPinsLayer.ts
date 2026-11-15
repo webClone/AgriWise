@@ -27,7 +27,7 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
 
   // Filter strictly for entities eligible for map pins
   const locatedEntities = entities.filter(
-    (e) => e.display_eligibility?.eligible_for_map_pin && e.geometry?.coordinates
+    (e) => e.display_eligibility?.eligible_for_map_pin && e.geometry?.type === "Point"
   );
 
   if (locatedEntities.length === 0) {

@@ -65,7 +65,7 @@ export default function WorkspaceSceneControlsP06({
        ))}
        {entities.map(entity=>{
          const label=String(entity.properties?.name||entity.properties?.deviceId||entity.entity_id);
-         const located=entity.display_eligibility?.eligible_for_map_pin===true && !!entity.geometry;
+         const located=(entity.display_eligibility?.eligible_for_map_pin===true||entity.display_eligibility?.eligible_for_map_geometry===true) && !!entity.geometry;
          const layerId=sceneLayerForEntityKind(entity.entity_kind);
          const hidden=manifest.find(l=>l.id===layerId)?.visible===false;
          const demo=entity.properties?.is_benchmark_fixture===true||entity.epistemic_class==="SIMULATED";
@@ -73,7 +73,7 @@ export default function WorkspaceSceneControlsP06({
           <button type="button" aria-current={selectedId===entity.entity_id||selectedId===entity.envelope_id?"true":undefined}
             onClick={()=>onSelectEntity(entity)}>
             <span>{entity.entity_kind.replaceAll("_"," ")} · {label}</span>
-            <small>{demo?"DEMO · ":""}{located?hidden?"Layer hidden":"Mapped":"Location not registered (list only)"}</small>
+            <small>{demo?"DEMO · ":""}{located?hidden?"Layer hidden":`${entity.geometry?.type} mapped`:"Location not registered (list only)"}</small>
           </button>
          </li>;
        })}

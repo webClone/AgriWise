@@ -22,7 +22,7 @@ export function buildSceneManifest({scope,entities,zones,rasterAvailable,visible
 export function visibleSceneEntities(entities,scope,visibleVectors={}){
  return filterCurrentSceneEntities(entities,scope).filter(e=>{
   const k=sceneLayerForEntityKind(e.entity_kind);
-  return !!k&&visibleVectors[k]!==false&&e.display_eligibility?.eligible_for_map_pin===true&&e.geometry?.type==="Point"&&Array.isArray(e.geometry.coordinates);
+  return !!k&&visibleVectors[k]!==false&&(e.display_eligibility?.eligible_for_map_pin===true||e.display_eligibility?.eligible_for_map_geometry===true)&&!!e.geometry;
  });
 }
 export function coincidentSceneEntities(entities,selected,project,radiusPx=13){

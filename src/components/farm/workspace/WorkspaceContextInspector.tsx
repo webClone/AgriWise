@@ -20,6 +20,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
+import {geometryBounds} from "@/lib/agribrain/workspace-geometry.mjs";
 import type { WorkspaceQuickAction } from "./WorkspaceToolDock";
 
 export default function WorkspaceContextInspector({
@@ -59,7 +60,8 @@ export default function WorkspaceContextInspector({
   const analysisUrl = `/farm/${encodeURIComponent(farmId)}/plot/${encodeURIComponent(plotId)}/analysis`;
 
   const entityProps = (matchedEntity?.properties || {}) as Record<string, any>;
-  const entityCoords = matchedEntity?.geometry?.coordinates;
+  const entityCoords = matchedEntity?.geometry?.type==="Point" ? matchedEntity.geometry.coordinates : null;
+  const footprintBounds = matchedEntity?.geometry?.type !== "Point" ? geometryBounds(matchedEntity?.geometry) : null;
   const isFixture = entityProps.is_benchmark_fixture === true || matchedEntity?.epistemic_class === "SIMULATED";
   const isOnline = isFixture ? false : (entityProps.isOnline ?? true);
   const latest = entityProps.latestReading;
@@ -109,6 +111,12 @@ export default function WorkspaceContextInspector({
                   {matchedEntity.epistemic_class}
                 </dd>
               </div>
+              {footprintBounds && (
+                <div>
+                  <dt>Mapped geometry</dt>
+                  <dd>{matchedEntity.geometry?.type} · bounds [{footprintBounds.map(v=>v.toFixed(5)).join(", ")}]</dd>
+                </div>
+              )}
               {matchedEntity.provenance?.record_digest && (
                 <div>
                   <dt>Envelope Integrity</dt>
@@ -234,6 +242,12 @@ export default function WorkspaceContextInspector({
                 <dt>Field of View</dt>
                 <dd>{entityProps.fieldOfView || "120° Wide Angle"}</dd>
               </div>
+              {footprintBounds && (
+                <div>
+                  <dt>Mapped geometry</dt>
+                  <dd>{matchedEntity.geometry?.type} · bounds [{footprintBounds.map(v=>v.toFixed(5)).join(", ")}]</dd>
+                </div>
+              )}
               {matchedEntity.provenance?.record_digest && (
                 <div>
                   <dt>Envelope Integrity</dt>
@@ -314,6 +328,12 @@ export default function WorkspaceContextInspector({
                   {matchedEntity.epistemic_class}
                 </dd>
               </div>
+              {footprintBounds && (
+                <div>
+                  <dt>Mapped geometry</dt>
+                  <dd>{matchedEntity.geometry?.type} · bounds [{footprintBounds.map(v=>v.toFixed(5)).join(", ")}]</dd>
+                </div>
+              )}
               {matchedEntity.provenance?.record_digest && (
                 <div>
                   <dt>Envelope Integrity</dt>
@@ -384,6 +404,12 @@ export default function WorkspaceContextInspector({
                 <div>
                   <dt>AI Tags</dt>
                   <dd style={{ color: "#38bdf8" }}>{entityProps.aiTags.join(", ")}</dd>
+                </div>
+              )}
+              {footprintBounds && (
+                <div>
+                  <dt>Mapped geometry</dt>
+                  <dd>{matchedEntity.geometry?.type} · bounds [{footprintBounds.map(v=>v.toFixed(5)).join(", ")}]</dd>
                 </div>
               )}
               {matchedEntity.provenance?.record_digest && (

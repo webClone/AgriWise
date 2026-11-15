@@ -23,6 +23,8 @@ import {
   isRenderedMaterialization,
 } from "@/lib/agribrain/render-materialization";
 import { getWorkspaceEntityPinsLayers } from "./layers/WorkspaceEntityPinsLayer";
+import { getWorkspaceEntityGeometryLayers } from "./layers/WorkspaceEntityGeometryLayer";
+import {geometryBounds} from "@/lib/agribrain/workspace-geometry.mjs";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
 import {sceneLayerForEntityKind,coincidentSceneEntities} from "@/components/farm/workspace/p06-scene-registry.mjs";
 
@@ -480,14 +482,16 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   useEffect(()=>{
     if(!selectedEntityId || !plotId)return;
     const e=workspaceEntities.find(x=>(x.entity_id===selectedEntityId||x.envelope_id===selectedEntityId)
-      &&x.owner_scope?.plot_id===plotId&&x.display_eligibility?.eligible_for_map_pin===true
-      &&x.geometry?.type==="Point");
-    const point=e?.geometry?.coordinates;
-    if(!point||point.length!==2||!point.every(Number.isFinite))return;
+      &&x.owner_scope?.plot_id===plotId&&
+      (x.display_eligibility?.eligible_for_map_pin===true||x.display_eligibility?.eligible_for_map_geometry===true));
+    const bounds=geometryBounds(e?.geometry);
+    if(!bounds)return;
+    // The bounding-box midpoint is a viewport target only, never emitted as a sensor/mission pin.
+    const target:[number,number]=[(bounds[0]+bounds[2])/2,(bounds[1]+bounds[3])/2];
     const key=[sceneGeneration??0,plotId,e?.envelope_id,selectedEntityId].join(":");
     if(lastFocusedRef.current===key)return;
     lastFocusedRef.current=key;
-    setViewState(prev=>({...prev,longitude:point[0],latitude:point[1]}));
+    setViewState(prev=>({...prev,longitude:target[0],latitude:target[1]}));
   },[selectedEntityId,workspaceEntities,plotId,sceneGeneration,setViewState]);
 
   // V92.4: Build overlay surfaces dynamically from ALL resolved surfaces.
@@ -684,9 +688,10 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     }
   },[visibleEntities,onEntityClick,transectMode]);
 
-  const entityLayers=useMemo(()=>visibleEntities.length?getWorkspaceEntityPinsLayers({
-    entities:visibleEntities,selectedEntityId,onEntityClick:pickEntity,sceneOpacity,
-  }):[],[visibleEntities,selectedEntityId,pickEntity,sceneOpacity]);
+  const entityLayers=useMemo(()=>visibleEntities.length?[
+    ...getWorkspaceEntityGeometryLayers({entities:visibleEntities,selectedEntityId,onEntityClick:pickEntity,sceneOpacity}),
+    ...getWorkspaceEntityPinsLayers({entities:visibleEntities,selectedEntityId,onEntityClick:pickEntity,sceneOpacity}),
+  ]:[],[visibleEntities,selectedEntityId,pickEntity,sceneOpacity]);
 
   // 5. Compute hovered zone centroid for floating chip
   const hoveredZoneData = useMemo(() => {
