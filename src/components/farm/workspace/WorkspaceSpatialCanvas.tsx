@@ -26,6 +26,8 @@ interface WorkspaceSpatialCanvasProps {
   onPaletteChange: (lens: MapVisualLens) => void;
   onZoneClick: (zoneId: string) => void;
   workspaceEntities?: WorkspaceFeatureEnvelope[];
+  sceneVisibility?: Record<string,boolean>;
+  sceneOpacity?: Record<string,number>;
   selectedEntityId?: string | null;
   onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
 }
@@ -44,6 +46,8 @@ export default function WorkspaceSpatialCanvas({
   onPaletteChange,
   onZoneClick,
   workspaceEntities,
+  sceneVisibility,
+  sceneOpacity,
   selectedEntityId,
   onEntityClick,
 }: WorkspaceSpatialCanvasProps) {
@@ -79,6 +83,8 @@ export default function WorkspaceSpatialCanvas({
           paletteId={mapVisualLens}
           onPaletteChange={onPaletteChange}
           workspaceEntities={workspaceEntities}
+          sceneVisibility={sceneVisibility}
+          sceneOpacity={sceneOpacity}
           selectedEntityId={selectedEntityId}
           onEntityClick={onEntityClick}
         />

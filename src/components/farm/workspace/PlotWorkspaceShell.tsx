@@ -1,8 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PanelRightOpen, PanelRightClose } from "lucide-react";
 import WorkspaceSpatialCanvas from "./WorkspaceSpatialCanvas";
+import WorkspaceSceneControlsP06 from "./WorkspaceSceneControlsP06";
+import {buildSceneManifest,filterCurrentSceneEntities} from "./p06-scene-registry.mjs";
+import "./p06-scene-controls.css";
 import WorkspaceSpecializedToolsP04 from "./WorkspaceSpecializedToolsP04";
 import { useWorkspaceScientificAdapter } from "./useWorkspaceScientificAdapter";
 import WorkspaceToolDock, { type WorkspaceQuickAction } from "./WorkspaceToolDock";
@@ -30,7 +33,7 @@ function WorkspaceStateBridge() {
 function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const farmId = props.farmId || String(props.farm?.id || "");
   const plotId = props.plotId || String(props.plot?.id || "");
-  const { state, setActiveTool, toggleInspector, selectEntity } = usePlotWorkspace();
+  const { state, setActiveTool, toggleInspector, selectEntity, toggleSceneLayer, setSceneLayerOpacity, setAllSceneLayersVisibility, clearSelection } = usePlotWorkspace();
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState(false);
   const [investigation, setInvestigation] = useState<P04InvestigationKind | null>(null);
   const [hostMode, setHostMode] = useState<P04HostMode>("context");
@@ -38,6 +41,13 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   const [activeInitialSensorId, setActiveInitialSensorId] = useState<string | null>(null);
   const { entities } = useWorkspaceEntities(plotId, 30000, state.generationId);
   const launchControlRef = useRef<HTMLElement | null>(null);
+  const scopedScene = useMemo(() => ({tenantId:state.ownerScope.tenantId,farmId:state.plotScope.farmId,plotId:state.plotScope.plotId}),
+    [state.ownerScope.tenantId,state.plotScope.farmId,state.plotScope.plotId]);
+  const scopedEntities = useMemo(() => filterCurrentSceneEntities(entities,scopedScene),[entities,scopedScene]);
+  const selectSceneEntity = useCallback((entity:typeof entities[number]) => {
+    selectEntity({kind:entity.entity_kind,id:entity.entity_id,sourceSnapshotId:entity.source_version,
+      metadata:entity as unknown as Record<string,unknown>});
+  },[selectEntity]);
 
   const scientific = useWorkspaceScientificAdapter({
     farm: props.farm,
@@ -115,6 +125,12 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
       state.plotScope.geometryHash, state.plotScope.geometryVersion]);
 
 
+  const sceneZones = scientific.l10.data?.plot_id === plotId ? (scientific.l10.data?.zones ?? []) : [];
+  const sceneManifest = buildSceneManifest({
+    scope:scopedScene,entities:scopedEntities,zones:sceneZones,
+    rasterAvailable:!!scientific.l10.activeSurface&&scientific.l10.data?.plot_id===plotId,
+    visibleVectors:state.renderIntent.visibleVectors,sceneOpacity:state.renderIntent.sceneLayerOpacity
+  });
   const desktopInspectorOpen = !state.isInspectorCollapsed;
 
   const openTool = useCallback((tool: WorkspaceQuickAction) => {
@@ -178,16 +194,11 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             l10={scientific.l10}
             mapVisualLens={scientific.mapVisualLens}
             onPaletteChange={scientific.setMapVisualLens}
-            workspaceEntities={entities}
+            workspaceEntities={scopedEntities}
+            sceneVisibility={state.renderIntent.visibleVectors}
+            sceneOpacity={state.renderIntent.sceneLayerOpacity}
             selectedEntityId={state.selectedEntity.id}
-            onEntityClick={(entity) => {
-              selectEntity({
-                kind: entity.entity_kind,
-                id: entity.entity_id,
-                sourceSnapshotId: entity.source_version,
-                metadata: entity as unknown as Record<string, unknown>,
-              });
-            }}
+            onEntityClick={selectSceneEntity}
             onZoneClick={(zoneId) => {
               scientific.l10.setSelectedZone(zoneId);
               selectEntity({
@@ -198,6 +209,26 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
             }}
           />
         </div>
+        <WorkspaceSceneControlsP06
+          manifest={sceneManifest}
+          entities={scopedEntities}
+          zones={sceneZones}
+          selectedId={state.selectedEntity.id}
+          onToggle={(id,visible)=>{
+            toggleSceneLayer(id,visible);
+            if(!visible&&scopedEntities.some(e=>e.entity_id===state.selectedEntity.id &&
+               ((id==="sensors"&&e.entity_kind==="SENSOR")||(id==="cameras"&&e.entity_kind==="CAMERA")||
+                (id==="drones"&&e.entity_kind==="DRONE_MISSION")||
+                (id==="observations"&&(e.entity_kind==="FIELD_OBSERVATION"||e.entity_kind==="FIELD_EVENT"))))clearSelection();
+          }}
+          onOpacity={setSceneLayerOpacity}
+          onAll={setAllSceneLayersVisibility}
+          onSelectEntity={selectSceneEntity}
+          onSelectZone={zoneId=>{
+            scientific.l10.setSelectedZone(zoneId);
+            selectEntity({kind:"ZONE",id:zoneId,sourceSnapshotId:state.publication.snapshotId});
+          }}
+        />
         <WorkspaceSpecializedToolsP04
           plotId={plotId}
           plot={props.plot}
@@ -217,11 +248,11 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           onLaunch={launchInvestigation}
           onOpenSensor={handleOpenSensor}
           onOpenTool={openTool}
-          workspaceEntities={entities}
+          workspaceEntities={scopedEntities}
         />
         {investigation && (
           <WorkspaceInvestigationHostP04
-            kind={investigation} mode={hostMode} workspaceEntities={entities}
+            kind={investigation} mode={hostMode} workspaceEntities={scopedEntities}
             onMode={setHostMode} onClose={closeInvestigation}
           />
         )}
@@ -233,7 +264,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
           plotId={plotId}
           onOpenSensor={handleOpenSensor}
           onOpenTool={openTool}
-          workspaceEntities={entities}
+          workspaceEntities={scopedEntities}
           onCollapse={() => {
             if (window.matchMedia("(max-width: 820px)").matches) {
               setMobileInspectorOpen(false);

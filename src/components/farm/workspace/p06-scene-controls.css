@@ -1,0 +1,27 @@
+
+/* P06 — Spatial-first scene controls, independent of scientific source policy. */
+.pw-scene-controls{position:absolute;inset-block-start:80px;inset-inline-end:16px;z-index:47;display:flex;flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;max-width:min(340px,calc(100% - 20px));color:#f3f7f4}
+.pw-scene-controls button,.pw-scene-controls input{pointer-events:auto}
+.pw-scene-header{display:flex;gap:6px;pointer-events:auto}
+.pw-scene-header button{display:flex;align-items:center;gap:6px;padding:8px 10px;background:#122721ee;color:#e6f4e9;border:1px solid #688d7966;border-radius:10px;font-weight:600;font-size:12px;box-shadow:0 8px 24px #0005}
+.pw-scene-header button span{font-size:10px;color:#a9c9b5}
+.pw-scene-panel{width:min(325px,calc(100vw - 100px));max-height:50vh;overflow:auto;padding:12px;background:#112920f5;border:1px solid #759a8266;border-radius:12px;box-shadow:0 18px 40px #0009;pointer-events:auto;backdrop-filter:blur(15px)}
+.pw-scene-panel-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:12px}
+.pw-scene-panel-title button{background:transparent;border:0;color:#bfd7c6;padding:5px}
+.pw-scene-all{display:flex;gap:8px;margin:0 0 9px}
+.pw-scene-all button{background:#254635;color:#e5f4e9;border:1px solid #6fa17a66;border-radius:7px;padding:5px 9px;font-size:11px}
+.pw-scene-layer{border-top:1px solid #d4f0dc22;padding:9px 0 7px}
+.pw-scene-layer>label{display:flex;align-items:center;gap:9px;font-size:12px;cursor:pointer}
+.pw-scene-layer>label input{accent-color:#47af8b;width:15px;height:15px}
+.pw-scene-layer>label span{flex:1}
+.pw-scene-layer>label small{color:#c6dfcc;background:#ffffff19;padding:2px 7px;border-radius:20px}
+.pw-scene-opacity{display:flex;align-items:center;gap:7px;margin:8px 0 0 24px;color:#b3cabe;font-size:10px}
+.pw-scene-opacity input{flex:1;min-width:20px;accent-color:#4ab58d}
+.pw-scene-opacity output{width:34px;text-align:right}
+.pw-scene-hint{font-size:10px;line-height:1.5;color:#aec7b9;padding-top:8px}
+.pw-scene-directory ul{list-style:none;padding:0;margin:0;display:grid;gap:5px}
+.pw-scene-directory li button{display:flex;flex-direction:column;width:100%;text-align:start;gap:3px;background:#ffffff0d;color:#e2f2e6;padding:8px;border:1px solid #ffffff20;border-radius:7px;font-size:11px;overflow-wrap:anywhere}
+.pw-scene-directory li button small{color:#a4bdab;font-size:10px}
+.pw-scene-directory li button[aria-current="true"]{border-color:#31c6df;background:#176d7e40}
+.pw-scene-controls button:focus-visible,.pw-scene-controls input:focus-visible{outline:2px solid #58d5ed;outline-offset:2px}
+@media(max-width:820px){.pw-scene-controls{inset-block-start:64px;inset-inline-end:8px}.pw-scene-header button{padding:7px 8px}.pw-scene-panel{width:min(290px,calc(100vw - 75px));max-height:43vh}}
