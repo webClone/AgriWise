@@ -173,3 +173,61 @@ test("Batch B: validateSurfaceGrid rejects malformed or non-finite affine transf
   assert.equal(res.valid, false);
   assert.equal(res.reason, "grid_spec_affine_invalid");
 });
+
+test("Batch B: validateSurfaceGrid rejects sub-cell geographic origin shift (exact 54m discrepancy reproduction)", () => {
+  // Independent reproduction fixture:
+  // Declared bounds: [10, 36, 10.02, 36.02]
+  // Affine origin X: 10.0006 (offset by 0.0006 deg, ~54m east-west at 36°N)
+  // Pixel width: 0.01 deg
+  // Under the strict 1e-6 deg tolerance, this sub-cell geographic shift MUST be rejected.
+  const width = 2;
+  const height = 2;
+  const declaredBounds = [10, 36, 10.02, 36.02];
+  const pixelWidth = 0.01;
+  const pixelHeight = -0.01;
+  const shiftedOriginX = 10.0006;
+  const originY = 36.02;
+
+  const surface = {
+    surface_id: "surf-test-subcell-origin-shift",
+    values: [[0.5, 0.6], [0.7, 0.8]],
+    grid_spec: {
+      crs: "EPSG:4326",
+      bounds: declaredBounds,
+      width,
+      height,
+      transform: [shiftedOriginX, pixelWidth, 0, originY, 0, pixelHeight],
+    },
+  };
+
+  const res = validateSurfaceGrid(surface);
+  assert.equal(res.valid, false);
+  assert.equal(res.reason, "grid_spec_affine_bounds_mismatch");
+});
+
+test("Batch B: validateSurfaceGrid rejects sub-cell geographic extent endpoint shift", () => {
+  // Origin matches exactly, but pixel width causes endpoint xEnd to overshoot maxLng by 0.0006 deg
+  const width = 2;
+  const height = 2;
+  const declaredBounds = [10, 36, 10.02, 36.02];
+  const pixelWidthSlightlyOff = 0.0103; // xEnd = 10 + 2*0.0103 = 10.0206 (overshoot by 0.0006 deg)
+  const pixelHeight = -0.01;
+  const originX = 10;
+  const originY = 36.02;
+
+  const surface = {
+    surface_id: "surf-test-subcell-extent-shift",
+    values: [[0.5, 0.6], [0.7, 0.8]],
+    grid_spec: {
+      crs: "EPSG:4326",
+      bounds: declaredBounds,
+      width,
+      height,
+      transform: [originX, pixelWidthSlightlyOff, 0, originY, 0, pixelHeight],
+    },
+  };
+
+  const res = validateSurfaceGrid(surface);
+  assert.equal(res.valid, false);
+  assert.equal(res.reason, "grid_spec_affine_extent_mismatch");
+});

@@ -110,19 +110,19 @@ export function validateSurfaceGrid(surface, plotGeoJson) {
       return { valid: false, reason: "grid_spec_affine_orientation_not_north_up", bounds: null, width, height };
     }
 
-    // Numerical tolerance for origin and endpoint alignment
-    const tolX = Math.max(dx * 0.1, 1e-5);
-    const tolY = Math.max(Math.abs(dy) * 0.1, 1e-5);
+    // Strict numerical tolerance for origin and endpoint alignment (1e-6 degrees ~ 0.11m on ground).
+    // Rejects sub-cell geographic offsets and shifts while accommodating IEEE 754 precision.
+    const COORD_TOLERANCE_DEG = 1e-6;
 
     // 3. Origin check: x0 must match minLng, y0 must match maxLat (upper-left corner)
-    if (Math.abs(x0 - minLng) > tolX || Math.abs(y0 - maxLat) > tolY) {
+    if (Math.abs(x0 - minLng) > COORD_TOLERANCE_DEG || Math.abs(y0 - maxLat) > COORD_TOLERANCE_DEG) {
       return { valid: false, reason: "grid_spec_affine_bounds_mismatch", bounds: null, width, height };
     }
 
     // 4. Extent check: full raster extent endpoints must match declared bounds and dimensions
     const xEnd = x0 + width * dx;
     const yEnd = y0 + height * dy;
-    if (Math.abs(xEnd - maxLng) > tolX || Math.abs(yEnd - minLat) > tolY) {
+    if (Math.abs(xEnd - maxLng) > COORD_TOLERANCE_DEG || Math.abs(yEnd - minLat) > COORD_TOLERANCE_DEG) {
       return { valid: false, reason: "grid_spec_affine_extent_mismatch", bounds: null, width, height };
     }
   }
