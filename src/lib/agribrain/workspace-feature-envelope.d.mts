@@ -12,6 +12,7 @@ export type LocationSource =
   | "REGISTERED_HARDWARE"
   | "OBSERVED_GPS"
   | "SURVEYED"
+  | "USER_DECLARED"
   | "UNSPECIFIED";
 
 export type EpistemicClass =

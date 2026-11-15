@@ -43,7 +43,10 @@ export function geometryBounds(geometry){
 export function isRenderableWorkspaceEntity(e){
  return Boolean(e?.geometry&&isSupportedWorkspaceGeometry(e.geometry)&&
    e.spatial_support?.has_location===true&&
-   ["REGISTERED_HARDWARE","OBSERVED_GPS","SURVEYED"].includes(e.spatial_support?.location_source)&&
+   (["REGISTERED_HARDWARE","OBSERVED_GPS","SURVEYED"].includes(e.spatial_support?.location_source) ||
+    (e.spatial_support?.location_source==="USER_DECLARED" &&
+      ["PLANNED","ESTIMATED"].includes(e.epistemic_class) &&
+      e.provenance?.verified_identity!==true))&&
    (e.geometry.type==="Point"?e.display_eligibility?.eligible_for_map_pin===true:
     e.display_eligibility?.eligible_for_map_geometry===true));
 }

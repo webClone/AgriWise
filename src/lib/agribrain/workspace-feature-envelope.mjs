@@ -16,6 +16,7 @@ export const VALID_LOCATION_SOURCES = Object.freeze([
   "REGISTERED_HARDWARE",
   "OBSERVED_GPS",
   "SURVEYED",
+  "USER_DECLARED",
   "UNSPECIFIED",
 ]);
 
@@ -108,6 +109,8 @@ export function createWorkspaceFeatureEnvelope(params) {
     ? location_source
     : "UNSPECIFIED";
   const isLocationTrusted = TRUSTED_LOCATION_SOURCES.includes(sanitizedLocationSource);
+  const isOwnerDeclaredPlan = sanitizedLocationSource==="USER_DECLARED" && ["PLANNED","ESTIMATED"].includes(epistemic_class);
+  const displayLocationEligible = isLocationTrusted || isOwnerDeclaredPlan;
 
   // Evaluate location and map pin eligibility
   let has_location = false;
@@ -120,7 +123,7 @@ export function createWorkspaceFeatureEnvelope(params) {
     // Explicit geometry must validate; never downgrade a malformed footprint to a plausible point.
     geometry=normalizeWorkspaceGeometry(suppliedGeometry);
     has_location=true;
-    if (!isLocationTrusted) ineligibility_reason="UNTRUSTED_LOCATION_SOURCE";
+    if (!displayLocationEligible) ineligibility_reason="UNTRUSTED_LOCATION_SOURCE";
   } else if (
     latitude!==null && latitude!==undefined &&
     longitude!==null && longitude!==undefined &&
@@ -130,13 +133,13 @@ export function createWorkspaceFeatureEnvelope(params) {
   ) {
     has_location=true;
     geometry=normalizeWorkspaceGeometry({type:"Point",coordinates:[longitude,latitude]});
-    if (!isLocationTrusted) ineligibility_reason="UNTRUSTED_LOCATION_SOURCE";
+    if (!displayLocationEligible) ineligibility_reason="UNTRUSTED_LOCATION_SOURCE";
   } else {
     ineligibility_reason="LOCATION_UNREGISTERED";
   }
 
   const eligible_for_map_pin=Boolean(has_location&&isLocationTrusted&&!is_centroid_substitute&&geometry?.type==="Point");
-  const eligible_for_map_geometry=Boolean(has_location&&isLocationTrusted&&!is_centroid_substitute&&geometry&&geometry.type!=="Point");
+  const eligible_for_map_geometry=Boolean(has_location&&displayLocationEligible&&!is_centroid_substitute&&geometry&&geometry.type!=="Point");
 
   const display_eligibility = Object.freeze({
     eligible_for_map_pin,
@@ -286,7 +289,18 @@ export function validateWorkspaceFeatureEnvelope(envelope, expectedScope) {
 
   if (envelope.display_eligibility?.eligible_for_map_geometry === true) {
     if (!envelope.geometry || !["LineString","Polygon","MultiPolygon"].includes(envelope.geometry.type) || envelope.spatial_support?.has_location !== true) errors.push("eligible_for_map_geometry is true without valid non-point geometry");
-    if (!["REGISTERED_HARDWARE","OBSERVED_GPS","SURVEYED"].includes(envelope.spatial_support?.location_source)) errors.push("untrusted geometry location source");
+    const src=envelope.spatial_support?.location_source;
+    const trusted = ["REGISTERED_HARDWARE","OBSERVED_GPS","SURVEYED"].includes(src);
+    const ownerDeclared=src==="USER_DECLARED" && ["PLANNED","ESTIMATED"].includes(envelope.epistemic_class) &&
+      envelope.provenance?.verified_identity!==true;
+    if(!trusted&&!ownerDeclared) errors.push("untrusted geometry location source");
+  }
+  // A self-declared mapped shape must never be promoted to attested hardware or observed science.
+  if(envelope.spatial_support?.location_source==="USER_DECLARED" &&
+     (envelope.display_eligibility?.eligible_for_map_pin===true ||
+      !["PLANNED","ESTIMATED"].includes(envelope.epistemic_class) ||
+      envelope.provenance?.verified_identity===true)){
+    errors.push("owner-declared geometry cannot claim verified identity, map point or observed science");
   }
   return {
     valid: errors.length === 0,
