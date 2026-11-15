@@ -24,6 +24,7 @@ import {
 } from "@/lib/agribrain/render-materialization";
 import { getWorkspaceEntityPinsLayers } from "./layers/WorkspaceEntityPinsLayer";
 import type { WorkspaceFeatureEnvelope } from "@/lib/agribrain/workspace-feature-envelope";
+import {sceneLayerForEntityKind} from "@/components/farm/workspace/p06-scene-registry.mjs";
 
 function hasStaleGatewayEvidence(rawData: Record<string, unknown> | undefined): boolean {
   for (const value of Object.values(rawData || {})) {
@@ -64,6 +65,8 @@ interface PlotMapShellProps {
   workspaceEntities?: WorkspaceFeatureEnvelope[];
   selectedEntityId?: string | null;
   onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
+  sceneVisibility?: Record<string,boolean>;
+  sceneOpacity?: Record<string,number>;
 }
 
 export default function PlotMapShell(props: PlotMapShellProps) {
@@ -90,10 +93,14 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     workspaceEntities = [],
     selectedEntityId = null,
     onEntityClick,
+    sceneVisibility,
+    sceneOpacity,
   } = props;
 
   const primaryPlot = plots?.[0];
   const containerRef = useRef<HTMLDivElement>(null);
+  const showRaster=sceneVisibility?.raster!==false && (sceneOpacity?.raster??1)>0;
+  const showZones=sceneVisibility?.zones!==false && (sceneOpacity?.zones??1)>0;
 
   const l10 = useLayer10();
   const { commitBrowserRenderReceipt, clearBrowserRenderReceipt } = l10;
@@ -306,7 +313,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
 
   // Convert hover coordinate to cell reading in O(1)
   const activeCellData = useMemo(() => {
-    if (!hoverCoord || !gridBounds || !surfaceData?.values) return null;
+    if (!showRaster || !hoverCoord || !gridBounds || !surfaceData?.values) return null;
     let { lng, lat } = hoverCoord;
 
     if (gridBounds.crossesAntiMeridian && lng < 0) {
@@ -385,7 +392,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
       }
     }
     return null;
-  }, [hoverCoord, gridBounds, surfaceData, confidenceSurface, deviationSurface, l10.surfaceByType]);
+  }, [hoverCoord, gridBounds, surfaceData, confidenceSurface, deviationSurface, l10.surfaceByType, showRaster]);
 
   // NOTE: Browser-side biophysical transforms (LAI, FAPAR, RWC, ECE, nitrogen)
   // were removed in R5.0 Phase 2. Those formulas lacked crop calibration,
@@ -548,7 +555,9 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     l10.data?.render_authorization_version,
     l10.renderPlan,
   ]);
-  const surfaceLayers = surfaceStack.surfaceLayers;
+  // Render-plan computation remains unchanged; layer absence invalidates the pixel receipt.
+  const surfaceLayers=showRaster?surfaceStack.surfaceLayers.map((layer:any)=>
+    layer.clone({opacity:(layer.props.opacity??1)*(sceneOpacity?.raster??1)})) : [];
   const renderMaterialization = surfaceStack.materialization;
   const experimentalRenderMaterialization = surfaceStack.experimentalMaterialization;
   const hybridOverlayRenderMaterializations = surfaceStack.hybridOverlayMaterializations;
@@ -561,7 +570,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
   }, [clearBrowserRenderReceipt, l10.renderPlan.viewIdentity]);
 
   // 4b. Build ZONE layers (lightweight — rebuilds on hover, which is fine)
-  const zoneLayers = useMemo(() => buildLayerStack({
+  const preparedZoneLayers = useMemo(() => buildLayerStack({
     plotId,
     activeMode,
     surfaceData,
@@ -622,15 +631,18 @@ export default function PlotMapShell(props: PlotMapShellProps) {
     experimentalRenderMaterialization,
   ]);
 
-  // 4c. Build WORKSPACE ENTITY layers (sensors, cameras, field equipment pins)
-  const entityLayers = useMemo(() => {
-    if (!workspaceEntities || workspaceEntities.length === 0) return [];
-    return getWorkspaceEntityPinsLayers({
-      entities: workspaceEntities,
-      selectedEntityId,
-      onEntityClick,
-    });
-  }, [workspaceEntities, selectedEntityId, onEntityClick]);
+  const zoneLayers=showZones?preparedZoneLayers.map((layer:any)=>
+    layer.clone({opacity:(layer.props.opacity??1)*(sceneOpacity?.zones??1)})) : [];
+
+  // Vector visibility never depends on scientific raster availability or palette.
+  const visibleEntities=useMemo(()=>workspaceEntities.filter(entity=>{
+    const layer=sceneLayerForEntityKind(entity.entity_kind);
+    return !!layer && sceneVisibility?.[layer]!==false && (sceneOpacity?.[layer]??1)>0;
+  }),[workspaceEntities,sceneVisibility,sceneOpacity]);
+
+  const entityLayers=useMemo(()=>visibleEntities.length?getWorkspaceEntityPinsLayers({
+    entities:visibleEntities,selectedEntityId,onEntityClick,sceneOpacity,
+  }):[],[visibleEntities,selectedEntityId,onEntityClick,sceneOpacity]);
 
   // 5. Compute hovered zone centroid for floating chip
   const hoveredZoneData = useMemo(() => {
@@ -700,6 +712,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
 
   // Intercept map hover — only update when the hovered grid cell changes
   const handleMapHover = useCallback((info: any) => {
+    if(!showRaster)return;
     const { coordinate } = info;
     if (coordinate && Array.isArray(coordinate)) {
       const lng = coordinate[0];
@@ -714,7 +727,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
       lastHoverCellRef.current = null;
       setHoverCoord(null);
     }
-  }, []);
+  }, [showRaster]);
 
   // Intercept map click to define transect line
   const handleMapClick = useCallback((info: any) => {
@@ -963,13 +976,13 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         </Map>
       </DeckGL>
 
-      <PlotScientificLegend
+      {showRaster && <PlotScientificLegend
         layerName={activeMode || "Satellite context"}
         surface={surfaceData}
         scene={visualSource}
         degraded={isLowConfidence}
         canInterpret={canInterpretDiagnostically}
-      />
+      />}
 
       {/* --- PREMIUM CONTROL DOCK (Top-Right) --- */}
       <div 
@@ -1757,7 +1770,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
         </div>
       )}
 
-      {hoveredZoneData && (
+      {showZones && hoveredZoneData && (
         <ZoneChip
           label={hoveredZoneData.label}
           confidence={hoveredZoneData.confidence}
@@ -1770,7 +1783,7 @@ export default function PlotMapShell(props: PlotMapShellProps) {
       )}
 
       {/* Render persistent pinned chip for selected zone */}
-      {selectedZoneData && (
+      {showZones && selectedZoneData && (
         <ZoneChip
           label={selectedZoneData.label}
           confidence={selectedZoneData.confidence}

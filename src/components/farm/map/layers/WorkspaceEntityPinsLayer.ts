@@ -5,6 +5,7 @@ export interface WorkspaceEntityPinsLayerProps {
   entities: WorkspaceFeatureEnvelope[];
   selectedEntityId?: string | null;
   onEntityClick?: (entity: WorkspaceFeatureEnvelope) => void;
+  sceneOpacity?: Record<string,number>;
 }
 
 /**
@@ -16,7 +17,13 @@ export interface WorkspaceEntityPinsLayerProps {
  * registered coordinates. Unlocated devices/photos are excluded from this layer.
  */
 export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProps) {
-  const { entities, selectedEntityId, onEntityClick } = props;
+  const { entities, selectedEntityId, onEntityClick,sceneOpacity } = props;
+  const scaleAlpha=(entity:WorkspaceFeatureEnvelope,color:[number,number,number,number]):[number,number,number,number]=>{
+    const layer=({SENSOR:"sensors",CAMERA:"cameras",DRONE_MISSION:"drones",
+      FIELD_OBSERVATION:"observations",FIELD_EVENT:"observations"} as Record<string,string>)[entity.entity_kind];
+    const factor=Math.max(0,Math.min(1,sceneOpacity?.[layer]??1));
+    return [color[0],color[1],color[2],Math.round(color[3]*factor)];
+  };
 
   // Filter strictly for entities eligible for map pins
   const locatedEntities = entities.filter(
@@ -46,23 +53,23 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
     },
     getFillColor: (d) => {
       const isSelected = selectedEntityId === d.entity_id || selectedEntityId === d.envelope_id;
-      if (isSelected) return [34, 211, 238, 70]; // Cyan glow
-      if (d.entity_kind === "CAMERA") return [168, 85, 247, 45]; // Violet glow
-      if (d.entity_kind === "DRONE_MISSION") return [249, 115, 22, 45]; // Orange glow
-      if (d.entity_kind === "FIELD_OBSERVATION" || d.entity_kind === "FIELD_EVENT") return [244, 63, 94, 45]; // Rose glow
-      return [15, 23, 42, 140];
+      if (isSelected) return scaleAlpha(d, [34, 211, 238, 70]); // Cyan glow
+      if (d.entity_kind === "CAMERA") return scaleAlpha(d, [168, 85, 247, 45]); // Violet glow
+      if (d.entity_kind === "DRONE_MISSION") return scaleAlpha(d, [249, 115, 22, 45]); // Orange glow
+      if (d.entity_kind === "FIELD_OBSERVATION" || d.entity_kind === "FIELD_EVENT") return scaleAlpha(d, [244, 63, 94, 45]); // Rose glow
+      return scaleAlpha(d, [15, 23, 42, 140]);
     },
     getLineColor: (d) => {
       const isSelected = selectedEntityId === d.entity_id || selectedEntityId === d.envelope_id;
-      if (isSelected) return [34, 211, 238, 255];
-      if (d.entity_kind === "CAMERA") return [168, 85, 247, 200];
-      if (d.entity_kind === "DRONE_MISSION") return [249, 115, 22, 200];
-      if (d.entity_kind === "FIELD_OBSERVATION" || d.entity_kind === "FIELD_EVENT") return [244, 63, 94, 200];
-      return [255, 255, 255, 120];
+      if (isSelected) return scaleAlpha(d, [34, 211, 238, 255]);
+      if (d.entity_kind === "CAMERA") return scaleAlpha(d, [168, 85, 247, 200]);
+      if (d.entity_kind === "DRONE_MISSION") return scaleAlpha(d, [249, 115, 22, 200]);
+      if (d.entity_kind === "FIELD_OBSERVATION" || d.entity_kind === "FIELD_EVENT") return scaleAlpha(d, [244, 63, 94, 200]);
+      return scaleAlpha(d, [255, 255, 255, 120]);
     },
     updateTriggers: {
       getRadius: [selectedEntityId],
-      getFillColor: [selectedEntityId],
+      getFillColor: [selectedEntityId,sceneOpacity],
       getLineColor: [selectedEntityId],
     },
   });
@@ -87,48 +94,48 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
     getFillColor: (d) => {
       const isSelected = selectedEntityId === d.entity_id || selectedEntityId === d.envelope_id;
       if (isSelected) {
-        return [34, 211, 238, 255]; // Bright cyan when selected
+        return scaleAlpha(d, [34, 211, 238, 255]); // Bright cyan when selected
       }
 
       // Family 1: CAMERA (Optical Traps, Fixed Field Cameras)
       if (d.entity_kind === "CAMERA") {
-        return [168, 85, 247, 255]; // Violet / Aperture Purple (#a855f7)
+        return scaleAlpha(d, [168, 85, 247, 255]); // Violet / Aperture Purple (#a855f7)
       }
 
       // Family 2: DRONE_MISSION (Waypoints, Flight Corridors)
       if (d.entity_kind === "DRONE_MISSION") {
-        return [249, 115, 22, 255]; // Aviation Orange (#f97316)
+        return scaleAlpha(d, [249, 115, 22, 255]); // Aviation Orange (#f97316)
       }
 
       // Family 3: FIELD_OBSERVATION / FIELD_EVENT (Scouting, Symptoms, Ground Samples)
       if (d.entity_kind === "FIELD_OBSERVATION" || d.entity_kind === "FIELD_EVENT") {
-        return [244, 63, 94, 255]; // Observation Rose (#f43f5e)
+        return scaleAlpha(d, [244, 63, 94, 255]); // Observation Rose (#f43f5e)
       }
 
       // Family 4: SENSOR (IoT Telemetry, Soil Probes, Weather Stations)
       const isOnline = (d.properties as any)?.isOnline ?? true;
       const isFixture = (d.properties as any)?.is_benchmark_fixture ?? false;
       if (isFixture) {
-        return [234, 179, 8, 255]; // Amber for synthetic benchmark fixtures
+        return scaleAlpha(d, [234, 179, 8, 255]); // Amber for synthetic benchmark fixtures
       }
       if (!isOnline) {
-        return [148, 163, 184, 220]; // Muted slate if offline
+        return scaleAlpha(d, [148, 163, 184, 220]); // Muted slate if offline
       }
 
       const type = String((d.properties as any)?.type || "").toUpperCase();
       if (type.includes("MOISTURE")) {
-        return [16, 185, 129, 255]; // Vibrant Emerald
+        return scaleAlpha(d, [16, 185, 129, 255]); // Vibrant Emerald
       }
       if (type.includes("WEATHER")) {
-        return [56, 189, 248, 255]; // Sky Blue
+        return scaleAlpha(d, [56, 189, 248, 255]); // Sky Blue
       }
       if (type.includes("TEMP")) {
-        return [245, 158, 11, 255]; // Amber
+        return scaleAlpha(d, [245, 158, 11, 255]); // Amber
       }
       if (type.includes("EC")) {
-        return [167, 139, 250, 255]; // Purple
+        return scaleAlpha(d, [167, 139, 250, 255]); // Purple
       }
-      return [34, 197, 94, 255]; // General Green
+      return scaleAlpha(d, [34, 197, 94, 255]); // General Green
     },
     getLineColor: () => [255, 255, 255, 240],
     onClick: (info) => {
@@ -137,7 +144,7 @@ export function getWorkspaceEntityPinsLayers(props: WorkspaceEntityPinsLayerProp
       }
     },
     updateTriggers: {
-      getFillColor: [selectedEntityId],
+      getFillColor: [selectedEntityId,sceneOpacity],
       getRadius: [selectedEntityId],
     },
   });
