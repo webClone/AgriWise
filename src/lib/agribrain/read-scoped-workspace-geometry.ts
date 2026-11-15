@@ -10,7 +10,7 @@ export async function readScopedWorkspaceGeometry(scope:{tenantId:string;farmId:
    where:{tenantId:scope.tenantId,farmId:scope.farmId,plotId:scope.plotId,status:"OWNER_DECLARED"},
    orderBy:{createdAt:"desc"},take:200,
  });
- const validId=(value:string|null)=>typeof value==="string"&&/^[a-f\\d]{24}$/i.test(value);
+ const validId=(value:string|null)=>typeof value==="string"&&/^[a-f\d]{24}$/i.test(value);
  const cameraIds=records.filter(r=>r.sourceKind==="IP_CAMERA"&&validId(r.sourceId)).map(r=>r.sourceId!);
  const scoutingIds=records.filter(r=>r.sourceKind==="CROP_OBSERVATION"&&validId(r.sourceId)).map(r=>r.sourceId!);
  const [cameras,scouts]=await Promise.all([

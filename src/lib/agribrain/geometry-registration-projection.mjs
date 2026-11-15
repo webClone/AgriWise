@@ -11,7 +11,7 @@ export const geometryIntegrityDigest=geometry=>createHash("sha256").update(JSON.
 export function projectWorkspaceGeometryRegistration(record,scope){
  if(!isRegistrationRecordInScope(record,scope))return null;
  if(REGISTRATION_SOURCES[record.entityKind]!==record.sourceKind ||
-   (record.sourceKind==="OWNER_PLAN" ? record.sourceId!=null : !/^[a-f\\d]{24}$/i.test(record.sourceId||"")))return null;
+   (record.sourceKind==="OWNER_PLAN" ? record.sourceId!=null : !/^[a-f\d]{24}$/i.test(record.sourceId||"")))return null;
  if(record.epistemicClass!==(record.entityKind==="DRONE_MISSION"?"PLANNED":"ESTIMATED") ||
    record.locationSource!=="USER_DECLARED" || record.revision!==1)return null;
  if(!isSupportedWorkspaceGeometry(record.geometry) ||
