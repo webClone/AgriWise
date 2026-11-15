@@ -92,9 +92,11 @@ export default function WorkspaceInvestigationHostP04({
           <small>Zone: {context.zoneId ?? "No current zone"} · {state.clocks.activeTimeMode} · Generation {state.generationId}</small>
           <small>Snapshot: {state.publication.snapshotId ?? "Unavailable"}</small>
         </div>
-        <p className={context.qualified ? "p04-source-qualified" : "p04-source-warning"}>
-          <ShieldAlert size={16} aria-hidden="true"/> {context.explanation}
-        </p>
+        {(kind === "water" || (kind === "compare" && state.selectedEntity.kind === "ZONE")) && (
+          <p className={context.qualified ? "p04-source-qualified" : "p04-source-warning"}>
+            <ShieldAlert size={16} aria-hidden="true"/> {context.explanation}
+          </p>
+        )}
         {kind === "water" && (
           <div className="p04-investigation-section">
             <h3>Investigate current zone</h3>

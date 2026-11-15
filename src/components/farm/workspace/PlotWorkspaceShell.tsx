@@ -110,6 +110,7 @@ function PlotWorkspaceShellContent(props: PlotWorkspaceProps) {
   useEffect(() => {
     setInvestigation(null);
     setActiveSpecializedTool(null);
+    setActiveInitialSensorId(null);
   }, [state.generationId, state.plotScope.plotId, state.plotScope.cropCycleId,
       state.plotScope.geometryHash, state.plotScope.geometryVersion]);
 
