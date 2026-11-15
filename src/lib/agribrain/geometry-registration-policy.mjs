@@ -1,3 +1,4 @@
+import * as turf from "@turf/turf";
 import {isSupportedWorkspaceGeometry,normalizeWorkspaceGeometry,geometryBounds} from "./workspace-geometry.mjs";
 
 export const GEOMETRY_REGISTRATION_VERSION="2026.11-p06.5";
@@ -13,6 +14,11 @@ export const VALID_OBSERVATION_TYPES = Object.freeze(new Set([
   "health",
   "weather_impact"
 ]));
+export const VALID_SEVERITIES = Object.freeze(new Set([
+  "info",
+  "warning",
+  "critical"
+]));
 const OBJECT_ID=/^[a-f\d]{24}$/i;
 const permittedGeometry=Object.freeze({
   DRONE_MISSION:["LineString","Polygon","MultiPolygon"],
@@ -27,14 +33,42 @@ export function validateGeometryRegistrationInput(raw){
  if(source==="OWNER_PLAN"){
    if(raw.source_id!==undefined&&raw.source_id!==null)return {ok:false,error:"Owner plan must not claim an external source ID"};
    if(raw.new_observation!==undefined)return {ok:false,error:"Owner plan cannot attach crop observation"};
- }else if(source==="CROP_OBSERVATION"&&raw.new_observation){
-   if(typeof raw.new_observation!=="object"||!raw.new_observation.title?.trim()){
-     return {ok:false,error:"New crop observation requires a title"};
+ }else if(source==="CROP_OBSERVATION"&&raw.new_observation!==undefined){
+   if(typeof raw.new_observation!=="object"||raw.new_observation===null||Array.isArray(raw.new_observation)){
+     return {ok:false,error:"New crop observation must be an object"};
    }
    if(raw.source_id!==undefined&&raw.source_id!==null)return {ok:false,error:"Cannot supply both source_id and new_observation"};
-   const obsType = (raw.new_observation.type || "pest").toLowerCase().trim();
+   if(typeof raw.new_observation.title!=="string"||!raw.new_observation.title.trim()){
+     return {ok:false,error:"New crop observation requires a string title"};
+   }
+   if(raw.new_observation.title.trim().length>160){
+     return {ok:false,error:"Observation title exceeds 160 characters"};
+   }
+   if(raw.new_observation.type!==undefined&&raw.new_observation.type!==null){
+     if(typeof raw.new_observation.type!=="string"){
+       return {ok:false,error:"Observation category must be a string"};
+     }
+   }
+   const obsType = (raw.new_observation.type ? raw.new_observation.type.trim().toLowerCase() : "pest");
    if(!VALID_OBSERVATION_TYPES.has(obsType)) {
-     return {ok:false,error:`Invalid observation category: ${raw.new_observation.type}. Allowed: pest, disease, growth, health, weather_impact`};
+     return {ok:false,error:`Invalid observation category: ${String(raw.new_observation.type)}. Allowed: pest, disease, growth, health, weather_impact`};
+   }
+   if(raw.new_observation.severity!==undefined&&raw.new_observation.severity!==null){
+     if(typeof raw.new_observation.severity!=="string"){
+       return {ok:false,error:"Observation severity must be a string"};
+     }
+     const sev = raw.new_observation.severity.trim().toLowerCase();
+     if(!VALID_SEVERITIES.has(sev)){
+       return {ok:false,error:`Invalid observation severity: ${String(raw.new_observation.severity)}. Allowed: info, warning, critical`};
+     }
+   }
+   if(raw.new_observation.description!==undefined&&raw.new_observation.description!==null){
+     if(typeof raw.new_observation.description!=="string"){
+       return {ok:false,error:"Observation description must be a string"};
+     }
+     if(raw.new_observation.description.trim().length>2000){
+       return {ok:false,error:"Observation description exceeds 2000 characters"};
+     }
    }
  }else if(typeof raw.source_id!=="string"||!OBJECT_ID.test(raw.source_id)){
    return {ok:false,error:"Source record ID must be a Mongo ObjectId"};
@@ -58,9 +92,9 @@ export function validateGeometryRegistrationInput(raw){
    entity_kind:kind,source_kind:source,source_id:source==="OWNER_PLAN"?null:(raw.source_id||null),
    new_observation:raw.new_observation?{
      title:raw.new_observation.title.trim(),
-     type:(raw.new_observation.type?.trim().toLowerCase())||"pest",
-     severity:raw.new_observation.severity?.trim()||"warning",
-     description:raw.new_observation.description?.trim()||null,
+     type:(raw.new_observation.type?raw.new_observation.type.trim().toLowerCase():"pest"),
+     severity:(raw.new_observation.severity?raw.new_observation.severity.trim().toLowerCase():"warning"),
+     description:raw.new_observation.description?raw.new_observation.description.trim():null,
    }:null,
    geometry:normalizeWorkspaceGeometry(raw.geometry),label:raw.label.trim(),notes:raw.notes?.trim()||null,
    epistemic_class:kind==="DRONE_MISSION"?"PLANNED":"ESTIMATED",
@@ -220,11 +254,16 @@ export function validateParcelContainment(geometry, plotGeoJson, options = {}) {
       };
     }
 
+    if (!geometry || (geometry.type !== "Polygon" && geometry.type !== "MultiPolygon")) {
+      return { ok: false, error: "Field observation requires Polygon or MultiPolygon geometry" };
+    }
+
     const vertices = collectVertices(geometry?.coordinates);
     if (vertices.length === 0) {
       return { ok: false, error: "Geometry contains no valid coordinates to validate" };
     }
 
+    // Fast vertex point-in-polygon check with tolerance margin
     for (const pt of vertices) {
       const isContained = parcelPolygons.some((poly) => pointInPolygonWithTolerance(pt, poly, tolerance));
       if (!isContained) {
@@ -233,6 +272,46 @@ export function validateParcelContainment(geometry, plotGeoJson, options = {}) {
           error: `Field observation vertex [${pt[0].toFixed(5)}, ${pt[1].toFixed(5)}] is outside authoritative parcel boundary (exceeds ${Math.round(tolerance * 100000)}m tolerance)`,
         };
       }
+    }
+
+    // Full polygon topology & coverage check (concave boundaries, gaps, holes, and edge crossings)
+    try {
+      const scoutingFeature = geometry.type === "Feature" ? geometry : { type: "Feature", properties: {}, geometry };
+      const parcelFeature = plotGeom.type === "Feature" ? plotGeom : { type: "Feature", properties: {}, geometry: plotGeom };
+
+      // Reject self-intersecting geometries
+      const kinks = turf.kinks(scoutingFeature);
+      if (kinks?.features?.length > 0) {
+        return {
+          ok: false,
+          error: "Field observation polygon has self-intersecting boundaries (kinks detected)",
+        };
+      }
+
+      const toleranceMeters = Math.max(1, Math.round(tolerance * 100000)); // ~10m tolerance
+      const bufferedParcel = turf.buffer(parcelFeature, toleranceMeters, { units: "meters" });
+      if (!bufferedParcel) {
+        return {
+          ok: false,
+          error: "Failed to compute spatial buffer for authoritative parcel boundary",
+        };
+      }
+
+      const diff = turf.difference(turf.featureCollection([scoutingFeature, bufferedParcel]));
+      if (diff) {
+        const outsideArea = turf.area(diff);
+        if (outsideArea > 1.0) { // Ignore floating-point micro-slivers <= 1 m²
+          return {
+            ok: false,
+            error: `Field observation geometry is outside authoritative parcel boundary (edges or coverage outside parcel by ${outsideArea.toFixed(1)} m² exceeds ${toleranceMeters}m tolerance)`,
+          };
+        }
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        error: `Spatial topology validation failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
 
     return { ok: true };

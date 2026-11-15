@@ -31,6 +31,7 @@ export function validateGeometryRevisionInput(input:unknown,entityKind?:string):
  {ok:true;value:GeometryRevisionInput}|{ok:false;error:string};
 export function isRegistrationRecordInScope(record:unknown,scope:{tenantId:string;farmId:string;plotId:string}):boolean;
 export const VALID_OBSERVATION_TYPES:Readonly<Set<string>>;
+export const VALID_SEVERITIES:Readonly<Set<string>>;
 export function validateParcelContainment(
   geometry:unknown,
   plotGeoJson:unknown,

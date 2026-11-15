@@ -126,6 +126,15 @@ test("P06.05: FIELD_OBSERVATION registration allows new_observation creation wit
   };
   assert.equal(validateGeometryRegistrationInput(invalidCategoryInput).ok, false);
 
+  // Adversarial regressions: type-safe rejection of malformed primitive types without throwing TypeError
+  assert.equal(validateGeometryRegistrationInput({ ...input, new_observation: { title: "Test", type: 123 } }).ok, false);
+  assert.equal(validateGeometryRegistrationInput({ ...input, new_observation: { title: 123, type: "pest" } }).ok, false);
+  assert.equal(validateGeometryRegistrationInput({ ...input, new_observation: { title: "Test", type: "pest", severity: 123 } }).ok, false);
+  assert.equal(validateGeometryRegistrationInput({ ...input, new_observation: { title: "Test", type: "pest", severity: "invalid_severity" } }).ok, false);
+  assert.equal(validateGeometryRegistrationInput({ ...input, new_observation: { title: "Test", type: "pest", description: 123 } }).ok, false);
+  assert.equal(validateGeometryRegistrationInput({ ...input, new_observation: 123 }).ok, false);
+  assert.equal(validateGeometryRegistrationInput({ ...input, new_observation: "invalid_string" }).ok, false);
+
   // Conflict if both source_id and new_observation provided
   assert.equal(validateGeometryRegistrationInput({ ...input, source_id: "507f1f77bcf86cd799439099" }).ok, false);
 });
@@ -180,12 +189,106 @@ test("P06.05: validateParcelContainment enforces strict polygon containment for 
   assert.equal(resBufferScout.ok, false);
   assert.match(resBufferScout.error, /outside authoritative parcel boundary/);
 
-  // 3. Fail-closed: missing parcel boundary fails closed for scouting areas
+  // 3. Adversarial regression: Concave U-shaped parcel with scouting polygon crossing the gap
+  // All 4 vertices of scoutAcrossGap are inside the arms of the U, but edges and area cross outside the parcel!
+  const uShapeParcel = {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [[
+        [2.650, 36.500],
+        [2.660, 36.500],
+        [2.660, 36.510],
+        [2.657, 36.510],
+        [2.657, 36.504],
+        [2.653, 36.504],
+        [2.653, 36.510],
+        [2.650, 36.510],
+        [2.650, 36.500],
+      ]],
+    },
+  };
+  const scoutAcrossGap = {
+    type: "Polygon",
+    coordinates: [[
+      [2.651, 36.506],
+      [2.659, 36.506],
+      [2.659, 36.508],
+      [2.651, 36.508],
+      [2.651, 36.506],
+    ]],
+  };
+  const resAcrossGap = validateParcelContainment(scoutAcrossGap, uShapeParcel, { entityKind: "FIELD_OBSERVATION" });
+  assert.equal(resAcrossGap.ok, false);
+  assert.match(resAcrossGap.error, /outside authoritative parcel boundary/);
+
+  const scoutInsideArm = {
+    type: "Polygon",
+    coordinates: [[
+      [2.651, 36.502],
+      [2.652, 36.502],
+      [2.652, 36.508],
+      [2.651, 36.508],
+      [2.651, 36.502],
+    ]],
+  };
+  assert.equal(validateParcelContainment(scoutInsideArm, uShapeParcel, { entityKind: "FIELD_OBSERVATION" }).ok, true);
+
+  // 4. Adversarial regression: Donut parcel with inner hole ring
+  const donutParcel = {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [
+        [
+          [2.650, 36.500],
+          [2.660, 36.500],
+          [2.660, 36.510],
+          [2.650, 36.510],
+          [2.650, 36.500],
+        ],
+        [
+          [2.654, 36.504],
+          [2.656, 36.504],
+          [2.656, 36.506],
+          [2.654, 36.506],
+          [2.654, 36.504],
+        ],
+      ],
+    },
+  };
+  const scoutAcrossHole = {
+    type: "Polygon",
+    coordinates: [[
+      [2.652, 36.505],
+      [2.658, 36.505],
+      [2.658, 36.507],
+      [2.652, 36.507],
+      [2.652, 36.505],
+    ]],
+  };
+  const resAcrossHole = validateParcelContainment(scoutAcrossHole, donutParcel, { entityKind: "FIELD_OBSERVATION" });
+  assert.equal(resAcrossHole.ok, false);
+  assert.match(resAcrossHole.error, /outside authoritative parcel boundary/);
+
+  const scoutInSolid = {
+    type: "Polygon",
+    coordinates: [[
+      [2.651, 36.501],
+      [2.653, 36.501],
+      [2.653, 36.503],
+      [2.651, 36.503],
+      [2.651, 36.501],
+    ]],
+  };
+  assert.equal(validateParcelContainment(scoutInSolid, donutParcel, { entityKind: "FIELD_OBSERVATION" }).ok, true);
+
+  // 5. Fail-closed: missing parcel boundary fails closed for scouting areas
   const resMissingParcel = validateParcelContainment(insideScout, null, { entityKind: "FIELD_OBSERVATION" });
   assert.equal(resMissingParcel.ok, false);
   assert.match(resMissingParcel.error, /missing or unavailable/);
 
-  // 4. Drone flight corridor: off-field operational turnaround margin is permitted
+  // 6. Drone flight corridor: off-field operational turnaround margin is permitted
   const marginDrone = {
     type: "LineString",
     coordinates: [
@@ -196,7 +299,7 @@ test("P06.05: validateParcelContainment enforces strict polygon containment for 
   const resMarginDrone = validateParcelContainment(marginDrone, plotGeoJson, { entityKind: "DRONE_MISSION" });
   assert.equal(resMarginDrone.ok, true);
 
-  // 5. Drone flight corridor: far away out of envelope (California) -> MUST FAIL
+  // 7. Drone flight corridor: far away out of envelope (California) -> MUST FAIL
   const farDrone = {
     type: "LineString",
     coordinates: [
